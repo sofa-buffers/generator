@@ -30,6 +30,7 @@ import (
 	// only the CLI binary does (dependency arrows point inward, PLAN §8.6).
 	_ "github.com/sofa-buffers/generator/generators/c"
 	_ "github.com/sofa-buffers/generator/generators/cpp"
+	_ "github.com/sofa-buffers/generator/generators/csharp"
 	_ "github.com/sofa-buffers/generator/generators/golang"
 	_ "github.com/sofa-buffers/generator/generators/python"
 	_ "github.com/sofa-buffers/generator/generators/rust"

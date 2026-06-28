@@ -120,3 +120,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Rust backend — generate, build, round-trip, conformance
         run: ./tests/rust/run.sh
+
+  # Language milestone: C# / .NET (corelib-cs). Generates a project, builds it
+  # with dotnet, round-trips JSON, and checks byte-exact output against the shared
+  # vectors. run.sh clones corelib-cs.
+  lang-csharp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+      - name: C# backend — generate, build, round-trip, conformance
+        run: ./tests/csharp/run.sh
