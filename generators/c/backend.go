@@ -24,10 +24,17 @@ type Backend struct{}
 
 func (*Backend) Lang() string { return "c" }
 
-// Generate emits one .h + one .c per message (file_per_message). Shared $defs
-// types reachable from a message are emitted alongside it.
+// Generate emits one .h + one .c per message (file_per_message). When
+// cfg["emit"] == "project" it additionally scaffolds a buildable root project
+// (build files + devcontainer wiring + encode/decode harness, §9.1), with the
+// message sources placed under generated/.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "sofab_"), banner: cfgString(cfg, "tool_banner", "sbufgen")}
+	project := cfgString(cfg, "emit", "sources") == "project"
+	srcDir := ""
+	if project {
+		srcDir = "generated/"
+	}
 	var files []generator.File
 	for _, m := range s.Messages {
 		h, c, err := g.message(m)
@@ -36,9 +43,12 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		}
 		base := strings.ToLower(m.Name)
 		files = append(files,
-			generator.File{Path: base + ".h", Content: h},
-			generator.File{Path: base + ".c", Content: c},
+			generator.File{Path: srcDir + base + ".h", Content: h},
+			generator.File{Path: srcDir + base + ".c", Content: c},
 		)
+	}
+	if project {
+		files = append(files, g.projectFiles(s)...)
 	}
 	return files, nil
 }
