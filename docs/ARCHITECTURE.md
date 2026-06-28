@@ -1,6 +1,6 @@
 # SofaBuffers Generator — Architecture
 
-> **Status: C language backend complete + CI green.** This document is the
+> **Status: 6 language backends (C, Go, Python, TypeScript, C++, Rust) complete + CI green.** This document is the
 > single, up-to-date description of how the generator works and is the first
 > thing a maintainer or new-language contributor should read. Keeping it current
 > is part of the "done when" criterion of every milestone (PLAN §10), and it is
@@ -16,7 +16,7 @@
 > **Milestone model:** each target language is a milestone — a working backend
 > with its own CI job and tests, landed on `main` only when green, then on to
 > the next language. Order (testable-toolchain first): **C ✓ → Go ✓ → Python ✓
-> → TypeScript ✓ → C++ ✓ → (Rust / Java / C# next)**. C++
+> → TypeScript ✓ → C++ ✓ → Rust ✓ → (Java / C# next)**. C++
 > (`generators/cpp`, max-speed `corelib-cpp`) is header-only: each object derives
 > `OStreamMessage`+`IStreamMessage` with `serialize`/`deserialize`, nested via
 > `os.write(id,child)` / `is.read(child)`; 37 shared vectors byte-exact
@@ -245,5 +245,6 @@ adds build files + devcontainer wiring + an IR-driven encode/decode JSON harness
 | **Python backend** | **done** — `generators/python`: dataclasses + `_marshal`/pull-parser `_unmarshal` against `corelib-py`; stdlib-json harness (blob as `list[int]`, matching C); **37 shared vectors byte-exact**. `tests/python/run.sh`. |
 | **TypeScript backend** | **done** — `generators/typescript`: classes + `marshal(OStream)` + visitor-based `decode` against `corelib-ts`; 64-bit → `bigint`; strict-typecheck clean; **27 shared vectors byte-exact**. `tests/typescript/run.sh`. |
 | **C++ backend** | **done** — `generators/cpp` (max-speed `corelib-cpp`): header-only structs (OStreamMessage+IStreamMessage), nested via `os.write`/`is.read`, enum-class backing, `OStreamInline<_maxSize>`; **37 shared vectors byte-exact**. `tests/cpp/run.sh`. |
-| **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job + `lang-c` + `lang-go` + `lang-python` + `lang-typescript` + `lang-cpp` jobs on every push. |
-| Rust / Java / C# | next — toolchains now installed locally; wire into CI as each lands. |
+| **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job + `lang-c` + `lang-go` + `lang-python` + `lang-typescript` + `lang-cpp` + `lang-rust` jobs on every push. |
+| **Rust backend** | **done** — `generators/rust` (corelib-rs-no-std): structs + `marshal` + a flat-visitor decode (location-stack state machine), `require!` capability guards + Cargo features, serde-json harness; **37 shared vectors byte-exact**. `tests/rust/run.sh`. |
+| Java / C# | next — toolchains installing locally; wire into CI as each lands. |

@@ -106,3 +106,17 @@ jobs:
         run: g++ --version | head -1
       - name: C++ backend — generate, build, round-trip, conformance
         run: ./tests/cpp/run.sh
+
+  # Language milestone: Rust (corelib-rs-no-std). Generates a crate, builds it
+  # with cargo, round-trips JSON, and checks byte-exact output against the shared
+  # vectors. run.sh clones corelib-rs-no-std.
+  lang-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust backend — generate, build, round-trip, conformance
+        run: ./tests/rust/run.sh
