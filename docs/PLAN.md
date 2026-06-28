@@ -102,12 +102,12 @@ A file must contain `$defs` and/or `messages`. Field **ids must be unique** with
 
 | Type | Notes / constraints from schema |
 |---|---|
-| `u8 u16 u32 u64` | unsigned ints; optional `default` (range-checked per width); **no `min`/`max`** |
-| `i8 i16 i32 i64` | signed ints; optional `default` (range-checked per width); **no `min`/`max`** |
-| `fp32` `fp64` | floats; optional `default`, optional `decimals` (0–15); **no `min`/`max`** |
+| `u8 u16 u32 u64` | unsigned ints; optional `default` (range-checked per width) |
+| `i8 i16 i32 i64` | signed ints; optional `default` (range-checked per width) |
+| `fp32` `fp64` | floats; optional `default`, optional `decimals` (0–15) |
 | `boolean` | optional `default` |
-| `string` | **optional `maxlen`** (no `minlen`), optional `default`; see §5.7 for the per-target `maxlen` requirement |
-| `blob` | **optional `maxlen`** (no `minlen`), `default` is base64; see §5.7 |
+| `string` | optional `maxlen`, optional `default`; see §5.7 for the per-target `maxlen` requirement |
+| `blob` | optional `maxlen`, `default` is base64; see §5.7 |
 | `array` | fixed-length; `items: {type, count}`; element type is a **primitive, `string`, or `blob`** |
 | `enum` | inline map or `$ref`; values may be negative; `default` must match a value (`defaultMatchesEnum`) |
 | `bitfield` | inline `bits` map or `$ref`; each flag has `pos` 0–63 + optional `default` |
@@ -131,9 +131,7 @@ Common optional attributes on every field: `description`, `unit`, `deprecated`.
 - `array` of `string` or `blob` (dynamic-length elements) is **not** an array wire type — it is encoded as a **sequence** of string/blob fields;
 - `array` of a numeric type uses the real fixed array wire type.
 
-So the fixed-count `array` plus `struct`/`union` already cover every case; the variable-length / dynamic-element forms all lower onto sequences in the corelib at encode time. The generator must route `struct`/`union`/`array-of-string`/`array-of-blob` through the corelib's `sequence_begin/end` API and require the `sequence` capability for them. Full detail: [`schema/README.md` → "How this maps to the wire format"](../schema/README.md) and the [wire-format documentation](https://github.com/sofa-buffers/documentation/blob/main/README.md).
-
-> **Resolved.** This supersedes the earlier "sequence vs array" open question — there is no missing authoring type, so nothing needs adding to the schema for it. (The dangling references in §10/§11 should be updated accordingly.)
+So the fixed-count `array` plus `struct`/`union` already cover every case; the variable-length / dynamic-element forms all lower onto sequences in the corelib at encode time. The generator must route `struct`/`union`/`array-of-string`/`array-of-blob` through the corelib's `sequence_begin/end` API and require the `sequence` capability for them. Full detail: [`schema/README.md` → "How definition types map to the wire format"](../schema/README.md) and the [wire-format documentation](https://github.com/sofa-buffers/documentation/blob/main/README.md).
 
 ### 3.4 `$ref` handling
 
@@ -193,7 +191,7 @@ Notes that shape the backends:
 For a message `MyMessage` the generator emits, per language:
 
 1. A **type** holding all members with language-appropriate field types:
-   - integers → native sized ints (with validation against `min`/`max`),
+   - integers → native sized ints,
    - `enum` → a generated enum type backed by the right integer width,
    - `bitfield` → an integer with named bit accessors / flag constants,
    - `array` of a **numeric** element (`u*`/`i*`/`fp32`/`fp64`) → fixed-size array/`std::array`/`[N]T`, encoded with the corelib's array writers;
@@ -237,7 +235,7 @@ Example (C/C++):
 The schema carries human text the generated code must surface as **documentation comments** in the format each language's doc generator expects — so `doxygen`, `rustdoc`, `javadoc`, etc. pick them up automatically:
 
 - A message's **`summary`** → the doc comment on the generated message type.
-- Every field's optional **`description`** → the doc comment on that member/field. Append `unit` and, where useful, `default`, `min`/`max`, and a **`@deprecated`** tag when the field is marked `deprecated`.
+- Every field's optional **`description`** → the doc comment on that member/field. Append `unit` and, where useful, `default`, and a **`@deprecated`** tag when the field is marked `deprecated`.
 - Enum constant **`description`** → doc comment on each enum value; bitfield flag `description` → doc comment on each flag/accessor.
 
 Per-language comment style:
@@ -300,6 +298,19 @@ sofab::require!(fixlen, array, sequence, fp64, value64);
 ```
 
 Both patterns are **demonstrated end-to-end (and verified) in `generator-old/test/capability-guard-c/` and `…-rs/`** — see §10. The required capability set is **auto-derived from the definition** (the generator knows which wire features a message uses), so the guards are emitted automatically — there is no manual `features` config (§7.3). A corelib built without a needed capability is caught at compile time rather than in the field.
+
+#### API-version guard (every backend)
+
+Capability guards catch a *feature-stripped* corelib; an **API-version guard** catches an *incompatible* corelib — one whose encode/decode API has drifted from what the generator emitted against. Every corelib **publishes its API version** (the version of the public encode/decode surface the generated code calls — e.g. a C macro `SOFAB_API_VERSION`, `sofab::API_VERSION` in Rust, and the equivalent constant in each managed corelib). The generator is built/verified against a known API version (or a compatible range) and **bakes that expectation into the generated code**, emitting a **compile-time assertion** that the linked corelib is compatible. A future, breaking corelib then **fails to build with a clear message** instead of miscompiling or failing subtly at runtime.
+
+This is **distinct from the wire-format version** (the schema `version: 1` and the on-wire framing the corelib owns): the API-version guard protects the **source-level contract** between generated code and the corelib it links against, whereas the wire version protects encoder/decoder interop. The two evolve independently, so both are checked.
+
+- **Policy:** compatible = same **major** (a breaking API change bumps major); the guard accepts `major == expected` and `minor >= required`. The expected API version + policy are recorded in the file-header banner (§5.1) for traceability, and — like capability guards — the guard is emitted **automatically**, not configured.
+- **Per language (compile-time where possible, else fail-fast at init):**
+  - **C / C++ (embedded & max-speed):** `#if SOFAB_API_VERSION_MAJOR != N || SOFAB_API_VERSION_MINOR < M\n# error "SofaBuffers: generated against API vN.M, but the linked corelib is vX.Y — regenerate or update the corelib."\n#endif` (C++ may use `static_assert`).
+  - **Rust:** a const assertion against the corelib constant — `const _: () = assert!(sofab::API_VERSION_MAJOR == N);` — or a `sofab::require_api!(N, M)` macro if the corelib provides one.
+  - **Go / Python / Java / C# / TS:** prefer a static/compile-time check where the language allows (Go: a build-time `const` comparison; C#: analyzer/`#error`; TS: a type-level check against the corelib's declared `API_VERSION` literal); where none exists, emit a **one-time init/load-time assertion** that throws on mismatch — fail fast, never silently.
+- **Corelib requirement:** each corelib must expose its API version as a compile-time-visible constant/macro (split into major/minor) for the above to work. (Action item: confirm/standardize the constant name across all eight corelibs.)
 
 ### 5.5 Maximum serialized size constant (default buffer size)
 
@@ -371,7 +382,7 @@ There are really only **two optimization axes**, and every backend sits on one o
 - **Resolve everything at generation time.** Field ids, type mappings, enum backing widths, array element kinds/counts, and string/blob `maxlen` are all known statically — bake them in as constants/literals so nothing is computed at runtime.
 - **No reflection / no runtime schema.** All dispatch is concrete generated code; there is no descriptor interpretation at runtime (except C, which deliberately uses a static descriptor table — see below).
 - **Pick the narrowest correct type.** Map each integer to its exact width; choose the smallest signed/unsigned backing type for enums that covers the whole value set (e.g. a negative enum value forces signed). Avoid widening on the hot path.
-- **Validate cheaply or not at all on the hot path.** Range/`min`/`max`/`maxlen` checks are generated as `debug`-only assertions (or an opt-in `--validate` mode), so release builds pay nothing.
+- **Validate cheaply or not at all on the hot path.** Bounds checks (`maxlen`, array `count`) are generated as `debug`-only assertions (or an opt-in `--validate` mode), so release builds pay nothing.
 - **Honor defaults & `deprecated` without branches** where possible: initialize members to schema defaults at construction; emit deprecated fields behind a generation flag.
 
 ### 6.2 Embedded / minimal-footprint backends
@@ -379,6 +390,7 @@ There are really only **two optimization axes**, and every backend sits on one o
 > All three embedded backends must also emit the **compile-time capability guards** of §5.4 so a feature-stripped corelib build fails loudly instead of silently.
 
 **C (`corelib-c-cpp`, `object.h`):**
+- **Use the `object.h` API exclusively** — the static descriptor table + object encode/decode API — for *every* construct, including **unions** and **variable sequences of structs**. The `corelib-c-cpp` repo ships **examples and unit-tests covering exactly these cases**; treat them as the reference shape for the generated C code. There is no separate hand-rolled `ostream`/`istream` path to maintain.
 - Emit a `struct` + a **static `const` descriptor table** (`SOFAB_OBJECT_FIELD*` macros) per object; descriptors live in flash/`.rodata`, not RAM.
 - **No heap, no recursion on data**: nested structs via the `nested_list` index; fixed arrays sized from `count`; strings/blobs into caller-provided fixed buffers sized from `maxlen`.
 - Generate `#if` guards / respect `SOFAB_DISABLE_{FIXLEN,ARRAY,SEQUENCE,FP64,INT64}_SUPPORT` so unused wire paths compile out — pay only for types a message actually uses.
@@ -465,8 +477,7 @@ Each backend gets its own object under `targets:`; it inherits the generic block
 | `c_standard` | `c99` \| `c11` | `c99` | corelib is C99. |
 | `header_extension` / `source_extension` | string | `.h` / `.c` | |
 | `include_guard` | `ifndef` \| `pragma_once` | `ifndef` | |
-| `api_style` | `object_descriptor` \| `explicit_calls` | `object_descriptor` | descriptor tables (small footprint) vs direct `ostream`/`istream` calls (needed for unions / variable sequences — risk #2). |
-| `descriptor_profile` | `auto` \| `small` \| `medium` \| `big` | `auto` | → `SOFAB_OBJECT_DESCR_PROFILE`; `auto` = the narrowest that fits the message's ids/sizes (override only to force wider). |
+| `descriptor_profile` | `auto` \| `small` \| `medium` \| `big` | `auto` | → `SOFAB_OBJECT_DESCR_PROFILE`; `auto` = the narrowest that fits the message's ids/sizes (override only to force wider). The C backend always uses the `object.h` API (§6.2/§11); there is no alternative API-style knob. |
 | `string_storage` | `fixed_inline` \| `caller_buffer` | `fixed_inline` | `maxlen`-sized `char[]` vs pointer+len (no heap either way). |
 | `buffer` | see below | `{stack, auto}` | |
 
@@ -601,7 +612,6 @@ targets:
   c:
     symbol_prefix: myproj_
     c_standard: c99
-    api_style: object_descriptor
     descriptor_profile: auto              # narrowest profile that fits (auto-derived)
     string_storage: fixed_inline
     buffer: { mode: stack, size: 256 }    # uint8_t buf[256]
@@ -839,17 +849,17 @@ For every `(definition, config)` pair the `runner/`:
 
 Auto-generate / hand-curate a broad set of `.yaml` definitions covering each schema construct at its boundaries:
 
-- **Scalars:** every integer width (`u8…u64`, `i8…i64`) at `min`/`max`/0/`default`, signed/unsigned boundary values; `fp32`/`fp64` incl. 0, ±max, subnormals, NaN/±Inf, `decimals`; `boolean` true/false/default.
-- **Strings/blobs:** empty, length 1, `minlen`, `maxlen`, multibyte UTF-8; blob with base64 default.
+- **Scalars:** every integer width (`u8…u64`, `i8…i64`) at its type minimum, maximum, 0, and `default`, signed/unsigned boundary values; `fp32`/`fp64` incl. 0, ±max, subnormals, NaN/±Inf, `decimals`; `boolean` true/false/default.
+- **Strings/blobs:** empty, length 1, `maxlen`, multibyte UTF-8; blob with base64 default.
 - **Arrays:** every numeric element type at `count` 1 and large; **array-of-`string`** (the sequence-of-strings special case, §5).
 - **Enums:** contiguous, non-contiguous, **negative** values, explicit vs shorthand, `default`, and `$ref` to `$defs`.
 - **Bitfields:** flags at `pos` 0 and 63, defaults true/false, `$ref`.
 - **Structs:** flat, nested, **nesting depth 1, 2, … up to the 256 cap and one past it (must fail)**; `$ref` and shared/reused structs; recursive references.
 - **Unions:** multiple options, `default_id`, `$ref`.
-- **Sequences:** of each primitive and of structs *(once the §3.3 schema gap is resolved)*.
+- **Wire sequences:** `struct`/`union` nesting and `array`-of-`string`/`blob`, exercised at depth (§3.3).
 - **Field ids:** `0`, large, non-contiguous, and **duplicate-id (must fail validation)**.
 - **Metadata & evolution:** `deprecated` fields; `unit`/`description`/`summary` (assert they reach the doc comments); **forward/backward compat** — decode a message that has extra/unknown ids and assert they are skipped.
-- **Negative defs:** out-of-range `default`/`min`/`max`, `minlen>maxlen`, enum `default` not in set — assert the generator rejects them.
+- **Negative defs:** out-of-range `default`, a `string`/`blob` `default` longer than `maxlen`, duplicate ids, bitfield `pos` collisions, enum `default` not in set, union `default_id` with no matching option — assert the generator rejects them.
 
 ### 9.4 Config matrix — every combination
 
@@ -876,7 +886,7 @@ High-level, demonstrable checkpoints — each has a single clear "done when" cri
 | # | Milestone | Done when | Phase |
 |---|---|---|---|
 | **M0** | **Foundations** | The CLI loads a YAML/JSON definition + config, validates against the schema (incl. the five custom keywords, §3.2 / `schema/README.md`), resolves `$ref`, and builds a validated IR for `example.yaml` — no backend yet. **Initial `docs/ARCHITECTURE.md` created.** | 0 |
-| **M1** | **Format finalized** | The schema (`v1.x`) + IR are frozen — `sequence` confirmed as a wire type (§3.3, no authoring type), numeric `min`/`max` removed, `string`/`blob` `maxlen` made optional with a per-target check (§5.7). No further input-format churn expected. | 0 |
+| **M1** | **Format finalized** | The schema (`v1.x`) + IR are frozen. No further input-format churn expected. | 0 |
 | **M2** | **First backend emits compiling code** | `sbufgen --lang c` turns `example.yaml` into C (`object.h`) sources that compile against `corelib-c-cpp`, **with capability guards** (§5.4). | 1 |
 | **M3** | **Root-project generator works** | `emit: project` scaffolds a buildable C root project (build files + devcontainer wiring + encode/decode harness, §9.1) that builds **inside `corelib-c-cpp`'s devcontainer**. | 1 |
 | **M4** | **Conformance backbone green (C)** | The matrix runner drives the C harness: round-trip + golden shared-vector checks pass automatically. | 1 |
@@ -937,9 +947,8 @@ It exercises scalars, a negative-valued enum (forcing a signed backing type), a 
 
 ### Phase 0 — Foundations & format finalization
 - [ ] Pick generator language (Go recommended) — §2.1.
-- [x] **`sequence` settled** — confirmed as a **wire type**, not an authoring type (§3.3); no schema change needed. Backends must route `struct`/`union`/`array-of-string`/`array-of-blob` through `sequence_begin/end` and require the `sequence` capability.
 - [ ] Stand up the **project skeleton per §8.7** (`cmd/codegen`, `internal/{pipeline,parser,model,ir,analysis,generator,config}`, `generators/<lang>`), CLI parsing, CI with cross-compile matrix (win/linux/mac × x86-64/arm64 at minimum). Enforce the dependency rule: the core imports no `generators/*` package.
-- [ ] **Parser** + JSON-Schema validation (hard gate) incl. custom keywords `uniqueIds`, `defaultMatchesEnum` (§8.1).
+- [ ] **Parser** + JSON-Schema validation (hard gate) incl. the five custom keywords and the `$data` rules (§8.1, `schema/README.md`).
 - [ ] **Config system** (§7): YAML/JSON config loader; author **`schema/sbufgen-config-schema.json`** (`additionalProperties:false`) and **validate every config against it before use** (hard gate, §7.1); generic+per-target merge (+ `--in`/`--out` path overrides); `--print-defaults`; CI check that the schema and the handled config keys stay in lockstep and that all committed example/matrix configs validate.
 - [ ] Minimal CLI (§8.8): `--config`, `--lang`, optional `--in`/`--out` — no other flags.
 - [ ] **Composite model / AST** (§8.2): `Node` interface + node kinds, `$ref` resolution into a shared-type graph, canonical naming.
@@ -972,16 +981,14 @@ It exercises scalars, a negative-valued enum (forcing a signed backing type), a 
 
 ## 11. Key Risks & Open Questions
 
-1. **`sequence` vs `array`** — ✅ *resolved* (§3.3): `sequence` is a **wire type**, not an authoring type. `struct`/`union` and `array`-of-`string`/`blob` lower onto sequences at encode time; the fixed `array` + `struct`/`union` cover every case. No schema change was needed.
-2. **C `object.h` expressiveness** — the descriptor table cleanly handles scalars, arrays, fixlen, and nested structs, but **unions** and **variable sequences of structs** may need the lower-level `ostream`/`istream` API path. Decide per-type whether to emit descriptor-based or explicit-call code.
-3. **Embedded list/string sizing** — `no_std` Rust and C have no heap; `sequence`/`string`/`blob` need a bounded-capacity strategy (caller-provided buffers, `maxlen`-sized inline storage, or a configurable cap). Define a consistent policy.
-4. **Max-size constant (all languages)** — every message exposes a compile-time max-serialized-size constant (§5.5), used as the default buffer size and overridable for streaming (§5.6). The generator computes it analytically from a wire-format cost model (not by invoking each corelib) and the conformance suite verifies actual ≤ computed. C++ realizes it as the constexpr `_maxSize` driving `OStreamInline`. *Open:* messages containing a variable-length `sequence` are unbounded → no finite constant, streaming required.
-5. **Throughput-lib API drift** — ✅ *resolved by verification* (§4.1 table). Go uses `Write*`/`Bool`/`Bytes`/`Float32` and a **pull-parser** decoder; Python is snake_case with a pull-parser; Java/C#/TS are visitor-based. The generator must not template Go/Python as if they were the visitor languages.
-6. **Enum negative values & widths** — schema allows negative enum values (e.g. `GREEN: -100`); pick the smallest signed/unsigned backing type that fits the full value set.
-7. **Numeric `min`/`max`** — ✅ *removed*: domain-range validation is left to the application (as in protobuf / FlatBuffers / Cap'n Proto), so the old `fp32`/`fp64` `min` copy/paste bug is moot. `string`/`blob` keep an **optional** `maxlen` (no `minlen`), with a per-target presence check for fixed-storage backends (§5.7).
-8. **`array` of `string`/`blob` is not an array** — it has no array wire type; it is a *sequence* of string/blob fields (§3.3, §5). The generator must route it through `sequence_begin/end` and require the `sequence`+`fixlen` capabilities, not `array`. *(Found during verification.)*
-9. **Nesting-depth limit is generator-enforced, not lib-uniform** — only the embedded C path is naturally near 256 (`uint8_t depth`); other libs allow far more. The generator owns the 256 portability cap (§4.2). *(Found during verification.)*
-10. **Decode model differs per language** — visitor (Java/C#/TS/Rust), field-callback/descriptor (C/C++), pull-parser (Go/Python). Backends are not a single template. *(Found during verification.)*
+1. **C backend uses `object.h` exclusively.** The C generator targets the `corelib-c-cpp` `object.h` API only — static descriptor tables plus the object encode/decode API — including for **unions** and **variable sequences of structs**. This is a bit more involved than the plain-scalar case, but **`corelib-c-cpp` ships working examples and unit-tests covering exactly these cases**, so it is **proven, not a risk**; those tests are the reference shape for the generated code (§6.2). No separate hand-rolled `ostream`/`istream` code path is needed.
+2. **Embedded list/string sizing** — `no_std` Rust and C have no heap; `sequence`/`string`/`blob` need a bounded-capacity strategy (caller-provided buffers, `maxlen`-sized inline storage, or a configurable cap). Define a consistent policy (ties into §5.7).
+3. **Max-size constant (all languages)** — every message exposes a compile-time max-serialized-size constant (§5.5), used as the default buffer size and overridable for streaming (§5.6). The generator computes it analytically from a wire-format cost model (not by invoking each corelib) and the conformance suite verifies actual ≤ computed. C++ realizes it as the constexpr `_maxSize` driving `OStreamInline`. *Open:* a message containing a variable-length `sequence` (or an unbounded `string`/`blob`) has no finite constant → streaming required.
+4. **Enum negative values & widths** — schema allows negative enum values (e.g. `GREEN: -100`); pick the smallest signed/unsigned backing type that fits the full value set.
+5. **`array` of `string`/`blob` is a sequence, not an array** — it has no array wire type; the generator routes it through `sequence_begin/end` and requires the `sequence`+`fixlen` capabilities, not `array` (§3.3).
+6. **Nesting-depth limit is generator-enforced, not lib-uniform** — only the embedded C path is naturally near 256 (`uint8_t depth`); other libs allow far more. The generator owns the 256 portability cap (§4.2).
+7. **Decode model differs per language** — visitor (Java/C#/TS/Rust), field-callback/descriptor (C/C++), pull-parser (Go/Python). Backends are not a single template.
+8. **64-bit value precision** — `i64`/`u64` `default`s and enum values beyond 2^53 cannot be represented exactly by a JSON/JS number; the validator must carry them as strings or BigInt (see `schema/README.md` → Limitations).
 
 ---
 

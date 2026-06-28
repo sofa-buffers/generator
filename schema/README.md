@@ -9,8 +9,9 @@ files** (the YAML/JSON a user writes to describe their messages).
 
 > **Read this whole file before reimplementing the validator.** The schema does
 > **not** stand alone: correct validation depends on three things the bare JSON
-> Schema cannot express — `$data` cross-field rules, two **custom keywords**
-> (`uniqueIds`, `defaultMatchesEnum`), and a **dereference-then-validate** step.
+> Schema cannot express — `$data` cross-field rules, five **custom keywords**
+> (`uniqueIds`, `uniquePositions`, `defaultMatchesEnum`, `defaultIdMatchesUnion`,
+> `blobDefaultLength`), and a **dereference-then-validate** step.
 > A stock draft-07 validator will silently accept definitions the reference
 > implementation rejects. These extra checks are specified in
 > [§ Validation contract](#validation-contract) and **must be ported**.
@@ -59,23 +60,22 @@ rejected rather than ignored.
 | `union` | `oneof:` inline or `{ $ref }`; optional `default_id` |
 
 Common optional metadata on every field: `description`, `unit`, `deprecated`
-(floats also allow `decimals`). Numeric fields have **no `min`/`max`** — value
-range is the type's width only; domain-range validation is left to the
-application (as in protobuf / FlatBuffers / Cap'n Proto). `string`/`blob` carry an
-optional **`maxlen`** (no `minlen`). `maxlen` is optional at the schema level, but
-**targets that cannot allocate dynamically (e.g. C `char s[N]`, `no_std` Rust)
-require it** to size static storage — so a backend must reject a `maxlen`-less
-`string`/`blob` as a generator-side, per-language check (see PLAN § "Bounded
-storage & required `maxlen` per target").
+(floats also allow `decimals`). Numeric value-range validation is left to the
+application, as in protobuf / FlatBuffers / Cap'n Proto.
+
+`string`/`blob` carry an optional **`maxlen`**. It is optional at the schema level,
+but **targets that cannot allocate dynamically (e.g. C `char s[N]`, `no_std` Rust)
+require it** to size static storage — so such a backend rejects a `maxlen`-less
+`string`/`blob` as a generator-side, per-language check (see PLAN §5.7).
 
 Every field **requires `id`** (a uint in `0 .. 2147483647`) and `type`.
 
 ---
 
-## How this maps to the wire format ("where did `sequence` go?")
+## How definition types map to the wire format
 
-There is **no `sequence` type in the definition format**, and that is correct.
-`sequence` is a **wire type**, not an authoring type. See the
+`sequence` is a **wire type**, not an authoring type — there is intentionally no
+`sequence` keyword in the definition format. See the
 [wire-format documentation](https://github.com/sofa-buffers/documentation/blob/main/README.md).
 
 The wire encodes the type in the low 3 bits of each field's varint header:
@@ -185,12 +185,11 @@ ajv.addKeyword({
 });
 ```
 
-> **Presence, not truthiness.** The guard uses `data.default === undefined` (not
-> `!data.default`) so a **falsy** default — notably `default: 0`, a common valid
-> enum value — is still checked rather than skipped. Use `=== undefined` (or
-> `!("default" in data)`) in any reimplementation.
-> Note this keyword reads `data.enum`, so it must run **after** `$ref` resolution
-> (a `{ $ref }` enum is only a map of values once dereferenced).
+> **Use a presence test** (`data.default === undefined` / `!("default" in data)`),
+> so a **falsy** default — notably `default: 0`, a common valid enum value — is
+> still checked rather than skipped. This keyword reads `data.enum`, so it must run
+> **after** `$ref` resolution (a `{ $ref }` enum is only a map of values once
+> dereferenced).
 
 ### 5. Custom keyword: `blobDefaultLength`
 
@@ -279,13 +278,10 @@ A validator is only conformant if it does **all** of:
 - [ ] resolve `$ref` before validating, but keep `$ref` for generation;
 - [ ] fail closed: located error, non-zero exit, no output.
 
-**Still open (design decisions before freeze):**
+## Limitations
 
 - **64-bit ranges are not exactly enforced.** A 64-bit `i64`/`u64` `default` (and
   enum values) are checked with JSON-number bounds, but JSON/JS numbers are
   doubles, so values past 2^53 lose precision and an out-of-range 64-bit `default`
-  (e.g. 2^64) can slip through. A correct validator should carry 64-bit values as
+  (e.g. 2^64) can slip through. A reimplementation should carry 64-bit values as
   strings (or use a BigInt range check).
-- Heavy duplication (per-width `default` range tables) could be factored into
-  shared `$defs`; and the internal `$defs` keyword overloads the user-facing
-  `$defs` property (draft-07's keyword is `definitions`).
