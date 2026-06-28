@@ -1,0 +1,6 @@
+version: 1
+messages:
+  Meta:
+    summary: "A message exercising metadata."
+    payload:
+      weight: { id: 0, type: i16, unit: kg, description: "weight in kg", deprecated: true, default: 5 }

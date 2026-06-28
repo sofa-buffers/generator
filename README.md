@@ -20,13 +20,34 @@ runtime for its language, so the hard part — a fast, portable, footprint-tuned
 wire codec with a uniform streaming API — is owned by the corelibs, not the
 generated code.
 
-> **Status: design / planning.** The from-scratch generator described here is
-> being specified before implementation. The full design lives in
-> [`docs/PLAN.md`](docs/PLAN.md). Verified proof-of-concept artifacts (hand-written
-> code mirroring the generated shape, plus the capability guards) exist in the
-> `generator-old` repository's `test/` tree. This repo supersedes that TypeScript
-> POC. The living architecture document, [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
-> is created at milestone **M0**.
+> **Status: implemented — all 8 language backends complete and CI-green.** The
+> generator (`sbufgen`) emits typed code for **C, Go, Python, TypeScript, C++,
+> Rust, C#, and Java**; each is built against its real corelib in CI, JSON
+> round-trips every field kind, and is byte-exact against the shared wire
+> vectors. The full design lives in [`docs/PLAN.md`](docs/PLAN.md) and the living
+> architecture in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Quick start
+
+```sh
+# Build the single static binary (or grab one from a release).
+go build -o sbufgen ./cmd/sbufgen
+
+# Generate typed sources for one language from a definition.
+./sbufgen --lang go --in examples/example.yaml --out out/go
+
+# Generate for every language.
+for lang in c cpp go python typescript rust csharp java; do
+  ./sbufgen --lang "$lang" --in examples/example.yaml --out "out/$lang"
+done
+
+# Scaffold a full buildable project + encode/decode harness (per PLAN §7):
+#   sbufgen --config myconfig.yaml --lang rust --in examples --out out
+```
+
+Generated example sources for all 8 languages live on the
+[`example-output`](https://github.com/sofa-buffers/generator/tree/example-output/output)
+branch. Each backend's one-command conformance harness is `tests/<lang>/run.sh`.
 
 ### What it does
 

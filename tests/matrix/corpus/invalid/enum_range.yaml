@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: enum, enum: { BIG: 3000000000 } } } } }

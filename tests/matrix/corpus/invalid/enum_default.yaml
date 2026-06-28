@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: enum, enum: { X: 1 }, default: 9 } } } }

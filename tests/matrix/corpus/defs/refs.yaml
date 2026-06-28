@@ -1,0 +1,15 @@
+version: 1
+$defs:
+  struct:
+    Point: { x: { id: 0, type: i32 }, y: { id: 1, type: i32 } }
+  enum:
+    Color: { R: 0, G: 1, B: 2 }
+  bitfield:
+    Bits: { A: { pos: 0 }, B: { pos: 1 } }
+messages:
+  R:
+    payload:
+      p1: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Point' } }
+      p2: { id: 1, type: struct, fields: { $ref: '#/$defs/struct/Point' } }
+      c:  { id: 2, type: enum, enum: { $ref: '#/$defs/enum/Color' }, default: 1 }
+      bf: { id: 3, type: bitfield, bits: { $ref: '#/$defs/bitfield/Bits' } }

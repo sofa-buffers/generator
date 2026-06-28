@@ -1,0 +1,7 @@
+version: 1
+messages:
+  Sb:
+    payload:
+      s:     { id: 0, type: string, maxlen: 32, default: "hi" }
+      empty: { id: 1, type: string, maxlen: 4 }
+      b:     { id: 2, type: blob, maxlen: 8, default: "SGVsbG8=" }

@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: bitfield, bits: { x: { pos: 1 }, y: { pos: 1 } } } } } }

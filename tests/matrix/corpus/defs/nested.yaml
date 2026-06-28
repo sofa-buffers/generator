@@ -1,0 +1,13 @@
+version: 1
+messages:
+  Nest:
+    payload:
+      a:
+        id: 0
+        type: struct
+        fields:
+          b:
+            id: 0
+            type: struct
+            fields:
+              c: { id: 0, type: struct, fields: { d: { id: 0, type: i32, default: -7 } } }

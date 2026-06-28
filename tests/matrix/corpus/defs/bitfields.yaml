@@ -1,0 +1,5 @@
+version: 1
+messages:
+  Bf:
+    payload:
+      flags: { id: 0, type: bitfield, bits: { LOW: { pos: 0, default: true }, HIGH: { pos: 63 } } }

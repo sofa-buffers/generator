@@ -1,0 +1,149 @@
+// Package matrix is the M7 corpus runner: it validates a corner-case corpus of
+// definitions, generates each across ALL registered language backends, and
+// confirms the invalid corpus is rejected. It is hermetic (no toolchains) so it
+// runs in the core CI job.
+package matrix
+
+import (
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/sofa-buffers/generator/internal/analysis"
+	"github.com/sofa-buffers/generator/internal/generator"
+	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/model"
+	defparser "github.com/sofa-buffers/generator/internal/parser"
+
+	// Register every backend.
+	_ "github.com/sofa-buffers/generator/generators/c"
+	_ "github.com/sofa-buffers/generator/generators/cpp"
+	_ "github.com/sofa-buffers/generator/generators/csharp"
+	_ "github.com/sofa-buffers/generator/generators/golang"
+	_ "github.com/sofa-buffers/generator/generators/java"
+	_ "github.com/sofa-buffers/generator/generators/python"
+	_ "github.com/sofa-buffers/generator/generators/rust"
+	_ "github.com/sofa-buffers/generator/generators/typescript"
+)
+
+func buildIR(t *testing.T, path string) (*ir.Schema, error) {
+	t.Helper()
+	doc, err := defparser.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := doc.Resolve()
+	if err != nil {
+		return nil, err
+	}
+	if errs := defparser.Validate(resolved); errs != nil {
+		return nil, errs
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		return nil, err
+	}
+	if err := analysis.Analyze(s); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// TestCorpusGeneratesEverywhere: every positive def validates, builds an IR, and
+// generates non-empty output for every registered backend; generated Go parses.
+func TestCorpusGeneratesEverywhere(t *testing.T) {
+	defs, _ := filepath.Glob("corpus/defs/*.yaml")
+	if len(defs) == 0 {
+		t.Fatal("no corpus defs found")
+	}
+	langs := generator.Registered()
+	if len(langs) < 8 {
+		t.Fatalf("expected >=8 backends, got %v", langs)
+	}
+	for _, def := range defs {
+		def := def
+		t.Run(filepath.Base(def), func(t *testing.T) {
+			s, err := buildIR(t, def)
+			if err != nil {
+				t.Fatalf("should validate: %v", err)
+			}
+			for _, lang := range langs {
+				b, _ := generator.Lookup(lang)
+				files, err := b.Generate(s, map[string]any{})
+				if err != nil {
+					t.Errorf("[%s] generate: %v", lang, err)
+					continue
+				}
+				if len(files) == 0 {
+					t.Errorf("[%s] no files", lang)
+				}
+				for _, f := range files {
+					if len(f.Content) == 0 {
+						t.Errorf("[%s] empty file %s", lang, f.Path)
+					}
+					if lang == "go" && strings.HasSuffix(f.Path, ".go") {
+						if _, perr := parser.ParseFile(token.NewFileSet(), f.Path, f.Content, parser.AllErrors); perr != nil {
+							t.Errorf("[go] generated %s does not parse: %v", f.Path, perr)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestInvalidCorpusRejected: every invalid def fails the hard gate.
+func TestInvalidCorpusRejected(t *testing.T) {
+	bad, _ := filepath.Glob("corpus/invalid/*.yaml")
+	if len(bad) == 0 {
+		t.Fatal("no invalid corpus found")
+	}
+	for _, def := range bad {
+		def := def
+		t.Run(filepath.Base(def), func(t *testing.T) {
+			if _, err := buildIR(t, def); err == nil {
+				t.Fatalf("%s should have been rejected but validated", def)
+			}
+		})
+	}
+}
+
+// TestDanglingRefRejected: a $ref with no target fails at resolve time.
+func TestDanglingRefRejected(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n      a: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Nope' } }\n"
+	doc, err := defparser.Parse([]byte(src), "t.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.Resolve(); err == nil {
+		t.Fatal("dangling $ref should fail to resolve")
+	}
+}
+
+// TestNestingDepthCap: a struct nested past MAX_NESTING_DEPTH is rejected.
+func TestNestingDepthCap(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("version: 1\nmessages:\n  Deep:\n    payload:\n")
+	indent := "      "
+	// build a chain of nested structs deeper than the cap
+	depth := ir.MaxNestingDepth + 2
+	for i := 0; i < depth; i++ {
+		b.WriteString(indent + "f:\n")
+		b.WriteString(indent + "  id: 0\n")
+		b.WriteString(indent + "  type: struct\n")
+		b.WriteString(indent + "  fields:\n")
+		indent += "    "
+	}
+	b.WriteString(indent + "leaf: { id: 0, type: u8 }\n")
+
+	tmp := filepath.Join(t.TempDir(), "deep.yaml")
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildIR(t, tmp); err == nil {
+		t.Fatalf("nesting depth %d should exceed the cap (%d)", depth, ir.MaxNestingDepth)
+	}
+}

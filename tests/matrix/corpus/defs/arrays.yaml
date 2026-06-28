@@ -1,0 +1,9 @@
+version: 1
+messages:
+  Arr:
+    payload:
+      nums:  { id: 0, type: array, items: { type: i32, count: 3 }, default: [-1, 0, 2147483647] }
+      bytes: { id: 1, type: array, items: { type: u8, count: 2 }, default: [0, 255] }
+      fps:   { id: 2, type: array, items: { type: fp64, count: 2 }, default: [1.0, 2.0] }
+      strs:  { id: 3, type: array, items: { type: string, count: 2, maxlen: 8 }, default: ["a", "b"] }
+      blobs: { id: 4, type: array, items: { type: blob, count: 1, maxlen: 4 }, default: ["AAE="] }

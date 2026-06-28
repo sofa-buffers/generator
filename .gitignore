@@ -10,3 +10,6 @@
 
 # Editor / OS
 .DS_Store
+
+# Generated example sources (lives on the example-output branch)
+/output/

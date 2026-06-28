@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: blob, maxlen: 2, default: "SGVsbG8=" } } } }

@@ -1,0 +1,5 @@
+version: 1
+messages:
+  En:
+    payload:
+      color: { id: 0, type: enum, default: -1, enum: { NEG: -1, ZERO: 0, BIG: 2147483647 } }

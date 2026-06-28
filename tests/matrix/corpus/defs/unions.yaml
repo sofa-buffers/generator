@@ -1,0 +1,11 @@
+version: 1
+messages:
+  Un:
+    payload:
+      u:
+        id: 0
+        type: union
+        default_id: 1
+        oneof:
+          x: { id: 0, type: u16 }
+          y: { id: 1, type: string, maxlen: 16 }
