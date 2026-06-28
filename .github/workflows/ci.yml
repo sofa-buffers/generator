@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Language-independent core: builds, vets, and runs the hermetic test suite
+  # (no external toolchain or corelib needed).
+  hermetic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Gofmt check
+        run: test -z "$(gofmt -l .)" || { echo "unformatted files:"; gofmt -l .; exit 1; }
+      - name: Test
+        run: go test ./... -count=1
+      - name: Cross-compile matrix
+        run: |
+          for t in linux/amd64 linux/arm64 windows/amd64 darwin/arm64; do
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/sbufgen
+          done
+
+  # Language milestone: C (corelib-c-cpp). Generates code, builds it against the
+  # real corelib with gcc, round-trips through the harness, and checks byte-exact
+  # output against the shared wire vectors. tests/c/run.sh clones the corelib.
+  lang-c:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Toolchain
+        run: gcc --version && make --version | head -1
+      - name: C backend — generate, build, round-trip, conformance
+        run: ./tests/c/run.sh
