@@ -1,15 +1,22 @@
 # SofaBuffers Generator — Architecture
 
-> **Status: M0 (Foundations).** This document is the single, up-to-date
-> description of how the generator works and is the first thing a maintainer or
-> new-language contributor should read. Keeping it current is part of the
-> "done when" criterion of every milestone (PLAN §10).
+> **Status: C language backend complete + CI green.** This document is the
+> single, up-to-date description of how the generator works and is the first
+> thing a maintainer or new-language contributor should read. Keeping it current
+> is part of the "done when" criterion of every milestone (PLAN §10), and it is
+> updated **before every push to `main`**.
 >
-> **What exists today (M0):** the language-independent core — CLI, config
-> system, parser + hard-gate validation, generic model, `$ref`/shared-type
-> resolution, semantic checks, and the frozen IR. **No language backend is
-> wired yet**; a run validates a definition, resolves `$ref`, builds the IR,
-> and prints a summary.
+> **What exists today:** the language-independent core (CLI, config, parser +
+> hard-gate validation, model, `$ref`/shared-type resolution, semantic checks,
+> frozen IR) **plus the first language backend — C (`generators/c`)** — which
+> generates `object.h`-based code that compiles, round-trips, and is byte-exact
+> against the shared wire vectors. GitHub Actions CI (`.github/workflows/ci.yml`)
+> runs a hermetic core job and a per-language job (`lang-c`) on every push.
+>
+> **Milestone model:** each target language is a milestone — a working backend
+> with its own CI job and tests, landed on `main` only when green, then on to
+> the next language. Order (testable-toolchain first): **C ✓ → Go → Python →
+> TypeScript → C++ → (Rust / Java / C# once their toolchains are wired)**.
 
 ---
 
@@ -170,11 +177,26 @@ This is the most important long-term workflow. To add `generators/<lang>/`:
    blank-import the package from `cmd/sbufgen` so it self-registers.
 4. Add the per-target config keys to `schema/sbufgen-config-schema.json`
    (§7.3) — keep schema and handled keys in lockstep (§7.1).
-5. Add a root project / harness template + corpus entries (§9) and wire it into
-   the matrix runner.
+5. Add a root project / harness template + corpus entries (§9), a
+   `tests/<lang>/run.sh` harness (generate → build → round-trip → conformance
+   against that corelib), and a gated Go test mirroring `generators/c`.
+6. Add a `lang-<x>` job to `.github/workflows/ci.yml` that runs the harness, so
+   the backend is CI-verified on every push.
 
 No edits to the core model, pipeline, IR, or the message schema are required —
-adding a language is purely additive.
+adding a language is purely additive. **A language milestone lands on `main`
+only when its tests + CI job are green.**
+
+### Reference backend: C (`generators/c`)
+
+The C backend is the worked example to copy. Shape: a `gen` visitor over the IR
++ a `cfile` Builder; per object a struct + static `object.h` descriptor table +
+encode/decode/init wrappers; enum→signed / bitfield→unsigned backing;
+struct/union/array-of-string → nested sequence object; auto-derived capability
+guards + API-version guard + analytic `MAX_SIZE` (`cost.go`). `emit: project`
+adds build files + devcontainer wiring + an IR-driven encode/decode JSON harness
+(`project.go`). Tests: hermetic structural + determinism, plus
+`SOFAB_C_CORELIB`-gated compile/round-trip/vector-conformance (`tests/c/run.sh`).
 
 ---
 
@@ -205,4 +227,7 @@ adding a language is purely additive.
 | **M2 First backend (C)** | **done** — `generators/c` emits `object.h`-based struct + descriptor tables + encode/decode/init wrappers + capability guards + API-version guard + MAX_SIZE. `example.yaml` compiles **and round-trips** against the real `corelib-c-cpp` (`tests/c/run.sh`); guards verified to fire. Tag `m2`. |
 | **M3 Root-project generator (C)** | **done** — `emit: project` scaffolds a buildable C project (Makefile + CMakeLists + devcontainer wiring + README) with an **IR-driven encode/decode JSON harness** (§9.1). The harness builds against `corelib-c-cpp` and JSON round-trips every field kind. Tag `m3`. |
 | **M4 C conformance backbone** | **done** — drives the generated C encoder against the corelib's language-agnostic shared vectors (`assets/test_vectors.json`): **34 vectors byte-exact** (non-zero scalar/string at id 0). Sparse-encoder zero/blob/array cases are covered by the round-trip harness. `tests/c/run.sh` is the one-command backbone. Tag `m4`. |
-| M5+ | in progress (Rust/C++ backends, throughput langs, full matrix, release). |
+| **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job (build/vet/gofmt/test/cross-compile) + `lang-c` job (clone corelib → generate → build → round-trip → vector conformance) on every push. |
+| Go backend | **next** — throughput backend against `corelib-go` (pull-parser decode). |
+| Python / TypeScript / C++ | pending (testable here). |
+| Rust / Java / C# | pending — need their toolchains wired into CI. |
