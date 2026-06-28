@@ -180,7 +180,7 @@ Notes that shape the backends:
 ### 4.2 Nesting & depth
 
 - `struct`, `union`, and variable `sequence` are emitted using the corelib's `sequence_begin(id)` / `sequence_end()` API calls (the corelib handles the on-wire representation).
-- **Max nesting depth = 256 — enforced by the *generator*, not uniformly by the corelibs.** Verified reality: the corelibs do **not** share a 256 cap. The embedded **C** path is the binding constraint — its decoder uses a `uint8_t depth` counter (`object.h`) / `uint8_t skip_depth` (`istream.h`), i.e. ≤ 255 levels. The others are far looser: Rust caps at `u32`, Java at `long`, C# at `ulong`, and Go/Python/TS impose no fixed cap (limited only by stack/heap). To keep a message **portable across every backend**, the generator validates depth ≤ 256 at generation time (a hard error past it). Do **not** claim runtime 256-enforcement by the libs — only C is naturally near that bound.
+- **Max nesting depth = 256 — a hard limit from the SofaBuffers spec.** Every generator carries the same `MAX_NESTING_DEPTH = 256` **constant** and validates depth ≤ 256 at generation time, emitting a hard error past it. 256 is already an enormous nesting depth in practice, so the cap is never a real-world constraint; using one shared constant keeps every backend portable and the embedded **C** decoder (a `uint8_t depth` counter in `object.h` / `istream.h`) within its natural bound.
 
 ---
 
@@ -192,7 +192,7 @@ For a message `MyMessage` the generator emits, per language:
 
 1. A **type** holding all members with language-appropriate field types:
    - integers → native sized ints,
-   - `enum` → a generated enum type backed by the right integer width,
+   - `enum` → a generated enum type backed by the smallest **signed** integer width that fits (enums are signed zig-zag varints on the wire),
    - `bitfield` → an integer with named bit accessors / flag constants,
    - `array` of a **numeric** element (`u*`/`i*`/`fp32`/`fp64`) → fixed-size array/`std::array`/`[N]T`, encoded with the corelib's array writers;
    - `array` of **`string`** → **special case: there is no string-array wire type.** It is modelled as a fixed-length **sequence of string fields** (confirmed by `corelib-c-cpp`'s object test and the `examples/example.yaml` note "string arrays are internally represented as a sequence of strings"). So generated code wraps it in `sequence_begin/end` and writes one string per element — it requires the **sequence** (and fixlen) capability, *not* the array capability;
@@ -350,7 +350,7 @@ Generated code **MUST support processing a message in small chunks**, not only w
 
 `maxlen` on `string`/`blob` is **optional in the JSON Schema** — a definition may omit it, meaning "no declared upper bound." That is fine for targets that can allocate dynamically (Go/Python/Java/C#/TS, and any backend configured to use heap/growable storage: `std::string`, `Vec<u8>`, `heapless` with a runtime cap, etc.). It is **not** fine for targets where the receive/field buffer must exist as fixed, statically-sized storage and dynamic allocation is forbidden or disabled.
 
-The canonical case is embedded **C**: a string field becomes `char name[N];` and a blob becomes `uint8_t data[N];` — **the generator must know `N`**, and `N` comes from `maxlen`. With no `maxlen` there is no `N`, so the field cannot be emitted as fixed storage at all. The same applies to:
+The canonical case is embedded **C**: a string field becomes `char name[N];` and a blob becomes `uint8_t data[N];` — **the generator must know `N`**, and `N` comes from `maxlen`. With no `maxlen` there is no `N`, so the field cannot be emitted as fixed storage at all. An **array of `string`/`blob`** extends this one dimension: its `items.maxlen` (also optional) supplies the per-element bound, so a fixed-storage target emits a **2-D buffer** — e.g. C `char data[count][maxlen];` — and the same presence check applies to `items.maxlen` for those targets. The same applies to:
 
 - **C** (`corelib-c-cpp`, `object.h`) with `string_storage: fixed_inline` (the default) — `maxlen`-sized `char[]`/`uint8_t[]`.
 - **`no_std` Rust** (`corelib-rs-no-std`) with `string_storage: fixed` / `heapless` — bounded inline capacity needs the bound.
@@ -381,7 +381,7 @@ There are really only **two optimization axes**, and every backend sits on one o
 - **`switch` on field id for decode**, not a chain of `if`s — lets compilers build a jump table. Unknown ids fall through to the corelib's skip path (forward/backward compatibility for free).
 - **Resolve everything at generation time.** Field ids, type mappings, enum backing widths, array element kinds/counts, and string/blob `maxlen` are all known statically — bake them in as constants/literals so nothing is computed at runtime.
 - **No reflection / no runtime schema.** All dispatch is concrete generated code; there is no descriptor interpretation at runtime (except C, which deliberately uses a static descriptor table — see below).
-- **Pick the narrowest correct type.** Map each integer to its exact width; choose the smallest signed/unsigned backing type for enums that covers the whole value set (e.g. a negative enum value forces signed). Avoid widening on the hot path.
+- **Pick the narrowest correct type.** Map each integer to its exact width. Enums are **signed** (zig-zag varint) on the wire, so back each enum with the smallest **signed** integer width (`i8`/`i16`/`i32`/`i64`) that covers its value range. Avoid widening on the hot path.
 - **Validate cheaply or not at all on the hot path.** Bounds checks (`maxlen`, array `count`) are generated as `debug`-only assertions (or an opt-in `--validate` mode), so release builds pay nothing.
 - **Honor defaults & `deprecated` without branches** where possible: initialize members to schema defaults at construction; emit deprecated fields behind a generation flag.
 
@@ -477,7 +477,7 @@ Each backend gets its own object under `targets:`; it inherits the generic block
 | `c_standard` | `c99` \| `c11` | `c99` | corelib is C99. |
 | `header_extension` / `source_extension` | string | `.h` / `.c` | |
 | `include_guard` | `ifndef` \| `pragma_once` | `ifndef` | |
-| `descriptor_profile` | `auto` \| `small` \| `medium` \| `big` | `auto` | → `SOFAB_OBJECT_DESCR_PROFILE`; `auto` = the narrowest that fits the message's ids/sizes (override only to force wider). The C backend always uses the `object.h` API (§6.2/§11); there is no alternative API-style knob. |
+| `descriptor_profile` | `auto` \| `small` \| `medium` \| `big` | `auto` | → `SOFAB_OBJECT_DESCR_PROFILE`; `auto` = the narrowest that fits the message's ids/sizes (override only to force wider). The C backend always uses the `object.h` API (§6.2); there is no alternative API-style knob. |
 | `string_storage` | `fixed_inline` \| `caller_buffer` | `fixed_inline` | `maxlen`-sized `char[]` vs pointer+len (no heap either way). |
 | `buffer` | see below | `{stack, auto}` | |
 
@@ -981,14 +981,8 @@ It exercises scalars, a negative-valued enum (forcing a signed backing type), a 
 
 ## 11. Key Risks & Open Questions
 
-1. **C backend uses `object.h` exclusively.** The C generator targets the `corelib-c-cpp` `object.h` API only — static descriptor tables plus the object encode/decode API — including for **unions** and **variable sequences of structs**. This is a bit more involved than the plain-scalar case, but **`corelib-c-cpp` ships working examples and unit-tests covering exactly these cases**, so it is **proven, not a risk**; those tests are the reference shape for the generated code (§6.2). No separate hand-rolled `ostream`/`istream` code path is needed.
-2. **Embedded list/string sizing** — `no_std` Rust and C have no heap; `sequence`/`string`/`blob` need a bounded-capacity strategy (caller-provided buffers, `maxlen`-sized inline storage, or a configurable cap). Define a consistent policy (ties into §5.7).
-3. **Max-size constant (all languages)** — every message exposes a compile-time max-serialized-size constant (§5.5), used as the default buffer size and overridable for streaming (§5.6). The generator computes it analytically from a wire-format cost model (not by invoking each corelib) and the conformance suite verifies actual ≤ computed. C++ realizes it as the constexpr `_maxSize` driving `OStreamInline`. *Open:* a message containing a variable-length `sequence` (or an unbounded `string`/`blob`) has no finite constant → streaming required.
-4. **Enum negative values & widths** — schema allows negative enum values (e.g. `GREEN: -100`); pick the smallest signed/unsigned backing type that fits the full value set.
-5. **`array` of `string`/`blob` is a sequence, not an array** — it has no array wire type; the generator routes it through `sequence_begin/end` and requires the `sequence`+`fixlen` capabilities, not `array` (§3.3).
-6. **Nesting-depth limit is generator-enforced, not lib-uniform** — only the embedded C path is naturally near 256 (`uint8_t depth`); other libs allow far more. The generator owns the 256 portability cap (§4.2).
-7. **Decode model differs per language** — visitor (Java/C#/TS/Rust), field-callback/descriptor (C/C++), pull-parser (Go/Python). Backends are not a single template.
-8. **64-bit value precision** — `i64`/`u64` `default`s and enum values beyond 2^53 cannot be represented exactly by a JSON/JS number; the validator must carry them as strings or BigInt (see `schema/README.md` → Limitations).
+1. **Decode model differs per language** — visitor (Java/C#/TS/Rust), field-callback/descriptor (C/C++), pull-parser (Go/Python). Backends are not a single template.
+2. **64-bit value precision** — `i64`/`u64` `default`s and enum values beyond 2^53 cannot be represented exactly by a JSON/JS number; the validator must carry them as strings or BigInt (see `schema/README.md` → Limitations).
 
 ---
 

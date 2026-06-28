@@ -544,10 +544,18 @@
                     "minimum": 1,
                     "maximum": 2147483647,
                     "description": "Number of elements in this array"
+                  },
+                  "maxlen": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647,
+                    "description": "Maximum length of each string/blob element. Optional (as for a plain string/blob); lets a fixed-storage target size a 2-D buffer (e.g. C char[count][maxlen]). Only valid when 'type' is string or blob."
                   }
                 },
                 "required": ["type", "count"],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "if": { "required": ["maxlen"] },
+                "then": { "properties": { "type": { "enum": ["string", "blob"] } } }
               },
               "default": {
                 "type": "array",

@@ -118,7 +118,3 @@ cross-compilation); see [`docs/PLAN.md` §2.1](docs/PLAN.md) for the rationale.
   testing & conformance matrix, and the phased roadmap (M0–M8).
 - **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — the maintained, up-to-date
   description of how the generator works (kept current per the per-milestone rule).
-
-## License
-
-[MIT](LICENSE) © 2026 SofaBuffers

@@ -91,6 +91,7 @@ messages:
         items:
           type: string
           count: 5
+          maxlen: 16          # bounds each element so a fixed-storage target can size a 2-D buffer
         description: "An array of string values"
         default: ["one", "two", "three", "four", "five"]
         deprecated: false
@@ -102,6 +103,7 @@ messages:
         items:
           type: blob
           count: 3
+          maxlen: 8           # bounds each blob element for a fixed-storage 2-D buffer
         description: "An array of binary blobs"
         default: ["AAEC", "//8=", "ZGF0YQ=="]   # base64: [00 01 02], [FF FF], "data"
         deprecated: false

@@ -53,8 +53,8 @@ rejected rather than ignored.
 | `boolean` | optional `default` |
 | `string` | optional `maxlen`, optional `default` |
 | `blob` | optional `maxlen`; `default` is base64 |
-| `array` | fixed-length; `items: { type, count }`; element `type` ∈ numeric primitives, **`string`**, or **`blob`** |
-| `enum` | inline map or `{ $ref }`; values may be negative; `default` must match a value |
+| `array` | fixed-length; `items: { type, count, maxlen? }`; element `type` ∈ numeric primitives, **`string`**, or **`blob`** (`items.maxlen` is optional and only valid for string/blob elements) |
+| `enum` | inline map or `{ $ref }`; values may be negative (signed zig-zag varint on the wire — see below); `default` must match a value |
 | `bitfield` | inline `bits` map or `{ $ref }`; each flag has `pos` 0–63 + optional `default` |
 | `struct` | nested; `fields:` inline or `{ $ref }`; recursive |
 | `union` | `oneof:` inline or `{ $ref }`; optional `default_id` |
@@ -66,7 +66,10 @@ application, as in protobuf / FlatBuffers / Cap'n Proto.
 `string`/`blob` carry an optional **`maxlen`**. It is optional at the schema level,
 but **targets that cannot allocate dynamically (e.g. C `char s[N]`, `no_std` Rust)
 require it** to size static storage — so such a backend rejects a `maxlen`-less
-`string`/`blob` as a generator-side, per-language check (see PLAN §5.7).
+`string`/`blob` as a generator-side, per-language check (see PLAN §5.7). The same
+applies element-wise to a `string`/`blob` **array** via `items.maxlen`: when it is
+present a fixed-storage target can emit a **2-D buffer** (e.g. C
+`char data[count][maxlen]`).
 
 Every field **requires `id`** (a uint in `0 .. 2147483647`) and `type`.
 
@@ -101,6 +104,12 @@ So the authoring types lower onto the wire like this:
 - **`array` of `string`** or **`array` of `blob`** → **not an array** —
   arrays of dynamic-length elements are forbidden as an array wire type, so they
   are encoded as a **sequence of string/blob fields**.
+- **`enum`** → a **signed (zig-zag) varint** (wire type `0b001`). Enum values may
+  be negative, and signed zig-zag keeps both small positives and small negatives
+  compact, so negatives carry no extra cost. The generated enum's backing integer
+  is the smallest **signed** width (`i8`/`i16`/`i32`/`i64`) that covers its value
+  range; every backend derives it identically so an enum interoperates across
+  languages.
 
 This is why a definition only ever needs `array` (fixed, numeric/string/blob)
 plus `struct`/`union`: the variable-length and dynamic-element cases are all
