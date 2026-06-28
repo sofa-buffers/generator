@@ -57,4 +57,9 @@ echo "$OUT" | grep -q '"bignum":18446744073709551615' || { echo "FAIL: u64 round
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "$OUT" | grep -q '"someblob":\[10,20,30' || { echo "FAIL: blob round-trip"; exit 1; }
 echo "==> project harness round-trip OK"
+
+echo "==> M4: shared-vector byte-exact conformance + gated Go build tests"
+( cd "$ROOT" && SOFAB_C_CORELIB="$CORELIB" go test ./generators/c/ \
+    -run 'Conformance|Compiles|Project' -count=1 )
+
 echo "PASS"
