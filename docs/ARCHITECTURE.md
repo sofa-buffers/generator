@@ -200,5 +200,6 @@ adding a language is purely additive.
 
 | Milestone | State |
 |---|---|
-| **M0 Foundations** | **in progress** — core pipeline (CLI, config, parser+validation, model, analysis, IR) implemented and tested; this doc created. |
-| M1+ | not started (schema/IR freeze, first backend, conformance harness, …). |
+| **M0 Foundations** | **done** — core pipeline (CLI, config, parser+validation, model, analysis, IR) implemented and tested; this doc created. Tag `m0`. |
+| **M1 Format finalized** | **done** — schema + IR frozen; locked by a deterministic golden IR snapshot (`internal/ir/testdata/example.ir.json`) and the `--dump-ir` flag. Tag `m1`. |
+| M2+ | in progress (first backend = C `object.h`, conformance harness, …). |

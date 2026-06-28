@@ -42,6 +42,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		inDir        = fs.String("in", "", "input definition file or folder (overrides generic.input_dir)")
 		outDir       = fs.String("out", "", "output folder (overrides generic.output_dir)")
 		printDefault = fs.Bool("print-defaults", false, "print the effective resolved config for --lang and exit")
+		dumpIR       = fs.Bool("dump-ir", false, "print the built IR as JSON for each input and exit (no codegen)")
 		showVersion  = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
@@ -114,7 +115,12 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	exit := 0
 	for _, def := range defs {
-		res, err := pipeline.Run(pipeline.Options{DefPath: def, Lang: *lang, Config: cfg, OutDir: out})
+		// --dump-ir stops after the IR (stages [1]-[4]); no backend selected.
+		runLang := *lang
+		if *dumpIR {
+			runLang = ""
+		}
+		res, err := pipeline.Run(pipeline.Options{DefPath: def, Lang: runLang, Config: cfg, OutDir: out})
 		if err != nil {
 			var nb *pipeline.NoBackendError
 			if errors.As(err, &nb) {
@@ -125,6 +131,10 @@ func run(args []string, stdout, stderr *os.File) int {
 			}
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			exit = 1
+			continue
+		}
+		if *dumpIR {
+			stdout.Write(res.Schema.Dump())
 			continue
 		}
 		printSummary(stdout, def, res.Schema)

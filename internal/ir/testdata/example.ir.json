@@ -1,0 +1,223 @@
+{
+  "version": 1,
+  "messages": [
+    {
+      "name": "myfirstmessage",
+      "fields": [
+        {
+          "name": "someinteger",
+          "id": 0,
+          "kind": "i8",
+          "deprecated": true,
+          "has_default": true,
+          "unit": "kg"
+        },
+        {
+          "name": "somebool",
+          "id": 1,
+          "kind": "boolean",
+          "has_default": true
+        },
+        {
+          "name": "somestring",
+          "id": 2,
+          "kind": "string",
+          "maxlen": 50
+        },
+        {
+          "name": "somearray",
+          "id": 3,
+          "kind": "array",
+          "elem": "i32",
+          "count": 5,
+          "has_default": true
+        },
+        {
+          "name": "someenum",
+          "id": 4,
+          "kind": "enum",
+          "ref": "myfirstmessage_someenum",
+          "has_default": true
+        },
+        {
+          "name": "somebitfield",
+          "id": 5,
+          "kind": "bitfield",
+          "ref": "myfirstmessage_somebitfield"
+        },
+        {
+          "name": "somestruct",
+          "id": 6,
+          "kind": "struct",
+          "ref": "myfirstmessage_somestruct"
+        },
+        {
+          "name": "someunion",
+          "id": 7,
+          "kind": "union",
+          "ref": "myfirstmessage_someunion",
+          "has_default": true
+        },
+        {
+          "name": "test",
+          "id": 8,
+          "kind": "fp32",
+          "decimals": 2,
+          "has_default": true
+        },
+        {
+          "name": "someblob",
+          "id": 9,
+          "kind": "blob",
+          "maxlen": 16,
+          "has_default": true
+        },
+        {
+          "name": "someblobarray",
+          "id": 10,
+          "kind": "array",
+          "elem": "blob",
+          "count": 3,
+          "elem_maxlen": 8,
+          "has_default": true
+        },
+        {
+          "name": "bignum",
+          "id": 11,
+          "kind": "u64",
+          "has_default": true
+        },
+        {
+          "name": "somestringarray",
+          "id": 33,
+          "kind": "array",
+          "elem": "string",
+          "count": 5,
+          "elem_maxlen": 16,
+          "has_default": true
+        }
+      ]
+    }
+  ],
+  "named": [
+    {
+      "category": "bitfield",
+      "key": "myfirstmessage_somebitfield",
+      "inline": true,
+      "flags": [
+        {
+          "name": "flagA",
+          "pos": 0
+        },
+        {
+          "name": "flagB",
+          "pos": 1
+        }
+      ]
+    },
+    {
+      "category": "enum",
+      "key": "myfirstmessage_someenum",
+      "inline": true,
+      "consts": [
+        {
+          "name": "GREEN",
+          "value": -100
+        },
+        {
+          "name": "RED",
+          "value": 0
+        },
+        {
+          "name": "BLUE",
+          "value": 2
+        },
+        {
+          "name": "YELLOW",
+          "value": 33
+        }
+      ]
+    },
+    {
+      "category": "struct",
+      "key": "myfirstmessage_somestruct",
+      "inline": true,
+      "fields": [
+        {
+          "name": "nestedint",
+          "id": 0,
+          "kind": "u8",
+          "has_default": true
+        },
+        {
+          "name": "nestedstring",
+          "id": 1,
+          "kind": "string",
+          "maxlen": 32,
+          "has_default": true
+        },
+        {
+          "name": "nestedstruct",
+          "id": 2,
+          "kind": "struct",
+          "ref": "myfirstmessage_somestruct_nestedstruct"
+        }
+      ]
+    },
+    {
+      "category": "struct",
+      "key": "myfirstmessage_somestruct_nestedstruct",
+      "inline": true,
+      "fields": [
+        {
+          "name": "deepint",
+          "id": 0,
+          "kind": "i32",
+          "has_default": true
+        }
+      ]
+    },
+    {
+      "category": "union",
+      "key": "myfirstmessage_someunion",
+      "inline": true,
+      "fields": [
+        {
+          "name": "option1",
+          "id": 0,
+          "kind": "u16",
+          "has_default": true
+        },
+        {
+          "name": "option2",
+          "id": 1,
+          "kind": "string",
+          "maxlen": 64
+        },
+        {
+          "name": "option3",
+          "id": 2,
+          "kind": "struct",
+          "ref": "myfirstmessage_someunion_option3"
+        }
+      ]
+    },
+    {
+      "category": "struct",
+      "key": "myfirstmessage_someunion_option3",
+      "inline": true,
+      "fields": [
+        {
+          "name": "unionstructint",
+          "id": 0,
+          "kind": "i8"
+        },
+        {
+          "name": "unionstructbool",
+          "id": 1,
+          "kind": "boolean"
+        }
+      ]
+    }
+  ]
+}
