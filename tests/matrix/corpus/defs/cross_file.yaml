@@ -1,0 +1,11 @@
+# Uses $ref to pull definitions from another YAML file (../shared/common.yaml),
+# referencing Bounds (which transitively needs Vec3), Vec3 directly, an enum and
+# a bitfield — Vec3 ends up shared by several fields.
+version: 1
+messages:
+  Body:
+    payload:
+      bounds:   { id: 0, type: struct, fields: { $ref: '../shared/common.yaml#/$defs/struct/Bounds' } }
+      velocity: { id: 1, type: struct, fields: { $ref: '../shared/common.yaml#/$defs/struct/Vec3' } }
+      unit:     { id: 2, type: enum,   enum:   { $ref: '../shared/common.yaml#/$defs/enum/Unit' }, default: 0 }
+      caps:     { id: 3, type: bitfield, bits: { $ref: '../shared/common.yaml#/$defs/bitfield/Caps' } }

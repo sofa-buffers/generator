@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { "1bad": { id: 0, type: u8 } } } }

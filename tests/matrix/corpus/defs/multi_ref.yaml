@@ -1,0 +1,16 @@
+# A single $defs definition referenced multiple times -> one shared generated type.
+version: 1
+$defs:
+  struct:
+    Point: { x: { id: 0, type: i32 }, y: { id: 1, type: i32 } }
+  enum:
+    Color: { RED: 0, GREEN: 1, BLUE: 2 }
+messages:
+  Quad:
+    payload:
+      a: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Point' } }
+      b: { id: 1, type: struct, fields: { $ref: '#/$defs/struct/Point' } }
+      c: { id: 2, type: struct, fields: { $ref: '#/$defs/struct/Point' } }
+      d: { id: 3, type: struct, fields: { $ref: '#/$defs/struct/Point' } }
+      col1: { id: 4, type: enum, enum: { $ref: '#/$defs/enum/Color' }, default: 0 }
+      col2: { id: 5, type: enum, enum: { $ref: '#/$defs/enum/Color' }, default: 2 }

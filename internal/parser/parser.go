@@ -37,7 +37,16 @@ func Load(path string) (*Document, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading definition %q: %w", path, err)
 	}
-	return Parse(data, path)
+	doc, err := Parse(data, path)
+	if err != nil {
+		return nil, err
+	}
+	// Flatten cross-file ($ref to another file) references into local $defs so
+	// the rest of the pipeline sees a self-contained document.
+	if err := doc.InlineExternalRefs(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return doc, nil
 }
 
 // Parse decodes an in-memory definition. path is used only for messages.

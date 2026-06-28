@@ -122,6 +122,12 @@ the **`$ref`-resolved** document:
   validator checks the resolved tree (a dangling `$ref` fails fast), while the
   model lowers the *unresolved* document so a shared `$defs` type becomes one
   shared generated type, never duplicated (PLAN §3.4).
+- **cross-file `$ref`** (`internal/parser/external.go`): a `$ref` of the form
+  `file.yaml#/$defs/<cat>/<Name>` is inlined at load time — the referenced
+  definition (and its same-file dependencies) is merged into the document's own
+  `$defs` and the `$ref` rewritten to local, so everything downstream sees a
+  self-contained document. Chains flatten transitively. A **recursive `$ref`**
+  is rejected (a recursive value member has no finite size).
 
 All problems are reported at once (`allErrors`), sorted by location.
 

@@ -1,0 +1,2 @@
+version: 2
+messages: { M: { payload: { a: { id: 0, type: u8 } } } }

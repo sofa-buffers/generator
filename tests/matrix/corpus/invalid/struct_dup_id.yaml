@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: struct, fields: { x: { id: 5, type: u8 }, y: { id: 5, type: u8 } } } } } }

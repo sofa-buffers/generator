@@ -1,0 +1,6 @@
+version: 1
+messages:
+  Dec:
+    payload:
+      zero:    { id: 0, type: fp32, decimals: 0, default: 1.0 }
+      fifteen: { id: 1, type: fp64, decimals: 15, default: 3.141592653589793 }

@@ -1,0 +1,12 @@
+# Shared definitions referenced from other files via cross-file $ref.
+version: 1
+$defs:
+  struct:
+    Vec3: { x: { id: 0, type: fp32 }, y: { id: 1, type: fp32 }, z: { id: 2, type: fp32 } }
+    Bounds:                       # depends on Vec3 via a same-file local $ref
+      min: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Vec3' } }
+      max: { id: 1, type: struct, fields: { $ref: '#/$defs/struct/Vec3' } }
+  enum:
+    Unit: { METERS: 0, FEET: 1, INCHES: 2 }
+  bitfield:
+    Caps: { READ: { pos: 0 }, WRITE: { pos: 1 }, EXEC: { pos: 2 } }

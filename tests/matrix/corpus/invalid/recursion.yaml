@@ -1,0 +1,12 @@
+# A recursive $ref (struct referencing itself) cannot be code-generated to a
+# value member (infinite size) and is rejected at resolve time.
+version: 1
+$defs:
+  struct:
+    Node:
+      val:  { id: 0, type: u8 }
+      next: { id: 1, type: struct, fields: { $ref: '#/$defs/struct/Node' } }
+messages:
+  M:
+    payload:
+      root: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Node' } }

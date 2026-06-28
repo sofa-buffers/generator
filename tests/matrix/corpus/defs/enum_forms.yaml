@@ -1,0 +1,12 @@
+version: 1
+messages:
+  EForms:
+    payload:
+      mixed:
+        id: 0
+        type: enum
+        default: 7
+        enum:
+          SHORT: 7                                   # shorthand integer form
+          DESCRIBED: { value: -3, description: "an explained constant" }
+          ZERO: { value: 0 }

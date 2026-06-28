@@ -198,9 +198,12 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 // array-of-string/blob (a fixed sequence of string/blob fields, §5).
 func (g *gen) elemHolder(key string, f *ir.Field) *objectPlan {
 	p := &objectPlan{key: key, cType: g.cType(key, "elems"), descr: g.descrSym(key)}
-	maxlen := f.ElemMax
-	if !f.ElemMaxHas {
-		maxlen = 0
+	// Without items.maxlen a fixed-storage target has no real bound; fall back to
+	// 1 so the emitted C array is never zero-sized (a §5.7 hard check belongs
+	// here eventually). Dynamic targets carry the real bound.
+	maxlen := int64(1)
+	if f.ElemMaxHas {
+		maxlen = f.ElemMax
 	}
 	var elemDecl, ftype string
 	if f.Elem == ir.KindString {

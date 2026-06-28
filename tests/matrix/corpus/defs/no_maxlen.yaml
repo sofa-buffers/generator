@@ -1,0 +1,9 @@
+# string/blob without maxlen are valid at the schema level (dynamic-storage
+# targets); array-of-string without items.maxlen too.
+version: 1
+messages:
+  Dyn:
+    payload:
+      s:     { id: 0, type: string }
+      b:     { id: 1, type: blob }
+      names: { id: 2, type: array, items: { type: string, count: 2 } }
