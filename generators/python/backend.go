@@ -22,7 +22,7 @@ func (*Backend) Lang() string { return "python" }
 // Generate emits a single module (all enums/bitfields/dataclasses + messages).
 // In project mode it adds a harness and pyproject.toml.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sbufgen")}
+	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sbufgen"), omit: cfgBool(cfg, "omit_defaults")}
 	module := g.module(s)
 	files := []generator.File{{Path: "messages.py", Content: module}}
 	if cfgString(cfg, "emit", "sources") == "project" {
@@ -34,6 +34,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 type gen struct {
 	schema *ir.Schema
 	banner string
+	omit   bool
 }
 
 type pyfile struct{ b strings.Builder }
@@ -144,27 +145,37 @@ func (g *gen) emitDataclass(f *pyfile, name string, fields []*ir.Field) {
 
 func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 	acc := "self." + fld.Name
+	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		f.line("        e.write_unsigned(%d, int(%s))", fld.ID, acc)
+		write = fmt.Sprintf("e.write_unsigned(%d, int(%s))", fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		f.line("        e.write_signed(%d, int(%s))", fld.ID, acc)
+		write = fmt.Sprintf("e.write_signed(%d, int(%s))", fld.ID, acc)
 	case ir.KindBool:
-		f.line("        e.write_bool(%d, %s)", fld.ID, acc)
+		write = fmt.Sprintf("e.write_bool(%d, %s)", fld.ID, acc)
 	case ir.KindFP32:
-		f.line("        e.write_float32(%d, %s)", fld.ID, acc)
+		write = fmt.Sprintf("e.write_float32(%d, %s)", fld.ID, acc)
 	case ir.KindFP64:
-		f.line("        e.write_float64(%d, %s)", fld.ID, acc)
+		write = fmt.Sprintf("e.write_float64(%d, %s)", fld.ID, acc)
 	case ir.KindString:
-		f.line("        e.write_string(%d, %s)", fld.ID, acc)
+		write = fmt.Sprintf("e.write_string(%d, %s)", fld.ID, acc)
 	case ir.KindBlob:
 		f.line("        e.write_bytes(%d, bytes(%s))", fld.ID, acc)
+		return
 	case ir.KindStruct, ir.KindUnion:
 		f.line("        e.write_sequence_begin(%d)", fld.ID)
 		f.line("        %s._marshal(e)", acc)
 		f.line("        e.write_sequence_end()")
+		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
+		return
+	}
+	if g.omit {
+		f.line("        if %s != %s:", acc, g.pyDefault(fld))
+		f.line("            %s", write)
+	} else {
+		f.line("        %s", write)
 	}
 }
 

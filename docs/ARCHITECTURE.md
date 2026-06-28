@@ -226,6 +226,14 @@ adds build files + devcontainer wiring + an IR-driven encode/decode JSON harness
   the embedded config schema as a hard gate** before use, and resolves the
   effective config per target with precedence *default < generic < per-target*.
   Only `--in`/`--out` override the file from the CLI.
+- **`omit_defaults` (config):** when true, every backend skips a field equal
+  to its effective default (schema `default:`, else the type-zero) and decode
+  reconstructs it — protobuf-style sparse encoding, applied to scalar / `fp` /
+  `bool` / `enum` / `bitfield` / `string` fields. The 7 dense backends emit a
+  conditional write (and Rust gains a schema-default `impl Default` so decode
+  reconstructs correctly); C is inherently sparse (the `object.h` encoder
+  already omits zero/default fields). Default is off (dense). Tested in
+  `tests/matrix/omit_test.go` and round-tripped per language.
 - **Capability guards (§5.4), max-size & streaming (§5.5–§5.6):** these are
   backend concerns; the IR already carries the data a backend needs to derive
   required capabilities (the kinds/maxlens/counts per message). They arrive with

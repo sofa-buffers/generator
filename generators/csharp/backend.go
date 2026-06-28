@@ -21,7 +21,7 @@ type Backend struct{}
 func (*Backend) Lang() string { return "csharp" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Sofabuffers"), banner: cfgString(cfg, "tool_banner", "sbufgen")}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Sofabuffers"), banner: cfgString(cfg, "tool_banner", "sbufgen"), omit: cfgBool(cfg, "omit_defaults")}
 	files := []generator.File{{Path: "Messages.cs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -33,6 +33,7 @@ type gen struct {
 	schema *ir.Schema
 	ns     string
 	banner string
+	omit   bool
 }
 
 type cfile struct{ b strings.Builder }
@@ -138,25 +139,34 @@ func (g *gen) emitClass(f *cfile, name string, fields []*ir.Field, isMessage boo
 
 func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
 	acc := "this." + fld.Name
+	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		f.line("        os.WriteUnsigned(%d, (ulong)%s);", fld.ID, acc)
+		write = fmt.Sprintf("os.WriteUnsigned(%d, (ulong)%s);", fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		f.line("        os.WriteSigned(%d, (long)%s);", fld.ID, acc)
+		write = fmt.Sprintf("os.WriteSigned(%d, (long)%s);", fld.ID, acc)
 	case ir.KindBool:
-		f.line("        os.WriteBoolean(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.WriteBoolean(%d, %s);", fld.ID, acc)
 	case ir.KindFP32:
-		f.line("        os.WriteFp32(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.WriteFp32(%d, %s);", fld.ID, acc)
 	case ir.KindFP64:
-		f.line("        os.WriteFp64(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.WriteFp64(%d, %s);", fld.ID, acc)
 	case ir.KindString:
-		f.line("        os.WriteString(%d, %s ?? \"\");", fld.ID, acc)
+		write = fmt.Sprintf("os.WriteString(%d, %s ?? \"\");", fld.ID, acc)
 	case ir.KindBlob:
 		f.line("        os.WriteBlob(%d, %s ?? Array.Empty<byte>());", fld.ID, acc)
+		return
 	case ir.KindStruct, ir.KindUnion:
 		f.line("        os.WriteSequenceBegin(%d); (%s ?? new %s()).Marshal(os); os.WriteSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key))
+		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
+		return
+	}
+	if g.omit {
+		f.line("        if (%s != %s) { %s }", acc, g.csDefaultValue(fld), write)
+	} else {
+		f.line("        %s", write)
 	}
 }
 

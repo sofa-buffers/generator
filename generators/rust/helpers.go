@@ -15,6 +15,77 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
+func cfgBool(cfg map[string]any, key string) bool {
+	b, _ := cfg[key].(bool)
+	return b
+}
+
+// rustFieldDefault is the value used in a manual `impl Default` (schema default
+// or type-zero) — needed so omit_defaults decode reconstructs the right value.
+func (g *gen) rustFieldDefault(f *ir.Field) string {
+	switch f.Kind {
+	case ir.KindString:
+		if s, ok := f.Default.(string); ok {
+			return fmt.Sprintf("%q.to_string()", s)
+		}
+		return "String::new()"
+	case ir.KindBool:
+		if b, ok := f.Default.(bool); ok && b {
+			return "true"
+		}
+		return "false"
+	case ir.KindFP32, ir.KindFP64:
+		if f.Default != nil {
+			return rustFloat(f.Default)
+		}
+		return "0.0"
+	case ir.KindEnum, ir.KindBitfield, ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+		return g.rustIntDefault(f)
+	default: // struct/union/array/blob: always written, so Default is overwritten
+		return "Default::default()"
+	}
+}
+
+// rustCompare is the RHS of `self.field != X` for omission.
+func (g *gen) rustCompare(f *ir.Field) string {
+	if f.Kind == ir.KindString {
+		if s, ok := f.Default.(string); ok {
+			return fmt.Sprintf("%q", s)
+		}
+		return `""`
+	}
+	return g.rustFieldDefault(f)
+}
+
+func (g *gen) rustIntDefault(f *ir.Field) string {
+	if f.Kind == ir.KindBitfield {
+		var bits uint64
+		for _, fl := range f.Ref.Target.Flags {
+			if fl.HasDefault && fl.Default {
+				bits |= 1 << uint(fl.Pos)
+			}
+		}
+		return fmt.Sprintf("%d", bits)
+	}
+	if f.Default == nil {
+		return "0"
+	}
+	s := fmt.Sprintf("%v", f.Default) // int64 or a decimal string (u64/i64)
+	if f.Kind == ir.KindI64 && s == "-9223372036854775808" {
+		return "i64::MIN" // the literal would overflow before negation
+	}
+	return s
+}
+
+func rustFloat(v any) string {
+	s := fmt.Sprintf("%v", v)
+	if !strings.ContainsAny(s, ".eE") {
+		s += ".0"
+	}
+	return s
+}
+
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
 	var b strings.Builder

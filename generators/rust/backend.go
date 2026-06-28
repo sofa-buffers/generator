@@ -24,7 +24,7 @@ func (*Backend) Lang() string { return "rust" }
 // Generate emits src/messages.rs; project mode adds Cargo.toml + a serde-json
 // harness.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sbufgen")}
+	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sbufgen"), omit: cfgBool(cfg, "omit_defaults")}
 	files := []generator.File{{Path: "src/messages.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -35,6 +35,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 type gen struct {
 	schema *ir.Schema
 	banner string
+	omit   bool
 }
 
 type rfile struct{ b strings.Builder }
@@ -101,7 +102,13 @@ func (g *gen) emitBitfieldConsts(f *rfile, nt *ir.NamedType) {
 }
 
 func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bool) {
-	f.line("#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]")
+	// With omit_defaults, decode must reconstruct schema defaults, so a manual
+	// Default impl carries them; otherwise derive Default (type zeros) is fine.
+	if g.omit {
+		f.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]")
+	} else {
+		f.line("#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]")
+	}
 	f.line("#[serde(default)]")
 	f.line("pub struct %s {", name)
 	for _, fld := range fields {
@@ -109,6 +116,18 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	}
 	f.line("}")
 	f.blank()
+	if g.omit {
+		f.line("impl Default for %s {", name)
+		f.line("    fn default() -> Self {")
+		f.line("        Self {")
+		for _, fld := range fields {
+			f.line("            %s: %s,", fld.Name, g.rustFieldDefault(fld))
+		}
+		f.line("        }")
+		f.line("    }")
+		f.line("}")
+		f.blank()
+	}
 
 	f.line("impl %s {", name)
 	if isMessage {
@@ -143,25 +162,34 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 
 func (g *gen) emitMarshal(f *rfile, fld *ir.Field) {
 	acc := "self." + fld.Name
+	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		f.line("        let _ = os.write_unsigned(%d, %s as Unsigned);", fld.ID, acc)
+		write = fmt.Sprintf("let _ = os.write_unsigned(%d, %s as Unsigned);", fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		f.line("        let _ = os.write_signed(%d, %s as Signed);", fld.ID, acc)
+		write = fmt.Sprintf("let _ = os.write_signed(%d, %s as Signed);", fld.ID, acc)
 	case ir.KindBool:
-		f.line("        let _ = os.write_boolean(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("let _ = os.write_boolean(%d, %s);", fld.ID, acc)
 	case ir.KindFP32:
-		f.line("        let _ = os.write_fp32(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("let _ = os.write_fp32(%d, %s);", fld.ID, acc)
 	case ir.KindFP64:
-		f.line("        let _ = os.write_fp64(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("let _ = os.write_fp64(%d, %s);", fld.ID, acc)
 	case ir.KindString:
-		f.line("        let _ = os.write_str(%d, &%s);", fld.ID, acc)
+		write = fmt.Sprintf("let _ = os.write_str(%d, &%s);", fld.ID, acc)
 	case ir.KindBlob:
 		f.line("        let _ = os.write_blob(%d, &%s);", fld.ID, acc)
+		return
 	case ir.KindStruct, ir.KindUnion:
 		f.line("        let _ = os.write_sequence_begin(%d); %s.marshal(os); let _ = os.write_sequence_end();", fld.ID, acc)
+		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
+		return
+	}
+	if g.omit {
+		f.line("        if %s != %s { %s }", acc, g.rustCompare(fld), write)
+	} else {
+		f.line("        %s", write)
 	}
 }
 

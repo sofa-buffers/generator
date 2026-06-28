@@ -15,6 +15,11 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
+func cfgBool(cfg map[string]any, key string) bool {
+	b, _ := cfg[key].(bool)
+	return b
+}
+
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
 	var b strings.Builder

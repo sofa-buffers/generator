@@ -15,6 +15,27 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
+func cfgBool(cfg map[string]any, key string) bool {
+	b, _ := cfg[key].(bool)
+	return b
+}
+
+// csDefaultValue is the value a field is compared against for omission (its
+// init default, or the type-zero), matching the field initializer.
+func (g *gen) csDefaultValue(f *ir.Field) string {
+	if init := g.csInit(f); init != "" {
+		return strings.TrimPrefix(init, " = ")
+	}
+	switch f.Kind {
+	case ir.KindBool:
+		return "false"
+	case ir.KindString:
+		return `""`
+	default:
+		return "0"
+	}
+}
+
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
 	var b strings.Builder

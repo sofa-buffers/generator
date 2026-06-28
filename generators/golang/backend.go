@@ -25,6 +25,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		schema: s,
 		pkg:    cfgString(cfg, "package", "messages"),
 		banner: cfgString(cfg, "tool_banner", "sbufgen"),
+		omit:   cfgBool(cfg, "omit_defaults"),
 	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	// In a project the package gets its own directory so the harness can import
@@ -50,6 +51,7 @@ type gen struct {
 	schema *ir.Schema
 	pkg    string
 	banner string
+	omit   bool // omit fields equal to their default (omit_defaults config)
 }
 
 // ---- types.go : all named types -----------------------------------------
@@ -160,31 +162,61 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 
 func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 	acc := "m." + exported(fld.Name)
+	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("\te.WriteUnsigned(%d, uint64(%s))", fld.ID, acc)
+		write = fmt.Sprintf("e.WriteUnsigned(%d, uint64(%s))", fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("\te.WriteSigned(%d, int64(%s))", fld.ID, acc)
+		write = fmt.Sprintf("e.WriteSigned(%d, int64(%s))", fld.ID, acc)
 	case ir.KindBool:
-		f.line("\te.WriteBool(%d, %s)", fld.ID, acc)
+		write = fmt.Sprintf("e.WriteBool(%d, %s)", fld.ID, acc)
 	case ir.KindFP32:
-		f.line("\te.WriteFloat32(%d, %s)", fld.ID, acc)
+		write = fmt.Sprintf("e.WriteFloat32(%d, %s)", fld.ID, acc)
 	case ir.KindFP64:
-		f.line("\te.WriteFloat64(%d, %s)", fld.ID, acc)
+		write = fmt.Sprintf("e.WriteFloat64(%d, %s)", fld.ID, acc)
 	case ir.KindString:
-		f.line("\te.WriteString(%d, %s)", fld.ID, acc)
+		write = fmt.Sprintf("e.WriteString(%d, %s)", fld.ID, acc)
+	case ir.KindEnum:
+		write = fmt.Sprintf("e.WriteSigned(%d, int64(%s))", fld.ID, acc)
+	case ir.KindBitfield:
+		write = fmt.Sprintf("e.WriteUnsigned(%d, uint64(%s))", fld.ID, acc)
 	case ir.KindBlob:
 		f.line("\te.WriteBytes(%d, %s)", fld.ID, acc)
-	case ir.KindEnum:
-		f.line("\te.WriteSigned(%d, int64(%s))", fld.ID, acc)
-	case ir.KindBitfield:
-		f.line("\te.WriteUnsigned(%d, uint64(%s))", fld.ID, acc)
+		return
 	case ir.KindStruct, ir.KindUnion:
 		f.line("\te.WriteSequenceBegin(%d)", fld.ID)
 		f.line("\t%s.marshal(e)", acc)
 		f.line("\te.WriteSequenceEnd()")
+		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
+		return
+	}
+	// Scalar/string/enum/bitfield: optionally omit when equal to the default.
+	if g.omit {
+		f.line("\tif %s != %s {", acc, g.defaultCompare(fld))
+		f.line("\t\t%s", write)
+		f.line("\t}")
+	} else {
+		f.line("\t%s", write)
+	}
+}
+
+// defaultCompare is the RHS to compare a field against for omission: its schema
+// default if present, else the Go zero value (matching New<Msg>'s init).
+func (g *gen) defaultCompare(fld *ir.Field) string {
+	if lit, ok := g.defaultLiteral(fld); ok {
+		return lit
+	}
+	switch fld.Kind {
+	case ir.KindBool:
+		return "false"
+	case ir.KindString:
+		return `""`
+	case ir.KindEnum, ir.KindBitfield:
+		return g.typeName(fld.Ref.Key) + "(0)"
+	default:
+		return "0"
 	}
 }
 

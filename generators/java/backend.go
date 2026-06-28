@@ -22,7 +22,7 @@ type Backend struct{}
 func (*Backend) Lang() string { return "java" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, pkg: cfgString(cfg, "package", "messages"), banner: cfgString(cfg, "tool_banner", "sbufgen")}
+	g := &gen{schema: s, pkg: cfgString(cfg, "package", "messages"), banner: cfgString(cfg, "tool_banner", "sbufgen"), omit: cfgBool(cfg, "omit_defaults")}
 	dir := "src/main/java/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
 	var files []generator.File
 	files = append(files, generator.File{Path: dir + "Sbuf.java", Content: g.sbufSupport()})
@@ -39,6 +39,7 @@ type gen struct {
 	schema *ir.Schema
 	pkg    string
 	banner string
+	omit   bool
 }
 
 type jfile struct{ b strings.Builder }
@@ -118,25 +119,34 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, isMessage, is
 
 func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 	acc := "this." + fld.Name
+	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		f.line("        os.writeUnsigned(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.writeUnsigned(%d, %s);", fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		f.line("        os.writeSigned(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.writeSigned(%d, %s);", fld.ID, acc)
 	case ir.KindBool:
-		f.line("        os.writeBoolean(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.writeBoolean(%d, %s);", fld.ID, acc)
 	case ir.KindFP32:
-		f.line("        os.writeFp32(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.writeFp32(%d, %s);", fld.ID, acc)
 	case ir.KindFP64:
-		f.line("        os.writeFp64(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.writeFp64(%d, %s);", fld.ID, acc)
 	case ir.KindString:
-		f.line("        os.writeString(%d, %s == null ? \"\" : %s);", fld.ID, acc, acc)
+		write = fmt.Sprintf("os.writeString(%d, %s == null ? \"\" : %s);", fld.ID, acc, acc)
 	case ir.KindBlob:
 		f.line("        os.writeBlob(%d, %s == null ? new byte[0] : %s);", fld.ID, acc, acc)
+		return
 	case ir.KindStruct, ir.KindUnion:
 		f.line("        os.writeSequenceBegin(%d); (%s == null ? new %s() : %s).marshal(os); os.writeSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key), acc)
+		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
+		return
+	}
+	if g.omit {
+		f.line("        if (%s) { %s }", g.javaOmitCond(fld), write)
+	} else {
+		f.line("        %s", write)
 	}
 }
 

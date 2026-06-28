@@ -2,38 +2,71 @@
   "$schema": "http://json-schema.org/draft-07/schema",
   "$id": "https://github.com/sofa-buffers/generator/schema/sbufgen-config-schema.json",
   "title": "SofaBuffers Generator Config Schema",
-  "description": "Validates sbufgen configuration files (YAML or JSON). PLAN §7. Every level is closed (additionalProperties:false) so typos are rejected, not ignored.",
+  "description": "Validates sbufgen configuration files (YAML or JSON). PLAN \u00a77. Every level is closed (additionalProperties:false) so typos are rejected, not ignored.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "generic": { "$ref": "#/$defs/generic" },
+    "generic": {
+      "$ref": "#/$defs/generic"
+    },
     "targets": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "c": { "$ref": "#/$defs/target_c" },
-        "cpp-embedded": { "$ref": "#/$defs/target_cpp_embedded" },
-        "cpp": { "$ref": "#/$defs/target_cpp" },
-        "rust": { "$ref": "#/$defs/target_rust" },
-        "go": { "$ref": "#/$defs/target_go" },
-        "python": { "$ref": "#/$defs/target_python" },
-        "java": { "$ref": "#/$defs/target_java" },
-        "csharp": { "$ref": "#/$defs/target_csharp" },
-        "typescript": { "$ref": "#/$defs/target_typescript" }
+        "c": {
+          "$ref": "#/$defs/target_c"
+        },
+        "cpp-embedded": {
+          "$ref": "#/$defs/target_cpp_embedded"
+        },
+        "cpp": {
+          "$ref": "#/$defs/target_cpp"
+        },
+        "rust": {
+          "$ref": "#/$defs/target_rust"
+        },
+        "go": {
+          "$ref": "#/$defs/target_go"
+        },
+        "python": {
+          "$ref": "#/$defs/target_python"
+        },
+        "java": {
+          "$ref": "#/$defs/target_java"
+        },
+        "csharp": {
+          "$ref": "#/$defs/target_csharp"
+        },
+        "typescript": {
+          "$ref": "#/$defs/target_typescript"
+        }
       }
     }
   },
-
   "$defs": {
     "buffer": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "type": "string", "enum": ["stack", "heap"] },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "stack",
+            "heap"
+          ]
+        },
         "size": {
           "anyOf": [
-            { "type": "integer", "minimum": 1 },
-            { "type": "string", "enum": ["auto"] }
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "string",
+              "enum": [
+                "auto"
+              ]
+            }
           ]
         }
       }
@@ -42,179 +75,663 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "namespace": { "type": "string" },
-        "emit": { "type": "string", "enum": ["sources", "project"] },
-        "input_dir": { "type": "string" },
-        "output_dir": { "type": "string" },
-        "timestamp": { "type": "boolean" },
-        "timestamp_format": { "type": "string" },
-        "tool_banner": { "type": "string" },
-        "license": { "type": "string" },
-        "emit_deprecated": { "type": "boolean" },
-        "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-        "naming": { "type": "string" },
-        "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] }
+        "namespace": {
+          "type": "string"
+        },
+        "emit": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "project"
+          ]
+        },
+        "input_dir": {
+          "type": "string"
+        },
+        "output_dir": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "boolean"
+        },
+        "timestamp_format": {
+          "type": "string"
+        },
+        "tool_banner": {
+          "type": "string"
+        },
+        "license": {
+          "type": "string"
+        },
+        "emit_deprecated": {
+          "type": "boolean"
+        },
+        "validation": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "always",
+            "off"
+          ]
+        },
+        "naming": {
+          "type": "string"
+        },
+        "file_layout": {
+          "type": "string",
+          "enum": [
+            "one_file",
+            "file_per_message"
+          ]
+        },
+        "omit_defaults": {
+          "type": "boolean",
+          "description": "Omit fields equal to their default from the serialized stream (protobuf-style). Decode reconstructs them from the same defaults."
+        }
       }
     },
-
     "common_target": {
-      "namespace": { "type": "string" },
-      "emit": { "type": "string", "enum": ["sources", "project"] },
-      "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-      "naming": { "type": "string" },
-      "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] },
-      "buffer": { "$ref": "#/$defs/buffer" }
+      "namespace": {
+        "type": "string"
+      },
+      "emit": {
+        "type": "string",
+        "enum": [
+          "sources",
+          "project"
+        ]
+      },
+      "validation": {
+        "type": "string",
+        "enum": [
+          "debug",
+          "always",
+          "off"
+        ]
+      },
+      "naming": {
+        "type": "string"
+      },
+      "file_layout": {
+        "type": "string",
+        "enum": [
+          "one_file",
+          "file_per_message"
+        ]
+      },
+      "buffer": {
+        "$ref": "#/$defs/buffer"
+      }
     },
-
     "target_c": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "namespace": { "type": "string" },
-        "emit": { "type": "string", "enum": ["sources", "project"] },
-        "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-        "naming": { "type": "string" },
-        "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] },
-        "buffer": { "$ref": "#/$defs/buffer" },
-        "symbol_prefix": { "type": "string" },
-        "c_standard": { "type": "string", "enum": ["c99", "c11"] },
-        "header_extension": { "type": "string" },
-        "source_extension": { "type": "string" },
-        "include_guard": { "type": "string", "enum": ["ifndef", "pragma_once"] },
-        "descriptor_profile": { "type": "string", "enum": ["auto", "small", "medium", "big"] },
-        "string_storage": { "type": "string", "enum": ["fixed_inline", "caller_buffer"] }
+        "namespace": {
+          "type": "string"
+        },
+        "emit": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "project"
+          ]
+        },
+        "validation": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "always",
+            "off"
+          ]
+        },
+        "naming": {
+          "type": "string"
+        },
+        "file_layout": {
+          "type": "string",
+          "enum": [
+            "one_file",
+            "file_per_message"
+          ]
+        },
+        "buffer": {
+          "$ref": "#/$defs/buffer"
+        },
+        "symbol_prefix": {
+          "type": "string"
+        },
+        "c_standard": {
+          "type": "string",
+          "enum": [
+            "c99",
+            "c11"
+          ]
+        },
+        "header_extension": {
+          "type": "string"
+        },
+        "source_extension": {
+          "type": "string"
+        },
+        "include_guard": {
+          "type": "string",
+          "enum": [
+            "ifndef",
+            "pragma_once"
+          ]
+        },
+        "descriptor_profile": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "small",
+            "medium",
+            "big"
+          ]
+        },
+        "string_storage": {
+          "type": "string",
+          "enum": [
+            "fixed_inline",
+            "caller_buffer"
+          ]
+        },
+        "omit_defaults": {
+          "type": "boolean"
+        }
       }
     },
     "target_cpp_embedded": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "namespace": { "type": "string" },
-        "emit": { "type": "string", "enum": ["sources", "project"] },
-        "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-        "naming": { "type": "string" },
-        "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] },
-        "buffer": { "$ref": "#/$defs/buffer" },
-        "cpp_standard": { "type": "string", "enum": ["c++17", "c++20"] },
-        "max_size_strategy": { "type": "string", "enum": ["upper_bound"] }
+        "namespace": {
+          "type": "string"
+        },
+        "emit": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "project"
+          ]
+        },
+        "validation": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "always",
+            "off"
+          ]
+        },
+        "naming": {
+          "type": "string"
+        },
+        "file_layout": {
+          "type": "string",
+          "enum": [
+            "one_file",
+            "file_per_message"
+          ]
+        },
+        "buffer": {
+          "$ref": "#/$defs/buffer"
+        },
+        "cpp_standard": {
+          "type": "string",
+          "enum": [
+            "c++17",
+            "c++20"
+          ]
+        },
+        "max_size_strategy": {
+          "type": "string",
+          "enum": [
+            "upper_bound"
+          ]
+        },
+        "omit_defaults": {
+          "type": "boolean"
+        }
       }
     },
     "target_cpp": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "namespace": { "type": "string" },
-        "emit": { "type": "string", "enum": ["sources", "project"] },
-        "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-        "naming": { "type": "string" },
-        "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] },
-        "buffer": { "$ref": "#/$defs/buffer" },
-        "cpp_standard": { "type": "string", "enum": ["c++20", "c++23"] },
-        "header_only": { "type": "boolean" },
-        "max_size_strategy": { "type": "string", "enum": ["upper_bound"] },
-        "zero_copy_strings": { "type": "boolean" }
+        "namespace": {
+          "type": "string"
+        },
+        "emit": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "project"
+          ]
+        },
+        "validation": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "always",
+            "off"
+          ]
+        },
+        "naming": {
+          "type": "string"
+        },
+        "file_layout": {
+          "type": "string",
+          "enum": [
+            "one_file",
+            "file_per_message"
+          ]
+        },
+        "buffer": {
+          "$ref": "#/$defs/buffer"
+        },
+        "cpp_standard": {
+          "type": "string",
+          "enum": [
+            "c++20",
+            "c++23"
+          ]
+        },
+        "header_only": {
+          "type": "boolean"
+        },
+        "max_size_strategy": {
+          "type": "string",
+          "enum": [
+            "upper_bound"
+          ]
+        },
+        "zero_copy_strings": {
+          "type": "boolean"
+        },
+        "omit_defaults": {
+          "type": "boolean"
+        }
       }
     },
     "target_rust": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "emit": { "type": "string", "enum": ["sources", "project"] },
-        "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-        "naming": { "type": "string" },
-        "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] },
-        "buffer": { "$ref": "#/$defs/buffer" },
-        "module": { "type": "string" },
-        "edition": { "type": "string", "enum": ["2021", "2024"] },
-        "no_std": { "type": "boolean" },
-        "alloc": { "type": "boolean" },
-        "string_storage": { "type": "string", "enum": ["fixed", "heapless", "alloc_string"] },
-        "derives": { "type": "array", "items": { "type": "string" } }
+        "emit": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "project"
+          ]
+        },
+        "validation": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "always",
+            "off"
+          ]
+        },
+        "naming": {
+          "type": "string"
+        },
+        "file_layout": {
+          "type": "string",
+          "enum": [
+            "one_file",
+            "file_per_message"
+          ]
+        },
+        "buffer": {
+          "$ref": "#/$defs/buffer"
+        },
+        "module": {
+          "type": "string"
+        },
+        "edition": {
+          "type": "string",
+          "enum": [
+            "2021",
+            "2024"
+          ]
+        },
+        "no_std": {
+          "type": "boolean"
+        },
+        "alloc": {
+          "type": "boolean"
+        },
+        "string_storage": {
+          "type": "string",
+          "enum": [
+            "fixed",
+            "heapless",
+            "alloc_string"
+          ]
+        },
+        "derives": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "omit_defaults": {
+          "type": "boolean"
+        }
       }
     },
     "target_go": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "emit": { "type": "string", "enum": ["sources", "project"] },
-        "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-        "naming": { "type": "string" },
-        "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] },
-        "buffer": { "$ref": "#/$defs/buffer" },
-        "package": { "type": "string" },
-        "module_path": { "type": "string" },
-        "go_version": { "type": "string" },
-        "decode_style": { "type": "string", "enum": ["pull", "visitor"] },
-        "accessors": { "type": "string", "enum": ["fields", "getters"] }
+        "emit": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "project"
+          ]
+        },
+        "validation": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "always",
+            "off"
+          ]
+        },
+        "naming": {
+          "type": "string"
+        },
+        "file_layout": {
+          "type": "string",
+          "enum": [
+            "one_file",
+            "file_per_message"
+          ]
+        },
+        "buffer": {
+          "$ref": "#/$defs/buffer"
+        },
+        "package": {
+          "type": "string"
+        },
+        "module_path": {
+          "type": "string"
+        },
+        "go_version": {
+          "type": "string"
+        },
+        "decode_style": {
+          "type": "string",
+          "enum": [
+            "pull",
+            "visitor"
+          ]
+        },
+        "accessors": {
+          "type": "string",
+          "enum": [
+            "fields",
+            "getters"
+          ]
+        },
+        "omit_defaults": {
+          "type": "boolean"
+        }
       }
     },
     "target_python": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "emit": { "type": "string", "enum": ["sources", "project"] },
-        "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-        "naming": { "type": "string" },
-        "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] },
-        "buffer": { "$ref": "#/$defs/buffer" },
-        "package": { "type": "string" },
-        "python_min": { "type": "string" },
-        "class_style": { "type": "string", "enum": ["dataclass", "slots_dataclass", "plain"] },
-        "frozen": { "type": "boolean" },
-        "type_hints": { "type": "boolean" },
-        "decode_style": { "type": "string", "enum": ["pull", "visitor"] }
+        "emit": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "project"
+          ]
+        },
+        "validation": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "always",
+            "off"
+          ]
+        },
+        "naming": {
+          "type": "string"
+        },
+        "file_layout": {
+          "type": "string",
+          "enum": [
+            "one_file",
+            "file_per_message"
+          ]
+        },
+        "buffer": {
+          "$ref": "#/$defs/buffer"
+        },
+        "package": {
+          "type": "string"
+        },
+        "python_min": {
+          "type": "string"
+        },
+        "class_style": {
+          "type": "string",
+          "enum": [
+            "dataclass",
+            "slots_dataclass",
+            "plain"
+          ]
+        },
+        "frozen": {
+          "type": "boolean"
+        },
+        "type_hints": {
+          "type": "boolean"
+        },
+        "decode_style": {
+          "type": "string",
+          "enum": [
+            "pull",
+            "visitor"
+          ]
+        },
+        "omit_defaults": {
+          "type": "boolean"
+        }
       }
     },
     "target_java": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "emit": { "type": "string", "enum": ["sources", "project"] },
-        "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-        "naming": { "type": "string" },
-        "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] },
-        "buffer": { "$ref": "#/$defs/buffer" },
-        "package": { "type": "string" },
-        "java_version": { "type": "integer" },
-        "use_records": { "type": "boolean" },
-        "build": { "type": "string", "enum": ["maven", "gradle"] },
-        "group_id": { "type": "string" },
-        "artifact_id": { "type": "string" }
+        "emit": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "project"
+          ]
+        },
+        "validation": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "always",
+            "off"
+          ]
+        },
+        "naming": {
+          "type": "string"
+        },
+        "file_layout": {
+          "type": "string",
+          "enum": [
+            "one_file",
+            "file_per_message"
+          ]
+        },
+        "buffer": {
+          "$ref": "#/$defs/buffer"
+        },
+        "package": {
+          "type": "string"
+        },
+        "java_version": {
+          "type": "integer"
+        },
+        "use_records": {
+          "type": "boolean"
+        },
+        "build": {
+          "type": "string",
+          "enum": [
+            "maven",
+            "gradle"
+          ]
+        },
+        "group_id": {
+          "type": "string"
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "omit_defaults": {
+          "type": "boolean"
+        }
       }
     },
     "target_csharp": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "emit": { "type": "string", "enum": ["sources", "project"] },
-        "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-        "naming": { "type": "string" },
-        "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] },
-        "buffer": { "$ref": "#/$defs/buffer" },
-        "namespace": { "type": "string" },
-        "target_framework": { "type": "string" },
-        "nullable": { "type": "string", "enum": ["enable", "disable"] },
-        "lang_version": { "type": "string" },
-        "use_records": { "type": "boolean" },
-        "generate_doc_file": { "type": "boolean" }
+        "emit": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "project"
+          ]
+        },
+        "validation": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "always",
+            "off"
+          ]
+        },
+        "naming": {
+          "type": "string"
+        },
+        "file_layout": {
+          "type": "string",
+          "enum": [
+            "one_file",
+            "file_per_message"
+          ]
+        },
+        "buffer": {
+          "$ref": "#/$defs/buffer"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "target_framework": {
+          "type": "string"
+        },
+        "nullable": {
+          "type": "string",
+          "enum": [
+            "enable",
+            "disable"
+          ]
+        },
+        "lang_version": {
+          "type": "string"
+        },
+        "use_records": {
+          "type": "boolean"
+        },
+        "generate_doc_file": {
+          "type": "boolean"
+        },
+        "omit_defaults": {
+          "type": "boolean"
+        }
       }
     },
     "target_typescript": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "emit": { "type": "string", "enum": ["sources", "project"] },
-        "validation": { "type": "string", "enum": ["debug", "always", "off"] },
-        "naming": { "type": "string" },
-        "file_layout": { "type": "string", "enum": ["one_file", "file_per_message"] },
-        "buffer": { "$ref": "#/$defs/buffer" },
-        "module": { "type": "string", "enum": ["esm", "cjs", "dual"] },
-        "package_name": { "type": "string" },
-        "ts_target": { "type": "string" },
-        "node_min": { "type": "string" },
-        "bigint_policy": { "type": "string", "enum": ["when_needed", "always", "number"] },
-        "emit_dts": { "type": "boolean" },
-        "decode_style": { "type": "string", "enum": ["visitor"] }
+        "emit": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "project"
+          ]
+        },
+        "validation": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "always",
+            "off"
+          ]
+        },
+        "naming": {
+          "type": "string"
+        },
+        "file_layout": {
+          "type": "string",
+          "enum": [
+            "one_file",
+            "file_per_message"
+          ]
+        },
+        "buffer": {
+          "$ref": "#/$defs/buffer"
+        },
+        "module": {
+          "type": "string",
+          "enum": [
+            "esm",
+            "cjs",
+            "dual"
+          ]
+        },
+        "package_name": {
+          "type": "string"
+        },
+        "ts_target": {
+          "type": "string"
+        },
+        "node_min": {
+          "type": "string"
+        },
+        "bigint_policy": {
+          "type": "string",
+          "enum": [
+            "when_needed",
+            "always",
+            "number"
+          ]
+        },
+        "emit_dts": {
+          "type": "boolean"
+        },
+        "decode_style": {
+          "type": "string",
+          "enum": [
+            "visitor"
+          ]
+        },
+        "omit_defaults": {
+          "type": "boolean"
+        }
       }
     }
   }

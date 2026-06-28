@@ -15,6 +15,40 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
+func cfgBool(cfg map[string]any, key string) bool {
+	b, _ := cfg[key].(bool)
+	return b
+}
+
+// javaOmitCond is the condition under which to write a field (value differs from
+// its default), for omit_defaults. Strings use Objects.equals (content compare).
+func (g *gen) javaOmitCond(f *ir.Field) string {
+	acc := "this." + f.Name
+	def := g.javaDefaultValue(f)
+	if f.Kind == ir.KindString {
+		return fmt.Sprintf("!java.util.Objects.equals(%s, %s)", acc, def)
+	}
+	return fmt.Sprintf("%s != %s", acc, def)
+}
+
+func (g *gen) javaDefaultValue(f *ir.Field) string {
+	if init := g.javaInit(f); init != "" {
+		return strings.TrimPrefix(init, " = ")
+	}
+	switch f.Kind {
+	case ir.KindBool:
+		return "false"
+	case ir.KindString:
+		return `""`
+	case ir.KindFP32:
+		return "0f"
+	case ir.KindFP64:
+		return "0"
+	default:
+		return "0L"
+	}
+}
+
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
 	var b strings.Builder

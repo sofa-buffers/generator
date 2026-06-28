@@ -15,6 +15,11 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
+func cfgBool(cfg map[string]any, key string) bool {
+	b, _ := cfg[key].(bool)
+	return b
+}
+
 // exported converts a schema name to an exported Go identifier (PascalCase,
 // underscores folded into camel case).
 func exported(name string) string {

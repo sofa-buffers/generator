@@ -22,7 +22,7 @@ func (*Backend) Lang() string { return "cpp" }
 
 // Generate emits one header-only .hpp per message (with its reachable types).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "sofabuffers"), banner: cfgString(cfg, "tool_banner", "sbufgen")}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "sofabuffers"), banner: cfgString(cfg, "tool_banner", "sbufgen"), omit: cfgBool(cfg, "omit_defaults")}
 	var files []generator.File
 	for _, m := range s.Messages {
 		files = append(files, generator.File{Path: strings.ToLower(m.Name) + ".hpp", Content: g.header(m)})
@@ -37,6 +37,7 @@ type gen struct {
 	schema *ir.Schema
 	ns     string
 	banner string
+	omit   bool
 }
 
 type hfile struct{ b strings.Builder }
@@ -166,27 +167,36 @@ func (g *gen) emitStruct(f *hfile, name string, fields []*ir.Field, isMessage bo
 
 func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 	acc := fld.Name
+	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("        (void)os.write(%d, static_cast<std::uint64_t>(%s));", fld.ID, acc)
+		write = fmt.Sprintf("(void)os.write(%d, static_cast<std::uint64_t>(%s));", fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("        (void)os.write(%d, static_cast<std::int64_t>(%s));", fld.ID, acc)
+		write = fmt.Sprintf("(void)os.write(%d, static_cast<std::int64_t>(%s));", fld.ID, acc)
 	case ir.KindBool:
-		f.line("        (void)os.write(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
 	case ir.KindFP32, ir.KindFP64:
-		f.line("        (void)os.write(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
 	case ir.KindString:
-		f.line("        (void)os.write(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
+	case ir.KindEnum:
+		write = fmt.Sprintf("(void)os.write(%d, static_cast<std::int64_t>(%s));", fld.ID, acc)
+	case ir.KindBitfield:
+		write = fmt.Sprintf("(void)os.write(%d, static_cast<std::uint64_t>(%s));", fld.ID, acc)
 	case ir.KindBlob:
 		f.line("        (void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size()));", fld.ID, acc, acc)
-	case ir.KindEnum:
-		f.line("        (void)os.write(%d, static_cast<std::int64_t>(%s));", fld.ID, acc)
-	case ir.KindBitfield:
-		f.line("        (void)os.write(%d, static_cast<std::uint64_t>(%s));", fld.ID, acc)
+		return
 	case ir.KindStruct, ir.KindUnion:
 		f.line("        (void)os.write(%d, %s);", fld.ID, acc)
+		return
 	case ir.KindArray:
 		g.emitSerializeArray(f, fld, acc)
+		return
+	}
+	if g.omit {
+		f.line("        if (%s != %s) { %s }", acc, g.cppDefault(fld), write)
+	} else {
+		f.line("        %s", write)
 	}
 }
 
