@@ -32,6 +32,7 @@ import (
 	_ "github.com/sofa-buffers/generator/generators/cpp"
 	_ "github.com/sofa-buffers/generator/generators/csharp"
 	_ "github.com/sofa-buffers/generator/generators/golang"
+	_ "github.com/sofa-buffers/generator/generators/java"
 	_ "github.com/sofa-buffers/generator/generators/python"
 	_ "github.com/sofa-buffers/generator/generators/rust"
 	_ "github.com/sofa-buffers/generator/generators/typescript"
