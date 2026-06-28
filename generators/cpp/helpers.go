@@ -1,0 +1,304 @@
+package cpp
+
+import (
+	"encoding/base64"
+	"fmt"
+	"strings"
+
+	"github.com/sofa-buffers/generator/internal/ir"
+)
+
+func cfgString(cfg map[string]any, key, dflt string) string {
+	if v, ok := cfg[key].(string); ok && v != "" {
+		return v
+	}
+	return dflt
+}
+
+func exported(name string) string {
+	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
+	var b strings.Builder
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		b.WriteString(strings.ToUpper(p[:1]))
+		b.WriteString(p[1:])
+	}
+	if b.Len() == 0 {
+		return "X"
+	}
+	return b.String()
+}
+
+func (g *gen) typeName(key string) string {
+	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
+	var b strings.Builder
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		b.WriteString(strings.ToUpper(p[:1]))
+		b.WriteString(p[1:])
+	}
+	return b.String()
+}
+
+func (g *gen) cppType(f *ir.Field) string {
+	switch f.Kind {
+	case ir.KindU8:
+		return "std::uint8_t"
+	case ir.KindU16:
+		return "std::uint16_t"
+	case ir.KindU32:
+		return "std::uint32_t"
+	case ir.KindU64:
+		return "std::uint64_t"
+	case ir.KindI8:
+		return "std::int8_t"
+	case ir.KindI16:
+		return "std::int16_t"
+	case ir.KindI32:
+		return "std::int32_t"
+	case ir.KindI64:
+		return "std::int64_t"
+	case ir.KindFP32:
+		return "float"
+	case ir.KindFP64:
+		return "double"
+	case ir.KindBool:
+		return "bool"
+	case ir.KindString:
+		return "std::string"
+	case ir.KindBlob:
+		return "std::vector<std::uint8_t>"
+	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
+		return g.typeName(f.Ref.Key)
+	case ir.KindBitfield:
+		return bitfieldBacking(f.Ref.Target)
+	case ir.KindArray:
+		switch f.Elem {
+		case ir.KindString:
+			return "std::vector<std::string>"
+		case ir.KindBlob:
+			return "std::vector<std::vector<std::uint8_t>>"
+		default:
+			return fmt.Sprintf("std::array<%s, %d>", numCppType(f.Elem), f.Count)
+		}
+	}
+	return "void"
+}
+
+func numCppType(k ir.Kind) string {
+	switch k {
+	case ir.KindU8:
+		return "std::uint8_t"
+	case ir.KindU16:
+		return "std::uint16_t"
+	case ir.KindU32:
+		return "std::uint32_t"
+	case ir.KindU64:
+		return "std::uint64_t"
+	case ir.KindI8:
+		return "std::int8_t"
+	case ir.KindI16:
+		return "std::int16_t"
+	case ir.KindI32:
+		return "std::int32_t"
+	case ir.KindI64:
+		return "std::int64_t"
+	case ir.KindFP32:
+		return "float"
+	case ir.KindFP64:
+		return "double"
+	}
+	return "std::uint8_t"
+}
+
+func (g *gen) cppDefault(f *ir.Field) string {
+	switch f.Kind {
+	case ir.KindU64:
+		if f.Default != nil {
+			return scalarLit(f.Default) + "ULL"
+		}
+		return "0"
+	case ir.KindI64:
+		if f.Default != nil {
+			return scalarLit(f.Default) + "LL"
+		}
+		return "0"
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32:
+		if f.Default != nil {
+			return scalarLit(f.Default)
+		}
+		return "0"
+	case ir.KindBool:
+		if b, ok := f.Default.(bool); ok && b {
+			return "true"
+		}
+		return "false"
+	case ir.KindFP32:
+		if f.Default != nil {
+			return floatLit(f.Default) + "f"
+		}
+		return "0.0f"
+	case ir.KindFP64:
+		if f.Default != nil {
+			return floatLit(f.Default)
+		}
+		return "0.0"
+	case ir.KindString:
+		if s, ok := f.Default.(string); ok {
+			return fmt.Sprintf("%q", s)
+		}
+		return `""`
+	case ir.KindBlob:
+		if s, ok := f.Default.(string); ok {
+			if raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), "")); err == nil {
+				return fmt.Sprintf("{%s}", byteList(raw))
+			}
+		}
+		return "{}"
+	case ir.KindEnum:
+		tn := g.typeName(f.Ref.Key)
+		if f.Default != nil {
+			if name, ok := g.enumMember(f.Ref.Target, f.Default); ok {
+				return tn + "::" + name
+			}
+			return fmt.Sprintf("static_cast<%s>(%s)", tn, scalarLit(f.Default))
+		}
+		return fmt.Sprintf("static_cast<%s>(0)", tn)
+	case ir.KindBitfield:
+		return fmt.Sprintf("%d", g.bitfieldDefault(f))
+	case ir.KindStruct, ir.KindUnion:
+		return "{}"
+	case ir.KindArray:
+		return "{}"
+	}
+	return "{}"
+}
+
+func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {
+	v, ok := asInt(def)
+	if !ok {
+		return "", false
+	}
+	for _, c := range nt.Consts {
+		if c.Value == v {
+			return exported(c.Name), true
+		}
+	}
+	return "", false
+}
+
+func (g *gen) bitfieldDefault(f *ir.Field) uint64 {
+	var bits uint64
+	for _, fl := range f.Ref.Target.Flags {
+		if fl.HasDefault && fl.Default {
+			bits |= 1 << uint(fl.Pos)
+		}
+	}
+	return bits
+}
+
+func enumBacking(nt *ir.NamedType) string {
+	var lo, hi int64
+	for _, c := range nt.Consts {
+		if c.Value < lo {
+			lo = c.Value
+		}
+		if c.Value > hi {
+			hi = c.Value
+		}
+	}
+	switch {
+	case lo >= -128 && hi <= 127:
+		return "std::int8_t"
+	case lo >= -32768 && hi <= 32767:
+		return "std::int16_t"
+	default:
+		return "std::int32_t"
+	}
+}
+
+func bitfieldBacking(nt *ir.NamedType) string {
+	var max int64
+	for _, fl := range nt.Flags {
+		if fl.Pos > max {
+			max = fl.Pos
+		}
+	}
+	switch {
+	case max <= 7:
+		return "std::uint8_t"
+	case max <= 15:
+		return "std::uint16_t"
+	case max <= 31:
+		return "std::uint32_t"
+	default:
+		return "std::uint64_t"
+	}
+}
+
+func asInt(v any) (int64, bool) {
+	switch x := v.(type) {
+	case int:
+		return int64(x), true
+	case int64:
+		return x, true
+	case float64:
+		return int64(x), true
+	}
+	return 0, false
+}
+
+func scalarLit(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// floatLit renders a numeric default as a C++ floating literal (always with a
+// decimal point so "0" becomes "0.0", which is a valid float when suffixed).
+func floatLit(v any) string {
+	var fv float64
+	switch x := v.(type) {
+	case float64:
+		fv = x
+	case int:
+		fv = float64(x)
+	case int64:
+		fv = float64(x)
+	default:
+		return "0.0"
+	}
+	s := fmt.Sprintf("%g", fv)
+	if !strings.ContainsAny(s, ".eE") {
+		s += ".0"
+	}
+	return s
+}
+
+func byteList(b []byte) string {
+	parts := make([]string, len(b))
+	for i, x := range b {
+		parts[i] = fmt.Sprintf("0x%02x", x)
+	}
+	return strings.Join(parts, ", ")
+}
+
+const cppPrelude = `struct _StrSeq : sofab::IStreamMessage {
+    std::vector<std::string> &out;
+    explicit _StrSeq(std::vector<std::string> &o) : out(o) {}
+    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
+        std::string _s; is.read(_s); out.push_back(std::move(_s));
+    }
+};
+struct _BlobSeq : sofab::IStreamMessage {
+    std::vector<std::vector<std::uint8_t>> &out;
+    explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o) : out(o) {}
+    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
+        std::string _s; is.read(_s); out.emplace_back(_s.begin(), _s.end());
+    }
+};`

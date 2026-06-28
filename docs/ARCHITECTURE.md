@@ -16,7 +16,11 @@
 > **Milestone model:** each target language is a milestone — a working backend
 > with its own CI job and tests, landed on `main` only when green, then on to
 > the next language. Order (testable-toolchain first): **C ✓ → Go ✓ → Python ✓
-> → TypeScript ✓ → C++ → (Rust / Java / C# once their toolchains are wired)**.
+> → TypeScript ✓ → C++ ✓ → (Rust / Java / C# next)**. C++
+> (`generators/cpp`, max-speed `corelib-cpp`) is header-only: each object derives
+> `OStreamMessage`+`IStreamMessage` with `serialize`/`deserialize`, nested via
+> `os.write(id,child)` / `is.read(child)`; 37 shared vectors byte-exact
+> (`tests/cpp/run.sh`, CI job `lang-cpp`).
 > TypeScript (`generators/typescript`) emits classes with `marshal(OStream)` and
 > a visitor-based `decode` against `corelib-ts` (64-bit → `bigint`); 27 shared
 > vectors byte-exact (`tests/typescript/run.sh`, CI job `lang-typescript`).
@@ -240,6 +244,6 @@ adds build files + devcontainer wiring + an IR-driven encode/decode JSON harness
 | **Go backend** | **done** — `generators/golang`: struct + `Marshal`/pull-parser `Unmarshal` against `corelib-go`; `emit: project` Go module + stdlib-json harness; **37 shared vectors byte-exact** (dense encoder also matches zero values). `tests/go/run.sh`. |
 | **Python backend** | **done** — `generators/python`: dataclasses + `_marshal`/pull-parser `_unmarshal` against `corelib-py`; stdlib-json harness (blob as `list[int]`, matching C); **37 shared vectors byte-exact**. `tests/python/run.sh`. |
 | **TypeScript backend** | **done** — `generators/typescript`: classes + `marshal(OStream)` + visitor-based `decode` against `corelib-ts`; 64-bit → `bigint`; strict-typecheck clean; **27 shared vectors byte-exact**. `tests/typescript/run.sh`. |
-| **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job + `lang-c` + `lang-go` + `lang-python` + `lang-typescript` jobs (generate → build → round-trip → vector conformance) on every push. |
-| C++ | next (testable here via g++). |
-| Rust / Java / C# | pending — need their toolchains wired into CI. |
+| **C++ backend** | **done** — `generators/cpp` (max-speed `corelib-cpp`): header-only structs (OStreamMessage+IStreamMessage), nested via `os.write`/`is.read`, enum-class backing, `OStreamInline<_maxSize>`; **37 shared vectors byte-exact**. `tests/cpp/run.sh`. |
+| **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job + `lang-c` + `lang-go` + `lang-python` + `lang-typescript` + `lang-cpp` jobs on every push. |
+| Rust / Java / C# | next — toolchains now installed locally; wire into CI as each lands. |

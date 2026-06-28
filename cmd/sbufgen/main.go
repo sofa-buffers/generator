@@ -32,6 +32,7 @@ import (
 	_ "github.com/sofa-buffers/generator/generators/golang"
 	_ "github.com/sofa-buffers/generator/generators/python"
 	_ "github.com/sofa-buffers/generator/generators/typescript"
+	_ "github.com/sofa-buffers/generator/generators/cpp"
 )
 
 const version = "0.1.0-m0"
