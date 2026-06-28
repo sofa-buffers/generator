@@ -186,6 +186,7 @@
           ],
           "description": "Data type of the field; determines allowed attributes and constraints."
         },
+        "id": { "$ref": "#/$defs/types/id" },
         "min": {
           "description": "Minimum allowed value for numeric types."
         },
@@ -211,7 +212,7 @@
           "description": "Marks the field as deprecated; clients should avoid using it."
         }
       },
-      "required": ["type"],
+      "required": ["type", "id"],
       "additionalProperties": true,
 
       "allOf": [
@@ -443,7 +444,7 @@
             "allOf": [
               {
                 "properties": {
-                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                  "min": { "type": "number", "maximum": { "$data": "1/max" } }
                 }
               }
             ],
@@ -470,7 +471,7 @@
             "allOf": [
               {
                 "properties": {
-                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                  "min": { "type": "number", "maximum": { "$data": "1/max" } }
                 }
               }
             ],
@@ -646,12 +647,12 @@
                 "properties": {
                   "type": {
                     "type": "string",
-                    "description": "Data type of the array elements; only primitive types are allowed.",
+                    "description": "Data type of the array elements: a numeric primitive, or string/blob (each encoded on the wire as a sequence).",
                     "enum": [
                       "u8", "u16", "u32", "u64",
                       "i8", "i16", "i32", "i64",
                       "fp32", "fp64",
-                  	  "string"
+                  	  "string", "blob"
                     ]
                   },
                   "count": {
@@ -904,6 +905,27 @@
                     "default": {
                       "type": "array",
                       "items": { "type": "string" }
+                    }
+                  }
+                }
+              } ,
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "blob" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "string", "pattern": "^[A-Za-z0-9+/\\s]+={0,2}$" }
                     }
                   }
                 }
