@@ -202,4 +202,5 @@ adding a language is purely additive.
 |---|---|
 | **M0 Foundations** | **done** — core pipeline (CLI, config, parser+validation, model, analysis, IR) implemented and tested; this doc created. Tag `m0`. |
 | **M1 Format finalized** | **done** — schema + IR frozen; locked by a deterministic golden IR snapshot (`internal/ir/testdata/example.ir.json`) and the `--dump-ir` flag. Tag `m1`. |
-| M2+ | in progress (first backend = C `object.h`, conformance harness, …). |
+| **M2 First backend (C)** | **done** — `generators/c` emits `object.h`-based struct + descriptor tables + encode/decode/init wrappers + capability guards + API-version guard + MAX_SIZE. `example.yaml` compiles **and round-trips** against the real `corelib-c-cpp` (`tests/c/run.sh`); guards verified to fire. Tag `m2`. |
+| M3+ | in progress (root-project generator, conformance matrix, more backends). |
