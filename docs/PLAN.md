@@ -75,7 +75,7 @@ Tackle the hardest constraints first so the IR and emitter architecture are prov
 
 ## 3. The Object Definition Format (input)
 
-Authoritative source: `generator-old/schema/sofabuffers-schema-v1.json`.
+Authoritative source: [`schema/sofabuffers-schema-v1.json`](../schema/sofabuffers-schema-v1.json) (in this repo), documented in [`schema/README.md`](../schema/README.md).
 
 ### 3.1 Top-level shape
 
@@ -102,13 +102,13 @@ A file must contain `$defs` and/or `messages`. Field **ids must be unique** with
 
 | Type | Notes / constraints from schema |
 |---|---|
-| `u8 u16 u32 u64` | unsigned ints; `min`/`max`/`default` range-checked per width |
-| `i8 i16 i32 i64` | signed ints; `min`/`max`/`default` range-checked per width |
-| `fp32` `fp64` | floats; `min`/`max`/`default`, optional `decimals` (0–15) |
+| `u8 u16 u32 u64` | unsigned ints; optional `default` (range-checked per width); **no `min`/`max`** |
+| `i8 i16 i32 i64` | signed ints; optional `default` (range-checked per width); **no `min`/`max`** |
+| `fp32` `fp64` | floats; optional `default`, optional `decimals` (0–15); **no `min`/`max`** |
 | `boolean` | optional `default` |
-| `string` | required `maxlen`, optional `minlen`, optional `default` |
-| `blob` | required `maxlen`, optional `minlen`, `default` is base64 |
-| `array` | fixed-length; `items: {type, count}`; element type is a **primitive or `string`** only |
+| `string` | **optional `maxlen`** (no `minlen`), optional `default`; see §5.7 for the per-target `maxlen` requirement |
+| `blob` | **optional `maxlen`** (no `minlen`), `default` is base64; see §5.7 |
+| `array` | fixed-length; `items: {type, count}`; element type is a **primitive, `string`, or `blob`** |
 | `enum` | inline map or `$ref`; values may be negative; `default` must match a value (`defaultMatchesEnum`) |
 | `bitfield` | inline `bits` map or `$ref`; each flag has `pos` 0–63 + optional `default` |
 | `struct` | nested; `fields:` inline or `$ref`; **recursive** (structs in structs) |
@@ -116,11 +116,24 @@ A file must contain `$defs` and/or `messages`. Field **ids must be unique** with
 
 Common optional attributes on every field: `description`, `unit`, `deprecated`.
 
-### 3.3 ⚠️ Known gap: the `sequence` type
+> This table is a summary. The **authoritative** type rules, plus the validation
+> that the bare JSON Schema cannot express — the `$data` cross-field rules and the
+> five custom keywords (`uniqueIds`, `uniquePositions`, `defaultMatchesEnum`,
+> `defaultIdMatchesUnion`, `blobDefaultLength`) — and the dereference-then-validate
+> contract, are documented in [`schema/README.md`](../schema/README.md). A
+> reimplementation must follow that document, not this summary.
 
-`examples/example.yaml` uses `type: sequence` (variable-length, including a `sequence` of `struct`), but the v1 JSON Schema **only defines `array`** (fixed `count`). All corelibs natively support a variable-length **sequence** (distinct from the fixed-count `array`) via their `sequence_begin`/`sequence_end` API.
+### 3.3 `sequence` is a wire type, not an authoring type
 
-**Action item:** extend the schema to formally add `sequence` (variable-length list whose `items` may be any primitive **or** a `struct`/nested object), distinct from the fixed-count `array`. This must be settled before the IR is frozen because it affects every backend. (Documented as a Phase-0 task in §10.)
+`sequence` is **not** a field type a user writes — it is a **wire encoding** (`sequence_begin` / `sequence_end`, wire types `0b110`/`0b111`). The definition format therefore never needs a `sequence` keyword:
+
+- `struct`, `union`, and any nested structure are serialized **as a sequence** — each opens a fresh, isolated id scope (so nested ids never collide with the parent's);
+- `array` of `string` or `blob` (dynamic-length elements) is **not** an array wire type — it is encoded as a **sequence** of string/blob fields;
+- `array` of a numeric type uses the real fixed array wire type.
+
+So the fixed-count `array` plus `struct`/`union` already cover every case; the variable-length / dynamic-element forms all lower onto sequences in the corelib at encode time. The generator must route `struct`/`union`/`array-of-string`/`array-of-blob` through the corelib's `sequence_begin/end` API and require the `sequence` capability for them. Full detail: [`schema/README.md` → "How this maps to the wire format"](../schema/README.md) and the [wire-format documentation](https://github.com/sofa-buffers/documentation/blob/main/README.md).
+
+> **Resolved.** This supersedes the earlier "sequence vs array" open question — there is no missing authoring type, so nothing needs adding to the schema for it. (The dangling references in §10/§11 should be updated accordingly.)
 
 ### 3.4 `$ref` handling
 
@@ -321,6 +334,23 @@ Generated code **MUST support processing a message in small chunks**, not only w
   - **Embedded-friendly (C, C++ embedded, Rust no_std):** *only* the **`feed()` + flush-callback** model — no heap, fixed small buffers, callbacks push/pull the bytes.
   - **Non-embedded targets (Go, Python, Java, C#, TS, and max-speed C++):** additionally offer idiomatic **stream** integration — encode to a language `Writer`/`OutputStream`/stream and decode from an input stream/reader — layered on the same feed/flush primitives.
 - The §5.5 max-size constant is the default for the simple "one buffer, one shot" path; the streaming path is what a user opts into by deliberately supplying a **smaller** buffer.
+
+### 5.7 Bounded storage & required `maxlen` per target (generator-side check)
+
+`maxlen` on `string`/`blob` is **optional in the JSON Schema** — a definition may omit it, meaning "no declared upper bound." That is fine for targets that can allocate dynamically (Go/Python/Java/C#/TS, and any backend configured to use heap/growable storage: `std::string`, `Vec<u8>`, `heapless` with a runtime cap, etc.). It is **not** fine for targets where the receive/field buffer must exist as fixed, statically-sized storage and dynamic allocation is forbidden or disabled.
+
+The canonical case is embedded **C**: a string field becomes `char name[N];` and a blob becomes `uint8_t data[N];` — **the generator must know `N`**, and `N` comes from `maxlen`. With no `maxlen` there is no `N`, so the field cannot be emitted as fixed storage at all. The same applies to:
+
+- **C** (`corelib-c-cpp`, `object.h`) with `string_storage: fixed_inline` (the default) — `maxlen`-sized `char[]`/`uint8_t[]`.
+- **`no_std` Rust** (`corelib-rs-no-std`) with `string_storage: fixed` / `heapless` — bounded inline capacity needs the bound.
+- **C++ embedded** when using inline/stack storage sized from `maxlen`.
+- Any target whose `buffer.mode: stack` / fixed-capacity storage is selected.
+
+Because this requirement is **per-target and per-config** (it depends on the chosen storage strategy, not on the definition alone), it **cannot** be expressed in the shared JSON Schema — making `maxlen` schema-required would wrongly reject definitions that are perfectly valid for the dynamic-allocation backends. Instead it is a **generator-side, language-specific semantic check**, run after IR construction, in the affected backend (or its Strategy):
+
+> **Requirement:** when a backend (or its active config) uses fixed/static storage for `string`/`blob`, the generator **MUST** verify that **every** `string`/`blob` field reachable in the IR (including nested structs/unions and `array`-of-`string`/`blob` elements) has a `maxlen`. If any lacks one, the generator **emits a clear, located error naming the field and the target, and aborts non-zero with no output** (same hard-gate semantics as schema validation, §1) — e.g. *"field `TelemetryFrame.name` (string) has no `maxlen`, required by target `c` with `string_storage: fixed_inline`."* The dynamic-allocation backends skip the check.
+
+This belongs to the analysis/semantic layer as a **target-aware validation Strategy** (§8.5): the language-independent IR stays permissive (`maxlen` optional), and each backend contributes the constraints its storage model demands. It also ties into §5.5: a `string`/`blob` **without** `maxlen` is **unbounded**, so — like a variable `sequence` — it has no finite max-serialized-size contribution and forces the streaming/dynamic path; a fixed-storage target rejects it for exactly that reason.
 
 ---
 
@@ -845,8 +875,8 @@ High-level, demonstrable checkpoints — each has a single clear "done when" cri
 
 | # | Milestone | Done when | Phase |
 |---|---|---|---|
-| **M0** | **Foundations** | The CLI loads a YAML/JSON definition + config, validates against the schema (incl. `uniqueIds`/`defaultMatchesEnum`), resolves `$ref`, and builds a validated IR for `example.yaml` — no backend yet. **Initial `docs/ARCHITECTURE.md` created.** | 0 |
-| **M1** | **Format finalized** | The `sequence` type is resolved and the schema (`v1.x`) + IR are frozen; the `fp32/fp64` `min` bug is fixed. No further input-format churn expected. | 0 |
+| **M0** | **Foundations** | The CLI loads a YAML/JSON definition + config, validates against the schema (incl. the five custom keywords, §3.2 / `schema/README.md`), resolves `$ref`, and builds a validated IR for `example.yaml` — no backend yet. **Initial `docs/ARCHITECTURE.md` created.** | 0 |
+| **M1** | **Format finalized** | The schema (`v1.x`) + IR are frozen — `sequence` confirmed as a wire type (§3.3, no authoring type), numeric `min`/`max` removed, `string`/`blob` `maxlen` made optional with a per-target check (§5.7). No further input-format churn expected. | 0 |
 | **M2** | **First backend emits compiling code** | `sbufgen --lang c` turns `example.yaml` into C (`object.h`) sources that compile against `corelib-c-cpp`, **with capability guards** (§5.4). | 1 |
 | **M3** | **Root-project generator works** | `emit: project` scaffolds a buildable C root project (build files + devcontainer wiring + encode/decode harness, §9.1) that builds **inside `corelib-c-cpp`'s devcontainer**. | 1 |
 | **M4** | **Conformance backbone green (C)** | The matrix runner drives the C harness: round-trip + golden shared-vector checks pass automatically. | 1 |
@@ -907,7 +937,7 @@ It exercises scalars, a negative-valued enum (forcing a signed backing type), a 
 
 ### Phase 0 — Foundations & format finalization
 - [ ] Pick generator language (Go recommended) — §2.1.
-- [ ] **Resolve the `sequence` type** and update `sofabuffers-schema-v1.json` (and regenerate any schema-derived types). §3.3.
+- [x] **`sequence` settled** — confirmed as a **wire type**, not an authoring type (§3.3); no schema change needed. Backends must route `struct`/`union`/`array-of-string`/`array-of-blob` through `sequence_begin/end` and require the `sequence` capability.
 - [ ] Stand up the **project skeleton per §8.7** (`cmd/codegen`, `internal/{pipeline,parser,model,ir,analysis,generator,config}`, `generators/<lang>`), CLI parsing, CI with cross-compile matrix (win/linux/mac × x86-64/arm64 at minimum). Enforce the dependency rule: the core imports no `generators/*` package.
 - [ ] **Parser** + JSON-Schema validation (hard gate) incl. custom keywords `uniqueIds`, `defaultMatchesEnum` (§8.1).
 - [ ] **Config system** (§7): YAML/JSON config loader; author **`schema/sbufgen-config-schema.json`** (`additionalProperties:false`) and **validate every config against it before use** (hard gate, §7.1); generic+per-target merge (+ `--in`/`--out` path overrides); `--print-defaults`; CI check that the schema and the handled config keys stay in lockstep and that all committed example/matrix configs validate.
@@ -942,14 +972,14 @@ It exercises scalars, a negative-valued enum (forcing a signed backing type), a 
 
 ## 11. Key Risks & Open Questions
 
-1. **`sequence` vs `array` (schema gap)** — must be resolved in Phase 0; affects every backend and the IR. *(Highest priority.)*
+1. **`sequence` vs `array`** — ✅ *resolved* (§3.3): `sequence` is a **wire type**, not an authoring type. `struct`/`union` and `array`-of-`string`/`blob` lower onto sequences at encode time; the fixed `array` + `struct`/`union` cover every case. No schema change was needed.
 2. **C `object.h` expressiveness** — the descriptor table cleanly handles scalars, arrays, fixlen, and nested structs, but **unions** and **variable sequences of structs** may need the lower-level `ostream`/`istream` API path. Decide per-type whether to emit descriptor-based or explicit-call code.
 3. **Embedded list/string sizing** — `no_std` Rust and C have no heap; `sequence`/`string`/`blob` need a bounded-capacity strategy (caller-provided buffers, `maxlen`-sized inline storage, or a configurable cap). Define a consistent policy.
 4. **Max-size constant (all languages)** — every message exposes a compile-time max-serialized-size constant (§5.5), used as the default buffer size and overridable for streaming (§5.6). The generator computes it analytically from a wire-format cost model (not by invoking each corelib) and the conformance suite verifies actual ≤ computed. C++ realizes it as the constexpr `_maxSize` driving `OStreamInline`. *Open:* messages containing a variable-length `sequence` are unbounded → no finite constant, streaming required.
 5. **Throughput-lib API drift** — ✅ *resolved by verification* (§4.1 table). Go uses `Write*`/`Bool`/`Bytes`/`Float32` and a **pull-parser** decoder; Python is snake_case with a pull-parser; Java/C#/TS are visitor-based. The generator must not template Go/Python as if they were the visitor languages.
 6. **Enum negative values & widths** — schema allows negative enum values (e.g. `GREEN: -100`); pick the smallest signed/unsigned backing type that fits the full value set.
-7. **Float `min`/`max` schema bug** — in v1 the `fp32`/`fp64` branches constrain `min` to `type: integer` (copy/paste artifact); fix when revising the schema in Phase 0.
-8. **`array` of `string` is not an array** — it has no array wire type; it is a *sequence of strings* (§5, §5.4). The generator must route it through `sequence_begin/end` and require the `sequence`+`fixlen` capabilities, not `array`. *(Found during verification.)*
+7. **Numeric `min`/`max`** — ✅ *removed*: domain-range validation is left to the application (as in protobuf / FlatBuffers / Cap'n Proto), so the old `fp32`/`fp64` `min` copy/paste bug is moot. `string`/`blob` keep an **optional** `maxlen` (no `minlen`), with a per-target presence check for fixed-storage backends (§5.7).
+8. **`array` of `string`/`blob` is not an array** — it has no array wire type; it is a *sequence* of string/blob fields (§3.3, §5). The generator must route it through `sequence_begin/end` and require the `sequence`+`fixlen` capabilities, not `array`. *(Found during verification.)*
 9. **Nesting-depth limit is generator-enforced, not lib-uniform** — only the embedded C path is naturally near 256 (`uint8_t depth`); other libs allow far more. The generator owns the 256 portability cap (§4.2). *(Found during verification.)*
 10. **Decode model differs per language** — visitor (Java/C#/TS/Rust), field-callback/descriptor (C/C++), pull-parser (Go/Python). Backends are not a single template. *(Found during verification.)*
 

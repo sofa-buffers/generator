@@ -195,12 +195,6 @@
           "description": "Data type of the field; determines allowed attributes and constraints."
         },
         "id": { "$ref": "#/$defs/types/id" },
-        "min": {
-          "description": "Minimum allowed value for numeric types."
-        },
-        "max": {
-          "description": "Maximum allowed value for numeric types."
-        },
         "description": {
           "type": "string",
           "description": "Optional free text describing the purpose of this field."
@@ -230,8 +224,6 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "min": { "type": "integer", "minimum": -128, "maximum": 127 },
-              "max": { "type": "integer", "minimum": -128, "maximum": 127 },
               "default": {
                 "type": "integer", "minimum": -128, "maximum": 127,
                 "description": "Optional default signed 8-bit integer value."
@@ -240,13 +232,6 @@
               "unit": { },
               "deprecated": { }
             },
-            "allOf": [
-              {
-                "properties": {
-                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -256,8 +241,6 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "min": { "type": "integer", "minimum": 0, "maximum": 255 },
-              "max": { "type": "integer", "minimum": 0, "maximum": 255 },
               "default": {
                 "type": "integer", "minimum": 0, "maximum": 255,
                 "description": "Optional default unsigned 8-bit integer value."
@@ -266,13 +249,6 @@
               "unit": { },
               "deprecated": { }
             },
-            "allOf": [
-              {
-                "properties": {
-                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -282,8 +258,6 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "min": { "type": "integer", "minimum": -32768, "maximum": 32767 },
-              "max": { "type": "integer", "minimum": -32768, "maximum": 32767 },
               "default": {
                 "type": "integer", "minimum": -32768, "maximum": 32767,
                 "description": "Optional default signed 16-bit integer value."
@@ -292,13 +266,6 @@
               "unit": { },
               "deprecated": { }
             },
-            "allOf": [
-              {
-                "properties": {
-                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -308,8 +275,6 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "min": { "type": "integer", "minimum": 0, "maximum": 65535 },
-              "max": { "type": "integer", "minimum": 0, "maximum": 65535 },
               "default": {
                 "type": "integer", "minimum": 0, "maximum": 65535,
                 "description": "Optional default unsigned 16-bit integer value."
@@ -318,13 +283,6 @@
               "unit": { },
               "deprecated": { }
             },
-            "allOf": [
-              {
-                "properties": {
-                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -334,8 +292,6 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "min": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
-              "max": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
               "default": {
                 "type": "integer", "minimum": -2147483648, "maximum": 2147483647,
                 "description": "Optional default signed 32-bit integer value."
@@ -344,13 +300,6 @@
               "unit": { },
               "deprecated": { }
             },
-            "allOf": [
-              {
-                "properties": {
-                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -360,8 +309,6 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "min": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-              "max": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
               "default": {
                 "type": "integer", "minimum": 0, "maximum": 4294967295,
                 "description": "Optional default unsigned 32-bit integer value."
@@ -370,13 +317,6 @@
               "unit": { },
               "deprecated": { }
             },
-            "allOf": [
-              {
-                "properties": {
-                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -386,8 +326,6 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "min": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
-              "max": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
               "default": {
                 "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807,
                 "description": "Optional default signed 64-bit integer value."
@@ -396,13 +334,6 @@
               "unit": { },
               "deprecated": { }
             },
-            "allOf": [
-              {
-                "properties": {
-                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -412,8 +343,6 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "min": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
-              "max": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
               "default": {
                 "type": "integer", "minimum": 0, "maximum": 18446744073709551615,
                 "description": "Optional default unsigned 64-bit integer value."
@@ -422,13 +351,6 @@
               "unit": { },
               "deprecated": { }
             },
-            "allOf": [
-              {
-                "properties": {
-                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -438,8 +360,6 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "min": { "type": "number", "minimum": -3.4028235e+38, "maximum": 3.4028235e+38 },
-              "max": { "type": "number", "minimum": -3.4028235e+38, "maximum": 3.4028235e+38 },
               "default": {
                 "type": "number", "minimum": -3.4028235e+38, "maximum": 3.4028235e+38,
                 "description": "Optional default floating-point value."
@@ -449,13 +369,6 @@
               "unit": { },
               "deprecated": { }
             },
-            "allOf": [
-              {
-                "properties": {
-                  "min": { "type": "number", "maximum": { "$data": "1/max" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -465,8 +378,6 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "min": { "type": "number", "minimum": -1.7976931348623157e+308, "maximum": 1.7976931348623157e+308 },
-              "max": { "type": "number", "minimum": -1.7976931348623157e+308, "maximum": 1.7976931348623157e+308 },
               "default": {
                 "type": "number", "minimum": -1.7976931348623157e+308, "maximum": 1.7976931348623157e+308,
                 "description": "Optional default floating-point value."
@@ -476,13 +387,6 @@
               "unit": { },
               "deprecated": { }
             },
-            "allOf": [
-              {
-                "properties": {
-                  "min": { "type": "number", "maximum": { "$data": "1/max" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -508,35 +412,20 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "minlen": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 2147483647,
-                "description": "Minimum string length"
-              },
               "maxlen": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 2147483647,
-                "description": "Maximum string length"
+                "description": "Maximum string length. Optional, but required by targets that cannot allocate dynamically (see PLAN)."
               },
               "default": {
                 "type": "string",
-                "description": "Optional default string value; must comply with minlen and maxlen constraints if defined.",
-                "minLength": { "$data": "1/minlen" },
+                "description": "Optional default string value; must comply with the maxlen constraint if defined.",
                 "maxLength": { "$data": "1/maxlen" }
               },
               "description": { },
               "deprecated": { }
             },
-            "required": ["maxlen"],
-            "allOf": [
-              {
-                "properties": {
-                  "minlen": { "type": "integer", "maximum": { "$data": "1/maxlen" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },
@@ -546,35 +435,21 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "minlen": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 2147483647,
-                "description": "Minimum blob length"
-              },
               "maxlen": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 2147483647,
-                "description": "Maximum blob length"
+                "description": "Maximum blob length. Optional, but required by targets that cannot allocate dynamically (see PLAN)."
               },
               "default": {
                 "type": "string",
                 "pattern": "^[A-Za-z0-9+/\\s]+={0,2}$",
-                "description": "Optional default binary data; use !!binary to specify base64-encoded data; must comply with minlen and maxlen constraints if defined."
+                "description": "Optional default binary data; use !!binary to specify base64-encoded data; must comply with the maxlen constraint if defined."
               },
               "description": { },
               "deprecated": { }
             },
-            "required": ["maxlen"],
             "blobDefaultLength": true,
-            "allOf": [
-              {
-                "properties": {
-                  "minlen": { "type": "integer", "maximum": { "$data": "1/maxlen" } }
-                }
-              }
-            ],
             "additionalProperties": false
           }
         },

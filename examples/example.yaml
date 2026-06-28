@@ -11,8 +11,6 @@ messages:
         type: i8
         description: "A signed 8-bit integer value that represents a weight"
         unit: kg
-        min: 0
-        max: 100
         deprecated: true
         default: 10
 
@@ -34,7 +32,6 @@ messages:
       somestring:
         id: 2
         type: string
-        minlen: 5
         maxlen: 50
         description: "A string field with length constraints"
         #default: "Hello, World!"
@@ -43,7 +40,6 @@ messages:
       someblob:
         id: 9
         type: blob
-        minlen: 1
         maxlen: 16
         description: "A binary blob with length constraints"
         default: "SGVsbG8="   # base64 of "Hello"

@@ -46,12 +46,12 @@ rejected rather than ignored.
 
 | `type` | Notes / constraints |
 |---|---|
-| `u8 u16 u32 u64` | unsigned ints; `min`/`max`/`default` range-checked per width |
-| `i8 i16 i32 i64` | signed ints; `min`/`max`/`default` range-checked per width |
-| `fp32` `fp64` | floats; `min`/`max`/`default` (real numbers); optional `decimals` (0–15) |
+| `u8 u16 u32 u64` | unsigned ints; optional `default` (range-checked per width) |
+| `i8 i16 i32 i64` | signed ints; optional `default` (range-checked per width) |
+| `fp32` `fp64` | floats; optional `default` (real number); optional `decimals` (0–15) |
 | `boolean` | optional `default` |
-| `string` | **required `maxlen`**, optional `minlen`, optional `default` |
-| `blob` | **required `maxlen`**, optional `minlen`; `default` is base64 |
+| `string` | optional `maxlen`, optional `default` |
+| `blob` | optional `maxlen`; `default` is base64 |
 | `array` | fixed-length; `items: { type, count }`; element `type` ∈ numeric primitives, **`string`**, or **`blob`** |
 | `enum` | inline map or `{ $ref }`; values may be negative; `default` must match a value |
 | `bitfield` | inline `bits` map or `{ $ref }`; each flag has `pos` 0–63 + optional `default` |
@@ -59,7 +59,14 @@ rejected rather than ignored.
 | `union` | `oneof:` inline or `{ $ref }`; optional `default_id` |
 
 Common optional metadata on every field: `description`, `unit`, `deprecated`
-(numeric fields also allow `decimals` on floats).
+(floats also allow `decimals`). Numeric fields have **no `min`/`max`** — value
+range is the type's width only; domain-range validation is left to the
+application (as in protobuf / FlatBuffers / Cap'n Proto). `string`/`blob` carry an
+optional **`maxlen`** (no `minlen`). `maxlen` is optional at the schema level, but
+**targets that cannot allocate dynamically (e.g. C `char s[N]`, `no_std` Rust)
+require it** to size static storage — so a backend must reject a `maxlen`-less
+`string`/`blob` as a generator-side, per-language check (see PLAN § "Bounded
+storage & required `maxlen` per target").
 
 Every field **requires `id`** (a uint in `0 .. 2147483647`) and `type`.
 
@@ -130,9 +137,7 @@ these (or fails to compile them), silently dropping the checks. They are:
 
 | Where | Rule |
 |---|---|
-| every numeric type | `min` ≤ `max` (`min.maximum = {$data:"1/max"}`) |
-| `string`, `blob` | `minlen` ≤ `maxlen` |
-| `string` `default` | `minlen` ≤ `length(default)` ≤ `maxlen` |
+| `string` `default` | `length(default)` ≤ `maxlen` (when `maxlen` is present) |
 | `array` `default` | `length(default)` == `items.count` (min/maxItems via `$data`) |
 
 A Go/other reimplementation that can't run `$data` **must enforce these as
@@ -190,28 +195,25 @@ ajv.addKeyword({
 ### 5. Custom keyword: `blobDefaultLength`
 
 Applied to a `blob`-typed field; asserts that the **decoded byte length** of the
-base64 `default` falls within `minlen`/`maxlen`. (Plain string-length checks would
+base64 `default` does not exceed `maxlen`. (Plain string-length checks would
 measure the base64 text, which is ~4/3 longer than the bytes it encodes, so this
-cannot be expressed with `$data`/`minLength`.) Reference implementation:
+cannot be expressed with `$data`/`maxLength`.) Reference implementation:
 
 ```js
 ajv.addKeyword({
   keyword: "blobDefaultLength", type: "object", schemaType: "boolean", errors: true,
   validate(schema, data) {
-    if (!schema || data.default === undefined) return true;     // presence test
+    if (!schema || data.default === undefined || data.maxlen === undefined) return true;
     const bytes = Buffer.from(String(data.default), "base64").length;
-    if (data.minlen !== undefined && bytes < data.minlen) return false;
-    if (data.maxlen !== undefined && bytes > data.maxlen) return false;
-    return true;
+    return bytes <= data.maxlen;
   },
 });
 ```
 
 > `Buffer.from(.., "base64")` tolerates the whitespace the `default` `pattern`
 > allows. A non-JS reimplementation must base64-decode the default (ignoring
-> whitespace) and compare the **byte** count to `minlen`/`maxlen`. Uses a presence
-> test (`=== undefined`), not truthiness, so an empty/zero-ish default is not
-> skipped.
+> whitespace) and compare the **byte** count to `maxlen`. Skips when `maxlen` is
+> absent (it is optional), and uses a presence test (`=== undefined`) on `default`.
 
 ### 6. Custom keyword: `uniquePositions`
 
@@ -268,10 +270,10 @@ at once.
 A validator is only conformant if it does **all** of:
 
 - [ ] enforce the structural schema (types, ranges per width, closedness, required `type` + `id`);
-- [ ] enforce the `$data` rules of §2 (min≤max, minlen≤maxlen, default-length/array-count);
+- [ ] enforce the `$data` rules of §2 (string default ≤ maxlen, array default-count);
 - [ ] enforce `id` **uniqueness in every id scope** — payload **and** nested struct/union (the schema attaches `uniqueIds` to all three);
 - [ ] enforce enum-default membership with a **presence** (not truthiness) check (§4);
-- [ ] enforce `blob` **default byte-length** by base64-decoding and comparing to `minlen`/`maxlen` (§5);
+- [ ] enforce `blob` **default byte-length** by base64-decoding and comparing to `maxlen` (§5);
 - [ ] enforce `bitfield` **`pos` uniqueness** across a bitfield's flags (§6);
 - [ ] enforce `union` **`default_id` membership** against the declared option ids (§7);
 - [ ] resolve `$ref` before validating, but keep `$ref` for generation;
@@ -279,11 +281,11 @@ A validator is only conformant if it does **all** of:
 
 **Still open (design decisions before freeze):**
 
-- **64-bit ranges are not exactly enforced.** `i64`/`u64` `min`/`max`/`default`
-  are checked with JSON-number `maximum`, but JSON/JS numbers are doubles, so
-  values past 2^53 lose precision and out-of-range 64-bit values (e.g. 2^64) can
-  slip through. A correct validator should carry 64-bit values as strings (or use
-  a BigInt range check).
-- Heavy duplication (per-width range tables, the `min ≤ max` rule) could be
-  factored into shared `$defs`; and the internal `$defs` keyword overloads the
-  user-facing `$defs` property (draft-07's keyword is `definitions`).
+- **64-bit ranges are not exactly enforced.** A 64-bit `i64`/`u64` `default` (and
+  enum values) are checked with JSON-number bounds, but JSON/JS numbers are
+  doubles, so values past 2^53 lose precision and an out-of-range 64-bit `default`
+  (e.g. 2^64) can slip through. A correct validator should carry 64-bit values as
+  strings (or use a BigInt range check).
+- Heavy duplication (per-width `default` range tables) could be factored into
+  shared `$defs`; and the internal `$defs` keyword overloads the user-facing
+  `$defs` property (draft-07's keyword is `definitions`).
