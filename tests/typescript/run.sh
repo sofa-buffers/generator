@@ -43,7 +43,9 @@ gen "$WORK/conf.yaml" "$WORK/conf"
 
 setup() {
     node -e "const p=require('$1/package.json');p.dependencies['@sofabuffers/corelib']='file:$CORELIB';require('fs').writeFileSync('$1/package.json',JSON.stringify(p))"
-    ( cd "$1" && npm install >/dev/null 2>&1 )
+    # Retry once; surface the output on a second failure (npm can be flaky).
+    ( cd "$1" && npm install --no-audit --no-fund --silent ) \
+        || ( cd "$1" && npm install --no-audit --no-fund )
 }
 setup "$WORK/ex"
 setup "$WORK/conf"
