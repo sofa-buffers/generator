@@ -1,0 +1,983 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "title": "SofaBuffers Message Definition Schema v1",
+  "description": "Validates message definition files for custom messages and payloads.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version number."
+    },
+    "$defs": {
+      "type": "object",
+      "description": "Defines reusable field schemas that can be referenced by messages or other definitions.",
+      "properties": {
+        "struct": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_]*$": {
+              "$ref": "#/$defs/struct"
+            }
+          }
+        },
+        "union": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_]*$": {
+              "$ref": "#/$defs/union"
+            }
+          }
+        },
+        "enum": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_]*$": {
+              "$ref": "#/$defs/enum"
+            }
+          }
+        },
+        "bitfield": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_]*$": {
+              "$ref": "#/$defs/bitfield"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "messages": {
+      "type": "object",
+      "description": "Each key defines a message by its unique name and its schema.",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_]*$": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string",
+              "description": "Description of the message."
+            },
+            "payload": {
+              "type": "object",
+              "description": "Defines all fields of this message.",
+              "uniqueIds": true,
+              "patternProperties": {
+                "^[A-Za-z][A-Za-z0-9_]*$": {
+                  "$ref": "#/$defs/field"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["payload"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "anyOf": [
+    { "required": ["$defs"], "properties": { "$defs": { } } },
+    { "required": ["messages"], "properties": { "messages": { } } }
+  ],
+  "additionalProperties": false,
+
+  "$defs": {
+    "types": {
+      "id": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2147483647,
+        "description": "Unique numeric ID for the field within the parent message or struct."
+      }
+    },
+
+    "enum": {
+      "type": "object",
+      "description": "Defines the allowed constants for enum type fields; keys are enum names.",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_]*$": {
+          "description": "Defines a specific key name within the enum.",
+          "anyOf": [
+            {
+              "type": "integer", "description": "Numeric value associated with the enum key."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "value": { "type": "integer", "description": "Numeric value associated with the enum key." },
+                "description": { "type": "string", "description": "Optional explanation of the enum constant." }
+              },
+              "required": ["value"],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "bitfield": {
+      "type": "object",
+      "description": "Defines the schema and constraints for bitfield elements.",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_]*$": {
+          "type": "object",
+          "description": "Defines a specific flag within the bitfield.",
+          "properties": {
+            "pos": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 63,
+              "description": "Bit position of the flag within the bitfield."
+            },
+            "default": {
+              "type": "boolean",
+              "description": "Optional default value for the bitfield flag."
+            },
+            "description": {
+              "type": "string",
+              "description": "Optional explanation of the bitfield flag."
+            }
+          },
+          "required": ["pos"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "struct": {
+      "type": "object",
+      "description": "Defines the schema and constraints for struct elements",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_]*$": {
+          "$ref": "#/$defs/field"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "union": {
+      "type": "object",
+      "description": "Defines the schema and constraints for union elements.",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_]*$": {
+          "$ref": "#/$defs/field"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "field": {
+      "type": "object",
+      "description": "Defines a single field inside a payload, struct, or union, including type, constraints and metadata.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "u8", "u16", "u32", "u64",
+            "i8", "i16", "i32", "i64",
+            "fp32", "fp64",
+            "boolean", "string", "blob",
+            "array", "enum", "struct", "bitfield", "union"
+          ],
+          "description": "Data type of the field; determines allowed attributes and constraints."
+        },
+        "min": {
+          "description": "Minimum allowed value for numeric types."
+        },
+        "max": {
+          "description": "Maximum allowed value for numeric types."
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional free text describing the purpose of this field."
+        },
+        "decimals": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15,
+          "description": "Number of decimal places for floating-point numbers."
+        },
+        "unit": {
+          "type": "string",
+          "description": "Optional unit of measurement for numeric fields (e.g., 'kg', '°C')."
+        },
+        "deprecated": {
+          "type": "boolean",
+          "description": "Marks the field as deprecated; clients should avoid using it."
+        }
+      },
+      "required": ["type"],
+      "additionalProperties": true,
+
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "i8" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "min": { "type": "integer", "minimum": -128, "maximum": 127 },
+              "max": { "type": "integer", "minimum": -128, "maximum": 127 },
+              "default": {
+                "type": "integer", "minimum": -128, "maximum": 127,
+                "description": "Optional default signed 8-bit integer value."
+              },
+              "description": { },
+              "unit": { },
+              "deprecated": { }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "u8" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "min": { "type": "integer", "minimum": 0, "maximum": 255 },
+              "max": { "type": "integer", "minimum": 0, "maximum": 255 },
+              "default": {
+                "type": "integer", "minimum": 0, "maximum": 255,
+                "description": "Optional default unsigned 8-bit integer value."
+              },
+              "description": { },
+              "unit": { },
+              "deprecated": { }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "i16" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "min": { "type": "integer", "minimum": -32768, "maximum": 32767 },
+              "max": { "type": "integer", "minimum": -32768, "maximum": 32767 },
+              "default": {
+                "type": "integer", "minimum": -32768, "maximum": 32767,
+                "description": "Optional default signed 16-bit integer value."
+              },
+              "description": { },
+              "unit": { },
+              "deprecated": { }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "u16" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "min": { "type": "integer", "minimum": 0, "maximum": 65535 },
+              "max": { "type": "integer", "minimum": 0, "maximum": 65535 },
+              "default": {
+                "type": "integer", "minimum": 0, "maximum": 65535,
+                "description": "Optional default unsigned 16-bit integer value."
+              },
+              "description": { },
+              "unit": { },
+              "deprecated": { }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "i32" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "min": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+              "max": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+              "default": {
+                "type": "integer", "minimum": -2147483648, "maximum": 2147483647,
+                "description": "Optional default signed 32-bit integer value."
+              },
+              "description": { },
+              "unit": { },
+              "deprecated": { }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "u32" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "min": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+              "max": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+              "default": {
+                "type": "integer", "minimum": 0, "maximum": 4294967295,
+                "description": "Optional default unsigned 32-bit integer value."
+              },
+              "description": { },
+              "unit": { },
+              "deprecated": { }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "i64" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "min": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
+              "max": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
+              "default": {
+                "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807,
+                "description": "Optional default signed 64-bit integer value."
+              },
+              "description": { },
+              "unit": { },
+              "deprecated": { }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "u64" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "min": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+              "max": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+              "default": {
+                "type": "integer", "minimum": 0, "maximum": 18446744073709551615,
+                "description": "Optional default unsigned 64-bit integer value."
+              },
+              "description": { },
+              "unit": { },
+              "deprecated": { }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "fp32" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "min": { "type": "number", "minimum": -3.4028235e+38, "maximum": 3.4028235e+38 },
+              "max": { "type": "number", "minimum": -3.4028235e+38, "maximum": 3.4028235e+38 },
+              "default": {
+                "type": "number", "minimum": -3.4028235e+38, "maximum": 3.4028235e+38,
+                "description": "Optional default floating-point value."
+              },
+              "description": { },
+              "decimals": { },
+              "unit": { },
+              "deprecated": { }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "fp64" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "min": { "type": "number", "minimum": -1.7976931348623157e+308, "maximum": 1.7976931348623157e+308 },
+              "max": { "type": "number", "minimum": -1.7976931348623157e+308, "maximum": 1.7976931348623157e+308 },
+              "default": {
+                "type": "number", "minimum": -1.7976931348623157e+308, "maximum": 1.7976931348623157e+308,
+                "description": "Optional default floating-point value."
+              },
+              "description": { },
+              "decimals": { },
+              "unit": { },
+              "deprecated": { }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "min": { "type": "integer", "maximum": { "$data": "1/max" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "boolean" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "default": {
+                "type": "boolean",
+                "description": "Optional default boolean value."
+              },
+              "description": { },
+              "deprecated": { }
+            },
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "string" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "minlen": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "Minimum string length"
+              },
+              "maxlen": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "Maximum string length"
+              },
+              "default": {
+                "type": "string",
+                "description": "Optional default string value; must comply with minlen and maxlen constraints if defined.",
+                "minLength": { "$data": "1/minlen" },
+                "maxLength": { "$data": "1/maxlen" }
+              },
+              "description": { },
+              "deprecated": { }
+            },
+            "required": ["maxlen"],
+            "allOf": [
+              {
+                "properties": {
+                  "minlen": { "type": "integer", "maximum": { "$data": "1/maxlen" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "blob" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "minlen": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "Minimum blob length"
+              },
+              "maxlen": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "Maximum blob length"
+              },
+              "default": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9+/\\s]+={0,2}$",
+                "description": "Optional default binary data; use !!binary to specify base64-encoded data; must comply with minlen and maxlen constraints if defined."
+              },
+              "description": { },
+              "deprecated": { }
+            },
+            "required": ["maxlen"],
+            "allOf": [
+              {
+                "properties": {
+                  "minlen": { "type": "integer", "maximum": { "$data": "1/maxlen" } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+
+        {
+          "if": { "properties": { "type": { "const": "enum" } } },
+          "then": {
+            "required": ["enum"],
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "enum": {
+                "oneOf": [
+                  { "$ref": "#/$defs/enum" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "$ref": {
+                        "type": "string",
+                        "description": "Reference to a predefined enum in $defs."
+                      }
+                    },
+                    "required": ["$ref"],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "default": {
+                "type": "integer",
+                "description": "Optional default value for the enum; must match one of the defined enum values."
+              },
+              "description": { },
+              "deprecated": { }
+            },
+            "additionalProperties": false,
+            "defaultMatchesEnum": true
+          }
+        },
+
+        {
+          "if": { "properties": { "type": { "const": "bitfield" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "bits": {
+                "oneOf": [
+                  { "$ref": "#/$defs/bitfield" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "$ref": {
+                        "type": "string",
+                        "description": "Reference to a predefined bitfield in $defs."
+                      }
+                    },
+                    "required": ["$ref"],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "description": { },
+              "deprecated": { }
+            },
+            "required": ["bits"],
+            "additionalProperties": false
+          }
+        },
+
+        {
+          "if": { "properties": { "type": { "const": "array" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "items": {
+                "type": "object",
+                "description": "Defines the constraints for array elements",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "description": "Data type of the array elements; only primitive types are allowed.",
+                    "enum": [
+                      "u8", "u16", "u32", "u64",
+                      "i8", "i16", "i32", "i64",
+                      "fp32", "fp64",
+                  	  "string"
+                    ]
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647,
+                    "description": "Number of elements in this array"
+                  }
+                },
+                "required": ["type", "count"],
+                "additionalProperties": false
+              },
+              "default": {
+                "type": "array",
+                "description": "Optional default array value; must match the defined item type and count.",
+                "items": { },
+                "minItems": { "$data": "1/items/count" },
+                "maxItems": { "$data": "1/items/count" }
+              },
+              "description": { },
+              "deprecated": { }
+            },
+            "required": ["items"],
+            "additionalProperties": false,
+
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "i8" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "integer", "minimum": -128, "maximum": 127 }
+                    }
+                  }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "u8" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+                    }
+                  }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "i16" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "integer", "minimum": -32768, "maximum": 32767 }
+                    }
+                  }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "u16" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "integer", "minimum": 0, "maximum": 65535 }
+                    }
+                  }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "i32" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }
+                    }
+                  }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "u32" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+                    }
+                  }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "i64" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 }
+                    }
+                  }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "u64" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+                    }
+                  }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "fp32" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "number", "minimum": -3.4028235e+38, "maximum": 3.4028235e+38 }
+                    }
+                  }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "fp64" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "number", "minimum": -1.7976931348623157e+308, "maximum": 1.7976931348623157e+308 }
+                    }
+                  }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "string" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+
+        {
+          "if": { "properties": { "type": { "const": "struct" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "fields": {
+                "oneOf": [
+                  { "$ref": "#/$defs/struct" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "$ref": {
+                        "type": "string",
+                        "description": "Reference to a predefined struct in $defs."
+                      }
+                    },
+                    "required": ["$ref"],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "description": { },
+              "deprecated": { }
+            },
+            "required": ["fields"],
+            "additionalProperties": false
+          }
+        },
+
+        {
+          "if": { "properties": { "type": { "const": "union" } } },
+          "then": {
+            "properties": {
+              "id": { "$ref": "#/$defs/types/id" },
+              "type": { },
+              "oneof": {
+                "oneOf": [
+                  { "$ref": "#/$defs/union"},
+                  {
+                    "type": "object",
+                    "properties": {
+                      "$ref": {
+                        "type": "string",
+                        "description": "Reference to a predefined union in $defs."
+                      }
+                    },
+                    "required": ["$ref"],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "default_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647,
+                "description": "Optional: ID of the default option if none of the defined options match."
+              },
+              "description": { },
+              "deprecated": { }
+            },
+            "required": ["oneof"],
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  }
+}
