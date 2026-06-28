@@ -127,7 +127,7 @@ func (g *gen) jsonHelper(s *ir.Schema) []byte {
 	f.line("        for (int i = 0; i < s.length(); i++) { char c = s.charAt(i);")
 	f.line("            if (c == '\"' || c == '\\\\') b.append('\\\\').append(c);")
 	f.line("            else if (c == '\\n') b.append(\"\\\\n\"); else if (c == '\\t') b.append(\"\\\\t\");")
-	f.line("            else if (c < 0x20) b.append(String.format(\"\\\\u%04x\", (int)c)); else b.append(c); }")
+	f.line("            else if (c < 0x20) b.append(String.format(\"\\\\u%%04x\", (int)c)); else b.append(c); }")
 	f.line("        b.append('\"');")
 	f.line("    }")
 	f.line("    static void bytes(StringBuilder b, byte[] a) {")
