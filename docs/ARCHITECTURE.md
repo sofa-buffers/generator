@@ -16,7 +16,10 @@
 > **Milestone model:** each target language is a milestone — a working backend
 > with its own CI job and tests, landed on `main` only when green, then on to
 > the next language. Order (testable-toolchain first): **C ✓ → Go ✓ → Python ✓
-> → TypeScript → C++ → (Rust / Java / C# once their toolchains are wired)**.
+> → TypeScript ✓ → C++ → (Rust / Java / C# once their toolchains are wired)**.
+> TypeScript (`generators/typescript`) emits classes with `marshal(OStream)` and
+> a visitor-based `decode` against `corelib-ts` (64-bit → `bigint`); 27 shared
+> vectors byte-exact (`tests/typescript/run.sh`, CI job `lang-typescript`).
 > Python (`generators/python`) emits dataclasses + `_marshal`/pull-parser
 > `_unmarshal` against `corelib-py`; 37 shared vectors byte-exact
 > (`tests/python/run.sh`, CI job `lang-python`).
@@ -236,6 +239,7 @@ adds build files + devcontainer wiring + an IR-driven encode/decode JSON harness
 | **M4 C conformance backbone** | **done** — drives the generated C encoder against the corelib's language-agnostic shared vectors (`assets/test_vectors.json`): **34 vectors byte-exact** (non-zero scalar/string at id 0). Sparse-encoder zero/blob/array cases are covered by the round-trip harness. `tests/c/run.sh` is the one-command backbone. Tag `m4`. |
 | **Go backend** | **done** — `generators/golang`: struct + `Marshal`/pull-parser `Unmarshal` against `corelib-go`; `emit: project` Go module + stdlib-json harness; **37 shared vectors byte-exact** (dense encoder also matches zero values). `tests/go/run.sh`. |
 | **Python backend** | **done** — `generators/python`: dataclasses + `_marshal`/pull-parser `_unmarshal` against `corelib-py`; stdlib-json harness (blob as `list[int]`, matching C); **37 shared vectors byte-exact**. `tests/python/run.sh`. |
-| **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job (build/vet/gofmt/test/cross-compile) + `lang-c` + `lang-go` + `lang-python` jobs (generate → build → round-trip → vector conformance) on every push. |
-| TypeScript / C++ | next (testable here). |
+| **TypeScript backend** | **done** — `generators/typescript`: classes + `marshal(OStream)` + visitor-based `decode` against `corelib-ts`; 64-bit → `bigint`; strict-typecheck clean; **27 shared vectors byte-exact**. `tests/typescript/run.sh`. |
+| **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job + `lang-c` + `lang-go` + `lang-python` + `lang-typescript` jobs (generate → build → round-trip → vector conformance) on every push. |
+| C++ | next (testable here via g++). |
 | Rust / Java / C# | pending — need their toolchains wired into CI. |

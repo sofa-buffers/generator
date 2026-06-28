@@ -75,3 +75,19 @@ jobs:
           python-version: "3.12"
       - name: Python backend — generate, syntax, round-trip, conformance
         run: ./tests/python/run.sh
+
+  # Language milestone: TypeScript (corelib-ts). Builds the corelib, generates a
+  # module, typechecks (strict), round-trips JSON, and checks byte-exact output
+  # against the shared vectors. tests/typescript/run.sh clones + builds corelib.
+  lang-typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: TypeScript backend — build, typecheck, round-trip, conformance
+        run: ./tests/typescript/run.sh
