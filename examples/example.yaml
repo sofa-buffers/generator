@@ -1,0 +1,169 @@
+# yaml-language-server: $schema=../schema/sofabuffers-schema-v1.json
+version: 1
+
+messages:
+  myfirstmessage:
+    summary: |
+      A message schema demonstrating various field types and features.
+    payload:
+      someinteger:
+        id: 0
+        type: i8
+        description: "A signed 8-bit integer value that represents a weight"
+        unit: kg
+        min: 0
+        max: 100
+        deprecated: true
+        default: 10
+
+      test:
+        id: 8
+        type: fp32
+        default: 0
+        description: "A floating-point number for testing purposes"
+        deprecated: false
+        decimals: 2
+
+      somebool:
+        id: 1
+        type: boolean
+        description: "A boolean flag indicating true or false"
+        default: true
+        deprecated: false
+
+      somestring:
+        id: 2
+        type: string
+        minlen: 5
+        maxlen: 50
+        description: "A string field with length constraints"
+        #default: "Hello, World!"
+        deprecated: false
+
+      someblob:
+        id: 9
+        type: blob
+        minlen: 1
+        maxlen: 16
+        description: "A binary blob with length constraints"
+        default: "SGVsbG8="   # base64 of "Hello"
+        deprecated: false
+
+      someenum:
+        id: 4
+        type: enum
+        description: "An enumeration representing colors"
+        enum:
+          RED: {value: 0, description: "The color red"}
+          GREEN:
+            value: -100
+            description: "The color green"
+          BLUE: 2
+          YELLOW: 33
+        default: 2
+        deprecated: false
+
+      somebitfield:
+        id: 5
+        type: bitfield
+        description: "A bitfield representing various flags"
+        bits:
+          flagA:
+            pos: 0
+            default: false
+            description: "Activate feature A at bit position 0 with default value"
+          flagB:
+            pos: 1
+            default: true
+            description: "Activate feature B at bit position 1 with default value"
+        deprecated: false
+
+      somearray:
+        id: 3
+        type: array
+        items:
+          type: i32
+          count: 5
+        description: "An array of signed 32-bit integers"
+        default: [10, 20, 300, 4000, 50000]
+        deprecated: false
+
+      # string arrays are internally represented as a sequence of strings
+      somestringarray:
+        id: 33
+        type: array
+        items:
+          type: string
+          count: 5
+        description: "An array of string values"
+        default: ["one", "two", "three", "four", "five"]
+        deprecated: false
+
+      # blob arrays, like string arrays, are represented as a sequence on the wire
+      someblobarray:
+        id: 10
+        type: array
+        items:
+          type: blob
+          count: 3
+        description: "An array of binary blobs"
+        default: ["AAEC", "//8=", "ZGF0YQ=="]   # base64: [00 01 02], [FF FF], "data"
+        deprecated: false
+
+      somestruct:
+        id: 6
+        type: struct
+        description: "A nested structure within the message"
+        fields:
+          nestedint:
+            id: 0
+            type: u8
+            description: "An unsigned 8-bit integer in the nested struct"
+            default: 255
+          nestedstring:
+            id: 1
+            type: string
+            maxlen: 32
+            description: "A string in the nested struct"
+            default: "Nested"
+          nestedstruct:
+            id: 2
+            type: struct
+            description: "A deeper nested structure"
+            fields:
+              deepint:
+                id: 0
+                type: i32
+                description: "A signed 32-bit integer in the deeper nested struct"
+                default: -123456
+        deprecated: false
+
+      someunion:
+        id: 7
+        type: union
+        description: "A union field that can hold different types"
+        # default_id defines the option that is selected by default with the there defined default values
+        default_id: 0
+        oneof:
+          option1:
+            id: 0
+            type: u16
+            description: "An unsigned 16-bit integer option"
+            default: 0
+          option2:
+            id: 1
+            type: string
+            maxlen: 64
+            description: "A string option"
+          option3:
+            id: 2
+            type: struct
+            description: "A struct option"
+            fields:
+              unionstructint:
+                id: 0
+                type: i8
+              unionstructbool:
+                id: 1
+                type: boolean
+        deprecated: false

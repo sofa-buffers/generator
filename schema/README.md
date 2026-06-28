@@ -86,7 +86,7 @@ The wire encodes the type in the low 3 bits of each field's varint header:
 
 So the authoring types lower onto the wire like this:
 
-- **`struct`, `union`, and any nested structure** → emitted as a **sequence**
+- **`struct` and any nested structure** → emitted as a **sequence**
   (`sequence_begin … sequence_end`). Each sequence opens a fresh id scope, so a
   nested struct's field ids never collide with the parent's.
 - **`array` of a numeric type** → a real **array** wire type (`0b011/100/101`),
@@ -138,6 +138,10 @@ these (or fails to compile them), silently dropping the checks. They are:
 A Go/other reimplementation that can't run `$data` **must enforce these as
 explicit semantic checks** after structural validation.
 
+> `blob` `default` length is **not** a `$data` rule: its default is base64, so the
+> base64 *string* length ≠ the decoded *byte* length the bounds apply to. It is
+> enforced by the `blobDefaultLength` custom keyword (§5) instead.
+
 ### 3. Custom keyword: `uniqueIds`
 
 Applied to a `payload` object; asserts that the `id` of every direct child field
@@ -154,13 +158,11 @@ ajv.addKeyword({
 });
 ```
 
-> **Scope caveat (must fix in a new impl):** in v1 the `uniqueIds` keyword is
-> present **only on `messages.*.payload`**, *not* on `$defs/struct` or
-> `$defs/union`. So duplicate ids **inside a nested struct/union are not caught**.
-> Per the format, ids must be unique within **every** parent scope (each sequence
-> is its own id scope), so a correct validator must apply the uniqueness check to
-> struct and union members too — either by adding `uniqueIds` to those subschemas
-> or as a semantic pass over every id scope.
+> **Scope (every id scope):** `uniqueIds` is applied to `messages.*.payload`
+> **and** to `#/$defs/struct` and `#/$defs/union`, because ids must be unique
+> within **every** parent scope (each sequence is its own id scope). A
+> reimplementation must run the uniqueness check over all three, not just the
+> top-level payload.
 
 ### 4. Custom keyword: `defaultMatchesEnum`
 
@@ -171,21 +173,88 @@ enum's declared values. Reference implementation:
 ajv.addKeyword({
   keyword: "defaultMatchesEnum", type: "object", schemaType: "boolean", errors: true,
   validate(schema, data) {
-    if (!schema || !data.default) return true;            // <-- see caveat
+    if (!schema || data.default === undefined) return true;   // presence test, not truthiness
     const values = Object.values(data.enum).map(e => (typeof e === "object" ? e.value : e));
     return values.includes(data.default);
   },
 });
 ```
 
-> **Caveat (must fix in a new impl):** the guard `!data.default` also short-circuits
-> on a **falsy** default — notably `default: 0`. An enum whose `default` is `0`
-> when `0` is **not** a declared value would pass incorrectly. Use a presence test
-> (`data.default === undefined` / `!("default" in data)`) instead of truthiness.
+> **Presence, not truthiness.** The guard uses `data.default === undefined` (not
+> `!data.default`) so a **falsy** default — notably `default: 0`, a common valid
+> enum value — is still checked rather than skipped. Use `=== undefined` (or
+> `!("default" in data)`) in any reimplementation.
 > Note this keyword reads `data.enum`, so it must run **after** `$ref` resolution
 > (a `{ $ref }` enum is only a map of values once dereferenced).
 
-### 5. Hard-gate semantics
+### 5. Custom keyword: `blobDefaultLength`
+
+Applied to a `blob`-typed field; asserts that the **decoded byte length** of the
+base64 `default` falls within `minlen`/`maxlen`. (Plain string-length checks would
+measure the base64 text, which is ~4/3 longer than the bytes it encodes, so this
+cannot be expressed with `$data`/`minLength`.) Reference implementation:
+
+```js
+ajv.addKeyword({
+  keyword: "blobDefaultLength", type: "object", schemaType: "boolean", errors: true,
+  validate(schema, data) {
+    if (!schema || data.default === undefined) return true;     // presence test
+    const bytes = Buffer.from(String(data.default), "base64").length;
+    if (data.minlen !== undefined && bytes < data.minlen) return false;
+    if (data.maxlen !== undefined && bytes > data.maxlen) return false;
+    return true;
+  },
+});
+```
+
+> `Buffer.from(.., "base64")` tolerates the whitespace the `default` `pattern`
+> allows. A non-JS reimplementation must base64-decode the default (ignoring
+> whitespace) and compare the **byte** count to `minlen`/`maxlen`. Uses a presence
+> test (`=== undefined`), not truthiness, so an empty/zero-ish default is not
+> skipped.
+
+### 6. Custom keyword: `uniquePositions`
+
+Applied to a `bitfield` definition (`#/$defs/bitfield`); asserts that every flag's
+`pos` is unique, so two flags cannot occupy the same bit. Same shape as
+`uniqueIds`, but over `pos`:
+
+```js
+ajv.addKeyword({
+  keyword: "uniquePositions", type: "object", schemaType: "boolean", errors: false,
+  validate(schema, data) {
+    if (!schema) return true;
+    const pos = Object.values(data).map(f => f.pos);
+    return new Set(pos).size === pos.length;
+  },
+});
+```
+
+> Attached to `#/$defs/bitfield`, so it covers **both** an inline `bits` map and a
+> `$defs` bitfield reached via `{ $ref }` (after dereferencing).
+
+### 7. Custom keyword: `defaultIdMatchesUnion`
+
+Applied to a `union`-typed field; asserts that `default_id` (if present) matches
+the `id` of one of the union's declared options. The union analog of
+`defaultMatchesEnum`:
+
+```js
+ajv.addKeyword({
+  keyword: "defaultIdMatchesUnion", type: "object", schemaType: "boolean", errors: true,
+  validate(schema, data) {
+    if (!schema || data.default_id === undefined) return true;   // presence test
+    const ids = Object.values(data.oneof).map(o => o.id);
+    return ids.includes(data.default_id);
+  },
+});
+```
+
+> Reads `data.oneof`, so — like `defaultMatchesEnum` — it must run **after** `$ref`
+> resolution (a `{ $ref }` union is only a map of options once dereferenced). Uses
+> a presence test so `default_id: 0` (a valid option id) is not skipped.
+
+### 8. Hard-gate semantics
 
 Validation is an all-or-nothing gate: on any violation, the tool emits a clear,
 located error, exits non-zero, and produces **no output**. Invalid definitions are
@@ -200,26 +269,21 @@ A validator is only conformant if it does **all** of:
 
 - [ ] enforce the structural schema (types, ranges per width, closedness, required `type` + `id`);
 - [ ] enforce the `$data` rules of §2 (min≤max, minlen≤maxlen, default-length/array-count);
-- [ ] enforce `id` **uniqueness in every id scope** — payload **and** nested struct/union (fixing the §3 scope gap);
-- [ ] enforce enum-default membership with a **presence** (not truthiness) check (fixing the §4 caveat);
+- [ ] enforce `id` **uniqueness in every id scope** — payload **and** nested struct/union (the schema attaches `uniqueIds` to all three);
+- [ ] enforce enum-default membership with a **presence** (not truthiness) check (§4);
+- [ ] enforce `blob` **default byte-length** by base64-decoding and comparing to `minlen`/`maxlen` (§5);
+- [ ] enforce `bitfield` **`pos` uniqueness** across a bitfield's flags (§6);
+- [ ] enforce `union` **`default_id` membership** against the declared option ids (§7);
 - [ ] resolve `$ref` before validating, but keep `$ref` for generation;
 - [ ] fail closed: located error, non-zero exit, no output.
 
-## Changelog
+**Still open (design decisions before freeze):**
 
-**v1 (current), recent fixes**
-
-- **`id` is now required** on every field (base `field` definition: `required: ["type", "id"]`).
-  Previously a field could omit `id` and still validate.
-- **Float `min` accepts real numbers.** The `fp32`/`fp64` `min ≤ max` rule
-  mistakenly constrained `min` to `integer`, rejecting e.g. `min: 1.5`; it is now
-  `number`.
-- **`array` of `blob` is now authorable.** Added `blob` to `array.items.type`
-  (with a base64 `default` branch, matching the scalar `blob` default). On the
-  wire it is a sequence of blobs, like `array` of `string`.
-
-**Still open (intentional / design decisions):**
-
-- No `sequence` authoring type — by design (it is a wire type; see above).
-- `union.default_id` has no "matches a declared option" check (no analog to
-  `defaultMatchesEnum`).
+- **64-bit ranges are not exactly enforced.** `i64`/`u64` `min`/`max`/`default`
+  are checked with JSON-number `maximum`, but JSON/JS numbers are doubles, so
+  values past 2^53 lose precision and out-of-range 64-bit values (e.g. 2^64) can
+  slip through. A correct validator should carry 64-bit values as strings (or use
+  a BigInt range check).
+- Heavy duplication (per-width range tables, the `min ≤ max` rule) could be
+  factored into shared `$defs`; and the internal `$defs` keyword overloads the
+  user-facing `$defs` property (draft-07's keyword is `definitions`).

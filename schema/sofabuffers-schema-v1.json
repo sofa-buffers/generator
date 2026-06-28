@@ -19,7 +19,8 @@
             "^[A-Za-z][A-Za-z0-9_]*$": {
               "$ref": "#/$defs/struct"
             }
-          }
+          },
+          "additionalProperties": false
         },
         "union": {
           "type": "object",
@@ -27,7 +28,8 @@
             "^[A-Za-z][A-Za-z0-9_]*$": {
               "$ref": "#/$defs/union"
             }
-          }
+          },
+          "additionalProperties": false
         },
         "enum": {
           "type": "object",
@@ -35,7 +37,8 @@
             "^[A-Za-z][A-Za-z0-9_]*$": {
               "$ref": "#/$defs/enum"
             }
-          }
+          },
+          "additionalProperties": false
         },
         "bitfield": {
           "type": "object",
@@ -43,7 +46,8 @@
             "^[A-Za-z][A-Za-z0-9_]*$": {
               "$ref": "#/$defs/bitfield"
             }
-          }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -78,9 +82,10 @@
       "additionalProperties": false
     }
   },
+  "required": ["version"],
   "anyOf": [
-    { "required": ["$defs"], "properties": { "$defs": { } } },
-    { "required": ["messages"], "properties": { "messages": { } } }
+    { "required": ["$defs"] },
+    { "required": ["messages"] }
   ],
   "additionalProperties": false,
 
@@ -122,6 +127,7 @@
     "bitfield": {
       "type": "object",
       "description": "Defines the schema and constraints for bitfield elements.",
+      "uniquePositions": true,
       "patternProperties": {
         "^[A-Za-z][A-Za-z0-9_]*$": {
           "type": "object",
@@ -152,6 +158,7 @@
     "struct": {
       "type": "object",
       "description": "Defines the schema and constraints for struct elements",
+      "uniqueIds": true,
       "patternProperties": {
         "^[A-Za-z][A-Za-z0-9_]*$": {
           "$ref": "#/$defs/field"
@@ -163,6 +170,7 @@
     "union": {
       "type": "object",
       "description": "Defines the schema and constraints for union elements.",
+      "uniqueIds": true,
       "patternProperties": {
         "^[A-Za-z][A-Za-z0-9_]*$": {
           "$ref": "#/$defs/field"
@@ -559,6 +567,7 @@
               "deprecated": { }
             },
             "required": ["maxlen"],
+            "blobDefaultLength": true,
             "allOf": [
               {
                 "properties": {
@@ -996,6 +1005,7 @@
               "deprecated": { }
             },
             "required": ["oneof"],
+            "defaultIdMatchesUnion": true,
             "additionalProperties": false
           }
         }
