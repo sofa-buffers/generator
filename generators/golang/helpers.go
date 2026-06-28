@@ -97,6 +97,10 @@ func goNumType(k ir.Kind) string {
 		return "int32"
 	case ir.KindI64:
 		return "int64"
+	case ir.KindFP32:
+		return "float32"
+	case ir.KindFP64:
+		return "float64"
 	}
 	return "int64"
 }

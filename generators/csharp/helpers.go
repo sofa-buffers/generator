@@ -164,7 +164,8 @@ func (g *gen) csInit(f *ir.Field) string {
 		return ""
 	case ir.KindEnum:
 		if f.Default != nil {
-			return fmt.Sprintf(" = (%s)%s", g.typeName(f.Ref.Key), scalarLit(f.Default))
+			// parenthesize the value so a negative default casts correctly (CS0075).
+			return fmt.Sprintf(" = (%s)(%s)", g.typeName(f.Ref.Key), scalarLit(f.Default))
 		}
 		return ""
 	case ir.KindBitfield:

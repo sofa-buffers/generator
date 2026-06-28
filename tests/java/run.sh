@@ -54,4 +54,15 @@ echo "==> round-trip OK"
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/java/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/target/harness.jar"
 
+echo "==> corpus: every edge-case definition compiles (javac vs corelib jar)"
+JAR="$HOME/.m2/repository/org/sofabuffers/sofab/$VER/sofab-$VER.jar"
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
+    name=$(basename "$def" .yaml)
+    ( cd "$ROOT" && go run ./cmd/sbufgen --lang java --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    mkdir -p "$WORK/corpus/$name/out"
+    javac -cp "$JAR" -d "$WORK/corpus/$name/out" "$WORK"/corpus/"$name"/src/main/java/messages/*.java \
+        || { echo "FAIL: corpus def $name did not compile"; exit 1; }
+done
+echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
+
 echo "PASS"

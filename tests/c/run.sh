@@ -62,4 +62,16 @@ echo "==> M4: shared-vector byte-exact conformance + gated Go build tests"
 ( cd "$ROOT" && SOFAB_C_CORELIB="$CORELIB" go test ./generators/c/ \
     -run 'Conformance|Compiles|Project' -count=1 )
 
+echo "==> corpus: every edge-case definition compiles"
+# BIG descriptor profile so wide field ids (up to 2^31-1) fit the descriptor.
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
+    name=$(basename "$def" .yaml)
+    ( cd "$ROOT" && go run ./cmd/sbufgen --lang c --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    for c in "$WORK"/corpus/"$name"/*.c; do
+        gcc -std=c99 -Wall -DSOFAB_OBJECT_DESCR_PROFILE=3 -I"$INC" -I"$WORK/corpus/$name" -c "$c" -o /dev/null \
+            || { echo "FAIL: corpus def $name did not compile"; exit 1; }
+    done
+done
+echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
+
 echo "PASS"

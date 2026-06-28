@@ -59,7 +59,8 @@ func (g *gen) typesFile() []byte {
 		return nil
 	}
 	f := newGoFile(g.pkg)
-	f.imp(corelibImport)
+	// sofab is imported by emitObject only (structs/unions use the codec); an
+	// enum/bitfield-only types file must not import it unused.
 	for _, key := range g.schema.NamedOrder {
 		nt := g.schema.Named[key]
 		switch nt.Category {

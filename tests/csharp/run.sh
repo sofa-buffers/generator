@@ -53,4 +53,11 @@ echo "==> round-trip OK"
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"
 
+echo "==> corpus: every edge-case definition builds"
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
+    name=$(basename "$def" .yaml)
+    build "$def" "$WORK/corpus/$name"
+done
+echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
+
 echo "PASS"

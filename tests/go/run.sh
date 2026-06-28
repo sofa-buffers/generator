@@ -40,4 +40,13 @@ echo "==> round-trip OK"
 echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_GO_CORELIB="$CORELIB" go test ./generators/golang/ -run Conformance -count=1 )
 
+echo "==> corpus: every edge-case definition builds"
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
+    name=$(basename "$def" .yaml)
+    ( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang go --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/corpus/$name/go.mod"
+    ( cd "$WORK/corpus/$name" && GOFLAGS=-mod=mod go build ./... )
+done
+echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
+
 echo "PASS"

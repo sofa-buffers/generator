@@ -53,4 +53,15 @@ echo "==> shared-vector byte-exact conformance"
 make -C "$WORK/conf" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
 python3 "$ROOT/tests/cpp/check_vectors.py" "$CC/assets/test_vectors.json" "$WORK/conf/harness/harness"
 
+echo "==> corpus: every edge-case definition compiles"
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
+    name=$(basename "$def" .yaml)
+    ( cd "$ROOT" && go run ./cmd/sbufgen --lang cpp --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    for h in "$WORK"/corpus/"$name"/*.hpp; do
+        g++ -std=c++20 -fsyntax-only -x c++ -I"$CPP/include" "$h" \
+            || { echo "FAIL: corpus def $name did not compile"; exit 1; }
+    done
+done
+echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
+
 echo "PASS"
