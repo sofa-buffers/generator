@@ -1,0 +1,12 @@
+# Go build artifacts
+/sbufgen
+/bin/
+*.exe
+*.test
+*.out
+
+# Generated output (default config output_dir)
+/generated/
+
+# Editor / OS
+.DS_Store
