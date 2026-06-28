@@ -30,7 +30,7 @@ func TestGoldenOutput(t *testing.T) {
 			t.Fatalf("[%s] generate: %v", lang, err)
 		}
 		for _, f := range files {
-			golden := filepath.Join("golden", lang, f.Path)
+			golden := filepath.Join("testdata", "golden", lang, f.Path)
 			want, err := os.ReadFile(golden)
 			if err != nil {
 				t.Errorf("[%s] missing golden %s (regenerate)", lang, golden)
