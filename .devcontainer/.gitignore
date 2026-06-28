@@ -1,5 +1,7 @@
-# Local Claude config (bind-mounted into the container) — never commit
-.claude-config/
+# Local Claude config/state (bind-mounted into the container) — never commit
+.claude*
 
 # Local secrets — never commit
 .env
+.env.*
+!.env.example
