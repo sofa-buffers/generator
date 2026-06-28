@@ -29,6 +29,7 @@ import (
 	// Language backends self-register via init(). The core never imports these;
 	// only the CLI binary does (dependency arrows point inward, PLAN §8.6).
 	_ "github.com/sofa-buffers/generator/generators/c"
+	_ "github.com/sofa-buffers/generator/generators/golang"
 )
 
 const version = "0.1.0-m0"

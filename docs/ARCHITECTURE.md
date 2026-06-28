@@ -15,8 +15,12 @@
 >
 > **Milestone model:** each target language is a milestone — a working backend
 > with its own CI job and tests, landed on `main` only when green, then on to
-> the next language. Order (testable-toolchain first): **C ✓ → Go → Python →
+> the next language. Order (testable-toolchain first): **C ✓ → Go ✓ → Python →
 > TypeScript → C++ → (Rust / Java / C# once their toolchains are wired)**.
+> Go (`generators/golang`) emits one struct per object with `Marshal`
+> (streaming `Encoder`) + a pull-parser `Unmarshal` (`Decoder.Next/Skip`)
+> against `corelib-go`, with canonical-JSON struct tags; verified byte-exact on
+> 37 shared vectors (`tests/go/run.sh`, CI job `lang-go`).
 
 ---
 
@@ -227,7 +231,7 @@ adds build files + devcontainer wiring + an IR-driven encode/decode JSON harness
 | **M2 First backend (C)** | **done** — `generators/c` emits `object.h`-based struct + descriptor tables + encode/decode/init wrappers + capability guards + API-version guard + MAX_SIZE. `example.yaml` compiles **and round-trips** against the real `corelib-c-cpp` (`tests/c/run.sh`); guards verified to fire. Tag `m2`. |
 | **M3 Root-project generator (C)** | **done** — `emit: project` scaffolds a buildable C project (Makefile + CMakeLists + devcontainer wiring + README) with an **IR-driven encode/decode JSON harness** (§9.1). The harness builds against `corelib-c-cpp` and JSON round-trips every field kind. Tag `m3`. |
 | **M4 C conformance backbone** | **done** — drives the generated C encoder against the corelib's language-agnostic shared vectors (`assets/test_vectors.json`): **34 vectors byte-exact** (non-zero scalar/string at id 0). Sparse-encoder zero/blob/array cases are covered by the round-trip harness. `tests/c/run.sh` is the one-command backbone. Tag `m4`. |
-| **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job (build/vet/gofmt/test/cross-compile) + `lang-c` job (clone corelib → generate → build → round-trip → vector conformance) on every push. |
-| Go backend | **next** — throughput backend against `corelib-go` (pull-parser decode). |
-| Python / TypeScript / C++ | pending (testable here). |
+| **Go backend** | **done** — `generators/golang`: struct + `Marshal`/pull-parser `Unmarshal` against `corelib-go`; `emit: project` Go module + stdlib-json harness; **37 shared vectors byte-exact** (dense encoder also matches zero values). `tests/go/run.sh`. |
+| **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job (build/vet/gofmt/test/cross-compile) + `lang-c` + `lang-go` jobs (clone corelib → generate → build → round-trip → vector conformance) on every push. |
+| Python / TypeScript / C++ | next (testable here). |
 | Rust / Java / C# | pending — need their toolchains wired into CI. |
