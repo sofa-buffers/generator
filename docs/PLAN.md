@@ -118,9 +118,10 @@ Common optional attributes on every field: `description`, `unit`, `deprecated`.
 
 > This table is a summary. The **authoritative** type rules, plus the validation
 > that the bare JSON Schema cannot express — the `$data` cross-field rules and the
-> five custom keywords (`uniqueIds`, `uniquePositions`, `defaultMatchesEnum`,
-> `defaultIdMatchesUnion`, `blobDefaultLength`) — and the dereference-then-validate
-> contract, are documented in [`schema/README.md`](../schema/README.md). A
+> six custom keywords (`uniqueIds`, `uniquePositions`, `defaultMatchesEnum`,
+> `defaultIdMatchesUnion`, `blobDefaultLength`, `int64Range`) — and the
+> dereference-then-validate contract, are documented in
+> [`schema/README.md`](../schema/README.md). A
 > reimplementation must follow that document, not this summary.
 
 ### 3.3 `sequence` is a wire type, not an authoring type
@@ -192,7 +193,7 @@ For a message `MyMessage` the generator emits, per language:
 
 1. A **type** holding all members with language-appropriate field types:
    - integers → native sized ints,
-   - `enum` → a generated enum type backed by the smallest **signed** integer width that fits (enums are signed zig-zag varints on the wire),
+   - `enum` → a generated enum type backed by the smallest **signed** integer width that fits its **signed-32-bit** value set (enums are signed zig-zag varints on the wire),
    - `bitfield` → an integer with named bit accessors / flag constants,
    - `array` of a **numeric** element (`u*`/`i*`/`fp32`/`fp64`) → fixed-size array/`std::array`/`[N]T`, encoded with the corelib's array writers;
    - `array` of **`string`** → **special case: there is no string-array wire type.** It is modelled as a fixed-length **sequence of string fields** (confirmed by `corelib-c-cpp`'s object test and the `examples/example.yaml` note "string arrays are internally represented as a sequence of strings"). So generated code wraps it in `sequence_begin/end` and writes one string per element — it requires the **sequence** (and fixlen) capability, *not* the array capability;
@@ -381,7 +382,7 @@ There are really only **two optimization axes**, and every backend sits on one o
 - **`switch` on field id for decode**, not a chain of `if`s — lets compilers build a jump table. Unknown ids fall through to the corelib's skip path (forward/backward compatibility for free).
 - **Resolve everything at generation time.** Field ids, type mappings, enum backing widths, array element kinds/counts, and string/blob `maxlen` are all known statically — bake them in as constants/literals so nothing is computed at runtime.
 - **No reflection / no runtime schema.** All dispatch is concrete generated code; there is no descriptor interpretation at runtime (except C, which deliberately uses a static descriptor table — see below).
-- **Pick the narrowest correct type.** Map each integer to its exact width. Enums are **signed** (zig-zag varint) on the wire, so back each enum with the smallest **signed** integer width (`i8`/`i16`/`i32`/`i64`) that covers its value range. Avoid widening on the hot path.
+- **Pick the narrowest correct type.** Map each integer to its exact width. Enum values are **signed 32-bit** and encoded as **signed** (zig-zag varint) on the wire, so back each enum with the smallest **signed** integer width (`i8`/`i16`/`i32`) that covers its value range. Avoid widening on the hot path.
 - **Validate cheaply or not at all on the hot path.** Bounds checks (`maxlen`, array `count`) are generated as `debug`-only assertions (or an opt-in `--validate` mode), so release builds pay nothing.
 - **Honor defaults & `deprecated` without branches** where possible: initialize members to schema defaults at construction; emit deprecated fields behind a generation flag.
 
@@ -885,7 +886,7 @@ High-level, demonstrable checkpoints — each has a single clear "done when" cri
 
 | # | Milestone | Done when | Phase |
 |---|---|---|---|
-| **M0** | **Foundations** | The CLI loads a YAML/JSON definition + config, validates against the schema (incl. the five custom keywords, §3.2 / `schema/README.md`), resolves `$ref`, and builds a validated IR for `example.yaml` — no backend yet. **Initial `docs/ARCHITECTURE.md` created.** | 0 |
+| **M0** | **Foundations** | The CLI loads a YAML/JSON definition + config, validates against the schema (incl. the six custom keywords, §3.2 / `schema/README.md`), resolves `$ref`, and builds a validated IR for `example.yaml` — no backend yet. **Initial `docs/ARCHITECTURE.md` created.** | 0 |
 | **M1** | **Format finalized** | The schema (`v1.x`) + IR are frozen. No further input-format churn expected. | 0 |
 | **M2** | **First backend emits compiling code** | `sbufgen --lang c` turns `example.yaml` into C (`object.h`) sources that compile against `corelib-c-cpp`, **with capability guards** (§5.4). | 1 |
 | **M3** | **Root-project generator works** | `emit: project` scaffolds a buildable C root project (build files + devcontainer wiring + encode/decode harness, §9.1) that builds **inside `corelib-c-cpp`'s devcontainer**. | 1 |
@@ -948,7 +949,7 @@ It exercises scalars, a negative-valued enum (forcing a signed backing type), a 
 ### Phase 0 — Foundations & format finalization
 - [ ] Pick generator language (Go recommended) — §2.1.
 - [ ] Stand up the **project skeleton per §8.7** (`cmd/codegen`, `internal/{pipeline,parser,model,ir,analysis,generator,config}`, `generators/<lang>`), CLI parsing, CI with cross-compile matrix (win/linux/mac × x86-64/arm64 at minimum). Enforce the dependency rule: the core imports no `generators/*` package.
-- [ ] **Parser** + JSON-Schema validation (hard gate) incl. the five custom keywords and the `$data` rules (§8.1, `schema/README.md`).
+- [ ] **Parser** + JSON-Schema validation (hard gate) incl. the six custom keywords and the `$data` rules (§8.1, `schema/README.md`).
 - [ ] **Config system** (§7): YAML/JSON config loader; author **`schema/sbufgen-config-schema.json`** (`additionalProperties:false`) and **validate every config against it before use** (hard gate, §7.1); generic+per-target merge (+ `--in`/`--out` path overrides); `--print-defaults`; CI check that the schema and the handled config keys stay in lockstep and that all committed example/matrix configs validate.
 - [ ] Minimal CLI (§8.8): `--config`, `--lang`, optional `--in`/`--out` — no other flags.
 - [ ] **Composite model / AST** (§8.2): `Node` interface + node kinds, `$ref` resolution into a shared-type graph, canonical naming.
@@ -982,7 +983,6 @@ It exercises scalars, a negative-valued enum (forcing a signed backing type), a 
 ## 11. Key Risks & Open Questions
 
 1. **Decode model differs per language** — visitor (Java/C#/TS/Rust), field-callback/descriptor (C/C++), pull-parser (Go/Python). Backends are not a single template.
-2. **64-bit value precision** — `i64`/`u64` `default`s and enum values beyond 2^53 cannot be represented exactly by a JSON/JS number; the validator must carry them as strings or BigInt (see `schema/README.md` → Limitations).
 
 ---
 

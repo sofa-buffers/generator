@@ -107,12 +107,16 @@
           "description": "Defines a specific key name within the enum.",
           "anyOf": [
             {
-              "type": "integer", "description": "Numeric value associated with the enum key."
+              "type": "integer", "minimum": -2147483648, "maximum": 2147483647,
+              "description": "Numeric value associated with the enum key (signed 32-bit)."
             },
             {
               "type": "object",
               "properties": {
-                "value": { "type": "integer", "description": "Numeric value associated with the enum key." },
+                "value": {
+                  "type": "integer", "minimum": -2147483648, "maximum": 2147483647,
+                  "description": "Numeric value associated with the enum key (signed 32-bit)."
+                },
                 "description": { "type": "string", "description": "Optional explanation of the enum constant." }
               },
               "required": ["value"],
@@ -327,13 +331,15 @@
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
               "default": {
-                "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807,
-                "description": "Optional default signed 64-bit integer value."
+                "type": ["integer", "string"],
+                "pattern": "^-?(0|[1-9][0-9]*)$",
+                "description": "Optional default signed 64-bit integer. A plain JSON number works for values within +/-2^53; for exact values beyond that, give the integer as a JSON string (e.g. \"-9223372036854775808\")."
               },
               "description": { },
               "unit": { },
               "deprecated": { }
             },
+            "int64Range": "i64",
             "additionalProperties": false
           }
         },
@@ -344,13 +350,15 @@
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
               "default": {
-                "type": "integer", "minimum": 0, "maximum": 18446744073709551615,
-                "description": "Optional default unsigned 64-bit integer value."
+                "type": ["integer", "string"],
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "description": "Optional default unsigned 64-bit integer. A plain JSON number works for values within 2^53; for exact values beyond that, give the integer as a JSON string (e.g. \"18446744073709551615\")."
               },
               "description": { },
               "unit": { },
               "deprecated": { }
             },
+            "int64Range": "u64",
             "additionalProperties": false
           }
         },
@@ -478,8 +486,8 @@
                 ]
               },
               "default": {
-                "type": "integer",
-                "description": "Optional default value for the enum; must match one of the defined enum values."
+                "type": "integer", "minimum": -2147483648, "maximum": 2147483647,
+                "description": "Optional default value for the enum (signed 32-bit); must match one of the defined enum values."
               },
               "description": { },
               "deprecated": { }

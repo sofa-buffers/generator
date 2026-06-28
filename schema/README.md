@@ -9,9 +9,9 @@ files** (the YAML/JSON a user writes to describe their messages).
 
 > **Read this whole file before reimplementing the validator.** The schema does
 > **not** stand alone: correct validation depends on three things the bare JSON
-> Schema cannot express — `$data` cross-field rules, five **custom keywords**
+> Schema cannot express — `$data` cross-field rules, six **custom keywords**
 > (`uniqueIds`, `uniquePositions`, `defaultMatchesEnum`, `defaultIdMatchesUnion`,
-> `blobDefaultLength`), and a **dereference-then-validate** step.
+> `blobDefaultLength`, `int64Range`), and a **dereference-then-validate** step.
 > A stock draft-07 validator will silently accept definitions the reference
 > implementation rejects. These extra checks are specified in
 > [§ Validation contract](#validation-contract) and **must be ported**.
@@ -47,14 +47,14 @@ rejected rather than ignored.
 
 | `type` | Notes / constraints |
 |---|---|
-| `u8 u16 u32 u64` | unsigned ints; optional `default` (range-checked per width) |
-| `i8 i16 i32 i64` | signed ints; optional `default` (range-checked per width) |
+| `u8 u16 u32 u64` | unsigned ints; optional `default` (range-checked per width). For `u64`, a `default` beyond 2^53 must be a **JSON string** (exact) — see §8 |
+| `i8 i16 i32 i64` | signed ints; optional `default` (range-checked per width). For `i64`, a `default` beyond ±2^53 must be a **JSON string** — see §8 |
 | `fp32` `fp64` | floats; optional `default` (real number); optional `decimals` (0–15) |
 | `boolean` | optional `default` |
 | `string` | optional `maxlen`, optional `default` |
 | `blob` | optional `maxlen`; `default` is base64 |
 | `array` | fixed-length; `items: { type, count, maxlen? }`; element `type` ∈ numeric primitives, **`string`**, or **`blob`** (`items.maxlen` is optional and only valid for string/blob elements) |
-| `enum` | inline map or `{ $ref }`; values may be negative (signed zig-zag varint on the wire — see below); `default` must match a value |
+| `enum` | inline map or `{ $ref }`; values are **signed 32-bit** and may be negative (signed zig-zag varint on the wire — see below); `default` must match a value |
 | `bitfield` | inline `bits` map or `{ $ref }`; each flag has `pos` 0–63 + optional `default` |
 | `struct` | nested; `fields:` inline or `{ $ref }`; recursive |
 | `union` | `oneof:` inline or `{ $ref }`; optional `default_id` |
@@ -104,12 +104,12 @@ So the authoring types lower onto the wire like this:
 - **`array` of `string`** or **`array` of `blob`** → **not an array** —
   arrays of dynamic-length elements are forbidden as an array wire type, so they
   are encoded as a **sequence of string/blob fields**.
-- **`enum`** → a **signed (zig-zag) varint** (wire type `0b001`). Enum values may
-  be negative, and signed zig-zag keeps both small positives and small negatives
-  compact, so negatives carry no extra cost. The generated enum's backing integer
-  is the smallest **signed** width (`i8`/`i16`/`i32`/`i64`) that covers its value
-  range; every backend derives it identically so an enum interoperates across
-  languages.
+- **`enum`** → a **signed (zig-zag) varint** (wire type `0b001`). Enum values are
+  **signed 32-bit** (`-2147483648 … 2147483647`) and may be negative; signed
+  zig-zag keeps both small positives and small negatives compact, so negatives
+  carry no extra cost. The generated enum's backing integer is the smallest
+  **signed** width (`i8`/`i16`/`i32`) that covers its value range; every backend
+  derives it identically so an enum interoperates across languages.
 
 This is why a definition only ever needs `array` (fixed, numeric/string/blob)
 plus `struct`/`union`: the variable-length and dynamic-element cases are all
@@ -264,7 +264,47 @@ ajv.addKeyword({
 > resolution (a `{ $ref }` union is only a map of options once dereferenced). Uses
 > a presence test so `default_id: 0` (a valid option id) is not skipped.
 
-### 8. Hard-gate semantics
+### 8. Custom keyword: `int64Range`
+
+Applied to an `i64` / `u64` field; enforces the **exact** 64-bit range of its
+`default`. JSON/JS numbers are IEEE-754 doubles, so integers past 2^53 lose
+precision — therefore the schema accepts the `default` as **`integer | string`**:
+a plain number for everyday values (≤ 2^53), or a **JSON string** for exact values
+up to the full 64-bit bound. The keyword carries the kind (`"i64"` / `"u64"`) and
+checks the value with BigInt:
+
+```js
+ajv.addKeyword({
+  keyword: "int64Range", type: "object", schemaType: "string", errors: true,
+  validate(kind, data) {
+    const x = data.default;
+    if (x === undefined) return true;
+    let big;
+    if (typeof x === "string") {
+      if (!/^-?(0|[1-9][0-9]*)$/.test(x)) return false;
+      big = BigInt(x);
+    } else if (typeof x === "number") {
+      if (!Number.isSafeInteger(x)) return false;   // imprecise -> require a string
+      big = BigInt(x);
+    } else return false;
+    return kind === "u64"
+      ? big >= 0n && big <= 18446744073709551615n
+      : big >= -9223372036854775808n && big <= 9223372036854775807n;
+  },
+});
+```
+
+> **Numbers stay simple; strings make it exact.** A small `u64`/`i64` `default`
+> can still be written as a plain integer (`default: 42`). A value beyond the
+> double-safe range **must** be a string (`default: "18446744073709551615"`) — a
+> plain number there is rejected, because it would already have lost precision
+> before validation. (The `pattern` on `default` constrains only the string form;
+> the keyword does the range check for both.) **YAML note:** an unquoted big
+> integer is parsed as a lossy number, so always **quote** 64-bit values past 2^53.
+> A reimplementation must parse the string with a big-integer type and range-check
+> against the exact 64-bit bounds.
+
+### 9. Hard-gate semantics
 
 Validation is an all-or-nothing gate: on any violation, the tool emits a clear,
 located error, exits non-zero, and produces **no output**. Invalid definitions are
@@ -284,13 +324,7 @@ A validator is only conformant if it does **all** of:
 - [ ] enforce `blob` **default byte-length** by base64-decoding and comparing to `maxlen` (§5);
 - [ ] enforce `bitfield` **`pos` uniqueness** across a bitfield's flags (§6);
 - [ ] enforce `union` **`default_id` membership** against the declared option ids (§7);
+- [ ] enforce **exact 64-bit range** for `i64`/`u64` `default`s, accepting an integer or string and range-checking with a big-integer type (§8);
+- [ ] enforce **enum values are signed 32-bit** (`-2147483648 … 2147483647`), values and `default` alike;
 - [ ] resolve `$ref` before validating, but keep `$ref` for generation;
 - [ ] fail closed: located error, non-zero exit, no output.
-
-## Limitations
-
-- **64-bit ranges are not exactly enforced.** A 64-bit `i64`/`u64` `default` (and
-  enum values) are checked with JSON-number bounds, but JSON/JS numbers are
-  doubles, so values past 2^53 lose precision and an out-of-range 64-bit `default`
-  (e.g. 2^64) can slip through. A reimplementation should carry 64-bit values as
-  strings (or use a BigInt range check).

@@ -14,6 +14,13 @@ messages:
         deprecated: true
         default: 10
 
+      bignum:
+        id: 11
+        type: u64
+        description: "A 64-bit counter; small defaults may be plain numbers, but exact values beyond 2^53 must be given as a quoted string"
+        default: "18446744073709551615"   # u64 max, exact via string (a plain number would lose precision)
+        deprecated: false
+
       test:
         id: 8
         type: fp32
