@@ -100,7 +100,7 @@ func TestDeterministic(t *testing.T) {
 // TestCompilesAgainstCorelib is the real build gate: it compiles the generated
 // sources against corelib-c-cpp with gcc. It runs only when SOFAB_C_CORELIB
 // points at a corelib-c-cpp checkout and gcc is present; otherwise it skips
-// (the hermetic tests above still run, and tests/c/run.sh covers CI).
+// (the hermetic tests above still run, and tests/conformance/c/run.sh covers CI).
 func TestCompilesAgainstCorelib(t *testing.T) {
 	corelib := os.Getenv("SOFAB_C_CORELIB")
 	if corelib == "" {

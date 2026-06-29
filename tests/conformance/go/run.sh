@@ -2,11 +2,11 @@
 # Reproducible Go conformance harness: generate -> build -> round-trip ->
 # byte-exact shared-vector conformance against corelib-go.
 #
-# Usage: tests/go/run.sh [path-to-corelib-go]   (or set $SOFAB_GO_CORELIB)
+# Usage: tests/conformance/go/run.sh [path-to-corelib-go]   (or set $SOFAB_GO_CORELIB)
 # Requires: go, git.
 set -eu
 
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_GO_CORELIB:-}}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT

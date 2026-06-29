@@ -10,12 +10,12 @@
 #     always compiled in (no feature flags, no require! guard).
 # Both expose the same sofab:: interface and identical wire output.
 #
-# Usage: tests/rust/run.sh [corelib-rs-no-std] [corelib-rs]
+# Usage: tests/conformance/rust/run.sh [corelib-rs-no-std] [corelib-rs]
 #   (or set $SOFAB_RS_CORELIB / $SOFAB_RS_STD_CORELIB)
 # Requires: go, cargo, git, python3.
 set -eu
 
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 NOSTD="${1:-${SOFAB_RS_CORELIB:-}}"
 STD="${2:-${SOFAB_RS_STD_CORELIB:-}}"
 WORK=$(mktemp -d)
@@ -68,7 +68,7 @@ run_variant() {
     echo "==> [$label] round-trip OK"
 
     echo "==> [$label] shared-vector byte-exact conformance"
-    python3 "$ROOT/tests/rust/check_vectors.py" "$corelib/assets/test_vectors.json" "$WORK/conf-$label"
+    python3 "$ROOT/tests/conformance/rust/check_vectors.py" "$corelib/assets/test_vectors.json" "$WORK/conf-$label"
 
     echo "==> [$label] corpus: every edge-case definition builds"
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do

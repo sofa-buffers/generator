@@ -3,12 +3,12 @@
 # the generated code against the real corelib-c-cpp.
 #
 # Usage:
-#   tests/c/run.sh [path-to-corelib-c-cpp]
+#   tests/conformance/c/run.sh [path-to-corelib-c-cpp]
 # If no path is given (or $SOFAB_C_CORELIB is unset), the corelib is cloned into
 # a temp dir. Requires: go, gcc, git.
 set -eu
 
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_C_CORELIB:-}}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -28,7 +28,7 @@ echo "==> generating C for examples/messages/example.yaml"
 echo "==> compiling generated code + harness against corelib"
 gcc -std=c99 -Wall -Wextra \
     -I"$INC" -I"$WORK/gen" \
-    "$ROOT/tests/c/example_roundtrip.c" \
+    "$ROOT/tests/conformance/c/example_roundtrip.c" \
     "$WORK"/gen/*.c \
     "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" \
     -o "$WORK/rt"

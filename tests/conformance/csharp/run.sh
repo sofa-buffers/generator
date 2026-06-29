@@ -2,11 +2,11 @@
 # Reproducible C# conformance harness: generate -> dotnet build (vs corelib-cs)
 # -> round-trip -> byte-exact shared-vector conformance.
 #
-# Usage: tests/csharp/run.sh [corelib-cs]   (or set $SOFAB_CS_CORELIB)
+# Usage: tests/conformance/csharp/run.sh [corelib-cs]   (or set $SOFAB_CS_CORELIB)
 # Requires: go, dotnet, git, python3.
 set -eu
 
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_CS_CORELIB:-}}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -51,7 +51,7 @@ echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"
 echo "==> round-trip OK"
 
 echo "==> shared-vector byte-exact conformance"
-python3 "$ROOT/tests/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"
+python3 "$ROOT/tests/conformance/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"
 
 echo "==> corpus: every edge-case definition builds"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
