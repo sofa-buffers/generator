@@ -34,7 +34,7 @@ messages:
 YAML
 
 build() {
-    ( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang csharp --in "$1" --out "$2" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang csharp --in "$1" --out "$2" )
     ( cd "$2" && dotnet build -v q >/dev/null )
 }
 

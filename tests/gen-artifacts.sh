@@ -17,6 +17,6 @@ done
 
 for def in $DEFS; do
     name=$(basename "$def" .yaml)
-    ( cd "$ROOT" && go run ./cmd/sbufgen --lang "$LANG_KEY" --in "$def" --out "$OUT/$name" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --lang "$LANG_KEY" --in "$def" --out "$OUT/$name" )
 done
 echo "generated $(echo "$DEFS" | wc -w) definitions for '$LANG_KEY' into $OUT"

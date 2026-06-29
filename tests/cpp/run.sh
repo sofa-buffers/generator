@@ -37,7 +37,7 @@ messages:
 YAML
 
 echo "==> generating + building example project"
-( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang cpp --in examples/messages/example.yaml --out "$WORK/ex" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang cpp --in examples/messages/example.yaml --out "$WORK/ex" )
 make -C "$WORK/ex" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
 
 echo "==> JSON encode -> decode round-trip"
@@ -49,14 +49,14 @@ echo "$OUT" | grep -q '"someblob":\[10,20,30\]' || { echo "FAIL: blob round-trip
 echo "==> round-trip OK"
 
 echo "==> shared-vector byte-exact conformance"
-( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf" )
 make -C "$WORK/conf" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
 python3 "$ROOT/tests/cpp/check_vectors.py" "$CC/assets/test_vectors.json" "$WORK/conf/harness/harness"
 
 echo "==> corpus: every edge-case definition compiles"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
     name=$(basename "$def" .yaml)
-    ( cd "$ROOT" && go run ./cmd/sbufgen --lang cpp --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --lang cpp --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     for h in "$WORK"/corpus/"$name"/*.hpp; do
         g++ -std=c++20 -fsyntax-only -x c++ -I"$CPP/include" "$h" \
             || { echo "FAIL: corpus def $name did not compile"; exit 1; }

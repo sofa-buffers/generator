@@ -24,7 +24,7 @@ targets: { go: { package: messages, module_path: example.com/gen, go_version: "1
 YAML
 
 echo "==> generating Go project"
-( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang go --in examples/messages/example.yaml --out "$WORK/proj" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in examples/messages/example.yaml --out "$WORK/proj" )
 
 echo "==> wiring corelib + building"
 sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/proj/go.mod"
@@ -43,7 +43,7 @@ echo "==> shared-vector byte-exact conformance"
 echo "==> corpus: every edge-case definition builds"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
     name=$(basename "$def" .yaml)
-    ( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang go --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/corpus/$name/go.mod"
     ( cd "$WORK/corpus/$name" && GOFLAGS=-mod=mod go build ./... )
 done

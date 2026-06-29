@@ -152,7 +152,7 @@ broken so analysis terminates.
 ```
 .
 ├── cmd/
-│   └── sbufgen/            # CLI entrypoint (the sbufgen binary, §8.8)
+│   └── sofabgen/            # CLI entrypoint (the sofabgen binary, §8.8)
 ├── internal/              # GENERIC, language-independent core (imports no backend)
 │   ├── pipeline/          #   orchestrates stages [1]–[6]
 │   ├── parser/            #   YAML/JSON parse + $ref resolve + hard-gate validation
@@ -164,7 +164,7 @@ broken so analysis terminates.
 ├── generators/            # LANGUAGE-SPECIFIC backends (none wired in M0)
 ├── schema/
 │   ├── sofabuffers-schema-v1.json   # message-definition schema (authoritative)
-│   └── sbufgen-config-schema.json   # config schema (§7.1)
+│   └── sofabgen-config-schema.json   # config schema (§7.1)
 ├── schemas.go             # embeds the two schema files into the binary
 └── docs/
     ├── PLAN.md            # full design
@@ -180,7 +180,7 @@ nothing; the core depends only on the `internal/generator` *interface*, never on
 a concrete `generators/*` package. Arrows point inward.
 
 > *Naming note:* PLAN §8.7 sketches `cmd/codegen`; the binary is named
-> `sbufgen`, so the command package is `cmd/sbufgen` to match.
+> `sofabgen`, so the command package is `cmd/sofabgen` to match.
 
 ---
 
@@ -194,8 +194,8 @@ This is the most important long-term workflow. To add `generators/<lang>/`:
    `Generate(*ir.Schema, cfg map[string]any) ([]generator.File, error)`.
    Traverse the IR read-only; never mutate it.
 3. Call `generator.Register(&backend{})` from the package `init()`, and
-   blank-import the package from `cmd/sbufgen` so it self-registers.
-4. Add the per-target config keys to `schema/sbufgen-config-schema.json`
+   blank-import the package from `cmd/sofabgen` so it self-registers.
+4. Add the per-target config keys to `schema/sofabgen-config-schema.json`
    (§7.3) — keep schema and handled keys in lockstep (§7.1).
 5. Add a root project / harness template + corpus entries (§9), a
    `tests/<lang>/run.sh` harness (generate → build → round-trip → conformance
@@ -261,7 +261,7 @@ adds build files + devcontainer wiring + an IR-driven encode/decode JSON harness
 | **C++ backend** | **done** — `generators/cpp` (max-speed `corelib-cpp`): header-only structs (OStreamMessage+IStreamMessage), nested via `os.write`/`is.read`, enum-class backing, `OStreamInline<_maxSize>`; **37 shared vectors byte-exact**. `tests/cpp/run.sh`. |
 | **Per-language corpus build** | **done** — every `tests/<lang>/run.sh` now generates and **compiles every corpus definition against the real corelib** (C/C++/Java compile, Go/Rust/C# build, Python imports, TS typechecks) in addition to the example round-trip + vectors. This caught and fixed 3 real backend bugs (Go fp32/fp64 array element type, Go unused import in enum-only files, C# negative-enum cast). |
 | **M7 corpus matrix** | **done** — `tests/matrix`: a corner-case corpus (9 positive defs) generated across ALL 8 backends (+ Go-parse check), 11 invalid defs rejected, dangling-ref + nesting-depth-cap enforced. Hermetic (runs in the core CI job). |
-| **M8 reproducibility + release** | **done** — golden-output test (regenerate scalars.yaml for every backend, byte-diff vs committed goldens); `.github/workflows/release.yml` builds static `sbufgen` binaries on a `v*` tag — linux (amd64/386/arm64/arm), windows (amd64/386/arm64), macOS (amd64/arm64) — each attached individually (with a `.sha256`) to the release; README quickstart added. |
+| **M8 reproducibility + release** | **done** — golden-output test (regenerate scalars.yaml for every backend, byte-diff vs committed goldens); `.github/workflows/release.yml` builds static `sofabgen` binaries on a `v*` tag — linux (amd64/386/arm64/arm), windows (amd64/386/arm64), macOS (amd64/arm64) — each attached individually (with a `.sha256`) to the release; README quickstart added. |
 | **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job + `lang-c` + `lang-go` + `lang-python` + `lang-typescript` + `lang-cpp` + `lang-rust` + `lang-csharp` + `lang-java` jobs on every push. |
 | **Rust backend** | **done** — `generators/rust` (corelib-rs-no-std): structs + `marshal` + a flat-visitor decode (location-stack state machine), `require!` capability guards + Cargo features, serde-json harness; **37 shared vectors byte-exact**. `tests/rust/run.sh`. |
 | **C# backend** | **done** — `generators/csharp` (corelib-cs): classes + `Marshal` + flat-visitor location-stack decode (`IVisitor`); System.Text.Json harness (byte[]<->number[] converter); **37 shared vectors byte-exact**. `tests/csharp/run.sh`. |

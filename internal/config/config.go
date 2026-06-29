@@ -1,6 +1,6 @@
-// Package config loads and validates sbufgen configuration (PLAN §7). The
+// Package config loads and validates sofabgen configuration (PLAN §7). The
 // config file is the single source of truth; only --in/--out override it from
-// the CLI. Every config is validated against schema/sbufgen-config-schema.json
+// the CLI. Every config is validated against schema/sofabgen-config-schema.json
 // as a HARD GATE before use (§7.1) — same fail-closed semantics as definition
 // validation.
 package config

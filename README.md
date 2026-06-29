@@ -20,7 +20,7 @@ runtime for its language, so the hard part — a fast, portable, footprint-tuned
 wire codec with a uniform streaming API — is owned by the corelibs, not the
 generated code.
 
-The generator (`sbufgen`) emits typed code for **C, Go, Python, TypeScript,
+The generator (`sofabgen`) emits typed code for **C, Go, Python, TypeScript,
 C++, Rust, C#, and Java**. Every backend is built against its real corelib,
 JSON round-trips every field kind, and is byte-exact against the shared wire
 vectors — so code generated for one language interoperates with any other.
@@ -29,18 +29,18 @@ vectors — so code generated for one language interoperates with any other.
 
 ```sh
 # Grab a prebuilt binary from the latest release, or build from source:
-go build -o sbufgen ./cmd/sbufgen
+go build -o sofabgen ./cmd/sofabgen
 
 # Generate typed sources for one language from a definition.
-./sbufgen --lang go --in examples/messages/example.yaml --out out/go
+./sofabgen --lang go --in examples/messages/example.yaml --out out/go
 
 # Generate for every language.
 for lang in c cpp go python typescript rust csharp java; do
-  ./sbufgen --lang "$lang" --in examples/messages/example.yaml --out "out/$lang"
+  ./sofabgen --lang "$lang" --in examples/messages/example.yaml --out "out/$lang"
 done
 
 # Scaffold a full buildable project + encode/decode harness:
-#   sbufgen --config myconfig.yaml --lang rust --in examples --out out
+#   sofabgen --config myconfig.yaml --lang rust --in examples --out out
 ```
 
 Prebuilt static binaries for Linux, Windows and macOS (x86 and ARM, 32- and
@@ -67,7 +67,7 @@ generates the example, builds it against the real corelib, and round-trips it.
 4. Emits **one typed `serialize`/`deserialize` type per object** for the selected
    target language, tuned to that corelib's profile (minimal-footprint vs.
    maximum-throughput).
-5. Ships as a **single, statically-linked, cross-platform binary** (`sbufgen`).
+5. Ships as a **single, statically-linked, cross-platform binary** (`sofabgen`).
 
 ### Supported targets
 
@@ -93,7 +93,7 @@ language interoperates with code generated for any other for free.
 The CLI is deliberately tiny — everything configurable lives in a config file:
 
 ```sh
-sbufgen --config <file> --lang <c|cpp-embedded|cpp|rust|go|python|java|csharp|ts> \
+sofabgen --config <file> --lang <c|cpp-embedded|cpp|rust|go|python|java|csharp|ts> \
         [--in <dir>] [--out <dir>]
 ```
 
@@ -108,7 +108,7 @@ sbufgen --config <file> --lang <c|cpp-embedded|cpp|rust|go|python|java|csharp|ts
 
 ```
 .
-├── cmd/sbufgen/        # the `sbufgen` CLI entry point
+├── cmd/sofabgen/        # the `sofabgen` CLI entry point
 ├── generators/        # one backend per language (c, cpp, rust, golang, python, java, csharp, typescript)
 ├── internal/          # parser, validator, IR, analysis, generation pipeline
 ├── schema/            # the message-definition JSON Schema (draft-07)

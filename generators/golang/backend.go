@@ -24,7 +24,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	g := &gen{
 		schema: s,
 		pkg:    cfgString(cfg, "package", "messages"),
-		banner: cfgString(cfg, "tool_banner", "sbufgen"),
+		banner: cfgString(cfg, "tool_banner", "sofabgen"),
 		omit:   cfgBool(cfg, "omit_defaults"),
 	}
 	project := cfgString(cfg, "emit", "sources") == "project"

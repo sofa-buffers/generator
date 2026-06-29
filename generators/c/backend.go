@@ -6,7 +6,7 @@
 //
 // It traverses the frozen IR (Visitor role) and constructs source through a
 // small Builder (cfile), never ad-hoc cross-file string concatenation. It is
-// registered with internal/generator from init(); cmd/sbufgen blank-imports it.
+// registered with internal/generator from init(); cmd/sofabgen blank-imports it.
 package c
 
 import (
@@ -29,7 +29,7 @@ func (*Backend) Lang() string { return "c" }
 // (build files + devcontainer wiring + encode/decode harness, §9.1), with the
 // message sources placed under generated/.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "sofab_"), banner: cfgString(cfg, "tool_banner", "sbufgen")}
+	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "sofab_"), banner: cfgString(cfg, "tool_banner", "sofabgen")}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	srcDir := ""
 	if project {

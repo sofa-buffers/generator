@@ -21,7 +21,7 @@ type Backend struct{}
 func (*Backend) Lang() string { return "csharp" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Sofabuffers"), banner: cfgString(cfg, "tool_banner", "sbufgen"), omit: cfgBool(cfg, "omit_defaults")}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Sofabuffers"), banner: cfgString(cfg, "tool_banner", "sofabgen"), omit: cfgBool(cfg, "omit_defaults")}
 	files := []generator.File{{Path: "Messages.cs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)

@@ -35,7 +35,7 @@ generic: { emit: project, timestamp: false }
 targets: { typescript: {} }
 YAML
 
-gen() { ( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang typescript --in "$1" --out "$2" ); }
+gen() { ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang typescript --in "$1" --out "$2" ); }
 
 echo "==> generating example + conformance projects"
 gen "$ROOT/examples/messages/example.yaml" "$WORK/ex"

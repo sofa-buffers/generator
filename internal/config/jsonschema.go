@@ -7,7 +7,7 @@ import (
 )
 
 // A tiny draft-07 subset validator — just enough to enforce the config schema
-// (schema/sbufgen-config-schema.json): type, enum, properties,
+// (schema/sofabgen-config-schema.json): type, enum, properties,
 // additionalProperties:false, $ref ("#/..."), anyOf, items, minimum. The
 // config schema is deliberately written within this subset so the binary needs
 // no third-party JSON-Schema dependency (PLAN: minimal-dependency executable).

@@ -8,7 +8,7 @@ contract (Visitor over the IR + Builder for source construction).
 **No backend is wired yet (M0).** The core pipeline (`internal/`) builds and
 freezes a language-neutral IR and stops there. Adding a target is purely
 additive — a new package here that calls `generator.Register(...)` from its
-`init()`, blank-imported by `cmd/sbufgen`. The core imports nothing from this
+`init()`, blank-imported by `cmd/sofabgen`. The core imports nothing from this
 directory, so dependency arrows point inward (PLAN §8.6).
 
 See `docs/ARCHITECTURE.md` → "How to add a new target language".

@@ -30,7 +30,7 @@ jobs:
       - name: Cross-compile matrix
         run: |
           for t in linux/amd64 linux/arm64 windows/amd64 darwin/arm64; do
-            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/sbufgen
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/sofabgen
           done
 
   # Language milestone: C (corelib-c-cpp). Generates code, builds it against the

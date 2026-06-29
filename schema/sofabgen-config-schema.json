@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema",
-  "$id": "https://github.com/sofa-buffers/generator/schema/sbufgen-config-schema.json",
+  "$id": "https://github.com/sofa-buffers/generator/schema/sofabgen-config-schema.json",
   "title": "SofaBuffers Generator Config Schema",
-  "description": "Validates sbufgen configuration files (YAML or JSON). PLAN \u00a77. Every level is closed (additionalProperties:false) so typos are rejected, not ignored.",
+  "description": "Validates sofabgen configuration files (YAML or JSON). PLAN \u00a77. Every level is closed (additionalProperties:false) so typos are rejected, not ignored.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

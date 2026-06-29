@@ -1,5 +1,5 @@
-# Example sbufgen configuration (PLAN §7.4).
-# Validated against schema/sbufgen-config-schema.json before use.
+# Example sofabgen configuration (PLAN §7.4).
+# Validated against schema/sofabgen-config-schema.json before use.
 generic:
   namespace: my.proj.messages
   output_dir: ./generated

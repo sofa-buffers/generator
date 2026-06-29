@@ -22,7 +22,7 @@ type Backend struct{}
 func (*Backend) Lang() string { return "java" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, pkg: cfgString(cfg, "package", "messages"), banner: cfgString(cfg, "tool_banner", "sbufgen"), omit: cfgBool(cfg, "omit_defaults")}
+	g := &gen{schema: s, pkg: cfgString(cfg, "package", "messages"), banner: cfgString(cfg, "tool_banner", "sofabgen"), omit: cfgBool(cfg, "omit_defaults")}
 	dir := "src/main/java/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
 	var files []generator.File
 	files = append(files, generator.File{Path: dir + "Sbuf.java", Content: g.sbufSupport()})

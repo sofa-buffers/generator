@@ -35,7 +35,7 @@ messages:
 YAML
 
 build() {
-    ( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang java --in "$1" --out "$2" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang java --in "$1" --out "$2" )
     ( cd "$2" && mvn -q -Dsofab.version="$VER" package )
 }
 
@@ -58,7 +58,7 @@ echo "==> corpus: every edge-case definition compiles (javac vs corelib jar)"
 JAR="$HOME/.m2/repository/org/sofabuffers/sofab/$VER/sofab-$VER.jar"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
     name=$(basename "$def" .yaml)
-    ( cd "$ROOT" && go run ./cmd/sbufgen --lang java --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --lang java --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     mkdir -p "$WORK/corpus/$name/out"
     javac -cp "$JAR" -d "$WORK/corpus/$name/out" "$WORK"/corpus/"$name"/src/main/java/messages/*.java \
         || { echo "FAIL: corpus def $name did not compile"; exit 1; }

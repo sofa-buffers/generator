@@ -25,7 +25,7 @@ targets: { python: { package: messages } }
 YAML
 
 echo "==> generating Python project"
-( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang python --in examples/messages/example.yaml --out "$WORK/proj" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in examples/messages/example.yaml --out "$WORK/proj" )
 
 echo "==> syntax check"
 python3 -m py_compile "$WORK/proj/messages.py" "$WORK/proj/harness.py"
@@ -43,7 +43,7 @@ echo "==> shared-vector byte-exact conformance"
 echo "==> corpus: every edge-case definition imports"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
     name=$(basename "$def" .yaml)
-    ( cd "$ROOT" && go run ./cmd/sbufgen --lang python --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --lang python --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     PYTHONPATH="$CORELIB/src:$WORK/corpus/$name" python3 -c "import messages" \
         || { echo "FAIL: corpus def $name did not import"; exit 1; }
 done

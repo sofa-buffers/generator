@@ -22,7 +22,7 @@ func (*Backend) Lang() string { return "python" }
 // Generate emits a single module (all enums/bitfields/dataclasses + messages).
 // In project mode it adds a harness and pyproject.toml.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sbufgen"), omit: cfgBool(cfg, "omit_defaults")}
+	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), omit: cfgBool(cfg, "omit_defaults")}
 	module := g.module(s)
 	files := []generator.File{{Path: "messages.py", Content: module}}
 	if cfgString(cfg, "emit", "sources") == "project" {

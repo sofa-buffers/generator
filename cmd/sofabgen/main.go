@@ -1,9 +1,9 @@
-// Command sbufgen is the SofaBuffers code generator CLI (PLAN §8.8). The
+// Command sofabgen is the SofaBuffers code generator CLI (PLAN §8.8). The
 // surface is deliberately tiny — everything configurable lives in the config
 // file; only --in/--out override it (the paths that legitimately vary between
 // machines). No per-option flags.
 //
-//	sbufgen --config <file> --lang <target> [--in <dir>] [--out <dir>]
+//	sofabgen --config <file> --lang <target> [--in <dir>] [--out <dir>]
 //
 // In M0 no language backend is wired yet, so a run validates the definition(s),
 // resolves $ref, and builds the IR, printing a summary. With --lang set but no
@@ -45,7 +45,7 @@ func main() {
 }
 
 func run(args []string, stdout, stderr *os.File) int {
-	fs := flag.NewFlagSet("sbufgen", flag.ContinueOnError)
+	fs := flag.NewFlagSet("sofabgen", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
 		cfgPath      = fs.String("config", "", "path to the YAML/JSON config (§7); carries all options")
@@ -57,8 +57,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		showVersion  = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "sbufgen %s — SofaBuffers code generator\n\n", version)
-		fmt.Fprintf(stderr, "usage: sbufgen --config <file> --lang <target> [--in <dir>] [--out <dir>]\n\n")
+		fmt.Fprintf(stderr, "sofabgen %s — SofaBuffers code generator\n\n", version)
+		fmt.Fprintf(stderr, "usage: sofabgen --config <file> --lang <target> [--in <dir>] [--out <dir>]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

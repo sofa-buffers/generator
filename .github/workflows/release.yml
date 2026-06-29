@@ -1,6 +1,6 @@
 name: Release
 
-# Builds the single, statically-linked, cross-platform sbufgen binaries and
+# Builds the single, statically-linked, cross-platform sofabgen binaries and
 # attaches them to a GitHub release on a v* tag (PLAN §1, M8).
 on:
   push:
@@ -40,12 +40,12 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          out="sbufgen-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          go build -trimpath -ldflags "-s -w" -o "dist/$out" ./cmd/sbufgen
+          out="sofabgen-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          go build -trimpath -ldflags "-s -w" -o "dist/$out" ./cmd/sofabgen
           (cd dist && sha256sum "$out" > "$out.sha256")
       - uses: actions/upload-artifact@v4
         with:
-          name: sbufgen-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: sofabgen-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
 
   release:

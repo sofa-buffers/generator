@@ -1,5 +1,5 @@
 # Go build artifacts
-/sbufgen
+/sofabgen
 /bin/
 *.exe
 *.test

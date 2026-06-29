@@ -8,11 +8,11 @@ import "embed"
 // SchemaFS holds the authoritative message-definition schema and the config
 // schema. They remain the source of truth in schema/; this just bundles them.
 //
-//go:embed schema/sofabuffers-schema-v1.json schema/sbufgen-config-schema.json
+//go:embed schema/sofabuffers-schema-v1.json schema/sofabgen-config-schema.json
 var SchemaFS embed.FS
 
 // ConfigSchemaPath / MessageSchemaPath are the in-FS names.
 const (
 	MessageSchemaPath = "schema/sofabuffers-schema-v1.json"
-	ConfigSchemaPath  = "schema/sbufgen-config-schema.json"
+	ConfigSchemaPath  = "schema/sofabgen-config-schema.json"
 )

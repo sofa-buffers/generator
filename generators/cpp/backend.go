@@ -22,7 +22,7 @@ func (*Backend) Lang() string { return "cpp" }
 
 // Generate emits one header-only .hpp per message (with its reachable types).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "sofabuffers"), banner: cfgString(cfg, "tool_banner", "sbufgen"), omit: cfgBool(cfg, "omit_defaults")}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "sofabuffers"), banner: cfgString(cfg, "tool_banner", "sofabgen"), omit: cfgBool(cfg, "omit_defaults")}
 	var files []generator.File
 	for _, m := range s.Messages {
 		files = append(files, generator.File{Path: strings.ToLower(m.Name) + ".hpp", Content: g.header(m)})

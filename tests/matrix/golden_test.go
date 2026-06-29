@@ -14,14 +14,14 @@ import (
 // tests/matrix/golden/. A diff here means output drifted — regenerate with:
 //
 //	for l in c cpp go python typescript rust csharp java; do \
-//	  go run ./cmd/sbufgen --lang $l --in tests/matrix/corpus/defs/scalars.yaml \
+//	  go run ./cmd/sofabgen --lang $l --in tests/matrix/corpus/defs/scalars.yaml \
 //	    --out tests/matrix/golden/$l; done
 func TestGoldenOutput(t *testing.T) {
 	s, err := buildIR(t, "corpus/defs/scalars.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Use the same effective config the CLI applies (so goldens match `sbufgen`).
+	// Use the same effective config the CLI applies (so goldens match `sofabgen`).
 	empty := config.Empty()
 	for _, lang := range generator.Registered() {
 		b, _ := generator.Lookup(lang)

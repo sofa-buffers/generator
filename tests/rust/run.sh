@@ -32,7 +32,7 @@ messages:
 YAML
 
 build() {
-    ( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang rust --in "$1" --out "$2" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang rust --in "$1" --out "$2" )
     sed -i "s#\${SOFAB_RS_CORELIB}#$CORELIB#" "$2/Cargo.toml"
     ( cd "$2" && cargo build -q )
 }

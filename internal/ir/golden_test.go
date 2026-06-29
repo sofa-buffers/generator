@@ -13,7 +13,7 @@ import (
 // TestExampleIRGolden locks the IR shape for example.yaml (the M1 freeze). If
 // the IR projection changes, regenerate with:
 //
-//	go run ./cmd/sbufgen --dump-ir --in examples/messages/example.yaml > internal/ir/testdata/example.ir.json
+//	go run ./cmd/sofabgen --dump-ir --in examples/messages/example.yaml > internal/ir/testdata/example.ir.json
 //
 // A diff here is a deliberate, reviewed change to the frozen format.
 func TestExampleIRGolden(t *testing.T) {
@@ -44,7 +44,7 @@ func TestExampleIRGolden(t *testing.T) {
 		t.Fatalf("reading golden: %v (regenerate with --dump-ir)", err)
 	}
 	if string(got) != string(want) {
-		t.Fatalf("IR drift vs golden %s.\nRegenerate if intentional:\n  go run ./cmd/sbufgen --dump-ir --in examples/messages/example.yaml > %s\n--- got ---\n%s",
+		t.Fatalf("IR drift vs golden %s.\nRegenerate if intentional:\n  go run ./cmd/sofabgen --dump-ir --in examples/messages/example.yaml > %s\n--- got ---\n%s",
 			goldenPath, goldenPath, got)
 	}
 }
