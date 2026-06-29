@@ -76,6 +76,26 @@ type objectPlan struct {
 type member struct {
 	decl  string // e.g. "uint16_t u16;"
 	align int    // storage alignment in bytes, for widest-first member ordering
+	doc   string // field description (+unit), single-lined; "" => no member comment
+}
+
+// memberDoc derives a member's Doxygen text from the field's description and
+// unit: the description, with " (unit: <Unit>)" appended when a unit is set (or
+// just "(unit: <Unit>)" when there is no description). Multi-line descriptions
+// are collapsed to a single line so the text fits a trailing /**< ... */. Empty
+// when the field carries neither (the member is emitted byte-identically).
+func memberDoc(f *ir.Field) string {
+	d := strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(f.Description)
+	if f.Unit != "" {
+		if d != "" {
+			d += " (unit: " + f.Unit + ")"
+		} else {
+			d = "(unit: " + f.Unit + ")"
+		}
+	}
+	// Neutralise a comment terminator so a description containing "*/" cannot
+	// close the trailing /**< ... */ member comment early.
+	return strings.ReplaceAll(d, "*/", "* /")
 }
 
 type fieldEntry struct {
@@ -166,7 +186,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, cIdent(f.Name)), align: ir.AlignRank(f)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f)})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
@@ -179,7 +199,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, cIdent(f.Name)), align: ir.AlignRank(f)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f)})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
@@ -188,7 +208,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 			if err != nil {
 				return err
 			}
-			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f)})
+			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f)})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 		}
 	}
@@ -278,7 +298,11 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 func (g *gen) emitStruct(h *cfile, p *objectPlan) {
 	h.line("typedef struct {")
 	for _, m := range p.members {
-		h.line("    %s", m.decl)
+		if m.doc != "" {
+			h.line("    %s  /**< %s */", m.decl, m.doc)
+		} else {
+			h.line("    %s", m.decl)
+		}
 	}
 	h.line("} %s;", p.cType)
 	h.blank()

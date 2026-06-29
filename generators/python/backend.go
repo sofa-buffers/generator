@@ -74,11 +74,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitDataclass(f, g.typeName(key), nt.Fields)
+			g.emitDataclass(f, g.typeName(key), nt.Summary, nt.Fields)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitDataclass(f, exported(m.Name), m.Fields)
+		g.emitDataclass(f, exported(m.Name), m.Summary, m.Fields)
 	}
 	return f.bytes()
 }
@@ -99,13 +99,58 @@ func (g *gen) emitBitfieldConsts(f *pyfile, nt *ir.NamedType) {
 	f.blank()
 }
 
-func (g *gen) emitDataclass(f *pyfile, name string, fields []*ir.Field) {
+// emitClassDoc writes a triple-quoted class docstring as the first statement of
+// the class body when the summary is non-empty. A single-line summary becomes
+// """<summary>"""; a multi-line summary opens with """ on the first line and
+// closes with """ on its own line. UTF-8 passes through byte-for-byte.
+func emitClassDoc(f *pyfile, summary string) {
+	if summary == "" {
+		return
+	}
+	lines := strings.Split(summary, "\n")
+	if len(lines) == 1 {
+		f.line(`    """%s"""`, lines[0])
+		return
+	}
+	f.line(`    """%s`, lines[0])
+	for _, ln := range lines[1:] {
+		f.line("    %s", ln)
+	}
+	f.line(`    """`)
+}
+
+// pyFieldDocLines builds the Sphinx attribute-comment text (without the leading
+// "#: ") from a field's Description and Unit. A multi-line description yields one
+// line per source line; a non-empty Unit is appended as " (unit: <Unit>)" to the
+// last line. Returns nil when both are empty.
+func pyFieldDocLines(fld *ir.Field) []string {
+	if fld.Description == "" && fld.Unit == "" {
+		return nil
+	}
+	if fld.Description == "" {
+		return []string{fmt.Sprintf("(unit: %s)", fld.Unit)}
+	}
+	lines := strings.Split(fld.Description, "\n")
+	if fld.Unit != "" {
+		lines[len(lines)-1] = fmt.Sprintf("%s (unit: %s)", lines[len(lines)-1], fld.Unit)
+	}
+	return lines
+}
+
+func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field) {
 	f.line("@dataclass")
 	f.line("class %s:", name)
-	if len(fields) == 0 {
+	// Class docstring (pydoc/Sphinx) as the first statement in the body, when the
+	// summary is non-empty. It also satisfies the body for a field-less class.
+	emitClassDoc(f, summary)
+	if len(fields) == 0 && summary == "" {
 		f.line("    pass")
 	}
 	for _, fld := range fields {
+		// Sphinx attribute comment(s) immediately before the declaration.
+		for _, dl := range pyFieldDocLines(fld) {
+			f.line("    #: %s", dl)
+		}
 		f.line("    %s: %s = %s", pyIdent(fld.Name), g.pyAnnot(fld), g.pyDefault(fld))
 	}
 	f.blank()

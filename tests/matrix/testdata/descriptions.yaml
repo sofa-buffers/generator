@@ -1,0 +1,43 @@
+# A definition whose message and fields carry UTF-8 descriptions, used to verify
+# every backend renders them as language-idiomatic doc comments (Doxygen, rustdoc,
+# godoc, Python docstrings/Sphinx, TSDoc, Javadoc, C# XML doc) with the UTF-8 text
+# preserved byte-for-byte. NOT part of corpus/defs: it intentionally carries
+# non-ASCII, which the ASCII guard (TestGeneratedOutputIsASCII) forbids for
+# generator-inserted text but allows for pass-through user description text.
+version: 1
+
+messages:
+  TelemetryPacket:
+    summary: |
+      Telemetrie-Paket — Meßwerte eines Fahrzeugs ✓
+      Enthält 温度 (Temperatur) und 速度 (Geschwindigkeit). 🚗
+    payload:
+
+      outsideTemp:
+        id: 0
+        type: i16
+        description: "Außentemperatur in Grad Celsius ❄ (−40…85)"
+        unit: "°C"
+        default: 20
+
+      speed:
+        id: 1
+        type: u16
+        description: "速度 — vitesse du véhicule 🚗"
+        unit: "km/h"
+
+      deltaV:
+        id: 2
+        type: i32
+        description: "Δv: Geschwindigkeitsänderung gegenüber dem Sollwert"
+
+      ratio:
+        id: 3
+        type: fp32
+        description: "π-Verhältnis ≈ 3.14159 (naïve, café, façade)"
+
+      label:
+        id: 4
+        type: string
+        description: "Bezeichnung des Pakets ☕ — frei wählbar"
+        maxlen: 64

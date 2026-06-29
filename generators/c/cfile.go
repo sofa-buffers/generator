@@ -38,6 +38,9 @@ func (f *cfile) banner(tool, license, file, msg string) {
 // doc writes a Doxygen /*! ... */ one-liner (or multi-line) doc comment.
 func (f *cfile) doc(format string, args ...any) {
 	text := fmt.Sprintf(format, args...)
+	// Neutralise a comment terminator so doc text containing "*/" cannot close
+	// the /*! ... */ block early.
+	text = strings.ReplaceAll(text, "*/", "* /")
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	if len(lines) == 1 {
 		f.line("/*! %s */", lines[0])

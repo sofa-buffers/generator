@@ -51,6 +51,48 @@ func (g *gen) typeName(key string) string {
 
 func isBig(k ir.Kind) bool { return k == ir.KindU64 || k == ir.KindI64 }
 
+// emitDoc writes a TSDoc/JSDoc `/** ... */` block immediately before the
+// declaration it documents, at the given indent. Single-line text becomes
+// `/** text */`; multi-line text becomes a starred block. Any `*/` inside the
+// text is defanged to `* /` so it cannot close the comment early. Empty text
+// emits nothing, so it never leaves a dangling comment.
+func (f *tsfile) emitDoc(indent, text string) {
+	if text == "" {
+		return
+	}
+	text = strings.ReplaceAll(text, "*/", "* /")
+	lines := strings.Split(text, "\n")
+	if len(lines) == 1 {
+		f.line("%s/** %s */", indent, lines[0])
+		return
+	}
+	f.line("%s/**", indent)
+	for _, ln := range lines {
+		if ln == "" {
+			f.line("%s *", indent)
+		} else {
+			f.line("%s * %s", indent, ln)
+		}
+	}
+	f.line("%s */", indent)
+}
+
+// fieldDoc builds a field's TSDoc text from its Description and Unit: the
+// description with " (unit: <Unit>)" appended when a unit is set, or just
+// "(unit: <Unit>)" when only a unit is present. Empty when both are empty.
+func fieldDoc(fld *ir.Field) string {
+	switch {
+	case fld.Description != "" && fld.Unit != "":
+		return fld.Description + " (unit: " + fld.Unit + ")"
+	case fld.Description != "":
+		return fld.Description
+	case fld.Unit != "":
+		return "(unit: " + fld.Unit + ")"
+	default:
+		return ""
+	}
+}
+
 func (g *gen) tsType(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindU64, ir.KindI64:

@@ -112,10 +112,10 @@ func (g *gen) header(m *ir.Message) []byte {
 	for _, key := range order {
 		nt := g.schema.Named[key]
 		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitStruct(f, g.typeName(key), nt.Fields, false)
+			g.emitStruct(f, g.typeName(key), nt.Summary, nt.Fields, false)
 		}
 	}
-	g.emitStruct(f, exported(m.Name), m.Fields, true)
+	g.emitStruct(f, exported(m.Name), m.Summary, m.Fields, true)
 	f.line("} // namespace %s", g.ns)
 	return f.bytes()
 }
@@ -138,12 +138,17 @@ func (g *gen) emitBitfield(f *hfile, nt *ir.NamedType) {
 	f.blank()
 }
 
-func (g *gen) emitStruct(f *hfile, name string, fields []*ir.Field, isMessage bool) {
+func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isMessage bool) {
+	emitStructDoc(f, summary)
 	f.line("struct %s : sofab::OStreamMessage, sofab::IStreamMessage {", name)
 	// Declare members widest-first to minimise padding; encode/decode below stay
 	// in schema/id order, so the wire bytes are unchanged.
 	for _, fld := range ir.SortedForLayout(fields) {
-		f.line("    %s %s = %s;", g.cppType(fld), cppIdent(fld.Name), g.cppDefault(fld))
+		if doc := fieldDoc(fld); doc != "" {
+			f.line("    %s %s = %s;  ///< %s", g.cppType(fld), cppIdent(fld.Name), g.cppDefault(fld), doc)
+		} else {
+			f.line("    %s %s = %s;", g.cppType(fld), cppIdent(fld.Name), g.cppDefault(fld))
+		}
 	}
 	if isMessage {
 		size, _ := g.maxSize(fields)
@@ -196,6 +201,48 @@ func (g *gen) emitStruct(f *hfile, name string, fields []*ir.Field, isMessage bo
 	f.line("    }")
 	f.line("};")
 	f.blank()
+}
+
+// emitStructDoc writes a Doxygen @brief block before a struct, when the summary
+// is non-empty. Single-line summaries become a one-line /** @brief ... */;
+// multi-line summaries expand to a starred block, one comment line per source
+// line. UTF-8 passes through byte-for-byte.
+func emitStructDoc(f *hfile, summary string) {
+	if summary == "" {
+		return
+	}
+	// Neutralise a comment terminator so a summary containing "*/" cannot close
+	// the /** ... */ block early (the trailing member ///< form is a line comment
+	// and needs no such guard).
+	summary = strings.ReplaceAll(summary, "*/", "* /")
+	lines := strings.Split(summary, "\n")
+	if len(lines) == 1 {
+		f.line("/** @brief %s */", lines[0])
+		return
+	}
+	f.line("/**")
+	f.line(" * @brief %s", lines[0])
+	for _, ln := range lines[1:] {
+		f.line(" * %s", ln)
+	}
+	f.line(" */")
+}
+
+// fieldDoc builds the trailing member-doc text from a field's Description and
+// Unit. Multi-line descriptions collapse to one line (joined with spaces) since
+// a trailing ///< comment cannot span lines. Returns "" when both are empty.
+func fieldDoc(fld *ir.Field) string {
+	desc := strings.Join(strings.Split(fld.Description, "\n"), " ")
+	switch {
+	case desc != "" && fld.Unit != "":
+		return fmt.Sprintf("%s (unit: %s)", desc, fld.Unit)
+	case desc != "":
+		return desc
+	case fld.Unit != "":
+		return fmt.Sprintf("(unit: %s)", fld.Unit)
+	default:
+		return ""
+	}
 }
 
 func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
