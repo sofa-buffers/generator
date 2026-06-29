@@ -3,6 +3,17 @@
 // IStreamMessage with serialize()/deserialize(); nested struct/union decode via
 // is.read(child), encode via os.write(id, child). 64-bit-safe; no heap on the
 // hot path (OStreamInline<_maxSize>).
+//
+// The `corelib` config key selects the C++ corelib: "cpp" (default, pure
+// corelib-cpp) or "c-cpp" (the C++ wrapper over the C library in corelib-c-cpp).
+// Both expose the same sofab:: interface and identical encode output. They
+// differ on decode of variable-length fields: corelib-cpp resizes targets for
+// you, while the corelib-c-cpp wrapper binds a target by address and fills it
+// after the field callback. The "c-cpp" path therefore pre-sizes strings/blobs
+// from the field length, reads blobs/sequences via the wrapper's native
+// read() overloads, and reads enums into their underlying-typed storage (a
+// local temp would dangle under the deferred decoder). The project Makefile for
+// "c-cpp" compiles and links corelib-c-cpp's C sources.
 package cpp
 
 import (
@@ -22,7 +33,7 @@ func (*Backend) Lang() string { return "cpp" }
 
 // Generate emits one header-only .hpp per message (with its reachable types).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "sofabuffers"), banner: cfgString(cfg, "tool_banner", "sofabgen"), omit: cfgBool(cfg, "omit_defaults")}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "sofabuffers"), banner: cfgString(cfg, "tool_banner", "sofabgen"), omit: cfgBool(cfg, "omit_defaults"), clib: cfgString(cfg, "corelib", "cpp") == "c-cpp"}
 	var files []generator.File
 	for _, m := range s.Messages {
 		files = append(files, generator.File{Path: strings.ToLower(m.Name) + ".hpp", Content: g.header(m)})
@@ -38,6 +49,11 @@ type gen struct {
 	ns     string
 	banner string
 	omit   bool
+	// clib selects the corelib-c-cpp C++ wrapper (corelib: c-cpp) instead of the
+	// pure corelib-cpp. The wrapper's read(std::string&) fills the string's
+	// existing buffer rather than resizing it, so generated decode must pre-size
+	// variable-length fields from the field length the deserialize callback gets.
+	clib bool
 }
 
 type hfile struct{ b strings.Builder }
@@ -70,11 +86,16 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.blank()
 	// Guard the shared decode helpers so multiple generated headers (multi-message
 	// builds) can be included in one TU without redefining them.
-	f.line("#ifndef SOFABUFFERS_GEN_PRELUDE")
-	f.line("#define SOFABUFFERS_GEN_PRELUDE")
-	f.line("%s", cppPrelude)
-	f.line("#endif")
-	f.blank()
+	// The pure-corelib-cpp path needs shared sequence-decode helpers; the
+	// corelib-c-cpp wrapper decodes string/blob sequences via native read()
+	// overloads, so no prelude is emitted for it.
+	if !g.clib {
+		f.line("#ifndef SOFABUFFERS_GEN_PRELUDE")
+		f.line("#define SOFABUFFERS_GEN_PRELUDE")
+		f.line("%s", cppPrelude)
+		f.line("#endif")
+		f.blank()
+	}
 
 	for _, key := range order {
 		nt := g.schema.Named[key]
@@ -151,7 +172,12 @@ func (g *gen) emitStruct(f *hfile, name string, fields []*ir.Field, isMessage bo
 	f.blank()
 
 	// deserialize: unhandled ids are auto-skipped by the driver (no-op default).
-	f.line("    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {")
+	// In clib mode the field length (_size) pre-sizes variable-length targets.
+	sizeParam := "std::size_t"
+	if g.clib {
+		sizeParam = "std::size_t _size"
+	}
+	f.line("    void deserialize(sofab::IStreamImpl &is, sofab::id id, %s, std::size_t) noexcept override {", sizeParam)
 	f.line("        switch (id) {")
 	for _, fld := range fields {
 		f.line("        case %d:", fld.ID)
@@ -218,21 +244,62 @@ func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
 func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 	acc := fld.Name
 	switch fld.Kind {
+	case ir.KindString:
+		// corelib-c-cpp's read() fills the existing buffer, so pre-size from the
+		// field length; a zero-length string binds no target (read_field asserts
+		// varlen > 0), so skip the read and leave it empty. corelib-cpp resizes
+		// for us, so an empty string is fine there.
+		if g.clib {
+			f.line("            %s.assign(_size, '\\0'); if (_size) is.read(%s);", acc, acc)
+		} else {
+			f.line("            is.read(%s);", acc)
+		}
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
-		ir.KindBool, ir.KindFP32, ir.KindFP64, ir.KindString, ir.KindStruct, ir.KindUnion:
+		ir.KindBool, ir.KindFP32, ir.KindFP64, ir.KindStruct, ir.KindUnion:
 		f.line("            is.read(%s);", acc)
 	case ir.KindBlob:
-		f.line("            { std::string _t; is.read(_t); %s.assign(_t.begin(), _t.end()); }", acc)
+		// corelib-c-cpp binds blobs with the BLOB tag via its read(void*, size_t)
+		// overload into the address-stable vector buffer; corelib-cpp reads a
+		// length-prefixed blob into a std::string.
+		if g.clib {
+			f.line("            %s.resize(_size); is.read(%s.data(), _size);", acc, acc)
+		} else {
+			f.line("            { std::string _t; is.read(_t); %s.assign(_t.begin(), _t.end()); }", acc)
+		}
 	case ir.KindEnum:
-		f.line("            { std::int64_t _v = 0; is.read(_v); %s = static_cast<%s>(_v); }", acc, g.typeName(fld.Ref.Key))
+		// corelib-c-cpp's read binds a target by address and fills it after the
+		// callback, so a local temp would dangle; read straight into the enum's
+		// underlying-typed storage instead. corelib-cpp copies in place, so the
+		// temp is safe there.
+		if g.clib {
+			f.line("            is.read(reinterpret_cast<%s &>(%s));", enumBacking(fld.Ref.Target), acc)
+		} else {
+			f.line("            { std::int64_t _v = 0; is.read(_v); %s = static_cast<%s>(_v); }", acc, g.typeName(fld.Ref.Key))
+		}
 	case ir.KindBitfield:
-		f.line("            { std::uint64_t _v = 0; is.read(_v); %s = static_cast<%s>(_v); }", acc, g.cppType(fld))
+		// The bitfield member is an integral type, so corelib-c-cpp can fill it
+		// directly (no dangling temp).
+		if g.clib {
+			f.line("            is.read(%s);", acc)
+		} else {
+			f.line("            { std::uint64_t _v = 0; is.read(_v); %s = static_cast<%s>(_v); }", acc, g.cppType(fld))
+		}
 	case ir.KindArray:
 		switch fld.Elem {
 		case ir.KindString:
-			f.line("            { _StrSeq _r{%s}; is.read(_r); }", acc)
+			// corelib-c-cpp decodes the whole string sequence via its native
+			// read(vector<string>&) overload; corelib-cpp uses the _StrSeq helper.
+			if g.clib {
+				f.line("            is.read(%s);", acc)
+			} else {
+				f.line("            { _StrSeq _r{%s}; is.read(_r); }", acc)
+			}
 		case ir.KindBlob:
-			f.line("            { _BlobSeq _r{%s}; is.read(_r); }", acc)
+			if g.clib {
+				f.line("            is.read(%s);", acc)
+			} else {
+				f.line("            { _BlobSeq _r{%s}; is.read(_r); }", acc)
+			}
 		default:
 			f.line("            is.read(%s);", acc)
 		}

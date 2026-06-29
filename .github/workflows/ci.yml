@@ -124,9 +124,11 @@ jobs:
           name: generated-typescript
           path: generated
 
-  # Language milestone: C++ max-speed (corelib-cpp). Generates header-only code,
-  # builds it with g++ -std=c++20, round-trips JSON, and checks byte-exact output
-  # against the shared vectors. run.sh clones corelib-cpp + corelib-c-cpp.
+  # Language milestone: C++ (corelib-cpp + corelib-c-cpp). Generates code, builds
+  # it with g++ -std=c++20, round-trips JSON, and checks byte-exact output against
+  # the shared vectors — for BOTH C++ corelibs: the pure-C++20 corelib-cpp
+  # (default) and the corelib-c-cpp C++ wrapper (corelib: c-cpp). run.sh clones
+  # both corelibs.
   lang-cpp:
     runs-on: ubuntu-latest
     steps:
