@@ -1,0 +1,3 @@
+# the per-platform binary is downloaded at install time, never committed
+bin/sofabgen
+bin/sofabgen.exe

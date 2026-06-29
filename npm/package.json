@@ -1,0 +1,29 @@
+{
+  "name": "@sofa-buffers/sofabgen",
+  "version": "0.2.0",
+  "description": "SofaBuffers code generator (sofabgen) — generate typed serialization code from a message definition. Ships the prebuilt Go binary, fetched per-platform on install.",
+  "keywords": ["sofabuffers", "codegen", "serialization", "cli"],
+  "license": "MIT",
+  "homepage": "https://github.com/sofa-buffers/generator",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sofa-buffers/generator.git",
+    "directory": "npm"
+  },
+  "bin": {
+    "sofabgen": "bin/sofabgen.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "files": [
+    "bin/sofabgen.js",
+    "scripts/install.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "os": ["linux", "darwin", "win32"],
+  "cpu": ["x64", "arm64", "ia32", "arm"]
+}
