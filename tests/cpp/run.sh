@@ -101,13 +101,54 @@ run_variant cpp "" "-I$CPP/include" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC"
 # SOFAB_C_DIR; the generated Makefile compiles + links its C sources.
 run_variant c-cpp "c-cpp" "-I$CC/src/include" SOFAB_C_DIR="$CC"
 
-# NOTE: corelib feature-subset configs (SOFAB_DISABLE_*) are NOT exercised for
-# C++. The C *library* headers are feature-gated, so the generated C is tested
-# against every subset in tests/c/run.sh — but corelib-c-cpp's C++ *wrapper*
-# (sofab/sofab.hpp) is not gated: its OStream/IStream methods reference the C
-# write_string/write_blob/read_sequence/... entry points unconditionally, so the
-# wrapper itself fails to compile under any SOFAB_DISABLE_* macro, regardless of
-# what the generated code uses. Re-enable a subset matrix here once the wrapper
-# gates its methods to match the C headers.
+# corelib-c-cpp feature-subset configs. The C++ wrapper (sofab/sofab.hpp) gates
+# its methods on ARRAY / FP64 / INT64 (SOFAB_CPP_HAVE_*), so generated C++ that
+# avoids a disabled feature must still compile against the stripped wrapper. The
+# wrapper hard-requires FIXLEN and SEQUENCE (it #errors if either is disabled —
+# use the C API for those), so those two are only checked as expected rejections.
+# (corelib-cpp is always all-features, so this applies to corelib-c-cpp only.)
+cat > "$WORK/cfg-clib.yaml" <<'YAML'
+targets: { cpp: { namespace: sofabuffers, corelib: c-cpp } }
+YAML
+echo "==> corelib-c-cpp feature-subset configs (generated C++ vs the gated wrapper)"
+subset_cpp() {  # label  expect(ok|fail)  "DISABLE flags"  "yaml"
+    name=$1; expect=$2; flags=$3; yaml=$4
+    printf '%s' "$yaml" > "$WORK/subc_$name.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-clib.yaml" --lang cpp --in "$WORK/subc_$name.yaml" --out "$WORK/subc_$name" >/dev/null )
+    if g++ -std=c++20 -fsyntax-only -x c++ $flags -I"$CC/src/include" "$WORK"/subc_$name/*.hpp 2>/dev/null; then got=ok; else got=fail; fi
+    [ "$got" = "$expect" ] || { echo "FAIL: [$name] expected $expect, got $got ($flags)"; exit 1; }
+    echo "   [$name] $got"
+}
+# Definitions that AVOID the disabled feature must still compile.
+subset_cpp noarray ok "-DSOFAB_DISABLE_ARRAY_SUPPORT" \
+    'version: 1
+messages: { m: { payload: { a: {id: 0, type: i32}, s: {id: 1, type: string, maxlen: 16}, st: {id: 2, type: struct, fields: {x: {id: 0, type: i32}}}, sa: {id: 3, type: array, items: {type: string, count: 3}} } } }'
+subset_cpp nofp64 ok "-DSOFAB_DISABLE_FP64_SUPPORT" \
+    'version: 1
+messages: { m: { payload: { a: {id: 0, type: i32}, f: {id: 1, type: fp32}, s: {id: 2, type: string, maxlen: 16}, arr: {id: 3, type: array, items: {type: u8, count: 4}} } } }'
+subset_cpp noint64 ok "-DSOFAB_DISABLE_INT64_SUPPORT" \
+    'version: 1
+messages: { m: { payload: { a: {id: 0, type: u32}, b: {id: 1, type: i32}, f: {id: 2, type: fp32}, s: {id: 3, type: string, maxlen: 16}, st: {id: 4, type: struct, fields: {x: {id: 0, type: i32}}} } } }'
+subset_cpp stripped ok "-DSOFAB_DISABLE_ARRAY_SUPPORT -DSOFAB_DISABLE_FP64_SUPPORT -DSOFAB_DISABLE_INT64_SUPPORT" \
+    'version: 1
+messages: { m: { payload: { a: {id: 0, type: u8}, b: {id: 1, type: i16}, c: {id: 2, type: i32}, s: {id: 3, type: string, maxlen: 16}, bl: {id: 4, type: blob, maxlen: 8}, st: {id: 5, type: struct, fields: {x: {id: 0, type: i32}}}, sa: {id: 6, type: array, items: {type: string, count: 3}} } } }'
+# Definitions that USE the disabled feature must fail to compile.
+subset_cpp use_array fail "-DSOFAB_DISABLE_ARRAY_SUPPORT" \
+    'version: 1
+messages: { m: { payload: { arr: {id: 0, type: array, items: {type: u8, count: 4}} } } }'
+subset_cpp use_fp64 fail "-DSOFAB_DISABLE_FP64_SUPPORT" \
+    'version: 1
+messages: { m: { payload: { g: {id: 0, type: fp64} } } }'
+subset_cpp use_int64 fail "-DSOFAB_DISABLE_INT64_SUPPORT" \
+    'version: 1
+messages: { m: { payload: { a: {id: 0, type: u64} } } }'
+# The wrapper itself requires FIXLEN and SEQUENCE: disabling either is rejected.
+subset_cpp req_fixlen fail "-DSOFAB_DISABLE_FIXLEN_SUPPORT" \
+    'version: 1
+messages: { m: { payload: { a: {id: 0, type: i32} } } }'
+subset_cpp req_sequence fail "-DSOFAB_DISABLE_SEQUENCE_SUPPORT" \
+    'version: 1
+messages: { m: { payload: { a: {id: 0, type: i32} } } }'
+echo "==> C++ feature-subset configs OK"
 
 echo "PASS"

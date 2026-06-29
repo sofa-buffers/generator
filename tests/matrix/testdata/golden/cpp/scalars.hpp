@@ -52,15 +52,15 @@ struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {
     }
 
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
-        (void)os.write(0, static_cast<std::uint64_t>(u8min));
-        (void)os.write(1, static_cast<std::uint64_t>(u8max));
-        (void)os.write(2, static_cast<std::uint64_t>(u64max));
-        (void)os.write(3, static_cast<std::int64_t>(i8min));
-        (void)os.write(4, static_cast<std::int64_t>(i64min));
+        (void)os.write(0, u8min);
+        (void)os.write(1, u8max);
+        (void)os.write(2, u64max);
+        (void)os.write(3, i8min);
+        (void)os.write(4, i64min);
         (void)os.write(5, f32);
         (void)os.write(6, f64);
         (void)os.write(7, flag);
-        return os.writeIf(0, std::uint64_t{0}, false);
+        return os.writeIf(0, false, false);
     }
 
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
