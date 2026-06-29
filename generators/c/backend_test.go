@@ -62,18 +62,18 @@ func TestGeneratesHeaderAndSource(t *testing.T) {
 func TestStructuralInvariants(t *testing.T) {
 	h := genExample(t)["myfirstmessage.h"]
 	for _, want := range []string{
-		"#ifndef SOFAB_MYFIRSTMESSAGE_H",
+		"#ifndef MESSAGES_MYFIRSTMESSAGE_H", // include guard from the symbol_prefix (default messages_)
 		"#include \"sofab/object.h\"",
-		"#if SOFAB_API_VERSION != 1",                  // API-version guard
-		"#if defined(SOFAB_DISABLE_FIXLEN_SUPPORT)",   // capability guards
+		"#if SOFAB_API_VERSION != 1",                  // API-version guard (corelib macro)
+		"#if defined(SOFAB_DISABLE_FIXLEN_SUPPORT)",   // capability guards (corelib macros)
 		"#if defined(SOFAB_DISABLE_SEQUENCE_SUPPORT)", // struct/union/array-of-string
 		"#if defined(SOFAB_DISABLE_INT64_SUPPORT)",    // bignum u64
-		"#define SOFAB_MYFIRSTMESSAGE_MAX_SIZE",       // §5.5
-		"sofab_myfirstmessage_t;",
+		"#define MESSAGES_MYFIRSTMESSAGE_MAX_SIZE",    // §5.5
+		"messages_myfirstmessage_t;",
 		"int8_t someenum;",      // enum -> smallest signed backing
 		"uint8_t somebitfield;", // bitfield -> unsigned backing
-		"sofab_myfirstmessage_encode(",
-		"sofab_myfirstmessage_decode(",
+		"messages_myfirstmessage_encode(",
+		"messages_myfirstmessage_decode(",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q", want)

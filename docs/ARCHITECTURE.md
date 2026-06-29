@@ -255,9 +255,13 @@ precedence **built-in default < `generic` < per-target**. Only `--in`/`--out`
 override file paths from the CLI.
 
 **Generic options** (apply to every target; `generic:` block). Built-in
-defaults: `namespace=sofabuffers`, `emit=sources`, `timestamp=true`,
-`timestamp_format=iso8601`, `emit_deprecated=true`, `validation=debug`,
-`file_layout=file_per_message`. Others: `input_dir`, `output_dir`,
+defaults: `emit=sources`, `timestamp=true`, `timestamp_format=iso8601`,
+`emit_deprecated=true`, `validation=debug`, `file_layout=file_per_message`.
+`namespace` is deliberately *not* a generic default — it is a per-language
+concern, so each backend supplies its own idiomatic default (the unified base
+name `messages`: C++ `messages`, C# `Messages`, Go/Java package `messages`, C
+`symbol_prefix` `messages_`); set `generic.namespace` to override. Others:
+`input_dir`, `output_dir`,
 `tool_banner`, `license`, `omit_defaults`, `naming`.
 
 **Per-target options** (`targets.<lang>:`). The config schema is the full

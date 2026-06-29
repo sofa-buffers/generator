@@ -9,7 +9,7 @@ config.
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
 | `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets (see below). |
-| `namespace` | string | `sofabuffers` | C++ namespace wrapping the generated types. Also settable in `generic`. |
+| `namespace` | string | `messages` | C++ namespace wrapping the generated types. Also settable in `generic`. |
 
 ### `corelib`
 

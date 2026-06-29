@@ -9,7 +9,7 @@
 static_assert(sofab::API_VERSION == 1,
     "SofaBuffers: generated against C++ API v1, but the linked corelib differs.");
 
-namespace sofabuffers {
+namespace messages {
 
 #ifndef SOFABUFFERS_GEN_PRELUDE
 #define SOFABUFFERS_GEN_PRELUDE
@@ -94,4 +94,4 @@ struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {
     }
 };
 
-} // namespace sofabuffers
+} // namespace messages
