@@ -1,0 +1,39 @@
+# Real-world example: a connected-vehicle telemetry frame.
+#
+# This is the message file. It pulls shared types from TWO other files via
+# cross-file `$ref`:
+#   * common.yaml      — Timestamp, GeoPoint, Vector3
+#   * diagnostics.yaml — Gear, FaultFlags, DiagnosticCode
+#
+# Things worth noticing:
+#   * Vector3 is referenced twice (velocity + acceleration) -> ONE shared type.
+#   * DiagnosticCode drags in GeoPoint + Timestamp transitively (a $ref chain
+#     across files), all resolved to the same shared types.
+#   * Field ids are stable; a decoder skips unknown ids, so new fields can be
+#     added without breaking older readers (forward/backward compatible).
+version: 1
+messages:
+  VehicleTelemetry:
+    summary: |
+      Periodic telemetry frame emitted by a connected vehicle (~1 Hz). Carries
+      pose, motion, powertrain state and any active diagnostics.
+    payload:
+      vehicle_id:   { id: 0, type: string, maxlen: 24, description: "VIN or fleet asset id" }
+      captured_at:  { id: 1, type: struct, fields: { $ref: 'common.yaml#/$defs/struct/Timestamp' } }
+      location:     { id: 2, type: struct, fields: { $ref: 'common.yaml#/$defs/struct/GeoPoint' } }
+      heading_deg:  { id: 3, type: fp32, unit: deg, description: "Compass heading, 0..360" }
+
+      velocity:     { id: 4, type: struct, fields: { $ref: 'common.yaml#/$defs/struct/Vector3' }, description: "m/s, vehicle frame" }
+      acceleration: { id: 5, type: struct, fields: { $ref: 'common.yaml#/$defs/struct/Vector3' }, description: "m/s^2, vehicle frame" }
+      speed_kph:    { id: 6, type: fp32, unit: "km/h" }
+
+      gear:         { id: 7, type: enum, default: 0, enum: { $ref: 'diagnostics.yaml#/$defs/enum/Gear' } }
+      faults:       { id: 8, type: bitfield, bits: { $ref: 'diagnostics.yaml#/$defs/bitfield/FaultFlags' } }
+      battery_pct:  { id: 9, type: u8, unit: "%", default: 100, description: "State of charge / fuel level" }
+      odometer_m:   { id: 10, type: u64, unit: m }
+      tire_kpa:     { id: 11, type: array, items: { type: u16, count: 4 }, description: "Tire pressure FL, FR, RL, RR" }
+
+      # A single struct field; transitively pulls GeoPoint + Timestamp via $ref.
+      active_code:  { id: 12, type: struct, fields: { $ref: 'diagnostics.yaml#/$defs/struct/DiagnosticCode' }, description: "Most recent diagnostic trouble code" }
+
+      legacy_rpm:   { id: 13, type: u32, unit: rpm, deprecated: true, description: "Deprecated: use the dedicated powertrain stream" }

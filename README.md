@@ -45,7 +45,13 @@ done
 #   sbufgen --config myconfig.yaml --lang rust --in examples --out out
 ```
 
-Generated example sources for all 8 languages live on the
+Examples:
+- [`examples/example.yaml`](examples/example.yaml) — a showcase exercising every
+  field kind.
+- [`examples/realworld/`](examples/realworld/) — a realistic connected-vehicle
+  telemetry schema split across **multiple files** with cross-file `$ref`.
+
+Generated sources for all 8 languages live on the
 [`example-output`](https://github.com/sofa-buffers/generator/tree/example-output/output)
 branch. Each backend's one-command conformance harness is `tests/<lang>/run.sh`.
 

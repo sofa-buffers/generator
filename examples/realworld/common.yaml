@@ -1,0 +1,25 @@
+# Shared geometry and time definitions for the fleet schema.
+#
+# This file has no `messages:` — it is a library of reusable `$defs` that other
+# files pull in via cross-file `$ref` (see vehicle_telemetry.yaml). A definition
+# referenced from several places resolves to a single shared generated type, so
+# Vector3 is emitted once even though several fields use it.
+version: 1
+$defs:
+  struct:
+    # A WGS-84 geographic position.
+    GeoPoint:
+      latitude:  { id: 0, type: fp64, unit: deg, description: "WGS-84 latitude in decimal degrees" }
+      longitude: { id: 1, type: fp64, unit: deg, description: "WGS-84 longitude in decimal degrees" }
+      altitude:  { id: 2, type: fp32, unit: m,   description: "Metres above mean sea level" }
+
+    # A 3-component vector (used for both velocity and acceleration).
+    Vector3:
+      x: { id: 0, type: fp32 }
+      y: { id: 1, type: fp32 }
+      z: { id: 2, type: fp32 }
+
+    # A UTC instant with nanosecond resolution (Unix epoch).
+    Timestamp:
+      seconds: { id: 0, type: u64, unit: s,  description: "Unix epoch seconds (UTC)" }
+      nanos:   { id: 1, type: u32, unit: ns, description: "Nanoseconds within the second, 0..999999999" }

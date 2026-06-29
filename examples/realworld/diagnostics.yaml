@@ -1,0 +1,30 @@
+# Powertrain and diagnostics definitions.
+#
+# Note `DiagnosticCode` *itself* references common.yaml via cross-file `$ref` —
+# so any message that uses DiagnosticCode transitively pulls in GeoPoint and
+# Timestamp too. The generator flattens these chains automatically.
+version: 1
+$defs:
+  enum:
+    Gear:
+      PARK: 0
+      REVERSE: 1
+      NEUTRAL: 2
+      DRIVE: 3
+      SPORT: 4
+
+  bitfield:
+    # Active dashboard warning lights (one bit each).
+    FaultFlags:
+      ENGINE:        { pos: 0, description: "Check-engine / MIL" }
+      BATTERY:       { pos: 1, description: "12V or HV battery" }
+      BRAKES:        { pos: 2 }
+      TIRE_PRESSURE: { pos: 3 }
+      ABS:           { pos: 4 }
+
+  struct:
+    # An OBD-II diagnostic trouble code, with when and where it fired.
+    DiagnosticCode:
+      code:     { id: 0, type: string, maxlen: 8, description: "DTC, e.g. 'P0301'" }
+      occurred: { id: 1, type: struct, fields: { $ref: 'common.yaml#/$defs/struct/Timestamp' } }
+      where:    { id: 2, type: struct, fields: { $ref: 'common.yaml#/$defs/struct/GeoPoint' } }
