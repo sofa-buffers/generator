@@ -172,7 +172,9 @@ func (g *gen) emitStruct(f *hfile, name string, fields []*ir.Field, isMessage bo
 	for _, fld := range fields {
 		g.emitSerialize(f, fld)
 	}
-	f.line("        return os.writeIf(0, std::uint64_t{0}, false);")
+	// No-op write purely to return a Result; bool is never feature-gated (avoid a
+	// 64-bit literal so the body compiles under SOFAB_DISABLE_INT64_SUPPORT).
+	f.line("        return os.writeIf(0, false, false);")
 	f.line("    }")
 	f.blank()
 
@@ -200,10 +202,13 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 	acc := fld.Name
 	var write string
 	switch fld.Kind {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		write = fmt.Sprintf("(void)os.write(%d, static_cast<std::uint64_t>(%s));", fld.ID, acc)
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		write = fmt.Sprintf("(void)os.write(%d, static_cast<std::int64_t>(%s));", fld.ID, acc)
+	// Write each integer at its natural width (not a forced 64-bit cast): the
+	// varint output is value-based so the bytes are identical, and it lets the
+	// corelib-c-cpp wrapper compile with SOFAB_DISABLE_INT64_SUPPORT for messages
+	// that have no u64/i64 field (a u64/i64 field still requires INT64, correctly).
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
 	case ir.KindBool:
 		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
 	case ir.KindFP32, ir.KindFP64:
@@ -211,9 +216,9 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 	case ir.KindString:
 		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
 	case ir.KindEnum:
-		write = fmt.Sprintf("(void)os.write(%d, static_cast<std::int64_t>(%s));", fld.ID, acc)
+		write = fmt.Sprintf("(void)os.write(%d, static_cast<%s>(%s));", fld.ID, enumBacking(fld.Ref.Target), acc)
 	case ir.KindBitfield:
-		write = fmt.Sprintf("(void)os.write(%d, static_cast<std::uint64_t>(%s));", fld.ID, acc)
+		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
 	case ir.KindBlob:
 		f.line("        (void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size()));", fld.ID, acc, acc)
 		return
