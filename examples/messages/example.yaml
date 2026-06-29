@@ -1,135 +1,199 @@
-# yaml-language-server: $schema=../schema/sofabuffers-schema-v1.json
+# yaml-language-server: $schema=../../schema/sofabuffers-schema-v1.json
+#
+# example.yaml — the SofaBuffers showcase definition.
+#
+# A single message, `myfirstmessage`, that exercises EVERY field type and
+# feature the generator supports, so a reader can see each one in context:
+#
+#   scalars   : u8 u16 u32 u64 / i8 i16 i32 i64 / fp32 fp64 / boolean
+#   var-length: string  blob
+#   aggregates: enum  bitfield  array(scalar|string|blob)  struct(nested)  union
+#   per-field : id (wire key, unique per scope), description, unit, default,
+#               deprecated, decimals (fp hint), maxlen (string/blob/elements).
+#
+# Field ids are the wire keys: stable, unique within their scope, and what a
+# decoder uses to skip unknown fields for forward/backward compatibility.
 version: 1
 
 messages:
   myfirstmessage:
     summary: |
-      A message schema demonstrating various field types and features.
+      A demonstration message that uses every supported field type and feature.
     payload:
-      someinteger:
+
+      # --- Unsigned integers (u8, u16, u32, u64) -------------------------------
+      someu8:
         id: 0
-        type: i8
-        description: "A signed 8-bit integer value that represents a weight"
-        unit: kg
-        deprecated: true
-        default: 10
+        type: u8
+        description: "Unsigned 8-bit integer (0..255)"
+        default: 7
+
+      someu16:
+        id: 1
+        type: u16
+        description: "Unsigned 16-bit integer (0..65535)"
+        default: 1000
+
+      someu32:
+        id: 2
+        type: u32
+        description: "Unsigned 32-bit integer (0..4294967295)"
+        default: 100000
 
       bignum:
-        id: 11
+        id: 3
         type: u64
-        description: "A 64-bit counter; small defaults may be plain numbers, but exact values beyond 2^53 must be given as a quoted string"
-        default: "18446744073709551615"   # u64 max, exact via string (a plain number would lose precision)
-        deprecated: false
+        description: "Unsigned 64-bit counter"
+        # Small 64-bit defaults may be plain numbers, but exact values beyond
+        # 2^53 must be a quoted string or JSON/YAML would round them.
+        default: "18446744073709551615"   # u64 max, exact via string
 
+      # --- Signed integers (i8, i16, i32, i64) ---------------------------------
+      someinteger:
+        id: 4
+        type: i8
+        description: "Signed 8-bit integer (-128..127); here a weight"
+        unit: kg
+        default: 10
+        deprecated: true                  # readers may skip a deprecated field
+
+      somei16:
+        id: 5
+        type: i16
+        description: "Signed 16-bit integer (-32768..32767)"
+        default: -12345
+
+      somei32:
+        id: 6
+        type: i32
+        description: "Signed 32-bit integer"
+        default: -2000000
+
+      somei64:
+        id: 7
+        type: i64
+        description: "Signed 64-bit integer"
+        default: "-9223372036854775808"   # i64 min, exact via string
+
+      # --- Floating point (fp32, fp64) -----------------------------------------
       test:
         id: 8
         type: fp32
+        description: "32-bit float; `decimals` is a precision hint for tooling"
         default: 0
-        description: "A floating-point number for testing purposes"
-        deprecated: false
         decimals: 2
 
-      somebool:
-        id: 1
-        type: boolean
-        description: "A boolean flag indicating true or false"
-        default: true
-        deprecated: false
+      somefp64:
+        id: 9
+        type: fp64
+        description: "64-bit float"
+        default: 3.141592653589793
+        decimals: 6
 
+      # --- Boolean -------------------------------------------------------------
+      somebool:
+        id: 10
+        type: boolean
+        description: "A boolean flag"
+        default: true
+
+      # --- Variable-length (string, blob) --------------------------------------
       somestring:
-        id: 2
+        id: 11
         type: string
-        maxlen: 50
-        description: "A string field with length constraints"
-        #default: "Hello, World!"
-        deprecated: false
+        maxlen: 50                        # caps the encoded length
+        description: "A UTF-8 string with a maximum length"
 
       someblob:
-        id: 9
+        id: 12
         type: blob
         maxlen: 16
-        description: "A binary blob with length constraints"
-        default: "SGVsbG8="   # base64 of "Hello"
-        deprecated: false
+        description: "An opaque byte blob with a maximum length"
+        default: "SGVsbG8="               # base64 of "Hello"
 
+      # --- Enum ----------------------------------------------------------------
+      # Members take either `{value, description}` or a bare integer shorthand;
+      # values may be sparse and negative. `default` must name a valid value.
       someenum:
-        id: 4
+        id: 13
         type: enum
-        description: "An enumeration representing colors"
+        description: "An enumeration of colors"
         enum:
-          RED: {value: 0, description: "The color red"}
+          RED:   {value: 0, description: "The color red"}
           GREEN:
             value: -100
             description: "The color green"
-          BLUE: 2
+          BLUE:   2                       # shorthand: name -> value
           YELLOW: 33
-        default: 2
-        deprecated: false
+        default: 2                         # BLUE
 
+      # --- Bitfield ------------------------------------------------------------
+      # Independent flags, each at a fixed bit position, each with its own default.
       somebitfield:
-        id: 5
+        id: 14
         type: bitfield
-        description: "A bitfield representing various flags"
+        description: "A set of independent boolean flags"
         bits:
           flagA:
             pos: 0
             default: false
-            description: "Activate feature A at bit position 0 with default value"
+            description: "Feature A flag at bit 0"
           flagB:
             pos: 1
             default: true
-            description: "Activate feature B at bit position 1 with default value"
-        deprecated: false
+            description: "Feature B flag at bit 1"
 
+      # --- Arrays --------------------------------------------------------------
+      # Fixed-count arrays. `items.count` is the length; `items.maxlen` bounds
+      # each variable-length element so fixed-storage targets can size buffers.
       somearray:
-        id: 3
+        id: 15
         type: array
+        description: "A fixed array of 5 signed 32-bit integers"
         items:
           type: i32
           count: 5
-        description: "An array of signed 32-bit integers"
         default: [10, 20, 300, 4000, 50000]
-        deprecated: false
 
-      # string arrays are internally represented as a sequence of strings
+      # String arrays are modelled on the wire as a sequence of strings.
       somestringarray:
-        id: 33
+        id: 16
         type: array
+        description: "A fixed array of 5 strings"
         items:
           type: string
           count: 5
-          maxlen: 16          # bounds each element so a fixed-storage target can size a 2-D buffer
-        description: "An array of string values"
+          maxlen: 16                      # bounds each element (2-D buffer)
         default: ["one", "two", "three", "four", "five"]
-        deprecated: false
 
-      # blob arrays, like string arrays, are represented as a sequence on the wire
+      # Blob arrays, like string arrays, are a sequence on the wire.
       someblobarray:
-        id: 10
+        id: 17
         type: array
+        description: "A fixed array of 3 byte blobs"
         items:
           type: blob
           count: 3
-          maxlen: 8           # bounds each blob element for a fixed-storage 2-D buffer
-        description: "An array of binary blobs"
+          maxlen: 8                       # bounds each blob element
         default: ["AAEC", "//8=", "ZGF0YQ=="]   # base64: [00 01 02], [FF FF], "data"
-        deprecated: false
 
+      # --- Struct (nested) -----------------------------------------------------
+      # A composite type with its own id scope; structs may nest arbitrarily.
       somestruct:
-        id: 6
+        id: 18
         type: struct
-        description: "A nested structure within the message"
+        description: "A nested structure"
         fields:
           nestedint:
             id: 0
             type: u8
-            description: "An unsigned 8-bit integer in the nested struct"
+            description: "An unsigned 8-bit integer in the struct"
             default: 255
           nestedstring:
             id: 1
             type: string
             maxlen: 32
-            description: "A string in the nested struct"
+            description: "A string in the struct"
             default: "Nested"
           nestedstruct:
             id: 2
@@ -139,15 +203,16 @@ messages:
               deepint:
                 id: 0
                 type: i32
-                description: "A signed 32-bit integer in the deeper nested struct"
+                description: "A signed 32-bit integer two levels deep"
                 default: -123456
-        deprecated: false
 
+      # --- Union ---------------------------------------------------------------
+      # Exactly one option ("oneof") is active at a time. `default_id` selects
+      # which option — and its defaults — apply when none is set explicitly.
       someunion:
-        id: 7
+        id: 19
         type: union
-        description: "A union field that can hold different types"
-        # default_id defines the option that is selected by default with the there defined default values
+        description: "A field that holds exactly one of several types"
         default_id: 0
         oneof:
           option1:
@@ -171,4 +236,3 @@ messages:
               unionstructbool:
                 id: 1
                 type: boolean
-        deprecated: false
