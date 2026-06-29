@@ -60,6 +60,45 @@ func (f *jfile) line(format string, args ...any) {
 func (f *jfile) blank()        { f.b.WriteByte('\n') }
 func (f *jfile) bytes() []byte { return []byte(f.b.String()) }
 
+// javadoc writes a Javadoc doc comment for text at the given indent, or nothing
+// when text is empty. Single-line text becomes `/** text */`; multi-line text is
+// expanded across lines. Any `*/` in the text is neutralised to `* /` so it can
+// never close the comment early; UTF-8 passes through byte-for-byte.
+func (f *jfile) javadoc(indent, text string) {
+	if text == "" {
+		return
+	}
+	text = strings.ReplaceAll(text, "*/", "* /")
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) == 1 {
+		f.line("%s/** %s */", indent, lines[0])
+		return
+	}
+	f.line("%s/**", indent)
+	for _, ln := range lines {
+		if ln == "" {
+			f.line("%s *", indent)
+		} else {
+			f.line("%s * %s", indent, ln)
+		}
+	}
+	f.line("%s */", indent)
+}
+
+// fieldDoc is the Javadoc body for a field: its description, with a unit suffix
+// appended (or used alone). Empty when the field carries neither.
+func fieldDoc(fld *ir.Field) string {
+	d := fld.Description
+	if fld.Unit != "" {
+		if d == "" {
+			d = "(unit: " + fld.Unit + ")"
+		} else {
+			d += " (unit: " + fld.Unit + ")"
+		}
+	}
+	return d
+}
+
 // messageFile emits <Message>.java: the public message class plus its reachable
 // named-type classes (package-private) and the decode visitor.
 func (g *gen) messageFile(m *ir.Message) []byte {
@@ -75,20 +114,22 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	for _, key := range order {
 		nt := g.schema.Named[key]
 		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitClass(f, g.typeName(key), nt.Fields, false, false)
+			g.emitClass(f, g.typeName(key), nt.Fields, nt.Summary, false, false)
 		}
 	}
-	g.emitClass(f, exported(m.Name), m.Fields, true, true)
+	g.emitClass(f, exported(m.Name), m.Fields, m.Summary, true, true)
 	return f.bytes()
 }
 
-func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, isMessage, isPublic bool) {
+func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary string, isMessage, isPublic bool) {
 	vis := ""
 	if isPublic {
 		vis = "public "
 	}
+	f.javadoc("", summary)
 	f.line("%sclass %s {", vis, name)
 	for _, fld := range fields {
+		f.javadoc("    ", fieldDoc(fld))
 		f.line("    public %s %s%s;", g.javaType(fld), javaIdent(fld.Name), g.javaInit(fld))
 	}
 	f.blank()

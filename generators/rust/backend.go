@@ -98,11 +98,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitStruct(f, g.typeName(key), nt.Fields, false)
+			g.emitStruct(f, g.typeName(key), nt.Fields, false, "")
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitStruct(f, exported(m.Name), m.Fields, true)
+		g.emitStruct(f, exported(m.Name), m.Fields, true, m.Summary)
 	}
 	return f.bytes()
 }
@@ -125,7 +125,34 @@ func (g *gen) emitBitfieldConsts(f *rfile, nt *ir.NamedType) {
 	f.blank()
 }
 
-func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bool) {
+// emitDoc writes a rustdoc `///` comment (one line per line of text) at the
+// given indent. Empty text emits nothing, so it never leaves a dangling `///`.
+func (f *rfile) emitDoc(indent, text string) {
+	if text == "" {
+		return
+	}
+	for _, ln := range strings.Split(text, "\n") {
+		f.line("%s/// %s", indent, ln)
+	}
+}
+
+// fieldDoc builds a field's rustdoc text from its Description and Unit.
+func fieldDoc(fld *ir.Field) string {
+	switch {
+	case fld.Description != "" && fld.Unit != "":
+		return fld.Description + " (unit: " + fld.Unit + ")"
+	case fld.Description != "":
+		return fld.Description
+	case fld.Unit != "":
+		return "(unit: " + fld.Unit + ")"
+	default:
+		return ""
+	}
+}
+
+func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bool, summary string) {
+	// rustdoc summary attaches to the struct that immediately follows.
+	f.emitDoc("", summary)
 	// With omit_defaults, decode must reconstruct schema defaults, so a manual
 	// Default impl carries them; otherwise derive Default (type zeros) is fine.
 	if g.omit {
@@ -136,6 +163,9 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	f.line("#[serde(default)]")
 	f.line("pub struct %s {", name)
 	for _, fld := range fields {
+		// rustdoc attaches to the item that follows, so the doc must precede
+		// any #[serde(rename = ...)] attribute and the field itself.
+		f.emitDoc("    ", fieldDoc(fld))
 		if rustNeedsRename(fld.Name) {
 			f.line("    #[serde(rename = %q)]", fld.Name)
 		}

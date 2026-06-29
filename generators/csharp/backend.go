@@ -72,11 +72,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitClass(f, g.typeName(key), nt.Fields, false)
+			g.emitClass(f, g.typeName(key), nt.Summary, nt.Fields, false)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitClass(f, exported(m.Name), m.Fields, true)
+		g.emitClass(f, exported(m.Name), m.Summary, m.Fields, true)
 	}
 	return f.bytes()
 }
@@ -100,9 +100,11 @@ func (g *gen) emitBitfield(f *cfile, nt *ir.NamedType) {
 	f.blank()
 }
 
-func (g *gen) emitClass(f *cfile, name string, fields []*ir.Field, isMessage bool) {
+func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMessage bool) {
+	emitDoc(f, "", summary)
 	f.line("public sealed class %s {", name)
 	for _, fld := range fields {
+		emitDoc(f, "    ", fieldDoc(fld))
 		f.line("    public %s %s%s;", g.csType(fld), csIdent(fld.Name), g.csInit(fld))
 	}
 	f.blank()

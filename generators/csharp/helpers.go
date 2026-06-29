@@ -8,6 +8,45 @@ import (
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
+// xmlEscape escapes the three XML-special characters so a description stays
+// well-formed inside an XML doc comment. UTF-8 letters/symbols pass through
+// byte-for-byte. Order matters: `&` must be escaped first.
+func xmlEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
+}
+
+// fieldDoc builds the doc text for a field from its Description and Unit:
+// Description, with " (unit: <Unit>)" appended when a Unit is set; if only a
+// Unit is present the doc is "(unit: <Unit>)". Empty when both are empty.
+func fieldDoc(f *ir.Field) string {
+	switch {
+	case f.Description != "" && f.Unit != "":
+		return f.Description + " (unit: " + f.Unit + ")"
+	case f.Description != "":
+		return f.Description
+	case f.Unit != "":
+		return "(unit: " + f.Unit + ")"
+	}
+	return ""
+}
+
+// emitDoc writes an XML <summary> doc comment for text at the given indent.
+// Empty text emits nothing. Multi-line text uses the docfx-friendly block form.
+func emitDoc(f *cfile, indent, text string) {
+	if text == "" {
+		return
+	}
+	lines := strings.Split(text, "\n")
+	f.line("%s/// <summary>", indent)
+	for _, ln := range lines {
+		f.line("%s/// %s", indent, xmlEscape(ln))
+	}
+	f.line("%s/// </summary>", indent)
+}
+
 func cfgString(cfg map[string]any, key, dflt string) string {
 	if v, ok := cfg[key].(string); ok && v != "" {
 		return v

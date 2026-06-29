@@ -343,12 +343,26 @@ a reimplementation should emit code that honors all of them:
   `keywords.yaml` corpus compiles a keyword-heavy schema in every backend to guard
   this (and any new backend). Per-backend helpers: `cIdent`/`cppIdent`/`csIdent`/
   `javaIdent`/`pyIdent`/`rustIdent`.
-- **Emit pure ASCII.** Every byte a backend writes into generated code — source,
-  banners, doc comments, Makefiles, READMEs — must be ASCII (`< 0x80`). Use ASCII
-  punctuation in generator-inserted text (`-`, not the em-dash `—`). This keeps
-  output portable across toolchains, editors, and encodings. `TestGeneratedOutputIsASCII`
-  sweeps every backend over the corpus + example in sources *and* project mode and
-  fails on any non-ASCII byte.
+- **Emit pure ASCII *that the generator authors*.** Every byte a backend writes
+  on its own — banners, separators, Makefiles, READMEs, scaffolding — must be ASCII
+  (`< 0x80`): use ASCII punctuation (`-`, not the em-dash `—`). `TestGeneratedOutputIsASCII`
+  sweeps every backend over the corpus + example (whose descriptions are ASCII) in
+  sources *and* project mode and fails on any non-ASCII byte. This is about
+  generator-authored text — **user-supplied description text passes through
+  verbatim**, including UTF-8 (see next).
+- **Render descriptions as language-idiomatic doc comments.** A message `summary`
+  and a field `description`/`unit` become doc comments on the generated type and
+  member, in each language's documentation-generator format so Doxygen/rustdoc/
+  godoc/Sphinx/TSDoc/Javadoc/docfx pick them up: Doxygen `/*! */` + trailing `/**<`
+  (C), Doxygen `@brief` + `///<` (C++), rustdoc `///` (Rust), godoc `//` (Go),
+  class docstring + Sphinx `#:` (Python), TSDoc `/** */` (TS), Javadoc `/** */`
+  (Java), XML `/// <summary>` (C#). The comment attaches immediately before (or
+  trailing) the declaration so it lands inside the right namespace/package/module
+  for the doc tool. User text is passed through byte-for-byte (UTF-8 included);
+  backends only neutralise comment-terminators (`*/` → `* /`) and XML-escape
+  `&<>` (C#). `TestDescriptionsBecomeDocComments` (driven by the UTF-8
+  `testdata/descriptions.yaml`) verifies every backend emits the text on a comment
+  line with the UTF-8 preserved.
 
 **Adding a language is purely additive** — a new `generators/<lang>/` package + a
 blank import + per-target schema keys + a `tests/conformance/<lang>/run.sh` + a CI job. No

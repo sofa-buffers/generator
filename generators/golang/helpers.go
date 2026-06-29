@@ -151,10 +151,17 @@ func bitfieldGoType(nt *ir.NamedType) string {
 }
 
 func fieldDoc(f *ir.Field) string {
-	if f.Description == "" {
+	doc := oneline(f.Description)
+	if f.Unit != "" {
+		if doc != "" {
+			doc += " "
+		}
+		doc += "(unit: " + f.Unit + ")"
+	}
+	if doc == "" {
 		return ""
 	}
-	return " // " + oneline(f.Description)
+	return " // " + doc
 }
 
 func oneline(s string) string {
