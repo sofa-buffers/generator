@@ -4,8 +4,8 @@
 #include <assert.h>
 
 int main(void) {
-    sofab_myfirstmessage_t m;
-    sofab_myfirstmessage_init(&m);
+    messages_myfirstmessage_t m;
+    messages_myfirstmessage_init(&m);
 
     /* set representative non-default values across every field kind */
     m.someinteger = -42;
@@ -28,16 +28,16 @@ int main(void) {
     strcpy(m.somestringarray.items[3], "four");
     strcpy(m.somestringarray.items[4], "five");
 
-    uint8_t buf[SOFAB_MYFIRSTMESSAGE_MAX_SIZE];
+    uint8_t buf[MESSAGES_MYFIRSTMESSAGE_MAX_SIZE];
     size_t used = 0;
-    sofab_ret_t r = sofab_myfirstmessage_encode(&m, buf, sizeof(buf), &used);
+    sofab_ret_t r = messages_myfirstmessage_encode(&m, buf, sizeof(buf), &used);
     assert(r == SOFAB_RET_OK);
-    printf("encoded %zu bytes (max %d)\n", used, SOFAB_MYFIRSTMESSAGE_MAX_SIZE);
-    assert(used <= SOFAB_MYFIRSTMESSAGE_MAX_SIZE);
+    printf("encoded %zu bytes (max %d)\n", used, MESSAGES_MYFIRSTMESSAGE_MAX_SIZE);
+    assert(used <= MESSAGES_MYFIRSTMESSAGE_MAX_SIZE);
 
-    sofab_myfirstmessage_t d;
-    sofab_myfirstmessage_init(&d);
-    r = sofab_myfirstmessage_decode(&d, buf, used);
+    messages_myfirstmessage_t d;
+    messages_myfirstmessage_init(&d);
+    r = messages_myfirstmessage_decode(&d, buf, used);
     assert(r == SOFAB_RET_OK);
 
     /* verify round-trip */

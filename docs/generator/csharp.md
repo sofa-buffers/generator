@@ -8,7 +8,7 @@ config.
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `namespace` | string | `Sofabuffers` | The `namespace <name>` wrapping the generated classes. Also settable in `generic`. |
+| `namespace` | string | `Messages` | The `namespace <name>` wrapping the generated classes. Also settable in `generic`. |
 
 ```yaml
 targets:

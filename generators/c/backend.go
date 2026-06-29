@@ -30,7 +30,7 @@ func (*Backend) Lang() string { return "c" }
 // (build files + devcontainer wiring + encode/decode harness, §9.1), with the
 // message sources placed under generated/.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "sofab_"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
+	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "messages_"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	srcDir := ""
 	if project {

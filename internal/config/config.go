@@ -28,7 +28,10 @@ type Config struct {
 // Default returns the built-in defaults applied beneath every config (§7.2).
 func Default() map[string]any {
 	return map[string]any{
-		"namespace":        "sofabuffers",
+		// `namespace` is intentionally NOT defaulted here: it is a per-language
+		// concern, so each backend applies its own idiomatic default (C++
+		// `messages`, C# `Messages`). A generic default would shadow those. Set
+		// `generic.namespace` (or the per-target one) to override.
 		"emit":             "sources",
 		"timestamp":        true,
 		"timestamp_format": "iso8601",

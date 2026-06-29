@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Text;
 using sofab;
 
-namespace sofabuffers;
+namespace Messages;
 
 public sealed class Scalars {
     public byte u8min = 0;

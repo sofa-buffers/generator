@@ -8,7 +8,7 @@ config.
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `symbol_prefix` | string | `sofab_` | Prefix applied to every generated C symbol — struct typedefs (`<prefix>Name_t`), descriptor tables, and the encode/decode/init functions. Use it to avoid name collisions when linking generated code from several schemas into one binary. |
+| `symbol_prefix` | string | `messages_` | Prefix applied to every generated C symbol — struct typedefs (`<prefix>Name_t`), descriptor tables, and the encode/decode/init functions. Use it to avoid name collisions when linking generated code from several schemas into one binary. |
 
 ```yaml
 targets:
