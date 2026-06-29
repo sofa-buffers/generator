@@ -22,6 +22,22 @@ RUN ARCH="$(dpkg --print-architecture)" \
     && tar -C /usr/local -xzf /tmp/go.tar.gz \
     && rm /tmp/go.tar.gz
 
+# Language toolchains for the per-language conformance harnesses
+# (tests/<lang>/run.sh). C/C++ (gcc/g++/make) come from build-essential above;
+# Node (TypeScript) is installed below. This adds Python, Rust (cargo/rustc),
+# Java + Maven, and the .NET SDK (C#).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        cargo \
+        rustc \
+        default-jdk \
+        maven \
+        dotnet-sdk-8.0 \
+    && rm -rf /var/lib/apt/lists/*
+# .NET needs this where ICU/locale data is absent (the C# csproj also sets
+# InvariantGlobalization, but the env var keeps ad-hoc `dotnet` runs working).
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+
 # Node.js (LTS) for Claude Code
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
