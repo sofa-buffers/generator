@@ -11,13 +11,13 @@ import (
 
 // Scalars is a generated SofaBuffers object.
 type Scalars struct {
+	U64max uint64  `json:"u64max"`
+	I64min int64   `json:"i64min"`
+	F64    float64 `json:"f64"`
+	F32    float32 `json:"f32"`
 	U8min  uint8   `json:"u8min"`
 	U8max  uint8   `json:"u8max"`
-	U64max uint64  `json:"u64max"`
 	I8min  int8    `json:"i8min"`
-	I64min int64   `json:"i64min"`
-	F32    float32 `json:"f32"`
-	F64    float64 `json:"f64"`
 	Flag   bool    `json:"flag"`
 }
 

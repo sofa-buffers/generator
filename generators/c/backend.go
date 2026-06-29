@@ -11,6 +11,7 @@ package c
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -72,7 +73,8 @@ type objectPlan struct {
 }
 
 type member struct {
-	decl string // e.g. "uint16_t u16;"
+	decl  string // e.g. "uint16_t u16;"
+	align int    // storage alignment in bytes, for widest-first member ordering
 }
 
 type fieldEntry struct {
@@ -163,7 +165,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, f.Name)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, f.Name), align: ir.AlignRank(f)})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, f.Name, nestedIdx[ck])})
@@ -176,7 +178,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, f.Name)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, f.Name), align: ir.AlignRank(f)})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, f.Name, nestedIdx[ck])})
@@ -185,10 +187,15 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 			if err != nil {
 				return err
 			}
-			p.members = append(p.members, member{decl: decl})
+			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f)})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 		}
 	}
+	// Order the struct members widest-first to minimise padding. The descriptor
+	// (p.fields) and the wire format are unaffected — encode walks the descriptor
+	// in id order and decode keys off the field id, both independent of the C
+	// member layout (offsets are resolved with offsetof at compile time).
+	sort.SliceStable(p.members, func(i, j int) bool { return p.members[i].align > p.members[j].align })
 	plans[key] = p
 	*order = append(*order, key)
 	return nil

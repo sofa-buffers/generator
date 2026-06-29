@@ -137,7 +137,9 @@ func (g *gen) emitBitfield(f *hfile, nt *ir.NamedType) {
 
 func (g *gen) emitStruct(f *hfile, name string, fields []*ir.Field, isMessage bool) {
 	f.line("struct %s : sofab::OStreamMessage, sofab::IStreamMessage {", name)
-	for _, fld := range fields {
+	// Declare members widest-first to minimise padding; encode/decode below stay
+	// in schema/id order, so the wire bytes are unchanged.
+	for _, fld := range ir.SortedForLayout(fields) {
 		f.line("    %s %s = %s;", g.cppType(fld), fld.Name, g.cppDefault(fld))
 	}
 	if isMessage {

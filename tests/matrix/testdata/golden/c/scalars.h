@@ -36,13 +36,13 @@
 #endif
 
 typedef struct {
+    uint64_t u64max;
+    int64_t i64min;
+    double f64;
+    float f32;
     uint8_t u8min;
     uint8_t u8max;
-    uint64_t u64max;
     int8_t i8min;
-    int64_t i64min;
-    float f32;
-    double f64;
     uint8_t flag;
 } sofab_Scalars_t;
 

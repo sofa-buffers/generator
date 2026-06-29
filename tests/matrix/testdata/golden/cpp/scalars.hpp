@@ -31,13 +31,13 @@ struct _BlobSeq : sofab::IStreamMessage {
 #endif
 
 struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {
+    std::uint64_t u64max = 18446744073709551615ULL;
+    std::int64_t i64min = -9223372036854775808LL;
+    double f64 = -2.5;
+    float f32 = 3.14f;
     std::uint8_t u8min = 0;
     std::uint8_t u8max = 255;
-    std::uint64_t u64max = 18446744073709551615ULL;
     std::int8_t i8min = -128;
-    std::int64_t i64min = -9223372036854775808LL;
-    float f32 = 3.14f;
-    double f64 = -2.5;
     bool flag = true;
     static constexpr std::size_t _maxSize = 82;
 

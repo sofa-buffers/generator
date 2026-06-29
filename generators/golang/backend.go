@@ -114,7 +114,9 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 	f.imp(corelibImport)
 	f.line("// %s is a generated SofaBuffers object.", typeName)
 	f.line("type %s struct {", typeName)
-	for _, fld := range fields {
+	// Declare fields widest-first to minimise struct padding; marshal/unmarshal
+	// below stay in schema/id order, so the wire bytes are unchanged.
+	for _, fld := range ir.SortedForLayout(fields) {
 		tag := fmt.Sprintf("`json:%q`", fld.Name)
 		f.line("\t%s %s %s%s", exported(fld.Name), g.goType(fld), tag, fieldDoc(fld))
 	}
