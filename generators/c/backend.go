@@ -166,10 +166,10 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, f.Name), align: ir.AlignRank(f)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, cIdent(f.Name)), align: ir.AlignRank(f)})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
-				f.ID, p.cType, f.Name, nestedIdx[ck])})
+				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
 		case f.Kind == ir.KindArray && (f.Elem == ir.KindString || f.Elem == ir.KindBlob):
 			ck := key + "/" + f.Name + "#elems"
 			ep := g.elemHolder(ck, f)
@@ -179,10 +179,10 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, f.Name), align: ir.AlignRank(f)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, cIdent(f.Name)), align: ir.AlignRank(f)})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
-				f.ID, p.cType, f.Name, nestedIdx[ck])})
+				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
 		default:
 			decl, entry, err := g.scalarMember(p.cType, f)
 			if err != nil {
@@ -235,37 +235,38 @@ func (g *gen) elemHolder(key string, f *ir.Field) *objectPlan {
 // scalarMember produces the struct member decl + descriptor entry for a
 // non-composite field.
 func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err error) {
+	mn := cIdent(f.Name)
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		decl = fmt.Sprintf("%s %s;", uintC(f.Kind), f.Name)
-		entry = field(f.ID, cType, f.Name, "UNSIGNED")
+		decl = fmt.Sprintf("%s %s;", uintC(f.Kind), mn)
+		entry = field(f.ID, cType, mn, "UNSIGNED")
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		decl = fmt.Sprintf("%s %s;", intC(f.Kind), f.Name)
-		entry = field(f.ID, cType, f.Name, "SIGNED")
+		decl = fmt.Sprintf("%s %s;", intC(f.Kind), mn)
+		entry = field(f.ID, cType, mn, "SIGNED")
 	case ir.KindBool:
-		decl = fmt.Sprintf("uint8_t %s;", f.Name)
-		entry = field(f.ID, cType, f.Name, "UNSIGNED")
+		decl = fmt.Sprintf("uint8_t %s;", mn)
+		entry = field(f.ID, cType, mn, "UNSIGNED")
 	case ir.KindFP32:
-		decl = fmt.Sprintf("float %s;", f.Name)
-		entry = field(f.ID, cType, f.Name, "FP32")
+		decl = fmt.Sprintf("float %s;", mn)
+		entry = field(f.ID, cType, mn, "FP32")
 	case ir.KindFP64:
-		decl = fmt.Sprintf("double %s;", f.Name)
-		entry = field(f.ID, cType, f.Name, "FP64")
+		decl = fmt.Sprintf("double %s;", mn)
+		entry = field(f.ID, cType, mn, "FP64")
 	case ir.KindString:
-		decl = fmt.Sprintf("char %s[%d];", f.Name, maxlenOr(f, 1))
-		entry = field(f.ID, cType, f.Name, "STRING")
+		decl = fmt.Sprintf("char %s[%d];", mn, maxlenOr(f, 1))
+		entry = field(f.ID, cType, mn, "STRING")
 	case ir.KindBlob:
-		decl = fmt.Sprintf("uint8_t %s[%d];", f.Name, maxlenOr(f, 1))
-		entry = field(f.ID, cType, f.Name, "BLOB")
+		decl = fmt.Sprintf("uint8_t %s[%d];", mn, maxlenOr(f, 1))
+		entry = field(f.ID, cType, mn, "BLOB")
 	case ir.KindEnum:
-		decl = fmt.Sprintf("%s %s;", enumC(f.Ref.Target), f.Name)
-		entry = field(f.ID, cType, f.Name, "SIGNED")
+		decl = fmt.Sprintf("%s %s;", enumC(f.Ref.Target), mn)
+		entry = field(f.ID, cType, mn, "SIGNED")
 	case ir.KindBitfield:
-		decl = fmt.Sprintf("%s %s;", bitfieldC(f.Ref.Target), f.Name)
-		entry = field(f.ID, cType, f.Name, "UNSIGNED")
+		decl = fmt.Sprintf("%s %s;", bitfieldC(f.Ref.Target), mn)
+		entry = field(f.ID, cType, mn, "UNSIGNED")
 	case ir.KindArray:
-		decl = fmt.Sprintf("%s %s[%d];", arrayElemC(f.Elem), f.Name, f.Count)
-		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_ARRAY(%d, %s, %s, %s),", f.ID, cType, f.Name, arrayFieldType(f.Elem))
+		decl = fmt.Sprintf("%s %s[%d];", arrayElemC(f.Elem), mn, f.Count)
+		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_ARRAY(%d, %s, %s, %s),", f.ID, cType, mn, arrayFieldType(f.Elem))
 	default:
 		return "", "", fmt.Errorf("field %q: unsupported kind %s for C backend", f.Name, f.Kind)
 	}
@@ -591,4 +592,26 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 		return v
 	}
 	return dflt
+}
+
+// cKeywords are C reserved words (C99/C11). C has no identifier escape, so a
+// field with such a name is mangled (trailing underscore); the struct member and
+// its descriptor entry use the mangled name, while the JSON harness keys (emitted
+// elsewhere as string literals) keep the original name.
+var cKeywords = map[string]bool{
+	"auto": true, "break": true, "case": true, "char": true, "const": true,
+	"continue": true, "default": true, "do": true, "double": true, "else": true,
+	"enum": true, "extern": true, "float": true, "for": true, "goto": true,
+	"if": true, "inline": true, "int": true, "long": true, "register": true,
+	"restrict": true, "return": true, "short": true, "signed": true, "sizeof": true,
+	"static": true, "struct": true, "switch": true, "typedef": true, "union": true,
+	"unsigned": true, "void": true, "volatile": true, "while": true, "bool": true,
+}
+
+// cIdent mangles a field name that is a C keyword (trailing underscore).
+func cIdent(name string) string {
+	if cKeywords[name] {
+		return name + "_"
+	}
+	return name
 }

@@ -147,7 +147,7 @@ func (g *gen) emitJSONFns(f *hfile, typeName string, fields []*ir.Field) {
 }
 
 func (g *gen) emitToJSON(f *hfile, fld *ir.Field) {
-	acc := "o." + fld.Name
+	acc := "o." + cppIdent(fld.Name)
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("    out << static_cast<unsigned long long>(%s);", acc)
@@ -185,7 +185,7 @@ func (g *gen) emitToJSONArray(f *hfile, fld *ir.Field, acc string) {
 }
 
 func (g *gen) emitFromJSON(f *hfile, fld *ir.Field) {
-	acc := "o." + fld.Name
+	acc := "o." + cppIdent(fld.Name)
 	f.line("    c = sofab_json_get(j, %q);", fld.Name)
 	f.line("    if (c) {")
 	switch fld.Kind {

@@ -344,9 +344,7 @@ var _ = fmt.Sprintf
 
 // rustKeywords are reserved words that, used verbatim as a struct field name,
 // are a syntax error and must be written as a raw identifier (`r#name`). serde's
-// derives strip the `r#` prefix, so JSON field names are unchanged. (`self`,
-// `Self`, `crate`, `super` cannot be raw identifiers; they are implausible field
-// names and are left unescaped.)
+// derives strip the `r#` prefix, so JSON field names are unchanged.
 var rustKeywords = map[string]bool{
 	"as": true, "break": true, "const": true, "continue": true, "crate": true,
 	"dyn": true, "else": true, "enum": true, "extern": true, "false": true,
@@ -360,11 +358,25 @@ var rustKeywords = map[string]bool{
 	"unsized": true, "virtual": true, "try": true,
 }
 
-// rustIdent renders a schema field name as a Rust identifier, escaping reserved
-// keywords as raw identifiers (e.g. `where` -> `r#where`).
+// rustNonRaw are the four keywords that CANNOT be written as raw identifiers
+// (`r#self` etc. is rejected). A field with one of these names is mangled with a
+// trailing underscore instead; rustNeedsRename then forces a serde rename so the
+// JSON/wire name stays the original.
+var rustNonRaw = map[string]bool{"self": true, "Self": true, "crate": true, "super": true}
+
+// rustIdent renders a schema field name as a Rust identifier: `r#name` for a
+// keyword, `name_` for the four non-raw-able keywords, else unchanged.
 func rustIdent(name string) string {
+	if rustNonRaw[name] {
+		return name + "_"
+	}
 	if rustKeywords[name] {
 		return "r#" + name
 	}
 	return name
 }
+
+// rustNeedsRename reports whether a field needs a serde rename to preserve its
+// JSON name — true only for the underscore-mangled non-raw-able keywords (serde
+// already strips `r#`, so r#-escaped fields don't need it).
+func rustNeedsRename(name string) bool { return rustNonRaw[name] }

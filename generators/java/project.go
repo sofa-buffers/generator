@@ -163,7 +163,7 @@ func (g *gen) emitJSONFns(f *jfile, typeName string, fields []*ir.Field) {
 }
 
 func (g *gen) emitTo(f *jfile, fld *ir.Field) {
-	acc := "o." + fld.Name
+	acc := "o." + javaIdent(fld.Name)
 	switch fld.Kind {
 	case ir.KindU64:
 		f.line("        b.append(Long.toUnsignedString(%s));", acc)
@@ -199,7 +199,7 @@ func (g *gen) emitToArray(f *jfile, fld *ir.Field, acc string) {
 }
 
 func (g *gen) emitFrom(f *jfile, fld *ir.Field) {
-	acc := "o." + fld.Name
+	acc := "o." + javaIdent(fld.Name)
 	switch fld.Kind {
 	case ir.KindU64:
 		f.line("            %s = Long.parseUnsignedLong(e.getAsString());", acc)

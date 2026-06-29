@@ -23,7 +23,7 @@ func cfgBool(cfg map[string]any, key string) bool {
 // javaOmitCond is the condition under which to write a field (value differs from
 // its default), for omit_defaults. Strings use Objects.equals (content compare).
 func (g *gen) javaOmitCond(f *ir.Field) string {
-	acc := "this." + f.Name
+	acc := "this." + javaIdent(f.Name)
 	def := g.javaDefaultValue(f)
 	if f.Kind == ir.KindString {
 		return fmt.Sprintf("!java.util.Objects.equals(%s, %s)", acc, def)
@@ -328,4 +328,29 @@ final class Sbuf {
     static double[] toDoubleArray(List<Double> l) { double[] a = new double[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
 }
 `, g.banner, spdx, g.pkg))
+}
+
+// javaKeywords are Java reserved words. Java has no raw-identifier escape, so a
+// field with such a name is mangled (trailing underscore); the JSON key keeps the
+// original name (emitted as a separate string literal).
+var javaKeywords = map[string]bool{
+	"abstract": true, "assert": true, "boolean": true, "break": true, "byte": true,
+	"case": true, "catch": true, "char": true, "class": true, "const": true,
+	"continue": true, "default": true, "do": true, "double": true, "else": true,
+	"enum": true, "extends": true, "final": true, "finally": true, "float": true,
+	"for": true, "goto": true, "if": true, "implements": true, "import": true,
+	"instanceof": true, "int": true, "interface": true, "long": true, "native": true,
+	"new": true, "package": true, "private": true, "protected": true, "public": true,
+	"return": true, "short": true, "static": true, "strictfp": true, "super": true,
+	"switch": true, "synchronized": true, "this": true, "throw": true, "throws": true,
+	"transient": true, "try": true, "void": true, "volatile": true, "while": true,
+	"true": true, "false": true, "null": true, "var": true, "record": true, "yield": true,
+}
+
+// javaIdent mangles a field name that is a Java keyword (trailing underscore).
+func javaIdent(name string) string {
+	if javaKeywords[name] {
+		return name + "_"
+	}
+	return name
 }

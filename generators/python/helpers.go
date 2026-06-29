@@ -187,7 +187,7 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field) {
 }
 
 func (g *gen) toJSONExpr(f *ir.Field) string {
-	acc := "self." + f.Name
+	acc := "self." + pyIdent(f.Name)
 	switch f.Kind {
 	case ir.KindBlob:
 		return fmt.Sprintf("list(%s)", acc)
@@ -208,7 +208,7 @@ func (g *gen) toJSONExpr(f *ir.Field) string {
 }
 
 func (g *gen) fromJSONStmt(f *pyfile, fld *ir.Field) {
-	acc := "o." + fld.Name
+	acc := "o." + pyIdent(fld.Name)
 	src := fmt.Sprintf("d[%q]", fld.Name)
 	switch fld.Kind {
 	case ir.KindBlob:
@@ -225,4 +225,26 @@ func (g *gen) fromJSONStmt(f *pyfile, fld *ir.Field) {
 	default:
 		f.line("            %s = %s", acc, src)
 	}
+}
+
+// pyKeywords are Python's (hard) reserved words — invalid as attribute names.
+// (`match`/`case` are soft keywords, valid as identifiers, so not included.) No
+// escape exists, so such a field is mangled (trailing underscore); the JSON key
+// (a separate string literal) keeps the original name.
+var pyKeywords = map[string]bool{
+	"False": true, "None": true, "True": true, "and": true, "as": true,
+	"assert": true, "async": true, "await": true, "break": true, "class": true,
+	"continue": true, "def": true, "del": true, "elif": true, "else": true,
+	"except": true, "finally": true, "for": true, "from": true, "global": true,
+	"if": true, "import": true, "in": true, "is": true, "lambda": true,
+	"nonlocal": true, "not": true, "or": true, "pass": true, "raise": true,
+	"return": true, "try": true, "while": true, "with": true, "yield": true,
+}
+
+// pyIdent mangles a field name that is a Python keyword (trailing underscore).
+func pyIdent(name string) string {
+	if pyKeywords[name] {
+		return name + "_"
+	}
+	return name
 }

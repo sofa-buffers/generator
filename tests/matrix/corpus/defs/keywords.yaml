@@ -1,0 +1,108 @@
+# Field names that are reserved words in one or more target languages. Each
+# backend must escape (Rust `r#`, C# `@`) or mangle (C/C++/Java/Python trailing
+# `_`) them, or be keyword-safe by construction (Go exports/capitalises, TS allows
+# keyword member names) — without changing the wire (keyed by id) or JSON names.
+# Guards keyword handling across every backend, and any new one. See generators/*
+# (cIdent/cppIdent/csIdent/javaIdent/pyIdent/rustIdent).
+version: 1
+$defs:
+  struct:
+    Nested:
+      # keyword field names inside a nested struct exercise the flat-visitor
+      # location-stack path escaping (Rust/C#/Java).
+      type:   { id: 0, type: u32 }
+      class:  { id: 1, type: u32 }
+      where:  { id: 2, type: i32 }
+      return: { id: 3, type: boolean }
+messages:
+  Keywords:
+    payload:
+      # C / C++
+      int:        { id: 0,  type: u32 }
+      char:       { id: 1,  type: u32 }
+      const:      { id: 2,  type: u32 }
+      static:     { id: 3,  type: u32 }
+      struct:     { id: 4,  type: u32 }
+      void:       { id: 5,  type: u32 }
+      sizeof:     { id: 6,  type: u32 }
+      typedef:    { id: 7,  type: u32 }
+      register:   { id: 8,  type: u32 }
+      volatile:   { id: 9,  type: u32 }
+      # C++
+      class:      { id: 10, type: u32 }
+      new:        { id: 11, type: u32 }
+      delete:     { id: 12, type: u32 }
+      template:   { id: 13, type: u32 }
+      namespace:  { id: 14, type: u32 }
+      public:     { id: 15, type: u32 }
+      private:    { id: 16, type: u32 }
+      this:       { id: 17, type: u32 }
+      operator:   { id: 18, type: u32 }
+      virtual:    { id: 19, type: u32 }
+      # Rust
+      where:      { id: 20, type: u32 }
+      match:      { id: 21, type: u32 }
+      move:       { id: 22, type: u32 }
+      fn:         { id: 23, type: u32 }
+      impl:       { id: 24, type: u32 }
+      trait:      { id: 25, type: u32 }
+      loop:       { id: 26, type: u32 }
+      mut:        { id: 27, type: u32 }
+      pub:        { id: 28, type: u32 }
+      dyn:        { id: 29, type: u32 }
+      # Go
+      func:       { id: 30, type: u32 }
+      type:       { id: 31, type: u32 }
+      range:      { id: 32, type: u32 }
+      map:        { id: 33, type: u32 }
+      chan:       { id: 34, type: u32 }
+      defer:      { id: 35, type: u32 }
+      select:     { id: 36, type: u32 }
+      var:        { id: 37, type: u32 }
+      package:    { id: 38, type: u32 }
+      interface:  { id: 39, type: u32 }
+      # Python
+      def:        { id: 40, type: u32 }
+      lambda:     { id: 41, type: u32 }
+      yield:      { id: 42, type: u32 }
+      pass:       { id: 43, type: u32 }
+      elif:       { id: 44, type: u32 }
+      raise:      { id: 45, type: u32 }
+      global:     { id: 46, type: u32 }
+      async:      { id: 47, type: u32 }
+      await:      { id: 48, type: u32 }
+      # Java
+      final:      { id: 49, type: u32 }
+      abstract:   { id: 50, type: u32 }
+      extends:    { id: 51, type: u32 }
+      implements: { id: 52, type: u32 }
+      throws:     { id: 53, type: u32 }
+      instanceof: { id: 54, type: u32 }
+      super:      { id: 55, type: u32 }
+      boolean:    { id: 56, type: u32 }
+      # C#
+      sealed:     { id: 57, type: u32 }
+      override:   { id: 58, type: u32 }
+      params:     { id: 59, type: u32 }
+      out:        { id: 60, type: u32 }
+      ref:        { id: 61, type: u32 }
+      event:      { id: 62, type: u32 }
+      delegate:   { id: 63, type: u32 }
+      lock:       { id: 64, type: u32 }
+      object:     { id: 65, type: u32 }
+      ulong:      { id: 66, type: u32 }
+      # TypeScript / JavaScript
+      function:   { id: 67, type: u32 }
+      let:        { id: 68, type: u32 }
+      typeof:     { id: 69, type: u32 }
+      export:     { id: 70, type: u32 }
+      switch:     { id: 71, type: u32 }
+      case:       { id: 72, type: u32 }
+      default:    { id: 73, type: u32 }
+      break:      { id: 74, type: u32 }
+      continue:   { id: 75, type: u32 }
+      catch:      { id: 76, type: u32 }
+      # keyword-named array (exercises array_begin field-name escaping)
+      for:        { id: 77, type: array, items: { type: u8, count: 3 } }
+      # keyword-named nested struct (exercises sequence path escaping)
+      class_data: { id: 78, type: struct, fields: { $ref: '#/$defs/struct/Nested' } }
