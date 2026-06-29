@@ -20,7 +20,10 @@
 > (`generators/cpp`, max-speed `corelib-cpp`) is header-only: each object derives
 > `OStreamMessage`+`IStreamMessage` with `serialize`/`deserialize`, nested via
 > `os.write(id,child)` / `is.read(child)`; 37 shared vectors byte-exact
-> (`tests/cpp/run.sh`, CI job `lang-cpp`).
+> (`tests/cpp/run.sh`, CI job `lang-cpp`). A `corelib: c-cpp` target option emits
+> the same code against the **C++ wrapper in `corelib-c-cpp`** (decode pre-sizes
+> variable-length fields; Makefile links the C sources); `tests/cpp/run.sh`
+> round-trips and checks vectors against **both** C++ corelibs.
 > TypeScript (`generators/typescript`) emits classes with `marshal(OStream)` and
 > a visitor-based `decode` against `corelib-ts` (64-bit → `bigint`); 27 shared
 > vectors byte-exact (`tests/typescript/run.sh`, CI job `lang-typescript`).
@@ -258,7 +261,7 @@ adds build files + devcontainer wiring + an IR-driven encode/decode JSON harness
 | **Go backend** | **done** — `generators/golang`: struct + `Marshal`/pull-parser `Unmarshal` against `corelib-go`; `emit: project` Go module + stdlib-json harness; **37 shared vectors byte-exact** (dense encoder also matches zero values). `tests/go/run.sh`. |
 | **Python backend** | **done** — `generators/python`: dataclasses + `_marshal`/pull-parser `_unmarshal` against `corelib-py`; stdlib-json harness (blob as `list[int]`, matching C); **37 shared vectors byte-exact**. `tests/python/run.sh`. |
 | **TypeScript backend** | **done** — `generators/typescript`: classes + `marshal(OStream)` + visitor-based `decode` against `corelib-ts`; 64-bit → `bigint`; strict-typecheck clean; **27 shared vectors byte-exact**. `tests/typescript/run.sh`. |
-| **C++ backend** | **done** — `generators/cpp` (max-speed `corelib-cpp`): header-only structs (OStreamMessage+IStreamMessage), nested via `os.write`/`is.read`, enum-class backing, `OStreamInline<_maxSize>`; **37 shared vectors byte-exact**. `tests/cpp/run.sh`. |
+| **C++ backend** | **done** — `generators/cpp` (max-speed `corelib-cpp`): header-only structs (OStreamMessage+IStreamMessage), nested via `os.write`/`is.read`, enum-class backing, `OStreamInline<_maxSize>`; **37 shared vectors byte-exact**. `tests/cpp/run.sh`. A `corelib: c-cpp` option targets the **`corelib-c-cpp` C++ wrapper** (same code, decode pre-sizes variable-length fields, Makefile links the C sources); `run.sh` exercises **both** C++ corelibs. |
 | **Per-language corpus build** | **done** — every `tests/<lang>/run.sh` now generates and **compiles every corpus definition against the real corelib** (C/C++/Java compile, Go/Rust/C# build, Python imports, TS typechecks) in addition to the example round-trip + vectors. This caught and fixed 3 real backend bugs (Go fp32/fp64 array element type, Go unused import in enum-only files, C# negative-enum cast). |
 | **M7 corpus matrix** | **done** — `tests/matrix`: a corner-case corpus (9 positive defs) generated across ALL 8 backends (+ Go-parse check), 11 invalid defs rejected, dangling-ref + nesting-depth-cap enforced. Hermetic (runs in the core CI job). |
 | **M8 reproducibility + release** | **done** — golden-output test (regenerate scalars.yaml for every backend, byte-diff vs committed goldens); `.github/workflows/release.yml` builds static `sofabgen` binaries on a `v*` tag — linux (amd64/386/arm64/arm), windows (amd64/386/arm64), macOS (amd64/arm64) — each attached individually (with a `.sha256`) to the release; README quickstart added. |

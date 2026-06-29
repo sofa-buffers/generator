@@ -302,6 +302,14 @@
         "namespace": {
           "type": "string"
         },
+        "corelib": {
+          "type": "string",
+          "enum": [
+            "cpp",
+            "c-cpp"
+          ],
+          "default": "cpp"
+        },
         "emit": {
           "type": "string",
           "enum": [
