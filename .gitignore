@@ -13,3 +13,7 @@
 
 # Generated example sources (lives on the example-output branch)
 /output/
+
+# Core dumps (never commit crash snapshots)
+core
+core.*
