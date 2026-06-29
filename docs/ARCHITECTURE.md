@@ -45,6 +45,31 @@ in it. Generated code makes *typed calls* into a per-language runtime library
 located message, a non-zero exit, and **no output**. Invalid definitions are
 never code-generated. All problems are reported at once.
 
+### Design principles (the "why")
+
+- **Per-target optimization mandate.** The generated wrapper must add *zero
+  overhead* and steer each backend onto its corelib's fast/small path. There are
+  really **two optimization axes**, and every backend sits on one: **minimal
+  footprint** (the embedded targets — C, the C++ `c-cpp` wrapper, `no_std` Rust:
+  optimize for code/RAM size, no heap) and **maximum speed / throughput**
+  (everything else). "Max speed" (C++) and "high throughput" (Go/Python/Java/C#/
+  TS) are the *same goal* at different ceilings — header-only C++20 can reach the
+  metal (full inlining, zero-copy views, stack buffers), managed runtimes go as
+  fast as their runtime allows (minimize allocations/boxing). This single mandate
+  is *why* there are corelib options, multiple decode models, capability gating,
+  and width-minimizing layout/writes.
+- **The generator is a normal hosted program; only the *emitted* code carries
+  target constraints.** The generator itself need not be `no_std`/embedded — it
+  ships as a single, minimal-dependency, statically-linked, cross-compiled
+  executable (Windows/Linux/macOS × x86/x86-64/ARM/ARM64). Only the Rust/C it
+  *emits* is `no_std`/heap-free.
+- **Hardest constraints first.** The IR and emitter were proven against the worst
+  case (no-heap, no_std, static descriptors) before the throughput backends, so
+  the IR carries everything the strictest target needs; the throughput languages
+  then share an almost-identical `OStream`/`IStream`+Visitor shape and reuse it.
+- **Closed for modification, open for extension.** The four patterns (§8) keep
+  the core fixed while a new language is a new package — never a core edit.
+
 ---
 
 ## 2. System context
@@ -277,6 +302,32 @@ A backend is a self-contained, additive plugin. The contract:
   that the conformance tests drive).
 - **Determinism**: identical (definition, config) → byte-identical output.
 
+### Generated-code principles (every backend follows these)
+
+These shared rules keep the wrapper zero-overhead and the output interoperable —
+a reimplementation should emit code that honors all of them:
+
+- **Stay on the corelib's typed fast path.** Always call the dedicated typed
+  writers/readers (`write_unsigned`, `write_fp32`, `write_array_*`, …); never
+  touch the wire format from generated code (§1 firm boundary).
+- **Emit fields in ascending id order** — deterministic output, and lets the
+  decoder (and where applicable the encoder) dispatch optimally.
+- **Decode by `switch` on field id**, not an if-chain — compilers build a jump
+  table; unknown ids fall through to the corelib's skip path, giving
+  forward/backward compatibility for free.
+- **Resolve everything at generation time.** Field ids, type mappings, enum
+  backing widths, array element kinds/counts, `maxlen` — all known statically, so
+  bake them in as constants/literals; nothing is computed at runtime.
+- **No reflection / no runtime schema** — all dispatch is concrete generated
+  code. (The sole exception is C, which *deliberately* uses a static descriptor
+  table for footprint.)
+- **Pick the narrowest correct type** — map each integer to its exact width;
+  enum → smallest *signed* backing, bitfield → smallest *unsigned* backing; avoid
+  widening on the hot path (§11 natural-width writes).
+- **Validate cheaply or not at all on the hot path** — bounds checks (`maxlen`,
+  array `count`) are debug-only assertions (or an opt-in validate mode), so
+  release builds pay nothing.
+
 **Adding a language is purely additive** — a new `generators/<lang>/` package + a
 blank import + per-target schema keys + a `tests/<lang>/run.sh` + a CI job. No
 edits to the core, IR, or message schema. See §14.
@@ -466,7 +517,8 @@ internal/                GENERIC, language-independent core (imports no backend)
 generators/<lang>/       LANGUAGE-SPECIFIC backends (self-register)
 schema/                  message-definition schema + config schema (+ README spec)
 schemas.go               embeds the schema files into the binary
-docs/                    PLAN.md (full design), ARCHITECTURE.md (this), generator/ (per-lang config)
+docs/                    ARCHITECTURE.md (this — living source of truth), generator/ (per-lang config),
+                         PLAN.md (HISTORICAL original plan; rationale lifted into this file)
 tests/                   per-language run.sh harnesses + matrix corpus + goldens
 ```
 
