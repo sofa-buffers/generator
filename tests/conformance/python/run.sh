@@ -40,13 +40,13 @@ echo "==> round-trip OK"
 echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_PY_CORELIB="$CORELIB" go test ./generators/python/ -run Conformance -count=1 )
 
-echo "==> corpus: every edge-case definition imports"
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
+echo "==> corpus + realworld: every definition imports"
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang python --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     PYTHONPATH="$CORELIB/src:$WORK/corpus/$name" python3 -c "import messages" \
         || { echo "FAIL: corpus def $name did not import"; exit 1; }
 done
-echo "==> corpus imports ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
+echo "==> corpus imports ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
 
 echo "PASS"

@@ -28,9 +28,9 @@ func (g *gen) frames(m *ir.Message) []frame {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				cl := loc + "_" + fld.Name
-				walk(cl, path+"."+fld.Name, fld.Ref.Target.Fields)
+				walk(cl, path+"."+rustIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob):
-				out = append(out, frame{loc: loc + "_" + fld.Name, path: path + "." + fld.Name, seqArr: true, elemKind: fld.Elem})
+				out = append(out, frame{loc: loc + "_" + fld.Name, path: path + "." + rustIdent(fld.Name), seqArr: true, elemKind: fld.Elem})
 			}
 		}
 	}
@@ -140,11 +140,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64 || fld.Kind == ir.KindBitfield:
-				f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, fld.Name, g.rustType(fld))
+				f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), g.rustType(fld))
 			case fld.Kind == ir.KindBool:
-				f.line("            (_Loc::%s, %d) => %s.%s = value != 0,", fr.loc, fld.ID, fr.path, fld.Name)
+				f.line("            (_Loc::%s, %d) => %s.%s = value != 0,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 			case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
-				f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, fld.Name, numRustType(fld.Elem))
+				f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), numRustType(fld.Elem))
 			}
 		}
 	}
@@ -159,11 +159,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
-				f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, fld.Name, g.rustType(fld))
+				f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), g.rustType(fld))
 			case fld.Kind == ir.KindEnum:
-				f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, fld.Name, enumBacking(fld.Ref.Target))
+				f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), enumBacking(fld.Ref.Target))
 			case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
-				f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, fld.Name, numRustType(fld.Elem))
+				f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), numRustType(fld.Elem))
 			}
 		}
 	}
@@ -192,7 +192,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			}
 			for _, fld := range fr.fields {
 				if fld.Kind == ir.KindString {
-					f.line("            (_Loc::%s, %d) => %s.%s = _s,", fr.loc, fld.ID, fr.path, fld.Name)
+					f.line("            (_Loc::%s, %d) => %s.%s = _s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 				}
 			}
 		}
@@ -215,7 +215,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			}
 			for _, fld := range fr.fields {
 				if fld.Kind == ir.KindBlob {
-					f.line("            (_Loc::%s, %d) => %s.%s = _b,", fr.loc, fld.ID, fr.path, fld.Name)
+					f.line("            (_Loc::%s, %d) => %s.%s = _b,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 				}
 			}
 		}
@@ -231,7 +231,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		for _, fr := range fs {
 			for _, fld := range fr.fields {
 				if fld.Kind == ir.KindArray && fld.Elem != ir.KindString && fld.Elem != ir.KindBlob {
-					f.line("            (_Loc::%s, %d) => %s.%s.clear(),", fr.loc, fld.ID, fr.path, fld.Name)
+					f.line("            (_Loc::%s, %d) => %s.%s.clear(),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 				}
 			}
 		}
@@ -251,7 +251,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 					f.line("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
 				case fld.Kind == ir.KindArray && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob):
-					f.line("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, fld.Name, fr.loc+"_"+fld.Name)
+					f.line("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.loc+"_"+fld.Name)
 				}
 			}
 		}
@@ -275,9 +275,9 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == kind:
-				f.line("            (_Loc::%s, %d) => %s.%s = value,", fr.loc, fld.ID, fr.path, fld.Name)
+				f.line("            (_Loc::%s, %d) => %s.%s = value,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
-				f.line("            (_Loc::%s, %d) => %s.%s.push(value),", fr.loc, fld.ID, fr.path, fld.Name)
+				f.line("            (_Loc::%s, %d) => %s.%s.push(value),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 			}
 		}
 	}
