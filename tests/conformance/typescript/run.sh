@@ -2,11 +2,11 @@
 # Reproducible TypeScript conformance harness: build corelib-ts, generate ->
 # typecheck -> round-trip -> byte-exact shared-vector conformance.
 #
-# Usage: tests/typescript/run.sh [path-to-corelib-ts]   (or set $SOFAB_TS_CORELIB)
+# Usage: tests/conformance/typescript/run.sh [path-to-corelib-ts]   (or set $SOFAB_TS_CORELIB)
 # Requires: go, node, npm, git.
 set -eu
 
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_TS_CORELIB:-}}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -61,7 +61,7 @@ echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"
 echo "==> round-trip OK"
 
 echo "==> shared-vector byte-exact conformance"
-python3 "$ROOT/tests/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
+python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
 
 echo "==> corpus: every edge-case definition typechecks"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do

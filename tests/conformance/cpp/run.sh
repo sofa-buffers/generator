@@ -7,11 +7,11 @@
 # Both expose the same sofab:: interface; the generated code adapts its decode
 # (and project Makefile) to the selected corelib.
 #
-# Usage: tests/cpp/run.sh [corelib-cpp] [corelib-c-cpp]   (or set the env vars)
+# Usage: tests/conformance/cpp/run.sh [corelib-cpp] [corelib-c-cpp]   (or set the env vars)
 # Requires: go, g++, gcc, make, python3, git.
 set -eu
 
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CPP="${1:-${SOFAB_CPP_DIR:-}}"
 CC="${2:-${SOFAB_C_DIR:-}}"
 WORK=$(mktemp -d)
@@ -80,7 +80,7 @@ run_variant() {
     echo "==> [$label] shared-vector byte-exact conformance"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf-$label" )
     make -C "$WORK/conf-$label" "$@" >/dev/null
-    python3 "$ROOT/tests/cpp/check_vectors.py" "$CC/assets/test_vectors.json" "$WORK/conf-$label/harness/harness"
+    python3 "$ROOT/tests/conformance/cpp/check_vectors.py" "$CC/assets/test_vectors.json" "$WORK/conf-$label/harness/harness"
 
     echo "==> [$label] corpus: every edge-case definition compiles"
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do

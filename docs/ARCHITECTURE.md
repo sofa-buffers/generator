@@ -329,7 +329,7 @@ a reimplementation should emit code that honors all of them:
   release builds pay nothing.
 
 **Adding a language is purely additive** — a new `generators/<lang>/` package + a
-blank import + per-target schema keys + a `tests/<lang>/run.sh` + a CI job. No
+blank import + per-target schema keys + a `tests/conformance/<lang>/run.sh` + a CI job. No
 edits to the core, IR, or message schema. See §14.
 
 ---
@@ -486,7 +486,7 @@ A reimplementation is **conformant** when it reproduces these gates:
    guarantees cross-language interop.
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
-   field kind (`tests/<lang>/run.sh`).
+   field kind (`tests/conformance/<lang>/run.sh`).
 3. **Corpus** (`tests/matrix`) — a corner-case corpus generated across **all**
    backends; invalid defs are rejected; dangling-ref + depth-cap enforced.
    Per-language `run.sh` additionally **compiles/builds every corpus def** against
@@ -519,7 +519,7 @@ schema/                  message-definition schema + config schema (+ README spe
 schemas.go               embeds the schema files into the binary
 docs/                    ARCHITECTURE.md (this — living source of truth), generator/ (per-lang config),
                          PLAN.md (HISTORICAL original plan; rationale lifted into this file)
-tests/                   per-language run.sh harnesses + matrix corpus + goldens
+tests/                   conformance/<lang>/run.sh harnesses + matrix/ hermetic Go tests (+ README)
 ```
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
@@ -544,7 +544,7 @@ Rust (derive `Default` = zeros). These do not affect the **binary** wire interop
 2. Register the backend at `init()` and blank-import it from `cmd/sofabgen`.
 3. Add the per-target config keys to `schema/sofabgen-config-schema.json` and a
    `docs/generator/<lang>.md`.
-4. Add a project/harness template, corpus coverage, and a `tests/<lang>/run.sh`
+4. Add a project/harness template, corpus coverage, and a `tests/conformance/<lang>/run.sh`
    (generate → build → round-trip → byte-exact vectors) plus a gated unit test.
 5. Add a `lang-<x>` CI job running the harness.
 

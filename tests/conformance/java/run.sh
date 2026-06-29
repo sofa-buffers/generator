@@ -2,11 +2,11 @@
 # Reproducible Java conformance harness: install corelib, generate -> mvn package
 # -> round-trip -> byte-exact shared-vector conformance.
 #
-# Usage: tests/java/run.sh [corelib-java]   (or set $SOFAB_JAVA_CORELIB)
+# Usage: tests/conformance/java/run.sh [corelib-java]   (or set $SOFAB_JAVA_CORELIB)
 # Requires: go, javac/java (JDK 17+), mvn, git, python3.
 set -eu
 
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_JAVA_CORELIB:-}}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -52,7 +52,7 @@ echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"
 echo "==> round-trip OK"
 
 echo "==> shared-vector byte-exact conformance"
-python3 "$ROOT/tests/java/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/target/harness.jar"
+python3 "$ROOT/tests/conformance/java/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/target/harness.jar"
 
 echo "==> corpus: every edge-case definition compiles (javac vs corelib jar)"
 JAR="$HOME/.m2/repository/org/sofabuffers/sofab/$VER/sofab-$VER.jar"

@@ -2,11 +2,11 @@
 # Reproducible Python conformance harness: generate -> syntax-check ->
 # round-trip -> byte-exact shared-vector conformance against corelib-py.
 #
-# Usage: tests/python/run.sh [path-to-corelib-py]   (or set $SOFAB_PY_CORELIB)
+# Usage: tests/conformance/python/run.sh [path-to-corelib-py]   (or set $SOFAB_PY_CORELIB)
 # Requires: go, python3, git.
 set -eu
 
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_PY_CORELIB:-}}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
