@@ -1,5 +1,5 @@
 {
-  "name": "@sofa-buffers/sofabgen",
+  "name": "@sofa-buffers/generator",
   "version": "0.2.0",
   "description": "SofaBuffers code generator (sofabgen) — generate typed serialization code from a message definition. Ships the prebuilt Go binary, fetched per-platform on install.",
   "keywords": ["sofabuffers", "codegen", "serialization", "cli"],

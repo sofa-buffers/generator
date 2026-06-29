@@ -1,14 +1,19 @@
-# @sofa-buffers/sofabgen (npm distribution — EXPERIMENTAL)
+# @sofa-buffers/generator (npm distribution — EXPERIMENTAL)
 
 > ⚠️ **Experimental scaffold, on a branch.** Not published yet. This packages the
 > `sofabgen` code generator (a Go binary) for npm so it can be used as a
 > project-local dev dependency — no global install, no Go toolchain.
 
+> **Package name vs. command:** the package is **`@sofa-buffers/generator`** (it
+> matches the GitHub repo), but the CLI command it installs is **`sofabgen`** —
+> the same package-name ≠ command split as `@angular/cli`→`ng` or `typescript`→
+> `tsc`. Install the package; run `sofabgen`.
+
 ## Usage (the goal)
 
 ```sh
-npm install --save-dev @sofa-buffers/sofabgen
-# then, from the project:
+npm install --save-dev @sofa-buffers/generator
+# then, from the project (the command is `sofabgen`):
 npx sofabgen --lang cpp --in messages/example.yaml --out generated/
 ```
 
@@ -20,7 +25,7 @@ Or wire it into `package.json` scripts so codegen is reproducible per project:
     "gen": "sofabgen --lang ts --in messages/ --out src/generated/"
   },
   "devDependencies": {
-    "@sofa-buffers/sofabgen": "0.2.0"
+    "@sofa-buffers/generator": "0.2.0"
   }
 }
 ```
@@ -44,7 +49,7 @@ No runtime dependencies; only Node built-ins (`https`, `crypto`, `fs`).
 
 ## Open questions / decisions before publishing
 
-- **Package name & scope** — ✅ confirmed: `@sofa-buffers/sofabgen`, under the
+- **Package name & scope** — ✅ confirmed: `@sofa-buffers/generator`, under the
   `sofa-buffers` npm org. (A scoped package publishes with `npm publish
   --access public` and an org-member token.)
 - **Version ↔ release coupling** — the package `version` must correspond to a
@@ -52,7 +57,7 @@ No runtime dependencies; only Node built-ins (`https`, `crypto`, `fs`).
   Publishing the npm package therefore has to be tied to the release workflow.
 - **Alternative packaging** — instead of a `postinstall` download, the more
   hermetic pattern (used by esbuild/swc) is **per-platform optional-dependency
-  packages** (`@sofa-buffers/sofabgen-linux-x64`, …) selected via `os`/`cpu`, so
+  packages** (`@sofa-buffers/generator-linux-x64`, …) selected via `os`/`cpu`, so
   there's no install-time network or script. More packages to publish, but no
   postinstall and works offline from a cache. This scaffold uses the simpler
   download approach first; switching is a follow-up if desired.
