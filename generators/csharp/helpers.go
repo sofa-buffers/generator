@@ -353,3 +353,33 @@ func varintLen(x uint64) int64 {
 	}
 	return n
 }
+
+// csKeywords are C# reserved words; used as an identifier they need the
+// verbatim-identifier escape `@name`. System.Text.Json serialises `@int` under
+// the name "int", so JSON/wire names are unchanged.
+var csKeywords = map[string]bool{
+	"abstract": true, "as": true, "base": true, "bool": true, "break": true,
+	"byte": true, "case": true, "catch": true, "char": true, "checked": true,
+	"class": true, "const": true, "continue": true, "decimal": true, "default": true,
+	"delegate": true, "do": true, "double": true, "else": true, "enum": true,
+	"event": true, "explicit": true, "extern": true, "false": true, "finally": true,
+	"fixed": true, "float": true, "for": true, "foreach": true, "goto": true,
+	"if": true, "implicit": true, "in": true, "int": true, "interface": true,
+	"internal": true, "is": true, "lock": true, "long": true, "namespace": true,
+	"new": true, "null": true, "object": true, "operator": true, "out": true,
+	"override": true, "params": true, "private": true, "protected": true, "public": true,
+	"readonly": true, "ref": true, "return": true, "sbyte": true, "sealed": true,
+	"short": true, "sizeof": true, "stackalloc": true, "static": true, "string": true,
+	"struct": true, "switch": true, "this": true, "throw": true, "true": true,
+	"try": true, "typeof": true, "uint": true, "ulong": true, "unchecked": true,
+	"unsafe": true, "ushort": true, "using": true, "virtual": true, "void": true,
+	"volatile": true, "while": true,
+}
+
+// csIdent escapes a field name that is a C# keyword as a verbatim identifier.
+func csIdent(name string) string {
+	if csKeywords[name] {
+		return "@" + name
+	}
+	return name
+}

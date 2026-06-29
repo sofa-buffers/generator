@@ -106,7 +106,7 @@ func (g *gen) emitDataclass(f *pyfile, name string, fields []*ir.Field) {
 		f.line("    pass")
 	}
 	for _, fld := range fields {
-		f.line("    %s: %s = %s", fld.Name, g.pyAnnot(fld), g.pyDefault(fld))
+		f.line("    %s: %s = %s", pyIdent(fld.Name), g.pyAnnot(fld), g.pyDefault(fld))
 	}
 	f.blank()
 
@@ -147,7 +147,7 @@ func (g *gen) emitDataclass(f *pyfile, name string, fields []*ir.Field) {
 }
 
 func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
-	acc := "self." + fld.Name
+	acc := "self." + pyIdent(fld.Name)
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -206,7 +206,7 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
 }
 
 func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
-	acc := "self." + fld.Name
+	acc := "self." + pyIdent(fld.Name)
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("                %s = d.unsigned()", acc)

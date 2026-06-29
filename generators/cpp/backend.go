@@ -143,7 +143,7 @@ func (g *gen) emitStruct(f *hfile, name string, fields []*ir.Field, isMessage bo
 	// Declare members widest-first to minimise padding; encode/decode below stay
 	// in schema/id order, so the wire bytes are unchanged.
 	for _, fld := range ir.SortedForLayout(fields) {
-		f.line("    %s %s = %s;", g.cppType(fld), fld.Name, g.cppDefault(fld))
+		f.line("    %s %s = %s;", g.cppType(fld), cppIdent(fld.Name), g.cppDefault(fld))
 	}
 	if isMessage {
 		size, _ := g.maxSize(fields)
@@ -199,7 +199,7 @@ func (g *gen) emitStruct(f *hfile, name string, fields []*ir.Field, isMessage bo
 }
 
 func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
-	acc := fld.Name
+	acc := cppIdent(fld.Name)
 	var write string
 	switch fld.Kind {
 	// Write each integer at its natural width (not a forced 64-bit cast): the
@@ -252,7 +252,7 @@ func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
 }
 
 func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
-	acc := fld.Name
+	acc := cppIdent(fld.Name)
 	switch fld.Kind {
 	case ir.KindString:
 		// corelib-c-cpp's read() fills the existing buffer, so pre-size from the

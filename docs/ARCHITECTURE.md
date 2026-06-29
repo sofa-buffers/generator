@@ -327,6 +327,18 @@ a reimplementation should emit code that honors all of them:
 - **Validate cheaply or not at all on the hot path** — bounds checks (`maxlen`,
   array `count`) are debug-only assertions (or an opt-in validate mode), so
   release builds pay nothing.
+- **Escape reserved-word field names.** A schema field name may collide with a
+  target-language keyword (`where`, `class`, `int`, …); the backend must make it a
+  valid identifier — *escape* where the language allows (Rust `r#name`, C#
+  `@name`), *mangle* otherwise (C/C++/Java/Python trailing `_`), or be keyword-safe
+  by construction (Go exports/capitalises; TS allows keyword member names). A few
+  words can't be escaped at all (Rust `self`/`Self`/`crate`/`super`) and must be
+  mangled. The **wire is unaffected** (keyed by id) and the **JSON name stays the
+  original** — keep the raw name for JSON keys, and add a rename when the
+  identifier was mangled (escapes like `r#`/`@` are serializer-transparent). The
+  `keywords.yaml` corpus compiles a keyword-heavy schema in every backend to guard
+  this (and any new backend). Per-backend helpers: `cIdent`/`cppIdent`/`csIdent`/
+  `javaIdent`/`pyIdent`/`rustIdent`.
 
 **Adding a language is purely additive** — a new `generators/<lang>/` package + a
 blank import + per-target schema keys + a `tests/conformance/<lang>/run.sh` + a CI job. No

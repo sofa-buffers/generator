@@ -136,6 +136,9 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	f.line("#[serde(default)]")
 	f.line("pub struct %s {", name)
 	for _, fld := range fields {
+		if rustNeedsRename(fld.Name) {
+			f.line("    #[serde(rename = %q)]", fld.Name)
+		}
 		f.line("    pub %s: %s,", rustIdent(fld.Name), g.rustType(fld))
 	}
 	f.line("}")

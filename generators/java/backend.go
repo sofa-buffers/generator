@@ -89,7 +89,7 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, isMessage, is
 	}
 	f.line("%sclass %s {", vis, name)
 	for _, fld := range fields {
-		f.line("    public %s %s%s;", g.javaType(fld), fld.Name, g.javaInit(fld))
+		f.line("    public %s %s%s;", g.javaType(fld), javaIdent(fld.Name), g.javaInit(fld))
 	}
 	f.blank()
 
@@ -127,7 +127,7 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, isMessage, is
 }
 
 func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
-	acc := "this." + fld.Name
+	acc := "this." + javaIdent(fld.Name)
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:

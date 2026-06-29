@@ -24,9 +24,9 @@ func (g *gen) frames(m *ir.Message) []frame {
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				walk(loc+"_"+fld.Name, path+"."+fld.Name, fld.Ref.Target.Fields)
+				walk(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob):
-				out = append(out, frame{loc: loc + "_" + fld.Name, path: path + "." + fld.Name, seqArr: true, elemKind: fld.Elem})
+				out = append(out, frame{loc: loc + "_" + fld.Name, path: path + "." + javaIdent(fld.Name), seqArr: true, elemKind: fld.Elem})
 			}
 		}
 	}
@@ -115,7 +115,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		}
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindString {
-				arms = append(arms, jcase(fld.ID, fr.path+"."+fld.Name+" = _s"))
+				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+" = _s"))
 			}
 		}
 		if len(arms) > 0 {
@@ -140,7 +140,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		var arms []string
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindBlob {
-				arms = append(arms, jcase(fld.ID, fr.path+"."+fld.Name+" = _b"))
+				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+" = _b"))
 			}
 		}
 		if len(arms) > 0 {
@@ -157,7 +157,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		var arms []string
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindArray && fld.Elem != ir.KindString && fld.Elem != ir.KindBlob {
-				arms = append(arms, jcase(fld.ID, fr.path+"."+fld.Name+".clear()"))
+				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+".clear()"))
 			}
 		}
 		if len(arms) > 0 {
@@ -178,7 +178,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				arms = append(arms, jcase(fld.ID, "cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
 			case fld.Kind == ir.KindArray && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob):
-				arms = append(arms, jcase(fld.ID, fr.path+"."+fld.Name+".clear(); cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
+				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+".clear(); cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
 			}
 		}
 		if len(arms) > 0 {
@@ -204,7 +204,7 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 			if !ok {
 				continue
 			}
-			target := fr.path + "." + fld.Name
+			target := fr.path + "." + javaIdent(fld.Name)
 			var stmt string
 			if act == "add" {
 				stmt = target + ".add(value)"

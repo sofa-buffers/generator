@@ -18,9 +18,9 @@ func (g *gen) frames(m *ir.Message) []frame {
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				walk(loc+"_"+fld.Name, path+"."+fld.Name, fld.Ref.Target.Fields)
+				walk(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob):
-				out = append(out, frame{loc: loc + "_" + fld.Name, path: path + "." + fld.Name, seqArr: true, elemKind: fld.Elem})
+				out = append(out, frame{loc: loc + "_" + fld.Name, path: path + "." + csIdent(fld.Name), seqArr: true, elemKind: fld.Elem})
 			}
 		}
 	}
@@ -49,13 +49,13 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64:
-				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, fld.Name, g.csType(fld))
+				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.csType(fld))
 			case fld.Kind == ir.KindBitfield:
-				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, fld.Name, g.typeName(fld.Ref.Key))
+				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
 			case fld.Kind == ir.KindBool:
-				f.line("            case (%s, %d): %s.%s = value != 0; break;", fr.loc, fld.ID, fr.path, fld.Name)
+				f.line("            case (%s, %d): %s.%s = value != 0; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
-				f.line("            case (%s, %d): %s.%s.Add((%s)value); break;", fr.loc, fld.ID, fr.path, fld.Name, numCsType(fld.Elem))
+				f.line("            case (%s, %d): %s.%s.Add((%s)value); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), numCsType(fld.Elem))
 			}
 		}
 	}
@@ -69,11 +69,11 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
-				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, fld.Name, g.csType(fld))
+				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.csType(fld))
 			case fld.Kind == ir.KindEnum:
-				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, fld.Name, g.typeName(fld.Ref.Key))
+				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
 			case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
-				f.line("            case (%s, %d): %s.%s.Add((%s)value); break;", fr.loc, fld.ID, fr.path, fld.Name, numCsType(fld.Elem))
+				f.line("            case (%s, %d): %s.%s.Add((%s)value); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), numCsType(fld.Elem))
 			}
 		}
 	}
@@ -96,7 +96,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		}
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindString {
-				f.line("            case (%s, %d): %s.%s = _s; break;", fr.loc, fld.ID, fr.path, fld.Name)
+				f.line("            case (%s, %d): %s.%s = _s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			}
 		}
 	}
@@ -116,7 +116,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		}
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindBlob {
-				f.line("            case (%s, %d): %s.%s = _b; break;", fr.loc, fld.ID, fr.path, fld.Name)
+				f.line("            case (%s, %d): %s.%s = _b; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			}
 		}
 	}
@@ -129,7 +129,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindArray && fld.Elem != ir.KindString && fld.Elem != ir.KindBlob {
-				f.line("            case (%s, %d): %s.%s.Clear(); break;", fr.loc, fld.ID, fr.path, fld.Name)
+				f.line("            case (%s, %d): %s.%s.Clear(); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			}
 		}
 	}
@@ -146,7 +146,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				f.line("            case (%s, %d): cur = %s; break;", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
 			case fld.Kind == ir.KindArray && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob):
-				f.line("            case (%s, %d): %s.%s.Clear(); cur = %s; break;", fr.loc, fld.ID, fr.path, fld.Name, fr.loc+"_"+fld.Name)
+				f.line("            case (%s, %d): %s.%s.Clear(); cur = %s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), fr.loc+"_"+fld.Name)
 			}
 		}
 	}
@@ -164,9 +164,9 @@ func (g *gen) emitFloatVisit(f *cfile, fs []frame, kind ir.Kind, cb, ctype strin
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == kind:
-				f.line("            case (%s, %d): %s.%s = value; break;", fr.loc, fld.ID, fr.path, fld.Name)
+				f.line("            case (%s, %d): %s.%s = value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
-				f.line("            case (%s, %d): %s.%s.Add(value); break;", fr.loc, fld.ID, fr.path, fld.Name)
+				f.line("            case (%s, %d): %s.%s.Add(value); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			}
 		}
 	}

@@ -103,7 +103,7 @@ func (g *gen) emitBitfield(f *cfile, nt *ir.NamedType) {
 func (g *gen) emitClass(f *cfile, name string, fields []*ir.Field, isMessage bool) {
 	f.line("public sealed class %s {", name)
 	for _, fld := range fields {
-		f.line("    public %s %s%s;", g.csType(fld), fld.Name, g.csInit(fld))
+		f.line("    public %s %s%s;", g.csType(fld), csIdent(fld.Name), g.csInit(fld))
 	}
 	f.blank()
 
@@ -141,7 +141,7 @@ func (g *gen) emitClass(f *cfile, name string, fields []*ir.Field, isMessage boo
 }
 
 func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
-	acc := "this." + fld.Name
+	acc := "this." + csIdent(fld.Name)
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
