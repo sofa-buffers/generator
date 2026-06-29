@@ -63,13 +63,13 @@ echo "==> round-trip OK"
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
 
-echo "==> corpus: every edge-case definition typechecks"
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
+echo "==> corpus + realworld: every definition typechecks"
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
     gen "$def" "$WORK/corpus/$name"
     ln -s "$WORK/ex/node_modules" "$WORK/corpus/$name/node_modules"
     ( cd "$WORK/corpus/$name" && npx tsc --noEmit )
 done
-echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
+echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
 
 echo "PASS"

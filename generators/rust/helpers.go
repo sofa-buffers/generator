@@ -341,3 +341,30 @@ func varintLen(x uint64) int64 {
 }
 
 var _ = fmt.Sprintf
+
+// rustKeywords are reserved words that, used verbatim as a struct field name,
+// are a syntax error and must be written as a raw identifier (`r#name`). serde's
+// derives strip the `r#` prefix, so JSON field names are unchanged. (`self`,
+// `Self`, `crate`, `super` cannot be raw identifiers; they are implausible field
+// names and are left unescaped.)
+var rustKeywords = map[string]bool{
+	"as": true, "break": true, "const": true, "continue": true, "crate": true,
+	"dyn": true, "else": true, "enum": true, "extern": true, "false": true,
+	"fn": true, "for": true, "if": true, "impl": true, "in": true, "let": true,
+	"loop": true, "match": true, "mod": true, "move": true, "mut": true,
+	"pub": true, "ref": true, "return": true, "static": true, "struct": true,
+	"trait": true, "true": true, "type": true, "unsafe": true, "use": true,
+	"where": true, "while": true, "async": true, "await": true, "yield": true,
+	"gen": true, "abstract": true, "become": true, "box": true, "do": true,
+	"final": true, "macro": true, "override": true, "priv": true, "typeof": true,
+	"unsized": true, "virtual": true, "try": true,
+}
+
+// rustIdent renders a schema field name as a Rust identifier, escaping reserved
+// keywords as raw identifiers (e.g. `where` -> `r#where`).
+func rustIdent(name string) string {
+	if rustKeywords[name] {
+		return "r#" + name
+	}
+	return name
+}

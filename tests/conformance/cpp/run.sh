@@ -82,8 +82,8 @@ run_variant() {
     make -C "$WORK/conf-$label" "$@" >/dev/null
     python3 "$ROOT/tests/conformance/cpp/check_vectors.py" "$CC/assets/test_vectors.json" "$WORK/conf-$label/harness/harness"
 
-    echo "==> [$label] corpus: every edge-case definition compiles"
-    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
+    echo "==> [$label] corpus + realworld: every definition compiles"
+    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
         name=$(basename "$def" .yaml)
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp --in "$def" --out "$WORK/corpus-$label/$name" >/dev/null )
         for h in "$WORK"/corpus-"$label"/"$name"/*.hpp; do
@@ -91,7 +91,7 @@ run_variant() {
                 || { echo "FAIL: [$label] corpus def $name did not compile"; exit 1; }
         done
     done
-    echo "==> [$label] corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
+    echo "==> [$label] corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
 }
 
 # Pure C++20 corelib-cpp (default).

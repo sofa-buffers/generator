@@ -62,9 +62,9 @@ echo "==> M4: shared-vector byte-exact conformance + gated Go build tests"
 ( cd "$ROOT" && SOFAB_C_CORELIB="$CORELIB" go test ./generators/c/ \
     -run 'Conformance|Compiles|Project' -count=1 )
 
-echo "==> corpus: every edge-case definition compiles"
+echo "==> corpus + realworld: every definition compiles"
 # BIG descriptor profile so wide field ids (up to 2^31-1) fit the descriptor.
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     for c in "$WORK"/corpus/"$name"/*.c; do
@@ -72,7 +72,7 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
             || { echo "FAIL: corpus def $name did not compile"; exit 1; }
     done
 done
-echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
+echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
 
 # corelib feature-subset configs. corelib-c-cpp can be built with SOFAB_DISABLE_*
 # macros to drop wire types for a smaller footprint. The generated code guards

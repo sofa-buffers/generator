@@ -70,12 +70,12 @@ run_variant() {
     echo "==> [$label] shared-vector byte-exact conformance"
     python3 "$ROOT/tests/conformance/rust/check_vectors.py" "$corelib/assets/test_vectors.json" "$WORK/conf-$label"
 
-    echo "==> [$label] corpus: every edge-case definition builds"
-    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
+    echo "==> [$label] corpus + realworld: every definition builds"
+    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
         name=$(basename "$def" .yaml)
         rust_build "$def" "$WORK/corpus-$label/$name"
     done
-    echo "==> [$label] corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
+    echo "==> [$label] corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
 }
 
 # corelib-rs (std, the default): always-on, no feature flags.

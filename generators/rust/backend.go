@@ -136,7 +136,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	f.line("#[serde(default)]")
 	f.line("pub struct %s {", name)
 	for _, fld := range fields {
-		f.line("    pub %s: %s,", fld.Name, g.rustType(fld))
+		f.line("    pub %s: %s,", rustIdent(fld.Name), g.rustType(fld))
 	}
 	f.line("}")
 	f.blank()
@@ -145,7 +145,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 		f.line("    fn default() -> Self {")
 		f.line("        Self {")
 		for _, fld := range fields {
-			f.line("            %s: %s,", fld.Name, g.rustFieldDefault(fld))
+			f.line("            %s: %s,", rustIdent(fld.Name), g.rustFieldDefault(fld))
 		}
 		f.line("        }")
 		f.line("    }")
@@ -185,7 +185,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 }
 
 func (g *gen) emitMarshal(f *rfile, fld *ir.Field) {
-	acc := "self." + fld.Name
+	acc := "self." + rustIdent(fld.Name)
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
