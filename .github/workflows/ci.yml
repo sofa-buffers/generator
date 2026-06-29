@@ -47,6 +47,14 @@ jobs:
         run: gcc --version && make --version | head -1
       - name: C backend — generate, build, round-trip, conformance
         run: ./tests/c/run.sh
+      - name: Generate sources (artifact)
+        if: always()
+        run: ./tests/gen-artifacts.sh c generated
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generated-c
+          path: generated
 
   # Language milestone: Go (corelib-go). Generates a module, builds it against
   # the real corelib, round-trips JSON, and checks byte-exact output against the
@@ -60,6 +68,14 @@ jobs:
           go-version: "1.24"
       - name: Go backend — generate, build, round-trip, conformance
         run: ./tests/go/run.sh
+      - name: Generate sources (artifact)
+        if: always()
+        run: ./tests/gen-artifacts.sh go generated
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generated-go
+          path: generated
 
   # Language milestone: Python (corelib-py). Generates a module, syntax-checks,
   # round-trips JSON, and checks byte-exact output against the shared vectors.
@@ -75,6 +91,14 @@ jobs:
           python-version: "3.12"
       - name: Python backend — generate, syntax, round-trip, conformance
         run: ./tests/python/run.sh
+      - name: Generate sources (artifact)
+        if: always()
+        run: ./tests/gen-artifacts.sh python generated
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generated-python
+          path: generated
 
   # Language milestone: TypeScript (corelib-ts). Builds the corelib, generates a
   # module, typechecks (strict), round-trips JSON, and checks byte-exact output
@@ -91,6 +115,14 @@ jobs:
           node-version: "20"
       - name: TypeScript backend — build, typecheck, round-trip, conformance
         run: ./tests/typescript/run.sh
+      - name: Generate sources (artifact)
+        if: always()
+        run: ./tests/gen-artifacts.sh typescript generated
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generated-typescript
+          path: generated
 
   # Language milestone: C++ max-speed (corelib-cpp). Generates header-only code,
   # builds it with g++ -std=c++20, round-trips JSON, and checks byte-exact output
@@ -106,6 +138,14 @@ jobs:
         run: g++ --version | head -1
       - name: C++ backend — generate, build, round-trip, conformance
         run: ./tests/cpp/run.sh
+      - name: Generate sources (artifact)
+        if: always()
+        run: ./tests/gen-artifacts.sh cpp generated
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generated-cpp
+          path: generated
 
   # Language milestone: Rust (corelib-rs-no-std). Generates a crate, builds it
   # with cargo, round-trips JSON, and checks byte-exact output against the shared
@@ -120,6 +160,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Rust backend — generate, build, round-trip, conformance
         run: ./tests/rust/run.sh
+      - name: Generate sources (artifact)
+        if: always()
+        run: ./tests/gen-artifacts.sh rust generated
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generated-rust
+          path: generated
 
   # Language milestone: C# / .NET (corelib-cs). Generates a project, builds it
   # with dotnet, round-trips JSON, and checks byte-exact output against the shared
@@ -136,6 +184,14 @@ jobs:
           dotnet-version: "9.0.x"
       - name: C# backend — generate, build, round-trip, conformance
         run: ./tests/csharp/run.sh
+      - name: Generate sources (artifact)
+        if: always()
+        run: ./tests/gen-artifacts.sh csharp generated
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generated-csharp
+          path: generated
 
   # Language milestone: Java (corelib-java, Maven). Installs the corelib,
   # generates a Maven project, builds a fat jar, round-trips JSON, and checks
@@ -153,3 +209,11 @@ jobs:
           java-version: "17"
       - name: Java backend — generate, build, round-trip, conformance
         run: ./tests/java/run.sh
+      - name: Generate sources (artifact)
+        if: always()
+        run: ./tests/gen-artifacts.sh java generated
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generated-java
+          path: generated
