@@ -8,6 +8,11 @@ Shared options (`emit`, `validation`, `naming`, `file_layout`, `buffer`,
 the top-level `generic:` block and apply to every target; they are **not**
 repeated here. A per-target value overrides the `generic` value for that target.
 
+> **SPDX header.** The generic `license` option sets the `SPDX-License-Identifier`
+> stamped into every generated file, for all targets. It defaults to **no
+> license** (no SPDX line). Set e.g. `license: MIT` or `license: Apache-2.0` to
+> emit one; `license: none` is the explicit "omit it" form.
+
 | Target | Doc | Honored language-specific options |
 |--------|-----|-----------------------------------|
 | `c` | [c.md](c.md) | `symbol_prefix` |

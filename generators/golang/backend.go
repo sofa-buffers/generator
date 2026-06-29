@@ -22,10 +22,11 @@ func (*Backend) Lang() string { return "go" }
 // with an encode/decode JSON harness.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{
-		schema: s,
-		pkg:    cfgString(cfg, "package", "messages"),
-		banner: cfgString(cfg, "tool_banner", "sofabgen"),
-		omit:   cfgBool(cfg, "omit_defaults"),
+		schema:  s,
+		pkg:     cfgString(cfg, "package", "messages"),
+		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
+		license: generator.LicenseID(cfg),
+		omit:    cfgBool(cfg, "omit_defaults"),
 	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	// In a project the package gets its own directory so the harness can import
@@ -48,10 +49,11 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 }
 
 type gen struct {
-	schema *ir.Schema
-	pkg    string
-	banner string
-	omit   bool // omit fields equal to their default (omit_defaults config)
+	schema  *ir.Schema
+	pkg     string
+	banner  string
+	license string // SPDX id, "" to omit the header line
+	omit    bool   // omit fields equal to their default (omit_defaults config)
 }
 
 // ---- types.go : all named types -----------------------------------------
@@ -74,7 +76,7 @@ func (g *gen) typesFile() []byte {
 			g.emitObject(f, g.typeName(key), nt.Fields)
 		}
 	}
-	return f.bytes(g.banner)
+	return f.bytes(g.banner, g.license)
 }
 
 func (g *gen) emitEnum(f *gofile, nt *ir.NamedType) {
@@ -356,7 +358,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("\t}")
 	f.line("\treturn m, nil")
 	f.line("}")
-	return f.bytes(g.banner)
+	return f.bytes(g.banner, g.license)
 }
 
 func (g *gen) emitDefaults(f *gofile, fields []*ir.Field) {

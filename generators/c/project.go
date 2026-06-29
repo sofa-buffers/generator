@@ -108,7 +108,7 @@ func (g *gen) readme(s *ir.Schema) string {
 
 func (g *gen) harness(s *ir.Schema) []byte {
 	h := &cfile{}
-	h.banner(g.banner, "main.c", "encode/decode harness")
+	h.banner(g.banner, g.license, "main.c", "encode/decode harness")
 	h.line("#include <stdio.h>")
 	h.line("#include <stdlib.h>")
 	h.line("#include <string.h>")

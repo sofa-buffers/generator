@@ -30,7 +30,7 @@ func (*Backend) Lang() string { return "c" }
 // (build files + devcontainer wiring + encode/decode harness, §9.1), with the
 // message sources placed under generated/.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "sofab_"), banner: cfgString(cfg, "tool_banner", "sofabgen")}
+	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "sofab_"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	srcDir := ""
 	if project {
@@ -55,9 +55,10 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 }
 
 type gen struct {
-	schema *ir.Schema
-	prefix string
-	banner string
+	schema  *ir.Schema
+	prefix  string
+	banner  string
+	license string // SPDX id, "" to omit the header line
 }
 
 // objectPlan is the fully-resolved emission plan for one C object (the message,
@@ -98,7 +99,7 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	maxField := plans[msgKey].maxField
 
 	h := &cfile{}
-	h.banner(g.banner, strings.ToLower(m.Name)+".h", m.Name)
+	h.banner(g.banner, g.license, strings.ToLower(m.Name)+".h", m.Name)
 	h.line("#ifndef %s", guardName)
 	h.line("#define %s", guardName)
 	h.blank()
@@ -130,7 +131,7 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	h.line("#endif /* %s */", guardName)
 
 	c := &cfile{}
-	c.banner(g.banner, strings.ToLower(m.Name)+".c", m.Name)
+	c.banner(g.banner, g.license, strings.ToLower(m.Name)+".c", m.Name)
 	c.line(`#include "%s.h"`, strings.ToLower(m.Name))
 	c.blank()
 	c.line("#include <string.h>")
