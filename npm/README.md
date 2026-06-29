@@ -30,36 +30,65 @@ Or wire it into `package.json` scripts so codegen is reproducible per project:
 }
 ```
 
-## How it works
+## How it works — per-platform optional dependencies
 
-`sofabgen` is a single static Go binary. The CI release workflow already builds
-one per platform/arch (`sofabgen-<os>-<arch>` + a `.sha256`) and attaches them to
-each GitHub release. This npm package ships **no binary of its own** — instead:
+`sofabgen` is a single static Go binary. The release workflow builds one per
+platform/arch (`sofabgen-<os>-<arch>` + a `.sha256`) and attaches them to each
+GitHub release. The npm distribution uses the **optional-dependency** pattern
+(as esbuild / swc / Biome / turbo do):
 
-1. On `postinstall`, `scripts/install.js` maps the host
-   (`process.platform`/`process.arch`) to the matching release asset, downloads
-   it from `…/releases/download/v<version>/sofabgen-<os>-<arch>`, verifies its
-   SHA-256, and writes it to `bin/`.
-2. `bin/sofabgen.js` (the package's `bin`) `exec`s that binary, forwarding args,
-   stdio, and exit code.
-3. If the install ran with `--ignore-scripts`, the launcher downloads the binary
-   lazily on first run, so it still works.
+- **`@sofa-buffers/generator`** (this package) is tiny: a `bin/sofabgen.js`
+  launcher and an `optionalDependencies` entry for every platform package. It
+  carries **no binary** and runs **no install script**.
+- **`@sofa-buffers/generator-<platform>-<arch>`** — one package per target
+  (`linux-x64`, `linux-ia32`, `linux-arm64`, `linux-arm`, `darwin-x64`,
+  `darwin-arm64`, `win32-x64`, `win32-ia32`, `win32-arm64`). Each declares
+  matching `"os"`/`"cpu"` and ships exactly one binary at `bin/sofabgen[.exe]`.
 
-No runtime dependencies; only Node built-ins (`https`, `crypto`, `fs`).
+On install, npm reads the `os`/`cpu` of each optional dependency and installs
+**only the one** that matches the host (silently skipping the rest). At runtime
+`bin/sofabgen.js` resolves that package
+(`require.resolve("@sofa-buffers/generator-<platform>-<arch>/package.json")`) and
+execs its binary, forwarding args/stdio/exit code. No download, no `postinstall`,
+no runtime dependencies.
+
+Why this over a `postinstall` download: it works **offline / air-gapped / in CI /
+with `--ignore-scripts`**, the binary is **integrity-hashed in the lockfile** and
+**reproducible** with `npm ci`, and it is **cached by corporate npm proxies**
+(Artifactory/Verdaccio) instead of re-hitting GitHub.
+
+> **`--omit=optional` caveat:** installing with `--no-optional` / `--omit=optional`
+> skips the binary; the launcher then prints a clear error. (This is the one
+> tradeoff of the optional-deps model.)
+
+## Building & publishing the packages
+
+The platform packages are generated from the release binaries — never committed
+(`npm/packages/` is git-ignored):
+
+```sh
+cd npm
+# download each binary from the v<version> release, verify its sha256, and write
+# the 9 platform packages into npm/packages/  (or: --from <dir> to copy locally)
+node scripts/build-platform-packages.js
+# publish platform packages FIRST, then the main package (so its optional deps resolve)
+for d in packages/*/; do npm publish "$d" --access public; done
+npm publish . --access public
+```
+
+This must run with the package `version` already bumped to match a published
+GitHub release tag `v<version>` (the binaries are downloaded from it). The
+natural home is a step in `.github/workflows/release.yml`, gated on the `v*` tag,
+using an npm token with publish rights to the `@sofa-buffers` scope.
 
 ## Open questions / decisions before publishing
 
-- **Package name & scope** — ✅ confirmed: `@sofa-buffers/generator`, under the
-  `sofa-buffers` npm org. (A scoped package publishes with `npm publish
-  --access public` and an org-member token.)
-- **Version ↔ release coupling** — the package `version` must correspond to a
-  published GitHub release tag `v<version>` (the download URL derives from it).
-  Publishing the npm package therefore has to be tied to the release workflow.
-- **Alternative packaging** — instead of a `postinstall` download, the more
-  hermetic pattern (used by esbuild/swc) is **per-platform optional-dependency
-  packages** (`@sofa-buffers/generator-linux-x64`, …) selected via `os`/`cpu`, so
-  there's no install-time network or script. More packages to publish, but no
-  postinstall and works offline from a cache. This scaffold uses the simpler
-  download approach first; switching is a follow-up if desired.
-- **Private/air-gapped installs** — a download-on-install package needs network
-  access to GitHub releases; the optional-deps approach avoids that.
+- **Version ↔ release coupling** — `version` in `package.json` (and in every
+  `optionalDependencies` entry) must equal the GitHub release tag the binaries
+  come from. A release step should bump all of them together.
+- **Publish automation** — wire `scripts/build-platform-packages.js` + the
+  publish loop into the release workflow with an `NPM_TOKEN` secret; publish
+  platform packages before the main package.
+- **Smoke test** — after publishing, `npm i -D @sofa-buffers/generator` on each
+  OS in CI and run `sofabgen --version` to catch a missing/mis-tagged platform
+  package.

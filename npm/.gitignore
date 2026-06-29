@@ -1,3 +1,5 @@
-# the per-platform binary is downloaded at install time, never committed
+# Per-platform packages + binaries are built from the release assets at publish
+# time (scripts/build-platform-packages.js); never committed.
+packages/
 bin/sofabgen
 bin/sofabgen.exe
