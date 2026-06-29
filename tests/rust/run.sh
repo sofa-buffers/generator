@@ -78,11 +78,11 @@ run_variant() {
     echo "==> [$label] corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions)"
 }
 
-# corelib-rs-no-std (default): corpus builds span the feature-subset matrix.
-run_variant no-std "" "$NOSTD"
+# corelib-rs (std, the default): always-on, no feature flags.
+run_variant rs "corelib: rs" "$STD"
 
-# corelib-rs (std): always-on, no feature flags.
-run_variant std "corelib: rs" "$STD"
+# corelib-rs-no-std: corpus builds span the feature-subset matrix.
+run_variant no-std "corelib: rs-no-std" "$NOSTD"
 
 echo "==> no-std feature-subset smoke: a varint-only schema builds with no features"
 printf 'version: 1\nmessages:\n  tiny: { payload: { a: { id: 0, type: i32 }, b: { id: 1, type: u16 }, c: { id: 2, type: boolean } } }\n' > "$WORK/tiny.yaml"

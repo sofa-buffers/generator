@@ -38,14 +38,70 @@ func (g *gen) frames(m *ir.Message) []frame {
 	return out
 }
 
+// visitorUse records which optional Visitor callbacks a message actually needs.
+// The corelib-rs-no-std Visitor gates fp32/string/blob (fixlen), fp64 (fp64),
+// array_begin (array) and sequence_begin/end (sequence) behind Cargo features,
+// so the generated impl must override only the callbacks the schema uses —
+// unused ones fall back to the trait's default no-op and never reference a
+// gated-out method. unsigned/signed are always present, so always emitted.
+type visitorUse struct {
+	fp32, fp64, str, blob, scalarArray, sequence bool
+}
+
+func visitorUseOf(fs []frame) visitorUse {
+	u := visitorUse{}
+	if len(fs) > 1 { // any nested struct/union or string/blob-array frame
+		u.sequence = true
+	}
+	for _, fr := range fs {
+		if fr.seqArr {
+			u.str = u.str || fr.elemKind == ir.KindString
+			u.blob = u.blob || fr.elemKind == ir.KindBlob
+		}
+		for _, fld := range fr.fields {
+			switch fld.Kind {
+			case ir.KindFP32:
+				u.fp32 = true
+			case ir.KindFP64:
+				u.fp64 = true
+			case ir.KindString:
+				u.str = true
+			case ir.KindBlob:
+				u.blob = true
+			case ir.KindArray:
+				switch fld.Elem {
+				case ir.KindString:
+					u.str = true
+				case ir.KindBlob:
+					u.blob = true
+				case ir.KindFP32:
+					u.fp32, u.scalarArray = true, true
+				case ir.KindFP64:
+					u.fp64, u.scalarArray = true, true
+				default:
+					u.scalarArray = true
+				}
+			}
+		}
+	}
+	return u
+}
+
 func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
+	use := visitorUseOf(fs)
 
 	// Wrap the decoder in a private module so _Loc / V don't clash across
 	// messages in a multi-message crate.
 	f.line("mod %s_dec {", strings.ToLower(name))
 	f.line("    use super::*;")
-	f.line("    use sofab::{IStream, Visitor, Id, Unsigned, Signed, ArrayKind};")
+	// ArrayKind is gated behind the no-std `array` feature; import it only when an
+	// array_begin override is emitted (i.e. the message has a scalar array).
+	arrayKind := ""
+	if use.scalarArray {
+		arrayKind = ", ArrayKind"
+	}
+	f.line("    use sofab::{IStream, Visitor, Id, Unsigned, Signed%s};", arrayKind)
 	f.blank()
 	f.line("    pub fn decode(data: &[u8]) -> %s {", name)
 	f.line("        let mut m = %s::default();", name)
@@ -115,85 +171,97 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("        }")
 	f.line("    }")
 
-	g.emitFloatVisit(f, fs, ir.KindFP32, "fp32", "f32")
-	g.emitFloatVisit(f, fs, ir.KindFP64, "fp64", "f64")
+	if use.fp32 {
+		g.emitFloatVisit(f, fs, ir.KindFP32, "fp32", "f32")
+	}
+	if use.fp64 {
+		g.emitFloatVisit(f, fs, ir.KindFP64, "fp64", "f64")
+	}
 
-	// string: scalar strings + string-array elements
-	f.line("    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
-	f.line("        self.acc.extend_from_slice(chunk);")
-	f.line("        if self.acc.len() < total { return; }")
-	f.line("        let _s = String::from_utf8_lossy(&self.acc).into_owned();")
-	f.line("        self.acc.clear();")
-	f.line("        match (self.cur, id) {")
-	for _, fr := range fs {
-		if fr.seqArr && fr.elemKind == ir.KindString {
-			f.line("            (_Loc::%s, _) => %s.push(_s),", fr.loc, fr.path)
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindString {
-				f.line("            (_Loc::%s, %d) => %s.%s = _s,", fr.loc, fld.ID, fr.path, fld.Name)
+	if use.str {
+		// string: scalar strings + string-array elements
+		f.line("    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
+		f.line("        self.acc.extend_from_slice(chunk);")
+		f.line("        if self.acc.len() < total { return; }")
+		f.line("        let _s = String::from_utf8_lossy(&self.acc).into_owned();")
+		f.line("        self.acc.clear();")
+		f.line("        match (self.cur, id) {")
+		for _, fr := range fs {
+			if fr.seqArr && fr.elemKind == ir.KindString {
+				f.line("            (_Loc::%s, _) => %s.push(_s),", fr.loc, fr.path)
+			}
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindString {
+					f.line("            (_Loc::%s, %d) => %s.%s = _s,", fr.loc, fld.ID, fr.path, fld.Name)
+				}
 			}
 		}
+		f.line("            _ => {}")
+		f.line("        }")
+		f.line("    }")
 	}
-	f.line("            _ => {}")
-	f.line("        }")
-	f.line("    }")
 
-	// blob: scalar blobs + blob-array elements
-	f.line("    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
-	f.line("        self.acc.extend_from_slice(chunk);")
-	f.line("        if self.acc.len() < total { return; }")
-	f.line("        let _b = self.acc.clone();")
-	f.line("        self.acc.clear();")
-	f.line("        match (self.cur, id) {")
-	for _, fr := range fs {
-		if fr.seqArr && fr.elemKind == ir.KindBlob {
-			f.line("            (_Loc::%s, _) => %s.push(_b),", fr.loc, fr.path)
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindBlob {
-				f.line("            (_Loc::%s, %d) => %s.%s = _b,", fr.loc, fld.ID, fr.path, fld.Name)
+	if use.blob {
+		// blob: scalar blobs + blob-array elements
+		f.line("    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
+		f.line("        self.acc.extend_from_slice(chunk);")
+		f.line("        if self.acc.len() < total { return; }")
+		f.line("        let _b = self.acc.clone();")
+		f.line("        self.acc.clear();")
+		f.line("        match (self.cur, id) {")
+		for _, fr := range fs {
+			if fr.seqArr && fr.elemKind == ir.KindBlob {
+				f.line("            (_Loc::%s, _) => %s.push(_b),", fr.loc, fr.path)
+			}
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindBlob {
+					f.line("            (_Loc::%s, %d) => %s.%s = _b,", fr.loc, fld.ID, fr.path, fld.Name)
+				}
 			}
 		}
+		f.line("            _ => {}")
+		f.line("        }")
+		f.line("    }")
 	}
-	f.line("            _ => {}")
-	f.line("        }")
-	f.line("    }")
 
-	// array_begin clears the target vec so element pushes start fresh
-	f.line("    fn array_begin(&mut self, id: Id, _kind: ArrayKind, _count: usize) {")
-	f.line("        match (self.cur, id) {")
-	for _, fr := range fs {
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindArray && fld.Elem != ir.KindString && fld.Elem != ir.KindBlob {
-				f.line("            (_Loc::%s, %d) => %s.%s.clear(),", fr.loc, fld.ID, fr.path, fld.Name)
+	if use.scalarArray {
+		// array_begin clears the target vec so element pushes start fresh
+		f.line("    fn array_begin(&mut self, id: Id, _kind: ArrayKind, _count: usize) {")
+		f.line("        match (self.cur, id) {")
+		for _, fr := range fs {
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindArray && fld.Elem != ir.KindString && fld.Elem != ir.KindBlob {
+					f.line("            (_Loc::%s, %d) => %s.%s.clear(),", fr.loc, fld.ID, fr.path, fld.Name)
+				}
 			}
 		}
+		f.line("            _ => {}")
+		f.line("        }")
+		f.line("    }")
 	}
-	f.line("            _ => {}")
-	f.line("        }")
-	f.line("    }")
 
-	// sequence_begin: push current, descend; clear seq-array vecs on entry
-	f.line("    fn sequence_begin(&mut self, id: Id) {")
-	f.line("        self.stack.push(self.cur);")
-	f.line("        self.cur = match (self.cur, id) {")
-	for _, fr := range fs {
-		for _, fld := range fr.fields {
-			switch {
-			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				f.line("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
-			case fld.Kind == ir.KindArray && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob):
-				f.line("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, fld.Name, fr.loc+"_"+fld.Name)
+	if use.sequence {
+		// sequence_begin: push current, descend; clear seq-array vecs on entry
+		f.line("    fn sequence_begin(&mut self, id: Id) {")
+		f.line("        self.stack.push(self.cur);")
+		f.line("        self.cur = match (self.cur, id) {")
+		for _, fr := range fs {
+			for _, fld := range fr.fields {
+				switch {
+				case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
+					f.line("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
+				case fld.Kind == ir.KindArray && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob):
+					f.line("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, fld.Name, fr.loc+"_"+fld.Name)
+				}
 			}
 		}
+		f.line("            _ => self.cur,")
+		f.line("        };")
+		f.line("    }")
+		f.line("    fn sequence_end(&mut self) {")
+		f.line("        self.cur = self.stack.pop().unwrap_or(_Loc::Root);")
+		f.line("    }")
 	}
-	f.line("            _ => self.cur,")
-	f.line("        };")
-	f.line("    }")
-	f.line("    fn sequence_end(&mut self) {")
-	f.line("        self.cur = self.stack.pop().unwrap_or(_Loc::Root);")
-	f.line("    }")
 
 	f.line("}") // impl Visitor
 	f.line("}") // mod <name>_dec
