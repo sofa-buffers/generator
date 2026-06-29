@@ -27,14 +27,17 @@ func (g *gen) makefile() string {
 # Point SOFAB_C_CORELIB at a corelib-c-cpp checkout.
 SOFAB_C_CORELIB ?= /opt/corelib-c-cpp
 CC ?= cc
-CFLAGS ?= -std=c99 -Wall -Wextra -Igenerated \
-  -I$(SOFAB_C_CORELIB)/src/include -I$(SOFAB_C_CORELIB)/test/shared
+# The C standard is kept separate from CFLAGS so it is always applied even if a
+# caller overrides CFLAGS. The generated code targets C99.
+CSTD ?= -std=c99
+CFLAGS ?= -Wall -Wextra
+INCLUDES := -Igenerated -I$(SOFAB_C_CORELIB)/src/include -I$(SOFAB_C_CORELIB)/test/shared
 CORE := $(SOFAB_C_CORELIB)/src/object.c $(SOFAB_C_CORELIB)/src/ostream.c $(SOFAB_C_CORELIB)/src/istream.c
 JSON := $(SOFAB_C_CORELIB)/test/shared/sofab_test_json.c
 GEN  := $(wildcard generated/*.c)
 
 harness/harness: harness/main.c $(GEN) $(CORE) $(JSON)
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CC) $(CSTD) $(CFLAGS) $(INCLUDES) $^ -o $@
 
 .PHONY: clean
 clean:
@@ -108,7 +111,7 @@ func (g *gen) readme(s *ir.Schema) string {
 
 func (g *gen) harness(s *ir.Schema) []byte {
 	h := &cfile{}
-	h.banner(g.banner, "main.c", "encode/decode harness")
+	h.banner(g.banner, g.license, "main.c", "encode/decode harness")
 	h.line("#include <stdio.h>")
 	h.line("#include <stdlib.h>")
 	h.line("#include <string.h>")

@@ -101,4 +101,13 @@ run_variant cpp "" "-I$CPP/include" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC"
 # SOFAB_C_DIR; the generated Makefile compiles + links its C sources.
 run_variant c-cpp "c-cpp" "-I$CC/src/include" SOFAB_C_DIR="$CC"
 
+# NOTE: corelib feature-subset configs (SOFAB_DISABLE_*) are NOT exercised for
+# C++. The C *library* headers are feature-gated, so the generated C is tested
+# against every subset in tests/c/run.sh — but corelib-c-cpp's C++ *wrapper*
+# (sofab/sofab.hpp) is not gated: its OStream/IStream methods reference the C
+# write_string/write_blob/read_sequence/... entry points unconditionally, so the
+# wrapper itself fails to compile under any SOFAB_DISABLE_* macro, regardless of
+# what the generated code uses. Re-enable a subset matrix here once the wrapper
+# gates its methods to match the C headers.
+
 echo "PASS"

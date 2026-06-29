@@ -11,6 +11,7 @@ package c
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -29,7 +30,7 @@ func (*Backend) Lang() string { return "c" }
 // (build files + devcontainer wiring + encode/decode harness, §9.1), with the
 // message sources placed under generated/.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "sofab_"), banner: cfgString(cfg, "tool_banner", "sofabgen")}
+	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "sofab_"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	srcDir := ""
 	if project {
@@ -54,9 +55,10 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 }
 
 type gen struct {
-	schema *ir.Schema
-	prefix string
-	banner string
+	schema  *ir.Schema
+	prefix  string
+	banner  string
+	license string // SPDX id, "" to omit the header line
 }
 
 // objectPlan is the fully-resolved emission plan for one C object (the message,
@@ -72,7 +74,8 @@ type objectPlan struct {
 }
 
 type member struct {
-	decl string // e.g. "uint16_t u16;"
+	decl  string // e.g. "uint16_t u16;"
+	align int    // storage alignment in bytes, for widest-first member ordering
 }
 
 type fieldEntry struct {
@@ -96,7 +99,7 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	maxField := plans[msgKey].maxField
 
 	h := &cfile{}
-	h.banner(g.banner, strings.ToLower(m.Name)+".h", m.Name)
+	h.banner(g.banner, g.license, strings.ToLower(m.Name)+".h", m.Name)
 	h.line("#ifndef %s", guardName)
 	h.line("#define %s", guardName)
 	h.blank()
@@ -128,7 +131,7 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	h.line("#endif /* %s */", guardName)
 
 	c := &cfile{}
-	c.banner(g.banner, strings.ToLower(m.Name)+".c", m.Name)
+	c.banner(g.banner, g.license, strings.ToLower(m.Name)+".c", m.Name)
 	c.line(`#include "%s.h"`, strings.ToLower(m.Name))
 	c.blank()
 	c.line("#include <string.h>")
@@ -163,7 +166,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, f.Name)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, f.Name), align: ir.AlignRank(f)})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, f.Name, nestedIdx[ck])})
@@ -176,7 +179,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, f.Name)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, f.Name), align: ir.AlignRank(f)})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, f.Name, nestedIdx[ck])})
@@ -185,10 +188,15 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 			if err != nil {
 				return err
 			}
-			p.members = append(p.members, member{decl: decl})
+			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f)})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 		}
 	}
+	// Order the struct members widest-first to minimise padding. The descriptor
+	// (p.fields) and the wire format are unaffected — encode walks the descriptor
+	// in id order and decode keys off the field id, both independent of the C
+	// member layout (offsets are resolved with offsetof at compile time).
+	sort.SliceStable(p.members, func(i, j int) bool { return p.members[i].align > p.members[j].align })
 	plans[key] = p
 	*order = append(*order, key)
 	return nil

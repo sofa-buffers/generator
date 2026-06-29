@@ -100,7 +100,7 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	f.line("\tfmt.Fprintln(os.Stderr, \"error:\", err)")
 	f.line("\tos.Exit(1)")
 	f.line("}")
-	return f.bytes(g.banner)
+	return f.bytes(g.banner, g.license)
 }
 
 func defaultMessage(s *ir.Schema) string {

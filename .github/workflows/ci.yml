@@ -149,9 +149,11 @@ jobs:
           name: generated-cpp
           path: generated
 
-  # Language milestone: Rust (corelib-rs-no-std). Generates a crate, builds it
-  # with cargo, round-trips JSON, and checks byte-exact output against the shared
-  # vectors. run.sh clones corelib-rs-no-std.
+  # Language milestone: Rust (corelib-rs-no-std + corelib-rs). Generates a crate,
+  # builds it with cargo, round-trips JSON, and checks byte-exact output against
+  # the shared vectors — for BOTH Rust corelibs: corelib-rs-no-std (default,
+  # feature-gated; the corpus spans the no-std feature-subset matrix) and the
+  # always-on std corelib-rs (corelib: rs). run.sh clones both.
   lang-rust:
     runs-on: ubuntu-latest
     steps:

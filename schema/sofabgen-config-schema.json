@@ -366,6 +366,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "corelib": {
+          "type": "string",
+          "enum": [
+            "rs-no-std",
+            "rs"
+          ],
+          "default": "rs-no-std"
+        },
         "emit": {
           "type": "string",
           "enum": [
