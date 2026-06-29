@@ -1,272 +1,500 @@
-# SofaBuffers Generator — Architecture
+# SofaBuffers Generator — Architecture & Requirements
 
-> **Status: ALL 8 language backends (C, Go, Python, TypeScript, C++, Rust, C#, Java) complete + CI green.** This document is the
-> single, up-to-date description of how the generator works and is the first
-> thing a maintainer or new-language contributor should read. Keeping it current
-> is part of the "done when" criterion of every milestone (PLAN §10), and it is
-> updated **before every push to `main`**.
+> **Purpose of this document.** A complete, language-agnostic description of
+> *what* the SofaBuffers code generator is and *how* it is structured —
+> sufficient to **reimplement it from scratch in another language**. It specifies
+> the contracts (input format, validation, IR, wire/corelib API, output) and the
+> design decisions, not Go specifics. Where a contract is normatively defined
+> elsewhere, this document points to it:
 >
-> **What exists today:** the language-independent core (CLI, config, parser +
-> hard-gate validation, model, `$ref`/shared-type resolution, semantic checks,
-> frozen IR) **plus the first language backend — C (`generators/c`)** — which
-> generates `object.h`-based code that compiles, round-trips, and is byte-exact
-> against the shared wire vectors. GitHub Actions CI (`.github/workflows/ci.yml`)
-> runs a hermetic core job and a per-language job (`lang-c`) on every push.
+> - **Input definition format + validation rules** — `schema/README.md` and
+>   `schema/sofabuffers-schema-v1.json` (authoritative; §4–§5 here summarise).
+> - **Wire format** — the [SofaBuffers wire-format docs](https://github.com/sofa-buffers/documentation)
+>   and any `corelib-*` repository (§9 here summarises the contract the generated
+>   code targets).
+> - **Config format** — `schema/sofabgen-config-schema.json` and `docs/generator/`.
 >
-> **Milestone model:** each target language is a milestone — a working backend
-> with its own CI job and tests, landed on `main` only when green, then on to
-> the next language. Order (testable-toolchain first): **C ✓ → Go ✓ → Python ✓
-> → TypeScript ✓ → C++ ✓ → Rust ✓ → C# ✓ → Java ✓ — ALL 8 BACKENDS COMPLETE.** C++
-> (`generators/cpp`, max-speed `corelib-cpp`) is header-only: each object derives
-> `OStreamMessage`+`IStreamMessage` with `serialize`/`deserialize`, nested via
-> `os.write(id,child)` / `is.read(child)`; 37 shared vectors byte-exact
-> (`tests/cpp/run.sh`, CI job `lang-cpp`). A `corelib: c-cpp` target option emits
-> the same code against the **C++ wrapper in `corelib-c-cpp`** (decode pre-sizes
-> variable-length fields; Makefile links the C sources); `tests/cpp/run.sh`
-> round-trips and checks vectors against **both** C++ corelibs.
-> TypeScript (`generators/typescript`) emits classes with `marshal(OStream)` and
-> a visitor-based `decode` against `corelib-ts` (64-bit → `bigint`); 27 shared
-> vectors byte-exact (`tests/typescript/run.sh`, CI job `lang-typescript`).
-> Python (`generators/python`) emits dataclasses + `_marshal`/pull-parser
-> `_unmarshal` against `corelib-py`; 37 shared vectors byte-exact
-> (`tests/python/run.sh`, CI job `lang-python`).
-> Go (`generators/golang`) emits one struct per object with `Marshal`
-> (streaming `Encoder`) + a pull-parser `Unmarshal` (`Decoder.Next/Skip`)
-> against `corelib-go`, with canonical-JSON struct tags; verified byte-exact on
-> 37 shared vectors (`tests/go/run.sh`, CI job `lang-go`).
+> Status: all 8 language backends (C, C++, Rust, Go, Python, TypeScript, C#, Java)
+> are implemented and CI-green. Keep this file current — it is updated before
+> every push to `main`.
 
 ---
 
-## 1. Overview & responsibilities
+## 1. Purpose, scope, and the firm boundary
 
 The generator is a **definition → typed-wrapper compiler**. It reads a
-SofaBuffers message definition (YAML/JSON), validates it, lowers it to a
-language-neutral Intermediate Representation (IR), and — once backends are
-wired — emits one idiomatic, typed `serialize`/`deserialize` type per object
-for a target language.
+SofaBuffers *message definition* (YAML/JSON), validates it, lowers it to a
+language-neutral **Intermediate Representation (IR)**, and emits one idiomatic,
+typed `encode`/`decode` type per object for a chosen target language.
 
-**Firm boundary:** the **corelib owns the wire format** (varints, byte order,
-framing, field-skipping). The generator never touches bytes; it emits typed
-calls into each corelib's public encode/decode API (PLAN §4). This is why the
-core pipeline is entirely language- and wire-format-independent.
+**Firm boundary — the corelib owns the wire format.** The generator never
+touches bytes: no varint encoding, byte order, framing, or field-skipping lives
+in it. Generated code makes *typed calls* into a per-language runtime library
+(the **corelib**) that implements the wire format (§9). Consequences:
 
-The tool **fails closed**: any validation or analysis error aborts with a
-clear, located error, a non-zero exit, and **no output** (PLAN §1).
+- The entire core pipeline (parse → validate → IR) is wire-format- and
+  language-independent.
+- Cross-language interop is guaranteed by every corelib implementing the *same*
+  wire format, verified by shared byte-exact vectors (§12) — not by the
+  generator.
+- A reimplementation must reproduce the **definition format**, the
+  **validation**, the **IR semantics**, and the **typed calls each corelib
+  expects** — but never a byte encoder.
 
----
-
-## 2. Architecture & patterns
-
-The design follows four established patterns (PLAN §8):
-
-- **Composite** — the model and IR are trees where every element implements a
-  common `Node` interface (`Accept`, `Children`, `NodeName`), so traversal is
-  uniform and recursive. See `internal/ir`.
-- **Visitor** — generation is a `Visitor` over the IR (`VisitSchema`,
-  `VisitMessage`, `VisitNamedType`, `VisitField`). A backend is one visitor
-  family; new outputs (a docs visitor, a test-harness visitor) are added
-  without touching the model. `ir.Walk` provides the default depth-first walk.
-- **Builder** — backends will construct source files through an intent-level
-  Builder API (no ad-hoc string concatenation), with formatting separated from
-  content. *(Builders arrive with the first backend in M2.)*
-- **Strategy** — configurable behaviour (naming, decode model, buffer mode,
-  output language) is injected from the validated config, not hard-coded.
-
-Rationale: the patterns keep the core closed for modification but open for
-extension — a new language is a new package, never an edit to the core.
+**Fail closed.** Any parse, validation, or analysis error aborts with a clear,
+located message, a non-zero exit, and **no output**. Invalid definitions are
+never code-generated. All problems are reported at once.
 
 ---
 
-## 3. Pipeline / flows
+## 2. System context
 
 ```
-config (§7) ┐ (resolved: defaults → generic → per-target; --in/--out override paths)
-            ▼
-YAML / JSON ─▶ [1] Parser     parse + hard-gate validation (resolved doc)
-            ─▶ [2] Model      lower validated doc → IR nodes (refs preserved)
-            ─▶ [3] Analysis   resolve shared-type graph + semantic checks
-            ─▶ [4] IR         frozen, language-neutral Intermediate Representation
-            ══ Language Selection Point ══   ← the ONLY place a language is chosen
-            ─▶ [5] Backend    Visitor(IR) + Builder → files     (not wired in M0)
-            ─▶ [6] Formatter  deterministic formatting           (with the backend)
+        definition file(s)  ─┐                         ┌─▶  generated source files
+        (.yaml / .json)      │                         │    (one typed type per object;
+                             ▼                         │     "sources" or full "project")
+   config file ──▶ [ sofabgen generator ] ────────────┘
+   (.yaml / .json)              │
+                                └── targets one language per run (--lang)
+
+   generated code ──calls──▶ corelib-<lang>  (owns the wire format; not produced here)
 ```
 
-Stage by stage (what it consumes → produces):
+- **Inputs:** one definition file or a folder of them; a config file selecting
+  the target and options; CLI flags (`--lang`, `--in`, `--out`, …).
+- **Output:** for the selected language, either bare **sources** (the message
+  types) or a buildable **project** (sources + build files + a JSON
+  encode/decode harness).
+- **External dependency at *runtime of the generated code*:** the corelib for
+  that language. The generator itself has no runtime dependency on it.
 
-| # | Stage | Package | Consumes | Produces |
-|---|---|---|---|---|
-| 1 | Parser | `internal/parser` | file bytes | unresolved `Document` + **validated** (hard gate) |
-| 2 | Model | `internal/model` | validated, unresolved `Document` | `ir.Schema` with unresolved `TypeRef`s + hoisted inline types |
-| 3 | Analysis | `internal/analysis` | `ir.Schema` | resolved shared-type graph + semantic checks |
-| 4 | IR | `internal/ir` | — | the frozen Composite tree backends consume |
-| 5 | Backend | `generators/<lang>` | frozen IR + effective config | `[]generator.File` |
-| 6 | Formatter | (in the backend) | builder output | deterministic source |
+### CLI surface (`cmd/sofabgen`)
+
+| Flag | Meaning |
+|---|---|
+| `--config <file>` | Config file (carries all options; §7). |
+| `--lang <target>` | Target backend (`c`, `cpp`, `rust`, `go`, `python`, `java`, `csharp`, `typescript`). |
+| `--in <file\|dir>` | Definition input (overrides `generic.input_dir`). |
+| `--out <dir>` | Output folder (overrides `generic.output_dir`). |
+| `--print-defaults` | Print the effective resolved config for `--lang` and exit. |
+| `--dump-ir` | Print the built IR as JSON and exit (no codegen) — the IR contract is observable/golden-tested. |
+| `--version` | Print version and exit. |
+
+---
+
+## 3. The compilation pipeline
+
+```
+config (resolved: defaults → generic → per-target; --in/--out override paths)
+   │
+   ▼
+[1] Parser     parse YAML/JSON, resolve $ref, HARD-GATE validate  → unresolved Document
+[2] Model      lower validated doc → IR nodes, hoist inline types → ir.Schema (refs by key)
+[3] Analysis   resolve shared-type graph + semantic checks, freeze → ir.Schema (refs resolved)
+[4] IR         frozen, language-neutral Composite tree
+══ Language Selection Point ══   ← the ONLY place a language is chosen
+[5] Backend    Visitor(IR) + Builder                              → []File
+[6] Formatter  deterministic formatting (inside the backend)      → source bytes
+```
+
+| # | Stage | Consumes | Produces |
+|---|---|---|---|
+| 1 | **Parser** | file bytes | `$ref`-resolved + **validated** unresolved `Document` |
+| 2 | **Model** | validated `Document` | `ir.Schema` with unresolved `TypeRef`s + hoisted inline types |
+| 3 | **Analysis** | `ir.Schema` | resolved shared-type graph + semantic checks; tree frozen |
+| 4 | **IR** | — | the frozen Composite tree backends consume |
+| 5 | **Backend** | frozen IR + effective config | `[]File` (path + bytes) |
+| 6 | **Formatter** | builder output | deterministic source |
 
 **The language-independent core ends at stage [4].** A backend is selected only
-after the IR is frozen, at the **Language Selection Point** —
-`internal/generator.Lookup(lang)`. `internal/pipeline` wires the stages.
+after the IR is frozen, at the **Language Selection Point** — a registry lookup
+by language key. Stages [1]–[4] know nothing about any target language.
 
-### Validation contract (stage [1])
-
-Validation is hand-ported from `schema/README.md` because the schema relies on
-Ajv-only features no stock Go validator accepts. The parser reproduces, over
-the **`$ref`-resolved** document:
-
-- the **structural** schema (types, per-width default ranges, closed objects,
-  required `type`+`id`, name pattern);
-- the two **`$data`** cross-field rules (string `default` ≤ `maxlen`; array
-  `default` length == `items.count`);
-- the six **custom keywords** — `uniqueIds` (every id scope: payload + nested
-  struct/union), `uniquePositions` (bitfield), `defaultMatchesEnum`,
-  `defaultIdMatchesUnion`, `blobDefaultLength` (base64-decode then compare
-  bytes), `int64Range` (exact 64-bit via `math/big`, accepting integer or
-  quoted string);
-- **dereference-then-validate, generate-from-the-unresolved-document**: the
-  validator checks the resolved tree (a dangling `$ref` fails fast), while the
-  model lowers the *unresolved* document so a shared `$defs` type becomes one
-  shared generated type, never duplicated (PLAN §3.4).
-- **cross-file `$ref`** (`internal/parser/external.go`): a `$ref` of the form
-  `file.yaml#/$defs/<cat>/<Name>` is inlined at load time — the referenced
-  definition (and its same-file dependencies) is merged into the document's own
-  `$defs` and the `$ref` rewritten to local, so everything downstream sees a
-  self-contained document. Chains flatten transitively. A **recursive `$ref`**
-  is rejected (a recursive value member has no finite size).
-
-All problems are reported at once (`allErrors`), sorted by location.
-
-### Two IR states (model vs analysis)
-
-PLAN §8.2 describes a "generic model" and an "IR". In this implementation both
-are the same Composite types (`internal/ir`) in two states:
-
-- **post-Model** — `TypeRef.Target == nil` (references by key only);
-- **post-Analysis** — every `TypeRef.Target` points at the single shared
-  `NamedType`, semantic checks have run, and the tree is **frozen** (backends
-  treat it as immutable, PLAN §8.6).
-
-Semantic checks in M0: shared-type resolution (dangling-ref detection), and the
-shared `MaxNestingDepth = 256` cap (PLAN §4.2), with recursive-struct back-edges
-broken so analysis terminates.
+**Two IR states.** The same Composite types carry two states: *post-Model*
+(`TypeRef.Target == nil`, references by key only) and *post-Analysis* (every
+`TypeRef.Target` points at the single shared `NamedType`, checks have run, tree
+frozen). Backends only ever see the frozen post-Analysis state and must treat it
+as immutable.
 
 ---
 
-## 4. Project structure
+## 4. Input contract: the definition format
+
+Authoritative spec: **`schema/README.md`** (+ the JSON Schema). Summary:
+
+A document has `version: 1` and at least one of `$defs` / `messages`. A message
+has an optional `summary` and a required `payload` (its top-level **id scope**).
+Every field requires **`id`** (0 … 2³¹−1) and **`type`**; common optional
+metadata is `description`, `unit`, `deprecated` (floats also allow `decimals`
+0–15). All identifiers match `^[A-Za-z][A-Za-z0-9_]*$`; objects are **closed**
+(unknown keys are rejected).
+
+**Field types and their declaration keys:**
+
+| Category | Types / form | Key constraints |
+|---|---|---|
+| Unsigned int | `u8 u16 u32 u64` | optional `default` (range-checked; `u64` > 2⁵³ must be a quoted string) |
+| Signed int | `i8 i16 i32 i64` | optional `default` (zig-zag on wire; `i64` past ±2⁵³ must be a quoted string) |
+| Float | `fp32 fp64` | optional `default` (number), `decimals` 0–15 |
+| Bool | `boolean` | optional `default` |
+| String | `string` | optional `maxlen`, `default`; UTF-8 |
+| Blob | `blob` | optional `maxlen` (caps **decoded** bytes), `default` is base64 |
+| Enum | `type: enum` + `enum: {NAME: int \| {value,description}}` or `{$ref}` | values **signed 32-bit**, may be negative; `default` must be a declared value |
+| Bitfield | `type: bitfield` + `bits: {FLAG: {pos 0–63, default?}}` or `{$ref}` | each `pos` unique |
+| Array | `type: array` + `items: {type, count, maxlen?}` | fixed `count`; element `type` ∈ numeric \| `string` \| `blob`; `maxlen` only for string/blob elements |
+| Struct | `type: struct` + `fields: {...}` or `{$ref}` | nested; **own id scope** |
+| Union | `type: union` + `oneof: {...}` or `{$ref}`, optional `default_id` | exactly one option; **own id scope** |
+
+**Id scopes.** `id` is the wire key a decoder uses to route/skip fields. Ids must
+be unique **within each scope**, and **each struct/union opens a fresh scope**
+(so nested ids never collide with the parent). The three scope kinds: a
+message `payload`, a `struct`'s `fields`, a `union`'s `oneof`.
+
+**Shared types (`$ref`).** A `{$ref: "#/$defs/<category>/<Name>"}` reuses a
+definition from `$defs` so it becomes **one shared generated type** (inline
+definitions duplicate). Cross-file refs `file.yaml#/$defs/...` are inlined at
+load time and flattened transitively; **recursive refs are rejected** (a
+recursive value member has no finite size).
+
+**How definition types lower onto the wire** (the generator must route these to
+the corelib correctly — see §9): `struct`/`union` and *arrays of string/blob*
+become **sequences** (open a fresh id scope); arrays of numerics become real
+**array** wire types; `enum` becomes a **signed (zig-zag) varint** with a backing
+width = smallest signed int covering its value range; `bitfield` becomes an
+**unsigned varint** with a backing width = smallest unsigned int covering its
+highest `pos`. `sequence` is a wire type only — there is no `sequence` keyword in
+the definition language.
+
+---
+
+## 5. Validation contract (the hard gate)
+
+Plain JSON-Schema (draft-07) validation is **not sufficient**; a conforming
+validator must reproduce all of `schema/README.md` §Validation. Checklist:
+
+1. **Structural** schema: types, per-width default ranges, closed objects,
+   required `type`+`id`, identifier pattern.
+2. **Dereference-then-validate, generate-from-unresolved**: resolve every `$ref`
+   and validate the *resolved* tree (a dangling ref fails fast), but lower the
+   *unresolved* document so a shared `$defs` type stays a single generated type.
+3. **`$data` cross-field rules** (no stock validator runs these): string
+   `default` length ≤ `maxlen`; array `default` length == `items.count`.
+4. **Six custom keywords**:
+   - `uniqueIds` — id unique in **every** scope (payload + each struct + each union).
+   - `uniquePositions` — bitfield `pos` unique.
+   - `defaultMatchesEnum` — enum `default` ∈ declared values (**presence** test, so `default: 0` is checked).
+   - `defaultIdMatchesUnion` — union `default_id` matches an option id (presence test).
+   - `blobDefaultLength` — base64-decode the blob `default`, compare **byte** length to `maxlen`.
+   - `int64Range` — exact 64-bit range for `i64`/`u64` `default`, accepting an integer or a quoted string, checked with a big-integer type.
+5. **Enum values are signed 32-bit** (−2³¹ … 2³¹−1), values and `default` alike.
+6. **Nesting-depth cap** (`MaxNestingDepth = 256`) and recursive-ref rejection.
+7. **Fail closed** with `allErrors` (report every problem, sorted by location).
+
+---
+
+## 6. The Intermediate Representation (the backend data model)
+
+The IR is the **frozen contract every backend consumes**. It is a Composite tree
+(every node implements `Accept`/`Children`/`NodeName`) traversed by the Visitor
+pattern. A reimplementation needs equivalent data structures:
+
+- **`Schema`** — the root: `Version`, an ordered list of `Message`, and the
+  **shared named-type graph** `Named` (keyed by canonical name, e.g.
+  `struct/Point`) with a deterministic `NamedOrder`.
+- **`Message`** — `Name`, `Summary`, ordered `Fields`.
+- **`NamedType`** — a shared `struct`/`union`/`enum`/`bitfield`: a `Category`,
+  `Name`/`Key`, and one of `Fields` (struct/union), `Consts` (enum), `Flags`
+  (bitfield); unions also carry an optional `DefaultID`.
+- **`Field`** — `Name`, `ID`, `Kind`, metadata (`Description`/`Unit`/
+  `Deprecated`), and kind-specific data: `Default` (typed per kind), `Maxlen`,
+  `Decimals` (scalars/string/blob); `Elem`/`Count`/`ElemMax` (array); `Ref`
+  (composite → shared `NamedType`).
+- **`Kind`** — the closed leaf/composite enum: `U8 U16 U32 U64 I8 I16 I32 I64
+  FP32 FP64 Bool String Blob Array Enum Bitfield Struct Union`. Width per kind
+  is intrinsic (1/2/4/8 bytes; enum/bitfield width derived from value range / max
+  position) — see `internal/ir/layout.go` `AlignRank`.
+- **`TypeRef`** — `{Key, Target}`; post-Analysis `Target` is always resolved.
+
+**Determinism (required).** Model/analysis sort fields by id, named types by key,
+enum consts by value, bitfield flags by pos. The IR — and therefore generated
+output — is byte-stable, so golden-diff tests are meaningful. The IR is
+observable via `--dump-ir` and locked by a golden snapshot.
+
+---
+
+## 7. Configuration model
+
+`internal/config` loads YAML/JSON, **validates it against the embedded config
+schema as a hard gate**, then resolves the **effective config per target** with
+precedence **built-in default < `generic` < per-target**. Only `--in`/`--out`
+override file paths from the CLI.
+
+**Generic options** (apply to every target; `generic:` block). Built-in
+defaults: `namespace=sofabuffers`, `emit=sources`, `timestamp=true`,
+`timestamp_format=iso8601`, `emit_deprecated=true`, `validation=debug`,
+`file_layout=file_per_message`. Others: `input_dir`, `output_dir`,
+`tool_banner`, `license`, `omit_defaults`, `naming`.
+
+**Per-target options** (`targets.<lang>:`). The config schema is the full
+*intended* surface; backends today consume only a subset (the rest validate but
+are reserved — documented per language in `docs/generator/<lang>.md`). The
+**honored, behaviour-changing** options:
+
+| Option | Targets | Effect |
+|---|---|---|
+| `corelib` | `cpp` (`cpp`\|`c-cpp`), `rust` (`rs`\|`rs-no-std`) | Selects which corelib the code targets (§9/§10). |
+| `namespace` | cpp, csharp (also generic) | Wrapping namespace. |
+| `package` | go, java | Package name. |
+| `module_path`, `go_version` | go | `go.mod` fields. |
+| `symbol_prefix` | c | Prefix on generated C symbols. |
+| `emit` | all | `sources` vs `project`. |
+| `omit_defaults` | all | Sparse encoding (§11). |
+| `license` (generic) | all | SPDX header id; default **none** (§11). |
+
+A reimplementation should keep the config schema and the set of honored keys in
+lockstep, and resolve with the same precedence.
+
+---
+
+## 8. Backend contract & code-generation model
+
+A backend is a self-contained, additive plugin. The contract:
+
+- **Interface**: `Lang() string` (the `--lang` key) and
+  `Generate(schema, cfg) ([]File, error)` where `File = {Path, Content}`. The
+  backend traverses the **read-only** frozen IR and returns files; it must never
+  mutate the IR.
+- **Registry / self-registration**: each backend registers itself by language
+  key into a central registry at init; the CLI selects via `Lookup(lang)`.
+  Duplicate registration is a build-time error. The core imports the registry
+  *interface* only, never a concrete backend — dependencies point inward.
+- **Patterns**: **Visitor** over the IR for traversal; **Builder** for source
+  construction (intent-level line/file builders, formatting separated from
+  content — no ad-hoc string concatenation); **Strategy** for config-injected
+  behaviour (corelib, namespace, omit, layout).
+- **Emit modes** (`emit`): `sources` = just the message types; `project` = a
+  buildable project (build files + an encode/decode **canonical-JSON harness**
+  that the conformance tests drive).
+- **Determinism**: identical (definition, config) → byte-identical output.
+
+**Adding a language is purely additive** — a new `generators/<lang>/` package + a
+blank import + per-target schema keys + a `tests/<lang>/run.sh` + a CI job. No
+edits to the core, IR, or message schema. See §14.
+
+---
+
+## 9. Wire-format & corelib API contract
+
+This is the contract the generator targets: which **typed calls** it emits and
+which **decode model** the generated code uses. The generator never encodes
+bytes. The **byte-level wire format** (varint/zig-zag encoding, little-endian
+order, FIXLEN length-subtype framing, the field header layout) is **not repeated
+here** — it is normatively specified in the
+[SofaBuffers wire-format documentation](https://github.com/sofa-buffers/documentation),
+and each `corelib-*` README documents its own API surface. A generator
+reimplementation needs §9.1–§9.4; a corelib port needs the wire-format docs.
+
+### 9.1 Wire-type taxonomy (for routing)
+
+The generator only needs the *mapping* from authoring types to the eight wire
+types, to route each field to the right corelib call. Each field's header
+carries the field `id` and a 3-bit wire type:
+
+| Tag | Wire type | Authoring types routed to it |
+|---|---|---|
+| `0b000` | varint unsigned | `u8…u64`, `boolean`, `bitfield` |
+| `0b001` | varint signed (zig-zag) | `i8…i64`, `enum` |
+| `0b010` | fixed-length value | `fp32`, `fp64`, `string`, `blob` |
+| `0b011` / `0b100` | array of unsigned / signed | numeric arrays |
+| `0b101` | array of fixed-length | `fp32`/`fp64` arrays |
+| `0b110` / `0b111` | sequence start / end | `struct`, `union`, arrays of string/blob |
+
+`struct`/`union` and arrays of string/blob are routed through `sequence_begin …
+sequence_end` (each opens a fresh id scope). Decoders route by id within the
+current scope and **skip unknown fields** by wire type (forward/backward
+compatibility). Full framing details: the wire-format docs above.
+
+### 9.2 Encode API (OStream)
+
+Encoding is **streaming**: an `OStream` writes into a caller buffer and invokes a
+flush sink when full (so a message can exceed RAM). The generated `encode`
+serialises each field in schema/id order via these operations (names per
+corelib; canonical set):
+
+`write_unsigned(id, v)` · `write_signed(id, v)` · `write_boolean(id, v)` ·
+`write_fp32(id, v)` · `write_fp64(id, v)` · `write_string(id, s)` ·
+`write_blob(id, ptr, len)` · `write_array_unsigned/signed(id, elems)` ·
+`write_array_fp32/fp64(id, elems)` · `write_sequence_begin(id)` ·
+`write_sequence_end()`.
+
+Integers are written at their **natural width** (the varint output is
+value-based, so the bytes are identical to a widened write; this lets
+width-reduced corelib builds compile — §11).
+
+### 9.3 Decode models
+
+Decoding has **four families**; a backend picks the one its corelib exposes. All
+route by `(scope, id)` and are forward-compatible (skip unknown ids).
+
+1. **Flat visitor + location-stack** (Rust, C#, Java, and the C++ `c-cpp`
+   wrapper). The corelib drives a `Visitor` with flat callbacks; the generated
+   visitor is a `(location, id)` state machine with a stack pushed/popped on
+   sequence begin/end. Callbacks: `unsigned(id,v)`, `signed(id,v)`,
+   `fp32/fp64(id,v)`, `string(id, total, offset, chunk)` and `blob(...)`
+   (delivered in chunks; `total` is the full length), `array_begin(id, kind,
+   count)` then element callbacks, `sequence_begin(id)`, `sequence_end()`. This
+   is the **reusable template for any new flat-visitor corelib**.
+2. **Pull-parser** (Go, Python). The generated `decode` loops `Decoder.Next()`
+   → a field `{id, wire-type}`, switches on `id`, reads the typed value, and
+   `Skip()`s unknowns; returns at EOF or sequence end.
+3. **Child-visitor** (pure C++ `corelib-cpp`). Nested objects decode via
+   `is.read(child)` (a child `IStreamMessage`); scalars via `is.read(member)`.
+4. **Descriptor-table callback** (C `corelib-c-cpp`). A static descriptor table
+   (id → offset → wire type, generated per object) drives
+   `sofab_object_encode`/`decode`; a field callback fills members by id. Member
+   *layout* is decoupled from wire order (offsets via `offsetof`).
+
+### 9.4 Capability / value-width model
+
+Footprint-tunable corelibs gate wire types behind build switches; the generator
+must (a) only emit calls for the wire types a message uses, and (b) surface a
+guard so a stripped corelib + a message needing a missing feature fails loudly.
+The authoritative switch lists live in each corelib's README — the generator
+only needs to mirror their *names* and gate on the schema's used features:
+
+- **corelib-rs-no-std** — Cargo features (`fixlen`, `array`, `sequence`, `fp64`,
+  `value64`); see its [README](https://github.com/sofa-buffers/corelib-rs-no-std).
+  The generated crate sets `default-features = false` + exactly the features the
+  schema uses, emits only the `Visitor` callbacks those types need, and a
+  `require!` guard asserts the set.
+- **corelib-c-cpp** — `SOFAB_DISABLE_*` macros (`FIXLEN`, `ARRAY`, `SEQUENCE`,
+  `FP64`, `INT64`); see its [README](https://github.com/sofa-buffers/corelib-c-cpp).
+  Generated C emits per-feature `#error` guards (only for features it uses); the
+  C++ wrapper hard-requires FIXLEN+SEQUENCE and gates ARRAY/FP64/INT64.
+- **Value width** — disabling 64-bit integers narrows the value type to 32-bit;
+  a schema with no `u64`/`i64` field then builds against the smaller corelib.
+
+---
+
+## 10. Per-language backend reference
+
+| Lang | Corelib(s) | Decode model | Notes |
+|---|---|---|---|
+| **C** | `corelib-c-cpp` | descriptor-table callback | `object.h` struct + static descriptor; `symbol_prefix`; auto capability + API-version guards; analytic `MAX_SIZE`. |
+| **C++** | `corelib-cpp` (default) / `corelib-c-cpp` (`corelib: c-cpp`) | child-visitor / flat-visitor wrapper | header-only `OStreamMessage`+`IStreamMessage`; `c-cpp` decode pre-sizes varlen fields + links the C sources. |
+| **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. |
+| **Go** | `corelib-go` | pull-parser | struct + `Marshal`/`Unmarshal` (`Decoder.Next/Skip`); canonical-JSON tags. |
+| **Python** | `corelib-py` | pull-parser | dataclasses + `_marshal`/`_unmarshal`. |
+| **TypeScript** | `corelib-ts` | flat-visitor | classes + `marshal`; 64-bit → `bigint`. |
+| **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; System.Text.Json harness. |
+| **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); Gson harness. |
+
+**Common type mapping:** enum → smallest *signed* backing; bitfield → smallest
+*unsigned* backing; fixed numeric array → native fixed array/slice; string/blob
+array & struct/union → sequence framing.
+
+---
+
+## 11. Cross-cutting design decisions
+
+- **`omit_defaults`** — when on, a field equal to its effective default (schema
+  `default:`, else type-zero) is skipped on encode and reconstructed on decode
+  (protobuf-style sparse). Applies to scalar/fp/bool/enum/bitfield/string. C is
+  inherently sparse; the others emit a conditional write (Rust also gains a
+  schema-default `impl Default`). Default off.
+- **Widest-first member layout** — value-type backends declare struct members by
+  alignment widest-first (8→4→2→1, stable within a width; composite/heap = 8) to
+  cut native padding, via the shared `AlignRank`/`SortedForLayout`. Applied to C,
+  C++, Go (where declaration order drives layout); skipped for Rust (compiler
+  reorders) and managed C#/Java. **Declaration-only** — encode/descriptor stay in
+  schema/id order, so the wire bytes are byte-identical.
+- **Configurable SPDX license** — a single generic `license` option sets the
+  `SPDX-License-Identifier` in every generated file's header, for all targets.
+  Default is **no license** (no SPDX line); `MIT`/`Apache-2.0`/… emit one;
+  `none` is the explicit omit.
+- **Natural-width integer writes** — encode writes each integer at its natural
+  width (not a forced 64-bit cast); byte-identical varint output, and lets a
+  width-reduced corelib build compile.
+- **Capability guards & analytic max-size** — backends derive required corelib
+  capabilities and (for fixed-storage targets) a compile-time upper-bound buffer
+  size from the IR.
+- **Canonical-JSON harness** — `emit: project` includes a JSON encode/decode CLI
+  used by the conformance tests; field-type ↔ JSON conventions are fixed per
+  backend (a few known cross-language JSON discrepancies remain — see §13/open
+  items).
+
+---
+
+## 12. Testing & conformance strategy
+
+A reimplementation is **conformant** when it reproduces these gates:
+
+1. **Byte-exact shared vectors** — each corelib ships
+   `assets/test_vectors.json`; the generated encoder's output must be
+   byte-identical to the vectors (per language: 27–37 vectors). This is what
+   guarantees cross-language interop.
+2. **Round-trip harness** — `emit: project` builds the generated code against the
+   real corelib and round-trips canonical JSON through encode→decode for every
+   field kind (`tests/<lang>/run.sh`).
+3. **Corpus** (`tests/matrix`) — a corner-case corpus generated across **all**
+   backends; invalid defs are rejected; dangling-ref + depth-cap enforced.
+   Per-language `run.sh` additionally **compiles/builds every corpus def** against
+   the corelib.
+4. **Corelib feature-subset matrix** — C (and the gated C++ wrapper) build
+   generated code against each `SOFAB_DISABLE_*` config paired with a matching
+   def, plus negative guard checks; Rust's no-std corpus spans the feature
+   subsets.
+5. **Golden reproducibility** — regenerate a fixed def for every backend and
+   byte-diff against committed goldens (`tests/matrix/testdata/golden/`); plus a
+   frozen IR golden.
+6. **CI** — a hermetic core job + one `lang-<x>` job per language, on every push.
+
+---
+
+## 13. Repository structure & dependency rule
 
 ```
-.
-├── cmd/
-│   └── sofabgen/            # CLI entrypoint (the sofabgen binary, §8.8)
-├── internal/              # GENERIC, language-independent core (imports no backend)
-│   ├── pipeline/          #   orchestrates stages [1]–[6]
-│   ├── parser/            #   YAML/JSON parse + $ref resolve + hard-gate validation
-│   ├── model/             #   lowering: validated doc → IR nodes
-│   ├── analysis/          #   shared-type resolution + semantic checks
-│   ├── ir/                #   the Composite IR + Visitor (no dependencies)
-│   ├── generator/         #   backend CONTRACT only (interface + registry)
-│   └── config/            #   config load + config-schema validation (§7)
-├── generators/            # LANGUAGE-SPECIFIC backends (none wired in M0)
-├── schema/
-│   ├── sofabuffers-schema-v1.json   # message-definition schema (authoritative)
-│   └── sofabgen-config-schema.json   # config schema (§7.1)
-├── schemas.go             # embeds the two schema files into the binary
-└── docs/
-    ├── PLAN.md            # full design
-    └── ARCHITECTURE.md    # this file
+cmd/sofabgen/            CLI entrypoint (the sofabgen binary)
+internal/                GENERIC, language-independent core (imports no backend)
+  pipeline/              orchestrates stages [1]–[6]
+  parser/                YAML/JSON parse + $ref resolve + hard-gate validation
+  model/                 lowering: validated doc → IR nodes
+  analysis/              shared-type resolution + semantic checks (freeze)
+  ir/                    the Composite IR + Visitor + layout helper (no deps)
+  generator/             backend CONTRACT only (interface + registry + license helper)
+  config/                config load + config-schema validation
+generators/<lang>/       LANGUAGE-SPECIFIC backends (self-register)
+schema/                  message-definition schema + config schema (+ README spec)
+schemas.go               embeds the schema files into the binary
+docs/                    PLAN.md (full design), ARCHITECTURE.md (this), generator/ (per-lang config)
+tests/                   per-language run.sh harnesses + matrix corpus + goldens
 ```
-
-**Package ↔ stage:** `parser`→[1], `model`→[2], `analysis`→[3], `ir`→[4],
-`generators/<lang>`→[5], formatter→[6]; `pipeline` wires them; `config` feeds
-all.
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
-nothing; the core depends only on the `internal/generator` *interface*, never on
-a concrete `generators/*` package. Arrows point inward.
+nothing; the core depends only on the `generator` *interface*, never on a
+concrete `generators/*`. Arrows point inward — adding a language never edits the
+core.
 
-> *Naming note:* PLAN §8.7 sketches `cmd/codegen`; the binary is named
-> `sofabgen`, so the command package is `cmd/sofabgen` to match.
-
----
-
-## 5. How to add a new target language
-
-This is the most important long-term workflow. To add `generators/<lang>/`:
-
-1. Create the package with `generator.go` (the `Backend` impl), `visitor.go`
-   (the IR Visitor), `builder.go` (source construction), and `templates/`.
-2. Implement `generator.Backend`: `Lang() string` and
-   `Generate(*ir.Schema, cfg map[string]any) ([]generator.File, error)`.
-   Traverse the IR read-only; never mutate it.
-3. Call `generator.Register(&backend{})` from the package `init()`, and
-   blank-import the package from `cmd/sofabgen` so it self-registers.
-4. Add the per-target config keys to `schema/sofabgen-config-schema.json`
-   (§7.3) — keep schema and handled keys in lockstep (§7.1).
-5. Add a root project / harness template + corpus entries (§9), a
-   `tests/<lang>/run.sh` harness (generate → build → round-trip → conformance
-   against that corelib), and a gated Go test mirroring `generators/c`.
-6. Add a `lang-<x>` job to `.github/workflows/ci.yml` that runs the harness, so
-   the backend is CI-verified on every push.
-
-No edits to the core model, pipeline, IR, or the message schema are required —
-adding a language is purely additive. **A language milestone lands on `main`
-only when its tests + CI job are green.**
-
-### Reference backend: C (`generators/c`)
-
-The C backend is the worked example to copy. Shape: a `gen` visitor over the IR
-+ a `cfile` Builder; per object a struct + static `object.h` descriptor table +
-encode/decode/init wrappers; enum→signed / bitfield→unsigned backing;
-struct/union/array-of-string → nested sequence object; auto-derived capability
-guards + API-version guard + analytic `MAX_SIZE` (`cost.go`). `emit: project`
-adds build files + devcontainer wiring + an IR-driven encode/decode JSON harness
-(`project.go`). Tests: hermetic structural + determinism, plus
-`SOFAB_C_CORELIB`-gated compile/round-trip/vector-conformance (`tests/c/run.sh`).
+**Known open items (for interop hardening):** the canonical-JSON harness has a
+few cross-language inconsistencies to reconcile for *true* JSON interop (blob is
+`number[]` in C/Python/C++/Rust/C#/Java but base64 in Go; `u64` is a JSON number
+everywhere except a string in TS); schema defaults are applied per-backend except
+Rust (derive `Default` = zeros). These do not affect the **binary** wire interop
+(which is vector-verified).
 
 ---
 
-## 6. Config & extension points
+## 14. How to add a new target language
 
-- **Config model (§7):** `internal/config` loads YAML/JSON, **validates against
-  the embedded config schema as a hard gate** before use, and resolves the
-  effective config per target with precedence *default < generic < per-target*.
-  Only `--in`/`--out` override the file from the CLI.
-- **`omit_defaults` (config):** when true, every backend skips a field equal
-  to its effective default (schema `default:`, else the type-zero) and decode
-  reconstructs it — protobuf-style sparse encoding, applied to scalar / `fp` /
-  `bool` / `enum` / `bitfield` / `string` fields. The 7 dense backends emit a
-  conditional write (and Rust gains a schema-default `impl Default` so decode
-  reconstructs correctly); C is inherently sparse (the `object.h` encoder
-  already omits zero/default fields). Default is off (dense). Tested in
-  `tests/matrix/omit_test.go` and round-tripped per language.
-- **Capability guards (§5.4), max-size & streaming (§5.5–§5.6):** these are
-  backend concerns; the IR already carries the data a backend needs to derive
-  required capabilities (the kinds/maxlens/counts per message). They arrive with
-  the backends (M2+).
-- **Determinism:** model/analysis sort fields by id, named types by key, enum
-  consts by value, and flags by pos, so the IR — and future generated output —
-  is stable for golden-diff CI (PLAN §8.6).
-- **Planned future outputs:** test harnesses, docs, OpenAPI specs, and
-  additional languages — all added as new Visitors, no core changes.
+1. Create `generators/<lang>/` implementing the backend interface (`Lang`,
+   `Generate`); traverse the IR read-only via the Visitor; build source with a
+   Builder.
+2. Register the backend at `init()` and blank-import it from `cmd/sofabgen`.
+3. Add the per-target config keys to `schema/sofabgen-config-schema.json` and a
+   `docs/generator/<lang>.md`.
+4. Add a project/harness template, corpus coverage, and a `tests/<lang>/run.sh`
+   (generate → build → round-trip → byte-exact vectors) plus a gated unit test.
+5. Add a `lang-<x>` CI job running the harness.
 
----
-
-## 7. Milestone status
-
-| Milestone | State |
-|---|---|
-| **M0 Foundations** | **done** — core pipeline (CLI, config, parser+validation, model, analysis, IR) implemented and tested; this doc created. Tag `m0`. |
-| **M1 Format finalized** | **done** — schema + IR frozen; locked by a deterministic golden IR snapshot (`internal/ir/testdata/example.ir.json`) and the `--dump-ir` flag. Tag `m1`. |
-| **M2 First backend (C)** | **done** — `generators/c` emits `object.h`-based struct + descriptor tables + encode/decode/init wrappers + capability guards + API-version guard + MAX_SIZE. `example.yaml` compiles **and round-trips** against the real `corelib-c-cpp` (`tests/c/run.sh`); guards verified to fire. Tag `m2`. |
-| **M3 Root-project generator (C)** | **done** — `emit: project` scaffolds a buildable C project (Makefile + CMakeLists + devcontainer wiring + README) with an **IR-driven encode/decode JSON harness** (§9.1). The harness builds against `corelib-c-cpp` and JSON round-trips every field kind. Tag `m3`. |
-| **M4 C conformance backbone** | **done** — drives the generated C encoder against the corelib's language-agnostic shared vectors (`assets/test_vectors.json`): **34 vectors byte-exact** (non-zero scalar/string at id 0). Sparse-encoder zero/blob/array cases are covered by the round-trip harness. `tests/c/run.sh` is the one-command backbone. Tag `m4`. |
-| **Go backend** | **done** — `generators/golang`: struct + `Marshal`/pull-parser `Unmarshal` against `corelib-go`; `emit: project` Go module + stdlib-json harness; **37 shared vectors byte-exact** (dense encoder also matches zero values). `tests/go/run.sh`. |
-| **Python backend** | **done** — `generators/python`: dataclasses + `_marshal`/pull-parser `_unmarshal` against `corelib-py`; stdlib-json harness (blob as `list[int]`, matching C); **37 shared vectors byte-exact**. `tests/python/run.sh`. |
-| **TypeScript backend** | **done** — `generators/typescript`: classes + `marshal(OStream)` + visitor-based `decode` against `corelib-ts`; 64-bit → `bigint`; strict-typecheck clean; **27 shared vectors byte-exact**. `tests/typescript/run.sh`. |
-| **C++ backend** | **done** — `generators/cpp` (max-speed `corelib-cpp`): header-only structs (OStreamMessage+IStreamMessage), nested via `os.write`/`is.read`, enum-class backing, `OStreamInline<_maxSize>`; **37 shared vectors byte-exact**. `tests/cpp/run.sh`. A `corelib: c-cpp` option targets the **`corelib-c-cpp` C++ wrapper** (same code, decode pre-sizes variable-length fields, Makefile links the C sources); `run.sh` exercises **both** C++ corelibs. |
-| **Member layout** | **done** — value-type backends declare struct members **widest-first** (8→4→2→1-byte alignment, stable within a width) to minimise native padding (`ir.SortedForLayout`, shared helper in `internal/ir/layout.go`). Applied to C, C++, Go (where declaration order drives layout); skipped for Rust (`repr(Rust)` auto-reorders) and the managed C#/Java. Declaration-only: encode walks schema/id order and decode is id-keyed, so the wire bytes are byte-identical (C/C++ conformance unchanged). |
-| **Per-language corpus build** | **done** — every `tests/<lang>/run.sh` now generates and **compiles every corpus definition against the real corelib** (C/C++/Java compile, Go/Rust/C# build, Python imports, TS typechecks) in addition to the example round-trip + vectors. This caught and fixed 3 real backend bugs (Go fp32/fp64 array element type, Go unused import in enum-only files, C# negative-enum cast). |
-| **M7 corpus matrix** | **done** — `tests/matrix`: a corner-case corpus (9 positive defs) generated across ALL 8 backends (+ Go-parse check), 11 invalid defs rejected, dangling-ref + nesting-depth-cap enforced. Hermetic (runs in the core CI job). |
-| **M8 reproducibility + release** | **done** — golden-output test (regenerate scalars.yaml for every backend, byte-diff vs committed goldens); `.github/workflows/release.yml` builds static `sofabgen` binaries on a `v*` tag — linux (amd64/386/arm64/arm), windows (amd64/386/arm64), macOS (amd64/arm64) — each attached individually (with a `.sha256`) to the release; README quickstart added. |
-| **CI** | **done + green** — `.github/workflows/ci.yml`: hermetic core job + `lang-c` + `lang-go` + `lang-python` + `lang-typescript` + `lang-cpp` + `lang-rust` + `lang-csharp` + `lang-java` jobs on every push. |
-| **Rust backend** | **done** — `generators/rust` (corelib-rs-no-std): structs + `marshal` + a flat-visitor decode (location-stack state machine), `require!` capability guards + Cargo features, serde-json harness; **37 shared vectors byte-exact**. A `corelib` target option selects the corelib: **`rs`** (default, the always-on std **`corelib-rs`** — no features / no `require!`) or **`rs-no-std`** (the feature-gated no-std crate, which enables only the wire types each schema needs via `default-features = false` and emits only the `Visitor` callbacks those types require). `tests/rust/run.sh` exercises **both** corelibs, and the no-std corpus spans the feature-subset matrix. |
-| **C# backend** | **done** — `generators/csharp` (corelib-cs): classes + `Marshal` + flat-visitor location-stack decode (`IVisitor`); System.Text.Json harness (byte[]<->number[] converter); **37 shared vectors byte-exact**. `tests/csharp/run.sh`. |
-| **Java backend** | **done** — `generators/java` (corelib-java, Maven): classes + `marshal` + flat-visitor location-stack decode (nested switch); ints→long (u64 via `toUnsignedString`); Gson harness; **37 shared vectors byte-exact**. `tests/java/run.sh`. |
+A language milestone lands on `main` only when its tests + CI job are green, and
+this document is updated to match.
