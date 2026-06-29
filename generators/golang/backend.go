@@ -325,7 +325,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 
 	typeName := exported(m.Name)
 	if m.Summary != "" {
-		f.line("// %s — %s", typeName, oneline(m.Summary))
+		f.line("// %s - %s", typeName, oneline(m.Summary))
 	}
 	g.emitObject(f, typeName, m.Fields)
 
