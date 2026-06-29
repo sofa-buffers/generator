@@ -343,6 +343,12 @@ a reimplementation should emit code that honors all of them:
   `keywords.yaml` corpus compiles a keyword-heavy schema in every backend to guard
   this (and any new backend). Per-backend helpers: `cIdent`/`cppIdent`/`csIdent`/
   `javaIdent`/`pyIdent`/`rustIdent`.
+- **Emit pure ASCII.** Every byte a backend writes into generated code — source,
+  banners, doc comments, Makefiles, READMEs — must be ASCII (`< 0x80`). Use ASCII
+  punctuation in generator-inserted text (`-`, not the em-dash `—`). This keeps
+  output portable across toolchains, editors, and encodings. `TestGeneratedOutputIsASCII`
+  sweeps every backend over the corpus + example in sources *and* project mode and
+  fails on any non-ASCII byte.
 
 **Adding a language is purely additive** — a new `generators/<lang>/` package + a
 blank import + per-target schema keys + a `tests/conformance/<lang>/run.sh` + a CI job. No
