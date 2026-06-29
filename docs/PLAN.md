@@ -1,11 +1,22 @@
 # SofaBuffers Code Generator — Implementation Plan
 
+> ⚠️ **HISTORICAL — point-in-time design plan, not the current state.**
+> This is the original (2026-06-28) plan written *before* implementation. The
+> project is now fully built (all 8 backends), so parts of this document are
+> superseded or only approximately match the code. **For the current,
+> authoritative architecture, contracts, and design rationale, read
+> [`ARCHITECTURE.md`](ARCHITECTURE.md)** — that is the living source of truth and
+> the file to keep updated. This plan is retained only as a historical record of
+> the original intent and decision-making; its still-relevant rationale has been
+> lifted into ARCHITECTURE.md (§1 design principles, §8 generated-code
+> principles). Do not update this file to track the implementation.
+
 > A new, from-scratch code generator that turns a YAML object/message definition
 > (validated against `sofabuffers-schema-v1.json`) into typed, ready-to-use source
 > code in every supported language, where the generated code calls into the
 > highly-optimized **corelib** for that language.
 
-**Status:** Proposal / design plan
+**Status:** Historical (superseded by `ARCHITECTURE.md`) — original proposal / design plan
 **Author context:** Replaces the existing TypeScript POC in `generator-old/`
 **Date:** 2026-06-28
 
