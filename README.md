@@ -20,17 +20,15 @@ runtime for its language, so the hard part — a fast, portable, footprint-tuned
 wire codec with a uniform streaming API — is owned by the corelibs, not the
 generated code.
 
-> **Status: implemented — all 8 language backends complete and CI-green.** The
-> generator (`sbufgen`) emits typed code for **C, Go, Python, TypeScript, C++,
-> Rust, C#, and Java**; each is built against its real corelib in CI, JSON
-> round-trips every field kind, and is byte-exact against the shared wire
-> vectors. The full design lives in [`docs/PLAN.md`](docs/PLAN.md) and the living
-> architecture in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+The generator (`sbufgen`) emits typed code for **C, Go, Python, TypeScript,
+C++, Rust, C#, and Java**. Every backend is built against its real corelib,
+JSON round-trips every field kind, and is byte-exact against the shared wire
+vectors — so code generated for one language interoperates with any other.
 
 ## Quick start
 
 ```sh
-# Build the single static binary (or grab one from a release).
+# Grab a prebuilt binary from the latest release, or build from source:
 go build -o sbufgen ./cmd/sbufgen
 
 # Generate typed sources for one language from a definition.
@@ -41,9 +39,13 @@ for lang in c cpp go python typescript rust csharp java; do
   ./sbufgen --lang "$lang" --in examples/messages/example.yaml --out "out/$lang"
 done
 
-# Scaffold a full buildable project + encode/decode harness (per PLAN §7):
+# Scaffold a full buildable project + encode/decode harness:
 #   sbufgen --config myconfig.yaml --lang rust --in examples --out out
 ```
+
+Prebuilt static binaries for Linux, Windows and macOS (x86 and ARM, 32- and
+64-bit) are attached to every
+[release](https://github.com/sofa-buffers/generator/releases).
 
 Examples:
 - [`examples/messages/example.yaml`](examples/messages/example.yaml) — a showcase exercising every
@@ -51,11 +53,8 @@ Examples:
 - [`examples/messages/realworld/`](examples/messages/realworld/) — a realistic connected-vehicle
   telemetry schema split across **multiple files** with cross-file `$ref`.
 
-Want to see the generated output without running anything? Every CI run attaches
-the generated sources for each language as a downloadable artifact named
-`generated-<lang>` (see the **Artifacts** section of any
-[CI run](https://github.com/sofa-buffers/generator/actions)). Each backend's
-one-command conformance harness is `tests/<lang>/run.sh`.
+Each backend has a one-command conformance harness at `tests/<lang>/run.sh` that
+generates the example, builds it against the real corelib, and round-trips it.
 
 ### What it does
 
@@ -89,7 +88,7 @@ The generator emits code against one corelib per language:
 Because every corelib speaks the **same wire format**, code generated for one
 language interoperates with code generated for any other for free.
 
-### CLI (planned)
+### CLI
 
 The CLI is deliberately tiny — everything configurable lives in a config file:
 
@@ -109,14 +108,16 @@ sbufgen --config <file> --lang <c|cpp-embedded|cpp|rust|go|python|java|csharp|ts
 
 ```
 .
-├── schema/
-│   └── sofabuffers-schema-v1.json   # the message-definition JSON Schema (draft-07)
-├── docs/
-│   ├── PLAN.md                      # full implementation plan & design
-│   └── ARCHITECTURE.md              # living architecture doc (created at M0)
-├── assets/                          # logo & icon
-├── .devcontainer/                   # Go toolchain dev container
-└── LICENSE                          # MIT
+├── cmd/sbufgen/        # the `sbufgen` CLI entry point
+├── generators/        # one backend per language (c, cpp, rust, golang, python, java, csharp, typescript)
+├── internal/          # parser, validator, IR, analysis, generation pipeline
+├── schema/            # the message-definition JSON Schema (draft-07)
+├── examples/          # example definitions (config/ + messages/)
+├── tests/             # per-language conformance harnesses (tests/<lang>/run.sh)
+├── docs/              # architecture & design
+├── assets/            # logo & icon
+├── .devcontainer/     # Go toolchain dev container
+└── LICENSE            # MIT
 ```
 
 The definition schema (`schema/sofabuffers-schema-v1.json`) is authoritative for
@@ -135,15 +136,15 @@ cp .devcontainer/.env.example .devcontainer/.env
 ```
 
 Then open the folder in a devcontainer-aware editor, or build the image directly
-via the scripts under `.devcontainer/`. The recommended generator implementation
-language is **Go** (single static binary, frictionless `GOOS`/`GOARCH`
-cross-compilation); see [`docs/PLAN.md` §2.1](docs/PLAN.md) for the rationale.
+via the scripts under `.devcontainer/`. The generator is written in **Go** — a
+single static binary with frictionless `GOOS`/`GOARCH` cross-compilation.
 
 ## Documentation
 
-- **[`docs/PLAN.md`](docs/PLAN.md)** — the complete design: input format, corelib
-  runtime contract, generated-code shape, optimization strategy, configuration,
-  generator architecture (Composite / Visitor / Builder / Strategy), the
-  testing & conformance matrix, and the phased roadmap (M0–M8).
-- **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — the maintained, up-to-date
-  description of how the generator works (kept current per the per-milestone rule).
+- **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — how the generator is
+  structured: the parser → validator → IR → backend pipeline, the per-corelib
+  decode models, and the design patterns (Composite / Visitor / Builder /
+  Strategy) that hold it together.
+- **[`docs/PLAN.md`](docs/PLAN.md)** — the design rationale: input format, corelib
+  runtime contract, generated-code shape, optimization strategy, and
+  configuration.
