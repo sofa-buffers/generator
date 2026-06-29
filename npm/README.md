@@ -44,8 +44,9 @@ No runtime dependencies; only Node built-ins (`https`, `crypto`, `fs`).
 
 ## Open questions / decisions before publishing
 
-- **Package name & scope** — `@sofa-buffers/sofabgen` is a placeholder; confirm
-  the npm org/scope and availability.
+- **Package name & scope** — ✅ confirmed: `@sofa-buffers/sofabgen`, under the
+  `sofa-buffers` npm org. (A scoped package publishes with `npm publish
+  --access public` and an org-member token.)
 - **Version ↔ release coupling** — the package `version` must correspond to a
   published GitHub release tag `v<version>` (the download URL derives from it).
   Publishing the npm package therefore has to be tied to the release workflow.
