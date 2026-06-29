@@ -17,11 +17,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux: x86-64, x86-32, ARM64, ARM32
           - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: "386" }
           - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: arm }
+          # macOS: Intel + Apple Silicon (Go ships no 32-bit darwin targets)
           - { goos: darwin, goarch: amd64 }
           - { goos: darwin, goarch: arm64 }
+          # Windows: x86-64, x86-32, ARM64
           - { goos: windows, goarch: amd64, ext: ".exe" }
+          - { goos: windows, goarch: "386", ext: ".exe" }
           - { goos: windows, goarch: arm64, ext: ".exe" }
     steps:
       - uses: actions/checkout@v4
