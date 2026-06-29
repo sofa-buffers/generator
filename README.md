@@ -51,9 +51,11 @@ Examples:
 - [`examples/realworld/`](examples/realworld/) — a realistic connected-vehicle
   telemetry schema split across **multiple files** with cross-file `$ref`.
 
-Generated sources for all 8 languages live on the
-[`example-output`](https://github.com/sofa-buffers/generator/tree/example-output/output)
-branch. Each backend's one-command conformance harness is `tests/<lang>/run.sh`.
+Want to see the generated output without running anything? Every CI run attaches
+the generated sources for each language as a downloadable artifact named
+`generated-<lang>` (see the **Artifacts** section of any
+[CI run](https://github.com/sofa-buffers/generator/actions)). Each backend's
+one-command conformance harness is `tests/<lang>/run.sh`.
 
 ### What it does
 
