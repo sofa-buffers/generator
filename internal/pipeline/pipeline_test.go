@@ -8,7 +8,7 @@ import (
 )
 
 func TestRunExampleBuildsIR(t *testing.T) {
-	def := filepath.Join("..", "..", "examples", "example.yaml")
+	def := filepath.Join("..", "..", "examples", "messages", "example.yaml")
 	res, err := Run(Options{DefPath: def})
 	if err != nil {
 		t.Fatalf("example.yaml should run clean, got: %v", err)
@@ -26,7 +26,7 @@ func TestRunExampleBuildsIR(t *testing.T) {
 }
 
 func TestRunNoBackendSignalled(t *testing.T) {
-	def := filepath.Join("..", "..", "examples", "example.yaml")
+	def := filepath.Join("..", "..", "examples", "messages", "example.yaml")
 	res, err := Run(Options{DefPath: def, Lang: "c"})
 	var nb *NoBackendError
 	if !errors.As(err, &nb) {

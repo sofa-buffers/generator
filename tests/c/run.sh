@@ -22,8 +22,8 @@ INC="$CORELIB/src/include"
 SRC="$CORELIB/src"
 echo "==> corelib: $CORELIB"
 
-echo "==> generating C for examples/example.yaml"
-( cd "$ROOT" && go run ./cmd/sbufgen --lang c --in examples/example.yaml --out "$WORK/gen" )
+echo "==> generating C for examples/messages/example.yaml"
+( cd "$ROOT" && go run ./cmd/sbufgen --lang c --in examples/messages/example.yaml --out "$WORK/gen" )
 
 echo "==> compiling generated code + harness against corelib"
 gcc -std=c99 -Wall -Wextra \
@@ -49,7 +49,7 @@ cat > "$WORK/proj.yaml" <<YAML
 generic: { emit: project, timestamp: false }
 targets: { c: { symbol_prefix: sofab_ } }
 YAML
-( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/proj.yaml" --lang c --in examples/example.yaml --out "$WORK/proj" )
+( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/proj.yaml" --lang c --in examples/messages/example.yaml --out "$WORK/proj" )
 make -C "$WORK/proj" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 IN='{"someinteger":-5,"somebool":true,"somestring":"hi","somearray":[1,2,3,4,5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"test":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"bignum":18446744073709551615,"somestringarray":["a","b","c","d","e"]}'
 OUT=$(printf '%s' "$IN" | "$WORK/proj/harness/harness" encode | "$WORK/proj/harness/harness" decode)

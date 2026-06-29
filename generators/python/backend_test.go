@@ -58,7 +58,7 @@ func genPy(t *testing.T, s *ir.Schema, cfg map[string]any) map[string][]byte {
 }
 
 func TestPythonStructural(t *testing.T) {
-	mod := string(genPy(t, schemaFile(t, "../../examples/example.yaml"), map[string]any{})["messages.py"])
+	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["messages.py"])
 	for _, want := range []string{
 		"from sofab import Encoder, Decoder, WireType",
 		"@dataclass",
@@ -81,7 +81,7 @@ func TestPythonSyntaxValid(t *testing.T) {
 		t.Skip("python3 not found")
 	}
 	dir := t.TempDir()
-	for path, content := range genPy(t, schemaFile(t, "../../examples/example.yaml"), map[string]any{"emit": "project"}) {
+	for path, content := range genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{"emit": "project"}) {
 		if err := os.WriteFile(filepath.Join(dir, path), content, 0o644); err != nil {
 			t.Fatal(err)
 		}

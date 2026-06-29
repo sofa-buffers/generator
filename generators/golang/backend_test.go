@@ -14,7 +14,7 @@ import (
 
 func exampleSchema(t *testing.T) *ir.Schema {
 	t.Helper()
-	return schemaFromYAMLFile(t, "../../examples/example.yaml")
+	return schemaFromYAMLFile(t, "../../examples/messages/example.yaml")
 }
 
 func schemaFromYAMLString(t *testing.T, src string) *ir.Schema {

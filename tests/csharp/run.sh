@@ -39,7 +39,7 @@ build() {
 }
 
 echo "==> generating + building example + conformance projects"
-build "$ROOT/examples/example.yaml" "$WORK/ex"
+build "$ROOT/examples/messages/example.yaml" "$WORK/ex"
 build "$WORK/conf.yaml" "$WORK/conf"
 
 echo "==> JSON encode -> decode round-trip"

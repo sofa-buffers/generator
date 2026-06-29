@@ -34,11 +34,11 @@ generated code.
 go build -o sbufgen ./cmd/sbufgen
 
 # Generate typed sources for one language from a definition.
-./sbufgen --lang go --in examples/example.yaml --out out/go
+./sbufgen --lang go --in examples/messages/example.yaml --out out/go
 
 # Generate for every language.
 for lang in c cpp go python typescript rust csharp java; do
-  ./sbufgen --lang "$lang" --in examples/example.yaml --out "out/$lang"
+  ./sbufgen --lang "$lang" --in examples/messages/example.yaml --out "out/$lang"
 done
 
 # Scaffold a full buildable project + encode/decode harness (per PLAN §7):
@@ -46,9 +46,9 @@ done
 ```
 
 Examples:
-- [`examples/example.yaml`](examples/example.yaml) — a showcase exercising every
+- [`examples/messages/example.yaml`](examples/messages/example.yaml) — a showcase exercising every
   field kind.
-- [`examples/realworld/`](examples/realworld/) — a realistic connected-vehicle
+- [`examples/messages/realworld/`](examples/messages/realworld/) — a realistic connected-vehicle
   telemetry schema split across **multiple files** with cross-file `$ref`.
 
 Want to see the generated output without running anything? Every CI run attaches

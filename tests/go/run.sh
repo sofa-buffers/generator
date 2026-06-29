@@ -24,7 +24,7 @@ targets: { go: { package: messages, module_path: example.com/gen, go_version: "1
 YAML
 
 echo "==> generating Go project"
-( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang go --in examples/example.yaml --out "$WORK/proj" )
+( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang go --in examples/messages/example.yaml --out "$WORK/proj" )
 
 echo "==> wiring corelib + building"
 sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/proj/go.mod"

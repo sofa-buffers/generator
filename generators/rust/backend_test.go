@@ -12,7 +12,7 @@ import (
 
 func exampleModule(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile("../../examples/example.yaml")
+	b, err := os.ReadFile("../../examples/messages/example.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

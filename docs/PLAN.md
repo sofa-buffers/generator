@@ -196,7 +196,7 @@ For a message `MyMessage` the generator emits, per language:
    - `enum` → a generated enum type backed by the smallest **signed** integer width that fits its **signed-32-bit** value set (enums are signed zig-zag varints on the wire),
    - `bitfield` → an integer with named bit accessors / flag constants,
    - `array` of a **numeric** element (`u*`/`i*`/`fp32`/`fp64`) → fixed-size array/`std::array`/`[N]T`, encoded with the corelib's array writers;
-   - `array` of **`string`** → **special case: there is no string-array wire type.** It is modelled as a fixed-length **sequence of string fields** (confirmed by `corelib-c-cpp`'s object test and the `examples/example.yaml` note "string arrays are internally represented as a sequence of strings"). So generated code wraps it in `sequence_begin/end` and writes one string per element — it requires the **sequence** (and fixlen) capability, *not* the array capability;
+   - `array` of **`string`** → **special case: there is no string-array wire type.** It is modelled as a fixed-length **sequence of string fields** (confirmed by `corelib-c-cpp`'s object test and the `examples/messages/example.yaml` note "string arrays are internally represented as a sequence of strings"). So generated code wraps it in `sequence_begin/end` and writes one string per element — it requires the **sequence** (and fixlen) capability, *not* the array capability;
    - `sequence` → growable list/`Vec`/slice (or, in `no_std`/C, a caller-provided buffer + count),
    - `struct`/`union` → a reference to that object's generated type,
    - `string`/`blob` → language string/byte type, bounded by `maxlen`.

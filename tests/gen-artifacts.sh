@@ -10,7 +10,7 @@ LANG_KEY="$1"
 OUT="$2"
 
 # The showcase example, the real-world multi-file schema, and the edge-case corpus.
-DEFS="$ROOT/examples/example.yaml $ROOT/examples/realworld/vehicle_telemetry.yaml"
+DEFS="$ROOT/examples/messages/example.yaml $ROOT/examples/messages/realworld/vehicle_telemetry.yaml"
 for d in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
     DEFS="$DEFS $d"
 done

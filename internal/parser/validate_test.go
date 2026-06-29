@@ -21,7 +21,7 @@ func validateString(t *testing.T, src string) Errors {
 }
 
 func TestExampleYAMLIsValid(t *testing.T) {
-	path := filepath.Join("..", "..", "examples", "example.yaml")
+	path := filepath.Join("..", "..", "examples", "messages", "example.yaml")
 	doc, err := Load(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)

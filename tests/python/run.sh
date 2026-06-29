@@ -25,7 +25,7 @@ targets: { python: { package: messages } }
 YAML
 
 echo "==> generating Python project"
-( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang python --in examples/example.yaml --out "$WORK/proj" )
+( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang python --in examples/messages/example.yaml --out "$WORK/proj" )
 
 echo "==> syntax check"
 python3 -m py_compile "$WORK/proj/messages.py" "$WORK/proj/harness.py"

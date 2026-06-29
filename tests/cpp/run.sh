@@ -37,7 +37,7 @@ messages:
 YAML
 
 echo "==> generating + building example project"
-( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang cpp --in examples/example.yaml --out "$WORK/ex" )
+( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang cpp --in examples/messages/example.yaml --out "$WORK/ex" )
 make -C "$WORK/ex" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
 
 echo "==> JSON encode -> decode round-trip"

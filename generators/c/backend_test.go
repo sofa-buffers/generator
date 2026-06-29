@@ -15,7 +15,7 @@ import (
 
 func buildExampleIR(t *testing.T) *ir.Schema {
 	t.Helper()
-	def := filepath.Join("..", "..", "examples", "example.yaml")
+	def := filepath.Join("..", "..", "examples", "messages", "example.yaml")
 	doc, err := parser.Load(def)
 	if err != nil {
 		t.Fatal(err)

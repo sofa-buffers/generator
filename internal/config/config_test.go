@@ -7,7 +7,7 @@ import (
 )
 
 func TestExampleConfigValidates(t *testing.T) {
-	path := filepath.Join("..", "..", "examples", "sbufgen.yaml")
+	path := filepath.Join("..", "..", "examples", "config", "sbufgen.yaml")
 	c, err := Load(path)
 	if err != nil {
 		t.Fatalf("example config should validate: %v", err)

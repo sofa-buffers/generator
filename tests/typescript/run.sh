@@ -38,7 +38,7 @@ YAML
 gen() { ( cd "$ROOT" && go run ./cmd/sbufgen --config "$WORK/cfg.yaml" --lang typescript --in "$1" --out "$2" ); }
 
 echo "==> generating example + conformance projects"
-gen "$ROOT/examples/example.yaml" "$WORK/ex"
+gen "$ROOT/examples/messages/example.yaml" "$WORK/ex"
 gen "$WORK/conf.yaml" "$WORK/conf"
 
 setup() {

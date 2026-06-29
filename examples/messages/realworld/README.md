@@ -14,7 +14,7 @@ realworld/
 Generate it for any target:
 
 ```sh
-sbufgen --lang go --in examples/realworld/vehicle_telemetry.yaml --out out/telemetry
+sbufgen --lang go --in examples/messages/realworld/vehicle_telemetry.yaml --out out/telemetry
 # ...or cpp, rust, python, typescript, csharp, java, c
 ```
 

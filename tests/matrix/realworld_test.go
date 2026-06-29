@@ -10,11 +10,11 @@ import (
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
-// TestRealWorldExample guards examples/realworld: the multi-file, cross-file
+// TestRealWorldExample guards examples/messages/realworld: the multi-file, cross-file
 // $ref schema must validate, resolve its shared-type graph correctly, and
 // generate for every backend (Go output is parse-checked). Hermetic.
 func TestRealWorldExample(t *testing.T) {
-	s, err := buildIR(t, "../../examples/realworld/vehicle_telemetry.yaml")
+	s, err := buildIR(t, "../../examples/messages/realworld/vehicle_telemetry.yaml")
 	if err != nil {
 		t.Fatalf("real-world example should validate: %v", err)
 	}
