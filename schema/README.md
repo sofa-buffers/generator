@@ -53,7 +53,7 @@ rejected rather than ignored.
 | `boolean` | optional `default` |
 | `string` | optional `maxlen`, optional `default` |
 | `blob` | optional `maxlen`; `default` is base64 |
-| `array` | fixed-length; `items: { type, count, maxlen? }`; element `type` ∈ numeric primitives, **`string`**, or **`blob`** (`items.maxlen` is optional and only valid for string/blob elements) |
+| `array` | `items: { type, count?, ... }`; element `type` ∈ numeric primitives, `string`, `blob`, **`enum` / `boolean` / `bitfield`**, or the composites **`struct` / `union` / `array`** (nested, recursive). `count` is the capacity and is **optional** (required only by no-heap targets, like `maxlen`); composite/enum/bitfield elements carry their own `fields` / `oneof` / `items` / `enum` / `bits`. `items.maxlen` only for string/blob elements |
 | `enum` | inline map or `{ $ref }`; values are **signed 32-bit** and may be negative (signed zig-zag varint on the wire — see below); `default` must match a value |
 | `bitfield` | inline `bits` map or `{ $ref }`; each flag has `pos` 0–63 + optional `default` |
 | `struct` | nested; `fields:` inline or `{ $ref }`; recursive |
@@ -78,45 +78,27 @@ Every field **requires `id`** (a uint in `0 .. 2147483647`) and `type`.
 ## How definition types map to the wire format
 
 `sequence` is a **wire type**, not an authoring type — there is intentionally no
-`sequence` keyword in the definition format. See the
-[wire-format documentation](https://github.com/sofa-buffers/documentation/blob/main/README.md).
+`sequence` keyword in the definition format.
 
-The wire encodes the type in the low 3 bits of each field's varint header:
+The complete mapping from every definition type to its wire structure — scalars,
+the two array forms, arrays of `struct`/`union`/`array` and of
+`enum`/`boolean`/`bitfield`, structs, unions, maps, recursive types, and the
+empty/default rules — is specified **once** in the
+[Message & Marshalling Specification](https://github.com/sofa-buffers/documentation/blob/main/MESSAGE_SPEC.md),
+with the byte/bit layout in
+[CORELIB_PLAN](https://github.com/sofa-buffers/documentation/blob/main/CORELIB_PLAN.md)
+(both in the documentation repo). This README does **not** duplicate them.
 
-| Bits | Wire type |
-|---|---|
-| `0b000` | unsigned integer |
-| `0b001` | signed integer (zig-zag) |
-| `0b010` | fixed-length value (fp32 / fp64 / UTF-8 string / blob) |
-| `0b011` | array of unsigned |
-| `0b100` | array of signed |
-| `0b101` | array of fixed-length values |
-| `0b110` | **sequence start** (opens a new, isolated id scope) |
-| `0b111` | **sequence end** |
+Two generator-side specifics those documents do not cover:
 
-So the authoring types lower onto the wire like this:
-
-- **`struct` and any nested structure** → emitted as a **sequence**
-  (`sequence_begin … sequence_end`). Each sequence opens a fresh id scope, so a
-  nested struct's field ids never collide with the parent's.
-- **`array` of a numeric type** → a real **array** wire type (`0b011/100/101`),
-  one length prefix for all elements.
-- **`array` of `string`** or **`array` of `blob`** → **not an array** —
-  arrays of dynamic-length elements are forbidden as an array wire type, so they
-  are encoded as a **sequence of string/blob fields**.
-- **`enum`** → a **signed (zig-zag) varint** (wire type `0b001`). Enum values are
-  **signed 32-bit** (`-2147483648 … 2147483647`) and may be negative; signed
-  zig-zag keeps both small positives and small negatives compact, so negatives
-  carry no extra cost. The generated enum's backing integer is the smallest
+- **enum backing type:** the generated enum's backing integer is the smallest
   **signed** width (`i8`/`i16`/`i32`) that covers its value range; every backend
   derives it identically so an enum interoperates across languages.
-
-This is why a definition only ever needs `array` (fixed, numeric/string/blob)
-plus `struct`/`union`: the variable-length and dynamic-element cases are all
-expressed as sequences by the corelib at encode time. The **generator** must
-therefore route `struct`/`union`/`array-of-string`/`array-of-blob` through the
-corelib's `sequence_begin/end` API, and require the `sequence` capability for them
-(see the generator plan).
+- **sequence routing / capability:** `struct`, `union`, and arrays of dynamic or
+  composite elements (`string`/`blob`/`struct`/`union`/`array`) are emitted as
+  sequences, so the generator must route them through the corelib's
+  `sequence_begin/end` API and require the `sequence` capability for them (see the
+  generator plan).
 
 ---
 

@@ -237,3 +237,134 @@ messages:
               unionstructbool:
                 id: 1
                 type: boolean
+
+      # --- Struct containing an array (composite-in-struct) --------------------
+      # A struct field may itself be an array; nothing new on the wire.
+      somestructwitharray:
+        id: 22
+        type: struct
+        description: "A struct that contains an array field"
+        fields:
+          label:
+            id: 0
+            type: string
+            maxlen: 16
+            default: "row"
+          values:
+            id: 1
+            type: array
+            description: "An array living inside a struct"
+            items:
+              type: u16
+              count: 4
+            default: [1, 2, 3, 4]
+
+      # --- Array of structs ----------------------------------------------------
+      # items.type: struct -> wrapper sequence of struct sequences.
+      somestructarray:
+        id: 23
+        type: array
+        description: "Array of up to 3 point structs"
+        items:
+          type: struct
+          count: 3
+          fields:
+            x:
+              id: 0
+              type: i32
+              default: 0
+            y:
+              id: 1
+              type: i32
+              default: 0
+
+      # --- Array of arrays (matrix) --------------------------------------------
+      # items.type: array -> outer wrapper sequence whose elements are arrays.
+      somematrix:
+        id: 24
+        type: array
+        description: "Array of up to 2 rows, each up to 4 u32"
+        items:
+          type: array
+          count: 2
+          items:
+            type: u32
+            count: 4
+
+      # --- Array of unions -----------------------------------------------------
+      # items.type: union -> wrapper sequence of union sequences.
+      someunionarray:
+        id: 25
+        type: array
+        description: "Array of up to 2 variant values"
+        items:
+          type: union
+          count: 2
+          default_id: 0
+          oneof:
+            asint:
+              id: 0
+              type: i32
+            asstring:
+              id: 1
+              type: string
+              maxlen: 16
+
+      # --- Array of enum -------------------------------------------------------
+      # enum -> signed varint, so this lowers to a signed-int array on the wire.
+      someenumarray:
+        id: 26
+        type: array
+        description: "Array of up to 4 colors"
+        items:
+          type: enum
+          count: 4
+          enum:
+            RED: 0
+            GREEN: 1
+            BLUE: 2
+        default: [2, 1, 0]
+
+      # --- Array of boolean ----------------------------------------------------
+      # boolean -> unsigned varint 0/1, so this lowers to an unsigned-int array.
+      someboolarray:
+        id: 27
+        type: array
+        description: "Array of up to 8 boolean flags"
+        items:
+          type: boolean
+          count: 8
+        default: [true, true, false]
+
+      # --- Array of bitfield ---------------------------------------------------
+      # bitfield -> packed unsigned varint, so this lowers to an unsigned-int array.
+      somebitfieldarray:
+        id: 28
+        type: array
+        description: "Array of up to 3 flag sets"
+        items:
+          type: bitfield
+          count: 3
+          bits:
+            flagA: { pos: 0 }
+            flagB: { pos: 1 }
+
+      # --- Map = array of key/value structs, dynamic length --------------------
+      # A map is just an array of {key, value} structs. `count` is OMITTED here:
+      # the collection is dynamic (heap targets). A heap-less target would add a
+      # `count` (capacity) so the buffer can be pre-sized. `count` never goes on
+      # the wire either way.
+      somemap:
+        id: 29
+        type: array
+        description: "A string -> u32 map as key/value pairs (dynamic length)"
+        items:
+          type: struct
+          fields:
+            key:
+              id: 0
+              type: string
+              maxlen: 32
+            value:
+              id: 1
+              type: u32
