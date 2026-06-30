@@ -99,6 +99,109 @@
       }
     },
 
+    "arrayItems": {
+      "type": "object",
+      "description": "Constraints for array elements. Numeric primitives and string/blob are leaf elements (compact array wire types / a sequence of fixlen values); struct/union/array elements make this a nested array, lowered to a wrapper sequence of nested sequences. See MESSAGE_SPEC.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Element type. Scalars and string/blob are leaf elements; struct/union/array nest further.",
+          "enum": [
+            "u8", "u16", "u32", "u64",
+            "i8", "i16", "i32", "i64",
+            "fp32", "fp64",
+            "string", "blob",
+            "struct", "union", "array",
+            "enum", "boolean", "bitfield"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "Capacity (maximum element count) of this array dimension. Optional, but required by targets that cannot allocate dynamically (so the buffer can be pre-sized). When present, the wire may carry 0 .. count elements; when omitted, the array is dynamic / unbounded. Never appears on the wire either way."
+        },
+        "maxlen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "Maximum byte length of each string/blob element. Only valid when 'type' is string or blob."
+        },
+        "fields": {
+          "description": "Field definitions when 'type' is struct.",
+          "oneOf": [
+            { "$ref": "#/$defs/struct" },
+            {
+              "type": "object",
+              "properties": { "$ref": { "type": "string", "description": "Reference to a predefined struct in $defs." } },
+              "required": ["$ref"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "oneof": {
+          "description": "Option definitions when 'type' is union.",
+          "oneOf": [
+            { "$ref": "#/$defs/union" },
+            {
+              "type": "object",
+              "properties": { "$ref": { "type": "string", "description": "Reference to a predefined union in $defs." } },
+              "required": ["$ref"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "default_id": {
+          "type": "integer", "minimum": 0, "maximum": 2147483647,
+          "description": "Default option id when 'type' is union."
+        },
+        "items": {
+          "$ref": "#/$defs/arrayItems",
+          "description": "Inner element definition when 'type' is array (array of arrays)."
+        },
+        "enum": {
+          "description": "Member definitions when 'type' is enum.",
+          "oneOf": [
+            { "$ref": "#/$defs/enum" },
+            {
+              "type": "object",
+              "properties": { "$ref": { "type": "string", "description": "Reference to a predefined enum in $defs." } },
+              "required": ["$ref"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "bits": {
+          "description": "Flag definitions when 'type' is bitfield.",
+          "oneOf": [
+            { "$ref": "#/$defs/bitfield" },
+            {
+              "type": "object",
+              "properties": { "$ref": { "type": "string", "description": "Reference to a predefined bitfield in $defs." } },
+              "required": ["$ref"],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": ["type"],
+      "additionalProperties": false,
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "struct" } }, "required": ["type"] }, "then": { "required": ["fields"] } },
+        { "if": { "properties": { "type": { "const": "union" } }, "required": ["type"] }, "then": { "required": ["oneof"] } },
+        { "if": { "properties": { "type": { "const": "array" } }, "required": ["type"] }, "then": { "required": ["items"] } },
+        { "if": { "required": ["maxlen"] }, "then": { "properties": { "type": { "enum": ["string", "blob"] } } } },
+        { "if": { "required": ["fields"] }, "then": { "properties": { "type": { "const": "struct" } } } },
+        { "if": { "required": ["oneof"] }, "then": { "properties": { "type": { "const": "union" } } } },
+        { "if": { "required": ["default_id"] }, "then": { "properties": { "type": { "const": "union" } } } },
+        { "if": { "required": ["items"] }, "then": { "properties": { "type": { "const": "array" } } } },
+        { "if": { "properties": { "type": { "const": "enum" } }, "required": ["type"] }, "then": { "required": ["enum"] } },
+        { "if": { "properties": { "type": { "const": "bitfield" } }, "required": ["type"] }, "then": { "required": ["bits"] } },
+        { "if": { "required": ["enum"] }, "then": { "properties": { "type": { "const": "enum" } } } },
+        { "if": { "required": ["bits"] }, "then": { "properties": { "type": { "const": "bitfield" } } } }
+      ]
+    },
+
     "enum": {
       "type": "object",
       "description": "Defines the allowed constants for enum type fields; keys are enum names.",
@@ -533,43 +636,11 @@
             "properties": {
               "id": { "$ref": "#/$defs/types/id" },
               "type": { },
-              "items": {
-                "type": "object",
-                "description": "Defines the constraints for array elements",
-                "properties": {
-                  "type": {
-                    "type": "string",
-                    "description": "Data type of the array elements: a numeric primitive, or string/blob (each encoded on the wire as a sequence).",
-                    "enum": [
-                      "u8", "u16", "u32", "u64",
-                      "i8", "i16", "i32", "i64",
-                      "fp32", "fp64",
-                  	  "string", "blob"
-                    ]
-                  },
-                  "count": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 2147483647,
-                    "description": "Number of elements in this array"
-                  },
-                  "maxlen": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 2147483647,
-                    "description": "Maximum length of each string/blob element. Optional (as for a plain string/blob); lets a fixed-storage target size a 2-D buffer (e.g. C char[count][maxlen]). Only valid when 'type' is string or blob."
-                  }
-                },
-                "required": ["type", "count"],
-                "additionalProperties": false,
-                "if": { "required": ["maxlen"] },
-                "then": { "properties": { "type": { "enum": ["string", "blob"] } } }
-              },
+              "items": { "$ref": "#/$defs/arrayItems" },
               "default": {
                 "type": "array",
                 "description": "Optional default array value; must match the defined item type and count.",
                 "items": { },
-                "minItems": { "$data": "1/items/count" },
                 "maxItems": { "$data": "1/items/count" }
               },
               "description": { },
