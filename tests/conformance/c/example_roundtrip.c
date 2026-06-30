@@ -8,20 +8,20 @@ int main(void) {
     messages_myfirstmessage_init(&m);
 
     /* set representative non-default values across every field kind */
-    m.someinteger = -42;
+    m.somei8 = -42;
     m.somebool = 1;
     strcpy(m.somestring, "hello sofa");
-    for (int i = 0; i < 5; i++) m.somearray[i] = (int32_t)(i*1000 - 2000);
+    for (int i = 0; i < 5; i++) m.someintarray[i] = (int32_t)(i*1000 - 2000);
     m.someenum = 33;              /* YELLOW */
     m.somebitfield = 0x2;         /* flagB */
     m.somestruct.nestedint = 200;
     strcpy(m.somestruct.nestedstring, "nested!");
     m.somestruct.nestedstruct.deepint = -123456;
     m.someunion.option1 = 4242;   /* one option set */
-    m.test = 3.5f;
+    m.somefp32 = 3.5f;
     memcpy(m.someblob, (uint8_t[]){1,2,3,4,5}, 5);
     for (int i = 0; i < 3; i++) memset(m.someblobarray.items[i], i+1, 8);
-    m.bignum = 18446744073709551615ULL;
+    m.someu64 = 18446744073709551615ULL;
     strcpy(m.somestringarray.items[0], "one");
     strcpy(m.somestringarray.items[1], "two");
     strcpy(m.somestringarray.items[2], "three");
@@ -41,20 +41,20 @@ int main(void) {
     assert(r == SOFAB_RET_OK);
 
     /* verify round-trip */
-    assert(d.someinteger == -42);
+    assert(d.somei8 == -42);
     assert(d.somebool == 1);
     assert(strcmp(d.somestring, "hello sofa") == 0);
-    for (int i = 0; i < 5; i++) assert(d.somearray[i] == (int32_t)(i*1000 - 2000));
+    for (int i = 0; i < 5; i++) assert(d.someintarray[i] == (int32_t)(i*1000 - 2000));
     assert(d.someenum == 33);
     assert(d.somebitfield == 0x2);
     assert(d.somestruct.nestedint == 200);
     assert(strcmp(d.somestruct.nestedstring, "nested!") == 0);
     assert(d.somestruct.nestedstruct.deepint == -123456);
     assert(d.someunion.option1 == 4242);
-    assert(d.test == 3.5f);
+    assert(d.somefp32 == 3.5f);
     assert(memcmp(d.someblob, m.someblob, 16) == 0);
     for (int i = 0; i < 3; i++) assert(memcmp(d.someblobarray.items[i], m.someblobarray.items[i], 8) == 0);
-    assert(d.bignum == 18446744073709551615ULL);
+    assert(d.someu64 == 18446744073709551615ULL);
     assert(strcmp(d.somestringarray.items[0], "one") == 0);
     assert(strcmp(d.somestringarray.items[4], "five") == 0);
 

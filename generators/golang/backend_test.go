@@ -86,9 +86,9 @@ func TestGoStructuralInvariants(t *testing.T) {
 		"func (m *Myfirstmessage) unmarshal(d *sofab.Decoder) error",
 		"func NewMyfirstmessage() *Myfirstmessage",
 		"func DecodeMyfirstmessage(",
-		"e.WriteSequenceBegin(",  // nested struct/union framing
-		"d.Next()",               // pull-parser decode
-		"`json:\"someinteger\"`", // canonical json tags
+		"e.WriteSequenceBegin(", // nested struct/union framing
+		"d.Next()",              // pull-parser decode
+		"`json:\"somei8\"`",     // canonical json tags
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("myfirstmessage.go missing %q", want)

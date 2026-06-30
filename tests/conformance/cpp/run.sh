@@ -41,7 +41,7 @@ YAML
 
 # Exercises every field-type family (ints, u64, fp, bool, string, enum, bitfield,
 # fixed array, blob, string array, blob array, nested struct, union).
-IN='{"someinteger":-5,"somebool":true,"somestring":"hi","somearray":[1,2,3,4,5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"test":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"bignum":18446744073709551615,"somestringarray":["a","b","c","d","e"]}'
+IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"someu64":18446744073709551615,"somestringarray":["a","b","c","d","e"]}'
 
 # run_variant LABEL CORELIB INCLUDE MAKEVARS...
 #   CORELIB  - "" for pure corelib-cpp, "c-cpp" for the corelib-c-cpp wrapper.
@@ -63,11 +63,11 @@ run_variant() {
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(printf '%s' "$IN" | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)
     for chk in \
-        '"bignum":18446744073709551615' \
-        '"someinteger":-5' \
+        '"someu64":18446744073709551615' \
+        '"somei8":-5' \
         '"someenum":33' \
         '"somebitfield":2' \
-        '"somearray":\[1,2,3,4,5\]' \
+        '"someintarray":\[1,2,3,4,5\]' \
         '"someblob":\[10,20,30\]' \
         '"somestringarray":\["a","b","c","d","e"\]' \
         '"someblobarray":\[\[1\],\[2\],\[3\]\]' \

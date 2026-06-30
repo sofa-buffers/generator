@@ -55,7 +55,7 @@ func TestCsStructural(t *testing.T) {
 		"public static Myfirstmessage Decode(byte[] data)",
 		"internal sealed class MyfirstmessageVisitor : IVisitor {",
 		"public void SequenceBegin(int id)", // flat-visitor nesting
-		"public ulong bignum = 18446744073709551615UL;",
+		"public ulong someu64 = 18446744073709551615UL;",
 		"public enum MyfirstmessageSomeenum : sbyte {",
 	} {
 		if !strings.Contains(m, want) {

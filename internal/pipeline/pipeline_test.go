@@ -19,9 +19,9 @@ func TestRunExampleBuildsIR(t *testing.T) {
 	if res.Schema.Messages[0].Name != "myfirstmessage" {
 		t.Fatalf("unexpected message name %q", res.Schema.Messages[0].Name)
 	}
-	// 20 payload fields in the example (one per type/feature).
-	if got := len(res.Schema.Messages[0].Fields); got != 20 {
-		t.Fatalf("expected 20 fields, got %d", got)
+	// 22 payload fields in the example (one per type/feature, incl. all 3 array kinds).
+	if got := len(res.Schema.Messages[0].Fields); got != 22 {
+		t.Fatalf("expected 22 fields, got %d", got)
 	}
 }
 
