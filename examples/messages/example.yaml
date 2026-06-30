@@ -236,3 +236,30 @@ messages:
               unionstructbool:
                 id: 1
                 type: boolean
+
+      # --- Array wire-type coverage: unsigned-int and float arrays --------------
+      # The i32 `somearray` above covers the signed-integer array wire type
+      # (0b100). These two cover the remaining array wire types, so every array
+      # form is exercised. (string/blob arrays lower to sequences, not array
+      # wire types; an array of struct is not expressible — array items must be a
+      # numeric primitive or string/blob.)
+
+      # Unsigned-integer array -> wire type 0b011 (array of unsigned integers).
+      someuintarray:
+        id: 20
+        type: array
+        description: "A fixed array of 4 unsigned 32-bit integers"
+        items:
+          type: u32
+          count: 4
+        default: [0, 1, 1000, 4294967295]
+
+      # Float array -> wire type 0b101 (array of fixlen values).
+      somefloatarray:
+        id: 21
+        type: array
+        description: "A fixed array of 3 fp32 values"
+        items:
+          type: fp32
+          count: 3
+        default: [0.0, -1.5, 3.25]
