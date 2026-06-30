@@ -547,53 +547,110 @@ func (v *validator) checkArrayField(f map[string]any, loc string) {
 	}
 	items, ok := itemsRaw.(map[string]any)
 	if !ok {
-		v.add(loc+"/items", "items must be a mapping {type, count, maxlen?}")
+		v.add(loc+"/items", "items must be a mapping {type, count?, ...}")
 		return
 	}
-	for k := range items {
-		switch k {
-		case "type", "count", "maxlen":
-		default:
-			v.add(loc+"/items", "unknown items key %q (allowed: type, count, maxlen)", k)
-		}
-	}
-	etypRaw, ok := items["type"]
-	etyp, _ := etypRaw.(string)
-	if !ok || !arrayElemTypes[etyp] {
-		v.add(loc+"/items/type", "array element type must be one of u8..u64,i8..i64,fp32,fp64,string,blob")
-	}
-	var count int64 = -1
-	if cRaw, ok := items["count"]; !ok {
-		v.add(loc+"/items", "items requires \"count\"")
-	} else if c, ok := asInt(cRaw); !ok || c < 1 || c > 2147483647 {
-		v.add(loc+"/items/count", "count must be an integer in 1..2147483647")
-	} else {
-		count = c
-	}
-	if _, ok := items["maxlen"]; ok {
-		if etyp != "string" && etyp != "blob" {
-			v.add(loc+"/items/maxlen", "items.maxlen is only valid for string/blob elements")
-		} else if m, ok := asInt(items["maxlen"]); !ok || m < 1 || m > 2147483647 {
-			v.add(loc+"/items/maxlen", "items.maxlen must be an integer in 1..2147483647")
-		}
-	}
-	// array default: $data rule len == count, plus per-element type/range.
+	etyp, enumValues := v.checkArrayItems(items, loc+"/items")
+
+	// array default: length <= count (capacity), plus per-element validation.
+	// Only leaf-typed element arrays carry a flat default.
 	if d, ok := f["default"]; ok {
 		arr, ok := d.([]any)
 		if !ok {
 			v.add(loc+"/default", "array default must be a sequence")
 			return
 		}
-		if count >= 0 && int64(len(arr)) != count {
-			v.add(loc+"/default", "array default has %d elements, must equal count %d", len(arr), count)
+		if c, ok := asInt(items["count"]); ok && int64(len(arr)) > c {
+			v.add(loc+"/default", "array default has %d elements, exceeds count %d", len(arr), c)
 		}
 		for i, el := range arr {
-			v.checkArrayElem(etyp, el, fmt.Sprintf("%s/default/%d", loc, i))
+			v.checkArrayElem(etyp, el, enumValues, fmt.Sprintf("%s/default/%d", loc, i))
 		}
 	}
 }
 
-func (v *validator) checkArrayElem(etyp string, el any, loc string) {
+// checkArrayItems validates an array element definition (the `items` mapping) and
+// returns the element type plus, for enum elements, its declared values (for the
+// caller's default check). It recurses into composite/nested element types,
+// enforcing the full contract (uniqueIds / uniquePositions / defaultMatchesEnum /
+// defaultIdMatchesUnion) exactly as field-level composites do.
+func (v *validator) checkArrayItems(items map[string]any, loc string) (etyp string, enumValues []int64) {
+	etyp, ok := items["type"].(string)
+	if !ok || !arrayElemTypes[etyp] {
+		v.add(loc+"/type", "array element type must be one of u8..u64,i8..i64,fp32,fp64,boolean,string,blob,enum,bitfield,struct,union,array")
+		return etyp, nil
+	}
+	// per-element-type allowed keys (additionalProperties:false)
+	allowed := []string{"type", "count"}
+	switch etyp {
+	case "string", "blob":
+		allowed = append(allowed, "maxlen")
+	case "enum":
+		allowed = append(allowed, "enum")
+	case "bitfield":
+		allowed = append(allowed, "bits")
+	case "struct":
+		allowed = append(allowed, "fields")
+	case "union":
+		allowed = append(allowed, "oneof", "default_id")
+	case "array":
+		allowed = append(allowed, "items")
+	}
+	v.closed(items, loc, allowed...)
+
+	// count is OPTIONAL (capacity); range-check when present.
+	if cRaw, ok := items["count"]; ok {
+		if c, ok := asInt(cRaw); !ok || c < 1 || c > 2147483647 {
+			v.add(loc+"/count", "count must be an integer in 1..2147483647")
+		}
+	}
+	// maxlen only for string/blob (the key set above already rejects it elsewhere).
+	if mlRaw, ok := items["maxlen"]; ok && (etyp == "string" || etyp == "blob") {
+		if m, ok := asInt(mlRaw); !ok || m < 1 || m > 2147483647 {
+			v.add(loc+"/maxlen", "items.maxlen must be an integer in 1..2147483647")
+		}
+	}
+
+	// composite / nested element sub-definitions → reuse the field validators so
+	// every custom-keyword check recurses into array elements.
+	switch etyp {
+	case "enum":
+		if em, ok := items["enum"]; ok {
+			enumValues = v.validateEnumDef(em, loc+"/enum")
+		} else {
+			v.add(loc, "enum array element requires an \"enum\" map")
+		}
+	case "bitfield":
+		if b, ok := items["bits"]; ok {
+			v.validateBitfieldDef(b, loc+"/bits")
+		} else {
+			v.add(loc, "bitfield array element requires a \"bits\" map")
+		}
+	case "struct":
+		if fields, ok := items["fields"]; ok {
+			v.validateIDScope(fields, loc+"/fields") // fresh id scope (uniqueIds)
+		} else {
+			v.add(loc, "struct array element requires \"fields\"")
+		}
+	case "union":
+		if _, ok := items["oneof"]; ok {
+			v.checkUnionField(items, loc) // oneof uniqueIds + defaultIdMatchesUnion
+		} else {
+			v.add(loc, "union array element requires \"oneof\"")
+		}
+	case "array":
+		if inner, ok := items["items"].(map[string]any); ok {
+			v.checkArrayItems(inner, loc+"/items") // recurse (array of arrays)
+		} else if _, present := items["items"]; present {
+			v.add(loc+"/items", "items must be a mapping")
+		} else {
+			v.add(loc, "array array element requires \"items\"")
+		}
+	}
+	return etyp, enumValues
+}
+
+func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, loc string) {
 	switch etyp {
 	case "u8", "u16", "u32", "i8", "i16", "i32":
 		n, ok := asInt(el)
@@ -614,6 +671,19 @@ func (v *validator) checkArrayElem(etyp string, el any, loc string) {
 	case "fp32", "fp64":
 		if _, ok := asFloat(el); !ok {
 			v.add(loc, "element must be a number")
+		}
+	case "boolean":
+		if _, ok := el.(bool); !ok {
+			v.add(loc, "element must be a boolean")
+		}
+	case "enum":
+		n, ok := asInt(el)
+		if !ok {
+			v.add(loc, "enum element must be an integer")
+			return
+		}
+		if enumValues != nil && !containsInt(enumValues, n) {
+			v.add(loc, "enum element %d does not match any declared enum value", n)
 		}
 	case "string":
 		if _, ok := el.(string); !ok {
@@ -699,7 +769,10 @@ func asMapOf(v *validator, node any, loc string) map[string]any {
 var (
 	decIntRe  = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
 	base64Re  = regexp.MustCompile(`^[A-Za-z0-9+/\s]+={0,2}$`)
-	arrayElem = []string{"u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "fp32", "fp64", "string", "blob"}
+	arrayElem = []string{
+		"u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "fp32", "fp64",
+		"boolean", "string", "blob", "enum", "bitfield", "struct", "union", "array",
+	}
 )
 
 var arrayElemTypes = func() map[string]bool {

@@ -166,7 +166,7 @@ metadata is `description`, `unit`, `deprecated` (floats also allow `decimals`
 | Blob | `blob` | optional `maxlen` (caps **decoded** bytes), `default` is base64 |
 | Enum | `type: enum` + `enum: {NAME: int \| {value,description}}` or `{$ref}` | values **signed 32-bit**, may be negative; `default` must be a declared value |
 | Bitfield | `type: bitfield` + `bits: {FLAG: {pos 0–63, default?}}` or `{$ref}` | each `pos` unique |
-| Array | `type: array` + `items: {type, count, maxlen?}` | fixed `count`; element `type` ∈ numeric \| `string` \| `blob`; `maxlen` only for string/blob elements |
+| Array | `type: array` + `items: {type, count?, ...}` | element `type` ∈ numeric \| `string` \| `blob` \| `boolean` \| `enum` \| `bitfield` \| `struct` \| `union` \| `array` (composite/nested elements carry their own `fields`/`oneof`/`enum`/`bits`/`items`); `count` is the **optional** capacity (max), so `default` length ≤ `count`; `maxlen` only for string/blob elements |
 | Struct | `type: struct` + `fields: {...}` or `{$ref}` | nested; **own id scope** |
 | Union | `type: union` + `oneof: {...}` or `{$ref}`, optional `default_id` | exactly one option; **own id scope** |
 
@@ -203,7 +203,9 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
    and validate the *resolved* tree (a dangling ref fails fast), but lower the
    *unresolved* document so a shared `$defs` type stays a single generated type.
 3. **`$data` cross-field rules** (no stock validator runs these): string
-   `default` length ≤ `maxlen`; array `default` length == `items.count`.
+   `default` length ≤ `maxlen`; array `default` length ≤ `items.count` (count is
+   the optional capacity). All six custom keywords recurse into composite array
+   elements (e.g. an array-of-struct element's fields get `uniqueIds`).
 4. **Six custom keywords**:
    - `uniqueIds` — id unique in **every** scope (payload + each struct + each union).
    - `uniquePositions` — bitfield `pos` unique.
@@ -232,8 +234,11 @@ pattern. A reimplementation needs equivalent data structures:
   (bitfield); unions also carry an optional `DefaultID`.
 - **`Field`** — `Name`, `ID`, `Kind`, metadata (`Description`/`Unit`/
   `Deprecated`), and kind-specific data: `Default` (typed per kind), `Maxlen`,
-  `Decimals` (scalars/string/blob); `Elem`/`Count`/`ElemMax` (array); `Ref`
-  (composite → shared `NamedType`).
+  `Decimals` (scalars/string/blob); `Elem`/`Count`/`ElemMax` (array) plus
+  `ElemRef` (composite element → shared `NamedType`) and `ElemItems` (recursive
+  `ArrayElem`, array-of-array); `Ref` (composite → shared `NamedType`). A
+  composite array element is hoisted to a shared `NamedType` exactly like a
+  composite field, so backends resolve both the same way.
 - **`Kind`** — the closed leaf/composite enum: `U8 U16 U32 U64 I8 I16 I32 I64
   FP32 FP64 Bool String Blob Array Enum Bitfield Struct Union`. Width per kind
   is intrinsic (1/2/4/8 bytes; enum/bitfield width derived from value range / max

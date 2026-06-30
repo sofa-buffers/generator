@@ -82,9 +82,9 @@ func TestNegativeCases(t *testing.T) {
 			expect: "default",
 		},
 		{
-			name:   "array default count mismatch",
-			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: i32, count: 3}, default: [1, 2]}\n",
-			expect: "must equal count 3",
+			name:   "array default exceeds count",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: i32, count: 3}, default: [1, 2, 3, 4]}\n",
+			expect: "exceeds count 3",
 		},
 		{
 			name:   "unknown top-level key",
@@ -105,6 +105,32 @@ func TestNegativeCases(t *testing.T) {
 			name:   "enum value out of signed 32-bit",
 			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: enum, enum: {BIG: 3000000000}}\n",
 			expect: "out of signed 32-bit range",
+		},
+		// Contract recursion into composite array elements (README §3–7):
+		{
+			name:   "array-of-struct duplicate id (uniqueIds)",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: struct, count: 2, fields: {x: {id: 0, type: i32}, y: {id: 0, type: i32}}}}\n",
+			expect: "duplicate id 0",
+		},
+		{
+			name:   "array-of-enum bad default (defaultMatchesEnum)",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: enum, count: 3, enum: {RED: 0, GREEN: 1}}, default: [5]}\n",
+			expect: "does not match any declared enum value",
+		},
+		{
+			name:   "array-of-union bad default_id (defaultIdMatchesUnion)",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: union, count: 2, default_id: 9, oneof: {x: {id: 0, type: i32}}}}\n",
+			expect: "matches no option id",
+		},
+		{
+			name:   "array-of-bitfield duplicate pos (uniquePositions)",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {A: {pos: 0}, B: {pos: 0}}}}\n",
+			expect: "duplicate pos 0",
+		},
+		{
+			name:   "struct array element missing fields",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: struct, count: 2}}\n",
+			expect: "struct array element requires",
 		},
 		{
 			name:   "dangling $ref",

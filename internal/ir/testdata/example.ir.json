@@ -154,6 +154,71 @@
           "kind": "union",
           "ref": "myfirstmessage_someunion",
           "has_default": true
+        },
+        {
+          "name": "somestructwitharray",
+          "id": 22,
+          "kind": "struct",
+          "ref": "myfirstmessage_somestructwitharray"
+        },
+        {
+          "name": "somestructarray",
+          "id": 23,
+          "kind": "array",
+          "elem": "struct",
+          "count": 3,
+          "elem_ref": "myfirstmessage_somestructarray_elem"
+        },
+        {
+          "name": "somematrix",
+          "id": 24,
+          "kind": "array",
+          "elem": "array",
+          "count": 2,
+          "elem_items": {
+            "elem": "u32",
+            "count": 4
+          }
+        },
+        {
+          "name": "someunionarray",
+          "id": 25,
+          "kind": "array",
+          "elem": "union",
+          "count": 2,
+          "elem_ref": "myfirstmessage_someunionarray_elem"
+        },
+        {
+          "name": "someenumarray",
+          "id": 26,
+          "kind": "array",
+          "elem": "enum",
+          "count": 4,
+          "elem_ref": "myfirstmessage_someenumarray_elem",
+          "has_default": true
+        },
+        {
+          "name": "someboolarray",
+          "id": 27,
+          "kind": "array",
+          "elem": "boolean",
+          "count": 8,
+          "has_default": true
+        },
+        {
+          "name": "somebitfieldarray",
+          "id": 28,
+          "kind": "array",
+          "elem": "bitfield",
+          "count": 3,
+          "elem_ref": "myfirstmessage_somebitfieldarray_elem"
+        },
+        {
+          "name": "somemap",
+          "id": 29,
+          "kind": "array",
+          "elem": "struct",
+          "elem_ref": "myfirstmessage_somemap_elem"
         }
       ]
     }
@@ -162,6 +227,21 @@
     {
       "category": "bitfield",
       "key": "myfirstmessage_somebitfield",
+      "inline": true,
+      "flags": [
+        {
+          "name": "flagA",
+          "pos": 0
+        },
+        {
+          "name": "flagB",
+          "pos": 1
+        }
+      ]
+    },
+    {
+      "category": "bitfield",
+      "key": "myfirstmessage_somebitfieldarray_elem",
       "inline": true,
       "flags": [
         {
@@ -194,6 +274,43 @@
         {
           "name": "YELLOW",
           "value": 33
+        }
+      ]
+    },
+    {
+      "category": "enum",
+      "key": "myfirstmessage_someenumarray_elem",
+      "inline": true,
+      "consts": [
+        {
+          "name": "RED",
+          "value": 0
+        },
+        {
+          "name": "GREEN",
+          "value": 1
+        },
+        {
+          "name": "BLUE",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "category": "struct",
+      "key": "myfirstmessage_somemap_elem",
+      "inline": true,
+      "fields": [
+        {
+          "name": "key",
+          "id": 0,
+          "kind": "string",
+          "maxlen": 32
+        },
+        {
+          "name": "value",
+          "id": 1,
+          "kind": "u32"
         }
       ]
     },
@@ -237,6 +354,47 @@
       ]
     },
     {
+      "category": "struct",
+      "key": "myfirstmessage_somestructarray_elem",
+      "inline": true,
+      "fields": [
+        {
+          "name": "x",
+          "id": 0,
+          "kind": "i32",
+          "has_default": true
+        },
+        {
+          "name": "y",
+          "id": 1,
+          "kind": "i32",
+          "has_default": true
+        }
+      ]
+    },
+    {
+      "category": "struct",
+      "key": "myfirstmessage_somestructwitharray",
+      "inline": true,
+      "fields": [
+        {
+          "name": "label",
+          "id": 0,
+          "kind": "string",
+          "maxlen": 16,
+          "has_default": true
+        },
+        {
+          "name": "values",
+          "id": 1,
+          "kind": "array",
+          "elem": "u16",
+          "count": 4,
+          "has_default": true
+        }
+      ]
+    },
+    {
       "category": "union",
       "key": "myfirstmessage_someunion",
       "inline": true,
@@ -275,6 +433,24 @@
           "name": "unionstructbool",
           "id": 1,
           "kind": "boolean"
+        }
+      ]
+    },
+    {
+      "category": "union",
+      "key": "myfirstmessage_someunionarray_elem",
+      "inline": true,
+      "fields": [
+        {
+          "name": "asint",
+          "id": 0,
+          "kind": "i32"
+        },
+        {
+          "name": "asstring",
+          "id": 1,
+          "kind": "string",
+          "maxlen": 16
         }
       ]
     }
