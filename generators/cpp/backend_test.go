@@ -56,9 +56,9 @@ func TestCppStructural(t *testing.T) {
 		"std::vector<std::uint8_t> encode() const",
 		"static Myfirstmessage decode(",
 		"enum class MyfirstmessageSomeenum : std::int8_t {", // smallest signed backing
-		"std::uint64_t bignum = 18446744073709551615ULL;",
-		"is.read(",           // nested decode via is.read
-		"float test = 0.0f;", // valid float literal
+		"std::uint64_t someu64 = 18446744073709551615ULL;",
+		"is.read(",               // nested decode via is.read
+		"float somefp32 = 0.0f;", // valid float literal
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q", want)

@@ -67,7 +67,7 @@ func TestStructuralInvariants(t *testing.T) {
 		"#if SOFAB_API_VERSION != 1",                  // API-version guard (corelib macro)
 		"#if defined(SOFAB_DISABLE_FIXLEN_SUPPORT)",   // capability guards (corelib macros)
 		"#if defined(SOFAB_DISABLE_SEQUENCE_SUPPORT)", // struct/union/array-of-string
-		"#if defined(SOFAB_DISABLE_INT64_SUPPORT)",    // bignum u64
+		"#if defined(SOFAB_DISABLE_INT64_SUPPORT)",    // someu64 / somei64
 		"#define MESSAGES_MYFIRSTMESSAGE_MAX_SIZE",    // §5.5
 		"messages_myfirstmessage_t;",
 		"int8_t someenum;",      // enum -> smallest signed backing

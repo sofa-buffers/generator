@@ -56,7 +56,7 @@ func TestRustStructural(t *testing.T) {
 		"mod myfirstmessage_dec {",             // isolated decode module
 		"fn sequence_begin(&mut self, id: Id)", // flat-visitor nesting
 		"ArrayKind",                            // example has arrays -> array_begin imports it
-		"pub bignum: u64,",
+		"pub someu64: u64,",
 		"#[serde(default)]",
 	} {
 		if !strings.Contains(m, want) {

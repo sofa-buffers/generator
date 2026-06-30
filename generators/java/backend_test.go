@@ -55,7 +55,7 @@ func TestJavaStructural(t *testing.T) {
 		"public static Myfirstmessage decode(byte[] data)",
 		"class MyfirstmessageVisitor implements Visitor {",
 		"public void sequenceBegin(int id)", // flat-visitor nesting
-		"public long bignum = Long.parseUnsignedLong(\"18446744073709551615\");",
+		"public long someu64 = Long.parseUnsignedLong(\"18446744073709551615\");",
 		"class MyfirstmessageSomestructNestedstruct {", // nested types in file
 	} {
 		if !strings.Contains(m, want) {

@@ -43,10 +43,10 @@ build "$ROOT/examples/messages/example.yaml" "$WORK/ex"
 build "$WORK/conf.yaml" "$WORK/conf"
 
 echo "==> JSON encode -> decode round-trip"
-IN='{"someinteger":-5,"somebool":true,"somestring":"hi","somearray":[1,2,3,4,5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"test":2.5,"someblob":[10,20,30],"bignum":18446744073709551615,"somestringarray":["a","b","c"]}'
+IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someu64":18446744073709551615,"somestringarray":["a","b","c"]}'
 H="dotnet $WORK/ex/bin/Debug/net9.0/harness.dll"
 OUT=$(printf '%s' "$IN" | $H encode myfirstmessage | $H decode myfirstmessage)
-echo "$OUT" | grep -q '"bignum":18446744073709551615' || { echo "FAIL: u64 round-trip"; exit 1; }
+echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
 

@@ -71,7 +71,7 @@ func TestProjectBuildsAndRoundTrips(t *testing.T) {
 		t.Fatalf("project build failed:\n%s", out)
 	}
 	harness := filepath.Join(dir, "harness", "harness")
-	in := `{"someinteger":-5,"somebool":true,"somestring":"hi","bignum":18446744073709551615,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someblob":[10,20,30]}`
+	in := `{"somei8":-5,"somebool":true,"somestring":"hi","someu64":18446744073709551615,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someblob":[10,20,30]}`
 	enc := exec.Command(harness, "encode")
 	enc.Stdin = strings.NewReader(in)
 	encoded, err := enc.Output()
@@ -84,7 +84,7 @@ func TestProjectBuildsAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode failed: %v", err)
 	}
-	for _, want := range []string{`"bignum":18446744073709551615`, `"deepint":-99`, `"someblob":[10,20,30`, `"someinteger":-5`} {
+	for _, want := range []string{`"someu64":18446744073709551615`, `"deepint":-99`, `"someblob":[10,20,30`, `"somei8":-5`} {
 		if !strings.Contains(string(decoded), want) {
 			t.Errorf("round-trip missing %q in:\n%s", want, decoded)
 		}

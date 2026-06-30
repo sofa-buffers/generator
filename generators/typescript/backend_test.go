@@ -59,7 +59,7 @@ func TestTSStructural(t *testing.T) {
 		"static decode(bytes: Uint8Array): Myfirstmessage {",
 		"_visitor(): Visitor {",
 		"sequenceBegin(id: number): Visitor | void {", // nested routing
-		"bignum: bigint = 18446744073709551615n;",     // u64 -> bigint
+		"someu64: bigint = 18446744073709551615n;",    // u64 -> bigint
 		"os.writeSequenceBegin(",                      // nested framing
 		"export enum MyfirstmessageSomeenum {",
 	} {
