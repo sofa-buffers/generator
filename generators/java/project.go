@@ -33,7 +33,7 @@ func (g *gen) pom() string {
     <exec.mainClass>` + g.pkg + `.Main</exec.mainClass>
   </properties>
   <dependencies>
-    <dependency><groupId>org.sofabuffers</groupId><artifactId>sofab</artifactId><version>${sofab.version}</version></dependency>
+    <dependency><groupId>org.sofabuffers</groupId><artifactId>SofaBuffers</artifactId><version>${sofab.version}</version></dependency>
     <dependency><groupId>com.google.code.gson</groupId><artifactId>gson</artifactId><version>2.11.0</version></dependency>
   </dependencies>
   <build>
