@@ -1,7 +1,7 @@
 # C target — `targets.c`
 
 Language-specific options for the C backend. For shared options (`emit`,
-`file_layout`, `buffer`, `omit_defaults`, …) see the [`generic`](README.md)
+`file_layout`, `buffer`, …) see the [`generic`](README.md)
 config.
 
 ## Honored options

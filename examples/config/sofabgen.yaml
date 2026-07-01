@@ -7,7 +7,6 @@ generic:
   license: MIT
   emit_deprecated: true
   validation: debug
-  omit_defaults: false      # true = skip fields equal to their default (protobuf-style)
 targets:
   cpp:
     namespace: myproj::msg

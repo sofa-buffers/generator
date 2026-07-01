@@ -1,7 +1,7 @@
 # Go target — `targets.go`
 
 Language-specific options for the Go backend. For shared options (`emit`,
-`file_layout`, `buffer`, `omit_defaults`, …) see the [`generic`](README.md)
+`file_layout`, `buffer`, …) see the [`generic`](README.md)
 config.
 
 ## Honored options

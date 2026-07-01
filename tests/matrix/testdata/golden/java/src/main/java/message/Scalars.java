@@ -15,14 +15,14 @@ public class Scalars {
     public boolean flag = true;
 
     public void marshal(OStream os) throws IOException {
-        os.writeUnsigned(0, this.u8min);
-        os.writeUnsigned(1, this.u8max);
-        os.writeUnsigned(2, this.u64max);
-        os.writeSigned(3, this.i8min);
-        os.writeSigned(4, this.i64min);
-        os.writeFp32(5, this.f32);
-        os.writeFp64(6, this.f64);
-        os.writeBoolean(7, this.flag);
+        if (this.u8min != 0L) { os.writeUnsigned(0, this.u8min); }
+        if (this.u8max != 255L) { os.writeUnsigned(1, this.u8max); }
+        if (this.u64max != Long.parseUnsignedLong("18446744073709551615")) { os.writeUnsigned(2, this.u64max); }
+        if (this.i8min != -128L) { os.writeSigned(3, this.i8min); }
+        if (this.i64min != -9223372036854775808L) { os.writeSigned(4, this.i64min); }
+        if (this.f32 != 3.14f) { os.writeFp32(5, this.f32); }
+        if (this.f64 != -2.5) { os.writeFp64(6, this.f64); }
+        if (this.flag != true) { os.writeBoolean(7, this.flag); }
     }
     public static final int MAX_SIZE = 82;
     public byte[] encode() {

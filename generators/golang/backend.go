@@ -26,7 +26,6 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		pkg:     cfgString(cfg, "package", "message"),
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
 		license: generator.LicenseID(cfg),
-		omit:    cfgBool(cfg, "omit_defaults"),
 	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	// In a project the package gets its own directory so the harness can import
@@ -53,7 +52,6 @@ type gen struct {
 	pkg     string
 	banner  string
 	license string // SPDX id, "" to omit the header line
-	omit    bool   // omit fields equal to their default (omit_defaults config)
 }
 
 // ---- types.go : all named types -----------------------------------------
@@ -185,9 +183,19 @@ func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 	case ir.KindBitfield:
 		write = fmt.Sprintf("e.WriteUnsigned(%d, uint64(%s))", fld.ID, acc)
 	case ir.KindBlob:
-		f.line("\te.WriteBytes(%d, %s)", fld.ID, acc)
+		// blob is a leaf: omit when equal to its default (empty if none).
+		def := "nil"
+		if lit, ok := g.defaultLiteral(fld); ok {
+			def = lit
+		}
+		f.line("\tif !bytes.Equal(%s, %s) {", acc, def)
+		f.line("\t\te.WriteBytes(%d, %s)", fld.ID, acc)
+		f.line("\t}")
 		return
 	case ir.KindStruct, ir.KindUnion:
+		// A sequence is always framed; its child fields are omitted per-field by
+		// the nested marshal (MESSAGE_SPEC S2). An all-default nested object thus
+		// becomes an empty wrapper sequence, not a dropped field.
 		f.line("\te.WriteSequenceBegin(%d)", fld.ID)
 		f.line("\t%s.marshal(e)", acc)
 		f.line("\te.WriteSequenceEnd()")
@@ -196,14 +204,12 @@ func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 		g.emitMarshalArray(f, fld, acc)
 		return
 	}
-	// Scalar/string/enum/bitfield: optionally omit when equal to the default.
-	if g.omit {
-		f.line("\tif %s != %s {", acc, g.defaultCompare(fld))
-		f.line("\t\t%s", write)
-		f.line("\t}")
-	} else {
-		f.line("\t%s", write)
-	}
+	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
+	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
+	// the omitted field from its default.
+	f.line("\tif %s != %s {", acc, g.defaultCompare(fld))
+	f.line("\t\t%s", write)
+	f.line("\t}")
 }
 
 // defaultCompare is the RHS to compare a field against for omission: its schema
@@ -225,6 +231,20 @@ func (g *gen) defaultCompare(fld *ir.Field) string {
 }
 
 func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc string) {
+	// A native scalar array is a leaf field: omit it when equal to its default
+	// (materialized in New<Msg>), else when empty. A composite/dynamic-element
+	// array is a wrapper sequence and is always framed (never whole-omitted).
+	if isNativeArrayElem(fld.Elem) {
+		if def, ok := g.defaultLiteral(fld); ok {
+			f.imp("slices")
+			f.line("\tif !slices.Equal(%s, %s) {", acc, def)
+		} else {
+			f.line("\tif len(%s) != 0 {", acc)
+		}
+		g.marshalArray(f, "\t\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		f.line("\t}")
+		return
+	}
 	g.marshalArray(f, "\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
 }
 

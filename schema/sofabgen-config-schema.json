@@ -123,10 +123,6 @@
             "one_file",
             "file_per_message"
           ]
-        },
-        "omit_defaults": {
-          "type": "boolean",
-          "description": "Omit fields equal to their default from the serialized stream (protobuf-style). Decode reconstructs them from the same defaults."
         }
       }
     },
@@ -236,9 +232,6 @@
             "fixed_inline",
             "caller_buffer"
           ]
-        },
-        "omit_defaults": {
-          "type": "boolean"
         }
       }
     },
@@ -289,9 +282,6 @@
           "enum": [
             "upper_bound"
           ]
-        },
-        "omit_defaults": {
-          "type": "boolean"
         }
       }
     },
@@ -355,9 +345,6 @@
           ]
         },
         "zero_copy_strings": {
-          "type": "boolean"
-        },
-        "omit_defaults": {
           "type": "boolean"
         }
       }
@@ -431,9 +418,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "omit_defaults": {
-          "type": "boolean"
         }
       }
     },
@@ -491,9 +475,6 @@
             "fields",
             "getters"
           ]
-        },
-        "omit_defaults": {
-          "type": "boolean"
         }
       }
     },
@@ -555,9 +536,6 @@
             "pull",
             "visitor"
           ]
-        },
-        "omit_defaults": {
-          "type": "boolean"
         }
       }
     },
@@ -614,9 +592,6 @@
         },
         "artifact_id": {
           "type": "string"
-        },
-        "omit_defaults": {
-          "type": "boolean"
         }
       }
     },
@@ -672,9 +647,6 @@
           "type": "boolean"
         },
         "generate_doc_file": {
-          "type": "boolean"
-        },
-        "omit_defaults": {
           "type": "boolean"
         }
       }
@@ -744,9 +716,6 @@
           "enum": [
             "visitor"
           ]
-        },
-        "omit_defaults": {
-          "type": "boolean"
         }
       }
     }

@@ -23,7 +23,7 @@ const corelibPkg = "@sofa-buffers/corelib"
 // Generate emits a single message.ts module; project mode adds a harness +
 // package.json + tsconfig.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), omit: cfgBool(cfg, "omit_defaults")}
+	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
 	files := []generator.File{{Path: "message.ts", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -35,7 +35,6 @@ type gen struct {
 	schema  *ir.Schema
 	banner  string
 	license string // SPDX id, "" to omit the header line
-	omit    bool
 }
 
 type tsfile struct{ b strings.Builder }
@@ -140,9 +139,15 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 	case ir.KindString:
 		write = fmt.Sprintf("os.writeString(%d, %s);", fld.ID, acc)
 	case ir.KindBlob:
-		f.line("    os.writeBlob(%d, %s);", fld.ID, acc)
+		// blob is a leaf: omit when equal to its default (empty if none).
+		f.line("    if (!arrEq(%s, %s)) {", acc, g.tsDefault(fld))
+		f.line("      os.writeBlob(%d, %s);", fld.ID, acc)
+		f.line("    }")
 		return
 	case ir.KindStruct, ir.KindUnion:
+		// A sequence is always framed; its child fields are omitted per-field by
+		// the nested marshal (MESSAGE_SPEC S2). An all-default nested object thus
+		// becomes an empty wrapper sequence, not a dropped field.
 		f.line("    os.writeSequenceBegin(%d);", fld.ID)
 		f.line("    %s.marshal(os);", acc)
 		f.line("    os.writeSequenceEnd();")
@@ -151,16 +156,28 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 		g.emitMarshalArray(f, fld, acc)
 		return
 	}
-	if g.omit {
-		f.line("    if (%s !== %s) {", acc, g.tsDefault(fld))
-		f.line("      %s", write)
-		f.line("    }")
-	} else {
-		f.line("    %s", write)
-	}
+	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
+	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
+	// the omitted field from its default (materialized at construction).
+	f.line("    if (%s !== %s) {", acc, g.tsDefault(fld))
+	f.line("      %s", write)
+	f.line("    }")
 }
 
 func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
+	// A native scalar array is a leaf field: omit it when equal to its default
+	// (materialized at construction), else when empty. A composite/dynamic-element
+	// array is a wrapper sequence and is always framed (never whole-omitted).
+	if nativeArrayElem(fld.Elem) {
+		if def, ok := g.nativeArrayDefault(fld); ok {
+			f.line("    if (!arrEq(%s, %s)) {", acc, def)
+		} else {
+			f.line("    if (%s.length !== 0) {", acc)
+		}
+		g.marshalArray(f, "      ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		f.line("    }")
+		return
+	}
 	g.marshalArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
 }
 

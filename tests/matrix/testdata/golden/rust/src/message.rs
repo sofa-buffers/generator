@@ -3,7 +3,7 @@
 use sofab::{OStream, IStream, Visitor, Id, Unsigned, Signed};
 use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Scalars {
     pub u8min: u8,
@@ -16,17 +16,32 @@ pub struct Scalars {
     pub flag: bool,
 }
 
+impl Default for Scalars {
+    fn default() -> Self {
+        Self {
+            u8min: 0,
+            u8max: 255,
+            u64max: 18446744073709551615,
+            i8min: -128,
+            i64min: i64::MIN,
+            f32: 3.14,
+            f64: -2.5,
+            flag: true,
+        }
+    }
+}
+
 impl Scalars {
     pub const MAX_SIZE: usize = 82;
     pub fn marshal(&self, os: &mut OStream) {
-        let _ = os.write_unsigned(0, self.u8min as Unsigned);
-        let _ = os.write_unsigned(1, self.u8max as Unsigned);
-        let _ = os.write_unsigned(2, self.u64max as Unsigned);
-        let _ = os.write_signed(3, self.i8min as Signed);
-        let _ = os.write_signed(4, self.i64min as Signed);
-        let _ = os.write_fp32(5, self.f32);
-        let _ = os.write_fp64(6, self.f64);
-        let _ = os.write_boolean(7, self.flag);
+        if self.u8min != 0 { let _ = os.write_unsigned(0, self.u8min as Unsigned); }
+        if self.u8max != 255 { let _ = os.write_unsigned(1, self.u8max as Unsigned); }
+        if self.u64max != 18446744073709551615 { let _ = os.write_unsigned(2, self.u64max as Unsigned); }
+        if self.i8min != -128 { let _ = os.write_signed(3, self.i8min as Signed); }
+        if self.i64min != i64::MIN { let _ = os.write_signed(4, self.i64min as Signed); }
+        if self.f32 != 3.14 { let _ = os.write_fp32(5, self.f32); }
+        if self.f64 != -2.5 { let _ = os.write_fp64(6, self.f64); }
+        if self.flag != true { let _ = os.write_boolean(7, self.flag); }
     }
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = vec![0u8; Self::MAX_SIZE];

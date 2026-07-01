@@ -14,10 +14,10 @@ import (
 	defparser "github.com/sofa-buffers/generator/internal/parser"
 )
 
-// TestOmitDefaultsGenerates: with omit_defaults=true, every backend still
-// generates valid output (Go parses), and the marshal becomes conditional —
-// proving the option flows through and the codegen stays well-formed.
-func TestOmitDefaultsGenerates(t *testing.T) {
+// TestAllBackendsSparse: encoding is always sparse-canonical (MESSAGE_SPEC §2,
+// no config toggle), so every backend's marshal is conditional (a per-field
+// "!= default" guard) with the default config, and stays well-formed (Go parses).
+func TestAllBackendsSparse(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      a: { id: 0, type: u32, default: 0 }\n" +
 		"      b: { id: 1, type: i32, default: 10 }\n" +
@@ -44,12 +44,11 @@ func TestOmitDefaultsGenerates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := map[string]any{"omit_defaults": true}
 	for _, lang := range generator.Registered() {
 		b, _ := generator.Lookup(lang)
-		files, err := b.Generate(s, cfg)
+		files, err := b.Generate(s, map[string]any{})
 		if err != nil {
-			t.Errorf("[%s] generate with omit_defaults: %v", lang, err)
+			t.Errorf("[%s] generate: %v", lang, err)
 			continue
 		}
 		sawConditional := false
@@ -64,17 +63,19 @@ func TestOmitDefaultsGenerates(t *testing.T) {
 				}
 			}
 		}
-		// C is sparse via object.h (no generated conditional); every other
-		// backend must emit an omit guard.
+		// C is sparse via the object.h descriptor (no generated conditional);
+		// every other backend must emit a per-field sparse guard.
 		if lang != "c" && !sawConditional {
-			t.Errorf("[%s] omit_defaults produced no conditional write", lang)
+			t.Errorf("[%s] sparse-canonical marshal produced no conditional write", lang)
 		}
 	}
 }
 
-// TestOmitDefaultsOffIsDense: without the option, the Go marshal writes
-// unconditionally (no per-field guard) — the default behavior is unchanged.
-func TestOmitDefaultsOffIsDense(t *testing.T) {
+// TestGoMarshalIsSparse: the Go marshal is always sparse-canonical (MESSAGE_SPEC
+// §2) — every leaf field is written under an "if != default" guard, with no
+// config toggle. (The corelibs are dumb codecs; the sparse rule lives in the
+// generated code. Only the C backend defers omission to the object.h descriptor.)
+func TestGoMarshalIsSparse(t *testing.T) {
 	s, err := buildIR(t, "corpus/defs/scalars.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -83,8 +84,8 @@ func TestOmitDefaultsOffIsDense(t *testing.T) {
 	files, _ := b.Generate(s, map[string]any{})
 	for _, f := range files {
 		if strings.HasSuffix(f.Path, "scalars.go") {
-			if strings.Contains(string(f.Content), "if m.") {
-				t.Error("default (omit off) Go marshal should be unconditional")
+			if !strings.Contains(string(f.Content), "if m.") {
+				t.Error("Go marshal must be sparse-canonical (per-field != default guard)")
 			}
 		}
 	}

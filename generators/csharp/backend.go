@@ -21,7 +21,7 @@ type Backend struct{}
 func (*Backend) Lang() string { return "csharp" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), omit: cfgBool(cfg, "omit_defaults")}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
 	files := []generator.File{{Path: "Message.cs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -34,7 +34,6 @@ type gen struct {
 	ns      string
 	banner  string
 	license string // SPDX id, "" to omit the header line
-	omit    bool
 }
 
 type cfile struct{ b strings.Builder }
@@ -159,23 +158,40 @@ func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
 	case ir.KindString:
 		write = fmt.Sprintf("os.WriteString(%d, %s ?? \"\");", fld.ID, acc)
 	case ir.KindBlob:
-		f.line("        os.WriteBlob(%d, %s ?? Array.Empty<byte>());", fld.ID, acc)
+		// A blob is a leaf: omit when equal to its default (empty if none). The
+		// decoder reconstructs the omitted field from its materialized default.
+		f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s ?? Array.Empty<byte>(), %s)) { os.WriteBlob(%d, %s ?? Array.Empty<byte>()); }", acc, g.csDefaultValue(fld), fld.ID, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
+		// A sequence is always framed; its child fields are omitted per-field by
+		// the nested Marshal (MESSAGE_SPEC S2). An all-default nested object thus
+		// becomes an empty wrapper sequence, not a dropped field.
 		f.line("        os.WriteSequenceBegin(%d); (%s ?? new %s()).Marshal(os); os.WriteSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key))
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
 		return
 	}
-	if g.omit {
-		f.line("        if (%s != %s) { %s }", acc, g.csDefaultValue(fld), write)
-	} else {
-		f.line("        %s", write)
-	}
+	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
+	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
+	// the omitted field from its default.
+	f.line("        if (%s != %s) { %s }", acc, g.csDefaultValue(fld), write)
 }
 
 func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
+	// A native scalar array is a leaf field: omit it when equal to its default
+	// (materialized in the field initializer), else when empty. A composite/
+	// dynamic-element array is a wrapper sequence and is always framed.
+	if nativeArrayElem(fld.Elem) {
+		if def, ok := g.csNativeArrayLiteral(fld); ok {
+			f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", acc, def)
+		} else {
+			f.line("        if (%s.Count != 0) {", acc)
+		}
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		f.line("        }")
+		return
+	}
 	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
 }
 

@@ -3,8 +3,10 @@
 
 Usage: check_vectors.py <test_vectors.json> <conf-project-dir>
 For each single-field, id-0 scalar vector it feeds {"a": value} to
-`npx tsx harness.ts encode <message>` and compares the hex output to the vector.
-64-bit values are passed as JSON strings (the TS harness parses them with BigInt).
+`npx tsx harness.ts encode <message>` and compares the hex output byte-for-byte to
+the vector's `serialized_sparse` — the sparse-canonical bytes a generated encoder
+must produce (MESSAGE_SPEC S2): empty for a default-valued field, else the dense
+bytes. 64-bit values are passed as JSON strings (the TS harness parses BigInt).
 """
 import json
 import subprocess
@@ -44,8 +46,7 @@ def main() -> int:
             stdout=subprocess.PIPE,
             check=True,
         ).stdout
-        got = out.hex()
-        want = v["serialized"]["hex"]
+        got, want = out.hex(), v["serialized_sparse"]["hex"]
         if got != want:
             print(f"FAIL vector {v['name']}: got {got} want {want}")
             return 1

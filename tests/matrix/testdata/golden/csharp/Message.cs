@@ -17,14 +17,14 @@ public sealed class Scalars {
     public bool flag = true;
 
     public void Marshal(OStream os) {
-        os.WriteUnsigned(0, (ulong)this.u8min);
-        os.WriteUnsigned(1, (ulong)this.u8max);
-        os.WriteUnsigned(2, (ulong)this.u64max);
-        os.WriteSigned(3, (long)this.i8min);
-        os.WriteSigned(4, (long)this.i64min);
-        os.WriteFp32(5, this.f32);
-        os.WriteFp64(6, this.f64);
-        os.WriteBoolean(7, this.flag);
+        if (this.u8min != 0) { os.WriteUnsigned(0, (ulong)this.u8min); }
+        if (this.u8max != 255) { os.WriteUnsigned(1, (ulong)this.u8max); }
+        if (this.u64max != 18446744073709551615UL) { os.WriteUnsigned(2, (ulong)this.u64max); }
+        if (this.i8min != -128) { os.WriteSigned(3, (long)this.i8min); }
+        if (this.i64min != -9223372036854775808L) { os.WriteSigned(4, (long)this.i64min); }
+        if (this.f32 != 3.14f) { os.WriteFp32(5, this.f32); }
+        if (this.f64 != -2.5) { os.WriteFp64(6, this.f64); }
+        if (this.flag != true) { os.WriteBoolean(7, this.flag); }
     }
     public const int MaxSize = 82;
     public byte[] Encode() {

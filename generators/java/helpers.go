@@ -15,13 +15,9 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
-func cfgBool(cfg map[string]any, key string) bool {
-	b, _ := cfg[key].(bool)
-	return b
-}
-
 // javaOmitCond is the condition under which to write a field (value differs from
-// its default), for omit_defaults. Strings use Objects.equals (content compare).
+// its default): sparse encoding is canonical (MESSAGE_SPEC S2). Strings use
+// Objects.equals (content compare).
 func (g *gen) javaOmitCond(f *ir.Field) string {
 	acc := "this." + javaIdent(f.Name)
 	def := g.javaDefaultValue(f)
@@ -46,6 +42,39 @@ func (g *gen) javaDefaultValue(f *ir.Field) string {
 		return "0"
 	default:
 		return "0L"
+	}
+}
+
+// javaNativeArrayLiteral renders a native scalar array's schema default as an
+// immutable-List expression (List.of(...)); ("", false) when there is no default.
+// It is used both to materialize the field default and, in marshal, as the RHS to
+// compare against for whole-array omission.
+func (g *gen) javaNativeArrayLiteral(f *ir.Field) (string, bool) {
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return "", false
+	}
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		parts[i] = g.javaArrayElemLit(f.Elem, v)
+	}
+	return "List.of(" + strings.Join(parts, ", ") + ")", true
+}
+
+// javaArrayElemLit renders one native array element default as a boxed Java
+// literal (Long/Float/Double/Boolean), matching the List<...> member type.
+func (g *gen) javaArrayElemLit(elem ir.Kind, v any) string {
+	switch elem {
+	case ir.KindBool:
+		return fmt.Sprintf("%v", v)
+	case ir.KindFP32:
+		return floatLit(v) + "f"
+	case ir.KindFP64:
+		return floatLit(v)
+	case ir.KindU64:
+		return fmt.Sprintf("Long.parseUnsignedLong(%q)", scalarLit(v))
+	default: // integers, enum, bitfield -> Long
+		return scalarLit(v) + "L"
 	}
 }
 
@@ -130,6 +159,14 @@ func (g *gen) javaInit(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return " = new " + g.typeName(f.Ref.Key) + "()"
 	case ir.KindArray:
+		// A native scalar array is a leaf field: materialize its schema default so
+		// an omitted default array reconstructs correctly and marshal can compare
+		// against it. Composite arrays are wrapper sequences (always framed).
+		if nativeArrayElem(f.Elem) {
+			if lit, ok := g.javaNativeArrayLiteral(f); ok {
+				return " = new ArrayList<>(" + lit + ")"
+			}
+		}
 		return " = new ArrayList<>()"
 	case ir.KindString:
 		if s, ok := f.Default.(string); ok {

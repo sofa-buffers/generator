@@ -292,6 +292,15 @@ func ifStr(c bool, a, b string) string {
 // the list collectors for array-of-string/blob sequences.
 const tsPrelude = `const _utf8 = new TextDecoder();
 
+// arrEq is an element-wise equality check used by the sparse-canonical marshal to
+// decide whether a leaf blob or native scalar array equals its default (and may
+// thus be omitted). Works for Uint8Array and number/bigint/boolean arrays.
+function arrEq(a: ArrayLike<unknown>, b: ArrayLike<unknown>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 class ChunkAcc {
   private parts = new Map<number, Uint8Array[]>();
   private got = new Map<number, number>();

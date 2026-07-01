@@ -21,14 +21,30 @@ type Scalars struct {
 }
 
 func (m *Scalars) marshal(e *sofab.Encoder) {
-	e.WriteUnsigned(0, uint64(m.U8min))
-	e.WriteUnsigned(1, uint64(m.U8max))
-	e.WriteUnsigned(2, uint64(m.U64max))
-	e.WriteSigned(3, int64(m.I8min))
-	e.WriteSigned(4, int64(m.I64min))
-	e.WriteFloat32(5, m.F32)
-	e.WriteFloat64(6, m.F64)
-	e.WriteBool(7, m.Flag)
+	if m.U8min != 0 {
+		e.WriteUnsigned(0, uint64(m.U8min))
+	}
+	if m.U8max != 255 {
+		e.WriteUnsigned(1, uint64(m.U8max))
+	}
+	if m.U64max != 18446744073709551615 {
+		e.WriteUnsigned(2, uint64(m.U64max))
+	}
+	if m.I8min != -128 {
+		e.WriteSigned(3, int64(m.I8min))
+	}
+	if m.I64min != -9223372036854775808 {
+		e.WriteSigned(4, int64(m.I64min))
+	}
+	if m.F32 != 3.14 {
+		e.WriteFloat32(5, m.F32)
+	}
+	if m.F64 != -2.5 {
+		e.WriteFloat64(6, m.F64)
+	}
+	if m.Flag != true {
+		e.WriteBool(7, m.Flag)
+	}
 }
 
 func (m *Scalars) unmarshal(d *sofab.Decoder) error {

@@ -54,11 +54,6 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
-func cfgBool(cfg map[string]any, key string) bool {
-	b, _ := cfg[key].(bool)
-	return b
-}
-
 // csDefaultValue is the value a field is compared against for omission (its
 // init default, or the type-zero), matching the field initializer.
 func (g *gen) csDefaultValue(f *ir.Field) string {
@@ -192,6 +187,12 @@ func (g *gen) csInit(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return " = new()"
 	case ir.KindArray:
+		// A NATIVE scalar array is a leaf field: materialize its default so an
+		// omitted default array reconstructs correctly and marshal can compare
+		// against it. Composite arrays are wrapper sequences (always framed).
+		if lit, ok := g.csNativeArrayLiteral(f); ok {
+			return " = " + lit
+		}
 		return " = new()"
 	case ir.KindString:
 		if s, ok := f.Default.(string); ok {
@@ -248,6 +249,41 @@ func (g *gen) csInit(f *ir.Field) string {
 		return ""
 	}
 	return ""
+}
+
+// csNativeArrayLiteral renders a native scalar array's schema default as a C#
+// list literal (new List<T>{...}); ("", false) when the element is not a native
+// scalar or there is no default. enum/bitfield elements are cast (nonzero ints
+// have no implicit enum conversion); fp32 elements take the float suffix.
+func (g *gen) csNativeArrayLiteral(f *ir.Field) (string, bool) {
+	if !nativeArrayElem(f.Elem) {
+		return "", false
+	}
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return "", false
+	}
+	elemType := g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		switch f.Elem {
+		case ir.KindBool:
+			if b, ok := v.(bool); ok && b {
+				parts[i] = "true"
+			} else {
+				parts[i] = "false"
+			}
+		case ir.KindFP32:
+			parts[i] = floatLit(v) + "f"
+		case ir.KindFP64:
+			parts[i] = floatLit(v)
+		case ir.KindEnum, ir.KindBitfield:
+			parts[i] = fmt.Sprintf("(%s)(%s)", elemType, scalarLit(v))
+		default: // numeric: an in-range integer constant converts implicitly
+			parts[i] = scalarLit(v)
+		}
+	}
+	return fmt.Sprintf("new List<%s>{%s}", elemType, strings.Join(parts, ", ")), true
 }
 
 func (g *gen) bitfieldDefault(f *ir.Field) uint64 {

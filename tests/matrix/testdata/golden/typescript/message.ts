@@ -3,6 +3,15 @@ import { OStream, decode, type Visitor } from "@sofa-buffers/corelib";
 
 const _utf8 = new TextDecoder();
 
+// arrEq is an element-wise equality check used by the sparse-canonical marshal to
+// decide whether a leaf blob or native scalar array equals its default (and may
+// thus be omitted). Works for Uint8Array and number/bigint/boolean arrays.
+function arrEq(a: ArrayLike<unknown>, b: ArrayLike<unknown>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 class ChunkAcc {
   private parts = new Map<number, Uint8Array[]>();
   private got = new Map<number, number>();
@@ -54,14 +63,30 @@ export class Scalars {
   flag: boolean = true;
 
   marshal(os: OStream): void {
-    os.writeUnsigned(0, this.u8min);
-    os.writeUnsigned(1, this.u8max);
-    os.writeUnsigned(2, this.u64max);
-    os.writeSigned(3, this.i8min);
-    os.writeSigned(4, this.i64min);
-    os.writeFp32(5, this.f32);
-    os.writeFp64(6, this.f64);
-    os.writeBoolean(7, this.flag);
+    if (this.u8min !== 0) {
+      os.writeUnsigned(0, this.u8min);
+    }
+    if (this.u8max !== 255) {
+      os.writeUnsigned(1, this.u8max);
+    }
+    if (this.u64max !== 18446744073709551615n) {
+      os.writeUnsigned(2, this.u64max);
+    }
+    if (this.i8min !== -128) {
+      os.writeSigned(3, this.i8min);
+    }
+    if (this.i64min !== -9223372036854775808n) {
+      os.writeSigned(4, this.i64min);
+    }
+    if (this.f32 !== 3.14) {
+      os.writeFp32(5, this.f32);
+    }
+    if (this.f64 !== -2.5) {
+      os.writeFp64(6, this.f64);
+    }
+    if (this.flag !== true) {
+      os.writeBoolean(7, this.flag);
+    }
   }
 
   toJSON(): Record<string, unknown> {

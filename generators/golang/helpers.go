@@ -212,6 +212,14 @@ func (g *gen) defaultLiteral(f *ir.Field) (string, bool) {
 		}
 	case ir.KindEnum:
 		return fmt.Sprintf("%s(%v)", g.typeName(f.Ref.Key), scalarLit(f.Default)), true
+	case ir.KindArray:
+		// A NATIVE scalar array is a leaf field: materialize its default so an
+		// omitted default array reconstructs correctly, and so marshal can compare
+		// against it. Composite arrays are wrapper sequences (always framed) and
+		// are left zero.
+		if isNativeArrayElem(f.Elem) {
+			return g.nativeArrayLiteral(f)
+		}
 	}
 	return "", false
 }
@@ -229,6 +237,39 @@ func (g *gen) bitfieldDefault(f *ir.Field) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("%s(%d)", g.typeName(f.Ref.Key), bits), true
+}
+
+// isNativeArrayElem reports whether an array element uses a native scalar array
+// wire type (vs. a wrapper sequence). Native arrays are a leaf field (omitted as
+// a whole when equal to their default); composite/dynamic-element arrays are
+// always framed.
+func isNativeArrayElem(elem ir.Kind) bool {
+	switch elem {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
+		ir.KindFP32, ir.KindFP64, ir.KindBool, ir.KindEnum, ir.KindBitfield:
+		return true
+	}
+	return false
+}
+
+// nativeArrayLiteral renders a native scalar array's schema default as a Go
+// slice literal ([]T{...}); ("", false) when there is no default.
+func (g *gen) nativeArrayLiteral(f *ir.Field) (string, bool) {
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return "", false
+	}
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		switch f.Elem {
+		case ir.KindBool, ir.KindFP32, ir.KindFP64:
+			parts[i] = fmt.Sprintf("%v", v)
+		default: // numeric / enum / bitfield: an untyped constant converts in []T
+			parts[i] = scalarLit(v)
+		}
+	}
+	return fmt.Sprintf("[]%s{%s}", g.goArrayElem(f.Elem, f.ElemRef, f.ElemItems), strings.Join(parts, ", ")), true
 }
 
 // scalarLit renders a decoded integer default (int64 or a quoted big string).

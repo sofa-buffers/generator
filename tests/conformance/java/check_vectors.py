@@ -3,7 +3,9 @@
 
 Usage: check_vectors.py <test_vectors.json> <harness.jar>
 Runs `java -jar <harness.jar> encode <message>` for each single-field id-0 scalar
-vector and compares the hex output to the vector.
+vector and compares the hex output byte-for-byte to the vector's
+`serialized_sparse` — the sparse-canonical bytes a generated encoder must produce
+(MESSAGE_SPEC S2): empty for a default-valued field, else the dense bytes.
 """
 import json
 import subprocess
@@ -31,7 +33,7 @@ def main() -> int:
             ["java", "-jar", jar, "encode", msg],
             input=payload.encode(), stdout=subprocess.PIPE, check=True,
         ).stdout
-        got, want = out.hex(), v["serialized"]["hex"]
+        got, want = out.hex(), v["serialized_sparse"]["hex"]
         if got != want:
             print(f"FAIL vector {v['name']}: got {got} want {want}")
             return 1
