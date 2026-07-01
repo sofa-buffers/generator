@@ -100,10 +100,8 @@ func (g *gen) emitVisitor(f *tsfile, name string, fields []*ir.Field) {
 			switch {
 			case x.Kind == ir.KindStruct || x.Kind == ir.KindUnion:
 				f.line("        case %d: self.%s = new %s(); return self.%s._visitor();", x.ID, x.Name, g.typeName(x.Ref.Key), x.Name)
-			case x.Kind == ir.KindArray && x.Elem == ir.KindString:
-				f.line("        case %d: self.%s = []; return stringListVisitor(self.%s);", x.ID, x.Name, x.Name)
-			case x.Kind == ir.KindArray && x.Elem == ir.KindBlob:
-				f.line("        case %d: self.%s = []; return blobListVisitor(self.%s);", x.ID, x.Name, x.Name)
+			case x.Kind == ir.KindArray:
+				f.line("        case %d: self.%s = []; return %s;", x.ID, x.Name, g.listVisitor("self."+x.Name, x.Elem, x.ElemRef, x.ElemItems))
 			}
 		}
 		f.line("        }")
@@ -129,30 +127,32 @@ func (g *gen) emitFloatCb(f *tsfile, fields []*ir.Field, kind ir.Kind, cb string
 	f.line("      },")
 }
 
-// emitArrayCbs handles numeric arrays (string/blob arrays are sequences).
+// emitArrayCbs handles native arrays: numeric, plus enum (signed), boolean and
+// bitfield (unsigned). String/blob/struct/union/nested arrays are sequences and
+// are routed through sequenceBegin instead.
 func (g *gen) emitArrayCbs(f *tsfile, fields []*ir.Field) {
-	numArr := func(x *ir.Field) bool {
-		return x.Kind == ir.KindArray && x.Elem != ir.KindString && x.Elem != ir.KindBlob
+	natArr := func(x *ir.Field) bool {
+		return x.Kind == ir.KindArray && nativeArrayElem(x.Elem)
 	}
-	if !has(fields, numArr) {
+	if !has(fields, natArr) {
 		return
 	}
 	// arrayBegin initialises the target slice.
 	f.line("      arrayBegin(id: number, _kind: number, _count: number): void {")
 	f.line("        switch (id) {")
 	for _, x := range fields {
-		if numArr(x) {
+		if natArr(x) {
 			f.line("        case %d: self.%s = []; break;", x.ID, x.Name)
 		}
 	}
 	f.line("        }")
 	f.line("      },")
 
-	// Each callback is emitted ONCE; per-field it decides bigint vs Number.
+	// Each callback is emitted ONCE; per-field it converts the wire value.
 	emitElem := func(cb, valType string, match func(ir.Kind) bool) {
 		var sel []*ir.Field
 		for _, x := range fields {
-			if numArr(x) && match(x.Elem) {
+			if natArr(x) && match(x.Elem) {
 				sel = append(sel, x)
 			}
 		}
@@ -162,23 +162,103 @@ func (g *gen) emitArrayCbs(f *tsfile, fields []*ir.Field) {
 		f.line("      %s(id: number, index: number, value: %s): void {", cb, valType)
 		f.line("        switch (id) {")
 		for _, x := range sel {
-			if isBig(x.Elem) || valType == "number" {
-				f.line("        case %d: self.%s[index] = value; break;", x.ID, x.Name)
-			} else {
-				f.line("        case %d: self.%s[index] = Number(value); break;", x.ID, x.Name)
-			}
+			f.line("        case %d: self.%s[index] = %s; break;", x.ID, x.Name, g.arrayElemRHS(x.Elem, x.ElemRef, "value"))
 		}
 		f.line("        }")
 		f.line("      },")
 	}
 	emitElem("arrayUnsigned", "bigint", func(k ir.Kind) bool {
-		return k == ir.KindU8 || k == ir.KindU16 || k == ir.KindU32 || k == ir.KindU64
+		return k == ir.KindU8 || k == ir.KindU16 || k == ir.KindU32 || k == ir.KindU64 || k == ir.KindBool || k == ir.KindBitfield
 	})
 	emitElem("arraySigned", "bigint", func(k ir.Kind) bool {
-		return k == ir.KindI8 || k == ir.KindI16 || k == ir.KindI32 || k == ir.KindI64
+		return k == ir.KindI8 || k == ir.KindI16 || k == ir.KindI32 || k == ir.KindI64 || k == ir.KindEnum
 	})
 	emitElem("arrayFp32", "number", func(k ir.Kind) bool { return k == ir.KindFP32 })
 	emitElem("arrayFp64", "number", func(k ir.Kind) bool { return k == ir.KindFP64 })
+}
+
+// arrayElemRHS converts a decoded array element `value` to the member type:
+// 64-bit ints and floats pass through; bool becomes a comparison; enum casts;
+// the rest narrow via Number().
+func (g *gen) arrayElemRHS(elem ir.Kind, ref *ir.TypeRef, value string) string {
+	switch elem {
+	case ir.KindU64, ir.KindI64, ir.KindFP32, ir.KindFP64:
+		return value
+	case ir.KindBool:
+		return value + " !== 0n"
+	case ir.KindEnum:
+		return "Number(" + value + ") as " + g.typeName(ref.Key)
+	default: // u8/u16/u32, i8/i16/i32, bitfield
+		return "Number(" + value + ")"
+	}
+}
+
+// nativeArrayElem reports whether an array element is encoded as a native array
+// wire type (numeric/enum/boolean/bitfield) rather than a wrapper sequence.
+func nativeArrayElem(k ir.Kind) bool {
+	switch k {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
+		ir.KindFP32, ir.KindFP64, ir.KindEnum, ir.KindBool, ir.KindBitfield:
+		return true
+	}
+	return false
+}
+
+// seqArrayElem reports whether an array element lowers to a wrapper sequence
+// (string/blob/struct/union, or a nested array).
+func seqArrayElem(k ir.Kind) bool {
+	switch k {
+	case ir.KindString, ir.KindBlob, ir.KindStruct, ir.KindUnion, ir.KindArray:
+		return true
+	}
+	return false
+}
+
+// listVisitor returns a TS expression for a Visitor that collects array elements
+// (described by elem/ref/items) into the array expression `out`. Used for the
+// wrapper-sequence element kinds.
+func (g *gen) listVisitor(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindString:
+		return "stringListVisitor(" + out + ")"
+	case ir.KindBlob:
+		return "blobListVisitor(" + out + ")"
+	case ir.KindStruct, ir.KindUnion:
+		return "structListVisitor(" + out + ", () => new " + g.typeName(ref.Key) + "())"
+	case ir.KindArray:
+		return g.nestedArrayListVisitor(out, items)
+	}
+	return "{}"
+}
+
+// nestedArrayListVisitor returns a Visitor literal that collects rows (each row an
+// inner array described by items) into `out`. Native inner rows arrive via
+// arrayBegin/arrayXxx; sequence inner rows arrive via sequenceBegin and recurse.
+func (g *gen) nestedArrayListVisitor(out string, items *ir.ArrayElem) string {
+	if nativeArrayElem(items.Elem) {
+		cb, valType := arrayCb(items.Elem)
+		rhs := g.arrayElemRHS(items.Elem, items.ElemRef, "value")
+		return "{ arrayBegin(id: number): void { " + out + "[id] = []; }, " +
+			cb + "(id: number, index: number, value: " + valType + "): void { " + out + "[id][index] = " + rhs + "; } }"
+	}
+	inner := g.listVisitor(out+"[id]", items.Elem, items.ElemRef, items.ElemItems)
+	return "{ sequenceBegin(id: number): Visitor { " + out + "[id] = []; return " + inner + "; } }"
+}
+
+// arrayCb maps a native array element kind to its corelib callback name and the
+// value type that callback receives.
+func arrayCb(k ir.Kind) (string, string) {
+	switch k {
+	case ir.KindFP32:
+		return "arrayFp32", "number"
+	case ir.KindFP64:
+		return "arrayFp64", "number"
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		return "arraySigned", "bigint"
+	default: // unsigned, bool, bitfield
+		return "arrayUnsigned", "bigint"
+	}
 }
 
 func has(fields []*ir.Field, pred func(*ir.Field) bool) bool {
@@ -198,7 +278,7 @@ func isSignedish(x *ir.Field) bool {
 }
 func seqField(x *ir.Field) bool {
 	return x.Kind == ir.KindStruct || x.Kind == ir.KindUnion ||
-		(x.Kind == ir.KindArray && (x.Elem == ir.KindString || x.Elem == ir.KindBlob))
+		(x.Kind == ir.KindArray && seqArrayElem(x.Elem))
 }
 
 func ifStr(c bool, a, b string) string {
@@ -246,4 +326,8 @@ function stringListVisitor(out: string[]): Visitor {
 function blobListVisitor(out: Uint8Array[]): Visitor {
   const acc = new ChunkAcc();
   return { blob(id, total, offset, chunk) { const b = acc.blob(id, total, offset, chunk); if (b !== null) out.push(b); } };
+}
+
+function structListVisitor<T extends { _visitor(): Visitor }>(out: T[], make: () => T): Visitor {
+  return { sequenceBegin(_id: number): Visitor { const o = make(); out.push(o); return o._visitor(); } };
 }`

@@ -9,18 +9,29 @@ import (
 // golden testing and --dump-ir). Composite fields render their resolved target
 // key, so the snapshot captures the shared-type graph.
 type dumpField struct {
-	Name       string `json:"name"`
-	ID         int64  `json:"id"`
-	Kind       string `json:"kind"`
-	Ref        string `json:"ref,omitempty"`
-	Elem       string `json:"elem,omitempty"`
-	Count      int64  `json:"count,omitempty"`
-	Maxlen     *int64 `json:"maxlen,omitempty"`
-	ElemMaxlen *int64 `json:"elem_maxlen,omitempty"`
-	Decimals   *int   `json:"decimals,omitempty"`
-	Deprecated bool   `json:"deprecated,omitempty"`
-	HasDefault bool   `json:"has_default,omitempty"`
-	Unit       string `json:"unit,omitempty"`
+	Name       string    `json:"name"`
+	ID         int64     `json:"id"`
+	Kind       string    `json:"kind"`
+	Ref        string    `json:"ref,omitempty"`
+	Elem       string    `json:"elem,omitempty"`
+	Count      int64     `json:"count,omitempty"`
+	ElemRef    string    `json:"elem_ref,omitempty"`
+	ElemItems  *dumpElem `json:"elem_items,omitempty"`
+	Maxlen     *int64    `json:"maxlen,omitempty"`
+	ElemMaxlen *int64    `json:"elem_maxlen,omitempty"`
+	Decimals   *int      `json:"decimals,omitempty"`
+	Deprecated bool      `json:"deprecated,omitempty"`
+	HasDefault bool      `json:"has_default,omitempty"`
+	Unit       string    `json:"unit,omitempty"`
+}
+
+// dumpElem is the JSON projection of a nested array element (array-of-array).
+type dumpElem struct {
+	Elem       string    `json:"elem"`
+	Count      int64     `json:"count,omitempty"`
+	ElemRef    string    `json:"elem_ref,omitempty"`
+	ElemMaxlen *int64    `json:"elem_maxlen,omitempty"`
+	ElemItems  *dumpElem `json:"elem_items,omitempty"`
 }
 
 type dumpNamed struct {
@@ -73,10 +84,29 @@ func projectField(f *Field) dumpField {
 			m := f.ElemMax
 			d.ElemMaxlen = &m
 		}
+		if f.ElemRef != nil {
+			d.ElemRef = f.ElemRef.Key
+		}
+		d.ElemItems = projectElem(f.ElemItems)
 	}
 	if f.HasMaxlen {
 		m := f.Maxlen
 		d.Maxlen = &m
+	}
+	return d
+}
+
+func projectElem(e *ArrayElem) *dumpElem {
+	if e == nil {
+		return nil
+	}
+	d := &dumpElem{Elem: e.Elem.String(), Count: e.Count, ElemItems: projectElem(e.ElemItems)}
+	if e.ElemRef != nil {
+		d.ElemRef = e.ElemRef.Key
+	}
+	if e.ElemMaxHas {
+		m := e.ElemMax
+		d.ElemMaxlen = &m
 	}
 	return d
 }

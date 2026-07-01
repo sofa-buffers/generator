@@ -225,27 +225,64 @@ func (g *gen) defaultCompare(fld *ir.Field) string {
 }
 
 func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc string) {
-	switch fld.Elem {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("\tsofab.WriteUnsignedArray(e, %d, %s)", fld.ID, acc)
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("\tsofab.WriteSignedArray(e, %d, %s)", fld.ID, acc)
+	g.marshalArray(f, "\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// marshalArray writes the array val as field idExpr. Numeric/enum/boolean/
+// bitfield elements use the native array wire type (enum->signed, bool/bitfield->
+// unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
+// whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
+// arrays, depth-suffixing loop vars to avoid collisions.
+func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	iv := fmt.Sprintf("_i%d", depth)
+	ev := fmt.Sprintf("_e%d", depth)
+	switch elem {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
+		f.line("%ssofab.WriteUnsignedArray(e, %s, %s)", ind, idExpr, val)
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		f.line("%ssofab.WriteSignedArray(e, %s, %s)", ind, idExpr, val)
+	case ir.KindBool:
+		// bool is outside the integer array constraint; lower to 0/1 unsigned.
+		bv := fmt.Sprintf("_b%d", depth)
+		f.line("%s{", ind)
+		f.line("%s\t%s := make([]uint8, len(%s))", ind, bv, val)
+		f.line("%s\tfor %s, %s := range %s {", ind, iv, ev, val)
+		f.line("%s\t\tif %s {", ind, ev)
+		f.line("%s\t\t\t%s[%s] = 1", ind, bv, iv)
+		f.line("%s\t\t}", ind)
+		f.line("%s\t}", ind)
+		f.line("%s\tsofab.WriteUnsignedArray(e, %s, %s)", ind, idExpr, bv)
+		f.line("%s}", ind)
 	case ir.KindFP32:
-		f.line("\te.WriteFloat32Array(%d, %s)", fld.ID, acc)
+		f.line("%se.WriteFloat32Array(%s, %s)", ind, idExpr, val)
 	case ir.KindFP64:
-		f.line("\te.WriteFloat64Array(%d, %s)", fld.ID, acc)
+		f.line("%se.WriteFloat64Array(%s, %s)", ind, idExpr, val)
 	case ir.KindString:
-		f.line("\te.WriteSequenceBegin(%d)", fld.ID)
-		f.line("\tfor i, s := range %s {", acc)
-		f.line("\t\te.WriteString(sofab.ID(i), s)")
-		f.line("\t}")
-		f.line("\te.WriteSequenceEnd()")
+		f.line("%se.WriteSequenceBegin(%s)", ind, idExpr)
+		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
+		f.line("%s\te.WriteString(sofab.ID(%s), %s)", ind, iv, ev)
+		f.line("%s}", ind)
+		f.line("%se.WriteSequenceEnd()", ind)
 	case ir.KindBlob:
-		f.line("\te.WriteSequenceBegin(%d)", fld.ID)
-		f.line("\tfor i, b := range %s {", acc)
-		f.line("\t\te.WriteBytes(sofab.ID(i), b)")
-		f.line("\t}")
-		f.line("\te.WriteSequenceEnd()")
+		f.line("%se.WriteSequenceBegin(%s)", ind, idExpr)
+		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
+		f.line("%s\te.WriteBytes(sofab.ID(%s), %s)", ind, iv, ev)
+		f.line("%s}", ind)
+		f.line("%se.WriteSequenceEnd()", ind)
+	case ir.KindStruct, ir.KindUnion:
+		f.line("%se.WriteSequenceBegin(%s)", ind, idExpr)
+		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
+		f.line("%s\te.WriteSequenceBegin(sofab.ID(%s))", ind, iv)
+		f.line("%s\t%s.marshal(e)", ind, ev)
+		f.line("%s\te.WriteSequenceEnd()", ind)
+		f.line("%s}", ind)
+		f.line("%se.WriteSequenceEnd()", ind)
+	case ir.KindArray:
+		f.line("%se.WriteSequenceBegin(%s)", ind, idExpr)
+		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
+		g.marshalArray(f, ind+"\t", fmt.Sprintf("sofab.ID(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		f.line("%s}", ind)
+		f.line("%se.WriteSequenceEnd()", ind)
 	}
 }
 
@@ -284,35 +321,64 @@ func (g *gen) emitUnmarshalField(f *gofile, fld *ir.Field) {
 }
 
 func (g *gen) emitUnmarshalArray(f *gofile, fld *ir.Field, acc string) {
-	switch fld.Elem {
+	g.unmarshalArray(f, "\t\t\t", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// unmarshalArray reads an array into target, mirroring marshalArray: native
+// array readers for numeric/enum/boolean/bitfield elements, a wrapper-sequence
+// loop for string/blob/struct/union/array elements. Recurses for nested arrays,
+// depth-suffixing locals to avoid collisions.
+func (g *gen) unmarshalArray(f *gofile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("\t\t\t%s, _ = sofab.ReadUnsignedArray[%s](d)", acc, goNumType(fld.Elem))
+		f.line("%s%s, _ = sofab.ReadUnsignedArray[%s](d)", ind, target, goNumType(elem))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("\t\t\t%s, _ = sofab.ReadSignedArray[%s](d)", acc, goNumType(fld.Elem))
+		f.line("%s%s, _ = sofab.ReadSignedArray[%s](d)", ind, target, goNumType(elem))
+	case ir.KindBitfield:
+		f.line("%s%s, _ = sofab.ReadUnsignedArray[%s](d)", ind, target, g.typeName(ref.Key))
+	case ir.KindEnum:
+		f.line("%s%s, _ = sofab.ReadSignedArray[%s](d)", ind, target, g.typeName(ref.Key))
+	case ir.KindBool:
+		uv := fmt.Sprintf("_u%d", depth)
+		iv := fmt.Sprintf("_i%d", depth)
+		ev := fmt.Sprintf("_e%d", depth)
+		f.line("%s%s, _ := sofab.ReadUnsignedArray[uint8](d)", ind, uv)
+		f.line("%s%s = make([]bool, len(%s))", ind, target, uv)
+		f.line("%sfor %s, %s := range %s {", ind, iv, ev, uv)
+		f.line("%s\t%s[%s] = %s != 0", ind, target, iv, ev)
+		f.line("%s}", ind)
 	case ir.KindFP32:
-		f.line("\t\t\t%s, _ = d.ReadFloat32Array()", acc)
+		f.line("%s%s, _ = d.ReadFloat32Array()", ind, target)
 	case ir.KindFP64:
-		f.line("\t\t\t%s, _ = d.ReadFloat64Array()", acc)
-	case ir.KindString:
-		f.line("\t\t\t%s = %s[:0]", acc, acc)
-		f.line("\t\t\tfor {")
-		f.line("\t\t\t\tef, _ := d.Next()")
-		f.line("\t\t\t\tif ef.Type == sofab.TypeSequenceEnd {")
-		f.line("\t\t\t\t\tbreak")
-		f.line("\t\t\t\t}")
-		f.line("\t\t\t\ts, _ := d.String()")
-		f.line("\t\t\t\t%s = append(%s, s)", acc, acc)
-		f.line("\t\t\t}")
-	case ir.KindBlob:
-		f.line("\t\t\t%s = %s[:0]", acc, acc)
-		f.line("\t\t\tfor {")
-		f.line("\t\t\t\tef, _ := d.Next()")
-		f.line("\t\t\t\tif ef.Type == sofab.TypeSequenceEnd {")
-		f.line("\t\t\t\t\tbreak")
-		f.line("\t\t\t\t}")
-		f.line("\t\t\t\tb, _ := d.Bytes()")
-		f.line("\t\t\t\t%s = append(%s, b)", acc, acc)
-		f.line("\t\t\t}")
+		f.line("%s%s, _ = d.ReadFloat64Array()", ind, target)
+	default: // string/blob/struct/union/array -> wrapper sequence
+		ef := fmt.Sprintf("_ef%d", depth)
+		ev := fmt.Sprintf("_e%d", depth)
+		f.line("%s%s = %s[:0]", ind, target, target)
+		f.line("%sfor {", ind)
+		f.line("%s\t%s, _ := d.Next()", ind, ef)
+		f.line("%s\tif %s.Type == sofab.TypeSequenceEnd {", ind, ef)
+		f.line("%s\t\tbreak", ind)
+		f.line("%s\t}", ind)
+		switch elem {
+		case ir.KindString:
+			f.line("%s\t%s, _ := d.String()", ind, ev)
+			f.line("%s\t%s = append(%s, %s)", ind, target, target, ev)
+		case ir.KindBlob:
+			f.line("%s\t%s, _ := d.Bytes()", ind, ev)
+			f.line("%s\t%s = append(%s, %s)", ind, target, target, ev)
+		case ir.KindStruct, ir.KindUnion:
+			f.line("%s\tvar %s %s", ind, ev, g.typeName(ref.Key))
+			f.line("%s\tif err := %s.unmarshal(d); err != nil {", ind, ev)
+			f.line("%s\t\treturn err", ind)
+			f.line("%s\t}", ind)
+			f.line("%s\t%s = append(%s, %s)", ind, target, target, ev)
+		case ir.KindArray:
+			f.line("%s\tvar %s []%s", ind, ev, g.goArrayElem(items.Elem, items.ElemRef, items.ElemItems))
+			g.unmarshalArray(f, ind+"\t", ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+			f.line("%s\t%s = append(%s, %s)", ind, target, target, ev)
+		}
+		f.line("%s}", ind)
 	}
 }
 

@@ -172,12 +172,55 @@ func (b *builder) buildArray(fld *ir.Field, f map[string]any, name, parentKey st
 	etyp, _ := items["type"].(string)
 	fld.Elem = kindOf(etyp)
 	if c, ok := asInt(items["count"]); ok {
-		fld.Count = c
+		fld.HasCount, fld.Count = true, c // count is optional (capacity)
 	}
 	if ml, ok := asInt(items["maxlen"]); ok {
 		fld.ElemMaxHas, fld.ElemMax = true, ml
 	}
+	fld.ElemRef = b.elemRef(etyp, items, name, parentKey)
+	if etyp == "array" {
+		inner, _ := items["items"].(map[string]any)
+		fld.ElemItems = b.buildArrayElem(inner, name+"_elem", parentKey)
+	}
 	fld.Default = f["default"]
+}
+
+// elemRef hoists/refs a composite array element type (enum/bitfield/struct/union)
+// to a shared NamedType, reusing the field-level inline-hoisting path. Returns
+// nil for leaf elements (scalars/string/blob/boolean) and nested arrays.
+func (b *builder) elemRef(etyp string, items map[string]any, name, parentKey string) *ir.TypeRef {
+	switch etyp {
+	case "enum":
+		return b.refForComposite(items["enum"], ir.CatEnum, name+"_elem", parentKey)
+	case "bitfield":
+		return b.refForComposite(items["bits"], ir.CatBitfield, name+"_elem", parentKey)
+	case "struct":
+		return b.refForComposite(items["fields"], ir.CatStruct, name+"_elem", parentKey)
+	case "union":
+		return b.refForComposite(items["oneof"], ir.CatUnion, name+"_elem", parentKey)
+	}
+	return nil
+}
+
+// buildArrayElem lowers a nested array element (items.items...) recursively.
+func (b *builder) buildArrayElem(items map[string]any, name, parentKey string) *ir.ArrayElem {
+	if items == nil {
+		return nil
+	}
+	etyp, _ := items["type"].(string)
+	e := &ir.ArrayElem{Elem: kindOf(etyp)}
+	if c, ok := asInt(items["count"]); ok {
+		e.HasCount, e.Count = true, c
+	}
+	if ml, ok := asInt(items["maxlen"]); ok {
+		e.ElemMaxHas, e.ElemMax = true, ml
+	}
+	e.ElemRef = b.elemRef(etyp, items, name, parentKey)
+	if etyp == "array" {
+		inner, _ := items["items"].(map[string]any)
+		e.ElemItems = b.buildArrayElem(inner, name+"_elem", parentKey)
+	}
+	return e
 }
 
 // refForComposite resolves a composite member to a shared NamedType. If the

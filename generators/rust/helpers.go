@@ -136,16 +136,34 @@ func (g *gen) rustType(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString:
-			return "Vec<String>"
-		case ir.KindBlob:
-			return "Vec<Vec<u8>>"
-		default:
-			return "Vec<" + numRustType(f.Elem) + ">"
-		}
+		return "Vec<" + g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems) + ">"
 	}
 	return "()"
+}
+
+// rustArrayElem is the Rust type of an array element, recursing for nested
+// arrays. Numeric/bool map to their scalar Rust type; enum/bitfield to their
+// integer backing; struct/union to the shared type name; a nested array wraps
+// another Vec level.
+func (g *gen) rustArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindString:
+		return "String"
+	case ir.KindBlob:
+		return "Vec<u8>"
+	case ir.KindBool:
+		return "bool"
+	case ir.KindEnum:
+		return enumBacking(ref.Target)
+	case ir.KindBitfield:
+		return bitfieldBacking(ref.Target)
+	case ir.KindStruct, ir.KindUnion:
+		return g.typeName(ref.Key)
+	case ir.KindArray:
+		return "Vec<" + g.rustArrayElem(items.Elem, items.ElemRef, items.ElemItems) + ">"
+	default: // numeric
+		return numRustType(elem)
+	}
 }
 
 func numRustType(k ir.Kind) string {
@@ -217,8 +235,9 @@ func bitfieldBacking(nt *ir.NamedType) string {
 // the generated Cargo.toml.
 func (g *gen) capabilities(s *ir.Schema) []string {
 	caps := map[string]bool{}
-	var walk func(fields []*ir.Field)
 	seen := map[string]bool{}
+	var walk func(fields []*ir.Field)
+	var walkArray func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem)
 	walk = func(fields []*ir.Field) {
 		for _, f := range fields {
 			switch f.Kind {
@@ -236,24 +255,44 @@ func (g *gen) capabilities(s *ir.Schema) []string {
 					walk(f.Ref.Target.Fields)
 				}
 			case ir.KindArray:
-				switch f.Elem {
-				case ir.KindString, ir.KindBlob:
-					caps["sequence"] = true
-					caps["fixlen"] = true
-				case ir.KindFP64:
-					caps["array"] = true
-					caps["fixlen"] = true
-					caps["fp64"] = true
-				case ir.KindFP32:
-					caps["array"] = true
-					caps["fixlen"] = true
-				case ir.KindU64, ir.KindI64:
-					caps["array"] = true
-					caps["value64"] = true
-				default:
-					caps["array"] = true
-				}
+				walkArray(f.Elem, f.ElemRef, f.ElemItems)
 			}
+		}
+	}
+	// walkArray adds the capabilities an array element needs. Numeric/enum/bool/
+	// bitfield elements use a native array; string/blob/struct/union/nested-array
+	// elements lower to a wrapper sequence.
+	walkArray = func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) {
+		switch elem {
+		case ir.KindString, ir.KindBlob:
+			caps["sequence"] = true
+			caps["fixlen"] = true
+		case ir.KindStruct, ir.KindUnion:
+			caps["sequence"] = true
+			if !seen[ref.Key] {
+				seen[ref.Key] = true
+				walk(ref.Target.Fields)
+			}
+		case ir.KindArray:
+			caps["sequence"] = true
+			walkArray(items.Elem, items.ElemRef, items.ElemItems)
+		case ir.KindFP64:
+			caps["array"] = true
+			caps["fixlen"] = true
+			caps["fp64"] = true
+		case ir.KindFP32:
+			caps["array"] = true
+			caps["fixlen"] = true
+		case ir.KindU64, ir.KindI64:
+			caps["array"] = true
+			caps["value64"] = true
+		case ir.KindBitfield:
+			caps["array"] = true
+			if bitfieldBacking(ref.Target) == "u64" {
+				caps["value64"] = true
+			}
+		default: // small numeric, enum, bool
+			caps["array"] = true
 		}
 	}
 	for _, m := range s.Messages {
@@ -301,16 +340,7 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 		}
 		return hdr + varintLen(uint64(f.Maxlen)<<3) + f.Maxlen, true
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString, ir.KindBlob:
-			if !f.ElemMaxHas {
-				return 0, false
-			}
-			per := varintLen(uint64(f.Count)<<3|7) + varintLen(uint64(f.ElemMax)<<3) + f.ElemMax
-			return hdr + 1 + f.Count*per + 1, true
-		default:
-			return hdr + varintLen(uint64(f.Count)) + f.Count*10, true
-		}
+		return g.arrayCost(hdr, f.Elem, f.ElemRef, f.ElemItems, f.Count, f.ElemMaxHas, f.ElemMax, seen)
 	case ir.KindStruct, ir.KindUnion:
 		if seen[f.Ref.Key] {
 			return 0, false
@@ -329,6 +359,51 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 		return hdr + inner + 1, true
 	}
 	return hdr, true
+}
+
+// arrayCost bounds the encoded size of an array field body (hdr is the field
+// header). Native (numeric/enum/bool/bitfield) elements use a native array;
+// string/blob/struct/union/nested-array elements lower to a wrapper sequence. A
+// dynamic (count == 0) wrapper-sequence array is unbounded, so it forces the
+// default cap.
+func (g *gen) arrayCost(hdr int64, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64, seen map[string]bool) (int64, bool) {
+	ihdr := varintLen(uint64(count)<<3 | 7) // per-element wrapper/child header estimate
+	switch elem {
+	case ir.KindString, ir.KindBlob:
+		if !elemMaxHas || count == 0 {
+			return 0, false
+		}
+		per := ihdr + varintLen(uint64(elemMax)<<3) + elemMax
+		return hdr + 1 + count*per + 1, true
+	case ir.KindStruct, ir.KindUnion:
+		if count == 0 || seen[ref.Key] {
+			return 0, false
+		}
+		seen[ref.Key] = true
+		var inner int64
+		for _, c := range ref.Target.Fields {
+			cc, ok := g.fieldCost(c, seen)
+			if !ok {
+				delete(seen, ref.Key)
+				return 0, false
+			}
+			inner += cc
+		}
+		delete(seen, ref.Key)
+		per := ihdr + inner + 1 // element sequence header + body + sequence end
+		return hdr + 1 + count*per + 1, true
+	case ir.KindArray:
+		if count == 0 {
+			return 0, false
+		}
+		cc, ok := g.arrayCost(ihdr, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax, seen)
+		if !ok {
+			return 0, false
+		}
+		return hdr + 1 + count*cc + 1, true
+	default: // numeric / enum / bool / bitfield -> native array
+		return hdr + varintLen(uint64(count)) + count*10, true
+	}
 }
 
 func varintLen(x uint64) int64 {

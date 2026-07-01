@@ -36,19 +36,7 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 		}
 		return hdr + varintLen(uint64(f.Maxlen)<<3) + f.Maxlen, true
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString, ir.KindBlob:
-			if !f.ElemMaxHas {
-				return 0, false
-			}
-			// sequence framing + count * (string field cost) + seq_end
-			elemHdr := varintLen(uint64(f.Count)<<3 | 7)
-			per := elemHdr + varintLen(uint64(f.ElemMax)<<3) + f.ElemMax
-			return hdr + 1 + f.Count*per + 1, true
-		default:
-			elem := arrayElemMax(f.Elem)
-			return hdr + varintLen(uint64(f.Count)) + f.Count*elem, true
-		}
+		return g.arrayCost(hdr, specOfField(f), seen)
 	case ir.KindStruct, ir.KindUnion:
 		// sequence_begin + sum(children) + sequence_end. Recurse; cap recursion
 		// on cycles (a recursive struct is unbounded for a static max).
@@ -71,6 +59,53 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 	return hdr, true
 }
 
+// arrayCost bounds one array field (including its own header hdr). Native
+// numeric/enum/boolean/bitfield elements use the array wire type; string/blob,
+// struct/union and nested-array elements lower to a wrapper sequence whose child
+// ids are the 0-based index. Recurses for nested arrays and into struct/union
+// element fields; returns false when a reachable element is unbounded.
+func (g *gen) arrayCost(hdr int64, spec arraySpec, seen map[string]bool) (int64, bool) {
+	switch spec.elem {
+	case ir.KindString, ir.KindBlob:
+		if !spec.maxHas {
+			return 0, false
+		}
+		// sequence framing + count * (fixlen field cost) + seq_end
+		elemHdr := varintLen(uint64(spec.count)<<3 | 7)
+		per := elemHdr + varintLen(uint64(spec.max)<<3) + spec.max
+		return hdr + 1 + spec.count*per + 1, true
+	case ir.KindStruct, ir.KindUnion:
+		if seen[spec.ref.Key] {
+			return 0, false
+		}
+		seen[spec.ref.Key] = true
+		var inner int64
+		for _, c := range spec.ref.Target.Fields {
+			cc, ok := g.fieldCost(c, seen)
+			if !ok {
+				delete(seen, spec.ref.Key)
+				return 0, false
+			}
+			inner += cc
+		}
+		delete(seen, spec.ref.Key)
+		// seq_begin(field) + count * (seq_begin(index) + struct + seq_end) + seq_end
+		elemHdr := varintLen(uint64(spec.count)<<3 | 7)
+		per := elemHdr + inner + 1
+		return hdr + 1 + spec.count*per + 1, true
+	case ir.KindArray:
+		// seq_begin(field) + count * (inner array as field id=index) + seq_end
+		per, ok := g.arrayCost(varintLen(uint64(spec.count)<<3|7), specOfItems(spec.items), seen)
+		if !ok {
+			return 0, false
+		}
+		return hdr + 1 + spec.count*per + 1, true
+	default: // native numeric/enum/boolean/bitfield
+		elem := arrayElemMax(spec.elem)
+		return hdr + varintLen(uint64(spec.count)) + spec.count*elem, true
+	}
+}
+
 func scalarVarintMax(f *ir.Field) int64 {
 	switch f.Kind {
 	case ir.KindBool:
@@ -88,17 +123,19 @@ func scalarVarintMax(f *ir.Field) int64 {
 
 func arrayElemMax(k ir.Kind) int64 {
 	switch k {
+	case ir.KindBool:
+		return 1
 	case ir.KindU8, ir.KindI8:
 		return 2
 	case ir.KindU16, ir.KindI16:
 		return 3
-	case ir.KindU32, ir.KindI32:
+	case ir.KindU32, ir.KindI32, ir.KindEnum:
 		return 5
 	case ir.KindFP32:
 		return 4
 	case ir.KindFP64:
 		return 8
-	default:
+	default: // u64/i64/bitfield
 		return 10
 	}
 }

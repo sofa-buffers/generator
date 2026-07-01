@@ -170,21 +170,50 @@ type Field struct {
 
 	// Array (Kind == KindArray):
 	Elem       Kind  // element kind
-	Count      int64 // fixed element count
+	HasCount   bool  // capacity present (count is optional → dynamic/unbounded)
+	Count      int64 // element capacity (max); 0 when dynamic
 	ElemMaxHas bool
 	ElemMax    int64
+	// Composite / nested array element (when Kind == KindArray):
+	//   ElemRef   — set when Elem is enum/bitfield/struct/union
+	//   ElemItems — set when Elem is array (array of arrays), recursive
+	ElemRef   *TypeRef
+	ElemItems *ArrayElem
 
 	// Composite (enum/bitfield/struct/union): the resolved shared type.
 	Ref *TypeRef
 }
 
+// ArrayElem describes the element of an array whose element is itself an array
+// (array-of-array). It mirrors the array portion of a Field, recursively, so the
+// nesting can be walked without a Field wrapper.
+type ArrayElem struct {
+	Elem       Kind       // inner element kind
+	ElemRef    *TypeRef   // inner element composite (enum/bitfield/struct/union)
+	HasCount   bool       // inner capacity present
+	Count      int64      // inner array capacity
+	ElemMaxHas bool       // inner string/blob element maxlen present
+	ElemMax    int64      // inner string/blob element maxlen
+	ElemItems  *ArrayElem // deeper nesting (inner element is itself an array)
+}
+
 func (f *Field) Accept(v Visitor) { v.VisitField(f) }
 func (f *Field) NodeName() string { return f.Name }
 func (f *Field) Children() []Node {
+	var out []Node
 	if f.Ref != nil && f.Ref.Target != nil {
-		return []Node{f.Ref.Target}
+		out = append(out, f.Ref.Target)
 	}
-	return nil
+	// Array element composite (enum/bitfield/struct/union), incl. nested arrays.
+	if f.ElemRef != nil && f.ElemRef.Target != nil {
+		out = append(out, f.ElemRef.Target)
+	}
+	for e := f.ElemItems; e != nil; e = e.ElemItems {
+		if e.ElemRef != nil && e.ElemRef.Target != nil {
+			out = append(out, e.ElemRef.Target)
+		}
+	}
+	return out
 }
 
 // TypeRef points a composite field at its shared NamedType. After analysis,

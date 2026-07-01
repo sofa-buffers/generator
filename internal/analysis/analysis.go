@@ -73,16 +73,25 @@ func (a *analyzer) resolveRefs() {
 
 func (a *analyzer) resolveFields(fields []*ir.Field, loc string) {
 	for _, f := range fields {
-		if f.Ref == nil {
-			continue
+		a.resolveRef(f.Ref, loc+"/"+f.Name)
+		// array element composite (enum/bitfield/struct/union), incl. nested.
+		a.resolveRef(f.ElemRef, loc+"/"+f.Name+"[]")
+		for e := f.ElemItems; e != nil; e = e.ElemItems {
+			a.resolveRef(e.ElemRef, loc+"/"+f.Name+"[]")
 		}
-		target, ok := a.schema.Named[f.Ref.Key]
-		if !ok {
-			a.add(loc+"/"+f.Name, "unresolved type reference %q", f.Ref.Key)
-			continue
-		}
-		f.Ref.Target = target
 	}
+}
+
+func (a *analyzer) resolveRef(r *ir.TypeRef, loc string) {
+	if r == nil {
+		return
+	}
+	target, ok := a.schema.Named[r.Key]
+	if !ok {
+		a.add(loc, "unresolved type reference %q", r.Key)
+		return
+	}
+	r.Target = target
 }
 
 // checkDepth enforces the shared MAX_NESTING_DEPTH = 256 cap (§4.2). Each
@@ -101,22 +110,33 @@ func (a *analyzer) walkDepth(fields []*ir.Field, depth int, loc string, onPath m
 		return
 	}
 	for _, f := range fields {
-		// array-of-string / array-of-blob also lower onto a sequence (§3.3),
-		// adding one framing level, but carry no nested fields to recurse into.
-		if f.Ref == nil || f.Ref.Target == nil {
-			continue
+		// A composite field, or a composite array element (array-of-struct /
+		// array-of-union), opens a nesting level; a nested array's element does
+		// too. enum/bitfield/scalar/string/blob elements are leaves.
+		a.descend(f.Ref, depth, loc+"/"+f.Name, onPath)
+		a.descend(f.ElemRef, depth, loc+"/"+f.Name, onPath)
+		for e := f.ElemItems; e != nil; e = e.ElemItems {
+			a.descend(e.ElemRef, depth, loc+"/"+f.Name, onPath)
 		}
-		t := f.Ref.Target
-		if t.Category != ir.CatStruct && t.Category != ir.CatUnion {
-			continue // enum/bitfield are leaves
-		}
-		if onPath[t.Key] {
-			continue // recursive back-edge: not a static-depth violation
-		}
-		onPath[t.Key] = true
-		a.walkDepth(t.Fields, depth+1, loc+"/"+f.Name, onPath)
-		delete(onPath, t.Key)
 	}
+}
+
+// descend recurses into a struct/union target one nesting level deeper, breaking
+// recursive back-edges (their runtime depth is data-dependent, not static).
+func (a *analyzer) descend(r *ir.TypeRef, depth int, loc string, onPath map[string]bool) {
+	if r == nil || r.Target == nil {
+		return
+	}
+	t := r.Target
+	if t.Category != ir.CatStruct && t.Category != ir.CatUnion {
+		return
+	}
+	if onPath[t.Key] {
+		return
+	}
+	onPath[t.Key] = true
+	a.walkDepth(t.Fields, depth+1, loc, onPath)
+	delete(onPath, t.Key)
 }
 
 // checkUnionDefaults is a placeholder hook for cross-field semantic checks the

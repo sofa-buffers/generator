@@ -82,16 +82,55 @@ func (g *gen) cppType(f *ir.Field) string {
 	case ir.KindBitfield:
 		return bitfieldBacking(f.Ref.Target)
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString:
-			return "std::vector<std::string>"
-		case ir.KindBlob:
-			return "std::vector<std::vector<std::uint8_t>>"
-		default:
-			return fmt.Sprintf("std::array<%s, %d>", numCppType(f.Elem), f.Count)
-		}
+		return g.cppArrayContainer(f.Elem, f.ElemRef, f.ElemItems, f.Count)
 	}
 	return "void"
+}
+
+// isNativeArrayElem reports whether an array element lowers to a native array
+// wire type (numeric/enum/boolean/bitfield): those are stored in a fixed
+// std::array. String/blob/struct/union/nested-array elements lower to a wrapper
+// sequence and are stored in a std::vector (decode appends).
+func isNativeArrayElem(k ir.Kind) bool {
+	switch k {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
+		ir.KindFP32, ir.KindFP64, ir.KindBool, ir.KindEnum, ir.KindBitfield:
+		return true
+	}
+	return false
+}
+
+// cppArrayContainer is the C++ member type for an array with the given element:
+// std::array<T, count> for native elements, std::vector<T> otherwise.
+func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64) string {
+	et := g.cppArrayElem(elem, ref, items)
+	if isNativeArrayElem(elem) {
+		return fmt.Sprintf("std::array<%s, %d>", et, count)
+	}
+	return "std::vector<" + et + ">"
+}
+
+// cppArrayElem is the C++ type of a single array element, recursing for nested
+// arrays. Enum/bitfield map to their backing/underlying type only where the
+// element is stored raw; enum keeps its scoped type so JSON stays value-typed.
+func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindString:
+		return "std::string"
+	case ir.KindBlob:
+		return "std::vector<std::uint8_t>"
+	case ir.KindBool:
+		return "bool"
+	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
+		return g.typeName(ref.Key)
+	case ir.KindBitfield:
+		return bitfieldBacking(ref.Target)
+	case ir.KindArray:
+		return g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count)
+	default:
+		return numCppType(elem)
+	}
 }
 
 func numCppType(k ir.Kind) string {
@@ -292,6 +331,25 @@ func byteList(b []byte) string {
 	}
 	return strings.Join(parts, ", ")
 }
+
+// cppMsgSeqPrelude is emitted for BOTH corelibs (the _StrSeq/_BlobSeq prelude is
+// pure-corelib-cpp only). _MsgSeq decodes a wrapper sequence of struct/union
+// elements, or of nested (native) arrays, into a std::vector: one element is
+// emplaced and read per child. is.read descends into a struct/union element's
+// own sub-sequence, or reads a nested array element, exactly as a scalar field
+// would. The target is held by pointer (not a bound reference) so the same
+// instance can be reused: the corelib-c-cpp decoder is deferred and dereferences
+// the visitor after deserialize returns, so on that path the visitor is given
+// static storage (a bound stack local would be a use-after-return). Unused
+// template, so it costs nothing when a message has no such array.
+const cppMsgSeqPrelude = `template <typename T>
+struct _MsgSeq : sofab::IStreamMessage {
+    std::vector<T> *out = nullptr;
+    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
+        out->emplace_back();
+        is.read(out->back());
+    }
+};`
 
 const cppPrelude = `struct _StrSeq : sofab::IStreamMessage {
     std::vector<std::string> &out;

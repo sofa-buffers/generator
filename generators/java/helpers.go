@@ -96,20 +96,33 @@ func (g *gen) javaType(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString:
-			return "List<String>"
-		case ir.KindBlob:
-			return "List<byte[]>"
-		case ir.KindFP32:
-			return "List<Float>"
-		case ir.KindFP64:
-			return "List<Double>"
-		default:
-			return "List<Long>"
-		}
+		return "List<" + g.javaArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">"
 	}
 	return "Object"
+}
+
+// javaArrayElemType is the boxed element type stored in an array's List<...>.
+// Integers/enum/bitfield box to Long, boolean to Boolean, fp to Float/Double;
+// struct/union use the class type; nested arrays recurse into List<...>.
+func (g *gen) javaArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindString:
+		return "String"
+	case ir.KindBlob:
+		return "byte[]"
+	case ir.KindFP32:
+		return "Float"
+	case ir.KindFP64:
+		return "Double"
+	case ir.KindBool:
+		return "Boolean"
+	case ir.KindStruct, ir.KindUnion:
+		return g.typeName(ref.Key)
+	case ir.KindArray:
+		return "List<" + g.javaArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
+	default: // integers, enum, bitfield
+		return "Long"
+	}
 }
 
 func (g *gen) javaInit(f *ir.Field) string {
@@ -214,25 +227,42 @@ func javaBytes(b []byte) string {
 }
 
 // reachable returns named-type keys used by m in post-order (children first).
+// Both scalar refs (f.Ref) and composite array element refs (f.ElemRef / nested
+// f.ElemItems) are followed so array-of-struct/union/enum element classes are
+// discovered and emitted.
 func (g *gen) reachable(m *ir.Message) []string {
 	var order []string
 	seen := map[string]bool{}
+	var addRef func(ref *ir.TypeRef)
 	var visit func(fields []*ir.Field)
+	var visitElem func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem)
+	addRef = func(ref *ir.TypeRef) {
+		if ref == nil || seen[ref.Key] {
+			return
+		}
+		seen[ref.Key] = true
+		t := ref.Target
+		if t.Category == ir.CatStruct || t.Category == ir.CatUnion {
+			visit(t.Fields)
+		}
+		order = append(order, ref.Key)
+	}
+	visitElem = func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) {
+		switch elem {
+		case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
+			addRef(ref)
+		case ir.KindArray:
+			visitElem(items.Elem, items.ElemRef, items.ElemItems)
+		}
+	}
 	visit = func(fields []*ir.Field) {
 		for _, f := range fields {
-			if f.Ref == nil {
-				continue
+			if f.Ref != nil {
+				addRef(f.Ref)
 			}
-			key := f.Ref.Key
-			if seen[key] {
-				continue
+			if f.Kind == ir.KindArray {
+				visitElem(f.Elem, f.ElemRef, f.ElemItems)
 			}
-			seen[key] = true
-			t := f.Ref.Target
-			if t.Category == ir.CatStruct || t.Category == ir.CatUnion {
-				visit(t.Fields)
-			}
-			order = append(order, key)
 		}
 	}
 	visit(m.Fields)
@@ -273,16 +303,11 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 		}
 		return hdr + varintLen(uint64(f.Maxlen)<<3) + f.Maxlen, true
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString, ir.KindBlob:
-			if !f.ElemMaxHas {
-				return 0, false
-			}
-			per := varintLen(uint64(f.Count)<<3|7) + varintLen(uint64(f.ElemMax)<<3) + f.ElemMax
-			return hdr + 1 + f.Count*per + 1, true
-		default:
-			return hdr + varintLen(uint64(f.Count)) + f.Count*10, true
+		body, ok := g.arrayBodyCost(f.Count, f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax, seen)
+		if !ok {
+			return 0, false
 		}
+		return hdr + body, true
 	case ir.KindStruct, ir.KindUnion:
 		if seen[f.Ref.Key] {
 			return 0, false
@@ -301,6 +326,52 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 		return hdr + inner + 1, true
 	}
 	return hdr, true
+}
+
+// arrayBodyCost is an upper bound (in bytes) for an array's on-wire payload,
+// excluding the outer field header. Native numeric/enum/boolean/bitfield elements
+// use the native array wire type; string/blob/struct/union/nested-array elements
+// lower to a wrapper sequence. A dynamic (count 0) array or an unbounded
+// string/blob element makes the size unbounded (ok=false).
+func (g *gen) arrayBodyCost(count int64, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, seen map[string]bool) (int64, bool) {
+	if count <= 0 {
+		return 0, false
+	}
+	idxHdr := varintLen(uint64(count)<<3 | 7) // generous per-element header
+	switch elem {
+	case ir.KindString, ir.KindBlob:
+		if !elemMaxHas {
+			return 0, false
+		}
+		per := idxHdr + varintLen(uint64(elemMax)<<3) + elemMax
+		return 1 + count*per + 1, true
+	case ir.KindStruct, ir.KindUnion:
+		if seen[ref.Key] {
+			return 0, false
+		}
+		seen[ref.Key] = true
+		var inner int64
+		for _, c := range ref.Target.Fields {
+			cc, ok := g.fieldCost(c, seen)
+			if !ok {
+				delete(seen, ref.Key)
+				return 0, false
+			}
+			inner += cc
+		}
+		delete(seen, ref.Key)
+		per := idxHdr + inner + 1
+		return 1 + count*per + 1, true
+	case ir.KindArray:
+		innerBody, ok := g.arrayBodyCost(items.Count, items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, seen)
+		if !ok {
+			return 0, false
+		}
+		per := idxHdr + innerBody
+		return 1 + count*per + 1, true
+	default: // numeric / enum / boolean / bitfield -> native array
+		return 1 + count*10, true
+	}
 }
 
 func varintLen(x uint64) int64 {
@@ -324,6 +395,7 @@ import java.util.List;
 
 final class Sbuf {
     static long[] toLongArray(List<Long> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
+    static long[] boolToLongArray(List<Boolean> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i) ? 1 : 0; return a; }
     static float[] toFloatArray(List<Float> l) { float[] a = new float[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
     static double[] toDoubleArray(List<Double> l) { double[] a = new double[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
 }

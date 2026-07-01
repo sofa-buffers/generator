@@ -64,18 +64,30 @@ func (g *gen) pyAnnot(f *ir.Field) string {
 	case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString:
-			return "list[str]"
-		case ir.KindBlob:
-			return "list[bytes]"
-		case ir.KindFP32, ir.KindFP64:
-			return "list[float]"
-		default:
-			return "list[int]"
-		}
+		return g.pyArrayAnnot(f.Elem, f.ElemRef, f.ElemItems)
 	default: // integers
 		return "int"
+	}
+}
+
+// pyArrayAnnot returns the list[...] annotation for an array element, recursing
+// for nested arrays.
+func (g *gen) pyArrayAnnot(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindString:
+		return "list[str]"
+	case ir.KindBlob:
+		return "list[bytes]"
+	case ir.KindFP32, ir.KindFP64:
+		return "list[float]"
+	case ir.KindBool:
+		return "list[bool]"
+	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
+		return "list[" + g.typeName(ref.Key) + "]"
+	case ir.KindArray:
+		return "list[" + g.pyArrayAnnot(items.Elem, items.ElemRef, items.ElemItems) + "]"
+	default: // integers, bitfield
+		return "list[int]"
 	}
 }
 
@@ -196,14 +208,27 @@ func (g *gen) toJSONExpr(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return acc + ".to_jsonable()"
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindBlob:
-			return fmt.Sprintf("[list(_x) for _x in %s]", acc)
-		default:
-			return fmt.Sprintf("list(%s)", acc)
-		}
+		return g.pyArrayToJSON(acc, f.Elem, f.ElemRef, f.ElemItems, 0)
 	default:
 		return acc
+	}
+}
+
+// pyArrayToJSON builds a JSON-able expression for an array value: blob->list[int],
+// enum/bitfield->int, struct/union->to_jsonable(); recurses for nested arrays.
+func (g *gen) pyArrayToJSON(val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) string {
+	v := fmt.Sprintf("_x%d", depth)
+	switch elem {
+	case ir.KindBlob:
+		return fmt.Sprintf("[list(%s) for %s in %s]", v, v, val)
+	case ir.KindEnum, ir.KindBitfield:
+		return fmt.Sprintf("[int(%s) for %s in %s]", v, v, val)
+	case ir.KindStruct, ir.KindUnion:
+		return fmt.Sprintf("[%s.to_jsonable() for %s in %s]", v, v, val)
+	case ir.KindArray:
+		return fmt.Sprintf("[%s for %s in %s]", g.pyArrayToJSON(v, items.Elem, items.ElemRef, items.ElemItems, depth+1), v, val)
+	default:
+		return fmt.Sprintf("list(%s)", val)
 	}
 }
 
@@ -216,14 +241,26 @@ func (g *gen) fromJSONStmt(f *pyfile, fld *ir.Field) {
 	case ir.KindStruct, ir.KindUnion:
 		f.line("            %s = %s.from_jsonable(%s)", acc, g.typeName(fld.Ref.Key), src)
 	case ir.KindArray:
-		switch fld.Elem {
-		case ir.KindBlob:
-			f.line("            %s = [bytes(_x) for _x in %s]", acc, src)
-		default:
-			f.line("            %s = list(%s)", acc, src)
-		}
+		f.line("            %s = %s", acc, g.pyArrayFromJSON(src, fld.Elem, fld.ElemRef, fld.ElemItems, 0))
 	default:
 		f.line("            %s = %s", acc, src)
+	}
+}
+
+// pyArrayFromJSON builds an expression rebuilding an array from JSON: blob->bytes,
+// struct/union->from_jsonable(); recurses for nested arrays. enum/bitfield/bool
+// stay plain ints/bools (list()).
+func (g *gen) pyArrayFromJSON(src string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) string {
+	v := fmt.Sprintf("_x%d", depth)
+	switch elem {
+	case ir.KindBlob:
+		return fmt.Sprintf("[bytes(%s) for %s in %s]", v, v, src)
+	case ir.KindStruct, ir.KindUnion:
+		return fmt.Sprintf("[%s.from_jsonable(%s) for %s in %s]", g.typeName(ref.Key), v, v, src)
+	case ir.KindArray:
+		return fmt.Sprintf("[%s for %s in %s]", g.pyArrayFromJSON(v, items.Elem, items.ElemRef, items.ElemItems, depth+1), v, src)
+	default:
+		return fmt.Sprintf("list(%s)", src)
 	}
 }
 

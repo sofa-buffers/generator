@@ -1,6 +1,7 @@
 package java
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -32,7 +33,7 @@ func (g *gen) pom() string {
     <exec.mainClass>` + g.pkg + `.Main</exec.mainClass>
   </properties>
   <dependencies>
-    <dependency><groupId>org.sofabuffers</groupId><artifactId>sofab</artifactId><version>${sofab.version}</version></dependency>
+    <dependency><groupId>org.sofabuffers</groupId><artifactId>SofaBuffers</artifactId><version>${sofab.version}</version></dependency>
     <dependency><groupId>com.google.code.gson</groupId><artifactId>gson</artifactId><version>2.11.0</version></dependency>
   </dependencies>
   <build>
@@ -185,17 +186,31 @@ func (g *gen) emitTo(f *jfile, fld *ir.Field) {
 }
 
 func (g *gen) emitToArray(f *jfile, fld *ir.Field, acc string) {
-	f.line("        { b.append('['); for (int _i = 0; _i < %s.size(); _i++) { if (_i>0) b.append(',');", acc)
-	switch fld.Elem {
+	g.jsonToArray(f, "        ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// jsonToArray writes val as a JSON array. u* elements print unsigned; struct/union
+// recurse via to(); nested arrays recurse; the rest print via append. Loop vars
+// are depth-suffixed to nest safely.
+func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	iv := fmt.Sprintf("_i%d", depth)
+	el := fmt.Sprintf("%s.get(%s)", val, iv)
+	f.line("%s{ b.append('['); for (int %s = 0; %s < %s.size(); %s++) { if (%s>0) b.append(',');", ind, iv, iv, val, iv, iv)
+	switch elem {
 	case ir.KindString:
-		f.line("            Json.str(b, %s.get(_i)); } b.append(']'); }", acc)
+		f.line("%s    Json.str(b, %s);", ind, el)
 	case ir.KindBlob:
-		f.line("            Json.bytes(b, %s.get(_i)); } b.append(']'); }", acc)
+		f.line("%s    Json.bytes(b, %s);", ind, el)
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("            b.append(Long.toUnsignedString(%s.get(_i))); } b.append(']'); }", acc)
-	default:
-		f.line("            b.append(%s.get(_i)); } b.append(']'); }", acc)
+		f.line("%s    b.append(Long.toUnsignedString(%s));", ind, el)
+	case ir.KindStruct, ir.KindUnion:
+		f.line("%s    to(%s, b);", ind, el)
+	case ir.KindArray:
+		g.jsonToArray(f, ind+"    ", el, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+	default: // i*, enum, bitfield, boolean, fp
+		f.line("%s    b.append(%s);", ind, el)
 	}
+	f.line("%s} b.append(']'); }", ind)
 }
 
 func (g *gen) emitFrom(f *jfile, fld *ir.Field) {
@@ -223,21 +238,42 @@ func (g *gen) emitFrom(f *jfile, fld *ir.Field) {
 }
 
 func (g *gen) emitFromArray(f *jfile, fld *ir.Field, acc string) {
-	f.line("            %s.clear(); for (JsonElement _e : e.getAsJsonArray()) {", acc)
-	switch fld.Elem {
+	g.jsonFromArray(f, "            ", acc, "e.getAsJsonArray()", fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// jsonFromArray rebuilds target from the JsonArray src, mirroring jsonToArray:
+// u64 parses from string, struct/union recurse via from(), nested arrays recurse
+// into a fresh List; the rest map to the matching Gson accessor. Loop/temporary
+// vars are depth-suffixed to nest safely.
+func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	ev := fmt.Sprintf("_e%d", depth)
+	f.line("%s%s.clear(); for (JsonElement %s : %s) {", ind, target, ev, src)
+	switch elem {
 	case ir.KindString:
-		f.line("                %s.add(_e.getAsString()); }", acc)
+		f.line("%s    %s.add(%s.getAsString());", ind, target, ev)
 	case ir.KindBlob:
-		f.line("                %s.add(Json.toBytes(_e.getAsJsonArray())); }", acc)
+		f.line("%s    %s.add(Json.toBytes(%s.getAsJsonArray()));", ind, target, ev)
 	case ir.KindU64:
-		f.line("                %s.add(Long.parseUnsignedLong(_e.getAsString())); }", acc)
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("                %s.add(_e.getAsLong()); }", acc)
+		f.line("%s    %s.add(Long.parseUnsignedLong(%s.getAsString()));", ind, target, ev)
+	case ir.KindBool:
+		f.line("%s    %s.add(%s.getAsBoolean());", ind, target, ev)
 	case ir.KindFP32:
-		f.line("                %s.add(_e.getAsFloat()); }", acc)
+		f.line("%s    %s.add(%s.getAsFloat());", ind, target, ev)
 	case ir.KindFP64:
-		f.line("                %s.add(_e.getAsDouble()); }", acc)
+		f.line("%s    %s.add(%s.getAsDouble());", ind, target, ev)
+	case ir.KindStruct, ir.KindUnion:
+		v := fmt.Sprintf("_v%d", depth)
+		f.line("%s    %s %s = new %s(); from(%s.getAsJsonObject(), %s); %s.add(%s);", ind, g.typeName(ref.Key), v, g.typeName(ref.Key), ev, v, target, v)
+	case ir.KindArray:
+		v := fmt.Sprintf("_v%d", depth)
+		vt := "List<" + g.javaArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
+		f.line("%s    %s %s = new ArrayList<>();", ind, vt, v)
+		g.jsonFromArray(f, ind+"    ", v, ev+".getAsJsonArray()", items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		f.line("%s    %s.add(%s);", ind, target, v)
+	default: // u8/u16/u32, i8..i64, enum, bitfield
+		f.line("%s    %s.add(%s.getAsLong());", ind, target, ev)
 	}
+	f.line("%s}", ind)
 }
 
 func defaultMessage(s *ir.Schema) string {

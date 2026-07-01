@@ -108,18 +108,30 @@ func (g *gen) tsType(f *ir.Field) string {
 	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString:
-			return "string[]"
-		case ir.KindBlob:
-			return "Uint8Array[]"
-		case ir.KindU64, ir.KindI64:
-			return "bigint[]"
-		default:
-			return "number[]"
-		}
+		return g.tsArrayType(f.Elem, f.ElemRef, f.ElemItems)
 	}
 	return "unknown"
+}
+
+// tsArrayType returns the `T[]` member type for an array element, recursing for
+// nested arrays (array-of-array -> T[][]).
+func (g *gen) tsArrayType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindString:
+		return "string[]"
+	case ir.KindBlob:
+		return "Uint8Array[]"
+	case ir.KindU64, ir.KindI64:
+		return "bigint[]"
+	case ir.KindBool:
+		return "boolean[]"
+	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
+		return g.typeName(ref.Key) + "[]"
+	case ir.KindArray:
+		return g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems) + "[]"
+	default: // integers, bitfield
+		return "number[]"
+	}
 }
 
 func (g *gen) tsDefault(f *ir.Field) string {
@@ -256,16 +268,28 @@ func (g *gen) toJSONExpr(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return acc + ".toJSON()"
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindU64, ir.KindI64:
-			return acc + ".map((x) => x.toString())"
-		case ir.KindBlob:
-			return acc + ".map((x) => Array.from(x))"
-		default:
-			return acc
-		}
+		return g.tsArrayToJSON(acc, f.Elem, f.ElemRef, f.ElemItems, 0)
 	default:
 		return acc
+	}
+}
+
+// tsArrayToJSON builds a JSON-able expression for an array value: u64/i64 -> string,
+// blob -> number[], struct/union -> toJSON(); recurses for nested arrays. enum/
+// bool/bitfield/numeric/string are already JSON-native (identity).
+func (g *gen) tsArrayToJSON(val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) string {
+	x := fmt.Sprintf("_x%d", depth)
+	switch elem {
+	case ir.KindU64, ir.KindI64:
+		return fmt.Sprintf("%s.map((%s) => %s.toString())", val, x, x)
+	case ir.KindBlob:
+		return fmt.Sprintf("%s.map((%s) => Array.from(%s))", val, x, x)
+	case ir.KindStruct, ir.KindUnion:
+		return fmt.Sprintf("%s.map((%s) => %s.toJSON())", val, x, x)
+	case ir.KindArray:
+		return fmt.Sprintf("%s.map((%s) => %s)", val, x, g.tsArrayToJSON(x, items.Elem, items.ElemRef, items.ElemItems, depth+1))
+	default:
+		return val
 	}
 }
 
@@ -288,16 +312,32 @@ func (g *gen) fromJSONStmt(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return fmt.Sprintf("%s = %s.fromJSON(%s as Record<string, unknown>)", acc, g.typeName(f.Ref.Key), src)
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindU64, ir.KindI64:
-			return fmt.Sprintf("%s = (%s as (string | number)[]).map((x) => BigInt(x))", acc, src)
-		case ir.KindBlob:
-			return fmt.Sprintf("%s = (%s as number[][]).map((x) => new Uint8Array(x))", acc, src)
-		case ir.KindString:
-			return fmt.Sprintf("%s = %s as string[]", acc, src)
-		default:
-			return fmt.Sprintf("%s = %s as number[]", acc, src)
-		}
+		return fmt.Sprintf("%s = %s", acc, g.tsArrayFromJSON(src, f.Elem, f.ElemRef, f.ElemItems, 0))
 	}
 	return acc + " = undefined as never"
+}
+
+// tsArrayFromJSON rebuilds an array from JSON: u64/i64 -> bigint, blob -> Uint8Array,
+// struct/union -> fromJSON(); recurses for nested arrays. enum/bool/bitfield/numeric/
+// string are plain casts.
+func (g *gen) tsArrayFromJSON(src string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) string {
+	x := fmt.Sprintf("_x%d", depth)
+	switch elem {
+	case ir.KindU64, ir.KindI64:
+		return fmt.Sprintf("(%s as (string | number)[]).map((%s) => BigInt(%s))", src, x, x)
+	case ir.KindBlob:
+		return fmt.Sprintf("(%s as number[][]).map((%s) => new Uint8Array(%s))", src, x, x)
+	case ir.KindStruct, ir.KindUnion:
+		return fmt.Sprintf("(%s as Record<string, unknown>[]).map((%s) => %s.fromJSON(%s))", src, x, g.typeName(ref.Key), x)
+	case ir.KindEnum:
+		return fmt.Sprintf("%s as %s[]", src, g.typeName(ref.Key))
+	case ir.KindArray:
+		return fmt.Sprintf("(%s as unknown[]).map((%s) => %s)", src, x, g.tsArrayFromJSON(x, items.Elem, items.ElemRef, items.ElemItems, depth+1))
+	case ir.KindBool:
+		return fmt.Sprintf("%s as boolean[]", src)
+	case ir.KindString:
+		return fmt.Sprintf("%s as string[]", src)
+	default:
+		return fmt.Sprintf("%s as number[]", src)
+	}
 }

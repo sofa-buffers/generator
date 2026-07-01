@@ -176,22 +176,53 @@ func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
 }
 
 func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
-	switch fld.Elem {
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// marshalArray writes the list `val` as field `idExpr`. Numeric/enum/boolean/
+// bitfield elements use the native array wire type (enum -> signed, boolean/
+// bitfield -> unsigned, value-converted to the corelib's array element width);
+// string/blob/struct/union/array elements lower to a wrapper sequence whose child
+// ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested arrays,
+// depth-suffixing the loop var to avoid collisions.
+func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	iv := fmt.Sprintf("_i%d", depth)
+	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("        os.WriteArrayUnsigned(%d, %s.ToArray());", fld.ID, acc)
+		f.line("%sos.WriteArrayUnsigned(%s, %s.ToArray());", ind, idExpr, val)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("        os.WriteArraySigned(%d, %s.ToArray());", fld.ID, acc)
+		f.line("%sos.WriteArraySigned(%s, %s.ToArray());", ind, idExpr, val)
 	case ir.KindFP32:
-		f.line("        os.WriteArrayFp32(%d, %s.ToArray());", fld.ID, acc)
+		f.line("%sos.WriteArrayFp32(%s, %s.ToArray());", ind, idExpr, val)
 	case ir.KindFP64:
-		f.line("        os.WriteArrayFp64(%d, %s.ToArray());", fld.ID, acc)
+		f.line("%sos.WriteArrayFp64(%s, %s.ToArray());", ind, idExpr, val)
+	case ir.KindEnum:
+		// enum -> signed array at the enum's backing width (matches Go's typed array).
+		f.line("%sos.WriteArraySigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, enumBacking(ref.Target))
+	case ir.KindBitfield:
+		f.line("%sos.WriteArrayUnsigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, bitfieldBacking(ref.Target))
+	case ir.KindBool:
+		// boolean -> unsigned u8 array of 0/1.
+		f.line("%sos.WriteArrayUnsigned(%s, Array.ConvertAll(%s.ToArray(), _x => _x ? (byte)1 : (byte)0));", ind, idExpr, val)
 	case ir.KindString:
-		f.line("        os.WriteSequenceBegin(%d);", fld.ID)
-		f.line("        for (int _i = 0; _i < %s.Count; _i++) os.WriteString(_i, %s[_i] ?? \"\");", acc, acc)
-		f.line("        os.WriteSequenceEnd();")
+		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) os.WriteString(%s, %s[%s] ?? \"\");", ind, iv, iv, val, iv, iv, val, iv)
+		f.line("%sos.WriteSequenceEnd();", ind)
 	case ir.KindBlob:
-		f.line("        os.WriteSequenceBegin(%d);", fld.ID)
-		f.line("        for (int _i = 0; _i < %s.Count; _i++) os.WriteBlob(_i, %s[_i] ?? Array.Empty<byte>());", acc, acc)
-		f.line("        os.WriteSequenceEnd();")
+		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) os.WriteBlob(%s, %s[%s] ?? Array.Empty<byte>());", ind, iv, iv, val, iv, iv, val, iv)
+		f.line("%sos.WriteSequenceEnd();", ind)
+	case ir.KindStruct, ir.KindUnion:
+		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) {", ind, iv, iv, val, iv)
+		f.line("%s    os.WriteSequenceBegin(%s); (%s[%s] ?? new %s()).Marshal(os); os.WriteSequenceEnd();", ind, iv, val, iv, g.typeName(ref.Key))
+		f.line("%s}", ind)
+		f.line("%sos.WriteSequenceEnd();", ind)
+	case ir.KindArray:
+		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) {", ind, iv, iv, val, iv)
+		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		f.line("%s}", ind)
+		f.line("%sos.WriteSequenceEnd();", ind)
 	}
 }

@@ -161,22 +161,53 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 }
 
 func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
-	switch fld.Elem {
+	g.marshalArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
+// bitfield elements use the native array wire type (enum->signed, bool/bitfield->
+// unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
+// whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
+// arrays.
+func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	ev := fmt.Sprintf("_e%d", depth)
+	iv := fmt.Sprintf("_i%d", depth)
+	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("    os.writeUnsignedArray(%d, %s);", fld.ID, acc)
+		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("    os.writeSignedArray(%d, %s);", fld.ID, acc)
+		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
+	case ir.KindEnum:
+		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
+	case ir.KindBool:
+		f.line("%sos.writeUnsignedArray(%s, %s.map((%s) => (%s ? 1 : 0)));", ind, idExpr, val, ev, ev)
+	case ir.KindBitfield:
+		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
 	case ir.KindFP32:
-		f.line("    os.writeFp32Array(%d, %s);", fld.ID, acc)
+		f.line("%sos.writeFp32Array(%s, %s);", ind, idExpr, val)
 	case ir.KindFP64:
-		f.line("    os.writeFp64Array(%d, %s);", fld.ID, acc)
+		f.line("%sos.writeFp64Array(%s, %s);", ind, idExpr, val)
 	case ir.KindString:
-		f.line("    os.writeSequenceBegin(%d);", fld.ID)
-		f.line("    %s.forEach((s, i) => os.writeString(i, s));", acc)
-		f.line("    os.writeSequenceEnd();")
+		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%s%s.forEach((%s, %s) => os.writeString(%s, %s));", ind, val, ev, iv, iv, ev)
+		f.line("%sos.writeSequenceEnd();", ind)
 	case ir.KindBlob:
-		f.line("    os.writeSequenceBegin(%d);", fld.ID)
-		f.line("    %s.forEach((b, i) => os.writeBlob(i, b));", acc)
-		f.line("    os.writeSequenceEnd();")
+		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%s%s.forEach((%s, %s) => os.writeBlob(%s, %s));", ind, val, ev, iv, iv, ev)
+		f.line("%sos.writeSequenceEnd();", ind)
+	case ir.KindStruct, ir.KindUnion:
+		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%s%s.forEach((%s, %s) => {", ind, val, ev, iv)
+		f.line("%s  os.writeSequenceBegin(%s);", ind, iv)
+		f.line("%s  %s.marshal(os);", ind, ev)
+		f.line("%s  os.writeSequenceEnd();", ind)
+		f.line("%s});", ind)
+		f.line("%sos.writeSequenceEnd();", ind)
+	case ir.KindArray:
+		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%s%s.forEach((%s, %s) => {", ind, val, ev, iv)
+		g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		f.line("%s});", ind)
+		f.line("%sos.writeSequenceEnd();", ind)
 	}
 }

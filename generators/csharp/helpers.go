@@ -135,16 +135,29 @@ func (g *gen) csType(f *ir.Field) string {
 	case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString:
-			return "List<string>"
-		case ir.KindBlob:
-			return "List<byte[]>"
-		default:
-			return "List<" + numCsType(f.Elem) + ">"
-		}
+		return "List<" + g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">"
 	}
 	return "object"
+}
+
+// csArrayElemType is the C# type of an array element, recursing for nested
+// arrays. Numeric elements map to their scalar type; enum/bitfield/struct/union
+// to the named type; string/blob to string/byte[]; a nested array to List<...>.
+func (g *gen) csArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindString:
+		return "string"
+	case ir.KindBlob:
+		return "byte[]"
+	case ir.KindBool:
+		return "bool"
+	case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
+		return g.typeName(ref.Key)
+	case ir.KindArray:
+		return "List<" + g.csArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
+	default:
+		return numCsType(elem)
+	}
 }
 
 func numCsType(k ir.Kind) string {
@@ -361,7 +374,12 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 			}
 			per := varintLen(uint64(f.Count)<<3|7) + varintLen(uint64(f.ElemMax)<<3) + f.ElemMax
 			return hdr + 1 + f.Count*per + 1, true
+		case ir.KindStruct, ir.KindUnion, ir.KindArray:
+			// Composite/nested-array elements are not statically bounded here;
+			// fall back to the whole-message size cap.
+			return 0, false
 		default:
+			// Numeric/enum/boolean/bitfield elements use the native array wire.
 			return hdr + varintLen(uint64(f.Count)) + f.Count*10, true
 		}
 	case ir.KindStruct, ir.KindUnion:
@@ -421,4 +439,58 @@ func csIdent(name string) string {
 		return "@" + name
 	}
 	return name
+}
+
+// ---- array element classification ----------------------------------------
+
+// unsignedArrayElem reports whether an array element is delivered through the
+// Unsigned callback (native unsigned wire type): u*/boolean/bitfield.
+func unsignedArrayElem(k ir.Kind) bool {
+	return k == ir.KindU8 || k == ir.KindU16 || k == ir.KindU32 || k == ir.KindU64 ||
+		k == ir.KindBool || k == ir.KindBitfield
+}
+
+// signedArrayElem reports whether an array element is delivered through the
+// Signed callback (native signed wire type): i*/enum.
+func signedArrayElem(k ir.Kind) bool {
+	return k == ir.KindI8 || k == ir.KindI16 || k == ir.KindI32 || k == ir.KindI64 ||
+		k == ir.KindEnum
+}
+
+// nativeArrayElem reports whether an array element encodes as a native array
+// wire type (numeric/enum/boolean/bitfield) rather than a wrapper sequence.
+func nativeArrayElem(k ir.Kind) bool {
+	return unsignedArrayElem(k) || signedArrayElem(k) || k == ir.KindFP32 || k == ir.KindFP64
+}
+
+// seqArrayElem reports whether an array element lowers to a wrapper sequence
+// (string/blob/struct/union, or a nested array).
+func seqArrayElem(k ir.Kind) bool {
+	switch k {
+	case ir.KindString, ir.KindBlob, ir.KindStruct, ir.KindUnion, ir.KindArray:
+		return true
+	}
+	return false
+}
+
+// arrayElemAddRHS converts a decoded native array element `v` to the member
+// element type before appending: bool becomes a comparison, enum/bitfield cast
+// to the named type, floats pass through, and integers narrow to their width.
+func (g *gen) arrayElemAddRHS(elem ir.Kind, ref *ir.TypeRef, v string) string {
+	switch elem {
+	case ir.KindBool:
+		return v + " != 0"
+	case ir.KindEnum, ir.KindBitfield:
+		return "(" + g.typeName(ref.Key) + ")" + v
+	case ir.KindFP32, ir.KindFP64:
+		return v
+	default: // numeric
+		return "(" + numCsType(elem) + ")" + v
+	}
+}
+
+// lastElem is the accessor for the most-recently-added element of List `list`,
+// used as the target when decoding into an array element in-place.
+func lastElem(list string) string {
+	return list + "[" + list + ".Count - 1]"
 }
