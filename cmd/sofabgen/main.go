@@ -62,6 +62,11 @@ func run(args []string, stdout, stderr *os.File) int {
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
+		// -h/--help is an explicit, valid request (flag prints usage); exit 0.
+		// Any other parse error is a misuse; exit 2.
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if *showVersion {
