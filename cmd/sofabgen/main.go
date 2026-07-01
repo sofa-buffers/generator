@@ -38,7 +38,7 @@ import (
 	_ "github.com/sofa-buffers/generator/generators/typescript"
 )
 
-const version = "0.5.0"
+const version = "0.5.1"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
