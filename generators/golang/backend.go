@@ -231,6 +231,20 @@ func (g *gen) defaultCompare(fld *ir.Field) string {
 }
 
 func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc string) {
+	// A native scalar array is a leaf field: omit it when equal to its default
+	// (materialized in New<Msg>), else when empty. A composite/dynamic-element
+	// array is a wrapper sequence and is always framed (never whole-omitted).
+	if isNativeArrayElem(fld.Elem) {
+		if def, ok := g.defaultLiteral(fld); ok {
+			f.imp("slices")
+			f.line("\tif !slices.Equal(%s, %s) {", acc, def)
+		} else {
+			f.line("\tif len(%s) != 0 {", acc)
+		}
+		g.marshalArray(f, "\t\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		f.line("\t}")
+		return
+	}
 	g.marshalArray(f, "\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
 }
 
