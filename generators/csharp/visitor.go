@@ -15,10 +15,10 @@ type frame struct {
 	fields []*ir.Field // object scope
 	// array scope (fields == nil, isArr == true):
 	isArr    bool
-	elem     ir.Kind      // element kind of this array
-	ref      *ir.TypeRef  // enum/bitfield/struct/union element
+	elem     ir.Kind       // element kind of this array
+	ref      *ir.TypeRef   // enum/bitfield/struct/union element
 	items    *ir.ArrayElem // nested-array element descriptor
-	childLoc string       // struct/union element or sequence-nested inner-array scope
+	childLoc string        // struct/union element or sequence-nested inner-array scope
 }
 
 func (g *gen) frames(m *ir.Message) []frame {

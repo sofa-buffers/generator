@@ -207,7 +207,7 @@ func (g *gen) arrayValueToJSON(h *cfile, spec arraySpec, acc, ind string, depth 
 	h.line(`%sfputc('[', out);`, ind)
 	h.line("%sfor (int %s = 0; %s < %d; %s++) {", ind, iv, iv, spec.count, iv)
 	h.line(`%s    if (%s) fputc(',', out);`, ind, iv)
-	elem := fmt.Sprintf("%s[%s]", acc, iv)     // native element access
+	elem := fmt.Sprintf("%s[%s]", acc, iv)       // native element access
 	slot := fmt.Sprintf("%s.items[%s]", acc, iv) // holder element access
 	switch spec.elem {
 	case ir.KindFP32, ir.KindFP64:
