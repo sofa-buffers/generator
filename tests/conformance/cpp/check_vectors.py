@@ -3,26 +3,17 @@
 
 Usage: check_vectors.py <test_vectors.json> <harness-binary>
 For each single-field, id-0 scalar vector it feeds {"a": value} to
-`<harness> encode <message>` and compares the hex output to the vector.
+`<harness> encode <message>` and compares the hex output byte-for-byte to the
+vector's `serialized_sparse` — the sparse-canonical bytes a generated encoder must
+produce (MESSAGE_SPEC S2): empty for a default-valued field, else the dense bytes.
+The vectorgen (corelib-c-cpp) is the single source of truth; this driver no longer
+re-derives "is this value the default".
 """
 import json
 import subprocess
 import sys
 
 OP_TO_MSG = {"unsigned": "vecu", "signed": "veci", "fp32": "vecf32", "fp64": "vecf64", "string": "vecs"}
-
-
-def is_default(op: str, val) -> bool:
-    """A sparse-canonical encoder (MESSAGE_SPEC S2) omits a field equal to its
-    type default (zero / empty), so a default-valued single-field message encodes
-    to an EMPTY payload. Mirror the Go conformance's goValueIsDefault."""
-    if op in ("unsigned", "signed"):
-        return val == 0
-    if op in ("fp32", "fp64"):
-        return val == 0 or val == 0.0
-    if op == "string":
-        return val == ""
-    return False
 
 
 def main() -> int:
@@ -43,13 +34,8 @@ def main() -> int:
         out = subprocess.run(
             [harness, "encode", msg], input=payload.encode(), stdout=subprocess.PIPE, check=True
         ).stdout
-        got, want = out.hex(), v["serialized"]["hex"]
-        if is_default(f["op"], val):
-            # Default-valued field is omitted (sparse), so the payload is empty.
-            if got != "":
-                print(f"FAIL vector {v['name']}: default-valued field must be omitted (sparse), got {got}")
-                return 1
-        elif got != want:
+        got, want = out.hex(), v["serialized_sparse"]["hex"]
+        if got != want:
             print(f"FAIL vector {v['name']}: got {got} want {want}")
             return 1
         checked += 1

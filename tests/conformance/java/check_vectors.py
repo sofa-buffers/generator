@@ -3,29 +3,15 @@
 
 Usage: check_vectors.py <test_vectors.json> <harness.jar>
 Runs `java -jar <harness.jar> encode <message>` for each single-field id-0 scalar
-vector and compares the hex output to the vector.
-
-Encoding is sparse-canonical (MESSAGE_SPEC S2): a field equal to its default is
-omitted, so a default-valued single-field message encodes to an EMPTY payload.
-The dense per-field vector is still validated for every non-default value.
+vector and compares the hex output byte-for-byte to the vector's
+`serialized_sparse` — the sparse-canonical bytes a generated encoder must produce
+(MESSAGE_SPEC S2): empty for a default-valued field, else the dense bytes.
 """
 import json
 import subprocess
 import sys
 
 OP_TO_MSG = {"unsigned": "vecu", "signed": "veci", "fp32": "vecf32", "fp64": "vecf64", "string": "vecs"}
-
-
-def value_is_default(op, val) -> bool:
-    """A shared-vector scalar value that equals its type default (zero / empty),
-    which a sparse-canonical encoder omits from the wire."""
-    if op in ("unsigned", "signed"):
-        return val == 0
-    if op in ("fp32", "fp64"):
-        return val == 0
-    if op == "string":
-        return val == ""
-    return False
 
 
 def main() -> int:
@@ -47,16 +33,10 @@ def main() -> int:
             ["java", "-jar", jar, "encode", msg],
             input=payload.encode(), stdout=subprocess.PIPE, check=True,
         ).stdout
-        got = out.hex()
-        if value_is_default(f["op"], val):
-            if got != "":
-                print(f"FAIL vector {v['name']}: default-valued field must be omitted (sparse), got {got}")
-                return 1
-        else:
-            want = v["serialized"]["hex"]
-            if got != want:
-                print(f"FAIL vector {v['name']}: got {got} want {want}")
-                return 1
+        got, want = out.hex(), v["serialized_sparse"]["hex"]
+        if got != want:
+            print(f"FAIL vector {v['name']}: got {got} want {want}")
+            return 1
         checked += 1
     print(f"Java shared-vector conformance: {checked} byte-exact")
     return 0 if checked else 1

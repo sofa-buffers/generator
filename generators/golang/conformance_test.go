@@ -13,8 +13,9 @@ import (
 
 // M-Go conformance: build the generated Go encoder against corelib-go and assert
 // byte-exact output against the language-agnostic shared vectors. The Go encoder
-// is DENSE (it writes every field), so unlike C it also matches zero-valued
-// scalar vectors. Gated on SOFAB_GO_CORELIB (a corelib-go checkout).
+// is sparse-canonical (MESSAGE_SPEC S2), so it is compared against each vector's
+// serialized_sparse bytes (empty for a default-valued field, else the dense
+// bytes). Gated on SOFAB_GO_CORELIB (a corelib-go checkout).
 
 type goVectorFile struct {
 	Vectors []goVector `json:"vectors"`
@@ -30,6 +31,9 @@ type goVector struct {
 	Serialized struct {
 		Hex string `json:"hex"`
 	} `json:"serialized"`
+	SerializedSparse struct {
+		Hex string `json:"hex"`
+	} `json:"serialized_sparse"`
 }
 
 func TestGoSharedVectorConformance(t *testing.T) {
@@ -73,15 +77,11 @@ func TestGoSharedVectorConformance(t *testing.T) {
 			continue
 		}
 		got := goRunEncode(t, bin, in)
-		// Sparse-canonical (MESSAGE_SPEC S2): a field equal to its default is
-		// omitted, so a default-valued single-field message encodes to empty. The
-		// dense per-field vector is still validated for every non-default value.
-		if goValueIsDefault(f.Op, string(f.Value)) {
-			if got != "" {
-				t.Errorf("vector %q: default-valued field must be omitted (sparse), got %s", v.Name, got)
-			}
-		} else if got != v.Serialized.Hex {
-			t.Errorf("vector %q: got %s want %s", v.Name, got, v.Serialized.Hex)
+		// Compare byte-for-byte against the canonical sparse bytes (MESSAGE_SPEC
+		// S2): serialized_sparse is empty for a default-valued field, else the
+		// dense per-field bytes. The vectorgen is the single source of truth.
+		if got != v.SerializedSparse.Hex {
+			t.Errorf("vector %q: got %s want %s", v.Name, got, v.SerializedSparse.Hex)
 		}
 		checked++
 	}
@@ -113,21 +113,6 @@ func goScalarJSON(op, rawValue string) (string, bool) {
 		return `{"a":` + s + `}`, true
 	}
 	return "", false
-}
-
-// goValueIsDefault reports whether a shared-vector scalar value is the type
-// default (zero / empty) -- which a sparse-canonical encoder omits.
-func goValueIsDefault(op, rawValue string) bool {
-	s := strings.Trim(strings.TrimSpace(rawValue), `"`)
-	switch op {
-	case "unsigned", "signed":
-		return s == "0"
-	case "fp32", "fp64":
-		return s == "0" || s == "0.0"
-	case "string":
-		return s == ""
-	}
-	return false
 }
 
 func buildGoHarness(t *testing.T, corelib, def string) (string, error) {
