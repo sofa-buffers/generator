@@ -27,11 +27,11 @@ type Backend struct{}
 
 func (*Backend) Lang() string { return "rust" }
 
-// Generate emits src/messages.rs; project mode adds Cargo.toml + a serde-json
+// Generate emits src/message.rs; project mode adds Cargo.toml + a serde-json
 // harness.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), omit: cfgBool(cfg, "omit_defaults"), corelib: cfgString(cfg, "corelib", "rs")}
-	files := []generator.File{{Path: "src/messages.rs", Content: g.module(s)}}
+	files := []generator.File{{Path: "src/message.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
 	}

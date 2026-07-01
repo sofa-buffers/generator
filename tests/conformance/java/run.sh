@@ -22,7 +22,7 @@ echo "==> installing corelib-java $VER to local repo"
 
 cat > "$WORK/cfg.yaml" <<'YAML'
 generic: { emit: project, timestamp: false }
-targets: { java: { package: messages } }
+targets: { java: { package: message } }
 YAML
 cat > "$WORK/conf.yaml" <<'YAML'
 version: 1
@@ -60,7 +60,7 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     name=$(basename "$def" .yaml)
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang java --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     mkdir -p "$WORK/corpus/$name/out"
-    javac -cp "$JAR" -d "$WORK/corpus/$name/out" "$WORK"/corpus/"$name"/src/main/java/messages/*.java \
+    javac -cp "$JAR" -d "$WORK/corpus/$name/out" "$WORK"/corpus/"$name"/src/main/java/message/*.java \
         || { echo "FAIL: corpus def $name did not compile"; exit 1; }
 done
 echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"

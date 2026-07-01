@@ -23,7 +23,7 @@ func (*Backend) Lang() string { return "go" }
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{
 		schema:  s,
-		pkg:     cfgString(cfg, "package", "messages"),
+		pkg:     cfgString(cfg, "package", "message"),
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
 		license: generator.LicenseID(cfg),
 		omit:    cfgBool(cfg, "omit_defaults"),

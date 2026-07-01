@@ -58,7 +58,7 @@ func genPy(t *testing.T, s *ir.Schema, cfg map[string]any) map[string][]byte {
 }
 
 func TestPythonStructural(t *testing.T) {
-	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["messages.py"])
+	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["message.py"])
 	for _, want := range []string{
 		"from sofab import Encoder, Decoder, WireType",
 		"@dataclass",
@@ -70,7 +70,7 @@ func TestPythonStructural(t *testing.T) {
 		"e.write_sequence_begin(",
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("messages.py missing %q", want)
+			t.Errorf("message.py missing %q", want)
 		}
 	}
 }
@@ -86,7 +86,7 @@ func TestPythonSyntaxValid(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command(py, "-m", "py_compile", filepath.Join(dir, "messages.py"), filepath.Join(dir, "harness.py"))
+	cmd := exec.Command(py, "-m", "py_compile", filepath.Join(dir, "message.py"), filepath.Join(dir, "harness.py"))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generated Python is invalid:\n%s", out)
 	}
