@@ -89,16 +89,18 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.blank()
 	// Guard the shared decode helpers so multiple generated headers (multi-message
 	// builds) can be included in one TU without redefining them.
-	// The pure-corelib-cpp path needs shared sequence-decode helpers; the
-	// corelib-c-cpp wrapper decodes string/blob sequences via native read()
-	// overloads, so no prelude is emitted for it.
+	// The _MsgSeq struct/union/nested-array sequence decoder is shared by both
+	// corelibs. The pure-corelib-cpp path additionally needs the _StrSeq/_BlobSeq
+	// string/blob sequence helpers; the corelib-c-cpp wrapper decodes those via
+	// native read() overloads instead.
+	f.line("#ifndef SOFABUFFERS_GEN_PRELUDE")
+	f.line("#define SOFABUFFERS_GEN_PRELUDE")
 	if !g.clib {
-		f.line("#ifndef SOFABUFFERS_GEN_PRELUDE")
-		f.line("#define SOFABUFFERS_GEN_PRELUDE")
 		f.line("%s", cppPrelude)
-		f.line("#endif")
-		f.blank()
 	}
+	f.line("%s", cppMsgSeqPrelude)
+	f.line("#endif")
+	f.blank()
 
 	for _, key := range order {
 		nt := g.schema.Named[key]
@@ -284,17 +286,47 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 }
 
 func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
-	switch fld.Elem {
-	case ir.KindString:
-		f.line("        (void)os.sequenceBegin(%d);", fld.ID)
-		f.line("        { sofab::id _i = 0; for (const auto &_s : %s) { (void)os.write(_i++, _s); } }", acc)
-		f.line("        (void)os.sequenceEnd();")
+	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0)
+}
+
+// serializeArray writes an array value as field idExpr, mirroring the Go/Python
+// backends: numeric/bitfield elements use the native array wire type directly;
+// enum (->signed) and boolean (->0/1 unsigned) are value-converted through a
+// temporary native array; string/blob/struct/union/nested-array elements lower
+// to a wrapper sequence whose child ids are the 0-based index. Recurses for
+// nested arrays, depth-suffixing loop vars to avoid collisions.
+func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, depth int) {
+	iv := fmt.Sprintf("_i%d", depth)
+	ev := fmt.Sprintf("_e%d", depth)
+	tv := fmt.Sprintf("_t%d", depth)
+	switch elem {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
+		ir.KindFP32, ir.KindFP64, ir.KindBitfield:
+		f.line("%s(void)os.write(%s, %s);", ind, idExpr, val)
+	case ir.KindEnum:
+		bk := enumBacking(ref.Target)
+		f.line("%s{ std::array<%s, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
+			ind, bk, count, tv, iv, iv, count, iv, tv, iv, bk, val, iv, idExpr, tv)
+	case ir.KindBool:
+		f.line("%s{ std::array<std::uint8_t, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
+			ind, count, tv, iv, iv, count, iv, tv, iv, val, iv, idExpr, tv)
 	case ir.KindBlob:
-		f.line("        (void)os.sequenceBegin(%d);", fld.ID)
-		f.line("        { sofab::id _i = 0; for (const auto &_b : %s) { (void)os.write(_i++, _b.data(), static_cast<std::int32_t>(_b.size())); } }", acc)
-		f.line("        (void)os.sequenceEnd();")
-	default:
-		f.line("        (void)os.write(%d, %s);", fld.ID, acc)
+		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
+		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { (void)os.write(%s++, %s.data(), static_cast<std::int32_t>(%s.size())); } }", ind, iv, ev, val, iv, ev, ev)
+		f.line("%s(void)os.sequenceEnd();", ind)
+	case ir.KindString, ir.KindStruct, ir.KindUnion:
+		// os.write(index, element): a string writes a fixlen field; a struct/union
+		// writes sequenceBegin(index)/serialize/sequenceEnd (per MESSAGE_SPEC).
+		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
+		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { (void)os.write(%s++, %s); } }", ind, iv, ev, val, iv, ev)
+		f.line("%s(void)os.sequenceEnd();", ind)
+	case ir.KindArray:
+		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
+		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) {", ind, iv, ev, val)
+		g.serializeArray(f, ind+"    ", fmt.Sprintf("%s++", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, depth+1)
+		f.line("%s} }", ind)
+		f.line("%s(void)os.sequenceEnd();", ind)
 	}
 }
 
@@ -342,47 +374,118 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			f.line("            { std::uint64_t _v = 0; is.read(_v); %s = static_cast<%s>(_v); }", acc, g.cppType(fld))
 		}
 	case ir.KindArray:
-		switch fld.Elem {
-		case ir.KindString:
-			// corelib-c-cpp decodes the whole string sequence via its native
-			// read(vector<string>&) overload; corelib-cpp uses the _StrSeq helper.
-			if g.clib {
-				f.line("            is.read(%s);", acc)
-			} else {
-				f.line("            { _StrSeq _r{%s}; is.read(_r); }", acc)
-			}
-		case ir.KindBlob:
-			if g.clib {
-				f.line("            is.read(%s);", acc)
-			} else {
-				f.line("            { _BlobSeq _r{%s}; is.read(_r); }", acc)
-			}
-		default:
-			f.line("            is.read(%s);", acc)
-		}
+		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0)
 	}
 }
 
+// deserializeArray reads an array into target, mirroring serializeArray. Native
+// numeric/bitfield arrays read directly; enum/boolean arrays value-convert;
+// string/blob use the native/_StrSeq helpers; struct/union and nested arrays use
+// the _MsgSeq sequence visitor. The corelib-c-cpp wrapper binds targets by
+// address for a deferred pass, so its enum/boolean arrays read in place (a temp
+// would dangle) and the target vector is reserved so an emplace never moves a
+// still-unfilled bound element.
+func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, depth int) {
+	tv := fmt.Sprintf("_t%d", depth)
+	iv := fmt.Sprintf("_i%d", depth)
+	rv := fmt.Sprintf("_r%d", depth)
+	switch elem {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
+		ir.KindFP32, ir.KindFP64, ir.KindBitfield:
+		f.line("%sis.read(%s);", ind, target)
+	case ir.KindEnum:
+		bk := enumBacking(ref.Target)
+		if g.clib {
+			f.line("%sis.read(reinterpret_cast<std::array<%s, %d> &>(%s));", ind, bk, count, target)
+		} else {
+			f.line("%s{ std::array<%s, %d> %s{}; is.read(%s); for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); }",
+				ind, bk, count, tv, tv, iv, iv, count, iv, target, iv, g.cppArrayElem(elem, ref, items), tv, iv)
+		}
+	case ir.KindBool:
+		if g.clib {
+			f.line("%sis.read(reinterpret_cast<std::array<std::uint8_t, %d> &>(%s));", ind, count, target)
+		} else {
+			f.line("%s{ std::array<std::uint8_t, %d> %s{}; is.read(%s); for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] != 0; }",
+				ind, count, tv, tv, iv, iv, count, iv, target, iv, tv, iv)
+		}
+	case ir.KindString:
+		if g.clib {
+			f.line("%sis.read(%s);", ind, target)
+		} else {
+			f.line("%s{ _StrSeq %s{%s}; is.read(%s); }", ind, rv, target, rv)
+		}
+	case ir.KindBlob:
+		if g.clib {
+			f.line("%sis.read(%s);", ind, target)
+		} else {
+			f.line("%s{ _BlobSeq %s{%s}; is.read(%s); }", ind, rv, target, rv)
+		}
+	case ir.KindStruct, ir.KindUnion:
+		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, rv)
+	case ir.KindArray:
+		inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count)
+		g.deserializeSeqInto(f, ind, target, inner, count, rv)
+	}
+}
+
+// deserializeSeqInto reads a wrapper sequence of elemType into target via the
+// _MsgSeq visitor. corelib-cpp decodes synchronously, so a plain stack-local
+// visitor is fine. The corelib-c-cpp wrapper is a deferred decoder that uses the
+// visitor after this call returns, so its visitor gets static storage; a fixed
+// count also reserves the target up front so an emplace never reallocates a
+// still-bound element (a dynamic sequence cannot be pre-sized this way).
+func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count int64, rv string) {
+	if g.clib {
+		reserve := ""
+		if count > 0 {
+			reserve = fmt.Sprintf(" %s.reserve(%d);", target, count)
+		}
+		f.line("%s{ static _MsgSeq<%s> %s; %s.out = &%s;%s is.read(%s); }", ind, elemType, rv, rv, target, reserve, rv)
+		return
+	}
+	f.line("%s{ _MsgSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, elemType, rv, rv, target, rv)
+}
+
 // reachable returns named-type keys used by m in post-order (children first).
+// Composite array elements (enum/bitfield/struct/union) and nested-array element
+// composites are collected too, so an array-of-struct element type is emitted.
 func (g *gen) reachable(m *ir.Message) []string {
 	var order []string
 	seen := map[string]bool{}
 	var visit func(fields []*ir.Field)
+	var addRef func(ref *ir.TypeRef)
+	var visitArray func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem)
+	addRef = func(ref *ir.TypeRef) {
+		if ref == nil {
+			return
+		}
+		key := ref.Key
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		t := ref.Target
+		if t.Category == ir.CatStruct || t.Category == ir.CatUnion {
+			visit(t.Fields)
+		}
+		order = append(order, key)
+	}
+	visitArray = func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) {
+		switch elem {
+		case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
+			addRef(ref)
+		case ir.KindArray:
+			visitArray(items.Elem, items.ElemRef, items.ElemItems)
+		}
+	}
 	visit = func(fields []*ir.Field) {
 		for _, f := range fields {
-			if f.Ref == nil {
+			if f.Kind == ir.KindArray {
+				visitArray(f.Elem, f.ElemRef, f.ElemItems)
 				continue
 			}
-			key := f.Ref.Key
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			t := f.Ref.Target
-			if t.Category == ir.CatStruct || t.Category == ir.CatUnion {
-				visit(t.Fields)
-			}
-			order = append(order, key)
+			addRef(f.Ref)
 		}
 	}
 	visit(m.Fields)

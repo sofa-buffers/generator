@@ -36,34 +36,74 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 		}
 		return hdr + varintLen(uint64(f.Maxlen)<<3) + f.Maxlen, true
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString, ir.KindBlob:
-			if !f.ElemMaxHas {
-				return 0, false
-			}
-			per := varintLen(uint64(f.Count)<<3|7) + varintLen(uint64(f.ElemMax)<<3) + f.ElemMax
-			return hdr + 1 + f.Count*per + 1, true
-		default:
-			return hdr + varintLen(uint64(f.Count)) + f.Count*10, true
-		}
-	case ir.KindStruct, ir.KindUnion:
-		if seen[f.Ref.Key] {
+		body, ok := g.arrayCost(f.Elem, f.ElemRef, f.ElemItems, f.Count, f.ElemMaxHas, f.ElemMax, seen)
+		if !ok {
 			return 0, false
 		}
-		seen[f.Ref.Key] = true
-		var inner int64
-		for _, c := range f.Ref.Target.Fields {
-			cc, ok := g.fieldCost(c, seen)
-			if !ok {
-				delete(seen, f.Ref.Key)
-				return 0, false
-			}
-			inner += cc
+		return hdr + body, true
+	case ir.KindStruct, ir.KindUnion:
+		inner, ok := g.structInner(f.Ref, seen)
+		if !ok {
+			return 0, false
 		}
-		delete(seen, f.Ref.Key)
 		return hdr + inner + 1, true
 	}
 	return hdr, true
+}
+
+// structInner sums the worst-case cost of a struct/union's fields (a union is
+// bounded by the sum of all options, a safe over-estimate). Guards recursion via
+// the shared seen set.
+func (g *gen) structInner(ref *ir.TypeRef, seen map[string]bool) (int64, bool) {
+	if seen[ref.Key] {
+		return 0, false
+	}
+	seen[ref.Key] = true
+	var inner int64
+	for _, c := range ref.Target.Fields {
+		cc, ok := g.fieldCost(c, seen)
+		if !ok {
+			delete(seen, ref.Key)
+			return 0, false
+		}
+		inner += cc
+	}
+	delete(seen, ref.Key)
+	return inner, true
+}
+
+// arrayCost bounds an array's payload (excluding the field's own header, which
+// the caller adds). A dynamic array (no fixed count) is unbounded. Numeric/enum/
+// boolean/bitfield elements use the native count-prefixed array; string/blob/
+// struct/union/nested-array elements lower to a wrapper sequence framed by a
+// per-index header plus a one-byte sequence end.
+func (g *gen) arrayCost(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64, seen map[string]bool) (int64, bool) {
+	if count <= 0 {
+		return 0, false // dynamic length -> unbounded
+	}
+	idHdr := varintLen(uint64(count)<<3 | 7)
+	switch elem {
+	case ir.KindString, ir.KindBlob:
+		if !elemMaxHas {
+			return 0, false
+		}
+		per := idHdr + varintLen(uint64(elemMax)<<3) + elemMax
+		return 1 + count*per + 1, true
+	case ir.KindStruct, ir.KindUnion:
+		inner, ok := g.structInner(ref, seen)
+		if !ok {
+			return 0, false
+		}
+		return count*(idHdr+inner+1) + 1, true
+	case ir.KindArray:
+		ic, ok := g.arrayCost(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax, seen)
+		if !ok {
+			return 0, false
+		}
+		return count*(idHdr+ic) + 1, true
+	default: // numeric / enum / boolean / bitfield -> native array
+		return varintLen(uint64(count)) + count*10, true
+	}
 }
 
 func varintLen(x uint64) int64 {

@@ -228,25 +228,54 @@ func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 }
 
 func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
-	switch fld.Elem {
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
+// bitfield elements use the native array wire type (enum->signed, bool/bitfield->
+// unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
+// whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
+// arrays.
+func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	iv := fmt.Sprintf("_i%d", depth)
+	ev := fmt.Sprintf("_e%d", depth)
+	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("        e.write_unsigned_array(%d, %s)", fld.ID, acc)
+		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, val)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("        e.write_signed_array(%d, %s)", fld.ID, acc)
+		f.line("%se.write_signed_array(%s, %s)", ind, idExpr, val)
+	case ir.KindEnum:
+		f.line("%se.write_signed_array(%s, [int(_v) for _v in %s])", ind, idExpr, val)
+	case ir.KindBool:
+		f.line("%se.write_unsigned_array(%s, [1 if _v else 0 for _v in %s])", ind, idExpr, val)
+	case ir.KindBitfield:
+		f.line("%se.write_unsigned_array(%s, [int(_v) for _v in %s])", ind, idExpr, val)
 	case ir.KindFP32:
-		f.line("        e.write_float32_array(%d, %s)", fld.ID, acc)
+		f.line("%se.write_float32_array(%s, %s)", ind, idExpr, val)
 	case ir.KindFP64:
-		f.line("        e.write_float64_array(%d, %s)", fld.ID, acc)
+		f.line("%se.write_float64_array(%s, %s)", ind, idExpr, val)
 	case ir.KindString:
-		f.line("        e.write_sequence_begin(%d)", fld.ID)
-		f.line("        for _i, _s in enumerate(%s):", acc)
-		f.line("            e.write_string(_i, _s)")
-		f.line("        e.write_sequence_end()")
+		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
+		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
+		f.line("%s    e.write_string(%s, %s)", ind, iv, ev)
+		f.line("%se.write_sequence_end()", ind)
 	case ir.KindBlob:
-		f.line("        e.write_sequence_begin(%d)", fld.ID)
-		f.line("        for _i, _b in enumerate(%s):", acc)
-		f.line("            e.write_bytes(_i, bytes(_b))")
-		f.line("        e.write_sequence_end()")
+		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
+		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
+		f.line("%s    e.write_bytes(%s, bytes(%s))", ind, iv, ev)
+		f.line("%se.write_sequence_end()", ind)
+	case ir.KindStruct, ir.KindUnion:
+		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
+		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
+		f.line("%s    e.write_sequence_begin(%s)", ind, iv)
+		f.line("%s    %s._marshal(e)", ind, ev)
+		f.line("%s    e.write_sequence_end()", ind)
+		f.line("%se.write_sequence_end()", ind)
+	case ir.KindArray:
+		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
+		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
+		g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		f.line("%se.write_sequence_end()", ind)
 	}
 }
 
@@ -275,28 +304,44 @@ func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 }
 
 func (g *gen) emitUnmarshalArray(f *pyfile, fld *ir.Field, acc string) {
-	switch fld.Elem {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("                %s = d.read_unsigned_array()", acc)
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("                %s = d.read_signed_array()", acc)
+	g.unmarshalArray(f, "                ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// unmarshalArray reads an array into `target`, mirroring marshalArray: native
+// array readers for numeric/enum/boolean/bitfield elements, a wrapper-sequence
+// loop for string/blob/struct/union/array elements. Recurses for nested arrays.
+func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	switch elem {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
+		f.line("%s%s = d.read_unsigned_array()", ind, target)
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		f.line("%s%s = d.read_signed_array()", ind, target)
+	case ir.KindBool:
+		f.line("%s%s = [bool(_v) for _v in d.read_unsigned_array()]", ind, target)
 	case ir.KindFP32:
-		f.line("                %s = d.read_float32_array()", acc)
+		f.line("%s%s = d.read_float32_array()", ind, target)
 	case ir.KindFP64:
-		f.line("                %s = d.read_float64_array()", acc)
-	case ir.KindString:
-		f.line("                %s = []", acc)
-		f.line("                while True:")
-		f.line("                    _ef = d.next()")
-		f.line("                    if _ef is None or _ef.type == WireType.SEQUENCE_END:")
-		f.line("                        break")
-		f.line("                    %s.append(d.string())", acc)
-	case ir.KindBlob:
-		f.line("                %s = []", acc)
-		f.line("                while True:")
-		f.line("                    _ef = d.next()")
-		f.line("                    if _ef is None or _ef.type == WireType.SEQUENCE_END:")
-		f.line("                        break")
-		f.line("                    %s.append(d.bytes())", acc)
+		f.line("%s%s = d.read_float64_array()", ind, target)
+	default: // string/blob/struct/union/array -> wrapper sequence
+		ef := fmt.Sprintf("_ef%d", depth)
+		ev := fmt.Sprintf("_e%d", depth)
+		f.line("%s%s = []", ind, target)
+		f.line("%swhile True:", ind)
+		f.line("%s    %s = d.next()", ind, ef)
+		f.line("%s    if %s is None or %s.type == WireType.SEQUENCE_END:", ind, ef, ef)
+		f.line("%s        break", ind)
+		switch elem {
+		case ir.KindString:
+			f.line("%s    %s.append(d.string())", ind, target)
+		case ir.KindBlob:
+			f.line("%s    %s.append(d.bytes())", ind, target)
+		case ir.KindStruct, ir.KindUnion:
+			f.line("%s    %s = %s()", ind, ev, g.typeName(ref.Key))
+			f.line("%s    %s._unmarshal(d)", ind, ev)
+			f.line("%s    %s.append(%s)", ind, target, ev)
+		case ir.KindArray:
+			g.unmarshalArray(f, ind+"    ", ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+			f.line("%s    %s.append(%s)", ind, target, ev)
+		}
 	}
 }

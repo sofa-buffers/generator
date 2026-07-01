@@ -251,22 +251,52 @@ func (g *gen) emitMarshal(f *rfile, fld *ir.Field) {
 }
 
 func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
-	switch fld.Elem {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("        let _ = os.write_array_unsigned(%d, &%s);", fld.ID, acc)
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("        let _ = os.write_array_signed(%d, &%s);", fld.ID, acc)
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// marshalArray writes the array val as field idExpr. Numeric/enum/bitfield
+// elements use the native array wire type (numeric/enum by signedness, bitfield
+// -> unsigned); boolean lowers to a 0/1 unsigned array; string/blob/struct/union/
+// array elements lower to a wrapper sequence whose child ids are the 0-based
+// index (per MESSAGE_SPEC). Recurses for nested arrays, depth-suffixing loop vars
+// to avoid collisions.
+func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	iv := fmt.Sprintf("_i%d", depth)
+	ev := fmt.Sprintf("_e%d", depth)
+	tv := fmt.Sprintf("_t%d", depth)
+	switch elem {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
+		// bitfield backing is an unsigned int (UnsignedElem), so it writes directly.
+		f.line("%slet _ = os.write_array_unsigned(%s, &%s);", ind, idExpr, val)
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		// enum backing is a signed int (SignedElem), so it writes directly.
+		f.line("%slet _ = os.write_array_signed(%s, &%s);", ind, idExpr, val)
+	case ir.KindBool:
+		// bool is not an array element type; lower to a 0/1 unsigned array.
+		f.line("%s{ let %s: Vec<u8> = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, val, idExpr, tv)
 	case ir.KindFP32:
-		f.line("        let _ = os.write_array_fp32(%d, &%s);", fld.ID, acc)
+		f.line("%slet _ = os.write_array_fp32(%s, &%s);", ind, idExpr, val)
 	case ir.KindFP64:
-		f.line("        let _ = os.write_array_fp64(%d, &%s);", fld.ID, acc)
+		f.line("%slet _ = os.write_array_fp64(%s, &%s);", ind, idExpr, val)
 	case ir.KindString:
-		f.line("        let _ = os.write_sequence_begin(%d);", fld.ID)
-		f.line("        for (_i, _s) in %s.iter().enumerate() { let _ = os.write_str(_i as Id, _s); }", acc)
-		f.line("        let _ = os.write_sequence_end();")
+		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() { let _ = os.write_str(%s as Id, %s); }", ind, iv, ev, val, iv, ev)
+		f.line("%slet _ = os.write_sequence_end();", ind)
 	case ir.KindBlob:
-		f.line("        let _ = os.write_sequence_begin(%d);", fld.ID)
-		f.line("        for (_i, _b) in %s.iter().enumerate() { let _ = os.write_blob(_i as Id, _b); }", acc)
-		f.line("        let _ = os.write_sequence_end();")
+		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() { let _ = os.write_blob(%s as Id, %s); }", ind, iv, ev, val, iv, ev)
+		f.line("%slet _ = os.write_sequence_end();", ind)
+	case ir.KindStruct, ir.KindUnion:
+		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
+		f.line("%s    let _ = os.write_sequence_begin(%s as Id); %s.marshal(os); let _ = os.write_sequence_end();", ind, iv, ev)
+		f.line("%s}", ind)
+		f.line("%slet _ = os.write_sequence_end();", ind)
+	case ir.KindArray:
+		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		f.line("%s}", ind)
+		f.line("%slet _ = os.write_sequence_end();", ind)
 	}
 }

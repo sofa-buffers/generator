@@ -7,34 +7,96 @@ import (
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
-// frame is one sequence container reachable from a message: the root, a
-// struct/union field, or an array-of-string/blob field. loc is the _Loc variant;
-// path is the Rust accessor (e.g. "self.m.somestruct.nestedstruct").
+// frameKind classifies a sequence container reachable from a message.
+type frameKind int
+
+const (
+	fkStruct       frameKind = iota // root / struct / union / struct-array element: named fields
+	fkSeqArr                        // array of string/blob: elements pushed in string()/blob()
+	fkStructArr                     // array of struct/union: per-element sequence pushes a default and descends
+	fkNestedNative                  // array of native array: array_begin pushes an inner Vec, elements push to the last
+	fkArrArr                        // array of (string/blob/struct/nested) array: per-element sequence descends
+)
+
+// frame is one sequence container reachable from a message. loc is the _Loc
+// variant; path is the Rust accessor (e.g. "self.m.somestruct.nestedstruct").
 type frame struct {
 	loc      string
 	path     string
-	fields   []*ir.Field // struct/union frames
-	seqArr   bool        // array-of-string/blob frame
-	elemKind ir.Kind
+	kind     frameKind
+	fields   []*ir.Field // fkStruct
+	elemLoc  string      // fkStructArr, fkArrArr: location to descend to on a per-element sequence_begin
+	elemKind ir.Kind     // fkSeqArr: string/blob element; fkNestedNative: inner native element kind
+	elemRef  *ir.TypeRef // fkNestedNative: enum/bitfield backing type
+}
+
+// isWrapperElem reports whether an array element lowers to a wrapper sequence
+// (vs a native array), i.e. it needs its own decode frame.
+func isWrapperElem(k ir.Kind) bool {
+	switch k {
+	case ir.KindString, ir.KindBlob, ir.KindStruct, ir.KindUnion, ir.KindArray:
+		return true
+	}
+	return false
+}
+
+// isNativeArrayElem reports whether an array element uses a native array wire
+// type (numeric/fp/enum/boolean/bitfield), delivered via array_begin + scalar
+// callbacks rather than a wrapper sequence.
+func isNativeArrayElem(k ir.Kind) bool {
+	switch k {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
+		ir.KindFP32, ir.KindFP64, ir.KindEnum, ir.KindBool, ir.KindBitfield:
+		return true
+	}
+	return false
 }
 
 // frames walks a message and returns every sequence container, root first.
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
-	var walk func(loc, path string, fields []*ir.Field)
-	walk = func(loc, path string, fields []*ir.Field) {
-		out = append(out, frame{loc: loc, path: path, fields: fields})
+	var walkFields func(loc, path string, fields []*ir.Field)
+	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem)
+
+	walkFields = func(loc, path string, fields []*ir.Field) {
+		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields})
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				cl := loc + "_" + fld.Name
-				walk(cl, path+"."+rustIdent(fld.Name), fld.Ref.Target.Fields)
-			case fld.Kind == ir.KindArray && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob):
-				out = append(out, frame{loc: loc + "_" + fld.Name, path: path + "." + rustIdent(fld.Name), seqArr: true, elemKind: fld.Elem})
+				walkFields(cl, path+"."+rustIdent(fld.Name), fld.Ref.Target.Fields)
+			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
+				addArray(loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems)
 			}
 		}
 	}
-	walk("Root", "self.m", m.Fields)
+
+	// addArray builds the frame(s) for a wrapper-sequence array whose Vec is at
+	// (loc, path) and whose element is (elem, ref, items).
+	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) {
+		switch elem {
+		case ir.KindString, ir.KindBlob:
+			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem})
+		case ir.KindStruct, ir.KindUnion:
+			el := loc + "_e"
+			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el})
+			walkFields(el, path+".last_mut().unwrap()", ref.Target.Fields)
+		case ir.KindArray:
+			// The element is an inner array (items). A native inner array is handled
+			// by a single wrapper frame (array_begin pushes a new inner Vec, elements
+			// push to the last); a wrapper inner array descends recursively.
+			if isNativeArrayElem(items.Elem) {
+				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef})
+			} else {
+				el := loc + "_e"
+				out = append(out, frame{loc: loc, path: path, kind: fkArrArr, elemLoc: el})
+				addArray(el, path+".last_mut().unwrap()", items.Elem, items.ElemRef, items.ElemItems)
+			}
+		}
+	}
+
+	walkFields("Root", "self.m", m.Fields)
 	return out
 }
 
@@ -50,13 +112,22 @@ type visitorUse struct {
 
 func visitorUseOf(fs []frame) visitorUse {
 	u := visitorUse{}
-	if len(fs) > 1 { // any nested struct/union or string/blob-array frame
+	if len(fs) > 1 { // any nested struct/union or wrapper-array frame
 		u.sequence = true
 	}
 	for _, fr := range fs {
-		if fr.seqArr {
+		switch fr.kind {
+		case fkSeqArr:
 			u.str = u.str || fr.elemKind == ir.KindString
 			u.blob = u.blob || fr.elemKind == ir.KindBlob
+		case fkNestedNative:
+			u.scalarArray = true
+			switch fr.elemKind {
+			case ir.KindFP32:
+				u.fp32 = true
+			case ir.KindFP64:
+				u.fp64 = true
+			}
 		}
 		for _, fld := range fr.fields {
 			switch fld.Kind {
@@ -78,7 +149,9 @@ func visitorUseOf(fs []frame) visitorUse {
 					u.fp32, u.scalarArray = true, true
 				case ir.KindFP64:
 					u.fp64, u.scalarArray = true, true
-				default:
+				case ir.KindStruct, ir.KindUnion, ir.KindArray:
+					// wrapper element — handled by its own sub-frame
+				default: // numeric/enum/bool/bitfield native leaf
 					u.scalarArray = true
 				}
 			}
@@ -96,7 +169,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("mod %s_dec {", strings.ToLower(name))
 	f.line("    use super::*;")
 	// ArrayKind is gated behind the no-std `array` feature; import it only when an
-	// array_begin override is emitted (i.e. the message has a scalar array).
+	// array_begin override is emitted (i.e. the message has a native array).
 	arrayKind := ""
 	if use.scalarArray {
 		arrayKind = ", ArrayKind"
@@ -133,18 +206,34 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 
 	f.line("impl<'a> Visitor for V<'a> {")
 
-	// unsigned: u*/bitfield scalars, bool, and unsigned array elements
+	// unsigned: u*/bitfield scalars, bool, and unsigned/bool/bitfield array elements
 	f.line("    fn unsigned(&mut self, id: Id, value: Unsigned) {")
 	f.line("        match (self.cur, id) {")
 	for _, fr := range fs {
-		for _, fld := range fr.fields {
+		switch fr.kind {
+		case fkStruct:
+			for _, fld := range fr.fields {
+				switch {
+				case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64 || fld.Kind == ir.KindBitfield:
+					f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), g.rustType(fld))
+				case fld.Kind == ir.KindBool:
+					f.line("            (_Loc::%s, %d) => %s.%s = value != 0,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+				case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
+					f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), numRustType(fld.Elem))
+				case fld.Kind == ir.KindArray && fld.Elem == ir.KindBool:
+					f.line("            (_Loc::%s, %d) => %s.%s.push(value != 0),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+				case fld.Kind == ir.KindArray && fld.Elem == ir.KindBitfield:
+					f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), bitfieldBacking(fld.ElemRef.Target))
+				}
+			}
+		case fkNestedNative:
 			switch {
-			case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64 || fld.Kind == ir.KindBitfield:
-				f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), g.rustType(fld))
-			case fld.Kind == ir.KindBool:
-				f.line("            (_Loc::%s, %d) => %s.%s = value != 0,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
-			case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
-				f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), numRustType(fld.Elem))
+			case isUnsignedElem(fr.elemKind):
+				f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value as %s),", fr.loc, fr.path, numRustType(fr.elemKind))
+			case fr.elemKind == ir.KindBool:
+				f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value != 0),", fr.loc, fr.path)
+			case fr.elemKind == ir.KindBitfield:
+				f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value as %s),", fr.loc, fr.path, bitfieldBacking(fr.elemRef.Target))
 			}
 		}
 	}
@@ -152,18 +241,30 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("        }")
 	f.line("    }")
 
-	// signed: i*/enum scalars + signed array elements
+	// signed: i*/enum scalars + signed/enum array elements
 	f.line("    fn signed(&mut self, id: Id, value: Signed) {")
 	f.line("        match (self.cur, id) {")
 	for _, fr := range fs {
-		for _, fld := range fr.fields {
+		switch fr.kind {
+		case fkStruct:
+			for _, fld := range fr.fields {
+				switch {
+				case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
+					f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), g.rustType(fld))
+				case fld.Kind == ir.KindEnum:
+					f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), enumBacking(fld.Ref.Target))
+				case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
+					f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), numRustType(fld.Elem))
+				case fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum:
+					f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), enumBacking(fld.ElemRef.Target))
+				}
+			}
+		case fkNestedNative:
 			switch {
-			case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
-				f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), g.rustType(fld))
-			case fld.Kind == ir.KindEnum:
-				f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), enumBacking(fld.Ref.Target))
-			case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
-				f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), numRustType(fld.Elem))
+			case isSignedElem(fr.elemKind):
+				f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value as %s),", fr.loc, fr.path, numRustType(fr.elemKind))
+			case fr.elemKind == ir.KindEnum:
+				f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value as %s),", fr.loc, fr.path, enumBacking(fr.elemRef.Target))
 			}
 		}
 	}
@@ -187,7 +288,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		f.line("        self.acc.clear();")
 		f.line("        match (self.cur, id) {")
 		for _, fr := range fs {
-			if fr.seqArr && fr.elemKind == ir.KindString {
+			if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
 				f.line("            (_Loc::%s, _) => %s.push(_s),", fr.loc, fr.path)
 			}
 			for _, fld := range fr.fields {
@@ -210,7 +311,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		f.line("        self.acc.clear();")
 		f.line("        match (self.cur, id) {")
 		for _, fr := range fs {
-			if fr.seqArr && fr.elemKind == ir.KindBlob {
+			if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
 				f.line("            (_Loc::%s, _) => %s.push(_b),", fr.loc, fr.path)
 			}
 			for _, fld := range fr.fields {
@@ -225,14 +326,20 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	}
 
 	if use.scalarArray {
-		// array_begin clears the target vec so element pushes start fresh
+		// array_begin clears a native-array target (scalar array field) or starts a
+		// fresh inner Vec (nested native array).
 		f.line("    fn array_begin(&mut self, id: Id, _kind: ArrayKind, _count: usize) {")
 		f.line("        match (self.cur, id) {")
 		for _, fr := range fs {
-			for _, fld := range fr.fields {
-				if fld.Kind == ir.KindArray && fld.Elem != ir.KindString && fld.Elem != ir.KindBlob {
-					f.line("            (_Loc::%s, %d) => %s.%s.clear(),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+			switch fr.kind {
+			case fkStruct:
+				for _, fld := range fr.fields {
+					if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
+						f.line("            (_Loc::%s, %d) => %s.%s.clear(),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+					}
 				}
+			case fkNestedNative:
+				f.line("            (_Loc::%s, _) => %s.push(Vec::new()),", fr.loc, fr.path)
 			}
 		}
 		f.line("            _ => {}")
@@ -241,18 +348,27 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	}
 
 	if use.sequence {
-		// sequence_begin: push current, descend; clear seq-array vecs on entry
+		// sequence_begin: push current, descend. String/blob/composite array fields
+		// clear their Vec on entry; struct/nested-array wrapper frames push a fresh
+		// element and descend on each per-element sequence_begin.
 		f.line("    fn sequence_begin(&mut self, id: Id) {")
 		f.line("        self.stack.push(self.cur);")
 		f.line("        self.cur = match (self.cur, id) {")
 		for _, fr := range fs {
-			for _, fld := range fr.fields {
-				switch {
-				case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-					f.line("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
-				case fld.Kind == ir.KindArray && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob):
-					f.line("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.loc+"_"+fld.Name)
+			switch fr.kind {
+			case fkStruct:
+				for _, fld := range fr.fields {
+					switch {
+					case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
+						f.line("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
+					case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
+						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.loc+"_"+fld.Name)
+					}
 				}
+			case fkStructArr:
+				f.line("            (_Loc::%s, _) => { %s.push(Default::default()); _Loc::%s },", fr.loc, fr.path, fr.elemLoc)
+			case fkArrArr:
+				f.line("            (_Loc::%s, _) => { %s.push(Vec::new()); _Loc::%s },", fr.loc, fr.path, fr.elemLoc)
 			}
 		}
 		f.line("            _ => self.cur,")
@@ -272,6 +388,10 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 	f.line("    fn %s(&mut self, id: Id, value: %s) {", cb, rtype)
 	f.line("        match (self.cur, id) {")
 	for _, fr := range fs {
+		if fr.kind == fkNestedNative && fr.elemKind == kind {
+			f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value),", fr.loc, fr.path)
+			continue
+		}
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == kind:

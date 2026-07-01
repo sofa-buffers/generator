@@ -27,6 +27,14 @@ struct _BlobSeq : sofab::IStreamMessage {
         std::string _s; is.read(_s); out.emplace_back(_s.begin(), _s.end());
     }
 };
+template <typename T>
+struct _MsgSeq : sofab::IStreamMessage {
+    std::vector<T> *out = nullptr;
+    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
+        out->emplace_back();
+        is.read(out->back());
+    }
+};
 #endif
 
 struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {

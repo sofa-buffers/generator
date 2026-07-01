@@ -169,19 +169,36 @@ func (g *gen) emitToJSON(f *hfile, fld *ir.Field) {
 }
 
 func (g *gen) emitToJSONArray(f *hfile, fld *ir.Field, acc string) {
-	f.line("    { out << '['; bool _f = true; for (const auto &_e : %s) { if (!_f) out << ','; _f = false;", acc)
-	switch fld.Elem {
+	g.toJSONArray(f, "    ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// toJSONArray renders an array expr as a JSON array, recursing for nested arrays.
+// Enum/signed integers print as long long; unsigned/bitfield as unsigned long
+// long; struct/union delegate to to_json; blob stays a number[] (C canonical).
+func (g *gen) toJSONArray(f *hfile, ind, expr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	ev := fmt.Sprintf("_e%d", depth)
+	ff := fmt.Sprintf("_f%d", depth)
+	f.line("%s{ out << '['; bool %s = true; for (const auto &%s : %s) { if (!%s) out << ','; %s = false;", ind, ff, ev, expr, ff, ff)
+	inner := ind + "    "
+	switch elem {
 	case ir.KindString:
-		f.line("        json_str(out, _e); } out << ']'; }")
+		f.line("%sjson_str(out, %s);", inner, ev)
 	case ir.KindBlob:
-		f.line("        json_bytes(out, _e); } out << ']'; }")
+		f.line("%sjson_bytes(out, %s);", inner, ev)
 	case ir.KindFP32, ir.KindFP64:
-		f.line("        json_num(out, _e); } out << ']'; }")
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("        out << static_cast<long long>(_e); } out << ']'; }")
-	default:
-		f.line("        out << static_cast<unsigned long long>(_e); } out << ']'; }")
+		f.line("%sjson_num(out, %s);", inner, ev)
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		f.line("%sout << static_cast<long long>(%s);", inner, ev)
+	case ir.KindBool:
+		f.line("%sout << (%s ? \"true\" : \"false\");", inner, ev)
+	case ir.KindStruct, ir.KindUnion:
+		f.line("%sto_json(%s, out);", inner, ev)
+	case ir.KindArray:
+		g.toJSONArray(f, inner, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+	default: // unsigned / bitfield
+		f.line("%sout << static_cast<unsigned long long>(%s);", inner, ev)
 	}
+	f.line("%s} out << ']'; }", ind)
 }
 
 func (g *gen) emitFromJSON(f *hfile, fld *ir.Field) {
@@ -214,24 +231,56 @@ func (g *gen) emitFromJSON(f *hfile, fld *ir.Field) {
 }
 
 func (g *gen) emitFromJSONArray(f *hfile, fld *ir.Field, acc string) {
-	if fld.Elem == ir.KindString || fld.Elem == ir.KindBlob {
-		f.line("        %s.clear();", acc) // vectors append; fixed arrays overwrite by index
+	g.fromJSONArray(f, "        ", "c", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0)
+}
+
+// fromJSONArray parses a JSON array node into target, recursing for nested
+// arrays. Native elements (numeric/enum/boolean/bitfield) overwrite a fixed
+// std::array by index; string/blob/struct/union/nested-array elements append to
+// a std::vector.
+func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, depth int) {
+	iv := fmt.Sprintf("_i%d", depth)
+	ev := fmt.Sprintf("_e%d", depth)
+	vv := fmt.Sprintf("_v%d", depth)
+	inner := ind + "    "
+	if isNativeArrayElem(elem) {
+		f.line("%sfor (size_t %s = 0; %s < sofab_json_array_size(%s); %s++) {", ind, iv, iv, node, iv)
+		f.line("%sconst sofab_json_t *%s = sofab_json_array_at(%s, %s);", inner, ev, node, iv)
+		switch elem {
+		case ir.KindFP32, ir.KindFP64:
+			f.line("%sif (%s < %s.size()) %s[%s] = static_cast<%s>(sofab_json_double(%s));", inner, iv, target, target, iv, numCppType(elem), ev)
+		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+			f.line("%sif (%s < %s.size()) %s[%s] = static_cast<%s>(sofab_json_i64(%s));", inner, iv, target, target, iv, numCppType(elem), ev)
+		case ir.KindEnum:
+			f.line("%sif (%s < %s.size()) %s[%s] = static_cast<%s>(sofab_json_i64(%s));", inner, iv, target, target, iv, g.typeName(ref.Key), ev)
+		case ir.KindBool:
+			f.line("%sif (%s < %s.size()) %s[%s] = sofab_json_bool(%s) != 0;", inner, iv, target, target, iv, ev)
+		case ir.KindBitfield:
+			f.line("%sif (%s < %s.size()) %s[%s] = static_cast<%s>(sofab_json_u64(%s));", inner, iv, target, target, iv, bitfieldBacking(ref.Target), ev)
+		default: // unsigned
+			f.line("%sif (%s < %s.size()) %s[%s] = static_cast<%s>(sofab_json_u64(%s));", inner, iv, target, target, iv, numCppType(elem), ev)
+		}
+		f.line("%s}", ind)
+		return
 	}
-	f.line("        for (size_t _i = 0; _i < sofab_json_array_size(c); _i++) {")
-	f.line("            const sofab_json_t *_e = sofab_json_array_at(c, _i);")
-	switch fld.Elem {
+	// std::vector element: clear then append.
+	f.line("%s%s.clear();", ind, target)
+	f.line("%sfor (size_t %s = 0; %s < sofab_json_array_size(%s); %s++) {", ind, iv, iv, node, iv)
+	f.line("%sconst sofab_json_t *%s = sofab_json_array_at(%s, %s);", inner, ev, node, iv)
+	switch elem {
 	case ir.KindString:
-		f.line("            { size_t _l; const char *_s = sofab_json_string(_e, &_l); %s.emplace_back(_s, _l); }", acc)
+		f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back(_s, _l); }", inner, ev, target)
 	case ir.KindBlob:
-		f.line("            { std::vector<std::uint8_t> _b; json_to_bytes(_e, _b); %s.push_back(std::move(_b)); }", acc)
-	case ir.KindFP32, ir.KindFP64:
-		f.line("            if (_i < %s.size()) %s[_i] = static_cast<%s>(sofab_json_double(_e));", acc, acc, numCppType(fld.Elem))
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("            if (_i < %s.size()) %s[_i] = static_cast<%s>(sofab_json_i64(_e));", acc, acc, numCppType(fld.Elem))
-	default:
-		f.line("            if (_i < %s.size()) %s[_i] = static_cast<%s>(sofab_json_u64(_e));", acc, acc, numCppType(fld.Elem))
+		f.line("%s{ std::vector<std::uint8_t> _b; json_to_bytes(%s, _b); %s.push_back(std::move(_b)); }", inner, ev, target)
+	case ir.KindStruct, ir.KindUnion:
+		f.line("%s{ %s %s; from_json(%s, %s); %s.push_back(std::move(%s)); }", inner, g.typeName(ref.Key), vv, ev, vv, target, vv)
+	case ir.KindArray:
+		icont := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count)
+		f.line("%s{ %s %s{};", inner, icont, vv)
+		g.fromJSONArray(f, inner+"    ", ev, vv, items.Elem, items.ElemRef, items.ElemItems, items.Count, depth+1)
+		f.line("%s%s.push_back(std::move(%s)); }", inner+"    ", target, vv)
 	}
-	f.line("        }")
+	f.line("%s}", ind)
 }
 
 func (g *gen) harnessMain(s *ir.Schema) []byte {

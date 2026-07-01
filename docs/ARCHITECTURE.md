@@ -182,9 +182,13 @@ load time and flattened transitively; **recursive refs are rejected** (a
 recursive value member has no finite size).
 
 **How definition types lower onto the wire** (the generator must route these to
-the corelib correctly — see §9): `struct`/`union` and *arrays of string/blob*
-become **sequences** (open a fresh id scope); arrays of numerics become real
-**array** wire types; `enum` becomes a **signed (zig-zag) varint** with a backing
+the corelib correctly — see §9): `struct`/`union` and *arrays of composite or
+dynamic elements* (`string`/`blob`/`struct`/`union`/nested `array`) become
+**sequences** — an array lowers to a **wrapper sequence** whose child ids are the
+0-based element index (each opens a fresh id scope); arrays of numeric **and
+`enum`/`boolean`/`bitfield`** elements become real **array** wire types
+(`enum`→signed, `boolean`/`bitfield`→unsigned — value-converted, no new wire
+form); `enum` becomes a **signed (zig-zag) varint** with a backing
 width = smallest signed int covering its value range; `bitfield` becomes an
 **unsigned varint** with a backing width = smallest unsigned int covering its
 highest `pos`. `sequence` is a wire type only — there is no `sequence` keyword in

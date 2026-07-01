@@ -39,6 +39,10 @@ function blobListVisitor(out: Uint8Array[]): Visitor {
   return { blob(id, total, offset, chunk) { const b = acc.blob(id, total, offset, chunk); if (b !== null) out.push(b); } };
 }
 
+function structListVisitor<T extends { _visitor(): Visitor }>(out: T[], make: () => T): Visitor {
+  return { sequenceBegin(_id: number): Visitor { const o = make(); out.push(o); return o._visitor(); } };
+}
+
 export class Scalars {
   u8min: number = 0;
   u8max: number = 255;

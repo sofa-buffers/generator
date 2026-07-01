@@ -201,22 +201,44 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 }
 
 func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
-	switch fld.Elem {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("        os.writeArrayUnsigned(%d, Sbuf.toLongArray(%s));", fld.ID, acc)
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("        os.writeArraySigned(%d, Sbuf.toLongArray(%s));", fld.ID, acc)
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+}
+
+// marshalArray writes the array val as field idExpr. Numeric/enum/boolean/
+// bitfield elements use the native array wire type (enum->signed, bool/bitfield->
+// unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
+// whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
+// arrays, depth-suffixing loop vars to avoid collisions.
+func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+	iv := fmt.Sprintf("_i%d", depth)
+	switch elem {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
+		f.line("%sos.writeArrayUnsigned(%s, Sbuf.toLongArray(%s));", ind, idExpr, val)
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		f.line("%sos.writeArraySigned(%s, Sbuf.toLongArray(%s));", ind, idExpr, val)
+	case ir.KindBool:
+		f.line("%sos.writeArrayUnsigned(%s, Sbuf.boolToLongArray(%s));", ind, idExpr, val)
 	case ir.KindFP32:
-		f.line("        os.writeArrayFp32(%d, Sbuf.toFloatArray(%s));", fld.ID, acc)
+		f.line("%sos.writeArrayFp32(%s, Sbuf.toFloatArray(%s));", ind, idExpr, val)
 	case ir.KindFP64:
-		f.line("        os.writeArrayFp64(%d, Sbuf.toDoubleArray(%s));", fld.ID, acc)
+		f.line("%sos.writeArrayFp64(%s, Sbuf.toDoubleArray(%s));", ind, idExpr, val)
 	case ir.KindString:
-		f.line("        os.writeSequenceBegin(%d);", fld.ID)
-		f.line("        for (int _i = 0; _i < %s.size(); _i++) os.writeString(_i, %s.get(_i) == null ? \"\" : %s.get(_i));", acc, acc, acc)
-		f.line("        os.writeSequenceEnd();")
+		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) os.writeString(%s, %s.get(%s) == null ? \"\" : %s.get(%s));", ind, iv, iv, val, iv, iv, val, iv, val, iv)
+		f.line("%sos.writeSequenceEnd();", ind)
 	case ir.KindBlob:
-		f.line("        os.writeSequenceBegin(%d);", fld.ID)
-		f.line("        for (int _i = 0; _i < %s.size(); _i++) os.writeBlob(_i, %s.get(_i) == null ? new byte[0] : %s.get(_i));", acc, acc, acc)
-		f.line("        os.writeSequenceEnd();")
+		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) os.writeBlob(%s, %s.get(%s) == null ? new byte[0] : %s.get(%s));", ind, iv, iv, val, iv, iv, val, iv, val, iv)
+		f.line("%sos.writeSequenceEnd();", ind)
+	case ir.KindStruct, ir.KindUnion:
+		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { os.writeSequenceBegin(%s); (%s.get(%s) == null ? new %s() : %s.get(%s)).marshal(os); os.writeSequenceEnd(); }", ind, iv, iv, val, iv, iv, val, iv, g.typeName(ref.Key), val, iv)
+		f.line("%sos.writeSequenceEnd();", ind)
+	case ir.KindArray:
+		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) {", ind, iv, iv, val, iv)
+		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s.get(%s)", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		f.line("%s}", ind)
+		f.line("%sos.writeSequenceEnd();", ind)
 	}
 }

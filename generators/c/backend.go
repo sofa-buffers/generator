@@ -190,11 +190,11 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
-		case f.Kind == ir.KindArray && (f.Elem == ir.KindString || f.Elem == ir.KindBlob):
+		case f.Kind == ir.KindArray && isHolderElem(f.Elem):
+			// string/blob/struct/union/nested-array elements lower to a wrapper
+			// sequence: a synthetic holder object with one field per element.
 			ck := key + "/" + f.Name + "#elems"
-			ep := g.elemHolder(ck, f)
-			plans[ck] = ep
-			*order = append(*order, ck)
+			ep := g.buildHolder(ck, specOfField(f), plans, order)
 			if _, ok := nestedIdx[ck]; !ok {
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
@@ -222,33 +222,118 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 	return nil
 }
 
-// elemHolder builds the synthetic object holding the elements of an
-// array-of-string/blob (a fixed sequence of string/blob fields, §5).
-func (g *gen) elemHolder(key string, f *ir.Field) *objectPlan {
+// arraySpec captures an array's element type — the element kind plus the extra
+// IR carried for composite (ElemRef) and nested-array (ElemItems) elements, and
+// the element capacity/maxlen. It lets buildHolder and the harness treat an
+// outer field and a nested inner array uniformly.
+type arraySpec struct {
+	elem   ir.Kind
+	ref    *ir.TypeRef
+	items  *ir.ArrayElem
+	count  int64
+	maxHas bool
+	max    int64
+}
+
+func specOfField(f *ir.Field) arraySpec {
+	return arraySpec{elem: f.Elem, ref: f.ElemRef, items: f.ElemItems, count: f.Count, maxHas: f.ElemMaxHas, max: f.ElemMax}
+}
+
+func specOfItems(a *ir.ArrayElem) arraySpec {
+	return arraySpec{elem: a.Elem, ref: a.ElemRef, items: a.ElemItems, count: a.Count, maxHas: a.ElemMaxHas, max: a.ElemMax}
+}
+
+// isHolderElem reports whether an array element kind lowers to a wrapper
+// sequence (a holder object) rather than a native array wire type. Numeric,
+// enum, boolean and bitfield elements stay native; string/blob/struct/union and
+// nested arrays become holders.
+func isHolderElem(k ir.Kind) bool {
+	return k == ir.KindString || k == ir.KindBlob || k == ir.KindStruct || k == ir.KindUnion || k == ir.KindArray
+}
+
+// arrayCap is the C storage capacity for an array element count: the count, but
+// never below 1 so the emitted C array (and its descriptor) is never zero-sized.
+// A dynamic (unbounded) collection carries count 0; fixed storage still needs a
+// slot.
+func arrayCap(count int64) int64 {
+	if count < 1 {
+		return 1
+	}
+	return count
+}
+
+// buildHolder builds (and registers, post-order) the synthetic object holding
+// the elements of an array whose element lowers to a wrapper sequence: one field
+// per element, id = 0-based index (per MESSAGE_SPEC). It handles string/blob
+// (a fixlen field each), struct/union (a nested sequence each) and nested arrays
+// (an inner array, or an inner holder sequence, each). Recurses for deep nesting.
+func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPlan, order *[]string) *objectPlan {
 	p := &objectPlan{key: key, cType: g.cType(key, "elems"), descr: g.descrSym(key)}
-	// Without items.maxlen a fixed-storage target has no real bound; fall back to
-	// 1 so the emitted C array is never zero-sized (a §5.7 hard check belongs
-	// here eventually). Dynamic targets carry the real bound.
-	maxlen := int64(1)
-	if f.ElemMaxHas {
-		maxlen = f.ElemMax
+	cap := arrayCap(spec.count)
+	switch spec.elem {
+	case ir.KindString, ir.KindBlob:
+		// Without items.maxlen a fixed-storage target has no real bound; fall back
+		// to 1 so the emitted C array is never zero-sized.
+		maxlen := int64(1)
+		if spec.maxHas {
+			maxlen = spec.max
+		}
+		var elemDecl, ftype string
+		if spec.elem == ir.KindString {
+			elemDecl = fmt.Sprintf("char items[%d][%d];", cap, maxlen)
+			ftype = "SOFAB_OBJECT_FIELDTYPE_STRING"
+		} else {
+			elemDecl = fmt.Sprintf("uint8_t items[%d][%d];", cap, maxlen)
+			ftype = "SOFAB_OBJECT_FIELDTYPE_BLOB"
+		}
+		p.members = append(p.members, member{decl: elemDecl})
+		for i := int64(0); i < cap; i++ {
+			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
+				"    SOFAB_OBJECT_FIELD(%d, %s, items[%d], %s),", i, p.cType, i, ftype)})
+		}
+	case ir.KindStruct, ir.KindUnion:
+		// Each element is itself a nested object (struct/union): the element type
+		// is emitted as a normal named object, and every holder slot is a sequence
+		// referencing that one descriptor (nested_idx 0).
+		ek := "named/" + spec.ref.Key
+		if err := g.collect(ek, g.cType(ek, spec.ref.Target.Name), spec.ref.Target.Fields, plans, order); err == nil {
+			p.nested = append(p.nested, ek)
+		}
+		p.members = append(p.members, member{decl: fmt.Sprintf("%s items[%d];", plans[ek].cType, cap)})
+		for i := int64(0); i < cap; i++ {
+			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
+				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, items[%d], SOFAB_OBJECT_FIELDTYPE_SEQUENCE, 0),", i, p.cType, i)})
+		}
+	case ir.KindArray:
+		inner := specOfItems(spec.items)
+		if isHolderElem(inner.elem) {
+			// Inner element is itself a holder: each slot is a sequence to it.
+			ik := key + "/inner"
+			ip := g.buildHolder(ik, inner, plans, order)
+			p.nested = append(p.nested, ik)
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s items[%d];", ip.cType, cap)})
+			for i := int64(0); i < cap; i++ {
+				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
+					"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, items[%d], SOFAB_OBJECT_FIELDTYPE_SEQUENCE, 0),", i, p.cType, i)})
+			}
+		} else {
+			// Inner element is a native array: a 2-D C array, each row an array
+			// field (id = index).
+			icap := arrayCap(inner.count)
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s items[%d][%d];", g.arrayElemCType(inner.elem, inner.ref), cap, icap)})
+			for i := int64(0); i < cap; i++ {
+				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
+					"    SOFAB_OBJECT_FIELD_ARRAY(%d, %s, items[%d], %s),", i, p.cType, i, arrayFieldType(inner.elem))})
+			}
+		}
 	}
-	var elemDecl, ftype string
-	if f.Elem == ir.KindString {
-		elemDecl = fmt.Sprintf("char items[%d][%d];", f.Count, maxlen)
-		ftype = "SOFAB_OBJECT_FIELDTYPE_STRING"
-	} else {
-		elemDecl = fmt.Sprintf("uint8_t items[%d][%d];", f.Count, maxlen)
-		ftype = "SOFAB_OBJECT_FIELDTYPE_BLOB"
-	}
-	p.members = append(p.members, member{decl: elemDecl})
-	for i := int64(0); i < f.Count; i++ {
-		p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
-			"    SOFAB_OBJECT_FIELD(%d, %s, items[%d], %s),", i, p.cType, i, ftype)})
+	for i := int64(0); i < cap; i++ {
 		if i > p.maxField {
 			p.maxField = i
 		}
 	}
+	plans[key] = p
+	*order = append(*order, key)
 	return p
 }
 
@@ -285,7 +370,9 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 		decl = fmt.Sprintf("%s %s;", bitfieldC(f.Ref.Target), mn)
 		entry = field(f.ID, cType, mn, "UNSIGNED")
 	case ir.KindArray:
-		decl = fmt.Sprintf("%s %s[%d];", arrayElemC(f.Elem), mn, f.Count)
+		// Native array element (numeric/enum/boolean/bitfield): enum -> signed,
+		// boolean/bitfield -> unsigned, value-converted (not a sequence).
+		decl = fmt.Sprintf("%s %s[%d];", g.arrayElemCType(f.Elem, f.ElemRef), mn, f.Count)
 		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_ARRAY(%d, %s, %s, %s),", f.ID, cType, mn, arrayFieldType(f.Elem))
 	default:
 		return "", "", fmt.Errorf("field %q: unsupported kind %s for C backend", f.Name, f.Kind)
@@ -415,6 +502,37 @@ func (g *gen) capabilities(m *ir.Message) capset {
 	var caps capset
 	seen := map[string]bool{}
 	var walk func(fields []*ir.Field)
+	// arrCaps folds in the capabilities an array's element type needs, recursing
+	// through nested arrays and into struct/union element fields.
+	var arrCaps func(spec arraySpec)
+	arrCaps = func(spec arraySpec) {
+		switch spec.elem {
+		case ir.KindString, ir.KindBlob:
+			caps.sequence = true
+			caps.fixlen = true
+		case ir.KindStruct, ir.KindUnion:
+			caps.sequence = true
+			if !seen[spec.ref.Key] {
+				seen[spec.ref.Key] = true
+				walk(spec.ref.Target.Fields)
+			}
+		case ir.KindArray:
+			caps.sequence = true // holder wrapper sequence
+			arrCaps(specOfItems(spec.items))
+		case ir.KindFP64:
+			caps.array = true
+			caps.fixlen = true
+			caps.fp64 = true
+		case ir.KindFP32:
+			caps.array = true
+			caps.fixlen = true
+		case ir.KindU64, ir.KindI64:
+			caps.array = true
+			caps.value64 = true
+		default: // unsigned/signed numeric, enum, boolean, bitfield
+			caps.array = true
+		}
+	}
 	walk = func(fields []*ir.Field) {
 		for _, f := range fields {
 			switch f.Kind {
@@ -432,23 +550,7 @@ func (g *gen) capabilities(m *ir.Message) capset {
 					walk(f.Ref.Target.Fields)
 				}
 			case ir.KindArray:
-				switch f.Elem {
-				case ir.KindString, ir.KindBlob:
-					caps.sequence = true
-					caps.fixlen = true
-				case ir.KindFP64:
-					caps.array = true
-					caps.fixlen = true
-					caps.fp64 = true
-				case ir.KindFP32:
-					caps.array = true
-					caps.fixlen = true
-				case ir.KindU64, ir.KindI64:
-					caps.array = true
-					caps.value64 = true
-				default:
-					caps.array = true
-				}
+				arrCaps(specOfField(f))
 			}
 		}
 	}
@@ -533,15 +635,30 @@ func arrayElemC(k ir.Kind) string {
 
 func arrayFieldType(k ir.Kind) string {
 	switch k {
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		return "SOFAB_OBJECT_FIELDTYPE_ARRAY_SIGNED"
 	case ir.KindFP32:
 		return "SOFAB_OBJECT_FIELDTYPE_ARRAY_FP32"
 	case ir.KindFP64:
 		return "SOFAB_OBJECT_FIELDTYPE_ARRAY_FP64"
-	default:
+	default: // unsigned numeric, boolean, bitfield
 		return "SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED"
 	}
+}
+
+// arrayElemCType is the C storage type of a native array element: enum/bitfield
+// take their smallest backing width, boolean is a byte, everything else follows
+// arrayElemC (numeric/fp).
+func (g *gen) arrayElemCType(elem ir.Kind, ref *ir.TypeRef) string {
+	switch elem {
+	case ir.KindEnum:
+		return enumC(ref.Target)
+	case ir.KindBitfield:
+		return bitfieldC(ref.Target)
+	case ir.KindBool:
+		return "uint8_t"
+	}
+	return arrayElemC(elem)
 }
 
 // enumC backs an enum with the smallest SIGNED width covering its range (§6.1).
@@ -601,14 +718,31 @@ func (g *gen) maxDepth(fields []*ir.Field) int {
 		switch {
 		case f.Kind == ir.KindStruct || f.Kind == ir.KindUnion:
 			d = 1 + g.maxDepth(f.Ref.Target.Fields)
-		case f.Kind == ir.KindArray && (f.Elem == ir.KindString || f.Elem == ir.KindBlob):
-			d = 1
+		case f.Kind == ir.KindArray && isHolderElem(f.Elem):
+			d = g.arrayDepth(specOfField(f))
 		}
 		if d > best {
 			best = d
 		}
 	}
 	return best
+}
+
+// arrayDepth returns the sequence-nesting depth a holder-lowered array adds to
+// the decoder stack: the holder sequence itself plus whatever its elements nest.
+// string/blob holders are one level; struct/union elements add a per-element
+// sequence plus the element's own depth; nested arrays add their inner array's
+// depth. Native array elements contribute nothing beyond the holder.
+func (g *gen) arrayDepth(spec arraySpec) int {
+	switch spec.elem {
+	case ir.KindString, ir.KindBlob:
+		return 1
+	case ir.KindStruct, ir.KindUnion:
+		return 2 + g.maxDepth(spec.ref.Target.Fields)
+	case ir.KindArray:
+		return 1 + g.arrayDepth(specOfItems(spec.items))
+	}
+	return 0
 }
 
 func cfgString(cfg map[string]any, key, dflt string) string {

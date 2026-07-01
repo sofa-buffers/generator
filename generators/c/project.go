@@ -195,23 +195,40 @@ func (g *gen) fieldToJSON(h *cfile, f *ir.Field) {
 }
 
 func (g *gen) arrayToJSON(h *cfile, f *ir.Field, acc string) {
-	h.line(`    fputc('[', out);`)
-	h.line("    for (int _i = 0; _i < %d; _i++) {", f.Count)
-	h.line(`        if (_i) fputc(',', out);`)
-	switch f.Elem {
+	g.arrayValueToJSON(h, specOfField(f), acc, "    ", 0)
+}
+
+// arrayValueToJSON emits the JSON for one array value. Native numeric/enum/
+// boolean/bitfield elements are read from acc[_iN]; string/blob/struct/union and
+// nested-array elements live in the holder's acc.items[_iN] slot. Recurses for
+// nested arrays, depth-suffixing the loop variable.
+func (g *gen) arrayValueToJSON(h *cfile, spec arraySpec, acc, ind string, depth int) {
+	iv := fmt.Sprintf("_i%d", depth)
+	h.line(`%sfputc('[', out);`, ind)
+	h.line("%sfor (int %s = 0; %s < %d; %s++) {", ind, iv, iv, spec.count, iv)
+	h.line(`%s    if (%s) fputc(',', out);`, ind, iv)
+	elem := fmt.Sprintf("%s[%s]", acc, iv)     // native element access
+	slot := fmt.Sprintf("%s.items[%s]", acc, iv) // holder element access
+	switch spec.elem {
 	case ir.KindFP32, ir.KindFP64:
-		h.line(`        fprintf(out, "%%.17g", (double)%s[_i]);`, acc)
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		h.line(`        fprintf(out, "%%lld", (long long)%s[_i]);`, acc)
+		h.line(`%s    fprintf(out, "%%.17g", (double)%s);`, ind, elem)
+	case ir.KindBool:
+		h.line(`%s    fputs(%s ? "true" : "false", out);`, ind, elem)
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		h.line(`%s    fprintf(out, "%%lld", (long long)%s);`, ind, elem)
 	case ir.KindString:
-		h.line(`        json_str(out, %s.items[_i]);`, acc)
+		h.line(`%s    json_str(out, %s);`, ind, slot)
 	case ir.KindBlob:
-		h.line(`        json_bytes(out, %s.items[_i], sizeof(%s.items[_i]));`, acc, acc)
-	default: // unsigned numeric
-		h.line(`        fprintf(out, "%%llu", (unsigned long long)%s[_i]);`, acc)
+		h.line(`%s    json_bytes(out, %s, sizeof(%s));`, ind, slot, slot)
+	case ir.KindStruct, ir.KindUnion:
+		h.line(`%s    %s_to_json(&%s, out);`, ind, g.jsonFn(spec.ref.Key), slot)
+	case ir.KindArray:
+		g.arrayValueToJSON(h, specOfItems(spec.items), slot, ind+"    ", depth+1)
+	default: // unsigned numeric, bitfield
+		h.line(`%s    fprintf(out, "%%llu", (unsigned long long)%s);`, ind, elem)
 	}
-	h.line("    }")
-	h.line(`    fputc(']', out);`)
+	h.line("%s}", ind)
+	h.line(`%sfputc(']', out);`, ind)
 }
 
 func (g *gen) emitFromJSON(h *cfile, cType, fn string, fields []*ir.Field) {
@@ -253,23 +270,40 @@ func (g *gen) fieldFromJSON(h *cfile, f *ir.Field) {
 }
 
 func (g *gen) arrayFromJSON(h *cfile, f *ir.Field, acc string) {
-	h.line("        for (size_t _i = 0; _i < sofab_json_array_size(c) && _i < %d; _i++) {", f.Count)
-	h.line("            const sofab_json_t *_e = sofab_json_array_at(c, _i);")
-	switch f.Elem {
+	g.arrayValueFromJSON(h, specOfField(f), acc, "c", "        ", 0)
+}
+
+// arrayValueFromJSON parses one array value from the JSON node jnode. Mirrors
+// arrayValueToJSON: native elements land in acc[_iN], holder elements in
+// acc.items[_iN]. Recurses for nested arrays.
+func (g *gen) arrayValueFromJSON(h *cfile, spec arraySpec, acc, jnode, ind string, depth int) {
+	iv := fmt.Sprintf("_i%d", depth)
+	ev := fmt.Sprintf("_e%d", depth)
+	h.line("%sfor (size_t %s = 0; %s < sofab_json_array_size(%s) && %s < %d; %s++) {", ind, iv, iv, jnode, iv, spec.count, iv)
+	h.line("%s    const sofab_json_t *%s = sofab_json_array_at(%s, %s);", ind, ev, jnode, iv)
+	elem := fmt.Sprintf("%s[%s]", acc, iv)
+	slot := fmt.Sprintf("%s.items[%s]", acc, iv)
+	switch spec.elem {
 	case ir.KindFP32:
-		h.line("            %s[_i] = (float)sofab_json_double(_e);", acc)
+		h.line("%s    %s = (float)sofab_json_double(%s);", ind, elem, ev)
 	case ir.KindFP64:
-		h.line("            %s[_i] = (double)sofab_json_double(_e);", acc)
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		h.line("            %s[_i] = (%s)sofab_json_i64(_e);", acc, arrayElemC(f.Elem))
+		h.line("%s    %s = (double)sofab_json_double(%s);", ind, elem, ev)
+	case ir.KindBool:
+		h.line("%s    %s = (uint8_t)sofab_json_bool(%s);", ind, elem, ev)
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		h.line("%s    %s = (%s)sofab_json_i64(%s);", ind, elem, g.arrayElemCType(spec.elem, spec.ref), ev)
 	case ir.KindString:
-		h.line("            json_to_str(_e, %s.items[_i], sizeof(%s.items[_i]));", acc, acc)
+		h.line("%s    json_to_str(%s, %s, sizeof(%s));", ind, ev, slot, slot)
 	case ir.KindBlob:
-		h.line("            json_to_bytes(_e, %s.items[_i], sizeof(%s.items[_i]));", acc, acc)
-	default:
-		h.line("            %s[_i] = (%s)sofab_json_u64(_e);", acc, arrayElemC(f.Elem))
+		h.line("%s    json_to_bytes(%s, %s, sizeof(%s));", ind, ev, slot, slot)
+	case ir.KindStruct, ir.KindUnion:
+		h.line("%s    %s_from_json(%s, &%s);", ind, g.jsonFn(spec.ref.Key), ev, slot)
+	case ir.KindArray:
+		g.arrayValueFromJSON(h, specOfItems(spec.items), slot, ev, ind+"    ", depth+1)
+	default: // unsigned numeric, bitfield
+		h.line("%s    %s = (%s)sofab_json_u64(%s);", ind, elem, g.arrayElemCType(spec.elem, spec.ref), ev)
 	}
-	h.line("        }")
+	h.line("%s}", ind)
 }
 
 func (g *gen) emitMain(h *cfile, s *ir.Schema) {

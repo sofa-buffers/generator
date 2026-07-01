@@ -4,6 +4,7 @@ import java.util.List;
 
 final class Sbuf {
     static long[] toLongArray(List<Long> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
+    static long[] boolToLongArray(List<Boolean> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i) ? 1 : 0; return a; }
     static float[] toFloatArray(List<Float> l) { float[] a = new float[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
     static double[] toDoubleArray(List<Double> l) { double[] a = new double[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
 }

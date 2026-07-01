@@ -72,16 +72,29 @@ func (g *gen) goType(f *ir.Field) string {
 	case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
-		switch f.Elem {
-		case ir.KindString:
-			return "[]string"
-		case ir.KindBlob:
-			return "[][]byte"
-		default:
-			return "[]" + goNumType(f.Elem)
-		}
+		return "[]" + g.goArrayElem(f.Elem, f.ElemRef, f.ElemItems)
 	}
 	return "any"
+}
+
+// goArrayElem is the Go type of an array element, recursing for nested arrays.
+// Numeric/bool/enum/bitfield/struct/union map to their scalar Go type; a nested
+// array prepends another slice level.
+func (g *gen) goArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindString:
+		return "string"
+	case ir.KindBlob:
+		return "[]byte"
+	case ir.KindBool:
+		return "bool"
+	case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
+		return g.typeName(ref.Key)
+	case ir.KindArray:
+		return "[]" + g.goArrayElem(items.Elem, items.ElemRef, items.ElemItems)
+	default: // numeric
+		return goNumType(elem)
+	}
 }
 
 func goNumType(k ir.Kind) string {
