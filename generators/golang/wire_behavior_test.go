@@ -113,52 +113,38 @@ func normJSON(t *testing.T, s string) string {
 	return string(b)
 }
 
-// --- omit_defaults --------------------------------------------------------
+// --- sparse-canonical omission (MESSAGE_SPEC §2) --------------------------
 
-// TestOmitDefaultsWire: with omit_defaults the encoder must drop a field whose
-// value equals its default (so an all-default message encodes to an EMPTY
-// payload), while a field that overrides its default stays on the wire. Without
-// the option the encoder is dense (defaults appear on the wire). Both modes must
-// round-trip (the decoder reconstructs omitted fields from the schema default).
-func TestOmitDefaultsWire(t *testing.T) {
+// TestSparseWireOmitsDefaults: encoding is always sparse-canonical (no toggle).
+// A field equal to its default is dropped, so an all-default message encodes to
+// an EMPTY payload and reconstructs its defaults on decode; a field that
+// overrides its default stays on the wire and round-trips.
+func TestSparseWireOmitsDefaults(t *testing.T) {
 	corelib := requireGoCorelib(t)
 	def := "version: 1\nmessages:\n  vec:\n    payload:\n" +
 		"      a: {id: 0, type: u32, default: 7}\n" +
 		"      b: {id: 1, type: i32, default: 10}\n" +
 		"      c: {id: 2, type: boolean, default: true}\n"
-	dense := buildGoHarnessCfg(t, corelib, def, nil)
-	sparse := buildGoHarnessCfg(t, corelib, def, map[string]any{"omit_defaults": true})
+	bin := buildGoHarnessCfg(t, corelib, def, nil)
 
+	// All fields at their default -> empty payload; decode reconstructs them.
 	allDefault := `{"a":7,"b":10,"c":true}`
-	denseHex := encHex(t, dense, "vec", allDefault)
-	sparseHex := encHex(t, sparse, "vec", allDefault)
-
-	if sparseHex != "" {
-		t.Errorf("omit_defaults: an all-default message must encode to an empty payload, got %q", sparseHex)
+	if got := encHex(t, bin, "vec", allDefault); got != "" {
+		t.Errorf("all-default message must encode to an empty payload (sparse), got %q", got)
 	}
-	if denseHex == "" {
-		t.Error("omit off: an all-default message must be dense (default values on the wire)")
-	}
-	if len(sparseHex) >= len(denseHex) {
-		t.Errorf("omit_defaults must shrink the wire: sparse=%q dense=%q", sparseHex, denseHex)
-	}
-	// Both modes reconstruct the defaults on decode.
-	if got := decJSON(t, sparse, "vec", sparseHex); got != normJSON(t, allDefault) {
-		t.Errorf("omit_defaults decode of empty payload must reconstruct defaults: got %s want %s", got, normJSON(t, allDefault))
-	}
-	if got := roundTrip(t, dense, "vec", allDefault); got != normJSON(t, allDefault) {
-		t.Errorf("dense round-trip: got %s", got)
+	if got := decJSON(t, bin, "vec", ""); got != normJSON(t, allDefault) {
+		t.Errorf("decode of empty payload must reconstruct defaults: got %s want %s", got, normJSON(t, allDefault))
 	}
 
-	// A field overriding its default is written even under omit_defaults, and
-	// round-trips (the untouched defaults are reconstructed).
+	// A field overriding its default is on the wire and round-trips (the
+	// untouched defaults are reconstructed).
 	override := `{"a":99,"b":10,"c":true}`
-	overHex := encHex(t, sparse, "vec", override)
+	overHex := encHex(t, bin, "vec", override)
 	if overHex == "" {
-		t.Error("omit_defaults: a field overriding its default must appear on the wire")
+		t.Error("a field overriding its default must appear on the wire")
 	}
-	if got := decJSON(t, sparse, "vec", overHex); got != normJSON(t, override) {
-		t.Errorf("omit_defaults override round-trip: got %s want %s", got, normJSON(t, override))
+	if got := decJSON(t, bin, "vec", overHex); got != normJSON(t, override) {
+		t.Errorf("override round-trip: got %s want %s", got, normJSON(t, override))
 	}
 }
 

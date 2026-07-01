@@ -72,9 +72,11 @@ func TestOmitDefaultsGenerates(t *testing.T) {
 	}
 }
 
-// TestOmitDefaultsOffIsDense: without the option, the Go marshal writes
-// unconditionally (no per-field guard) — the default behavior is unchanged.
-func TestOmitDefaultsOffIsDense(t *testing.T) {
+// TestGoMarshalIsSparse: the Go marshal is always sparse-canonical (MESSAGE_SPEC
+// §2) — every leaf field is written under an "if != default" guard, with no
+// config toggle. (The corelibs are dumb codecs; the sparse rule lives in the
+// generated code. Only the C backend defers omission to the object.h descriptor.)
+func TestGoMarshalIsSparse(t *testing.T) {
 	s, err := buildIR(t, "corpus/defs/scalars.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -83,8 +85,8 @@ func TestOmitDefaultsOffIsDense(t *testing.T) {
 	files, _ := b.Generate(s, map[string]any{})
 	for _, f := range files {
 		if strings.HasSuffix(f.Path, "scalars.go") {
-			if strings.Contains(string(f.Content), "if m.") {
-				t.Error("default (omit off) Go marshal should be unconditional")
+			if !strings.Contains(string(f.Content), "if m.") {
+				t.Error("Go marshal must be sparse-canonical (per-field != default guard)")
 			}
 		}
 	}
