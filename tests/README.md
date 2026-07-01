@@ -13,7 +13,7 @@ tests/
 │   ├── matrix_test.go      #   generate every corpus def across ALL backends; reject invalid defs
 │   ├── golden_test.go      #   regenerate scalars.yaml per backend, byte-diff vs committed goldens
 │   ├── refs_test.go        #   $ref / shared-type graph resolution
-│   ├── omit_test.go        #   omit_defaults round-trip
+│   ├── omit_test.go        #   sparse-canonical marshal
 │   ├── realworld_test.go   #   the multi-file vehicle_telemetry schema
 │   ├── corpus/             #   definition corpus — see corpus/README.md
 │   │   ├── defs/           #     15 positive corner-case definitions

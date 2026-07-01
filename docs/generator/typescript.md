@@ -1,15 +1,14 @@
 # TypeScript target — `targets.typescript`
 
 Language-specific options for the TypeScript backend. For shared options
-(`emit`, `file_layout`, `buffer`, `omit_defaults`, …) see the
+(`emit`, `file_layout`, `buffer`, …) see the
 [`generic`](README.md) config.
 
 ## Honored options
 
 The TypeScript target currently has **no language-specific options** that change
 its output — it is driven entirely by the shared `generic` options. (`emit:
-project` scaffolds a buildable package; `omit_defaults` controls default
-omission.)
+project` scaffolds a buildable package.)
 
 ## Reserved options
 

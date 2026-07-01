@@ -4,7 +4,7 @@ Each file here documents the **language-specific** options for one `sofabgen`
 target — the keys you may set under `targets.<lang>` in your config.
 
 Shared options (`emit`, `validation`, `naming`, `file_layout`, `buffer`,
-`omit_defaults`, `namespace`, `tool_banner`, `license`, `timestamp`, …) live in
+`namespace`, `tool_banner`, `license`, `timestamp`, …) live in
 the top-level `generic:` block and apply to every target; they are **not**
 repeated here. A per-target value overrides the `generic` value for that target.
 

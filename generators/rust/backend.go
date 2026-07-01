@@ -30,7 +30,7 @@ func (*Backend) Lang() string { return "rust" }
 // Generate emits src/message.rs; project mode adds Cargo.toml + a serde-json
 // harness.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), omit: cfgBool(cfg, "omit_defaults"), corelib: cfgString(cfg, "corelib", "rs")}
+	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), corelib: cfgString(cfg, "corelib", "rs")}
 	files := []generator.File{{Path: "src/message.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -42,7 +42,6 @@ type gen struct {
 	schema  *ir.Schema
 	banner  string
 	license string // SPDX id, "" to omit the header line
-	omit    bool
 	// corelib selects the Rust corelib: "rs" (default, corelib-rs — std,
 	// high-throughput, every wire type always compiled in, no feature flags and no
 	// require! capability guard) or "rs-no-std" (corelib-rs-no-std — #![no_std],
@@ -153,13 +152,11 @@ func fieldDoc(fld *ir.Field) string {
 func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bool, summary string) {
 	// rustdoc summary attaches to the struct that immediately follows.
 	f.emitDoc("", summary)
-	// With omit_defaults, decode must reconstruct schema defaults, so a manual
-	// Default impl carries them; otherwise derive Default (type zeros) is fine.
-	if g.omit {
-		f.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]")
-	} else {
-		f.line("#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]")
-	}
+	// Encoding is sparse-canonical (MESSAGE_SPEC S2): a field equal to its default
+	// is omitted, so decode must reconstruct schema defaults. A manual Default impl
+	// carries them (native scalar arrays and blobs materialize their default too),
+	// so derive(Default) type-zeros are never correct here.
+	f.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]")
 	f.line("#[serde(default)]")
 	f.line("pub struct %s {", name)
 	for _, fld := range fields {
@@ -173,18 +170,16 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	}
 	f.line("}")
 	f.blank()
-	if g.omit {
-		f.line("impl Default for %s {", name)
-		f.line("    fn default() -> Self {")
-		f.line("        Self {")
-		for _, fld := range fields {
-			f.line("            %s: %s,", rustIdent(fld.Name), g.rustFieldDefault(fld))
-		}
-		f.line("        }")
-		f.line("    }")
-		f.line("}")
-		f.blank()
+	f.line("impl Default for %s {", name)
+	f.line("    fn default() -> Self {")
+	f.line("        Self {")
+	for _, fld := range fields {
+		f.line("            %s: %s,", rustIdent(fld.Name), g.rustFieldDefault(fld))
 	}
+	f.line("        }")
+	f.line("    }")
+	f.line("}")
+	f.blank()
 
 	f.line("impl %s {", name)
 	if isMessage {
@@ -234,23 +229,44 @@ func (g *gen) emitMarshal(f *rfile, fld *ir.Field) {
 	case ir.KindString:
 		write = fmt.Sprintf("let _ = os.write_str(%d, &%s);", fld.ID, acc)
 	case ir.KindBlob:
-		f.line("        let _ = os.write_blob(%d, &%s);", fld.ID, acc)
+		// blob is a leaf: omit when equal to its default (value-equal; empty if
+		// none).
+		if lit, ok := g.rustBlobLiteral(fld); ok {
+			f.line("        if %s != %s { let _ = os.write_blob(%d, &%s); }", acc, lit, fld.ID, acc)
+		} else {
+			f.line("        if !%s.is_empty() { let _ = os.write_blob(%d, &%s); }", acc, fld.ID, acc)
+		}
 		return
 	case ir.KindStruct, ir.KindUnion:
+		// A sequence is always framed; its child fields are omitted per-field by
+		// the nested marshal (MESSAGE_SPEC S2). An all-default nested object thus
+		// becomes an empty wrapper sequence, not a dropped field.
 		f.line("        let _ = os.write_sequence_begin(%d); %s.marshal(os); let _ = os.write_sequence_end();", fld.ID, acc)
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
 		return
 	}
-	if g.omit {
-		f.line("        if %s != %s { %s }", acc, g.rustCompare(fld), write)
-	} else {
-		f.line("        %s", write)
-	}
+	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
+	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
+	// the omitted field from its default.
+	f.line("        if %s != %s { %s }", acc, g.rustCompare(fld), write)
 }
 
 func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
+	// A native scalar array is a leaf field: omit it when equal to its default
+	// (materialized in Default), else when empty. A composite/dynamic-element
+	// array is a wrapper sequence and is always framed (never whole-omitted).
+	if isNativeArrayElem(fld.Elem) {
+		if lit, ok := g.rustNativeArrayLiteral(fld); ok {
+			f.line("        if %s != %s {", acc, lit)
+		} else {
+			f.line("        if !%s.is_empty() {", acc)
+		}
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		f.line("        }")
+		return
+	}
 	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
 }
 

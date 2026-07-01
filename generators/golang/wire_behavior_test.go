@@ -30,9 +30,8 @@ func requireGoCorelib(t *testing.T) string {
 	return corelib
 }
 
-// buildGoHarnessCfg is buildGoHarness with a caller-supplied config (so tests can
-// toggle omit_defaults). Every message in def is reachable via the encode/decode
-// CLI by name.
+// buildGoHarnessCfg is buildGoHarness with a caller-supplied config. Every
+// message in def is reachable via the encode/decode CLI by name.
 func buildGoHarnessCfg(t *testing.T, corelib, def string, extra map[string]any) string {
 	t.Helper()
 	s := schemaFromYAMLString(t, def)

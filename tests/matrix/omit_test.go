@@ -14,10 +14,10 @@ import (
 	defparser "github.com/sofa-buffers/generator/internal/parser"
 )
 
-// TestOmitDefaultsGenerates: with omit_defaults=true, every backend still
-// generates valid output (Go parses), and the marshal becomes conditional —
-// proving the option flows through and the codegen stays well-formed.
-func TestOmitDefaultsGenerates(t *testing.T) {
+// TestAllBackendsSparse: encoding is always sparse-canonical (MESSAGE_SPEC §2,
+// no config toggle), so every backend's marshal is conditional (a per-field
+// "!= default" guard) with the default config, and stays well-formed (Go parses).
+func TestAllBackendsSparse(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      a: { id: 0, type: u32, default: 0 }\n" +
 		"      b: { id: 1, type: i32, default: 10 }\n" +
@@ -44,12 +44,11 @@ func TestOmitDefaultsGenerates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := map[string]any{"omit_defaults": true}
 	for _, lang := range generator.Registered() {
 		b, _ := generator.Lookup(lang)
-		files, err := b.Generate(s, cfg)
+		files, err := b.Generate(s, map[string]any{})
 		if err != nil {
-			t.Errorf("[%s] generate with omit_defaults: %v", lang, err)
+			t.Errorf("[%s] generate: %v", lang, err)
 			continue
 		}
 		sawConditional := false
@@ -64,10 +63,10 @@ func TestOmitDefaultsGenerates(t *testing.T) {
 				}
 			}
 		}
-		// C is sparse via object.h (no generated conditional); every other
-		// backend must emit an omit guard.
+		// C is sparse via the object.h descriptor (no generated conditional);
+		// every other backend must emit a per-field sparse guard.
 		if lang != "c" && !sawConditional {
-			t.Errorf("[%s] omit_defaults produced no conditional write", lang)
+			t.Errorf("[%s] sparse-canonical marshal produced no conditional write", lang)
 		}
 	}
 }

@@ -22,7 +22,7 @@ type Backend struct{}
 func (*Backend) Lang() string { return "java" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, pkg: cfgString(cfg, "package", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), omit: cfgBool(cfg, "omit_defaults")}
+	g := &gen{schema: s, pkg: cfgString(cfg, "package", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
 	dir := "src/main/java/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
 	var files []generator.File
 	files = append(files, generator.File{Path: dir + "Sbuf.java", Content: g.sbufSupport()})
@@ -40,7 +40,6 @@ type gen struct {
 	pkg     string
 	banner  string
 	license string // SPDX id, "" to omit the header line
-	omit    bool
 }
 
 // header writes the @generated banner and, when a license is set, an SPDX line.
@@ -184,23 +183,39 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 	case ir.KindString:
 		write = fmt.Sprintf("os.writeString(%d, %s == null ? \"\" : %s);", fld.ID, acc, acc)
 	case ir.KindBlob:
-		f.line("        os.writeBlob(%d, %s == null ? new byte[0] : %s);", fld.ID, acc, acc)
+		// A blob is a leaf: omit when equal to its default (empty when none).
+		f.line("        if (!Arrays.equals(%s, %s)) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, g.javaDefaultValue(fld), fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
+		// A sequence is always framed; its child fields are omitted per-field by
+		// the nested marshal (MESSAGE_SPEC S2). An all-default nested object thus
+		// becomes an empty wrapper sequence, not a dropped field.
 		f.line("        os.writeSequenceBegin(%d); (%s == null ? new %s() : %s).marshal(os); os.writeSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key), acc)
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
 		return
 	}
-	if g.omit {
-		f.line("        if (%s) { %s }", g.javaOmitCond(fld), write)
-	} else {
-		f.line("        %s", write)
-	}
+	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
+	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
+	// the omitted field from its default.
+	f.line("        if (%s) { %s }", g.javaOmitCond(fld), write)
 }
 
 func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
+	// A native scalar array is a leaf field: omit it when equal to its default
+	// (materialized at construction), else when empty. A composite/dynamic-element
+	// array is a wrapper sequence and is always framed (never whole-omitted).
+	if nativeArrayElem(fld.Elem) {
+		if def, ok := g.javaNativeArrayLiteral(fld); ok {
+			f.line("        if (!%s.equals(%s)) {", def, acc)
+		} else {
+			f.line("        if (%s != null && !%s.isEmpty()) {", acc, acc)
+		}
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		f.line("        }")
+		return
+	}
 	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
 }
 

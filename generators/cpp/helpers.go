@@ -15,11 +15,6 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
-func cfgBool(cfg map[string]any, key string) bool {
-	b, _ := cfg[key].(bool)
-	return b
-}
-
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
 	var b strings.Builder
@@ -217,9 +212,60 @@ func (g *gen) cppDefault(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return "{}"
 	case ir.KindArray:
+		// A native scalar array is a leaf: materialize its schema default at
+		// construction (zero-filled when none) so an omitted default array
+		// reconstructs correctly and serialize can compare against it. A
+		// composite/dynamic-element array is a wrapper sequence (always framed) and
+		// is left empty.
+		if isNativeArrayElem(f.Elem) {
+			return g.cppNativeArrayBraces(f)
+		}
 		return "{}"
 	}
 	return "{}"
+}
+
+// cppNativeArrayBraces renders a native scalar array's schema default as a braced
+// initializer ({v0, v1, ...}); "{}" (zero-filled) when there is no default.
+func (g *gen) cppNativeArrayBraces(f *ir.Field) string {
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return "{}"
+	}
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		parts[i] = g.cppArrayElemLit(f.Elem, f.ElemRef, v)
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// cppArrayElemLit renders one native-array element default as a C++ literal typed
+// for the array's element type (u64/i64 get width suffixes; fp a decimal point;
+// enum its scoped member/cast; bool true/false).
+func (g *gen) cppArrayElemLit(elem ir.Kind, ref *ir.TypeRef, v any) string {
+	switch elem {
+	case ir.KindU64:
+		return scalarLit(v) + "ULL"
+	case ir.KindI64:
+		return scalarLit(v) + "LL"
+	case ir.KindFP32:
+		return floatLit(v) + "f"
+	case ir.KindFP64:
+		return floatLit(v)
+	case ir.KindBool:
+		if b, ok := v.(bool); ok && b {
+			return "true"
+		}
+		return "false"
+	case ir.KindEnum:
+		tn := g.typeName(ref.Key)
+		if name, ok := g.enumMember(ref.Target, v); ok {
+			return tn + "::" + name
+		}
+		return fmt.Sprintf("static_cast<%s>(%s)", tn, scalarLit(v))
+	default: // u8..i32, bitfield
+		return scalarLit(v)
+	}
 }
 
 func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {

@@ -154,7 +154,17 @@ func TestPythonConformance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode %q: %v", in, err)
 		}
-		if got := hex.EncodeToString(out); got != v.Serialized.Hex {
+		// Sparse-canonical (MESSAGE_SPEC S2): a field equal to its default is
+		// omitted, so a default-valued single-field message encodes to empty. The
+		// dense per-field vector is still validated for every non-default value.
+		got := hex.EncodeToString(out)
+		if pyValueIsDefault(f.Op, string(f.Value)) {
+			if got != "" {
+				t.Errorf("vector %q: default-valued field must be omitted (sparse), got %s", v.Name, got)
+			} else {
+				checked++
+			}
+		} else if got != v.Serialized.Hex {
 			t.Errorf("vector %q: got %s want %s", v.Name, got, v.Serialized.Hex)
 		} else {
 			checked++
@@ -181,6 +191,21 @@ func g(t *testing.T, typ string) string {
 		}
 	}
 	return dir
+}
+
+// pyValueIsDefault reports whether a shared-vector scalar value is the type
+// default (zero / empty) -- which a sparse-canonical encoder omits.
+func pyValueIsDefault(op, rawValue string) bool {
+	s := strings.Trim(strings.TrimSpace(rawValue), `"`)
+	switch op {
+	case "unsigned", "signed":
+		return s == "0"
+	case "fp32", "fp64":
+		return s == "0" || s == "0.0"
+	case "string":
+		return s == ""
+	}
+	return false
 }
 
 func scalarJSON(op, rawValue string) (string, bool) {

@@ -1,6 +1,7 @@
 package rust
 
 import (
+	"encoding/base64"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,7 +22,7 @@ func cfgBool(cfg map[string]any, key string) bool {
 }
 
 // rustFieldDefault is the value used in a manual `impl Default` (schema default
-// or type-zero) — needed so omit_defaults decode reconstructs the right value.
+// or type-zero) — needed so sparse-canonical decode reconstructs the right value.
 func (g *gen) rustFieldDefault(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindString:
@@ -42,9 +43,66 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 	case ir.KindEnum, ir.KindBitfield, ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
 		return g.rustIntDefault(f)
-	default: // struct/union/array/blob: always written, so Default is overwritten
+	case ir.KindBlob:
+		// blob is a leaf: materialize its default so decode reconstructs it and
+		// marshal can compare against it (empty Vec when there is no default).
+		if lit, ok := g.rustBlobLiteral(f); ok {
+			return lit
+		}
+		return "Vec::new()"
+	case ir.KindArray:
+		// A native scalar array is a leaf: materialize its schema default so an
+		// omitted default array reconstructs correctly. Composite arrays are
+		// wrapper sequences (always framed) and stay an empty Vec.
+		if isNativeArrayElem(f.Elem) {
+			if lit, ok := g.rustNativeArrayLiteral(f); ok {
+				return lit
+			}
+		}
+		return "Vec::new()"
+	default: // struct/union: all children default, so Default::default() is right
 		return "Default::default()"
 	}
+}
+
+// rustNativeArrayLiteral renders a native scalar array's schema default as a Rust
+// `vec![...]` literal; ("", false) when there is no default. Element literals are
+// unconstrained and infer to the field's Vec element type.
+func (g *gen) rustNativeArrayLiteral(f *ir.Field) (string, bool) {
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return "", false
+	}
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		switch f.Elem {
+		case ir.KindBool:
+			parts[i] = fmt.Sprintf("%v", v)
+		case ir.KindFP32, ir.KindFP64:
+			parts[i] = rustFloat(v)
+		default: // numeric / enum / bitfield (int64 or a decimal string)
+			parts[i] = fmt.Sprintf("%v", v)
+		}
+	}
+	return fmt.Sprintf("vec![%s]", strings.Join(parts, ", ")), true
+}
+
+// rustBlobLiteral renders a blob field's base64 schema default as a Rust
+// `vec![...]` of bytes; ("", false) when there is no (decodable) default.
+func (g *gen) rustBlobLiteral(f *ir.Field) (string, bool) {
+	s, ok := f.Default.(string)
+	if !ok {
+		return "", false
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), ""))
+	if err != nil {
+		return "", false
+	}
+	parts := make([]string, len(raw))
+	for i, b := range raw {
+		parts[i] = fmt.Sprintf("%d", b)
+	}
+	return fmt.Sprintf("vec![%s]", strings.Join(parts, ", ")), true
 }
 
 // rustCompare is the RHS of `self.field != X` for omission.

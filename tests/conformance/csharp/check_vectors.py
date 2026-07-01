@@ -12,6 +12,18 @@ import sys
 OP_TO_MSG = {"unsigned": "vecu", "signed": "veci", "fp32": "vecf32", "fp64": "vecf64", "string": "vecs"}
 
 
+def is_default(op, val):
+    """A sparse-canonical encoder omits a field equal to its type default, so a
+    default-valued single-field message encodes to an empty payload."""
+    if op in ("unsigned", "signed"):
+        return str(val).strip('"') == "0"
+    if op in ("fp32", "fp64"):
+        return float(val) == 0.0
+    if op == "string":
+        return val == ""
+    return False
+
+
 def main() -> int:
     vectors_path, dll = sys.argv[1], sys.argv[2]
     data = json.load(open(vectors_path))
@@ -31,10 +43,19 @@ def main() -> int:
             ["dotnet", dll, "encode", msg],
             input=payload.encode(), stdout=subprocess.PIPE, check=True,
         ).stdout
-        got, want = out.hex(), v["serialized"]["hex"]
-        if got != want:
-            print(f"FAIL vector {v['name']}: got {got} want {want}")
-            return 1
+        got = out.hex()
+        # Sparse-canonical (MESSAGE_SPEC S2): a field equal to its default is
+        # omitted, so a default-valued single-field message encodes to empty.
+        # The dense per-field vector is still validated for every non-default.
+        if is_default(f["op"], val):
+            if got != "":
+                print(f"FAIL vector {v['name']}: default-valued field must be omitted (sparse), got {got}")
+                return 1
+        else:
+            want = v["serialized"]["hex"]
+            if got != want:
+                print(f"FAIL vector {v['name']}: got {got} want {want}")
+                return 1
         checked += 1
     print(f"C# shared-vector conformance: {checked} byte-exact")
     return 0 if checked else 1

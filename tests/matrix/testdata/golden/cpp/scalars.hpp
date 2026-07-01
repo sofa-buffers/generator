@@ -60,14 +60,14 @@ struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {
     }
 
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
-        (void)os.write(0, u8min);
-        (void)os.write(1, u8max);
-        (void)os.write(2, u64max);
-        (void)os.write(3, i8min);
-        (void)os.write(4, i64min);
-        (void)os.write(5, f32);
-        (void)os.write(6, f64);
-        (void)os.write(7, flag);
+        if (u8min != 0) { (void)os.write(0, u8min); }
+        if (u8max != 255) { (void)os.write(1, u8max); }
+        if (u64max != 18446744073709551615ULL) { (void)os.write(2, u64max); }
+        if (i8min != -128) { (void)os.write(3, i8min); }
+        if (i64min != -9223372036854775808LL) { (void)os.write(4, i64min); }
+        if (f32 != 3.14f) { (void)os.write(5, f32); }
+        if (f64 != -2.5) { (void)os.write(6, f64); }
+        if (flag != true) { (void)os.write(7, flag); }
         return os.writeIf(0, false, false);
     }
 

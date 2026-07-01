@@ -15,11 +15,6 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
-func cfgBool(cfg map[string]any, key string) bool {
-	b, _ := cfg[key].(bool)
-	return b
-}
-
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
 	var b strings.Builder
@@ -182,9 +177,49 @@ func (g *gen) tsDefault(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return "new " + g.typeName(f.Ref.Key) + "()"
 	case ir.KindArray:
+		// A native scalar array is a leaf field: materialize its schema default so
+		// an omitted (default-valued) array reconstructs correctly on decode and so
+		// marshal can compare against it. Composite arrays are wrapper sequences
+		// (always framed) and start empty.
+		if nativeArrayElem(f.Elem) {
+			if lit, ok := g.nativeArrayDefault(f); ok {
+				return lit
+			}
+		}
 		return "[]"
 	}
 	return "undefined as never"
+}
+
+// nativeArrayDefault renders a native scalar array's schema default as a TS array
+// literal; ("", false) when there is no default. u64/i64 elements are bigint
+// literals, enum elements are cast to the enum type, booleans/floats/integers are
+// their JSON-native form.
+func (g *gen) nativeArrayDefault(f *ir.Field) (string, bool) {
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return "", false
+	}
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		switch f.Elem {
+		case ir.KindU64, ir.KindI64:
+			parts[i] = scalarLit(v) + "n"
+		case ir.KindBool:
+			if b, ok := v.(bool); ok && b {
+				parts[i] = "true"
+			} else {
+				parts[i] = "false"
+			}
+		case ir.KindFP32, ir.KindFP64:
+			parts[i] = fmt.Sprintf("%v", v)
+		case ir.KindEnum:
+			parts[i] = fmt.Sprintf("(%s as %s)", scalarLit(v), g.typeName(f.ElemRef.Key))
+		default: // u8/u16/u32, i8/i16/i32, bitfield
+			parts[i] = scalarLit(v)
+		}
+	}
+	return "[" + strings.Join(parts, ", ") + "]", true
 }
 
 func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {

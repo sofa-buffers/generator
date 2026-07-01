@@ -15,11 +15,6 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
-func cfgBool(cfg map[string]any, key string) bool {
-	b, _ := cfg[key].(bool)
-	return b
-}
-
 // exported -> PascalCase class name.
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
@@ -133,9 +128,54 @@ func (g *gen) pyDefault(f *ir.Field) string {
 		// lazy lambda so the referenced class need not be defined yet.
 		return fmt.Sprintf("field(default_factory=lambda: %s())", g.typeName(f.Ref.Key))
 	case ir.KindArray:
+		// A NATIVE scalar array is a leaf field: materialize its schema default so
+		// an omitted default array reconstructs correctly and marshal can compare
+		// against it. Composite arrays are wrapper sequences (always framed) and
+		// start empty.
+		if isNativeArrayElem(f.Elem) {
+			if lit, ok := g.pyNativeArrayLiteral(f); ok {
+				return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
+			}
+		}
 		return "field(default_factory=list)"
 	}
 	return "None"
+}
+
+// isNativeArrayElem reports whether an array element uses a native scalar array
+// wire type (vs. a wrapper sequence). Native arrays are a leaf field (omitted as
+// a whole when equal to their default); composite/dynamic-element arrays are
+// always framed.
+func isNativeArrayElem(elem ir.Kind) bool {
+	switch elem {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
+		ir.KindFP32, ir.KindFP64, ir.KindBool, ir.KindEnum, ir.KindBitfield:
+		return true
+	}
+	return false
+}
+
+// pyNativeArrayLiteral renders a native scalar array's schema default as a Python
+// list literal ([...]); ("", false) when there is no default.
+func (g *gen) pyNativeArrayLiteral(f *ir.Field) (string, bool) {
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return "", false
+	}
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		if f.Elem == ir.KindBool {
+			if b, _ := v.(bool); b {
+				parts[i] = "True"
+			} else {
+				parts[i] = "False"
+			}
+			continue
+		}
+		parts[i] = scalarLit(v)
+	}
+	return "[" + strings.Join(parts, ", ") + "]", true
 }
 
 func (g *gen) bitfieldDefault(f *ir.Field) uint64 {

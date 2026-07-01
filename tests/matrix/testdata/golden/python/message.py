@@ -17,14 +17,22 @@ class Scalars:
     flag: bool = True
 
     def _marshal(self, e: Encoder) -> None:
-        e.write_unsigned(0, int(self.u8min))
-        e.write_unsigned(1, int(self.u8max))
-        e.write_unsigned(2, int(self.u64max))
-        e.write_signed(3, int(self.i8min))
-        e.write_signed(4, int(self.i64min))
-        e.write_float32(5, self.f32)
-        e.write_float64(6, self.f64)
-        e.write_bool(7, self.flag)
+        if self.u8min != 0:
+            e.write_unsigned(0, int(self.u8min))
+        if self.u8max != 255:
+            e.write_unsigned(1, int(self.u8max))
+        if self.u64max != 18446744073709551615:
+            e.write_unsigned(2, int(self.u64max))
+        if self.i8min != -128:
+            e.write_signed(3, int(self.i8min))
+        if self.i64min != -9223372036854775808:
+            e.write_signed(4, int(self.i64min))
+        if self.f32 != 3.14:
+            e.write_float32(5, self.f32)
+        if self.f64 != -2.5:
+            e.write_float64(6, self.f64)
+        if self.flag != True:
+            e.write_bool(7, self.flag)
 
     def _unmarshal(self, d: Decoder) -> None:
         while True:

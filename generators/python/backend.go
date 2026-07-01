@@ -22,7 +22,7 @@ func (*Backend) Lang() string { return "python" }
 // Generate emits a single module (all enums/bitfields/dataclasses + messages).
 // In project mode it adds a harness and pyproject.toml.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), omit: cfgBool(cfg, "omit_defaults")}
+	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
 	module := g.module(s)
 	files := []generator.File{{Path: "message.py", Content: module}}
 	if cfgString(cfg, "emit", "sources") == "project" {
@@ -35,7 +35,6 @@ type gen struct {
 	schema  *ir.Schema
 	banner  string
 	license string // SPDX id, "" to omit the header line
-	omit    bool
 }
 
 type pyfile struct{ b strings.Builder }
@@ -208,9 +207,14 @@ func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 	case ir.KindString:
 		write = fmt.Sprintf("e.write_string(%d, %s)", fld.ID, acc)
 	case ir.KindBlob:
-		f.line("        e.write_bytes(%d, bytes(%s))", fld.ID, acc)
+		// blob is a leaf: omit when equal to its default (empty if none).
+		f.line("        if bytes(%s) != %s:", acc, g.pyDefault(fld))
+		f.line("            e.write_bytes(%d, bytes(%s))", fld.ID, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
+		// A sequence is always framed; its child fields are omitted per-field by
+		// the nested marshal (MESSAGE_SPEC S2). An all-default nested object thus
+		// becomes an empty wrapper sequence, not a dropped field.
 		f.line("        e.write_sequence_begin(%d)", fld.ID)
 		f.line("        %s._marshal(e)", acc)
 		f.line("        e.write_sequence_end()")
@@ -219,15 +223,26 @@ func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 		g.emitMarshalArray(f, fld, acc)
 		return
 	}
-	if g.omit {
-		f.line("        if %s != %s:", acc, g.pyDefault(fld))
-		f.line("            %s", write)
-	} else {
-		f.line("        %s", write)
-	}
+	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
+	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
+	// the omitted field from its default.
+	f.line("        if %s != %s:", acc, g.pyDefault(fld))
+	f.line("            %s", write)
 }
 
 func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
+	// A native scalar array is a leaf field: omit it when equal to its default
+	// (materialized in the dataclass), else when empty. A composite/dynamic-element
+	// array is a wrapper sequence and is always framed (never whole-omitted).
+	if isNativeArrayElem(fld.Elem) {
+		if lit, ok := g.pyNativeArrayLiteral(fld); ok {
+			f.line("        if %s != %s:", acc, lit)
+		} else {
+			f.line("        if len(%s) != 0:", acc)
+		}
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		return
+	}
 	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
 }
 

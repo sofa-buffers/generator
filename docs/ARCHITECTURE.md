@@ -271,7 +271,7 @@ concern, so each backend supplies its own idiomatic default (the unified base
 name `messages`: C++ `messages`, C# `Messages`, Go/Java package `messages`, C
 `symbol_prefix` `messages_`); set `generic.namespace` to override. Others:
 `input_dir`, `output_dir`,
-`tool_banner`, `license`, `omit_defaults`, `naming`.
+`tool_banner`, `license`, `naming`.
 
 **Per-target options** (`targets.<lang>:`). The config schema is the full
 *intended* surface; backends today consume only a subset (the rest validate but
@@ -286,7 +286,6 @@ are reserved — documented per language in `docs/generator/<lang>.md`). The
 | `module_path`, `go_version` | go | `go.mod` fields. |
 | `symbol_prefix` | c | Prefix on generated C symbols. |
 | `emit` | all | `sources` vs `project`. |
-| `omit_defaults` | all | Sparse encoding (§11). |
 | `license` (generic) | all | SPDX header id; default **none** (§11). |
 
 A reimplementation should keep the config schema and the set of honored keys in
@@ -493,11 +492,18 @@ array & struct/union → sequence framing.
 
 ## 11. Cross-cutting design decisions
 
-- **`omit_defaults`** — when on, a field equal to its effective default (schema
-  `default:`, else type-zero) is skipped on encode and reconstructed on decode
-  (protobuf-style sparse). Applies to scalar/fp/bool/enum/bitfield/string. C is
-  inherently sparse; the others emit a conditional write (Rust also gains a
-  schema-default `impl Default`). Default off.
+- **Sparse-canonical encoding** — encoding is **always** sparse (no config
+  toggle, MESSAGE_SPEC §2): a field equal to its effective default (schema
+  `default:`, else type-zero) is skipped on encode and reconstructed on decode.
+  The `!= default` test is applied **per field, except a `sequence`** (a
+  `struct`/`union`, and the wrapper form of composite/dynamic-element arrays):
+  a sequence is always framed, so an all-default nested object becomes an *empty
+  wrapper sequence*, not a dropped field. The corelibs are dumb codecs, so the
+  rule lives in the **generated code**: every imperative backend emits per-field
+  guards; a native scalar array materializes its schema default and is
+  whole-omitted when equal (else when empty); Rust gains a manual `impl Default`.
+  Only the **C** backend defers omission to the `object.h` descriptor (same
+  per-field rule; see corelib-c-cpp).
 - **Widest-first member layout** — value-type backends declare struct members by
   alignment widest-first (8→4→2→1, stable within a width; composite/heap = 8) to
   cut native padding, via the shared `AlignRank`/`SortedForLayout`. Applied to C,

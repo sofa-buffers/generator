@@ -33,7 +33,7 @@ func (*Backend) Lang() string { return "cpp" }
 
 // Generate emits one header-only .hpp per message (with its reachable types).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), omit: cfgBool(cfg, "omit_defaults"), clib: cfgString(cfg, "corelib", "cpp") == "c-cpp"}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: cfgString(cfg, "corelib", "cpp") == "c-cpp"}
 	var files []generator.File
 	for _, m := range s.Messages {
 		files = append(files, generator.File{Path: strings.ToLower(m.Name) + ".hpp", Content: g.header(m)})
@@ -49,7 +49,6 @@ type gen struct {
 	ns      string
 	banner  string
 	license string // SPDX id, "" to omit the header line
-	omit    bool
 	// clib selects the corelib-c-cpp C++ wrapper (corelib: c-cpp) instead of the
 	// pure corelib-cpp. The wrapper's read(std::string&) fills the string's
 	// existing buffer rather than resizing it, so generated decode must pre-size
@@ -269,23 +268,39 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 	case ir.KindBitfield:
 		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
 	case ir.KindBlob:
-		f.line("        (void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size()));", fld.ID, acc, acc)
+		// A blob is a leaf: sparse-canonical encoding (MESSAGE_SPEC S2) omits it
+		// when it equals its default (empty if none). The decoder reconstructs the
+		// omitted blob from the member's construction default.
+		f.line("        if (%s != std::vector<std::uint8_t>%s) { (void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size())); }", acc, g.cppDefault(fld), fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
+		// A sequence is ALWAYS framed; its child fields are omitted per-field by the
+		// nested serialize. An all-default nested object thus encodes to an empty
+		// wrapper sequence, not a dropped field.
 		f.line("        (void)os.write(%d, %s);", fld.ID, acc)
 		return
 	case ir.KindArray:
 		g.emitSerializeArray(f, fld, acc)
 		return
 	}
-	if g.omit {
-		f.line("        if (%s != %s) { %s }", acc, g.cppDefault(fld), write)
-	} else {
-		f.line("        %s", write)
-	}
+	// Scalar/string/enum/bitfield leaf: always omit when equal to the default.
+	// Sparse encoding is canonical (MESSAGE_SPEC S2); the decoder reconstructs the
+	// omitted field from its member construction default.
+	f.line("        if (%s != %s) { %s }", acc, g.cppDefault(fld), write)
 }
 
 func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
+	// A native scalar array is a leaf: omit the whole field when it equals its
+	// default (materialized at construction). A composite/dynamic-element array is
+	// a wrapper sequence and is ALWAYS framed (never whole-omitted, no per-element
+	// omission).
+	if isNativeArrayElem(fld.Elem) {
+		def := g.cppArrayContainer(fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count) + g.cppDefault(fld)
+		f.line("        if (%s != %s) {", acc, def)
+		g.serializeArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0)
+		f.line("        }")
+		return
+	}
 	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0)
 }
 
