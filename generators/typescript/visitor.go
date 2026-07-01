@@ -302,27 +302,39 @@ function arrEq(a: ArrayLike<unknown>, b: ArrayLike<unknown>): boolean {
 }
 
 class ChunkAcc {
-  private parts = new Map<number, Uint8Array[]>();
-  private got = new Map<number, number>();
+  // The accumulator maps are only needed when a payload arrives split across
+  // several chunks. On the contiguous decode fast path every string/blob arrives
+  // whole in a single chunk, so the maps stay unallocated and str()/blob() take
+  // the single-shot path below: no Map construction, insertion or lookup.
+  private parts?: Map<number, Uint8Array[]>;
+  private got?: Map<number, number>;
   private push(id: number, total: number, _offset: number, chunk: Uint8Array): Uint8Array | null {
+    if (!this.parts) { this.parts = new Map(); this.got = new Map(); }
     let arr = this.parts.get(id);
-    if (!arr) { arr = []; this.parts.set(id, arr); this.got.set(id, 0); }
+    if (!arr) { arr = []; this.parts.set(id, arr); this.got!.set(id, 0); }
     arr.push(chunk);
-    this.got.set(id, (this.got.get(id) ?? 0) + chunk.length);
-    if ((this.got.get(id) ?? 0) >= total) {
+    this.got!.set(id, (this.got!.get(id) ?? 0) + chunk.length);
+    if ((this.got!.get(id) ?? 0) >= total) {
       const out = new Uint8Array(total);
       let o = 0;
       for (const c of arr) { if (o >= total) break; out.set(c.subarray(0, Math.min(c.length, total - o)), o); o += c.length; }
-      this.parts.delete(id); this.got.delete(id);
+      this.parts.delete(id); this.got!.delete(id);
       return out;
     }
     return null;
   }
   str(id: number, total: number, offset: number, chunk: Uint8Array): string | null {
+    // Single-shot: the whole payload is in this one chunk -> decode directly.
+    if (offset === 0 && chunk.length >= total) {
+      return _utf8.decode(chunk.length === total ? chunk : chunk.subarray(0, total));
+    }
     const b = this.push(id, total, offset, chunk);
     return b === null ? null : _utf8.decode(b);
   }
   blob(id: number, total: number, offset: number, chunk: Uint8Array): Uint8Array | null {
+    if (offset === 0 && chunk.length >= total) {
+      return chunk.length === total ? chunk : chunk.subarray(0, total);
+    }
     return this.push(id, total, offset, chunk);
   }
 }
