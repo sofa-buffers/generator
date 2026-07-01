@@ -9,36 +9,36 @@
 
 #include <string.h>
 
-static const sofab_object_descr_field_t _messages_fields_message_Scalars[] = {
-    SOFAB_OBJECT_FIELD(0, messages_Scalars_t, u8min, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
-    SOFAB_OBJECT_FIELD(1, messages_Scalars_t, u8max, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
-    SOFAB_OBJECT_FIELD(2, messages_Scalars_t, u64max, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
-    SOFAB_OBJECT_FIELD(3, messages_Scalars_t, i8min, SOFAB_OBJECT_FIELDTYPE_SIGNED),
-    SOFAB_OBJECT_FIELD(4, messages_Scalars_t, i64min, SOFAB_OBJECT_FIELDTYPE_SIGNED),
-    SOFAB_OBJECT_FIELD(5, messages_Scalars_t, f32, SOFAB_OBJECT_FIELDTYPE_FP32),
-    SOFAB_OBJECT_FIELD(6, messages_Scalars_t, f64, SOFAB_OBJECT_FIELDTYPE_FP64),
-    SOFAB_OBJECT_FIELD(7, messages_Scalars_t, flag, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
+static const sofab_object_descr_field_t _message_fields_message_Scalars[] = {
+    SOFAB_OBJECT_FIELD(0, message_Scalars_t, u8min, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
+    SOFAB_OBJECT_FIELD(1, message_Scalars_t, u8max, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
+    SOFAB_OBJECT_FIELD(2, message_Scalars_t, u64max, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
+    SOFAB_OBJECT_FIELD(3, message_Scalars_t, i8min, SOFAB_OBJECT_FIELDTYPE_SIGNED),
+    SOFAB_OBJECT_FIELD(4, message_Scalars_t, i64min, SOFAB_OBJECT_FIELDTYPE_SIGNED),
+    SOFAB_OBJECT_FIELD(5, message_Scalars_t, f32, SOFAB_OBJECT_FIELDTYPE_FP32),
+    SOFAB_OBJECT_FIELD(6, message_Scalars_t, f64, SOFAB_OBJECT_FIELDTYPE_FP64),
+    SOFAB_OBJECT_FIELD(7, message_Scalars_t, flag, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
 };
-const sofab_object_descr_t _messages_descr_message_Scalars = SOFAB_OBJECT_DESCR(_messages_fields_message_Scalars, 8, NULL, 0);
+const sofab_object_descr_t _message_descr_message_Scalars = SOFAB_OBJECT_DESCR(_message_fields_message_Scalars, 8, NULL, 0);
 
-void messages_scalars_init(messages_Scalars_t *msg) {
-    sofab_object_init(&_messages_descr_message_Scalars, msg);
+void message_scalars_init(message_Scalars_t *msg) {
+    sofab_object_init(&_message_descr_message_Scalars, msg);
 }
 
-sofab_ret_t messages_scalars_encode(const messages_Scalars_t *msg, uint8_t *buf, size_t buflen, size_t *used) {
+sofab_ret_t message_scalars_encode(const message_Scalars_t *msg, uint8_t *buf, size_t buflen, size_t *used) {
     sofab_ostream_t ctx;
     sofab_ret_t ret;
     sofab_ostream_init(&ctx, buf, buflen, 0, NULL, NULL);
-    ret = sofab_object_encode(&ctx, &_messages_descr_message_Scalars, msg);
+    ret = sofab_object_encode(&ctx, &_message_descr_message_Scalars, msg);
     if (used) { *used = sofab_ostream_flush(&ctx); }
     return ret;
 }
 
-sofab_ret_t messages_scalars_decode(messages_Scalars_t *msg, const uint8_t *buf, size_t len) {
+sofab_ret_t message_scalars_decode(message_Scalars_t *msg, const uint8_t *buf, size_t len) {
     sofab_istream_t ctx;
     sofab_object_decoder_t dec[1];
     memset(dec, 0, sizeof(dec));
-    dec[0].info = &_messages_descr_message_Scalars;
+    dec[0].info = &_message_descr_message_Scalars;
     dec[0].dst = (uint8_t *)msg;
     dec[0].depth = (uint8_t)(sizeof(dec) / sizeof(dec[0]) - 1);
     sofab_istream_init(&ctx, sofab_object_field_cb, (void *)&dec[0]);

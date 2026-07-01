@@ -21,14 +21,14 @@ export PYTHONPATH="$CORELIB/src"
 
 cat > "$WORK/cfg.yaml" <<YAML
 generic: { emit: project, timestamp: false }
-targets: { python: { package: messages } }
+targets: { python: { package: message } }
 YAML
 
 echo "==> generating Python project"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in examples/messages/example.yaml --out "$WORK/proj" )
 
 echo "==> syntax check"
-python3 -m py_compile "$WORK/proj/messages.py" "$WORK/proj/harness.py"
+python3 -m py_compile "$WORK/proj/message.py" "$WORK/proj/harness.py"
 
 echo "==> JSON encode -> decode round-trip"
 IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someu64":18446744073709551615,"somestringarray":["a","b","c"]}'
@@ -44,7 +44,7 @@ echo "==> corpus + realworld: every definition imports"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang python --in "$def" --out "$WORK/corpus/$name" >/dev/null )
-    PYTHONPATH="$CORELIB/src:$WORK/corpus/$name" python3 -c "import messages" \
+    PYTHONPATH="$CORELIB/src:$WORK/corpus/$name" python3 -c "import message" \
         || { echo "FAIL: corpus def $name did not import"; exit 1; }
 done
 echo "==> corpus imports ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"

@@ -42,11 +42,11 @@ func genTS(t *testing.T) string {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, f := range files {
-		if f.Path == "messages.ts" {
+		if f.Path == "message.ts" {
 			return string(f.Content)
 		}
 	}
-	t.Fatal("no messages.ts")
+	t.Fatal("no message.ts")
 	return ""
 }
 
@@ -64,7 +64,7 @@ func TestTSStructural(t *testing.T) {
 		"export enum MyfirstmessageSomeenum {",
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("messages.ts missing %q", want)
+			t.Errorf("message.ts missing %q", want)
 		}
 	}
 	// no duplicate visitor callback keys (would be a TS error)

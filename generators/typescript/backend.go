@@ -20,11 +20,11 @@ func (*Backend) Lang() string { return "typescript" }
 
 const corelibPkg = "@sofa-buffers/corelib"
 
-// Generate emits a single messages.ts module; project mode adds a harness +
+// Generate emits a single message.ts module; project mode adds a harness +
 // package.json + tsconfig.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), omit: cfgBool(cfg, "omit_defaults")}
-	files := []generator.File{{Path: "messages.ts", Content: g.module(s)}}
+	files := []generator.File{{Path: "message.ts", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
 	}

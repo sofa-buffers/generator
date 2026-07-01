@@ -36,7 +36,7 @@ func exampleModule(t *testing.T, cfg map[string]any) string {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, f := range files {
-		if f.Path == "src/messages.rs" {
+		if f.Path == "src/message.rs" {
 			return string(f.Content)
 		}
 	}
@@ -60,7 +60,7 @@ func TestRustStructural(t *testing.T) {
 		"#[serde(default)]",
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("messages.rs (rs) missing %q", want)
+			t.Errorf("message.rs (rs) missing %q", want)
 		}
 	}
 	if strings.Contains(m, "require!") {

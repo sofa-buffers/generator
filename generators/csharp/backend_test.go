@@ -36,7 +36,7 @@ func exampleModule(t *testing.T) string {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, f := range files {
-		if f.Path == "Messages.cs" {
+		if f.Path == "Message.cs" {
 			return string(f.Content)
 		}
 	}
@@ -59,7 +59,7 @@ func TestCsStructural(t *testing.T) {
 		"public enum MyfirstmessageSomeenum : sbyte {",
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("Messages.cs missing %q", want)
+			t.Errorf("Message.cs missing %q", want)
 		}
 	}
 }

@@ -24,7 +24,7 @@ func (*Backend) Lang() string { return "python" }
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), omit: cfgBool(cfg, "omit_defaults")}
 	module := g.module(s)
-	files := []generator.File{{Path: "messages.py", Content: module}}
+	files := []generator.File{{Path: "message.py", Content: module}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
 	}
