@@ -53,7 +53,7 @@ func genTS(t *testing.T) string {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, decode, type Visitor } from "@sofabuffers/corelib";`,
+		`import { OStream, decode, type Visitor } from "@sofa-buffers/corelib";`,
 		"export class Myfirstmessage {",
 		"marshal(os: OStream): void {",
 		"static decode(bytes: Uint8Array): Myfirstmessage {",
