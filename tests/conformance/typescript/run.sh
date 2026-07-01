@@ -42,7 +42,7 @@ gen "$ROOT/examples/messages/example.yaml" "$WORK/ex"
 gen "$WORK/conf.yaml" "$WORK/conf"
 
 setup() {
-    node -e "const p=require('$1/package.json');p.dependencies['@sofabuffers/corelib']='file:$CORELIB';require('fs').writeFileSync('$1/package.json',JSON.stringify(p))"
+    node -e "const p=require('$1/package.json');p.dependencies['@sofa-buffers/corelib']='file:$CORELIB';require('fs').writeFileSync('$1/package.json',JSON.stringify(p))"
     # Retry once; surface the output on a second failure (npm can be flaky).
     ( cd "$1" && npm install --no-audit --no-fund --silent ) \
         || ( cd "$1" && npm install --no-audit --no-fund )

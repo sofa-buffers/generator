@@ -1,6 +1,6 @@
 // Package typescript is the TypeScript throughput backend (PLAN §6.4): it emits
 // one class per object with marshal(OStream) and a visitor-based decode against
-// corelib-ts (@sofabuffers/corelib). 64-bit fields use bigint.
+// corelib-ts (@sofa-buffers/corelib). 64-bit fields use bigint.
 package typescript
 
 import (
@@ -18,7 +18,7 @@ type Backend struct{}
 
 func (*Backend) Lang() string { return "typescript" }
 
-const corelibPkg = "@sofabuffers/corelib"
+const corelibPkg = "@sofa-buffers/corelib"
 
 // Generate emits a single messages.ts module; project mode adds a harness +
 // package.json + tsconfig.
