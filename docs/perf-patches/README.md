@@ -30,8 +30,10 @@ code and its data model. Three recurring mistakes, all fixed below:
 3. **The pull decoder read byte-by-byte** through a buffered reader instead of the
    corelib's contiguous cursor (Go only).
 
-The cross-language analysis lives in the arena repo under `docs/perf/bottlenecks.md`
-and `docs/perf/decode-design.md`.
+The **design rationale** for the visitor→direct-switch decoder lives alongside these
+guides in [`decode-design.md`](decode-design.md). The cross-language **benchmark
+analysis** (measured before/after, the standings it came from) lives in the arena
+repo under `docs/perf/bottlenecks.md`.
 
 ## The patches
 
