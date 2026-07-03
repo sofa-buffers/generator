@@ -22,16 +22,17 @@ for d in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
 done
 
 # Alternate corelib to ALSO generate, for the languages that have two.
-# ALT_EXTRA carries any extra config the variant needs: the corelib-c-cpp wrapper
-# always uses fixed-capacity (embedded) containers and rejects unbounded fields,
-# so allow_dynamic keeps a std::vector/std::string fallback for the intentionally
+# ALT_EXTRA carries any extra config the variant needs: both embedded profiles
+# (the corelib-c-cpp wrapper, and corelib-rs-no-std which now defaults to a
+# genuinely no_std/heap-free crate) use fixed-capacity containers and reject
+# unbounded fields, so allow_dynamic keeps a heap fallback for the intentionally
 # unbounded fields in the corpus (example.yaml's somemap, the no_maxlen def) —
-# same rationale as tests/conformance/cpp/run.sh. rs-no-std has no such key.
+# same rationale as tests/conformance/{cpp,rust}/run.sh.
 ALT_CORELIB=""
 ALT_EXTRA=""
 case "$LANG_KEY" in
     cpp)  ALT_CORELIB="c-cpp"; ALT_EXTRA=", allow_dynamic: true" ;;
-    rust) ALT_CORELIB="rs-no-std" ;;
+    rust) ALT_CORELIB="rs-no-std"; ALT_EXTRA=", allow_dynamic: true" ;;
 esac
 ALT_CFG=""
 if [ -n "$ALT_CORELIB" ]; then
