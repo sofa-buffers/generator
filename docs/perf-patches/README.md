@@ -33,14 +33,20 @@ and `docs/perf/decode-design.md`.
 | 2 | **Java** | primitive `long[]/float[]/double[]` instead of boxed `List<Long>` + string single-shot | `generators/java/{backend,visitor,project}.go` | 0.62× → **0.86×** |
 | 3 | **C#** | string/blob single-shot decode | `generators/csharp/visitor.go` | 0.81× → **0.89×** |
 | 4 | **Go** | decode via the corelib's zero-copy `AcceptBytes` visitor instead of the pull API | `generators/golang/backend.go` | 0.46× → **0.99×** |
+| 5 | **TypeScript** | monomorphic `decodeFrom(Cursor)` per type instead of the megamorphic push/visitor decoder | `generators/typescript/{backend,visitor,project}.go` | decode **+22%** (see note) |
 
 Each row links to a `<lang>-*.md` implementation guide and a `<lang>-*.patch`
 reference diff (the exact before→after on the arena's generated output).
 
-> **TypeScript** already received the analogous fix — the `ChunkAcc` single-shot
-> decode — in **v0.5.1**. It is the worked example that this whole loop closes:
-> once the generator emits the optimized form, the arena's `setup.sh` patch step
-> becomes a no-op and is removed. Use it as the reference for "done".
+> **TypeScript** got an earlier, smaller fix — the `ChunkAcc` string single-shot —
+> folded into codegen in **v0.5.1**; that is the worked example of this whole loop
+> closing (once the generator emits the optimized form, the arena's `setup.sh` patch
+> step becomes a no-op and is removed). Fix #5 above is the *deeper* TS change — the
+> full push/visitor → monomorphic decoder redesign — and requires a **companion
+> corelib addition** (a pull `Cursor`, corelib-ts PR #16), so its guide covers both
+> the corelib and codegen sides. Note its measured impact is **decode-only**: the
+> arena's TS combined metric is encode-bound, so the round-trip number barely moves
+> until TS *encode* is also tuned (tracked separately).
 
 ## What a reference `.patch` is (and isn't)
 
