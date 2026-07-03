@@ -35,8 +35,9 @@ func (*Backend) Lang() string { return "cpp" }
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	clib := cfgString(cfg, "corelib", "cpp") == "c-cpp"
 	// corelib-c-cpp targets real embedded devices, so it always uses fixed-capacity,
-	// heap-free containers (blobs -> FixedBytes<N>, struct/union/matrix/blob
-	// sequences -> InlineVector<T,N>, sized from the schema). There is no knob: if a
+	// heap-free containers (blobs -> sofab::FixedBytes<N>, struct/union/matrix/blob
+	// sequences -> sofab::InlineVector<T,N>, sized from the schema; both live in the
+	// corelib next to sofab::FixedString). There is no knob: if a
 	// target has the resources for a heap, use corelib: cpp (which uses
 	// std::vector/std::string). The pure corelib-cpp path keeps dynamic containers.
 	fixed := clib
@@ -68,9 +69,9 @@ type gen struct {
 	clib bool
 	// fixed is the fixed-capacity (embedded) representation; it is always equal to
 	// clib (corelib-c-cpp always uses fixed containers, corelib-cpp always dynamic).
-	// Bounded strings become sofab::FixedString<N>, blobs FixedBytes<N>, and
-	// string/blob/struct/union/matrix sequence arrays InlineVector<T,N>, all sized
-	// from the schema — no heap on the message path.
+	// Bounded strings become sofab::FixedString<N>, blobs sofab::FixedBytes<N>, and
+	// string/blob/struct/union/matrix sequence arrays sofab::InlineVector<T,N>, all
+	// sized from the schema — no heap on the message path.
 	fixed bool
 	// allowDynamic keeps a std::vector/std::string fallback for genuinely
 	// unbounded fields (string/blob without maxlen, array without count) on the
@@ -473,7 +474,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		}
 	case ir.KindString:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
-		if strings.HasPrefix(cont, "InlineVector") {
+		if strings.HasPrefix(cont, "sofab::InlineVector") {
 			// Fixed string sequence: fill fixed inline FixedString slots by the
 			// element size via the scalar FixedString read, no heap. Static for the
 			// same deferred-decoder reason as the other fixed collectors.
@@ -485,7 +486,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		}
 	case ir.KindBlob:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
-		if strings.HasPrefix(cont, "InlineVector") {
+		if strings.HasPrefix(cont, "sofab::InlineVector") {
 			// Fixed blob sequence: fill fixed inline slots by the element size (the
 			// read(void*,size_t) blob overload), no heap. The collector is static
 			// because the corelib-c-cpp decoder dereferences it after this returns.
@@ -512,7 +513,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 // count also reserves the target up front so an emplace never reallocates a
 // still-bound element (a dynamic sequence cannot be pre-sized this way).
 func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count int64, rv, container string) {
-	if strings.HasPrefix(container, "InlineVector") {
+	if strings.HasPrefix(container, "sofab::InlineVector") {
 		// Fixed inline sequence: the visitor emplaces into the next inline slot
 		// (address-stable, no reserve/reallocation). Static for the same deferred
 		// reason as the dynamic clib path.

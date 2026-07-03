@@ -51,22 +51,38 @@ What `c-cpp` produces vs `cpp` (all sized from the schema's `maxlen`/`count`):
 | Field kind | `corelib: cpp` (dynamic) | `corelib: c-cpp` (fixed) |
 |---|---|---|
 | string (`maxlen N`) | `std::string` | `sofab::FixedString<N>` (inline, no heap) |
-| blob (`maxlen N`) | `std::vector<std::uint8_t>` | `FixedBytes<N>` (inline, no heap) |
-| string array (`count N`, elem `maxlen M`) | `std::vector<std::string>` | `InlineVector<sofab::FixedString<M>, N>` |
-| blob array (`count N`, elem `maxlen M`) | `std::vector<std::vector<std::uint8_t>>` | `InlineVector<FixedBytes<M>, N>` |
-| struct / union / matrix array (`count N`) | `std::vector<T>` | `InlineVector<T, N>` |
+| blob (`maxlen N`) | `std::vector<std::uint8_t>` | `sofab::FixedBytes<N>` (inline, no heap) |
+| string array (`count N`, elem `maxlen M`) | `std::vector<std::string>` | `sofab::InlineVector<sofab::FixedString<M>, N>` |
+| blob array (`count N`, elem `maxlen M`) | `std::vector<std::vector<std::uint8_t>>` | `sofab::InlineVector<sofab::FixedBytes<M>, N>` |
+| struct / union / matrix array (`count N`) | `std::vector<T>` | `sofab::InlineVector<T, N>` |
 | native numeric/enum/bool/bitfield array | `std::array<T, N>` | `std::array<T, N>` (already fixed) |
 
-`sofab::FixedString<N>` lives in the corelib-c-cpp wrapper (`sofab.hpp`): a
-heap-free, `std::string`-friendly fixed-capacity string (implicit
-construct/assign from `std::string`/`std::string_view`/`const char*`, implicit
-`operator std::string_view` view, `c_str()`, comparisons, `str()` to go back to an
-owning `std::string`). The decoder fills it in place via the same
-`read_string_noterm` path as `std::string`. `FixedBytes<N>` / `InlineVector<T,N>`
-are emitted header-only into the generated prelude (no extra files ship).
-`InlineVector` separates capacity (`N`) from logical length, and its inline
-storage never reallocates, so it is strictly safer under the corelib-c-cpp
-deferred decoder than the `std::vector` + `reserve()` it replaces. A
+All three fixed-capacity containers — `sofab::FixedString<N>`,
+`sofab::FixedBytes<N>` and `sofab::InlineVector<T,N>` — live in the corelib-c-cpp
+wrapper (`sofab.hpp`) as a single source of truth; the generator only references
+them (nothing container-shaped is emitted into the generated headers, so a fix to
+a container is a corelib change, not a codegen change).
+
+`sofab::FixedString<N>` is a heap-free, `std::string`-friendly fixed-capacity
+string (implicit construct/assign from `std::string`/`std::string_view`/`const
+char*`, implicit `operator std::string_view` view, `c_str()`, comparisons, `str()`
+to go back to an owning `std::string`); the decoder fills it in place via the same
+`read_string_noterm` path as `std::string`. `sofab::FixedBytes<N>` is the same
+idea for a blob.
+
+**Why a custom container and not plain STL?** Each of these tracks a **logical
+length distinct from the capacity `N`** — a blob shorter than its `maxlen`, an
+array shorter than its `count`. `std::array<T,N>` is always exactly length `N`, so
+it cannot represent "3 of a possible 5"; `std::vector` would represent it but
+reintroduces the heap this profile exists to avoid. So a purpose-built inline
+container (inline `std::array` storage + a separate `len_`) is the only fit — and
+where a field really *is* fixed-length (the native numeric arrays), the generator
+does use plain `std::array<T,N>`. `InlineVector`'s inline storage also never
+reallocates, so a bound-then-filled element is address-stable — strictly safer
+under the corelib-c-cpp deferred decoder than a `std::vector` + `reserve()`.
+Because they are non-aggregates with `initializer_list` constructors, a brace-init
+like `msg.field = {"a", "b"}` sets the logical length correctly rather than
+silently leaving it at zero (which would drop the field from the wire). A
 non-allocating `encodeTo(dst, cap)` is also emitted alongside the convenience
 `encode()`.
 

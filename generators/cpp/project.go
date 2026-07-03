@@ -276,7 +276,7 @@ func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, re
 	f.line("%sconst sofab_json_t *%s = sofab_json_array_at(%s, %s);", inner, ev, node, iv)
 	switch elem {
 	case ir.KindString:
-		if strings.HasPrefix(g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), "InlineVector") {
+		if strings.HasPrefix(g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), "sofab::InlineVector") {
 			// InlineVector<FixedString>: default-construct a slot, then assign.
 			f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back().assign(std::string_view{_s, _l}); }", inner, ev, target)
 		} else {

@@ -90,7 +90,7 @@ func (g *gen) cppType(f *ir.Field) string {
 		// (no heap). The read(void*,size_t) blob overload already takes a raw
 		// pointer, so decode needs no corelib change.
 		if g.fixed && f.HasMaxlen {
-			return fmt.Sprintf("FixedBytes<%d>", f.Maxlen)
+			return fmt.Sprintf("sofab::FixedBytes<%d>", f.Maxlen)
 		}
 		return "std::vector<std::uint8_t>"
 	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
@@ -133,10 +133,10 @@ func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 		switch elem {
 		case ir.KindString, ir.KindBlob:
 			if elemMaxHas {
-				return fmt.Sprintf("InlineVector<%s, %d>", et, count)
+				return fmt.Sprintf("sofab::InlineVector<%s, %d>", et, count)
 			}
 		case ir.KindStruct, ir.KindUnion, ir.KindArray:
-			return fmt.Sprintf("InlineVector<%s, %d>", et, count)
+			return fmt.Sprintf("sofab::InlineVector<%s, %d>", et, count)
 		}
 	}
 	return "std::vector<" + et + ">"
@@ -154,7 +154,7 @@ func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, e
 		return "std::string"
 	case ir.KindBlob:
 		if g.fixed && elemMaxHas {
-			return fmt.Sprintf("FixedBytes<%d>", elemMax)
+			return fmt.Sprintf("sofab::FixedBytes<%d>", elemMax)
 		}
 		return "std::vector<std::uint8_t>"
 	case ir.KindBool:
@@ -440,73 +440,17 @@ struct _MsgSeq : sofab::IStreamMessage {
 };`
 
 // cppFixedPrelude is emitted only for the fixed-capacity (embedded) path
-// (corelib: c-cpp). It provides heap-free, schema-sized
-// storage that presents the same .data()/.size() surface the encode/decode paths
-// already use, so the emitted wire bytes are unchanged.
+// (corelib: c-cpp). The heap-free containers it decodes into —
+// sofab::FixedBytes<N> (a blob) and sofab::InlineVector<T,N> (a sequence) —
+// live in the corelib alongside sofab::FixedString<N>, so the generator only
+// references them; this prelude supplies the element collectors that bridge the
+// corelib's sequence-decode callbacks into that inline storage:
 //
-//   - FixedBytes<N>: a blob of at most N bytes, std::array<uint8_t,N> + length.
-//     Encode uses .data()/.size() (unchanged); decode uses the corelib's
-//     read(void*,size_t) blob overload, so no corelib change is needed.
-//   - InlineVector<T,N>: a fixed-capacity sequence (std::array<T,N> + length)
-//     exposing exactly what serialize and the _MsgSeq* visitors use. Inline
-//     storage never reallocates, so a bound-then-filled element (the deferred
-//     corelib-c-cpp decoder) is address-stable — strictly safer than the
-//     std::vector + reserve() it replaces.
-//   - _MsgSeqFixed / _FixedBlobSeq: element collectors that write into the next
-//     inline slot instead of push_back/emplace_back onto the heap.
-const cppFixedPrelude = `template <std::size_t N>
-struct FixedBytes {
-    std::array<std::uint8_t, N> buf{};
-    std::size_t len_ = 0;
-    FixedBytes() = default;
-    FixedBytes(std::initializer_list<std::uint8_t> init) noexcept {
-        for (auto b : init) { if (len_ >= N) break; buf[len_++] = b; }
-    }
-    std::uint8_t *data() noexcept { return buf.data(); }
-    const std::uint8_t *data() const noexcept { return buf.data(); }
-    std::size_t size() const noexcept { return len_; }
-    void set_len(std::size_t n) noexcept { len_ = n < N ? n : N; }
-    void clear() noexcept { len_ = 0; }
-    void push_back(std::uint8_t b) noexcept { if (len_ < N) buf[len_++] = b; }
-    bool operator==(const FixedBytes &o) const noexcept {
-        if (len_ != o.len_) return false;
-        for (std::size_t i = 0; i < len_; ++i) { if (buf[i] != o.buf[i]) return false; }
-        return true;
-    }
-    bool operator!=(const FixedBytes &o) const noexcept { return !(*this == o); }
-};
-template <typename T, std::size_t N>
-struct InlineVector {
-    std::array<T, N> buf{};
-    std::size_t len_ = 0;
-    std::size_t size() const noexcept { return len_; }
-    static constexpr std::size_t capacity() noexcept { return N; }
-    void reserve(std::size_t) noexcept {}
-    void clear() noexcept { len_ = 0; }
-    T &emplace_back() noexcept {
-        std::size_t i = len_ < N ? len_++ : N - 1;
-        buf[i] = T{};
-        return buf[i];
-    }
-    void push_back(const T &v) noexcept { emplace_back() = v; }
-    void push_back(T &&v) noexcept { emplace_back() = static_cast<T &&>(v); }
-    T &back() noexcept { return buf[len_ - 1]; }
-    T &operator[](std::size_t i) noexcept { return buf[i]; }
-    const T &operator[](std::size_t i) const noexcept { return buf[i]; }
-    T *data() noexcept { return buf.data(); }
-    const T *data() const noexcept { return buf.data(); }
-    T *begin() noexcept { return buf.data(); }
-    T *end() noexcept { return buf.data() + len_; }
-    const T *begin() const noexcept { return buf.data(); }
-    const T *end() const noexcept { return buf.data() + len_; }
-    bool operator==(const InlineVector &o) const noexcept {
-        if (len_ != o.len_) return false;
-        for (std::size_t i = 0; i < len_; ++i) { if (!(buf[i] == o.buf[i])) return false; }
-        return true;
-    }
-    bool operator!=(const InlineVector &o) const noexcept { return !(*this == o); }
-};
-template <typename Container>
+//   - _MsgSeqFixed / _FixedBlobSeq / _FixedStrSeq: per-element visitors that
+//     emplace into the next inline slot instead of push_back/emplace_back onto
+//     the heap. Inline storage never reallocates, so a bound-then-filled element
+//     (the deferred corelib-c-cpp decoder) is address-stable.
+const cppFixedPrelude = `template <typename Container>
 struct _MsgSeqFixed : sofab::IStreamMessage {
     Container *out = nullptr;
     void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
