@@ -6,11 +6,12 @@ import (
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/analysis"
+	"github.com/sofa-buffers/generator/internal/ir"
 	"github.com/sofa-buffers/generator/internal/model"
 	"github.com/sofa-buffers/generator/internal/parser"
 )
 
-func exampleModule(t *testing.T, cfg map[string]any) string {
+func exampleSchema(t *testing.T) *ir.Schema {
 	t.Helper()
 	b, err := os.ReadFile("../../examples/messages/example.yaml")
 	if err != nil {
@@ -31,6 +32,12 @@ func exampleModule(t *testing.T, cfg map[string]any) string {
 	if err := analysis.Analyze(s); err != nil {
 		t.Fatal(err)
 	}
+	return s
+}
+
+func exampleModule(t *testing.T, cfg map[string]any) string {
+	t.Helper()
+	s := exampleSchema(t)
 	files, err := (&Backend{}).Generate(s, cfg)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -86,7 +93,8 @@ func TestRustStructural(t *testing.T) {
 	}
 
 	// corelib-rs-no-std: require! guard asserting the example's capabilities.
-	n := exampleModule(t, map[string]any{"corelib": "rs-no-std"})
+	// allow_dynamic keeps a heap fallback for the example's unbounded `somemap`.
+	n := exampleModule(t, map[string]any{"corelib": "rs-no-std", "allow_dynamic": true})
 	if !strings.Contains(n, "sofab::require!(") {
 		t.Error("rs-no-std must emit a require! capability guard")
 	}
@@ -94,6 +102,40 @@ func TestRustStructural(t *testing.T) {
 		if !strings.Contains(n, cap) {
 			t.Errorf("expected require!(... %s ...)", cap)
 		}
+	}
+	// The no_std profile lowers bounded fields to fixed-capacity heapless storage
+	// (serde gated behind a feature), and keeps an alloc fallback for unbounded ones.
+	for _, want := range []string{
+		"#[cfg(feature = \"serde\")]",                                      // serde import gated
+		"#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]", // serde derive gated
+		"pub somestring: heapless::String<50>,",                            // bounded string -> heapless
+		"pub someblob: heapless::Vec<u8, 16>,",                             // bounded blob -> heapless
+		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",     // string array -> inline
+		"pub somemap: alloc::vec::Vec<",                                    // unbounded -> alloc fallback
+		"pub fn encode(&self) -> heapless::Vec<u8,",                        // heap-free encode
+		"stack: heapless::Vec<_Loc,",                                       // bounded decode stack
+		"if self.somestring.as_str() != \"\" {",                            // string omit via as_str
+	} {
+		if !strings.Contains(n, want) {
+			t.Errorf("no_std message.rs missing %q", want)
+		}
+	}
+	// No heap String/Vec, no serde-always-derive under no_std.
+	for _, notWant := range []string{
+		"pub somestring: String,",
+		"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]",
+		"String::from_utf8_lossy",
+	} {
+		if strings.Contains(n, notWant) {
+			t.Errorf("no_std message.rs should not contain %q", notWant)
+		}
+	}
+
+	// no_std: an unbounded field without allow_dynamic is a hard error.
+	if _, err := (&Backend{}).Generate(exampleSchema(t), map[string]any{"corelib": "rs-no-std"}); err == nil {
+		t.Error("expected unbounded-field error under no_std without allow_dynamic")
+	} else if !strings.Contains(err.Error(), "somemap") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 

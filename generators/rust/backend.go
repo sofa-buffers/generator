@@ -30,7 +30,26 @@ func (*Backend) Lang() string { return "rust" }
 // Generate emits src/message.rs; project mode adds Cargo.toml + a serde-json
 // harness.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), corelib: cfgString(cfg, "corelib", "rs")}
+	corelib := cfgString(cfg, "corelib", "rs")
+	// The no_std/heap-free profile is the point of corelib-rs-no-std, so it is on by
+	// default there (opt out with no_std: false); it is never on for the std corelib.
+	noStd := corelib == "rs-no-std" && cfgBoolDefault(cfg, "no_std", true)
+	g := &gen{
+		schema:       s,
+		banner:       cfgString(cfg, "tool_banner", "sofabgen"),
+		license:      generator.LicenseID(cfg),
+		corelib:      corelib,
+		noStd:        noStd,
+		allowDynamic: cfgBool(cfg, "allow_dynamic"),
+	}
+	if noStd {
+		// The heap-free profile lowers every field to fixed-capacity heapless
+		// storage sized from the schema; a field with no maxlen/count cannot be
+		// sized, so reject it (unless allow_dynamic keeps a heap fallback).
+		if err := g.checkBounded(s); err != nil {
+			return nil, err
+		}
+	}
 	files := []generator.File{{Path: "src/message.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -47,10 +66,57 @@ type gen struct {
 	// require! capability guard) or "rs-no-std" (corelib-rs-no-std — #![no_std],
 	// heap-free, Cargo feature flags to shrink the binary).
 	corelib string
+	// noStd is the genuinely heap-free profile (corelib-rs-no-std + no_std): emit a
+	// #![no_std] lib crate, heapless::String<N>/Vec<T,N> fixed-capacity fields sized
+	// from the schema, a bounded decode stack, and serde gated behind a cargo
+	// feature. When false the crate is ordinary std (String/Vec/serde), even against
+	// the no-std corelib (a std consumer can still link it).
+	noStd bool
+	// allowDynamic keeps an alloc::String/alloc::Vec heap fallback for genuinely
+	// unbounded fields (no maxlen/count) instead of failing generation — the Rust
+	// analog of the C++ c-cpp allow_dynamic. Bounded fields still go heapless.
+	allowDynamic bool
 }
 
 // std reports whether the std corelib-rs is selected (vs corelib-rs-no-std).
 func (g *gen) std() bool { return g.corelib != "rs-no-std" }
+
+// dynString / dynBlob / dynArray report whether a given unbounded field falls
+// back to an alloc heap container (allow_dynamic) rather than heapless storage.
+func (g *gen) usesAlloc(s *ir.Schema) bool {
+	if !g.noStd || !g.allowDynamic {
+		return false
+	}
+	found := false
+	var walk func(fields []*ir.Field)
+	seen := map[string]bool{}
+	walk = func(fields []*ir.Field) {
+		for _, f := range fields {
+			switch f.Kind {
+			case ir.KindString, ir.KindBlob:
+				if !f.HasMaxlen {
+					found = true
+				}
+			case ir.KindArray:
+				if !f.HasCount {
+					found = true
+				}
+				if (f.Elem == ir.KindString || f.Elem == ir.KindBlob) && !f.ElemMaxHas {
+					found = true
+				}
+			case ir.KindStruct, ir.KindUnion:
+				if !seen[f.Ref.Key] {
+					seen[f.Ref.Key] = true
+					walk(f.Ref.Target.Fields)
+				}
+			}
+		}
+	}
+	for _, m := range s.Messages {
+		walk(m.Fields)
+	}
+	return found
+}
 
 type rfile struct{ b strings.Builder }
 
@@ -72,6 +138,12 @@ func (g *gen) module(s *ir.Schema) []byte {
 	// only when the schema has a scalar array); it is gated behind the no-std
 	// `array` feature, so it is imported there on demand, not crate-wide.
 	f.line("use sofab::{OStream, IStream, Visitor, Id, Unsigned, Signed};")
+	// serde is optional under no_std: the derives are gated behind a `serde` cargo
+	// feature (off in the heap-free firmware build, on for the JSON harness), so the
+	// import must be gated too. The std profile always derives serde.
+	if g.noStd {
+		f.line("#[cfg(feature = \"serde\")]")
+	}
 	f.line("use serde::{Serialize, Deserialize};")
 	f.blank()
 	// capability guard for the whole crate. corelib-rs-no-std gates wire types
@@ -156,15 +228,28 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	// is omitted, so decode must reconstruct schema defaults. A manual Default impl
 	// carries them (native scalar arrays and blobs materialize their default too),
 	// so derive(Default) type-zeros are never correct here.
-	f.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]")
-	f.line("#[serde(default)]")
+	// Under no_std, serde is optional: derive it (and #[serde(default)]) only behind
+	// the `serde` cargo feature so the firmware build carries no serde. The std
+	// profile always derives it.
+	if g.noStd {
+		f.line("#[derive(Debug, Clone, PartialEq)]")
+		f.line("#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]")
+		f.line("#[cfg_attr(feature = \"serde\", serde(default))]")
+	} else {
+		f.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]")
+		f.line("#[serde(default)]")
+	}
 	f.line("pub struct %s {", name)
 	for _, fld := range fields {
 		// rustdoc attaches to the item that follows, so the doc must precede
 		// any #[serde(rename = ...)] attribute and the field itself.
 		f.emitDoc("    ", fieldDoc(fld))
 		if rustNeedsRename(fld.Name) {
-			f.line("    #[serde(rename = %q)]", fld.Name)
+			if g.noStd {
+				f.line("    #[cfg_attr(feature = \"serde\", serde(rename = %q))]", fld.Name)
+			} else {
+				f.line("    #[serde(rename = %q)]", fld.Name)
+			}
 		}
 		f.line("    pub %s: %s,", rustIdent(fld.Name), g.rustType(fld))
 	}
@@ -194,12 +279,24 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	f.line("    }")
 
 	if isMessage {
-		f.line("    pub fn encode(&self) -> Vec<u8> {")
-		f.line("        let mut buf = vec![0u8; Self::MAX_SIZE];")
-		f.line("        let used = { let mut os = OStream::new(&mut buf); self.marshal(&mut os); os.bytes_used() };")
-		f.line("        buf.truncate(used);")
-		f.line("        buf")
-		f.line("    }")
+		if g.noStd {
+			// Heap-free encode into a fixed-capacity heapless::Vec sized by MAX_SIZE.
+			size, _ := g.maxSize(fields)
+			f.line("    pub fn encode(&self) -> heapless::Vec<u8, %d> {", size)
+			f.line("        let mut buf: heapless::Vec<u8, %d> = heapless::Vec::new();", size)
+			f.line("        let _ = buf.resize_default(%d);", size)
+			f.line("        let used = { let mut os = OStream::new(&mut buf); self.marshal(&mut os); os.bytes_used() };")
+			f.line("        buf.truncate(used);")
+			f.line("        buf")
+			f.line("    }")
+		} else {
+			f.line("    pub fn encode(&self) -> Vec<u8> {")
+			f.line("        let mut buf = vec![0u8; Self::MAX_SIZE];")
+			f.line("        let used = { let mut os = OStream::new(&mut buf); self.marshal(&mut os); os.bytes_used() };")
+			f.line("        buf.truncate(used);")
+			f.line("        buf")
+			f.line("    }")
+		}
 		f.line("    pub fn decode(data: &[u8]) -> Self {")
 		f.line("        %s_dec::decode(data)", strings.ToLower(name))
 		f.line("    }")
@@ -229,10 +326,10 @@ func (g *gen) emitMarshal(f *rfile, fld *ir.Field) {
 	case ir.KindString:
 		write = fmt.Sprintf("let _ = os.write_str(%d, &%s);", fld.ID, acc)
 	case ir.KindBlob:
-		// blob is a leaf: omit when equal to its default (value-equal; empty if
-		// none).
-		if lit, ok := g.rustBlobLiteral(fld); ok {
-			f.line("        if %s != %s { let _ = os.write_blob(%d, &%s); }", acc, lit, fld.ID, acc)
+		// blob is a leaf: omit when equal to its default. Compare as slices so the
+		// same form works for std Vec and no_std heapless/alloc Vec alike.
+		if raw, ok := g.blobBytes(fld); ok {
+			f.line("        if &%s[..] != &%s[..] { let _ = os.write_blob(%d, &%s); }", acc, byteSliceLit(raw), fld.ID, acc)
 		} else {
 			f.line("        if !%s.is_empty() { let _ = os.write_blob(%d, &%s); }", acc, fld.ID, acc)
 		}
@@ -250,7 +347,7 @@ func (g *gen) emitMarshal(f *rfile, fld *ir.Field) {
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default.
-	f.line("        if %s != %s { %s }", acc, g.rustCompare(fld), write)
+	f.line("        if %s { %s }", g.rustLeafNe(acc, fld), write)
 }
 
 func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
@@ -262,16 +359,17 @@ func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
 			// Fixed `[elem; N]` is never "empty"; omit when equal to its default
 			// (mirrors the C++ backend's `!= std::array{}`).
 			f.line("        if %s != %s {", acc, g.rustFieldDefault(fld))
-		} else if lit, ok := g.rustNativeArrayLiteral(fld); ok {
-			f.line("        if %s != %s {", acc, lit)
+		} else if parts, ok := g.rustNativeArrayParts(fld); ok {
+			// Dynamic native array with a default: slice compare (std Vec / no_std alloc).
+			f.line("        if &%s[..] != &[%s][..] {", acc, parts)
 		} else {
 			f.line("        if !%s.is_empty() {", acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 0)
 		f.line("        }")
 		return
 	}
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 0)
 }
 
 // marshalArray writes the array val as field idExpr. Numeric/enum/bitfield
@@ -280,7 +378,7 @@ func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
 // array elements lower to a wrapper sequence whose child ids are the 0-based
 // index (per MESSAGE_SPEC). Recurses for nested arrays, depth-suffixing loop vars
 // to avoid collisions.
-func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount bool, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	tv := fmt.Sprintf("_t%d", depth)
@@ -292,8 +390,17 @@ func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// enum backing is a signed int (SignedElem), so it writes directly.
 		f.line("%slet _ = os.write_array_signed(%s, &%s);", ind, idExpr, val)
 	case ir.KindBool:
-		// bool is not an array element type; lower to a 0/1 unsigned array.
-		f.line("%s{ let %s: Vec<u8> = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, val, idExpr, tv)
+		// bool is not an array element type; lower to a 0/1 unsigned array. The
+		// no_std profile avoids the heap collect: a fixed array maps in place via
+		// core::array::from_fn, a dynamic (allow_dynamic) one collects into alloc.
+		switch {
+		case !g.noStd:
+			f.line("%s{ let %s: Vec<u8> = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, val, idExpr, tv)
+		case hasCount:
+			f.line("%s{ let %s: [u8; %d] = core::array::from_fn(|_k| %s[_k] as u8); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, count, val, idExpr, tv)
+		default:
+			f.line("%s{ let %s: alloc::vec::Vec<u8> = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, val, idExpr, tv)
+		}
 	case ir.KindFP32:
 		f.line("%slet _ = os.write_array_fp32(%s, &%s);", ind, idExpr, val)
 	case ir.KindFP64:
@@ -315,7 +422,7 @@ func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindArray:
 		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
-		g.marshalArray(f, ind+"    ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, depth+1)
 		f.line("%s}", ind)
 		f.line("%slet _ = os.write_sequence_end();", ind)
 	}
