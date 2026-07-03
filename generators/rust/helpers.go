@@ -21,13 +21,89 @@ func cfgBool(cfg map[string]any, key string) bool {
 	return b
 }
 
+func cfgBoolDefault(cfg map[string]any, key string, dflt bool) bool {
+	if b, ok := cfg[key].(bool); ok {
+		return b
+	}
+	return dflt
+}
+
+// checkBounded enforces the no_std profile's sizing policy (the Rust analog of the
+// C++ c-cpp checkBounded): every field that lowers to fixed heapless storage must
+// be sized by the schema. A string/blob needs a maxlen; an array needs a count
+// (and a string/blob element needs its own maxlen). An unbounded such field is a
+// hard error unless allow_dynamic keeps an alloc heap fallback for it.
+func (g *gen) checkBounded(s *ir.Schema) error {
+	seen := map[string]bool{}
+	var walk func(owner string, fields []*ir.Field) error
+	walk = func(owner string, fields []*ir.Field) error {
+		for _, f := range fields {
+			if err := g.checkField(owner, f, seen, walk); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, m := range s.Messages {
+		if err := walk(m.Name, m.Fields); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *gen) checkField(owner string, f *ir.Field, seen map[string]bool, walk func(string, []*ir.Field) error) error {
+	if g.allowDynamic {
+		// A heap fallback is allowed, so nothing is rejected; still recurse into
+		// nested types to size their fixed fields.
+		if (f.Kind == ir.KindStruct || f.Kind == ir.KindUnion) && !seen[f.Ref.Key] {
+			seen[f.Ref.Key] = true
+			return walk(f.Ref.Key, f.Ref.Target.Fields)
+		}
+		return nil
+	}
+	switch f.Kind {
+	case ir.KindString, ir.KindBlob:
+		if !f.HasMaxlen {
+			return fmt.Errorf("no_std: field %q of %q is an unbounded %s (no maxlen); add a maxlen or set allow_dynamic: true", f.Name, owner, kindName(f.Kind))
+		}
+	case ir.KindArray:
+		if !f.HasCount {
+			return fmt.Errorf("no_std: array field %q of %q has no count; add a count or set allow_dynamic: true", f.Name, owner)
+		}
+		if (f.Elem == ir.KindString || f.Elem == ir.KindBlob) && !f.ElemMaxHas {
+			return fmt.Errorf("no_std: %s-array field %q of %q has no element maxlen; add items.maxlen or set allow_dynamic: true", kindName(f.Elem), f.Name, owner)
+		}
+	case ir.KindStruct, ir.KindUnion:
+		if !seen[f.Ref.Key] {
+			seen[f.Ref.Key] = true
+			return walk(f.Ref.Key, f.Ref.Target.Fields)
+		}
+	}
+	return nil
+}
+
+func kindName(k ir.Kind) string {
+	switch k {
+	case ir.KindString:
+		return "string"
+	case ir.KindBlob:
+		return "blob"
+	}
+	return "field"
+}
+
 // rustFieldDefault is the value used in a manual `impl Default` (schema default
 // or type-zero) — needed so sparse-canonical decode reconstructs the right value.
 func (g *gen) rustFieldDefault(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindString:
-		if s, ok := f.Default.(string); ok {
-			return fmt.Sprintf("%q.to_string()", s)
+		lit, hasLit := f.Default.(string)
+		if g.noStd {
+			return g.rustStrNew(f.HasMaxlen, lit, hasLit)
+		}
+		if hasLit {
+			return fmt.Sprintf("%q.to_string()", lit)
 		}
 		return "String::new()"
 	case ir.KindBool:
@@ -45,25 +121,29 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 		return g.rustIntDefault(f)
 	case ir.KindBlob:
 		// blob is a leaf: materialize its default so decode reconstructs it and
-		// marshal can compare against it (empty Vec when there is no default).
-		if lit, ok := g.rustBlobLiteral(f); ok {
-			return lit
+		// marshal can compare against it (empty container when there is no default).
+		if raw, ok := g.blobBytes(f); ok {
+			return g.rustBlobNew(f.HasMaxlen, byteSliceLit(raw), true)
 		}
-		return "Vec::new()"
+		return g.rustBlobNew(f.HasMaxlen, "", false)
 	case ir.KindArray:
 		// A native scalar array is a leaf: materialize its schema default so an
 		// omitted default array reconstructs correctly. A fixed-count native array
 		// is a stack `[elem; N]`; a dynamic one stays a heap Vec. Composite arrays
-		// are wrapper sequences (always framed) and stay an empty Vec.
+		// are wrapper sequences (always framed) and stay an empty container.
 		if elem, n, ok := g.fixedNativeArray(f); ok {
 			return g.rustFixedArrayDefault(f, elem, n)
 		}
 		if isNativeArrayElem(f.Elem) {
-			if lit, ok := g.rustNativeArrayLiteral(f); ok {
-				return lit
+			if parts, ok := g.rustNativeArrayParts(f); ok {
+				if g.noStd {
+					// dynamic (count-less) native array under allow_dynamic -> alloc Vec.
+					return "[" + parts + "].to_vec()"
+				}
+				return "vec![" + parts + "]"
 			}
 		}
-		return "Vec::new()"
+		return g.rustSeqNew(f.HasCount)
 	default: // struct/union: all children default, so Default::default() is right
 		return "Default::default()"
 	}
@@ -91,43 +171,93 @@ func (g *gen) rustNativeArrayParts(f *ir.Field) (string, bool) {
 	return strings.Join(parts, ", "), true
 }
 
-// rustNativeArrayLiteral renders a native scalar array's schema default as a Rust
-// `vec![...]` literal (for the dynamic/`Vec` path); ("", false) when no default.
-func (g *gen) rustNativeArrayLiteral(f *ir.Field) (string, bool) {
-	parts, ok := g.rustNativeArrayParts(f)
-	if !ok {
-		return "", false
-	}
-	return "vec![" + parts + "]", true
-}
-
-// rustBlobLiteral renders a blob field's base64 schema default as a Rust
-// `vec![...]` of bytes; ("", false) when there is no (decodable) default.
-func (g *gen) rustBlobLiteral(f *ir.Field) (string, bool) {
+// blobBytes decodes a blob field's base64 schema default; (nil, false) when there
+// is no (decodable) default.
+func (g *gen) blobBytes(f *ir.Field) ([]byte, bool) {
 	s, ok := f.Default.(string)
 	if !ok {
-		return "", false
+		return nil, false
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), ""))
 	if err != nil {
-		return "", false
+		return nil, false
 	}
+	return raw, true
+}
+
+// byteSliceLit renders bytes as a Rust array literal `[10, 20, 30]`.
+func byteSliceLit(raw []byte) string {
 	parts := make([]string, len(raw))
 	for i, b := range raw {
 		parts[i] = fmt.Sprintf("%d", b)
 	}
-	return fmt.Sprintf("vec![%s]", strings.Join(parts, ", ")), true
+	return "[" + strings.Join(parts, ", ") + "]"
 }
 
-// rustCompare is the RHS of `self.field != X` for omission.
-func (g *gen) rustCompare(f *ir.Field) string {
-	if f.Kind == ir.KindString {
-		if s, ok := f.Default.(string); ok {
-			return fmt.Sprintf("%q", s)
+// rustStrNew builds a string field's Default expression per profile. Under no_std
+// a bounded string is a heapless::String<N> filled by push_str (heap-free); an
+// unbounded one falls back to alloc::String.
+func (g *gen) rustStrNew(hasMax bool, lit string, hasLit bool) string {
+	if hasMax {
+		if hasLit {
+			return fmt.Sprintf("{ let mut _s = heapless::String::new(); let _ = _s.push_str(%q); _s }", lit)
 		}
-		return `""`
+		return "heapless::String::new()"
 	}
-	return g.rustFieldDefault(f)
+	if hasLit {
+		return fmt.Sprintf("alloc::string::String::from(%q)", lit)
+	}
+	return "alloc::string::String::new()"
+}
+
+// rustBlobNew builds a blob field's Default expression per profile (sliceLit is a
+// `[..]` byte-array literal, used only when hasLit). std uses vec!; no_std bounded
+// builds a heapless::Vec by extend_from_slice; unbounded falls back to alloc::Vec.
+func (g *gen) rustBlobNew(hasMax bool, sliceLit string, hasLit bool) string {
+	if !g.noStd {
+		if hasLit {
+			return "vec!" + sliceLit
+		}
+		return "Vec::new()"
+	}
+	if hasMax {
+		if hasLit {
+			return fmt.Sprintf("{ let mut _v = heapless::Vec::new(); let _ = _v.extend_from_slice(&%s); _v }", sliceLit)
+		}
+		return "heapless::Vec::new()"
+	}
+	if hasLit {
+		return sliceLit + ".to_vec()"
+	}
+	return "alloc::vec::Vec::new()"
+}
+
+// rustSeqNew is the empty-container Default for a wrapper sequence / dynamic array
+// per profile.
+func (g *gen) rustSeqNew(hasCount bool) string {
+	switch {
+	case !g.noStd:
+		return "Vec::new()"
+	case hasCount:
+		return "heapless::Vec::new()"
+	default:
+		return "alloc::vec::Vec::new()"
+	}
+}
+
+// rustLeafNe is the boolean omit-guard `<lhs> != <default>` for a scalar/string
+// leaf field. A string compares against its &str default (as_str() under no_std,
+// where the field is a heapless/alloc string); other scalars against their
+// materialized default value.
+func (g *gen) rustLeafNe(acc string, f *ir.Field) string {
+	if f.Kind == ir.KindString {
+		lit, _ := f.Default.(string)
+		if g.noStd {
+			return fmt.Sprintf("%s.as_str() != %q", acc, lit)
+		}
+		return fmt.Sprintf("%s != %q", acc, lit)
+	}
+	return fmt.Sprintf("%s != %s", acc, g.rustFieldDefault(f))
 }
 
 func (g *gen) rustIntDefault(f *ir.Field) string {
@@ -196,7 +326,44 @@ func (g *gen) fixedNativeArray(f *ir.Field) (elem string, n int64, ok bool) {
 	if f.Kind != ir.KindArray || !isNativeArrayElem(f.Elem) || !f.HasCount {
 		return "", 0, false
 	}
-	return g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems), f.Count, true
+	return g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax), f.Count, true
+}
+
+// rustStr / rustBlob / rustSeq map a variable-length string, blob, or wrapper
+// sequence to its storage type per profile: std String/Vec (default), fixed
+// heapless::String<N>/Vec<T,N> sized from the schema (no_std), or an alloc heap
+// fallback when the field is unbounded and allow_dynamic is set.
+func (g *gen) rustStr(hasMax bool, max int64) string {
+	switch {
+	case !g.noStd:
+		return "String"
+	case hasMax:
+		return fmt.Sprintf("heapless::String<%d>", max)
+	default:
+		return "alloc::string::String"
+	}
+}
+
+func (g *gen) rustBlob(hasMax bool, max int64) string {
+	switch {
+	case !g.noStd:
+		return "Vec<u8>"
+	case hasMax:
+		return fmt.Sprintf("heapless::Vec<u8, %d>", max)
+	default:
+		return "alloc::vec::Vec<u8>"
+	}
+}
+
+func (g *gen) rustSeq(elem string, hasCount bool, count int64) string {
+	switch {
+	case !g.noStd:
+		return "Vec<" + elem + ">"
+	case hasCount:
+		return fmt.Sprintf("heapless::Vec<%s, %d>", elem, count)
+	default:
+		return "alloc::vec::Vec<" + elem + ">"
+	}
 }
 
 // rustFixedArrayDefault renders the Default value of a fixed native array
@@ -241,9 +408,9 @@ func (g *gen) rustType(f *ir.Field) string {
 	case ir.KindBool:
 		return "bool"
 	case ir.KindString:
-		return "String"
+		return g.rustStr(f.HasMaxlen, f.Maxlen)
 	case ir.KindBlob:
-		return "Vec<u8>"
+		return g.rustBlob(f.HasMaxlen, f.Maxlen)
 	case ir.KindEnum:
 		return enumBacking(f.Ref.Target)
 	case ir.KindBitfield:
@@ -254,7 +421,7 @@ func (g *gen) rustType(f *ir.Field) string {
 		if elem, n, ok := g.fixedNativeArray(f); ok {
 			return fmt.Sprintf("[%s; %d]", elem, n)
 		}
-		return "Vec<" + g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems) + ">"
+		return g.rustSeq(g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax), f.HasCount, f.Count)
 	}
 	return "()"
 }
@@ -262,13 +429,14 @@ func (g *gen) rustType(f *ir.Field) string {
 // rustArrayElem is the Rust type of an array element, recursing for nested
 // arrays. Numeric/bool map to their scalar Rust type; enum/bitfield to their
 // integer backing; struct/union to the shared type name; a nested array wraps
-// another Vec level.
-func (g *gen) rustArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+// another sequence container. String/blob elements are sized from the element
+// maxlen under the no_std profile (elemMaxHas/elemMax).
+func (g *gen) rustArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64) string {
 	switch elem {
 	case ir.KindString:
-		return "String"
+		return g.rustStr(elemMaxHas, elemMax)
 	case ir.KindBlob:
-		return "Vec<u8>"
+		return g.rustBlob(elemMaxHas, elemMax)
 	case ir.KindBool:
 		return "bool"
 	case ir.KindEnum:
@@ -278,7 +446,7 @@ func (g *gen) rustArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) 
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(ref.Key)
 	case ir.KindArray:
-		return "Vec<" + g.rustArrayElem(items.Elem, items.ElemRef, items.ElemItems) + ">"
+		return g.rustSeq(g.rustArrayElem(items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax), items.HasCount, items.Count)
 	default: // numeric
 		return numRustType(elem)
 	}

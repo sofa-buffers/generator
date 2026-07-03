@@ -404,10 +404,15 @@
           ]
         },
         "no_std": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "rust corelib: rs-no-std only. Emit a genuinely #![no_std], heap-free crate: heapless::String<N>/Vec<T,N> fixed-capacity fields sized from the schema, a bounded decode stack, and serde gated behind a cargo feature. On by default for corelib: rs-no-std; set false to emit an ordinary std crate against the no-std corelib."
         },
         "alloc": {
           "type": "boolean"
+        },
+        "allow_dynamic": {
+          "type": "boolean",
+          "description": "rust no_std only. Keep an alloc::String/alloc::Vec heap fallback for genuinely unbounded fields (string/blob without maxlen, array without count) instead of failing generation; bounded fields still use fixed-capacity heapless storage. The Rust analog of the c-cpp allow_dynamic."
         },
         "string_storage": {
           "type": "string",

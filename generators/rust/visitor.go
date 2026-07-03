@@ -176,10 +176,20 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	}
 	f.line("    use sofab::{IStream, Visitor, Id, Unsigned, Signed%s};", arrayKind)
 	f.blank()
+	// Bounded decode stack for the no_std profile: nesting depth never exceeds the
+	// number of reachable frames, so that is a safe fixed capacity (min 4).
+	stackCap := len(fs)
+	if stackCap < 4 {
+		stackCap = 4
+	}
 	f.line("    pub fn decode(data: &[u8]) -> %s {", name)
 	f.line("        let mut m = %s::default();", name)
 	f.line("        {")
-	f.line("            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };")
+	if g.noStd {
+		f.line("            let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, ai: 0 };")
+	} else {
+		f.line("            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };")
+	}
 	f.line("            let mut is = IStream::new();")
 	f.line("            let _ = is.feed(data, &mut v);")
 	f.line("        }")
@@ -198,9 +208,16 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 
 	f.line("struct V<'a> {")
 	f.line("    m: &'a mut %s,", name)
-	f.line("    stack: Vec<_Loc>,")
-	f.line("    cur: _Loc,")
-	f.line("    acc: Vec<u8>,")
+	if g.noStd {
+		// Heap-free: bounded location stack; no `acc` (the generated decode() feeds
+		// the whole buffer at once, so string/blob always arrive single-shot).
+		f.line("    stack: heapless::Vec<_Loc, %d>,", stackCap)
+		f.line("    cur: _Loc,")
+	} else {
+		f.line("    stack: Vec<_Loc>,")
+		f.line("    cur: _Loc,")
+		f.line("    acc: Vec<u8>,")
+	}
 	f.line("    ai: usize, // index into the fixed native array currently being filled")
 	f.line("}")
 	f.blank()
@@ -228,13 +245,14 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				}
 			}
 		case fkNestedNative:
+			tgt := fr.path + ".last_mut().unwrap()"
 			switch {
 			case isUnsignedElem(fr.elemKind):
-				f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value as %s),", fr.loc, fr.path, numRustType(fr.elemKind))
+				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(tgt, "value as "+numRustType(fr.elemKind)))
 			case fr.elemKind == ir.KindBool:
-				f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value != 0),", fr.loc, fr.path)
+				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(tgt, "value != 0"))
 			case fr.elemKind == ir.KindBitfield:
-				f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value as %s),", fr.loc, fr.path, bitfieldBacking(fr.elemRef.Target))
+				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(tgt, "value as "+bitfieldBacking(fr.elemRef.Target)))
 			}
 		}
 	}
@@ -261,11 +279,12 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				}
 			}
 		case fkNestedNative:
+			tgt := fr.path + ".last_mut().unwrap()"
 			switch {
 			case isSignedElem(fr.elemKind):
-				f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value as %s),", fr.loc, fr.path, numRustType(fr.elemKind))
+				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(tgt, "value as "+numRustType(fr.elemKind)))
 			case fr.elemKind == ir.KindEnum:
-				f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value as %s),", fr.loc, fr.path, enumBacking(fr.elemRef.Target))
+				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(tgt, "value as "+enumBacking(fr.elemRef.Target)))
 			}
 		}
 	}
@@ -283,59 +302,99 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.str {
 		// string: scalar strings + string-array elements
 		f.line("    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
-		f.line("        // Single-shot: whole payload in one chunk -> build straight from the")
-		f.line("        // slice, skipping the `acc` accumulate + second copy.")
-		f.line("        let _s = if offset == 0 && chunk.len() >= total {")
-		f.line("            String::from_utf8_lossy(&chunk[..total]).into_owned()")
-		f.line("        } else {")
-		f.line("            self.acc.extend_from_slice(chunk);")
-		f.line("            if self.acc.len() < total { return; }")
-		f.line("            let s = String::from_utf8_lossy(&self.acc).into_owned();")
-		f.line("            self.acc.clear();")
-		f.line("            s")
-		f.line("        };")
-		f.line("        match (self.cur, id) {")
-		for _, fr := range fs {
-			if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-				f.line("            (_Loc::%s, _) => %s.push(_s),", fr.loc, fr.path)
-			}
-			for _, fld := range fr.fields {
-				if fld.Kind == ir.KindString {
-					f.line("            (_Loc::%s, %d) => %s.%s = _s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+		if g.noStd {
+			// Heap-free single-shot: decode() feeds the whole buffer at once, so a
+			// string always arrives in one chunk. Build straight into the field's
+			// fixed storage (heapless/alloc String, both take push_str) — no temp.
+			f.line("        if offset != 0 || chunk.len() < total { return; }")
+			f.line("        let _s = core::str::from_utf8(&chunk[..total]).unwrap_or(\"\");")
+			f.line("        match (self.cur, id) {")
+			for _, fr := range fs {
+				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
+					f.line("            (_Loc::%s, _) => { let _ = %s.push(Default::default()); if let Some(_e) = %s.last_mut() { let _ = _e.push_str(_s); } }", fr.loc, fr.path, fr.path)
+				}
+				for _, fld := range fr.fields {
+					if fld.Kind == ir.KindString {
+						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.push_str(_s); }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
+					}
 				}
 			}
+			f.line("            _ => {}")
+			f.line("        }")
+			f.line("    }")
+		} else {
+			f.line("        // Single-shot: whole payload in one chunk -> build straight from the")
+			f.line("        // slice, skipping the `acc` accumulate + second copy.")
+			f.line("        let _s = if offset == 0 && chunk.len() >= total {")
+			f.line("            String::from_utf8_lossy(&chunk[..total]).into_owned()")
+			f.line("        } else {")
+			f.line("            self.acc.extend_from_slice(chunk);")
+			f.line("            if self.acc.len() < total { return; }")
+			f.line("            let s = String::from_utf8_lossy(&self.acc).into_owned();")
+			f.line("            self.acc.clear();")
+			f.line("            s")
+			f.line("        };")
+			f.line("        match (self.cur, id) {")
+			for _, fr := range fs {
+				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
+					f.line("            (_Loc::%s, _) => %s.push(_s),", fr.loc, fr.path)
+				}
+				for _, fld := range fr.fields {
+					if fld.Kind == ir.KindString {
+						f.line("            (_Loc::%s, %d) => %s.%s = _s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+					}
+				}
+			}
+			f.line("            _ => {}")
+			f.line("        }")
+			f.line("    }")
 		}
-		f.line("            _ => {}")
-		f.line("        }")
-		f.line("    }")
 	}
 
 	if use.blob {
 		// blob: scalar blobs + blob-array elements
 		f.line("    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
-		f.line("        let _b = if offset == 0 && chunk.len() >= total {")
-		f.line("            chunk[..total].to_vec()")
-		f.line("        } else {")
-		f.line("            self.acc.extend_from_slice(chunk);")
-		f.line("            if self.acc.len() < total { return; }")
-		f.line("            let b = self.acc.clone();")
-		f.line("            self.acc.clear();")
-		f.line("            b")
-		f.line("        };")
-		f.line("        match (self.cur, id) {")
-		for _, fr := range fs {
-			if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-				f.line("            (_Loc::%s, _) => %s.push(_b),", fr.loc, fr.path)
-			}
-			for _, fld := range fr.fields {
-				if fld.Kind == ir.KindBlob {
-					f.line("            (_Loc::%s, %d) => %s.%s = _b,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+		if g.noStd {
+			f.line("        if offset != 0 || chunk.len() < total { return; }")
+			f.line("        match (self.cur, id) {")
+			for _, fr := range fs {
+				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
+					f.line("            (_Loc::%s, _) => { let _ = %s.push(Default::default()); if let Some(_e) = %s.last_mut() { let _ = _e.extend_from_slice(&chunk[..total]); } }", fr.loc, fr.path, fr.path)
+				}
+				for _, fld := range fr.fields {
+					if fld.Kind == ir.KindBlob {
+						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.extend_from_slice(&chunk[..total]); }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
+					}
 				}
 			}
+			f.line("            _ => {}")
+			f.line("        }")
+			f.line("    }")
+		} else {
+			f.line("        let _b = if offset == 0 && chunk.len() >= total {")
+			f.line("            chunk[..total].to_vec()")
+			f.line("        } else {")
+			f.line("            self.acc.extend_from_slice(chunk);")
+			f.line("            if self.acc.len() < total { return; }")
+			f.line("            let b = self.acc.clone();")
+			f.line("            self.acc.clear();")
+			f.line("            b")
+			f.line("        };")
+			f.line("        match (self.cur, id) {")
+			for _, fr := range fs {
+				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
+					f.line("            (_Loc::%s, _) => %s.push(_b),", fr.loc, fr.path)
+				}
+				for _, fld := range fr.fields {
+					if fld.Kind == ir.KindBlob {
+						f.line("            (_Loc::%s, %d) => %s.%s = _b,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+					}
+				}
+			}
+			f.line("            _ => {}")
+			f.line("        }")
+			f.line("    }")
 		}
-		f.line("            _ => {}")
-		f.line("        }")
-		f.line("    }")
 	}
 
 	if use.scalarArray {
@@ -360,7 +419,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 					}
 				}
 			case fkNestedNative:
-				f.line("            (_Loc::%s, _) => %s.push(Vec::new()),", fr.loc, fr.path)
+				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(fr.path, g.innerNew()))
 			}
 		}
 		f.line("            _ => {}")
@@ -373,7 +432,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// clear their Vec on entry; struct/nested-array wrapper frames push a fresh
 		// element and descend on each per-element sequence_begin.
 		f.line("    fn sequence_begin(&mut self, id: Id) {")
-		f.line("        self.stack.push(self.cur);")
+		f.line("        %s", g.pushStmt("self.stack", "self.cur"))
 		f.line("        self.cur = match (self.cur, id) {")
 		for _, fr := range fs {
 			switch fr.kind {
@@ -387,9 +446,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 					}
 				}
 			case fkStructArr:
-				f.line("            (_Loc::%s, _) => { %s.push(Default::default()); _Loc::%s },", fr.loc, fr.path, fr.elemLoc)
+				f.line("            (_Loc::%s, _) => { %s _Loc::%s },", fr.loc, g.pushStmt(fr.path, "Default::default()"), fr.elemLoc)
 			case fkArrArr:
-				f.line("            (_Loc::%s, _) => { %s.push(Vec::new()); _Loc::%s },", fr.loc, fr.path, fr.elemLoc)
+				f.line("            (_Loc::%s, _) => { %s _Loc::%s },", fr.loc, g.pushStmt(fr.path, g.innerNew()), fr.elemLoc)
 			}
 		}
 		f.line("            _ => self.cur,")
@@ -413,7 +472,7 @@ func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string
 		f.line("            (_Loc::%s, %d) => { %s.%s[self.ai] = %s; self.ai += 1; }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), rhs)
 		return
 	}
-	f.line("            (_Loc::%s, %d) => %s.%s.push(%s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), rhs)
+	f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs))
 }
 
 func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype string) {
@@ -421,7 +480,7 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 	f.line("        match (self.cur, id) {")
 	for _, fr := range fs {
 		if fr.kind == fkNestedNative && fr.elemKind == kind {
-			f.line("            (_Loc::%s, _) => %s.last_mut().unwrap().push(value),", fr.loc, fr.path)
+			f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(fr.path+".last_mut().unwrap()", "value"))
 			continue
 		}
 		for _, fld := range fr.fields {
@@ -436,6 +495,30 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 	f.line("            _ => {}")
 	f.line("        }")
 	f.line("    }")
+}
+
+// pushExpr / pushStmt / innerNew handle the heapless-vs-heap container push: under
+// no_std push returns a Result that must be consumed (let _ = ...) and inner
+// containers are heapless::Vec; the std path uses a bare Vec push.
+func (g *gen) pushExpr(target, val string) string {
+	if g.noStd {
+		return fmt.Sprintf("{ let _ = %s.push(%s); }", target, val)
+	}
+	return fmt.Sprintf("%s.push(%s)", target, val)
+}
+
+func (g *gen) pushStmt(target, val string) string {
+	if g.noStd {
+		return fmt.Sprintf("let _ = %s.push(%s);", target, val)
+	}
+	return fmt.Sprintf("%s.push(%s);", target, val)
+}
+
+func (g *gen) innerNew() string {
+	if g.noStd {
+		return "heapless::Vec::new()"
+	}
+	return "Vec::new()"
 }
 
 func isUnsignedElem(k ir.Kind) bool {

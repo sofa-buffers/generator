@@ -81,13 +81,47 @@ run_variant() {
 # corelib-rs (std, the default): always-on, no feature flags.
 run_variant rs "corelib: rs" "$STD"
 
-# corelib-rs-no-std: corpus builds span the feature-subset matrix.
-run_variant no-std "corelib: rs-no-std" "$NOSTD"
+# corelib-rs-no-std is now the genuinely #![no_std], heap-free profile (heapless
+# fixed-capacity fields). The rich example.yaml has an unbounded field (somemap),
+# so it needs allow_dynamic: true to keep an alloc fallback for that one field —
+# the Rust analog of the c-cpp allow_dynamic variant. The corpus spans the
+# feature-subset matrix under the same config.
+run_variant no-std "corelib: rs-no-std, allow_dynamic: true" "$NOSTD"
+
+# The point of the no_std profile is a crate that builds as #![no_std] and
+# heap-free. A bin cannot be no_std on a hosted target, so prove it on the lib
+# target: `cargo build --lib --no-default-features` drops serde/std and compiles
+# the pure heapless (+ optional alloc) crate. Exercise BOTH allow_dynamic configs,
+# mirroring the c-cpp bounded-vs-allow_dynamic split.
+echo "==> no_std lib builds heap-free (--lib --no-default-features), allow_dynamic on AND off"
+
+# (a) allow_dynamic: true — example.yaml keeps an alloc fallback for somemap, so
+# the crate pulls `extern crate alloc` yet still compiles as #![no_std] on a lib.
+grep -q 'extern crate alloc' "$WORK/ex-no-std/src/lib.rs" || { echo "FAIL: allow_dynamic crate should pull extern crate alloc"; exit 1; }
+( cd "$WORK/ex-no-std" && cargo build -q --lib --no-default-features )
+echo "==> [allow_dynamic=true] no_std lib (heapless + alloc fallback) builds"
+
+# (b) allow_dynamic: false (default) — a fully bounded schema must lower to pure
+# heapless with NO allocator at all (no `extern crate alloc`), and an unbounded
+# field must instead be a hard generation error.
+printf 'generic: { emit: project, timestamp: false }\ntargets: { rust: { corelib: rs-no-std } }\n' > "$WORK/cfg-strict.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-strict.yaml" --lang rust --in "$WORK/conf.yaml" --out "$WORK/strict" )
+if grep -q 'extern crate alloc' "$WORK/strict/src/lib.rs"; then echo "FAIL: strict (bounded, no allow_dynamic) crate must not pull alloc"; exit 1; fi
+sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/strict/Cargo.toml"
+( cd "$WORK/strict" && cargo build -q --lib --no-default-features )
+echo "==> [allow_dynamic=false] strict no_std lib (pure heapless, no alloc) builds"
+
+# an unbounded field without allow_dynamic is rejected, not silently heaped.
+printf 'version: 1\nmessages:\n  m: { payload: { s: { id: 0, type: string } } }\n' > "$WORK/unbounded.yaml"
+if ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-strict.yaml" --lang rust --in "$WORK/unbounded.yaml" --out "$WORK/unbounded" 2>/dev/null ); then
+    echo "FAIL: unbounded field under no_std without allow_dynamic should error"; exit 1
+fi
+echo "==> [allow_dynamic=false] unbounded field is correctly rejected"
 
 echo "==> no-std feature-subset smoke: a varint-only schema builds with no features"
 printf 'version: 1\nmessages:\n  tiny: { payload: { a: { id: 0, type: i32 }, b: { id: 1, type: u16 }, c: { id: 2, type: boolean } } }\n' > "$WORK/tiny.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-no-std.yaml" --lang rust --in "$WORK/tiny.yaml" --out "$WORK/tiny" )
-grep -q 'default-features = false }' "$WORK/tiny/Cargo.toml" || { echo "FAIL: varint-only schema should need no sofab features"; exit 1; }
+grep -q 'default-features = false' "$WORK/tiny/Cargo.toml" || { echo "FAIL: varint-only schema should need no sofab features"; exit 1; }
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/tiny/Cargo.toml"
 ( cd "$WORK/tiny" && cargo build -q )
 echo "==> minimal no-std footprint build OK"

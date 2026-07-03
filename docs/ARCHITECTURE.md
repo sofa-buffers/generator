@@ -458,7 +458,16 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    references them rather than emitting them — and are filled via the same
    `read_*` paths as their dynamic counterparts; genuinely
    unbounded fields (no `maxlen`/`count`) are rejected unless `allow_dynamic` opts
-   them into a `std::string`/`std::vector` fallback.
+   them into a `std::string`/`std::vector` fallback. **Rust `corelib: rs-no-std`
+   (`no_std`, on by default) is the direct analog** (`docs/generator/rust.md`):
+   bounded strings/blobs/sequence arrays lower to `heapless::String<N>` /
+   `heapless::Vec<T,N>` (the `heapless` crate; the corelib stays storage-agnostic),
+   `encode` fills a fixed `heapless::Vec<u8, MAX_SIZE>`, the location stack is a
+   bounded `heapless::Vec`, `serde` is gated behind a cargo feature, and the crate
+   root carries `#![no_std]` — same wire bytes, same `allow_dynamic` rule for
+   unbounded fields (an `alloc` fallback). A binary can't be `no_std` on a hosted
+   target, so the firmware artifact is the lib (`cargo build --lib
+   --no-default-features`); the JSON harness bin is a separate `std` target.
 2. **Push child-visitor** (Go). The generated struct implements the corelib's
    `sofab.Visitor`; `Decode<Msg>` runs `sofab.AcceptBytes(buf, m)`, a zero-copy
    cursor over the in-memory buffer that calls a typed method per field
