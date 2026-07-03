@@ -50,33 +50,38 @@ What `c-cpp` produces vs `cpp` (all sized from the schema's `maxlen`/`count`):
 
 | Field kind | `corelib: cpp` (dynamic) | `corelib: c-cpp` (fixed) |
 |---|---|---|
+| string (`maxlen N`) | `std::string` | `sofab::FixedString<N>` (inline, no heap) |
 | blob (`maxlen N`) | `std::vector<std::uint8_t>` | `FixedBytes<N>` (inline, no heap) |
+| string array (`count N`, elem `maxlen M`) | `std::vector<std::string>` | `InlineVector<sofab::FixedString<M>, N>` |
 | blob array (`count N`, elem `maxlen M`) | `std::vector<std::vector<std::uint8_t>>` | `InlineVector<FixedBytes<M>, N>` |
 | struct / union / matrix array (`count N`) | `std::vector<T>` | `InlineVector<T, N>` |
 | native numeric/enum/bool/bitfield array | `std::array<T, N>` | `std::array<T, N>` (already fixed) |
-| string (scalar or array element) | `std::string` / `std::vector<std::string>` | **unchanged — see below** |
 
-`FixedBytes<N>` / `InlineVector<T,N>` are emitted header-only into the generated
-prelude (no extra files ship). `InlineVector` separates capacity (`N`) from
-logical length, and its inline storage never reallocates, so it is strictly safer
-under the corelib-c-cpp deferred decoder than the `std::vector` + `reserve()` it
-replaces. A non-allocating `encodeTo(dst, cap)` is also emitted alongside the
-convenience `encode()`.
+`sofab::FixedString<N>` lives in the corelib-c-cpp wrapper (`sofab.hpp`): a
+heap-free, `std::string`-friendly fixed-capacity string (implicit
+construct/assign from `std::string`/`std::string_view`/`const char*`, implicit
+`operator std::string_view` view, `c_str()`, comparisons, `str()` to go back to an
+owning `std::string`). The decoder fills it in place via the same
+`read_string_noterm` path as `std::string`. `FixedBytes<N>` / `InlineVector<T,N>`
+are emitted header-only into the generated prelude (no extra files ship).
+`InlineVector` separates capacity (`N`) from logical length, and its inline
+storage never reallocates, so it is strictly safer under the corelib-c-cpp
+deferred decoder than the `std::vector` + `reserve()` it replaces. A
+non-allocating `encodeTo(dst, cap)` is also emitted alongside the convenience
+`encode()`.
 
-**Strings are not yet fixed.** A `FixedString<N>` needs a decode entry point in
-corelib-c-cpp for a non-`std::string` character buffer (the scalar read is
-hard-gated on `std::is_same_v<T, std::string>`, and `IStreamImpl`'s stream
-context is not reachable from generated code, so no interim bridge is possible).
-Until that lands, strings stay `std::string` even on the `c-cpp` path. Because
-`encode()`'s `std::vector` return and strings both remain, the `<string>` and
-`<vector>` header includes are also retained for now.
+**Unbounded fields.** A string or blob without `maxlen`, or an array without
+`count`, cannot be sized, so on the `c-cpp` path such a field fails generation with
+an error naming the field and the missing attribute — unless `allow_dynamic: true`
+keeps a `std::string`/`std::vector` fallback for it (bounded fields still go
+fixed). This makes "no hidden allocation" the default guarantee: size your schema,
+or consciously opt a field into a heap fallback.
 
-**Unbounded fields.** A blob without `maxlen`, or an array without `count`, cannot
-be sized, so on the `c-cpp` path such a field fails generation with an error
-naming the field and the missing attribute — unless `allow_dynamic: true` keeps a
-`std::vector`/`std::string` fallback for it (bounded fields still go fixed). This
-makes "no hidden allocation" the default guarantee: size your schema, or
-consciously opt a field into a heap fallback.
+The `encode()` convenience method still returns a `std::vector<std::uint8_t>`
+(heap) for host-side use; embedded callers use the non-allocating
+`encodeTo(dst, cap)`. Because `encode()` and the `allow_dynamic` fallbacks may
+still use `std::string`/`std::vector`, the `<string>`/`<vector>` header includes
+are retained.
 
 Note: the `-Os -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti`
 compile flags and `-Wl,--gc-sections` link flag ship in the generated `c-cpp`

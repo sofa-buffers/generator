@@ -446,14 +446,17 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    (Rust `[T; N]`, Java `long[]/float[]/double[]`) filled by index, not a
    grown heap collection. The C++ `c-cpp` wrapper (the embedded target) goes
    further: it **always** uses fixed-capacity, heap-free containers
-   (`docs/generator/cpp.md`) — blobs and struct/union/matrix/blob wrapper-sequence
-   arrays decode into schema-sized inline storage (`FixedBytes<N>` /
-   `InlineVector<T,N>`) instead of `std::vector`, removing message-path heap
-   allocation (pure `corelib: cpp` keeps `std::vector`/`std::string`). This is a
+   (`docs/generator/cpp.md`) — bounded strings, blobs, and their wrapper-sequence
+   arrays (plus struct/union/matrix sequences) decode into schema-sized inline
+   storage (`sofab::FixedString<N>` / `FixedBytes<N>` / `InlineVector<T,N>`)
+   instead of `std::string`/`std::vector`, removing message-path heap allocation
+   (pure `corelib: cpp` keeps `std::string`/`std::vector`). This is a
    representation change only — the deferred flat-visitor decode model and the wire
    bytes are unchanged (inline storage is address-stable, so it is strictly safer
-   under the deferred decoder). Strings remain `std::string` pending a
-   corelib-c-cpp fixed-string decode overload.
+   under the deferred decoder). `FixedString<N>` lives in the corelib-c-cpp wrapper
+   and is filled via the same `read_string_noterm` path as `std::string`; genuinely
+   unbounded fields (no `maxlen`/`count`) are rejected unless `allow_dynamic` opts
+   them into a `std::string`/`std::vector` fallback.
 2. **Push child-visitor** (Go). The generated struct implements the corelib's
    `sofab.Visitor`; `Decode<Msg>` runs `sofab.AcceptBytes(buf, m)`, a zero-copy
    cursor over the in-memory buffer that calls a typed method per field

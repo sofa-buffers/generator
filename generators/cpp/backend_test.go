@@ -143,41 +143,46 @@ func fixedHeader(t *testing.T, src, msgFile string, extra map[string]any) (strin
 	return "", nil
 }
 
-// TestCppFixedContainers: corelib: c-cpp lowers blobs and struct/matrix/blob
-// sequences to heap-free, schema-sized storage; strings and unbounded
-// (allow_dynamic) fields stay dynamic. Wire bytes are unchanged (proven
-// separately by the conformance run) — this asserts the emitted member types.
+// TestCppFixedContainers: corelib: c-cpp lowers bounded strings, blobs, and
+// struct/matrix/string/blob sequences to heap-free, schema-sized storage. Wire
+// bytes are unchanged (proven separately by the conformance run) — this asserts
+// the emitted member types.
 func TestCppFixedContainers(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      bl: { id: 0, type: blob, maxlen: 16 }\n" +
 		"      s: { id: 1, type: string, maxlen: 8 }\n" +
 		"      nums: { id: 2, type: array, items: { type: u32, count: 4 } }\n" +
 		"      blobs: { id: 3, type: array, items: { type: blob, count: 3, maxlen: 8 } }\n" +
-		"      pts: { id: 4, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n"
+		"      strs: { id: 4, type: array, items: { type: string, count: 5, maxlen: 16 } }\n" +
+		"      pts: { id: 5, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n"
 	h, err := fixedHeader(t, src, "m.hpp", nil)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"FixedBytes<16> bl = {};",                              // scalar blob -> fixed
-		"std::string s = \"\";",                                // string stays dynamic (deferred)
-		"std::array<std::uint32_t, 4> nums = {};",              // native array unchanged
-		"InlineVector<FixedBytes<8>, 3> blobs = {};",           // blob sequence -> inline
-		"InlineVector<MPtsElem",                                // struct sequence -> inline (prefix)
-		"struct FixedBytes {",                                  // prelude emitted
-		"struct InlineVector {",                                // prelude emitted
-		"if (bl != FixedBytes<16>{}) {",                        // blob default-compare typed
-		"static _FixedBlobSeq<InlineVector<FixedBytes<8>, 3>>", // blob-seq collector
-		"static _MsgSeqFixed<InlineVector<",                    // struct-seq collector
-		"std::size_t encodeTo(std::uint8_t *dst",               // heap-free encode
+		"FixedBytes<16> bl = {};",                                      // scalar blob -> fixed
+		"sofab::FixedString<8> s = \"\";",                              // bounded string -> FixedString
+		"std::array<std::uint32_t, 4> nums = {};",                      // native array unchanged
+		"InlineVector<FixedBytes<8>, 3> blobs = {};",                   // blob sequence -> inline
+		"InlineVector<sofab::FixedString<16>, 5> strs = {};",           // string sequence -> inline
+		"InlineVector<MPtsElem",                                        // struct sequence -> inline (prefix)
+		"struct FixedBytes {",                                          // prelude emitted
+		"struct InlineVector {",                                        // prelude emitted
+		"if (bl != FixedBytes<16>{}) {",                                // blob default-compare typed
+		"s.set_len(_size); if (_size) is.read(s);",                     // FixedString decode
+		"static _FixedBlobSeq<InlineVector<FixedBytes<8>, 3>>",         // blob-seq collector
+		"static _FixedStrSeq<InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
+		"static _MsgSeqFixed<InlineVector<",                            // struct-seq collector
+		"std::size_t encodeTo(std::uint8_t *dst",                       // heap-free encode
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("fixed header missing %q", want)
 		}
 	}
-	// No std::vector member for the blob or blob-sequence fields.
-	if strings.Contains(h, "std::vector<std::uint8_t> bl") || strings.Contains(h, "std::vector<std::vector<std::uint8_t>> blobs") {
-		t.Error("fixed profile must not emit std::vector for bounded blob/blob-array members")
+	// No std::string / std::vector member for the bounded string/blob fields.
+	if strings.Contains(h, "std::string s ") || strings.Contains(h, "std::vector<std::uint8_t> bl") ||
+		strings.Contains(h, "std::vector<std::string> strs") {
+		t.Error("fixed profile must not emit std::string/std::vector for bounded string/blob members")
 	}
 }
 
@@ -198,6 +203,35 @@ func TestCppFixedUnbounded(t *testing.T) {
 	}
 	if !strings.Contains(h, "std::vector<MMElem") && !strings.Contains(h, "std::vector<") {
 		t.Error("allow_dynamic should keep a std::vector fallback for the unbounded field")
+	}
+}
+
+// TestCppFixedUnboundedString: a string without maxlen is now an unbounded field
+// (no more string exemption) — a hard error, unless allow_dynamic keeps a
+// std::string fallback. A bounded string still becomes FixedString even under
+// allow_dynamic.
+func TestCppFixedUnboundedString(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s: { id: 0, type: string }\n"
+	if _, err := fixedHeader(t, src, "m.hpp", nil); err == nil {
+		t.Fatal("expected unbounded-string error under fixed profile")
+	} else if !strings.Contains(err.Error(), "has no maxlen") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	// allow_dynamic keeps the unbounded string as std::string, but a bounded one
+	// still becomes FixedString.
+	src2 := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s: { id: 0, type: string }\n" +
+		"      t: { id: 1, type: string, maxlen: 12 }\n"
+	h, err := fixedHeader(t, src2, "m.hpp", map[string]any{"allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("allow_dynamic should generate: %v", err)
+	}
+	if !strings.Contains(h, "std::string s = \"\";") {
+		t.Error("unbounded string under allow_dynamic should stay std::string")
+	}
+	if !strings.Contains(h, "sofab::FixedString<12> t = \"\";") {
+		t.Error("bounded string should still be FixedString even under allow_dynamic")
 	}
 }
 

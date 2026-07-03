@@ -68,10 +68,9 @@ type gen struct {
 	clib bool
 	// fixed is the fixed-capacity (embedded) representation; it is always equal to
 	// clib (corelib-c-cpp always uses fixed containers, corelib-cpp always dynamic).
-	// Blobs become FixedBytes<N> and struct/union/matrix/blob sequence arrays become
-	// InlineVector<T,N>, sized from the schema — no heap on the message path. Strings
-	// remain std::string (a fixed-string decode overload is blocked on a
-	// corelib-c-cpp addition).
+	// Bounded strings become sofab::FixedString<N>, blobs FixedBytes<N>, and
+	// string/blob/struct/union/matrix sequence arrays InlineVector<T,N>, all sized
+	// from the schema — no heap on the message path.
 	fixed bool
 	// allowDynamic keeps a std::vector/std::string fallback for genuinely
 	// unbounded fields (string/blob without maxlen, array without count) on the
@@ -393,7 +392,11 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// field length; a zero-length string binds no target (read_field asserts
 		// varlen > 0), so skip the read and leave it empty. corelib-cpp resizes
 		// for us, so an empty string is fine there.
-		if g.clib {
+		if g.fixed && fld.HasMaxlen {
+			// FixedString: set_len fixes the logical length (and the trailing NUL);
+			// read binds data()/size() via the same read_string_noterm path.
+			f.line("            %s.set_len(_size); if (_size) is.read(%s);", acc, acc)
+		} else if g.clib {
 			f.line("            %s.assign(_size, '\\0'); if (_size) is.read(%s);", acc, acc)
 		} else {
 			f.line("            is.read(%s);", acc)
@@ -469,7 +472,13 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 				ind, count, tv, tv, iv, iv, count, iv, target, iv, tv, iv)
 		}
 	case ir.KindString:
-		if g.clib {
+		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
+		if strings.HasPrefix(cont, "InlineVector") {
+			// Fixed string sequence: fill fixed inline FixedString slots by the
+			// element size via the scalar FixedString read, no heap. Static for the
+			// same deferred-decoder reason as the other fixed collectors.
+			f.line("%s{ static _FixedStrSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, cont, rv, rv, target, rv)
+		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
 			f.line("%s{ _StrSeq %s{%s}; is.read(%s); }", ind, rv, target, rv)
@@ -523,11 +532,10 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count i
 
 // checkBounded enforces the fixed-capacity (embedded) profile's unbounded-field
 // policy (plan §9): every field that the profile lowers to fixed storage must be
-// sized by the schema. A blob needs a maxlen; a struct/union/nested-array/blob
-// sequence needs a count (and a blob element needs an element maxlen). An
-// unbounded such field is a hard error unless allow_dynamic keeps a std::vector/
-// std::string fallback for it. Strings are exempt: they stay std::string in this
-// profile regardless (a fixed-string decode overload is blocked on corelib-c-cpp).
+// sized by the schema. A string or blob needs a maxlen; a
+// string/blob/struct/union/nested-array sequence needs a count (and a string/blob
+// element needs an element maxlen). An unbounded such field is a hard error unless
+// allow_dynamic keeps a std::vector/std::string fallback for it.
 func (g *gen) checkBounded(s *ir.Schema) error {
 	if g.allowDynamic {
 		return nil
@@ -537,9 +545,7 @@ func (g *gen) checkBounded(s *ir.Schema) error {
 	var walkArray func(owner, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool) error
 	walkArray = func(owner, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool) error {
 		switch elem {
-		case ir.KindString:
-			return nil // deferred to std::vector<std::string>
-		case ir.KindBlob:
+		case ir.KindString, ir.KindBlob:
 			if count <= 0 {
 				return unboundedErr(owner, path, "count")
 			}
@@ -566,7 +572,7 @@ func (g *gen) checkBounded(s *ir.Schema) error {
 		seen[owner] = true
 		for _, fld := range fields {
 			switch fld.Kind {
-			case ir.KindBlob:
+			case ir.KindString, ir.KindBlob:
 				if !fld.HasMaxlen {
 					return unboundedErr(owner, fld.Name, "maxlen")
 				}
@@ -591,7 +597,7 @@ func (g *gen) checkBounded(s *ir.Schema) error {
 }
 
 func unboundedErr(owner, path, missing string) error {
-	return fmt.Errorf("cpp: field %q in %q has no %s; the fixed-capacity (embedded) profile requires count on every array and maxlen on every blob (set allow_dynamic: true to keep a std::vector/std::string fallback for unbounded fields)", path, owner, missing)
+	return fmt.Errorf("cpp: field %q in %q has no %s; the fixed-capacity (embedded) profile requires count on every array and maxlen on every string/blob (set allow_dynamic: true to keep a std::vector/std::string fallback for unbounded fields)", path, owner, missing)
 }
 
 // reachable returns named-type keys used by m in post-order (children first).

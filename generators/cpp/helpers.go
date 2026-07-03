@@ -76,11 +76,14 @@ func (g *gen) cppType(f *ir.Field) string {
 	case ir.KindBool:
 		return "bool"
 	case ir.KindString:
-		// Strings stay std::string even in the fixed profile: a FixedString<N>
-		// decode overload is blocked on a corelib-c-cpp addition (the scalar string
-		// read is hard-gated on std::is_same_v<T,std::string>, and IStreamImpl::ctx_
-		// is protected/unreachable from generated code, so the interim bridge is not
-		// writable). See docs/generator/cpp.md.
+		// Fixed profile: a bounded string becomes sofab::FixedString<N> (heap-free
+		// inline storage; the corelib-c-cpp wrapper fills it via the same
+		// read_string_noterm path as std::string). An unbounded string has no
+		// maxlen, so it stays std::string — allowed only under allow_dynamic, else
+		// checkBounded rejects it.
+		if g.fixed && f.HasMaxlen {
+			return fmt.Sprintf("sofab::FixedString<%d>", f.Maxlen)
+		}
 		return "std::string"
 	case ir.KindBlob:
 		// Fixed profile: a bounded blob becomes fixed-capacity inline storage
@@ -119,8 +122,8 @@ func isNativeArrayElem(k ir.Kind) bool {
 // elements the default profile uses std::vector<T>; the fixed profile lowers a
 // bounded array (count present, and for blobs the element maxlen present) to an
 // InlineVector<T, count> — fixed inline storage with a separate logical length,
-// no heap. Strings remain std::vector<std::string> in either profile (the fixed
-// string element type is blocked on a corelib-c-cpp decode overload).
+// no heap. A string/blob element additionally needs its element maxlen to be
+// sized; without it the array stays std::vector.
 func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64) string {
 	et := g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax)
 	if isNativeArrayElem(elem) {
@@ -128,7 +131,7 @@ func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 	}
 	if g.fixed && count > 0 {
 		switch elem {
-		case ir.KindBlob:
+		case ir.KindString, ir.KindBlob:
 			if elemMaxHas {
 				return fmt.Sprintf("InlineVector<%s, %d>", et, count)
 			}
@@ -145,6 +148,9 @@ func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64) string {
 	switch elem {
 	case ir.KindString:
+		if g.fixed && elemMaxHas {
+			return fmt.Sprintf("sofab::FixedString<%d>", elemMax)
+		}
 		return "std::string"
 	case ir.KindBlob:
 		if g.fixed && elemMaxHas {
@@ -514,6 +520,15 @@ struct _FixedBlobSeq : sofab::IStreamMessage {
         auto &b = out->emplace_back();
         b.set_len(_size);
         if (_size) is.read(b.data(), _size);
+    }
+};
+template <typename Container>
+struct _FixedStrSeq : sofab::IStreamMessage {
+    Container *out = nullptr;
+    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t _size, std::size_t) noexcept override {
+        auto &s = out->emplace_back();
+        s.set_len(_size);
+        if (_size) is.read(s);
     }
 };`
 

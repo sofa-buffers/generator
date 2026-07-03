@@ -223,7 +223,8 @@ func (g *gen) emitFromJSON(f *hfile, fld *ir.Field) {
 	case ir.KindFP64:
 		f.line("        %s = sofab_json_double(c);", acc)
 	case ir.KindString:
-		f.line("        { size_t _l; const char *_s = sofab_json_string(c, &_l); %s.assign(_s, _l); }", acc)
+		// assign(string_view) works for both std::string and sofab::FixedString.
+		f.line("        { size_t _l; const char *_s = sofab_json_string(c, &_l); %s.assign(std::string_view{_s, _l}); }", acc)
 	case ir.KindBlob:
 		f.line("        %s.clear(); json_to_bytes(c, %s);", acc, acc)
 	case ir.KindEnum:
@@ -275,7 +276,12 @@ func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, re
 	f.line("%sconst sofab_json_t *%s = sofab_json_array_at(%s, %s);", inner, ev, node, iv)
 	switch elem {
 	case ir.KindString:
-		f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back(_s, _l); }", inner, ev, target)
+		if strings.HasPrefix(g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), "InlineVector") {
+			// InlineVector<FixedString>: default-construct a slot, then assign.
+			f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back().assign(std::string_view{_s, _l}); }", inner, ev, target)
+		} else {
+			f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back(_s, _l); }", inner, ev, target)
+		}
 	case ir.KindBlob:
 		f.line("%s{ %s _b{}; json_to_bytes(%s, _b); %s.push_back(std::move(_b)); }", inner, g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax), ev, target)
 	case ir.KindStruct, ir.KindUnion:
@@ -338,7 +344,7 @@ func defaultMessage(s *ir.Schema) string {
 	return ""
 }
 
-var jsonHelpers = `inline void json_str(std::ostream &out, const std::string &s) {
+var jsonHelpers = `inline void json_str(std::ostream &out, std::string_view s) {
     out << '"';
     for (unsigned char c : s) {
         if (c == '"' || c == '\\') { out << '\\' << c; }

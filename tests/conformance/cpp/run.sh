@@ -111,8 +111,11 @@ run_variant c-cpp "c-cpp" "-I$CC/src/include" SOFAB_C_DIR="$CC"
 # wrapper hard-requires FIXLEN and SEQUENCE (it #errors if either is disabled —
 # use the C API for those), so those two are only checked as expected rejections.
 # (corelib-cpp is always all-features, so this applies to corelib-c-cpp only.)
+# allow_dynamic: these subset schemas include string arrays without an element
+# maxlen; the fixed profile keeps a std::vector<std::string> fallback for those
+# (bounded strings still become FixedString<N>, exercised via the scalar fields).
 cat > "$WORK/cfg-clib.yaml" <<'YAML'
-targets: { cpp: { namespace: sofabuffers, corelib: c-cpp } }
+targets: { cpp: { namespace: sofabuffers, corelib: c-cpp, allow_dynamic: true } }
 YAML
 echo "==> corelib-c-cpp feature-subset configs (generated C++ vs the gated wrapper)"
 subset_cpp() {  # label  expect(ok|fail)  "DISABLE flags"  "yaml"
