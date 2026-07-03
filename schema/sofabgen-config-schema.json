@@ -300,6 +300,17 @@
           ],
           "default": "cpp"
         },
+        "containers": {
+          "type": "string",
+          "enum": [
+            "dynamic",
+            "fixed"
+          ],
+          "default": "dynamic"
+        },
+        "allow_dynamic": {
+          "type": "boolean"
+        },
         "emit": {
           "type": "string",
           "enum": [

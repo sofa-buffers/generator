@@ -33,7 +33,20 @@ func (*Backend) Lang() string { return "cpp" }
 
 // Generate emits one header-only .hpp per message (with its reachable types).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: cfgString(cfg, "corelib", "cpp") == "c-cpp"}
+	clib := cfgString(cfg, "corelib", "cpp") == "c-cpp"
+	fixed := cfgString(cfg, "containers", "dynamic") == "fixed"
+	// The fixed-capacity (embedded) profile layers on the corelib-c-cpp wrapper:
+	// its inline containers rely on the wrapper's deferred, address-stable decode
+	// model. It is meaningless (and unsupported) against the pure corelib-cpp.
+	if fixed && !clib {
+		return nil, fmt.Errorf("cpp: containers: fixed requires corelib: c-cpp (the fixed-capacity embedded profile targets the corelib-c-cpp wrapper)")
+	}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: clib, fixed: fixed, allowDynamic: cfgBool(cfg, "allow_dynamic", false)}
+	if fixed {
+		if err := g.checkBounded(s); err != nil {
+			return nil, err
+		}
+	}
 	var files []generator.File
 	for _, m := range s.Messages {
 		files = append(files, generator.File{Path: strings.ToLower(m.Name) + ".hpp", Content: g.header(m)})
@@ -54,6 +67,16 @@ type gen struct {
 	// existing buffer rather than resizing it, so generated decode must pre-size
 	// variable-length fields from the field length the deserialize callback gets.
 	clib bool
+	// fixed selects the fixed-capacity (embedded) profile (containers: fixed),
+	// layered on clib. Blobs become FixedBytes<N> and struct/union/matrix/blob
+	// sequence arrays become InlineVector<T,N>, sized from the schema — no heap on
+	// the message path. Strings remain std::string (a fixed-string decode overload
+	// is blocked on a corelib-c-cpp addition).
+	fixed bool
+	// allowDynamic keeps a std::vector/std::string fallback for genuinely
+	// unbounded fields (string/blob without maxlen, array without count) under the
+	// fixed profile; without it such a field is a hard generate-time error.
+	allowDynamic bool
 }
 
 type hfile struct{ b strings.Builder }
@@ -96,6 +119,9 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.line("#define SOFABUFFERS_GEN_PRELUDE")
 	if !g.clib {
 		f.line("%s", cppPrelude)
+	}
+	if g.fixed {
+		f.line("%s", cppFixedPrelude)
 	}
 	f.line("%s", cppMsgSeqPrelude)
 	f.line("#endif")
@@ -164,6 +190,19 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.line("        serialize(os);")
 		f.line("        return std::vector<std::uint8_t>(os.data(), os.data() + os.bytesUsed());")
 		f.line("    }")
+		if g.fixed {
+			// Heap-free encode for the embedded profile: serialize into an inline
+			// buffer and copy into caller storage. Returns the byte count, or 0 if
+			// the output does not fit in cap (bytes are otherwise unchanged).
+			f.line("    std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {")
+			f.line("        sofab::OStreamInline<_maxSize> os;")
+			f.line("        serialize(os);")
+			f.line("        std::size_t n = os.bytesUsed();")
+			f.line("        if (n > cap) { return 0; }")
+			f.line("        for (std::size_t i = 0; i < n; ++i) { dst[i] = os.data()[i]; }")
+			f.line("        return n;")
+			f.line("    }")
+		}
 		f.line("    static %s decode(const std::uint8_t *data, std::size_t len) {", name)
 		f.line("        sofab::IStreamObject<%s> in;", name)
 		f.line("        in.feed(data, len);")
@@ -271,7 +310,7 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 		// A blob is a leaf: sparse-canonical encoding (MESSAGE_SPEC S2) omits it
 		// when it equals its default (empty if none). The decoder reconstructs the
 		// omitted blob from the member's construction default.
-		f.line("        if (%s != std::vector<std::uint8_t>%s) { (void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size())); }", acc, g.cppDefault(fld), fld.ID, acc, acc)
+		f.line("        if (%s != %s%s) { (void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size())); }", acc, g.cppType(fld), g.cppDefault(fld), fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence is ALWAYS framed; its child fields are omitted per-field by the
@@ -295,7 +334,7 @@ func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
 	// a wrapper sequence and is ALWAYS framed (never whole-omitted, no per-element
 	// omission).
 	if isNativeArrayElem(fld.Elem) {
-		def := g.cppArrayContainer(fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count) + g.cppDefault(fld)
+		def := g.cppArrayContainer(fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax) + g.cppDefault(fld)
 		f.line("        if (%s != %s) {", acc, def)
 		g.serializeArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0)
 		f.line("        }")
@@ -365,7 +404,11 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// corelib-c-cpp binds blobs with the BLOB tag via its read(void*, size_t)
 		// overload into the address-stable vector buffer; corelib-cpp reads a
 		// length-prefixed blob into a std::string.
-		if g.clib {
+		if g.fixed && fld.HasMaxlen {
+			// FixedBytes: bound the inline buffer's logical length, then bind the
+			// stable buffer via the wrapper's read(void*,size_t) blob overload.
+			f.line("            %s.set_len(_size); is.read(%s.data(), _size);", acc, acc)
+		} else if g.clib {
 			f.line("            %s.resize(_size); is.read(%s.data(), _size);", acc, acc)
 		} else {
 			f.line("            { std::string _t; is.read(_t); %s.assign(_t.begin(), _t.end()); }", acc)
@@ -389,7 +432,7 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			f.line("            { std::uint64_t _v = 0; is.read(_v); %s = static_cast<%s>(_v); }", acc, g.cppType(fld))
 		}
 	case ir.KindArray:
-		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0)
+		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0)
 	}
 }
 
@@ -400,7 +443,7 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 // address for a deferred pass, so its enum/boolean arrays read in place (a temp
 // would dangle) and the target vector is reserved so an emplace never moves a
 // still-unfilled bound element.
-func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, depth int) {
+func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64, depth int) {
 	tv := fmt.Sprintf("_t%d", depth)
 	iv := fmt.Sprintf("_i%d", depth)
 	rv := fmt.Sprintf("_r%d", depth)
@@ -415,7 +458,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			f.line("%sis.read(reinterpret_cast<std::array<%s, %d> &>(%s));", ind, bk, count, target)
 		} else {
 			f.line("%s{ std::array<%s, %d> %s{}; is.read(%s); for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); }",
-				ind, bk, count, tv, tv, iv, iv, count, iv, target, iv, g.cppArrayElem(elem, ref, items), tv, iv)
+				ind, bk, count, tv, tv, iv, iv, count, iv, target, iv, g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax), tv, iv)
 		}
 	case ir.KindBool:
 		if g.clib {
@@ -431,16 +474,24 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			f.line("%s{ _StrSeq %s{%s}; is.read(%s); }", ind, rv, target, rv)
 		}
 	case ir.KindBlob:
-		if g.clib {
+		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
+		if strings.HasPrefix(cont, "InlineVector") {
+			// Fixed blob sequence: fill fixed inline slots by the element size (the
+			// read(void*,size_t) blob overload), no heap. The collector is static
+			// because the corelib-c-cpp decoder dereferences it after this returns.
+			f.line("%s{ static _FixedBlobSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, cont, rv, rv, target, rv)
+		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
 			f.line("%s{ _BlobSeq %s{%s}; is.read(%s); }", ind, rv, target, rv)
 		}
 	case ir.KindStruct, ir.KindUnion:
-		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, rv)
+		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
+		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, rv, cont)
 	case ir.KindArray:
-		inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count)
-		g.deserializeSeqInto(f, ind, target, inner, count, rv)
+		inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
+		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
+		g.deserializeSeqInto(f, ind, target, inner, count, rv, cont)
 	}
 }
 
@@ -450,7 +501,14 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 // visitor after this call returns, so its visitor gets static storage; a fixed
 // count also reserves the target up front so an emplace never reallocates a
 // still-bound element (a dynamic sequence cannot be pre-sized this way).
-func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count int64, rv string) {
+func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count int64, rv, container string) {
+	if strings.HasPrefix(container, "InlineVector") {
+		// Fixed inline sequence: the visitor emplaces into the next inline slot
+		// (address-stable, no reserve/reallocation). Static for the same deferred
+		// reason as the dynamic clib path.
+		f.line("%s{ static _MsgSeqFixed<%s> %s; %s.out = &%s; is.read(%s); }", ind, container, rv, rv, target, rv)
+		return
+	}
 	if g.clib {
 		reserve := ""
 		if count > 0 {
@@ -460,6 +518,79 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count i
 		return
 	}
 	f.line("%s{ _MsgSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, elemType, rv, rv, target, rv)
+}
+
+// checkBounded enforces the fixed-capacity (embedded) profile's unbounded-field
+// policy (plan §9): every field that the profile lowers to fixed storage must be
+// sized by the schema. A blob needs a maxlen; a struct/union/nested-array/blob
+// sequence needs a count (and a blob element needs an element maxlen). An
+// unbounded such field is a hard error unless allow_dynamic keeps a std::vector/
+// std::string fallback for it. Strings are exempt: they stay std::string in this
+// profile regardless (a fixed-string decode overload is blocked on corelib-c-cpp).
+func (g *gen) checkBounded(s *ir.Schema) error {
+	if g.allowDynamic {
+		return nil
+	}
+	seen := map[string]bool{}
+	var walkFields func(owner string, fields []*ir.Field) error
+	var walkArray func(owner, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool) error
+	walkArray = func(owner, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool) error {
+		switch elem {
+		case ir.KindString:
+			return nil // deferred to std::vector<std::string>
+		case ir.KindBlob:
+			if count <= 0 {
+				return unboundedErr(owner, path, "count")
+			}
+			if !elemMaxHas {
+				return unboundedErr(owner, path, "element maxlen")
+			}
+		case ir.KindStruct, ir.KindUnion:
+			if count <= 0 {
+				return unboundedErr(owner, path, "count")
+			}
+			return walkFields(g.typeName(ref.Key), ref.Target.Fields)
+		case ir.KindArray:
+			if count <= 0 {
+				return unboundedErr(owner, path, "count")
+			}
+			return walkArray(owner, path+"[]", items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas)
+		}
+		return nil
+	}
+	walkFields = func(owner string, fields []*ir.Field) error {
+		if seen[owner] {
+			return nil
+		}
+		seen[owner] = true
+		for _, fld := range fields {
+			switch fld.Kind {
+			case ir.KindBlob:
+				if !fld.HasMaxlen {
+					return unboundedErr(owner, fld.Name, "maxlen")
+				}
+			case ir.KindStruct, ir.KindUnion:
+				if err := walkFields(g.typeName(fld.Ref.Key), fld.Ref.Target.Fields); err != nil {
+					return err
+				}
+			case ir.KindArray:
+				if err := walkArray(owner, fld.Name, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	for _, m := range s.Messages {
+		if err := walkFields(exported(m.Name), m.Fields); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func unboundedErr(owner, path, missing string) error {
+	return fmt.Errorf("cpp: field %q in %q has no %s; the fixed-capacity (embedded) profile requires count on every array and maxlen on every blob (set allow_dynamic: true to keep a std::vector/std::string fallback for unbounded fields)", path, owner, missing)
 }
 
 // reachable returns named-type keys used by m in post-order (children first).

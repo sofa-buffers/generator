@@ -106,6 +106,116 @@ func headerFromYAML(t *testing.T, src, msgFile string) string {
 	return ""
 }
 
+// fixedHeader generates a message header under the fixed-capacity (embedded)
+// profile (containers: fixed, corelib: c-cpp) with the given extra config.
+func fixedHeader(t *testing.T, src, msgFile string, extra map[string]any) (string, error) {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "in.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]any{"namespace": "sofabuffers", "corelib": "c-cpp", "containers": "fixed"}
+	for k, v := range extra {
+		cfg[k] = v
+	}
+	files, err := (&Backend{}).Generate(s, cfg)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range files {
+		if f.Path == msgFile {
+			return string(f.Content), nil
+		}
+	}
+	t.Fatalf("no header %s", msgFile)
+	return "", nil
+}
+
+// TestCppFixedContainers: the opt-in fixed-capacity profile lowers blobs and
+// struct/matrix/blob sequences to heap-free, schema-sized storage; strings and
+// unbounded (allow_dynamic) fields stay dynamic. Wire bytes are unchanged (proven
+// separately by the conformance run) — this asserts the emitted member types.
+func TestCppFixedContainers(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      bl: { id: 0, type: blob, maxlen: 16 }\n" +
+		"      s: { id: 1, type: string, maxlen: 8 }\n" +
+		"      nums: { id: 2, type: array, items: { type: u32, count: 4 } }\n" +
+		"      blobs: { id: 3, type: array, items: { type: blob, count: 3, maxlen: 8 } }\n" +
+		"      pts: { id: 4, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n"
+	h, err := fixedHeader(t, src, "m.hpp", nil)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"FixedBytes<16> bl = {};",                              // scalar blob -> fixed
+		"std::string s = \"\";",                                // string stays dynamic (deferred)
+		"std::array<std::uint32_t, 4> nums = {};",              // native array unchanged
+		"InlineVector<FixedBytes<8>, 3> blobs = {};",           // blob sequence -> inline
+		"InlineVector<MPtsElem",                                // struct sequence -> inline (prefix)
+		"struct FixedBytes {",                                  // prelude emitted
+		"struct InlineVector {",                                // prelude emitted
+		"if (bl != FixedBytes<16>{}) {",                        // blob default-compare typed
+		"static _FixedBlobSeq<InlineVector<FixedBytes<8>, 3>>", // blob-seq collector
+		"static _MsgSeqFixed<InlineVector<",                    // struct-seq collector
+		"std::size_t encodeTo(std::uint8_t *dst",               // heap-free encode
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("fixed header missing %q", want)
+		}
+	}
+	// No std::vector member for the blob or blob-sequence fields.
+	if strings.Contains(h, "std::vector<std::uint8_t> bl") || strings.Contains(h, "std::vector<std::vector<std::uint8_t>> blobs") {
+		t.Error("fixed profile must not emit std::vector for bounded blob/blob-array members")
+	}
+}
+
+// TestCppFixedUnbounded: an unbounded field (array without count) is a hard error
+// under the fixed profile, unless allow_dynamic keeps a std::vector fallback.
+func TestCppFixedUnbounded(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      m: { id: 0, type: array, items: { type: struct, fields: { k: { id: 0, type: i32 } } } }\n"
+	if _, err := fixedHeader(t, src, "m.hpp", nil); err == nil {
+		t.Fatal("expected unbounded-field error under fixed profile")
+	} else if !strings.Contains(err.Error(), "has no count") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	// allow_dynamic keeps a std::vector fallback and generates cleanly.
+	h, err := fixedHeader(t, src, "m.hpp", map[string]any{"allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("allow_dynamic should generate: %v", err)
+	}
+	if !strings.Contains(h, "std::vector<MMElem") && !strings.Contains(h, "std::vector<") {
+		t.Error("allow_dynamic should keep a std::vector fallback for the unbounded field")
+	}
+}
+
+// TestCppFixedRequiresClib: the fixed profile is only meaningful on corelib-c-cpp.
+func TestCppFixedRequiresClib(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n      a: { id: 0, type: u32 }\n"
+	doc, _ := parser.Parse([]byte(src), "in.yaml")
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, _ := model.Build(doc)
+	_ = analysis.Analyze(s)
+	_, err := (&Backend{}).Generate(s, map[string]any{"containers": "fixed"}) // corelib defaults to cpp
+	if err == nil || !strings.Contains(err.Error(), "requires corelib: c-cpp") {
+		t.Errorf("expected corelib gate error, got %v", err)
+	}
+}
+
 // TestCppSparse: the C++ serialize is always sparse-canonical (MESSAGE_SPEC S2),
 // with no config toggle. A scalar/string/blob leaf is written under an
 // "if (v != default)" guard; a native scalar array (leaf) is whole-omitted vs a
