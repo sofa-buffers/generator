@@ -34,21 +34,12 @@ func (*Backend) Lang() string { return "cpp" }
 // Generate emits one header-only .hpp per message (with its reachable types).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	clib := cfgString(cfg, "corelib", "cpp") == "c-cpp"
-	// containers defaults to `fixed` on the corelib-c-cpp (embedded) path — the
-	// heap-free representation is the expected one for that target — and to
-	// `dynamic` on the pure corelib-cpp (max-speed) path. Either can be overridden
-	// explicitly; `containers: fixed` is only valid with corelib: c-cpp.
-	containersDefault := "dynamic"
-	if clib {
-		containersDefault = "fixed"
-	}
-	fixed := cfgString(cfg, "containers", containersDefault) == "fixed"
-	// The fixed-capacity (embedded) profile layers on the corelib-c-cpp wrapper:
-	// its inline containers rely on the wrapper's deferred, address-stable decode
-	// model. It is meaningless (and unsupported) against the pure corelib-cpp.
-	if fixed && !clib {
-		return nil, fmt.Errorf("cpp: containers: fixed requires corelib: c-cpp (the fixed-capacity embedded profile targets the corelib-c-cpp wrapper)")
-	}
+	// corelib-c-cpp targets real embedded devices, so it always uses fixed-capacity,
+	// heap-free containers (blobs -> FixedBytes<N>, struct/union/matrix/blob
+	// sequences -> InlineVector<T,N>, sized from the schema). There is no knob: if a
+	// target has the resources for a heap, use corelib: cpp (which uses
+	// std::vector/std::string). The pure corelib-cpp path keeps dynamic containers.
+	fixed := clib
 	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: clib, fixed: fixed, allowDynamic: cfgBool(cfg, "allow_dynamic", false)}
 	if fixed {
 		if err := g.checkBounded(s); err != nil {
@@ -75,15 +66,17 @@ type gen struct {
 	// existing buffer rather than resizing it, so generated decode must pre-size
 	// variable-length fields from the field length the deserialize callback gets.
 	clib bool
-	// fixed selects the fixed-capacity (embedded) profile (containers: fixed),
-	// layered on clib. Blobs become FixedBytes<N> and struct/union/matrix/blob
-	// sequence arrays become InlineVector<T,N>, sized from the schema — no heap on
-	// the message path. Strings remain std::string (a fixed-string decode overload
-	// is blocked on a corelib-c-cpp addition).
+	// fixed is the fixed-capacity (embedded) representation; it is always equal to
+	// clib (corelib-c-cpp always uses fixed containers, corelib-cpp always dynamic).
+	// Blobs become FixedBytes<N> and struct/union/matrix/blob sequence arrays become
+	// InlineVector<T,N>, sized from the schema — no heap on the message path. Strings
+	// remain std::string (a fixed-string decode overload is blocked on a
+	// corelib-c-cpp addition).
 	fixed bool
 	// allowDynamic keeps a std::vector/std::string fallback for genuinely
-	// unbounded fields (string/blob without maxlen, array without count) under the
-	// fixed profile; without it such a field is a hard generate-time error.
+	// unbounded fields (string/blob without maxlen, array without count) on the
+	// c-cpp path; without it such a field is a hard generate-time error (an
+	// embedded target must size its schema or opt the field into a heap fallback).
 	allowDynamic bool
 }
 

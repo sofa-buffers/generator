@@ -300,16 +300,9 @@
           ],
           "default": "cpp"
         },
-        "containers": {
-          "type": "string",
-          "description": "Container storage profile. 'fixed' = heap-free, schema-sized inline storage (requires corelib: c-cpp); 'dynamic' = std::vector/std::string. Defaults to 'fixed' when corelib is c-cpp, otherwise 'dynamic'.",
-          "enum": [
-            "dynamic",
-            "fixed"
-          ]
-        },
         "allow_dynamic": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "corelib: c-cpp only. Keep a std::vector/std::string heap fallback for genuinely unbounded fields (string/blob without maxlen, array without count) instead of failing generation; bounded fields still use fixed-capacity inline storage."
         },
         "emit": {
           "type": "string",

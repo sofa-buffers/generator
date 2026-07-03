@@ -8,9 +8,8 @@ config.
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets (see below). |
-| `containers` | `dynamic` \| `fixed` | `fixed` on `c-cpp`, else `dynamic` | `fixed` = the heap-free embedded profile: blobs and struct/union/matrix/blob sequences become fixed-capacity inline storage sized from the schema. Requires `corelib: c-cpp` (see below). |
-| `allow_dynamic` | bool | `false` | Under `containers: fixed`, keep a `std::vector`/`std::string` fallback for genuinely unbounded fields instead of failing generation. |
+| `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets. This also picks the container representation: `cpp` = dynamic (`std::vector`/`std::string`), `c-cpp` = fixed-capacity/heap-free (see below). |
+| `allow_dynamic` | bool | `false` | `corelib: c-cpp` only. Keep a `std::vector`/`std::string` heap fallback for genuinely unbounded fields instead of failing generation. |
 | `namespace` | string | `messages` | C++ namespace wrapping the generated types. Also settable in `generic`. |
 
 ### `corelib`
@@ -38,25 +37,23 @@ targets:
 [`corelib-cpp`]: https://github.com/sofa-buffers/corelib-cpp
 [`corelib-c-cpp`]: https://github.com/sofa-buffers/corelib-c-cpp
 
-### `containers: fixed` (embedded footprint profile)
+### `corelib: c-cpp` = fixed-capacity (embedded) containers
 
-The heap-free profile, and the **default for `corelib: c-cpp`** — embedded is the
-regular use of that target, so fixed containers are what you get unless you set
-`containers: dynamic`. (On the pure `corelib: cpp` max-speed path the default is
-`dynamic`, and `fixed` there is a generate-time error.) It removes hidden dynamic
-allocation from the generated message code, for embedded targets with very
-constrained memory. Wire output is **unchanged** — this is purely an in-memory
-representation change, so
-the shared conformance vectors and every sha256 stay identical.
+`corelib: c-cpp` targets real embedded devices, so it **always** uses fixed-capacity,
+heap-free containers — there is no separate knob. This removes hidden dynamic
+allocation from the generated message code. If a target has the resources for a
+heap, use `corelib: cpp` (which uses `std::vector`/`std::string`). Wire output is
+identical either way — this is purely an in-memory representation change, so the
+shared conformance vectors and every sha256 stay the same.
 
-What changes (all sized from the schema's `maxlen`/`count`):
+What `c-cpp` produces vs `cpp` (all sized from the schema's `maxlen`/`count`):
 
-| Field kind | default `c-cpp` | `containers: fixed` |
+| Field kind | `corelib: cpp` (dynamic) | `corelib: c-cpp` (fixed) |
 |---|---|---|
 | blob (`maxlen N`) | `std::vector<std::uint8_t>` | `FixedBytes<N>` (inline, no heap) |
 | blob array (`count N`, elem `maxlen M`) | `std::vector<std::vector<std::uint8_t>>` | `InlineVector<FixedBytes<M>, N>` |
 | struct / union / matrix array (`count N`) | `std::vector<T>` | `InlineVector<T, N>` |
-| native numeric/enum/bool/bitfield array | `std::array<T, N>` | unchanged (already fixed) |
+| native numeric/enum/bool/bitfield array | `std::array<T, N>` | `std::array<T, N>` (already fixed) |
 | string (scalar or array element) | `std::string` / `std::vector<std::string>` | **unchanged — see below** |
 
 `FixedBytes<N>` / `InlineVector<T,N>` are emitted header-only into the generated
@@ -70,30 +67,28 @@ convenience `encode()`.
 corelib-c-cpp for a non-`std::string` character buffer (the scalar read is
 hard-gated on `std::is_same_v<T, std::string>`, and `IStreamImpl`'s stream
 context is not reachable from generated code, so no interim bridge is possible).
-Until that lands, strings stay `std::string` even under `containers: fixed`.
-Because `encode()`'s `std::vector` return and strings both remain, the `<string>`
-and `<vector>` header includes are also retained for now.
+Until that lands, strings stay `std::string` even on the `c-cpp` path. Because
+`encode()`'s `std::vector` return and strings both remain, the `<string>` and
+`<vector>` header includes are also retained for now.
 
 **Unbounded fields.** A blob without `maxlen`, or an array without `count`, cannot
-be sized. Under `containers: fixed` such a field fails generation with an error
-naming the field and the missing attribute, unless `allow_dynamic: true` keeps a
-`std::vector` fallback for it (bounded fields still go fixed). This makes "no
-hidden allocation" an explicit, opted-into guarantee rather than a silent
-per-field fallback.
+be sized, so on the `c-cpp` path such a field fails generation with an error
+naming the field and the missing attribute — unless `allow_dynamic: true` keeps a
+`std::vector`/`std::string` fallback for it (bounded fields still go fixed). This
+makes "no hidden allocation" the default guarantee: size your schema, or
+consciously opt a field into a heap fallback.
 
 Note: the `-Os -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti`
-compile flags and `-Wl,--gc-sections` link flag now ship in the generated
-`c-cpp` `Makefile` **unconditionally** (all generated + corelib code is `noexcept`
-and uses no RTTI), independent of `containers` — a `.text` win with no wire/API
-change.
+compile flags and `-Wl,--gc-sections` link flag ship in the generated `c-cpp`
+`Makefile` (all generated + corelib code is `noexcept` and uses no RTTI) — a
+`.text` win with no wire/API change.
 
 ```yaml
 targets:
   cpp:
     namespace: myproj
-    corelib: c-cpp            # containers: fixed is implied (the default here)
-    allow_dynamic: true       # optional: keep std::vector for unbounded fields
-    # containers: dynamic     # set this to opt back out to std::vector/std::string
+    corelib: c-cpp        # fixed-capacity, heap-free containers
+    allow_dynamic: true   # optional: keep std::vector/std::string for unbounded fields
 ```
 
 ## Reserved options

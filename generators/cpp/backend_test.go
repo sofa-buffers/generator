@@ -107,7 +107,8 @@ func headerFromYAML(t *testing.T, src, msgFile string) string {
 }
 
 // fixedHeader generates a message header under the fixed-capacity (embedded)
-// profile (containers: fixed, corelib: c-cpp) with the given extra config.
+// profile — i.e. corelib: c-cpp, which always uses fixed containers — with the
+// given extra config.
 func fixedHeader(t *testing.T, src, msgFile string, extra map[string]any) (string, error) {
 	t.Helper()
 	doc, err := parser.Parse([]byte(src), "in.yaml")
@@ -125,7 +126,7 @@ func fixedHeader(t *testing.T, src, msgFile string, extra map[string]any) (strin
 	if err := analysis.Analyze(s); err != nil {
 		t.Fatal(err)
 	}
-	cfg := map[string]any{"namespace": "sofabuffers", "corelib": "c-cpp", "containers": "fixed"}
+	cfg := map[string]any{"namespace": "sofabuffers", "corelib": "c-cpp"}
 	for k, v := range extra {
 		cfg[k] = v
 	}
@@ -142,9 +143,9 @@ func fixedHeader(t *testing.T, src, msgFile string, extra map[string]any) (strin
 	return "", nil
 }
 
-// TestCppFixedContainers: the opt-in fixed-capacity profile lowers blobs and
-// struct/matrix/blob sequences to heap-free, schema-sized storage; strings and
-// unbounded (allow_dynamic) fields stay dynamic. Wire bytes are unchanged (proven
+// TestCppFixedContainers: corelib: c-cpp lowers blobs and struct/matrix/blob
+// sequences to heap-free, schema-sized storage; strings and unbounded
+// (allow_dynamic) fields stay dynamic. Wire bytes are unchanged (proven
 // separately by the conformance run) — this asserts the emitted member types.
 func TestCppFixedContainers(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
@@ -200,22 +201,6 @@ func TestCppFixedUnbounded(t *testing.T) {
 	}
 }
 
-// TestCppFixedRequiresClib: the fixed profile is only meaningful on corelib-c-cpp.
-func TestCppFixedRequiresClib(t *testing.T) {
-	src := "version: 1\nmessages:\n  M:\n    payload:\n      a: { id: 0, type: u32 }\n"
-	doc, _ := parser.Parse([]byte(src), "in.yaml")
-	resolved, _ := doc.Resolve()
-	if errs := parser.Validate(resolved); errs != nil {
-		t.Fatalf("invalid: %v", errs)
-	}
-	s, _ := model.Build(doc)
-	_ = analysis.Analyze(s)
-	_, err := (&Backend{}).Generate(s, map[string]any{"containers": "fixed"}) // corelib defaults to cpp
-	if err == nil || !strings.Contains(err.Error(), "requires corelib: c-cpp") {
-		t.Errorf("expected corelib gate error, got %v", err)
-	}
-}
-
 // genHeader generates a single header with an explicit config (no defaults added
 // beyond the backend's own), returning the header body.
 func genHeader(t *testing.T, src, msgFile string, cfg map[string]any) (string, error) {
@@ -248,34 +233,26 @@ func genHeader(t *testing.T, src, msgFile string, cfg map[string]any) (string, e
 	return "", nil
 }
 
-// TestCppContainersDefault: corelib c-cpp (the embedded target) defaults to the
-// fixed-capacity profile; the pure-cpp path stays dynamic; and either default can
-// be overridden explicitly.
-func TestCppContainersDefault(t *testing.T) {
+// TestCppContainersByCorelib: the container representation is chosen solely by
+// corelib — c-cpp (embedded) always uses fixed-capacity storage, pure cpp always
+// uses dynamic std::vector/std::string. There is no separate knob.
+func TestCppContainersByCorelib(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n      bl: { id: 0, type: blob, maxlen: 16 }\n"
-	// c-cpp, no containers key -> fixed by default.
+	// corelib: c-cpp -> fixed containers.
 	h, err := genHeader(t, src, "m.hpp", map[string]any{"namespace": "sofabuffers", "corelib": "c-cpp"})
 	if err != nil {
-		t.Fatalf("c-cpp default generate: %v", err)
+		t.Fatalf("c-cpp generate: %v", err)
 	}
 	if !strings.Contains(h, "FixedBytes<16> bl") {
-		t.Error("c-cpp should default to containers: fixed (expected FixedBytes member)")
+		t.Error("c-cpp should use fixed containers (expected FixedBytes member)")
 	}
-	// c-cpp with explicit dynamic opt-out -> std::vector.
-	h, err = genHeader(t, src, "m.hpp", map[string]any{"namespace": "sofabuffers", "corelib": "c-cpp", "containers": "dynamic"})
-	if err != nil {
-		t.Fatalf("c-cpp dynamic generate: %v", err)
-	}
-	if !strings.Contains(h, "std::vector<std::uint8_t> bl") {
-		t.Error("containers: dynamic should opt back out to std::vector")
-	}
-	// pure cpp -> dynamic by default (no corelib key).
+	// pure cpp (default) -> dynamic std::vector.
 	h, err = genHeader(t, src, "m.hpp", map[string]any{"namespace": "sofabuffers"})
 	if err != nil {
-		t.Fatalf("cpp default generate: %v", err)
+		t.Fatalf("cpp generate: %v", err)
 	}
 	if !strings.Contains(h, "std::vector<std::uint8_t> bl") {
-		t.Error("pure cpp should default to containers: dynamic")
+		t.Error("pure cpp should use dynamic std::vector")
 	}
 }
 

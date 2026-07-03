@@ -433,8 +433,8 @@ struct _MsgSeq : sofab::IStreamMessage {
     }
 };`
 
-// cppFixedPrelude is emitted only for the fixed-capacity (embedded) profile
-// (containers: fixed, corelib: c-cpp). It provides heap-free, schema-sized
+// cppFixedPrelude is emitted only for the fixed-capacity (embedded) path
+// (corelib: c-cpp). It provides heap-free, schema-sized
 // storage that presents the same .data()/.size() surface the encode/decode paths
 // already use, so the emitted wire bytes are unchanged.
 //
