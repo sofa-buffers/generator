@@ -186,16 +186,22 @@ func (g *gen) emitTo(f *jfile, fld *ir.Field) {
 }
 
 func (g *gen) emitToArray(f *jfile, fld *ir.Field, acc string) {
-	g.jsonToArray(f, "        ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	g.jsonToArray(f, "        ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, primitiveArrayElem(fld.Elem))
 }
 
 // jsonToArray writes val as a JSON array. u* elements print unsigned; struct/union
 // recurse via to(); nested arrays recurse; the rest print via append. Loop vars
-// are depth-suffixed to nest safely.
-func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+// are depth-suffixed to nest safely. prim: val is a primitive array (index via
+// [i]/length) rather than a boxed List (get(i)/size()).
+func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, prim bool) {
 	iv := fmt.Sprintf("_i%d", depth)
 	el := fmt.Sprintf("%s.get(%s)", val, iv)
-	f.line("%s{ b.append('['); for (int %s = 0; %s < %s.size(); %s++) { if (%s>0) b.append(',');", ind, iv, iv, val, iv, iv)
+	bound := val + ".size()"
+	if prim {
+		el = fmt.Sprintf("%s[%s]", val, iv)
+		bound = val + ".length"
+	}
+	f.line("%s{ b.append('['); for (int %s = 0; %s < %s; %s++) { if (%s>0) b.append(',');", ind, iv, iv, bound, iv, iv)
 	switch elem {
 	case ir.KindString:
 		f.line("%s    Json.str(b, %s);", ind, el)
@@ -206,7 +212,7 @@ func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeR
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%s    to(%s, b);", ind, el)
 	case ir.KindArray:
-		g.jsonToArray(f, ind+"    ", el, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		g.jsonToArray(f, ind+"    ", el, items.Elem, items.ElemRef, items.ElemItems, depth+1, false)
 	default: // i*, enum, bitfield, boolean, fp
 		f.line("%s    b.append(%s);", ind, el)
 	}
@@ -238,14 +244,33 @@ func (g *gen) emitFrom(f *jfile, fld *ir.Field) {
 }
 
 func (g *gen) emitFromArray(f *jfile, fld *ir.Field, acc string) {
-	g.jsonFromArray(f, "            ", acc, "e.getAsJsonArray()", fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	g.jsonFromArray(f, "            ", acc, "e.getAsJsonArray()", fld.Elem, fld.ElemRef, fld.ElemItems, 0, primitiveArrayElem(fld.Elem))
 }
 
 // jsonFromArray rebuilds target from the JsonArray src, mirroring jsonToArray:
 // u64 parses from string, struct/union recurse via from(), nested arrays recurse
 // into a fresh List; the rest map to the matching Gson accessor. Loop/temporary
 // vars are depth-suffixed to nest safely.
-func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, prim bool) {
+	if prim {
+		// Primitive array: allocate to the JSON array size and fill by index.
+		av := fmt.Sprintf("_a%d", depth)
+		kv := fmt.Sprintf("_k%d", depth)
+		var getter string
+		switch elem {
+		case ir.KindU64:
+			getter = fmt.Sprintf("Long.parseUnsignedLong(%s.get(%s).getAsString())", av, kv)
+		case ir.KindFP32:
+			getter = fmt.Sprintf("%s.get(%s).getAsFloat()", av, kv)
+		case ir.KindFP64:
+			getter = fmt.Sprintf("%s.get(%s).getAsDouble()", av, kv)
+		default: // u8/u16/u32, i8..i64, enum, bitfield
+			getter = fmt.Sprintf("%s.get(%s).getAsLong()", av, kv)
+		}
+		f.line("%sJsonArray %s = %s; %s = new %s[%s.size()];", ind, av, src, target, primArrayBase(elem), av)
+		f.line("%sfor (int %s = 0; %s < %s.length; %s++) %s[%s] = %s;", ind, kv, kv, target, kv, target, kv, getter)
+		return
+	}
 	ev := fmt.Sprintf("_e%d", depth)
 	f.line("%s%s.clear(); for (JsonElement %s : %s) {", ind, target, ev, src)
 	switch elem {
@@ -268,7 +293,7 @@ func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref
 		v := fmt.Sprintf("_v%d", depth)
 		vt := "List<" + g.javaArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
 		f.line("%s    %s %s = new ArrayList<>();", ind, vt, v)
-		g.jsonFromArray(f, ind+"    ", v, ev+".getAsJsonArray()", items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		g.jsonFromArray(f, ind+"    ", v, ev+".getAsJsonArray()", items.Elem, items.ElemRef, items.ElemItems, depth+1, false)
 		f.line("%s    %s.add(%s);", ind, target, v)
 	default: // u8/u16/u32, i8..i64, enum, bitfield
 		f.line("%s    %s.add(%s.getAsLong());", ind, target, ev)

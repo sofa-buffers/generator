@@ -107,7 +107,67 @@ func (g *gen) typeName(key string) string {
 	return b.String()
 }
 
-// javaType: all integers map to long (Java has no unsigned); arrays use List.
+// primitiveArrayElem reports whether an array element lowers to a Java primitive
+// array (`long[]`/`float[]`/`double[]`) instead of a boxed `List<...>`: integers,
+// enum and bitfield (all long-backed, delivered via signed/unsigned) and fp. It
+// is the hot allocator — boxing every element and unboxing on encode. Boolean
+// arrays stay `List<Boolean>` (no primitive OStream overload for them), and
+// string/blob/struct/union/nested arrays are wrapper sequences (not native).
+func primitiveArrayElem(k ir.Kind) bool {
+	switch k {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
+		ir.KindEnum, ir.KindBitfield, ir.KindFP32, ir.KindFP64:
+		return true
+	}
+	return false
+}
+
+// primArrayBase is the Java primitive element type backing a primitive array:
+// long for every integer width (the corelib widens to 64-bit), float/double for
+// the fp kinds.
+func primArrayBase(k ir.Kind) string {
+	switch k {
+	case ir.KindFP32:
+		return "float"
+	case ir.KindFP64:
+		return "double"
+	default:
+		return "long"
+	}
+}
+
+// javaPrimArrayLiteral renders a primitive array field's schema default as a
+// `new long[]{...}` / `new float[]{...}` / `new double[]{...}` literal of exactly
+// `count` elements — the schema values tail-padded with the element zero (a fixed
+// array always has `count` elements on the wire, so a short default must be
+// zero-filled to match C++/Rust). ("", false) when there is no default.
+func (g *gen) javaPrimArrayLiteral(f *ir.Field) (string, bool) {
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return "", false
+	}
+	base := primArrayBase(f.Elem)
+	zero := "0"
+	if base == "float" {
+		zero = "0.0f"
+	} else if base == "double" {
+		zero = "0.0"
+	}
+	parts := make([]string, 0, len(vals))
+	for _, v := range vals {
+		parts = append(parts, g.javaArrayElemLit(f.Elem, v))
+	}
+	if f.HasCount {
+		for int64(len(parts)) < f.Count {
+			parts = append(parts, zero)
+		}
+	}
+	return fmt.Sprintf("new %s[]{%s}", base, strings.Join(parts, ", ")), true
+}
+
+// javaType: all integers map to long (Java has no unsigned); native numeric/fp
+// arrays are primitive arrays (long[]/float[]/double[]), other arrays use List.
 func (g *gen) javaType(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum, ir.KindBitfield:
@@ -125,6 +185,9 @@ func (g *gen) javaType(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
+		if primitiveArrayElem(f.Elem) {
+			return primArrayBase(f.Elem) + "[]"
+		}
 		return "List<" + g.javaArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">"
 	}
 	return "Object"
@@ -162,7 +225,13 @@ func (g *gen) javaInit(f *ir.Field) string {
 		// A native scalar array is a leaf field: materialize its schema default so
 		// an omitted default array reconstructs correctly and marshal can compare
 		// against it. Composite arrays are wrapper sequences (always framed).
-		if nativeArrayElem(f.Elem) {
+		if primitiveArrayElem(f.Elem) {
+			if lit, ok := g.javaPrimArrayLiteral(f); ok {
+				return " = " + lit
+			}
+			return " = new " + primArrayBase(f.Elem) + "[0]"
+		}
+		if nativeArrayElem(f.Elem) { // boolean array (stays boxed List<Boolean>)
 			if lit, ok := g.javaNativeArrayLiteral(f); ok {
 				return " = new ArrayList<>(" + lit + ")"
 			}

@@ -133,12 +133,19 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	g.emitFloatVisit(f, fs, ir.KindFP32, "Fp32", "float")
 	g.emitFloatVisit(f, fs, ir.KindFP64, "Fp64", "double")
 
-	// String
+	// String. Single-shot: when the whole payload arrives in one chunk, decode
+	// straight from the contiguous input slice; the per-byte List<byte> accumulator
+	// is only the fallback for a genuinely split payload.
 	f.line("    public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
-	f.line("        for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
-	f.line("        if (acc.Count < total) return;")
-	f.line("        var _s = Encoding.UTF8.GetString(acc.ToArray());")
-	f.line("        acc.Clear();")
+	f.line("        string _s;")
+	f.line("        if (offset == 0 && chunkLength >= total) {")
+	f.line("            _s = Encoding.UTF8.GetString(data, chunkOffset, total);")
+	f.line("        } else {")
+	f.line("            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
+	f.line("            if (acc.Count < total) return;")
+	f.line("            _s = Encoding.UTF8.GetString(acc.ToArray());")
+	f.line("            acc.Clear();")
+	f.line("        }")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {
@@ -156,12 +163,18 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("        }")
 	f.line("    }")
 
-	// Blob
+	// Blob. Single-shot on the whole-in-one-chunk fast path (see String).
 	f.line("    public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
-	f.line("        for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
-	f.line("        if (acc.Count < total) return;")
-	f.line("        var _b = acc.ToArray();")
-	f.line("        acc.Clear();")
+	f.line("        byte[] _b;")
+	f.line("        if (offset == 0 && chunkLength >= total) {")
+	f.line("            _b = new byte[total];")
+	f.line("            System.Array.Copy(data, chunkOffset, _b, 0, total);")
+	f.line("        } else {")
+	f.line("            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
+	f.line("            if (acc.Count < total) return;")
+	f.line("            _b = acc.ToArray();")
+	f.line("            acc.Clear();")
+	f.line("        }")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {

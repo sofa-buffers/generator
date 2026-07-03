@@ -5,11 +5,11 @@ package message
 import (
 	"bytes"
 	"github.com/sofa-buffers/corelib-go"
-	"io"
 )
 
 // Scalars is a generated SofaBuffers object.
 type Scalars struct {
+	_visitorBase
 	U64max uint64  `json:"u64max"`
 	I64min int64   `json:"i64min"`
 	F64    float64 `json:"f64"`
@@ -47,46 +47,44 @@ func (m *Scalars) marshal(e *sofab.Encoder) {
 	}
 }
 
-func (m *Scalars) unmarshal(d *sofab.Decoder) error {
-	for {
-		fld, err := d.Next()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if fld.Type == sofab.TypeSequenceEnd {
-			return nil
-		}
-		switch fld.ID {
-		case 0:
-			v, _ := d.Unsigned()
-			m.U8min = uint8(v)
-		case 1:
-			v, _ := d.Unsigned()
-			m.U8max = uint8(v)
-		case 2:
-			v, _ := d.Unsigned()
-			m.U64max = uint64(v)
-		case 3:
-			v, _ := d.Signed()
-			m.I8min = int8(v)
-		case 4:
-			v, _ := d.Signed()
-			m.I64min = int64(v)
-		case 5:
-			m.F32, _ = d.Float32()
-		case 6:
-			m.F64, _ = d.Float64()
-		case 7:
-			m.Flag, _ = d.Bool()
-		default:
-			if err := d.Skip(); err != nil {
-				return err
-			}
-		}
+func (m *Scalars) Unsigned(id sofab.ID, v uint64) error {
+	switch id {
+	case 0:
+		m.U8min = uint8(v)
+	case 1:
+		m.U8max = uint8(v)
+	case 2:
+		m.U64max = uint64(v)
+	case 7:
+		m.Flag = v != 0
 	}
+	return nil
+}
+
+func (m *Scalars) Signed(id sofab.ID, v int64) error {
+	switch id {
+	case 3:
+		m.I8min = int8(v)
+	case 4:
+		m.I64min = int64(v)
+	}
+	return nil
+}
+
+func (m *Scalars) Float32(id sofab.ID, v float32) error {
+	switch id {
+	case 5:
+		m.F32 = v
+	}
+	return nil
+}
+
+func (m *Scalars) Float64(id sofab.ID, v float64) error {
+	switch id {
+	case 6:
+		m.F64 = v
+	}
+	return nil
 }
 
 // NewScalars returns a Scalars with schema defaults applied.
@@ -115,9 +113,11 @@ func (m *Scalars) Encode() ([]byte, error) {
 }
 
 // DecodeScalars parses bytes into a new message (with defaults pre-applied).
+// Decode runs the corelib's zero-copy AcceptBytes cursor over the buffer,
+// dispatching each field to the message's sofab.Visitor implementation.
 func DecodeScalars(data []byte) (*Scalars, error) {
 	m := NewScalars()
-	if err := m.unmarshal(sofab.NewDecoder(bytes.NewReader(data))); err != nil {
+	if err := sofab.AcceptBytes(data, m); err != nil {
 		return nil, err
 	}
 	return m, nil

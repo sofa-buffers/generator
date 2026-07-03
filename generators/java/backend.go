@@ -206,17 +206,30 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized at construction), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence and is always framed (never whole-omitted).
-	if nativeArrayElem(fld.Elem) {
+	if primitiveArrayElem(fld.Elem) {
+		// Primitive array (long[]/float[]/double[]): omit when equal to its default
+		// (Arrays.equals), else when empty; write straight to the OStream primitive
+		// overload with no Sbuf box/unbox temporary.
+		if lit, ok := g.javaPrimArrayLiteral(fld); ok {
+			f.line("        if (!java.util.Arrays.equals(%s, %s)) {", acc, lit)
+		} else {
+			f.line("        if (%s != null && %s.length != 0) {", acc, acc)
+		}
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true)
+		f.line("        }")
+		return
+	}
+	if nativeArrayElem(fld.Elem) { // boolean array (boxed List<Boolean>)
 		if def, ok := g.javaNativeArrayLiteral(fld); ok {
 			f.line("        if (!%s.equals(%s)) {", def, acc)
 		} else {
 			f.line("        if (%s != null && !%s.isEmpty()) {", acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false)
 		f.line("        }")
 		return
 	}
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false)
 }
 
 // marshalArray writes the array val as field idExpr. Numeric/enum/boolean/
@@ -224,19 +237,30 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 // unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
 // whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
 // arrays, depth-suffixing loop vars to avoid collisions.
-func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+// prim is true only for a direct primitive array field (`val` is a
+// long[]/float[]/double[]); it writes straight to the OStream overload. When
+// false, `val` is a boxed List and is unboxed via a Sbuf.to*Array temporary —
+// the case for boolean arrays and for a nested array's inner rows (which stay
+// List<...>).
+func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, prim bool) {
 	iv := fmt.Sprintf("_i%d", depth)
+	longs := "Sbuf.toLongArray(" + val + ")"
+	floats := "Sbuf.toFloatArray(" + val + ")"
+	doubles := "Sbuf.toDoubleArray(" + val + ")"
+	if prim {
+		longs, floats, doubles = val, val, val
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		f.line("%sos.writeArrayUnsigned(%s, Sbuf.toLongArray(%s));", ind, idExpr, val)
+		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, longs)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		f.line("%sos.writeArraySigned(%s, Sbuf.toLongArray(%s));", ind, idExpr, val)
+		f.line("%sos.writeArraySigned(%s, %s);", ind, idExpr, longs)
 	case ir.KindBool:
 		f.line("%sos.writeArrayUnsigned(%s, Sbuf.boolToLongArray(%s));", ind, idExpr, val)
 	case ir.KindFP32:
-		f.line("%sos.writeArrayFp32(%s, Sbuf.toFloatArray(%s));", ind, idExpr, val)
+		f.line("%sos.writeArrayFp32(%s, %s);", ind, idExpr, floats)
 	case ir.KindFP64:
-		f.line("%sos.writeArrayFp64(%s, Sbuf.toDoubleArray(%s));", ind, idExpr, val)
+		f.line("%sos.writeArrayFp64(%s, %s);", ind, idExpr, doubles)
 	case ir.KindString:
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) os.writeString(%s, %s.get(%s) == null ? \"\" : %s.get(%s));", ind, iv, iv, val, iv, iv, val, iv, val, iv)
@@ -252,7 +276,7 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindArray:
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) {", ind, iv, iv, val, iv)
-		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s.get(%s)", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s.get(%s)", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false)
 		f.line("%s}", ind)
 		f.line("%sos.writeSequenceEnd();", ind)
 	}

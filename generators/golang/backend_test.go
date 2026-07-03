@@ -83,15 +83,36 @@ func TestGoStructuralInvariants(t *testing.T) {
 	for _, want := range []string{
 		"package messages",
 		"func (m *Myfirstmessage) marshal(e *sofab.Encoder)",
-		"func (m *Myfirstmessage) unmarshal(d *sofab.Decoder) error",
+		"_visitorBase",                                          // struct embeds the no-op base
+		"func (m *Myfirstmessage) Unsigned(id sofab.ID, v uint64) error",  // visitor decode
+		"func (m *Myfirstmessage) BeginSequence(id sofab.ID) (sofab.Visitor, error)",
 		"func NewMyfirstmessage() *Myfirstmessage",
 		"func DecodeMyfirstmessage(",
-		"e.WriteSequenceBegin(", // nested struct/union framing
-		"d.Next()",              // pull-parser decode
-		"`json:\"somei8\"`",     // canonical json tags
+		"sofab.AcceptBytes(data, m)", // zero-copy cursor decode
+		"e.WriteSequenceBegin(",      // nested struct/union framing (marshal unchanged)
+		"`json:\"somei8\"`",          // canonical json tags
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("myfirstmessage.go missing %q", want)
+		}
+	}
+	for _, notWant := range []string{
+		"func (m *Myfirstmessage) unmarshal(d *sofab.Decoder)", // pull-parser removed
+		"d.Next()",
+	} {
+		if strings.Contains(msg, notWant) {
+			t.Errorf("myfirstmessage.go should no longer contain %q (pull-parser replaced by visitor)", notWant)
+		}
+	}
+	// The decode prelude (embedded no-op base + collectors) is emitted once.
+	prelude := files["sofab_visitor.go"]
+	for _, want := range []string{
+		"type _visitorBase struct{}",
+		"func _narrowU[T ~uint8 | ~uint16 | ~uint32 | ~uint64](v []uint64) []T",
+		"type _strSeq struct {",
+	} {
+		if !strings.Contains(prelude, want) {
+			t.Errorf("sofab_visitor.go missing %q", want)
 		}
 	}
 	types := files["types.go"]

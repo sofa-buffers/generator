@@ -258,7 +258,11 @@ func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
 	// (materialized in Default), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence and is always framed (never whole-omitted).
 	if isNativeArrayElem(fld.Elem) {
-		if lit, ok := g.rustNativeArrayLiteral(fld); ok {
+		if _, _, ok := g.fixedNativeArray(fld); ok {
+			// Fixed `[elem; N]` is never "empty"; omit when equal to its default
+			// (mirrors the C++ backend's `!= std::array{}`).
+			f.line("        if %s != %s {", acc, g.rustFieldDefault(fld))
+		} else if lit, ok := g.rustNativeArrayLiteral(fld); ok {
 			f.line("        if %s != %s {", acc, lit)
 		} else {
 			f.line("        if !%s.is_empty() {", acc)

@@ -58,9 +58,27 @@ func TestRustStructural(t *testing.T) {
 		"ArrayKind",                            // example has arrays -> array_begin imports it
 		"pub someu64: u64,",
 		"#[serde(default)]",
+		"pub someuintarray: [u32; 4],",                    // fixed native array (was Vec<u32>)
+		"pub somefloatarray: [f32; 3],",                   // fixed fp array
+		"pub someboolarray: [bool; 8],",                   // fixed bool array
+		"someuintarray: [0, 1, 1000, 4294967295],",        // default is an N-element array literal
+		"someboolarray: [true, true, false, false, false, false, false, false],", // short default tail-padded to N
+		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                    // omit-guard is a default compare
+		"self.m.someuintarray[self.ai] = value as u32; self.ai += 1;",            // indexed decode store
+		"ai: usize",                                       // fill index on the visitor
+		"if offset == 0 && chunk.len() >= total {",        // string/blob single-shot fast path
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs (rs) missing %q", want)
+		}
+	}
+	// String/blob arrays and array-of-array stay heap Vec (not fixed).
+	for _, notWant := range []string{
+		"pub someuintarray: Vec<u32>",
+		"someuintarray.push(",
+	} {
+		if strings.Contains(m, notWant) {
+			t.Errorf("message.rs (rs) should not contain %q (native fixed array must not be Vec/push)", notWant)
 		}
 	}
 	if strings.Contains(m, "require!") {

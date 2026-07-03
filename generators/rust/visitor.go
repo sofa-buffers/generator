@@ -179,7 +179,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("    pub fn decode(data: &[u8]) -> %s {", name)
 	f.line("        let mut m = %s::default();", name)
 	f.line("        {")
-	f.line("            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new() };")
+	f.line("            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };")
 	f.line("            let mut is = IStream::new();")
 	f.line("            let _ = is.feed(data, &mut v);")
 	f.line("        }")
@@ -201,6 +201,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("    stack: Vec<_Loc>,")
 	f.line("    cur: _Loc,")
 	f.line("    acc: Vec<u8>,")
+	f.line("    ai: usize, // index into the fixed native array currently being filled")
 	f.line("}")
 	f.blank()
 
@@ -219,11 +220,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				case fld.Kind == ir.KindBool:
 					f.line("            (_Loc::%s, %d) => %s.%s = value != 0,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 				case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
-					f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), numRustType(fld.Elem))
+					g.emitNativeArrayStore(f, fr, fld, fmt.Sprintf("value as %s", numRustType(fld.Elem)))
 				case fld.Kind == ir.KindArray && fld.Elem == ir.KindBool:
-					f.line("            (_Loc::%s, %d) => %s.%s.push(value != 0),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+					g.emitNativeArrayStore(f, fr, fld, "value != 0")
 				case fld.Kind == ir.KindArray && fld.Elem == ir.KindBitfield:
-					f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), bitfieldBacking(fld.ElemRef.Target))
+					g.emitNativeArrayStore(f, fr, fld, fmt.Sprintf("value as %s", bitfieldBacking(fld.ElemRef.Target)))
 				}
 			}
 		case fkNestedNative:
@@ -254,9 +255,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				case fld.Kind == ir.KindEnum:
 					f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), enumBacking(fld.Ref.Target))
 				case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
-					f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), numRustType(fld.Elem))
+					g.emitNativeArrayStore(f, fr, fld, fmt.Sprintf("value as %s", numRustType(fld.Elem)))
 				case fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum:
-					f.line("            (_Loc::%s, %d) => %s.%s.push(value as %s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), enumBacking(fld.ElemRef.Target))
+					g.emitNativeArrayStore(f, fr, fld, fmt.Sprintf("value as %s", enumBacking(fld.ElemRef.Target)))
 				}
 			}
 		case fkNestedNative:
@@ -282,10 +283,17 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.str {
 		// string: scalar strings + string-array elements
 		f.line("    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
-		f.line("        self.acc.extend_from_slice(chunk);")
-		f.line("        if self.acc.len() < total { return; }")
-		f.line("        let _s = String::from_utf8_lossy(&self.acc).into_owned();")
-		f.line("        self.acc.clear();")
+		f.line("        // Single-shot: whole payload in one chunk -> build straight from the")
+		f.line("        // slice, skipping the `acc` accumulate + second copy.")
+		f.line("        let _s = if offset == 0 && chunk.len() >= total {")
+		f.line("            String::from_utf8_lossy(&chunk[..total]).into_owned()")
+		f.line("        } else {")
+		f.line("            self.acc.extend_from_slice(chunk);")
+		f.line("            if self.acc.len() < total { return; }")
+		f.line("            let s = String::from_utf8_lossy(&self.acc).into_owned();")
+		f.line("            self.acc.clear();")
+		f.line("            s")
+		f.line("        };")
 		f.line("        match (self.cur, id) {")
 		for _, fr := range fs {
 			if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
@@ -305,10 +313,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.blob {
 		// blob: scalar blobs + blob-array elements
 		f.line("    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
-		f.line("        self.acc.extend_from_slice(chunk);")
-		f.line("        if self.acc.len() < total { return; }")
-		f.line("        let _b = self.acc.clone();")
-		f.line("        self.acc.clear();")
+		f.line("        let _b = if offset == 0 && chunk.len() >= total {")
+		f.line("            chunk[..total].to_vec()")
+		f.line("        } else {")
+		f.line("            self.acc.extend_from_slice(chunk);")
+		f.line("            if self.acc.len() < total { return; }")
+		f.line("            let b = self.acc.clone();")
+		f.line("            self.acc.clear();")
+		f.line("            b")
+		f.line("        };")
 		f.line("        match (self.cur, id) {")
 		for _, fr := range fs {
 			if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
@@ -328,13 +341,21 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.scalarArray {
 		// array_begin clears a native-array target (scalar array field) or starts a
 		// fresh inner Vec (nested native array).
+		// Reset the fixed-array fill index for every array. Fixed `[T; N]` fields are
+		// pre-allocated in the struct default, so they need no per-begin action; a
+		// dynamic native array clears its Vec; a nested-native scope pushes a fresh
+		// inner Vec.
 		f.line("    fn array_begin(&mut self, id: Id, _kind: ArrayKind, _count: usize) {")
+		f.line("        self.ai = 0;")
 		f.line("        match (self.cur, id) {")
 		for _, fr := range fs {
 			switch fr.kind {
 			case fkStruct:
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
+						if _, _, ok := g.fixedNativeArray(fld); ok {
+							continue // fixed [T; N]: nothing to clear
+						}
 						f.line("            (_Loc::%s, %d) => %s.%s.clear(),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 					}
 				}
@@ -384,6 +405,17 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.blank()
 }
 
+// emitNativeArrayStore emits one match arm for a direct native array element: an
+// indexed store `x[self.ai] = rhs; self.ai += 1;` for a fixed `[T; N]` array, or
+// a `.push(rhs)` for a dynamic (count-less) `Vec` array.
+func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
+	if _, _, ok := g.fixedNativeArray(fld); ok {
+		f.line("            (_Loc::%s, %d) => { %s.%s[self.ai] = %s; self.ai += 1; }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), rhs)
+		return
+	}
+	f.line("            (_Loc::%s, %d) => %s.%s.push(%s),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), rhs)
+}
+
 func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype string) {
 	f.line("    fn %s(&mut self, id: Id, value: %s) {", cb, rtype)
 	f.line("        match (self.cur, id) {")
@@ -397,7 +429,7 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 			case fld.Kind == kind:
 				f.line("            (_Loc::%s, %d) => %s.%s = value,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
-				f.line("            (_Loc::%s, %d) => %s.%s.push(value),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+				g.emitNativeArrayStore(f, fr, fld, "value")
 			}
 		}
 	}

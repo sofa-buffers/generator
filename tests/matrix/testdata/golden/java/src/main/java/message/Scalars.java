@@ -44,7 +44,9 @@ public class Scalars {
 class ScalarsVisitor implements Visitor {
     private final Scalars m;
     private int cur = 0;
-    private final java.util.Deque<Integer> stack = new java.util.ArrayDeque<>();
+    private int ai = 0;                 // index into the primitive array currently being filled
+    private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)
+    private int sp = 0;
     private final java.io.ByteArrayOutputStream acc = new java.io.ByteArrayOutputStream();
     ScalarsVisitor(Scalars msg) { m = msg; }
 
@@ -81,30 +83,42 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
-        acc.write(data, chunkOffset, chunkLength);
-        if (acc.size() < total) return;
-        String _s = new String(acc.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
-        acc.reset();
+        String _s;
+        if (offset == 0 && chunkLength >= total) {
+            _s = new String(data, chunkOffset, total, java.nio.charset.StandardCharsets.UTF_8);
+        } else {
+            acc.write(data, chunkOffset, chunkLength);
+            if (acc.size() < total) return;
+            _s = new String(acc.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+            acc.reset();
+        }
         switch (cur) {
         }
     }
     public void blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
-        acc.write(data, chunkOffset, chunkLength);
-        if (acc.size() < total) return;
-        byte[] _b = acc.toByteArray();
-        acc.reset();
+        byte[] _b;
+        if (offset == 0 && chunkLength >= total) {
+            _b = java.util.Arrays.copyOfRange(data, chunkOffset, chunkOffset + total);
+        } else {
+            acc.write(data, chunkOffset, chunkLength);
+            if (acc.size() < total) return;
+            _b = acc.toByteArray();
+            acc.reset();
+        }
         switch (cur) {
         }
     }
     public void arrayBegin(int id, ArrayKind kind, int count) {
+        ai = 0;
         switch (cur) {
         }
     }
     public void sequenceBegin(int id) {
-        stack.push(cur);
+        if (sp == stk.length) stk = java.util.Arrays.copyOf(stk, sp * 2);
+        stk[sp++] = cur;
         switch (cur) {
         }
     }
-    public void sequenceEnd() { cur = stack.isEmpty() ? 0 : stack.pop(); }
+    public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }
 }
 

@@ -20,6 +20,28 @@ func cfgBool(cfg map[string]any, key string) bool {
 	return b
 }
 
+// reservedGoMethod are the exported method names every generated object carries
+// (the sofab.Visitor callbacks, plus Encode on messages). A struct field whose
+// exported name matches one would collide with the method (Go forbids a field and
+// method sharing a name), so goFieldName mangles it; the `json` tag keeps the wire
+// name, so encoding/json is unaffected.
+var reservedGoMethod = map[string]bool{
+	"Unsigned": true, "Signed": true, "Float32": true, "Float64": true,
+	"String": true, "Bytes": true, "UnsignedArray": true, "SignedArray": true,
+	"Float32Array": true, "Float64Array": true, "BeginSequence": true, "EndSequence": true,
+	"Encode": true,
+}
+
+// goFieldName is the exported struct-field name for a schema field, mangled with a
+// trailing underscore when it would collide with a generated method.
+func goFieldName(name string) string {
+	n := exported(name)
+	if reservedGoMethod[n] {
+		return n + "_"
+	}
+	return n
+}
+
 // exported converts a schema name to an exported Go identifier (PascalCase,
 // underscores folded into camel case).
 func exported(name string) string {
