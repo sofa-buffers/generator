@@ -52,10 +52,12 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if g.license != "" {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
-	f.line("import { OStream, decode, type Visitor } from %q;", corelibPkg)
+	f.line("import { OStream, Cursor } from %q;", corelibPkg)
 	f.blank()
-	f.line("%s", tsPrelude)
-	f.blank()
+	if g.usesArrEq(s) {
+		f.line("%s", arrEqHelper)
+		f.blank()
+	}
 
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
@@ -116,8 +118,8 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 	// JSON
 	g.emitJSON(f, name, fields)
 
-	// visitor + decode
-	g.emitVisitor(f, name, fields)
+	// decode (monomorphic pull cursor)
+	g.emitDecode(f, name, fields)
 	f.line("}")
 	f.blank()
 }
@@ -139,8 +141,14 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 	case ir.KindString:
 		write = fmt.Sprintf("os.writeString(%d, %s);", fld.ID, acc)
 	case ir.KindBlob:
-		// blob is a leaf: omit when equal to its default (empty if none).
-		f.line("    if (!arrEq(%s, %s)) {", acc, g.tsDefault(fld))
+		// blob is a leaf: omit when equal to its default (empty if none). An empty
+		// default tests emptiness directly (no per-encode `new Uint8Array()` to
+		// compare against); a non-empty default needs an element-wise arrEq.
+		if blobHasNonEmptyDefault(fld) {
+			f.line("    if (!arrEq(%s, %s)) {", acc, g.tsDefault(fld))
+		} else {
+			f.line("    if (%s.length !== 0) {", acc)
+		}
 		f.line("      os.writeBlob(%d, %s);", fld.ID, acc)
 		f.line("    }")
 		return
@@ -205,12 +213,18 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindFP64:
 		f.line("%sos.writeFp64Array(%s, %s);", ind, idExpr, val)
 	case ir.KindString:
+		// Leaf sequence: an indexed for (not .forEach) avoids a per-marshal closure
+		// allocation and inlines the monomorphic write body.
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
-		f.line("%s%s.forEach((%s, %s) => os.writeString(%s, %s));", ind, val, ev, iv, iv, ev)
+		f.line("%sfor (let %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
+		f.line("%s  os.writeString(%s, %s[%s]!);", ind, iv, val, iv)
+		f.line("%s}", ind)
 		f.line("%sos.writeSequenceEnd();", ind)
 	case ir.KindBlob:
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
-		f.line("%s%s.forEach((%s, %s) => os.writeBlob(%s, %s));", ind, val, ev, iv, iv, ev)
+		f.line("%sfor (let %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
+		f.line("%s  os.writeBlob(%s, %s[%s]!);", ind, iv, val, iv)
+		f.line("%s}", ind)
 		f.line("%sos.writeSequenceEnd();", ind)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)

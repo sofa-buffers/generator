@@ -428,7 +428,7 @@ width-reduced corelib builds compile — §11).
 
 ### 9.3 Decode models
 
-Decoding has **five families**; a backend picks the one its corelib exposes. All
+Decoding has **six families**; a backend picks the one its corelib exposes. All
 route by `(scope, id)` and are forward-compatible (skip unknown ids).
 
 1. **Flat visitor + location-stack** (Rust, C#, Java, and the C++ `c-cpp`
@@ -466,6 +466,19 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    (id → offset → wire type, generated per object) drives
    `sofab_object_encode`/`decode`; a field callback fills members by id. Member
    *layout* is decoupled from wire order (offsets via `offsetof`).
+6. **Monomorphic pull cursor** (TypeScript). Each type emits a
+   `static decodeFrom(c: Cursor)` that loops `c.readHeader()` and runs one
+   `switch (c.id)` reading straight into `this.<field>` via typed pull primitives
+   (`readUnsigned/readSigned` number-first, `readFp32/64`, `readString`,
+   `readBlob` zero-copy view, `readUnsignedArray/readSignedArray/readFp32Array/
+   readFp64Array`); a nested message recurses into `Child.decodeFrom(c)` (which
+   consumes through its own `SequenceEnd`), a wrapper-sequence array loops
+   `readHeader` pushing elements, and `default: c.skip(c.wire)` drops unknown ids.
+   Because the only caller of each reader is that one per-type decoder, V8 keeps
+   the call sites monomorphic and inlines the loop — replacing the earlier
+   push/visitor path, whose shared call sites went **megamorphic** across the
+   nested message types' differently-shaped visitor objects. corelib-ts keeps the
+   flat `Visitor`/`decode` path too, for streaming callers.
 
 ### 9.4 Capability / value-width model
 
@@ -498,7 +511,7 @@ only needs to mirror their *names* and gate on the schema's used features:
 | **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. |
 | **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; `Decode` via zero-copy `sofab.AcceptBytes`; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
 | **Python** | `corelib-py` | pull-parser | dataclasses + `_marshal`/`_unmarshal`. |
-| **TypeScript** | `corelib-ts` | flat-visitor | classes + `marshal`; 64-bit → `bigint`. |
+| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint`; alloc-free `writeString`. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); Gson harness. |
 

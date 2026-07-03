@@ -46,6 +46,54 @@ func (g *gen) typeName(key string) string {
 
 func isBig(k ir.Kind) bool { return k == ir.KindU64 || k == ir.KindI64 }
 
+// blobHasNonEmptyDefault reports whether a blob field carries a non-empty schema
+// default (base64 decoding to at least one byte). Only such fields need an
+// element-wise arrEq guard in marshal; an empty default uses `.length !== 0`.
+func blobHasNonEmptyDefault(f *ir.Field) bool {
+	if f.Kind != ir.KindBlob {
+		return false
+	}
+	if s, ok := f.Default.(string); ok {
+		if raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), "")); err == nil {
+			return len(raw) > 0
+		}
+	}
+	return false
+}
+
+// usesArrEq reports whether any emitted class references the arrEq helper: a blob
+// with a non-empty default, or a native scalar array with a value default. When
+// none does, the helper (and its per-encode comparison operand) is not emitted.
+func (g *gen) usesArrEq(s *ir.Schema) bool {
+	needs := func(fields []*ir.Field) bool {
+		for _, fld := range fields {
+			if blobHasNonEmptyDefault(fld) {
+				return true
+			}
+			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
+				if _, ok := g.nativeArrayDefault(fld); ok {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, key := range s.NamedOrder {
+		nt := s.Named[key]
+		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+			if needs(nt.Fields) {
+				return true
+			}
+		}
+	}
+	for _, m := range s.Messages {
+		if needs(m.Fields) {
+			return true
+		}
+	}
+	return false
+}
+
 // emitDoc writes a TSDoc/JSDoc `/** ... */` block immediately before the
 // declaration it documents, at the given indent. Single-line text becomes
 // `/** text */`; multi-line text becomes a starred block. Any `*/` inside the
