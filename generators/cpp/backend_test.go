@@ -216,6 +216,69 @@ func TestCppFixedRequiresClib(t *testing.T) {
 	}
 }
 
+// genHeader generates a single header with an explicit config (no defaults added
+// beyond the backend's own), returning the header body.
+func genHeader(t *testing.T, src, msgFile string, cfg map[string]any) (string, error) {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "in.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(s, cfg)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range files {
+		if f.Path == msgFile {
+			return string(f.Content), nil
+		}
+	}
+	t.Fatalf("no header %s", msgFile)
+	return "", nil
+}
+
+// TestCppContainersDefault: corelib c-cpp (the embedded target) defaults to the
+// fixed-capacity profile; the pure-cpp path stays dynamic; and either default can
+// be overridden explicitly.
+func TestCppContainersDefault(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n      bl: { id: 0, type: blob, maxlen: 16 }\n"
+	// c-cpp, no containers key -> fixed by default.
+	h, err := genHeader(t, src, "m.hpp", map[string]any{"namespace": "sofabuffers", "corelib": "c-cpp"})
+	if err != nil {
+		t.Fatalf("c-cpp default generate: %v", err)
+	}
+	if !strings.Contains(h, "FixedBytes<16> bl") {
+		t.Error("c-cpp should default to containers: fixed (expected FixedBytes member)")
+	}
+	// c-cpp with explicit dynamic opt-out -> std::vector.
+	h, err = genHeader(t, src, "m.hpp", map[string]any{"namespace": "sofabuffers", "corelib": "c-cpp", "containers": "dynamic"})
+	if err != nil {
+		t.Fatalf("c-cpp dynamic generate: %v", err)
+	}
+	if !strings.Contains(h, "std::vector<std::uint8_t> bl") {
+		t.Error("containers: dynamic should opt back out to std::vector")
+	}
+	// pure cpp -> dynamic by default (no corelib key).
+	h, err = genHeader(t, src, "m.hpp", map[string]any{"namespace": "sofabuffers"})
+	if err != nil {
+		t.Fatalf("cpp default generate: %v", err)
+	}
+	if !strings.Contains(h, "std::vector<std::uint8_t> bl") {
+		t.Error("pure cpp should default to containers: dynamic")
+	}
+}
+
 // TestCppSparse: the C++ serialize is always sparse-canonical (MESSAGE_SPEC S2),
 // with no config toggle. A scalar/string/blob leaf is written under an
 // "if (v != default)" guard; a native scalar array (leaf) is whole-omitted vs a

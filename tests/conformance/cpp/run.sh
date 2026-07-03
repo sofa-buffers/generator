@@ -51,8 +51,12 @@ run_variant() {
     label=$1; corelib=$2; include=$3; shift 3
     echo "==> [$label] generating + building example project"
     if [ -n "$corelib" ]; then
-        printf 'generic: { emit: project, timestamp: false }\ntargets: { cpp: { namespace: sofabuffers, corelib: %s } }\n' "$corelib" > "$WORK/cfg-$label.yaml"
-        printf 'targets: { cpp: { namespace: sofabuffers, corelib: %s } }\n' "$corelib" > "$WORK/cfg-corpus-$label.yaml"
+        # corelib-c-cpp defaults to the fixed-capacity (embedded) containers
+        # profile; allow_dynamic keeps a std::vector/std::string fallback for the
+        # intentionally-unbounded fields in example.yaml (somemap) and the
+        # no_maxlen corpus def, so the rich corpus still exercises both paths.
+        printf 'generic: { emit: project, timestamp: false }\ntargets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: true } }\n' "$corelib" > "$WORK/cfg-$label.yaml"
+        printf 'targets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: true } }\n' "$corelib" > "$WORK/cfg-corpus-$label.yaml"
     else
         printf 'generic: { emit: project, timestamp: false }\ntargets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-$label.yaml"
         printf 'targets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-corpus-$label.yaml"

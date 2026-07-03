@@ -34,7 +34,15 @@ func (*Backend) Lang() string { return "cpp" }
 // Generate emits one header-only .hpp per message (with its reachable types).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	clib := cfgString(cfg, "corelib", "cpp") == "c-cpp"
-	fixed := cfgString(cfg, "containers", "dynamic") == "fixed"
+	// containers defaults to `fixed` on the corelib-c-cpp (embedded) path — the
+	// heap-free representation is the expected one for that target — and to
+	// `dynamic` on the pure corelib-cpp (max-speed) path. Either can be overridden
+	// explicitly; `containers: fixed` is only valid with corelib: c-cpp.
+	containersDefault := "dynamic"
+	if clib {
+		containersDefault = "fixed"
+	}
+	fixed := cfgString(cfg, "containers", containersDefault) == "fixed"
 	// The fixed-capacity (embedded) profile layers on the corelib-c-cpp wrapper:
 	// its inline containers rely on the wrapper's deferred, address-stable decode
 	// model. It is meaningless (and unsupported) against the pure corelib-cpp.

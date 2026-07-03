@@ -302,11 +302,11 @@
         },
         "containers": {
           "type": "string",
+          "description": "Container storage profile. 'fixed' = heap-free, schema-sized inline storage (requires corelib: c-cpp); 'dynamic' = std::vector/std::string. Defaults to 'fixed' when corelib is c-cpp, otherwise 'dynamic'.",
           "enum": [
             "dynamic",
             "fixed"
-          ],
-          "default": "dynamic"
+          ]
         },
         "allow_dynamic": {
           "type": "boolean"

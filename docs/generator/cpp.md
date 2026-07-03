@@ -9,7 +9,7 @@ config.
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
 | `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets (see below). |
-| `containers` | `dynamic` \| `fixed` | `dynamic` | `fixed` = the heap-free embedded profile: blobs and struct/union/matrix/blob sequences become fixed-capacity inline storage sized from the schema. Requires `corelib: c-cpp` (see below). |
+| `containers` | `dynamic` \| `fixed` | `fixed` on `c-cpp`, else `dynamic` | `fixed` = the heap-free embedded profile: blobs and struct/union/matrix/blob sequences become fixed-capacity inline storage sized from the schema. Requires `corelib: c-cpp` (see below). |
 | `allow_dynamic` | bool | `false` | Under `containers: fixed`, keep a `std::vector`/`std::string` fallback for genuinely unbounded fields instead of failing generation. |
 | `namespace` | string | `messages` | C++ namespace wrapping the generated types. Also settable in `generic`. |
 
@@ -40,10 +40,13 @@ targets:
 
 ### `containers: fixed` (embedded footprint profile)
 
-An opt-in profile that removes hidden dynamic allocation from the generated
-message code, for embedded targets with very constrained memory. It layers on
-`corelib: c-cpp` (setting it with `corelib: cpp` is a generate-time error). Wire
-output is **unchanged** — this is purely an in-memory representation change, so
+The heap-free profile, and the **default for `corelib: c-cpp`** — embedded is the
+regular use of that target, so fixed containers are what you get unless you set
+`containers: dynamic`. (On the pure `corelib: cpp` max-speed path the default is
+`dynamic`, and `fixed` there is a generate-time error.) It removes hidden dynamic
+allocation from the generated message code, for embedded targets with very
+constrained memory. Wire output is **unchanged** — this is purely an in-memory
+representation change, so
 the shared conformance vectors and every sha256 stay identical.
 
 What changes (all sized from the schema's `maxlen`/`count`):
@@ -88,9 +91,9 @@ change.
 targets:
   cpp:
     namespace: myproj
-    corelib: c-cpp
-    containers: fixed
-    allow_dynamic: true   # optional: keep std::vector for unbounded fields
+    corelib: c-cpp            # containers: fixed is implied (the default here)
+    allow_dynamic: true       # optional: keep std::vector for unbounded fields
+    # containers: dynamic     # set this to opt back out to std::vector/std::string
 ```
 
 ## Reserved options
