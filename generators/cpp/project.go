@@ -67,8 +67,14 @@ CC  ?= gcc
 # C++20 for the wrapper + harness.
 CSTD   ?= -std=c99
 CXXSTD ?= -std=c++20
-CFLAGS   ?= -O2
-CXXFLAGS ?= -O2 -Wall
+# Embedded-friendly defaults: optimise for size and let the linker garbage-collect
+# unused sections. All generated + corelib code is noexcept and uses no RTTI
+# (typeid/dynamic_cast), so exceptions and RTTI tables can be dropped outright.
+# These are safe for every corelib-c-cpp build and cut .text with zero wire/API
+# impact; override C/CXXFLAGS to change them.
+CFLAGS   ?= -Os -ffunction-sections -fdata-sections
+CXXFLAGS ?= -Os -Wall -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
+LDFLAGS  ?= -Wl,--gc-sections
 INCLUDES := -I. -I$(SOFAB_C_DIR)/src/include -I$(SOFAB_C_DIR)/test/shared
 
 COBJS = object.o ostream.o istream.o sofab_test_json.o
@@ -82,7 +88,7 @@ sofab_test_json.o: $(SOFAB_C_DIR)/test/shared/sofab_test_json.c
 	$(CC) $(CSTD) $(CFLAGS) -I$(SOFAB_C_DIR)/src/include -I$(SOFAB_C_DIR)/test/shared -c $< -o $@
 
 harness/harness: harness/main.cpp $(COBJS)
-	$(CXX) $(CXXSTD) $(CXXFLAGS) $(INCLUDES) harness/main.cpp $(COBJS) -o $@
+	$(CXX) $(CXXSTD) $(CXXFLAGS) $(INCLUDES) harness/main.cpp $(COBJS) $(LDFLAGS) -o $@
 
 .PHONY: clean
 clean:
@@ -217,7 +223,8 @@ func (g *gen) emitFromJSON(f *hfile, fld *ir.Field) {
 	case ir.KindFP64:
 		f.line("        %s = sofab_json_double(c);", acc)
 	case ir.KindString:
-		f.line("        { size_t _l; const char *_s = sofab_json_string(c, &_l); %s.assign(_s, _l); }", acc)
+		// assign(string_view) works for both std::string and sofab::FixedString.
+		f.line("        { size_t _l; const char *_s = sofab_json_string(c, &_l); %s.assign(std::string_view{_s, _l}); }", acc)
 	case ir.KindBlob:
 		f.line("        %s.clear(); json_to_bytes(c, %s);", acc, acc)
 	case ir.KindEnum:
@@ -231,14 +238,14 @@ func (g *gen) emitFromJSON(f *hfile, fld *ir.Field) {
 }
 
 func (g *gen) emitFromJSONArray(f *hfile, fld *ir.Field, acc string) {
-	g.fromJSONArray(f, "        ", "c", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0)
+	g.fromJSONArray(f, "        ", "c", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0)
 }
 
 // fromJSONArray parses a JSON array node into target, recursing for nested
 // arrays. Native elements (numeric/enum/boolean/bitfield) overwrite a fixed
 // std::array by index; string/blob/struct/union/nested-array elements append to
 // a std::vector.
-func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, depth int) {
+func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	vv := fmt.Sprintf("_v%d", depth)
@@ -269,15 +276,20 @@ func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, re
 	f.line("%sconst sofab_json_t *%s = sofab_json_array_at(%s, %s);", inner, ev, node, iv)
 	switch elem {
 	case ir.KindString:
-		f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back(_s, _l); }", inner, ev, target)
+		if strings.HasPrefix(g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), "InlineVector") {
+			// InlineVector<FixedString>: default-construct a slot, then assign.
+			f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back().assign(std::string_view{_s, _l}); }", inner, ev, target)
+		} else {
+			f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back(_s, _l); }", inner, ev, target)
+		}
 	case ir.KindBlob:
-		f.line("%s{ std::vector<std::uint8_t> _b; json_to_bytes(%s, _b); %s.push_back(std::move(_b)); }", inner, ev, target)
+		f.line("%s{ %s _b{}; json_to_bytes(%s, _b); %s.push_back(std::move(_b)); }", inner, g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax), ev, target)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%s{ %s %s; from_json(%s, %s); %s.push_back(std::move(%s)); }", inner, g.typeName(ref.Key), vv, ev, vv, target, vv)
 	case ir.KindArray:
-		icont := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count)
+		icont := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
 		f.line("%s{ %s %s{};", inner, icont, vv)
-		g.fromJSONArray(f, inner+"    ", ev, vv, items.Elem, items.ElemRef, items.ElemItems, items.Count, depth+1)
+		g.fromJSONArray(f, inner+"    ", ev, vv, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax, depth+1)
 		f.line("%s%s.push_back(std::move(%s)); }", inner+"    ", target, vv)
 	}
 	f.line("%s}", ind)
@@ -332,7 +344,7 @@ func defaultMessage(s *ir.Schema) string {
 	return ""
 }
 
-var jsonHelpers = `inline void json_str(std::ostream &out, const std::string &s) {
+var jsonHelpers = `inline void json_str(std::ostream &out, std::string_view s) {
     out << '"';
     for (unsigned char c : s) {
         if (c == '"' || c == '\\') { out << '\\' << c; }
@@ -344,11 +356,13 @@ var jsonHelpers = `inline void json_str(std::ostream &out, const std::string &s)
     }
     out << '"';
 }
-inline void json_bytes(std::ostream &out, const std::vector<std::uint8_t> &b) {
-    out << '['; bool f = true; for (auto x : b) { if (!f) out << ','; f = false; out << static_cast<unsigned>(x); } out << ']';
+template <class Bytes>
+inline void json_bytes(std::ostream &out, const Bytes &b) {
+    out << '['; bool f = true; for (std::size_t i = 0; i < b.size(); i++) { if (!f) out << ','; f = false; out << static_cast<unsigned>(b.data()[i]); } out << ']';
 }
 inline void json_num(std::ostream &out, double v) { char b[32]; std::snprintf(b, sizeof(b), "%.17g", v); out << b; }
-inline void json_to_bytes(const sofab_json_t *c, std::vector<std::uint8_t> &dst) {
+template <class Bytes>
+inline void json_to_bytes(const sofab_json_t *c, Bytes &dst) {
     size_t n = sofab_json_array_size(c);
     for (size_t i = 0; i < n; i++) dst.push_back(static_cast<std::uint8_t>(sofab_json_u64(sofab_json_array_at(c, i))));
 }`

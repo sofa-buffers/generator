@@ -15,6 +15,13 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
+func cfgBool(cfg map[string]any, key string, dflt bool) bool {
+	if v, ok := cfg[key].(bool); ok {
+		return v
+	}
+	return dflt
+}
+
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
 	var b strings.Builder
@@ -69,15 +76,29 @@ func (g *gen) cppType(f *ir.Field) string {
 	case ir.KindBool:
 		return "bool"
 	case ir.KindString:
+		// Fixed profile: a bounded string becomes sofab::FixedString<N> (heap-free
+		// inline storage; the corelib-c-cpp wrapper fills it via the same
+		// read_string_noterm path as std::string). An unbounded string has no
+		// maxlen, so it stays std::string — allowed only under allow_dynamic, else
+		// checkBounded rejects it.
+		if g.fixed && f.HasMaxlen {
+			return fmt.Sprintf("sofab::FixedString<%d>", f.Maxlen)
+		}
 		return "std::string"
 	case ir.KindBlob:
+		// Fixed profile: a bounded blob becomes fixed-capacity inline storage
+		// (no heap). The read(void*,size_t) blob overload already takes a raw
+		// pointer, so decode needs no corelib change.
+		if g.fixed && f.HasMaxlen {
+			return fmt.Sprintf("FixedBytes<%d>", f.Maxlen)
+		}
 		return "std::vector<std::uint8_t>"
 	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindBitfield:
 		return bitfieldBacking(f.Ref.Target)
 	case ir.KindArray:
-		return g.cppArrayContainer(f.Elem, f.ElemRef, f.ElemItems, f.Count)
+		return g.cppArrayContainer(f.Elem, f.ElemRef, f.ElemItems, f.Count, f.ElemMaxHas, f.ElemMax)
 	}
 	return "void"
 }
@@ -96,12 +117,27 @@ func isNativeArrayElem(k ir.Kind) bool {
 	return false
 }
 
-// cppArrayContainer is the C++ member type for an array with the given element:
-// std::array<T, count> for native elements, std::vector<T> otherwise.
-func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64) string {
-	et := g.cppArrayElem(elem, ref, items)
+// cppArrayContainer is the C++ member type for an array with the given element.
+// Native elements are always a fixed std::array<T, count>. For composite/dynamic
+// elements the default profile uses std::vector<T>; the fixed profile lowers a
+// bounded array (count present, and for blobs the element maxlen present) to an
+// InlineVector<T, count> — fixed inline storage with a separate logical length,
+// no heap. A string/blob element additionally needs its element maxlen to be
+// sized; without it the array stays std::vector.
+func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64) string {
+	et := g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax)
 	if isNativeArrayElem(elem) {
 		return fmt.Sprintf("std::array<%s, %d>", et, count)
+	}
+	if g.fixed && count > 0 {
+		switch elem {
+		case ir.KindString, ir.KindBlob:
+			if elemMaxHas {
+				return fmt.Sprintf("InlineVector<%s, %d>", et, count)
+			}
+		case ir.KindStruct, ir.KindUnion, ir.KindArray:
+			return fmt.Sprintf("InlineVector<%s, %d>", et, count)
+		}
 	}
 	return "std::vector<" + et + ">"
 }
@@ -109,11 +145,17 @@ func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 // cppArrayElem is the C++ type of a single array element, recursing for nested
 // arrays. Enum/bitfield map to their backing/underlying type only where the
 // element is stored raw; enum keeps its scoped type so JSON stays value-typed.
-func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64) string {
 	switch elem {
 	case ir.KindString:
+		if g.fixed && elemMaxHas {
+			return fmt.Sprintf("sofab::FixedString<%d>", elemMax)
+		}
 		return "std::string"
 	case ir.KindBlob:
+		if g.fixed && elemMaxHas {
+			return fmt.Sprintf("FixedBytes<%d>", elemMax)
+		}
 		return "std::vector<std::uint8_t>"
 	case ir.KindBool:
 		return "bool"
@@ -122,7 +164,7 @@ func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) s
 	case ir.KindBitfield:
 		return bitfieldBacking(ref.Target)
 	case ir.KindArray:
-		return g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count)
+		return g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
 	default:
 		return numCppType(elem)
 	}
@@ -394,6 +436,99 @@ struct _MsgSeq : sofab::IStreamMessage {
     void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
         out->emplace_back();
         is.read(out->back());
+    }
+};`
+
+// cppFixedPrelude is emitted only for the fixed-capacity (embedded) path
+// (corelib: c-cpp). It provides heap-free, schema-sized
+// storage that presents the same .data()/.size() surface the encode/decode paths
+// already use, so the emitted wire bytes are unchanged.
+//
+//   - FixedBytes<N>: a blob of at most N bytes, std::array<uint8_t,N> + length.
+//     Encode uses .data()/.size() (unchanged); decode uses the corelib's
+//     read(void*,size_t) blob overload, so no corelib change is needed.
+//   - InlineVector<T,N>: a fixed-capacity sequence (std::array<T,N> + length)
+//     exposing exactly what serialize and the _MsgSeq* visitors use. Inline
+//     storage never reallocates, so a bound-then-filled element (the deferred
+//     corelib-c-cpp decoder) is address-stable — strictly safer than the
+//     std::vector + reserve() it replaces.
+//   - _MsgSeqFixed / _FixedBlobSeq: element collectors that write into the next
+//     inline slot instead of push_back/emplace_back onto the heap.
+const cppFixedPrelude = `template <std::size_t N>
+struct FixedBytes {
+    std::array<std::uint8_t, N> buf{};
+    std::size_t len_ = 0;
+    FixedBytes() = default;
+    FixedBytes(std::initializer_list<std::uint8_t> init) noexcept {
+        for (auto b : init) { if (len_ >= N) break; buf[len_++] = b; }
+    }
+    std::uint8_t *data() noexcept { return buf.data(); }
+    const std::uint8_t *data() const noexcept { return buf.data(); }
+    std::size_t size() const noexcept { return len_; }
+    void set_len(std::size_t n) noexcept { len_ = n < N ? n : N; }
+    void clear() noexcept { len_ = 0; }
+    void push_back(std::uint8_t b) noexcept { if (len_ < N) buf[len_++] = b; }
+    bool operator==(const FixedBytes &o) const noexcept {
+        if (len_ != o.len_) return false;
+        for (std::size_t i = 0; i < len_; ++i) { if (buf[i] != o.buf[i]) return false; }
+        return true;
+    }
+    bool operator!=(const FixedBytes &o) const noexcept { return !(*this == o); }
+};
+template <typename T, std::size_t N>
+struct InlineVector {
+    std::array<T, N> buf{};
+    std::size_t len_ = 0;
+    std::size_t size() const noexcept { return len_; }
+    static constexpr std::size_t capacity() noexcept { return N; }
+    void reserve(std::size_t) noexcept {}
+    void clear() noexcept { len_ = 0; }
+    T &emplace_back() noexcept {
+        std::size_t i = len_ < N ? len_++ : N - 1;
+        buf[i] = T{};
+        return buf[i];
+    }
+    void push_back(const T &v) noexcept { emplace_back() = v; }
+    void push_back(T &&v) noexcept { emplace_back() = static_cast<T &&>(v); }
+    T &back() noexcept { return buf[len_ - 1]; }
+    T &operator[](std::size_t i) noexcept { return buf[i]; }
+    const T &operator[](std::size_t i) const noexcept { return buf[i]; }
+    T *data() noexcept { return buf.data(); }
+    const T *data() const noexcept { return buf.data(); }
+    T *begin() noexcept { return buf.data(); }
+    T *end() noexcept { return buf.data() + len_; }
+    const T *begin() const noexcept { return buf.data(); }
+    const T *end() const noexcept { return buf.data() + len_; }
+    bool operator==(const InlineVector &o) const noexcept {
+        if (len_ != o.len_) return false;
+        for (std::size_t i = 0; i < len_; ++i) { if (!(buf[i] == o.buf[i])) return false; }
+        return true;
+    }
+    bool operator!=(const InlineVector &o) const noexcept { return !(*this == o); }
+};
+template <typename Container>
+struct _MsgSeqFixed : sofab::IStreamMessage {
+    Container *out = nullptr;
+    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
+        is.read(out->emplace_back());
+    }
+};
+template <typename Container>
+struct _FixedBlobSeq : sofab::IStreamMessage {
+    Container *out = nullptr;
+    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t _size, std::size_t) noexcept override {
+        auto &b = out->emplace_back();
+        b.set_len(_size);
+        if (_size) is.read(b.data(), _size);
+    }
+};
+template <typename Container>
+struct _FixedStrSeq : sofab::IStreamMessage {
+    Container *out = nullptr;
+    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t _size, std::size_t) noexcept override {
+        auto &s = out->emplace_back();
+        s.set_len(_size);
+        if (_size) is.read(s);
     }
 };`
 

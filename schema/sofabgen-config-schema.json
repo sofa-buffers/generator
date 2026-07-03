@@ -300,6 +300,10 @@
           ],
           "default": "cpp"
         },
+        "allow_dynamic": {
+          "type": "boolean",
+          "description": "corelib: c-cpp only. Keep a std::vector/std::string heap fallback for genuinely unbounded fields (string/blob without maxlen, array without count) instead of failing generation; bounded fields still use fixed-capacity inline storage."
+        },
         "emit": {
           "type": "string",
           "enum": [
