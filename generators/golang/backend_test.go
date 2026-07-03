@@ -83,8 +83,8 @@ func TestGoStructuralInvariants(t *testing.T) {
 	for _, want := range []string{
 		"package messages",
 		"func (m *Myfirstmessage) marshal(e *sofab.Encoder)",
-		"_visitorBase",                                          // struct embeds the no-op base
-		"func (m *Myfirstmessage) Unsigned(id sofab.ID, v uint64) error",  // visitor decode
+		"_visitorBase", // struct embeds the no-op base
+		"func (m *Myfirstmessage) Unsigned(id sofab.ID, v uint64) error", // visitor decode
 		"func (m *Myfirstmessage) BeginSequence(id sofab.ID) (sofab.Visitor, error)",
 		"func NewMyfirstmessage() *Myfirstmessage",
 		"func DecodeMyfirstmessage(",
