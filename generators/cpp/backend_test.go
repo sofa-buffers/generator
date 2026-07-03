@@ -160,20 +160,18 @@ func TestCppFixedContainers(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"FixedBytes<16> bl = {};",                                      // scalar blob -> fixed
-		"sofab::FixedString<8> s = \"\";",                              // bounded string -> FixedString
-		"std::array<std::uint32_t, 4> nums = {};",                      // native array unchanged
-		"InlineVector<FixedBytes<8>, 3> blobs = {};",                   // blob sequence -> inline
-		"InlineVector<sofab::FixedString<16>, 5> strs = {};",           // string sequence -> inline
-		"InlineVector<MPtsElem",                                        // struct sequence -> inline (prefix)
-		"struct FixedBytes {",                                          // prelude emitted
-		"struct InlineVector {",                                        // prelude emitted
-		"if (bl != FixedBytes<16>{}) {",                                // blob default-compare typed
-		"s.set_len(_size); if (_size) is.read(s);",                     // FixedString decode
-		"static _FixedBlobSeq<InlineVector<FixedBytes<8>, 3>>",         // blob-seq collector
-		"static _FixedStrSeq<InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
-		"static _MsgSeqFixed<InlineVector<",                            // struct-seq collector
-		"std::size_t encodeTo(std::uint8_t *dst",                       // heap-free encode
+		"sofab::FixedBytes<16> bl = {};",                                      // scalar blob -> fixed
+		"sofab::FixedString<8> s = \"\";",                                     // bounded string -> FixedString
+		"std::array<std::uint32_t, 4> nums = {};",                             // native array unchanged
+		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",            // blob sequence -> inline
+		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",           // string sequence -> inline
+		"sofab::InlineVector<MPtsElem",                                        // struct sequence -> inline (prefix)
+		"if (bl != sofab::FixedBytes<16>{}) {",                                // blob default-compare typed
+		"s.set_len(_size); if (_size) is.read(s);",                            // FixedString decode
+		"static _FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",  // blob-seq collector
+		"static _FixedStrSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
+		"static _MsgSeqFixed<sofab::InlineVector<",                            // struct-seq collector
+		"std::size_t encodeTo(std::uint8_t *dst",                              // heap-free encode
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("fixed header missing %q", want)
@@ -183,6 +181,11 @@ func TestCppFixedContainers(t *testing.T) {
 	if strings.Contains(h, "std::string s ") || strings.Contains(h, "std::vector<std::uint8_t> bl") ||
 		strings.Contains(h, "std::vector<std::string> strs") {
 		t.Error("fixed profile must not emit std::string/std::vector for bounded string/blob members")
+	}
+	// The containers now live in the corelib (sofab::FixedBytes / sofab::InlineVector);
+	// the generator references them and must no longer hand-roll the definitions.
+	if strings.Contains(h, "struct FixedBytes {") || strings.Contains(h, "struct InlineVector {") {
+		t.Error("fixed profile must not emit its own FixedBytes/InlineVector; they come from the corelib")
 	}
 }
 
@@ -277,8 +280,8 @@ func TestCppContainersByCorelib(t *testing.T) {
 	if err != nil {
 		t.Fatalf("c-cpp generate: %v", err)
 	}
-	if !strings.Contains(h, "FixedBytes<16> bl") {
-		t.Error("c-cpp should use fixed containers (expected FixedBytes member)")
+	if !strings.Contains(h, "sofab::FixedBytes<16> bl") {
+		t.Error("c-cpp should use fixed containers (expected sofab::FixedBytes member)")
 	}
 	// pure cpp (default) -> dynamic std::vector.
 	h, err = genHeader(t, src, "m.hpp", map[string]any{"namespace": "sofabuffers"})
