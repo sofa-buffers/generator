@@ -1,5 +1,13 @@
 # Codegen performance improvements
 
+> **Status: implemented in the generator.** All four fixes below now emit from
+> `sofabgen` itself (Rust `[T; N]` arrays + string/blob single-shot; Java
+> primitive `long[]/float[]/double[]` + single-shot; C# string/blob single-shot;
+> Go `sofab.AcceptBytes` visitor decode). Wire output is unchanged — the generator
+> test suite stays green and the Go decode path is round-trip-verified against a
+> real `corelib-go`. The per-language arena `setup.sh` re-apply blocks can now be
+> deleted (they become no-ops). The guides below remain the design rationale.
+
 This directory documents four **generated-code performance fixes** discovered while
 performance-tuning the multi-language SofaBuffers benchmark arena (encode+decode
 of one canonical message, SofaBuffers vs Protobuf, per language). Each is currently

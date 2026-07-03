@@ -57,6 +57,9 @@ func TestCsStructural(t *testing.T) {
 		"public void SequenceBegin(int id)", // flat-visitor nesting
 		"public ulong someu64 = 18446744073709551615UL;",
 		"public enum MyfirstmessageSomeenum : sbyte {",
+		"if (offset == 0 && chunkLength >= total) {", // string/blob single-shot fast path
+		"_s = Encoding.UTF8.GetString(data, chunkOffset, total);",
+		"System.Array.Copy(data, chunkOffset, _b, 0, total);",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing %q", want)

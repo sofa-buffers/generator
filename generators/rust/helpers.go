@@ -52,8 +52,12 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 		return "Vec::new()"
 	case ir.KindArray:
 		// A native scalar array is a leaf: materialize its schema default so an
-		// omitted default array reconstructs correctly. Composite arrays are
-		// wrapper sequences (always framed) and stay an empty Vec.
+		// omitted default array reconstructs correctly. A fixed-count native array
+		// is a stack `[elem; N]`; a dynamic one stays a heap Vec. Composite arrays
+		// are wrapper sequences (always framed) and stay an empty Vec.
+		if elem, n, ok := g.fixedNativeArray(f); ok {
+			return g.rustFixedArrayDefault(f, elem, n)
+		}
 		if isNativeArrayElem(f.Elem) {
 			if lit, ok := g.rustNativeArrayLiteral(f); ok {
 				return lit
@@ -65,10 +69,10 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 	}
 }
 
-// rustNativeArrayLiteral renders a native scalar array's schema default as a Rust
-// `vec![...]` literal; ("", false) when there is no default. Element literals are
-// unconstrained and infer to the field's Vec element type.
-func (g *gen) rustNativeArrayLiteral(f *ir.Field) (string, bool) {
+// rustNativeArrayParts renders a native scalar array's schema default element
+// list (comma-joined, no brackets); ("", false) when there is no default.
+// Element literals are unconstrained and infer to the field's element type.
+func (g *gen) rustNativeArrayParts(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
 	if !ok {
 		return "", false
@@ -84,7 +88,17 @@ func (g *gen) rustNativeArrayLiteral(f *ir.Field) (string, bool) {
 			parts[i] = fmt.Sprintf("%v", v)
 		}
 	}
-	return fmt.Sprintf("vec![%s]", strings.Join(parts, ", ")), true
+	return strings.Join(parts, ", "), true
+}
+
+// rustNativeArrayLiteral renders a native scalar array's schema default as a Rust
+// `vec![...]` literal (for the dynamic/`Vec` path); ("", false) when no default.
+func (g *gen) rustNativeArrayLiteral(f *ir.Field) (string, bool) {
+	parts, ok := g.rustNativeArrayParts(f)
+	if !ok {
+		return "", false
+	}
+	return "vec![" + parts + "]", true
 }
 
 // rustBlobLiteral renders a blob field's base64 schema default as a Rust
@@ -173,6 +187,49 @@ func (g *gen) typeName(key string) string {
 	return b.String()
 }
 
+// fixedNativeArray reports whether an array field is a native-element array with
+// a statically known length — the case that lowers to a fixed Rust array
+// `[elem; N]` (stack, heap-free) instead of a heap `Vec<elem>`, mirroring the C++
+// backend's `std::array<T, N>`. Returns the element Rust type and N. Native but
+// count-less (dynamic) arrays, and composite-element arrays, keep `Vec`.
+func (g *gen) fixedNativeArray(f *ir.Field) (elem string, n int64, ok bool) {
+	if f.Kind != ir.KindArray || !isNativeArrayElem(f.Elem) || !f.HasCount {
+		return "", 0, false
+	}
+	return g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems), f.Count, true
+}
+
+// rustFixedArrayDefault renders the Default value of a fixed native array
+// `[elem; N]`. With a schema default it is an explicit array literal of exactly N
+// elements — the given values, tail-padded with the element zero (matching the
+// C++ `std::array` aggregate-init that zero-fills unspecified trailing elements,
+// so both backends encode the same N elements). With no default it is the
+// type-zero repeat literal (`[0; N]` / `[0.0; N]` / `[false; N]`).
+func (g *gen) rustFixedArrayDefault(f *ir.Field, elem string, n int64) string {
+	zero := "0"
+	switch f.Elem {
+	case ir.KindFP32, ir.KindFP64:
+		zero = "0.0"
+	case ir.KindBool:
+		zero = "false"
+	}
+	if vals, ok := f.Default.([]any); ok {
+		parts := make([]string, 0, n)
+		for _, v := range vals {
+			if f.Elem == ir.KindFP32 || f.Elem == ir.KindFP64 {
+				parts = append(parts, rustFloat(v))
+			} else {
+				parts = append(parts, fmt.Sprintf("%v", v))
+			}
+		}
+		for int64(len(parts)) < n {
+			parts = append(parts, zero)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	}
+	return fmt.Sprintf("[%s; %d]", zero, n)
+}
+
 func (g *gen) rustType(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
@@ -194,6 +251,9 @@ func (g *gen) rustType(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
+		if elem, n, ok := g.fixedNativeArray(f); ok {
+			return fmt.Sprintf("[%s; %d]", elem, n)
+		}
 		return "Vec<" + g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems) + ">"
 	}
 	return "()"

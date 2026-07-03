@@ -61,7 +61,7 @@ mod scalars_dec {
     pub fn decode(data: &[u8]) -> Scalars {
         let mut m = Scalars::default();
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new() };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };
             let mut is = IStream::new();
             let _ = is.feed(data, &mut v);
         }
@@ -78,6 +78,7 @@ struct V<'a> {
     stack: Vec<_Loc>,
     cur: _Loc,
     acc: Vec<u8>,
+    ai: usize, // index into the fixed native array currently being filled
 }
 
 impl<'a> Visitor for V<'a> {

@@ -56,7 +56,16 @@ func TestJavaStructural(t *testing.T) {
 		"class MyfirstmessageVisitor implements Visitor {",
 		"public void sequenceBegin(int id)", // flat-visitor nesting
 		"public long someu64 = Long.parseUnsignedLong(\"18446744073709551615\");",
-		"class MyfirstmessageSomestructNestedstruct {", // nested types in file
+		"class MyfirstmessageSomestructNestedstruct {",                                                // nested types in file
+		"public long[] someuintarray = new long[]{0L, 1L, 1000L, 4294967295L};",                       // primitive array (was List<Long>)
+		"public float[] somefloatarray = new float[]{0.0f, -1.5f, 3.25f};",                            // primitive fp array
+		"public long[] someenumarray = new long[]{2L, 1L, 0L, 0};",                                    // short default tail-padded to count
+		"os.writeArrayUnsigned(15, this.someuintarray);",                                              // direct write, no Sbuf box
+		"if (!java.util.Arrays.equals(this.someuintarray, new long[]{0L, 1L, 1000L, 4294967295L})) {", // Arrays.equals guard
+		"m.someuintarray[ai++] = value;",                                                              // indexed decode
+		"case 15: m.someuintarray = new long[count]; break;",                                          // right-sized alloc
+		"if (offset == 0 && chunkLength >= total) {",                                                  // string/blob single-shot
+		"public List<Boolean> someboolarray",                                                          // boolean array stays boxed List
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Myfirstmessage.java missing %q", want)

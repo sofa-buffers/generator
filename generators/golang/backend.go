@@ -38,6 +38,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if tf := g.typesFile(); tf != nil {
 		files = append(files, generator.File{Path: pkgDir + "types.go", Content: tf})
 	}
+	if g.hasObject() {
+		files = append(files, generator.File{Path: pkgDir + "sofab_visitor.go", Content: g.preludeFile()})
+	}
 	for _, m := range s.Messages {
 		files = append(files, generator.File{Path: pkgDir + strings.ToLower(m.Name) + ".go", Content: g.messageFile(m)})
 	}
@@ -52,6 +55,171 @@ type gen struct {
 	pkg     string
 	banner  string
 	license string // SPDX id, "" to omit the header line
+}
+
+// hasObject reports whether the schema emits at least one struct/union/message —
+// i.e. at least one sofab.Visitor implementation, so the shared decode prelude
+// (_visitorBase, narrow helpers, sequence collectors) is needed.
+func (g *gen) hasObject() bool {
+	if len(g.schema.Messages) > 0 {
+		return true
+	}
+	for _, key := range g.schema.NamedOrder {
+		switch g.schema.Named[key].Category {
+		case ir.CatStruct, ir.CatUnion:
+			return true
+		}
+	}
+	return false
+}
+
+// preludeFile is the once-per-package decode support: the no-op _visitorBase that
+// every generated object embeds, the integer-array narrowing helpers, and the
+// collector visitors that gather the elements of a wrapper-sequence array. These
+// are schema-independent, so the whole set is emitted unconditionally (unused
+// generic types/functions are legal Go) and shared by every message file.
+func (g *gen) preludeFile() []byte {
+	f := newGoFile(g.pkg)
+	f.imp(corelibImport)
+	f.line(`// _visitorBase supplies no-op defaults for every sofab.Visitor method, so a
+// generated object overrides only the callbacks its fields actually use.
+type _visitorBase struct{}
+
+func (_visitorBase) Unsigned(sofab.ID, uint64) error               { return nil }
+func (_visitorBase) Signed(sofab.ID, int64) error                  { return nil }
+func (_visitorBase) Float32(sofab.ID, float32) error               { return nil }
+func (_visitorBase) Float64(sofab.ID, float64) error               { return nil }
+func (_visitorBase) String(sofab.ID, string) error                 { return nil }
+func (_visitorBase) Bytes(sofab.ID, []byte) error                  { return nil }
+func (_visitorBase) UnsignedArray(sofab.ID, []uint64) error        { return nil }
+func (_visitorBase) SignedArray(sofab.ID, []int64) error           { return nil }
+func (_visitorBase) Float32Array(sofab.ID, []float32) error        { return nil }
+func (_visitorBase) Float64Array(sofab.ID, []float64) error        { return nil }
+func (_visitorBase) BeginSequence(sofab.ID) (sofab.Visitor, error) { return _visitorBase{}, nil }
+func (_visitorBase) EndSequence() error                            { return nil }
+
+// _narrowU / _narrowS copy a 64-bit-widened native array down to its declared
+// element width.
+func _narrowU[T ~uint8 | ~uint16 | ~uint32 | ~uint64](v []uint64) []T {
+	out := make([]T, len(v))
+	for i, x := range v {
+		out[i] = T(x)
+	}
+	return out
+}
+
+func _narrowS[T ~int8 | ~int16 | ~int32 | ~int64](v []int64) []T {
+	out := make([]T, len(v))
+	for i, x := range v {
+		out[i] = T(x)
+	}
+	return out
+}
+
+// _strSeq / _bytesSeq collect the elements of a string / blob array. Blob copies
+// (the corelib value aliases the decode buffer).
+type _strSeq struct {
+	_visitorBase
+	out *[]string
+}
+
+func (s *_strSeq) String(_ sofab.ID, v string) error { *s.out = append(*s.out, v); return nil }
+
+type _bytesSeq struct {
+	_visitorBase
+	out *[][]byte
+}
+
+func (s *_bytesSeq) Bytes(_ sofab.ID, v []byte) error {
+	*s.out = append(*s.out, append([]byte(nil), v...))
+	return nil
+}
+
+// _objSeq collects the elements of a struct/union array: each element is a nested
+// sequence decoded into a freshly appended T (PT is *T and a Visitor).
+type _objSeq[T any, PT interface {
+	*T
+	sofab.Visitor
+}] struct {
+	_visitorBase
+	out *[]T
+}
+
+func (s *_objSeq[T, PT]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
+	var zero T
+	*s.out = append(*s.out, zero)
+	return PT(&(*s.out)[len(*s.out)-1]), nil
+}
+
+// _uMatSeq / _sMatSeq / _f32MatSeq / _f64MatSeq / _boolMatSeq collect the rows of
+// a matrix (array whose elements are native arrays); each row arrives widened.
+type _uMatSeq[T ~uint8 | ~uint16 | ~uint32 | ~uint64] struct {
+	_visitorBase
+	out *[][]T
+}
+
+func (s *_uMatSeq[T]) UnsignedArray(_ sofab.ID, v []uint64) error {
+	*s.out = append(*s.out, _narrowU[T](v))
+	return nil
+}
+
+type _sMatSeq[T ~int8 | ~int16 | ~int32 | ~int64] struct {
+	_visitorBase
+	out *[][]T
+}
+
+func (s *_sMatSeq[T]) SignedArray(_ sofab.ID, v []int64) error {
+	*s.out = append(*s.out, _narrowS[T](v))
+	return nil
+}
+
+type _f32MatSeq struct {
+	_visitorBase
+	out *[][]float32
+}
+
+func (s *_f32MatSeq) Float32Array(_ sofab.ID, v []float32) error {
+	*s.out = append(*s.out, v)
+	return nil
+}
+
+type _f64MatSeq struct {
+	_visitorBase
+	out *[][]float64
+}
+
+func (s *_f64MatSeq) Float64Array(_ sofab.ID, v []float64) error {
+	*s.out = append(*s.out, v)
+	return nil
+}
+
+type _boolMatSeq struct {
+	_visitorBase
+	out *[][]bool
+}
+
+func (s *_boolMatSeq) UnsignedArray(_ sofab.ID, v []uint64) error {
+	row := make([]bool, len(v))
+	for i, x := range v {
+		row[i] = x != 0
+	}
+	*s.out = append(*s.out, row)
+	return nil
+}
+
+// _seqSeq collects an array whose elements are themselves wrapper-sequence arrays:
+// each element opens a sequence collected into a fresh inner slice by mk.
+type _seqSeq[T any] struct {
+	_visitorBase
+	out *[][]T
+	mk  func(*[]T) sofab.Visitor
+}
+
+func (s *_seqSeq[T]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
+	*s.out = append(*s.out, nil)
+	return s.mk(&(*s.out)[len(*s.out)-1]), nil
+}`)
+	return f.bytes(g.banner, g.license)
 }
 
 // ---- types.go : all named types -----------------------------------------
@@ -109,16 +277,21 @@ func (g *gen) emitBitfield(f *gofile, nt *ir.NamedType) {
 	f.blank()
 }
 
-// emitObject emits a struct + marshal + unmarshal for an id scope.
+// emitObject emits a struct + marshal + a sofab.Visitor decode implementation
+// for an id scope. Decode is push/visitor: the struct embeds _visitorBase (no-op
+// defaults) and overrides the callbacks its fields need, so DecodeX runs the
+// corelib's zero-copy AcceptBytes cursor over the buffer instead of pulling each
+// varint byte through a bufio.Reader.
 func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 	f.imp(corelibImport)
 	f.line("// %s is a generated SofaBuffers object.", typeName)
 	f.line("type %s struct {", typeName)
-	// Declare fields widest-first to minimise struct padding; marshal/unmarshal
-	// below stay in schema/id order, so the wire bytes are unchanged.
+	f.line("\t_visitorBase")
+	// Declare fields widest-first to minimise struct padding; marshal/decode stay
+	// in schema/id order, so the wire bytes are unchanged.
 	for _, fld := range ir.SortedForLayout(fields) {
 		tag := fmt.Sprintf("`json:%q`", fld.Name)
-		f.line("\t%s %s %s%s", exported(fld.Name), g.goType(fld), tag, fieldDoc(fld))
+		f.line("\t%s %s %s%s", goFieldName(fld.Name), g.goType(fld), tag, fieldDoc(fld))
 	}
 	f.line("}")
 	f.blank()
@@ -131,39 +304,13 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 	f.line("}")
 	f.blank()
 
-	// unmarshal (pull-parser; returns on EOF or sequence end)
-	f.imp("io")
-	f.line("func (m *%s) unmarshal(d *sofab.Decoder) error {", typeName)
-	f.line("\tfor {")
-	f.line("\t\tfld, err := d.Next()")
-	f.line("\t\tif err == io.EOF {")
-	f.line("\t\t\treturn nil")
-	f.line("\t\t}")
-	f.line("\t\tif err != nil {")
-	f.line("\t\t\treturn err")
-	f.line("\t\t}")
-	f.line("\t\tif fld.Type == sofab.TypeSequenceEnd {")
-	f.line("\t\t\treturn nil")
-	f.line("\t\t}")
-	f.line("\t\tswitch fld.ID {")
-	for _, fld := range fields {
-		f.line("\t\tcase %d:", fld.ID)
-		g.emitUnmarshalField(f, fld)
-	}
-	f.line("\t\tdefault:")
-	f.line("\t\t\tif err := d.Skip(); err != nil {")
-	f.line("\t\t\t\treturn err")
-	f.line("\t\t\t}")
-	f.line("\t\t}")
-	f.line("\t}")
-	f.line("}")
-	f.blank()
+	g.emitVisitorMethods(f, typeName, fields)
 }
 
 // ---- per-field marshal/unmarshal ----------------------------------------
 
 func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
-	acc := "m." + exported(fld.Name)
+	acc := "m." + goFieldName(fld.Name)
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
@@ -306,100 +453,179 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 	}
 }
 
-func (g *gen) emitUnmarshalField(f *gofile, fld *ir.Field) {
-	acc := "m." + exported(fld.Name)
-	switch fld.Kind {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("\t\t\tv, _ := d.Unsigned()")
-		f.line("\t\t\t%s = %s(v)", acc, g.goType(fld))
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("\t\t\tv, _ := d.Signed()")
-		f.line("\t\t\t%s = %s(v)", acc, g.goType(fld))
-	case ir.KindBool:
-		f.line("\t\t\t%s, _ = d.Bool()", acc)
-	case ir.KindFP32:
-		f.line("\t\t\t%s, _ = d.Float32()", acc)
-	case ir.KindFP64:
-		f.line("\t\t\t%s, _ = d.Float64()", acc)
-	case ir.KindString:
-		f.line("\t\t\t%s, _ = d.String()", acc)
-	case ir.KindBlob:
-		f.line("\t\t\t%s, _ = d.Bytes()", acc)
-	case ir.KindEnum:
-		f.line("\t\t\tv, _ := d.Signed()")
-		f.line("\t\t\t%s = %s(v)", acc, g.typeName(fld.Ref.Key))
-	case ir.KindBitfield:
-		f.line("\t\t\tv, _ := d.Unsigned()")
-		f.line("\t\t\t%s = %s(v)", acc, g.typeName(fld.Ref.Key))
-	case ir.KindStruct, ir.KindUnion:
-		f.line("\t\t\tif err := %s.unmarshal(d); err != nil {", acc)
-		f.line("\t\t\t\treturn err")
-		f.line("\t\t\t}")
-	case ir.KindArray:
-		g.emitUnmarshalArray(f, fld, acc)
+// emitVisitorMethods emits the sofab.Visitor callbacks a type's fields need.
+// Scalars bind straight into a struct member; native arrays arrive widened and
+// narrow to the declared element width; nested structs/unions and every
+// wrapper-sequence array descend via BeginSequence into a child visitor (a
+// nested object, or a collector from arrayCollector). Unused callbacks fall back
+// to the embedded _visitorBase no-ops.
+func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field) {
+	recv := "func (m *" + typeName + ") "
+
+	// scalar callbacks
+	var uns, sig, f32, f64, str, blob []string
+	// array callbacks (native, delivered widened)
+	var uArr, sArr, f32Arr, f64Arr []string
+	// sequence descents (nested object + wrapper-sequence arrays)
+	var seq []string
+
+	arm := func(id int64, body string) string { return fmt.Sprintf("case %d:\n%s", id, body) }
+	for _, fld := range fields {
+		acc := "m." + goFieldName(fld.Name)
+		switch fld.Kind {
+		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
+			uns = append(uns, arm(fld.ID, fmt.Sprintf("%s = %s(v)", acc, goNumType(fld.Kind))))
+		case ir.KindBitfield:
+			uns = append(uns, arm(fld.ID, fmt.Sprintf("%s = %s(v)", acc, g.typeName(fld.Ref.Key))))
+		case ir.KindBool:
+			uns = append(uns, arm(fld.ID, acc+" = v != 0"))
+		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+			sig = append(sig, arm(fld.ID, fmt.Sprintf("%s = %s(v)", acc, goNumType(fld.Kind))))
+		case ir.KindEnum:
+			sig = append(sig, arm(fld.ID, fmt.Sprintf("%s = %s(v)", acc, g.typeName(fld.Ref.Key))))
+		case ir.KindFP32:
+			f32 = append(f32, arm(fld.ID, acc+" = v"))
+		case ir.KindFP64:
+			f64 = append(f64, arm(fld.ID, acc+" = v"))
+		case ir.KindString:
+			str = append(str, arm(fld.ID, acc+" = v"))
+		case ir.KindBlob:
+			// v aliases the decode buffer (AcceptBytes) — copy what we keep.
+			blob = append(blob, arm(fld.ID, acc+" = append([]byte(nil), v...)"))
+		case ir.KindStruct, ir.KindUnion:
+			seq = append(seq, arm(fld.ID, fmt.Sprintf("return &%s, nil", acc)))
+		case ir.KindArray:
+			switch {
+			case isUnsignedNativeArray(fld.Elem):
+				uArr = append(uArr, arm(fld.ID, g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
+			case isSignedNativeArray(fld.Elem):
+				sArr = append(sArr, arm(fld.ID, g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
+			case fld.Elem == ir.KindFP32:
+				f32Arr = append(f32Arr, arm(fld.ID, acc+" = v"))
+			case fld.Elem == ir.KindFP64:
+				f64Arr = append(f64Arr, arm(fld.ID, acc+" = v"))
+			default: // wrapper-sequence array (string/blob/struct/union/nested)
+				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s = %s[:0]\n\t\treturn %s, nil", acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems))))
+			}
+		}
+	}
+
+	emitIDSwitch(f, recv, "Unsigned(id sofab.ID, v uint64) error", uns)
+	emitIDSwitch(f, recv, "Signed(id sofab.ID, v int64) error", sig)
+	emitIDSwitch(f, recv, "Float32(id sofab.ID, v float32) error", f32)
+	emitIDSwitch(f, recv, "Float64(id sofab.ID, v float64) error", f64)
+	emitIDSwitch(f, recv, "String(id sofab.ID, v string) error", str)
+	emitIDSwitch(f, recv, "Bytes(id sofab.ID, v []byte) error", blob)
+	emitIDSwitch(f, recv, "UnsignedArray(id sofab.ID, v []uint64) error", uArr)
+	emitIDSwitch(f, recv, "SignedArray(id sofab.ID, v []int64) error", sArr)
+	emitIDSwitch(f, recv, "Float32Array(id sofab.ID, v []float32) error", f32Arr)
+	emitIDSwitch(f, recv, "Float64Array(id sofab.ID, v []float64) error", f64Arr)
+
+	if len(seq) > 0 {
+		f.line("%sBeginSequence(id sofab.ID) (sofab.Visitor, error) {", recv)
+		f.line("\tswitch id {")
+		for _, a := range seq {
+			f.line("\t%s", a)
+		}
+		f.line("\t}")
+		f.line("\treturn _visitorBase{}, nil")
+		f.line("}")
+		f.blank()
 	}
 }
 
-func (g *gen) emitUnmarshalArray(f *gofile, fld *ir.Field, acc string) {
-	g.unmarshalArray(f, "\t\t\t", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+// emitIDSwitch emits `func … { switch id { <arms> }; return nil }` for a scalar/
+// native-array callback, or nothing when the type has no field for it (the
+// embedded _visitorBase no-op then applies).
+func emitIDSwitch(f *gofile, recv, sig string, arms []string) {
+	if len(arms) == 0 {
+		return
+	}
+	f.line("%s%s {", recv, sig)
+	f.line("\tswitch id {")
+	for _, a := range arms {
+		f.line("\t%s", a)
+	}
+	f.line("\t}")
+	f.line("\treturn nil")
+	f.line("}")
+	f.blank()
 }
 
-// unmarshalArray reads an array into target, mirroring marshalArray: native
-// array readers for numeric/enum/boolean/bitfield elements, a wrapper-sequence
-// loop for string/blob/struct/union/array elements. Recurses for nested arrays,
-// depth-suffixing locals to avoid collisions.
-func (g *gen) unmarshalArray(f *gofile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+// narrowArrayStmt assigns a widened native array (v) into the field, narrowing to
+// the declared element width. 64-bit widths (and bitfield/enum at 64-bit) assign
+// the widened slice directly; narrower widths allocate via _narrowU/_narrowS.
+func (g *gen) narrowArrayStmt(acc string, elem ir.Kind, ref *ir.TypeRef) string {
+	switch elem {
+	case ir.KindU64:
+		return acc + " = v"
+	case ir.KindI64:
+		return acc + " = v"
+	case ir.KindBool:
+		return fmt.Sprintf("%s = make([]bool, len(v))\n\t\tfor _i, _x := range v {\n\t\t\t%s[_i] = _x != 0\n\t\t}", acc, acc)
+	case ir.KindBitfield:
+		return fmt.Sprintf("%s = _narrowU[%s](v)", acc, g.typeName(ref.Key))
+	case ir.KindEnum:
+		return fmt.Sprintf("%s = _narrowS[%s](v)", acc, g.typeName(ref.Key))
+	case ir.KindU8, ir.KindU16, ir.KindU32:
+		return fmt.Sprintf("%s = _narrowU[%s](v)", acc, goNumType(elem))
+	default: // i8/i16/i32
+		return fmt.Sprintf("%s = _narrowS[%s](v)", acc, goNumType(elem))
+	}
+}
+
+// arrayCollector returns an expression constructing the sofab.Visitor that
+// collects a wrapper-sequence array's elements into the slice at ptr (an address
+// expression like "&m.Field" or a "*[]T" pointer). It recurses for nested arrays.
+func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindString:
+		return fmt.Sprintf("&_strSeq{out: %s}", ptr)
+	case ir.KindBlob:
+		return fmt.Sprintf("&_bytesSeq{out: %s}", ptr)
+	case ir.KindStruct, ir.KindUnion:
+		t := g.typeName(ref.Key)
+		return fmt.Sprintf("&_objSeq[%s, *%s]{out: %s}", t, t, ptr)
+	case ir.KindArray:
+		if isNativeArrayElem(items.Elem) {
+			return g.matrixCollector(ptr, items.Elem, items.ElemRef)
+		}
+		// Array of wrapper-sequence arrays: each element is itself a sequence
+		// collected into an inner slice by a recursively-built collector.
+		inner := g.goArrayElem(items.Elem, items.ElemRef, items.ElemItems)
+		mk := g.arrayCollector("p", items.Elem, items.ElemRef, items.ElemItems)
+		return fmt.Sprintf("&_seqSeq[%s]{out: %s, mk: func(p *[]%s) sofab.Visitor { return %s }}", inner, ptr, inner, mk)
+	}
+	return "_visitorBase{}"
+}
+
+// matrixCollector builds the row collector for an array whose elements are native
+// arrays ([][]elem): rows arrive via the widened *Array callbacks.
+func (g *gen) matrixCollector(ptr string, elem ir.Kind, ref *ir.TypeRef) string {
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("%s%s, _ = sofab.ReadUnsignedArray[%s](d)", ind, target, goNumType(elem))
+		return fmt.Sprintf("&_uMatSeq[%s]{out: %s}", goNumType(elem), ptr)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("%s%s, _ = sofab.ReadSignedArray[%s](d)", ind, target, goNumType(elem))
+		return fmt.Sprintf("&_sMatSeq[%s]{out: %s}", goNumType(elem), ptr)
 	case ir.KindBitfield:
-		f.line("%s%s, _ = sofab.ReadUnsignedArray[%s](d)", ind, target, g.typeName(ref.Key))
+		return fmt.Sprintf("&_uMatSeq[%s]{out: %s}", g.typeName(ref.Key), ptr)
 	case ir.KindEnum:
-		f.line("%s%s, _ = sofab.ReadSignedArray[%s](d)", ind, target, g.typeName(ref.Key))
-	case ir.KindBool:
-		uv := fmt.Sprintf("_u%d", depth)
-		iv := fmt.Sprintf("_i%d", depth)
-		ev := fmt.Sprintf("_e%d", depth)
-		f.line("%s%s, _ := sofab.ReadUnsignedArray[uint8](d)", ind, uv)
-		f.line("%s%s = make([]bool, len(%s))", ind, target, uv)
-		f.line("%sfor %s, %s := range %s {", ind, iv, ev, uv)
-		f.line("%s\t%s[%s] = %s != 0", ind, target, iv, ev)
-		f.line("%s}", ind)
+		return fmt.Sprintf("&_sMatSeq[%s]{out: %s}", g.typeName(ref.Key), ptr)
 	case ir.KindFP32:
-		f.line("%s%s, _ = d.ReadFloat32Array()", ind, target)
+		return fmt.Sprintf("&_f32MatSeq{out: %s}", ptr)
 	case ir.KindFP64:
-		f.line("%s%s, _ = d.ReadFloat64Array()", ind, target)
-	default: // string/blob/struct/union/array -> wrapper sequence
-		ef := fmt.Sprintf("_ef%d", depth)
-		ev := fmt.Sprintf("_e%d", depth)
-		f.line("%s%s = %s[:0]", ind, target, target)
-		f.line("%sfor {", ind)
-		f.line("%s\t%s, _ := d.Next()", ind, ef)
-		f.line("%s\tif %s.Type == sofab.TypeSequenceEnd {", ind, ef)
-		f.line("%s\t\tbreak", ind)
-		f.line("%s\t}", ind)
-		switch elem {
-		case ir.KindString:
-			f.line("%s\t%s, _ := d.String()", ind, ev)
-			f.line("%s\t%s = append(%s, %s)", ind, target, target, ev)
-		case ir.KindBlob:
-			f.line("%s\t%s, _ := d.Bytes()", ind, ev)
-			f.line("%s\t%s = append(%s, %s)", ind, target, target, ev)
-		case ir.KindStruct, ir.KindUnion:
-			f.line("%s\tvar %s %s", ind, ev, g.typeName(ref.Key))
-			f.line("%s\tif err := %s.unmarshal(d); err != nil {", ind, ev)
-			f.line("%s\t\treturn err", ind)
-			f.line("%s\t}", ind)
-			f.line("%s\t%s = append(%s, %s)", ind, target, target, ev)
-		case ir.KindArray:
-			f.line("%s\tvar %s []%s", ind, ev, g.goArrayElem(items.Elem, items.ElemRef, items.ElemItems))
-			g.unmarshalArray(f, ind+"\t", ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
-			f.line("%s\t%s = append(%s, %s)", ind, target, target, ev)
-		}
-		f.line("%s}", ind)
+		return fmt.Sprintf("&_f64MatSeq{out: %s}", ptr)
+	case ir.KindBool:
+		return fmt.Sprintf("&_boolMatSeq{out: %s}", ptr)
 	}
+	return "_visitorBase{}"
+}
+
+func isUnsignedNativeArray(k ir.Kind) bool {
+	return k == ir.KindU8 || k == ir.KindU16 || k == ir.KindU32 || k == ir.KindU64 || k == ir.KindBitfield || k == ir.KindBool
+}
+func isSignedNativeArray(k ir.Kind) bool {
+	return k == ir.KindI8 || k == ir.KindI16 || k == ir.KindI32 || k == ir.KindI64 || k == ir.KindEnum
 }
 
 // ---- per-message file ----------------------------------------------------
@@ -437,9 +663,11 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("}")
 	f.blank()
 	f.line("// Decode%s parses bytes into a new message (with defaults pre-applied).", typeName)
+	f.line("// Decode runs the corelib's zero-copy AcceptBytes cursor over the buffer,")
+	f.line("// dispatching each field to the message's sofab.Visitor implementation.")
 	f.line("func Decode%s(data []byte) (*%s, error) {", typeName, typeName)
 	f.line("\tm := New%s()", typeName)
-	f.line("\tif err := m.unmarshal(sofab.NewDecoder(bytes.NewReader(data))); err != nil {")
+	f.line("\tif err := sofab.AcceptBytes(data, m); err != nil {")
 	f.line("\t\treturn nil, err")
 	f.line("\t}")
 	f.line("\treturn m, nil")
@@ -453,6 +681,6 @@ func (g *gen) emitDefaults(f *gofile, fields []*ir.Field) {
 		if !ok {
 			continue
 		}
-		f.line("\tm.%s = %s", exported(fld.Name), lit)
+		f.line("\tm.%s = %s", goFieldName(fld.Name), lit)
 	}
 }

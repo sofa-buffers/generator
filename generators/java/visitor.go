@@ -93,7 +93,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("class %sVisitor implements Visitor {", name)
 	f.line("    private final %s m;", name)
 	f.line("    private int cur = 0;")
-	f.line("    private final java.util.Deque<Integer> stack = new java.util.ArrayDeque<>();")
+	f.line("    private int ai = 0;                 // index into the primitive array currently being filled")
+	f.line("    private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)")
+	f.line("    private int sp = 0;")
 	f.line("    private final java.io.ByteArrayOutputStream acc = new java.io.ByteArrayOutputStream();")
 	f.line("    %sVisitor(%s msg) { m = msg; }", name, name)
 	f.blank()
@@ -109,9 +111,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		case fld.Kind == ir.KindArray:
 			switch {
 			case isUnsignedElem(fld.Elem) || fld.Elem == ir.KindBitfield:
-				return "add", true
+				return "index", true // primitive long[] fill
 			case fld.Elem == ir.KindBool:
-				return "addBool", true
+				return "addBool", true // boolean array stays List<Boolean>
 			}
 		}
 		return "", false
@@ -122,7 +124,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64 || fld.Kind == ir.KindEnum:
 			return "= value", true
 		case fld.Kind == ir.KindArray && (isSignedElem(fld.Elem) || fld.Elem == ir.KindEnum):
-			return "add", true
+			return "index", true // primitive long[] fill
 		}
 		return "", false
 	})
@@ -132,7 +134,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			return "= value", true
 		}
 		if fld.Kind == ir.KindArray && fld.Elem == ir.KindFP32 {
-			return "add", true
+			return "index", true // primitive float[] fill
 		}
 		return "", false
 	})
@@ -141,17 +143,23 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			return "= value", true
 		}
 		if fld.Kind == ir.KindArray && fld.Elem == ir.KindFP64 {
-			return "add", true
+			return "index", true // primitive double[] fill
 		}
 		return "", false
 	})
 
-	// string
+	// string. Single-shot: when the whole payload arrives in one chunk, decode
+	// straight from the input slice, skipping the (synchronized) ByteArrayOutputStream.
 	f.line("    public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
-	f.line("        acc.write(data, chunkOffset, chunkLength);")
-	f.line("        if (acc.size() < total) return;")
-	f.line("        String _s = new String(acc.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);")
-	f.line("        acc.reset();")
+	f.line("        String _s;")
+	f.line("        if (offset == 0 && chunkLength >= total) {")
+	f.line("            _s = new String(data, chunkOffset, total, java.nio.charset.StandardCharsets.UTF_8);")
+	f.line("        } else {")
+	f.line("            acc.write(data, chunkOffset, chunkLength);")
+	f.line("            if (acc.size() < total) return;")
+	f.line("            _s = new String(acc.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);")
+	f.line("            acc.reset();")
+	f.line("        }")
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindString {
@@ -174,12 +182,17 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        }")
 	f.line("    }")
 
-	// blob
+	// blob. Single-shot on the whole-in-one-chunk fast path (see string).
 	f.line("    public void blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
-	f.line("        acc.write(data, chunkOffset, chunkLength);")
-	f.line("        if (acc.size() < total) return;")
-	f.line("        byte[] _b = acc.toByteArray();")
-	f.line("        acc.reset();")
+	f.line("        byte[] _b;")
+	f.line("        if (offset == 0 && chunkLength >= total) {")
+	f.line("            _b = java.util.Arrays.copyOfRange(data, chunkOffset, chunkOffset + total);")
+	f.line("        } else {")
+	f.line("            acc.write(data, chunkOffset, chunkLength);")
+	f.line("            if (acc.size() < total) return;")
+	f.line("            _b = acc.toByteArray();")
+	f.line("            acc.reset();")
+	f.line("        }")
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindBlob {
@@ -202,8 +215,11 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        }")
 	f.line("    }")
 
-	// arrayBegin: clear native-array targets; native-matrix rows append a new list.
+	// arrayBegin: a primitive array is right-sized to `count` and filled by index
+	// (ai reset below); a boolean array clears its List; native-matrix rows append
+	// a new inner list.
 	f.line("    public void arrayBegin(int id, ArrayKind kind, int count) {")
+	f.line("        ai = 0;")
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkNativeMat {
@@ -215,7 +231,10 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		}
 		var arms []string
 		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
+			if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) {
+				target := fr.path + "." + javaIdent(fld.Name)
+				arms = append(arms, jcase(fld.ID, target+" = new "+primArrayBase(fld.Elem)+"[count]"))
+			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) { // boolean List
 				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+".clear()"))
 			}
 		}
@@ -228,7 +247,8 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 
 	// sequenceBegin / sequenceEnd
 	f.line("    public void sequenceBegin(int id) {")
-	f.line("        stack.push(cur);")
+	f.line("        if (sp == stk.length) stk = java.util.Arrays.copyOf(stk, sp * 2);")
+	f.line("        stk[sp++] = cur;")
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		switch fr.kind {
@@ -253,7 +273,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	}
 	f.line("        }")
 	f.line("    }")
-	f.line("    public void sequenceEnd() { cur = stack.isEmpty() ? 0 : stack.pop(); }")
+	f.line("    public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
 	f.line("}")
 	f.blank()
 }
@@ -289,6 +309,8 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 				stmt = target + ".add(value)"
 			case "addBool":
 				stmt = target + ".add(value != 0)"
+			case "index":
+				stmt = target + "[ai++] = value"
 			default:
 				stmt = target + " " + act
 			}

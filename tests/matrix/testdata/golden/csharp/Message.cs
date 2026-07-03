@@ -76,18 +76,29 @@ internal sealed class ScalarsVisitor : IVisitor {
         }
     }
     public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
-        for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);
-        if (acc.Count < total) return;
-        var _s = Encoding.UTF8.GetString(acc.ToArray());
-        acc.Clear();
+        string _s;
+        if (offset == 0 && chunkLength >= total) {
+            _s = Encoding.UTF8.GetString(data, chunkOffset, total);
+        } else {
+            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);
+            if (acc.Count < total) return;
+            _s = Encoding.UTF8.GetString(acc.ToArray());
+            acc.Clear();
+        }
         switch ((cur, id)) {
         }
     }
     public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
-        for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);
-        if (acc.Count < total) return;
-        var _b = acc.ToArray();
-        acc.Clear();
+        byte[] _b;
+        if (offset == 0 && chunkLength >= total) {
+            _b = new byte[total];
+            System.Array.Copy(data, chunkOffset, _b, 0, total);
+        } else {
+            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);
+            if (acc.Count < total) return;
+            _b = acc.ToArray();
+            acc.Clear();
+        }
         switch ((cur, id)) {
         }
     }
