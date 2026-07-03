@@ -53,25 +53,39 @@ func genTS(t *testing.T) string {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, decode, type Visitor } from "@sofa-buffers/corelib";`,
+		`import { OStream, Cursor } from "@sofa-buffers/corelib";`,
 		"export class Myfirstmessage {",
 		"marshal(os: OStream): void {",
 		"static decode(bytes: Uint8Array): Myfirstmessage {",
-		"_visitor(): Visitor {",
-		"sequenceBegin(id: number): Visitor | void {", // nested routing
-		"someu64: bigint = 18446744073709551615n;",    // u64 -> bigint
-		"os.writeSequenceBegin(",                      // nested framing
+		"return Myfirstmessage.decodeFrom(new Cursor(bytes));",
+		"static decodeFrom(c: Cursor): Myfirstmessage {",
+		"while (c.readHeader()) {",                                      // monomorphic pull loop
+		"switch (c.id) {",                                               // one switch per type
+		"default: c.skip(c.wire); break;",                               // forward-compat skip
+		"o.somestruct = MyfirstmessageSomestruct.decodeFrom(c); break;", // nested message recursion
+		"while (c.readHeader()) arr.push(c.readString());",              // string-list sequence
+		"o.someu64 = c.readUnsigned() as bigint; break;",                // u64 -> bigint, number-first
+		"os.writeSequenceBegin(",                                        // nested framing (marshal unchanged)
 		"export enum MyfirstmessageSomeenum {",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q", want)
 		}
 	}
-	// no duplicate visitor callback keys (would be a TS error)
-	for _, cb := range []string{"arrayUnsigned(", "arraySigned(", "unsigned(", "signed("} {
-		if strings.Count(mod, "      "+cb) > len(strings.Split(mod, "export class "))-1 {
-			// crude guard: each callback should appear at most once per class
+	// The megamorphic push/visitor decode is gone: no _visitor()/ChunkAcc, no
+	// per-field visitor callbacks, no `decode`/`Visitor` import.
+	for _, gone := range []string{
+		"_visitor()", "ChunkAcc", "type Visitor", "sequenceBegin(",
+		"stringListVisitor", "unsigned(id: number, value: bigint)",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("message.ts should no longer emit %q (push/visitor decode removed)", gone)
 		}
+	}
+	// Fast-encode marshal tidy-up: a leaf string list uses an indexed for (no
+	// per-encode closure) rather than .forEach.
+	if !strings.Contains(mod, "for (let _i0 = 0; _i0 < this.somestringarray.length; _i0++) {") {
+		t.Error("message.ts missing indexed-for string-list marshal (fast-encode)")
 	}
 }
 
