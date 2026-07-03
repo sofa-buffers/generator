@@ -42,6 +42,7 @@ and `docs/perf/decode-design.md`.
 | 3 | **C#** | string/blob single-shot decode | `generators/csharp/visitor.go` | 0.81× → **0.89×** |
 | 4 | **Go** | decode via the corelib's zero-copy `AcceptBytes` visitor instead of the pull API | `generators/golang/backend.go` | 0.46× → **0.99×** |
 | 5 | **TypeScript** | monomorphic `decodeFrom(Cursor)` per type instead of the megamorphic push/visitor decoder | `generators/typescript/{backend,visitor,project}.go` | decode **+22%** (see note) |
+| 6 | **TypeScript** | allocation-free UTF-8 encode + blob/string-list marshal guards (corelib-ts #17 is the decisive part) | `generators/typescript/{backend,visitor}.go` | encode **−45%**; TS combined → **~0.81×** |
 
 Each row links to a `<lang>-*.md` implementation guide and a `<lang>-*.patch`
 reference diff (the exact before→after on the arena's generated output).
