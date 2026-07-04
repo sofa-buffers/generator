@@ -58,6 +58,46 @@ echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"
 echo "$OUT" | grep -q '"someblob":\[10,20,30' || { echo "FAIL: blob round-trip"; exit 1; }
 echo "==> project harness round-trip OK"
 
+echo "==> M5: default omission is byte-exact sparse (non-zero scalar + string defaults)"
+# The C backend emits a const default image + SOFAB_OBJECT_DESCR_WITH_DEFAULTS, so
+# a field equal to its (possibly non-zero) schema default is dropped from the wire
+# and reconstructed from the default on decode. This gates that end-to-end against
+# the real corelib — with a zero-baseline encoder every field below would serialize.
+cat > "$WORK/defmsg.yaml" <<'YAML'
+version: 1
+messages:
+  DefMsg:
+    payload:
+      a:     { id: 0, type: u32, default: 7 }
+      b:     { id: 1, type: i32, default: 10 }
+      flag:  { id: 2, type: boolean, default: true }
+      label: { id: 3, type: string, maxlen: 16, default: "hi" }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in "$WORK/defmsg.yaml" --out "$WORK/defproj" )
+make -C "$WORK/defproj" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+DH="$WORK/defproj/harness/harness"
+
+# Every field at its default -> empty payload (nothing serialized).
+n=$(printf '%s' '{"a":7,"b":10,"flag":true,"label":"hi"}' | "$DH" encode | wc -c)
+[ "$n" -eq 0 ] || { echo "FAIL: all-default message must encode to 0 bytes, got $n"; exit 1; }
+
+# A field overriding its default is on the wire; the omitted defaults are
+# reconstructed on decode (proves "absent == default", not "absent == zero").
+RT=$(printf '%s' '{"a":99,"b":10,"flag":true,"label":"hi"}' | "$DH" encode | "$DH" decode)
+echo "$RT" | grep -q '"a":99'        || { echo "FAIL: overridden field lost"; exit 1; }
+echo "$RT" | grep -q '"b":10'        || { echo "FAIL: omitted default b not reconstructed"; exit 1; }
+echo "$RT" | grep -q '"flag":true'   || { echo "FAIL: omitted default flag not reconstructed"; exit 1; }
+echo "$RT" | grep -q '"label":"hi"'  || { echo "FAIL: omitted default string not reconstructed"; exit 1; }
+
+# A value differing from a non-zero default is serialized (bool default true -> false).
+n=$(printf '%s' '{"a":7,"b":10,"flag":false,"label":"hi"}' | "$DH" encode | wc -c)
+[ "$n" -gt 0 ] || { echo "FAIL: value != non-zero default must be on the wire"; exit 1; }
+
+# A non-default string is serialized and round-trips (exercises the string compare).
+RT=$(printf '%s' '{"a":7,"b":10,"flag":true,"label":"hey"}' | "$DH" encode | "$DH" decode)
+echo "$RT" | grep -q '"label":"hey"' || { echo "FAIL: non-default string not round-tripped"; exit 1; }
+echo "==> default omission byte-exact OK"
+
 echo "==> M4: shared-vector byte-exact conformance + gated Go build tests"
 ( cd "$ROOT" && SOFAB_C_CORELIB="$CORELIB" go test ./generators/c/ \
     -run 'Conformance|Compiles|Project' -count=1 )

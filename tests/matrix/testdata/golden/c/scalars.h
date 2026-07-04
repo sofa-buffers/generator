@@ -48,7 +48,7 @@ typedef struct {
 /*! Worst-case serialized size of Scalars (every field present, all maxlen/count). */
 #define MESSAGE_SCALARS_MAX_SIZE 49
 
-/*! Initialize a Scalars with schema defaults (zeroed in this build). */
+/*! Initialize a Scalars with its schema defaults (non-default fields zeroed). */
 void message_scalars_init(message_Scalars_t *msg);
 /*! Encode msg into buf[buflen]; *used receives the byte count. Returns sofab_ret_t. */
 sofab_ret_t message_scalars_encode(const message_Scalars_t *msg, uint8_t *buf, size_t buflen, size_t *used);

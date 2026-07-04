@@ -69,8 +69,18 @@ type objectPlan struct {
 	descr    string // descriptor symbol
 	members  []member
 	fields   []fieldEntry
-	nested   []string // child object keys in nested_list order
+	nested   []string      // child object keys in nested_list order
+	defaults []defaultInit // non-zero leaf-field defaults, for the const image
 	maxField int64
+}
+
+// defaultInit is one designated-initializer entry (".field = expr") in an
+// object's const default image. Only leaf fields whose default differs from
+// all-zero storage are recorded; when the slice is empty no image is emitted and
+// the descriptor keeps the plain SOFAB_OBJECT_DESCR form (zero .rodata cost).
+type defaultInit struct {
+	ident string // C member name (matches the struct decl)
+	expr  string // C initializer RHS
 }
 
 type member struct {
@@ -210,6 +220,9 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 			}
 			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f)})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
+			if expr, ok := g.cDefaultInit(f); ok {
+				p.defaults = append(p.defaults, defaultInit{ident: cIdent(f.Name), expr: expr})
+			}
 		}
 	}
 	// Order the struct members widest-first to minimise padding. The descriptor
@@ -401,24 +414,42 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 		c.line("%s", fe.macro)
 	}
 	c.line("};")
+
+	// nested_list / nested_count arguments (NULL, 0 when the object has no
+	// struct/union/sequence children — byte-identical to the historical form).
+	nested, nestedCount := "NULL", 0
 	if len(p.nested) > 0 {
 		c.line("static const sofab_object_descr_t *const %s[] = {", g.nestedSym(p.key))
 		for _, nk := range p.nested {
 			c.line("    &%s,", g.descrSym(nk))
 		}
 		c.line("};")
-		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR(%s, %d, %s, %d);",
-			p.descr, g.fieldsSym(p.key), len(p.fields), g.nestedSym(p.key), len(p.nested))
+		nested, nestedCount = g.nestedSym(p.key), len(p.nested)
+	}
+
+	// A const default image seeds sofab_object_init and is the corelib's
+	// omission baseline (fields equal to it are dropped). Emit it only when a
+	// leaf field carries a non-zero default; otherwise the plain descriptor
+	// compares against zero and costs no .rodata. Designated initializers are
+	// order-independent, so the widest-first member reordering is irrelevant.
+	if len(p.defaults) > 0 {
+		c.line("static const %s %s = {", p.cType, g.defaultsSym(p.key))
+		for _, d := range p.defaults {
+			c.line("    .%s = %s,", d.ident, d.expr)
+		}
+		c.line("};")
+		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(%s, %d, %s, %d, &%s);",
+			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, g.defaultsSym(p.key))
 	} else {
-		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR(%s, %d, NULL, 0);",
-			p.descr, g.fieldsSym(p.key), len(p.fields))
+		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR(%s, %d, %s, %d);",
+			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount)
 	}
 	c.blank()
 }
 
 func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string) {
 	pfx := g.prefix + strings.ToLower(m.Name)
-	h.doc("Initialize a %s with schema defaults (zeroed in this build).", m.Name)
+	h.doc("Initialize a %s with its schema defaults (non-default fields zeroed).", m.Name)
 	h.line("void %s_init(%s *msg);", pfx, msgType)
 	h.doc("Encode msg into buf[buflen]; *used receives the byte count. Returns sofab_ret_t.")
 	h.line("sofab_ret_t %s_encode(const %s *msg, uint8_t *buf, size_t buflen, size_t *used);", pfx, msgType)
@@ -564,6 +595,7 @@ func (g *gen) cType(key, name string) string { return g.prefix + sanitize(key, n
 func (g *gen) descrSym(key string) string    { return "_" + g.prefix + "descr_" + sanitizeKey(key) }
 func (g *gen) fieldsSym(key string) string   { return "_" + g.prefix + "fields_" + sanitizeKey(key) }
 func (g *gen) nestedSym(key string) string   { return "_" + g.prefix + "nested_" + sanitizeKey(key) }
+func (g *gen) defaultsSym(key string) string { return "_" + g.prefix + "defaults_" + sanitizeKey(key) }
 
 func sanitize(key, name string) string {
 	// message/<name> and named/<cat>/<Name> -> a readable, unique identifier.

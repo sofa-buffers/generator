@@ -19,7 +19,16 @@ static const sofab_object_descr_field_t _message_fields_message_Scalars[] = {
     SOFAB_OBJECT_FIELD(6, message_Scalars_t, f64, SOFAB_OBJECT_FIELDTYPE_FP64),
     SOFAB_OBJECT_FIELD(7, message_Scalars_t, flag, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
 };
-const sofab_object_descr_t _message_descr_message_Scalars = SOFAB_OBJECT_DESCR(_message_fields_message_Scalars, 8, NULL, 0);
+static const message_Scalars_t _message_defaults_message_Scalars = {
+    .u8max = 255,
+    .u64max = 18446744073709551615ULL,
+    .i8min = -128,
+    .i64min = (-9223372036854775807LL - 1),
+    .f32 = 3.14f,
+    .f64 = -2.5,
+    .flag = 1,
+};
+const sofab_object_descr_t _message_descr_message_Scalars = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(_message_fields_message_Scalars, 8, NULL, 0, &_message_defaults_message_Scalars);
 
 void message_scalars_init(message_Scalars_t *msg) {
     sofab_object_init(&_message_descr_message_Scalars, msg);
