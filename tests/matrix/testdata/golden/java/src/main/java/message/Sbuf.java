@@ -3,6 +3,13 @@ package message;
 import java.util.List;
 
 final class Sbuf {
+    // Shared zero-length defaults: field initializers reference these instead of
+    // allocating a fresh empty array per instance (decode replaces them anyway).
+    static final long[] EMPTY_LONGS = {};
+    static final float[] EMPTY_FLOATS = {};
+    static final double[] EMPTY_DOUBLES = {};
+    static final byte[] EMPTY_BYTES = {};
+
     static long[] toLongArray(List<Long> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
     static long[] boolToLongArray(List<Boolean> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i) ? 1 : 0; return a; }
     static float[] toFloatArray(List<Float> l) { float[] a = new float[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }

@@ -118,8 +118,13 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	if isMessage {
 		size, _ := g.maxSize(fields)
 		f.line("    public const int MaxSize = %d;", size)
+		f.line("    // Per-thread scratch buffer: Encode() marshals into it and returns an")
+		f.line("    // exact-size copy, so the worst-case buffer is not re-allocated (and")
+		f.line("    // zeroed) on every call. Do not call Encode() reentrantly from a")
+		f.line("    // Marshal() override on the same thread.")
+		f.line("    [ThreadStatic] private static byte[] _encScratch;")
 		f.line("    public byte[] Encode() {")
-		f.line("        var buf = new byte[MaxSize];")
+		f.line("        var buf = _encScratch ??= new byte[MaxSize];")
 		f.line("        var os = new OStream(buf);")
 		f.line("        Marshal(os);")
 		f.line("        var outp = new byte[os.BytesUsed];")
@@ -160,6 +165,12 @@ func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
 	case ir.KindBlob:
 		// A blob is a leaf: omit when equal to its default (empty if none). The
 		// decoder reconstructs the omitted field from its materialized default.
+		// With an empty default the content compare degenerates to a length
+		// check, sparing the LINQ SequenceEqual enumeration per call.
+		if g.csDefaultValue(fld) == "Array.Empty<byte>()" {
+			f.line("        if (%s != null && %s.Length != 0) { os.WriteBlob(%d, %s); }", acc, acc, fld.ID, acc)
+			return
+		}
 		f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s ?? Array.Empty<byte>(), %s)) { os.WriteBlob(%d, %s ?? Array.Empty<byte>()); }", acc, g.csDefaultValue(fld), fld.ID, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
@@ -182,17 +193,29 @@ func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in the field initializer), else when empty. A composite/
 	// dynamic-element array is a wrapper sequence and is always framed.
+	if primArrayElem(fld.Elem) {
+		// Primitive array (T[]): written straight to the OStream overload with
+		// no List.ToArray temporary.
+		if def, ok := g.csPrimArrayLiteral(fld); ok {
+			f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", acc, def)
+		} else {
+			f.line("        if (%s != null && %s.Length != 0) {", acc, acc)
+		}
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true)
+		f.line("        }")
+		return
+	}
 	if nativeArrayElem(fld.Elem) {
 		if def, ok := g.csNativeArrayLiteral(fld); ok {
 			f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", acc, def)
 		} else {
 			f.line("        if (%s.Count != 0) {", acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false)
 		f.line("        }")
 		return
 	}
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false)
 }
 
 // marshalArray writes the list `val` as field `idExpr`. Numeric/enum/boolean/
@@ -200,18 +223,24 @@ func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
 // bitfield -> unsigned, value-converted to the corelib's array element width);
 // string/blob/struct/union/array elements lower to a wrapper sequence whose child
 // ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested arrays,
-// depth-suffixing the loop var to avoid collisions.
-func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+// depth-suffixing the loop var to avoid collisions. isPrim marks `val` as a
+// primitive T[] field (written directly); inner rows of nested arrays stay
+// List<T> and bridge via ToArray.
+func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, isPrim bool) {
 	iv := fmt.Sprintf("_i%d", depth)
+	arr := val + ".ToArray()"
+	if isPrim {
+		arr = val
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("%sos.WriteArrayUnsigned(%s, %s.ToArray());", ind, idExpr, val)
+		f.line("%sos.WriteArrayUnsigned(%s, %s);", ind, idExpr, arr)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("%sos.WriteArraySigned(%s, %s.ToArray());", ind, idExpr, val)
+		f.line("%sos.WriteArraySigned(%s, %s);", ind, idExpr, arr)
 	case ir.KindFP32:
-		f.line("%sos.WriteArrayFp32(%s, %s.ToArray());", ind, idExpr, val)
+		f.line("%sos.WriteArrayFp32(%s, %s);", ind, idExpr, arr)
 	case ir.KindFP64:
-		f.line("%sos.WriteArrayFp64(%s, %s.ToArray());", ind, idExpr, val)
+		f.line("%sos.WriteArrayFp64(%s, %s);", ind, idExpr, arr)
 	case ir.KindEnum:
 		// enum -> signed array at the enum's backing width (matches Go's typed array).
 		f.line("%sos.WriteArraySigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, enumBacking(ref.Target))
@@ -241,7 +270,7 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindArray:
 		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) {", ind, iv, iv, val, iv)
-		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false)
 		f.line("%s}", ind)
 		f.line("%sos.WriteSequenceEnd();", ind)
 	}

@@ -143,9 +143,15 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 	if isMessage {
 		size, _ := g.maxSize(fields)
 		f.line("    public static final int MAX_SIZE = %d;", size)
+		f.line("    // Per-thread scratch buffer: encode() marshals into it and returns an")
+		f.line("    // exact-size copy, so the worst-case buffer is not re-allocated (and")
+		f.line("    // zeroed) on every call. Do not call encode() reentrantly from a")
+		f.line("    // marshal() override on the same thread.")
+		f.line("    private static final ThreadLocal<byte[]> ENC_BUF =")
+		f.line("        ThreadLocal.withInitial(() -> new byte[MAX_SIZE]);")
 		f.line("    public byte[] encode() {")
 		f.line("        try {")
-		f.line("            byte[] buf = new byte[MAX_SIZE];")
+		f.line("            byte[] buf = ENC_BUF.get();")
 		f.line("            OStream os = new OStream(buf);")
 		f.line("            marshal(os);")
 		f.line("            return Arrays.copyOf(buf, os.bytesUsed());")
@@ -184,6 +190,12 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 		write = fmt.Sprintf("os.writeString(%d, %s == null ? \"\" : %s);", fld.ID, acc, acc)
 	case ir.KindBlob:
 		// A blob is a leaf: omit when equal to its default (empty when none).
+		// With an empty default the content compare degenerates to a length
+		// check, sparing an Arrays.equals against a fresh byte[0] per call.
+		if def := g.javaDefaultValue(fld); def == "new byte[0]" || def == "Sbuf.EMPTY_BYTES" {
+			f.line("        if (%s == null || %s.length != 0) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, acc, fld.ID, acc, acc)
+			return
+		}
 		f.line("        if (!Arrays.equals(%s, %s)) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, g.javaDefaultValue(fld), fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:

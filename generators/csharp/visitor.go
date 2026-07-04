@@ -70,8 +70,10 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("internal sealed class %sVisitor : IVisitor {", name)
 	f.line("    private readonly %s m;", name)
 	f.line("    private int cur = 0;")
-	f.line("    private readonly Stack<int> stack = new();")
-	f.line("    private readonly List<byte> acc = new();")
+	f.line("    private int ai = 0;                // index into the primitive array currently being filled")
+	f.line("    private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)")
+	f.line("    private int sp = 0;")
+	f.line("    private List<byte> acc;            // lazy: only split string/blob payloads need it")
 	f.line("    public %sVisitor(%s msg) { m = msg; }", name, name)
 	for i, fr := range fs {
 		f.line("    private const int %s = %d;", fr.loc, i)
@@ -97,6 +99,8 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
 			case fld.Kind == ir.KindBool:
 				f.line("            case (%s, %d): %s.%s = value != 0; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
+			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && unsignedArrayElem(fld.Elem):
+				f.line("            case (%s, %d): %s.%s[ai++] = %s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))
 			case fld.Kind == ir.KindArray && unsignedArrayElem(fld.Elem):
 				f.line("            case (%s, %d): %s.%s.Add(%s); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))
 			}
@@ -122,6 +126,8 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.csType(fld))
 			case fld.Kind == ir.KindEnum:
 				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
+			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && signedArrayElem(fld.Elem):
+				f.line("            case (%s, %d): %s.%s[ai++] = %s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))
 			case fld.Kind == ir.KindArray && signedArrayElem(fld.Elem):
 				f.line("            case (%s, %d): %s.%s.Add(%s); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))
 			}
@@ -141,6 +147,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("        if (offset == 0 && chunkLength >= total) {")
 	f.line("            _s = Encoding.UTF8.GetString(data, chunkOffset, total);")
 	f.line("        } else {")
+	f.line("            acc ??= new List<byte>();")
 	f.line("            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
 	f.line("            if (acc.Count < total) return;")
 	f.line("            _s = Encoding.UTF8.GetString(acc.ToArray());")
@@ -173,6 +180,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("            _b = new byte[total];")
 	f.line("            System.Array.Copy(data, chunkOffset, _b, 0, total);")
 	f.line("        } else {")
+	f.line("            acc ??= new List<byte>();")
 	f.line("            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
 	f.line("            if (acc.Count < total) return;")
 	f.line("            _b = acc.ToArray();")
@@ -201,6 +209,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// ArrayBegin: clear direct native arrays; start a fresh inner row for a
 	// native-nested (array-of-array) scope (each row arrives as ArrayBegin(index)).
 	f.line("    public void ArrayBegin(int id, ArrayKind kind, int count) {")
+	f.line("        ai = 0;")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {
@@ -210,7 +219,9 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 			continue
 		}
 		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
+			if fld.Kind == ir.KindArray && primArrayElem(fld.Elem) {
+				f.line("            case (%s, %d): %s.%s = new %s[count]; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
+			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				f.line("            case (%s, %d): %s.%s.Clear(); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			}
 		}
@@ -224,7 +235,8 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// fresh element then descends; a sequence-nested inner array appends a fresh
 	// inner list then descends.
 	f.line("    public void SequenceBegin(int id) {")
-	f.line("        stack.Push(cur);")
+	f.line("        if (sp == stk.Length) System.Array.Resize(ref stk, sp * 2);")
+	f.line("        stk[sp++] = cur;")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {
@@ -247,7 +259,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	}
 	f.line("        }")
 	f.line("    }")
-	f.line("    public void SequenceEnd() { cur = stack.Count > 0 ? stack.Pop() : 0; }")
+	f.line("    public void SequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
 	f.line("}")
 	f.blank()
 }
@@ -267,7 +279,7 @@ func (g *gen) emitFloatVisit(f *cfile, fs []frame, kind ir.Kind, cb, ctype strin
 			case fld.Kind == kind:
 				f.line("            case (%s, %d): %s.%s = value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
-				f.line("            case (%s, %d): %s.%s.Add(value); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
+				f.line("            case (%s, %d): %s.%s[ai++] = value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			}
 		}
 	}
