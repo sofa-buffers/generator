@@ -59,8 +59,9 @@ rejected rather than ignored.
 | `struct` | nested; `fields:` inline or `{ $ref }`; recursive |
 | `union` | `oneof:` inline or `{ $ref }`; optional `default_id` |
 
-Common optional metadata on every field: `description`, `unit`, `deprecated`
-(floats also allow `decimals`). Numeric value-range validation is left to the
+Common optional metadata on every field: `description`, `deprecated`. **`unit`
+is allowed only on the numeric types** (`u8…u64`, `i8…i64`, `fp32`, `fp64`);
+floats also allow `decimals`. Numeric value-range validation is left to the
 application, as in protobuf / FlatBuffers / Cap'n Proto.
 
 `string`/`blob` carry an optional **`maxlen`**. It is optional at the schema level,
@@ -129,7 +130,7 @@ these (or fails to compile them), silently dropping the checks. They are:
 | Where | Rule |
 |---|---|
 | `string` `default` | `length(default)` ≤ `maxlen` (when `maxlen` is present) |
-| `array` `default` | `length(default)` == `items.count` (min/maxItems via `$data`) |
+| `array` `default` | `length(default)` ≤ `items.count` (maxItems via `$data`; `count` is the optional capacity) |
 
 A Go/other reimplementation that can't run `$data` **must enforce these as
 explicit semantic checks** after structural validation.

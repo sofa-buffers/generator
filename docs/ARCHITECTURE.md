@@ -139,7 +139,9 @@ by language key. Stages [1]–[4] know nothing about any target language.
 (`TypeRef.Target == nil`, references by key only) and *post-Analysis* (every
 `TypeRef.Target` points at the single shared `NamedType`, checks have run, tree
 frozen). Backends only ever see the frozen post-Analysis state and must treat it
-as immutable.
+as immutable. The "freeze" is a **contract, not a mechanism** — nothing makes
+the tree immutable at runtime; analysis itself performs exactly reference
+resolution plus the nesting-depth check (§5).
 
 ---
 
@@ -150,9 +152,10 @@ Authoritative spec: **`schema/README.md`** (+ the JSON Schema). Summary:
 A document has `version: 1` and at least one of `$defs` / `messages`. A message
 has an optional `summary` and a required `payload` (its top-level **id scope**).
 Every field requires **`id`** (0 … 2³¹−1) and **`type`**; common optional
-metadata is `description`, `unit`, `deprecated` (floats also allow `decimals`
-0–15). All identifiers match `^[A-Za-z][A-Za-z0-9_]*$`; objects are **closed**
-(unknown keys are rejected).
+metadata is `description` and `deprecated`. **`unit` is allowed only on the ten
+numeric types** (`u8…u64`, `i8…i64`, `fp32`, `fp64`) — all other types reject
+it; floats additionally allow `decimals` 0–15. All identifiers match
+`^[A-Za-z][A-Za-z0-9_]*$`; objects are **closed** (unknown keys are rejected).
 
 **Field types and their declaration keys:**
 
@@ -169,6 +172,14 @@ metadata is `description`, `unit`, `deprecated` (floats also allow `decimals`
 | Array | `type: array` + `items: {type, count?, ...}` | element `type` ∈ numeric \| `string` \| `blob` \| `boolean` \| `enum` \| `bitfield` \| `struct` \| `union` \| `array` (composite/nested elements carry their own `fields`/`oneof`/`enum`/`bits`/`items`); `count` is the **optional** capacity (max), so `default` length ≤ `count`; `maxlen` only for string/blob elements |
 | Struct | `type: struct` + `fields: {...}` or `{$ref}` | nested; **own id scope** |
 | Union | `type: union` + `oneof: {...}` or `{$ref}`, optional `default_id` | exactly one option; **own id scope** |
+
+**Bounds and fixed-storage targets.** `maxlen` and array `count` are optional
+at the schema level, but the fixed-storage backends (C, the C++ `c-cpp`
+profile, `no_std` Rust) require every string/blob/array to be bounded so
+storage can be sized at compile time — an unbounded field there is a generation
+error unless `allow_dynamic` opts it into a heap fallback (§9.3). Blob
+`default` base64 tolerates embedded whitespace; numeric value-range semantics
+beyond the declared width are left to the application.
 
 **Id scopes.** `id` is the wire key a decoder uses to route/skip fields. Ids must
 be unique **within each scope**, and **each struct/union opens a fresh scope**
@@ -209,7 +220,9 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
 3. **`$data` cross-field rules** (no stock validator runs these): string
    `default` length ≤ `maxlen`; array `default` length ≤ `items.count` (count is
    the optional capacity). All six custom keywords recurse into composite array
-   elements (e.g. an array-of-struct element's fields get `uniqueIds`).
+   elements (e.g. an array-of-struct element's fields get `uniqueIds`). Array
+   `default` elements are additionally validated **per element** (type/range
+   check, base64 decode for blob elements, enum membership).
 4. **Six custom keywords**:
    - `uniqueIds` — id unique in **every** scope (payload + each struct + each union).
    - `uniquePositions` — bitfield `pos` unique.
@@ -219,6 +232,9 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
    - `int64Range` — exact 64-bit range for `i64`/`u64` `default`, accepting an integer or a quoted string, checked with a big-integer type.
 5. **Enum values are signed 32-bit** (−2³¹ … 2³¹−1), values and `default` alike.
 6. **Nesting-depth cap** (`MaxNestingDepth = 256`) and recursive-ref rejection.
+   Recursive/dangling refs are rejected fail-fast during `$ref` resolution
+   (stage [1]); the depth cap runs in the **analysis** stage ([3]) — both are
+   pre-codegen hard gates.
 7. **Fail closed** with `allErrors` (report every problem, sorted by location).
 
 ---
@@ -226,31 +242,45 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
 ## 6. The Intermediate Representation (the backend data model)
 
 The IR is the **frozen contract every backend consumes**. It is a Composite tree
-(every node implements `Accept`/`Children`/`NodeName`) traversed by the Visitor
-pattern. A reimplementation needs equivalent data structures:
+traversed by the Visitor pattern — the four node types (`Schema`, `Message`,
+`NamedType`, `Field`) implement `Accept`/`Children`/`NodeName`; enum consts,
+bitfield flags, `TypeRef`, and `ArrayElem` are plain data, not nodes. A default
+depth-first `Walk` helper exists alongside the Visitor. A reimplementation
+needs equivalent data structures:
 
 - **`Schema`** — the root: `Version`, an ordered list of `Message`, and the
   **shared named-type graph** `Named` (keyed by canonical name, e.g.
   `struct/Point`) with a deterministic `NamedOrder`.
 - **`Message`** — `Name`, `Summary`, ordered `Fields`.
 - **`NamedType`** — a shared `struct`/`union`/`enum`/`bitfield`: a `Category`,
-  `Name`/`Key`, and one of `Fields` (struct/union), `Consts` (enum), `Flags`
-  (bitfield); unions also carry an optional `DefaultID`.
+  `Name`/`Key`, an optional `Summary`, an `Inline` flag (marks hoisted inline
+  definitions; synthetic keys `<parentKey>_<fieldName>` / `<name>_elem`), and
+  one of `Fields` (struct/union), `Consts` (enum), `Flags` (bitfield). A
+  union's `default_id` is carried on the **referencing field's** `Default` —
+  the `NamedType.DefaultID` member exists in the Go structs but is never
+  populated; do not rely on it.
 - **`Field`** — `Name`, `ID`, `Kind`, metadata (`Description`/`Unit`/
   `Deprecated`), and kind-specific data: `Default` (typed per kind), `Maxlen`,
-  `Decimals` (scalars/string/blob); `Elem`/`Count`/`ElemMax` (array) plus
+  `Decimals` (scalars/string/blob); `Elem`/`Count`/`ElemMax` (array) — the
+  optional values `Maxlen`/`Count`/`ElemMax` each pair with a presence flag
+  (`HasMaxlen`/`HasCount`/`ElemMaxHas`), since 0 is a valid value — plus
   `ElemRef` (composite element → shared `NamedType`) and `ElemItems` (recursive
   `ArrayElem`, array-of-array); `Ref` (composite → shared `NamedType`). A
   composite array element is hoisted to a shared `NamedType` exactly like a
   composite field, so backends resolve both the same way.
 - **`Kind`** — the closed leaf/composite enum: `U8 U16 U32 U64 I8 I16 I32 I64
-  FP32 FP64 Bool String Blob Array Enum Bitfield Struct Union`. Width per kind
+  FP32 FP64 Bool String Blob Array Enum Bitfield Struct Union` (plus a
+  zero-value `Invalid` sentinel). Width per kind
   is intrinsic (1/2/4/8 bytes; enum/bitfield width derived from value range / max
   position) — see `internal/ir/layout.go` `AlignRank`.
 - **`TypeRef`** — `{Key, Target}`; post-Analysis `Target` is always resolved.
 
-**Determinism (required).** Model/analysis sort fields by id, named types by key,
-enum consts by value, bitfield flags by pos. The IR — and therefore generated
+**Determinism (required).** Model/analysis sort messages by name, fields by id
+(name as tiebreak), enum consts by value, bitfield flags by pos. `NamedOrder`
+is **registration order**, not key-sorted: `$defs` types in fixed category
+order (struct → union → enum → bitfield), name-sorted within each category,
+then inline-hoisted synthetics appended as encountered during lowering — still
+fully deterministic. The IR — and therefore generated
 output — is byte-stable, so golden-diff tests are meaningful. The IR is
 observable via `--dump-ir` and locked by a golden snapshot.
 
@@ -266,10 +296,13 @@ override file paths from the CLI.
 **Generic options** (apply to every target; `generic:` block). Built-in
 defaults: `emit=sources`, `timestamp=true`, `timestamp_format=iso8601`,
 `emit_deprecated=true`, `validation=debug`, `file_layout=file_per_message`.
+Of these only **`emit` is consumed by backends today** — `timestamp`,
+`timestamp_format`, `emit_deprecated`, `validation`, `file_layout` (and
+`naming`) validate and resolve but no backend reads them yet (reserved).
 `namespace` is deliberately *not* a generic default — it is a per-language
 concern, so each backend supplies its own idiomatic default (the unified base
-name `messages`: C++ `messages`, C# `Messages`, Go/Java package `messages`, C
-`symbol_prefix` `messages_`); set `generic.namespace` to override. Others:
+name `message`: C++ `message`, C# `Message`, Go/Java package `message`, C
+`symbol_prefix` `message_`); set `generic.namespace` to override. Others:
 `input_dir`, `output_dir`,
 `tool_banner`, `license`, `naming`.
 
@@ -285,8 +318,11 @@ are reserved — documented per language in `docs/generator/<lang>.md`). The
 | `package` | go, java | Package name. |
 | `module_path`, `go_version` | go | `go.mod` fields. |
 | `symbol_prefix` | c | Prefix on generated C symbols. |
+| `allow_dynamic` | cpp (`c-cpp`), rust (`rs-no-std`) | Lets unbounded string/blob/array fields fall back to heap containers instead of failing generation (§9.3). |
+| `no_std` | rust | With `corelib: rs-no-std`, emit the `#![no_std]` crate profile (default `true`). |
 | `emit` | all | `sources` vs `project`. |
 | `license` (generic) | all | SPDX header id; default **none** (§11). |
+| `tool_banner` (generic) | all | Tool name stamped in every generated file header (default `sofabgen`). |
 
 A reimplementation should keep the config schema and the set of honored keys in
 lockstep, and resolve with the same precedence.
@@ -303,7 +339,8 @@ A backend is a self-contained, additive plugin. The contract:
   mutate the IR.
 - **Registry / self-registration**: each backend registers itself by language
   key into a central registry at init; the CLI selects via `Lookup(lang)`.
-  Duplicate registration is a build-time error. The core imports the registry
+  Duplicate registration panics at init (surfacing the first time a binary
+  wiring both backends runs). The core imports the registry
   *interface* only, never a concrete backend — dependencies point inward.
 - **Patterns**: **Visitor** over the IR for traversal; **Builder** for source
   construction (intent-level line/file builders, formatting separated from
@@ -337,8 +374,9 @@ a reimplementation should emit code that honors all of them:
   enum → smallest *signed* backing, bitfield → smallest *unsigned* backing; avoid
   widening on the hot path (§11 natural-width writes).
 - **Validate cheaply or not at all on the hot path** — bounds checks (`maxlen`,
-  array `count`) are debug-only assertions (or an opt-in validate mode), so
-  release builds pay nothing.
+  array `count`) are debug-only assertions, so release builds pay nothing. (The
+  config `validation` key that would make this switchable is reserved — no
+  backend consumes it yet.)
 - **Escape reserved-word field names.** A schema field name may collide with a
   target-language keyword (`where`, `class`, `int`, …); the backend must make it a
   valid identifier — *escape* where the language allows (Rust `r#name`, C#
@@ -529,7 +567,7 @@ only needs to mirror their *names* and gate on the schema's used features:
 
 | Lang | Corelib(s) | Decode model | Notes |
 |---|---|---|---|
-| **C** | `corelib-c-cpp` | descriptor-table callback | `object.h` struct + static descriptor; `symbol_prefix`; auto capability + API-version guards; analytic `MAX_SIZE`. |
+| **C** | `corelib-c-cpp` | descriptor-table callback | `object.h` struct + static descriptor; `symbol_prefix`; auto capability + API-version guards; analytic `MAX_SIZE`; project mode also emits `Makefile` + `CMakeLists.txt`, `run.sh`, and a devcontainer. |
 | **C++** | `corelib-cpp` (default) / `corelib-c-cpp` (`corelib: c-cpp`) | child-visitor / flat-visitor wrapper | header-only `OStreamMessage`+`IStreamMessage`; `c-cpp` decode pre-sizes varlen fields + links the C sources. |
 | **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. |
 | **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; `Decode` via zero-copy `sofab.AcceptBytes`; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
@@ -602,9 +640,10 @@ array & struct/union → sequence framing.
 A reimplementation is **conformant** when it reproduces these gates:
 
 1. **Byte-exact shared vectors** — each corelib ships
-   `assets/test_vectors.json`; the generated encoder's output must be
-   byte-identical to the vectors (per language: 27–37 vectors). This is what
-   guarantees cross-language interop.
+   `assets/test_vectors.json` (currently 75 vectors); the generated encoder's
+   output must be byte-identical to the subset each language harness's filter
+   selects (~37–41 per language). This is what guarantees cross-language
+   interop.
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`).
@@ -619,7 +658,17 @@ A reimplementation is **conformant** when it reproduces these gates:
 5. **Golden reproducibility** — regenerate a fixed def for every backend and
    byte-diff against committed goldens (`tests/matrix/testdata/golden/`); plus a
    frozen IR golden.
-6. **CI** — a hermetic core job + one `lang-<x>` job per language, on every push.
+6. **CI** — a hermetic core job + one `lang-<x>` job per language, on every
+   push to `main`, every pull request, and manual dispatch. Each `lang-<x>` job
+   additionally uploads the generated sources (example + realworld + corpus,
+   built by `tests/gen-artifacts.sh`, including the non-default corelib
+   variants for C++/Rust) as a downloadable artifact.
+7. **Hermetic unit layer** — Go unit tests beside the code:
+   `internal/{parser,analysis,config,pipeline,ir}` and per-backend
+   `generators/*/backend_test.go` (plus gated corelib round-trip tests), and
+   dedicated matrix suites for sparse omission (`omit_test.go`), shared refs
+   (`refs_test.go`), the multi-file real-world example (`realworld_test.go`),
+   ASCII output, and doc comments (§8).
 
 ---
 
@@ -628,19 +677,26 @@ A reimplementation is **conformant** when it reproduces these gates:
 ```
 cmd/sofabgen/            CLI entrypoint (the sofabgen binary)
 internal/                GENERIC, language-independent core (imports no backend)
-  pipeline/              orchestrates stages [1]–[6]
+  pipeline/              orchestrates stages [1]–[5] (stage [6] formatting lives inside each backend)
   parser/                YAML/JSON parse + $ref resolve + hard-gate validation
   model/                 lowering: validated doc → IR nodes
-  analysis/              shared-type resolution + semantic checks (freeze)
+  analysis/              ref resolution + nesting-depth check (freeze-by-contract)
   ir/                    the Composite IR + Visitor + layout helper (no deps)
   generator/             backend CONTRACT only (interface + registry + license helper)
   config/                config load + config-schema validation
-generators/<lang>/       LANGUAGE-SPECIFIC backends (self-register)
+generators/<lang>/       LANGUAGE-SPECIFIC backends (self-register; Go's dir is
+                         golang/, its --lang key "go")
 schema/                  message-definition schema + config schema (+ README spec)
 schemas.go               embeds the schema files into the binary
 docs/                    ARCHITECTURE.md (this — living source of truth), generator/ (per-lang config),
-                         PLAN.md (HISTORICAL original plan; rationale lifted into this file)
-tests/                   conformance/<lang>/run.sh harnesses + matrix/ hermetic Go tests (+ README)
+                         PLAN.md (HISTORICAL original plan; rationale lifted into this file),
+                         plans/ (feature design docs), perf-patches/ (generated-code performance
+                         fixes: rationale + reference diffs, now folded into the backends)
+examples/                example config + message definitions (incl. the multi-file realworld/ set)
+assets/                  project logo/icon (README images)
+tests/                   conformance/<lang>/run.sh harnesses + matrix/ hermetic Go tests (+ README);
+                         gen-artifacts.sh builds the per-language CI artifact bundle
+.github/workflows/       ci.yml (hermetic + lang-<x> jobs), release.yml
 ```
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
@@ -653,7 +709,9 @@ few cross-language inconsistencies to reconcile for *true* JSON interop (blob is
 `number[]` in C/Python/C++/Rust/C#/Java but base64 in Go; `u64` is a JSON number
 everywhere except a string in TS); schema defaults are applied per-backend except
 Rust (derive `Default` = zeros). These do not affect the **binary** wire interop
-(which is vector-verified).
+(which is vector-verified). Further known drift: the config schema defines a
+`cpp-embedded` target with no registered backend, and `NamedType.DefaultID` is
+declared but never populated (§6).
 
 ---
 

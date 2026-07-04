@@ -363,7 +363,7 @@
             "rs-no-std",
             "rs"
           ],
-          "default": "rs-no-std"
+          "default": "rs"
         },
         "emit": {
           "type": "string",
