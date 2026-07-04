@@ -25,9 +25,15 @@ public class Scalars {
         if (this.flag != true) { os.writeBoolean(7, this.flag); }
     }
     public static final int MAX_SIZE = 82;
+    // Per-thread scratch buffer: encode() marshals into it and returns an
+    // exact-size copy, so the worst-case buffer is not re-allocated (and
+    // zeroed) on every call. Do not call encode() reentrantly from a
+    // marshal() override on the same thread.
+    private static final ThreadLocal<byte[]> ENC_BUF =
+        ThreadLocal.withInitial(() -> new byte[MAX_SIZE]);
     public byte[] encode() {
         try {
-            byte[] buf = new byte[MAX_SIZE];
+            byte[] buf = ENC_BUF.get();
             OStream os = new OStream(buf);
             marshal(os);
             return Arrays.copyOf(buf, os.bytesUsed());
@@ -47,7 +53,7 @@ class ScalarsVisitor implements Visitor {
     private int ai = 0;                 // index into the primitive array currently being filled
     private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)
     private int sp = 0;
-    private final java.io.ByteArrayOutputStream acc = new java.io.ByteArrayOutputStream();
+    private java.io.ByteArrayOutputStream acc; // lazy: only split string/blob payloads need it
     ScalarsVisitor(Scalars msg) { m = msg; }
 
     public void unsigned(int id, long value) {
@@ -87,6 +93,7 @@ class ScalarsVisitor implements Visitor {
         if (offset == 0 && chunkLength >= total) {
             _s = new String(data, chunkOffset, total, java.nio.charset.StandardCharsets.UTF_8);
         } else {
+            if (acc == null) acc = new java.io.ByteArrayOutputStream();
             acc.write(data, chunkOffset, chunkLength);
             if (acc.size() < total) return;
             _s = new String(acc.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
@@ -100,6 +107,7 @@ class ScalarsVisitor implements Visitor {
         if (offset == 0 && chunkLength >= total) {
             _b = java.util.Arrays.copyOfRange(data, chunkOffset, chunkOffset + total);
         } else {
+            if (acc == null) acc = new java.io.ByteArrayOutputStream();
             acc.write(data, chunkOffset, chunkLength);
             if (acc.size() < total) return;
             _b = acc.toByteArray();

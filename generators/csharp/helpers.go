@@ -130,6 +130,9 @@ func (g *gen) csType(f *ir.Field) string {
 	case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
+		if primArrayElem(f.Elem) {
+			return g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + "[]"
+		}
 		return "List<" + g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">"
 	}
 	return "object"
@@ -190,6 +193,12 @@ func (g *gen) csInit(f *ir.Field) string {
 		// A NATIVE scalar array is a leaf field: materialize its default so an
 		// omitted default array reconstructs correctly and marshal can compare
 		// against it. Composite arrays are wrapper sequences (always framed).
+		if primArrayElem(f.Elem) {
+			if lit, ok := g.csPrimArrayLiteral(f); ok {
+				return " = " + lit
+			}
+			return " = Array.Empty<" + g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">()"
+		}
 		if lit, ok := g.csNativeArrayLiteral(f); ok {
 			return " = " + lit
 		}
@@ -284,6 +293,33 @@ func (g *gen) csNativeArrayLiteral(f *ir.Field) (string, bool) {
 		}
 	}
 	return fmt.Sprintf("new List<%s>{%s}", elemType, strings.Join(parts, ", ")), true
+}
+
+// csPrimArrayLiteral renders a primitive (numeric/fp) array field's schema
+// default as a `new T[]{...}` literal; ("", false) when there is no default.
+// Element rendering matches csNativeArrayLiteral so the marshal omit-compare
+// sees identical values.
+func (g *gen) csPrimArrayLiteral(f *ir.Field) (string, bool) {
+	if !primArrayElem(f.Elem) {
+		return "", false
+	}
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return "", false
+	}
+	elemType := g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		switch f.Elem {
+		case ir.KindFP32:
+			parts[i] = floatLit(v) + "f"
+		case ir.KindFP64:
+			parts[i] = floatLit(v)
+		default: // numeric: an in-range integer constant converts implicitly
+			parts[i] = scalarLit(v)
+		}
+	}
+	return fmt.Sprintf("new %s[]{%s}", elemType, strings.Join(parts, ", ")), true
 }
 
 func (g *gen) bitfieldDefault(f *ir.Field) uint64 {
@@ -497,6 +533,22 @@ func signedArrayElem(k ir.Kind) bool {
 // wire type (numeric/enum/boolean/bitfield) rather than a wrapper sequence.
 func nativeArrayElem(k ir.Kind) bool {
 	return unsignedArrayElem(k) || signedArrayElem(k) || k == ir.KindFP32 || k == ir.KindFP64
+}
+
+// primArrayElem reports whether an array element lowers to a C# primitive
+// array (`byte[]`/`int[]`/`float[]`/...) instead of a boxed-growth `List<T>`:
+// the pure numeric and fp kinds. It is the hot allocator — a List field costs
+// a `.ToArray()` temporary on every encode and Add-growth on every decode.
+// Bool/enum/bitfield arrays stay `List<T>` (they value-convert element-wise),
+// and string/blob/struct/union/nested arrays are wrapper sequences.
+func primArrayElem(k ir.Kind) bool {
+	switch k {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
+		ir.KindFP32, ir.KindFP64:
+		return true
+	}
+	return false
 }
 
 // seqArrayElem reports whether an array element lowers to a wrapper sequence

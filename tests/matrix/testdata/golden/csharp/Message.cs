@@ -27,8 +27,13 @@ public sealed class Scalars {
         if (this.flag != true) { os.WriteBoolean(7, this.flag); }
     }
     public const int MaxSize = 82;
+    // Per-thread scratch buffer: Encode() marshals into it and returns an
+    // exact-size copy, so the worst-case buffer is not re-allocated (and
+    // zeroed) on every call. Do not call Encode() reentrantly from a
+    // Marshal() override on the same thread.
+    [ThreadStatic] private static byte[] _encScratch;
     public byte[] Encode() {
-        var buf = new byte[MaxSize];
+        var buf = _encScratch ??= new byte[MaxSize];
         var os = new OStream(buf);
         Marshal(os);
         var outp = new byte[os.BytesUsed];
@@ -46,8 +51,10 @@ public sealed class Scalars {
 internal sealed class ScalarsVisitor : IVisitor {
     private readonly Scalars m;
     private int cur = 0;
-    private readonly Stack<int> stack = new();
-    private readonly List<byte> acc = new();
+    private int ai = 0;                // index into the primitive array currently being filled
+    private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)
+    private int sp = 0;
+    private List<byte> acc;            // lazy: only split string/blob payloads need it
     public ScalarsVisitor(Scalars msg) { m = msg; }
     private const int Root = 0;
 
@@ -80,6 +87,7 @@ internal sealed class ScalarsVisitor : IVisitor {
         if (offset == 0 && chunkLength >= total) {
             _s = Encoding.UTF8.GetString(data, chunkOffset, total);
         } else {
+            acc ??= new List<byte>();
             for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);
             if (acc.Count < total) return;
             _s = Encoding.UTF8.GetString(acc.ToArray());
@@ -94,6 +102,7 @@ internal sealed class ScalarsVisitor : IVisitor {
             _b = new byte[total];
             System.Array.Copy(data, chunkOffset, _b, 0, total);
         } else {
+            acc ??= new List<byte>();
             for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);
             if (acc.Count < total) return;
             _b = acc.ToArray();
@@ -103,14 +112,16 @@ internal sealed class ScalarsVisitor : IVisitor {
         }
     }
     public void ArrayBegin(int id, ArrayKind kind, int count) {
+        ai = 0;
         switch ((cur, id)) {
         }
     }
     public void SequenceBegin(int id) {
-        stack.Push(cur);
+        if (sp == stk.Length) System.Array.Resize(ref stk, sp * 2);
+        stk[sp++] = cur;
         switch ((cur, id)) {
         }
     }
-    public void SequenceEnd() { cur = stack.Count > 0 ? stack.Pop() : 0; }
+    public void SequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }
 }
 

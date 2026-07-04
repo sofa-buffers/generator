@@ -22,7 +22,13 @@ func (g *gen) javaOmitCond(f *ir.Field) string {
 	acc := "this." + javaIdent(f.Name)
 	def := g.javaDefaultValue(f)
 	if f.Kind == ir.KindString {
-		return fmt.Sprintf("!java.util.Objects.equals(%s, %s)", acc, def)
+		// Same truth table as !Objects.equals(acc, def) for a non-null literal
+		// default, without the static-call indirection; an empty default is
+		// just an isEmpty check.
+		if def == `""` {
+			return fmt.Sprintf("(%s == null || !%s.isEmpty())", acc, acc)
+		}
+		return fmt.Sprintf("!%s.equals(%s)", def, acc)
 	}
 	return fmt.Sprintf("%s != %s", acc, def)
 }
@@ -229,7 +235,14 @@ func (g *gen) javaInit(f *ir.Field) string {
 			if lit, ok := g.javaPrimArrayLiteral(f); ok {
 				return " = " + lit
 			}
-			return " = new " + primArrayBase(f.Elem) + "[0]"
+			switch primArrayBase(f.Elem) {
+			case "float":
+				return " = Sbuf.EMPTY_FLOATS"
+			case "double":
+				return " = Sbuf.EMPTY_DOUBLES"
+			default:
+				return " = Sbuf.EMPTY_LONGS"
+			}
 		}
 		if nativeArrayElem(f.Elem) { // boolean array (stays boxed List<Boolean>)
 			if lit, ok := g.javaNativeArrayLiteral(f); ok {
@@ -248,7 +261,7 @@ func (g *gen) javaInit(f *ir.Field) string {
 				return fmt.Sprintf(" = new byte[]{%s}", javaBytes(raw))
 			}
 		}
-		return " = new byte[0]"
+		return " = Sbuf.EMPTY_BYTES"
 	case ir.KindBool:
 		if b, ok := f.Default.(bool); ok && b {
 			return " = true"
@@ -500,6 +513,13 @@ func (g *gen) sbufSupport() []byte {
 import java.util.List;
 
 final class Sbuf {
+    // Shared zero-length defaults: field initializers reference these instead of
+    // allocating a fresh empty array per instance (decode replaces them anyway).
+    static final long[] EMPTY_LONGS = {};
+    static final float[] EMPTY_FLOATS = {};
+    static final double[] EMPTY_DOUBLES = {};
+    static final byte[] EMPTY_BYTES = {};
+
     static long[] toLongArray(List<Long> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
     static long[] boolToLongArray(List<Boolean> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i) ? 1 : 0; return a; }
     static float[] toFloatArray(List<Float> l) { float[] a = new float[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
