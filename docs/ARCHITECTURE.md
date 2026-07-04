@@ -557,7 +557,13 @@ array & struct/union → sequence framing.
   guards; a native scalar array materializes its schema default and is
   whole-omitted when equal (else when empty); Rust gains a manual `impl Default`.
   Only the **C** backend defers omission to the `object.h` descriptor (same
-  per-field rule; see corelib-c-cpp).
+  per-field rule; see corelib-c-cpp): when any leaf field has a non-zero
+  default it emits a `static const` default image and points the descriptor at
+  it via `SOFAB_OBJECT_DESCR_WITH_DEFAULTS` (the corelib seeds `_init` from the
+  image and omits fields equal to it); an all-zero-default object keeps the
+  plain `SOFAB_OBJECT_DESCR` (compares against zero, zero `.rodata` cost). The
+  image is a `.rodata` struct, so the RAM cost is one pointer per descriptor.
+  STRING fields are compared by null-terminated content, not raw buffer bytes.
 - **Widest-first member layout** — value-type backends declare struct members by
   alignment widest-first (8→4→2→1, stable within a width; composite/heap = 8) to
   cut native padding, via the shared `AlignRank`/`SortedForLayout`. Applied to C,
