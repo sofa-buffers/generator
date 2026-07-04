@@ -32,6 +32,7 @@ messages:
   vecf32: { payload: { a: { id: 0, type: fp32 } } }
   vecf64: { payload: { a: { id: 0, type: fp64 } } }
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
+  vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
 YAML
 
 build() {

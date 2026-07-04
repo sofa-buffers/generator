@@ -367,12 +367,23 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		f.line("%s{ std::array<std::uint8_t, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
 			ind, count, tv, iv, iv, count, iv, tv, iv, val, iv, idExpr, tv)
 	case ir.KindBlob:
+		// A blob element is a leaf: omit it when it equals the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2). The
+		// index still advances on an omitted element so surviving ids stay aligned.
 		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
-		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { (void)os.write(%s++, %s.data(), static_cast<std::int32_t>(%s.size())); } }", ind, iv, ev, val, iv, ev, ev)
+		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { if (!%s.empty()) { (void)os.write(%s, %s.data(), static_cast<std::int32_t>(%s.size())); } ++%s; } }", ind, iv, ev, val, ev, iv, ev, ev, iv)
 		f.line("%s(void)os.sequenceEnd();", ind)
-	case ir.KindString, ir.KindStruct, ir.KindUnion:
-		// os.write(index, element): a string writes a fixlen field; a struct/union
-		// writes sequenceBegin(index)/serialize/sequenceEnd (per MESSAGE_SPEC).
+	case ir.KindString:
+		// A string element is a leaf: omit it when it equals the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2). The
+		// index still advances on an omitted element so surviving ids stay aligned.
+		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
+		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { if (!%s.empty()) { (void)os.write(%s, %s); } ++%s; } }", ind, iv, ev, val, ev, iv, ev, iv)
+		f.line("%s(void)os.sequenceEnd();", ind)
+	case ir.KindStruct, ir.KindUnion:
+		// A struct/union element is itself a sequence: ALWAYS framed, never omitted
+		// (MESSAGE_SPEC S2). os.write(index, element) writes
+		// sequenceBegin(index)/serialize/sequenceEnd.
 		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
 		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { (void)os.write(%s++, %s); } }", ind, iv, ev, val, iv, ev)
 		f.line("%s(void)os.sequenceEnd();", ind)

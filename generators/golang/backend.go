@@ -116,22 +116,33 @@ func _narrowS[T ~int8 | ~int16 | ~int32 | ~int64](v []int64) []T {
 	return out
 }
 
-// _strSeq / _bytesSeq collect the elements of a string / blob array. Blob copies
-// (the corelib value aliases the decode buffer).
+// _strSeq / _bytesSeq collect the elements of a string / blob array. Elements are
+// keyed by index id (MESSAGE_SPEC S2): a default (empty) element is omitted on the
+// wire, so we place each value at its id and fill any gap with the element default
+// ("" / nil). Blob copies (the corelib value aliases the decode buffer).
 type _strSeq struct {
 	_visitorBase
 	out *[]string
 }
 
-func (s *_strSeq) String(_ sofab.ID, v string) error { *s.out = append(*s.out, v); return nil }
+func (s *_strSeq) String(id sofab.ID, v string) error {
+	for len(*s.out) <= int(id) {
+		*s.out = append(*s.out, "")
+	}
+	(*s.out)[id] = v
+	return nil
+}
 
 type _bytesSeq struct {
 	_visitorBase
 	out *[][]byte
 }
 
-func (s *_bytesSeq) Bytes(_ sofab.ID, v []byte) error {
-	*s.out = append(*s.out, append([]byte(nil), v...))
+func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
+	for len(*s.out) <= int(id) {
+		*s.out = append(*s.out, nil)
+	}
+	(*s.out)[id] = append([]byte(nil), v...)
 	return nil
 }
 
@@ -425,15 +436,23 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindFP64:
 		f.line("%se.WriteFloat64Array(%s, %s)", ind, idExpr, val)
 	case ir.KindString:
+		// A string element is a leaf: omit it when equal to the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%se.WriteSequenceBegin(%s)", ind, idExpr)
 		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
-		f.line("%s\te.WriteString(sofab.ID(%s), %s)", ind, iv, ev)
+		f.line("%s\tif %s != \"\" {", ind, ev)
+		f.line("%s\t\te.WriteString(sofab.ID(%s), %s)", ind, iv, ev)
+		f.line("%s\t}", ind)
 		f.line("%s}", ind)
 		f.line("%se.WriteSequenceEnd()", ind)
 	case ir.KindBlob:
+		// A blob element is a leaf: omit it when equal to the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%se.WriteSequenceBegin(%s)", ind, idExpr)
 		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
-		f.line("%s\te.WriteBytes(sofab.ID(%s), %s)", ind, iv, ev)
+		f.line("%s\tif len(%s) != 0 {", ind, ev)
+		f.line("%s\t\te.WriteBytes(sofab.ID(%s), %s)", ind, iv, ev)
+		f.line("%s\t}", ind)
 		f.line("%s}", ind)
 		f.line("%se.WriteSequenceEnd()", ind)
 	case ir.KindStruct, ir.KindUnion:

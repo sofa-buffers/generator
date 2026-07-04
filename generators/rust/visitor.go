@@ -311,7 +311,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-					f.line("            (_Loc::%s, _) => { let _ = %s.push(Default::default()); if let Some(_e) = %s.last_mut() { let _ = _e.push_str(_s); } }", fr.loc, fr.path, fr.path)
+					f.line("            (_Loc::%s, _) => { %s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.push_str(_s); } }", fr.loc, g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -337,7 +337,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-					f.line("            (_Loc::%s, _) => %s.push(_s),", fr.loc, fr.path)
+					f.line("            (_Loc::%s, _) => { %s %s[id as usize] = _s; }", fr.loc, g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -359,7 +359,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => { let _ = %s.push(Default::default()); if let Some(_e) = %s.last_mut() { let _ = _e.extend_from_slice(&chunk[..total]); } }", fr.loc, fr.path, fr.path)
+					f.line("            (_Loc::%s, _) => { %s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.extend_from_slice(&chunk[..total]); } }", fr.loc, g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
@@ -383,7 +383,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => %s.push(_b),", fr.loc, fr.path)
+					f.line("            (_Loc::%s, _) => { %s %s[id as usize] = _b; }", fr.loc, g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
@@ -519,6 +519,20 @@ func (g *gen) innerNew() string {
 		return "heapless::Vec::new()"
 	}
 	return "Vec::new()"
+}
+
+// seqElemGrow emits the id-indexed growth prefix for a wrapper-sequence string/
+// blob element collector: grow the container to id+1, filling the gap with the
+// element default (empty), so a decoded element lands at index = its wire id and
+// omitted default elements leave the right gaps (MESSAGE_SPEC S2). Under no_std the
+// container is a fixed-capacity heapless::Vec (or an alloc fallback under
+// allow_dynamic): push may be a no-op when full, so the loop breaks when the length
+// stops growing to avoid spinning on an out-of-capacity id; get_mut then no-ops.
+func (g *gen) seqElemGrow(path string) string {
+	if g.noStd {
+		return fmt.Sprintf("while %s.len() <= id as usize { let _n = %s.len(); let _ = %s.push(Default::default()); if %s.len() == _n { break; } }", path, path, path, path)
+	}
+	return fmt.Sprintf("while %s.len() <= id as usize { %s.push(Default::default()); }", path, path)
 }
 
 func isUnsignedElem(k ir.Kind) bool {

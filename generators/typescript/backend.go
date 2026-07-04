@@ -214,16 +214,25 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%sos.writeFp64Array(%s, %s);", ind, idExpr, val)
 	case ir.KindString:
 		// Leaf sequence: an indexed for (not .forEach) avoids a per-marshal closure
-		// allocation and inlines the monomorphic write body.
+		// allocation and inlines the monomorphic write body. A string element is a
+		// leaf keyed by index id: omit it when equal to the element default (empty),
+		// leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
 		f.line("%sfor (let %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
-		f.line("%s  os.writeString(%s, %s[%s]!);", ind, iv, val, iv)
+		f.line("%s  if (%s[%s]! !== \"\") {", ind, val, iv)
+		f.line("%s    os.writeString(%s, %s[%s]!);", ind, iv, val, iv)
+		f.line("%s  }", ind)
 		f.line("%s}", ind)
 		f.line("%sos.writeSequenceEnd();", ind)
 	case ir.KindBlob:
+		// A blob element is a leaf keyed by index id: omit it when equal to the
+		// element default (empty), leaving an id gap the decoder restores
+		// (MESSAGE_SPEC S2).
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
 		f.line("%sfor (let %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
-		f.line("%s  os.writeBlob(%s, %s[%s]!);", ind, iv, val, iv)
+		f.line("%s  if (%s[%s]!.length !== 0) {", ind, val, iv)
+		f.line("%s    os.writeBlob(%s, %s[%s]!);", ind, iv, val, iv)
+		f.line("%s  }", ind)
 		f.line("%s}", ind)
 		f.line("%sos.writeSequenceEnd();", ind)
 	case ir.KindStruct, ir.KindUnion:

@@ -63,9 +63,9 @@ func TestTSStructural(t *testing.T) {
 		"switch (c.id) {",                                               // one switch per type
 		"default: c.skip(c.wire); break;",                               // forward-compat skip
 		"o.somestruct = MyfirstmessageSomestruct.decodeFrom(c); break;", // nested message recursion
-		"while (c.readHeader()) arr.push(c.readString());",              // string-list sequence
-		"o.someu64 = c.readUnsigned() as bigint; break;",                // u64 -> bigint, number-first
-		"os.writeSequenceBegin(",                                        // nested framing (marshal unchanged)
+		`while (c.readHeader()) { const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(); }`, // id-aware string-list sequence (MESSAGE_SPEC S2)
+		"o.someu64 = c.readUnsigned() as bigint; break;",                                                                  // u64 -> bigint, number-first
+		"os.writeSequenceBegin(", // nested framing (marshal unchanged)
 		"export enum MyfirstmessageSomeenum {",
 	} {
 		if !strings.Contains(mod, want) {

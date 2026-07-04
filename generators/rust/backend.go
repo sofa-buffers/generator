@@ -406,12 +406,16 @@ func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindFP64:
 		f.line("%slet _ = os.write_array_fp64(%s, &%s);", ind, idExpr, val)
 	case ir.KindString:
+		// A string element is a leaf: omit it when equal to the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() { let _ = os.write_str(%s as Id, %s); }", ind, iv, ev, val, iv, ev)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() { let _ = os.write_str(%s as Id, %s); } }", ind, iv, ev, val, ev, iv, ev)
 		f.line("%slet _ = os.write_sequence_end();", ind)
 	case ir.KindBlob:
+		// A blob element is a leaf: omit it when equal to the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() { let _ = os.write_blob(%s as Id, %s); }", ind, iv, ev, val, iv, ev)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() { let _ = os.write_blob(%s as Id, %s); } }", ind, iv, ev, val, ev, iv, ev)
 		f.line("%slet _ = os.write_sequence_end();", ind)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
