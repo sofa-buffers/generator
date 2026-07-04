@@ -457,11 +457,18 @@ struct _MsgSeqFixed : sofab::IStreamMessage {
         is.read(out->emplace_back());
     }
 };
+// _FixedBlobSeq / _FixedStrSeq place a blob / string element at its index id
+// (MESSAGE_SPEC S2): a default (empty) element is omitted on the wire, so the
+// inline vector is grown with empty-default slots up to id and the value is
+// stored at that index rather than appended in arrival order. Inline storage
+// never reallocates, so an earlier bound-then-filled element stays address-stable
+// while later slots grow.
 template <typename Container>
 struct _FixedBlobSeq : sofab::IStreamMessage {
     Container *out = nullptr;
-    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t _size, std::size_t) noexcept override {
-        auto &b = out->emplace_back();
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
+        while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
+        auto &b = (*out)[id];
         b.set_len(_size);
         if (_size) is.read(b.data(), _size);
     }
@@ -469,25 +476,35 @@ struct _FixedBlobSeq : sofab::IStreamMessage {
 template <typename Container>
 struct _FixedStrSeq : sofab::IStreamMessage {
     Container *out = nullptr;
-    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t _size, std::size_t) noexcept override {
-        auto &s = out->emplace_back();
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
+        while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
+        auto &s = (*out)[id];
         s.set_len(_size);
         if (_size) is.read(s);
     }
 };`
 
+// _StrSeq / _BlobSeq collect the elements of a string / blob wrapper-sequence
+// array. Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
+// element is omitted on the wire, so each value is placed at its id and any gap
+// is grown with the element default ("" / empty blob) rather than appended in
+// arrival order.
 const cppPrelude = `struct _StrSeq : sofab::IStreamMessage {
     std::vector<std::string> &out;
     explicit _StrSeq(std::vector<std::string> &o) : out(o) {}
-    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
-        std::string _s; is.read(_s); out.push_back(std::move(_s));
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
+        std::string _s; is.read(_s);
+        while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
+        out[id] = std::move(_s);
     }
 };
 struct _BlobSeq : sofab::IStreamMessage {
     std::vector<std::vector<std::uint8_t>> &out;
     explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o) : out(o) {}
-    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
-        std::string _s; is.read(_s); out.emplace_back(_s.begin(), _s.end());
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
+        std::string _s; is.read(_s);
+        while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
+        out[id].assign(_s.begin(), _s.end());
     }
 };`
 

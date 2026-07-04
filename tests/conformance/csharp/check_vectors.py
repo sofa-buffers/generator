@@ -14,21 +14,42 @@ import sys
 OP_TO_MSG = {"unsigned": "vecu", "signed": "veci", "fp32": "vecf32", "fp64": "vecf64", "string": "vecs"}
 
 
+def string_array_values(fields):
+    """Ordered element values when `fields` is a single id-0 wrapper sequence
+    whose children are all string ops (a wrapper-array of string) — the shape the
+    MESSAGE_SPEC S2 element-omission vectors use; else None. Encoded against the
+    `vecsa` harness message."""
+    if len(fields) < 2 or fields[0].get("op") != "sequence_begin" or fields[0].get("id") != 0:
+        return None
+    if fields[-1].get("op") != "sequence_end":
+        return None
+    mid = fields[1:-1]
+    if not mid or any(op.get("op") != "string" for op in mid):
+        return None
+    return [op["value"] for op in mid]
+
+
 def main() -> int:
     vectors_path, dll = sys.argv[1], sys.argv[2]
     data = json.load(open(vectors_path))
     checked = 0
     for v in data["vectors"]:
-        if len(v["fields"]) != 1 or v.get("offset", 0) != 0:
+        if v.get("offset", 0) != 0:
             continue
-        f = v["fields"][0]
-        msg = OP_TO_MSG.get(f["op"])
-        if msg is None or f["id"] != 0:
+        arr = string_array_values(v["fields"])
+        if arr is not None:
+            msg, payload = "vecsa", json.dumps({"a": arr})
+        elif len(v["fields"]) == 1:
+            f = v["fields"][0]
+            msg = OP_TO_MSG.get(f["op"])
+            if msg is None or f["id"] != 0:
+                continue
+            val = f["value"]
+            if f["op"] in ("fp32", "fp64") and isinstance(val, str):  # inf/-inf
+                continue
+            payload = json.dumps({"a": val})
+        else:
             continue
-        val = f["value"]
-        if f["op"] in ("fp32", "fp64") and isinstance(val, str):  # inf/-inf
-            continue
-        payload = json.dumps({"a": val})
         out = subprocess.run(
             ["dotnet", dll, "encode", msg],
             input=payload.encode(), stdout=subprocess.PIPE, check=True,

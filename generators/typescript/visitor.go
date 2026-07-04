@@ -72,7 +72,7 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// readHeader. Loop until the sequence-end (readHeader() -> false).
 		f.line("      case %d: {", x.ID)
 		f.line("        const arr: %s = [];", g.tsType(x))
-		f.line("        while (c.readHeader()) arr.push(%s);", g.elemDecode(x.Elem, x.ElemRef, x.ElemItems))
+		f.line("        while (c.readHeader()) { %s }", g.seqCollectBody("arr", x.Elem, x.ElemRef, x.ElemItems))
 		f.line("        %s = arr;", acc)
 		f.line("        break;")
 		f.line("      }")
@@ -124,10 +124,27 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 			return g.nativeArrayRead(items.Elem, items.ElemRef)
 		}
 		rowT := g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems)
-		return "((): " + rowT + "[] => { const _r: " + rowT + "[] = []; while (c.readHeader()) _r.push(" +
-			g.elemDecode(items.Elem, items.ElemRef, items.ElemItems) + "); return _r; })()"
+		return "((): " + rowT + "[] => { const _r: " + rowT + "[] = []; while (c.readHeader()) { " +
+			g.seqCollectBody("_r", items.Elem, items.ElemRef, items.ElemItems) + " } return _r; })()"
 	}
 	return "undefined as never"
+}
+
+// seqCollectBody returns the body of a `while (c.readHeader()) { ... }` loop that
+// places one decoded element into arr. String/blob leaf elements are keyed by
+// their wire id (MESSAGE_SPEC S2): a default (empty) element is omitted on the
+// wire, so we grow arr with the element default ("" / empty bytes) and place the
+// value at its id, restoring any gap. Composite elements (struct/union/nested-
+// array) are always framed, never omitted, so they push in arrival order.
+func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindString:
+		return "const _id = c.id; while (" + arr + ".length <= _id) " + arr + `.push(""); ` + arr + "[_id] = c.readString();"
+	case ir.KindBlob:
+		return "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); " + arr + "[_id] = c.readBlob();"
+	default:
+		return arr + ".push(" + g.elemDecode(elem, ref, items) + ");"
+	}
 }
 
 // nativeArrayElem reports whether an array element is encoded as a native array

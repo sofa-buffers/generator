@@ -16,15 +16,19 @@ namespace message {
 struct _StrSeq : sofab::IStreamMessage {
     std::vector<std::string> &out;
     explicit _StrSeq(std::vector<std::string> &o) : out(o) {}
-    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
-        std::string _s; is.read(_s); out.push_back(std::move(_s));
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
+        std::string _s; is.read(_s);
+        while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
+        out[id] = std::move(_s);
     }
 };
 struct _BlobSeq : sofab::IStreamMessage {
     std::vector<std::vector<std::uint8_t>> &out;
     explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o) : out(o) {}
-    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
-        std::string _s; is.read(_s); out.emplace_back(_s.begin(), _s.end());
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
+        std::string _s; is.read(_s);
+        while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
+        out[id].assign(_s.begin(), _s.end());
     }
 };
 template <typename T>

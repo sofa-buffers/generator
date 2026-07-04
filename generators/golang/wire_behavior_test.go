@@ -249,6 +249,39 @@ func TestEmptyArrayWireIsEmptySequence(t *testing.T) {
 	}
 }
 
+// TestWrapperArrayStringElementSparse pins MESSAGE_SPEC §2 element-level omission:
+// inside a wrapper-sequence array a string element equal to its element default
+// (empty) is dropped, leaving an id gap the decoder restores; trailing default
+// elements collapse. The hex here is the cross-language canonical form (verified
+// byte-identical against C, C++, Rust, Python, TypeScript, Java, C#).
+func TestWrapperArrayStringElementSparse(t *testing.T) {
+	corelib := requireGoCorelib(t)
+	def := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      arr: {id: 0, type: array, items: {type: string, count: 4, maxlen: 8}}\n"
+	bin := buildGoHarnessCfg(t, corelib, def, nil)
+
+	cases := []struct {
+		in, wantHex, wantJSON string
+	}{
+		// gap at index 1: seq_begin(0), str(0)="a", str(2)="c", seq_end
+		{`{"arr":["a","","c"]}`, "06020a61120a6307", `{"arr":["a","","c"]}`},
+		// trailing default collapses: only str(0)="a" survives
+		{`{"arr":["a",""]}`, "06020a6107", `{"arr":["a"]}`},
+		// all-default array is an empty wrapper sequence (decodes to nil slice)
+		{`{"arr":["",""]}`, "0607", `{"arr":null}`},
+		// leading gap kept (str(1)="x"), trailing default collapses
+		{`{"arr":["","x",""]}`, "060a0a7807", `{"arr":["","x"]}`},
+	}
+	for _, c := range cases {
+		if got := encHex(t, bin, "vec", c.in); got != c.wantHex {
+			t.Errorf("encode %s: got %s, want %s", c.in, got, c.wantHex)
+		}
+		if got := roundTrip(t, bin, "vec", c.in); got != normJSON(t, c.wantJSON) {
+			t.Errorf("round-trip %s: got %s, want %s", c.in, got, normJSON(t, c.wantJSON))
+		}
+	}
+}
+
 // arrLen decodes hexBytes and returns the length of the top-level "arr" field,
 // treating a JSON null (Go's rendering of an empty/nil slice) as length 0.
 func arrLen(t *testing.T, bin, msg, hexBytes string) int {

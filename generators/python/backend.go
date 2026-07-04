@@ -270,14 +270,20 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindFP64:
 		f.line("%se.write_float64_array(%s, %s)", ind, idExpr, val)
 	case ir.KindString:
+		// A string element is a leaf: omit it when equal to the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
-		f.line("%s    e.write_string(%s, %s)", ind, iv, ev)
+		f.line(`%s    if %s != "":`, ind, ev)
+		f.line("%s        e.write_string(%s, %s)", ind, iv, ev)
 		f.line("%se.write_sequence_end()", ind)
 	case ir.KindBlob:
+		// A blob element is a leaf: omit it when equal to the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
-		f.line("%s    e.write_bytes(%s, bytes(%s))", ind, iv, ev)
+		f.line("%s    if len(%s) != 0:", ind, ev)
+		f.line("%s        e.write_bytes(%s, bytes(%s))", ind, iv, ev)
 		f.line("%se.write_sequence_end()", ind)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
@@ -347,9 +353,19 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *i
 		f.line("%s        break", ind)
 		switch elem {
 		case ir.KindString:
-			f.line("%s    %s.append(d.string())", ind, target)
+			// A string element is keyed by index id: a default (empty) element is
+			// omitted on the wire, so place the value at its id and fill any gap
+			// with the element default "" (MESSAGE_SPEC S2).
+			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
+			f.line(`%s        %s.append("")`, ind, target)
+			f.line("%s    %s[%s.id] = d.string()", ind, target, ef)
 		case ir.KindBlob:
-			f.line("%s    %s.append(d.bytes())", ind, target)
+			// A blob element is keyed by index id: a default (empty) element is
+			// omitted on the wire, so place the value at its id and fill any gap
+			// with the element default b"" (MESSAGE_SPEC S2).
+			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
+			f.line(`%s        %s.append(b"")`, ind, target)
+			f.line("%s    %s[%s.id] = d.bytes()", ind, target, ef)
 		case ir.KindStruct, ir.KindUnion:
 			f.line("%s    %s = %s()", ind, ev, g.typeName(ref.Key))
 			f.line("%s    %s._unmarshal(d)", ind, ev)

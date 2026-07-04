@@ -163,7 +163,10 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindString {
-			f.line("        case %d: %s.add(_s); break;", fr.idx, fr.listExpr)
+			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
+			// element is omitted on the wire, so place the value at its id and fill
+			// any gap with the element default ("").
+			f.line("        case %d: while (%s.size() <= id) %s.add(\"\"); %s.set(id, _s); break;", fr.idx, fr.listExpr, fr.listExpr, fr.listExpr)
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -196,7 +199,10 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindBlob {
-			f.line("        case %d: %s.add(_b); break;", fr.idx, fr.listExpr)
+			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
+			// element is omitted on the wire, so place the value at its id and fill
+			// any gap with the element default (empty bytes).
+			f.line("        case %d: while (%s.size() <= id) %s.add(new byte[0]); %s.set(id, _b); break;", fr.idx, fr.listExpr, fr.listExpr, fr.listExpr)
 			continue
 		}
 		if fr.kind != fkNormal {

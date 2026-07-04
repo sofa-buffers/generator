@@ -150,7 +150,10 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindString {
-				f.line("            case (%s, _): %s.Add(_s); break;", fr.loc, fr.path)
+				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
+				// element is omitted on the wire, so place each value at its id and
+				// grow the list, filling any gap with the element default ("").
+				f.line("            case (%s, _): while (%s.Count <= id) %s.Add(\"\"); %s[id] = _s; break;", fr.loc, fr.path, fr.path, fr.path)
 			}
 			continue
 		}
@@ -179,7 +182,10 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindBlob {
-				f.line("            case (%s, _): %s.Add(_b); break;", fr.loc, fr.path)
+				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
+				// element is omitted on the wire, so place each value at its id and
+				// grow the list, filling any gap with the element default (empty bytes).
+				f.line("            case (%s, _): while (%s.Count <= id) %s.Add(Array.Empty<byte>()); %s[id] = _b; break;", fr.loc, fr.path, fr.path, fr.path)
 			}
 			continue
 		}

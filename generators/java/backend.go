@@ -262,12 +262,18 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindFP64:
 		f.line("%sos.writeArrayFp64(%s, %s);", ind, idExpr, doubles)
 	case ir.KindString:
+		// A string element is a leaf: omit it when equal to the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		ev := fmt.Sprintf("_e%d", depth)
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) os.writeString(%s, %s.get(%s) == null ? \"\" : %s.get(%s));", ind, iv, iv, val, iv, iv, val, iv, val, iv)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { String %s = %s.get(%s); if (%s != null && !%s.isEmpty()) os.writeString(%s, %s); }", ind, iv, iv, val, iv, ev, val, iv, ev, ev, iv, ev)
 		f.line("%sos.writeSequenceEnd();", ind)
 	case ir.KindBlob:
+		// A blob element is a leaf: omit it when equal to the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		ev := fmt.Sprintf("_e%d", depth)
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) os.writeBlob(%s, %s.get(%s) == null ? new byte[0] : %s.get(%s));", ind, iv, iv, val, iv, iv, val, iv, val, iv)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s != null && %s.length != 0) os.writeBlob(%s, %s); }", ind, iv, iv, val, iv, ev, val, iv, ev, ev, iv, ev)
 		f.line("%sos.writeSequenceEnd();", ind)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)

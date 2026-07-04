@@ -221,12 +221,16 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// boolean -> unsigned u8 array of 0/1.
 		f.line("%sos.WriteArrayUnsigned(%s, Array.ConvertAll(%s.ToArray(), _x => _x ? (byte)1 : (byte)0));", ind, idExpr, val)
 	case ir.KindString:
+		// A string element is a leaf: omit it when equal to the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) os.WriteString(%s, %s[%s] ?? \"\");", ind, iv, iv, val, iv, iv, val, iv)
+		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) { if ((%s[%s] ?? \"\") != \"\") os.WriteString(%s, %s[%s] ?? \"\"); }", ind, iv, iv, val, iv, val, iv, iv, val, iv)
 		f.line("%sos.WriteSequenceEnd();", ind)
 	case ir.KindBlob:
+		// A blob element is a leaf: omit it when equal to the element default
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) os.WriteBlob(%s, %s[%s] ?? Array.Empty<byte>());", ind, iv, iv, val, iv, iv, val, iv)
+		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) { if ((%s[%s] ?? Array.Empty<byte>()).Length != 0) os.WriteBlob(%s, %s[%s] ?? Array.Empty<byte>()); }", ind, iv, iv, val, iv, val, iv, iv, val, iv)
 		f.line("%sos.WriteSequenceEnd();", ind)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)

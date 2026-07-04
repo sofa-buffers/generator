@@ -21,24 +21,45 @@ OP_TO_MSG = {
 }
 
 
+def string_array_values(fields):
+    """Ordered element values when `fields` is a single id-0 wrapper sequence
+    whose children are all string ops (a wrapper-array of string) — the shape the
+    MESSAGE_SPEC S2 element-omission vectors use; else None. Encoded against the
+    `vecsa` harness message."""
+    if len(fields) < 2 or fields[0].get("op") != "sequence_begin" or fields[0].get("id") != 0:
+        return None
+    if fields[-1].get("op") != "sequence_end":
+        return None
+    mid = fields[1:-1]
+    if not mid or any(op.get("op") != "string" for op in mid):
+        return None
+    return [op["value"] for op in mid]
+
+
 def main() -> int:
     vectors_path, proj = sys.argv[1], sys.argv[2]
     data = json.load(open(vectors_path))
     checked = 0
     for v in data["vectors"]:
-        if len(v["fields"]) != 1 or v.get("offset", 0) != 0:
+        if v.get("offset", 0) != 0:
             continue
-        f = v["fields"][0]
-        msg = OP_TO_MSG.get(f["op"])
-        if msg is None or f["id"] != 0:
-            continue
-        op, val = f["op"], f["value"]
-        if op in ("fp32", "fp64") and isinstance(val, str):  # inf/-inf
-            continue
-        if op in ("unsigned", "signed"):
-            payload = {"a": str(val)}  # bigint via string
+        arr = string_array_values(v["fields"])
+        if arr is not None:
+            msg, payload = "vecsa", {"a": arr}
+        elif len(v["fields"]) == 1:
+            f = v["fields"][0]
+            msg = OP_TO_MSG.get(f["op"])
+            if msg is None or f["id"] != 0:
+                continue
+            op, val = f["op"], f["value"]
+            if op in ("fp32", "fp64") and isinstance(val, str):  # inf/-inf
+                continue
+            if op in ("unsigned", "signed"):
+                payload = {"a": str(val)}  # bigint via string
+            else:
+                payload = {"a": val}
         else:
-            payload = {"a": val}
+            continue
         out = subprocess.run(
             ["npx", "tsx", "harness.ts", "encode", msg],
             input=json.dumps(payload).encode(),

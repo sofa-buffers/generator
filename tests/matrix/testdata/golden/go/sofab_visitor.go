@@ -41,22 +41,33 @@ func _narrowS[T ~int8 | ~int16 | ~int32 | ~int64](v []int64) []T {
 	return out
 }
 
-// _strSeq / _bytesSeq collect the elements of a string / blob array. Blob copies
-// (the corelib value aliases the decode buffer).
+// _strSeq / _bytesSeq collect the elements of a string / blob array. Elements are
+// keyed by index id (MESSAGE_SPEC S2): a default (empty) element is omitted on the
+// wire, so we place each value at its id and fill any gap with the element default
+// ("" / nil). Blob copies (the corelib value aliases the decode buffer).
 type _strSeq struct {
 	_visitorBase
 	out *[]string
 }
 
-func (s *_strSeq) String(_ sofab.ID, v string) error { *s.out = append(*s.out, v); return nil }
+func (s *_strSeq) String(id sofab.ID, v string) error {
+	for len(*s.out) <= int(id) {
+		*s.out = append(*s.out, "")
+	}
+	(*s.out)[id] = v
+	return nil
+}
 
 type _bytesSeq struct {
 	_visitorBase
 	out *[][]byte
 }
 
-func (s *_bytesSeq) Bytes(_ sofab.ID, v []byte) error {
-	*s.out = append(*s.out, append([]byte(nil), v...))
+func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
+	for len(*s.out) <= int(id) {
+		*s.out = append(*s.out, nil)
+	}
+	(*s.out)[id] = append([]byte(nil), v...)
 	return nil
 }
 

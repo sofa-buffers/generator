@@ -552,9 +552,19 @@ array & struct/union → sequence framing.
   The `!= default` test is applied **per field, except a `sequence`** (a
   `struct`/`union`, and the wrapper form of composite/dynamic-element arrays):
   a sequence is always framed, so an all-default nested object becomes an *empty
-  wrapper sequence*, not a dropped field. The corelibs are dumb codecs, so the
+  wrapper sequence*, not a dropped field. **Within a wrapper array the same rule
+  reaches the elements** (id = index, MESSAGE_SPEC §2): a `string`/`blob`
+  **element** is a leaf, so it is **omitted when it equals its element default
+  (empty)** — leaving an id gap the decoder fills from the default, so trailing
+  default elements collapse (`["a",""]` encodes as `["a"]`, `["",""]` as the
+  empty wrapper). A `struct`/`union`/nested-array element is itself a sequence and
+  stays framed. (The compact native scalar arrays are exempt — they carry no
+  per-element header, so their elements are always serialized in full.) The
+  corelibs are dumb codecs, so the
   rule lives in the **generated code**: every imperative backend emits per-field
-  guards; a native scalar array materializes its schema default and is
+  guards and, for wrapper-array string/blob elements, a per-element `!= empty`
+  guard on encode plus an id-indexed decode collector that gap-fills with the
+  element default; a native scalar array materializes its schema default and is
   whole-omitted when equal (else when empty); Rust gains a manual `impl Default`.
   Only the **C** backend defers omission to the `object.h` descriptor (same
   per-field rule; see corelib-c-cpp): when any leaf field has a non-zero
