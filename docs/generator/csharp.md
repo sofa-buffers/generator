@@ -1,24 +1,17 @@
 # C# target — `targets.csharp`
 
-Language-specific options for the C# backend. For shared options (`emit`,
-`file_layout`, `buffer`, …) see the [`generic`](README.md)
-config.
+Options accepted under `targets.csharp`. For shared options (`emit`,
+`tool_banner`, `license`, …) see the [generic config](README.md).
 
-## Honored options
+## Options
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `namespace` | string | `Messages` | The `namespace <name>` wrapping the generated classes. Also settable in `generic`. |
+| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
+| `namespace` | string | `Message` | The `namespace <name>` wrapping the generated classes. Also settable in `generic`. |
 
 ```yaml
 targets:
   csharp:
     namespace: MyProj.Messages
 ```
-
-## Reserved options
-
-Accepted by the schema validator but not yet honored by the generator:
-
-`target_framework` · `nullable` · `lang_version` · `use_records` ·
-`generate_doc_file`

@@ -293,23 +293,22 @@ schema as a hard gate**, then resolves the **effective config per target** with
 precedence **built-in default < `generic` < per-target**. Only `--in`/`--out`
 override file paths from the CLI.
 
-**Generic options** (apply to every target; `generic:` block). Built-in
-defaults: `emit=sources`, `timestamp=true`, `timestamp_format=iso8601`,
-`emit_deprecated=true`, `validation=debug`, `file_layout=file_per_message`.
-Of these only **`emit` is consumed by backends today** — `timestamp`,
-`timestamp_format`, `emit_deprecated`, `validation`, `file_layout` (and
-`naming`) validate and resolve but no backend reads them yet (reserved).
-`namespace` is deliberately *not* a generic default — it is a per-language
-concern, so each backend supplies its own idiomatic default (the unified base
-name `message`: C++ `message`, C# `Message`, Go/Java package `message`, C
-`symbol_prefix` `message_`); set `generic.namespace` to override. Others:
-`input_dir`, `output_dir`,
-`tool_banner`, `license`, `naming`.
+**The schema lists only honored keys.** Every key the config schema accepts is
+consumed by the generator; the schema and the set of consumed keys are kept in
+lockstep. (Planning-era reserved keys — `buffer`, `validation`, `naming`,
+`file_layout`, `timestamp`, `timestamp_format`, `emit_deprecated`, and a batch
+of per-target ones — validated but were never read; they have been pruned.)
 
-**Per-target options** (`targets.<lang>:`). The config schema is the full
-*intended* surface; backends today consume only a subset (the rest validate but
-are reserved — documented per language in `docs/generator/<lang>.md`). The
-**honored, behaviour-changing** options:
+**Generic options** (apply to every target; `generic:` block): `emit`
+(built-in default `sources`), `namespace`, `input_dir`, `output_dir`,
+`tool_banner`, `license`. `namespace` is deliberately *not* a generic default —
+it is a per-language concern, so each backend supplies its own idiomatic
+default (the unified base name `message`: C++ `message`, C# `Message`, Go/Java
+package `message`, C `symbol_prefix` `message_`); set `generic.namespace` to
+override.
+
+**Per-target options** (`targets.<lang>:`), documented per language in
+`docs/generator/<lang>.md`:
 
 | Option | Targets | Effect |
 |---|---|---|
@@ -374,9 +373,9 @@ a reimplementation should emit code that honors all of them:
   enum → smallest *signed* backing, bitfield → smallest *unsigned* backing; avoid
   widening on the hot path (§11 natural-width writes).
 - **Validate cheaply or not at all on the hot path** — bounds checks (`maxlen`,
-  array `count`) are debug-only assertions, so release builds pay nothing. (The
-  config `validation` key that would make this switchable is reserved — no
-  backend consumes it yet.)
+  array `count`) are debug-only assertions, so release builds pay nothing.
+  (There is no config knob for this today; a `validation` key existed in the
+  schema but was never consumed and has been pruned.)
 - **Escape reserved-word field names.** A schema field name may collide with a
   target-language keyword (`where`, `class`, `int`, …); the backend must make it a
   valid identifier — *escape* where the language allows (Rust `r#name`, C#

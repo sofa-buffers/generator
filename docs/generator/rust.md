@@ -1,13 +1,13 @@
 # Rust target — `targets.rust`
 
-Language-specific options for the Rust backend. For shared options (`emit`,
-`file_layout`, `buffer`, …) see the [`generic`](README.md)
-config.
+Options accepted under `targets.rust`. For shared options (`emit`,
+`tool_banner`, `license`, …) see the [generic config](README.md).
 
-## Honored options
+## Options
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
+| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
 | `corelib` | `rs` \| `rs-no-std` | `rs` | Which Rust corelib the generated crate targets (see below). |
 | `no_std` | bool | `true` when `corelib: rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate (see below). Set `false` to emit an ordinary `std` crate against the no-std corelib. Ignored for `corelib: rs`. |
 | `allow_dynamic` | bool | `false` | Under `no_std`, keep an `alloc` heap fallback for genuinely unbounded fields instead of failing generation. |
@@ -84,9 +84,3 @@ targets:
 
 [`corelib-rs-no-std`]: https://github.com/sofa-buffers/corelib-rs-no-std
 [`corelib-rs`]: https://github.com/sofa-buffers/corelib-rs
-
-## Reserved options
-
-Accepted by the schema validator but not yet honored by the generator:
-
-`module` · `edition` · `alloc` · `string_storage` · `derives`

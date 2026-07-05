@@ -1,50 +1,27 @@
 # Example sofabgen configuration (PLAN §7.4).
-# Validated against schema/sofabgen-config-schema.json before use.
+# Validated against schema/sofabgen-config-schema.json before use — the schema
+# is closed (unknown keys are rejected) and lists only honored options.
 generic:
-  namespace: my.proj.messages
+  namespace: my.proj.messages   # per-language namespace targets override below
   output_dir: ./generated
-  timestamp: false          # reproducible builds (or rely on SOURCE_DATE_EPOCH)
-  license: MIT
-  emit_deprecated: true
-  validation: debug
+  license: MIT                  # SPDX header; omit (or `none`) for no SPDX line
+  emit: sources                 # or `project` for a buildable project scaffold
 targets:
   cpp:
     namespace: myproj::msg
-    cpp_standard: c++20
-    zero_copy_strings: true
-    buffer: { mode: stack, size: auto }
+    corelib: cpp                # or c-cpp for fixed-capacity, heap-free containers
   c:
     symbol_prefix: myproj_
-    c_standard: c99
-    descriptor_profile: auto
-    string_storage: fixed_inline
-    buffer: { mode: stack, size: 256 }
   rust:
-    module: myproj::messages
-    edition: "2021"
-    no_std: true
-    string_storage: heapless
-    derives: [Debug, Clone, Default, PartialEq]
-    buffer: { mode: heap }
+    corelib: rs                 # or rs-no-std for the #![no_std] profile
   go:
     package: messages
+    module_path: github.com/myproj/messages
     go_version: "1.21"
-    decode_style: pull
-  python:
-    package: myproj.messages
-    class_style: dataclass
-    frozen: true
+  python: {}
   java:
     package: com.myproj.messages
-    java_version: 17
-    use_records: true
-    build: maven
   csharp:
     namespace: MyProj.Messages
-    target_framework: net9.0
-    nullable: enable
-    use_records: true
   typescript:
-    module: dual
-    package_name: "@myproj/messages"
-    int64: bigint
+    int64: bigint               # or long / number for a bigint-free hot path

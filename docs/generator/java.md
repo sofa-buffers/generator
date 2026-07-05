@@ -1,23 +1,17 @@
 # Java target — `targets.java`
 
-Language-specific options for the Java backend. For shared options (`emit`,
-`file_layout`, `buffer`, …) see the [`generic`](README.md)
-config.
+Options accepted under `targets.java`. For shared options (`emit`,
+`tool_banner`, `license`, …) see the [generic config](README.md).
 
-## Honored options
+## Options
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `package` | string | `messages` | The `package <name>;` declaration of the generated classes (and the Maven source directory layout in project mode). |
+| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
+| `package` | string | `message` | The `package <name>;` declaration of the generated classes (and the Maven source directory layout in project mode). |
 
 ```yaml
 targets:
   java:
     package: com.myproj.messages
 ```
-
-## Reserved options
-
-Accepted by the schema validator but not yet honored by the generator:
-
-`java_version` · `use_records` · `build` · `group_id` · `artifact_id`

@@ -49,7 +49,7 @@ IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"s
 #   CFGBODY - the targets.rust config block contents (e.g. "" or "corelib: rs").
 run_variant() {
     label=$1; cfgbody=$2; corelib=$3
-    printf 'generic: { emit: project, timestamp: false }\ntargets: { rust: { %s } }\n' "$cfgbody" > "$WORK/cfg-$label.yaml"
+    printf 'generic: { emit: project }\ntargets: { rust: { %s } }\n' "$cfgbody" > "$WORK/cfg-$label.yaml"
 
     rust_build() {  # def-or-yaml out-dir
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang rust --in "$1" --out "$2" )
@@ -105,7 +105,7 @@ echo "==> [allow_dynamic=true] no_std lib (heapless + alloc fallback) builds"
 # (b) allow_dynamic: false (default) — a fully bounded schema must lower to pure
 # heapless with NO allocator at all (no `extern crate alloc`), and an unbounded
 # field must instead be a hard generation error.
-printf 'generic: { emit: project, timestamp: false }\ntargets: { rust: { corelib: rs-no-std } }\n' > "$WORK/cfg-strict.yaml"
+printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }\n' > "$WORK/cfg-strict.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-strict.yaml" --lang rust --in "$WORK/conf.yaml" --out "$WORK/strict" )
 if grep -q 'extern crate alloc' "$WORK/strict/src/lib.rs"; then echo "FAIL: strict (bounded, no allow_dynamic) crate must not pull alloc"; exit 1; fi
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/strict/Cargo.toml"

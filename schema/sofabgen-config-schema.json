@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema",
   "$id": "https://github.com/sofa-buffers/generator/schema/sofabgen-config-schema.json",
   "title": "SofaBuffers Generator Config Schema",
-  "description": "Validates sofabgen configuration files (YAML or JSON). PLAN \u00a77. Every level is closed (additionalProperties:false) so typos are rejected, not ignored.",
+  "description": "Validates sofabgen configuration files (YAML or JSON). PLAN §7. Every level is closed (additionalProperties:false) so typos are rejected, not ignored. Every key in this schema is honored by the generator; the schema and the set of consumed keys are kept in lockstep.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -41,194 +41,53 @@
     }
   },
   "$defs": {
-    "buffer": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "type": "string",
-          "enum": [
-            "stack",
-            "heap"
-          ]
-        },
-        "size": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 1
-            },
-            {
-              "type": "string",
-              "enum": [
-                "auto"
-              ]
-            }
-          ]
-        }
-      }
+    "emit": {
+      "type": "string",
+      "enum": [
+        "sources",
+        "project"
+      ],
+      "description": "sources (default): just the message-type source files. project: additionally scaffold a buildable project (build files + the canonical-JSON conformance harness)."
     },
     "generic": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "namespace": {
-          "type": "string"
+          "type": "string",
+          "description": "Namespace wrapping the generated types, for the targets that have one (C++ namespace, C# namespace). No generic default on purpose: each backend applies its own idiomatic default (C++ `message`, C# `Message`)."
         },
         "emit": {
-          "type": "string",
-          "enum": [
-            "sources",
-            "project"
-          ]
+          "$ref": "#/$defs/emit"
         },
         "input_dir": {
-          "type": "string"
+          "type": "string",
+          "description": "Directory of message definitions to generate from. The CLI --in flag overrides it."
         },
         "output_dir": {
-          "type": "string"
-        },
-        "timestamp": {
-          "type": "boolean"
-        },
-        "timestamp_format": {
-          "type": "string"
+          "type": "string",
+          "description": "Directory the generated files are written to. The CLI --out flag overrides it."
         },
         "tool_banner": {
-          "type": "string"
+          "type": "string",
+          "description": "Tool name stamped into every generated file header (default: sofabgen)."
         },
         "license": {
-          "type": "string"
-        },
-        "emit_deprecated": {
-          "type": "boolean"
-        },
-        "validation": {
           "type": "string",
-          "enum": [
-            "debug",
-            "always",
-            "off"
-          ]
-        },
-        "naming": {
-          "type": "string"
-        },
-        "file_layout": {
-          "type": "string",
-          "enum": [
-            "one_file",
-            "file_per_message"
-          ]
+          "description": "SPDX license identifier stamped into every generated file header (e.g. MIT, Apache-2.0, LicenseRef-Acme). Unset or `none` (the default) emits no SPDX line."
         }
-      }
-    },
-    "common_target": {
-      "namespace": {
-        "type": "string"
-      },
-      "emit": {
-        "type": "string",
-        "enum": [
-          "sources",
-          "project"
-        ]
-      },
-      "validation": {
-        "type": "string",
-        "enum": [
-          "debug",
-          "always",
-          "off"
-        ]
-      },
-      "naming": {
-        "type": "string"
-      },
-      "file_layout": {
-        "type": "string",
-        "enum": [
-          "one_file",
-          "file_per_message"
-        ]
-      },
-      "buffer": {
-        "$ref": "#/$defs/buffer"
       }
     },
     "target_c": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "namespace": {
-          "type": "string"
-        },
         "emit": {
-          "type": "string",
-          "enum": [
-            "sources",
-            "project"
-          ]
-        },
-        "validation": {
-          "type": "string",
-          "enum": [
-            "debug",
-            "always",
-            "off"
-          ]
-        },
-        "naming": {
-          "type": "string"
-        },
-        "file_layout": {
-          "type": "string",
-          "enum": [
-            "one_file",
-            "file_per_message"
-          ]
-        },
-        "buffer": {
-          "$ref": "#/$defs/buffer"
+          "$ref": "#/$defs/emit"
         },
         "symbol_prefix": {
-          "type": "string"
-        },
-        "c_standard": {
           "type": "string",
-          "enum": [
-            "c99",
-            "c11"
-          ]
-        },
-        "header_extension": {
-          "type": "string"
-        },
-        "source_extension": {
-          "type": "string"
-        },
-        "include_guard": {
-          "type": "string",
-          "enum": [
-            "ifndef",
-            "pragma_once"
-          ]
-        },
-        "descriptor_profile": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "small",
-            "medium",
-            "big"
-          ]
-        },
-        "string_storage": {
-          "type": "string",
-          "enum": [
-            "fixed_inline",
-            "caller_buffer"
-          ]
+          "description": "Prefix applied to every generated C symbol - struct typedefs, descriptor tables, and the encode/decode/init functions (default: message_)."
         }
       }
     },
@@ -236,8 +95,12 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "emit": {
+          "$ref": "#/$defs/emit"
+        },
         "namespace": {
-          "type": "string"
+          "type": "string",
+          "description": "C++ namespace wrapping the generated types (default: message). Overrides generic.namespace for this target."
         },
         "corelib": {
           "type": "string",
@@ -245,58 +108,13 @@
             "cpp",
             "c-cpp"
           ],
-          "default": "cpp"
+          "default": "cpp",
+          "description": "Which C++ corelib the generated code targets. cpp (default): pure-C++20 header-only corelib-cpp with dynamic containers (std::vector/std::string). c-cpp: the C++ wrapper over corelib-c-cpp with fixed-capacity, heap-free containers sized from the schema."
         },
         "allow_dynamic": {
           "type": "boolean",
+          "default": false,
           "description": "corelib: c-cpp only. Keep a std::vector/std::string heap fallback for genuinely unbounded fields (string/blob without maxlen, array without count) instead of failing generation; bounded fields still use fixed-capacity inline storage."
-        },
-        "emit": {
-          "type": "string",
-          "enum": [
-            "sources",
-            "project"
-          ]
-        },
-        "validation": {
-          "type": "string",
-          "enum": [
-            "debug",
-            "always",
-            "off"
-          ]
-        },
-        "naming": {
-          "type": "string"
-        },
-        "file_layout": {
-          "type": "string",
-          "enum": [
-            "one_file",
-            "file_per_message"
-          ]
-        },
-        "buffer": {
-          "$ref": "#/$defs/buffer"
-        },
-        "cpp_standard": {
-          "type": "string",
-          "enum": [
-            "c++20",
-            "c++23"
-          ]
-        },
-        "header_only": {
-          "type": "boolean"
-        },
-        "max_size_strategy": {
-          "type": "string",
-          "enum": [
-            "upper_bound"
-          ]
-        },
-        "zero_copy_strings": {
-          "type": "boolean"
         }
       }
     },
@@ -304,76 +122,26 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "emit": {
+          "$ref": "#/$defs/emit"
+        },
         "corelib": {
           "type": "string",
           "enum": [
             "rs-no-std",
             "rs"
           ],
-          "default": "rs"
-        },
-        "emit": {
-          "type": "string",
-          "enum": [
-            "sources",
-            "project"
-          ]
-        },
-        "validation": {
-          "type": "string",
-          "enum": [
-            "debug",
-            "always",
-            "off"
-          ]
-        },
-        "naming": {
-          "type": "string"
-        },
-        "file_layout": {
-          "type": "string",
-          "enum": [
-            "one_file",
-            "file_per_message"
-          ]
-        },
-        "buffer": {
-          "$ref": "#/$defs/buffer"
-        },
-        "module": {
-          "type": "string"
-        },
-        "edition": {
-          "type": "string",
-          "enum": [
-            "2021",
-            "2024"
-          ]
+          "default": "rs",
+          "description": "Which Rust corelib the generated crate targets. rs (default): the std corelib-rs, tuned for throughput. rs-no-std: the #![no_std] corelib-rs-no-std, feature-gated per wire type and tuned for footprint."
         },
         "no_std": {
           "type": "boolean",
           "description": "rust corelib: rs-no-std only. Emit a genuinely #![no_std], heap-free crate: heapless::String<N>/Vec<T,N> fixed-capacity fields sized from the schema, a bounded decode stack, and serde gated behind a cargo feature. On by default for corelib: rs-no-std; set false to emit an ordinary std crate against the no-std corelib."
         },
-        "alloc": {
-          "type": "boolean"
-        },
         "allow_dynamic": {
           "type": "boolean",
+          "default": false,
           "description": "rust no_std only. Keep an alloc::String/alloc::Vec heap fallback for genuinely unbounded fields (string/blob without maxlen, array without count) instead of failing generation; bounded fields still use fixed-capacity heapless storage. The Rust analog of the c-cpp allow_dynamic."
-        },
-        "string_storage": {
-          "type": "string",
-          "enum": [
-            "fixed",
-            "heapless",
-            "alloc_string"
-          ]
-        },
-        "derives": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
         }
       }
     },
@@ -382,55 +150,19 @@
       "additionalProperties": false,
       "properties": {
         "emit": {
-          "type": "string",
-          "enum": [
-            "sources",
-            "project"
-          ]
-        },
-        "validation": {
-          "type": "string",
-          "enum": [
-            "debug",
-            "always",
-            "off"
-          ]
-        },
-        "naming": {
-          "type": "string"
-        },
-        "file_layout": {
-          "type": "string",
-          "enum": [
-            "one_file",
-            "file_per_message"
-          ]
-        },
-        "buffer": {
-          "$ref": "#/$defs/buffer"
+          "$ref": "#/$defs/emit"
         },
         "package": {
-          "type": "string"
+          "type": "string",
+          "description": "The `package <name>` clause of the generated .go files (default: message)."
         },
         "module_path": {
-          "type": "string"
+          "type": "string",
+          "description": "The module path written to the generated go.mod in project mode (default: example.com/generated)."
         },
         "go_version": {
-          "type": "string"
-        },
-        "decode_style": {
           "type": "string",
-          "enum": [
-            "pull",
-            "visitor"
-          ]
-        },
-        "accessors": {
-          "type": "string",
-          "enum": [
-            "fields",
-            "getters"
-          ]
+          "description": "The `go <version>` directive written to the generated go.mod in project mode (default: 1.21)."
         }
       }
     },
@@ -439,59 +171,7 @@
       "additionalProperties": false,
       "properties": {
         "emit": {
-          "type": "string",
-          "enum": [
-            "sources",
-            "project"
-          ]
-        },
-        "validation": {
-          "type": "string",
-          "enum": [
-            "debug",
-            "always",
-            "off"
-          ]
-        },
-        "naming": {
-          "type": "string"
-        },
-        "file_layout": {
-          "type": "string",
-          "enum": [
-            "one_file",
-            "file_per_message"
-          ]
-        },
-        "buffer": {
-          "$ref": "#/$defs/buffer"
-        },
-        "package": {
-          "type": "string"
-        },
-        "python_min": {
-          "type": "string"
-        },
-        "class_style": {
-          "type": "string",
-          "enum": [
-            "dataclass",
-            "slots_dataclass",
-            "plain"
-          ]
-        },
-        "frozen": {
-          "type": "boolean"
-        },
-        "type_hints": {
-          "type": "boolean"
-        },
-        "decode_style": {
-          "type": "string",
-          "enum": [
-            "pull",
-            "visitor"
-          ]
+          "$ref": "#/$defs/emit"
         }
       }
     },
@@ -500,54 +180,11 @@
       "additionalProperties": false,
       "properties": {
         "emit": {
-          "type": "string",
-          "enum": [
-            "sources",
-            "project"
-          ]
-        },
-        "validation": {
-          "type": "string",
-          "enum": [
-            "debug",
-            "always",
-            "off"
-          ]
-        },
-        "naming": {
-          "type": "string"
-        },
-        "file_layout": {
-          "type": "string",
-          "enum": [
-            "one_file",
-            "file_per_message"
-          ]
-        },
-        "buffer": {
-          "$ref": "#/$defs/buffer"
+          "$ref": "#/$defs/emit"
         },
         "package": {
-          "type": "string"
-        },
-        "java_version": {
-          "type": "integer"
-        },
-        "use_records": {
-          "type": "boolean"
-        },
-        "build": {
           "type": "string",
-          "enum": [
-            "maven",
-            "gradle"
-          ]
-        },
-        "group_id": {
-          "type": "string"
-        },
-        "artifact_id": {
-          "type": "string"
+          "description": "The `package <name>;` declaration of the generated classes, and the Maven source-directory layout in project mode (default: message)."
         }
       }
     },
@@ -556,54 +193,11 @@
       "additionalProperties": false,
       "properties": {
         "emit": {
-          "type": "string",
-          "enum": [
-            "sources",
-            "project"
-          ]
-        },
-        "validation": {
-          "type": "string",
-          "enum": [
-            "debug",
-            "always",
-            "off"
-          ]
-        },
-        "naming": {
-          "type": "string"
-        },
-        "file_layout": {
-          "type": "string",
-          "enum": [
-            "one_file",
-            "file_per_message"
-          ]
-        },
-        "buffer": {
-          "$ref": "#/$defs/buffer"
+          "$ref": "#/$defs/emit"
         },
         "namespace": {
-          "type": "string"
-        },
-        "target_framework": {
-          "type": "string"
-        },
-        "nullable": {
           "type": "string",
-          "enum": [
-            "enable",
-            "disable"
-          ]
-        },
-        "lang_version": {
-          "type": "string"
-        },
-        "use_records": {
-          "type": "boolean"
-        },
-        "generate_doc_file": {
-          "type": "boolean"
+          "description": "The `namespace <name>` wrapping the generated classes (default: Message). Overrides generic.namespace for this target."
         }
       }
     },
@@ -612,49 +206,7 @@
       "additionalProperties": false,
       "properties": {
         "emit": {
-          "type": "string",
-          "enum": [
-            "sources",
-            "project"
-          ]
-        },
-        "validation": {
-          "type": "string",
-          "enum": [
-            "debug",
-            "always",
-            "off"
-          ]
-        },
-        "naming": {
-          "type": "string"
-        },
-        "file_layout": {
-          "type": "string",
-          "enum": [
-            "one_file",
-            "file_per_message"
-          ]
-        },
-        "buffer": {
-          "$ref": "#/$defs/buffer"
-        },
-        "module": {
-          "type": "string",
-          "enum": [
-            "esm",
-            "cjs",
-            "dual"
-          ]
-        },
-        "package_name": {
-          "type": "string"
-        },
-        "ts_target": {
-          "type": "string"
-        },
-        "node_min": {
-          "type": "string"
+          "$ref": "#/$defs/emit"
         },
         "int64": {
           "type": "string",
@@ -665,15 +217,6 @@
           ],
           "default": "bigint",
           "description": "64-bit field representation. bigint (default): bigint scalars and bigint[] arrays. long: u64[]/i64[] backed by corelib Long[] behind a get/set accessor pair (bigint-free encode/decode hot path; assignment accepts Long | bigint | number); scalars stay bigint. number: additionally maps u64/i64 scalars to number - the caller guarantees scalar values fit the +/-2^53 safe-integer range. All modes are wire-identical."
-        },
-        "emit_dts": {
-          "type": "boolean"
-        },
-        "decode_style": {
-          "type": "string",
-          "enum": [
-            "visitor"
-          ]
         }
       }
     }

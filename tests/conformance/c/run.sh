@@ -46,7 +46,7 @@ echo "==> guard fired as expected"
 
 echo "==> M3: emit:project -> build harness -> JSON encode/decode round-trip"
 cat > "$WORK/proj.yaml" <<YAML
-generic: { emit: project, timestamp: false }
+generic: { emit: project }
 targets: { c: { symbol_prefix: sofab_ } }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in examples/messages/example.yaml --out "$WORK/proj" )
