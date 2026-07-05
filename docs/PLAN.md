@@ -495,14 +495,14 @@ Each backend gets its own object under `targets:`; it inherits the generic block
 
 > **Capabilities are auto-derived, not configured.** The generator computes the required capability set (`fixlen`, `array`, `sequence`, `fp64`, 64-bit `int`, …) directly from the definition — it knows which wire features a message needs — so there is **no `features`/`value_width` knob**. It emits the §5.4 compile-time guards for exactly those capabilities (the build fails clearly if the linked corelib was built with the matching `SOFAB_DISABLE_*`), and selects the narrowest integer width that fits. `integer_overflow_check` / `object_api` are corelib build choices the generator does not need from config.
 
-#### `cpp-embedded` — corelib-c-cpp, `sofab.hpp` (embedded C++)
+#### ~~`cpp-embedded`~~ — superseded by `cpp` + `corelib: c-cpp`
 
-| Key | Allowed / type | Default | Notes |
-|---|---|---|---|
-| `namespace` | string | `sofab` | |
-| `cpp_standard` | `c++17` \| `c++20` | `c++17` | wrapper minimum (verify when wiring the backend). |
-| `buffer` | see below | `{stack, auto}` | `OStreamInline<N>`/`OStreamObject<T>` vs `OStream`. |
-| `max_size_strategy` | `upper_bound` | `upper_bound` | how `_maxSize` (§5.5) is computed. |
+Originally planned as a separate corelib-c-cpp/`sofab.hpp` target; it shipped
+instead as a **profile of the `cpp` target**: `targets.cpp.corelib: c-cpp`
+selects the corelib-c-cpp C++ wrapper with heap-free fixed-capacity containers
+by default (`allow_dynamic: true` keeps a heap fallback for unbounded fields).
+The standalone `cpp-embedded` target key was removed from the config schema
+and CLI.
 
 > Capabilities are **auto-derived** (as for `c` above) — no `features`/`value_width` knob; the wrapper builds on the C core, so the §5.4 guards cover the same `SOFAB_DISABLE_*`.
 
@@ -581,7 +581,7 @@ Each backend gets its own object under `targets:`; it inherits the generic block
 | `package_name` | string | — | e.g. `@scope/messages`; corelib is `@sofabuffers/corelib`. |
 | `ts_target` | string | `ES2020` | corelib `target: ES2020`. |
 | `node_min` | string | `18` | corelib `engines.node >=18`. |
-| `bigint_policy` | `when_needed` \| `always` \| `number` | `when_needed` | use `bigint` for 64-bit fields, `number` otherwise (corelib reads scalars as `bigint`). |
+| `int64` | `bigint` \| `long` \| `number` | `bigint` | 64-bit representation, wire-identical across modes: `long` backs u64/i64 **arrays** with corelib `Long[]` behind an accessor pair (bigint-free hot path); `number` additionally maps 64-bit **scalars** to `number` (values must fit ±2^53). Replaced the earlier `bigint_policy` sketch. |
 | `emit_dts` | bool | `true` | emit `.d.ts` declarations. |
 | `decode_style` | `visitor` | `visitor` | corelib decode is visitor-based (`sequenceBegin` may return a child visitor). |
 
@@ -659,7 +659,7 @@ targets:
   typescript:
     module: dual
     package_name: "@myproj/messages"
-    bigint_policy: when_needed
+    int64: bigint
 ```
 
 The same document is accepted as JSON. A built-in `sofabgen config --print-defaults` (or similar) emits the fully-resolved effective config for a given target so users can see exactly what was applied.
@@ -764,7 +764,7 @@ codegen/
 │   ├── golang/               #   each: generator.go · visitor.go · builder.go · templates/
 │   ├── typescript/
 │   ├── python/
-│   ├── c/  · cpp/ · cpp_embedded/ · rust/ · java/ · csharp/   # (full target set, §1)
+│   ├── c/  · cpp/ · rust/ · java/ · csharp/                   # (full target set, §1)
 │   └── …
 │
 └── tests/                    # cross-cutting tests; per-language root projects live in §9.1
@@ -780,7 +780,7 @@ codegen/
 The CLI is deliberately **tiny** — everything configurable lives in the config file (§7). The only required arguments are the config path and the target language:
 
 ```
-sofabgen --config <file> --lang <c|cpp-embedded|cpp|rust|go|python|java|csharp|ts>
+sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript>
         [--in <dir>] [--out <dir>]
 ```
 

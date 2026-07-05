@@ -16,9 +16,6 @@
         "c": {
           "$ref": "#/$defs/target_c"
         },
-        "cpp-embedded": {
-          "$ref": "#/$defs/target_cpp_embedded"
-        },
         "cpp": {
           "$ref": "#/$defs/target_cpp"
         },
@@ -231,56 +228,6 @@
           "enum": [
             "fixed_inline",
             "caller_buffer"
-          ]
-        }
-      }
-    },
-    "target_cpp_embedded": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "namespace": {
-          "type": "string"
-        },
-        "emit": {
-          "type": "string",
-          "enum": [
-            "sources",
-            "project"
-          ]
-        },
-        "validation": {
-          "type": "string",
-          "enum": [
-            "debug",
-            "always",
-            "off"
-          ]
-        },
-        "naming": {
-          "type": "string"
-        },
-        "file_layout": {
-          "type": "string",
-          "enum": [
-            "one_file",
-            "file_per_message"
-          ]
-        },
-        "buffer": {
-          "$ref": "#/$defs/buffer"
-        },
-        "cpp_standard": {
-          "type": "string",
-          "enum": [
-            "c++17",
-            "c++20"
-          ]
-        },
-        "max_size_strategy": {
-          "type": "string",
-          "enum": [
-            "upper_bound"
           ]
         }
       }
@@ -709,13 +656,15 @@
         "node_min": {
           "type": "string"
         },
-        "bigint_policy": {
+        "int64": {
           "type": "string",
           "enum": [
-            "when_needed",
-            "always",
+            "bigint",
+            "long",
             "number"
-          ]
+          ],
+          "default": "bigint",
+          "description": "64-bit field representation. bigint (default): bigint scalars and bigint[] arrays. long: u64[]/i64[] backed by corelib Long[] behind a get/set accessor pair (bigint-free encode/decode hot path; assignment accepts Long | bigint | number); scalars stay bigint. number: additionally maps u64/i64 scalars to number - the caller guarantees scalar values fit the +/-2^53 safe-integer range. All modes are wire-identical."
         },
         "emit_dts": {
           "type": "boolean"

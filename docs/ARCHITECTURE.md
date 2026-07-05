@@ -572,7 +572,7 @@ only needs to mirror their *names* and gate on the schema's used features:
 | **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. |
 | **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; `Decode` via zero-copy `sofab.AcceptBytes`; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
 | **Python** | `corelib-py` | pull-parser | dataclasses + `_marshal`/`_unmarshal`. |
-| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint`; alloc-free `writeString`. |
+| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); Gson harness. |
 
@@ -709,9 +709,10 @@ few cross-language inconsistencies to reconcile for *true* JSON interop (blob is
 `number[]` in C/Python/C++/Rust/C#/Java but base64 in Go; `u64` is a JSON number
 everywhere except a string in TS); schema defaults are applied per-backend except
 Rust (derive `Default` = zeros). These do not affect the **binary** wire interop
-(which is vector-verified). Further known drift: the config schema defines a
-`cpp-embedded` target with no registered backend, and `NamedType.DefaultID` is
-declared but never populated (§6).
+(which is vector-verified). Further known drift: `NamedType.DefaultID` is
+declared but never populated (§6). (The planning-era `cpp-embedded` target was
+removed from the config schema — embedded C++ shipped as the `cpp` target's
+`corelib: c-cpp` profile instead.)
 
 ---
 

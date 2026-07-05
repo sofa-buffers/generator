@@ -64,6 +64,48 @@ echo "==> round-trip OK"
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
 
+# int64: long / number — the Long-backed 64-bit hot path must be wire-identical
+# to the default bigint representation (issue #51; corelib-ts #19/#20).
+echo "==> int64 modes: Long-backed 64-bit path is wire-identical"
+cat > "$WORK/i64.yaml" <<'YAML'
+version: 1
+messages:
+  m64:
+    payload:
+      us: { id: 0, type: array, items: { type: u64, count: 8 } }
+      is: { id: 1, type: array, items: { type: i64, count: 8 } }
+      ud: { id: 2, type: array, items: { type: u64, count: 2 }, default: [1, "18446744073709551615"] }
+      u:  { id: 3, type: u64 }
+      i:  { id: 4, type: i64 }
+YAML
+for mode in bigint long number; do
+    cat > "$WORK/cfg_$mode.yaml" <<YAML
+generic: { emit: project, timestamp: false }
+targets: { typescript: { int64: $mode } }
+YAML
+    gen "$WORK/i64.yaml" "$WORK/i64-$mode"
+    ln -s "$WORK/ex/node_modules" "$WORK/i64-$mode/node_modules"
+done
+( cd "$WORK/i64-long" && npx tsc --noEmit )
+( cd "$WORK/i64-number" && npx tsc --noEmit )
+enc64() { ( cd "$WORK/i64-$1" && printf '%s' "$2" | npx tsx harness.ts encode m64 ); }
+# Full 64-bit range (scalars beyond 2^53): bigint vs long. ud == its schema
+# default exercises the longArrEq omission guard.
+I64FULL='{"us":["1","18446744073709551615","4294967296"],"is":["-1","-9223372036854775808","9223372036854775807"],"ud":["1","18446744073709551615"],"u":"18446744073709551615","i":"-9223372036854775808"}'
+enc64 bigint "$I64FULL" > "$WORK/i64_full_bigint.bin"
+enc64 long   "$I64FULL" > "$WORK/i64_full_long.bin"
+cmp -s "$WORK/i64_full_bigint.bin" "$WORK/i64_full_long.bin" || { echo "FAIL: int64: long wire drift"; exit 1; }
+# Safe-integer scalars (fit 2^53): bigint vs number.
+I64SAFE='{"us":["1","18446744073709551615"],"is":["-9223372036854775808"],"ud":["5","6"],"u":"9007199254740991","i":"-9007199254740991"}'
+enc64 bigint "$I64SAFE" > "$WORK/i64_safe_bigint.bin"
+enc64 number "$I64SAFE" > "$WORK/i64_safe_number.bin"
+cmp -s "$WORK/i64_safe_bigint.bin" "$WORK/i64_safe_number.bin" || { echo "FAIL: int64: number wire drift"; exit 1; }
+# Decode parity: long mode reproduces the bigint mode's JSON from the same bytes.
+DEC_A=$( cd "$WORK/i64-bigint" && npx tsx harness.ts decode m64 < "$WORK/i64_full_bigint.bin" )
+DEC_B=$( cd "$WORK/i64-long"   && npx tsx harness.ts decode m64 < "$WORK/i64_full_bigint.bin" )
+[ "$DEC_A" = "$DEC_B" ] || { echo "FAIL: int64: long decode drift"; exit 1; }
+echo "==> int64 modes OK (bigint == long == number on the wire)"
+
 echo "==> corpus + realworld: every definition typechecks"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)

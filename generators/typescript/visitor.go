@@ -39,18 +39,29 @@ func (g *gen) emitDecode(f *tsfile, name string, fields []*ir.Field) {
 // number-first (number|bigint)[] to the field's declared element type; the
 // runtime values are byte-for-byte what the old visitor produced.
 func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
-	acc := "o." + x.Name
+	// A Long-backed array decodes into the private backing field directly: the
+	// readers produce canonical Long[], so the setter's fromValue pass (and its
+	// array copy) would be pure overhead on the hot path.
+	acc := g.storage("o", x)
 	switch x.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindBitfield:
 		f.line("      case %d: %s = Number(c.readUnsigned()); break;", x.ID, acc)
 	case ir.KindU64:
-		f.line("      case %d: %s = c.readUnsigned() as bigint; break;", x.ID, acc)
+		if g.numberScalars() {
+			f.line("      case %d: %s = Number(c.readUnsigned()); break;", x.ID, acc)
+		} else {
+			f.line("      case %d: %s = c.readUnsigned() as bigint; break;", x.ID, acc)
+		}
 	case ir.KindBool:
 		f.line("      case %d: %s = Boolean(c.readUnsigned()); break;", x.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32:
 		f.line("      case %d: %s = Number(c.readSigned()); break;", x.ID, acc)
 	case ir.KindI64:
-		f.line("      case %d: %s = c.readSigned() as bigint; break;", x.ID, acc)
+		if g.numberScalars() {
+			f.line("      case %d: %s = Number(c.readSigned()); break;", x.ID, acc)
+		} else {
+			f.line("      case %d: %s = c.readSigned() as bigint; break;", x.ID, acc)
+		}
 	case ir.KindEnum:
 		f.line("      case %d: %s = Number(c.readSigned()) as %s; break;", x.ID, acc, g.typeName(x.Ref.Key))
 	case ir.KindFP32:
@@ -87,8 +98,14 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 func (g *gen) nativeArrayRead(elem ir.Kind, ref *ir.TypeRef) string {
 	switch elem {
 	case ir.KindU64:
+		if g.longArrays() {
+			return "c.readUnsignedArrayLong()"
+		}
 		return "c.readUnsignedArray() as bigint[]"
 	case ir.KindI64:
+		if g.longArrays() {
+			return "c.readSignedArrayLong()"
+		}
 		return "c.readSignedArray() as bigint[]"
 	case ir.KindI8, ir.KindI16, ir.KindI32:
 		return "c.readSignedArray() as number[]"
@@ -170,5 +187,17 @@ const arrEqHelper = `// arrEq is an element-wise equality check used by the spar
 function arrEq(a: ArrayLike<unknown>, b: ArrayLike<unknown>): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}`
+
+// longArrEqHelper is the Long[] flavour of arrEq: Long elements are object
+// identities, so the sparse-omission default compare goes by (low, high) word
+// pairs instead of element !==. Emitted only when some Long-backed 64-bit
+// array carries a non-empty schema default (see scanHelpers).
+const longArrEqHelper = `// longArrEq is arrEq for Long[]: element-wise compare by (low, high) word pair
+// (Long objects are identities, so !== would never match a default literal).
+function longArrEq(a: readonly Long[], b: readonly Long[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i]!.low !== b[i]!.low || a[i]!.high !== b[i]!.high) return false;
   return true;
 }`

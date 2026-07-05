@@ -156,7 +156,7 @@ func loadConfigSchema() (map[string]any, error) {
 // KnownTargets lists the target keys the config schema accepts, for CLI help
 // and validation of --lang.
 func KnownTargets() []string {
-	ts := []string{"c", "cpp-embedded", "cpp", "rust", "go", "python", "java", "csharp", "typescript"}
+	ts := []string{"c", "cpp", "rust", "go", "python", "java", "csharp", "typescript"}
 	sort.Strings(ts)
 	return ts
 }

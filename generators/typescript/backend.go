@@ -1,6 +1,9 @@
 // Package typescript is the TypeScript throughput backend (PLAN §6.4): it emits
 // one class per object with marshal(OStream) and a visitor-based decode against
-// corelib-ts (@sofa-buffers/corelib). 64-bit fields use bigint.
+// corelib-ts (@sofa-buffers/corelib). 64-bit fields use bigint by default; the
+// `int64` config key (bigint | long | number) can back 64-bit arrays with
+// corelib Long[] and map 64-bit scalars to number for a bigint-free hot path
+// (all modes are wire-identical).
 package typescript
 
 import (
@@ -23,7 +26,7 @@ const corelibPkg = "@sofa-buffers/corelib"
 // Generate emits a single message.ts module; project mode adds a harness +
 // package.json + tsconfig.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
+	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), i64rep: cfgInt64Mode(cfg)}
 	files := []generator.File{{Path: "message.ts", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -34,7 +37,8 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 type gen struct {
 	schema  *ir.Schema
 	banner  string
-	license string // SPDX id, "" to omit the header line
+	license string    // SPDX id, "" to omit the header line
+	i64rep  int64Mode // 64-bit representation (config key `int64`)
 }
 
 type tsfile struct{ b strings.Builder }
@@ -52,10 +56,19 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if g.license != "" {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
-	f.line("import { OStream, Cursor } from %q;", corelibPkg)
+	use := g.scanHelpers(s)
+	if use.long {
+		f.line("import { OStream, Cursor, Long } from %q;", corelibPkg)
+	} else {
+		f.line("import { OStream, Cursor } from %q;", corelibPkg)
+	}
 	f.blank()
-	if g.usesArrEq(s) {
+	if use.arrEq {
 		f.line("%s", arrEqHelper)
+		f.blank()
+	}
+	if use.longArrEq {
+		f.line("%s", longArrEqHelper)
 		f.blank()
 	}
 
@@ -102,6 +115,10 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 	f.emitDoc("", summary)
 	f.line("export class %s {", name)
 	for _, fld := range fields {
+		if g.longBacked(fld) {
+			g.emitLongAccessor(f, fld)
+			continue
+		}
 		f.emitDoc("  ", fieldDoc(fld))
 		f.line("  %s: %s = %s;", fld.Name, g.tsType(fld), g.tsDefault(fld))
 	}
@@ -124,8 +141,42 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 	f.blank()
 }
 
+// emitLongAccessor declares a Long-backed 64-bit array: a private Long[]
+// backing field the hot paths read/write directly, plus a get/set accessor
+// pair keeping the public surface ergonomic — assignment accepts Long | bigint
+// | number elements and converts ONCE, off the per-encode path. In-place
+// mutation (msg.x.push(v)) operates on the Long[] itself, so v must be a Long.
+func (g *gen) emitLongAccessor(f *tsfile, fld *ir.Field) {
+	t := g.tsType(fld)
+	f.line("  private _%s: %s = %s;", fld.Name, t, g.tsDefault(fld))
+	f.emitDoc("  ", fieldDoc(fld))
+	f.line("  get %s(): %s { return this._%s; }", fld.Name, t, fld.Name)
+	f.line("  set %s(vals: %s) { this._%s = %s; }", fld.Name, g.longSetterParam(fld), fld.Name, g.longConvert("vals", fld.Elem, fld.ElemItems, 0))
+}
+
+// longSetterParam is the accessor setter's parameter type: element positions
+// accept Long | bigint | number at every nesting depth.
+func (g *gen) longSetterParam(fld *ir.Field) string {
+	t := "readonly (Long | bigint | number)[]"
+	for e, it := fld.Elem, fld.ElemItems; e == ir.KindArray; e, it = it.Elem, it.ElemItems {
+		t = "readonly (" + t + ")[]"
+	}
+	return t
+}
+
+// longConvert builds the setter's one-time conversion of the accepted mixed
+// input to the canonical Long[] backing value, mapping Long.fromValue at the
+// element depth (nested arrays map per row).
+func (g *gen) longConvert(val string, elem ir.Kind, items *ir.ArrayElem, depth int) string {
+	if elem == ir.KindArray {
+		v := fmt.Sprintf("_v%d", depth)
+		return fmt.Sprintf("%s.map((%s) => %s)", val, v, g.longConvert(v, items.Elem, items.ElemItems, depth+1))
+	}
+	return val + ".map(Long.fromValue)"
+}
+
 func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
-	acc := "this." + fld.Name
+	acc := g.storage("this", fld)
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -178,7 +229,13 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 	// array is a wrapper sequence and is always framed (never whole-omitted).
 	if nativeArrayElem(fld.Elem) {
 		if def, ok := g.nativeArrayDefault(fld); ok {
-			f.line("    if (!arrEq(%s, %s)) {", acc, def)
+			// Long elements are object identities: compare with the (low, high)
+			// word-pair helper instead of arrEq's element !==.
+			eq := "arrEq"
+			if g.longBacked(fld) {
+				eq = "longArrEq"
+			}
+			f.line("    if (!%s(%s, %s)) {", eq, acc, def)
 		} else {
 			f.line("    if (%s.length !== 0) {", acc)
 		}
@@ -198,10 +255,22 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 	ev := fmt.Sprintf("_e%d", depth)
 	iv := fmt.Sprintf("_i%d", depth)
 	switch elem {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
+	case ir.KindU8, ir.KindU16, ir.KindU32:
 		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+	case ir.KindU64:
+		if g.longArrays() {
+			f.line("%sos.writeUnsignedArrayLong(%s, %s);", ind, idExpr, val)
+		} else {
+			f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
+		}
+	case ir.KindI8, ir.KindI16, ir.KindI32:
 		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
+	case ir.KindI64:
+		if g.longArrays() {
+			f.line("%sos.writeSignedArrayLong(%s, %s);", ind, idExpr, val)
+		} else {
+			f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
+		}
 	case ir.KindEnum:
 		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
 	case ir.KindBool:
