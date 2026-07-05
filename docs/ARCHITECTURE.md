@@ -709,9 +709,10 @@ few cross-language inconsistencies to reconcile for *true* JSON interop (blob is
 `number[]` in C/Python/C++/Rust/C#/Java but base64 in Go; `u64` is a JSON number
 everywhere except a string in TS); schema defaults are applied per-backend except
 Rust (derive `Default` = zeros). These do not affect the **binary** wire interop
-(which is vector-verified). Further known drift: the config schema defines a
-`cpp-embedded` target with no registered backend, and `NamedType.DefaultID` is
-declared but never populated (§6).
+(which is vector-verified). Further known drift: `NamedType.DefaultID` is
+declared but never populated (§6). (The planning-era `cpp-embedded` target was
+removed from the config schema — embedded C++ shipped as the `cpp` target's
+`corelib: c-cpp` profile instead.)
 
 ---
 

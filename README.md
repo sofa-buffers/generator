@@ -93,7 +93,7 @@ language interoperates with code generated for any other for free.
 The CLI is deliberately tiny — everything configurable lives in a config file:
 
 ```sh
-sofabgen --config <file> --lang <c|cpp-embedded|cpp|rust|go|python|java|csharp|ts> \
+sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript> \
         [--in <dir>] [--out <dir>]
 ```
 

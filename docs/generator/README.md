@@ -28,6 +28,3 @@ repeated here. A per-target value overrides the `generic` value for that target.
 > validates several per-target keys the generator does not act on yet. Each doc
 > lists its target's reserved keys under "Reserved options" — they pass
 > validation but currently have no effect.
->
-> The schema also defines a `cpp-embedded` target that has no backend yet; it is
-> not documented here.
