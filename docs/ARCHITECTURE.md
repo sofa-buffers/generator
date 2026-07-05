@@ -572,7 +572,7 @@ only needs to mirror their *names* and gate on the schema's used features:
 | **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. |
 | **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; `Decode` via zero-copy `sofab.AcceptBytes`; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
 | **Python** | `corelib-py` | pull-parser | dataclasses + `_marshal`/`_unmarshal`. |
-| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint`; alloc-free `writeString`. |
+| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); Gson harness. |
 

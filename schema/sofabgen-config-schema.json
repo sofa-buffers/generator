@@ -717,6 +717,16 @@
             "number"
           ]
         },
+        "int64": {
+          "type": "string",
+          "enum": [
+            "bigint",
+            "long",
+            "number"
+          ],
+          "default": "bigint",
+          "description": "64-bit field representation. bigint (default): bigint scalars and bigint[] arrays. long: u64[]/i64[] backed by corelib Long[] behind a get/set accessor pair (bigint-free encode/decode hot path; assignment accepts Long | bigint | number); scalars stay bigint. number: additionally maps u64/i64 scalars to number - the caller guarantees scalar values fit the +/-2^53 safe-integer range. All modes are wire-identical."
+        },
         "emit_dts": {
           "type": "boolean"
         },
