@@ -16,13 +16,13 @@ repeated here. A per-target value overrides the `generic` value for that target.
 | Target | Doc | Honored language-specific options |
 |--------|-----|-----------------------------------|
 | `c` | [c.md](c.md) | `symbol_prefix` |
-| `cpp` | [cpp.md](cpp.md) | `corelib`, `namespace` |
-| `rust` | [rust.md](rust.md) | `corelib` |
+| `cpp` | [cpp.md](cpp.md) | `corelib`, `namespace`, `allow_dynamic` |
+| `rust` | [rust.md](rust.md) | `corelib`, `no_std`, `allow_dynamic` |
 | `go` | [go.md](go.md) | `package`, `module_path`, `go_version` |
 | `python` | [python.md](python.md) | — |
 | `java` | [java.md](java.md) | `package` |
 | `csharp` | [csharp.md](csharp.md) | `namespace` |
-| `typescript` | [typescript.md](typescript.md) | — |
+| `typescript` | [typescript.md](typescript.md) | `int64` |
 
 > **Reserved options.** The config schema is the full *intended* surface, so it
 > validates several per-target keys the generator does not act on yet. Each doc

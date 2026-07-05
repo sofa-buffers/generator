@@ -709,14 +709,6 @@
         "node_min": {
           "type": "string"
         },
-        "bigint_policy": {
-          "type": "string",
-          "enum": [
-            "when_needed",
-            "always",
-            "number"
-          ]
-        },
         "int64": {
           "type": "string",
           "enum": [

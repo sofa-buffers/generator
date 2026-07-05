@@ -47,4 +47,4 @@ targets:
   typescript:
     module: dual
     package_name: "@myproj/messages"
-    bigint_policy: when_needed
+    int64: bigint

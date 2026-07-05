@@ -59,5 +59,8 @@ Measured on the full-scale arena message (best-of-3, corelib-ts #19/#20):
 
 Accepted by the schema validator but not yet honored by the generator:
 
-`module` · `package_name` · `ts_target` · `node_min` · `bigint_policy`
-(subsumed by `int64` for 64-bit representation) · `emit_dts` · `decode_style`
+`module` · `package_name` · `ts_target` · `node_min` · `emit_dts` ·
+`decode_style`
+
+(The formerly reserved `bigint_policy` key was removed from the schema —
+64-bit representation is the honored `int64` option above.)

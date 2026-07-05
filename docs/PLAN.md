@@ -581,8 +581,7 @@ Each backend gets its own object under `targets:`; it inherits the generic block
 | `package_name` | string | — | e.g. `@scope/messages`; corelib is `@sofabuffers/corelib`. |
 | `ts_target` | string | `ES2020` | corelib `target: ES2020`. |
 | `node_min` | string | `18` | corelib `engines.node >=18`. |
-| `bigint_policy` | `when_needed` \| `always` \| `number` | `when_needed` | use `bigint` for 64-bit fields, `number` otherwise (corelib reads scalars as `bigint`). |
-| `int64` | `bigint` \| `long` \| `number` | `bigint` | 64-bit representation, wire-identical across modes: `long` backs u64/i64 **arrays** with corelib `Long[]` behind an accessor pair (bigint-free hot path); `number` additionally maps 64-bit **scalars** to `number` (values must fit ±2^53). |
+| `int64` | `bigint` \| `long` \| `number` | `bigint` | 64-bit representation, wire-identical across modes: `long` backs u64/i64 **arrays** with corelib `Long[]` behind an accessor pair (bigint-free hot path); `number` additionally maps 64-bit **scalars** to `number` (values must fit ±2^53). Replaced the earlier `bigint_policy` sketch. |
 | `emit_dts` | bool | `true` | emit `.d.ts` declarations. |
 | `decode_style` | `visitor` | `visitor` | corelib decode is visitor-based (`sequenceBegin` may return a child visitor). |
 
@@ -660,7 +659,7 @@ targets:
   typescript:
     module: dual
     package_name: "@myproj/messages"
-    bigint_policy: when_needed
+    int64: bigint
 ```
 
 The same document is accepted as JSON. A built-in `sofabgen config --print-defaults` (or similar) emits the fully-resolved effective config for a given target so users can see exactly what was applied.
