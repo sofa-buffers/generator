@@ -1,16 +1,16 @@
 # C++ target — `targets.cpp`
 
-Language-specific options for the C++ backend. For shared options (`emit`,
-`file_layout`, `buffer`, …) see the [`generic`](README.md)
-config.
+Options accepted under `targets.cpp`. For shared options (`emit`,
+`tool_banner`, `license`, …) see the [generic config](README.md).
 
-## Honored options
+## Options
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
+| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
 | `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets. This also picks the container representation: `cpp` = dynamic (`std::vector`/`std::string`), `c-cpp` = fixed-capacity/heap-free (see below). |
 | `allow_dynamic` | bool | `false` | `corelib: c-cpp` only. Keep a `std::vector`/`std::string` heap fallback for genuinely unbounded fields instead of failing generation. |
-| `namespace` | string | `messages` | C++ namespace wrapping the generated types. Also settable in `generic`. |
+| `namespace` | string | `message` | C++ namespace wrapping the generated types. Also settable in `generic`. |
 
 ### `corelib`
 
@@ -111,9 +111,3 @@ targets:
     corelib: c-cpp        # fixed-capacity, heap-free containers
     allow_dynamic: true   # optional: keep std::vector/std::string for unbounded fields
 ```
-
-## Reserved options
-
-Accepted by the schema validator but not yet honored by the generator:
-
-`cpp_standard` · `header_only` · `max_size_strategy` · `zero_copy_strings`

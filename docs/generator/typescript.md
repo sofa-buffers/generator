@@ -1,10 +1,14 @@
 # TypeScript target — `targets.typescript`
 
-Language-specific options for the TypeScript backend. For shared options
-(`emit`, `file_layout`, `buffer`, …) see the
-[`generic`](README.md) config.
+Options accepted under `targets.typescript`. For shared options (`emit`,
+`tool_banner`, `license`, …) see the [generic config](README.md).
 
-## Honored options
+## Options
+
+| Option | Type | Default | Effect |
+|--------|------|---------|--------|
+| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
+| `int64` | `bigint` \| `long` \| `number` | `bigint` | Representation of 64-bit integer fields in the generated TS API (see below). All modes are wire-identical. |
 
 ### `int64` — 64-bit field representation
 
@@ -54,13 +58,3 @@ Measured on the full-scale arena message (best-of-3, corelib-ts #19/#20):
 | `bigint` | 25.5 | 0.66 | 39.2 | 0.90 |
 | `long` | 38.0 | 0.95 | 47.3 | 1.17 |
 | `number` | 40.2 | 1.04 | 50.8 | 1.18 |
-
-## Reserved options
-
-Accepted by the schema validator but not yet honored by the generator:
-
-`module` · `package_name` · `ts_target` · `node_min` · `emit_dts` ·
-`decode_style`
-
-(The formerly reserved `bigint_policy` key was removed from the schema —
-64-bit representation is the honored `int64` option above.)

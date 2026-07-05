@@ -30,14 +30,13 @@ func Default() map[string]any {
 	return map[string]any{
 		// `namespace` is intentionally NOT defaulted here: it is a per-language
 		// concern, so each backend applies its own idiomatic default (C++
-		// `messages`, C# `Messages`). A generic default would shadow those. Set
+		// `message`, C# `Message`). A generic default would shadow those. Set
 		// `generic.namespace` (or the per-target one) to override.
-		"emit":             "sources",
-		"timestamp":        true,
-		"timestamp_format": "iso8601",
-		"emit_deprecated":  true,
-		"validation":       "debug",
-		"file_layout":      "file_per_message",
+		//
+		// Every other honored key (tool_banner, license, symbol_prefix, …) is
+		// defaulted where it is consumed, so this map stays minimal — a key
+		// belongs here only when several layers need to agree on its default.
+		"emit": "sources",
 	}
 }
 

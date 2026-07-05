@@ -1,18 +1,13 @@
 # Python target — `targets.python`
 
-Language-specific options for the Python backend. For shared options (`emit`,
-`file_layout`, `buffer`, …) see the [`generic`](README.md)
-config.
+Options accepted under `targets.python`. For shared options (`emit`,
+`tool_banner`, `license`, …) see the [generic config](README.md).
 
-## Honored options
+## Options
 
-The Python target currently has **no language-specific options** that change its
-output — it is driven entirely by the shared `generic` options. (`emit: project`
-scaffolds a buildable package)
+The Python target has **no language-specific options** — it is driven entirely
+by the shared generic options.
 
-## Reserved options
-
-Accepted by the schema validator but not yet honored by the generator:
-
-`package` · `python_min` · `class_style` · `frozen` · `type_hints` ·
-`decode_style`
+| Option | Type | Default | Effect |
+|--------|------|---------|--------|
+| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. `emit: project` scaffolds a buildable package. |
