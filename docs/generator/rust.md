@@ -82,5 +82,12 @@ targets:
     allow_dynamic: true      # optional: alloc fallback for unbounded fields
 ```
 
+## Struct field order
+
+Generated struct fields stay in **schema order** — unlike the C, C++ and Go
+targets, no widest-first reordering is applied, because the Rust compiler
+already reorders the fields of a default-`repr` struct itself to minimize
+padding.
+
 [`corelib-rs-no-std`]: https://github.com/sofa-buffers/corelib-rs-no-std
 [`corelib-rs`]: https://github.com/sofa-buffers/corelib-rs
