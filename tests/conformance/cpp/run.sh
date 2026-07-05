@@ -56,10 +56,10 @@ run_variant() {
         # profile; allow_dynamic keeps a std::vector/std::string fallback for the
         # intentionally-unbounded fields in example.yaml (somemap) and the
         # no_maxlen corpus def, so the rich corpus still exercises both paths.
-        printf 'generic: { emit: project, timestamp: false }\ntargets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: true } }\n' "$corelib" > "$WORK/cfg-$label.yaml"
+        printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: true } }\n' "$corelib" > "$WORK/cfg-$label.yaml"
         printf 'targets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: true } }\n' "$corelib" > "$WORK/cfg-corpus-$label.yaml"
     else
-        printf 'generic: { emit: project, timestamp: false }\ntargets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-$label.yaml"
+        printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-$label.yaml"
         printf 'targets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-corpus-$label.yaml"
     fi
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in examples/messages/example.yaml --out "$WORK/ex-$label" )

@@ -20,7 +20,7 @@ export SOFAB_CS_CORELIB="$CORELIB"
 echo "==> corelib-cs: $CORELIB"
 
 cat > "$WORK/cfg.yaml" <<'YAML'
-generic: { emit: project, timestamp: false }
+generic: { emit: project }
 targets: { csharp: { namespace: Sofabuffers } }
 YAML
 cat > "$WORK/conf.yaml" <<'YAML'

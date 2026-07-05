@@ -19,7 +19,7 @@ fi
 echo "==> corelib-go: $CORELIB"
 
 cat > "$WORK/cfg.yaml" <<YAML
-generic: { emit: project, timestamp: false }
+generic: { emit: project }
 targets: { go: { package: message, module_path: example.com/gen, go_version: "1.21" } }
 YAML
 

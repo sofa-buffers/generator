@@ -32,7 +32,7 @@ messages:
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
 YAML
 cat > "$WORK/cfg.yaml" <<'YAML'
-generic: { emit: project, timestamp: false }
+generic: { emit: project }
 targets: { typescript: {} }
 YAML
 
@@ -80,7 +80,7 @@ messages:
 YAML
 for mode in bigint long number; do
     cat > "$WORK/cfg_$mode.yaml" <<YAML
-generic: { emit: project, timestamp: false }
+generic: { emit: project }
 targets: { typescript: { int64: $mode } }
 YAML
     gen "$WORK/i64.yaml" "$WORK/i64-$mode"

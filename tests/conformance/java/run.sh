@@ -21,7 +21,7 @@ echo "==> installing corelib-java $VER to local repo"
 ( cd "$CORELIB" && mvn -q -DskipTests install )
 
 cat > "$WORK/cfg.yaml" <<'YAML'
-generic: { emit: project, timestamp: false }
+generic: { emit: project }
 targets: { java: { package: message } }
 YAML
 cat > "$WORK/conf.yaml" <<'YAML'

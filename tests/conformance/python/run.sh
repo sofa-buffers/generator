@@ -20,8 +20,8 @@ echo "==> corelib-py: $CORELIB"
 export PYTHONPATH="$CORELIB/src"
 
 cat > "$WORK/cfg.yaml" <<YAML
-generic: { emit: project, timestamp: false }
-targets: { python: { package: message } }
+generic: { emit: project }
+targets: { python: {} }
 YAML
 
 echo "==> generating Python project"
