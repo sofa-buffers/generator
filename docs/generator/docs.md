@@ -11,7 +11,11 @@ sofabgen --lang docs --in examples/messages/example.yaml --out out/docs
 The HTML output is a **single self-contained page** (`message.html`) — inline
 CSS, no external assets, light/dark via `prefers-color-scheme` — so it can be
 attached to CI artifacts, mailed around, or dropped on a static server as-is.
-It documents:
+A **fixed sidebar** on the left (static on narrow screens) lists every message
+and named type for one-click jumps; all tables share **one column grid**
+(`table-layout: fixed` + a common `colgroup`), so columns line up from table to
+table — the Unit column appears page-wide when any field carries a unit. The
+page documents:
 
 - every **message** with its summary and a field table (id, name, type,
   default, unit, description, deprecation),

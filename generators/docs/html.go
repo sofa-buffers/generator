@@ -28,11 +28,18 @@ type section struct {
 	Badge   string // "message" | "struct" | "union" | "enum" | "bitfield"
 	Summary string
 	Note    string // extra line under the summary (e.g. the union default option)
-	HasUnit bool   // any field carries a unit -> show the Unit column
+	// HasUnit is PAGE-wide (any field anywhere carries a unit), not per
+	// section, so every field table shares the same column grid — mixed
+	// layouts would make the reader's eye re-find the columns per table.
+	HasUnit bool
 
 	Fields []*fieldRow
 	Consts []*constRow
 	Flags  []*flagRow
+}
+
+func (p *page) sections() []*section {
+	return append(append([]*section{}, p.Messages...), p.Types...)
 }
 
 type fieldRow struct {
@@ -65,6 +72,14 @@ func (g *gen) htmlPage() ([]byte, error) {
 	}
 	for _, key := range g.schema.NamedOrder {
 		p.Types = append(p.Types, g.typeSection(g.schema.Named[key]))
+	}
+	// Promote HasUnit to a page-wide flag (see the section comment).
+	hasUnit := false
+	for _, s := range p.sections() {
+		hasUnit = hasUnit || s.HasUnit
+	}
+	for _, s := range p.sections() {
+		s.HasUnit = hasUnit
 	}
 	var buf bytes.Buffer
 	// html/template strips comments from template output, so the generated-by
@@ -293,14 +308,16 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   }
 }
 * { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
 body {
-  margin: 0 auto; padding: 2rem 1.5rem 4rem; max-width: 72rem;
+  margin: 0;
   background: var(--bg); color: var(--fg);
   font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 h1 { font-size: 1.7rem; margin: 0 0 .25rem; }
 h2 { font-size: 1.25rem; margin: 2.5rem 0 .5rem; padding-top: .5rem; border-top: 1px solid var(--line); }
 h3 { font-size: 1.05rem; margin: 1.8rem 0 .4rem; }
+h2, h3 { scroll-margin-top: 1rem; }
 p.meta { color: var(--muted); margin: 0 0 1.5rem; }
 p.summary { white-space: pre-line; margin: .3rem 0 .8rem; }
 p.note { color: var(--muted); font-style: italic; margin: .3rem 0 .8rem; }
@@ -308,12 +325,41 @@ code, .type { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
 code { background: var(--code-bg); padding: .1em .35em; border-radius: 4px; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-nav ul { margin: .2rem 0 .8rem; padding-left: 1.4rem; }
+nav.sidebar {
+  position: fixed; top: 0; left: 0; bottom: 0; width: 17rem;
+  overflow-y: auto; padding: 1.4rem 1.2rem 2rem;
+  border-right: 1px solid var(--line); background: var(--thead);
+}
+.sidebar .brand { font-weight: 700; font-size: 1.05rem; }
+.sidebar p.meta { font-size: .8rem; margin: .1rem 0 .8rem; }
+.sidebar strong {
+  display: block; margin: 1rem 0 .3rem;
+  font-size: .72rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--muted);
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; }
+.sidebar li { margin: .15rem 0; }
+.sidebar li code { background: none; padding: 0; }
+.sidebar .badge { margin-left: .35rem; font-size: .62rem; }
+main { margin-left: 17rem; padding: 2rem 2.5rem 4rem; max-width: 66rem; }
+@media (max-width: 64rem) {
+  nav.sidebar {
+    position: static; width: auto;
+    border-right: none; border-bottom: 1px solid var(--line);
+  }
+  main { margin-left: 0; padding: 1.5rem 1.25rem 3rem; max-width: none; }
+}
 .tablewrap { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; margin: .4rem 0 1rem; }
-th, td { text-align: left; vertical-align: top; padding: .45rem .7rem; border-bottom: 1px solid var(--line); }
-th { background: var(--thead); font-weight: 600; white-space: nowrap; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table {
+  border-collapse: collapse; table-layout: fixed;
+  width: 100%; min-width: 44rem; margin: .4rem 0 1rem;
+}
+th, td {
+  text-align: left; vertical-align: top; padding: .45rem .7rem;
+  border-bottom: 1px solid var(--line); overflow-wrap: break-word;
+}
+th { background: var(--thead); font-weight: 600; }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.desc { white-space: pre-line; }
 td .none { color: var(--muted); }
 .badge {
@@ -327,20 +373,23 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
 </style>
 </head>
 <body>
-<header>
-<h1>SofaBuffers Messages</h1>
-<p class="meta">schema v{{.Version}} &middot; {{len .Messages}} message(s) &middot; {{len .Types}} named type(s)</p>
-</header>
-<nav>
+<nav class="sidebar">
+<div class="brand">SofaBuffers</div>
+<p class="meta">schema v{{.Version}}</p>
 <strong>Messages</strong>
 <ul>
 {{range .Messages}}<li><a href="#{{.Anchor}}"><code>{{.Title}}</code></a></li>
 {{end}}</ul>
 {{if .Types}}<strong>Named types</strong>
 <ul>
-{{range .Types}}<li><a href="#{{.Anchor}}"><code>{{.Title}}</code></a> <span class="badge">{{.Badge}}</span></li>
+{{range .Types}}<li><a href="#{{.Anchor}}"><code>{{.Title}}</code></a><span class="badge">{{.Badge}}</span></li>
 {{end}}</ul>
 {{end}}</nav>
+<main>
+<header>
+<h1>SofaBuffers Messages</h1>
+<p class="meta">schema v{{.Version}} &middot; {{len .Messages}} message(s) &middot; {{len .Types}} named type(s)</p>
+</header>
 {{range .Messages}}
 <h2 id="{{.Anchor}}"><code>{{.Title}}</code><span class="badge">{{.Badge}}</span></h2>
 {{template "body" .}}
@@ -353,24 +402,29 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
 {{end}}
 {{end}}
 <footer>Generated by {{.Banner}}; do not edit.</footer>
+</main>
 </body>
 </html>
 {{define "body"}}{{if .Summary}}<p class="summary">{{.Summary}}</p>
 {{end}}{{if .Note}}<p class="note">{{.Note}}</p>
 {{end}}{{if .Consts}}<div class="tablewrap"><table>
-<thead><tr><th>Constant</th><th>Value</th><th>Description</th></tr></thead>
+<colgroup><col style="width:6%"><col style="width:17%"><col></colgroup>
+<thead><tr><th class="num">Value</th><th>Constant</th><th>Description</th></tr></thead>
 <tbody>
-{{range .Consts}}<tr><td><code>{{.Name}}</code></td><td class="num">{{.Value}}</td><td class="desc">{{if .Description}}{{.Description}}{{else}}<span class="none">&ndash;</span>{{end}}</td></tr>
+{{range .Consts}}<tr><td class="num">{{.Value}}</td><td><code>{{.Name}}</code></td><td class="desc">{{if .Description}}{{.Description}}{{else}}<span class="none">&ndash;</span>{{end}}</td></tr>
 {{end}}</tbody>
 </table></div>
 {{else if .Flags}}<div class="tablewrap"><table>
-<thead><tr><th>Flag</th><th>Bit</th><th>Default</th><th>Description</th></tr></thead>
+<colgroup><col style="width:6%"><col style="width:17%"><col style="width:14%"><col></colgroup>
+<thead><tr><th class="num">Bit</th><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
 <tbody>
-{{range .Flags}}<tr><td><code>{{.Name}}</code></td><td class="num">{{.Pos}}</td><td>{{if .Default}}<code>{{.Default}}</code>{{else}}<span class="none">&ndash;</span>{{end}}</td><td class="desc">{{if .Description}}{{.Description}}{{else}}<span class="none">&ndash;</span>{{end}}</td></tr>
+{{range .Flags}}<tr><td class="num">{{.Pos}}</td><td><code>{{.Name}}</code></td><td>{{if .Default}}<code>{{.Default}}</code>{{else}}<span class="none">&ndash;</span>{{end}}</td><td class="desc">{{if .Description}}{{.Description}}{{else}}<span class="none">&ndash;</span>{{end}}</td></tr>
 {{end}}</tbody>
 </table></div>
 {{else if .Fields}}<div class="tablewrap"><table>
-<thead><tr><th>ID</th><th>Field</th><th>Type</th><th>Default</th>{{if .HasUnit}}<th>Unit</th>{{end}}<th>Description</th></tr></thead>
+{{if .HasUnit}}<colgroup><col style="width:6%"><col style="width:17%"><col style="width:20%"><col style="width:14%"><col style="width:8%"><col></colgroup>
+{{else}}<colgroup><col style="width:6%"><col style="width:17%"><col style="width:20%"><col style="width:14%"><col></colgroup>
+{{end}}<thead><tr><th class="num">ID</th><th>Field</th><th>Type</th><th>Default</th>{{if .HasUnit}}<th>Unit</th>{{end}}<th>Description</th></tr></thead>
 <tbody>
 {{$hasUnit := .HasUnit}}{{range .Fields}}<tr><td class="num">{{.ID}}</td><td><code>{{.Name}}</code>{{if .Deprecated}}<span class="badge dep">deprecated</span>{{end}}</td><td class="type">{{.Type}}</td><td>{{if .Default}}<code>{{.Default}}</code>{{else}}<span class="none">&ndash;</span>{{end}}</td>{{if $hasUnit}}<td>{{if .Unit}}{{.Unit}}{{else}}<span class="none">&ndash;</span>{{end}}</td>{{end}}<td class="desc">{{if .Description}}{{.Description}}{{else}}<span class="none">&ndash;</span>{{end}}</td></tr>
 {{end}}</tbody>
