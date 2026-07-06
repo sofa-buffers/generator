@@ -55,6 +55,19 @@ func TestDescriptionsBecomeDocComments(t *testing.T) {
 			}
 			out := all.String()
 
+			if lang == "docs" {
+				// The docs backend renders descriptions as page CONTENT, not code
+				// comments: no comment-line requirement, and units get their own
+				// table column instead of an "(unit: …)" suffix. Only UTF-8
+				// fidelity is checked here.
+				for _, frag := range append([]string{"Enthält 温度", "🚗", "(naïve, café, façade)", "°C", "km/h"}, commentAnchors...) {
+					if !strings.Contains(out, frag) {
+						t.Errorf("missing %q in generated docs (UTF-8 not preserved?)", frag)
+					}
+				}
+				return
+			}
+
 			for _, frag := range presenceOnly {
 				if !strings.Contains(out, frag) {
 					t.Errorf("missing %q in generated output (UTF-8 not preserved?)", frag)

@@ -64,8 +64,9 @@ func TestAllBackendsSparse(t *testing.T) {
 			}
 		}
 		// C is sparse via the object.h descriptor (no generated conditional);
-		// every other backend must emit a per-field sparse guard.
-		if lang != "c" && !sawConditional {
+		// docs emits documentation, not marshal code; every other backend must
+		// emit a per-field sparse guard.
+		if lang != "c" && lang != "docs" && !sawConditional {
 			t.Errorf("[%s] sparse-canonical marshal produced no conditional write", lang)
 		}
 	}

@@ -36,6 +36,9 @@
         },
         "typescript": {
           "$ref": "#/$defs/target_typescript"
+        },
+        "docs": {
+          "$ref": "#/$defs/target_docs"
         }
       }
     }
@@ -217,6 +220,20 @@
           ],
           "default": "bigint",
           "description": "64-bit field representation. bigint (default): bigint scalars and bigint[] arrays. long: u64[]/i64[] backed by corelib Long[] behind a get/set accessor pair (bigint-free encode/decode hot path; assignment accepts Long | bigint | number); scalars stay bigint. number: additionally maps u64/i64 scalars to number - the caller guarantees scalar values fit the +/-2^53 safe-integer range. All modes are wire-identical."
+        }
+      }
+    },
+    "target_docs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "html"
+          ],
+          "default": "html",
+          "description": "Documentation output format. html (default, and currently the only format): a single self-contained page (inline CSS, no external assets) documenting every message and named type."
         }
       }
     }

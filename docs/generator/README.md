@@ -33,6 +33,7 @@ target; a per-target value overrides the `generic` value for that target
 | `java` | [java.md](java.md) | `package` |
 | `csharp` | [csharp.md](csharp.md) | `namespace` |
 | `typescript` | [typescript.md](typescript.md) | `int64` |
+| `docs` | [docs.md](docs.md) | `format` |
 
 > **History.** The schema used to validate a set of *reserved* planning-era
 > keys (`buffer`, `validation`, `naming`, `file_layout`, `timestamp`, …) that

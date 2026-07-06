@@ -39,6 +39,9 @@ for lang in c cpp go python typescript rust csharp java; do
   ./sofabgen --lang "$lang" --in examples/messages/example.yaml --out "out/$lang"
 done
 
+# Render the definitions as a self-contained HTML reference page instead:
+./sofabgen --lang docs --in examples/messages/example.yaml --out out/docs
+
 # Scaffold a full buildable project + encode/decode harness:
 #   sofabgen --config myconfig.yaml --lang rust --in examples --out out
 ```
@@ -88,12 +91,17 @@ The generator emits code against one corelib per language:
 Because every corelib speaks the **same wire format**, code generated for one
 language interoperates with code generated for any other for free.
 
+Beyond the language backends there is one non-code target: `docs` renders the
+definitions as a **self-contained HTML reference page** (messages, field
+tables, cross-linked named types — see
+[docs/generator/docs.md](docs/generator/docs.md)).
+
 ### CLI
 
 The CLI is deliberately tiny — everything configurable lives in a config file:
 
 ```sh
-sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript> \
+sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|docs> \
         [--in <dir>] [--out <dir>]
 ```
 
@@ -109,7 +117,7 @@ sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript> \
 ```
 .
 ├── cmd/sofabgen/        # the `sofabgen` CLI entry point
-├── generators/        # one backend per language (c, cpp, rust, golang, python, java, csharp, typescript)
+├── generators/        # one backend per target (c, cpp, rust, golang, python, java, csharp, typescript, docs)
 ├── internal/          # parser, validator, IR, analysis, generation pipeline
 ├── schema/            # the message-definition JSON Schema (draft-07)
 ├── examples/          # example definitions (config/ + messages/)
