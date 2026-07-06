@@ -111,3 +111,13 @@ targets:
     corelib: c-cpp        # fixed-capacity, heap-free containers
     allow_dynamic: true   # optional: keep std::vector/std::string for unbounded fields
 ```
+
+## Struct member order (widest-first)
+
+The members of a generated message struct are declared **widest-first**
+(8→4→2→1-byte alignment; strings, blobs, containers and nested types rank
+as 8), not in schema order, so the compiler inserts less padding between them.
+Members of equal alignment keep their schema order. This affects **declaration
+order only** — encode iterates the schema/field-id order, so the wire bytes are
+byte-identical to every other target. Initialize members by name (designated
+initializers or assignment), not with positional aggregate initialization.
