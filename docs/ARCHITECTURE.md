@@ -661,11 +661,13 @@ A reimplementation is **conformant** when it reproduces these gates:
 5. **Golden reproducibility** — regenerate a fixed def for every backend and
    byte-diff against committed goldens (`tests/matrix/testdata/golden/`); plus a
    frozen IR golden.
-6. **CI** — a hermetic core job + one `lang-<x>` job per language, on every
+6. **CI** — a hermetic core job + one `lang-<x>` job per target, on every
    push to `main`, every pull request, and manual dispatch. Each `lang-<x>` job
    additionally uploads the generated sources (example + realworld + corpus,
    built by `tests/gen-artifacts.sh`, including the non-default corelib
-   variants for C++/Rust) as a downloadable artifact.
+   variants for C++/Rust) as a downloadable artifact. `lang-docs` is
+   artifact-only (the rendered HTML reference pages) — nothing executes, so it
+   has no conformance step.
 7. **Hermetic unit layer** — Go unit tests beside the code:
    `internal/{parser,analysis,config,pipeline,ir}` and per-backend
    `generators/*/backend_test.go` (plus gated corelib round-trip tests), and
