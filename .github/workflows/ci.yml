@@ -221,3 +221,20 @@ jobs:
         with:
           name: generated-java
           path: generated
+
+  # Docs target: non-code, so no toolchain, no conformance harness — nothing
+  # executes. Renders the example + realworld + corpus definitions to the
+  # self-contained HTML reference pages and attaches them as an artifact.
+  lang-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Generate docs (artifact)
+        run: ./tests/gen-artifacts.sh docs generated
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generated-docs
+          path: generated

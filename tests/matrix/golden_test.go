@@ -13,7 +13,7 @@ import (
 // every backend must be byte-identical to the committed golden snapshots under
 // tests/matrix/golden/. A diff here means output drifted — regenerate with:
 //
-//	for l in c cpp go python typescript rust csharp java; do \
+//	for l in c cpp go python typescript rust csharp java docs; do \
 //	  go run ./cmd/sofabgen --lang $l --in tests/matrix/corpus/defs/scalars.yaml \
 //	    --out tests/matrix/golden/$l; done
 func TestGoldenOutput(t *testing.T) {

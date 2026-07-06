@@ -15,7 +15,8 @@
 > - **Config format** — `schema/sofabgen-config-schema.json` and `docs/generator/`.
 >
 > Status: all 8 language backends (C, C++, Rust, Go, Python, TypeScript, C#, Java)
-> are implemented and CI-green. Keep this file current — it is updated before
+> plus the non-code `docs` target (self-contained HTML reference page) are
+> implemented and CI-green. Keep this file current — it is updated before
 > every push to `main`.
 
 ---
@@ -98,7 +99,7 @@ never code-generated. All problems are reported at once.
 | Flag | Meaning |
 |---|---|
 | `--config <file>` | Config file (carries all options; §7). |
-| `--lang <target>` | Target backend (`c`, `cpp`, `rust`, `go`, `python`, `java`, `csharp`, `typescript`). |
+| `--lang <target>` | Target backend (`c`, `cpp`, `rust`, `go`, `python`, `java`, `csharp`, `typescript`, `docs`). |
 | `--in <file\|dir>` | Definition input (overrides `generic.input_dir`). |
 | `--out <dir>` | Output folder (overrides `generic.output_dir`). |
 | `--print-defaults` | Print the effective resolved config for `--lang` and exit. |
@@ -318,6 +319,7 @@ override.
 | `module_path`, `go_version` | go | `go.mod` fields. |
 | `symbol_prefix` | c | Prefix on generated C symbols. |
 | `allow_dynamic` | cpp (`c-cpp`), rust (`rs-no-std`) | Lets unbounded string/blob/array fields fall back to heap containers instead of failing generation (§9.3). |
+| `format` | docs (`html`) | Documentation output format of the non-code `docs` target; `html` is currently the only one. |
 | `no_std` | rust | With `corelib: rs-no-std`, emit the `#![no_std]` crate profile (default `true`). |
 | `emit` | all | `sources` vs `project`. |
 | `license` (generic) | all | SPDX header id; default **none** (§11). |
@@ -407,7 +409,8 @@ a reimplementation should emit code that honors all of them:
   backends only neutralise comment-terminators (`*/` → `* /`) and XML-escape
   `&<>` (C#). `TestDescriptionsBecomeDocComments` (driven by the UTF-8
   `testdata/descriptions.yaml`) verifies every backend emits the text on a comment
-  line with the UTF-8 preserved.
+  line with the UTF-8 preserved (the `docs` target renders the text as
+  HTML-escaped page *content* instead; there only UTF-8 fidelity is checked).
 
 **Adding a language is purely additive** — a new `generators/<lang>/` package + a
 blank import + per-target schema keys + a `tests/conformance/<lang>/run.sh` + a CI job. No
@@ -574,6 +577,7 @@ only needs to mirror their *names* and gate on the schema's used features:
 | **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); Gson harness. |
+| **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 
 **Common type mapping:** enum → smallest *signed* backing; bitfield → smallest
 *unsigned* backing; fixed numeric array → native fixed array/slice; string/blob
@@ -657,11 +661,13 @@ A reimplementation is **conformant** when it reproduces these gates:
 5. **Golden reproducibility** — regenerate a fixed def for every backend and
    byte-diff against committed goldens (`tests/matrix/testdata/golden/`); plus a
    frozen IR golden.
-6. **CI** — a hermetic core job + one `lang-<x>` job per language, on every
+6. **CI** — a hermetic core job + one `lang-<x>` job per target, on every
    push to `main`, every pull request, and manual dispatch. Each `lang-<x>` job
    additionally uploads the generated sources (example + realworld + corpus,
    built by `tests/gen-artifacts.sh`, including the non-default corelib
-   variants for C++/Rust) as a downloadable artifact.
+   variants for C++/Rust) as a downloadable artifact. `lang-docs` is
+   artifact-only (the rendered HTML reference pages) — nothing executes, so it
+   has no conformance step.
 7. **Hermetic unit layer** — Go unit tests beside the code:
    `internal/{parser,analysis,config,pipeline,ir}` and per-backend
    `generators/*/backend_test.go` (plus gated corelib round-trip tests), and

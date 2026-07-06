@@ -25,3 +25,5 @@ targets:
     namespace: MyProj.Messages
   typescript:
     int64: bigint               # or long / number for a bigint-free hot path
+  docs:
+    format: html                # reference documentation instead of code

@@ -31,6 +31,7 @@ import (
 	_ "github.com/sofa-buffers/generator/generators/c"
 	_ "github.com/sofa-buffers/generator/generators/cpp"
 	_ "github.com/sofa-buffers/generator/generators/csharp"
+	_ "github.com/sofa-buffers/generator/generators/docs"
 	_ "github.com/sofa-buffers/generator/generators/golang"
 	_ "github.com/sofa-buffers/generator/generators/java"
 	_ "github.com/sofa-buffers/generator/generators/python"

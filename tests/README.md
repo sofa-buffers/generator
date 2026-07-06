@@ -38,7 +38,8 @@ tests/
 
 Pure Go tests, no language toolchain or corelib required, so they run in the
 hermetic CI core job on every push. They exercise the generator itself: every
-corpus definition generates across all 8 backends, every invalid definition is
+corpus definition generates across all registered backends (8 languages plus
+the `docs` target), every invalid definition is
 rejected, the IR/`$ref` graph resolves, and regenerated output is byte-identical
 to the committed goldens (the reproducibility gate). The corpus is documented in
 [`matrix/corpus/README.md`](matrix/corpus/README.md).
