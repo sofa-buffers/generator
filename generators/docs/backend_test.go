@@ -73,10 +73,38 @@ func TestDocsStructural(t *testing.T) {
 		"deprecated",
 		// union field default (default_id) resolved to its option name
 		"option1 (id 0)",
+		// fixed sidebar navigation
+		`<nav class="sidebar">`,
+		"position: fixed",
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("message.html missing %q", want)
 		}
+	}
+}
+
+// TestDocsUniformColumns: every field table on a page shares ONE column grid.
+// example.yaml carries units, so all its field tables must use the wider
+// unit-bearing colgroup; a unit-free schema must use the no-unit colgroup.
+func TestDocsUniformColumns(t *testing.T) {
+	unitCols := `<colgroup><col style="width:6%"><col style="width:17%"><col style="width:20%"><col style="width:14%"><col style="width:8%"><col></colgroup>`
+	noUnitCols := `<colgroup><col style="width:6%"><col style="width:17%"><col style="width:20%"><col style="width:14%"><col></colgroup>`
+
+	withUnits := genDocs(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})
+	if strings.Contains(withUnits, noUnitCols) {
+		t.Error("schema with units: found a field table without the Unit column (mixed grids)")
+	}
+	if !strings.Contains(withUnits, unitCols) {
+		t.Error("schema with units: unit-bearing colgroup missing")
+	}
+
+	src := "version: 1\nmessages:\n  m:\n    payload:\n      a: {id: 0, type: u8}\n      s: {id: 1, type: struct, fields: {x: {id: 0, type: u8}}}\n"
+	noUnits := genDocs(t, schema(t, src), map[string]any{})
+	if strings.Contains(noUnits, unitCols) {
+		t.Error("unit-free schema: found a field table with a Unit column")
+	}
+	if !strings.Contains(noUnits, noUnitCols) {
+		t.Error("unit-free schema: no-unit colgroup missing")
 	}
 }
 
