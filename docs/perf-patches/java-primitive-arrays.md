@@ -39,22 +39,36 @@ class ExampleArrays {
 }
 ```
 
-Decode allocates each array to its `arrayBegin` `count` and fills by index (no box):
+Decode reserves a small backing array and grows it by index as elements arrive
+(no box). The `arrayBegin` `count` is **untrusted wire input**, so it is *not* used
+for the up-front `new T[count]` allocation — that is an OOM DoS (see #96); it only
+caps growth so a valid array still ends exactly right-sized:
 
 ```java
 private int ai = 0;                          // add to the visitor
+private static final int ARRAY_INIT_CAP = 16;
+private int acap = 0;                        // declared count = growth ceiling
 public void arrayBegin(int id, ArrayKind kind, int count) {
     ai = 0;
+    acap = count;
     switch (cur) {
-    case 2: switch (id) { case 0: m.arrays.u8 = new long[count]; break; /* … */ } break;
-    case 3: switch (id) { case 0: m.arrays.nested.fp32 = new float[count]; break; /* … */ } break;
+    case 2: switch (id) { case 0: m.arrays.u8 = new long[Math.min(count, ARRAY_INIT_CAP)]; break; /* … */ } break;
+    case 3: switch (id) { case 0: m.arrays.nested.fp32 = new float[Math.min(count, ARRAY_INIT_CAP)]; break; /* … */ } break;
     }
 }
 public void unsigned(int id, long value) {
     switch (cur) {
     case 0: /* scalar direct-assign, unchanged */ break;
-    case 2: switch (id) { case 0: m.arrays.u8[ai++] = value; break; /* … */ } break;
+    case 2: switch (id) { case 0: m.arrays.u8 = ensureCap(m.arrays.u8, ai, acap); m.arrays.u8[ai++] = value; break; /* … */ } break;
     }
+}
+// one overload per element base (long/float/double); doubles but never exceeds `cap`:
+private static long[] ensureCap(long[] a, int i, int cap) {
+    if (i < a.length) return a;
+    long n = (long) a.length * 2;
+    if (n < i + 1) n = i + 1;
+    if (n > cap) n = cap;
+    return java.util.Arrays.copyOf(a, (int) n);
 }
 ```
 
@@ -69,10 +83,13 @@ family becomes unused (leave it or stop emitting it).
   `List<…>` + `new ArrayList<>()`, and drop the `Sbuf.to*Array(...)` wrapper in
   `marshal` — pass the field directly. Change the empty-guard from `!x.isEmpty()` to
   `x != null && x.length != 0`.
-- **Decode — `generators/java/visitor.go`.** Add an `int ai` field to the emitted
-  visitor. Change the array-element case from `m.arrays.u8.add(value)` to
-  `m.arrays.u8[ai++] = value` (and the fp handlers likewise), and change the emitted
-  `arrayBegin` from `.clear()` to `<field> = new <prim>[count]; ai = 0`.
+- **Decode — `generators/java/visitor.go`.** Add `int ai` / `int acap` fields and a
+  static `ensureCap` overload per element base to the emitted visitor. Change the
+  array-element case from `m.arrays.u8.add(value)` to
+  `m.arrays.u8 = ensureCap(m.arrays.u8, ai, acap); m.arrays.u8[ai++] = value` (and the
+  fp handlers likewise), and change the emitted `arrayBegin` from `.clear()` to
+  `<field> = new <prim>[Math.min(count, ARRAY_INIT_CAP)]; ai = 0; acap = count`
+  (bounded reservation, not `new <prim>[count]` — the wire count is untrusted, #96).
   (Optional, in the same file: swap the `ArrayDeque<Integer> stack` for an unboxed
   `int[]` + index — the reference diff does this; it removes the per-`sequenceBegin`
   `Integer` boxing.)
@@ -93,8 +110,12 @@ family becomes unused (leave it or stop emitting it).
 - **Only for fixed/native arrays.** Keep `List<…>` for `string_array`, struct/union
   arrays, and any non-fixed array — those don't have `OStream` primitive overloads
   and aren't the hot allocator.
-- **`arrayBegin` count is authoritative** — the corelib passes the exact element
-  count, so `new long[count]` is right-sized and filled fully; no growth.
+- **`arrayBegin` count is untrusted, not authoritative** — for a *valid* message the
+  corelib delivers exactly `count` elements, but the count is attacker-controlled wire
+  input (up to `ARRAY_MAX ≈ 2^31`). Allocating `new long[count]` up front is an
+  `OutOfMemoryError` DoS on malformed input (#96). Reserve `min(count, ARRAY_INIT_CAP)`
+  and grow on demand, capped at `count`: allocation then tracks elements actually
+  delivered (bounded by input size), yet a valid array still ends exactly right-sized.
 
 ## Also folded in: string/blob single-shot
 

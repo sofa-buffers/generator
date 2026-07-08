@@ -91,7 +91,10 @@ alter a single emitted byte. Steps to validate:
   path as a fallback for genuinely split payloads.
 - **Prefer fixed/primitive over heap/boxed.** Fixed-size schema arrays map to stack
   arrays; never box a scalar to fill a collection.
-- **Pre-size, don't grow.** When the element count is known (`arrayBegin` gives it,
-  or the schema fixes it), allocate once at the right size and fill by index.
+- **Pre-size, don't grow — but only from a *trusted* count.** When the count is
+  fixed by the schema, allocate once at the right size and fill by index. A decode-time
+  `arrayBegin` count is untrusted wire input: pre-sizing to it is an OOM DoS (see #96 /
+  `java-primitive-arrays.md`) — reserve a small cap and grow bounded by elements
+  actually delivered instead.
 - **Keep the streaming/skip API.** These changes optimize the common in-memory
   decode; do not remove the visitor/streaming path that large or chunked inputs need.
