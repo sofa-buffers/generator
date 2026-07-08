@@ -121,6 +121,41 @@ func TestGoStructuralInvariants(t *testing.T) {
 	}
 }
 
+// A blob field inside a nested struct/union lands in types.go (not the message
+// file), and its marshal uses bytes.Equal. Regression for #84: types.go must
+// import "bytes" itself rather than relying on the message file's own import.
+// go/parser only parses, so it never caught this — the failure is an undefined
+// identifier at compile time. Here we assert every generated file that
+// references bytes. also imports it.
+func TestGoNestedBlobImportsBytes(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  outer:
+    payload:
+      nested:
+        id: 0
+        type: struct
+        fields:
+          bytes_field:
+            id: 3
+            type: blob
+`)
+	files := genGo(t, s, map[string]any{"package": "messages"})
+	types := files["types.go"]
+	if !strings.Contains(types, "bytes.Equal") {
+		t.Fatalf("expected nested blob marshal to use bytes.Equal in types.go:\n%s", firstLines(types, 20))
+	}
+	for path, src := range files {
+		if !strings.HasSuffix(path, ".go") {
+			continue
+		}
+		if strings.Contains(src, "bytes.") && !strings.Contains(src, `"bytes"`) {
+			t.Errorf("%s references bytes. but does not import \"bytes\":\n%s", path, firstLines(src, 12))
+		}
+	}
+}
+
 func TestGoDeterministic(t *testing.T) {
 	a := genGo(t, exampleSchema(t), map[string]any{"package": "messages"})
 	b := genGo(t, exampleSchema(t), map[string]any{"package": "messages"})
