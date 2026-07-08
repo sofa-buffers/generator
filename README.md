@@ -21,7 +21,7 @@ wire codec with a uniform streaming API — is owned by the corelibs, not the
 generated code.
 
 The generator (`sofabgen`) emits typed code for **C, Go, Python, TypeScript,
-C++, Rust, C#, and Java**. Every backend is built against its real corelib,
+C++, Rust, C#, Java, and Zig**. Every backend is built against its real corelib,
 JSON round-trips every field kind, and is byte-exact against the shared wire
 vectors — so code generated for one language interoperates with any other.
 
@@ -82,11 +82,13 @@ The generator emits code against one corelib per language:
 | C++ (embedded) | `corelib-c-cpp` (`sofab.hpp`) | Embedded |
 | C++ (max speed) | `corelib-cpp` | Header-only C++20, zero-copy |
 | Rust (`no_std`) | `corelib-rs-no-std` | Embedded, no `alloc` by default |
+| Rust (std) | `corelib-rs` | High throughput |
 | Go | `corelib-go` | High throughput |
 | Python | `corelib-py` | High throughput |
 | Java | `corelib-java` | High throughput |
 | C# / .NET | `corelib-cs` | High throughput |
 | TypeScript | `corelib-ts` | High throughput |
+| Zig | `corelib-zig` | Max speed, zero-copy decode |
 
 Because every corelib speaks the **same wire format**, code generated for one
 language interoperates with code generated for any other for free.
