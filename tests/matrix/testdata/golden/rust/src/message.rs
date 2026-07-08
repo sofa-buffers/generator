@@ -52,6 +52,9 @@ impl Scalars {
     pub fn decode(data: &[u8]) -> Self {
         scalars_dec::decode(data)
     }
+    pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error> {
+        scalars_dec::try_decode(data)
+    }
 }
 
 mod scalars_dec {
@@ -66,6 +69,16 @@ mod scalars_dec {
             let _ = is.feed(data, &mut v);
         }
         m
+    }
+
+    pub fn try_decode(data: &[u8]) -> Result<Scalars, sofab::Error> {
+        let mut m = Scalars::default();
+        {
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };
+            let mut is = IStream::new();
+            is.feed(data, &mut v)?;
+        }
+        Ok(m)
     }
 
 #[derive(Clone, Copy, PartialEq)]

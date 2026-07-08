@@ -60,29 +60,34 @@ func TestRustStructural(t *testing.T) {
 		"pub fn marshal(&self, os: &mut OStream)",
 		"pub fn encode(&self) -> Vec<u8>",
 		"pub fn decode(data: &[u8]) -> Self",
-		"mod myfirstmessage_dec {",             // isolated decode module
-		"fn sequence_begin(&mut self, id: Id)", // flat-visitor nesting
-		"ArrayKind",                            // example has arrays -> array_begin imports it
+		"pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error>", // fallible entry point (generator#79)
+		"is.feed(data, &mut v)?;",                                      // fallible decode propagates feed's Result
+		"mod myfirstmessage_dec {",                                     // isolated decode module
+		"fn sequence_begin(&mut self, id: Id)",                         // flat-visitor nesting
+		"ArrayKind",                                                    // example has arrays -> array_begin imports it
 		"pub someu64: u64,",
 		"#[serde(default)]",
-		"pub someuintarray: [u32; 4],",                                           // fixed native array (was Vec<u32>)
-		"pub somefloatarray: [f32; 3],",                                          // fixed fp array
-		"pub someboolarray: [bool; 8],",                                          // fixed bool array
-		"someuintarray: [0, 1, 1000, 4294967295],",                               // default is an N-element array literal
-		"someboolarray: [true, true, false, false, false, false, false, false],", // short default tail-padded to N
-		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                    // omit-guard is a default compare
-		"self.m.someuintarray[self.ai] = value as u32; self.ai += 1;",            // indexed decode store
+		"pub someuintarray: [u32; 4],",                                                   // fixed native array (was Vec<u32>)
+		"pub somefloatarray: [f32; 3],",                                                  // fixed fp array
+		"pub someboolarray: [bool; 8],",                                                  // fixed bool array
+		"someuintarray: [0, 1, 1000, 4294967295],",                                       // default is an N-element array literal
+		"someboolarray: [true, true, false, false, false, false, false, false],",         // short default tail-padded to N
+		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                            // omit-guard is a default compare
+		"if self.ai < 4 { self.m.someuintarray[self.ai] = value as u32; self.ai += 1; }", // bounds-checked indexed decode store (generator#78)
 		"ai: usize", // fill index on the visitor
-		"if offset == 0 && chunk.len() >= total {", // string/blob single-shot fast path
+		"if offset == 0 && chunk.len() >= total {",                                        // string/blob single-shot fast path
+		"core::str::from_utf8(&chunk[..total]).map(|s| s.to_owned()).unwrap_or_default()", // invalid UTF-8 -> empty, agrees with no_std (generator#80)
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs (rs) missing %q", want)
 		}
 	}
 	// String/blob arrays and array-of-array stay heap Vec (not fixed).
+	// from_utf8_lossy (U+FFFD) would diverge from no_std's empty-on-invalid (generator#80).
 	for _, notWant := range []string{
 		"pub someuintarray: Vec<u32>",
 		"someuintarray.push(",
+		"String::from_utf8_lossy",
 	} {
 		if strings.Contains(m, notWant) {
 			t.Errorf("message.rs (rs) should not contain %q (native fixed array must not be Vec/push)", notWant)

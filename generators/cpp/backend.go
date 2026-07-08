@@ -204,10 +204,25 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 			f.line("        return n;")
 			f.line("    }")
 		}
+		// Infallible, best-effort decode: kept for back-compat. It discards feed's
+		// Result and always returns a value, so it can never reject malformed input
+		// — prefer try_decode when the accept/reject verdict matters.
 		f.line("    static %s decode(const std::uint8_t *data, std::size_t len) {", name)
 		f.line("        sofab::IStreamObject<%s> in;", name)
 		f.line("        in.feed(data, len);")
 		f.line("        return *in;")
+		f.line("    }")
+		f.blank()
+		// Fallible decode: surfaces the corelib's accept/reject decision. feed()
+		// detects malformed input and returns Error::InvalidMessage, but the
+		// infallible decode above drops it, so the public C++ API could otherwise
+		// never reject (generator#83). On success out holds the message; on error
+		// out is left unchanged and the returned Result carries the status.
+		f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, %s &out) {", name)
+		f.line("        sofab::IStreamObject<%s> in;", name)
+		f.line("        sofab::IStreamImpl::Result r = in.feed(data, len);")
+		f.line("        if (r.ok()) { out = *in; }")
+		f.line("        return r;")
 		f.line("    }")
 		f.blank()
 	}

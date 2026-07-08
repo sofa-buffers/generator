@@ -198,22 +198,39 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if stackCap < 4 {
 		stackCap = 4
 	}
+	vInit := "let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };"
+	if g.noStd {
+		if needAcc {
+			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, ai: 0 };", accNew)
+		} else {
+			vInit = "let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, ai: 0 };"
+		}
+	}
+	// Infallible, best-effort decode: kept for back-compat. It discards feed's
+	// Result and returns whatever was filled, so it can never reject malformed
+	// input — prefer try_decode when the accept/reject verdict matters.
 	f.line("    pub fn decode(data: &[u8]) -> %s {", name)
 	f.line("        let mut m = %s::default();", name)
 	f.line("        {")
-	if g.noStd {
-		if needAcc {
-			f.line("            let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, ai: 0 };", accNew)
-		} else {
-			f.line("            let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, ai: 0 };")
-		}
-	} else {
-		f.line("            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };")
-	}
+	f.line("            %s", vInit)
 	f.line("            let mut is = IStream::new();")
 	f.line("            let _ = is.feed(data, &mut v);")
 	f.line("        }")
 	f.line("        m")
+	f.line("    }")
+	f.blank()
+	// Fallible decode: surfaces the corelib's accept/reject decision. IStream::feed
+	// detects malformed input and returns Err, but the infallible decode above drops
+	// it, so the public Rust API could otherwise never reject (generator#79). Emitted
+	// for both the std and no_std profiles.
+	f.line("    pub fn try_decode(data: &[u8]) -> Result<%s, sofab::Error> {", name)
+	f.line("        let mut m = %s::default();", name)
+	f.line("        {")
+	f.line("            %s", vInit)
+	f.line("            let mut is = IStream::new();")
+	f.line("            is.feed(data, &mut v)?;")
+	f.line("        }")
+	f.line("        Ok(m)")
 	f.line("    }")
 	f.blank()
 
@@ -356,12 +373,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		} else {
 			f.line("        // Single-shot: whole payload in one chunk -> build straight from the")
 			f.line("        // slice, skipping the `acc` accumulate + second copy.")
+			f.line("        // Invalid UTF-8 -> empty string, matching the no_std profile's")
+			f.line("        // from_utf8(..).unwrap_or(\"\") (generator#80): the two Rust profiles")
+			f.line("        // must agree on a string's value. (spec 8 strict/reject is generator#85.)")
 			f.line("        let _s = if offset == 0 && chunk.len() >= total {")
-			f.line("            String::from_utf8_lossy(&chunk[..total]).into_owned()")
+			f.line("            core::str::from_utf8(&chunk[..total]).map(|s| s.to_owned()).unwrap_or_default()")
 			f.line("        } else {")
 			f.line("            self.acc.extend_from_slice(chunk);")
 			f.line("            if self.acc.len() < total { return; }")
-			f.line("            let s = String::from_utf8_lossy(&self.acc).into_owned();")
+			f.line("            let s = core::str::from_utf8(&self.acc).map(|s| s.to_owned()).unwrap_or_default();")
 			f.line("            self.acc.clear();")
 			f.line("            s")
 			f.line("        };")
@@ -504,12 +524,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.blank()
 }
 
-// emitNativeArrayStore emits one match arm for a direct native array element: an
-// indexed store `x[self.ai] = rhs; self.ai += 1;` for a fixed `[T; N]` array, or
-// a `.push(rhs)` for a dynamic (count-less) `Vec` array.
+// emitNativeArrayStore emits one match arm for a direct native array element: a
+// bounds-checked indexed store `if self.ai < N { x[self.ai] = rhs; self.ai += 1; }`
+// for a fixed `[T; N]` array, or a `.push(rhs)` for a dynamic (count-less) `Vec`
+// array. The bound drops excess elements when a malformed wire message supplies
+// more than the schema's `count` (mirrors the Zig/C fills); without it the indexed
+// write panics on over-long input — a crash/DoS on untrusted data (generator#78).
 func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
-	if _, _, ok := g.fixedNativeArray(fld); ok {
-		f.line("            (_Loc::%s, %d) => { %s.%s[self.ai] = %s; self.ai += 1; }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), rhs)
+	if _, n, ok := g.fixedNativeArray(fld); ok {
+		f.line("            (_Loc::%s, %d) => { if self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } }", fr.loc, fld.ID, n, fr.path, rustIdent(fld.Name), rhs)
 		return
 	}
 	f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs))

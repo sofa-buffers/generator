@@ -342,6 +342,10 @@ func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 		write = fmt.Sprintf("e.WriteUnsigned(%d, uint64(%s))", fld.ID, acc)
 	case ir.KindBlob:
 		// blob is a leaf: omit when equal to its default (empty if none).
+		// bytes.Equal below is emitted into whatever file holds this marshal
+		// (per-message or the shared types.go), so import "bytes" here rather
+		// than relying on the message file's own bytes.Buffer import.
+		f.imp("bytes")
 		def := "nil"
 		if lit, ok := g.defaultLiteral(fld); ok {
 			def = lit

@@ -63,6 +63,13 @@ struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {
         return *in;
     }
 
+    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Scalars &out) {
+        sofab::IStreamObject<Scalars> in;
+        sofab::IStreamImpl::Result r = in.feed(data, len);
+        if (r.ok()) { out = *in; }
+        return r;
+    }
+
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
         if (u8min != 0) { (void)os.write(0, u8min); }
         if (u8max != 255) { (void)os.write(1, u8max); }
