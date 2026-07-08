@@ -73,7 +73,7 @@ func TestRustStructural(t *testing.T) {
 		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                    // omit-guard is a default compare
 		"self.m.someuintarray[self.ai] = value as u32; self.ai += 1;",            // indexed decode store
 		"ai: usize", // fill index on the visitor
-		"if offset == 0 && chunk.len() >= total {", // string/blob single-shot fast path
+		"if offset == 0 && chunk.len() >= total {",                                        // string/blob single-shot fast path
 		"core::str::from_utf8(&chunk[..total]).map(|s| s.to_owned()).unwrap_or_default()", // invalid UTF-8 -> empty, agrees with no_std (generator#80)
 	} {
 		if !strings.Contains(m, want) {
