@@ -55,6 +55,7 @@ func TestCppStructural(t *testing.T) {
 		"static constexpr std::size_t _maxSize =",
 		"std::vector<std::uint8_t> encode() const",
 		"static Myfirstmessage decode(",
+		"static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Myfirstmessage &out)",
 		"enum class MyfirstmessageSomeenum : std::int8_t {", // smallest signed backing
 		"std::uint64_t someu64 = 18446744073709551615ULL;",
 		"is.read(",               // nested decode via is.read

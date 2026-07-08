@@ -352,12 +352,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		} else {
 			f.line("        // Single-shot: whole payload in one chunk -> build straight from the")
 			f.line("        // slice, skipping the `acc` accumulate + second copy.")
+			f.line("        // Invalid UTF-8 -> empty string, matching the no_std profile's")
+			f.line("        // from_utf8(..).unwrap_or(\"\") (generator#80): the two Rust profiles")
+			f.line("        // must agree on a string's value. (spec 8 strict/reject is generator#85.)")
 			f.line("        let _s = if offset == 0 && chunk.len() >= total {")
-			f.line("            String::from_utf8_lossy(&chunk[..total]).into_owned()")
+			f.line("            core::str::from_utf8(&chunk[..total]).map(|s| s.to_owned()).unwrap_or_default()")
 			f.line("        } else {")
 			f.line("            self.acc.extend_from_slice(chunk);")
 			f.line("            if self.acc.len() < total { return; }")
-			f.line("            let s = String::from_utf8_lossy(&self.acc).into_owned();")
+			f.line("            let s = core::str::from_utf8(&self.acc).map(|s| s.to_owned()).unwrap_or_default();")
 			f.line("            self.acc.clear();")
 			f.line("            s")
 			f.line("        };")
@@ -491,12 +494,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.blank()
 }
 
-// emitNativeArrayStore emits one match arm for a direct native array element: an
-// indexed store `x[self.ai] = rhs; self.ai += 1;` for a fixed `[T; N]` array, or
-// a `.push(rhs)` for a dynamic (count-less) `Vec` array.
+// emitNativeArrayStore emits one match arm for a direct native array element: a
+// bounds-checked indexed store `if self.ai < N { x[self.ai] = rhs; self.ai += 1; }`
+// for a fixed `[T; N]` array, or a `.push(rhs)` for a dynamic (count-less) `Vec`
+// array. The bound drops excess elements when a malformed wire message supplies
+// more than the schema's `count` (mirrors the Zig/C fills); without it the indexed
+// write panics on over-long input — a crash/DoS on untrusted data (generator#78).
 func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
-	if _, _, ok := g.fixedNativeArray(fld); ok {
-		f.line("            (_Loc::%s, %d) => { %s.%s[self.ai] = %s; self.ai += 1; }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), rhs)
+	if _, n, ok := g.fixedNativeArray(fld); ok {
+		f.line("            (_Loc::%s, %d) => { if self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } }", fr.loc, fld.ID, n, fr.path, rustIdent(fld.Name), rhs)
 		return
 	}
 	f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs))
