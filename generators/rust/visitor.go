@@ -182,9 +182,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if stackCap < 4 {
 		stackCap = 4
 	}
-	vInit := "let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };"
+	vInit := "let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, ai: 0 };"
 	if g.noStd {
-		vInit = "let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, ai: 0 };"
+		vInit = "let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, err: false, ai: 0 };"
 	}
 	// Infallible, best-effort decode: kept for back-compat. It discards feed's
 	// Result and returns whatever was filled, so it can never reject malformed
@@ -205,11 +205,16 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// for both the std and no_std profiles.
 	f.line("    pub fn try_decode(data: &[u8]) -> Result<%s, sofab::Error> {", name)
 	f.line("        let mut m = %s::default();", name)
+	f.line("        let overflow;")
 	f.line("        {")
 	f.line("            %s", vInit)
 	f.line("            let mut is = IStream::new();")
 	f.line("            is.feed(data, &mut v)?;")
+	f.line("            overflow = v.err;")
 	f.line("        }")
+	f.line("        // A fixed-capacity field overflowed during the fill (generator#82):")
+	f.line("        // report it rather than return a silently-truncated value.")
+	f.line("        if overflow { return Err(sofab::Error::BufferFull); }")
 	f.line("        Ok(m)")
 	f.line("    }")
 	f.blank()
@@ -235,6 +240,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		f.line("    cur: _Loc,")
 		f.line("    acc: Vec<u8>,")
 	}
+	// Sticky decode-failure flag: a no_std fixed-capacity fill that overflows
+	// (heapless String/Vec push past capacity) sets this so try_decode can report
+	// it instead of silently truncating (generator#82). The std profile has no
+	// fixed capacity, so it never sets it.
+	f.line("    err: bool,")
 	f.line("    ai: usize, // index into the fixed native array currently being filled")
 	f.line("}")
 	f.blank()
@@ -328,11 +338,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-					f.line("            (_Loc::%s, _) => { %s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.push_str(_s); } }", fr.loc, g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } }", fr.loc, g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
-						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.push_str(_s); }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
+						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.push_str(_s); if %s.%s.len() != _s.len() { self.err = true; } }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
 					}
 				}
 			}
@@ -376,11 +386,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => { %s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.extend_from_slice(&chunk[..total]); } }", fr.loc, g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.extend_from_slice(&chunk[..total]); if _e.len() != total { self.err = true; } } }", fr.loc, g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
-						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.extend_from_slice(&chunk[..total]); }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
+						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.extend_from_slice(&chunk[..total]); if %s.%s.len() != total { self.err = true; } }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
 					}
 				}
 			}

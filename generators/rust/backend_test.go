@@ -62,6 +62,8 @@ func TestRustStructural(t *testing.T) {
 		"pub fn decode(data: &[u8]) -> Self",
 		"pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error>", // fallible entry point (generator#79)
 		"is.feed(data, &mut v)?;",                                      // fallible decode propagates feed's Result
+		"if overflow { return Err(sofab::Error::BufferFull); }",        // fixed-capacity overflow surfaced (generator#82)
+		"err: bool,",                                                   // sticky overflow flag on the visitor (generator#82)
 		"mod myfirstmessage_dec {",                                     // isolated decode module
 		"fn sequence_begin(&mut self, id: Id)", // flat-visitor nesting
 		"ArrayKind",                            // example has arrays -> array_begin imports it
@@ -117,6 +119,7 @@ func TestRustStructural(t *testing.T) {
 		"pub fn encode(&self) -> heapless::Vec<u8,",                        // heap-free encode
 		"stack: heapless::Vec<_Loc,",                                       // bounded decode stack
 		"if self.somestring.as_str() != \"\" {",                            // string omit via as_str
+		"self.err = true;",                                                 // fixed-capacity overflow flagged in the fill (generator#82)
 	} {
 		if !strings.Contains(n, want) {
 			t.Errorf("no_std message.rs missing %q", want)
