@@ -71,7 +71,7 @@ func TestRustStructural(t *testing.T) {
 		"someuintarray: [0, 1, 1000, 4294967295],",                               // default is an N-element array literal
 		"someboolarray: [true, true, false, false, false, false, false, false],", // short default tail-padded to N
 		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                    // omit-guard is a default compare
-		"self.m.someuintarray[self.ai] = value as u32; self.ai += 1;",            // indexed decode store
+		"if self.ai < 4 { self.m.someuintarray[self.ai] = value as u32; self.ai += 1; }", // bounds-checked indexed decode store (generator#78)
 		"ai: usize", // fill index on the visitor
 		"if offset == 0 && chunk.len() >= total {", // string/blob single-shot fast path
 	} {
