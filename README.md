@@ -79,15 +79,15 @@ The generator emits code against one corelib per language:
 | Target | Corelib | Profile |
 |---|---|---|
 | C (`object.h`) | `corelib-c-cpp` | Embedded, minimal footprint, no heap |
-| C++ (embedded) | `corelib-c-cpp` (`sofab.hpp`) | Embedded |
-| C++ (max speed) | `corelib-cpp` | Header-only C++20, zero-copy |
+| C++ (embedded) | `corelib-c-cpp` (`sofab.hpp`) | Embedded friendly |
+| C++ (max speed) | `corelib-cpp` | Max speed, zero-copy decode |
 | Rust (`no_std`) | `corelib-rs-no-std` | Embedded, no `alloc` by default |
-| Rust (std) | `corelib-rs` | High throughput |
-| Go | `corelib-go` | High throughput |
-| Python | `corelib-py` | High throughput |
-| Java | `corelib-java` | High throughput |
-| C# / .NET | `corelib-cs` | High throughput |
-| TypeScript | `corelib-ts` | High throughput |
+| Rust (std) | `corelib-rs` | Max speed |
+| Go | `corelib-go` | Max speed |
+| Python | `corelib-py` | Max speed |
+| Java | `corelib-java` | Max speed |
+| C# / .NET | `corelib-cs` | Max speed |
+| TypeScript | `corelib-ts` | Max speed |
 | Zig | `corelib-zig` | Max speed, zero-copy decode |
 
 Because every corelib speaks the **same wire format**, code generated for one
