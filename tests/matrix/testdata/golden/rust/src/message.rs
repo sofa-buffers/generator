@@ -64,7 +64,7 @@ mod scalars_dec {
     pub fn decode(data: &[u8]) -> Scalars {
         let mut m = Scalars::default();
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, ai: 0 };
             let mut is = IStream::new();
             let _ = is.feed(data, &mut v);
         }
@@ -73,11 +73,16 @@ mod scalars_dec {
 
     pub fn try_decode(data: &[u8]) -> Result<Scalars, sofab::Error> {
         let mut m = Scalars::default();
+        let overflow;
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, ai: 0 };
             let mut is = IStream::new();
             is.feed(data, &mut v)?;
+            overflow = v.err;
         }
+        // A fixed-capacity field overflowed during the fill (generator#82):
+        // report it rather than return a silently-truncated value.
+        if overflow { return Err(sofab::Error::BufferFull); }
         Ok(m)
     }
 
@@ -91,6 +96,7 @@ struct V<'a> {
     stack: Vec<_Loc>,
     cur: _Loc,
     acc: Vec<u8>,
+    err: bool,
     ai: usize, // index into the fixed native array currently being filled
 }
 
