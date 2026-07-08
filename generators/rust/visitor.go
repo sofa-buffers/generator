@@ -464,12 +464,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.blank()
 }
 
-// emitNativeArrayStore emits one match arm for a direct native array element: an
-// indexed store `x[self.ai] = rhs; self.ai += 1;` for a fixed `[T; N]` array, or
-// a `.push(rhs)` for a dynamic (count-less) `Vec` array.
+// emitNativeArrayStore emits one match arm for a direct native array element: a
+// bounds-checked indexed store `if self.ai < N { x[self.ai] = rhs; self.ai += 1; }`
+// for a fixed `[T; N]` array, or a `.push(rhs)` for a dynamic (count-less) `Vec`
+// array. The bound drops excess elements when a malformed wire message supplies
+// more than the schema's `count` (mirrors the Zig/C fills); without it the indexed
+// write panics on over-long input — a crash/DoS on untrusted data (generator#78).
 func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
-	if _, _, ok := g.fixedNativeArray(fld); ok {
-		f.line("            (_Loc::%s, %d) => { %s.%s[self.ai] = %s; self.ai += 1; }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), rhs)
+	if _, n, ok := g.fixedNativeArray(fld); ok {
+		f.line("            (_Loc::%s, %d) => { if self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } }", fr.loc, fld.ID, n, fr.path, rustIdent(fld.Name), rhs)
 		return
 	}
 	f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs))
