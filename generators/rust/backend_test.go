@@ -74,15 +74,18 @@ func TestRustStructural(t *testing.T) {
 		"self.m.someuintarray[self.ai] = value as u32; self.ai += 1;",            // indexed decode store
 		"ai: usize", // fill index on the visitor
 		"if offset == 0 && chunk.len() >= total {", // string/blob single-shot fast path
+		"core::str::from_utf8(&chunk[..total]).map(|s| s.to_owned()).unwrap_or_default()", // invalid UTF-8 -> empty, agrees with no_std (generator#80)
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs (rs) missing %q", want)
 		}
 	}
 	// String/blob arrays and array-of-array stay heap Vec (not fixed).
+	// from_utf8_lossy (U+FFFD) would diverge from no_std's empty-on-invalid (generator#80).
 	for _, notWant := range []string{
 		"pub someuintarray: Vec<u32>",
 		"someuintarray.push(",
+		"String::from_utf8_lossy",
 	} {
 		if strings.Contains(m, notWant) {
 			t.Errorf("message.rs (rs) should not contain %q (native fixed array must not be Vec/push)", notWant)
