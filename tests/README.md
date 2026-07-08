@@ -29,7 +29,8 @@ tests/
 │   ├── java/     { run.sh, check_vectors.py }
 │   ├── csharp/   { run.sh, check_vectors.py }
 │   ├── rust/     { run.sh, check_vectors.py }
-│   └── typescript/ { run.sh, check_vectors.py }
+│   ├── typescript/ { run.sh, check_vectors.py }
+│   └── zig/      { run.sh, check_vectors.py }
 │
 └── gen-artifacts.sh        # shared: generate example sources per language (CI artifacts)
 ```
@@ -38,7 +39,7 @@ tests/
 
 Pure Go tests, no language toolchain or corelib required, so they run in the
 hermetic CI core job on every push. They exercise the generator itself: every
-corpus definition generates across all registered backends (8 languages plus
+corpus definition generates across all registered backends (9 languages plus
 the `docs` target), every invalid definition is
 rejected, the IR/`$ref` graph resolves, and regenerated output is byte-identical
 to the committed goldens (the reproducibility gate). The corpus is documented in
@@ -70,6 +71,7 @@ the corelib** into a temp dir; to test against a local checkout, pass its path a
 | `java` | corelib-java | `$1` / `SOFAB_JAVA_CORELIB` | `check_vectors.py` |
 | `csharp` | corelib-cs | `$1` / `SOFAB_CS_CORELIB` | `check_vectors.py` |
 | `typescript` | corelib-ts | `$1` / `SOFAB_TS_CORELIB` | `check_vectors.py` |
+| `zig` | corelib-zig | `$1` / `SOFAB_ZIG_CORELIB` | `check_vectors.py` |
 
 `cpp` and `rust` each exercise **both** of their corelibs (the `corelib` config
 option). `check_vectors.py` drives the generated harness against the corelib's

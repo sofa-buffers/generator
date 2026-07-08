@@ -37,6 +37,7 @@ import (
 	_ "github.com/sofa-buffers/generator/generators/python"
 	_ "github.com/sofa-buffers/generator/generators/rust"
 	_ "github.com/sofa-buffers/generator/generators/typescript"
+	_ "github.com/sofa-buffers/generator/generators/zig"
 )
 
 const version = "0.14.0"
