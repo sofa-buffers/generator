@@ -50,7 +50,7 @@ jobs:
       - name: Generate sources (artifact)
         if: always()
         run: ./tests/gen-artifacts.sh c generated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: generated-c
@@ -71,7 +71,7 @@ jobs:
       - name: Generate sources (artifact)
         if: always()
         run: ./tests/gen-artifacts.sh go generated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: generated-go
@@ -94,7 +94,7 @@ jobs:
       - name: Generate sources (artifact)
         if: always()
         run: ./tests/gen-artifacts.sh python generated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: generated-python
@@ -118,7 +118,7 @@ jobs:
       - name: Generate sources (artifact)
         if: always()
         run: ./tests/gen-artifacts.sh typescript generated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: generated-typescript
@@ -143,7 +143,7 @@ jobs:
       - name: Generate sources (artifact)
         if: always()
         run: ./tests/gen-artifacts.sh cpp generated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: generated-cpp
@@ -167,7 +167,7 @@ jobs:
       - name: Generate sources (artifact)
         if: always()
         run: ./tests/gen-artifacts.sh rust generated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: generated-rust
@@ -191,7 +191,7 @@ jobs:
       - name: Generate sources (artifact)
         if: always()
         run: ./tests/gen-artifacts.sh csharp generated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: generated-csharp
@@ -216,7 +216,7 @@ jobs:
       - name: Generate sources (artifact)
         if: always()
         run: ./tests/gen-artifacts.sh java generated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: generated-java
@@ -241,7 +241,7 @@ jobs:
       - name: Generate sources (artifact)
         if: always()
         run: ./tests/gen-artifacts.sh zig generated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: generated-zig
@@ -259,7 +259,7 @@ jobs:
           go-version: "1.26"
       - name: Generate docs (artifact)
         run: ./tests/gen-artifacts.sh docs generated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: generated-docs
           path: generated
