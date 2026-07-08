@@ -65,12 +65,12 @@ func TestRustStructural(t *testing.T) {
 		"ArrayKind",                            // example has arrays -> array_begin imports it
 		"pub someu64: u64,",
 		"#[serde(default)]",
-		"pub someuintarray: [u32; 4],",                                           // fixed native array (was Vec<u32>)
-		"pub somefloatarray: [f32; 3],",                                          // fixed fp array
-		"pub someboolarray: [bool; 8],",                                          // fixed bool array
-		"someuintarray: [0, 1, 1000, 4294967295],",                               // default is an N-element array literal
-		"someboolarray: [true, true, false, false, false, false, false, false],", // short default tail-padded to N
-		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                    // omit-guard is a default compare
+		"pub someuintarray: [u32; 4],",                                                   // fixed native array (was Vec<u32>)
+		"pub somefloatarray: [f32; 3],",                                                  // fixed fp array
+		"pub someboolarray: [bool; 8],",                                                  // fixed bool array
+		"someuintarray: [0, 1, 1000, 4294967295],",                                       // default is an N-element array literal
+		"someboolarray: [true, true, false, false, false, false, false, false],",         // short default tail-padded to N
+		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                            // omit-guard is a default compare
 		"if self.ai < 4 { self.m.someuintarray[self.ai] = value as u32; self.ai += 1; }", // bounds-checked indexed decode store (generator#78)
 		"ai: usize", // fill index on the visitor
 		"if offset == 0 && chunk.len() >= total {", // string/blob single-shot fast path
