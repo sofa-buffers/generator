@@ -300,6 +300,9 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 		f.line("    pub fn decode(data: &[u8]) -> Self {")
 		f.line("        %s_dec::decode(data)", strings.ToLower(name))
 		f.line("    }")
+		f.line("    pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error> {")
+		f.line("        %s_dec::try_decode(data)", strings.ToLower(name))
+		f.line("    }")
 	}
 	f.line("}")
 	f.blank()

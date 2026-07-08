@@ -182,18 +182,35 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if stackCap < 4 {
 		stackCap = 4
 	}
+	vInit := "let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };"
+	if g.noStd {
+		vInit = "let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, ai: 0 };"
+	}
+	// Infallible, best-effort decode: kept for back-compat. It discards feed's
+	// Result and returns whatever was filled, so it can never reject malformed
+	// input — prefer try_decode when the accept/reject verdict matters.
 	f.line("    pub fn decode(data: &[u8]) -> %s {", name)
 	f.line("        let mut m = %s::default();", name)
 	f.line("        {")
-	if g.noStd {
-		f.line("            let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, ai: 0 };")
-	} else {
-		f.line("            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), ai: 0 };")
-	}
+	f.line("            %s", vInit)
 	f.line("            let mut is = IStream::new();")
 	f.line("            let _ = is.feed(data, &mut v);")
 	f.line("        }")
 	f.line("        m")
+	f.line("    }")
+	f.blank()
+	// Fallible decode: surfaces the corelib's accept/reject decision. IStream::feed
+	// detects malformed input and returns Err, but the infallible decode above drops
+	// it, so the public Rust API could otherwise never reject (generator#79). Emitted
+	// for both the std and no_std profiles.
+	f.line("    pub fn try_decode(data: &[u8]) -> Result<%s, sofab::Error> {", name)
+	f.line("        let mut m = %s::default();", name)
+	f.line("        {")
+	f.line("            %s", vInit)
+	f.line("            let mut is = IStream::new();")
+	f.line("            is.feed(data, &mut v)?;")
+	f.line("        }")
+	f.line("        Ok(m)")
 	f.line("    }")
 	f.blank()
 

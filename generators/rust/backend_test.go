@@ -60,7 +60,9 @@ func TestRustStructural(t *testing.T) {
 		"pub fn marshal(&self, os: &mut OStream)",
 		"pub fn encode(&self) -> Vec<u8>",
 		"pub fn decode(data: &[u8]) -> Self",
-		"mod myfirstmessage_dec {",             // isolated decode module
+		"pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error>", // fallible entry point (generator#79)
+		"is.feed(data, &mut v)?;",                                      // fallible decode propagates feed's Result
+		"mod myfirstmessage_dec {",                                     // isolated decode module
 		"fn sequence_begin(&mut self, id: Id)", // flat-visitor nesting
 		"ArrayKind",                            // example has arrays -> array_begin imports it
 		"pub someu64: u64,",
