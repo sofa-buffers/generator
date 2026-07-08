@@ -28,6 +28,7 @@ import (
 	_ "github.com/sofa-buffers/generator/generators/python"
 	_ "github.com/sofa-buffers/generator/generators/rust"
 	_ "github.com/sofa-buffers/generator/generators/typescript"
+	_ "github.com/sofa-buffers/generator/generators/zig"
 )
 
 func buildIR(t *testing.T, path string) (*ir.Schema, error) {

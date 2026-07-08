@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema",
   "$id": "https://github.com/sofa-buffers/generator/schema/sofabgen-config-schema.json",
   "title": "SofaBuffers Generator Config Schema",
-  "description": "Validates sofabgen configuration files (YAML or JSON). PLAN §7. Every level is closed (additionalProperties:false) so typos are rejected, not ignored. Every key in this schema is honored by the generator; the schema and the set of consumed keys are kept in lockstep.",
+  "description": "Validates sofabgen configuration files (YAML or JSON). PLAN \u00a77. Every level is closed (additionalProperties:false) so typos are rejected, not ignored. Every key in this schema is honored by the generator; the schema and the set of consumed keys are kept in lockstep.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -36,6 +36,9 @@
         },
         "typescript": {
           "$ref": "#/$defs/target_typescript"
+        },
+        "zig": {
+          "$ref": "#/$defs/target_zig"
         },
         "docs": {
           "$ref": "#/$defs/target_docs"
@@ -220,6 +223,15 @@
           ],
           "default": "bigint",
           "description": "64-bit field representation. bigint (default): bigint scalars and bigint[] arrays. long: u64[]/i64[] backed by corelib Long[] behind a get/set accessor pair (bigint-free encode/decode hot path; assignment accepts Long | bigint | number); scalars stay bigint. number: additionally maps u64/i64 scalars to number - the caller guarantees scalar values fit the +/-2^53 safe-integer range. All modes are wire-identical."
+        }
+      }
+    },
+    "target_zig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "emit": {
+          "$ref": "#/$defs/emit"
         }
       }
     },

@@ -14,7 +14,7 @@
 >   code targets).
 > - **Config format** — `schema/sofabgen-config-schema.json` and `docs/generator/`.
 >
-> Status: all 8 language backends (C, C++, Rust, Go, Python, TypeScript, C#, Java)
+> Status: all 9 language backends (C, C++, Rust, Go, Python, TypeScript, C#, Java, Zig)
 > plus the non-code `docs` target (self-contained HTML reference page) are
 > implemented and CI-green. Keep this file current — it is updated before
 > every push to `main`.
@@ -99,7 +99,7 @@ never code-generated. All problems are reported at once.
 | Flag | Meaning |
 |---|---|
 | `--config <file>` | Config file (carries all options; §7). |
-| `--lang <target>` | Target backend (`c`, `cpp`, `rust`, `go`, `python`, `java`, `csharp`, `typescript`, `docs`). |
+| `--lang <target>` | Target backend (`c`, `cpp`, `rust`, `go`, `python`, `java`, `csharp`, `typescript`, `zig`, `docs`). |
 | `--in <file\|dir>` | Definition input (overrides `generic.input_dir`). |
 | `--out <dir>` | Output folder (overrides `generic.output_dir`). |
 | `--print-defaults` | Print the effective resolved config for `--lang` and exit. |
@@ -577,6 +577,7 @@ only needs to mirror their *names* and gate on the schema's used features:
 | **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); Gson harness. |
+| **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `marshal`; zero-copy decode (strings/blobs borrow the input buffer, arrays from a caller allocator); fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 
 **Common type mapping:** enum → smallest *signed* backing; bitfield → smallest

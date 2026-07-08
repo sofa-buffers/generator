@@ -35,7 +35,7 @@ go build -o sofabgen ./cmd/sofabgen
 ./sofabgen --lang go --in examples/messages/example.yaml --out out/go
 
 # Generate for every language.
-for lang in c cpp go python typescript rust csharp java; do
+for lang in c cpp go python typescript rust csharp java zig; do
   ./sofabgen --lang "$lang" --in examples/messages/example.yaml --out "out/$lang"
 done
 
@@ -101,7 +101,7 @@ tables, cross-linked named types — see
 The CLI is deliberately tiny — everything configurable lives in a config file:
 
 ```sh
-sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|docs> \
+sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|zig|docs> \
         [--in <dir>] [--out <dir>]
 ```
 
@@ -117,7 +117,7 @@ sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|doc
 ```
 .
 ├── cmd/sofabgen/        # the `sofabgen` CLI entry point
-├── generators/        # one backend per target (c, cpp, rust, golang, python, java, csharp, typescript, docs)
+├── generators/        # one backend per target (c, cpp, rust, golang, python, java, csharp, typescript, zig, docs)
 ├── internal/          # parser, validator, IR, analysis, generation pipeline
 ├── schema/            # the message-definition JSON Schema (draft-07)
 ├── examples/          # example definitions (config/ + messages/)
