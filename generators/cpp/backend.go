@@ -438,7 +438,11 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		if g.fixed && fld.HasMaxlen {
 			// FixedBytes: bound the inline buffer's logical length, then bind the
 			// stable buffer via the wrapper's read(void*,size_t) blob overload.
-			f.line("            %s.set_len(_size); is.read(%s.data(), _size);", acc, acc)
+			// Pass the clamped size() (not the raw wire _size) so a _size wider
+			// than the inline capacity N cannot overflow the buffer — set_len
+			// already clamped len_ to min(_size, N), mirroring the FixedString
+			// path above. Feeding the unclamped _size overflows (issue #95).
+			f.line("            %s.set_len(_size); is.read(%s.data(), %s.size());", acc, acc, acc)
 		} else if g.clib {
 			f.line("            %s.resize(_size); is.read(%s.data(), _size);", acc, acc)
 		} else {

@@ -470,7 +470,7 @@ struct _FixedBlobSeq : sofab::IStreamMessage {
         while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
         auto &b = (*out)[id];
         b.set_len(_size);
-        if (_size) is.read(b.data(), _size);
+        if (_size) is.read(b.data(), b.size());
     }
 };
 template <typename Container>

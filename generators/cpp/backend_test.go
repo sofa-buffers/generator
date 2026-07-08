@@ -169,6 +169,7 @@ func TestCppFixedContainers(t *testing.T) {
 		"sofab::InlineVector<MPtsElem",                                        // struct sequence -> inline (prefix)
 		"if (bl != sofab::FixedBytes<16>{}) {",                                // blob default-compare typed
 		"s.set_len(_size); if (_size) is.read(s);",                            // FixedString decode
+		"bl.set_len(_size); is.read(bl.data(), bl.size());",                   // FixedBytes decode: clamped size, not raw _size (issue #95)
 		"static _FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",  // blob-seq collector
 		"static _FixedStrSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
 		"static _MsgSeqFixed<sofab::InlineVector<",                            // struct-seq collector
@@ -187,6 +188,12 @@ func TestCppFixedContainers(t *testing.T) {
 	// the generator references them and must no longer hand-roll the definitions.
 	if strings.Contains(h, "struct FixedBytes {") || strings.Contains(h, "struct InlineVector {") {
 		t.Error("fixed profile must not emit its own FixedBytes/InlineVector; they come from the corelib")
+	}
+	// FixedBytes decode must never feed the unclamped wire length to the raw
+	// read(void*, size_t) overload — that overflows the inline N-byte buffer
+	// (issue #95). The bounded form uses .size() (clamped by set_len).
+	if strings.Contains(h, "is.read(bl.data(), _size);") {
+		t.Error("FixedBytes decode uses unclamped _size — buffer overflow (issue #95)")
 	}
 }
 
