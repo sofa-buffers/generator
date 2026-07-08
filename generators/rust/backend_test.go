@@ -122,17 +122,21 @@ func TestRustStructural(t *testing.T) {
 		"pub fn encode(&self) -> heapless::Vec<u8,",                        // heap-free encode
 		"stack: heapless::Vec<_Loc,",                                       // bounded decode stack
 		"if self.somestring.as_str() != \"\" {",                            // string omit via as_str
+		"let _ = self.acc.extend_from_slice(chunk);",                       // accumulates a chunked string/blob (generator#81)
+		"if offset == 0 && chunk.len() >= total {",                         // single-shot fast path, now in no_std too
 		"self.err = true;",                                                 // fixed-capacity overflow flagged in the fill (generator#82)
 	} {
 		if !strings.Contains(n, want) {
 			t.Errorf("no_std message.rs missing %q", want)
 		}
 	}
-	// No heap String/Vec, no serde-always-derive under no_std.
+	// No heap String/Vec, no serde-always-derive under no_std; the string/blob
+	// visitor must no longer bail on a non-initial chunk (generator#81).
 	for _, notWant := range []string{
 		"pub somestring: String,",
 		"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]",
 		"String::from_utf8_lossy",
+		"if offset != 0 || chunk.len() < total { return; }",
 	} {
 		if strings.Contains(n, notWant) {
 			t.Errorf("no_std message.rs should not contain %q", notWant)

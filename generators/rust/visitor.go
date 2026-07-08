@@ -164,6 +164,22 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	use := visitorUseOf(fs)
 
+	// no_std string/blob accumulation buffer: reconstructs a payload split across
+	// feed chunks (generator#81), matching the std profile's `acc`. Sized to the
+	// message's max encoded size (a safe bound on any single payload); an
+	// alloc-fallback crate uses an unbounded Vec. The std profile always carries
+	// an acc (a heap Vec), so this is only conditional under no_std.
+	needAcc := g.noStd && (use.str || use.blob)
+	accType, accNew := "", ""
+	if needAcc {
+		if g.usesAlloc(g.schema) {
+			accType, accNew = "alloc::vec::Vec<u8>", "alloc::vec::Vec::new()"
+		} else {
+			sz, _ := g.maxSize(fields)
+			accType, accNew = fmt.Sprintf("heapless::Vec<u8, %d>", sz), "heapless::Vec::new()"
+		}
+	}
+
 	// Wrap the decoder in a private module so _Loc / V don't clash across
 	// messages in a multi-message crate.
 	f.line("mod %s_dec {", strings.ToLower(name))
@@ -184,7 +200,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	}
 	vInit := "let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, ai: 0 };"
 	if g.noStd {
-		vInit = "let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, err: false, ai: 0 };"
+		if needAcc {
+			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, err: false, ai: 0 };", accNew)
+		} else {
+			vInit = "let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, err: false, ai: 0 };"
+		}
 	}
 	// Infallible, best-effort decode: kept for back-compat. It discards feed's
 	// Result and returns whatever was filled, so it can never reject malformed
@@ -231,10 +251,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("struct V<'a> {")
 	f.line("    m: &'a mut %s,", name)
 	if g.noStd {
-		// Heap-free: bounded location stack; no `acc` (the generated decode() feeds
-		// the whole buffer at once, so string/blob always arrive single-shot).
+		// Heap-free: bounded location stack. `acc` reassembles a string/blob split
+		// across feed chunks (generator#81); omitted when the message has neither.
 		f.line("    stack: heapless::Vec<_Loc, %d>,", stackCap)
 		f.line("    cur: _Loc,")
+		if needAcc {
+			f.line("    acc: %s,", accType)
+		}
 	} else {
 		f.line("    stack: Vec<_Loc>,")
 		f.line("    cur: _Loc,")
@@ -330,11 +353,19 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// string: scalar strings + string-array elements
 		f.line("    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
 		if g.noStd {
-			// Heap-free single-shot: decode() feeds the whole buffer at once, so a
-			// string always arrives in one chunk. Build straight into the field's
-			// fixed storage (heapless/alloc String, both take push_str) — no temp.
-			f.line("        if offset != 0 || chunk.len() < total { return; }")
-			f.line("        let _s = core::str::from_utf8(&chunk[..total]).unwrap_or(\"\");")
+			// Accumulate across chunks so a streaming (multi-feed) string is
+			// reconstructed like the std profile (generator#81), bounded by `acc`'s
+			// capacity. The single-shot fast path (whole payload in one chunk) reads
+			// the slice directly and skips the acc copy. offset==0 starts a fresh
+			// payload; acc is built up only while the payload is still incomplete.
+			f.line("        if offset == 0 { self.acc.clear(); }")
+			f.line("        let _s = if offset == 0 && chunk.len() >= total {")
+			f.line("            core::str::from_utf8(&chunk[..total]).unwrap_or(\"\")")
+			f.line("        } else {")
+			f.line("            let _ = self.acc.extend_from_slice(chunk);")
+			f.line("            if self.acc.len() < total { return; }")
+			f.line("            core::str::from_utf8(&self.acc[..total]).unwrap_or(\"\")")
+			f.line("        };")
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
@@ -385,15 +416,24 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// blob: scalar blobs + blob-array elements
 		f.line("    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
 		if g.noStd {
-			f.line("        if offset != 0 || chunk.len() < total { return; }")
+			// Accumulate across chunks like the string visitor / std profile
+			// (generator#81); single-shot fast path reads the slice directly.
+			f.line("        if offset == 0 { self.acc.clear(); }")
+			f.line("        let _b: &[u8] = if offset == 0 && chunk.len() >= total {")
+			f.line("            &chunk[..total]")
+			f.line("        } else {")
+			f.line("            let _ = self.acc.extend_from_slice(chunk);")
+			f.line("            if self.acc.len() < total { return; }")
+			f.line("            &self.acc[..total]")
+			f.line("        };")
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => { %s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.extend_from_slice(&chunk[..total]); if _e.len() != total { self.err = true; } } }", fr.loc, g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } }", fr.loc, g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
-						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.extend_from_slice(&chunk[..total]); if %s.%s.len() != total { self.err = true; } }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
+						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.extend_from_slice(_b); if %s.%s.len() != total { self.err = true; } }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
 					}
 				}
 			}
