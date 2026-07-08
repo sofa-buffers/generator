@@ -62,8 +62,10 @@ func TestJavaStructural(t *testing.T) {
 		"public long[] someenumarray = new long[]{2L, 1L, 0L, 0};",                                    // short default tail-padded to count
 		"os.writeArrayUnsigned(15, this.someuintarray);",                                              // direct write, no Sbuf box
 		"if (!java.util.Arrays.equals(this.someuintarray, new long[]{0L, 1L, 1000L, 4294967295L})) {", // Arrays.equals guard
-		"m.someuintarray[ai++] = value;",                                                              // indexed decode
-		"case 15: m.someuintarray = new long[count]; break;",                                          // right-sized alloc
+		"m.someuintarray = ensureCap(m.someuintarray, ai, acap); m.someuintarray[ai++] = value;",      // grow-on-demand indexed decode (#96)
+		"case 15: m.someuintarray = new long[Math.min(count, ARRAY_INIT_CAP)]; break;",                // bounded reservation, not new long[count] (#96)
+		"private static long[] ensureCap(long[] a, int i, int cap) {",                                 // lazy-growth helper
+		"private static float[] ensureCap(float[] a, int i, int cap) {",                               // fp32 overload
 		"if (offset == 0 && chunkLength >= total) {",                                                  // string/blob single-shot
 		"public List<Boolean> someboolarray",                                                          // boolean array stays boxed List
 	} {

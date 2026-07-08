@@ -89,11 +89,22 @@ func locIndex(fs []frame, loc string) int {
 
 func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
+	primBases := primArrayBasesUsed(fs) // "long"/"float"/"double" element bases needing lazy growth
+	hasPrim := len(primBases) > 0
 
 	f.line("class %sVisitor implements Visitor {", name)
 	f.line("    private final %s m;", name)
 	f.line("    private int cur = 0;")
 	f.line("    private int ai = 0;                 // index into the primitive array currently being filled")
+	if hasPrim {
+		// The wire-supplied element count is UNTRUSTED: a malformed message can
+		// claim ~2^31 elements, so we never allocate `new T[count]` up front (that
+		// is an OutOfMemoryError DoS — see generator issue #96). Instead reserve a
+		// small backing array and grow it as elements actually arrive, capped at
+		// `acap` (the declared count) so the array still ends exactly right-sized.
+		f.line("    private static final int ARRAY_INIT_CAP = 16; // bounded eager reservation; grow lazily")
+		f.line("    private int acap = 0;               // declared element count = growth ceiling for the array being filled")
+	}
 	f.line("    private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)")
 	f.line("    private int sp = 0;")
 	f.line("    private java.io.ByteArrayOutputStream acc; // lazy: only split string/blob payloads need it")
@@ -223,11 +234,15 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        }")
 	f.line("    }")
 
-	// arrayBegin: a primitive array is right-sized to `count` and filled by index
+	// arrayBegin: a primitive array reserves a small backing store (capped, NOT
+	// `new T[count]` — count is untrusted, see #96) and is grown/filled by index
 	// (ai reset below); a boolean array clears its List; native-matrix rows append
 	// a new inner list.
 	f.line("    public void arrayBegin(int id, ArrayKind kind, int count) {")
 	f.line("        ai = 0;")
+	if hasPrim {
+		f.line("        acap = count;")
+	}
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkNativeMat {
@@ -241,7 +256,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) {
 				target := fr.path + "." + javaIdent(fld.Name)
-				arms = append(arms, jcase(fld.ID, target+" = new "+primArrayBase(fld.Elem)+"[count]"))
+				arms = append(arms, jcase(fld.ID, target+" = new "+primArrayBase(fld.Elem)+"[Math.min(count, ARRAY_INIT_CAP)]"))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) { // boolean List
 				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+".clear()"))
 			}
@@ -282,8 +297,43 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        }")
 	f.line("    }")
 	f.line("    public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
+	// Lazy-growth helper(s): enlarge the backing array to hold index `i`, doubling
+	// but never exceeding `cap` (the declared element count) so a valid array ends
+	// exactly right-sized. Growth tracks elements actually delivered, so an
+	// untrusted count cannot force an up-front over-allocation (#96).
+	for _, base := range primBases {
+		f.line("    private static %s[] ensureCap(%s[] a, int i, int cap) {", base, base)
+		f.line("        if (i < a.length) return a;")
+		f.line("        long n = (long) a.length * 2;")
+		f.line("        if (n < i + 1) n = i + 1;")
+		f.line("        if (n > cap) n = cap;")
+		f.line("        return java.util.Arrays.copyOf(a, (int) n);")
+		f.line("    }")
+	}
 	f.line("}")
 	f.blank()
+}
+
+// primArrayBasesUsed returns the distinct Java primitive element bases
+// ("long"/"float"/"double") of the primitive-array fields across all frames, in
+// a stable order, so emitVisitor can emit exactly the ensureCap overloads it needs.
+func primArrayBasesUsed(fs []frame) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, order := range []string{"long", "float", "double"} {
+		for _, fr := range fs {
+			if fr.kind != fkNormal {
+				continue
+			}
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) && primArrayBase(fld.Elem) == order && !seen[order] {
+					seen[order] = true
+					out = append(out, order)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // emitScalarCb writes a callback that routes (cur,id) to a field assignment or a
@@ -318,7 +368,8 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 			case "addBool":
 				stmt = target + ".add(value != 0)"
 			case "index":
-				stmt = target + "[ai++] = value"
+				// Grow the backing array on demand (never trust the wire count).
+				stmt = target + " = ensureCap(" + target + ", ai, acap); " + target + "[ai++] = value"
 			default:
 				stmt = target + " " + act
 			}
