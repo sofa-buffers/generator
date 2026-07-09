@@ -198,12 +198,12 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if stackCap < 4 {
 		stackCap = 4
 	}
-	vInit := "let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, ai: 0 };"
+	vInit := "let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0 };"
 	if g.noStd {
 		if needAcc {
-			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, err: false, ai: 0 };", accNew)
+			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, err: false, inv: false, ai: 0 };", accNew)
 		} else {
-			vInit = "let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, err: false, ai: 0 };"
+			vInit = "let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, err: false, inv: false, ai: 0 };"
 		}
 	}
 	// Infallible, best-effort decode: kept for back-compat. It discards feed's
@@ -226,12 +226,17 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("    pub fn try_decode(data: &[u8]) -> Result<%s, sofab::Error> {", name)
 	f.line("        let mut m = %s::default();", name)
 	f.line("        let overflow;")
+	f.line("        let invalid;")
 	f.line("        {")
 	f.line("            %s", vInit)
 	f.line("            let mut is = IStream::new();")
 	f.line("            is.feed(data, &mut v)?;")
 	f.line("            overflow = v.err;")
+	f.line("            invalid = v.inv;")
 	f.line("        }")
+	f.line("        // A scalar array carried more elements than its schema `count`")
+	f.line("        // (generator#100): INVALID per MESSAGE_SPEC 3+7, never clamp.")
+	f.line("        if invalid { return Err(sofab::Error::InvalidMsg); }")
 	f.line("        // A fixed-capacity field overflowed during the fill (generator#82):")
 	f.line("        // report it rather than return a silently-truncated value.")
 	f.line("        if overflow { return Err(sofab::Error::BufferFull); }")
@@ -268,6 +273,10 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// it instead of silently truncating (generator#82). The std profile has no
 	// fixed capacity, so it never sets it.
 	f.line("    err: bool,")
+	// Sticky malformed-message flag: a native array delivered more elements than
+	// its schema `count` capacity (generator#100). MESSAGE_SPEC 3+7 make this
+	// INVALID, so try_decode must reject — clamping is non-conformant.
+	f.line("    inv: bool,")
 	f.line("    ai: usize, // index into the fixed native array currently being filled")
 	f.line("}")
 	f.blank()
@@ -537,12 +546,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 // emitNativeArrayStore emits one match arm for a direct native array element: a
 // bounds-checked indexed store `if self.ai < N { x[self.ai] = rhs; self.ai += 1; }`
 // for a fixed `[T; N]` array, or a `.push(rhs)` for a dynamic (count-less) `Vec`
-// array. The bound drops excess elements when a malformed wire message supplies
-// more than the schema's `count` (mirrors the Zig/C fills); without it the indexed
-// write panics on over-long input — a crash/DoS on untrusted data (generator#78).
+// array. The bound keeps an over-count element from the indexed write — which
+// would panic, a crash/DoS on untrusted data (generator#78) — and flags the
+// message as malformed: a wire element count above the schema's `count` is
+// INVALID per MESSAGE_SPEC 3+7 and must reject, not clamp (generator#100).
 func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
 	if _, n, ok := g.fixedNativeArray(fld); ok {
-		f.line("            (_Loc::%s, %d) => { if self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } }", fr.loc, fld.ID, n, fr.path, rustIdent(fld.Name), rhs)
+		f.line("            (_Loc::%s, %d) => { if self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } else { self.inv = true; } }", fr.loc, fld.ID, n, fr.path, rustIdent(fld.Name), rhs)
 		return
 	}
 	f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs))

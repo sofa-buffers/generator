@@ -76,6 +76,14 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		f.line("      case %d: %s = %s.decodeFrom(c); break;", x.ID, acc, g.typeName(x.Ref.Key))
 	case ir.KindArray:
 		if nativeArrayElem(x.Elem) {
+			// A wire element count above the schema `count` capacity is INVALID
+			// per MESSAGE_SPEC §3+§7 — reject the whole message, never keep-all
+			// (generator#100). Count-less (dynamic) arrays have no bound.
+			if x.HasCount {
+				f.line("      case %d: { const _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s = _a; break; }",
+					x.ID, g.nativeArrayRead(x.Elem, x.ElemRef), x.Count, x.Name, x.Count, acc)
+				return
+			}
 			f.line("      case %d: %s = %s; break;", x.ID, acc, g.nativeArrayRead(x.Elem, x.ElemRef))
 			return
 		}

@@ -56,7 +56,14 @@ func (g *gen) module(s *ir.Schema) []byte {
 	f.line("import io")
 	f.line("from dataclasses import dataclass, field")
 	f.line("from enum import IntEnum")
-	f.line("from sofab import Encoder, Decoder, WireType")
+	// SofaDecodeError is raised only by the over-count scalar-array guard
+	// (generator#100), so import it only when a count-bearing native array
+	// exists — an unconditional import would be unused for other schemas.
+	if schemaHasCountedNativeArray(s) {
+		f.line("from sofab import Encoder, Decoder, SofaDecodeError, WireType")
+	} else {
+		f.line("from sofab import Encoder, Decoder, WireType")
+	}
 	f.blank()
 
 	// enums + bitfield constants first
@@ -80,6 +87,31 @@ func (g *gen) module(s *ir.Schema) []byte {
 		g.emitDataclass(f, exported(m.Name), m.Summary, m.Fields)
 	}
 	return f.bytes()
+}
+
+// schemaHasCountedNativeArray reports whether any message or named-type field
+// is a native scalar array with a schema `count` — the fields whose decode
+// emits the over-count SofaDecodeError guard (generator#100).
+func schemaHasCountedNativeArray(s *ir.Schema) bool {
+	counted := func(fields []*ir.Field) bool {
+		for _, fld := range fields {
+			if fld.Kind == ir.KindArray && fld.HasCount && isNativeArrayElem(fld.Elem) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, key := range s.NamedOrder {
+		if counted(s.Named[key].Fields) {
+			return true
+		}
+	}
+	for _, m := range s.Messages {
+		if counted(m.Fields) {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
@@ -326,6 +358,13 @@ func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 
 func (g *gen) emitUnmarshalArray(f *pyfile, fld *ir.Field, acc string) {
 	g.unmarshalArray(f, "                ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	// A wire element count above the schema `count` capacity is INVALID per
+	// MESSAGE_SPEC §3+§7 — reject the whole message, never keep-all
+	// (generator#100). Count-less (dynamic) arrays have no bound.
+	if fld.HasCount && isNativeArrayElem(fld.Elem) {
+		f.line("                if len(%s) > %d:", acc, fld.Count)
+		f.line(`                    raise SofaDecodeError("%s: array count above schema capacity %d")`, fld.Name, fld.Count)
+	}
 }
 
 // unmarshalArray reads an array into `target`, mirroring marshalArray: native

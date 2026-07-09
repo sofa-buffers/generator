@@ -60,6 +60,7 @@ func TestCppStructural(t *testing.T) {
 		"std::uint64_t someu64 = 18446744073709551615ULL;",
 		"is.read(",               // nested decode via is.read
 		"float somefp32 = 0.0f;", // valid float literal
+		"if (_count > 4) { is.invalidate(); return; }", // over-count scalar array rejected as INVALID (generator#100)
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q", want)
@@ -178,6 +179,11 @@ func TestCppFixedContainers(t *testing.T) {
 		if !strings.Contains(h, want) {
 			t.Errorf("fixed header missing %q", want)
 		}
+	}
+	// The clib wrapper emits no over-count guard: the C runtime itself rejects a
+	// count/capacity mismatch with SOFAB_RET_E_INVALID_MSG (generator#100).
+	if strings.Contains(h, "is.invalidate()") {
+		t.Error("corelib: c-cpp must not emit is.invalidate() (C runtime already rejects over-count)")
 	}
 	// No std::string / std::vector member for the bounded string/blob fields.
 	if strings.Contains(h, "std::string s ") || strings.Contains(h, "std::vector<std::uint8_t> bl") ||

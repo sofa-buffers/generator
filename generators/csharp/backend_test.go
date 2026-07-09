@@ -61,6 +61,8 @@ func TestCsStructural(t *testing.T) {
 		"if (offset == 0 && chunkLength >= total) {", // string/blob single-shot fast path
 		"_s = Encoding.UTF8.GetString(data, chunkOffset, total);",
 		"System.Array.Copy(data, chunkOffset, _b, 0, total);",
+		// over-count scalar array rejected as INVALID before the (untrusted-count) allocation (#100)
+		"if (count > 4) throw new SofabException(SofabError.InvalidMessage, \"someuintarray: array count above schema capacity 4\"); ",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing %q", want)

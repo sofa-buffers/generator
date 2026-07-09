@@ -326,7 +326,12 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 		f.line("            auto bytes = obj.encode();")
 		f.line("            std::cout.write(reinterpret_cast<const char *>(bytes.data()), bytes.size());")
 		f.line("        } else if (mode == \"decode\") {")
-		f.line("            auto obj = %s::decode(reinterpret_cast<const std::uint8_t *>(in.data()), in.size());", mt)
+		// try_decode, not the best-effort decode: the harness must surface the
+		// accept/reject verdict (a malformed input exits non-zero) so the
+		// conformance run can assert rejects, e.g. over-count arrays (#100).
+		f.line("            %s obj;", mt)
+		f.line("            auto r = %s::try_decode(reinterpret_cast<const std::uint8_t *>(in.data()), in.size(), obj);", mt)
+		f.line("            if (!r.ok()) { std::cerr << \"decode error\\n\"; return 1; }")
 		f.line("            to_json(obj, std::cout); std::cout << \"\\n\";")
 		f.line("        } else { std::cerr << \"unknown mode\\n\"; return 2; }")
 		f.line("    }")

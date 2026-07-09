@@ -63,7 +63,9 @@ func TestRustStructural(t *testing.T) {
 		"pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error>", // fallible entry point (generator#79)
 		"is.feed(data, &mut v)?;",                                      // fallible decode propagates feed's Result
 		"if overflow { return Err(sofab::Error::BufferFull); }",        // fixed-capacity overflow surfaced (generator#82)
+		"if invalid { return Err(sofab::Error::InvalidMsg); }",         // over-count array rejected as INVALID (generator#100)
 		"err: bool,",                           // sticky overflow flag on the visitor (generator#82)
+		"inv: bool,",                           // sticky malformed-message flag (generator#100)
 		"mod myfirstmessage_dec {",             // isolated decode module
 		"fn sequence_begin(&mut self, id: Id)", // flat-visitor nesting
 		"ArrayKind",                            // example has arrays -> array_begin imports it
@@ -73,9 +75,9 @@ func TestRustStructural(t *testing.T) {
 		"pub somefloatarray: [f32; 3],",            // fixed fp array
 		"pub someboolarray: [bool; 8],",            // fixed bool array
 		"someuintarray: [0, 1, 1000, 4294967295],", // default is an N-element array literal
-		"someboolarray: [true, true, false, false, false, false, false, false],",         // short default tail-padded to N
-		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                            // omit-guard is a default compare
-		"if self.ai < 4 { self.m.someuintarray[self.ai] = value as u32; self.ai += 1; }", // bounds-checked indexed decode store (generator#78)
+		"someboolarray: [true, true, false, false, false, false, false, false],",                                   // short default tail-padded to N
+		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                                                      // omit-guard is a default compare
+		"if self.ai < 4 { self.m.someuintarray[self.ai] = value as u32; self.ai += 1; } else { self.inv = true; }", // bounds-checked store (generator#78); over-count rejects (generator#100)
 		"ai: usize", // fill index on the visitor
 		"if offset == 0 && chunk.len() >= total {",                                        // string/blob single-shot fast path
 		"core::str::from_utf8(&chunk[..total]).map(|s| s.to_owned()).unwrap_or_default()", // invalid UTF-8 -> empty, agrees with no_std (generator#80)

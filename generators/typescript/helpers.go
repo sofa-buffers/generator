@@ -130,9 +130,10 @@ func blobHasNonEmptyDefault(f *ir.Field) bool {
 // helperUse records which module-level helpers/imports the schema's emitted
 // classes actually reference, so unused ones are not emitted.
 type helperUse struct {
-	arrEq     bool // element-wise !== compare: blob or non-Long native array with a value default
-	longArrEq bool // (low, high) word compare: Long-backed 64-bit array with a value default
-	long      bool // any Long-backed field -> import Long from the corelib
+	arrEq      bool // element-wise !== compare: blob or non-Long native array with a value default
+	longArrEq  bool // (low, high) word compare: Long-backed 64-bit array with a value default
+	long       bool // any Long-backed field -> import Long from the corelib
+	countedArr bool // count-bearing native array -> import SofabError for the over-count reject (generator#100)
 }
 
 // scanHelpers walks every emitted class's fields and reports which helpers the
@@ -150,6 +151,9 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 				use.long = true
 			}
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
+				if fld.HasCount {
+					use.countedArr = true
+				}
 				if _, ok := g.nativeArrayDefault(fld); ok {
 					if g.longBacked(fld) {
 						use.longArrEq = true

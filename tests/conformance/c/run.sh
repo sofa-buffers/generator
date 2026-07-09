@@ -58,6 +58,20 @@ echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"
 echo "$OUT" | grep -q '"someblob":\[10,20,30' || { echo "FAIL: blob round-trip"; exit 1; }
 echo "==> project harness round-trip OK"
 
+# Over-count scalar array (generator#100): someuintarray declares count: 4
+# (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
+# INVALID per MESSAGE_SPEC 3+7 (the C reference already rejects: the object
+# descriptor binds capacity N and the istream returns SOFAB_RET_E_INVALID_MSG);
+# exactly 4 still decode.
+echo "==> over-count scalar array must reject (generator#100)"
+printf '\173\005\001\002\003\004\005' > "$WORK/overcount.bin"
+printf '\173\004\001\002\003\004' > "$WORK/control.bin"
+if "$WORK/proj/harness/harness" decode < "$WORK/overcount.bin" >/dev/null 2>&1; then
+    echo "FAIL: over-count scalar array (5 > count 4) must be INVALID"; exit 1
+fi
+"$WORK/proj/harness/harness" decode < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
+echo "==> over-count reject OK"
+
 echo "==> M5: default omission is byte-exact sparse (non-zero scalar + string defaults)"
 # The C backend emits a const default image + SOFAB_OBJECT_DESCR_WITH_DEFAULTS, so
 # a field equal to its (possibly non-zero) schema default is dropped from the wire

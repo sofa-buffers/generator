@@ -305,3 +305,49 @@ func arrLen(t *testing.T, bin, msg, hexBytes string) int {
 	}
 	return len(m["arr"].([]any))
 }
+
+// decExpectErr feeds hex bytes to `harness decode` and requires a non-zero exit
+// (the generated decode surfaced an error).
+func decExpectErr(t *testing.T, bin, msg, hexBytes string) {
+	t.Helper()
+	raw, err := hex.DecodeString(hexBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "decode", msg)
+	cmd.Stdin = bytes.NewReader(raw)
+	if out, err := cmd.Output(); err == nil {
+		t.Fatalf("decode %s %s: expected a decode error (INVALID per MESSAGE_SPEC §3+§7), got %s", msg, hexBytes, out)
+	}
+}
+
+// --- over-count scalar arrays (MESSAGE_SPEC §3+§7, generator#100) ----------
+
+// TestOverCountScalarArrayRejected: a count-prefixed scalar array whose wire
+// element count exceeds the schema `count` capacity N must fail the whole
+// decode (INVALID) — no clamp, no keep-all. `count == N` still decodes, and a
+// count-less (dynamic) array keeps every element.
+func TestOverCountScalarArrayRejected(t *testing.T) {
+	corelib := requireGoCorelib(t)
+	def := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      arr: {id: 0, type: array, items: {type: u8, count: 5}}\n"
+	bin := buildGoHarnessCfg(t, corelib, def, nil)
+
+	// Control: exactly N elements decode (issue #100 reproducer, control).
+	// A []uint8 field is []byte to encoding/json, so it renders as base64:
+	// "AQIDBAU=" == 01 02 03 04 05.
+	if got := decJSON(t, bin, "vec", "03050102030405"); got != normJSON(t, `{"arr":"AQIDBAU="}`) {
+		t.Errorf("control (count == N) must decode: got %s", got)
+	}
+	// Over-count by one: 6 elements against count: 5 must reject.
+	decExpectErr(t, bin, "vec", "0306010203040506")
+
+	// A dynamic (count-less) array has no N: keep-all stays correct. u16 keeps
+	// the same unsigned-array wire form but renders as a JSON array.
+	dynDef := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      arr: {id: 0, type: array, items: {type: u16}}\n"
+	dynBin := buildGoHarnessCfg(t, corelib, dynDef, nil)
+	if got := arrLen(t, dynBin, "vec", "0306010203040506"); got != 6 {
+		t.Errorf("dynamic array must keep all 6 elements, got %d", got)
+	}
+}

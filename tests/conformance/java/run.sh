@@ -52,6 +52,18 @@ echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 roun
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
 
+# Over-count scalar array (generator#100): someuintarray declares count: 4
+# (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
+# INVALID per MESSAGE_SPEC 3+7 (decode exits non-zero); exactly 4 still decode.
+echo "==> over-count scalar array must reject (generator#100)"
+printf '\173\005\001\002\003\004\005' > "$WORK/overcount.bin"
+printf '\173\004\001\002\003\004' > "$WORK/control.bin"
+if $H decode myfirstmessage < "$WORK/overcount.bin" >/dev/null 2>&1; then
+    echo "FAIL: over-count scalar array (5 > count 4) must be INVALID"; exit 1
+fi
+$H decode myfirstmessage < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
+echo "==> over-count reject OK"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/java/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/target/harness.jar"
 
