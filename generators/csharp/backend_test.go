@@ -53,6 +53,7 @@ func TestCsStructural(t *testing.T) {
 		"public void Marshal(OStream os)",
 		"public byte[] Encode()",
 		"public static Myfirstmessage Decode(byte[] data)",
+		"public static DecodeStatus TryDecode(byte[] data, out Myfirstmessage msg)", // status-surfacing decode (#105)
 		"internal sealed class MyfirstmessageVisitor : IVisitor {",
 		"public void SequenceBegin(int id)", // flat-visitor nesting
 		"public ulong someu64 = 18446744073709551615UL;",

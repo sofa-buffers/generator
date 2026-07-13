@@ -543,6 +543,21 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    nested message types' differently-shaped visitor objects. corelib-ts keeps the
    flat `Visitor`/`decode` path too, for streaming callers.
 
+**Decode outcome (MESSAGE_SPEC §7).** Every corelib reports the finish-less
+three-valued outcome — COMPLETE / INCOMPLETE / INVALID — and the generated
+one-shot decode must not hide it. For corelibs that surface INCOMPLETE as an
+error/exception (Go, Rust, C++, C, Python, TS, Zig) the fallible decode entry
+point (`try_decode`, Go's `(msg, error)`, thrown exceptions) already propagates
+all three. The **status-returning** corelibs (C#, Java) treat INCOMPLETE as a
+non-error status (`DecodeStatus` from `Feed`/`status()`), so their backends emit
+an additional status-surfacing entry point next to the back-compat best-effort
+`Decode`/`decode`: C# `static DecodeStatus TryDecode(byte[] data, out T msg)`
+and Java `static DecodeStatus tryDecode(byte[] data, T out) throws
+SofabException` — the status is returned, malformed input still throws
+(generator#105 / G-0008). Project-mode harnesses expose this as a `trydecode`
+mode (status line, then JSON), which the conformance harnesses use to pin
+"lone `0x80` → INCOMPLETE, empty input → COMPLETE".
+
 ### 9.4 Capability / value-width model
 
 Footprint-tunable corelibs gate wire types behind build switches; the generator
@@ -575,8 +590,8 @@ only needs to mirror their *names* and gate on the schema's used features:
 | **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; `Decode` via zero-copy `sofab.AcceptBytes`; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
 | **Python** | `corelib-py` | pull-parser | dataclasses + `_marshal`/`_unmarshal`. |
 | **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`. |
-| **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; System.Text.Json harness. |
-| **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); Gson harness. |
+| **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
+| **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
 | **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `marshal`; zero-copy decode (strings/blobs borrow the input buffer, arrays from a caller allocator); fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 

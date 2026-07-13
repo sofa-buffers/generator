@@ -46,6 +46,10 @@ public sealed class Scalars {
         new IStream().Feed(data, 0, data.Length, v);
         return m;
     }
+    public static DecodeStatus TryDecode(byte[] data, out Scalars msg) {
+        msg = new Scalars();
+        return new IStream().Feed(data, 0, data.Length, new ScalarsVisitor(msg));
+    }
 }
 
 internal sealed class ScalarsVisitor : IVisitor {

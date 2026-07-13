@@ -157,11 +157,27 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		f.line("            return Arrays.copyOf(buf, os.bytesUsed());")
 		f.line("        } catch (IOException e) { throw new RuntimeException(e); }")
 		f.line("    }")
+		// Best-effort decode: kept for back-compat. feed() suspends without
+		// throwing on a truncated message, so this cannot tell COMPLETE from
+		// INCOMPLETE — prefer tryDecode when that verdict matters
+		// (generator#105).
 		f.line("    public static %s decode(byte[] data) {", name)
 		f.line("        %s m = new %s();", name, name)
 		f.line("        try { new IStream().feed(data, new %sVisitor(m)); }", name)
 		f.line("        catch (Exception e) { throw new RuntimeException(e); }")
 		f.line("        return m;")
+		f.line("    }")
+		// Status-surfacing one-shot decode (MESSAGE_SPEC §7): fills the
+		// caller-provided instance with the fields decoded so far and returns
+		// the corelib's terminal DecodeStatus — COMPLETE at a clean field
+		// boundary, INCOMPLETE when the bytes end inside a field or an open
+		// sequence. Malformed input throws SofabException (INVALID) from feed;
+		// the caller owns end-of-input and decides whether a trailing
+		// INCOMPLETE is a truncation error.
+		f.line("    public static DecodeStatus tryDecode(byte[] data, %s out) throws SofabException {", name)
+		f.line("        IStream is = new IStream();")
+		f.line("        is.feed(data, new %sVisitor(out));", name)
+		f.line("        return is.status();")
 		f.line("    }")
 	}
 	f.line("}")
