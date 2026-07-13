@@ -131,11 +131,25 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		f.line("        Array.Copy(buf, outp, os.BytesUsed);")
 		f.line("        return outp;")
 		f.line("    }")
+		// Best-effort decode: kept for back-compat. It discards Feed's
+		// DecodeStatus, so a truncated message is indistinguishable from a
+		// COMPLETE one — prefer TryDecode when that verdict matters
+		// (generator#105).
 		f.line("    public static %s Decode(byte[] data) {", name)
 		f.line("        var m = new %s();", name)
 		f.line("        var v = new %sVisitor(m);", name)
 		f.line("        new IStream().Feed(data, 0, data.Length, v);")
 		f.line("        return m;")
+		f.line("    }")
+		// Status-surfacing one-shot decode (MESSAGE_SPEC §7): returns the
+		// corelib's terminal DecodeStatus — Complete at a clean field boundary,
+		// Incomplete when the bytes end inside a field or an open sequence.
+		// Malformed input throws SofabException (Invalid) from Feed. msg always
+		// receives the fields decoded so far; on Incomplete the caller owns
+		// end-of-input and decides whether truncation is an error.
+		f.line("    public static DecodeStatus TryDecode(byte[] data, out %s msg) {", name)
+		f.line("        msg = new %s();", name)
+		f.line("        return new IStream().Feed(data, 0, data.Length, new %sVisitor(msg));", name)
 		f.line("    }")
 	}
 	f.line("}")

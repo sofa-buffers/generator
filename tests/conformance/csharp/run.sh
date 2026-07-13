@@ -54,6 +54,14 @@ echo "==> round-trip OK"
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"
 
+echo "==> §7 decode status through the generated API (generator#105)"
+HC="dotnet $WORK/conf/bin/Debug/net9.0/harness.dll"
+ST=$(printf '\200' | $HC trydecode vecu | head -n1)   # lone 0x80: dangling varint
+[ "$ST" = "INCOMPLETE" ] || { echo "FAIL: lone 0x80 -> $ST (want INCOMPLETE)"; exit 1; }
+ST=$(printf '' | $HC trydecode vecu | head -n1)       # empty message: valid
+[ "$ST" = "COMPLETE" ] || { echo "FAIL: empty message -> $ST (want COMPLETE)"; exit 1; }
+echo "==> TryDecode status OK (0x80 INCOMPLETE, empty COMPLETE)"
+
 echo "==> corpus + realworld: every definition builds"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)

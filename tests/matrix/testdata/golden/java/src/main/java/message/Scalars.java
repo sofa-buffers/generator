@@ -45,6 +45,11 @@ public class Scalars {
         catch (Exception e) { throw new RuntimeException(e); }
         return m;
     }
+    public static DecodeStatus tryDecode(byte[] data, Scalars out) throws SofabException {
+        IStream is = new IStream();
+        is.feed(data, new ScalarsVisitor(out));
+        return is.status();
+    }
 }
 
 class ScalarsVisitor implements Visitor {

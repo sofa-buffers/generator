@@ -53,6 +53,7 @@ func TestJavaStructural(t *testing.T) {
 		"public void marshal(OStream os) throws IOException",
 		"public byte[] encode()",
 		"public static Myfirstmessage decode(byte[] data)",
+		"public static DecodeStatus tryDecode(byte[] data, Myfirstmessage out) throws SofabException", // status-surfacing decode (#105)
 		"class MyfirstmessageVisitor implements Visitor {",
 		"public void sequenceBegin(int id)", // flat-visitor nesting
 		"public long someu64 = Long.parseUnsignedLong(\"18446744073709551615\");",
