@@ -82,6 +82,20 @@ run_variant() {
     done
     echo "==> [$label] round-trip OK"
 
+    # Over-count scalar array (generator#100): someuintarray declares count: 4
+    # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
+    # INVALID per MESSAGE_SPEC 3+7 (pure cpp: the generated guard calls
+    # is.invalidate(); c-cpp: the C runtime rejects the count/capacity
+    # mismatch); exactly 4 still decode.
+    echo "==> [$label] over-count scalar array must reject (generator#100)"
+    printf '\173\005\001\002\003\004\005' > "$WORK/overcount.bin"
+    printf '\173\004\001\002\003\004' > "$WORK/control.bin"
+    if "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overcount.bin" >/dev/null 2>&1; then
+        echo "FAIL: [$label] over-count scalar array (5 > count 4) must be INVALID"; exit 1
+    fi
+    "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/control.bin" >/dev/null || { echo "FAIL: [$label] control (count == 4) must decode"; exit 1; }
+    echo "==> [$label] over-count reject OK"
+
     echo "==> [$label] shared-vector byte-exact conformance"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf-$label" )
     make -C "$WORK/conf-$label" "$@" >/dev/null

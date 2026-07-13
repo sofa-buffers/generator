@@ -245,7 +245,19 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	if g.clib {
 		sizeParam = "std::size_t _size"
 	}
-	f.line("    void deserialize(sofab::IStreamImpl &is, sofab::id id, %s, std::size_t) noexcept override {", sizeParam)
+	// The wire element count (_count) is needed for the over-count guard on
+	// count-bearing native arrays (generator#100); in clib mode the C runtime
+	// rejects a count/capacity mismatch itself, so the parameter stays unnamed.
+	countParam := "std::size_t"
+	if !g.clib {
+		for _, fld := range fields {
+			if fld.Kind == ir.KindArray && fld.HasCount && isNativeArrayElem(fld.Elem) {
+				countParam = "std::size_t _count"
+				break
+			}
+		}
+	}
+	f.line("    void deserialize(sofab::IStreamImpl &is, sofab::id id, %s, %s) noexcept override {", sizeParam, countParam)
 	f.line("        switch (id) {")
 	for _, fld := range fields {
 		f.line("        case %d:", fld.ID)
@@ -467,6 +479,14 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			f.line("            { std::uint64_t _v = 0; is.read(_v); %s = static_cast<%s>(_v); }", acc, g.cppType(fld))
 		}
 	case ir.KindArray:
+		// A wire element count above the schema `count` capacity is INVALID per
+		// MESSAGE_SPEC §3+§7 — poison the stream so feed()/try_decode report
+		// Error::InvalidMessage instead of the corelib read clamping the excess
+		// (generator#100). The clib wrapper needs no guard: the C runtime
+		// rejects a count/capacity mismatch on its own (SOFAB_RET_E_INVALID_MSG).
+		if !g.clib && fld.HasCount && isNativeArrayElem(fld.Elem) {
+			f.line("            if (_count > %d) { is.invalidate(); return; }", fld.Count)
+		}
 		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0)
 	}
 }

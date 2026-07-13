@@ -1,6 +1,10 @@
 package csharp
 
-import "github.com/sofa-buffers/generator/internal/ir"
+import (
+	"fmt"
+
+	"github.com/sofa-buffers/generator/internal/ir"
+)
 
 // frame is one location in the flat-visitor state machine: either an object
 // scope (root / struct / union / array-element object, with fields) or an array
@@ -219,10 +223,19 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 			continue
 		}
 		for _, fld := range fr.fields {
+			// A wire element count above the schema `count` capacity is INVALID
+			// per MESSAGE_SPEC §3+§7 — reject up front, never clamp or keep-all
+			// (generator#100). The guard also bounds the eager `new T[count]`
+			// below to the schema capacity (the count is untrusted, cf. #96).
+			guard := ""
+			if fld.HasCount {
+				guard = fmt.Sprintf("if (count > %d) throw new SofabException(SofabError.InvalidMessage, \"%s: array count above schema capacity %d\"); ",
+					fld.Count, fld.Name, fld.Count)
+			}
 			if fld.Kind == ir.KindArray && primArrayElem(fld.Elem) {
-				f.line("            case (%s, %d): %s.%s = new %s[count]; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
+				f.line("            case (%s, %d): %s%s.%s = new %s[count]; break;", fr.loc, fld.ID, guard, fr.path, csIdent(fld.Name), g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
-				f.line("            case (%s, %d): %s.%s.Clear(); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
+				f.line("            case (%s, %d): %s%s.%s.Clear(); break;", fr.loc, fld.ID, guard, fr.path, csIdent(fld.Name))
 			}
 		}
 	}

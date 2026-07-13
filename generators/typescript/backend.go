@@ -57,11 +57,15 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
 	use := g.scanHelpers(s)
+	imports := []string{"OStream", "Cursor"}
 	if use.long {
-		f.line("import { OStream, Cursor, Long } from %q;", corelibPkg)
-	} else {
-		f.line("import { OStream, Cursor } from %q;", corelibPkg)
+		imports = append(imports, "Long")
 	}
+	if use.countedArr {
+		// Only the over-count scalar-array reject (generator#100) throws.
+		imports = append(imports, "SofabError", "SofabErrorCode")
+	}
+	f.line("import { %s } from %q;", strings.Join(imports, ", "), corelibPkg)
 	f.blank()
 	if use.arrEq {
 		f.line("%s", arrEqHelper)

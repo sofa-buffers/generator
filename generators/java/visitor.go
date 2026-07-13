@@ -254,11 +254,20 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		}
 		var arms []string
 		for _, fld := range fr.fields {
+			// A wire element count above the schema `count` capacity is INVALID
+			// per MESSAGE_SPEC §3+§7 — reject up front, never clamp or keep-all
+			// (generator#100). Unchecked wrapper: Visitor callbacks cannot throw
+			// the checked SofabException; decode() rethrows as RuntimeException.
+			guard := ""
+			if fld.HasCount {
+				guard = fmt.Sprintf("if (count > %d) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"%s: array count above schema capacity %d\")); ",
+					fld.Count, fld.Name, fld.Count)
+			}
 			if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) {
 				target := fr.path + "." + javaIdent(fld.Name)
-				arms = append(arms, jcase(fld.ID, target+" = new "+primArrayBase(fld.Elem)+"[Math.min(count, ARRAY_INIT_CAP)]"))
+				arms = append(arms, jcase(fld.ID, guard+target+" = new "+primArrayBase(fld.Elem)+"[Math.min(count, ARRAY_INIT_CAP)]"))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) { // boolean List
-				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+".clear()"))
+				arms = append(arms, jcase(fld.ID, guard+fr.path+"."+javaIdent(fld.Name)+".clear()"))
 			}
 		}
 		if len(arms) > 0 {

@@ -53,7 +53,7 @@ func genTS(t *testing.T) string {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, Cursor } from "@sofa-buffers/corelib";`,
+		`import { OStream, Cursor, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`, // over-count reject needs the error type (generator#100)
 		"export class Myfirstmessage {",
 		"marshal(os: OStream): void {",
 		"static decode(bytes: Uint8Array): Myfirstmessage {",
@@ -128,7 +128,7 @@ func genTSWith(t *testing.T, src string, cfg map[string]any) string {
 func TestTSInt64Long(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "long"})
 	for _, want := range []string{
-		`import { OStream, Cursor, Long } from "@sofa-buffers/corelib";`,
+		`import { OStream, Cursor, Long, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once.
 		"private _us: Long[] = [];",
 		"get us(): Long[] { return this._us; }",
@@ -144,9 +144,10 @@ func TestTSInt64Long(t *testing.T) {
 		`private _ud: Long[] = [Long.fromValue(1n), Long.fromValue(18446744073709551615n)];`,
 		"if (!longArrEq(this._ud, [Long.fromValue(1n), Long.fromValue(18446744073709551615n)])) {",
 		"function longArrEq(a: readonly Long[], b: readonly Long[]): boolean {",
-		// Decode bypasses the setter (readers return canonical Long[]).
-		"case 0: o._us = c.readUnsignedArrayLong(); break;",
-		"case 1: o._is = c.readSignedArrayLong(); break;",
+		// Decode bypasses the setter (readers return canonical Long[]); a wire
+		// count above the schema capacity rejects as INVALID (generator#100).
+		`case 0: { const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _a; break; }`,
+		`case 1: { const _a = c.readSignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "is: array count above schema capacity 8"); o._is = _a; break; }`,
 		// toJSON prints via Long.toString with the schema signedness.
 		`"us": this._us.map((_x0) => _x0.toString(false)),`,
 		`"is": this._is.map((_x0) => _x0.toString(true)),`,
@@ -173,7 +174,7 @@ func TestTSInt64Number(t *testing.T) {
 	for _, want := range []string{
 		// Arrays are Long-backed exactly as in long mode.
 		"os.writeUnsignedArrayLong(0, this._us);",
-		"case 0: o._us = c.readUnsignedArrayLong(); break;",
+		`case 0: { const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _a; break; }`,
 		// Scalars are plain numbers: number default, !== 0 guard, Number() decode.
 		"u: number = 0;",
 		"i: number = -7;",
@@ -197,10 +198,10 @@ func TestTSInt64Default(t *testing.T) {
 	for _, cfg := range []map[string]any{{}, {"int64": "bigint"}} {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
-			`import { OStream, Cursor } from "@sofa-buffers/corelib";`,
+			`import { OStream, Cursor, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`,
 			"us: bigint[] = [];",
 			"os.writeUnsignedArray(0, this.us);",
-			"case 0: o.us = c.readUnsignedArray() as bigint[]; break;",
+			`case 0: { const _a = c.readUnsignedArray() as bigint[]; if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o.us = _a; break; }`,
 			"u: bigint = 0n;",
 		} {
 			if !strings.Contains(mod, want) {

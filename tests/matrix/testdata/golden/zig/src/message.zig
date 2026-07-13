@@ -50,6 +50,9 @@ pub const Scalars = struct {
         var m: Scalars = .{};
         var v: _dec_Scalars = .{ .m = &m, .alloc = alloc };
         try sofab.decode(data, &v);
+        // A scalar array carried more elements than its schema count:
+        // INVALID per MESSAGE_SPEC 3+7, never clamp (generator#100).
+        if (v.inv) return error.InvalidMessage;
         return m;
     }
 };
@@ -60,6 +63,7 @@ const _dec_Scalars = struct {
     m: *Scalars,
     alloc: std.mem.Allocator,
     cur: _Loc = .root,
+    inv: bool = false, // a scalar array overflowed its schema count -> INVALID
 
     const _Loc = enum {
         root,
@@ -127,10 +131,24 @@ const _EncodeSink = struct {
     }
 };
 
-/// Store the next native-array element, bounds-checked (a hostile count can
-/// exceed the destination capacity; excess elements are dropped).
+/// Store the next native-array element into a dynamic (count-less) slice,
+/// bounds-checked; the slice is pre-sized to the wire count, so the bound
+/// only guards a failed allocation (the data is then dropped).
 fn _put(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s))) void {
     if (i.* >= s.len) return;
+    @constCast(&s[i.*]).* = v;
+    i.* += 1;
+}
+
+/// Store the next native-array element into a fixed [N]T destination. An
+/// element past the schema capacity N flags the message malformed: a wire
+/// count above the schema count is INVALID per MESSAGE_SPEC 3+7 and must be
+/// rejected, not clamped (generator#100).
+fn _putc(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s)), inv: *bool) void {
+    if (i.* >= s.len) {
+        inv.* = true;
+        return;
+    }
     @constCast(&s[i.*]).* = v;
     i.* += 1;
 }

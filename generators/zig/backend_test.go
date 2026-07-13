@@ -72,7 +72,8 @@ func TestZigStructural(t *testing.T) {
 		"somemap: []const MyfirstmessageSomemap",                                              // dynamic composite array -> slice
 		"if (!std.mem.eql(u32, self.someuintarray[0..], &.{ 0, 1, 1000, 4294967295 })) {",     // omit-guard vs default
 		"std.mem.sliceAsBytes",                                                                // bool array 0/1 lowering
-		"_put(&self.m.someuintarray, &self.ai,",                                               // bounds-checked indexed store
+		"_putc(&self.m.someuintarray, &self.ai,",                                              // capacity-checked indexed store (generator#100)
+		"if (v.inv) return error.InvalidMessage;",                                             // over-count array rejected as INVALID (generator#100)
 		"if (offset != 0) return;",                                                            // single-shot payload guard
 		"self.m.somestring = chunk,",                                                          // zero-copy string decode
 		"/// Unsigned 8-bit integer",                                                          // descriptions as doc comments

@@ -176,6 +176,17 @@ func (g *gen) putTarget(fr frame, fld *ir.Field) string {
 	return acc
 }
 
+// putCall renders the element store for a direct native array field: the
+// capacity-checked _putc for a fixed [N]T — an over-count element flags the
+// message INVALID per MESSAGE_SPEC 3+7 (generator#100) — or plain _put for a
+// dynamic (count-less) slice, which keeps every wire element.
+func (g *gen) putCall(fr frame, fld *ir.Field, val string) string {
+	if _, _, ok := g.fixedNativeArray(fld); ok {
+		return fmt.Sprintf("_putc(%s, &self.ai, %s, &self.inv)", g.putTarget(fr, fld), val)
+	}
+	return fmt.Sprintf("_put(%s, &self.ai, %s)", g.putTarget(fr, fld), val)
+}
+
 // storeCast renders the visitor value expression for a numeric destination
 // type: u64/i64 pass through, narrower integers truncate (the declared width
 // is a storage hint; the wire value is a single varint).
@@ -202,6 +213,10 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 		f.line("    sp: usize = 0,")
 	}
 	f.line("    cur: _Loc = .root,")
+	// Sticky malformed-message flag: a fixed native array received more
+	// elements than its schema count (generator#100); decode() then rejects
+	// with error.InvalidMessage. Always present so decode() can check it.
+	f.line("    inv: bool = false, // a scalar array overflowed its schema count -> INVALID")
 	if use.scalarArray {
 		f.line("    ai: usize = 0, // index into the native array currently being filled")
 	}
@@ -252,9 +267,9 @@ func (g *gen) intArm(fr frame, fld *ir.Field, signed bool) string {
 		case fld.Kind == ir.KindEnum:
 			return fmt.Sprintf("%s = %s", acc, storeCast(enumBacking(fld.Ref.Target), "value"))
 		case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
-			return fmt.Sprintf("_put(%s, &self.ai, %s)", g.putTarget(fr, fld), storeCast(numZigType(fld.Elem), "value"))
+			return g.putCall(fr, fld, storeCast(numZigType(fld.Elem), "value"))
 		case fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum:
-			return fmt.Sprintf("_put(%s, &self.ai, %s)", g.putTarget(fr, fld), storeCast(enumBacking(fld.ElemRef.Target), "value"))
+			return g.putCall(fr, fld, storeCast(enumBacking(fld.ElemRef.Target), "value"))
 		}
 		return ""
 	}
@@ -266,11 +281,11 @@ func (g *gen) intArm(fr frame, fld *ir.Field, signed bool) string {
 	case fld.Kind == ir.KindBitfield:
 		return fmt.Sprintf("%s = %s", acc, storeCast(bitfieldBacking(fld.Ref.Target), "value"))
 	case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
-		return fmt.Sprintf("_put(%s, &self.ai, %s)", g.putTarget(fr, fld), storeCast(numZigType(fld.Elem), "value"))
+		return g.putCall(fr, fld, storeCast(numZigType(fld.Elem), "value"))
 	case fld.Kind == ir.KindArray && fld.Elem == ir.KindBool:
-		return fmt.Sprintf("_put(%s, &self.ai, value != 0)", g.putTarget(fr, fld))
+		return g.putCall(fr, fld, "value != 0")
 	case fld.Kind == ir.KindArray && fld.Elem == ir.KindBitfield:
-		return fmt.Sprintf("_put(%s, &self.ai, %s)", g.putTarget(fr, fld), storeCast(bitfieldBacking(fld.ElemRef.Target), "value"))
+		return g.putCall(fr, fld, storeCast(bitfieldBacking(fld.ElemRef.Target), "value"))
 	}
 	return ""
 }
@@ -383,7 +398,7 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 			case fld.Kind == kind:
 				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = value,", fld.ID, acc))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => _put(%s, &self.ai, value),", fld.ID, g.putTarget(fr, fld)))
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, g.putCall(fr, fld, "value")))
 			}
 		}
 		if len(fa.arms) > 0 {

@@ -60,7 +60,9 @@ func genPy(t *testing.T, s *ir.Schema, cfg map[string]any) map[string][]byte {
 func TestPythonStructural(t *testing.T) {
 	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["message.py"])
 	for _, want := range []string{
-		"from sofab import Encoder, Decoder, WireType",
+		// example.yaml has count-bearing native arrays, so the over-count guard
+		// (generator#100) pulls in SofaDecodeError.
+		"from sofab import Encoder, Decoder, SofaDecodeError, WireType",
 		"@dataclass",
 		"class Myfirstmessage:",
 		"def _marshal(self, e: Encoder)",
@@ -68,6 +70,8 @@ func TestPythonStructural(t *testing.T) {
 		"class MyfirstmessageSomeenum(IntEnum):",
 		"def to_jsonable(self)",
 		"e.write_sequence_begin(",
+		"if len(self.someuintarray) > 4:", // over-count scalar array rejected (generator#100)
+		`raise SofaDecodeError("someuintarray: array count above schema capacity 4")`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q", want)

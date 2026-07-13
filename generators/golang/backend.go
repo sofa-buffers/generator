@@ -518,15 +518,22 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 		case ir.KindStruct, ir.KindUnion:
 			seq = append(seq, arm(fld.ID, fmt.Sprintf("return &%s, nil", acc)))
 		case ir.KindArray:
+			// A wire element count above the schema `count` capacity is INVALID
+			// per MESSAGE_SPEC §3+§7 — reject, never clamp or keep-all
+			// (generator#100). Count-less (dynamic) arrays have no bound.
+			guard := ""
+			if fld.HasCount {
+				guard = fmt.Sprintf("if len(v) > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", fld.Count)
+			}
 			switch {
 			case isUnsignedNativeArray(fld.Elem):
-				uArr = append(uArr, arm(fld.ID, g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
+				uArr = append(uArr, arm(fld.ID, guard+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
 			case isSignedNativeArray(fld.Elem):
-				sArr = append(sArr, arm(fld.ID, g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
+				sArr = append(sArr, arm(fld.ID, guard+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
 			case fld.Elem == ir.KindFP32:
-				f32Arr = append(f32Arr, arm(fld.ID, acc+" = v"))
+				f32Arr = append(f32Arr, arm(fld.ID, guard+acc+" = v"))
 			case fld.Elem == ir.KindFP64:
-				f64Arr = append(f64Arr, arm(fld.ID, acc+" = v"))
+				f64Arr = append(f64Arr, arm(fld.ID, guard+acc+" = v"))
 			default: // wrapper-sequence array (string/blob/struct/union/nested)
 				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s = %s[:0]\n\t\treturn %s, nil", acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems))))
 			}

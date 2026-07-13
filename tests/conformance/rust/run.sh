@@ -68,6 +68,19 @@ run_variant() {
     echo "$OUT" | grep -q '"someblob":\[10,20,30\]' || { echo "FAIL: [$label] blob round-trip"; exit 1; }
     echo "==> [$label] round-trip OK"
 
+    # Over-count scalar array (generator#100): someuintarray declares count: 4
+    # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
+    # INVALID per MESSAGE_SPEC 3+7 (try_decode rejects, harness exits non-zero);
+    # exactly 4 still decode.
+    echo "==> [$label] over-count scalar array must reject (generator#100)"
+    printf '\173\005\001\002\003\004\005' > "$WORK/overcount.bin"
+    printf '\173\004\001\002\003\004' > "$WORK/control.bin"
+    if (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overcount.bin" >/dev/null 2>&1); then
+        echo "FAIL: [$label] over-count scalar array (5 > count 4) must be INVALID"; exit 1
+    fi
+    (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/control.bin" >/dev/null) || { echo "FAIL: [$label] control (count == 4) must decode"; exit 1; }
+    echo "==> [$label] over-count reject OK"
+
     echo "==> [$label] shared-vector byte-exact conformance"
     python3 "$ROOT/tests/conformance/rust/check_vectors.py" "$corelib/assets/test_vectors.json" "$WORK/conf-$label"
 

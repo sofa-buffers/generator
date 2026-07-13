@@ -147,7 +147,13 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                let obj: %s = serde_json::from_slice(&input).expect(\"json\");", mt)
 		f.line("                std::io::stdout().write_all(&obj.encode()).unwrap();")
 		f.line("            } else if mode == \"decode\" {")
-		f.line("                let obj = %s::decode(&input);", mt)
+		// try_decode, not the best-effort decode: the harness must surface the
+		// accept/reject verdict (a malformed input exits non-zero) so the
+		// conformance run can assert rejects, e.g. over-count arrays (#100).
+		f.line("                let obj = match %s::try_decode(&input) {", mt)
+		f.line("                    Ok(o) => o,")
+		f.line("                    Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }")
+		f.line("                };")
 		f.line("                println!(\"{}\", serde_json::to_string(&obj).unwrap());")
 		f.line("            } else { eprintln!(\"unknown mode\"); std::process::exit(2); }")
 		f.line("        }")

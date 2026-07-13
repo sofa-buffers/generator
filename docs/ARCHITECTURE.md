@@ -558,6 +558,40 @@ SofabException` — the status is returned, malformed input still throws
 mode (status line, then JSON), which the conformance harnesses use to pin
 "lone `0x80` → INCOMPLETE, empty input → COMPLETE".
 
+#### Decode verdict: over-count scalar arrays are INVALID (all families)
+
+MESSAGE_SPEC §3 makes a scalar-array field's schema `count` its capacity **N**
+(the wire carries the actual element count, `0..N`), and §7 classifies "a
+length or count above its maximum" as **INVALID** — silently accepting it is
+non-conformant. Every generated decoder therefore **rejects** a scalar array
+whose wire element count exceeds N: the whole decode fails with the backend's
+malformed-message error (never clamp, never keep-all). Count-less (dynamic)
+arrays have no N and keep every element. Who enforces it differs by family
+(generator#100):
+
+- **Corelib-enforced** — C and the C++ `c-cpp` wrapper: the object descriptor /
+  `is.read` binds the member's capacity, and the C istream rejects a
+  count/capacity mismatch with `SOFAB_RET_E_INVALID_MSG`. No generated guard.
+- **Generated guard, corelib error hook** — pure C++ `corelib-cpp`: the
+  generated `deserialize` compares the delivered count against N and calls
+  `IStreamImpl::invalidate()`, so `feed()`/`try_decode` return
+  `Error::InvalidMessage`.
+- **Generated guard, sticky flag** — Rust (`inv` on the visitor, surfaced by
+  `try_decode` as `Error::InvalidMsg`; distinct from the `err`/`BufferFull`
+  capacity-overflow flag) and Zig (`inv` on the decoder; `decode` returns
+  `error.InvalidMessage`).
+- **Generated guard, error return / throw** — Go (`len(v) > N` in the array
+  callback returns `sofab.ErrInvalidMsg` through `AcceptBytes`), Java
+  (`arrayBegin` throws `SofabException(INVALID_MSG)` wrapped unchecked), C#
+  (`ArrayBegin` throws `SofabException(InvalidMessage)` — the guard also bounds
+  the eager `new T[count]` allocation), Python (`raise SofaDecodeError` after
+  the whole-array read), TypeScript (`throw SofabError(InvalidMsg)` after the
+  whole-array read).
+
+The infallible best-effort entry points kept for back-compat (Rust/C++
+`decode`) still discard the verdict; the fallible path is authoritative, and
+the conformance harnesses assert the reject through it (§12).
+
 ### 9.4 Capability / value-width model
 
 Footprint-tunable corelibs gate wire types behind build switches; the generator
@@ -665,7 +699,12 @@ A reimplementation is **conformant** when it reproduces these gates:
    interop.
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
-   field kind (`tests/conformance/<lang>/run.sh`).
+   field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one
+   **malformed** input — an over-count scalar array (5 elements against
+   `someuintarray`'s `count: 4`) — and asserts the decode **fails** (INVALID,
+   §9.3), while the `count == N` control still decodes (generator#100). The
+   harness `decode` therefore uses the fallible entry point everywhere (Rust
+   `try_decode`, C++ `try_decode`, …).
 3. **Corpus** (`tests/matrix`) — a corner-case corpus generated across **all**
    backends; invalid defs are rejected; dangling-ref + depth-cap enforced.
    Per-language `run.sh` additionally **compiles/builds every corpus def** against
