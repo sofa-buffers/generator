@@ -334,14 +334,15 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		}
 	}
 	// The wire element count (_count) is needed for the over-count guard on
-	// count-bearing native arrays (generator#100) and the limit guard on
-	// count-less ones (#102); in clib mode the C runtime rejects a
-	// count/capacity mismatch itself, so the parameter stays unnamed.
+	// count-bearing native arrays (generator#100), the limit guard on count-less
+	// ones (#102), and to size a count-less native vector before its span read
+	// (#112); in clib mode the C runtime rejects a count/capacity mismatch itself,
+	// so the parameter stays unnamed.
 	countParam := "std::size_t"
 	if !g.clib {
 		for _, fld := range fields {
 			if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) &&
-				(fld.HasCount || g.limArrHas) {
+				(fld.HasCount || g.limArrHas || g.dynNativeArray(fld.Elem, fld.Count)) {
 				countParam = "std::size_t _count"
 				break
 			}
@@ -478,11 +479,23 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		f.line("%s(void)os.write(%s, %s);", ind, idExpr, val)
 	case ir.KindEnum:
 		bk := enumBacking(ref.Target)
-		f.line("%s{ std::array<%s, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
-			ind, bk, count, tv, iv, iv, count, iv, tv, iv, bk, val, iv, idExpr, tv)
+		if g.dynNativeArray(elem, count) {
+			// Count-less enum array (heap): the temp is sized to the value's length,
+			// not a compile-time count.
+			f.line("%s{ std::vector<%s> %s(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
+				ind, bk, tv, val, iv, iv, val, iv, tv, iv, bk, val, iv, idExpr, tv)
+		} else {
+			f.line("%s{ std::array<%s, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
+				ind, bk, count, tv, iv, iv, count, iv, tv, iv, bk, val, iv, idExpr, tv)
+		}
 	case ir.KindBool:
-		f.line("%s{ std::array<std::uint8_t, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
-			ind, count, tv, iv, iv, count, iv, tv, iv, val, iv, idExpr, tv)
+		if g.dynNativeArray(elem, count) {
+			f.line("%s{ std::vector<std::uint8_t> %s(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
+				ind, tv, val, iv, iv, val, iv, tv, iv, val, iv, idExpr, tv)
+		} else {
+			f.line("%s{ std::array<std::uint8_t, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
+				ind, count, tv, iv, iv, count, iv, tv, iv, val, iv, idExpr, tv)
+		}
 	case ir.KindBlob:
 		// A blob element is a leaf: omit it when it equals the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2). The
@@ -614,18 +627,33 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindFP32, ir.KindFP64, ir.KindBitfield:
-		f.line("%sis.read(%s);", ind, target)
+		if g.dynNativeArray(elem, count) {
+			// Count-less native array (heap): the corelib's span read fills at most
+			// target.size() elements, so size the vector to the wire count first,
+			// else it would decode empty (#112). The count-cap guard (#102), when
+			// configured, has already rejected an over-cap _count above.
+			f.line("%s%s.resize(_count); is.read(%s);", ind, target, target)
+		} else {
+			f.line("%sis.read(%s);", ind, target)
+		}
 	case ir.KindEnum:
 		bk := enumBacking(ref.Target)
+		et := g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax)
 		if g.clib {
 			f.line("%sis.read(reinterpret_cast<std::array<%s, %d> &>(%s));", ind, bk, count, target)
+		} else if g.dynNativeArray(elem, count) {
+			f.line("%s{ %s.resize(_count); std::vector<%s> %s(_count); is.read(%s); for (std::size_t %s = 0; %s < _count; ++%s) %s[%s] = static_cast<%s>(%s[%s]); }",
+				ind, target, bk, tv, tv, iv, iv, iv, target, iv, et, tv, iv)
 		} else {
 			f.line("%s{ std::array<%s, %d> %s{}; is.read(%s); for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); }",
-				ind, bk, count, tv, tv, iv, iv, count, iv, target, iv, g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax), tv, iv)
+				ind, bk, count, tv, tv, iv, iv, count, iv, target, iv, et, tv, iv)
 		}
 	case ir.KindBool:
 		if g.clib {
 			f.line("%sis.read(reinterpret_cast<std::array<std::uint8_t, %d> &>(%s));", ind, count, target)
+		} else if g.dynNativeArray(elem, count) {
+			f.line("%s{ %s.resize(_count); std::vector<std::uint8_t> %s(_count); is.read(%s); for (std::size_t %s = 0; %s < _count; ++%s) %s[%s] = %s[%s] != 0; }",
+				ind, target, tv, tv, iv, iv, iv, target, iv, tv, iv)
 		} else {
 			f.line("%s{ std::array<std::uint8_t, %d> %s{}; is.read(%s); for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] != 0; }",
 				ind, count, tv, tv, iv, iv, count, iv, target, iv, tv, iv)

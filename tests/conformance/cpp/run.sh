@@ -147,9 +147,14 @@ printf '\003\004\001\002\003\004' > "$WORK/in102.bin"         # count 4 == cap
 if "$WORK/lim102/harness/harness" decode dyn < "$WORK/over102.bin" >/dev/null 2>&1; then
     echo "FAIL: [cpp] over-cap dynamic array (count 5 > max_dyn_array_count 4) must fail"; exit 1
 fi
-"$WORK/lim102/harness/harness" decode dyn < "$WORK/in102.bin" >/dev/null || { echo "FAIL: [cpp] in-cap dynamic array must decode"; exit 1; }
+# The in-cap decode must not only succeed but PRESERVE the elements: a schema-
+# unbounded native array is a std::vector<T> sized to the wire count, not a
+# std::array<T, 0> that silently decodes empty (generator#112). Assert the values
+# survive the round-trip, not just that decode returns success.
+DEC=$("$WORK/lim102/harness/harness" decode dyn < "$WORK/in102.bin") || { echo "FAIL: [cpp] in-cap dynamic array must decode"; exit 1; }
+echo "$DEC" | grep -q '"a":\[1,2,3,4\]' || { echo "FAIL: [cpp] unbounded native array lost its elements (regression generator#112); got: $DEC"; exit 1; }
 "$WORK/nolim102/harness/harness" decode dyn < "$WORK/over102.bin" >/dev/null || { echo "FAIL: [cpp] without limits the same bytes must decode"; exit 1; }
-echo "==> [cpp] decode limits OK (over-cap rejected, in-cap + unlimited accepted)"
+echo "==> [cpp] decode limits OK (over-cap rejected, in-cap preserves elements, unlimited accepted)"
 
 # corelib-c-cpp feature-subset configs. The C++ wrapper (sofab/sofab.hpp) gates
 # its methods on ARRAY / FP64 / INT64 (SOFAB_CPP_HAVE_*), so generated C++ that
