@@ -49,6 +49,29 @@ fi
 (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/control.bin" >/dev/null) || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+echo "==> receiver-side decode limits (generator#102)"
+cat > "$WORK/dyn102.yaml" <<'YAML'
+version: 1
+messages:
+  dyn: { payload: { a: { id: 0, type: array, items: { type: u64 } } } }
+YAML
+cat > "$WORK/cfg-limits.yaml" <<YAML
+generic: { emit: project, max_dyn_array_count: 4 }
+targets: { go: { package: message, module_path: example.com/gen, go_version: "1.21" } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limits.yaml" --lang go --in "$WORK/dyn102.yaml" --out "$WORK/lim102" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/lim102/go.mod"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/dyn102.yaml" --out "$WORK/nolim102" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/nolim102/go.mod"
+printf '\003\005\001\002\003\004\005' > "$WORK/over102.bin"   # id0 array, count 5 > cap 4
+printf '\003\004\001\002\003\004' > "$WORK/in102.bin"         # count 4 == cap
+if (cd "$WORK/lim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/over102.bin" >/dev/null 2>&1); then
+    echo "FAIL: over-cap dynamic array (count 5 > max_dyn_array_count 4) must fail (ErrLimitExceeded)"; exit 1
+fi
+(cd "$WORK/lim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/in102.bin" >/dev/null) || { echo "FAIL: in-cap dynamic array must decode"; exit 1; }
+(cd "$WORK/nolim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/over102.bin" >/dev/null) || { echo "FAIL: without limits the same bytes must decode"; exit 1; }
+echo "==> decode limits OK (over-cap rejected, in-cap + unlimited accepted)"
+
 echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_GO_CORELIB="$CORELIB" go test ./generators/golang/ -run "Conformance|Wire" -count=1 )
 

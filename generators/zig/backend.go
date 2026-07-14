@@ -34,6 +34,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		schema:  s,
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
 		license: generator.LicenseID(cfg),
+		limits:  resolveLimits(s, cfg),
 	}
 	files := []generator.File{{Path: "src/message.zig", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
@@ -46,6 +47,42 @@ type gen struct {
 	schema  *ir.Schema
 	banner  string
 	license string // SPDX id, "" to omit the header line
+	limits  limitSet
+}
+
+// limitSet is the receiver-side decode-limit configuration (generator#102),
+// resolved against the schema: an entry is active only when its key is
+// configured AND the schema has an unbounded field of that kind — otherwise
+// the option is inert and no plumbing is emitted. Enforcement is per-field in
+// the generated decoder (schema-bounded fields keep only their generator#100
+// guard), so the configured value is emitted as-is, never raised to a schema
+// bound.
+type limitSet struct {
+	arrayCount, stringLen, blobLen int64
+	arrayHas, stringHas, blobHas   bool
+}
+
+func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
+
+// resolveLimits reads the max_dyn_* config keys and resolves them against the
+// schema's bounds (see limitSet).
+func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
+	var all []*ir.Field
+	for _, m := range s.Messages {
+		all = append(all, m.Fields...)
+	}
+	b := ir.Bounds(all)
+	var l limitSet
+	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
+		l.arrayCount, l.arrayHas = v, true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
+		l.stringLen, l.stringHas = v, true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
+		l.blobLen, l.blobHas = v, true
+	}
+	return l
 }
 
 type zfile struct{ b strings.Builder }
@@ -97,6 +134,24 @@ func (g *gen) module(s *ir.Schema) []byte {
 	f.line("const sofab = @import(\"sofab\");")
 	f.blank()
 
+	if g.limits.any() {
+		f.line("// Receiver-side decode limits (generator#102), baked from the sofabgen config")
+		f.line("// (max_dyn_*): they govern only schema-unbounded fields (an array without")
+		f.line("// `count`, a string/blob without `maxlen`) and are checked at the count or")
+		f.line("// length header, before the field's storage is allocated. Exceeding a cap")
+		f.line("// fails decode() with error.LimitExceeded -- a policy rejection, never a clamp.")
+		if g.limits.arrayHas {
+			f.line("const max_dyn_array_count: usize = %d;", g.limits.arrayCount)
+		}
+		if g.limits.stringHas {
+			f.line("const max_dyn_string_len: usize = %d;", g.limits.stringLen)
+		}
+		if g.limits.blobHas {
+			f.line("const max_dyn_blob_len: usize = %d;", g.limits.blobLen)
+		}
+		f.blank()
+	}
+
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		switch nt.Category {
@@ -118,7 +173,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	for _, m := range s.Messages {
 		g.emitDecoder(f, exported(m.Name), m.Fields)
 	}
-	g.emitSupport(f)
+	g.emitSupport(f, g.dynAllocUse(s))
 	return f.bytes()
 }
 
@@ -199,6 +254,11 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 		f.line("        // A scalar array carried more elements than its schema count:")
 		f.line("        // INVALID per MESSAGE_SPEC 3+7, never clamp (generator#100).")
 		f.line("        if (v.inv) return error.InvalidMessage;")
+		if g.msgLimitGuards(fields) {
+			f.line("        // An unbounded field exceeded a receiver-configured decode limit")
+			f.line("        // (max_dyn_*): policy rejection, never a clamp (generator#102).")
+			f.line("        if (v.lim) return error.LimitExceeded;")
+		}
 		f.line("        return m;")
 		f.line("    }")
 	}
@@ -331,7 +391,14 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 // encode flush sink and the small generic decode stores. Zig analyzes private
 // declarations lazily, so helpers a given schema never references cost
 // nothing.
-func (g *gen) emitSupport(f *zfile) {
+//
+// dynAlloc selects the _put/_allocN pair: when any message decodes a
+// slice-backed native array, the hardened grow-on-demand versions are emitted
+// (the wire count is untrusted, so the eager allocation is capped and grown as
+// elements actually arrive — generator#102); otherwise the pair is unreferenced
+// and keeps its historical exact-count text, so schemas without such arrays
+// stay byte-identical.
+func (g *gen) emitSupport(f *zfile, dynAlloc bool) {
 	f.line("// --- shared encode/decode support -------------------------------------------")
 	f.blank()
 	f.line("/// Flush sink behind encode(): drains the OStream scratch buffer into a")
@@ -348,14 +415,33 @@ func (g *gen) emitSupport(f *zfile) {
 	f.line("    }")
 	f.line("};")
 	f.blank()
-	f.line("/// Store the next native-array element into a dynamic (count-less) slice,")
-	f.line("/// bounds-checked; the slice is pre-sized to the wire count, so the bound")
-	f.line("/// only guards a failed allocation (the data is then dropped).")
-	f.line("fn _put(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s))) void {")
-	f.line("    if (i.* >= s.len) return;")
-	f.line("    @constCast(&s[i.*]).* = v;")
-	f.line("    i.* += 1;")
-	f.line("}")
+	if dynAlloc {
+		f.line("/// Store the next native-array element into a dynamic slice, growing the")
+		f.line("/// capped initial allocation (see _allocN) geometrically as the elements")
+		f.line("/// actually arrive -- never past the announced wire count n. An element the")
+		f.line("/// grow cannot hold (allocation failure) is dropped.")
+		f.line("fn _put(s: anytype, a: std.mem.Allocator, i: *usize, n: usize, v: std.meta.Elem(@TypeOf(s.*))) void {")
+		f.line("    if (i.* >= n) return;")
+		f.line("    if (i.* >= s.*.len) {")
+		f.line("        const T = std.meta.Elem(@TypeOf(s.*));")
+		f.line("        const new = a.alloc(T, @min(@max(s.*.len * 2, i.* + 1), n)) catch return;")
+		f.line("        @memcpy(new[0..s.*.len], s.*);")
+		f.line("        @memset(new[s.*.len..], std.mem.zeroes(T));")
+		f.line("        s.* = new;")
+		f.line("    }")
+		f.line("    @constCast(&s.*[i.*]).* = v;")
+		f.line("    i.* += 1;")
+		f.line("}")
+	} else {
+		f.line("/// Store the next native-array element into a dynamic (count-less) slice,")
+		f.line("/// bounds-checked; the slice is pre-sized to the wire count, so the bound")
+		f.line("/// only guards a failed allocation (the data is then dropped).")
+		f.line("fn _put(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s))) void {")
+		f.line("    if (i.* >= s.len) return;")
+		f.line("    @constCast(&s[i.*]).* = v;")
+		f.line("    i.* += 1;")
+		f.line("}")
+	}
 	f.blank()
 	f.line("/// Store the next native-array element into a fixed [N]T destination. An")
 	f.line("/// element past the schema capacity N flags the message malformed: a wire")
@@ -386,13 +472,26 @@ func (g *gen) emitSupport(f *zfile) {
 	f.line("    return true;")
 	f.line("}")
 	f.blank()
-	f.line("/// Allocate a zeroed native-array destination of exactly `n` elements (the")
-	f.line("/// wire count); on allocation failure the array decodes as empty.")
-	f.line("fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {")
-	f.line("    const s = a.alloc(T, n) catch return &.{};")
-	f.line("    @memset(s, std.mem.zeroes(T));")
-	f.line("    return s;")
-	f.line("}")
+	if dynAlloc {
+		f.line("/// Allocate the initial storage for a native array announcing n wire")
+		f.line("/// elements. The count is untrusted until the elements actually arrive, so")
+		f.line("/// the eager allocation is capped and _put grows it on demand (a lying")
+		f.line("/// count cannot force a huge allocation); on allocation failure the array")
+		f.line("/// decodes as empty.")
+		f.line("fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {")
+		f.line("    const s = a.alloc(T, @min(n, 1024)) catch return &.{};")
+		f.line("    @memset(s, std.mem.zeroes(T));")
+		f.line("    return s;")
+		f.line("}")
+	} else {
+		f.line("/// Allocate a zeroed native-array destination of exactly `n` elements (the")
+		f.line("/// wire count); on allocation failure the array decodes as empty.")
+		f.line("fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {")
+		f.line("    const s = a.alloc(T, n) catch return &.{};")
+		f.line("    @memset(s, std.mem.zeroes(T));")
+		f.line("    return s;")
+		f.line("}")
+	}
 	f.blank()
 	f.line("/// Place a wrapper-array string/blob element at its wire id (= array index),")
 	f.line("/// growing the destination and filling id gaps left by omitted default")

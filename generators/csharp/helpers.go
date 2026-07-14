@@ -54,6 +54,22 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
+// cfgLimit reads an integer decode-limit key (generator#102). YAML/JSON decode
+// integers into different Go types depending on the path, so all are accepted.
+func cfgLimit(cfg map[string]any, key string) (int64, bool) {
+	switch v := cfg[key].(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case uint64:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	}
+	return 0, false
+}
+
 // csDefaultValue is the value a field is compared against for omission (its
 // init default, or the type-zero), matching the field initializer.
 func (g *gen) csDefaultValue(f *ir.Field) string {

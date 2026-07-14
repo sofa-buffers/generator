@@ -20,6 +20,22 @@ func cfgBool(cfg map[string]any, key string) bool {
 	return b
 }
 
+// cfgLimit reads an integer decode-limit key (generator#102). YAML/JSON decode
+// integers into different Go types depending on the path, so all are accepted.
+func cfgLimit(cfg map[string]any, key string) (int64, bool) {
+	switch v := cfg[key].(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case uint64:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	}
+	return 0, false
+}
+
 // reservedGoMethod are the exported method names every generated object carries
 // (the sofab.Visitor callbacks, plus Encode on messages). A struct field whose
 // exported name matches one would collide with the method (Go forbids a field and

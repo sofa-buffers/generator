@@ -49,6 +49,34 @@ fi
 (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+# Receiver-side decode limits (generator#102): max_dyn_array_count: 4 caps a
+# count-less (schema-unbounded) u64 array. Wire header 0x03 = id 0, unsigned
+# array; a wire count of 5 MUST fail decode with the corelib limit error,
+# exactly 4 still decodes, and the same oversized bytes decode fine against a
+# project generated WITHOUT the limit (unset = unlimited).
+echo "==> receiver-side decode limits must reject over-cap counts (generator#102)"
+cat > "$WORK/limit-def.yaml" <<YAML
+version: 1
+messages:
+  dyn:
+    payload:
+      a: { id: 0, type: array, items: { type: u64 } }
+YAML
+cat > "$WORK/limit-cfg.yaml" <<YAML
+generic: { emit: project, max_dyn_array_count: 4 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/limitproj" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/nolimitproj" )
+printf '\003\005\001\002\003\004\005' > "$WORK/limit-over.bin"
+printf '\003\004\001\002\003\004' > "$WORK/limit-ok.bin"
+if (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null 2>"$WORK/limit-err.txt"; then
+    echo "FAIL: wire count 5 > max_dyn_array_count 4 must fail decode"; exit 1
+fi
+grep -qi "limit" "$WORK/limit-err.txt" || { echo "FAIL: over-cap decode error should mention the limit"; cat "$WORK/limit-err.txt"; exit 1; }
+(cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/limit-ok.bin" >/dev/null || { echo "FAIL: wire count 4 must decode under limit 4"; exit 1; }
+(cd "$WORK/nolimitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null || { echo "FAIL: unset limit must keep count 5 decodable"; exit 1; }
+echo "==> decode-limit reject OK"
+
 echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_PY_CORELIB="$CORELIB" go test ./generators/python/ -run Conformance -count=1 )
 

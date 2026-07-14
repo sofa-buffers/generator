@@ -31,12 +31,15 @@ type frame struct {
 	elemType  string      // fkSeqObj: java class for `new X()`
 	innerElem ir.Kind     // fkNativeMat: inner element kind
 	innerRef  *ir.TypeRef // fkNativeMat: inner element ref (unused; kept for symmetry)
+	// schema bounds, for the receiver-side decode limits (generator#102):
+	elemMaxHas    bool // fkSeqLeaf: the string/blob element declares a maxlen
+	innerHasCount bool // fkNativeMat: the inner array declares a count
 }
 
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walk func(loc, path string, fields []*ir.Field)
-	var addArray func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem)
+	var addArray func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool)
 	walk = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{kind: fkNormal, loc: loc, path: path, fields: fields})
 		for _, fld := range fields {
@@ -44,29 +47,29 @@ func (g *gen) frames(m *ir.Message) []frame {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				walk(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems)
+				addArray(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas)
 			}
 		}
 	}
 	// addArray registers the frame(s) entered inside the wrapper sequence of a
 	// sequence-typed array (string/blob/struct/union/nested). listExpr is the List
 	// accessor the frame collects into; `get` reaches the just-added last element.
-	addArray = func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) {
+	addArray = func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool) {
 		get := listExpr + ".get(" + listExpr + ".size()-1)"
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			out = append(out, frame{kind: fkSeqLeaf, loc: loc, listExpr: listExpr, elemKind: elem})
+			out = append(out, frame{kind: fkSeqLeaf, loc: loc, listExpr: listExpr, elemKind: elem, elemMaxHas: elemMaxHas})
 		case ir.KindStruct, ir.KindUnion:
 			elemLoc := loc + "_e"
 			out = append(out, frame{kind: fkSeqObj, loc: loc, listExpr: listExpr, childLoc: elemLoc, elemType: g.typeName(ref.Key)})
 			walk(elemLoc, get, ref.Target.Fields)
 		case ir.KindArray:
 			if nativeArrayElem(items.Elem) {
-				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerRef: items.ElemRef})
+				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerRef: items.ElemRef, innerHasCount: items.HasCount})
 			} else {
 				innerLoc := loc + "_e"
 				out = append(out, frame{kind: fkSeqMat, loc: loc, listExpr: listExpr, childLoc: innerLoc})
-				addArray(innerLoc, get, items.Elem, items.ElemRef, items.ElemItems)
+				addArray(innerLoc, get, items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas)
 			}
 		}
 	}
@@ -87,10 +90,108 @@ func locIndex(fs []frame, loc string) int {
 	return 0
 }
 
+// activeLimits reports which receiver-side decode limits (generator#102) apply
+// to this visitor: the limit must be configured AND the message must reach at
+// least one schema-unbounded field the visitor can guard — an unbounded native
+// array (count header via arrayBegin) or an unbounded string/blob (length via
+// the `total` parameter). Otherwise no constant and no guard is emitted, so an
+// unset or inert key leaves the output byte-identical.
+func (g *gen) activeLimits(fs []frame) (limArr, limStr, limBlob bool) {
+	for _, fr := range fs {
+		switch fr.kind {
+		case fkNormal:
+			for _, fld := range fr.fields {
+				switch {
+				case fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) && !fld.HasCount:
+					limArr = true
+				case fld.Kind == ir.KindString && !fld.HasMaxlen:
+					limStr = true
+				case fld.Kind == ir.KindBlob && !fld.HasMaxlen:
+					limBlob = true
+				}
+			}
+		case fkSeqLeaf:
+			if !fr.elemMaxHas {
+				if fr.elemKind == ir.KindString {
+					limStr = true
+				} else {
+					limBlob = true
+				}
+			}
+		case fkNativeMat:
+			if !fr.innerHasCount {
+				limArr = true
+			}
+		}
+	}
+	return limArr && g.limits.arrayHas, limStr && g.limits.stringHas, limBlob && g.limits.blobHas
+}
+
+// limitThrow renders the generator#102 rejection: same unchecked-wrapper shape
+// as the generator#100 schema guard (a Visitor callback cannot throw the
+// checked SofabException), but with the LIMIT_EXCEEDED category — a receiver
+// policy error, kept distinct from wire malformation.
+func limitThrow(name, noun string, limit int64) string {
+	return fmt.Sprintf("throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, \"%s: %s %d\"));",
+		name, noun, limit)
+}
+
+// limitThrowGuard is limitThrow behind a condition, for arms that also do work
+// when the guard passes.
+func limitThrowGuard(cond, name, noun string, limit int64) string {
+	return fmt.Sprintf("if (%s) %s", cond, limitThrow(name, noun, limit))
+}
+
+// locName is the human-readable field path of a frame loc for error details:
+// the loc minus its "Root_" prefix (element hops keep their "_e" suffix).
+func locName(loc string) string {
+	if len(loc) > 5 && loc[:5] == "Root_" {
+		return loc[5:]
+	}
+	return loc
+}
+
+// emitLenLimitGuard writes the receiver-side length guard (generator#102) at
+// the very top of the string()/blob() callback: when the wire `total` exceeds
+// the configured cap AND the (cur, id) destination is a schema-unbounded field
+// of this kind, decoding fails with LIMIT_EXCEEDED before any byte is
+// accumulated — the guard runs ahead of both the single-shot and the chunked
+// path, so an oversized split payload is rejected on its first chunk.
+// Schema-bounded fields fall through unaffected (governed by their own maxlen).
+func (g *gen) emitLenLimitGuard(f *jfile, fs []frame, kind ir.Kind, constName, noun string, limit int64) {
+	f.line("        if (total > %s) {", constName)
+	f.line("            switch (cur) {")
+	for _, fr := range fs {
+		if fr.kind == fkSeqLeaf && fr.elemKind == kind && !fr.elemMaxHas {
+			f.line("            case %d: %s", fr.idx, limitThrow(locName(fr.loc), noun+" above configured limit", limit))
+			continue
+		}
+		if fr.kind != fkNormal {
+			continue
+		}
+		var arms []string
+		for _, fld := range fr.fields {
+			if fld.Kind == kind && !fld.HasMaxlen {
+				arms = append(arms, fmt.Sprintf("case %d: %s", fld.ID, limitThrow(fld.Name, noun+" above configured limit", limit)))
+			}
+		}
+		if len(arms) > 0 {
+			f.line("            case %d: switch (id) {", fr.idx)
+			for _, a := range arms {
+				f.line("                %s", a)
+			}
+			f.line("            } break;")
+		}
+	}
+	f.line("            }")
+	f.line("        }")
+}
+
 func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	primBases := primArrayBasesUsed(fs) // "long"/"float"/"double" element bases needing lazy growth
 	hasPrim := len(primBases) > 0
+	limArr, limStr, limBlob := g.activeLimits(fs) // per-visitor decode limits (generator#102)
 
 	f.line("class %sVisitor implements Visitor {", name)
 	f.line("    private final %s m;", name)
@@ -108,6 +209,26 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("    private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)")
 	f.line("    private int sp = 0;")
 	f.line("    private java.io.ByteArrayOutputStream acc; // lazy: only split string/blob payloads need it")
+	if limArr || limStr || limBlob {
+		// Emitted only for the limits that are configured AND have at least one
+		// schema-unbounded field in this message, so an unset or inert key changes
+		// nothing in the output.
+		f.line("    // Receiver-side decode limits (generator#102), baked from the sofabgen")
+		f.line("    // config: caps on fields the schema left unbounded (no count / maxlen).")
+		f.line("    // Exceeding one fails the decode with SofabError.LIMIT_EXCEEDED at the")
+		f.line("    // wire count/length header, before any allocation or accumulation --")
+		f.line("    // never a clamp. Schema-bounded fields are not governed by these caps;")
+		f.line("    // they keep their own generator#100 schema-capacity guard.")
+		if limArr {
+			f.line("    static final long MAX_DYN_ARRAY_COUNT = %dL;", g.limits.arrayCount)
+		}
+		if limStr {
+			f.line("    static final long MAX_DYN_STRING_LEN = %dL;", g.limits.stringLen)
+		}
+		if limBlob {
+			f.line("    static final long MAX_DYN_BLOB_LEN = %dL;", g.limits.blobLen)
+		}
+	}
 	f.line("    %sVisitor(%s msg) { m = msg; }", name, name)
 	f.blank()
 
@@ -162,6 +283,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	// string. Single-shot: when the whole payload arrives in one chunk, decode
 	// straight from the input slice, skipping the (synchronized) ByteArrayOutputStream.
 	f.line("    public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
+	if limStr {
+		g.emitLenLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN", "string length", g.limits.stringLen)
+	}
 	f.line("        String _s;")
 	f.line("        if (offset == 0 && chunkLength >= total) {")
 	f.line("            _s = new String(data, chunkOffset, total, java.nio.charset.StandardCharsets.UTF_8);")
@@ -199,6 +323,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 
 	// blob. Single-shot on the whole-in-one-chunk fast path (see string).
 	f.line("    public void blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
+	if limBlob {
+		g.emitLenLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN", "blob length", g.limits.blobLen)
+	}
 	f.line("        byte[] _b;")
 	f.line("        if (offset == 0 && chunkLength >= total) {")
 	f.line("            _b = java.util.Arrays.copyOfRange(data, chunkOffset, chunkOffset + total);")
@@ -246,7 +373,14 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkNativeMat {
-			f.line("        case %d: %s.add(new ArrayList<>()); break;", fr.idx, fr.listExpr)
+			// A native-matrix row is itself a native array: an inner array the
+			// schema left unbounded is governed by the configured cap too
+			// (generator#102), checked at its own count header.
+			guard := ""
+			if limArr && !fr.innerHasCount {
+				guard = limitThrowGuard("count > MAX_DYN_ARRAY_COUNT", locName(fr.loc), "array count above configured limit", g.limits.arrayCount) + " "
+			}
+			f.line("        case %d: %s%s.add(new ArrayList<>()); break;", fr.idx, guard, fr.listExpr)
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -258,10 +392,15 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// per MESSAGE_SPEC §3+§7 — reject up front, never clamp or keep-all
 			// (generator#100). Unchecked wrapper: Visitor callbacks cannot throw
 			// the checked SofabException; decode() rethrows as RuntimeException.
+			// An UNBOUNDED array (no schema count) is instead governed by the
+			// configured max_dyn_array_count when set (generator#102): exceeding
+			// it is LIMIT_EXCEEDED — a receiver policy error, not INVALID_MSG.
 			guard := ""
 			if fld.HasCount {
 				guard = fmt.Sprintf("if (count > %d) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"%s: array count above schema capacity %d\")); ",
 					fld.Count, fld.Name, fld.Count)
+			} else if limArr {
+				guard = limitThrowGuard("count > MAX_DYN_ARRAY_COUNT", fld.Name, "array count above configured limit", g.limits.arrayCount) + " "
 			}
 			if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) {
 				target := fr.path + "." + javaIdent(fld.Name)

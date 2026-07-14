@@ -15,6 +15,22 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
+// cfgLimit reads an integer decode-limit key (generator#102). YAML/JSON decode
+// integers into different Go types depending on the path, so all are accepted.
+func cfgLimit(cfg map[string]any, key string) (int64, bool) {
+	switch v := cfg[key].(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case uint64:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	}
+	return 0, false
+}
+
 // exported -> PascalCase class name.
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
@@ -233,9 +249,29 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field) {
 	f.line("    @classmethod")
 	f.line("    def decode(cls, data: bytes) -> %q:", name)
 	f.line("        o = cls()")
-	f.line("        o._unmarshal(Decoder(io.BytesIO(data)))")
+	f.line("        o._unmarshal(Decoder(io.BytesIO(data)%s))", g.decoderArgs())
 	f.line("        return o")
 	f.blank()
+}
+
+// decoderArgs renders the Decoder keyword arguments for the active
+// receiver-side decode limits ("" when none), appended to every generated
+// Decoder construction; corelib-py enforces the caps and raises SofaLimitError.
+func (g *gen) decoderArgs() string {
+	var opts []string
+	if g.limits.arrayHas {
+		opts = append(opts, "max_array_count=MAX_DYN_ARRAY_COUNT")
+	}
+	if g.limits.stringHas {
+		opts = append(opts, "max_string_len=MAX_DYN_STRING_LEN")
+	}
+	if g.limits.blobHas {
+		opts = append(opts, "max_blob_len=MAX_DYN_BLOB_LEN")
+	}
+	if len(opts) == 0 {
+		return ""
+	}
+	return ", " + strings.Join(opts, ", ")
 }
 
 func (g *gen) toJSONExpr(f *ir.Field) string {

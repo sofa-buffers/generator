@@ -28,6 +28,10 @@ type frame struct {
 	elemLoc  string      // fkStructArr, fkArrArr: location to descend to on a per-element sequence_begin
 	elemKind ir.Kind     // fkSeqArr: string/blob element; fkNestedNative: inner native element kind
 	elemRef  *ir.TypeRef // fkNestedNative: enum/bitfield backing type
+	// elemDyn marks a schema-unbounded element, the target of the receiver-side
+	// decode limits (generator#102): fkSeqArr — the string/blob element has no
+	// maxlen; fkNestedNative — the inner native array has no count.
+	elemDyn bool
 }
 
 // isWrapperElem reports whether an array element lowers to a wrapper sequence
@@ -57,7 +61,7 @@ func isNativeArrayElem(k ir.Kind) bool {
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walkFields func(loc, path string, fields []*ir.Field)
-	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem)
+	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool)
 
 	walkFields = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields})
@@ -67,17 +71,18 @@ func (g *gen) frames(m *ir.Message) []frame {
 				cl := loc + "_" + fld.Name
 				walkFields(cl, path+"."+rustIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems)
+				addArray(loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas)
 			}
 		}
 	}
 
 	// addArray builds the frame(s) for a wrapper-sequence array whose Vec is at
-	// (loc, path) and whose element is (elem, ref, items).
-	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) {
+	// (loc, path) and whose element is (elem, ref, items). elemMaxHas is the
+	// string/blob element's maxlen presence (unused for other element kinds).
+	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool) {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem})
+			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDyn: !elemMaxHas})
 		case ir.KindStruct, ir.KindUnion:
 			el := loc + "_e"
 			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el})
@@ -87,11 +92,11 @@ func (g *gen) frames(m *ir.Message) []frame {
 			// by a single wrapper frame (array_begin pushes a new inner Vec, elements
 			// push to the last); a wrapper inner array descends recursively.
 			if isNativeArrayElem(items.Elem) {
-				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef})
+				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef, elemDyn: !items.HasCount})
 			} else {
 				el := loc + "_e"
 				out = append(out, frame{loc: loc, path: path, kind: fkArrArr, elemLoc: el})
-				addArray(el, path+".last_mut().unwrap()", items.Elem, items.ElemRef, items.ElemItems)
+				addArray(el, path+".last_mut().unwrap()", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas)
 			}
 		}
 	}
@@ -198,7 +203,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if stackCap < 4 {
 		stackCap = 4
 	}
-	vInit := "let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0 };"
+	// The sticky lim flag exists only when a receiver-side decode limit is
+	// active (generator#102) — std profile only, so the no_std inits never carry it.
+	limInit := ""
+	if g.limits.any() {
+		limInit = " lim: false,"
+	}
+	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false,%s ai: 0 };", limInit)
 	if g.noStd {
 		if needAcc {
 			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, err: false, inv: false, ai: 0 };", accNew)
@@ -227,16 +238,27 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("        let mut m = %s::default();", name)
 	f.line("        let overflow;")
 	f.line("        let invalid;")
+	if g.limits.any() {
+		f.line("        let limited;")
+	}
 	f.line("        {")
 	f.line("            %s", vInit)
 	f.line("            let mut is = IStream::new();")
 	f.line("            is.feed(data, &mut v)?;")
 	f.line("            overflow = v.err;")
 	f.line("            invalid = v.inv;")
+	if g.limits.any() {
+		f.line("            limited = v.lim;")
+	}
 	f.line("        }")
 	f.line("        // A scalar array carried more elements than its schema `count`")
 	f.line("        // (generator#100): INVALID per MESSAGE_SPEC 3+7, never clamp.")
 	f.line("        if invalid { return Err(sofab::Error::InvalidMsg); }")
+	if g.limits.any() {
+		f.line("        // An unbounded field exceeded a configured receiver-side decode")
+		f.line("        // limit (generator#102): reject, never clamp.")
+		f.line("        if limited { return Err(sofab::Error::LimitExceeded); }")
+	}
 	f.line("        // A fixed-capacity field overflowed during the fill (generator#82):")
 	f.line("        // report it rather than return a silently-truncated value.")
 	f.line("        if overflow { return Err(sofab::Error::BufferFull); }")
@@ -277,6 +299,12 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// its schema `count` capacity (generator#100). MESSAGE_SPEC 3+7 make this
 	// INVALID, so try_decode must reject — clamping is non-conformant.
 	f.line("    inv: bool,")
+	// Sticky limit-exceeded flag: an unbounded field's declared wire count/length
+	// exceeded a configured max_dyn_* receiver cap (generator#102); try_decode
+	// rejects with LimitExceeded. Emitted only when a limit is active (std profile).
+	if g.limits.any() {
+		f.line("    lim: bool,")
+	}
 	f.line("    ai: usize, // index into the fixed native array currently being filled")
 	f.line("}")
 	f.blank()
@@ -305,14 +333,21 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			}
 		case fkNestedNative:
 			tgt := fr.path + ".last_mut().unwrap()"
+			var store string
 			switch {
 			case isUnsignedElem(fr.elemKind):
-				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(tgt, "value as "+numRustType(fr.elemKind)))
+				store = g.pushExpr(tgt, "value as "+numRustType(fr.elemKind))
 			case fr.elemKind == ir.KindBool:
-				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(tgt, "value != 0"))
+				store = g.pushExpr(tgt, "value != 0")
 			case fr.elemKind == ir.KindBitfield:
-				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(tgt, "value as "+bitfieldBacking(fr.elemRef.Target)))
+				store = g.pushExpr(tgt, "value as "+bitfieldBacking(fr.elemRef.Target))
+			default:
+				continue
 			}
+			if g.limits.arrayHas && fr.elemDyn {
+				store = g.limArrayStore(store)
+			}
+			f.line("            (_Loc::%s, _) => %s,", fr.loc, store)
 		}
 	}
 	f.line("            _ => {}")
@@ -339,12 +374,19 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			}
 		case fkNestedNative:
 			tgt := fr.path + ".last_mut().unwrap()"
+			var store string
 			switch {
 			case isSignedElem(fr.elemKind):
-				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(tgt, "value as "+numRustType(fr.elemKind)))
+				store = g.pushExpr(tgt, "value as "+numRustType(fr.elemKind))
 			case fr.elemKind == ir.KindEnum:
-				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(tgt, "value as "+enumBacking(fr.elemRef.Target)))
+				store = g.pushExpr(tgt, "value as "+enumBacking(fr.elemRef.Target))
+			default:
+				continue
 			}
+			if g.limits.arrayHas && fr.elemDyn {
+				store = g.limArrayStore(store)
+			}
+			f.line("            (_Loc::%s, _) => %s,", fr.loc, store)
 		}
 	}
 	f.line("            _ => {}")
@@ -361,6 +403,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.str {
 		// string: scalar strings + string-array elements
 		f.line("    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
+		if g.limits.stringHas {
+			g.emitLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN")
+		}
 		if g.noStd {
 			// Accumulate across chunks so a streaming (multi-feed) string is
 			// reconstructed like the std profile (generator#81), bounded by `acc`'s
@@ -424,6 +469,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.blob {
 		// blob: scalar blobs + blob-array elements
 		f.line("    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
+		if g.limits.blobHas {
+			g.emitLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN")
+		}
 		if g.noStd {
 			// Accumulate across chunks like the string visitor / std profile
 			// (generator#81); single-shot fast path reads the slice directly.
@@ -494,10 +542,21 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 						if _, _, ok := g.fixedNativeArray(fld); ok {
 							continue // fixed [T; N]: nothing to clear
 						}
+						// Unbounded array under an active receiver cap (generator#102):
+						// reject an over-cap wire count at the header, before any
+						// elements accumulate.
+						if g.limits.arrayHas && !fld.HasCount {
+							f.line("            (_Loc::%s, %d) => { if _count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s.%s.clear() },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+							continue
+						}
 						f.line("            (_Loc::%s, %d) => %s.%s.clear(),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 					}
 				}
 			case fkNestedNative:
+				if g.limits.arrayHas && fr.elemDyn {
+					f.line("            (_Loc::%s, _) => { if _count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s },", fr.loc, g.pushExpr(fr.path, g.innerNew()))
+					continue
+				}
 				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(fr.path, g.innerNew()))
 			}
 		}
@@ -543,6 +602,40 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.blank()
 }
 
+// emitLimitGuard emits the receiver-side decode-limit pre-check (generator#102)
+// at the top of the string/blob callback, before any accumulation: every
+// schema-unbounded field of that kind (no maxlen — scalar fields and wrapper-
+// sequence elements alike) gets a (loc, id) arm that rejects a declared `total`
+// above the configured cap by setting the sticky lim flag and bailing out.
+// Placing the check ahead of the single-shot/chunked split covers both paths,
+// and on a chunked payload every later chunk re-hits the guard, so nothing is
+// ever buffered. Bounded fields get no arm: their schema maxlen governs them.
+// Emitted only when the limit is active, i.e. never under no_std.
+func (g *gen) emitLimitGuard(f *rfile, fs []frame, kind ir.Kind, constName string) {
+	var arms []string
+	for _, fr := range fs {
+		if fr.kind == fkSeqArr && fr.elemKind == kind && fr.elemDyn {
+			arms = append(arms, fmt.Sprintf("            (_Loc::%s, _) => if total > %s { self.lim = true; return; },", fr.loc, constName))
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == kind && !fld.HasMaxlen {
+				arms = append(arms, fmt.Sprintf("            (_Loc::%s, %d) => if total > %s { self.lim = true; return; },", fr.loc, fld.ID, constName))
+			}
+		}
+	}
+	if len(arms) == 0 {
+		return
+	}
+	f.line("        // Unbounded fields under an active receiver cap (generator#102):")
+	f.line("        // reject an over-cap declared total before any bytes accumulate.")
+	f.line("        match (self.cur, id) {")
+	for _, a := range arms {
+		f.line("%s", a)
+	}
+	f.line("            _ => {}")
+	f.line("        }")
+}
+
 // emitNativeArrayStore emits one match arm for a direct native array element: a
 // bounds-checked indexed store `if self.ai < N { x[self.ai] = rhs; self.ai += 1; }`
 // for a fixed `[T; N]` array, or a `.push(rhs)` for a dynamic (count-less) `Vec`
@@ -555,7 +648,20 @@ func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string
 		f.line("            (_Loc::%s, %d) => { if self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } else { self.inv = true; } }", fr.loc, fld.ID, n, fr.path, rustIdent(fld.Name), rhs)
 		return
 	}
-	f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs))
+	store := g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs)
+	if g.limits.arrayHas && !fld.HasCount {
+		store = g.limArrayStore(store)
+	}
+	f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, store)
+}
+
+// limArrayStore wraps an unbounded-array element store so it is dropped once
+// the sticky lim flag is set (generator#102): the over-cap array was rejected
+// at its count header, so its elements must not accumulate either. For a
+// nested-native array this also keeps the last_mut().unwrap() safe after the
+// tripped array_begin skipped its inner-Vec push.
+func (g *gen) limArrayStore(expr string) string {
+	return fmt.Sprintf("{ if !self.lim { %s; } }", expr)
 }
 
 func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype string) {
@@ -563,7 +669,11 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 	f.line("        match (self.cur, id) {")
 	for _, fr := range fs {
 		if fr.kind == fkNestedNative && fr.elemKind == kind {
-			f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(fr.path+".last_mut().unwrap()", "value"))
+			store := g.pushExpr(fr.path+".last_mut().unwrap()", "value")
+			if g.limits.arrayHas && fr.elemDyn {
+				store = g.limArrayStore(store)
+			}
+			f.line("            (_Loc::%s, _) => %s,", fr.loc, store)
 			continue
 		}
 		for _, fld := range fr.fields {

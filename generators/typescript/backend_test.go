@@ -192,6 +192,54 @@ func TestTSInt64Number(t *testing.T) {
 	}
 }
 
+// TestTSDecodeLimits: the max_dyn_* config keys bake receiver-side decode
+// limits (generator#102) into the generated module — exported MAX_DYN_*
+// constants referenced by the DecodeLimits object every static decode() passes
+// to its Cursor. The cap is raised to the largest schema bound of its kind
+// (escape hatch: schema-bounded fields stay governed by their own bound), an
+// unset key emits nothing, a key whose kind has no unbounded field is inert,
+// and the plumbing is identical across all three int64 modes.
+func TestTSDecodeLimits(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  dyn:
+    payload:
+      s:    { id: 0, type: string }
+      arr:  { id: 1, type: array, items: { type: u64 } }
+      barr: { id: 2, type: array, items: { type: i32, count: 100000 } }
+`
+	for _, mode := range []string{"bigint", "long", "number"} {
+		mod := genTSWith(t, src, map[string]any{
+			"int64":               mode,
+			"max_dyn_array_count": 65536,
+			"max_dyn_string_len":  4096,
+			"max_dyn_blob_len":    2048, // no unbounded blob in the schema -> inert
+		})
+		for _, want := range []string{
+			"export const MAX_DYN_ARRAY_COUNT = 100000;", // raised to the schema count of barr
+			"export const MAX_DYN_STRING_LEN = 4096;",
+			"return Dyn.decodeFrom(new Cursor(bytes, { maxArrayCount: MAX_DYN_ARRAY_COUNT, maxStringLen: MAX_DYN_STRING_LEN }));",
+		} {
+			if !strings.Contains(mod, want) {
+				t.Errorf("int64: %s message.ts missing %q", mode, want)
+			}
+		}
+		if strings.Contains(mod, "MAX_DYN_BLOB_LEN") {
+			t.Errorf("int64: %s: inert blob limit must not be emitted (no unbounded blob)", mode)
+		}
+	}
+
+	// No limits configured -> byte-identical plumbing-free output.
+	plain := genTSWith(t, src, map[string]any{})
+	if strings.Contains(plain, "MAX_DYN") || strings.Contains(plain, "maxArrayCount") {
+		t.Error("unset limits must emit no limit plumbing")
+	}
+	if !strings.Contains(plain, "return Dyn.decodeFrom(new Cursor(bytes));") {
+		t.Error("unset limits must keep the bare Cursor construction")
+	}
+}
+
 // TestTSInt64Default locks the default (and explicit bigint) mode to the
 // bigint-everywhere shapes: no Long import, no accessor pairs.
 func TestTSInt64Default(t *testing.T) {

@@ -8,6 +8,9 @@ Options accepted under `targets.zig`. For shared options (`emit`,
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
 | `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
+| `max_dyn_array_count` | integer | unset = unlimited | Receiver-side decode limit (generator#102): caps the wire element count of arrays the schema left unbounded (no `count`). Baked as a private `max_dyn_array_count` constant and checked per-field at the array's count header, before its storage is allocated; exceeding it fails `decode()` with `error.LimitExceeded` (never a clamp). Emitted as configured — fields with a schema `count` keep only their own generator#100 guard. |
+| `max_dyn_string_len` | integer | unset = unlimited | Same, for strings without a schema `maxlen`: the header-announced length is checked before the zero-copy borrow is taken (a policy cap, not just an allocation guard). |
+| `max_dyn_blob_len` | integer | unset = unlimited | Same, for blobs without a schema `maxlen`. |
 
 The Zig target has a single corelib — [`corelib-zig`], the **max-speed** port
 of the family (allocation-free streaming encoder, zero-copy contiguous
@@ -68,6 +71,19 @@ max-speed port, and the generated code takes an allocator on the decode
 path, so a string/blob without `maxlen` or an array without `count` is fine —
 bounded native arrays still lower to fixed `[N]T` stack storage and skip the
 allocator entirely.
+
+Two receiver-side protections cover those unbounded fields on decode:
+
+- **`max_dyn_*` decode limits** (generator#102, opt-in, see the options
+  table): enforcement lives entirely in the generated decoder — the corelib
+  only defines `error.LimitExceeded`. Guards are per-field, emitted only for
+  schema-unbounded fields, and feed a sticky `lim` flag checked after the
+  generator#100 `inv` flag (`InvalidMessage` takes precedence).
+- **Capped eager allocation** (always on): a dynamic native array's wire
+  count is untrusted until its elements actually arrive, so `decode()`
+  allocates at most 1024 elements up front and grows geometrically (never
+  past the announced count) as elements land — a lying count cannot force a
+  huge allocation. Honest messages decode identically.
 
 ## Struct field order
 

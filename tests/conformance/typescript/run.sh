@@ -73,6 +73,36 @@ fi
 (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+# Receiver-side decode limits (generator#102): a count-less u64 array with
+# max_dyn_array_count: 4 baked into the generated module (id 0 -> header 0x03 =
+# 0<<3 | unsigned-array). A wire count of 5 MUST throw the corelib's
+# LIMIT_EXCEEDED (decode exits non-zero); a count of 4 still decodes; and the
+# same 5-element bytes MUST decode in a project generated WITHOUT limits.
+echo "==> receiver-side decode limits (generator#102)"
+cat > "$WORK/dyn.yaml" <<'YAML'
+version: 1
+messages:
+  dyn: { payload: { a: { id: 0, type: array, items: { type: u64 } } } }
+YAML
+cat > "$WORK/cfg_lim.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4 }
+targets: { typescript: {} }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_lim.yaml" --lang typescript --in "$WORK/dyn.yaml" --out "$WORK/lim" )
+gen "$WORK/dyn.yaml" "$WORK/nolim"
+ln -s "$WORK/ex/node_modules" "$WORK/lim/node_modules"
+ln -s "$WORK/ex/node_modules" "$WORK/nolim/node_modules"
+( cd "$WORK/lim" && npx tsc --noEmit )
+printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
+printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
+if (cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/limerr.txt"; then
+    echo "FAIL: dynamic array count 5 must exceed max_dyn_array_count 4"; exit 1
+fi
+grep -q "maxArrayCount" "$WORK/limerr.txt" || { echo "FAIL: over-limit error must mention the limit"; cat "$WORK/limerr.txt"; exit 1; }
+(cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count == limit (4) must decode"; exit 1; }
+(cd "$WORK/nolim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: no-limits project must accept count 5"; exit 1; }
+echo "==> decode limits OK"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
 

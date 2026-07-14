@@ -79,6 +79,51 @@ func TestPythonStructural(t *testing.T) {
 	}
 }
 
+// TestPythonDecodeLimits: the max_dyn_* config keys bake receiver-side decode
+// limits (generator#102) into the generated module -- named constants at
+// module level plus Decoder(max_array_count=..., ...) kwargs in every decode.
+// The cap is raised to the largest schema bound of its kind (escape hatch:
+// schema-bounded fields stay governed by their own bound), an unset key emits
+// nothing, and a key whose kind has no unbounded field is inert.
+func TestPythonDecodeLimits(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  dyn:
+    payload:
+      s:    { id: 0, type: string }
+      arr:  { id: 1, type: array, items: { type: u64 } }
+      barr: { id: 2, type: array, items: { type: i32, count: 100000 } }
+`
+	s := schema(t, src)
+	mod := string(genPy(t, s, map[string]any{
+		"max_dyn_array_count": 65536,
+		"max_dyn_string_len":  4096,
+		"max_dyn_blob_len":    2048, // no unbounded blob in the schema -> inert
+	})["message.py"])
+	for _, want := range []string{
+		"MAX_DYN_ARRAY_COUNT = 100000", // raised to the schema count of barr
+		"MAX_DYN_STRING_LEN = 4096",
+		"o._unmarshal(Decoder(io.BytesIO(data), max_array_count=MAX_DYN_ARRAY_COUNT, max_string_len=MAX_DYN_STRING_LEN))",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q", want)
+		}
+	}
+	if strings.Contains(mod, "MAX_DYN_BLOB_LEN") || strings.Contains(mod, "max_blob_len") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
+	}
+
+	// No limits configured -> byte-identical plumbing-free output.
+	plain := string(genPy(t, s, map[string]any{})["message.py"])
+	if strings.Contains(plain, "MAX_DYN") || strings.Contains(plain, "max_array_count") {
+		t.Error("unset limits must emit no limit plumbing")
+	}
+	if !strings.Contains(plain, "o._unmarshal(Decoder(io.BytesIO(data)))") {
+		t.Error("unset limits must leave the plain Decoder call unchanged")
+	}
+}
+
 func TestPythonSyntaxValid(t *testing.T) {
 	py, err := exec.LookPath("python3")
 	if err != nil {

@@ -153,6 +153,126 @@ func TestRustStructural(t *testing.T) {
 	}
 }
 
+// TestRustDecodeLimits: the max_dyn_* config keys bake receiver-side decode
+// limits (generator#102) into the generated module — constants plus per-field
+// guards on schema-unbounded fields only (an unbounded array's wire count is
+// checked in array_begin, an unbounded string/blob's declared total at the top
+// of its callback, all before any accumulation). A bounded field gets no limit
+// guard: it is governed by its own schema bound (+ the generator#100 guard).
+// try_decode surfaces the sticky lim flag as Error::LimitExceeded, after
+// InvalidMsg and before BufferFull. Unset keys emit nothing; the keys are inert
+// for corelib-rs-no-std (statically bounded, no LimitExceeded in that corelib).
+func TestRustDecodeLimits(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  dyn:
+    payload:
+      s:    { id: 0, type: string }
+      arr:  { id: 1, type: array, items: { type: u64 } }
+      barr: { id: 2, type: array, items: { type: i32, count: 3 } }
+      b:    { id: 3, type: blob }
+      sa:   { id: 4, type: array, items: { type: string } }
+      mat:  { id: 5, type: array, items: { type: array, items: { type: u32 } } }
+`
+	doc, err := parser.Parse([]byte(src), "dyn.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	gen := func(cfg map[string]any) string {
+		t.Helper()
+		files, err := (&Backend{}).Generate(s, cfg)
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		for _, f := range files {
+			if f.Path == "src/message.rs" {
+				return string(f.Content)
+			}
+		}
+		t.Fatal("no module")
+		return ""
+	}
+	limitsCfg := map[string]any{
+		"max_dyn_array_count": 4,
+		"max_dyn_string_len":  16,
+		"max_dyn_blob_len":    8,
+	}
+
+	m := gen(limitsCfg)
+	for _, want := range []string{
+		// Constants baked as configured (no raise: guards are per-field).
+		"const MAX_DYN_ARRAY_COUNT: usize = 4;",
+		"const MAX_DYN_STRING_LEN: usize = 16;",
+		"const MAX_DYN_BLOB_LEN: usize = 8;",
+		// Sticky flag on the visitor, sibling of inv.
+		"lim: bool,",
+		// Unbounded array: count checked in array_begin before any elements land,
+		// and the element store is dropped once the flag is set.
+		"(_Loc::Root, 1) => { if _count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.arr.clear() },",
+		"(_Loc::Root, 1) => { if !self.lim { self.m.arr.push(value as u64); } },",
+		// Unbounded nested native inner array: same guard on its array_begin arm
+		// (the inner-Vec push is skipped, so the store must be lim-gated too).
+		"(_Loc::Root_mat, _) => { if _count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.mat.push(Vec::new()) },",
+		"(_Loc::Root_mat, _) => { if !self.lim { self.m.mat.last_mut().unwrap().push(value as u32); } },",
+		// Unbounded string/blob: declared total checked at the top of the callback,
+		// scalar fields and wrapper-sequence string elements alike.
+		"(_Loc::Root, 0) => if total > MAX_DYN_STRING_LEN { self.lim = true; return; },",
+		"(_Loc::Root_sa, _) => if total > MAX_DYN_STRING_LEN { self.lim = true; return; },",
+		"(_Loc::Root, 3) => if total > MAX_DYN_BLOB_LEN { self.lim = true; return; },",
+		// try_decode surfaces the flag as LimitExceeded.
+		"if limited { return Err(sofab::Error::LimitExceeded); }",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.rs (limits) missing %q", want)
+		}
+	}
+	// Precedence order in try_decode: inv first, then lim, then err.
+	invIdx := strings.Index(m, "if invalid { return Err(sofab::Error::InvalidMsg); }")
+	limIdx := strings.Index(m, "if limited { return Err(sofab::Error::LimitExceeded); }")
+	errIdx := strings.Index(m, "if overflow { return Err(sofab::Error::BufferFull); }")
+	if invIdx < 0 || limIdx < 0 || errIdx < 0 || !(invIdx < limIdx && limIdx < errIdx) {
+		t.Errorf("try_decode checks out of order: inv=%d lim=%d err=%d (want inv < lim < err)", invIdx, limIdx, errIdx)
+	}
+	// The BOUNDED array (barr, id 2, fixed [i32; 3]) must NOT get a limit guard:
+	// its schema count governs it (generator#100 over-count guard).
+	if strings.Contains(m, "(_Loc::Root, 2) => { if _count > MAX_DYN_ARRAY_COUNT") {
+		t.Error("bounded array barr must not get a limit guard")
+	}
+
+	// No limits configured -> byte-identical plumbing-free output.
+	plain := gen(map[string]any{})
+	for _, notWant := range []string{"MAX_DYN_", "lim:", "LimitExceeded", "limited"} {
+		if strings.Contains(plain, notWant) {
+			t.Errorf("unset limits must emit no limit plumbing, found %q", notWant)
+		}
+	}
+
+	// corelib-rs-no-std: the keys are inert (statically bounded storage, no
+	// Error::LimitExceeded in that corelib) — no constants, no guards.
+	noStdCfg := map[string]any{"corelib": "rs-no-std", "allow_dynamic": true}
+	for k, v := range limitsCfg {
+		noStdCfg[k] = v
+	}
+	n := gen(noStdCfg)
+	for _, notWant := range []string{"MAX_DYN_", "LimitExceeded"} {
+		if strings.Contains(n, notWant) {
+			t.Errorf("rs-no-std must ignore max_dyn_* keys, found %q", notWant)
+		}
+	}
+}
+
 func TestRustDeterministic(t *testing.T) {
 	if exampleModule(t, map[string]any{}) != exampleModule(t, map[string]any{}) {
 		t.Fatal("Rust generation not deterministic")

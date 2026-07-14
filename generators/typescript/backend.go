@@ -26,7 +26,7 @@ const corelibPkg = "@sofa-buffers/corelib"
 // Generate emits a single message.ts module; project mode adds a harness +
 // package.json + tsconfig.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), i64rep: cfgInt64Mode(cfg)}
+	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), i64rep: cfgInt64Mode(cfg), limits: resolveLimits(s, cfg)}
 	files := []generator.File{{Path: "message.ts", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -39,6 +39,63 @@ type gen struct {
 	banner  string
 	license string    // SPDX id, "" to omit the header line
 	i64rep  int64Mode // 64-bit representation (config key `int64`)
+	limits  limitSet  // receiver-side decode limits (generator#102)
+}
+
+// limitSet is the receiver-side decode-limit configuration (generator#102),
+// resolved against the schema: each active entry is the configured cap raised
+// to the largest schema bound of its kind, so a schema-bounded field larger
+// than the cap stays governed by its schema bound alone (the corelib enforces
+// these globally per decode). An entry is active only when its key is
+// configured AND the schema actually has an unbounded field of that kind —
+// otherwise the option would be inert and no plumbing is emitted.
+type limitSet struct {
+	arrayCount, stringLen, blobLen int64
+	arrayHas, stringHas, blobHas   bool
+}
+
+func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
+
+// resolveLimits reads the max_dyn_* config keys and resolves them against the
+// schema's bounds (see limitSet).
+func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
+	var all []*ir.Field
+	for _, m := range s.Messages {
+		all = append(all, m.Fields...)
+	}
+	b := ir.Bounds(all)
+	var l limitSet
+	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
+		l.arrayCount, l.arrayHas = max(v, b.MaxCount), true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
+		l.stringLen, l.stringHas = max(v, b.MaxStringLen), true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
+		l.blobLen, l.blobHas = max(v, b.MaxBlobLen), true
+	}
+	return l
+}
+
+// cursorLimits renders the DecodeLimits argument every generated static
+// decode() passes to its Cursor ("" when no limit is active). The object
+// literal references the exported MAX_DYN_* constants, independent of the
+// int64 representation mode.
+func (g *gen) cursorLimits() string {
+	if !g.limits.any() {
+		return ""
+	}
+	var parts []string
+	if g.limits.arrayHas {
+		parts = append(parts, "maxArrayCount: MAX_DYN_ARRAY_COUNT")
+	}
+	if g.limits.stringHas {
+		parts = append(parts, "maxStringLen: MAX_DYN_STRING_LEN")
+	}
+	if g.limits.blobHas {
+		parts = append(parts, "maxBlobLen: MAX_DYN_BLOB_LEN")
+	}
+	return ", { " + strings.Join(parts, ", ") + " }"
 }
 
 type tsfile struct{ b strings.Builder }
@@ -67,6 +124,24 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	f.line("import { %s } from %q;", strings.Join(imports, ", "), corelibPkg)
 	f.blank()
+	if g.limits.any() {
+		f.line("// Receiver-side decode limits (generator#102), baked from the sofabgen config")
+		f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
+		f.line("// only fields the schema left unbounded; each cap is raised to the largest")
+		f.line("// schema bound of its kind, so a schema-bounded field stays governed by its")
+		f.line("// own bound alone. Every static decode() passes them to its Cursor; exceeding")
+		f.line("// a cap throws SofabError with code LimitExceeded, before allocation.")
+		if g.limits.arrayHas {
+			f.line("export const MAX_DYN_ARRAY_COUNT = %d;", g.limits.arrayCount)
+		}
+		if g.limits.stringHas {
+			f.line("export const MAX_DYN_STRING_LEN = %d;", g.limits.stringLen)
+		}
+		if g.limits.blobHas {
+			f.line("export const MAX_DYN_BLOB_LEN = %d;", g.limits.blobLen)
+		}
+		f.blank()
+	}
 	if use.arrEq {
 		f.line("%s", arrEqHelper)
 		f.blank()

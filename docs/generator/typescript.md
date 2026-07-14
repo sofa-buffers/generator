@@ -9,6 +9,27 @@ Options accepted under `targets.typescript`. For shared options (`emit`,
 |--------|------|---------|--------|
 | `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
 | `int64` | `bigint` \| `long` \| `number` | `bigint` | Representation of 64-bit integer fields in the generated TS API (see below). All modes are wire-identical. |
+| `max_dyn_array_count` | integer | unset (unlimited) | Receiver-side decode limit (generator#102): maximum element count accepted for an **unbounded** array (one without a schema `count`). See below. |
+| `max_dyn_string_len` | integer | unset (unlimited) | Receiver-side decode limit: maximum byte length accepted for an **unbounded** string (one without a schema `maxlen`). See below. |
+| `max_dyn_blob_len` | integer | unset (unlimited) | Receiver-side decode limit: maximum byte length accepted for an **unbounded** blob (one without a schema `maxlen`). See below. |
+
+### `max_dyn_*` — receiver-side decode limits
+
+The three `max_dyn_*` keys (settable under `generic` or `targets.typescript`)
+cap what a *received* message may claim before anything is allocated. They
+govern **only** fields the schema left unbounded (`array` without `count`,
+`string`/`blob` without `maxlen`); an unset key means unlimited (the previous
+behavior). When at least one key is active, the module exports `MAX_DYN_ARRAY_COUNT`
+/ `MAX_DYN_STRING_LEN` / `MAX_DYN_BLOB_LEN` constants and every generated
+`static decode(bytes)` passes them to its `Cursor` as a corelib `DecodeLimits`
+object. Exceeding a cap throws `SofabError` with code
+`SofabErrorCode.LimitExceeded` at the count/length header — never a clamp or
+truncation. Each cap is raised to the largest schema bound of its kind, so a
+schema-bounded field larger than the cap stays governed by its own bound alone
+(its over-schema counts are still rejected by the generator#100 guard). A key
+whose kind has no unbounded field in the schema is inert and emits nothing;
+with no keys set the output is byte-identical to previous releases. The
+plumbing is independent of the `int64` mode.
 
 ### `int64` — 64-bit field representation
 

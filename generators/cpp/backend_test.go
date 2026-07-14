@@ -341,3 +341,61 @@ func TestCppSparse(t *testing.T) {
 		t.Error("composite array must be framed via sequenceBegin")
 	}
 }
+
+// TestCppDecodeLimits: the max_dyn_* config keys bake receiver-side decode
+// limits (generator#102) into the generated header on the pure-corelib-cpp
+// path: guarded macros, per-field exceedLimit() guards on unbounded fields
+// only, and the derived streaming reassembly cap passed as sofab::Limits into
+// the one-shot decode entry points. Unset keys or the c-cpp profile emit none
+// of it.
+func TestCppDecodeLimits(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  dyn:
+    payload:
+      s:    { id: 0, type: string }
+      bs:   { id: 1, type: string, maxlen: 8000 }
+      arr:  { id: 2, type: array, items: { type: u64 } }
+      barr: { id: 3, type: array, items: { type: i32, count: 3 } }
+`
+	cfg := map[string]any{
+		"max_dyn_array_count": 65536,
+		"max_dyn_string_len":  4096,
+		"max_dyn_blob_len":    2048, // no unbounded blob -> inert
+	}
+	h, err := genHeader(t, src, "dyn.hpp", cfg)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"#define SOFAB_MAX_DYN_ARRAY_COUNT 65536",
+		"#define SOFAB_MAX_DYN_STRING_LEN 4096",
+		// derived cap: max(cfg string 4096, cfg blob unset, schema maxlen 8000, count*10 30)
+		"#define SOFAB_MAX_DYN_BUFFERED_FIELD 8000",
+		"if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }",
+		"if (_count > SOFAB_MAX_DYN_ARRAY_COUNT) { is.exceedLimit(); return; }",
+		"sofab::IStreamObject<Dyn> in{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}};",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("dyn.hpp missing %q", want)
+		}
+	}
+	if strings.Contains(h, "SOFAB_MAX_DYN_BLOB_LEN") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
+	}
+	// The bounded string (maxlen 8000) must NOT get a limit guard: exactly one
+	// string guard (for the unbounded s), governed otherwise by its schema bound.
+	if n := strings.Count(h, "SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit()"); n != 1 {
+		t.Errorf("want exactly 1 string limit guard (unbounded field only), got %d", n)
+	}
+
+	// No limits configured -> no plumbing at all.
+	plain, err := genHeader(t, src, "dyn.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate plain: %v", err)
+	}
+	if strings.Contains(plain, "SOFAB_MAX_DYN") || strings.Contains(plain, "exceedLimit") {
+		t.Error("unset limits must emit no limit plumbing")
+	}
+}

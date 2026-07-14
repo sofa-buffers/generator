@@ -15,6 +15,22 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
+// cfgLimit reads an integer decode-limit key (generator#102). YAML/JSON decode
+// integers into different Go types depending on the path, so all are accepted.
+func cfgLimit(cfg map[string]any, key string) (int64, bool) {
+	switch v := cfg[key].(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case uint64:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	}
+	return 0, false
+}
+
 // int64Mode selects the TS representation of 64-bit integer fields (config key
 // `int64`, à la protobufjs). bigint in the 64-bit hot path is the dominant cost
 // of the TS codec (JavaScriptCore optimizes bigint far worse than V8), so the

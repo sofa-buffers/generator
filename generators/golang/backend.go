@@ -26,6 +26,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		pkg:     cfgString(cfg, "package", "message"),
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
 		license: generator.LicenseID(cfg),
+		limits:  resolveLimits(s, cfg),
 	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	// In a project the package gets its own directory so the harness can import
@@ -55,6 +56,42 @@ type gen struct {
 	pkg     string
 	banner  string
 	license string // SPDX id, "" to omit the header line
+	limits  limitSet
+}
+
+// limitSet is the receiver-side decode-limit configuration (generator#102),
+// resolved against the schema: each active entry is the configured cap raised
+// to the largest schema bound of its kind, so a schema-bounded field larger
+// than the cap stays governed by its schema bound alone (the corelib enforces
+// these globally per decode). An entry is active only when its key is
+// configured AND the schema actually has an unbounded field of that kind —
+// otherwise the option would be inert and no plumbing is emitted.
+type limitSet struct {
+	arrayCount, stringLen, blobLen int64
+	arrayHas, stringHas, blobHas   bool
+}
+
+func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
+
+// resolveLimits reads the max_dyn_* config keys and resolves them against the
+// schema's bounds (see limitSet).
+func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
+	var all []*ir.Field
+	for _, m := range s.Messages {
+		all = append(all, m.Fields...)
+	}
+	b := ir.Bounds(all)
+	var l limitSet
+	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
+		l.arrayCount, l.arrayHas = max(v, b.MaxCount), true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
+		l.stringLen, l.stringHas = max(v, b.MaxStringLen), true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
+		l.blobLen, l.blobHas = max(v, b.MaxBlobLen), true
+	}
+	return l
 }
 
 // hasObject reports whether the schema emits at least one struct/union/message —
@@ -230,7 +267,45 @@ func (s *_seqSeq[T]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
 	*s.out = append(*s.out, nil)
 	return s.mk(&(*s.out)[len(*s.out)-1]), nil
 }`)
+	if g.limits.any() {
+		f.blank()
+		f.line("// Receiver-side decode limits (generator#102), baked from the sofabgen config")
+		f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
+		f.line("// only fields the schema left unbounded; each cap is raised to the largest")
+		f.line("// schema bound of its kind, so a schema-bounded field stays governed by its")
+		f.line("// own bound alone. Exceeding a cap fails Decode with sofab.ErrLimitExceeded.")
+		f.line("const (")
+		if g.limits.arrayHas {
+			f.line("\tMaxDynArrayCount = %d", g.limits.arrayCount)
+		}
+		if g.limits.stringHas {
+			f.line("\tMaxDynStringLen = %d", g.limits.stringLen)
+		}
+		if g.limits.blobHas {
+			f.line("\tMaxDynBlobLen = %d", g.limits.blobLen)
+		}
+		f.line(")")
+	}
 	return f.bytes(g.banner, g.license)
+}
+
+// acceptOpts renders the sofab decode options for the active receiver-side
+// limits ("" when none), appended to every generated AcceptBytes call.
+func (g *gen) acceptOpts() string {
+	var opts []string
+	if g.limits.arrayHas {
+		opts = append(opts, "sofab.WithMaxArrayCount(MaxDynArrayCount)")
+	}
+	if g.limits.stringHas {
+		opts = append(opts, "sofab.WithMaxStringLen(MaxDynStringLen)")
+	}
+	if g.limits.blobHas {
+		opts = append(opts, "sofab.WithMaxBlobLen(MaxDynBlobLen)")
+	}
+	if len(opts) == 0 {
+		return ""
+	}
+	return ", " + strings.Join(opts, ", ")
 }
 
 // ---- types.go : all named types -----------------------------------------
@@ -697,7 +772,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("// dispatching each field to the message's sofab.Visitor implementation.")
 	f.line("func Decode%s(data []byte) (*%s, error) {", typeName, typeName)
 	f.line("\tm := New%s()", typeName)
-	f.line("\tif err := sofab.AcceptBytes(data, m); err != nil {")
+	f.line("\tif err := sofab.AcceptBytes(data, m%s); err != nil {", g.acceptOpts())
 	f.line("\t\treturn nil, err")
 	f.line("\t}")
 	f.line("\treturn m, nil")

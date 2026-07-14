@@ -42,6 +42,12 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		noStd:        noStd,
 		allowDynamic: cfgBool(cfg, "allow_dynamic"),
 	}
+	// Receiver-side decode limits (generator#102) apply only to the std
+	// corelib-rs: corelib-rs-no-std has no Error::LimitExceeded, and its heapless
+	// storage is statically schema-bounded anyway, so the keys are inert there.
+	if g.std() {
+		g.limits = resolveLimits(s, cfg)
+	}
 	if noStd {
 		// The heap-free profile lowers every field to fixed-capacity heapless
 		// storage sized from the schema; a field with no maxlen/count cannot be
@@ -76,6 +82,44 @@ type gen struct {
 	// unbounded fields (no maxlen/count) instead of failing generation — the Rust
 	// analog of the C++ c-cpp allow_dynamic. Bounded fields still go heapless.
 	allowDynamic bool
+	// limits are the receiver-side decode limits (generator#102); resolved only
+	// for the std corelib-rs (empty — all inert — under corelib-rs-no-std).
+	limits limitSet
+}
+
+// limitSet is the receiver-side decode-limit configuration (generator#102),
+// resolved against the schema. An entry is active only when its max_dyn_* key
+// is configured AND the schema actually has an unbounded field of that kind —
+// otherwise the option would be inert and no limit plumbing is emitted. The
+// guards are per-field on unbounded fields only (a schema-bounded field keeps
+// its own generator#100 schema guard instead), so the configured value is
+// emitted as-is, with no raise to the largest schema bound.
+type limitSet struct {
+	arrayCount, stringLen, blobLen int64
+	arrayHas, stringHas, blobHas   bool
+}
+
+func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
+
+// resolveLimits reads the max_dyn_* config keys and resolves them against the
+// schema's bounds (see limitSet).
+func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
+	var all []*ir.Field
+	for _, m := range s.Messages {
+		all = append(all, m.Fields...)
+	}
+	b := ir.Bounds(all)
+	var l limitSet
+	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
+		l.arrayCount, l.arrayHas = v, true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
+		l.stringLen, l.stringHas = v, true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
+		l.blobLen, l.blobHas = v, true
+	}
+	return l
 }
 
 // std reports whether the std corelib-rs is selected (vs corelib-rs-no-std).
@@ -155,6 +199,24 @@ func (g *gen) module(s *ir.Schema) []byte {
 			f.line("sofab::require!(%s);", strings.Join(caps, ", "))
 			f.blank()
 		}
+	}
+	// Receiver-side decode limits (generator#102), baked from the sofabgen config.
+	if g.limits.any() {
+		f.line("// Receiver-side decode limits (generator#102), from the sofabgen config")
+		f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
+		f.line("// only schema-unbounded fields (array without count, string/blob without")
+		f.line("// maxlen); schema-bounded fields stay governed by their own bound. Exceeding")
+		f.line("// a cap fails try_decode with sofab::Error::LimitExceeded, never a clamp.")
+		if g.limits.arrayHas {
+			f.line("const MAX_DYN_ARRAY_COUNT: usize = %d;", g.limits.arrayCount)
+		}
+		if g.limits.stringHas {
+			f.line("const MAX_DYN_STRING_LEN: usize = %d;", g.limits.stringLen)
+		}
+		if g.limits.blobHas {
+			f.line("const MAX_DYN_BLOB_LEN: usize = %d;", g.limits.blobLen)
+		}
+		f.blank()
 	}
 
 	for _, key := range s.NamedOrder {

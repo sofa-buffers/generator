@@ -11,6 +11,7 @@ Options accepted under `targets.go`. For shared options (`emit`,
 | `package` | string | `message` | The `package <name>` clause of the generated `.go` files. |
 | `module_path` | string | `example.com/generated` | The module path written to the generated `go.mod` (project mode). |
 | `go_version` | string | `1.21` | The `go <version>` directive written to the generated `go.mod` (project mode). |
+| `max_dyn_array_count` / `max_dyn_string_len` / `max_dyn_blob_len` | integer | unset = unlimited | See [generic config](README.md). Baked as `MaxDyn*` package constants and passed into every `Decode<Msg>` via `sofab.WithMaxArrayCount/WithMaxStringLen/WithMaxBlobLen`; a violation returns `sofab.ErrLimitExceeded`. The corelib enforces these globally per decode, so each cap is raised to the largest schema bound of its kind — schema-bounded fields stay governed by their own bound. A key whose kind has no unbounded field emits nothing. |
 
 ```yaml
 targets:

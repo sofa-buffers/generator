@@ -11,6 +11,29 @@ Options accepted under `targets.rust`. For shared options (`emit`,
 | `corelib` | `rs` \| `rs-no-std` | `rs` | Which Rust corelib the generated crate targets (see below). |
 | `no_std` | bool | `true` when `corelib: rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate (see below). Set `false` to emit an ordinary `std` crate against the no-std corelib. Ignored for `corelib: rs`. |
 | `allow_dynamic` | bool | `false` | Under `no_std`, keep an `alloc` heap fallback for genuinely unbounded fields instead of failing generation. |
+| `max_dyn_array_count` | int | unset = unlimited | Receiver-side decode limit (generator#102): max element count accepted for an **unbounded** array (no schema `count`). `corelib: rs` only (see below). |
+| `max_dyn_string_len` | int | unset = unlimited | Receiver-side decode limit: max byte length accepted for an **unbounded** string (no schema `maxlen`). `corelib: rs` only. |
+| `max_dyn_blob_len` | int | unset = unlimited | Receiver-side decode limit: max byte length accepted for an **unbounded** blob (no schema `maxlen`). `corelib: rs` only. |
+
+### `max_dyn_*` — receiver-side decode limits
+
+The `max_dyn_array_count` / `max_dyn_string_len` / `max_dyn_blob_len` keys
+(generic or `targets.rust`) bake receiver-side decode limits (generator#102)
+into the generated module as `MAX_DYN_*` constants. They govern **only**
+schema-unbounded fields — an array without `count`, a string/blob without
+`maxlen`; a schema-bounded field stays governed by its own bound (plus the
+generator#100 over-count guard). The generated visitor checks the wire count /
+declared total **at the header, before any elements or bytes accumulate**;
+exceeding a cap makes `try_decode` return `sofab::Error::LimitExceeded` — never
+a clamp. The best-effort `decode()` is unchanged. Precedence when several
+verdicts apply: `InvalidMsg` (over-schema count), then `LimitExceeded`, then
+`BufferFull`.
+
+**std profile only.** The limits apply to `corelib: rs` (std). Under
+`corelib: rs-no-std` the keys are inert: heapless storage is statically
+schema-bounded already (an unbounded field is either rejected at generation
+time or consciously opted into a heap fallback via `allow_dynamic`), and that
+corelib has no `Error::LimitExceeded`.
 
 ### `corelib`
 

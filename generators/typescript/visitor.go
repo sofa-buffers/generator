@@ -13,7 +13,7 @@ import "github.com/sofa-buffers/generator/internal/ir"
 // skip() for forward/backward compatibility.
 func (g *gen) emitDecode(f *tsfile, name string, fields []*ir.Field) {
 	f.line("  static decode(bytes: Uint8Array): %s {", name)
-	f.line("    return %s.decodeFrom(new Cursor(bytes));", name)
+	f.line("    return %s.decodeFrom(new Cursor(bytes%s));", name, g.cursorLimits())
 	f.line("  }")
 	f.blank()
 	f.line("  // Monomorphic pull decode: one switch(id) reads straight into this type's fields.")
