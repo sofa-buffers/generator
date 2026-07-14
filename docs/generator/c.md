@@ -25,3 +25,17 @@ of equal alignment keep their schema order. This affects **declaration order
 only** — encode and the descriptor table iterate in schema/field-id order, so
 the wire bytes are byte-identical to every other target. Initialize structs by
 member name (`_init()` or designated initializers), not positionally.
+
+## String storage (`maxlen + 1`)
+
+A `string` field with `maxlen: N` is stored as `char <name>[N + 1]` — one extra
+byte beyond the schema bound. The corelib reads strings as NUL-terminated
+(`sofab_istream_read_string` reserves one byte for the `'\0'`, rejecting a wire
+length greater than `capacity - 1`), so the `+1` makes the **usable** capacity
+equal the schema bound: a wire string of exactly `maxlen` bytes is accepted, and
+`maxlen + 1` is still rejected as `SOFAB_RET_E_INVALID_MSG`. The same `+1`
+applies to `string` elements of an array (`char items[count][maxlen + 1]`).
+
+`blob` fields are **not** terminated, so they keep exactly `maxlen` bytes of
+storage and accept a wire blob of up to `maxlen` bytes. Descriptor capacity is
+derived from `sizeof` the member, so no macro or descriptor change is involved.

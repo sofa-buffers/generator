@@ -287,16 +287,22 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 	case ir.KindString, ir.KindBlob:
 		// Without items.maxlen a fixed-storage target has no real bound; fall back
 		// to 1 so the emitted C array is never zero-sized.
-		maxlen := int64(1)
-		if spec.maxHas {
-			maxlen = spec.max
-		}
 		var elemDecl, ftype string
 		if spec.elem == ir.KindString {
-			elemDecl = fmt.Sprintf("char items[%d][%d];", cap, maxlen)
+			// +1 for the NUL the corelib's read_string reserves, so a maxlen-byte
+			// wire string element is accepted at its schema bound (#103).
+			slen := int64(1)
+			if spec.maxHas {
+				slen = spec.max + 1
+			}
+			elemDecl = fmt.Sprintf("char items[%d][%d];", cap, slen)
 			ftype = "SOFAB_OBJECT_FIELDTYPE_STRING"
 		} else {
-			elemDecl = fmt.Sprintf("uint8_t items[%d][%d];", cap, maxlen)
+			blen := int64(1)
+			if spec.maxHas {
+				blen = spec.max
+			}
+			elemDecl = fmt.Sprintf("uint8_t items[%d][%d];", cap, blen)
 			ftype = "SOFAB_OBJECT_FIELDTYPE_BLOB"
 		}
 		p.members = append(p.members, member{decl: elemDecl})
@@ -371,7 +377,10 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 		decl = fmt.Sprintf("double %s;", mn)
 		entry = field(f.ID, cType, mn, "FP64")
 	case ir.KindString:
-		decl = fmt.Sprintf("char %s[%d];", mn, maxlenOr(f, 1))
+		// +1 for the NUL: the corelib's read_string reserves one byte for the
+		// terminator (istream.c rejects length > capacity-1), so a maxlen-byte wire
+		// string needs maxlen+1 of storage to be accepted at its schema bound (#103).
+		decl = fmt.Sprintf("char %s[%d];", mn, maxlenOr(f, 0)+1)
 		entry = field(f.ID, cType, mn, "STRING")
 	case ir.KindBlob:
 		decl = fmt.Sprintf("uint8_t %s[%d];", mn, maxlenOr(f, 1))
