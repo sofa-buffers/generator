@@ -43,7 +43,14 @@ zig_build() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang zig --in "$1" --out "$2" )
     rel=$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$WORK/corelib-link" "$2")
     sed -i "s#\${SOFAB_ZIG_CORELIB}#$rel#" "$2/build.zig.zon"
-    ( cd "$2" && zig build --release=fast )
+    # Hermetic caches: CI zig setups (mlugg/setup-zig) restore a shared zig
+    # cache across runs, and every generated package carries the same
+    # build.zig.zon name + fingerprint (one package identity) - a restored or
+    # shared cache can then serve a stale harness for an A/B pair that differs
+    # only in generator config (seen on the #102 lim/nolim projects: the
+    # no-limits harness rejected with LimitExceeded). A per-project local
+    # cache and a per-WORK global cache key every build to this run only.
+    ( cd "$2" && zig build --release=fast --cache-dir .zig-cache --global-cache-dir "$WORK/zig-global-cache" )
 }
 
 echo "==> generating + building example + conformance projects"
