@@ -416,16 +416,19 @@ func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 	case ir.KindBitfield:
 		write = fmt.Sprintf("e.WriteUnsigned(%d, uint64(%s))", fld.ID, acc)
 	case ir.KindBlob:
-		// blob is a leaf: omit when equal to its default (empty if none).
-		// bytes.Equal below is emitted into whatever file holds this marshal
-		// (per-message or the shared types.go), so import "bytes" here rather
-		// than relying on the message file's own bytes.Buffer import.
-		f.imp("bytes")
-		def := "nil"
-		if lit, ok := g.defaultLiteral(fld); ok {
-			def = lit
+		// blob is a leaf: omit when equal to its default. With a schema default,
+		// compare against its literal via bytes.Equal (importing "bytes" into
+		// whatever file holds this marshal, per-message or the shared types.go).
+		// With no default the default is the empty slice, so the idiomatic
+		// len()==0 test is exactly equivalent to bytes.Equal(x, nil) — matching
+		// the array/string/scalar omit-checks and leaving generated code free of
+		// the bytes dependency in the common case (#113).
+		if def, ok := g.defaultLiteral(fld); ok {
+			f.imp("bytes")
+			f.line("\tif !bytes.Equal(%s, %s) {", acc, def)
+		} else {
+			f.line("\tif len(%s) != 0 {", acc)
 		}
-		f.line("\tif !bytes.Equal(%s, %s) {", acc, def)
 		f.line("\t\te.WriteBytes(%d, %s)", fld.ID, acc)
 		f.line("\t}")
 		return
