@@ -145,6 +145,50 @@ func fixedHeader(t *testing.T, src, msgFile string, extra map[string]any) (strin
 	return "", nil
 }
 
+// TestCppHeapUnboundedArray: on the heap (corelib: cpp) profile a schema-
+// unbounded array (no count) must lower to a growable std::vector<T> — like the
+// unbounded string->std::string and blob->std::vector<uint8_t> already do — not a
+// fixed std::array<T, 0>, which cannot hold any element and silently drops the
+// whole array on decode (#112). A bounded native array stays std::array<T, N>.
+func TestCppHeapUnboundedArray(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      arr:    { id: 0, type: array, items: { type: u32 } }\n" + // unbounded native
+		"      en:     { id: 1, type: array, items: { type: enum, enum: { a: 0, b: 1 } } }\n" + // unbounded enum
+		"      bl:     { id: 2, type: array, items: { type: boolean } }\n" + // unbounded bool
+		"      fixed:  { id: 3, type: array, items: { type: u32, count: 4 } }\n" + // bounded native
+		"      matrix: { id: 4, type: array, items: { type: array, items: { type: u32 } } }\n" // matrix, unbounded rows
+	h, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"std::vector<std::uint32_t> arr = {};",           // unbounded native -> vector (was std::array<T,0>)
+		"std::vector<bool> bl = {};",                     // unbounded bool -> vector
+		"std::array<std::uint32_t, 4> fixed = {};",       // bounded native array unchanged
+		"std::vector<std::vector<std::uint32_t>> matrix", // matrix rows are dynamic vectors too
+		"arr.resize(_count); is.read(arr);",              // decode sizes the vector to the wire count
+		"if (arr != std::vector<std::uint32_t>{}) {",     // whole-omit compares to an empty vector
+		"std::size_t _count) noexcept override",          // _count is named for the resize
+		"if constexpr (requires { row.resize(_count); }", // _MsgSeq sizes dynamic matrix rows
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("heap header missing %q:\n%s", want, h)
+		}
+	}
+	// The zero-length fixed array must never appear — that is the bug.
+	if strings.Contains(h, "std::array<std::uint32_t, 0>") {
+		t.Errorf("unbounded array must not lower to std::array<T, 0>:\n%s", h)
+	}
+	// enum vector: member is a vector of the scoped enum element type, and decode
+	// sizes it to _count before the value-narrowing read.
+	if !strings.Contains(h, "std::vector<MEnElem> en = {};") {
+		t.Errorf("unbounded enum array should be a std::vector of the enum element:\n%s", h)
+	}
+	if !strings.Contains(h, "en.resize(_count);") {
+		t.Errorf("unbounded enum array decode should resize to _count:\n%s", h)
+	}
+}
+
 // TestCppFixedContainers: corelib: c-cpp lowers bounded strings, blobs, and
 // struct/matrix/string/blob sequences to heap-free, schema-sized storage. Wire
 // bytes are unchanged (proven separately by the conformance run) — this asserts

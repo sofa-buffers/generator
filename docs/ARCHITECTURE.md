@@ -483,8 +483,11 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    one chunk (`offset == 0 && chunk_len >= total`) they build the value straight
    from the contiguous slice, keeping the byte accumulator only for split
    payloads. Fixed-count native arrays decode into a fixed/primitive member
-   (Rust `[T; N]`, Java `long[]/float[]/double[]`) filled by index, not a
-   grown heap collection. The C++ `c-cpp` wrapper (the embedded target) goes
+   (Rust `[T; N]`, Java `long[]/float[]/double[]`, C++ `std::array<T, N>`)
+   filled by index, not a grown heap collection; a **count-less** native array
+   on a heap target is dynamic instead (C++ `corelib: cpp` gives `std::vector<T>`,
+   sized to the wire count on decode — never `std::array<T, 0>`, which would drop
+   every element). The C++ `c-cpp` wrapper (the embedded target) goes
    further: it **always** uses fixed-capacity, heap-free containers
    (`docs/generator/cpp.md`) — bounded strings, blobs, and their wrapper-sequence
    arrays (plus struct/union/matrix sequences) decode into schema-sized inline

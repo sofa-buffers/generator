@@ -39,6 +39,18 @@ targets:
 [`corelib-cpp`]: https://github.com/sofa-buffers/corelib-cpp
 [`corelib-c-cpp`]: https://github.com/sofa-buffers/corelib-c-cpp
 
+### `corelib: cpp` = dynamic containers
+
+The default heap profile maps every **schema-unbounded** field to a growable
+container: a string with no `maxlen` → `std::string`, a blob with no `maxlen` →
+`std::vector<std::uint8_t>`, and an array with no `count` → `std::vector<T>` —
+including a **native scalar array** (e.g. an `array` of `u32` with no count is
+`std::vector<std::uint32_t>`, not `std::array<T, 0>`). A **bounded** native array
+(count present) stays a fixed `std::array<T, N>`. Decode sizes a dynamic native
+vector to the wire element count before filling it, and the
+[`max_dyn_array_count`](#options) cap (when set) rejects an over-cap count as
+`Error::LimitExceeded` before any allocation.
+
 ### `corelib: c-cpp` = fixed-capacity (embedded) containers
 
 `corelib: c-cpp` targets real embedded devices, so it **always** uses fixed-capacity,
