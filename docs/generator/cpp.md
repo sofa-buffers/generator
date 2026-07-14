@@ -93,7 +93,10 @@ non-allocating `encodeTo(dst, cap)` is also emitted alongside the convenience
 an error naming the field and the missing attribute — unless `allow_dynamic: true`
 keeps a `std::string`/`std::vector` fallback for it (bounded fields still go
 fixed). This makes "no hidden allocation" the default guarantee: size your schema,
-or consciously opt a field into a heap fallback.
+or consciously opt a field into a heap fallback. The `count` requirement covers
+**every** array element kind, including a plain numeric array: a count-less native
+scalar array (e.g. `array` of `u32`) is rejected too, rather than silently
+lowering to a zero-length `std::array<T, 0>` (generator#104).
 
 The `encode()` convenience method still returns a `std::vector<std::uint8_t>`
 (heap) for host-side use; embedded callers use the non-allocating

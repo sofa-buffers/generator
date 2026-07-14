@@ -22,8 +22,20 @@ INC="$CORELIB/src/include"
 SRC="$CORELIB/src"
 echo "==> corelib: $CORELIB"
 
-echo "==> generating C for examples/messages/example.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in examples/messages/example.yaml --out "$WORK/gen" )
+# The shared example intentionally leaves `somemap` unbounded (a dynamic map for
+# heap targets). The heapless C target requires a bound on every array, so derive
+# a C-appropriate example that gives it an explicit capacity — exactly what a
+# C-target schema author does. `count` never reaches the wire, so the round-trip
+# and shared vectors are unchanged.
+EXAMPLE="$WORK/example_c.yaml"
+awk '
+  /^      somemap:/ { inmap=1 }
+  inmap && /^          type: struct$/ { print; print "          count: 8"; inmap=0; next }
+  { print }
+' "$ROOT/examples/messages/example.yaml" > "$EXAMPLE"
+
+echo "==> generating C for the (bounded) example"
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$EXAMPLE" --out "$WORK/gen" )
 
 echo "==> compiling generated code + harness against corelib"
 gcc -std=c99 -Wall -Wextra \
@@ -49,7 +61,7 @@ cat > "$WORK/proj.yaml" <<YAML
 generic: { emit: project }
 targets: { c: { symbol_prefix: sofab_ } }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in examples/messages/example.yaml --out "$WORK/proj" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in "$EXAMPLE" --out "$WORK/proj" )
 make -C "$WORK/proj" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"someu64":18446744073709551615,"somestringarray":["a","b","c","d","e"]}'
 OUT=$(printf '%s' "$IN" | "$WORK/proj/harness/harness" encode | "$WORK/proj/harness/harness" decode)
@@ -120,6 +132,10 @@ echo "==> corpus + realworld: every definition compiles"
 # BIG descriptor profile so wide field ids (up to 2^31-1) fit the descriptor.
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
+    # no_maxlen is a deliberately-unbounded schema (dynamic-path coverage for heap
+    # targets); the heapless C target requires bounds on every field, so it is not
+    # a valid C input — the negative test below asserts it is rejected.
+    [ "$name" = "no_maxlen" ] && continue
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     for c in "$WORK"/corpus/"$name"/*.c; do
         gcc -std=c99 -Wall -DSOFAB_OBJECT_DESCR_PROFILE=3 -I"$INC" -I"$WORK/corpus/$name" -c "$c" -o /dev/null \
@@ -156,7 +172,7 @@ subset_c fixlen "-DSOFAB_DISABLE_ARRAY_SUPPORT -DSOFAB_DISABLE_SEQUENCE_SUPPORT 
 messages: { m: { payload: { a: {id: 0, type: i32}, s: {id: 1, type: string, maxlen: 16}, b: {id: 2, type: blob, maxlen: 8}, f: {id: 3, type: fp32}, g: {id: 4, type: fp64} } } }'
 subset_c sequence "-DSOFAB_DISABLE_ARRAY_SUPPORT -DSOFAB_DISABLE_FP64_SUPPORT -DSOFAB_DISABLE_INT64_SUPPORT" \
     'version: 1
-messages: { m: { payload: { a: {id: 0, type: i32}, st: {id: 1, type: struct, fields: { x: {id: 0, type: i32} }}, sa: {id: 2, type: array, items: {type: string, count: 3}} } } }'
+messages: { m: { payload: { a: {id: 0, type: i32}, st: {id: 1, type: struct, fields: { x: {id: 0, type: i32} }}, sa: {id: 2, type: array, items: {type: string, count: 3, maxlen: 8}} } } }'
 subset_c nofp64 "-DSOFAB_DISABLE_FP64_SUPPORT" \
     'version: 1
 messages: { m: { payload: { a: {id: 0, type: u64}, f: {id: 1, type: fp32}, s: {id: 2, type: string, maxlen: 16}, arr: {id: 3, type: array, items: {type: u8, count: 4}} } } }'
@@ -174,5 +190,29 @@ for flag in FIXLEN_SUPPORT ARRAY_SUPPORT SEQUENCE_SUPPORT FP64_SUPPORT INT64_SUP
     fi
 done
 echo "==> all guards fired as expected"
+
+# The C object model has no dynamic containers, so an unbounded string/blob/array
+# (no maxlen/count) is a hard generation error naming the field — not a silently
+# invented char[1]/T[0] that then rejects every real message at runtime (#104).
+# There is no allow_dynamic escape for C.
+echo "==> negative: unbounded fields are rejected at generate time (generator#104)"
+neg_reject() {  # label  yaml
+    name=$1; yaml=$2
+    printf '%s' "$yaml" > "$WORK/neg_$name.yaml"
+    if ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/neg_$name.yaml" --out "$WORK/neg_$name" >"$WORK/neg_$name.out" 2>&1 ); then
+        echo "FAIL: [$name] unbounded field should be rejected"; exit 1
+    fi
+    grep -q 'has no' "$WORK/neg_$name.out" || { echo "FAIL: [$name] error should name the missing bound:"; cat "$WORK/neg_$name.out"; exit 1; }
+    if grep -q 'allow_dynamic' "$WORK/neg_$name.out"; then
+        echo "FAIL: [$name] C has no allow_dynamic escape:"; cat "$WORK/neg_$name.out"; exit 1
+    fi
+    echo "   [$name] rejected: $(grep -o 'field .* has no [a-z ]*' "$WORK/neg_$name.out" | head -1)"
+}
+neg_reject string       'version: 1
+messages: { m: { payload: { s: { id: 0, type: string } } } }'
+neg_reject nativearray  'version: 1
+messages: { m: { payload: { a: { id: 0, type: array, items: { type: u32 } } } } }'
+neg_reject the_corpus_no_maxlen "$(cat "$ROOT"/tests/matrix/corpus/defs/no_maxlen.yaml)"
+echo "==> unbounded fields correctly rejected"
 
 echo "PASS"

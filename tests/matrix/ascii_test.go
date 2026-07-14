@@ -29,6 +29,9 @@ func TestGeneratedOutputIsASCII(t *testing.T) {
 			t.Fatalf("%s should validate: %v", def, err)
 		}
 		for _, lang := range generator.Registered() {
+			if fixedOnlyTarget(lang) && hasUnboundedField(s) {
+				continue // heapless target cannot size an unbounded field (generator#104)
+			}
 			b, _ := generator.Lookup(lang)
 			for _, cfg := range modes {
 				files, err := b.Generate(s, cfg)
