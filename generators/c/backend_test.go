@@ -168,6 +168,37 @@ func genCErr(t *testing.T, src string) error {
 	return err
 }
 
+func genCFromYAML(t *testing.T, src string) map[string]string {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "test.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := doc.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("schema must validate: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	out := map[string]string{}
+	for _, f := range files {
+		out[f.Path] = string(f.Content)
+	}
+	return out
+}
+
 // TestUnboundedFieldsRejected: the C object model has no dynamic containers, so
 // every string/blob (maxlen) and array (count, at every nesting level, ANY
 // element kind) must be sized by the schema. An unbounded such field is a hard
@@ -226,6 +257,34 @@ messages:
 `)
 	if err != nil {
 		t.Fatalf("a fully bounded schema must generate: %v", err)
+	}
+}
+
+// TestStringStorageReservesTerminator: a bounded string member must get maxlen+1
+// bytes of storage. The corelib's read_string reserves one byte for the NUL
+// (istream.c rejects wire length > capacity-1), so char[maxlen] would reject a
+// wire string of exactly maxlen bytes — its declared schema bound (#103). A blob
+// (no terminator) keeps exactly maxlen; a string element of a holder array gets
+// the same +1.
+func TestStringStorageReservesTerminator(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      s:    { id: 0, type: string, maxlen: 4 }
+      b:    { id: 1, type: blob, maxlen: 4 }
+      arr:  { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`)
+	h := files["m.h"]
+	for _, want := range []string{
+		"char s[5];",        // string: maxlen 4 + 1 for the NUL
+		"uint8_t b[4];",     // blob: exactly maxlen, no terminator
+		"char items[3][9];", // string element of a holder array: maxlen 8 + 1
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.h missing %q:\n%s", want, h)
+		}
 	}
 }
 
