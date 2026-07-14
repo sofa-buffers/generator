@@ -6,6 +6,11 @@ generic:
   output_dir: ./generated
   license: MIT                  # SPDX header; omit (or `none`) for no SPDX line
   emit: sources                 # or `project` for a buildable project scaffold
+  # Receiver-side decode limits for schema-unbounded fields (no count/maxlen).
+  # Unset = unlimited; exceeding one fails the decode with LimitExceeded.
+  max_dyn_array_count: 65536    # elements, per unbounded array
+  max_dyn_string_len: 4096      # bytes, per unbounded string
+  max_dyn_blob_len: 4096        # bytes, per unbounded blob
 targets:
   cpp:
     namespace: myproj::msg

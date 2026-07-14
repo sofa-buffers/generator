@@ -36,11 +36,11 @@ YAML
 
 printf 'generic: { emit: project }\n' > "$WORK/cfg.yaml"
 
-# zig_build DEF OUT-DIR -- generate a project and build its harness. The
+# zig_build DEF OUT-DIR [CFG] -- generate a project and build its harness. The
 # relative depth of the corelib symlink depends on the output nesting, so the
 # placeholder is resolved with a computed relative path.
 zig_build() {
-    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang zig --in "$1" --out "$2" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang zig --in "$1" --out "$2" )
     rel=$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$WORK/corelib-link" "$2")
     sed -i "s#\${SOFAB_ZIG_CORELIB}#$rel#" "$2/build.zig.zon"
     ( cd "$2" && zig build --release=fast )
@@ -71,6 +71,29 @@ if "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/overcount.bin" 
 fi
 "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
+
+# Receiver-side decode limits (generator#102): a count-less u64 array with
+# max_dyn_array_count: 4 baked into the generated module (id 0 -> header 0x03 =
+# 0<<3 | unsigned-array). A wire count of 5 MUST fail decode with the corelib's
+# error.LimitExceeded (exits non-zero); a count of 4 still decodes; and the
+# same 5-element bytes MUST decode in a project generated WITHOUT limits.
+echo "==> receiver-side decode limits (generator#102)"
+cat > "$WORK/dyn.yaml" <<'YAML'
+version: 1
+messages:
+  dyn: { payload: { a: { id: 0, type: array, items: { type: u64 } } } }
+YAML
+printf 'generic: { emit: project, max_dyn_array_count: 4 }\n' > "$WORK/cfg_lim.yaml"
+zig_build "$WORK/dyn.yaml" "$WORK/lim" "$WORK/cfg_lim.yaml"
+zig_build "$WORK/dyn.yaml" "$WORK/nolim"
+printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
+printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
+if "$WORK/lim/zig-out/bin/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null 2>&1; then
+    echo "FAIL: dynamic array count 5 must exceed max_dyn_array_count 4"; exit 1
+fi
+"$WORK/lim/zig-out/bin/harness" decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count == limit (4) must decode"; exit 1; }
+"$WORK/nolim/zig-out/bin/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: no-limits project must accept count 5"; exit 1; }
+echo "==> decode limits OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/zig/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"

@@ -63,6 +63,35 @@ fi
 $H decode myfirstmessage < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+# Receiver-side decode limits (generator#102): `a` is a count-less array
+# (id 0 -> header 0x03 = 0<<3 | unsigned-array), so a configured
+# max_dyn_array_count: 4 makes a wire count of 5 fail decode with
+# LimitExceeded (non-zero exit) at the count header; exactly 4 still decode,
+# and the same oversized bytes decode fine against a project generated
+# without limits (unset = unlimited).
+echo "==> receiver-side decode limits (generator#102)"
+cat > "$WORK/dyn.yaml" <<'YAML'
+version: 1
+messages:
+  dyn: { payload: { a: { id: 0, type: array, items: { type: u64 } } } }
+YAML
+cat > "$WORK/cfg-limit.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang csharp --in "$WORK/dyn.yaml" --out "$WORK/dynlim" )
+( cd "$WORK/dynlim" && dotnet build -v q >/dev/null )
+build "$WORK/dyn.yaml" "$WORK/dynfree"
+HL="dotnet $WORK/dynlim/bin/Debug/net9.0/harness.dll"
+HF="dotnet $WORK/dynfree/bin/Debug/net9.0/harness.dll"
+printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
+printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
+if $HL decode dyn < "$WORK/overlimit.bin" >/dev/null 2>&1; then
+    echo "FAIL: 5 elements above max_dyn_array_count 4 must fail decode"; exit 1
+fi
+$HL decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: 4 elements at the limit must decode"; exit 1; }
+$HF decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: no-limits project must decode the oversized message"; exit 1; }
+echo "==> decode limits OK"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"
 

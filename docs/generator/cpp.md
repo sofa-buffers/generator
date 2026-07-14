@@ -11,6 +11,8 @@ Options accepted under `targets.cpp`. For shared options (`emit`,
 | `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets. This also picks the container representation: `cpp` = dynamic (`std::vector`/`std::string`), `c-cpp` = fixed-capacity/heap-free (see below). |
 | `allow_dynamic` | bool | `false` | `corelib: c-cpp` only. Keep a `std::vector`/`std::string` heap fallback for genuinely unbounded fields instead of failing generation. |
 | `namespace` | string | `message` | C++ namespace wrapping the generated types. Also settable in `generic`. |
+| `max_dyn_array_count` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only (`c-cpp` is statically schema-bounded). Emits a per-field `is.exceedLimit()` guard on unbounded count-prefixed arrays; `feed()`/`try_decode` then return `Error::LimitExceeded`. |
+| `max_dyn_string_len` / `max_dyn_blob_len` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only. Per-field `_size` guard on unbounded strings/blobs, plus a **derived** streaming reassembly cap passed as `sofab::Limits{max_buffered_field}` into the one-shot decode entry points — `max(string cap, blob cap, largest schema maxlen, largest schema count * 10)`, so legitimately schema-bounded fields always still fit when fed in chunks. |
 
 ### `corelib`
 

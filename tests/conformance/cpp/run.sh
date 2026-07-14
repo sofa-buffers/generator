@@ -120,6 +120,37 @@ run_variant cpp "" "-I$CPP/include" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC"
 # SOFAB_C_DIR; the generated Makefile compiles + links its C sources.
 run_variant c-cpp "c-cpp" "-I$CC/src/include" SOFAB_C_DIR="$CC"
 
+# Receiver-side decode limits (generator#102), pure corelib-cpp only (the c-cpp
+# profile is statically schema-bounded). An unbounded array claiming more than
+# the configured max_dyn_array_count must fail the decode (LimitExceeded via
+# is.exceedLimit()); the same bytes decode fine without a configured limit.
+echo "==> [cpp] receiver-side decode limits (generator#102)"
+cat > "$WORK/dyn102.yaml" <<'YAML'
+version: 1
+messages:
+  dyn: { payload: { a: { id: 0, type: array, items: { type: u64 } } } }
+YAML
+cat > "$WORK/cfg-limits.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4 }
+targets: { cpp: { namespace: sofabuffers } }
+YAML
+cat > "$WORK/cfg-nolimits.yaml" <<'YAML'
+generic: { emit: project }
+targets: { cpp: { namespace: sofabuffers } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limits.yaml" --lang cpp --in "$WORK/dyn102.yaml" --out "$WORK/lim102" )
+make -C "$WORK/lim102" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolimits.yaml" --lang cpp --in "$WORK/dyn102.yaml" --out "$WORK/nolim102" )
+make -C "$WORK/nolim102" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+printf '\003\005\001\002\003\004\005' > "$WORK/over102.bin"   # id0 array, count 5 > cap 4
+printf '\003\004\001\002\003\004' > "$WORK/in102.bin"         # count 4 == cap
+if "$WORK/lim102/harness/harness" decode dyn < "$WORK/over102.bin" >/dev/null 2>&1; then
+    echo "FAIL: [cpp] over-cap dynamic array (count 5 > max_dyn_array_count 4) must fail"; exit 1
+fi
+"$WORK/lim102/harness/harness" decode dyn < "$WORK/in102.bin" >/dev/null || { echo "FAIL: [cpp] in-cap dynamic array must decode"; exit 1; }
+"$WORK/nolim102/harness/harness" decode dyn < "$WORK/over102.bin" >/dev/null || { echo "FAIL: [cpp] without limits the same bytes must decode"; exit 1; }
+echo "==> [cpp] decode limits OK (over-cap rejected, in-cap + unlimited accepted)"
+
 # corelib-c-cpp feature-subset configs. The C++ wrapper (sofab/sofab.hpp) gates
 # its methods on ARRAY / FP64 / INT64 (SOFAB_CPP_HAVE_*), so generated C++ that
 # avoids a disabled feature must still compile against the stripped wrapper. The

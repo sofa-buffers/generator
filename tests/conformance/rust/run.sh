@@ -95,6 +95,31 @@ run_variant() {
 # corelib-rs (std, the default): always-on, no feature flags.
 run_variant rs "corelib: rs" "$STD"
 
+# Receiver-side decode limits (generator#102), std corelib only (the no_std
+# profile is statically bounded, the keys are inert there): an unbounded u64
+# array (id 0 -> header 0x03 = 0<<3 | unsigned-array) under
+# max_dyn_array_count: 4. 5 wire elements MUST fail try_decode with
+# LimitExceeded (harness exits non-zero); exactly 4 still decode; and the same
+# oversized bytes MUST decode against a no-limits project (unset = unlimited).
+echo "==> [rs] receiver-side decode limits (generator#102)"
+printf 'version: 1\nmessages:\n  dyn: { payload: { a: { id: 0, type: array, items: { type: u64 } } } }\n' > "$WORK/dyn.yaml"
+printf 'generic: { emit: project, max_dyn_array_count: 4 }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-lim.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/lim" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/lim/Cargo.toml"
+( cd "$WORK/lim" && cargo build -q )
+printf '\003\005\001\002\003\004\005' > "$WORK/lim-over.bin"
+printf '\003\004\001\002\003\004' > "$WORK/lim-ok.bin"
+if (cd "$WORK/lim" && cargo run -q -- decode dyn < "$WORK/lim-over.bin" >/dev/null 2>&1); then
+    echo "FAIL: 5 elements > max_dyn_array_count 4 must reject (LimitExceeded)"; exit 1
+fi
+(cd "$WORK/lim" && cargo run -q -- decode dyn < "$WORK/lim-ok.bin" >/dev/null) || { echo "FAIL: 4 elements == cap must decode"; exit 1; }
+printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-nolim.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/nolim" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/nolim/Cargo.toml"
+( cd "$WORK/nolim" && cargo build -q )
+(cd "$WORK/nolim" && cargo run -q -- decode dyn < "$WORK/lim-over.bin" >/dev/null) || { echo "FAIL: no-limits project must decode oversized input"; exit 1; }
+echo "==> [rs] decode limits OK"
+
 # corelib-rs-no-std is now the genuinely #![no_std], heap-free profile (heapless
 # fixed-capacity fields). The rich example.yaml has an unbounded field (somemap),
 # so it needs allow_dynamic: true to keep an alloc fallback for that one field —

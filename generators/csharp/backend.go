@@ -21,7 +21,7 @@ type Backend struct{}
 func (*Backend) Lang() string { return "csharp" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(cfg)}
 	files := []generator.File{{Path: "Message.cs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -34,6 +34,29 @@ type gen struct {
 	ns      string
 	banner  string
 	license string // SPDX id, "" to omit the header line
+	limits  limitSet
+}
+
+// limitSet is the receiver-side decode-limit configuration (generator#102).
+// Unlike the corelib-global backends (Go/Python/TypeScript), the C# guards are
+// emitted per-field in the generated visitor and only on schema-unbounded
+// fields, so each configured cap is used as-is (no raise to the largest schema
+// bound): a schema-bounded field never meets a cap and keeps only its
+// generator#100 schema-capacity guard. A configured key is still inert for a
+// message whose reachable fields have no unbounded field of that kind
+// (ir.Bounds, checked per visitor) — then no constant or guard is emitted.
+type limitSet struct {
+	arrayCount, stringLen, blobLen int64
+	arrayHas, stringHas, blobHas   bool
+}
+
+// resolveLimits reads the max_dyn_* config keys (see limitSet).
+func resolveLimits(cfg map[string]any) limitSet {
+	var l limitSet
+	l.arrayCount, l.arrayHas = cfgLimit(cfg, "max_dyn_array_count")
+	l.stringLen, l.stringHas = cfgLimit(cfg, "max_dyn_string_len")
+	l.blobLen, l.blobHas = cfgLimit(cfg, "max_dyn_blob_len")
+	return l
 }
 
 type cfile struct{ b strings.Builder }

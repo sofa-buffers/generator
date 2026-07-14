@@ -22,7 +22,7 @@ type Backend struct{}
 func (*Backend) Lang() string { return "java" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, pkg: cfgString(cfg, "package", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
+	g := &gen{schema: s, pkg: cfgString(cfg, "package", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(s, cfg)}
 	dir := "src/main/java/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
 	var files []generator.File
 	files = append(files, generator.File{Path: dir + "Sbuf.java", Content: g.sbufSupport()})
@@ -40,6 +40,40 @@ type gen struct {
 	pkg     string
 	banner  string
 	license string // SPDX id, "" to omit the header line
+	limits  limitSet
+}
+
+// limitSet is the receiver-side decode-limit configuration (generator#102). An
+// entry is active only when its key is configured AND the schema actually has
+// an unbounded field of that kind — otherwise the option would be inert and no
+// limit plumbing is emitted. Unlike backends whose corelib enforces the limits
+// globally per decode (Go, Python, TypeScript), the Java visitor guards each
+// unbounded field individually, so the configured value is emitted as-is —
+// schema-bounded fields never see it (they keep their generator#100 guard).
+type limitSet struct {
+	arrayCount, stringLen, blobLen int64
+	arrayHas, stringHas, blobHas   bool
+}
+
+// resolveLimits reads the max_dyn_* config keys and gates them on the schema's
+// bounds (see limitSet).
+func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
+	var all []*ir.Field
+	for _, m := range s.Messages {
+		all = append(all, m.Fields...)
+	}
+	b := ir.Bounds(all)
+	var l limitSet
+	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
+		l.arrayCount, l.arrayHas = v, true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
+		l.stringLen, l.stringHas = v, true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
+		l.blobLen, l.blobHas = v, true
+	}
+	return l
 }
 
 // header writes the @generated banner and, when a license is set, an SPDX line.

@@ -97,6 +97,98 @@ func TestZigStructural(t *testing.T) {
 	}
 }
 
+// TestZigDecodeLimits: the max_dyn_* config keys bake receiver-side decode
+// limits (generator#102) into the generated module — private constants plus a
+// per-field guard on every schema-unbounded field, feeding the sticky `lim`
+// flag that decode() turns into error.LimitExceeded (after the generator#100
+// InvalidMessage check). The configured value is emitted as-is (enforcement is
+// per-field, so schema-bounded fields keep only their own #100 guard), an
+// unset key emits nothing, and a key whose kind has no unbounded field is
+// inert. Independently of the config, the dynamic-array decode path must use
+// the hardened capped-eager-allocation _allocN/_put pair (a lying wire count
+// must not force a huge allocation).
+func TestZigDecodeLimits(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  dyn:
+    payload:
+      s:    { id: 0, type: string }
+      arr:  { id: 1, type: array, items: { type: u64 } }
+      barr: { id: 2, type: array, items: { type: i32, count: 100000 } }
+`
+	doc, err := parser.Parse([]byte(src), "dyn.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	gen := func(cfg map[string]any) string {
+		files, err := (&Backend{}).Generate(s, cfg)
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		return string(files[0].Content)
+	}
+
+	m := gen(map[string]any{
+		"max_dyn_array_count": 65536,
+		"max_dyn_string_len":  4096,
+		"max_dyn_blob_len":    2048, // no unbounded blob in the schema -> inert
+	})
+	for _, want := range []string{
+		// Constants carry the configured values as-is (never raised to the
+		// schema count of barr; that field is governed by its own bound).
+		"const max_dyn_array_count: usize = 65536;",
+		"const max_dyn_string_len: usize = 4096;",
+		// Unbounded fields are guarded at the count/length header, before the
+		// field's storage is taken.
+		"1 => if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.arr = _allocN(u64, self.alloc, count); },",
+		"0 => if (total > max_dyn_string_len) { self.lim = true; } else { self.m.s = chunk; },",
+		// InvalidMessage (generator#100) takes precedence over LimitExceeded.
+		"if (v.inv) return error.InvalidMessage;",
+		"if (v.lim) return error.LimitExceeded;",
+		// The schema-bounded array keeps only its generator#100 guard.
+		"2 => _putc(&self.m.barr, &self.ai, @truncate(value), &self.inv),",
+		// Hardened eager allocation: cap the untrusted wire count...
+		"const s = a.alloc(T, @min(n, 1024)) catch return &.{};",
+		// ...and grow as elements actually arrive, never past the announced count.
+		"const new = a.alloc(T, @min(@max(s.*.len * 2, i.* + 1), n)) catch return;",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("limits message.zig missing %q", want)
+		}
+	}
+	if strings.Contains(m, "max_dyn_blob_len") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
+	}
+	// Exactly the two unbounded fields are guarded (bounded barr is not).
+	if got := strings.Count(m, "self.lim = true"); got != 2 {
+		t.Errorf("want exactly 2 limit guards, got %d", got)
+	}
+
+	// No limits configured -> no limit plumbing at all; the eager-allocation
+	// hardening stays (it is a bugfix, not an option).
+	plain := gen(map[string]any{})
+	for _, notWant := range []string{"max_dyn", "lim: bool", "self.lim", "LimitExceeded"} {
+		if strings.Contains(plain, notWant) {
+			t.Errorf("unset limits must not emit %q", notWant)
+		}
+	}
+	if !strings.Contains(plain, "@min(n, 1024)") {
+		t.Error("no-config output must keep the hardened capped allocation")
+	}
+}
+
 func TestZigProjectMode(t *testing.T) {
 	files := exampleFiles(t, map[string]any{"emit": "project"})
 	for _, path := range []string{"src/message.zig", "src/main.zig", "build.zig", "build.zig.zon", "README.md"} {

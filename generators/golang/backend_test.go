@@ -3,6 +3,7 @@ package golang
 import (
 	goparser "go/parser"
 	"go/token"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -170,4 +171,49 @@ func firstLines(s string, n int) string {
 		lines = lines[:n]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// TestGoDecodeLimits: the max_dyn_* config keys bake receiver-side decode
+// limits (generator#102) into the generated package — constants in the prelude
+// plus sofab.WithMax* options on every AcceptBytes call. The cap is raised to
+// the largest schema bound of its kind (escape hatch: schema-bounded fields
+// stay governed by their own bound), an unset key emits nothing, and a key
+// whose kind has no unbounded field is inert.
+func TestGoDecodeLimits(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  dyn:
+    payload:
+      s:    { id: 0, type: string }
+      arr:  { id: 1, type: array, items: { type: u64 } }
+      barr: { id: 2, type: array, items: { type: i32, count: 100000 } }
+`
+	s := schemaFromYAMLString(t, src)
+	files := genGo(t, s, map[string]any{
+		"max_dyn_array_count": 65536,
+		"max_dyn_string_len":  4096,
+		"max_dyn_blob_len":    2048, // no unbounded blob in the schema -> inert
+	})
+	prelude, msg := files["sofab_visitor.go"], files["dyn.go"]
+	for _, want := range []*regexp.Regexp{
+		regexp.MustCompile(`MaxDynArrayCount\s+= 100000`), // raised to the schema count of barr
+		regexp.MustCompile(`MaxDynStringLen\s+= 4096`),
+	} {
+		if !want.MatchString(prelude) {
+			t.Errorf("prelude missing %v", want)
+		}
+	}
+	if strings.Contains(prelude, "MaxDynBlobLen") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
+	}
+	if !strings.Contains(msg, "sofab.AcceptBytes(data, m, sofab.WithMaxArrayCount(MaxDynArrayCount), sofab.WithMaxStringLen(MaxDynStringLen))") {
+		t.Error("Decode must pass the active limits into AcceptBytes")
+	}
+
+	// No limits configured -> byte-identical plumbing-free output.
+	plain := genGo(t, s, map[string]any{})
+	if strings.Contains(plain["sofab_visitor.go"], "MaxDyn") || strings.Contains(plain["dyn.go"], "WithMax") {
+		t.Error("unset limits must emit no limit plumbing")
+	}
 }

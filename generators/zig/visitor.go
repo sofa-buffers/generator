@@ -31,13 +31,18 @@ type frame struct {
 	elemRef  *ir.TypeRef // fkNestedNative: enum/bitfield backing type
 	elemType string      // fkStructArr/fkArrArr/fkNestedNative: Zig type of one element (for _grow)
 	elemFill string      // fkStructArr/fkArrArr/fkNestedNative: fill literal for _grow
+
+	// Schema-unbounded element markers, for the receiver-side decode limits
+	// (generator#102): only unbounded fields are guarded.
+	elemDynLen   bool // fkSeqArr: element string/blob has no schema maxlen
+	elemDynCount bool // fkNestedNative: inner native array has no schema count
 }
 
 // frames walks a message and returns every sequence container, root first.
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walkFields func(loc, path string, fields []*ir.Field)
-	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem)
+	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool)
 
 	walkFields = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields})
@@ -47,17 +52,18 @@ func (g *gen) frames(m *ir.Message) []frame {
 				cl := loc + "_" + fld.Name
 				walkFields(cl, path+"."+zigIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+zigIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems)
+				addArray(loc+"_"+fld.Name, path+"."+zigIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas)
 			}
 		}
 	}
 
 	// addArray builds the frame(s) for a wrapper-sequence array whose slice is
-	// at (loc, path) and whose element is (elem, ref, items).
-	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) {
+	// at (loc, path) and whose element is (elem, ref, items); elemMaxHas is the
+	// element's schema maxlen presence (string/blob elements only).
+	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool) {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem})
+			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDynLen: !elemMaxHas})
 		case ir.KindStruct, ir.KindUnion:
 			el := loc + "_e"
 			out = append(out, frame{
@@ -76,6 +82,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 					loc: loc, path: path, kind: fkNestedNative,
 					elemKind: items.Elem, elemRef: items.ElemRef,
 					elemType: "[]const " + inner, elemFill: "&.{}",
+					elemDynCount: !items.HasCount,
 				})
 			} else {
 				el := loc + "_e"
@@ -83,7 +90,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 					loc: loc, path: path, kind: fkArrArr, elemLoc: el,
 					elemType: "[]const " + inner, elemFill: "&.{}",
 				})
-				addArray(el, "_last("+path+").*", items.Elem, items.ElemRef, items.ElemItems)
+				addArray(el, "_last("+path+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas)
 			}
 		}
 	}
@@ -97,6 +104,11 @@ func (g *gen) frames(m *ir.Message) []frame {
 // skip, so only used callbacks are emitted.
 type visitorUse struct {
 	unsigned, signed, fp32, fp64, str, blob, scalarArray, sequence bool
+	// dynAlloc: the message decodes at least one slice-backed native array (a
+	// count-less direct field or a nested native element array), i.e. it
+	// allocates array storage from an untrusted wire count and needs the
+	// hardened _allocN/_put pair plus the announced-count register `an`.
+	dynAlloc bool
 }
 
 func visitorUseOf(fs []frame) visitorUse {
@@ -111,6 +123,7 @@ func visitorUseOf(fs []frame) visitorUse {
 			u.blob = u.blob || fr.elemKind == ir.KindBlob
 		case fkNestedNative:
 			u.scalarArray = true
+			u.dynAlloc = true
 			switch {
 			case fr.elemKind == ir.KindFP32:
 				u.fp32 = true
@@ -123,6 +136,9 @@ func visitorUseOf(fs []frame) visitorUse {
 			}
 		}
 		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) && !fld.HasCount {
+				u.dynAlloc = true
+			}
 			switch fld.Kind {
 			case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBool, ir.KindBitfield:
 				u.unsigned = true
@@ -160,31 +176,69 @@ func visitorUseOf(fs []frame) visitorUse {
 }
 
 // dynNativeArray reports whether a field is a dynamic (count-less) native
-// array, which needs an arrayBegin allocation of exactly the wire count.
+// array, which needs an arrayBegin allocation driven by the wire count.
 func (g *gen) dynNativeArray(f *ir.Field) bool {
 	return f.Kind == ir.KindArray && isNativeArrayElem(f.Elem) && !f.HasCount
 }
 
-// putTarget is the _put destination for a native array field: a pointer for a
-// fixed [N]T (mutable through the message), the slice value for a dynamic
-// decode-allocated array (_put const-casts the elements).
-func (g *gen) putTarget(fr frame, fld *ir.Field) string {
-	acc := fr.path + "." + zigIdent(fld.Name)
-	if _, _, ok := g.fixedNativeArray(fld); ok {
-		return "&" + acc
+// dynAllocUse reports whether any message decodes a slice-backed native array
+// (a count-less direct field or a nested native element array) — i.e. whether
+// the hardened _allocN/_put pair is referenced (see emitSupport).
+func (g *gen) dynAllocUse(s *ir.Schema) bool {
+	for _, m := range s.Messages {
+		if visitorUseOf(g.frames(m)).dynAlloc {
+			return true
+		}
 	}
-	return acc
+	return false
+}
+
+// msgLimitGuards reports whether the message's decoder emits at least one
+// decode-limit guard (generator#102) — i.e. whether it needs the sticky `lim`
+// flag and the decode() LimitExceeded check. It mirrors the guard emission
+// exactly: an active limit only guards fields the schema left unbounded.
+func (g *gen) msgLimitGuards(fields []*ir.Field) bool {
+	if !g.limits.any() {
+		return false
+	}
+	for _, fr := range g.frames(&ir.Message{Fields: fields}) {
+		switch fr.kind {
+		case fkNestedNative:
+			if g.limits.arrayHas && fr.elemDynCount {
+				return true
+			}
+		case fkSeqArr:
+			if fr.elemDynLen && ((fr.elemKind == ir.KindString && g.limits.stringHas) ||
+				(fr.elemKind == ir.KindBlob && g.limits.blobHas)) {
+				return true
+			}
+		case fkStruct:
+			for _, fld := range fr.fields {
+				switch {
+				case g.limits.arrayHas && g.dynNativeArray(fld):
+					return true
+				case g.limits.stringHas && fld.Kind == ir.KindString && !fld.HasMaxlen:
+					return true
+				case g.limits.blobHas && fld.Kind == ir.KindBlob && !fld.HasMaxlen:
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // putCall renders the element store for a direct native array field: the
 // capacity-checked _putc for a fixed [N]T — an over-count element flags the
-// message INVALID per MESSAGE_SPEC 3+7 (generator#100) — or plain _put for a
-// dynamic (count-less) slice, which keeps every wire element.
+// message INVALID per MESSAGE_SPEC 3+7 (generator#100) — or the growing _put
+// for a dynamic (count-less) slice, which keeps every wire element up to the
+// announced count while never trusting that count for the eager allocation.
 func (g *gen) putCall(fr frame, fld *ir.Field, val string) string {
+	acc := fr.path + "." + zigIdent(fld.Name)
 	if _, _, ok := g.fixedNativeArray(fld); ok {
-		return fmt.Sprintf("_putc(%s, &self.ai, %s, &self.inv)", g.putTarget(fr, fld), val)
+		return fmt.Sprintf("_putc(&%s, &self.ai, %s, &self.inv)", acc, val)
 	}
-	return fmt.Sprintf("_put(%s, &self.ai, %s)", g.putTarget(fr, fld), val)
+	return fmt.Sprintf("_put(&%s, self.alloc, &self.ai, self.an, %s)", acc, val)
 }
 
 // storeCast renders the visitor value expression for a numeric destination
@@ -217,8 +271,16 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	// elements than its schema count (generator#100); decode() then rejects
 	// with error.InvalidMessage. Always present so decode() can check it.
 	f.line("    inv: bool = false, // a scalar array overflowed its schema count -> INVALID")
+	// Sticky decode-limit flag (generator#102): an unbounded field exceeded a
+	// configured max_dyn_* cap; decode() then rejects with error.LimitExceeded.
+	if g.msgLimitGuards(fields) {
+		f.line("    lim: bool = false, // an unbounded field exceeded a configured decode limit (generator#102)")
+	}
 	if use.scalarArray {
 		f.line("    ai: usize = 0, // index into the native array currently being filled")
+	}
+	if use.dynAlloc {
+		f.line("    an: usize = 0, // announced wire count of that array (untrusted until its elements arrive)")
 	}
 	f.blank()
 	f.line("    const _Loc = enum {")
@@ -317,7 +379,7 @@ func (g *gen) nestedNativeArm(fr frame, signed bool) string {
 	}
 	// Guard the empty case: if the per-element allocation failed the outer
 	// slice may have no last element to fill.
-	return fmt.Sprintf("if (%s.len != 0) _put(_last(%s).*, &self.ai, %s)", fr.path, fr.path, cast)
+	return fmt.Sprintf("if (%s.len != 0) _put(_last(%s), self.alloc, &self.ai, self.an, %s)", fr.path, fr.path, cast)
 }
 
 func (g *gen) emitIntVisit(f *zfile, fs []frame, name string, signed bool) {
@@ -387,7 +449,7 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 	idUsed := false
 	for _, fr := range fs {
 		if fr.kind == fkNestedNative && fr.elemKind == kind {
-			body := fmt.Sprintf("if (%s.len != 0) _put(_last(%s).*, &self.ai, value)", fr.path, fr.path)
+			body := fmt.Sprintf("if (%s.len != 0) _put(_last(%s), self.alloc, &self.ai, self.an, value)", fr.path, fr.path)
 			all = append(all, frameArms{fr: fr, body: body})
 			continue
 		}
@@ -433,29 +495,69 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 // emitPayloadVisit emits the string or blob callback. The generated decode()
 // feeds the whole buffer at once, so payloads always arrive single-shot
 // (offset 0, whole chunk) and the borrowed chunk IS the value -- zero-copy.
+//
+// With an active max_dyn_string_len / max_dyn_blob_len (generator#102) every
+// schema-unbounded field checks the header-announced total length before the
+// value is taken: the borrow never allocates, but the cap is a policy bound,
+// so an over-limit payload flags `lim` and decode() fails with LimitExceeded.
 func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb string) {
-	f.blank()
-	f.line("    pub fn %s(self: *_dec_%s, id: sofab.Id, _: usize, offset: usize, chunk: []const u8) void {", cb, name)
-	f.line("        if (offset != 0) return; // decode() is single-shot; a split payload means truncated input")
-	f.line("        switch (self.cur) {")
+	active, capName := g.limits.stringHas, "max_dyn_string_len"
+	if kind == ir.KindBlob {
+		active, capName = g.limits.blobHas, "max_dyn_blob_len"
+	}
+	// Collect arms first: the total-length parameter is named only when some
+	// limit guard reads it (Zig rejects unused parameters).
+	type frameArms struct {
+		fr   frame
+		arms []string // fkStruct: "id => body" lines
+		body string   // fkSeqArr: single body
+	}
+	var all []frameArms
+	totalUsed := false
 	for _, fr := range fs {
 		if fr.kind == fkSeqArr && fr.elemKind == kind {
-			f.line("            .%s => _setElem([]const u8, self.alloc, &(%s), id, \"\", chunk),", fr.loc, fr.path)
+			body := fmt.Sprintf("_setElem([]const u8, self.alloc, &(%s), id, \"\", chunk)", fr.path)
+			if active && fr.elemDynLen {
+				totalUsed = true
+				body = fmt.Sprintf("if (total > %s) { self.lim = true; } else { %s; }", capName, body)
+			}
+			all = append(all, frameArms{fr: fr, body: body})
 		}
 		if fr.kind != fkStruct {
 			continue
 		}
-		var arms []string
+		fa := frameArms{fr: fr}
 		for _, fld := range fr.fields {
-			if fld.Kind == kind {
-				arms = append(arms, fmt.Sprintf("%d => %s.%s = chunk,", fld.ID, fr.path, zigIdent(fld.Name)))
+			if fld.Kind != kind {
+				continue
+			}
+			acc := fr.path + "." + zigIdent(fld.Name)
+			if active && !fld.HasMaxlen {
+				totalUsed = true
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %s) { self.lim = true; } else { %s = chunk; },", fld.ID, capName, acc))
+			} else {
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = chunk,", fld.ID, acc))
 			}
 		}
-		if len(arms) == 0 {
+		if len(fa.arms) > 0 {
+			all = append(all, fa)
+		}
+	}
+	totalParam := "_"
+	if totalUsed {
+		totalParam = "total"
+	}
+	f.blank()
+	f.line("    pub fn %s(self: *_dec_%s, id: sofab.Id, %s: usize, offset: usize, chunk: []const u8) void {", cb, name, totalParam)
+	f.line("        if (offset != 0) return; // decode() is single-shot; a split payload means truncated input")
+	f.line("        switch (self.cur) {")
+	for _, fa := range all {
+		if fa.body != "" {
+			f.line("            .%s => %s,", fa.fr.loc, fa.body)
 			continue
 		}
-		f.line("            .%s => switch (id) {", fr.loc)
-		for _, arm := range arms {
+		f.line("            .%s => switch (id) {", fa.fr.loc)
+		for _, arm := range fa.arms {
 			f.line("                %s", arm)
 		}
 		f.line("                else => {},")
@@ -467,8 +569,13 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 }
 
 // emitArrayBegin emits the arrayBegin callback: reset the element fill index,
-// allocate a dynamic native array to exactly the wire count, and append a
-// fresh inner slice for a nested native array element.
+// allocate a dynamic native array from the wire count (capped eagerly, grown
+// by _put as elements actually arrive), and append a fresh inner slice for a
+// nested native array element.
+//
+// With an active max_dyn_array_count (generator#102) every schema-unbounded
+// array checks the announced count first: an over-limit count flags `lim` and
+// skips the field, and decode() then fails with error.LimitExceeded.
 func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string) {
 	type frameArms struct {
 		fr   frame
@@ -484,8 +591,16 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string) {
 			for _, fld := range fr.fields {
 				if g.dynNativeArray(fld) {
 					elem := g.zigArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems)
-					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s.%s = _allocN(%s, self.alloc, count),",
-						fld.ID, fr.path, zigIdent(fld.Name), elem))
+					body := fmt.Sprintf("%s.%s = _allocN(%s, self.alloc, count)", fr.path, zigIdent(fld.Name), elem)
+					if g.limits.arrayHas {
+						// A count-less array is always unbounded, so every
+						// direct dynamic native array gets the guard. an = 0
+						// drops the rejected array's elements: a field over
+						// the cap never allocates (generator#102).
+						fa.arms = append(fa.arms, fmt.Sprintf("%d => if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { %s; },", fld.ID, body))
+					} else {
+						fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, body))
+					}
 				}
 			}
 			if len(fa.arms) > 0 {
@@ -496,6 +611,9 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string) {
 			inner := strings.TrimPrefix(fr.elemType, "[]const ")
 			body := fmt.Sprintf("if (_grow(%s, self.alloc, &(%s), %s.len + 1, &.{})) { _last(%s).* = _allocN(%s, self.alloc, count); }",
 				fr.elemType, fr.path, fr.path, fr.path, inner)
+			if g.limits.arrayHas && fr.elemDynCount {
+				body = fmt.Sprintf("if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else %s", body)
+			}
 			countUsed = true
 			all = append(all, frameArms{fr: fr, body: body})
 		}
@@ -510,6 +628,9 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string) {
 	f.blank()
 	f.line("    pub fn arrayBegin(self: *_dec_%s, %s: sofab.Id, %s: sofab.ArrayKind, %s: usize) void {", name, idParam, kindParam, countParam)
 	f.line("        self.ai = 0;")
+	if visitorUseOf(fs).dynAlloc {
+		f.line("        self.an = count;")
+	}
 	if len(all) > 0 {
 		f.line("        switch (self.cur) {")
 		for _, fa := range all {

@@ -47,6 +47,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 			return nil, err
 		}
 	}
+	g.resolveLimits(s, cfg)
 	var files []generator.File
 	for _, m := range s.Messages {
 		files = append(files, generator.File{Path: strings.ToLower(m.Name) + ".hpp", Content: g.header(m)})
@@ -78,6 +79,56 @@ type gen struct {
 	// c-cpp path; without it such a field is a hard generate-time error (an
 	// embedded target must size its schema or opt the field into a heap fallback).
 	allowDynamic bool
+	// Receiver-side decode limits (generator#102), pure-corelib-cpp path only
+	// (the c-cpp wrapper is statically schema-bounded). Each is active when its
+	// max_dyn_* config key is set AND the schema has an unbounded field of that
+	// kind; the generated deserialize then guards those fields per-field
+	// (is.exceedLimit() -> Error::LimitExceeded) before any read. limBuffered
+	// additionally caps the corelib's streaming reassembly buffer
+	// (sofab::Limits{max_buffered_field}) — derived, not its own config key:
+	// max of the configured string/blob caps, raised to the schema's largest
+	// bounded string/blob maxlen and worst bounded array payload (count * 10,
+	// the widest varint element) so legitimate schema-bounded fields always
+	// still fit when fed in chunks.
+	limArr, limStr, limBlob          int64
+	limArrHas, limStrHas, limBlobHas bool
+	limBuffered                      int64
+}
+
+func (g *gen) anyLimit() bool { return g.limArrHas || g.limStrHas || g.limBlobHas }
+
+// istreamLimits renders the IStreamObject constructor argument carrying the
+// derived streaming reassembly cap ("" when no length limit is configured).
+func (g *gen) istreamLimits() string {
+	if g.limBuffered <= 0 {
+		return ""
+	}
+	return "{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}}"
+}
+
+// resolveLimits fills the gen's limit fields from the max_dyn_* config keys and
+// the schema's bounds (see the gen field comment).
+func (g *gen) resolveLimits(s *ir.Schema, cfg map[string]any) {
+	if g.clib {
+		return // statically bounded (fixed containers); keys are inert
+	}
+	var all []*ir.Field
+	for _, m := range s.Messages {
+		all = append(all, m.Fields...)
+	}
+	b := ir.Bounds(all)
+	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
+		g.limArr, g.limArrHas = v, true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
+		g.limStr, g.limStrHas = v, true
+	}
+	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
+		g.limBlob, g.limBlobHas = v, true
+	}
+	if g.limStrHas || g.limBlobHas {
+		g.limBuffered = max(g.limStr, g.limBlob, b.MaxStringLen, b.MaxBlobLen, b.MaxCount*10)
+	}
 }
 
 type hfile struct{ b strings.Builder }
@@ -127,6 +178,34 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.line("%s", cppMsgSeqPrelude)
 	f.line("#endif")
 	f.blank()
+
+	// Receiver-side decode limits (generator#102), baked from the sofabgen config.
+	// Macros (not inline constexpr) so multiple generated headers agree in one TU;
+	// they govern only fields the schema left unbounded — exceeding one fails the
+	// decode with sofab::Error::LimitExceeded (a policy cap, not INVALID).
+	if g.anyLimit() {
+		if g.limArrHas {
+			f.line("#ifndef SOFAB_MAX_DYN_ARRAY_COUNT")
+			f.line("#define SOFAB_MAX_DYN_ARRAY_COUNT %d", g.limArr)
+			f.line("#endif")
+		}
+		if g.limStrHas {
+			f.line("#ifndef SOFAB_MAX_DYN_STRING_LEN")
+			f.line("#define SOFAB_MAX_DYN_STRING_LEN %d", g.limStr)
+			f.line("#endif")
+		}
+		if g.limBlobHas {
+			f.line("#ifndef SOFAB_MAX_DYN_BLOB_LEN")
+			f.line("#define SOFAB_MAX_DYN_BLOB_LEN %d", g.limBlob)
+			f.line("#endif")
+		}
+		if g.limBuffered > 0 {
+			f.line("#ifndef SOFAB_MAX_DYN_BUFFERED_FIELD")
+			f.line("#define SOFAB_MAX_DYN_BUFFERED_FIELD %d", g.limBuffered)
+			f.line("#endif")
+		}
+		f.blank()
+	}
 
 	for _, key := range order {
 		nt := g.schema.Named[key]
@@ -208,7 +287,7 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// Result and always returns a value, so it can never reject malformed input
 		// — prefer try_decode when the accept/reject verdict matters.
 		f.line("    static %s decode(const std::uint8_t *data, std::size_t len) {", name)
-		f.line("        sofab::IStreamObject<%s> in;", name)
+		f.line("        sofab::IStreamObject<%s> in%s;", name, g.istreamLimits())
 		f.line("        in.feed(data, len);")
 		f.line("        return *in;")
 		f.line("    }")
@@ -219,7 +298,7 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// never reject (generator#83). On success out holds the message; on error
 		// out is left unchanged and the returned Result carries the status.
 		f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, %s &out) {", name)
-		f.line("        sofab::IStreamObject<%s> in;", name)
+		f.line("        sofab::IStreamObject<%s> in%s;", name, g.istreamLimits())
 		f.line("        sofab::IStreamImpl::Result r = in.feed(data, len);")
 		f.line("        if (r.ok()) { out = *in; }")
 		f.line("        return r;")
@@ -240,18 +319,29 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.blank()
 
 	// deserialize: unhandled ids are auto-skipped by the driver (no-op default).
-	// In clib mode the field length (_size) pre-sizes variable-length targets.
+	// In clib mode the field length (_size) pre-sizes variable-length targets;
+	// the pure path needs it for the unbounded string/blob limit guards (#102).
 	sizeParam := "std::size_t"
 	if g.clib {
 		sizeParam = "std::size_t _size"
+	} else {
+		for _, fld := range fields {
+			if fld.Kind == ir.KindString && !fld.HasMaxlen && g.limStrHas ||
+				fld.Kind == ir.KindBlob && !fld.HasMaxlen && g.limBlobHas {
+				sizeParam = "std::size_t _size"
+				break
+			}
+		}
 	}
 	// The wire element count (_count) is needed for the over-count guard on
-	// count-bearing native arrays (generator#100); in clib mode the C runtime
-	// rejects a count/capacity mismatch itself, so the parameter stays unnamed.
+	// count-bearing native arrays (generator#100) and the limit guard on
+	// count-less ones (#102); in clib mode the C runtime rejects a
+	// count/capacity mismatch itself, so the parameter stays unnamed.
 	countParam := "std::size_t"
 	if !g.clib {
 		for _, fld := range fields {
-			if fld.Kind == ir.KindArray && fld.HasCount && isNativeArrayElem(fld.Elem) {
+			if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) &&
+				(fld.HasCount || g.limArrHas) {
 				countParam = "std::size_t _count"
 				break
 			}
@@ -431,6 +521,12 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// field length; a zero-length string binds no target (read_field asserts
 		// varlen > 0), so skip the read and leave it empty. corelib-cpp resizes
 		// for us, so an empty string is fine there.
+		// Unbounded string under a configured receiver-side cap: reject the
+		// claimed length before the read — a policy rejection, LimitExceeded,
+		// never INVALID and never a truncating read (generator#102).
+		if !g.clib && !fld.HasMaxlen && g.limStrHas {
+			f.line("            if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }")
+		}
 		if g.fixed && fld.HasMaxlen {
 			// FixedString: set_len fixes the logical length (and the trailing NUL);
 			// read binds data()/size() via the same read_string_noterm path.
@@ -447,6 +543,10 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// corelib-c-cpp binds blobs with the BLOB tag via its read(void*, size_t)
 		// overload into the address-stable vector buffer; corelib-cpp reads a
 		// length-prefixed blob into a std::string.
+		// Unbounded blob cap: same policy guard as the string case above (#102).
+		if !g.clib && !fld.HasMaxlen && g.limBlobHas {
+			f.line("            if (_size > SOFAB_MAX_DYN_BLOB_LEN) { is.exceedLimit(); return; }")
+		}
 		if g.fixed && fld.HasMaxlen {
 			// FixedBytes: bound the inline buffer's logical length, then bind the
 			// stable buffer via the wrapper's read(void*,size_t) blob overload.
@@ -486,6 +586,14 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// rejects a count/capacity mismatch on its own (SOFAB_RET_E_INVALID_MSG).
 		if !g.clib && fld.HasCount && isNativeArrayElem(fld.Elem) {
 			f.line("            if (_count > %d) { is.invalidate(); return; }", fld.Count)
+		}
+		// Count-less (dynamic) native array under a configured receiver-side
+		// cap: reject the claimed count before any element is read — the
+		// count-prefixed wire types are the amplification vector (#102).
+		// Wrapper-sequence arrays carry no count header and grow only with
+		// delivered bytes, so they need no guard.
+		if !g.clib && !fld.HasCount && isNativeArrayElem(fld.Elem) && g.limArrHas {
+			f.line("            if (_count > SOFAB_MAX_DYN_ARRAY_COUNT) { is.exceedLimit(); return; }")
 		}
 		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0)
 	}

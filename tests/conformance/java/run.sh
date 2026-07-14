@@ -36,7 +36,7 @@ messages:
 YAML
 
 build() {
-    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang java --in "$1" --out "$2" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang java --in "$1" --out "$2" )
     ( cd "$2" && mvn -q -Dsofab.version="$VER" package )
 }
 
@@ -63,6 +63,35 @@ if $H decode myfirstmessage < "$WORK/overcount.bin" >/dev/null 2>&1; then
 fi
 $H decode myfirstmessage < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
+
+# Receiver-side decode limits (generator#102): `a` is an UNBOUNDED u64 array
+# (id 0 -> header 0x03 = 0<<3 | unsigned-array). With max_dyn_array_count: 4
+# a wire count of 5 MUST fail with LIMIT_EXCEEDED (decode exits non-zero,
+# checked at the count header before allocation); exactly 4 still decodes; and
+# the same 5-element bytes MUST decode against a project built without limits.
+echo "==> receiver-side decode limits (generator#102)"
+cat > "$WORK/lim.yaml" <<'YAML'
+version: 1
+messages:
+  dyn: { payload: { a: { id: 0, type: array, items: { type: u64 } } } }
+YAML
+cat > "$WORK/limcfg.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4 }
+targets: { java: { package: message } }
+YAML
+build "$WORK/lim.yaml" "$WORK/lim" "$WORK/limcfg.yaml"
+build "$WORK/lim.yaml" "$WORK/nolim"
+HL="java -jar $WORK/lim/target/harness.jar"
+HN="java -jar $WORK/nolim/target/harness.jar"
+printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
+printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
+if $HL decode dyn < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/limerr.txt"; then
+    echo "FAIL: dyn array count 5 above max_dyn_array_count 4 must be rejected"; exit 1
+fi
+grep -q "LIMIT_EXCEEDED" "$WORK/limerr.txt" || { echo "FAIL: rejection must carry LIMIT_EXCEEDED"; exit 1; }
+$HL decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count 4 at the limit must decode"; exit 1; }
+$HN decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: no-limits project must decode 5 elements"; exit 1; }
+echo "==> decode limits OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/java/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/target/harness.jar"

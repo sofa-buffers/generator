@@ -612,6 +612,48 @@ only needs to mirror their *names* and gate on the schema's used features:
 - **Value width** — disabling 64-bit integers narrows the value type to 32-bit;
   a schema with no `u64`/`i64` field then builds against the smaller corelib.
 
+### 9.5 Decode resource bounds (receiver-side limits)
+
+MESSAGE_SPEC §5.4 bounds the decode *stack* (`MAX_DEPTH`); this is the **heap
+analogue** (generator#102). Schema `count`/`maxlen` are optional — a field
+without one is dynamic/unbounded, and its decoder would otherwise allocate
+whatever the wire claims (heap-exhaustion DoS; count-prefixed arrays are the
+sharp *amplification* vector: a ~10-byte message claiming `count = 2^31`).
+
+Three **sofabgen config** keys — `max_dyn_array_count`, `max_dyn_string_len`,
+`max_dyn_blob_len` (`generic:`, per-target overridable; **unset = unlimited**,
+today's behavior bit-for-bit) — bake receiver-side caps into the generated
+code as named constants. The rules, normative for every backend:
+
+- The caps govern **only** fields the schema left unbounded. A schema-bounded
+  field is governed by its own bound (#100); a field that legitimately needs
+  more than the cap gets an explicit schema bound (the escape hatch).
+- Exceeding a cap is a decode **error** in the corelib's `LimitExceeded`
+  category — a *policy* rejection, deliberately distinct from `INVALID` (the
+  bytes may be perfectly well-formed), and **never a clamp** (the #100 lesson:
+  silent clamping is data corruption).
+- The check runs at the count/length **header**, before any allocation or
+  buffering — a claimed oversize fails fast even if the payload never arrives.
+- A corelib never invents its own default cap; absent limits = current
+  behavior. Wrapper-sequence arrays carry no count header and grow only with
+  delivered bytes, so they need no guard (no amplification).
+
+Enforcement by family: **generated visitor guards** (Rust std, Java, C#, Zig,
+pure C++ — the corelib callback exposes `count`/`total` pre-allocation; the
+corelibs contribute only the error category); **passed into the corelib
+decoder** (Go `sofab.WithMax*` options, Python `Decoder(max_*=...)` kwargs,
+TypeScript `Cursor(buf, DecodeLimits)` — the corelib allocates, so it
+enforces; the generated cap is raised to the largest schema bound of its kind
+because these apply globally per decode); pure C++ additionally derives a
+streaming reassembly cap (`sofab::Limits{max_buffered_field}` =
+max(string/blob caps, largest schema maxlen, largest schema count x 10)) for
+its `acc_` buffer. **Statically bounded profiles** (C, C++ `corelib: c-cpp`,
+Rust `no_std`) are capacity-bound by construction — the keys are inert.
+
+Independent of the option (bugfix class), no generated decoder may allocate
+eagerly from an untrusted wire count: C# and Zig count-less array arms reserve
+bounded and grow with delivered elements (the Java #96/#98 pattern).
+
 ---
 
 ## 10. Per-language backend reference
