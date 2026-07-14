@@ -31,10 +31,29 @@ func buildExampleIR(t *testing.T) *ir.Schema {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The shared example intentionally leaves `somemap` unbounded (a dynamic map
+	// for heap targets). The heapless C target requires a bound on every array
+	// (checkBounded rejects unbounded fields), so give it an explicit capacity —
+	// exactly what a C-target schema author does. `count` never reaches the wire,
+	// so this does not affect the shared conformance vectors.
+	boundArrayField(s, "somemap", 8)
 	if err := analysis.Analyze(s); err != nil {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// boundArrayField gives the named top-level array field an explicit count so a
+// schema written for heap targets can be generated for the heapless C target.
+func boundArrayField(s *ir.Schema, name string, count int64) {
+	for _, m := range s.Messages {
+		for _, f := range m.Fields {
+			if f.Name == name {
+				f.HasCount = true
+				f.Count = count
+			}
+		}
+	}
 }
 
 func genExample(t *testing.T) map[string]string {
@@ -122,6 +141,91 @@ func TestCompilesAgainstCorelib(t *testing.T) {
 		"-o", filepath.Join(dir, "msg.o"))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generated C failed to compile against corelib:\n%s", out)
+	}
+}
+
+func genCErr(t *testing.T, src string) error {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "test.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := doc.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("schema must validate: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&Backend{}).Generate(s, map[string]any{})
+	return err
+}
+
+// TestUnboundedFieldsRejected: the C object model has no dynamic containers, so
+// every string/blob (maxlen) and array (count, at every nesting level, ANY
+// element kind) must be sized by the schema. An unbounded such field is a hard
+// generate-time error naming the field — not a silently invented char[1]/T[0]
+// that then rejects every real message at runtime (#104). There is no
+// allow_dynamic escape for C.
+func TestUnboundedFieldsRejected(t *testing.T) {
+	cases := []struct {
+		name, yaml, wantField, wantMissing string
+	}{
+		{"string no maxlen",
+			"version: 1\nmessages:\n  m: { payload: { s: { id: 0, type: string } } }", "s", "maxlen"},
+		{"blob no maxlen",
+			"version: 1\nmessages:\n  m: { payload: { b: { id: 0, type: blob } } }", "b", "maxlen"},
+		{"native scalar array no count",
+			"version: 1\nmessages:\n  m: { payload: { a: { id: 0, type: array, items: { type: u32 } } } }", "a", "count"},
+		{"string array no count",
+			"version: 1\nmessages:\n  m: { payload: { a: { id: 0, type: array, items: { type: string, maxlen: 8 } } } }", "a", "count"},
+		{"string array no element maxlen",
+			"version: 1\nmessages:\n  m: { payload: { a: { id: 0, type: array, items: { type: string, count: 4 } } } }", "a", "element maxlen"},
+		{"struct array no count",
+			"version: 1\nmessages:\n  m: { payload: { a: { id: 0, type: array, items: { type: struct, fields: { x: { id: 0, type: u8 } } } } } }", "a", "count"},
+		{"unbounded string inside nested struct",
+			"version: 1\nmessages:\n  m: { payload: { n: { id: 0, type: struct, fields: { s: { id: 0, type: string } } } } }", "s", "maxlen"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := genCErr(t, tc.yaml)
+			if err == nil {
+				t.Fatalf("expected a generate-time error for %q", tc.name)
+			}
+			for _, want := range []string{tc.wantField, tc.wantMissing} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q should mention %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "allow_dynamic") {
+				t.Errorf("C error must not suggest allow_dynamic (no such escape): %q", err)
+			}
+		})
+	}
+}
+
+// TestBoundedSchemaGenerates: a fully bounded schema — every string/blob has a
+// maxlen and every array a count — generates without error.
+func TestBoundedSchemaGenerates(t *testing.T) {
+	err := genCErr(t, `
+version: 1
+messages:
+  m:
+    payload:
+      s:    { id: 0, type: string, maxlen: 16 }
+      b:    { id: 1, type: blob, maxlen: 8 }
+      a:    { id: 2, type: array, items: { type: u32, count: 4 } }
+      sa:   { id: 3, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`)
+	if err != nil {
+		t.Fatalf("a fully bounded schema must generate: %v", err)
 	}
 }
 

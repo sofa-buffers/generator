@@ -223,6 +223,22 @@ func TestCppFixedUnbounded(t *testing.T) {
 	}
 }
 
+// TestCppFixedUnboundedNativeArray: a count-less NATIVE scalar array was the gap
+// in checkBounded — its walkArray switch only covered string/blob/struct/union/
+// nested-array elements, so a native scalar array slipped through and silently
+// became std::array<T, 0> even under allow_dynamic: false (generator#104 pt 3).
+// It must now be a hard error naming the field, exactly like the composite-array
+// and string cases.
+func TestCppFixedUnboundedNativeArray(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: { id: 0, type: array, items: { type: u32 } }\n"
+	if _, err := fixedHeader(t, src, "m.hpp", nil); err == nil {
+		t.Fatal("expected unbounded native-array error under fixed profile")
+	} else if !strings.Contains(err.Error(), "has no count") || !strings.Contains(err.Error(), `"a"`) {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // TestCppFixedUnboundedString: a string without maxlen is now an unbounded field
 // (no more string exemption) — a hard error, unless allow_dynamic keeps a
 // std::string fallback. A bounded string still becomes FixedString even under

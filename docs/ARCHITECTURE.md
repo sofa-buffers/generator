@@ -178,7 +178,11 @@ it; floats additionally allow `decimals` 0–15. All identifiers match
 at the schema level, but the fixed-storage backends (C, the C++ `c-cpp`
 profile, `no_std` Rust) require every string/blob/array to be bounded so
 storage can be sized at compile time — an unbounded field there is a generation
-error unless `allow_dynamic` opts it into a heap fallback (§9.3). Blob
+error (a `checkBounded` pass names the offending field before any code is
+emitted). The C++ `c-cpp` and `no_std` Rust profiles let `allow_dynamic` opt a
+field into a heap fallback (§9.3); the **C** target has no such escape — the C
+object model has no dynamic containers — so for C every string/blob needs a
+`maxlen` and every array a `count`, unconditionally. Blob
 `default` base64 tolerates embedded whitespace; numeric value-range semantics
 beyond the declared width are left to the application.
 

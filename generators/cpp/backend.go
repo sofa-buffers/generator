@@ -703,23 +703,21 @@ func (g *gen) checkBounded(s *ir.Schema) error {
 	var walkFields func(owner string, fields []*ir.Field) error
 	var walkArray func(owner, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool) error
 	walkArray = func(owner, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool) error {
+		// Every array level needs a count — including a native scalar array, which
+		// this switch previously did not cover: a count-less native array slipped
+		// through and silently became std::array<T, 0> even under allow_dynamic:
+		// false (generator#104 point 3).
+		if count <= 0 {
+			return unboundedErr(owner, path, "count")
+		}
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			if count <= 0 {
-				return unboundedErr(owner, path, "count")
-			}
 			if !elemMaxHas {
 				return unboundedErr(owner, path, "element maxlen")
 			}
 		case ir.KindStruct, ir.KindUnion:
-			if count <= 0 {
-				return unboundedErr(owner, path, "count")
-			}
 			return walkFields(g.typeName(ref.Key), ref.Target.Fields)
 		case ir.KindArray:
-			if count <= 0 {
-				return unboundedErr(owner, path, "count")
-			}
 			return walkArray(owner, path+"[]", items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas)
 		}
 		return nil
