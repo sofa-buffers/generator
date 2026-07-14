@@ -35,16 +35,38 @@ case "$LANG_KEY" in
     rust) ALT_CORELIB="rs-no-std"; ALT_EXTRA=", allow_dynamic: true" ;;
 esac
 ALT_CFG=""
+C_EXAMPLE=""
+trap 'rm -f "$ALT_CFG" "$C_EXAMPLE"' EXIT
 if [ -n "$ALT_CORELIB" ]; then
     ALT_CFG=$(mktemp)
-    trap 'rm -f "$ALT_CFG"' EXIT
     printf 'targets: { %s: { corelib: %s%s } }\n' "$LANG_KEY" "$ALT_CORELIB" "$ALT_EXTRA" > "$ALT_CFG"
+fi
+
+# The heapless C target has no allow_dynamic escape and rejects unbounded fields
+# (generator#104): no_maxlen is a deliberately-unbounded schema (skipped, not a C
+# input), and example.yaml's intentionally-dynamic `somemap` gets an explicit
+# capacity — same handling as tests/conformance/c/run.sh. `count` never reaches
+# the wire, so the generated wire bytes are unchanged.
+if [ "$LANG_KEY" = "c" ]; then
+    C_EXAMPLE=$(mktemp)
+    awk '
+      /^      somemap:/ { inmap=1 }
+      inmap && /^          type: struct$/ { print; print "          count: 8"; inmap=0; next }
+      { print }
+    ' "$ROOT/examples/messages/example.yaml" > "$C_EXAMPLE"
 fi
 
 count=0
 for def in $DEFS; do
     name=$(basename "$def" .yaml)
-    ( cd "$ROOT" && go run ./cmd/sofabgen --lang "$LANG_KEY" --in "$def" --out "$OUT/$name" )
+    src="$def"
+    if [ "$LANG_KEY" = "c" ]; then
+        case "$name" in
+            no_maxlen) continue ;;
+            example)   src="$C_EXAMPLE" ;;
+        esac
+    fi
+    ( cd "$ROOT" && go run ./cmd/sofabgen --lang "$LANG_KEY" --in "$src" --out "$OUT/$name" )
     count=$((count + 1))
     if [ -n "$ALT_CORELIB" ]; then
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$ALT_CFG" --lang "$LANG_KEY" --in "$def" --out "$OUT/$name-$ALT_CORELIB" )
