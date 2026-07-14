@@ -31,6 +31,9 @@ func (*Backend) Lang() string { return "c" }
 // message sources placed under generated/.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "message_"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
+	if err := checkBounded(s); err != nil {
+		return nil, err
+	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	srcDir := ""
 	if project {
@@ -264,17 +267,6 @@ func isHolderElem(k ir.Kind) bool {
 	return k == ir.KindString || k == ir.KindBlob || k == ir.KindStruct || k == ir.KindUnion || k == ir.KindArray
 }
 
-// arrayCap is the C storage capacity for an array element count: the count, but
-// never below 1 so the emitted C array (and its descriptor) is never zero-sized.
-// A dynamic (unbounded) collection carries count 0; fixed storage still needs a
-// slot.
-func arrayCap(count int64) int64 {
-	if count < 1 {
-		return 1
-	}
-	return count
-}
-
 // buildHolder builds (and registers, post-order) the synthetic object holding
 // the elements of an array whose element lowers to a wrapper sequence: one field
 // per element, id = 0-based index (per MESSAGE_SPEC). It handles string/blob
@@ -282,21 +274,21 @@ func arrayCap(count int64) int64 {
 // (an inner array, or an inner holder sequence, each). Recurses for deep nesting.
 func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPlan, order *[]string) *objectPlan {
 	p := &objectPlan{key: key, cType: g.cType(key, "elems"), descr: g.descrSym(key)}
-	cap := arrayCap(spec.count)
+	// checkBounded guarantees a count on every array, so the capacity is the
+	// schema count directly (no zero-sizing fallback).
+	cap := spec.count
 	switch spec.elem {
 	case ir.KindString, ir.KindBlob:
-		// Without items.maxlen a fixed-storage target has no real bound; fall back
-		// to 1 so the emitted C array is never zero-sized.
-		maxlen := int64(1)
-		if spec.maxHas {
-			maxlen = spec.max
-		}
+		// checkBounded guarantees the element maxlen, so the storage is the schema
+		// bound directly (no zero-sizing fallback).
 		var elemDecl, ftype string
 		if spec.elem == ir.KindString {
-			elemDecl = fmt.Sprintf("char items[%d][%d];", cap, maxlen)
+			// +1 for the NUL the corelib's read_string reserves, so a maxlen-byte
+			// wire string element is accepted at its schema bound (#103).
+			elemDecl = fmt.Sprintf("char items[%d][%d];", cap, spec.max+1)
 			ftype = "SOFAB_OBJECT_FIELDTYPE_STRING"
 		} else {
-			elemDecl = fmt.Sprintf("uint8_t items[%d][%d];", cap, maxlen)
+			elemDecl = fmt.Sprintf("uint8_t items[%d][%d];", cap, spec.max)
 			ftype = "SOFAB_OBJECT_FIELDTYPE_BLOB"
 		}
 		p.members = append(p.members, member{decl: elemDecl})
@@ -331,8 +323,8 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 			}
 		} else {
 			// Inner element is a native array: a 2-D C array, each row an array
-			// field (id = index).
-			icap := arrayCap(inner.count)
+			// field (id = index). checkBounded guarantees the inner count.
+			icap := inner.count
 			p.members = append(p.members, member{decl: fmt.Sprintf("%s items[%d][%d];", g.arrayElemCType(inner.elem, inner.ref), cap, icap)})
 			for i := int64(0); i < cap; i++ {
 				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
@@ -371,10 +363,15 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 		decl = fmt.Sprintf("double %s;", mn)
 		entry = field(f.ID, cType, mn, "FP64")
 	case ir.KindString:
-		decl = fmt.Sprintf("char %s[%d];", mn, maxlenOr(f, 1))
+		// checkBounded guarantees a maxlen on every string, so the storage is the
+		// schema bound directly (no zero-usable-capacity fallback). +1 for the NUL:
+		// the corelib's read_string reserves one byte for the terminator (istream.c
+		// rejects length > capacity-1), so a maxlen-byte wire string needs maxlen+1
+		// of storage to be accepted at its schema bound (#103).
+		decl = fmt.Sprintf("char %s[%d];", mn, f.Maxlen+1)
 		entry = field(f.ID, cType, mn, "STRING")
 	case ir.KindBlob:
-		decl = fmt.Sprintf("uint8_t %s[%d];", mn, maxlenOr(f, 1))
+		decl = fmt.Sprintf("uint8_t %s[%d];", mn, f.Maxlen)
 		entry = field(f.ID, cType, mn, "BLOB")
 	case ir.KindEnum:
 		decl = fmt.Sprintf("%s %s;", enumC(f.Ref.Target), mn)
@@ -732,13 +729,6 @@ func bitfieldC(nt *ir.NamedType) string {
 	default:
 		return "uint64_t"
 	}
-}
-
-func maxlenOr(f *ir.Field, dflt int64) int64 {
-	if f.HasMaxlen {
-		return f.Maxlen
-	}
-	return dflt
 }
 
 // maxDepth returns the maximum struct/union nesting under fields (for the

@@ -31,6 +31,69 @@ import (
 	_ "github.com/sofa-buffers/generator/generators/zig"
 )
 
+// fixedOnlyTarget reports whether a backend has a single fixed-capacity
+// (heapless) profile with no dynamic-container fallback. Such a target cannot
+// generate a schema with an unbounded field — that is a deliberate hard error
+// (generator#104). The cpp c-cpp and rust no_std fixed profiles are opt-in
+// configs, so their DEFAULT config (heap / maxspeed) still generates unbounded
+// schemas in this matrix; only C is heapless by default.
+func fixedOnlyTarget(lang string) bool { return lang == "c" }
+
+// hasUnboundedField reports whether any field lowers to storage a fixed-capacity
+// target cannot size from the schema: a string/blob without maxlen, an array (at
+// any depth, ANY element kind) without count, or a string/blob array element
+// without its own maxlen. Mirrors the C backend's checkBounded so the matrix can
+// skip exactly the (fixed-only-target, unbounded-schema) combos that error by
+// design; those are covered by the per-backend tests and conformance harnesses.
+func hasUnboundedField(s *ir.Schema) bool {
+	seen := map[string]bool{}
+	var walkFields func(key string, fields []*ir.Field) bool
+	var walkArray func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool) bool
+	walkArray = func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool) bool {
+		if count <= 0 {
+			return true
+		}
+		switch elem {
+		case ir.KindString, ir.KindBlob:
+			return !elemMaxHas
+		case ir.KindStruct, ir.KindUnion:
+			return walkFields(ref.Key, ref.Target.Fields)
+		case ir.KindArray:
+			return walkArray(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas)
+		}
+		return false
+	}
+	walkFields = func(key string, fields []*ir.Field) bool {
+		if seen[key] {
+			return false
+		}
+		seen[key] = true
+		for _, f := range fields {
+			switch f.Kind {
+			case ir.KindString, ir.KindBlob:
+				if !f.HasMaxlen {
+					return true
+				}
+			case ir.KindStruct, ir.KindUnion:
+				if walkFields(f.Ref.Key, f.Ref.Target.Fields) {
+					return true
+				}
+			case ir.KindArray:
+				if walkArray(f.Elem, f.ElemRef, f.ElemItems, f.Count, f.ElemMaxHas) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, m := range s.Messages {
+		if walkFields("message/"+m.Name, m.Fields) {
+			return true
+		}
+	}
+	return false
+}
+
 func buildIR(t *testing.T, path string) (*ir.Schema, error) {
 	t.Helper()
 	doc, err := defparser.Load(path)
@@ -73,6 +136,9 @@ func TestCorpusGeneratesEverywhere(t *testing.T) {
 				t.Fatalf("should validate: %v", err)
 			}
 			for _, lang := range langs {
+				if fixedOnlyTarget(lang) && hasUnboundedField(s) {
+					continue // deliberate hard error; covered by the c backend tests
+				}
 				b, _ := generator.Lookup(lang)
 				files, err := b.Generate(s, map[string]any{})
 				if err != nil {

@@ -178,7 +178,11 @@ it; floats additionally allow `decimals` 0–15. All identifiers match
 at the schema level, but the fixed-storage backends (C, the C++ `c-cpp`
 profile, `no_std` Rust) require every string/blob/array to be bounded so
 storage can be sized at compile time — an unbounded field there is a generation
-error unless `allow_dynamic` opts it into a heap fallback (§9.3). Blob
+error (a `checkBounded` pass names the offending field before any code is
+emitted). The C++ `c-cpp` and `no_std` Rust profiles let `allow_dynamic` opt a
+field into a heap fallback (§9.3); the **C** target has no such escape — the C
+object model has no dynamic containers — so for C every string/blob needs a
+`maxlen` and every array a `count`, unconditionally. Blob
 `default` base64 tolerates embedded whitespace; numeric value-range semantics
 beyond the declared width are left to the application.
 
@@ -483,8 +487,11 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    one chunk (`offset == 0 && chunk_len >= total`) they build the value straight
    from the contiguous slice, keeping the byte accumulator only for split
    payloads. Fixed-count native arrays decode into a fixed/primitive member
-   (Rust `[T; N]`, Java `long[]/float[]/double[]`) filled by index, not a
-   grown heap collection. The C++ `c-cpp` wrapper (the embedded target) goes
+   (Rust `[T; N]`, Java `long[]/float[]/double[]`, C++ `std::array<T, N>`)
+   filled by index, not a grown heap collection; a **count-less** native array
+   on a heap target is dynamic instead (C++ `corelib: cpp` gives `std::vector<T>`,
+   sized to the wire count on decode — never `std::array<T, 0>`, which would drop
+   every element). The C++ `c-cpp` wrapper (the embedded target) goes
    further: it **always** uses fixed-capacity, heap-free containers
    (`docs/generator/cpp.md`) — bounded strings, blobs, and their wrapper-sequence
    arrays (plus struct/union/matrix sequences) decode into schema-sized inline

@@ -133,16 +133,32 @@ func isNativeArrayElem(k ir.Kind) bool {
 	return false
 }
 
+// dynNativeArray reports whether a native-element array lowers to a growable
+// std::vector rather than a fixed std::array: the heap (corelib: cpp) profile
+// with no schema count. Such an array carries no compile-time capacity, so it
+// must be sized to the wire element count before the corelib's span-based
+// read/write (#112). A bounded native array (count present) stays a fixed
+// std::array; the fixed profile keeps std::array and rejects the count-less case
+// in checkBounded.
+func (g *gen) dynNativeArray(elem ir.Kind, count int64) bool {
+	return !g.fixed && isNativeArrayElem(elem) && count <= 0
+}
+
 // cppArrayContainer is the C++ member type for an array with the given element.
-// Native elements are always a fixed std::array<T, count>. For composite/dynamic
-// elements the default profile uses std::vector<T>; the fixed profile lowers a
-// bounded array (count present, and for blobs the element maxlen present) to an
+// A bounded native element is a fixed std::array<T, count>; a count-less native
+// element on the heap profile is a growable std::vector<T> (NOT std::array<T, 0>,
+// which cannot hold any element — #112). For composite/dynamic elements the
+// default profile uses std::vector<T>; the fixed profile lowers a bounded array
+// (count present, and for blobs the element maxlen present) to an
 // InlineVector<T, count> — fixed inline storage with a separate logical length,
 // no heap. A string/blob element additionally needs its element maxlen to be
 // sized; without it the array stays std::vector.
 func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64) string {
 	et := g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax)
 	if isNativeArrayElem(elem) {
+		if g.dynNativeArray(elem, count) {
+			return "std::vector<" + et + ">"
+		}
 		return fmt.Sprintf("std::array<%s, %d>", et, count)
 	}
 	if g.fixed && count > 0 {
@@ -449,9 +465,16 @@ func byteList(b []byte) string {
 const cppMsgSeqPrelude = `template <typename T>
 struct _MsgSeq : sofab::IStreamMessage {
     std::vector<T> *out = nullptr;
-    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
-        out->emplace_back();
-        is.read(out->back());
+    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t _count) noexcept override {
+        T &row = out->emplace_back();
+        // A count-less native-array row (matrix with dynamic rows) is a std::vector
+        // that the corelib's span read fills only up to its current size, so size it
+        // to the row's wire count first (#112). Struct/union rows are IStreamMessage
+        // (no resize) and fixed std::array rows have no resize(), so both skip this.
+        if constexpr (requires { row.resize(_count); } && !std::is_base_of_v<sofab::IStreamMessage, T>) {
+            row.resize(_count);
+        }
+        is.read(row);
     }
 };`
 
