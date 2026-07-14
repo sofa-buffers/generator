@@ -122,13 +122,11 @@ func TestGoStructuralInvariants(t *testing.T) {
 	}
 }
 
-// A blob field inside a nested struct/union lands in types.go (not the message
-// file), and its marshal uses bytes.Equal. Regression for #84: types.go must
-// import "bytes" itself rather than relying on the message file's own import.
-// go/parser only parses, so it never caught this — the failure is an undefined
-// identifier at compile time. Here we assert every generated file that
-// references bytes. also imports it.
-func TestGoNestedBlobImportsBytes(t *testing.T) {
+// A blob field with no schema default omits via the idiomatic len()==0 test,
+// matching the array/string/scalar omit-checks and touching neither bytes.Equal
+// nor the bytes import (#113). bytes.Equal(x, nil) is true iff len(x)==0, so the
+// emitted check is exactly equivalent.
+func TestGoNestedBlobOmitUsesLen(t *testing.T) {
 	s := schemaFromYAMLString(t, `
 version: 1
 messages:
@@ -144,8 +142,43 @@ messages:
 `)
 	files := genGo(t, s, map[string]any{"package": "messages"})
 	types := files["types.go"]
+	if !strings.Contains(types, "if len(m.BytesField) != 0 {") {
+		t.Errorf("expected nested blob marshal to omit via len() in types.go:\n%s", firstLines(types, 20))
+	}
+	if strings.Contains(types, "bytes.Equal") {
+		t.Errorf("default-less blob should not use bytes.Equal:\n%s", firstLines(types, 20))
+	}
+	if strings.Contains(types, `"bytes"`) {
+		t.Errorf("types.go should not import bytes for a default-less blob:\n%s", firstLines(types, 20))
+	}
+}
+
+// A blob field with a schema default still compares against that default via
+// bytes.Equal, and lands in types.go (not the message file) when nested.
+// Regression for #84: any file that references bytes. must import "bytes"
+// itself rather than relying on the message file's own import. go/parser only
+// parses, so it never caught this — the failure is an undefined identifier at
+// compile time. Here we assert every generated file that references bytes. also
+// imports it.
+func TestGoNestedDefaultedBlobImportsBytes(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  outer:
+    payload:
+      nested:
+        id: 0
+        type: struct
+        fields:
+          bytes_field:
+            id: 3
+            type: blob
+            default: "AAEC"
+`)
+	files := genGo(t, s, map[string]any{"package": "messages"})
+	types := files["types.go"]
 	if !strings.Contains(types, "bytes.Equal") {
-		t.Fatalf("expected nested blob marshal to use bytes.Equal in types.go:\n%s", firstLines(types, 20))
+		t.Fatalf("expected defaulted nested blob marshal to use bytes.Equal in types.go:\n%s", firstLines(types, 20))
 	}
 	for path, src := range files {
 		if !strings.HasSuffix(path, ".go") {
