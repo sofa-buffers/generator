@@ -213,12 +213,12 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		// Emitted only for the limits that are configured AND have at least one
 		// schema-unbounded field in this message, so an unset or inert key changes
 		// nothing in the output.
-		f.line("    // Receiver-side decode limits (generator#102), baked from the sofabgen")
+		f.line("    // Receiver-side decode limits, baked from the sofabgen")
 		f.line("    // config: caps on fields the schema left unbounded (no count / maxlen).")
 		f.line("    // Exceeding one fails the decode with SofabError.LIMIT_EXCEEDED at the")
 		f.line("    // wire count/length header, before any allocation or accumulation --")
 		f.line("    // never a clamp. Schema-bounded fields are not governed by these caps;")
-		f.line("    // they keep their own generator#100 schema-capacity guard.")
+		f.line("    // they keep their own schema-capacity guard.")
 		if limArr {
 			f.line("    static final long MAX_DYN_ARRAY_COUNT = %dL;", g.limits.arrayCount)
 		}

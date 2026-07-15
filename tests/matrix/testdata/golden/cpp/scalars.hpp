@@ -38,7 +38,7 @@ struct _MsgSeq : sofab::IStreamMessage {
         T &row = out->emplace_back();
         // A count-less native-array row (matrix with dynamic rows) is a std::vector
         // that the corelib's span read fills only up to its current size, so size it
-        // to the row's wire count first (#112). Struct/union rows are IStreamMessage
+        // to the row's wire count first. Struct/union rows are IStreamMessage
         // (no resize) and fixed std::array rows have no resize(), so both skip this.
         if constexpr (requires { row.resize(_count); } && !std::is_base_of_v<sofab::IStreamMessage, T>) {
             row.resize(_count);

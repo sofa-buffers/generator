@@ -288,6 +288,78 @@ messages:
 	}
 }
 
+// TestDeprecatedFieldRendering: a field marked deprecated must (a) carry the
+// native __attribute__((deprecated)) marker on its struct member and a Doxygen
+// @deprecated note in the member's doc comment, and (b) keep the generated .c
+// warning-clean — the descriptor field table (sizeof(((T*)0)->field)) and any
+// defaults designated-initializer that name the deprecated member are wrapped in
+// a -Wdeprecated-declarations diagnostic push/pop.
+func TestDeprecatedFieldRendering(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      keep:   { id: 0, type: u16, description: "Current identifier." }
+      legacy: { id: 1, type: u32, description: "Old identifier kept for compatibility.", deprecated: true, default: 7 }
+`)
+	h := files["m.h"]
+	// (a) native marker + @deprecated doc note on the deprecated member, and the
+	// description text is preserved alongside the note.
+	for _, want := range []string{
+		"uint32_t legacy __attribute__((deprecated));",
+		"Old identifier kept for compatibility. @deprecated",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.h missing %q:\n%s", want, h)
+		}
+	}
+	// A non-deprecated member must NOT get the marker or the note.
+	if strings.Contains(h, "uint16_t keep __attribute__((deprecated))") {
+		t.Errorf("non-deprecated member wrongly marked deprecated:\n%s", h)
+	}
+
+	c := files["m.c"]
+	// (b) the descriptor emission that references the deprecated member by name is
+	// guarded so the generated .c compiles clean under -Wdeprecated-declarations.
+	for _, want := range []string{
+		"#pragma GCC diagnostic push",
+		`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`,
+		"#pragma GCC diagnostic pop",
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c missing deprecation guard %q:\n%s", want, c)
+		}
+	}
+	// The guard must open before the field table and the designated initializer
+	// (.legacy = 7) must fall inside the guarded region (between push and pop).
+	push := strings.Index(c, "#pragma GCC diagnostic push")
+	pop := strings.Index(c, "#pragma GCC diagnostic pop")
+	init := strings.Index(c, ".legacy = 7")
+	table := strings.Index(c, "SOFAB_OBJECT_FIELD(1, message_m_t, legacy,")
+	if push < 0 || pop < 0 || table < 0 || init < 0 || !(push < table && table < pop) || !(push < init && init < pop) {
+		t.Errorf("descriptor references to the deprecated member are not inside the diagnostic guard:\n%s", c)
+	}
+}
+
+// TestNonDeprecatedNoGuard: a schema with no deprecated field must not emit any
+// diagnostic pragma (the guard is strictly opt-in, byte-cost-free otherwise).
+func TestNonDeprecatedNoGuard(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u16, default: 3 }
+`)
+	if strings.Contains(files["m.c"], "#pragma GCC diagnostic") {
+		t.Errorf("no deprecated field, but m.c emitted a diagnostic pragma:\n%s", files["m.c"])
+	}
+	if strings.Contains(files["m.h"], "__attribute__((deprecated))") {
+		t.Errorf("no deprecated field, but m.h emitted a deprecated attribute:\n%s", files["m.h"])
+	}
+}
+
 func keys(m map[string]string) []string {
 	var k []string
 	for x := range m {

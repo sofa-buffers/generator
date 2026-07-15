@@ -124,6 +124,49 @@ messages:
 	}
 }
 
+// TestPythonMetadataDocs: enum-constant and bitfield-flag descriptions render as
+// Sphinx "#:" attribute comments (flags append a "(default: true/false)" note),
+// and a deprecated field carries a ".. deprecated::" directive in its doc.
+func TestPythonMetadataDocs(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  enum:
+    Mode:
+      Off:    { value: 0, description: "Node is powered down." }
+      Active: { value: 1, description: "Node is sampling and transmitting." }
+  bitfield:
+    StatusFlags:
+      ready:      { pos: 0, default: true, description: "Node has completed initialization." }
+      overheated: { pos: 1, description: "Core temperature exceeded the safe threshold." }
+messages:
+  Telemetry:
+    payload:
+      legacyId: { id: 0, type: u32, description: "Old identifier retained for backward compatibility.", deprecated: true }
+      mode:     { id: 1, type: enum, enum: { $ref: "#/$defs/enum/Mode" } }
+      status:   { id: 2, type: bitfield, bits: { $ref: "#/$defs/bitfield/StatusFlags" } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		// enum-constant descriptions
+		"    #: Node is powered down.\n    OFF = 0",
+		"    #: Node is sampling and transmitting.\n    ACTIVE = 1",
+		// bitfield flag description + default note (and no-default flag)
+		"    #: Node has completed initialization. (default: true)\n    READY = 1 << 0",
+		"    #: Core temperature exceeded the safe threshold.\n    OVERHEATED = 1 << 1",
+		// deprecated field doc: description then a Sphinx deprecated directive
+		"    #: Old identifier retained for backward compatibility.\n    #: .. deprecated::",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q", want)
+		}
+	}
+	// A flag without a default must NOT carry a "(default:" note.
+	if strings.Contains(mod, "safe threshold. (default:") {
+		t.Error("no-default flag must not get a (default:) note")
+	}
+}
+
 func TestPythonSyntaxValid(t *testing.T) {
 	py, err := exec.LookPath("python3")
 	if err != nil {

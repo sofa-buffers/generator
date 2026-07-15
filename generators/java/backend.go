@@ -119,7 +119,8 @@ func (f *jfile) javadoc(indent, text string) {
 }
 
 // fieldDoc is the Javadoc body for a field: its description, with a unit suffix
-// appended (or used alone). Empty when the field carries neither.
+// appended (or used alone), plus a Javadoc @deprecated tag on a trailing line
+// when the field is deprecated. Empty when the field carries none of these.
 func fieldDoc(fld *ir.Field) string {
 	d := fld.Description
 	if fld.Unit != "" {
@@ -127,6 +128,14 @@ func fieldDoc(fld *ir.Field) string {
 			d = "(unit: " + fld.Unit + ")"
 		} else {
 			d += " (unit: " + fld.Unit + ")"
+		}
+	}
+	if fld.Deprecated {
+		const tag = "@deprecated This field is deprecated and may be removed in a future version."
+		if d == "" {
+			d = tag
+		} else {
+			d += "\n\n" + tag
 		}
 	}
 	return d
@@ -163,6 +172,9 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 	f.line("%sclass %s {", vis, name)
 	for _, fld := range fields {
 		f.javadoc("    ", fieldDoc(fld))
+		if fld.Deprecated {
+			f.line("    @Deprecated")
+		}
 		f.line("    public %s %s%s;", g.javaType(fld), javaIdent(fld.Name), g.javaInit(fld))
 	}
 	f.blank()

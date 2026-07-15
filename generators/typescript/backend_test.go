@@ -240,6 +240,56 @@ messages:
 	}
 }
 
+// metaDef exercises the metadata-comment surface: an enum with per-const
+// descriptions, a bitfield with a defaulted and a non-defaulted flag, a
+// deprecated field, and a field carrying a description + unit.
+const metaDef = `
+version: 1
+$defs:
+  enum:
+    Mode:
+      Off:    { value: 0, description: "Node is powered down." }
+      Active: { value: 1, description: "Node is sampling and transmitting." }
+  bitfield:
+    StatusFlags:
+      ready:      { pos: 0, default: true, description: "Node has completed initialization." }
+      overheated: { pos: 1, description: "Core temperature exceeded the safe threshold." }
+messages:
+  Telemetry:
+    payload:
+      temp:     { id: 0, type: i16, description: "Ambient temperature.", unit: degC }
+      legacyId: { id: 1, type: u32, description: "Old identifier retained for backward compatibility.", deprecated: true }
+      mode:     { id: 2, type: enum, enum: { $ref: "#/$defs/enum/Mode" } }
+      status:   { id: 3, type: bitfield, bits: { $ref: "#/$defs/bitfield/StatusFlags" } }
+`
+
+// TestTSMetadataComments checks that enum-const descriptions, bitfield-flag
+// descriptions + default notes, and the deprecated field marker all render as
+// TSDoc comments in the generated module.
+func TestTSMetadataComments(t *testing.T) {
+	mod := genTSWith(t, metaDef, map[string]any{})
+	for _, want := range []string{
+		// Enum-const descriptions.
+		"  /** Node is powered down. */\n  Off = 0,",
+		"  /** Node is sampling and transmitting. */\n  Active = 1,",
+		// Bitfield-flag descriptions; the defaulted flag carries a (default: ...) note.
+		"  /** Node has completed initialization. (default: true) */\n  Ready = 1,",
+		"  /** Core temperature exceeded the safe threshold. */\n  Overheated = 2,",
+		// Deprecated field: description kept, @deprecated tag appended (no runtime annotation in TS).
+		"  /**\n   * Old identifier retained for backward compatibility.\n   * @deprecated\n   */\n  legacyId: number = 0;",
+		// Field description + unit unchanged.
+		"  /** Ambient temperature. (unit: degC) */",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("meta message.ts missing %q", want)
+		}
+	}
+	// The junk citation must not leak into any emitted comment.
+	if strings.Contains(mod, "generator#") || strings.Contains(mod, "MESSAGE_SPEC") {
+		t.Error("generated module must not contain issue/spec citations")
+	}
+}
+
 // TestTSInt64Default locks the default (and explicit bigint) mode to the
 // bigint-everywhere shapes: no Long import, no accessor pairs.
 func TestTSInt64Default(t *testing.T) {

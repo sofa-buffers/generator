@@ -154,7 +154,7 @@ func _narrowS[T ~int8 | ~int16 | ~int32 | ~int64](v []int64) []T {
 }
 
 // _strSeq / _bytesSeq collect the elements of a string / blob array. Elements are
-// keyed by index id (MESSAGE_SPEC S2): a default (empty) element is omitted on the
+// keyed by index id: a default (empty) element is omitted on the
 // wire, so we place each value at its id and fill any gap with the element default
 // ("" / nil). Blob copies (the corelib value aliases the decode buffer).
 type _strSeq struct {
@@ -269,7 +269,7 @@ func (s *_seqSeq[T]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
 }`)
 	if g.limits.any() {
 		f.blank()
-		f.line("// Receiver-side decode limits (generator#102), baked from the sofabgen config")
+		f.line("// Receiver-side decode limits, baked from the sofabgen config")
 		f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
 		f.line("// only fields the schema left unbounded; each cap is raised to the largest")
 		f.line("// schema bound of its kind, so a schema-bounded field stays governed by its")
@@ -353,9 +353,19 @@ func (g *gen) emitBitfield(f *gofile, nt *ir.NamedType) {
 	f.line("type %s %s", tn, bitfieldGoType(nt))
 	f.line("const (")
 	for _, fl := range nt.Flags {
-		doc := ""
-		if fl.Description != "" {
-			doc = " // " + oneline(fl.Description)
+		doc := oneline(fl.Description)
+		if fl.HasDefault {
+			note := "(default: false)"
+			if fl.Default {
+				note = "(default: true)"
+			}
+			if doc != "" {
+				doc += " "
+			}
+			doc += note
+		}
+		if doc != "" {
+			doc = " // " + doc
 		}
 		f.line("\t%s%s %s = 1 << %d%s", tn, exported(fl.Name), tn, fl.Pos, doc)
 	}
@@ -377,7 +387,21 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 	// in schema/id order, so the wire bytes are unchanged.
 	for _, fld := range ir.SortedForLayout(fields) {
 		tag := fmt.Sprintf("`json:%q`", fld.Name)
-		f.line("\t%s %s %s%s", goFieldName(fld.Name), g.goType(fld), tag, fieldDoc(fld))
+		name := goFieldName(fld.Name)
+		if fld.Deprecated {
+			// Go has no deprecation attribute; the godoc convention is the marker.
+			// A "Deprecated:" paragraph must stand on its own line, so a deprecated
+			// field carries a leading doc block (keeping its description) instead of
+			// the trailing description comment used elsewhere.
+			if doc := fieldDocText(fld); doc != "" {
+				f.line("\t// %s %s", name, doc)
+				f.line("\t//")
+			}
+			f.line("\t// Deprecated: retained for backward compatibility only; do not use in new code.")
+			f.line("\t%s %s %s", name, g.goType(fld), tag)
+			continue
+		}
+		f.line("\t%s %s %s%s", name, g.goType(fld), tag, fieldDoc(fld))
 	}
 	f.line("}")
 	f.blank()

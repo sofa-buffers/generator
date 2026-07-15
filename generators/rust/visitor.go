@@ -251,15 +251,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		f.line("            limited = v.lim;")
 	}
 	f.line("        }")
-	f.line("        // A scalar array carried more elements than its schema `count`")
-	f.line("        // (generator#100): INVALID per MESSAGE_SPEC 3+7, never clamp.")
+	f.line("        // A scalar array carried more elements than its schema `count`.")
+	f.line("        // An element count above the schema capacity is invalid and is rejected, never clamped.")
 	f.line("        if invalid { return Err(sofab::Error::InvalidMsg); }")
 	if g.limits.any() {
 		f.line("        // An unbounded field exceeded a configured receiver-side decode")
-		f.line("        // limit (generator#102): reject, never clamp.")
+		f.line("        // limit: reject, never clamp.")
 		f.line("        if limited { return Err(sofab::Error::LimitExceeded); }")
 	}
-	f.line("        // A fixed-capacity field overflowed during the fill (generator#82):")
+	f.line("        // A fixed-capacity field overflowed during the fill:")
 	f.line("        // report it rather than return a silently-truncated value.")
 	f.line("        if overflow { return Err(sofab::Error::BufferFull); }")
 	f.line("        Ok(m)")
@@ -309,6 +309,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("}")
 	f.blank()
 
+	// The flat visitor assigns into deprecated fields (self.m.<path>) directly, so
+	// suppress the deprecated lint over the whole impl when any reachable field is
+	// deprecated; keeps the generated crate warning-clean.
+	for _, fr := range fs {
+		if fieldsHaveDeprecated(fr.fields) {
+			f.line("#[allow(deprecated)]")
+			break
+		}
+	}
 	f.line("impl<'a> Visitor for V<'a> {")
 
 	// unsigned: u*/bitfield scalars, bool, and unsigned/bool/bitfield array elements
@@ -438,8 +447,8 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        // Single-shot: whole payload in one chunk -> build straight from the")
 			f.line("        // slice, skipping the `acc` accumulate + second copy.")
 			f.line("        // Invalid UTF-8 -> empty string, matching the no_std profile's")
-			f.line("        // from_utf8(..).unwrap_or(\"\") (generator#80): the two Rust profiles")
-			f.line("        // must agree on a string's value. (spec 8 strict/reject is generator#85.)")
+			f.line("        // from_utf8(..).unwrap_or(\"\"): the two Rust profiles")
+			f.line("        // must agree on a string's value.")
 			f.line("        let _s = if offset == 0 && chunk.len() >= total {")
 			f.line("            core::str::from_utf8(&chunk[..total]).map(|s| s.to_owned()).unwrap_or_default()")
 			f.line("        } else {")
@@ -626,7 +635,7 @@ func (g *gen) emitLimitGuard(f *rfile, fs []frame, kind ir.Kind, constName strin
 	if len(arms) == 0 {
 		return
 	}
-	f.line("        // Unbounded fields under an active receiver cap (generator#102):")
+	f.line("        // Unbounded fields under an active receiver cap:")
 	f.line("        // reject an over-cap declared total before any bytes accumulate.")
 	f.line("        match (self.cur, id) {")
 	for _, a := range arms {

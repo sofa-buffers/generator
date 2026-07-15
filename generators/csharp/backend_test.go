@@ -77,6 +77,60 @@ func TestCsStructural(t *testing.T) {
 	}
 }
 
+// TestCsMetadataDoc: field/enum/flag metadata renders as XML-doc comments and
+// native annotations — a deprecated field carries [Obsolete] plus a
+// "Deprecated." doc note (and the generated marshal/decode that reads it is
+// wrapped in a CS0618 pragma so the output builds warning-clean), each enum
+// constant carries its description, and each flag carries its description with
+// the (default: true/false) note when the flag declares a default.
+func TestCsMetadataDoc(t *testing.T) {
+	const src = `
+version: 1
+
+$defs:
+  enum:
+    Mode:
+      Off:    { value: 0, description: "Node is powered down." }
+      Active: { value: 1, description: "Node is sampling and transmitting." }
+  bitfield:
+    StatusFlags:
+      ready:      { pos: 0, default: true, description: "Node has completed initialization." }
+      overheated: { pos: 1, description: "Core temperature exceeded the safe threshold." }
+
+messages:
+  Telemetry:
+    payload:
+      legacyId: { id: 1, type: u32, description: "Old identifier retained for backward compatibility.", deprecated: true }
+      mode:     { id: 2, type: enum, enum: { $ref: "#/$defs/enum/Mode" } }
+      status:   { id: 3, type: bitfield, bits: { $ref: "#/$defs/bitfield/StatusFlags" } }
+`
+	m := buildModule(t, []byte(src), "meta.yaml", map[string]any{"namespace": "Demo.Messages"})
+	for _, want := range []string{
+		// Deprecated field: doc note + native [Obsolete] attribute.
+		"/// Old identifier retained for backward compatibility.\n    /// Deprecated.\n    /// </summary>\n    [Obsolete]\n    public uint legacyId;",
+		// Internal access to the deprecated field is CS0618-suppressed.
+		"    public void Marshal(OStream os) {\n#pragma warning disable 618 // internal access to a member marked [Obsolete]",
+		"#pragma warning restore 618\n    }",
+		"#pragma warning disable 618 // internal access to a member marked [Obsolete]\ninternal sealed class TelemetryVisitor : IVisitor {",
+		// Enum constant descriptions.
+		"/// <summary>\n    /// Node is powered down.\n    /// </summary>\n    Off = 0,",
+		"/// <summary>\n    /// Node is sampling and transmitting.\n    /// </summary>\n    Active = 1,",
+		// Flag descriptions + default note.
+		"/// <summary>\n    /// Node has completed initialization. (default: true)\n    /// </summary>\n    Ready = 1,",
+		"/// <summary>\n    /// Core temperature exceeded the safe threshold.\n    /// </summary>\n    Overheated = 2,",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q", want)
+		}
+	}
+	// No development/issue/spec citations leak into the generated comments.
+	for _, junk := range []string{"generator#", "MESSAGE_SPEC", "cf. #96", "(generator#102)"} {
+		if strings.Contains(m, junk) {
+			t.Errorf("Message.cs leaks junk citation %q", junk)
+		}
+	}
+}
+
 func TestCsDeterministic(t *testing.T) {
 	if exampleModule(t) != exampleModule(t) {
 		t.Fatal("C# generation not deterministic")

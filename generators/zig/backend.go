@@ -106,17 +106,25 @@ func (f *zfile) emitDoc(indent, text string) {
 }
 
 // fieldDoc builds a field's doc-comment text from its Description and Unit.
+// A deprecated field gets a trailing "Deprecated." note (Zig has no native
+// deprecation attribute, so the doc line is the only marker).
 func fieldDoc(fld *ir.Field) string {
+	var doc string
 	switch {
 	case fld.Description != "" && fld.Unit != "":
-		return fld.Description + " (unit: " + fld.Unit + ")"
+		doc = fld.Description + " (unit: " + fld.Unit + ")"
 	case fld.Description != "":
-		return fld.Description
+		doc = fld.Description
 	case fld.Unit != "":
-		return "(unit: " + fld.Unit + ")"
-	default:
-		return ""
+		doc = "(unit: " + fld.Unit + ")"
 	}
+	if fld.Deprecated {
+		if doc != "" {
+			doc += "\n"
+		}
+		doc += "Deprecated."
+	}
+	return doc
 }
 
 func (g *gen) module(s *ir.Schema) []byte {
@@ -134,7 +142,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	f.line("const sofab = @import(\"sofab\");")
 	f.blank()
 	f.line("/// Error set of the one-shot decode() wrappers: the corelib baseline plus")
-	f.line("/// IncompleteMessage. The corelib reports INCOMPLETE (MESSAGE_SPEC 7) as a")
+	f.line("/// IncompleteMessage. The corelib reports INCOMPLETE as a")
 	f.line("/// non-error decode Status -- the caller owns end-of-input -- and for a")
 	f.line("/// one-shot decode over a whole buffer, end-of-input is here: a trailing")
 	f.line("/// .incomplete means the message was truncated. Kept distinct from")
@@ -143,7 +151,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	f.blank()
 
 	if g.limits.any() {
-		f.line("// Receiver-side decode limits (generator#102), baked from the sofabgen config")
+		f.line("// Receiver-side decode limits, baked from the sofabgen config")
 		f.line("// (max_dyn_*): they govern only schema-unbounded fields (an array without")
 		f.line("// `count`, a string/blob without `maxlen`) and are checked at the count or")
 		f.line("// length header, before the field's storage is allocated. Exceeding a cap")
@@ -200,7 +208,18 @@ func (g *gen) emitBitfieldConsts(f *zfile, nt *ir.NamedType) {
 	backing := bitfieldBacking(nt)
 	f.line("pub const %s = struct {", strings.ToLower(g.typeName(nt.Key)))
 	for _, fl := range nt.Flags {
-		f.emitDoc("    ", fl.Description)
+		doc := fl.Description
+		if fl.HasDefault {
+			if doc != "" {
+				doc += " "
+			}
+			if fl.Default {
+				doc += "(default: true)"
+			} else {
+				doc += "(default: false)"
+			}
+		}
+		f.emitDoc("    ", doc)
 		f.line("    pub const %s: %s = 1 << %d;", strings.ToUpper(fl.Name), backing, fl.Pos)
 	}
 	f.line("};")
@@ -262,16 +281,17 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 		f.line("        var v: _dec_%s = .{ .m = &m, .alloc = alloc };", name)
 		f.line("        const st = try sofab.decode(data, &v);")
 		f.line("        // A scalar array carried more elements than its schema count:")
-		f.line("        // INVALID per MESSAGE_SPEC 3+7, never clamp (generator#100).")
+		f.line("        // an element count above the schema capacity is invalid and is")
+		f.line("        // rejected, never clamped.")
 		f.line("        if (v.inv) return error.InvalidMessage;")
 		if g.msgLimitGuards(fields) {
 			f.line("        // An unbounded field exceeded a receiver-configured decode limit")
-			f.line("        // (max_dyn_*): policy rejection, never a clamp (generator#102).")
+			f.line("        // (max_dyn_*): a policy rejection, never a clamp.")
 			f.line("        if (v.lim) return error.LimitExceeded;")
 		}
-		f.line("        // The bytes end inside a field or an open sequence: INCOMPLETE")
-		f.line("        // (MESSAGE_SPEC 7). This wrapper decodes a whole buffer, so a")
-		f.line("        // trailing .incomplete is a truncated message (generator#120).")
+		f.line("        // The bytes end inside a field or an open sequence: INCOMPLETE.")
+		f.line("        // This wrapper decodes a whole buffer, so a trailing .incomplete")
+		f.line("        // is a truncated message.")
 		f.line("        if (st == .incomplete) return error.IncompleteMessage;")
 		f.line("        return m;")
 		f.line("    }")
@@ -459,8 +479,8 @@ func (g *gen) emitSupport(f *zfile, dynAlloc bool) {
 	f.blank()
 	f.line("/// Store the next native-array element into a fixed [N]T destination. An")
 	f.line("/// element past the schema capacity N flags the message malformed: a wire")
-	f.line("/// count above the schema count is INVALID per MESSAGE_SPEC 3+7 and must be")
-	f.line("/// rejected, not clamped (generator#100).")
+	f.line("/// count above the schema count is invalid and must be rejected, not")
+	f.line("/// clamped.")
 	f.line("fn _putc(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s)), inv: *bool) void {")
 	f.line("    if (i.* >= s.len) {")
 	f.line("        inv.* = true;")
@@ -509,7 +529,7 @@ func (g *gen) emitSupport(f *zfile, dynAlloc bool) {
 	f.blank()
 	f.line("/// Place a wrapper-array string/blob element at its wire id (= array index),")
 	f.line("/// growing the destination and filling id gaps left by omitted default")
-	f.line("/// elements (MESSAGE_SPEC S2/S5.1).")
+	f.line("/// elements.")
 	f.line("fn _setElem(comptime T: type, a: std.mem.Allocator, s: *[]const T, id: usize, fill: T, v: T) void {")
 	f.line("    if (!_grow(T, a, s, id + 1, fill)) return;")
 	f.line("    @constCast(&s.*[id]).* = v;")

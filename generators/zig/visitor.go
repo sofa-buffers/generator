@@ -274,7 +274,7 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	// Sticky decode-limit flag (generator#102): an unbounded field exceeded a
 	// configured max_dyn_* cap; decode() then rejects with error.LimitExceeded.
 	if g.msgLimitGuards(fields) {
-		f.line("    lim: bool = false, // an unbounded field exceeded a configured decode limit (generator#102)")
+		f.line("    lim: bool = false, // an unbounded field exceeded a configured decode limit")
 	}
 	if use.scalarArray {
 		f.line("    ai: usize = 0, // index into the native array currently being filled")

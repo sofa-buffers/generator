@@ -192,6 +192,70 @@ messages:
 	}
 }
 
+// TestZigMetadataDocs: enum-constant descriptions, bitfield-flag descriptions
+// with a default note, and a deprecated field's `///` note all reach the
+// generated source as clean Zig doc comments (Zig has no native deprecation
+// attribute, so the doc line is the only marker).
+func TestZigMetadataDocs(t *testing.T) {
+	const src = `
+version: 1
+
+$defs:
+  enum:
+    Mode:
+      Off:    { value: 0, description: "Node is powered down." }
+      Active: { value: 1, description: "Node is sampling and transmitting." }
+  bitfield:
+    StatusFlags:
+      ready:      { pos: 0, default: true, description: "Node has completed initialization." }
+      overheated: { pos: 1, description: "Core temperature exceeded the safe threshold." }
+
+messages:
+  Telemetry:
+    payload:
+      legacyId: { id: 0, type: u32, description: "Old identifier retained for backward compatibility.", deprecated: true }
+      mode:     { id: 1, type: enum, enum: { $ref: "#/$defs/enum/Mode" } }
+      status:   { id: 2, type: bitfield, bits: { $ref: "#/$defs/bitfield/StatusFlags" } }
+`
+	doc, err := parser.Parse([]byte(src), "meta.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Resolve()
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	for _, want := range []string{
+		// Enum-constant descriptions.
+		"/// Node is powered down.",
+		"/// Node is sampling and transmitting.",
+		// Bitfield-flag description; a flag with a default carries the note,
+		// one without does not.
+		"/// Node has completed initialization. (default: true)",
+		"/// Core temperature exceeded the safe threshold.",
+		// Deprecated field: description kept, plus the `///` deprecation note.
+		"/// Old identifier retained for backward compatibility.",
+		"/// Deprecated.",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("metadata message.zig missing %q", want)
+		}
+	}
+	// A flag without a default must NOT get a default note.
+	if strings.Contains(m, "safe threshold. (default:") {
+		t.Error("flag without a default must not carry a (default: ...) note")
+	}
+}
+
 func TestZigProjectMode(t *testing.T) {
 	files := exampleFiles(t, map[string]any{"emit": "project"})
 	for _, path := range []string{"src/message.zig", "src/main.zig", "build.zig", "build.zig.zon", "README.md"} {

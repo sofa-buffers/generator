@@ -220,18 +220,45 @@ func (f *tsfile) emitDoc(indent, text string) {
 
 // fieldDoc builds a field's TSDoc text from its Description and Unit: the
 // description with " (unit: <Unit>)" appended when a unit is set, or just
-// "(unit: <Unit>)" when only a unit is present. Empty when both are empty.
+// "(unit: <Unit>)" when only a unit is present. A deprecated field appends an
+// `@deprecated` JSDoc tag on its own line so the doc tool flags callers (tsc
+// does not error on the generated code's own internal use, so no local
+// suppression is needed). Empty when there is nothing to document.
 func fieldDoc(fld *ir.Field) string {
+	var doc string
 	switch {
 	case fld.Description != "" && fld.Unit != "":
-		return fld.Description + " (unit: " + fld.Unit + ")"
+		doc = fld.Description + " (unit: " + fld.Unit + ")"
 	case fld.Description != "":
-		return fld.Description
+		doc = fld.Description
 	case fld.Unit != "":
-		return "(unit: " + fld.Unit + ")"
-	default:
-		return ""
+		doc = "(unit: " + fld.Unit + ")"
 	}
+	if fld.Deprecated {
+		if doc != "" {
+			doc += "\n"
+		}
+		doc += "@deprecated"
+	}
+	return doc
+}
+
+// flagDoc builds a bitfield flag's TSDoc text: its Description, with a
+// " (default: true)" / " (default: false)" note appended when the flag carries
+// a schema default. Empty when there is nothing to document.
+func flagDoc(fl *ir.BitfieldFlag) string {
+	doc := fl.Description
+	if fl.HasDefault {
+		if doc != "" {
+			doc += " "
+		}
+		if fl.Default {
+			doc += "(default: true)"
+		} else {
+			doc += "(default: false)"
+		}
+	}
+	return doc
 }
 
 func (g *gen) tsType(f *ir.Field) string {

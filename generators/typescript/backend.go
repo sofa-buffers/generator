@@ -125,7 +125,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	f.line("import { %s } from %q;", strings.Join(imports, ", "), corelibPkg)
 	f.blank()
 	if g.limits.any() {
-		f.line("// Receiver-side decode limits (generator#102), baked from the sofabgen config")
+		f.line("// Receiver-side decode limits, baked from the sofabgen config")
 		f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
 		f.line("// only fields the schema left unbounded; each cap is raised to the largest")
 		f.line("// schema bound of its kind, so a schema-bounded field stays governed by its")
@@ -175,6 +175,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 func (g *gen) emitEnum(f *tsfile, nt *ir.NamedType) {
 	f.line("export enum %s {", g.typeName(nt.Key))
 	for _, c := range nt.Consts {
+		f.emitDoc("  ", c.Description)
 		f.line("  %s = %d,", exported(c.Name), c.Value)
 	}
 	f.line("}")
@@ -184,6 +185,7 @@ func (g *gen) emitEnum(f *tsfile, nt *ir.NamedType) {
 func (g *gen) emitBitfield(f *tsfile, nt *ir.NamedType) {
 	f.line("export enum %s {", g.typeName(nt.Key))
 	for _, fl := range nt.Flags {
+		f.emitDoc("  ", flagDoc(fl))
 		f.line("  %s = %d,", exported(fl.Name), uint64(1)<<uint(fl.Pos))
 	}
 	f.line("}")

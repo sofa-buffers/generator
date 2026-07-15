@@ -230,7 +230,11 @@ func (g *gen) header(m *ir.Message) []byte {
 func (g *gen) emitEnum(f *hfile, nt *ir.NamedType) {
 	f.line("enum class %s : %s {", g.typeName(nt.Key), enumBacking(nt))
 	for _, c := range nt.Consts {
-		f.line("    %s = %d,", exported(c.Name), c.Value)
+		if doc := oneLineDoc(c.Description); doc != "" {
+			f.line("    %s = %d,  ///< %s", exported(c.Name), c.Value, doc)
+		} else {
+			f.line("    %s = %d,", exported(c.Name), c.Value)
+		}
 	}
 	f.line("};")
 	f.blank()
@@ -239,10 +243,38 @@ func (g *gen) emitEnum(f *hfile, nt *ir.NamedType) {
 func (g *gen) emitBitfield(f *hfile, nt *ir.NamedType) {
 	f.line("enum %s : %s {", g.typeName(nt.Key), bitfieldBacking(nt))
 	for _, fl := range nt.Flags {
-		f.line("    %s%s = %d,", g.typeName(nt.Key), exported(fl.Name), uint64(1)<<uint(fl.Pos))
+		if doc := flagDoc(fl); doc != "" {
+			f.line("    %s%s = %d,  ///< %s", g.typeName(nt.Key), exported(fl.Name), uint64(1)<<uint(fl.Pos), doc)
+		} else {
+			f.line("    %s%s = %d,", g.typeName(nt.Key), exported(fl.Name), uint64(1)<<uint(fl.Pos))
+		}
 	}
 	f.line("};")
 	f.blank()
+}
+
+// oneLineDoc collapses a possibly multi-line description to a single line (joined
+// with spaces) for a trailing ///< comment, which cannot span lines.
+func oneLineDoc(s string) string {
+	return strings.Join(strings.Split(s, "\n"), " ")
+}
+
+// flagDoc builds a bitfield flag's trailing-doc text: its description, plus a
+// "(default: true/false)" note when the flag carries a schema default. Returns
+// "" when the flag has neither.
+func flagDoc(fl *ir.BitfieldFlag) string {
+	desc := oneLineDoc(fl.Description)
+	if !fl.HasDefault {
+		return desc
+	}
+	note := "(default: false)"
+	if fl.Default {
+		note = "(default: true)"
+	}
+	if desc != "" {
+		return desc + " " + note
+	}
+	return note
 }
 
 func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isMessage bool) {
@@ -250,11 +282,25 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.line("struct %s : sofab::OStreamMessage, sofab::IStreamMessage {", name)
 	// Declare members widest-first to minimise padding; encode/decode below stay
 	// in schema/id order, so the wire bytes are unchanged.
+	hasDeprecated := false
 	for _, fld := range ir.SortedForLayout(fields) {
-		if doc := fieldDoc(fld); doc != "" {
-			f.line("    %s %s = %s;  ///< %s", g.cppType(fld), cppIdent(fld.Name), g.cppDefault(fld), doc)
+		attr := ""
+		if fld.Deprecated {
+			attr = "[[deprecated]] "
+			hasDeprecated = true
+		}
+		doc := fieldDoc(fld)
+		if fld.Deprecated {
+			if doc != "" {
+				doc += " @deprecated"
+			} else {
+				doc = "@deprecated"
+			}
+		}
+		if doc != "" {
+			f.line("    %s%s %s = %s;  ///< %s", attr, g.cppType(fld), cppIdent(fld.Name), g.cppDefault(fld), doc)
 		} else {
-			f.line("    %s %s = %s;", g.cppType(fld), cppIdent(fld.Name), g.cppDefault(fld))
+			f.line("    %s%s %s = %s;", attr, g.cppType(fld), cppIdent(fld.Name), g.cppDefault(fld))
 		}
 	}
 	if isMessage {
@@ -262,6 +308,20 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.line("    static constexpr std::size_t _maxSize = %d;", size)
 	}
 	f.blank()
+
+	// The generated member functions below legitimately touch every field,
+	// including any marked [[deprecated]]; suppress the deprecation warning so the
+	// generated code stays warning-clean (gcc and clang both honour this pragma).
+	// The implicitly-defined default constructor also touches the deprecated
+	// member (via its default member initializer) and would warn at every
+	// construction site — including inside the corelib templates, out of reach of
+	// this region — so it is explicitly defaulted here, inside the suppressed span.
+	if hasDeprecated {
+		f.line("#pragma GCC diagnostic push")
+		f.line("#pragma GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+		f.line("    %s() = default;", name)
+		f.blank()
+	}
 
 	// per-message encode()/decode() (members so multiple messages don't clash).
 	if isMessage {
@@ -358,6 +418,9 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.line("        default: break;")
 	f.line("        }")
 	f.line("    }")
+	if hasDeprecated {
+		f.line("#pragma GCC diagnostic pop")
+	}
 	f.line("};")
 	f.blank()
 }

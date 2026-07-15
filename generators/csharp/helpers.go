@@ -22,15 +22,44 @@ func xmlEscape(s string) string {
 // Description, with " (unit: <Unit>)" appended when a Unit is set; if only a
 // Unit is present the doc is "(unit: <Unit>)". Empty when both are empty.
 func fieldDoc(f *ir.Field) string {
+	var doc string
 	switch {
 	case f.Description != "" && f.Unit != "":
-		return f.Description + " (unit: " + f.Unit + ")"
+		doc = f.Description + " (unit: " + f.Unit + ")"
 	case f.Description != "":
-		return f.Description
+		doc = f.Description
 	case f.Unit != "":
-		return "(unit: " + f.Unit + ")"
+		doc = "(unit: " + f.Unit + ")"
 	}
-	return ""
+	// A deprecated field carries the [Obsolete] attribute for tooling; the doc
+	// generator (XML-doc) has no @deprecated tag, so keep a human "Deprecated."
+	// note on its own doc line.
+	if f.Deprecated {
+		if doc != "" {
+			doc += "\n"
+		}
+		doc += "Deprecated."
+	}
+	return doc
+}
+
+// flagDoc builds the doc text for a bitfield flag: its Description, with a
+// " (default: true)" / " (default: false)" note appended when the flag declares
+// a default. Empty when the flag has neither.
+func flagDoc(fl *ir.BitfieldFlag) string {
+	doc := fl.Description
+	if fl.HasDefault {
+		note := "(default: false)"
+		if fl.Default {
+			note = "(default: true)"
+		}
+		if doc != "" {
+			doc += " " + note
+		} else {
+			doc = note
+		}
+	}
+	return doc
 }
 
 // emitDoc writes an XML <summary> doc comment for text at the given indent.

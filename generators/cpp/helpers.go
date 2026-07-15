@@ -469,7 +469,7 @@ struct _MsgSeq : sofab::IStreamMessage {
         T &row = out->emplace_back();
         // A count-less native-array row (matrix with dynamic rows) is a std::vector
         // that the corelib's span read fills only up to its current size, so size it
-        // to the row's wire count first (#112). Struct/union rows are IStreamMessage
+        // to the row's wire count first. Struct/union rows are IStreamMessage
         // (no resize) and fixed std::array rows have no resize(), so both skip this.
         if constexpr (requires { row.resize(_count); } && !std::is_base_of_v<sofab::IStreamMessage, T>) {
             row.resize(_count);
@@ -496,8 +496,8 @@ struct _MsgSeqFixed : sofab::IStreamMessage {
         is.read(out->emplace_back());
     }
 };
-// _FixedBlobSeq / _FixedStrSeq place a blob / string element at its index id
-// (MESSAGE_SPEC S2): a default (empty) element is omitted on the wire, so the
+// _FixedBlobSeq / _FixedStrSeq place a blob / string element at its index id:
+// a default (empty) element is omitted on the wire, so the
 // inline vector is grown with empty-default slots up to id and the value is
 // stored at that index rather than appended in arrival order. Inline storage
 // never reallocates, so an earlier bound-then-filled element stays address-stable

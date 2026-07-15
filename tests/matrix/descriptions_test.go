@@ -33,6 +33,7 @@ func TestDescriptionsBecomeDocComments(t *testing.T) {
 		"Δv: Geschwindigkeitsänderung",
 		"π-Verhältnis ≈ 3.14159",
 		"Bezeichnung des Pakets",
+		"Altprüfsumme", // deprecated field description
 	}
 	// Fragments that must appear verbatim (UTF-8 fidelity) but may live on a
 	// block-comment / docstring continuation line without a per-line marker.
@@ -54,6 +55,15 @@ func TestDescriptionsBecomeDocComments(t *testing.T) {
 				all.WriteByte('\n')
 			}
 			out := all.String()
+
+			// Every backend must surface a `deprecated` field's metadata: a
+			// language-native deprecation marker or doc note (case-insensitive
+			// "deprecat" covers [[deprecated]], @Deprecated, [Obsolete] + "Deprecated.",
+			// #[deprecated], @deprecated, __attribute__((deprecated)), godoc
+			// "Deprecated:", Sphinx ".. deprecated::", and the docs "deprecated" badge).
+			if !strings.Contains(strings.ToLower(out), "deprecat") {
+				t.Errorf("no deprecation marker for the deprecated field in %s output", lang)
+			}
 
 			if lang == "docs" {
 				// The docs backend renders descriptions as page CONTENT, not code

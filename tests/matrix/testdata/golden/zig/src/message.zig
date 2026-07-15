@@ -8,7 +8,7 @@ const std = @import("std");
 const sofab = @import("sofab");
 
 /// Error set of the one-shot decode() wrappers: the corelib baseline plus
-/// IncompleteMessage. The corelib reports INCOMPLETE (MESSAGE_SPEC 7) as a
+/// IncompleteMessage. The corelib reports INCOMPLETE as a
 /// non-error decode Status -- the caller owns end-of-input -- and for a
 /// one-shot decode over a whole buffer, end-of-input is here: a trailing
 /// .incomplete means the message was truncated. Kept distinct from
@@ -61,11 +61,12 @@ pub const Scalars = struct {
         var v: _dec_Scalars = .{ .m = &m, .alloc = alloc };
         const st = try sofab.decode(data, &v);
         // A scalar array carried more elements than its schema count:
-        // INVALID per MESSAGE_SPEC 3+7, never clamp (generator#100).
+        // an element count above the schema capacity is invalid and is
+        // rejected, never clamped.
         if (v.inv) return error.InvalidMessage;
-        // The bytes end inside a field or an open sequence: INCOMPLETE
-        // (MESSAGE_SPEC 7). This wrapper decodes a whole buffer, so a
-        // trailing .incomplete is a truncated message (generator#120).
+        // The bytes end inside a field or an open sequence: INCOMPLETE.
+        // This wrapper decodes a whole buffer, so a trailing .incomplete
+        // is a truncated message.
         if (st == .incomplete) return error.IncompleteMessage;
         return m;
     }
@@ -156,8 +157,8 @@ fn _put(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s))) void {
 
 /// Store the next native-array element into a fixed [N]T destination. An
 /// element past the schema capacity N flags the message malformed: a wire
-/// count above the schema count is INVALID per MESSAGE_SPEC 3+7 and must be
-/// rejected, not clamped (generator#100).
+/// count above the schema count is invalid and must be rejected, not
+/// clamped.
 fn _putc(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s)), inv: *bool) void {
     if (i.* >= s.len) {
         inv.* = true;
@@ -193,7 +194,7 @@ fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {
 
 /// Place a wrapper-array string/blob element at its wire id (= array index),
 /// growing the destination and filling id gaps left by omitted default
-/// elements (MESSAGE_SPEC S2/S5.1).
+/// elements.
 fn _setElem(comptime T: type, a: std.mem.Allocator, s: *[]const T, id: usize, fill: T, v: T) void {
     if (!_grow(T, a, s, id + 1, fill)) return;
     @constCast(&s.*[id]).* = v;
