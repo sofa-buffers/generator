@@ -306,20 +306,28 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 	case ir.KindString, ir.KindBlob:
 		// checkBounded guarantees the element maxlen, so the storage is the schema
 		// bound directly (no zero-sizing fallback).
-		var elemDecl, ftype string
 		if spec.elem == ir.KindString {
 			// +1 for the NUL the corelib's read_string reserves, so a maxlen-byte
-			// wire string element is accepted at its schema bound (#103).
-			elemDecl = fmt.Sprintf("char items[%d][%d];", cap, spec.max+1)
-			ftype = "SOFAB_OBJECT_FIELDTYPE_STRING"
+			// wire string element is accepted at its schema bound (#103). A string
+			// element recovers its length from the NUL, so no companion is needed.
+			p.members = append(p.members, member{decl: fmt.Sprintf("char items[%d][%d];", cap, spec.max+1)})
+			for i := int64(0); i < cap; i++ {
+				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
+					"    SOFAB_OBJECT_FIELD(%d, %s, items[%d], SOFAB_OBJECT_FIELDTYPE_STRING),", i, p.cType, i)})
+			}
 		} else {
-			elemDecl = fmt.Sprintf("uint8_t items[%d][%d];", cap, spec.max)
-			ftype = "SOFAB_OBJECT_FIELDTYPE_BLOB"
-		}
-		p.members = append(p.members, member{decl: elemDecl})
-		for i := int64(0); i < cap; i++ {
-			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
-				"    SOFAB_OBJECT_FIELD(%d, %s, items[%d], %s),", i, p.cType, i, ftype)})
+			// A blob element is opaque bytes and may be shorter than its maxlen, so —
+			// like a scalar blob (issue #128) — each element is a sized blob: a
+			// companion used-length immediately before its buffer. Without it a
+			// sub-maxlen element re-encodes zero-padded and an all-zero element drops
+			// (issue #130). Emit each element as a { len; buf[M]; } struct so the
+			// length abuts the byte buffer (alignment 1) for the BLOB_SIZED macro.
+			lenT := blobLenC(spec.max)
+			p.members = append(p.members, member{decl: fmt.Sprintf("struct { %s len; uint8_t buf[%d]; } items[%d];", lenT, spec.max, cap)})
+			for i := int64(0); i < cap; i++ {
+				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
+					"    SOFAB_OBJECT_FIELD_BLOB_SIZED(%d, %s, items[%d].buf, items[%d].len),", i, p.cType, i, i)})
+			}
 		}
 	case ir.KindStruct, ir.KindUnion:
 		// Each element is itself a nested object (struct/union): the element type

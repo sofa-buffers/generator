@@ -21,7 +21,7 @@ int main(void) {
     m.somefp32 = 3.5f;
     memcpy(m.someblob, (uint8_t[]){1,2,3,4,5}, 5);
     m.someblob_len = 5;   /* sized blob: set the used length (issue #128) */
-    for (int i = 0; i < 3; i++) memset(m.someblobarray.items[i], i+1, 8);
+    for (int i = 0; i < 3; i++) { memset(m.someblobarray.items[i].buf, i+1, 8); m.someblobarray.items[i].len = 8; }  /* sized blob elements (issue #130) */
     m.someu64 = 18446744073709551615ULL;
     strcpy(m.somestringarray.items[0], "one");
     strcpy(m.somestringarray.items[1], "two");
@@ -55,7 +55,10 @@ int main(void) {
     assert(d.somefp32 == 3.5f);
     assert(d.someblob_len == 5);   /* sub-maxlen blob length preserved (issue #128) */
     assert(memcmp(d.someblob, m.someblob, d.someblob_len) == 0);
-    for (int i = 0; i < 3; i++) assert(memcmp(d.someblobarray.items[i], m.someblobarray.items[i], 8) == 0);
+    for (int i = 0; i < 3; i++) {
+        assert(d.someblobarray.items[i].len == m.someblobarray.items[i].len);
+        assert(memcmp(d.someblobarray.items[i].buf, m.someblobarray.items[i].buf, d.someblobarray.items[i].len) == 0);
+    }
     assert(d.someu64 == 18446744073709551615ULL);
     assert(strcmp(d.somestringarray.items[0], "one") == 0);
     assert(strcmp(d.somestringarray.items[4], "five") == 0);

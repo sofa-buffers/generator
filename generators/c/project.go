@@ -229,7 +229,9 @@ func (g *gen) arrayValueToJSON(h *cfile, spec arraySpec, acc, ind string, depth 
 	case ir.KindString:
 		h.line(`%s    json_str(out, %s);`, ind, slot)
 	case ir.KindBlob:
-		h.line(`%s    json_bytes(out, %s, sizeof(%s));`, ind, slot, slot)
+		// Sized-blob element (issue #130): print only the used bytes, not the full
+		// buffer capacity — the element is a { len; buf[]; } holder slot.
+		h.line(`%s    json_bytes(out, %s.buf, %s.len);`, ind, slot, slot)
 	case ir.KindStruct, ir.KindUnion:
 		h.line(`%s    %s_to_json(&%s, out);`, ind, g.jsonFn(spec.ref.Key), slot)
 	case ir.KindArray:
@@ -314,7 +316,9 @@ func (g *gen) arrayValueFromJSON(h *cfile, spec arraySpec, acc, jnode, ind strin
 	case ir.KindString:
 		h.line("%s    json_to_str(%s, %s, sizeof(%s));", ind, ev, slot, slot)
 	case ir.KindBlob:
-		h.line("%s    json_to_bytes(%s, %s, sizeof(%s));", ind, ev, slot, slot)
+		// Sized-blob element (issue #130): record the parsed used-length in the
+		// slot's companion so encode emits exactly those bytes.
+		h.line("%s    %s.len = (%s)json_to_bytes(%s, %s.buf, sizeof(%s.buf));", ind, slot, blobLenC(spec.max), ev, slot, slot)
 	case ir.KindStruct, ir.KindUnion:
 		h.line("%s    %s_from_json(%s, &%s);", ind, g.jsonFn(spec.ref.Key), ev, slot)
 	case ir.KindArray:

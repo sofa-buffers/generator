@@ -71,6 +71,9 @@ echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"
 # value must round-trip with no trailing zero padding (issue #128). A prefix match
 # would have silently passed the old padded "[10,20,30,0,0,...]" output.
 echo "$OUT" | grep -q '"someblob":\[10,20,30\]' || { echo "FAIL: blob round-trip (sub-maxlen padded? issue #128)"; exit 1; }
+# Blob-array elements are sized blobs too (issue #130): sub-maxlen elements must
+# not be zero-padded to their maxlen (8) on round-trip.
+echo "$OUT" | grep -q '"someblobarray":\[\[1\],\[2\],\[3\]\]' || { echo "FAIL: blob-array element padded/dropped (issue #130)"; exit 1; }
 echo "==> project harness round-trip OK"
 
 # issue #128: a scalar/struct-field blob carries a used-length, so every length
@@ -98,6 +101,25 @@ for want in '[0]' '[0,0,0,0]' '[255]' '[1,2,3]' '[1,2,3,4]'; do
         || { echo "FAIL: blob $want round-tripped as $got (issue #128)"; exit 1; }
 done
 echo "==> sized-blob length round-trips OK"
+
+# issue #130: a blob *array* element is a sized blob too — each element keeps its
+# exact length, incl. an all-zero element and an empty element in the middle (a
+# used_len-0 element is omitted by index, so gaps round-trip in place).
+echo "==> M3c: sized blob-array elements round-trip every length (issue #130)"
+cat > "$WORK/barr.yaml" <<'YAML'
+version: 1
+messages:
+  Barr: { payload: { a: { id: 0, type: array, items: { type: blob, count: 3, maxlen: 4 } } } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in "$WORK/barr.yaml" --out "$WORK/barrproj" >/dev/null )
+make -C "$WORK/barrproj" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+AH="$WORK/barrproj/harness/harness"
+for want in '[[1],[2,3],[4,5,6,7]]' '[[0],[0,0,0,0],[255]]' '[[9],[],[7,7]]'; do
+    got=$(printf '{"a":%s}' "$want" | "$AH" encode | "$AH" decode)
+    echo "$got" | grep -q "\"a\":$(printf '%s' "$want" | sed 's/[][]/\\&/g')" \
+        || { echo "FAIL: blob array $want round-tripped as $got (issue #130)"; exit 1; }
+done
+echo "==> sized blob-array round-trips OK"
 
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
