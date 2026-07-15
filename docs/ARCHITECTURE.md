@@ -722,6 +722,23 @@ bounded and grow with delivered elements (the Java #96/#98 pattern).
 *unsigned* backing; fixed numeric array → native fixed array/slice; string/blob
 array & struct/union → sequence framing.
 
+**Metadata rendering (see §8 for the contract).** Every backend emits the
+definition metadata as doc comments on the generated symbols — message `summary`
+on the type; field `description`/`unit` on the member; enum-constant and
+bitfield-flag `description` (plus the flag `default` as a `(default: true|false)`
+note) on each generated constant. The `deprecated` flag additionally emits the
+language's native deprecation marker: `[[deprecated]]` (C++),
+`__attribute__((deprecated))` (C), `@Deprecated`+`@deprecated` (Java),
+`[Obsolete]` (C#), `#[deprecated]` (Rust), `@deprecated` TSDoc (TS), the godoc
+`Deprecated:` paragraph (Go), a Sphinx `.. deprecated::` directive (Python), and a
+`/// Deprecated.` note (Zig). Because the generated encode/decode still touches a
+deprecated field, C/C++/C#/Rust locally suppress the resulting self-use warning so
+generated code stays warning-clean. **C and Java lower enum/bitfield fields to a
+raw integer** and emit no named constants, so they carry only the field-level
+metadata above. The `docs` target renders the same metadata as HTML page content
+(dedicated Unit column, `deprecated` badge). Both corelib variants of C++
+(`cpp`/`c-cpp`) and Rust (`rs`/`rs-no-std`) render metadata identically.
+
 ---
 
 ## 11. Cross-cutting design decisions
