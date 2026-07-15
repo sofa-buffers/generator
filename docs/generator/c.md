@@ -100,8 +100,11 @@ non-empty default is not materialised (it would need a companion-length write th
 top-level `_init` doesn't reach); it decodes as empty. No corpus schema relies on
 this.
 
-> **Known gap — blob arrays.** A `blob` *array* element
-> (`SOFAB_OBJECT_FIELD(..., BLOB)` over `uint8_t items[count][maxlen]`) is **not
-> yet** sized, so a sub-`maxlen` element still round-trips zero-padded to
-> `maxlen` (the same class of bug as #128, tracked separately). Only scalar and
-> struct-field blobs carry a used-length today.
+**Blob arrays.** A `blob` *array* element is a sized blob too (issue #130): the
+wrapper-sequence holder stores each element as a `struct { <len>; uint8_t
+buf[maxlen]; } items[count]` (the length immediately before each byte buffer) and
+emits a per-element `SOFAB_OBJECT_FIELD_BLOB_SIZED(i, holder, items[i].buf,
+items[i].len)`, so a sub-`maxlen` element keeps its exact length. A `used_len == 0`
+element is omitted by index, so an empty element round-trips in place (the gap is
+preserved). A `string` array element stays `char items[count][maxlen + 1]` — it
+recovers its length from the NUL, so it needs no companion.

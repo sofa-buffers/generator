@@ -1,6 +1,7 @@
 package c
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -328,6 +329,39 @@ messages:
 	// A blob must never use the plain fixed-capacity descriptor (the #128 bug).
 	if strings.Contains(c, "message_m_t, plain, SOFAB_OBJECT_FIELDTYPE_BLOB)") {
 		t.Errorf("m.c still emits the unsized plain-BLOB descriptor for a blob field (issue #128):\n%s", c)
+	}
+}
+
+// TestBlobArraySized: a blob *array* element is a sized blob too (issue #130) —
+// the wrapper-sequence holder stores each element as a { len; buf[maxlen]; }
+// struct (length immediately before the byte buffer) and emits a per-element
+// SOFAB_OBJECT_FIELD_BLOB_SIZED descriptor, so a sub-maxlen element keeps its
+// exact length instead of being zero-padded to maxlen. A string array stays a
+// plain char[count][maxlen+1] (NUL-recovered, no companion length).
+func TestBlobArraySized(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      ba: { id: 0, type: array, items: { type: blob, count: 3, maxlen: 4 } }
+      sa: { id: 1, type: array, items: { type: string, count: 2, maxlen: 8 } }
+`)
+	h, c := files["m.h"], files["m.c"]
+	if !strings.Contains(h, "struct { uint8_t len; uint8_t buf[4]; } items[3];") {
+		t.Errorf("m.h missing sized blob-array holder:\n%s", h)
+	}
+	if !strings.Contains(h, "char items[2][9];") { // string array element unchanged (maxlen 8 + NUL)
+		t.Errorf("m.h string-array element storage changed unexpectedly:\n%s", h)
+	}
+	for i := 0; i < 3; i++ {
+		want := fmt.Sprintf("BLOB_SIZED(%d, message_m_ba_elems_t, items[%d].buf, items[%d].len),", i, i, i)
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c missing per-element sized descriptor %q:\n%s", want, c)
+		}
+	}
+	if strings.Contains(c, "items[0], SOFAB_OBJECT_FIELDTYPE_BLOB)") {
+		t.Errorf("m.c still emits the unsized plain-BLOB descriptor for a blob-array element (issue #130):\n%s", c)
 	}
 }
 
