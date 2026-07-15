@@ -459,3 +459,54 @@ messages:
 		t.Error("unset limits must emit no limit plumbing")
 	}
 }
+
+// TestCppMetadataDocs verifies the metadata doc-comment contract: enum-constant
+// descriptions, bitfield-flag descriptions plus their default note, and a
+// deprecated field's [[deprecated]] attribute, @deprecated doc note, and the
+// warning-suppression pragma that keeps the generated encode/decode clean.
+func TestCppMetadataDocs(t *testing.T) {
+	src := "version: 1\n" +
+		"$defs:\n" +
+		"  enum:\n" +
+		"    Mode:\n" +
+		"      Off:    { value: 0, description: \"Node is powered down.\" }\n" +
+		"      Active: { value: 1, description: \"Node is sampling and transmitting.\" }\n" +
+		"      Fault:  { value: 2, description: \"Node detected an unrecoverable fault.\" }\n" +
+		"  bitfield:\n" +
+		"    StatusFlags:\n" +
+		"      ready:      { pos: 0, default: true, description: \"Node has completed initialization.\" }\n" +
+		"      overheated: { pos: 1, description: \"Core temperature exceeded the safe threshold.\" }\n" +
+		"messages:\n" +
+		"  Telemetry:\n" +
+		"    payload:\n" +
+		"      legacyId: { id: 1, type: u32, description: \"Old identifier retained for backward compatibility.\", deprecated: true }\n" +
+		"      mode:     { id: 2, type: enum, enum: { $ref: \"#/$defs/enum/Mode\" }, description: \"Current operating mode.\" }\n" +
+		"      status:   { id: 3, type: bitfield, bits: { $ref: \"#/$defs/bitfield/StatusFlags\" }, description: \"Health flags for this sample.\" }\n"
+	h := headerFromYAML(t, src, "telemetry.hpp")
+	for _, want := range []string{
+		// enum-constant descriptions
+		"Off = 0,  ///< Node is powered down.",
+		"Active = 1,  ///< Node is sampling and transmitting.",
+		"Fault = 2,  ///< Node detected an unrecoverable fault.",
+		// bitfield-flag descriptions + default note
+		"BitfieldStatusFlagsReady = 1,  ///< Node has completed initialization. (default: true)",
+		"BitfieldStatusFlagsOverheated = 2,  ///< Core temperature exceeded the safe threshold.",
+		// deprecated field: native attribute + doc note
+		"[[deprecated]] std::uint32_t legacyId = 0;  ///< Old identifier retained for backward compatibility. @deprecated",
+		// warning-suppression pragma around the generated member functions
+		"#pragma GCC diagnostic push",
+		"#pragma GCC diagnostic ignored \"-Wdeprecated-declarations\"",
+		"#pragma GCC diagnostic pop",
+		// the default constructor is explicitly defaulted inside the suppressed
+		// span so its use of the deprecated member's initializer never warns
+		"Telemetry() = default;",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("header missing %q:\n%s", want, h)
+		}
+	}
+	// A flag without a default must NOT get a default note.
+	if strings.Contains(h, "safe threshold. (default:") {
+		t.Errorf("flag without a schema default must not carry a default note:\n%s", h)
+	}
+}

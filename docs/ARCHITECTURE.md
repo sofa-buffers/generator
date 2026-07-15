@@ -401,20 +401,47 @@ a reimplementation should emit code that honors all of them:
   sources *and* project mode and fails on any non-ASCII byte. This is about
   generator-authored text — **user-supplied description text passes through
   verbatim**, including UTF-8 (see next).
-- **Render descriptions as language-idiomatic doc comments.** A message `summary`
-  and a field `description`/`unit` become doc comments on the generated type and
-  member, in each language's documentation-generator format so Doxygen/rustdoc/
-  godoc/Sphinx/TSDoc/Javadoc/docfx pick them up: Doxygen `/*! */` + trailing `/**<`
-  (C), Doxygen `@brief` + `///<` (C++), rustdoc `///` (Rust), godoc `//` (Go),
-  class docstring + Sphinx `#:` (Python), TSDoc `/** */` (TS), Javadoc `/** */`
-  (Java), XML `/// <summary>` (C#). The comment attaches immediately before (or
-  trailing) the declaration so it lands inside the right namespace/package/module
-  for the doc tool. User text is passed through byte-for-byte (UTF-8 included);
-  backends only neutralise comment-terminators (`*/` → `* /`) and XML-escape
-  `&<>` (C#). `TestDescriptionsBecomeDocComments` (driven by the UTF-8
-  `testdata/descriptions.yaml`) verifies every backend emits the text on a comment
-  line with the UTF-8 preserved (the `docs` target renders the text as
-  HTML-escaped page *content* instead; there only UTF-8 fidelity is checked).
+- **Render all definition metadata as language-idiomatic doc comments.** Every
+  metadata field the schema allows becomes a doc comment (or native annotation) in
+  each language's documentation-generator format so Doxygen/rustdoc/godoc/Sphinx/
+  TSDoc/Javadoc/docfx pick them up. The full set a backend must surface, on the
+  matching generated symbol:
+  - message `summary` → the generated type doc;
+  - field `description` + `unit` → the field/member doc (`unit` appended as
+    `(unit: …)`);
+  - field `deprecated` → the language's **native deprecation marker** *and* a doc
+    note, so both the compiler/IDE and the doc generator see it: `[[deprecated]]`
+    (C++), `__attribute__((deprecated))` (C), `@Deprecated` + `@deprecated` (Java),
+    `[Obsolete]` + note (C#), `#[deprecated]` (Rust), `@deprecated` TSDoc (TS), the
+    godoc `Deprecated:` paragraph (Go), a Sphinx `.. deprecated::` directive
+    (Python), a `/// Deprecated.` note (Zig). Because a deprecated field is still
+    written/read by the generated encode/decode, the backends whose deprecation
+    marker is compiler-enforced (C, C++, C#, Rust) locally suppress the resulting
+    self-use warning around the generated internal accesses (`#pragma GCC
+    diagnostic`, `#pragma warning disable 618`, `#[allow(deprecated)]`) so
+    generated code stays warning-clean;
+  - enum constant `description` and bitfield flag `description` (+ a
+    `(default: true|false)` note from the flag's `default`) → a doc comment on each
+    generated constant. C and Java lower enum/bitfield fields to a raw integer and
+    emit no named constants, so there is no symbol to document — they carry only the
+    field-level metadata above.
+
+  The doc syntaxes are language-idiomatic: Doxygen `/*! */` + trailing `/**<` (C),
+  Doxygen + `///<` (C++), rustdoc `///` (Rust), godoc `//` (Go), class docstring +
+  Sphinx `#:` (Python), TSDoc `/** */` (TS), Javadoc `/** */` (Java), XML
+  `/// <summary>` (C#). The comment attaches immediately before (or trailing) the
+  declaration so it lands inside the right namespace/package/module for the doc
+  tool. **Generated comments carry only definition metadata** — never usage/example
+  code, changelog history, internal issue/spec references, or other development
+  notes. User text is passed through byte-for-byte (UTF-8 included); backends only
+  neutralise comment-terminators (`*/` → `* /`) and XML-escape `&<>` (C#), and all
+  generator-authored comment text is ASCII. `TestDescriptionsBecomeDocComments`
+  (driven by the UTF-8 `testdata/descriptions.yaml`) verifies every backend emits
+  the description/summary/unit text on a comment line with UTF-8 preserved and a
+  deprecation marker for the deprecated field; each backend's own unit test covers
+  its enum-constant, flag, and native-annotation rendering (the `docs` target
+  renders the same metadata as HTML-escaped page *content* instead, with `unit` and
+  `deprecated` as their own column/badge; there only UTF-8 fidelity is checked).
 
 **Adding a language is purely additive** — a new `generators/<lang>/` package + a
 blank import + per-target schema keys + a `tests/conformance/<lang>/run.sh` + a CI job. No

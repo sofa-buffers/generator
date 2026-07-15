@@ -82,10 +82,10 @@ mod scalars_dec {
             overflow = v.err;
             invalid = v.inv;
         }
-        // A scalar array carried more elements than its schema `count`
-        // (generator#100): INVALID per MESSAGE_SPEC 3+7, never clamp.
+        // A scalar array carried more elements than its schema `count`.
+        // An element count above the schema capacity is invalid and is rejected, never clamped.
         if invalid { return Err(sofab::Error::InvalidMsg); }
-        // A fixed-capacity field overflowed during the fill (generator#82):
+        // A fixed-capacity field overflowed during the fill:
         // report it rather than return a silently-truncated value.
         if overflow { return Err(sofab::Error::BufferFull); }
         Ok(m)

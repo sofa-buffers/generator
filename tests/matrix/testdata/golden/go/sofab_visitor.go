@@ -42,7 +42,7 @@ func _narrowS[T ~int8 | ~int16 | ~int32 | ~int64](v []int64) []T {
 }
 
 // _strSeq / _bytesSeq collect the elements of a string / blob array. Elements are
-// keyed by index id (MESSAGE_SPEC S2): a default (empty) element is omitted on the
+// keyed by index id: a default (empty) element is omitted on the
 // wire, so we place each value at its id and fill any gap with the element default
 // ("" / nil). Blob copies (the corelib value aliases the decode buffer).
 type _strSeq struct {

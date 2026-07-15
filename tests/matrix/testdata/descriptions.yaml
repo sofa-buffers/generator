@@ -41,3 +41,9 @@ messages:
         type: string
         description: "Bezeichnung des Pakets ☕ — frei wählbar"
         maxlen: 64
+
+      legacyChecksum:
+        id: 5
+        type: u32
+        description: "Altprüfsumme — nicht mehr verwenden"
+        deprecated: true

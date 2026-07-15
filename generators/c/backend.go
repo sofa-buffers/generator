@@ -75,6 +75,12 @@ type objectPlan struct {
 	nested   []string      // child object keys in nested_list order
 	defaults []defaultInit // non-zero leaf-field defaults, for the const image
 	maxField int64
+	// hasDeprecated is set when any field lowers to a deprecated struct member.
+	// The generated .c references members by name via sizeof(((T*)0)->field) in
+	// the descriptor table (and by designated initializer in the defaults image),
+	// both of which warn under -Wdeprecated-declarations; emitDescriptor wraps its
+	// output in a diagnostic push/pop when this is set.
+	hasDeprecated bool
 }
 
 // defaultInit is one designated-initializer entry (".field = expr") in an
@@ -87,9 +93,10 @@ type defaultInit struct {
 }
 
 type member struct {
-	decl  string // e.g. "uint16_t u16;"
-	align int    // storage alignment in bytes, for widest-first member ordering
-	doc   string // field description (+unit), single-lined; "" => no member comment
+	decl       string // e.g. "uint16_t u16;"
+	align      int    // storage alignment in bytes, for widest-first member ordering
+	doc        string // field description (+unit), single-lined; "" => no member comment
+	deprecated bool   // field carries deprecated:true — emit the native attribute + doc note
 }
 
 // memberDoc derives a member's Doxygen text from the field's description and
@@ -189,6 +196,9 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 		if f.ID > p.maxField {
 			p.maxField = f.ID
 		}
+		if f.Deprecated {
+			p.hasDeprecated = true
+		}
 		switch {
 		case f.Kind == ir.KindStruct || f.Kind == ir.KindUnion:
 			ck := "named/" + f.Ref.Key
@@ -199,7 +209,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f), deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
@@ -212,7 +222,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f), deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
@@ -221,7 +231,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 			if err != nil {
 				return err
 			}
-			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f)})
+			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 			if expr, ok := g.cDefaultInit(f); ok {
 				p.defaults = append(p.defaults, defaultInit{ident: cIdent(f.Name), expr: expr})
@@ -395,17 +405,45 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 func (g *gen) emitStruct(h *cfile, p *objectPlan) {
 	h.line("typedef struct {")
 	for _, m := range p.members {
-		if m.doc != "" {
-			h.line("    %s  /**< %s */", m.decl, m.doc)
+		decl, doc := m.decl, m.doc
+		if m.deprecated {
+			// Emit the native marker so callers touching the field warn, and add a
+			// Doxygen @deprecated note so the doc tool renders a deprecation section.
+			decl = deprecatedDecl(decl)
+			if doc != "" {
+				doc += " @deprecated"
+			} else {
+				doc = "@deprecated"
+			}
+		}
+		if doc != "" {
+			h.line("    %s  /**< %s */", decl, doc)
 		} else {
-			h.line("    %s", m.decl)
+			h.line("    %s", decl)
 		}
 	}
 	h.line("} %s;", p.cType)
 	h.blank()
 }
 
+// deprecatedDecl inserts the GCC/Clang deprecated attribute onto a struct-member
+// declaration ("uint32_t legacyId;" -> "uint32_t legacyId __attribute__((deprecated));").
+func deprecatedDecl(decl string) string {
+	if strings.HasSuffix(decl, ";") {
+		return decl[:len(decl)-1] + " __attribute__((deprecated));"
+	}
+	return decl + " __attribute__((deprecated))"
+}
+
 func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
+	// The field table's sizeof(((T*)0)->field) and the defaults image's
+	// designated initializers both name deprecated members, which warn under
+	// -Wdeprecated-declarations. Suppress locally so the generated .c stays
+	// warning-clean; offsetof (also in the macro) does not warn on its own.
+	if p.hasDeprecated {
+		c.line("#pragma GCC diagnostic push")
+		c.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
+	}
 	c.line("static const sofab_object_descr_field_t %s[] = {", g.fieldsSym(p.key))
 	for _, fe := range p.fields {
 		c.line("%s", fe.macro)
@@ -440,6 +478,9 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 	} else {
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR(%s, %d, %s, %d);",
 			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount)
+	}
+	if p.hasDeprecated {
+		c.line("#pragma GCC diagnostic pop")
 	}
 	c.blank()
 }

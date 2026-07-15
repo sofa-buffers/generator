@@ -108,7 +108,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	f.blank()
 
 	if g.limits.any() {
-		f.line("# Receiver-side decode limits (generator#102), baked from the sofabgen config")
+		f.line("# Receiver-side decode limits, baked from the sofabgen config")
 		f.line("# (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
 		f.line("# only fields the schema left unbounded; each cap is raised to the largest")
 		f.line("# schema bound of its kind, so a schema-bounded field stays governed by its")
@@ -177,6 +177,13 @@ func schemaHasCountedNativeArray(s *ir.Schema) bool {
 func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
 	f.line("class %s(IntEnum):", g.typeName(nt.Key))
 	for _, c := range nt.Consts {
+		// Sphinx attribute comment(s) carrying the constant's description, above
+		// the member so pydoc/Sphinx attaches it to the enum value.
+		if c.Description != "" {
+			for _, dl := range strings.Split(c.Description, "\n") {
+				f.line("    #: %s", dl)
+			}
+		}
 		f.line("    %s = %d", strings.ToUpper(c.Name), c.Value)
 	}
 	f.blank()
@@ -185,9 +192,37 @@ func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
 func (g *gen) emitBitfieldConsts(f *pyfile, nt *ir.NamedType) {
 	f.line("class %s(IntEnum):", g.typeName(nt.Key))
 	for _, fl := range nt.Flags {
+		// Sphinx attribute comment(s): the flag description, with the schema
+		// default appended as "(default: true/false)" when the flag has one.
+		for _, dl := range bitfieldFlagDocLines(fl) {
+			f.line("    #: %s", dl)
+		}
 		f.line("    %s = 1 << %d", strings.ToUpper(fl.Name), fl.Pos)
 	}
 	f.blank()
+}
+
+// bitfieldFlagDocLines builds the Sphinx attribute-comment text (without the
+// leading "#: ") for a bitfield flag: its Description, plus a trailing
+// "(default: true)" / "(default: false)" note appended to the last line when
+// the flag declares a default. Returns nil when there is nothing to document.
+func bitfieldFlagDocLines(fl *ir.BitfieldFlag) []string {
+	var lines []string
+	if fl.Description != "" {
+		lines = strings.Split(fl.Description, "\n")
+	}
+	if fl.HasDefault {
+		note := "(default: false)"
+		if fl.Default {
+			note = "(default: true)"
+		}
+		if len(lines) == 0 {
+			lines = []string{note}
+		} else {
+			lines[len(lines)-1] = lines[len(lines)-1] + " " + note
+		}
+	}
+	return lines
 }
 
 // emitClassDoc writes a triple-quoted class docstring as the first statement of
@@ -213,17 +248,25 @@ func emitClassDoc(f *pyfile, summary string) {
 // pyFieldDocLines builds the Sphinx attribute-comment text (without the leading
 // "#: ") from a field's Description and Unit. A multi-line description yields one
 // line per source line; a non-empty Unit is appended as " (unit: <Unit>)" to the
-// last line. Returns nil when both are empty.
+// last line. A deprecated field gets a trailing ".. deprecated::" directive so
+// Sphinx renders the deprecation and pydoc surfaces the note. Returns nil when
+// there is nothing to document.
 func pyFieldDocLines(fld *ir.Field) []string {
-	if fld.Description == "" && fld.Unit == "" {
-		return nil
+	var lines []string
+	if fld.Description != "" {
+		lines = strings.Split(fld.Description, "\n")
 	}
-	if fld.Description == "" {
-		return []string{fmt.Sprintf("(unit: %s)", fld.Unit)}
-	}
-	lines := strings.Split(fld.Description, "\n")
 	if fld.Unit != "" {
-		lines[len(lines)-1] = fmt.Sprintf("%s (unit: %s)", lines[len(lines)-1], fld.Unit)
+		if len(lines) == 0 {
+			lines = []string{fmt.Sprintf("(unit: %s)", fld.Unit)}
+		} else {
+			lines[len(lines)-1] = fmt.Sprintf("%s (unit: %s)", lines[len(lines)-1], fld.Unit)
+		}
+	}
+	if fld.Deprecated {
+		lines = append(lines,
+			".. deprecated::",
+			"   Deprecated and retained only for backward compatibility; do not use in new code.")
 	}
 	return lines
 }

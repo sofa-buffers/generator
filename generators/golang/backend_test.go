@@ -190,6 +190,74 @@ messages:
 	}
 }
 
+// TestGoMetadataDocComments checks that field/enum/bitfield metadata renders as
+// idiomatic godoc: a deprecated field carries a leading doc block with a
+// "Deprecated:" paragraph (Go's only deprecation marker) while keeping its
+// description; enum constants keep their trailing description; bitfield flags
+// keep their description and gain a "(default: true/false)" note when defaulted.
+func TestGoMetadataDocComments(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  enum:
+    Mode:
+      Off:    { value: 0, description: "Node is powered down." }
+      Active: { value: 1, description: "Node is sampling and transmitting." }
+  bitfield:
+    StatusFlags:
+      ready:      { pos: 0, default: true, description: "Node has completed initialization." }
+      overheated: { pos: 1, description: "Core temperature exceeded the safe threshold." }
+messages:
+  Telemetry:
+    summary: Periodic telemetry sample from a sensor node.
+    payload:
+      temp:     { id: 0, type: i16, description: "Ambient temperature.", unit: degC, default: 20 }
+      legacyId: { id: 1, type: u32, description: "Old identifier retained for backward compatibility.", deprecated: true }
+      mode:     { id: 2, type: enum, enum: { $ref: "#/$defs/enum/Mode" }, description: "Current operating mode." }
+      status:   { id: 3, type: bitfield, bits: { $ref: "#/$defs/bitfield/StatusFlags" }, description: "Health flags for this sample." }
+`
+	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "messages"})
+	msg, types := files["telemetry.go"], files["types.go"]
+
+	// Deprecated field: leading godoc block, description kept, Deprecated: line,
+	// and no trailing description comment on the field line itself.
+	for _, want := range []string{
+		"// LegacyId Old identifier retained for backward compatibility.",
+		"// Deprecated: retained for backward compatibility only; do not use in new code.",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("telemetry.go missing deprecated doc %q:\n%s", want, firstLines(msg, 20)) //nolint
+		}
+	}
+	if !regexp.MustCompile(`// Deprecated:[^\n]*\n\tLegacyId\s+uint32`).MatchString(msg) {
+		t.Errorf("Deprecated: line must directly precede the LegacyId field:\n%s", firstLines(msg, 20))
+	}
+
+	// Enum constant descriptions (trailing, unchanged; gofmt aligns columns).
+	for _, want := range []*regexp.Regexp{
+		regexp.MustCompile(`EnumModeOff\s+EnumMode = 0 // Node is powered down\.`),
+		regexp.MustCompile(`EnumModeActive\s+EnumMode = 1 // Node is sampling and transmitting\.`),
+	} {
+		if !want.MatchString(types) {
+			t.Errorf("types.go missing enum const doc %v", want)
+		}
+	}
+
+	// Bitfield flag descriptions + default note.
+	for _, want := range []*regexp.Regexp{
+		regexp.MustCompile(`BitfieldStatusFlagsReady\s+BitfieldStatusFlags = 1 << 0 // Node has completed initialization\. \(default: true\)`),
+		regexp.MustCompile(`BitfieldStatusFlagsOverheated\s+BitfieldStatusFlags = 1 << 1 // Core temperature exceeded the safe threshold\.`),
+	} {
+		if !want.MatchString(types) {
+			t.Errorf("types.go missing bitfield flag doc %v:\n%s", want, firstLines(types, 20))
+		}
+	}
+	// A defaulted flag with no description would still carry the note.
+	if strings.Contains(types, "(default: true) (default: true)") {
+		t.Error("default note duplicated")
+	}
+}
+
 func TestGoDeterministic(t *testing.T) {
 	a := genGo(t, exampleSchema(t), map[string]any{"package": "messages"})
 	b := genGo(t, exampleSchema(t), map[string]any{"package": "messages"})

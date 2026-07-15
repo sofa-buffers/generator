@@ -106,6 +106,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 func (g *gen) emitEnum(f *cfile, nt *ir.NamedType) {
 	f.line("public enum %s : %s {", g.typeName(nt.Key), enumBacking(nt))
 	for _, c := range nt.Consts {
+		emitDoc(f, "    ", c.Description)
 		f.line("    %s = %d,", exported(c.Name), c.Value)
 	}
 	f.line("}")
@@ -116,6 +117,7 @@ func (g *gen) emitBitfield(f *cfile, nt *ir.NamedType) {
 	f.line("[Flags]")
 	f.line("public enum %s : %s {", g.typeName(nt.Key), bitfieldBacking(nt))
 	for _, fl := range nt.Flags {
+		emitDoc(f, "    ", flagDoc(fl))
 		f.line("    %s = %d,", exported(fl.Name), uint64(1)<<uint(fl.Pos))
 	}
 	f.line("}")
@@ -127,14 +129,25 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	f.line("public sealed class %s {", name)
 	for _, fld := range fields {
 		emitDoc(f, "    ", fieldDoc(fld))
+		if fld.Deprecated {
+			f.line("    [Obsolete]")
+		}
 		f.line("    public %s %s%s;", g.csType(fld), csIdent(fld.Name), g.csInit(fld))
 	}
 	f.blank()
 
-	// Marshal
+	// Marshal. Generated marshal legitimately reads fields marked [Obsolete];
+	// silence the CS0618 deprecation warning around that internal access.
+	dep := hasDeprecatedDirect(fields)
 	f.line("    public void Marshal(OStream os) {")
+	if dep {
+		f.line("#pragma warning disable 618 // internal access to a member marked [Obsolete]")
+	}
 	for _, fld := range fields {
 		g.emitMarshal(f, fld)
+	}
+	if dep {
+		f.line("#pragma warning restore 618")
 	}
 	f.line("    }")
 
@@ -179,8 +192,47 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	f.blank()
 
 	if isMessage {
+		// The flat-visitor decode writes into reachable fields, including any
+		// marked [Obsolete] (message-level or nested struct/union); silence the
+		// CS0618 deprecation warning around the generated decode.
+		depVis := framesHaveDeprecated(g.frames(&ir.Message{Name: name, Fields: fields}))
+		if depVis {
+			f.line("#pragma warning disable 618 // internal access to a member marked [Obsolete]")
+		}
 		g.emitVisitor(f, name, fields)
+		if depVis {
+			f.line("#pragma warning restore 618")
+			f.blank()
+		}
 	}
+}
+
+// hasDeprecatedDirect reports whether any direct field of a class is deprecated,
+// so its Marshal reads a member marked [Obsolete] and needs the CS0618 guard.
+func hasDeprecatedDirect(fields []*ir.Field) bool {
+	for _, fld := range fields {
+		if fld.Deprecated {
+			return true
+		}
+	}
+	return false
+}
+
+// framesHaveDeprecated reports whether any object-scope field reachable from a
+// message (message-level or a nested struct/union) is deprecated, so the
+// generated visitor writes into a member marked [Obsolete].
+func framesHaveDeprecated(fs []frame) bool {
+	for _, fr := range fs {
+		if fr.isArr {
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Deprecated {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {

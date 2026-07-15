@@ -202,7 +202,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	// Receiver-side decode limits (generator#102), baked from the sofabgen config.
 	if g.limits.any() {
-		f.line("// Receiver-side decode limits (generator#102), from the sofabgen config")
+		f.line("// Receiver-side decode limits, from the sofabgen config")
 		f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
 		f.line("// only schema-unbounded fields (array without count, string/blob without")
 		f.line("// maxlen); schema-bounded fields stay governed by their own bound. Exceeding")
@@ -243,6 +243,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 func (g *gen) emitEnum(f *rfile, nt *ir.NamedType) {
 	f.line("pub mod %s {", strings.ToLower(g.typeName(nt.Key)))
 	for _, c := range nt.Consts {
+		f.emitDoc("    ", c.Description)
 		f.line("    pub const %s: %s = %d;", strings.ToUpper(c.Name), enumBacking(nt), c.Value)
 	}
 	f.line("}")
@@ -252,10 +253,29 @@ func (g *gen) emitEnum(f *rfile, nt *ir.NamedType) {
 func (g *gen) emitBitfieldConsts(f *rfile, nt *ir.NamedType) {
 	f.line("pub mod %s {", strings.ToLower(g.typeName(nt.Key)))
 	for _, fl := range nt.Flags {
+		f.emitDoc("    ", flagDoc(fl))
 		f.line("    pub const %s: %s = 1 << %d;", strings.ToUpper(fl.Name), bitfieldBacking(nt), fl.Pos)
 	}
 	f.line("}")
 	f.blank()
+}
+
+// flagDoc builds a bitfield flag's rustdoc text from its Description and, when
+// the flag has a schema default, an appended `(default: true/false)` note.
+func flagDoc(fl *ir.BitfieldFlag) string {
+	doc := fl.Description
+	if fl.HasDefault {
+		note := "(default: false)"
+		if fl.Default {
+			note = "(default: true)"
+		}
+		if doc != "" {
+			doc += " " + note
+		} else {
+			doc = note
+		}
+	}
+	return doc
 }
 
 // emitDoc writes a rustdoc `///` comment (one line per line of text) at the
@@ -265,22 +285,47 @@ func (f *rfile) emitDoc(indent, text string) {
 		return
 	}
 	for _, ln := range strings.Split(text, "\n") {
+		if ln == "" {
+			f.line("%s///", indent) // no trailing space on a blank doc line
+			continue
+		}
 		f.line("%s/// %s", indent, ln)
 	}
 }
 
-// fieldDoc builds a field's rustdoc text from its Description and Unit.
+// fieldDoc builds a field's rustdoc text from its Description and Unit. A
+// deprecated field gets a trailing `**Deprecated.**` note (on its own line);
+// the `#[deprecated]` attribute emitted alongside is what rustdoc renders as
+// the deprecation banner, but the prose note keeps the reason legible in source.
 func fieldDoc(fld *ir.Field) string {
+	var doc string
 	switch {
 	case fld.Description != "" && fld.Unit != "":
-		return fld.Description + " (unit: " + fld.Unit + ")"
+		doc = fld.Description + " (unit: " + fld.Unit + ")"
 	case fld.Description != "":
-		return fld.Description
+		doc = fld.Description
 	case fld.Unit != "":
-		return "(unit: " + fld.Unit + ")"
-	default:
-		return ""
+		doc = "(unit: " + fld.Unit + ")"
 	}
+	if fld.Deprecated {
+		if doc != "" {
+			doc += "\n\n**Deprecated.**"
+		} else {
+			doc = "**Deprecated.**"
+		}
+	}
+	return doc
+}
+
+// fieldsHaveDeprecated reports whether any of the given fields is deprecated, so
+// the generated impl blocks that read the field can carry #[allow(deprecated)].
+func fieldsHaveDeprecated(fields []*ir.Field) bool {
+	for _, fld := range fields {
+		if fld.Deprecated {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bool, summary string) {
@@ -306,6 +351,9 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 		// rustdoc attaches to the item that follows, so the doc must precede
 		// any #[serde(rename = ...)] attribute and the field itself.
 		f.emitDoc("    ", fieldDoc(fld))
+		if fld.Deprecated {
+			f.line("    #[deprecated]")
+		}
 		if rustNeedsRename(fld.Name) {
 			if g.noStd {
 				f.line("    #[cfg_attr(feature = \"serde\", serde(rename = %q))]", fld.Name)
@@ -317,6 +365,13 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	}
 	f.line("}")
 	f.blank()
+	// The generated Default, marshal, and decode read deprecated fields directly,
+	// which would trip the deprecated lint; suppress it over the impl blocks that
+	// touch them so the generated crate stays warning-clean.
+	deprecated := fieldsHaveDeprecated(fields)
+	if deprecated {
+		f.line("#[allow(deprecated)]")
+	}
 	f.line("impl Default for %s {", name)
 	f.line("    fn default() -> Self {")
 	f.line("        Self {")
@@ -328,6 +383,9 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	f.line("}")
 	f.blank()
 
+	if deprecated {
+		f.line("#[allow(deprecated)]")
+	}
 	f.line("impl %s {", name)
 	if isMessage {
 		size, _ := g.maxSize(fields)

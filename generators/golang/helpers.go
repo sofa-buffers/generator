@@ -201,7 +201,9 @@ func bitfieldGoType(nt *ir.NamedType) string {
 	}
 }
 
-func fieldDoc(f *ir.Field) string {
+// fieldDocText is the field's description plus a unit note, collapsed to one
+// line ("" when the field has neither).
+func fieldDocText(f *ir.Field) string {
 	doc := oneline(f.Description)
 	if f.Unit != "" {
 		if doc != "" {
@@ -209,6 +211,11 @@ func fieldDoc(f *ir.Field) string {
 		}
 		doc += "(unit: " + f.Unit + ")"
 	}
+	return doc
+}
+
+func fieldDoc(f *ir.Field) string {
+	doc := fieldDocText(f)
 	if doc == "" {
 		return ""
 	}

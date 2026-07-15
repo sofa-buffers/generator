@@ -273,6 +273,90 @@ messages:
 	}
 }
 
+// TestRustMetadataComments checks that message-definition metadata is rendered
+// into the generated source: enum-constant descriptions and bitfield-flag
+// descriptions (plus a `(default: true/false)` note when the flag has a schema
+// default) as rustdoc `///` lines, and a deprecated field carrying both the
+// native `#[deprecated]` attribute and a `**Deprecated.**` doc note, with
+// `#[allow(deprecated)]` over the impl blocks that read it so the crate stays
+// warning-clean.
+func TestRustMetadataComments(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  enum:
+    Mode:
+      Off:    { value: 0, description: "Node is powered down." }
+      Active: { value: 1, description: "Node is sampling and transmitting." }
+  bitfield:
+    StatusFlags:
+      ready:      { pos: 0, default: true, description: "Node has completed initialization." }
+      overheated: { pos: 1, description: "Core temperature exceeded the safe threshold." }
+messages:
+  Telemetry:
+    payload:
+      legacyId: { id: 0, type: u32, description: "Old identifier.", deprecated: true }
+      mode:     { id: 1, type: enum, enum: { $ref: "#/$defs/enum/Mode" } }
+      status:   { id: 2, type: bitfield, bits: { $ref: "#/$defs/bitfield/StatusFlags" } }
+`
+	doc, err := parser.Parse([]byte(src), "meta.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	gen := func(cfg map[string]any) string {
+		t.Helper()
+		files, err := (&Backend{}).Generate(s, cfg)
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		for _, f := range files {
+			if f.Path == "src/message.rs" {
+				return string(f.Content)
+			}
+		}
+		t.Fatal("no module")
+		return ""
+	}
+
+	// Both profiles must render the metadata identically.
+	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std", "allow_dynamic": true}} {
+		m := gen(cfg)
+		for _, want := range []string{
+			// Enum-constant descriptions.
+			"    /// Node is powered down.\n    pub const OFF: i8 = 0;",
+			"    /// Node is sampling and transmitting.\n    pub const ACTIVE: i8 = 1;",
+			// Bitfield-flag description + default note (and no note when no default).
+			"    /// Node has completed initialization. (default: true)\n    pub const READY: u8 = 1 << 0;",
+			"    /// Core temperature exceeded the safe threshold.\n    pub const OVERHEATED: u8 = 1 << 1;",
+			// Deprecated field: doc note + native attribute on the field.
+			"    /// Old identifier.\n    ///\n    /// **Deprecated.**\n    #[deprecated]\n    pub legacyId: u32,",
+			// Warning suppression over the impl blocks that read the field.
+			"#[allow(deprecated)]\nimpl Default for Telemetry {",
+			"#[allow(deprecated)]\nimpl Telemetry {",
+			"#[allow(deprecated)]\nimpl<'a> Visitor for V<'a> {",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing %q", cfg, want)
+			}
+		}
+		// A default-less flag must not gain a (default: ...) note.
+		if strings.Contains(m, "Core temperature exceeded the safe threshold. (default") {
+			t.Errorf("message.rs (%v): flag with no schema default must not carry a default note", cfg)
+		}
+	}
+}
+
 func TestRustDeterministic(t *testing.T) {
 	if exampleModule(t, map[string]any{}) != exampleModule(t, map[string]any{}) {
 		t.Fatal("Rust generation not deterministic")

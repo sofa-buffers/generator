@@ -82,6 +82,47 @@ func TestJavaDeterministic(t *testing.T) {
 	}
 }
 
+// TestJavaDeprecatedField: a deprecated field carries both the native
+// @Deprecated annotation and a Javadoc @deprecated tag (with its original
+// description preserved). Java lowers enum/bitfield fields to raw long, so no
+// enum/flag symbols are emitted to annotate.
+func TestJavaDeprecatedField(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  enum:
+    Mode:
+      Off: { value: 0, description: "Powered down." }
+  bitfield:
+    Flags:
+      ready: { pos: 0, default: true, description: "Initialized." }
+messages:
+  Telemetry:
+    payload:
+      legacyId: { id: 1, type: u32, description: "Old identifier retained for backward compatibility.", deprecated: true }
+      mode:     { id: 2, type: enum, enum: { $ref: "#/$defs/enum/Mode" } }
+      status:   { id: 3, type: bitfield, bits: { $ref: "#/$defs/bitfield/Flags" } }
+`
+	m := genJavaFromYAML(t, src, map[string]any{"package": "messages"})["src/main/java/messages/Telemetry.java"]
+	for _, want := range []string{
+		// Description preserved, @deprecated tag appended, native annotation emitted.
+		"     * Old identifier retained for backward compatibility.",
+		"     * @deprecated This field is deprecated and may be removed in a future version.",
+		"    @Deprecated\n    public long legacyId;",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Telemetry.java missing %q", want)
+		}
+	}
+	// Java lowers enum/bitfield to long: no enum/flag type or symbol is emitted.
+	if strings.Contains(m, "enum Mode") || strings.Contains(m, "enum Flags") {
+		t.Error("Java must lower enum/bitfield to long, not emit enum types")
+	}
+	if !strings.Contains(m, "public long mode;") || !strings.Contains(m, "public long status") {
+		t.Error("enum/bitfield fields must be lowered to long")
+	}
+}
+
 // genJavaFromYAML generates from an inline definition and returns the emitted
 // files keyed by path.
 func genJavaFromYAML(t *testing.T, src string, cfg map[string]any) map[string]string {

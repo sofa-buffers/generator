@@ -161,7 +161,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		// fields the schema leaves unbounded (array without count, string/blob
 		// without maxlen). Exceeding a cap fails decode with LimitExceeded at
 		// the count/total header, before any allocation.
-		f.line("    // Receiver-side decode limits (generator#102): caps on schema-unbounded")
+		f.line("    // Receiver-side decode limits: caps on schema-unbounded")
 		f.line("    // fields only; exceeding one throws SofabError.LimitExceeded.")
 		if limArr {
 			f.line("    private const long MaxDynArrayCount = %d;", g.limits.arrayCount)
@@ -400,7 +400,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		// elements actually delivered and an honest array ends exactly
 		// right-sized while an untrusted count allocates nothing up front.
 		f.line("    // Grow a to hold index i: double, never past cap (the wire count), so")
-		f.line("    // growth tracks elements actually delivered (untrusted count, cf. #96).")
+		f.line("    // growth tracks elements actually delivered (untrusted count).")
 		f.line("    private static T[] EnsureCap<T>(T[] a, int i, int cap) {")
 		f.line("        if (i < a.Length) return a;")
 		f.line("        long n = (long)a.Length * 2;")

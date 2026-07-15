@@ -173,6 +173,13 @@ func (g *gen) emitToJSON(h *cfile, cType, fn string, fields []*ir.Field) {
 }
 
 func (g *gen) fieldToJSON(h *cfile, f *ir.Field) {
+	if f.Deprecated {
+		// The harness legitimately reads the deprecated member by name; suppress the
+		// -Wdeprecated-declarations warning locally so the harness stays warning-clean.
+		h.line("#pragma GCC diagnostic push")
+		h.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
+		defer h.line("#pragma GCC diagnostic pop")
+	}
 	acc := "o->" + f.Name
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -243,6 +250,13 @@ func (g *gen) emitFromJSON(h *cfile, cType, fn string, fields []*ir.Field) {
 }
 
 func (g *gen) fieldFromJSON(h *cfile, f *ir.Field) {
+	if f.Deprecated {
+		// The harness legitimately writes the deprecated member by name; suppress the
+		// -Wdeprecated-declarations warning locally so the harness stays warning-clean.
+		h.line("#pragma GCC diagnostic push")
+		h.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
+		defer h.line("#pragma GCC diagnostic pop")
+	}
 	acc := "o->" + f.Name
 	h.line(`    c = sofab_json_get(j, "%s");`, f.Name)
 	h.line("    if (c) {")
