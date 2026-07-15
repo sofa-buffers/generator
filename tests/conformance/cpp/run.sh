@@ -96,6 +96,20 @@ run_variant() {
     "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/control.bin" >/dev/null || { echo "FAIL: [$label] control (count == 4) must decode"; exit 1; }
     echo "==> [$label] over-count reject OK"
 
+    # A string/blob-array element index >= the field's fixed capacity N must not
+    # hang the decoder (issue #126): the c-cpp fixed profile's _FixedStrSeq /
+    # _FixedBlobSeq used to spin forever growing an InlineVector<T,N> that caps at
+    # N. somestringarray (id 18) has N=5; feed SEQUENCE_START id 18 (0x96 0x01)
+    # then an element token with index 7 >= 5 (SEQUENCE_START id 7 = 0x3e). The
+    # decode must terminate (INCOMPLETE) rather than loop; a wall-clock cap catches
+    # the regression on both profiles (the heap profile grows a std::vector, so it
+    # already terminated).
+    echo "==> [$label] over-capacity seq element must not hang (issue #126)"
+    printf '\226\001\076' > "$WORK/dos126.bin"
+    timeout 10 "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/dos126.bin" >/dev/null 2>&1
+    [ $? -eq 124 ] && { echo "FAIL: [$label] decode hung on over-capacity sequence element (issue #126)"; exit 1; }
+    echo "==> [$label] no-hang OK"
+
     echo "==> [$label] shared-vector byte-exact conformance"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf-$label" )
     make -C "$WORK/conf-$label" "$@" >/dev/null

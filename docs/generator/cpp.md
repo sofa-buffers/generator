@@ -94,6 +94,14 @@ where a field really *is* fixed-length (the native numeric arrays), the generato
 does use plain `std::array<T,N>`. `InlineVector`'s inline storage also never
 reallocates, so a bound-then-filled element is address-stable — strictly safer
 under the corelib-c-cpp deferred decoder than a `std::vector` + `reserve()`.
+The generated per-element collectors (`_FixedStrSeq` / `_FixedBlobSeq`) place a
+string/blob element at its wire index `id` by growing the `InlineVector` up to
+that slot; because `emplace_back()` is a no-op once the vector is full, an
+untrusted element index `id >= N` is **dropped** (the fill loop is guarded by the
+container capacity) rather than spun on forever — the corelib skips the element's
+payload since the callback binds no destination, mirroring the native-array
+over-capacity drop (MESSAGE_SPEC §5.1). Without the guard a 4-byte message could
+hang the decoder (issue #126, DoS).
 Because they are non-aggregates with `initializer_list` constructors, a brace-init
 like `msg.field = {"a", "b"}` sets the logical length correctly rather than
 silently leaving it at zero (which would drop the field from the wire). A

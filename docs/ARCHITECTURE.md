@@ -683,7 +683,14 @@ code as named constants. The rules, normative for every backend:
   buffering — a claimed oversize fails fast even if the payload never arrives.
 - A corelib never invents its own default cap; absent limits = current
   behavior. Wrapper-sequence arrays carry no count header and grow only with
-  delivered bytes, so they need no guard (no amplification).
+  delivered bytes, so they need no *allocation* guard (no amplification) — but
+  on a statically bounded profile they still need a *capacity* guard against a
+  different DoS: a fixed-capacity string/blob-array collector that placed an
+  element at its wire index by growing an `InlineVector<T,N>` looped forever
+  once full (its `emplace_back()` no-ops at `N`), so an untrusted index `id >= N`
+  hangs the decoder. The generated per-element loop is bounded by the container
+  capacity; an over-capacity index is dropped (its payload skipped, as for a
+  native-array over-count, §5.1). C++ `corelib: c-cpp`, issue #126, DoS.
 
 Enforcement by family: **generated visitor guards** (Rust std, Java, C#, Zig,
 pure C++ — the corelib callback exposes `count`/`total` pre-allocation; the
