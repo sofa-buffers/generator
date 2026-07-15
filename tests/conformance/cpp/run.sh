@@ -106,8 +106,12 @@ run_variant() {
     # already terminated).
     echo "==> [$label] over-capacity seq element must not hang (issue #126)"
     printf '\226\001\076' > "$WORK/dos126.bin"
-    timeout 10 "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/dos126.bin" >/dev/null 2>&1
-    [ $? -eq 124 ] && { echo "FAIL: [$label] decode hung on over-capacity sequence element (issue #126)"; exit 1; }
+    # The malformed input decodes to INCOMPLETE (harness exits non-zero); capture
+    # the code with `|| rc=$?` so `set -e` doesn't abort on it. Only a timeout
+    # (124) — i.e. an actual hang — is the failure this guards against.
+    rc=0
+    timeout 10 "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/dos126.bin" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 124 ] && { echo "FAIL: [$label] decode hung on over-capacity sequence element (issue #126)"; exit 1; }
     echo "==> [$label] no-hang OK"
 
     echo "==> [$label] shared-vector byte-exact conformance"
