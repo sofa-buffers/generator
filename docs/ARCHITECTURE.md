@@ -553,17 +553,30 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
 **Decode outcome (MESSAGE_SPEC §7).** Every corelib reports the finish-less
 three-valued outcome — COMPLETE / INCOMPLETE / INVALID — and the generated
 one-shot decode must not hide it. For corelibs that surface INCOMPLETE as an
-error/exception (Go, Rust, C++, C, Python, TS, Zig) the fallible decode entry
+error/exception (Go, Rust, C++, C, Python, TS) the fallible decode entry
 point (`try_decode`, Go's `(msg, error)`, thrown exceptions) already propagates
-all three. The **status-returning** corelibs (C#, Java) treat INCOMPLETE as a
-non-error status (`DecodeStatus` from `Feed`/`status()`), so their backends emit
-an additional status-surfacing entry point next to the back-compat best-effort
-`Decode`/`decode`: C# `static DecodeStatus TryDecode(byte[] data, out T msg)`
-and Java `static DecodeStatus tryDecode(byte[] data, T out) throws
-SofabException` — the status is returned, malformed input still throws
-(generator#105 / G-0008). Project-mode harnesses expose this as a `trydecode`
-mode (status line, then JSON), which the conformance harnesses use to pin
-"lone `0x80` → INCOMPLETE, empty input → COMPLETE".
+all three. The **status-returning** corelibs (C#, Java, Zig) treat INCOMPLETE
+as a non-error status (C#/Java: `DecodeStatus` from `Feed`/`status()`; Zig:
+`Status` from `feed(chunk)`) and leave the end-of-input verdict to the caller,
+so their backends must surface it explicitly:
+
+- C#/Java emit an additional status-surfacing entry point next to the
+  back-compat best-effort `Decode`/`decode`: C# `static DecodeStatus
+  TryDecode(byte[] data, out T msg)` and Java `static DecodeStatus
+  tryDecode(byte[] data, T out) throws SofabException` — the status is
+  returned, malformed input still throws (generator#105 / G-0008).
+  Project-mode harnesses expose this as a `trydecode` mode (status line, then
+  JSON), which the conformance harnesses use to pin "lone `0x80` →
+  INCOMPLETE, empty input → COMPLETE".
+- Zig has no back-compat surface to preserve, so the single `decode(alloc,
+  data)` wrapper itself converts the terminal status: it binds `feed`'s
+  `Status` and fails a trailing `.incomplete` with `error.IncompleteMessage`
+  from the generated module-level error set `DecodeError = sofab.Error ||
+  error{IncompleteMessage}` — a one-shot whole-buffer decode *is* at
+  end-of-input, so `.incomplete` means truncation (generator#120; the error
+  is deliberately distinct from `error.InvalidMessage` so the §7 outcomes
+  never collapse). The Zig conformance harness pins the same two vectors
+  through the plain `decode` mode.
 
 #### Decode verdict: over-count scalar arrays are INVALID (all families)
 

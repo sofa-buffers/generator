@@ -7,6 +7,14 @@
 const std = @import("std");
 const sofab = @import("sofab");
 
+/// Error set of the one-shot decode() wrappers: the corelib baseline plus
+/// IncompleteMessage. The corelib reports INCOMPLETE (MESSAGE_SPEC 7) as a
+/// non-error decode Status -- the caller owns end-of-input -- and for a
+/// one-shot decode over a whole buffer, end-of-input is here: a trailing
+/// .incomplete means the message was truncated. Kept distinct from
+/// error.InvalidMessage so INCOMPLETE and INVALID never collapse.
+pub const DecodeError = sofab.Error || error{IncompleteMessage};
+
 pub const Scalars = struct {
     u8min: u8 = 0,
     u8max: u8 = 255,
@@ -46,13 +54,19 @@ pub const Scalars = struct {
     /// Decode a complete message. Zero-copy: the result borrows string and
     /// blob bytes from `data` (keep it alive as long as the message); array
     /// storage comes from `alloc` (an arena frees everything at once).
-    pub fn decode(alloc: std.mem.Allocator, data: []const u8) sofab.Error!Scalars {
+    /// Truncated input (the corelib's .incomplete decode Status) fails with
+    /// error.IncompleteMessage; malformed input with error.InvalidMessage.
+    pub fn decode(alloc: std.mem.Allocator, data: []const u8) DecodeError!Scalars {
         var m: Scalars = .{};
         var v: _dec_Scalars = .{ .m = &m, .alloc = alloc };
-        try sofab.decode(data, &v);
+        const st = try sofab.decode(data, &v);
         // A scalar array carried more elements than its schema count:
         // INVALID per MESSAGE_SPEC 3+7, never clamp (generator#100).
         if (v.inv) return error.InvalidMessage;
+        // The bytes end inside a field or an open sequence: INCOMPLETE
+        // (MESSAGE_SPEC 7). This wrapper decodes a whole buffer, so a
+        // trailing .incomplete is a truncated message (generator#120).
+        if (st == .incomplete) return error.IncompleteMessage;
         return m;
     }
 };

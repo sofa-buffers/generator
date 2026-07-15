@@ -59,9 +59,12 @@ func TestZigStructural(t *testing.T) {
 		"pub const Myfirstmessage = struct {",
 		"pub fn marshal(self: *const Myfirstmessage, os: *sofab.OStream) sofab.Error!void {",
 		"pub fn encode(self: *const Myfirstmessage, alloc: std.mem.Allocator)",
-		"pub fn decode(alloc: std.mem.Allocator, data: []const u8) sofab.Error!Myfirstmessage {",
-		"const _dec_Myfirstmessage = struct {",            // flat-visitor decoder
-		"pub fn sequenceBegin(self: *_dec_Myfirstmessage", // location-stack nesting
+		"pub const DecodeError = sofab.Error || error{IncompleteMessage};",
+		"pub fn decode(alloc: std.mem.Allocator, data: []const u8) DecodeError!Myfirstmessage {",
+		"const st = try sofab.decode(data, &v);",                 // corelib-zig feed(chunk)->Status: bind it (generator#120)
+		"if (st == .incomplete) return error.IncompleteMessage;", // truncated input rejected, distinct from INVALID
+		"const _dec_Myfirstmessage = struct {",                   // flat-visitor decoder
+		"pub fn sequenceBegin(self: *_dec_Myfirstmessage",        // location-stack nesting
 		"pub const MAX_SIZE: usize =",
 		"someu64: u64 = 18446744073709551615,",                                                // schema default in the declaration
 		"someuintarray: [4]u32 = .{ 0, 1, 1000, 4294967295 },",                                // fixed native array
