@@ -79,6 +79,21 @@ fi
 "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+# Decode outcome tri-state (MESSAGE_SPEC §7, generator#120): corelib-zig
+# reports INCOMPLETE as a non-error `Status` from feed(); the generated
+# one-shot decode() owns end-of-input, so a trailing .incomplete must fail
+# with error.IncompleteMessage — distinct from InvalidMessage, never silently
+# accepted. A lone 0x80 is a dangling varint header (INCOMPLETE); empty input
+# is a valid all-defaults message (COMPLETE).
+echo "==> §7 tri-state: truncated input is IncompleteMessage (generator#120)"
+printf '\200' > "$WORK/dangling.bin"
+if "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/dangling.bin" >/dev/null 2>"$WORK/trunc.err"; then
+    echo "FAIL: lone 0x80 (dangling varint) must not decode"; exit 1
+fi
+grep -q "IncompleteMessage" "$WORK/trunc.err" || { echo "FAIL: truncation must surface IncompleteMessage, not InvalidMessage"; cat "$WORK/trunc.err"; exit 1; }
+printf '' | "$WORK/ex/zig-out/bin/harness" decode myfirstmessage >/dev/null || { echo "FAIL: empty input (COMPLETE) must decode to defaults"; exit 1; }
+echo "==> tri-state OK"
+
 # Receiver-side decode limits (generator#102): a count-less u64 array with
 # max_dyn_array_count: 4 baked into the generated module (id 0 -> header 0x03 =
 # 0<<3 | unsigned-array). A wire count of 5 MUST fail decode with the corelib's

@@ -51,12 +51,23 @@ Per message:
   sink for streaming).
 - `encode(self, alloc) ![]u8` — convenience wrapper: streams through a stack
   scratch buffer into an allocated byte slice via the corelib flush sink.
-- `decode(alloc, data) sofab.Error!Message` — one-shot decode on the
+- `decode(alloc, data) DecodeError!Message` — one-shot decode on the
   corelib's zero-copy fast path. **The returned message borrows string/blob
   bytes from `data`** (keep the buffer alive as long as the message); array
   storage is allocated from `alloc` — pass an arena and free the whole
   message at once. `MAX_SIZE` bounds the encoded size (schema-sized, capped
   for unbounded fields).
+
+  The module-level `DecodeError` set is `sofab.Error || error{IncompleteMessage}`
+  and keeps the MESSAGE_SPEC §7 tri-state distinct: malformed bytes fail with
+  the corelib's `error.InvalidMessage`, while input that merely *ends* inside
+  a field or an open sequence — the corelib's non-error `.incomplete` decode
+  `Status` from `feed()` — fails with `error.IncompleteMessage`
+  (generator#120). The corelib leaves the end-of-input verdict to the caller;
+  a one-shot decode over a whole buffer is at end-of-input by definition, so
+  a trailing `.incomplete` is a truncated message, never silently accepted.
+  Streaming callers that want to keep feeding chunks drive `sofab.IStream`
+  directly.
 
 The decoder is the same flat-visitor `(location, id)` state machine as the
 Rust backend, monomorphized by the corelib's comptime duck typing (no
