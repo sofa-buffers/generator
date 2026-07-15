@@ -278,13 +278,56 @@ messages:
 `)
 	h := files["m.h"]
 	for _, want := range []string{
-		"char s[5];",        // string: maxlen 4 + 1 for the NUL
-		"uint8_t b[4];",     // blob: exactly maxlen, no terminator
-		"char items[3][9];", // string element of a holder array: maxlen 8 + 1
+		"char s[5];",                   // string: maxlen 4 + 1 for the NUL
+		"uint8_t b_len; uint8_t b[4];", // blob: companion used-length + exactly maxlen buffer (issue #128)
+		"char items[3][9];",            // string element of a holder array: maxlen 8 + 1
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("m.h missing %q:\n%s", want, h)
 		}
+	}
+}
+
+// TestBlobSized: a scalar/struct-field blob lowers to a sized blob — a companion
+// used-length member adjacent to (and immediately before) the buffer, plus the
+// SOFAB_OBJECT_FIELD_BLOB_SIZED descriptor — so a sub-maxlen blob keeps its exact
+// length on the wire instead of being zero-padded to maxlen or dropped when empty
+// (issue #128). _init must zero the struct first (the _len companion is not a
+// descriptor field, so sofab_object_init leaves it untouched), and a non-empty
+// blob default must materialize its used-length there.
+func TestBlobSized(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      plain: { id: 0, type: blob, maxlen: 4 }
+      big:   { id: 1, type: blob, maxlen: 300 }
+      dflt:  { id: 2, type: blob, maxlen: 8, default: "SGVsbG8=" }
+`)
+	h, c := files["m.h"], files["m.c"]
+	for _, want := range []string{
+		"uint8_t plain_len; uint8_t plain[4];", // narrow length (maxlen<=255 -> uint8_t), adjacent, before the buffer
+		"uint16_t big_len; uint8_t big[300];",  // wider length when maxlen exceeds a uint8_t
+		"uint8_t dflt_len; uint8_t dflt[8];",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.h missing %q:\n%s", want, h)
+		}
+	}
+	for _, want := range []string{
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(0, message_m_t, plain, plain_len),",
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(1, message_m_t, big, big_len),",
+		"memset(msg, 0, sizeof(*msg));", // zero first so the non-descriptor _len members are deterministic
+		"msg->dflt_len = 5;",            // "Hello" default materializes its used-length
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c missing %q:\n%s", want, c)
+		}
+	}
+	// A blob must never use the plain fixed-capacity descriptor (the #128 bug).
+	if strings.Contains(c, "message_m_t, plain, SOFAB_OBJECT_FIELDTYPE_BLOB)") {
+		t.Errorf("m.c still emits the unsized plain-BLOB descriptor for a blob field (issue #128):\n%s", c)
 	}
 }
 

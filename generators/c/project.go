@@ -193,7 +193,10 @@ func (g *gen) fieldToJSON(h *cfile, f *ir.Field) {
 	case ir.KindString:
 		h.line(`    json_str(out, %s);`, acc)
 	case ir.KindBlob:
-		h.line(`    json_bytes(out, %s, sizeof(%s));`, acc, acc)
+		// A scalar/struct-field blob is a sized blob (companion _len member): print
+		// only the used bytes, not the full fixed capacity, else a sub-maxlen blob
+		// shows trailing zero padding (issue #128).
+		h.line(`    json_bytes(out, %s, %s_len);`, acc, acc)
 	case ir.KindStruct, ir.KindUnion:
 		h.line(`    %s_to_json(&%s, out);`, g.jsonFn(f.Ref.Key), acc)
 	case ir.KindArray:
@@ -274,7 +277,9 @@ func (g *gen) fieldFromJSON(h *cfile, f *ir.Field) {
 	case ir.KindString:
 		h.line("        json_to_str(c, %s, sizeof(%s));", acc, acc)
 	case ir.KindBlob:
-		h.line("        json_to_bytes(c, %s, sizeof(%s));", acc, acc)
+		// Sized blob: record the parsed used-length into the companion _len member
+		// so encode emits exactly those bytes (issue #128).
+		h.line("        %s_len = (%s)json_to_bytes(c, %s, sizeof(%s));", acc, blobLenC(f.Maxlen), acc, acc)
 	case ir.KindStruct, ir.KindUnion:
 		h.line("        %s_from_json(c, &%s);", g.jsonFn(f.Ref.Key), acc)
 	case ir.KindArray:
@@ -407,7 +412,9 @@ static void json_to_str(const sofab_json_t *c, char *dst, size_t cap) {
     if (L >= cap) L = cap - 1;
     memcpy(dst, s, L); dst[L] = 0;
 }
-static void json_to_bytes(const sofab_json_t *c, unsigned char *dst, size_t cap) {
+static size_t json_to_bytes(const sofab_json_t *c, unsigned char *dst, size_t cap) {
     size_t n = sofab_json_array_size(c);
-    for (size_t i = 0; i < n && i < cap; i++) dst[i] = (unsigned char)sofab_json_u64(sofab_json_array_at(c, i));
+    if (n > cap) n = cap;
+    for (size_t i = 0; i < n; i++) dst[i] = (unsigned char)sofab_json_u64(sofab_json_array_at(c, i));
+    return n;
 }`

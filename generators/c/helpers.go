@@ -61,6 +61,25 @@ func (g *gen) cDefaultInit(f *ir.Field) (string, bool) {
 	return "", false
 }
 
+// blobDefaultRawLen returns the decoded byte length of a blob field's schema
+// default and whether it is worth materializing. It mirrors cDefaultInit's blob
+// case (same base64 decode, same all-zero => absent-default convention) so the
+// companion _len init and the default image stay in lockstep.
+func blobDefaultRawLen(f *ir.Field) (int64, bool) {
+	if f.Kind != ir.KindBlob {
+		return 0, false
+	}
+	s, ok := f.Default.(string)
+	if !ok {
+		return 0, false
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), ""))
+	if err != nil || allZero(raw) {
+		return 0, false
+	}
+	return int64(len(raw)), true
+}
+
 // cArrayDefaultInit renders a native scalar array's schema default as a C brace
 // initializer ("{ e0, e1, ... }"); ("", false) when there is no default or every
 // element is zero (the array member is then left zero-initialized). Composite /

@@ -31,6 +31,7 @@ static const message_Scalars_t _message_defaults_message_Scalars = {
 const sofab_object_descr_t _message_descr_message_Scalars = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(_message_fields_message_Scalars, 8, NULL, 0, &_message_defaults_message_Scalars);
 
 void message_scalars_init(message_Scalars_t *msg) {
+    memset(msg, 0, sizeof(*msg));
     sofab_object_init(&_message_descr_message_Scalars, msg);
 }
 

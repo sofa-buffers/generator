@@ -74,7 +74,12 @@ type objectPlan struct {
 	fields   []fieldEntry
 	nested   []string      // child object keys in nested_list order
 	defaults []defaultInit // non-zero leaf-field defaults, for the const image
-	maxField int64
+	// blobLenInits materialize a sized blob's declared default used-length in the
+	// generated _init: sofab_object_init copies the blob buffer from the default
+	// image but not the companion _len member (it is not a descriptor field), so
+	// _init sets it explicitly, otherwise the declared default decodes as empty.
+	blobLenInits []blobLenInit
+	maxField     int64
 	// hasDeprecated is set when any field lowers to a deprecated struct member.
 	// The generated .c references members by name via sizeof(((T*)0)->field) in
 	// the descriptor table (and by designated initializer in the defaults image),
@@ -90,6 +95,13 @@ type objectPlan struct {
 type defaultInit struct {
 	ident string // C member name (matches the struct decl)
 	expr  string // C initializer RHS
+}
+
+// blobLenInit records a sized blob whose schema default is non-empty: _init sets
+// member+"_len" to length so the declared default materializes on init/decode.
+type blobLenInit struct {
+	member string // blob member name (its length companion is member+"_len")
+	length int64  // decoded default byte length (0..maxlen)
 }
 
 type member struct {
@@ -235,6 +247,9 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 			if expr, ok := g.cDefaultInit(f); ok {
 				p.defaults = append(p.defaults, defaultInit{ident: cIdent(f.Name), expr: expr})
+				if n, ok := blobDefaultRawLen(f); ok {
+					p.blobLenInits = append(p.blobLenInits, blobLenInit{member: cIdent(f.Name), length: n})
+				}
 			}
 		}
 	}
@@ -381,8 +396,18 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 		decl = fmt.Sprintf("char %s[%d];", mn, f.Maxlen+1)
 		entry = field(f.ID, cType, mn, "STRING")
 	case ir.KindBlob:
-		decl = fmt.Sprintf("uint8_t %s[%d];", mn, f.Maxlen)
-		entry = field(f.ID, cType, mn, "BLOB")
+		// A blob is opaque bytes and may be shorter than its maxlen, so it needs a
+		// companion used-length: a bare uint8_t[N] cannot represent "3 of a possible
+		// 4" — on re-encode it emits the full N (zero-padded) and an all-zero short
+		// blob collapses to empty (issue #128, silent round-trip data loss). The
+		// sized descriptor pairs the buffer with a length member that MUST
+		// immediately precede it (offsetof(dfield) == offsetof(lfield)+sizeof(lfield));
+		// emit both as one adjacent decl so the widest-first member reorder can't
+		// separate them, and because a byte buffer has alignment 1 it always abuts
+		// the length with no padding. This is the C counterpart of C++ FixedBytes.
+		lenT := blobLenC(f.Maxlen)
+		decl = fmt.Sprintf("%s %s_len; uint8_t %s[%d];", lenT, mn, mn, f.Maxlen)
+		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_BLOB_SIZED(%d, %s, %s, %s_len),", f.ID, cType, mn, mn)
 	case ir.KindEnum:
 		decl = fmt.Sprintf("%s %s;", enumC(f.Ref.Target), mn)
 		entry = field(f.ID, cType, mn, "SIGNED")
@@ -424,6 +449,23 @@ func (g *gen) emitStruct(h *cfile, p *objectPlan) {
 	}
 	h.line("} %s;", p.cType)
 	h.blank()
+}
+
+// blobLenC picks the narrowest unsigned C type that can hold a used-length in
+// 0..maxlen for a sized blob's companion length member. The width is recorded in
+// the descriptor (SOFAB_OBJECT_FIELD_BLOB_SIZED reads sizeof(lfield)), so keeping
+// it minimal costs no wire bytes and only a byte or two of struct storage.
+func blobLenC(maxlen int64) string {
+	switch {
+	case maxlen <= 0xFF:
+		return "uint8_t"
+	case maxlen <= 0xFFFF:
+		return "uint16_t"
+	case maxlen <= 0xFFFFFFFF:
+		return "uint32_t"
+	default:
+		return "uint64_t"
+	}
 }
 
 // deprecatedDecl inserts the GCC/Clang deprecated attribute onto a struct-member
@@ -500,7 +542,14 @@ func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPla
 	depth := g.maxDepth(m.Fields) // decoder stack size
 
 	c.line("void %s_init(%s *msg) {", pfx, msgType)
+	// Zero first: sofab_object_init only writes descriptor fields, so a sized
+	// blob's companion _len member (not a descriptor field) would otherwise be
+	// left uninitialized and drive a garbage-length encode (issue #128).
+	c.line("    memset(msg, 0, sizeof(*msg));")
 	c.line("    sofab_object_init(&%s, msg);", root.descr)
+	for _, b := range root.blobLenInits {
+		c.line("    msg->%s_len = %d;", b.member, b.length)
+	}
 	c.line("}")
 	c.blank()
 
