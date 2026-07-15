@@ -67,8 +67,37 @@ IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"s
 OUT=$(printf '%s' "$IN" | "$WORK/proj/harness/harness" encode | "$WORK/proj/harness/harness" decode)
 echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
-echo "$OUT" | grep -q '"someblob":\[10,20,30' || { echo "FAIL: blob round-trip"; exit 1; }
+# Exact match (closing bracket): a scalar blob is a sized blob, so a sub-maxlen
+# value must round-trip with no trailing zero padding (issue #128). A prefix match
+# would have silently passed the old padded "[10,20,30,0,0,...]" output.
+echo "$OUT" | grep -q '"someblob":\[10,20,30\]' || { echo "FAIL: blob round-trip (sub-maxlen padded? issue #128)"; exit 1; }
 echo "==> project harness round-trip OK"
+
+# issue #128: a scalar/struct-field blob carries a used-length, so every length
+# 0..maxlen round-trips byte-exactly — including an all-zero blob (previously
+# dropped to empty) and a single 0x00 (previously collapsed). Blobs are skipped by
+# the shared-vector harness (scalarJSON), so this is the dedicated blob gate.
+echo "==> M3b: sized-blob round-trips every length 0..maxlen (issue #128)"
+cat > "$WORK/blob.yaml" <<'YAML'
+version: 1
+messages:
+  Blob: { payload: { b: { id: 0, type: blob, maxlen: 4 } } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in "$WORK/blob.yaml" --out "$WORK/blobproj" >/dev/null )
+make -C "$WORK/blobproj" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+BH="$WORK/blobproj/harness/harness"
+# An empty blob (used_len 0) is omitted -> 0-byte wire (can't be re-fed: the
+# corelib asserts datalen>0), so assert the omission rather than round-trip it.
+n=$(printf '{"b":[]}' | "$BH" encode | wc -c)
+[ "$n" -eq 0 ] || { echo "FAIL: empty blob must encode to 0 bytes, got $n"; exit 1; }
+# Every non-empty length round-trips byte-exactly, incl. a single 0x00 and an
+# all-zero full-capacity blob (both previously dropped/collapsed).
+for want in '[0]' '[0,0,0,0]' '[255]' '[1,2,3]' '[1,2,3,4]'; do
+    got=$(printf '{"b":%s}' "$want" | "$BH" encode | "$BH" decode)
+    echo "$got" | grep -q "\"b\":$(printf '%s' "$want" | sed 's/[][]/\\&/g')" \
+        || { echo "FAIL: blob $want round-tripped as $got (issue #128)"; exit 1; }
+done
+echo "==> sized-blob length round-trips OK"
 
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be

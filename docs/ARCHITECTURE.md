@@ -562,7 +562,19 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
 5. **Descriptor-table callback** (C `corelib-c-cpp`). A static descriptor table
    (id → offset → wire type, generated per object) drives
    `sofab_object_encode`/`decode`; a field callback fills members by id. Member
-   *layout* is decoupled from wire order (offsets via `offsetof`).
+   *layout* is decoupled from wire order (offsets via `offsetof`). A `blob` is a
+   **sized blob**: an opaque byte field can be shorter than its `maxlen`, and a
+   bare `uint8_t[maxlen]` has no way to recover the used length (it re-encodes
+   zero-padded to `maxlen`, and an all-zero short blob collapses to empty —
+   silent round-trip data loss, issue #128). So the generator emits a companion
+   used-length member immediately before the buffer and the
+   `SOFAB_OBJECT_FIELD_BLOB_SIZED` descriptor (the C counterpart of C++
+   `sofab::FixedBytes<N>`); `_init` zeroes the struct first because the length
+   member is not a descriptor field. Omission is length-driven (empty ⇒ omitted),
+   so a non-empty blob `default` materialises on decode but is transmitted rather
+   than omitted at its default value — a benign, wire-compatible divergence.
+   *(Blob **array** elements are not yet sized — same bug class, tracked
+   separately; `docs/generator/c.md`.)*
 6. **Monomorphic pull cursor** (TypeScript). Each type emits a
    `static decodeFrom(c: Cursor)` that loops `c.readHeader()` and runs one
    `switch (c.id)` reading straight into `this.<field>` via typed pull primitives
@@ -778,6 +790,10 @@ metadata above. The `docs` target renders the same metadata as HTML page content
   plain `SOFAB_OBJECT_DESCR` (compares against zero, zero `.rodata` cost). The
   image is a `.rodata` struct, so the RAM cost is one pointer per descriptor.
   STRING fields are compared by null-terminated content, not raw buffer bytes.
+  BLOB fields are **sized blobs**, whose omission is length-driven (omitted iff
+  `used_len == 0`) rather than compared against the image — so a non-empty blob
+  default is materialised on decode but transmitted, not omitted, at its default
+  value (issue #128; `docs/generator/c.md`).
 - **Widest-first member layout** — value-type backends declare struct members by
   alignment widest-first (8→4→2→1, stable within a width; composite/heap = 8) to
   cut native padding, via the shared `AlignRank`/`SortedForLayout`. Applied to C,

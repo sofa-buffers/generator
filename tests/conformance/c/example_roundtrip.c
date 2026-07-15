@@ -20,6 +20,7 @@ int main(void) {
     m.someunion.option1 = 4242;   /* one option set */
     m.somefp32 = 3.5f;
     memcpy(m.someblob, (uint8_t[]){1,2,3,4,5}, 5);
+    m.someblob_len = 5;   /* sized blob: set the used length (issue #128) */
     for (int i = 0; i < 3; i++) memset(m.someblobarray.items[i], i+1, 8);
     m.someu64 = 18446744073709551615ULL;
     strcpy(m.somestringarray.items[0], "one");
@@ -52,7 +53,8 @@ int main(void) {
     assert(d.somestruct.nestedstruct.deepint == -123456);
     assert(d.someunion.option1 == 4242);
     assert(d.somefp32 == 3.5f);
-    assert(memcmp(d.someblob, m.someblob, 16) == 0);
+    assert(d.someblob_len == 5);   /* sub-maxlen blob length preserved (issue #128) */
+    assert(memcmp(d.someblob, m.someblob, d.someblob_len) == 0);
     for (int i = 0; i < 3; i++) assert(memcmp(d.someblobarray.items[i], m.someblobarray.items[i], 8) == 0);
     assert(d.someu64 == 18446744073709551615ULL);
     assert(strcmp(d.somestringarray.items[0], "one") == 0);
