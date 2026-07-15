@@ -502,10 +502,18 @@ struct _MsgSeqFixed : sofab::IStreamMessage {
 // stored at that index rather than appended in arrival order. Inline storage
 // never reallocates, so an earlier bound-then-filled element stays address-stable
 // while later slots grow.
+// An element index at or beyond the fixed capacity N has no inline slot:
+// InlineVector::emplace_back() is a no-op once full (N never grows), so an
+// unbounded fill loop would spin forever on such an index (issue #126). Drop the
+// element instead — binding no destination leaves the corelib's target_ptr NULL,
+// so the core skips its payload, mirroring how an unhandled field / over-capacity
+// native-array element is dropped (MESSAGE_SPEC S5.1). Two open sequences at EOF
+// then surface INCOMPLETE, matching the heap profile / C / Go / Rust.
 template <typename Container>
 struct _FixedBlobSeq : sofab::IStreamMessage {
     Container *out = nullptr;
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
+        if (static_cast<std::size_t>(id) >= out->capacity()) return;
         while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
         auto &b = (*out)[id];
         b.set_len(_size);
@@ -516,6 +524,7 @@ template <typename Container>
 struct _FixedStrSeq : sofab::IStreamMessage {
     Container *out = nullptr;
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
+        if (static_cast<std::size_t>(id) >= out->capacity()) return;
         while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
         auto &s = (*out)[id];
         s.set_len(_size);

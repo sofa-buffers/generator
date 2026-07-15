@@ -218,6 +218,7 @@ func TestCppFixedContainers(t *testing.T) {
 		"static _FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",  // blob-seq collector
 		"static _FixedStrSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
 		"static _MsgSeqFixed<sofab::InlineVector<",                            // struct-seq collector
+		"if (static_cast<std::size_t>(id) >= out->capacity()) return;",        // over-capacity element dropped, no infinite loop (issue #126)
 		"std::size_t encodeTo(std::uint8_t *dst",                              // heap-free encode
 	} {
 		if !strings.Contains(h, want) {
