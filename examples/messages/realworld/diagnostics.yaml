@@ -3,24 +3,45 @@
 # Note `DiagnosticCode` *itself* references common.yaml via cross-file `$ref` —
 # so any message that uses DiagnosticCode transitively pulls in GeoPoint and
 # Timestamp too. The generator flattens these chains automatically.
+#
+# This file also defines a `bitfield` with per-flag defaults (Features) and a
+# `union` ($defs/union/SensorSample), both pulled into the message by $ref.
 version: 1
 $defs:
   enum:
+    # Members take either the `{value, description}` object form or the bare
+    # `NAME: value` shorthand; both may appear in the same enum.
     Gear:
-      PARK: 0
-      REVERSE: 1
+      PARK:    { value: 0, description: "Parking pawl engaged" }
+      REVERSE: { value: 1, description: "Reverse" }
       NEUTRAL: 2
-      DRIVE: 3
-      SPORT: 4
+      DRIVE:   3
+      SPORT:   { value: 4, description: "Sport / performance mode" }
 
   bitfield:
-    # Active dashboard warning lights (one bit each).
+    # Active dashboard warning lights (one bit each). No defaults -> all clear.
     FaultFlags:
       ENGINE:        { pos: 0, description: "Check-engine / MIL" }
       BATTERY:       { pos: 1, description: "12V or HV battery" }
       BRAKES:        { pos: 2 }
       TIRE_PRESSURE: { pos: 3 }
       ABS:           { pos: 4 }
+
+    # Driver-assist features that are enabled. Each flag carries its own default,
+    # so a fresh vehicle powers up with the assists its trim ships with on.
+    Features:
+      LANE_ASSIST:     { pos: 0, default: true,  description: "Lane-keep assist active" }
+      ADAPTIVE_CRUISE: { pos: 1, default: true,  description: "Adaptive cruise control active" }
+      AUTO_PARK:       { pos: 2, default: false, description: "Automated parking available" }
+      NIGHT_VISION:    { pos: 3, default: false }
+
+  union:
+    # An auxiliary sensor sample: exactly one representation is present on the
+    # wire. `default_id` is chosen where the union is used (see aux_sensor).
+    SensorSample:
+      analog:  { id: 0, type: fp32, unit: V, description: "Analog reading in volts" }
+      digital: { id: 1, type: boolean,       description: "Discrete on/off reading" }
+      counter: { id: 2, type: u32,           description: "Monotonic pulse counter" }
 
   struct:
     # An OBD-II diagnostic trouble code, with when and where it fired.
