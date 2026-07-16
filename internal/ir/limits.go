@@ -93,7 +93,9 @@ func Bounds(fields []*Field) BoundsInfo {
 					seen[f.Ref.Target] = true
 					walkFields(f.Ref.Target.Fields)
 				}
-			case KindArray:
+			case KindArray, KindMap:
+				// A map is a wrapper array of its {key,value} entry struct: same
+				// bounds walk (Elem == KindStruct recurses into key/value).
 				walkElem(f.Elem, f.ElemRef, f.ElemItems, f.HasCount, f.Count, f.ElemMaxHas, f.ElemMax)
 			}
 		}

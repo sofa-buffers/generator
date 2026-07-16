@@ -34,6 +34,7 @@ const (
 	KindBitfield // -> NamedType (Bitfield)
 	KindStruct   // -> NamedType (Struct)
 	KindUnion    // -> NamedType (Union)
+	KindMap      // map<K,V>: lowered to a wrapper array of a {key,value} entry struct
 )
 
 var kindNames = map[Kind]string{
@@ -42,6 +43,7 @@ var kindNames = map[Kind]string{
 	KindFP32: "fp32", KindFP64: "fp64", KindBool: "boolean",
 	KindString: "string", KindBlob: "blob", KindArray: "array",
 	KindEnum: "enum", KindBitfield: "bitfield", KindStruct: "struct", KindUnion: "union",
+	KindMap: "map",
 }
 
 func (k Kind) String() string {
@@ -215,6 +217,14 @@ func (f *Field) Children() []Node {
 	}
 	return out
 }
+
+// MapKey returns the key field of a KindMap field's entry struct (id 0). Valid
+// only post-Analysis (ElemRef.Target resolved). Fields are id-sorted, so the key
+// (id 0) is Fields[0] and the value (id 1) is Fields[1].
+func (f *Field) MapKey() *Field { return f.ElemRef.Target.Fields[0] }
+
+// MapValue returns the value field of a KindMap field's entry struct (id 1).
+func (f *Field) MapValue() *Field { return f.ElemRef.Target.Fields[1] }
 
 // TypeRef points a composite field at its shared NamedType. After analysis,
 // Target is always non-nil; before, only Key is set.

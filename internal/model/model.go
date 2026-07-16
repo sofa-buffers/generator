@@ -161,11 +161,53 @@ func (b *builder) buildField(name string, f map[string]any, parentKey string) *i
 		}
 	case "array":
 		b.buildArray(fld, f, name, parentKey)
+	case "map":
+		b.buildMap(fld, f, name, parentKey)
 	default: // scalars + boolean
 		fld.Default = f["default"]
 	}
 	return fld
 }
+
+// buildMap lowers a map field to KindMap plus an inline {key(id 0), value(id 1)}
+// entry struct, hoisted through the SAME path inline struct elements use
+// (refForComposite). The field reuses the array carriers: Elem == KindStruct
+// (the entry), ElemRef -> the hoisted entry, HasCount/Count == map capacity. The
+// wire form is therefore identical to array-of-struct (MESSAGE_SPEC §5.4).
+func (b *builder) buildMap(fld *ir.Field, f map[string]any, name, parentKey string) {
+	fld.Kind = ir.KindMap
+	fld.Elem = ir.KindStruct
+	if c, ok := asInt(f["count"]); ok {
+		fld.HasCount, fld.Count = true, c // capacity (max entries)
+	}
+	fld.ElemRef = b.mapEntryRef(f, name, parentKey)
+}
+
+// mapEntryRef synthesizes the {key,value} entry struct and hoists it. Because it
+// flows through buildFields -> buildField, the key/value element definitions are
+// lowered by the ordinary per-type paths (string maxlen, enum ref, struct/array/
+// union values, and nested maps all fall out for free).
+func (b *builder) mapEntryRef(def map[string]any, name, parentKey string) *ir.TypeRef {
+	entry := map[string]any{
+		"key":   withID(asMap(def["key"]), 0),
+		"value": withID(asMap(def["value"]), 1),
+	}
+	return b.refForComposite(entry, ir.CatStruct, name+"_entry", parentKey)
+}
+
+// withID returns a copy of an element definition with its field id set (element
+// definitions carry no id of their own; the entry struct assigns key=0, value=1).
+func withID(el map[string]any, id int) map[string]any {
+	out := map[string]any{"id": id}
+	for k, v := range el {
+		if k != "id" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func asMap(v any) map[string]any { m, _ := v.(map[string]any); return m }
 
 func (b *builder) buildArray(fld *ir.Field, f map[string]any, name, parentKey string) {
 	items, _ := f["items"].(map[string]any)
@@ -198,6 +240,10 @@ func (b *builder) elemRef(etyp string, items map[string]any, name, parentKey str
 		return b.refForComposite(items["fields"], ir.CatStruct, name+"_elem", parentKey)
 	case "union":
 		return b.refForComposite(items["oneof"], ir.CatUnion, name+"_elem", parentKey)
+	case "map":
+		// A map element hoists its own {key,value} entry struct, just like a
+		// struct element hoists its fields.
+		return b.mapEntryRef(items, name+"_elem", parentKey)
 	}
 	return nil
 }
@@ -332,6 +378,7 @@ var kindByName = map[string]ir.Kind{
 	"fp32": ir.KindFP32, "fp64": ir.KindFP64, "boolean": ir.KindBool,
 	"string": ir.KindString, "blob": ir.KindBlob, "array": ir.KindArray,
 	"enum": ir.KindEnum, "bitfield": ir.KindBitfield, "struct": ir.KindStruct, "union": ir.KindUnion,
+	"map": ir.KindMap,
 }
 
 func kindOf(t string) ir.Kind {

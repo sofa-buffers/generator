@@ -77,7 +77,7 @@ func projectField(f *Field) dumpField {
 	if f.Ref != nil {
 		d.Ref = f.Ref.Key
 	}
-	if f.Kind == KindArray {
+	if f.Kind == KindArray || f.Kind == KindMap {
 		d.Elem = f.Elem.String()
 		d.Count = f.Count
 		if f.ElemMaxHas {

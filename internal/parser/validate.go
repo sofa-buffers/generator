@@ -275,10 +275,89 @@ func (v *validator) validateField(node any, loc string) *int64 {
 	case "union":
 		v.closed(f, loc, "id", "type", "oneof", "default_id", "description", "deprecated")
 		v.checkUnionField(f, loc)
+	case "map":
+		v.closed(f, loc, "id", "type", "key", "value", "count", "description", "deprecated")
+		v.checkMapField(f, loc)
 	default:
 		v.add(loc+"/type", "unknown type %q", typ)
 	}
 	return idp
+}
+
+// mapKeyTypes are the hashable/comparable leaf types allowed as a map key.
+// fp32/fp64 (equality/NaN hazard), blob, and composites are rejected.
+var mapKeyTypes = map[string]bool{
+	"u8": true, "u16": true, "u32": true, "u64": true,
+	"i8": true, "i16": true, "i32": true, "i64": true,
+	"boolean": true, "string": true, "enum": true,
+}
+
+// checkMapField validates a map field: optional count (capacity) plus the
+// key/value element definitions.
+func (v *validator) checkMapField(f map[string]any, loc string) {
+	if cRaw, ok := f["count"]; ok {
+		if c, ok := asInt(cRaw); !ok || c < 1 || c > 2147483647 {
+			v.add(loc+"/count", "count must be an integer in 1..2147483647")
+		}
+	}
+	v.checkMapKV(f, loc)
+}
+
+// checkMapKV validates the key (restricted leaf) and value (any element type,
+// via the shared element grammar) of a map-shaped definition (a field or a map
+// array element).
+func (v *validator) checkMapKV(f map[string]any, loc string) {
+	if keyRaw, ok := f["key"]; ok {
+		v.checkMapKey(keyRaw, loc+"/key")
+	} else {
+		v.add(loc, "map requires a \"key\" definition")
+	}
+	if valRaw, ok := f["value"]; ok {
+		if vm, ok := valRaw.(map[string]any); ok {
+			v.checkArrayItems(vm, loc+"/value") // full element grammar (incl. nested map)
+		} else {
+			v.add(loc+"/value", "map value must be a mapping {type, ...}")
+		}
+	} else {
+		v.add(loc, "map requires a \"value\" definition")
+	}
+}
+
+// checkMapKey validates a map key element: a restricted leaf type, with maxlen
+// only for string and an enum map only for enum.
+func (v *validator) checkMapKey(node any, loc string) {
+	m, ok := node.(map[string]any)
+	if !ok {
+		v.add(loc, "map key must be a mapping {type, ...}")
+		return
+	}
+	kt, ok := m["type"].(string)
+	if !ok || !mapKeyTypes[kt] {
+		v.add(loc+"/type", "map key type must be one of u8..u64,i8..i64,boolean,string,enum")
+		return
+	}
+	allowed := []string{"type"}
+	switch kt {
+	case "string":
+		allowed = append(allowed, "maxlen")
+	case "enum":
+		allowed = append(allowed, "enum")
+	}
+	v.closed(m, loc, allowed...)
+	if kt == "string" {
+		if mlRaw, ok := m["maxlen"]; ok {
+			if x, ok := asInt(mlRaw); !ok || x < 1 || x > 2147483647 {
+				v.add(loc+"/maxlen", "maxlen must be an integer in 1..2147483647")
+			}
+		}
+	}
+	if kt == "enum" {
+		if em, ok := m["enum"]; ok {
+			v.validateEnumDef(em, loc+"/enum")
+		} else {
+			v.add(loc, "enum map key requires an \"enum\" map")
+		}
+	}
 }
 
 // ---- per-type helpers ---------------------------------------------------
@@ -595,6 +674,8 @@ func (v *validator) checkArrayItems(items map[string]any, loc string) (etyp stri
 		allowed = append(allowed, "oneof", "default_id")
 	case "array":
 		allowed = append(allowed, "items")
+	case "map":
+		allowed = append(allowed, "key", "value")
 	}
 	v.closed(items, loc, allowed...)
 
@@ -646,6 +727,8 @@ func (v *validator) checkArrayItems(items map[string]any, loc string) (etyp stri
 		} else {
 			v.add(loc, "array array element requires \"items\"")
 		}
+	case "map":
+		v.checkMapKV(items, loc) // map element: key + value (recurses)
 	}
 	return etyp, enumValues
 }
@@ -771,7 +854,7 @@ var (
 	base64Re  = regexp.MustCompile(`^[A-Za-z0-9+/\s]+={0,2}$`)
 	arrayElem = []string{
 		"u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "fp32", "fp64",
-		"boolean", "string", "blob", "enum", "bitfield", "struct", "union", "array",
+		"boolean", "string", "blob", "enum", "bitfield", "struct", "union", "array", "map",
 	}
 )
 

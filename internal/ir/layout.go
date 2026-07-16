@@ -23,7 +23,7 @@ func AlignRank(f *Field) int {
 		return 4
 	case KindU64, KindI64, KindFP64:
 		return 8
-	case KindString, KindBlob, KindArray, KindStruct, KindUnion:
+	case KindString, KindBlob, KindArray, KindStruct, KindUnion, KindMap:
 		return 8
 	case KindEnum:
 		return enumAlign(f.Ref.Target)
