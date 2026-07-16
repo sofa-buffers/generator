@@ -339,6 +339,44 @@ func (g *gen) nativeArrayLiteral(f *ir.Field) (string, bool) {
 	return fmt.Sprintf("[]%s{%s}", g.goArrayElem(f.Elem, f.ElemRef, f.ElemItems), strings.Join(parts, ", ")), true
 }
 
+// nativeArrayTrimmedDefault renders a count:N native array's schema default with
+// its trailing element-default run removed (the §3 canonical content of the
+// default), as a `[]T{...}` literal. The marshal omit-guard for a fixed-count
+// array compares the value's trimmed form against this (issue #139). The bool
+// result is false when the trimmed default is empty (no schema default, or an
+// all-element-default one) - the guard then reduces to a `len() != 0` check on
+// the trimmed value.
+func (g *gen) nativeArrayTrimmedDefault(f *ir.Field) (string, bool) {
+	vals, _ := f.Default.([]any)
+	parts := make([]string, 0, len(vals))
+	for _, v := range vals {
+		switch f.Elem {
+		case ir.KindBool, ir.KindFP32, ir.KindFP64:
+			parts = append(parts, fmt.Sprintf("%v", v))
+		default: // numeric / enum / bitfield
+			parts = append(parts, scalarLit(v))
+		}
+	}
+	// Drop the trailing element-default run (mirrors _trimTail on constants; a
+	// float -0.0 renders as "-0", so it is kept, matching the bit-pattern trim).
+	for len(parts) > 0 && isNativeElemDefaultLit(parts[len(parts)-1], f.Elem) {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	return fmt.Sprintf("[]%s{%s}", g.goArrayElem(f.Elem, f.ElemRef, f.ElemItems), strings.Join(parts, ", ")), true
+}
+
+// isNativeElemDefaultLit reports whether a rendered element literal is the
+// element default (0 / false / +0.0), for trimming a fixed-count array default.
+func isNativeElemDefaultLit(lit string, elem ir.Kind) bool {
+	if elem == ir.KindBool {
+		return lit == "false"
+	}
+	return lit == "0" // numeric/enum/bitfield 0, and +0.0 (which %v renders as "0")
+}
+
 // scalarLit renders a decoded integer default (int64 or a quoted big string).
 func scalarLit(v any) string {
 	switch x := v.(type) {

@@ -542,11 +542,32 @@ func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc string) {
 	// (materialized in New<Msg>), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence and is always framed (never whole-omitted).
 	if isNativeArrayElem(fld.Elem) {
-		if def, ok := g.defaultLiteral(fld); ok {
-			f.imp("slices")
-			f.line("\tif !slices.Equal(%s, %s) {", acc, def)
-		} else {
-			f.line("\tif len(%s) != 0 {", acc)
+		switch {
+		case fld.HasCount:
+			// A count:N native array is FIXED-LENGTH: it is omitted iff its value
+			// equals its default once both are padded to N with element defaults
+			// (MESSAGE_SPEC S2) - equivalently, once both trailing default runs are
+			// trimmed (the same S3 trim the write applies). The value is a []T slice
+			// that may be shorter than N, so comparing it against the N-element padded
+			// default never matched an empty/short value, wrongly emitting an
+			// all-default array as an explicit empty array (issue #139). Compare the
+			// TRIMMED value against the TRIMMED default instead.
+			trimmed := g.trimExpr(acc, fld.Elem, fld.ElemRef, true)
+			if def, ok := g.nativeArrayTrimmedDefault(fld); ok {
+				f.imp("slices")
+				f.line("\tif !slices.Equal(%s, %s) {", trimmed, def)
+			} else {
+				f.line("\tif len(%s) != 0 {", trimmed)
+			}
+		default:
+			// A dynamic (count-less) array is not padded: an exact compare against
+			// its schema default (else emptiness) is the omit test.
+			if def, ok := g.defaultLiteral(fld); ok {
+				f.imp("slices")
+				f.line("\tif !slices.Equal(%s, %s) {", acc, def)
+			} else {
+				f.line("\tif len(%s) != 0 {", acc)
+			}
 		}
 		g.marshalArray(f, "\t\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
 		f.line("\t}")

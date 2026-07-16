@@ -351,3 +351,47 @@ func TestOverCountScalarArrayRejected(t *testing.T) {
 		t.Errorf("dynamic array must keep all 6 elements, got %d", got)
 	}
 }
+
+// TestFixedCountArrayAllDefaultOmitted pins issue #139: a count:N native array
+// whose value is all-element-default (empty OR all-zero) is OMITTED (MESSAGE_SPEC
+// S2), not emitted as an explicit empty array. A populated array is trimmed to
+// its non-default prefix (S3) while its all-default siblings stay omitted, and a
+// count:N array with a non-empty schema default is omitted only when it equals
+// that default. (0.17.2 regressed to emitting every count:N array explicitly.)
+func TestFixedCountArrayAllDefaultOmitted(t *testing.T) {
+	corelib := requireGoCorelib(t)
+	def := "version: 1\nmessages:\n  probe:\n    payload:\n" +
+		"      u8s:  {id: 0, type: array, items: {type: u8, count: 5}}\n" +
+		"      i8s:  {id: 1, type: array, items: {type: i8, count: 5}}\n" +
+		"      f32s: {id: 2, type: array, items: {type: fp32, count: 3}}\n" +
+		"      bls:  {id: 3, type: array, items: {type: boolean, count: 4}}\n" +
+		"      u32s: {id: 4, type: array, items: {type: u32, count: 5}}\n" +
+		"      withdef: {id: 5, type: array, items: {type: u32, count: 3}, default: [1, 2]}\n"
+	bin := buildGoHarnessCfg(t, corelib, def, nil)
+
+	// (a) Every array at its default -> empty payload (all fields omitted). withdef
+	//     equals its own default [1,2], so it is omitted too.
+	allDefault := `{"u8s":[],"i8s":[],"f32s":[],"bls":[],"u32s":[],"withdef":[1,2]}`
+	if got := encHex(t, bin, "probe", allDefault); got != "" {
+		t.Errorf("all-default count:N arrays must be omitted (issue #139): got %q", got)
+	}
+
+	// (b) An all-ZERO (non-empty) count:N array is still all-default -> omitted.
+	allZero := `{"u8s":[0,0,0,0,0],"i8s":[],"f32s":[],"bls":[false,false,false,false],"u32s":[],"withdef":[1,2,0]}`
+	if got := encHex(t, bin, "probe", allZero); got != "" {
+		t.Errorf("all-zero count:N arrays must be omitted (issue #139): got %q", got)
+	}
+
+	// (c) Populate one array; only it is on the wire (trimmed), siblings omitted.
+	//     id 4 ARRAY_UNSIGNED (wire 3): header (4<<3)|3 = 0x23; count 3; 07 08 09.
+	oneSet := `{"u8s":[],"i8s":[],"f32s":[],"bls":[],"u32s":[7,8,9,0,0],"withdef":[1,2]}`
+	if got := encHex(t, bin, "probe", oneSet); got != "2303070809" {
+		t.Errorf("only the populated array (trimmed) must be on the wire: got %q", got)
+	}
+
+	// (d) A count:N array overriding its non-empty schema default is on the wire.
+	overDef := `{"u8s":[],"i8s":[],"f32s":[],"bls":[],"u32s":[],"withdef":[1,2,9]}`
+	if got := encHex(t, bin, "probe", overDef); got == "" {
+		t.Error("a count:N array overriding its schema default must be on the wire")
+	}
+}

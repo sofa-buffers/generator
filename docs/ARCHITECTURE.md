@@ -778,7 +778,14 @@ metadata above. The `docs` target renders the same metadata as HTML page content
     (`M' = 0` when all are default); the trailing default run **must not** be
     emitted. So `[7,8,9]` in a `count: 5` u32 field encodes as `23 03 07 08 09`,
     never `23 05 07 08 09 00 00`. This is the array-level analogue of the
-    sparse-canonical field rule below.
+    sparse-canonical field rule below. When the trimmed value additionally
+    **equals the field's (trimmed) default** — an all-element-default array with
+    no non-empty schema `default`, or one matching its `default` — the ordinary
+    §2 whole-field ≠-default test drops the field **entirely**; it is **not**
+    emitted as an explicit `count: 0` array (generator#139). A growable backend
+    must apply that omission test to the *trimmed* value, since the raw slice may
+    be empty or shorter than `N` and would never compare equal to the padded
+    `N`-element default.
   - **Decode (every backend).** A decoder **must** materialize exactly `N`
     elements — the `M` wire elements at `[0, M)`, element defaults at `[M, N)` —
     so a pre-sized fixed array (`T[N]`, `std::array<T,N>`, `[T; N]`, `[N]T`) and
