@@ -110,6 +110,167 @@ func TestZigStructural(t *testing.T) {
 // inert. Independently of the config, the dynamic-array decode path must use
 // the hardened capped-eager-allocation _allocN/_put pair (a lying wire count
 // must not force a huge allocation).
+// buildSchema compiles an inline YAML schema for a focused backend test.
+func buildSchema(t *testing.T, src string) *ir.Schema {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "t.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// TestZigFixedArrayTrailingDefaultRun: a `count: N` array is FIXED-LENGTH, so
+// its canonical encoding drops the trailing run of element-default elements --
+// the decoder rebuilds it from the schema count (MESSAGE_SPEC S3, generator#136
+// / F-0010). Every native element kind trims via the shared _trimTail helper.
+//
+// Scope guards, all asserted here:
+//   - a DYNAMIC (count-less) array is never trimmed: it has no N to refill from,
+//     so a trailing default element is significant data;
+//   - a NESTED array row (an ArrayElem, not a field) is never trimmed: the rule
+//     is scoped to fields, and a nested row is a slice anyway;
+//   - a wrapper-sequence element array (string/blob/struct) has no native array
+//     to trim at all.
+func TestZigFixedArrayTrailingDefaultRun(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      fu:    { id: 1, type: array, items: { type: u32, count: 5 } }
+      fi:    { id: 2, type: array, items: { type: i32, count: 5 } }
+      ff:    { id: 3, type: array, items: { type: fp32, count: 3 } }
+      fd:    { id: 4, type: array, items: { type: fp64, count: 3 } }
+      fb:    { id: 5, type: array, items: { type: boolean, count: 4 } }
+      fe:    { id: 6, type: array, items: { type: enum, count: 3, enum: { RED: 0, GREEN: 1 } } }
+      fbf:   { id: 7, type: array, items: { type: bitfield, count: 3, bits: { a: { pos: 0 }, b: { pos: 1 } } } }
+      dyn:   { id: 8, type: array, items: { type: u32 } }
+      dynf:  { id: 9, type: array, items: { type: fp32 } }
+      nest:  { id: 10, type: array, items: { type: array, count: 2, items: { type: u32, count: 4 } } }
+      strs:  { id: 11, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	// A fixed native array of every kind trims its trailing default run.
+	for _, want := range []string{
+		"try os.writeArrayUnsigned(1, _trimTail(self.fu[0..]));",
+		"try os.writeArraySigned(2, _trimTail(self.fi[0..]));",
+		"try os.writeArrayFp32(3, _trimTail(self.ff[0..]));",
+		"try os.writeArrayFp64(4, _trimTail(self.fd[0..]));",
+		// bool lowers to its 0/1 byte image; trimming that image is equivalent.
+		"try os.writeArrayUnsigned(5, _trimTail(std.mem.sliceAsBytes(self.fb[0..])));",
+		"try os.writeArraySigned(6, _trimTail(self.fe[0..]));",
+		"try os.writeArrayUnsigned(7, _trimTail(self.fbf[0..]));",
+		// The helper compares the element BYTE IMAGE, never ==: a trailing -0.0
+		// (which == 0.0) must survive, and a NaN is never a default.
+		"fn _trimTail(a: anytype) []const std.meta.Elem(@TypeOf(a)) {",
+		"while (n > 0 and std.mem.allEqual(u8, std.mem.asBytes(&a[n - 1]), 0)) : (n -= 1) {}",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing %q", want)
+		}
+	}
+
+	// A dynamic (count-less) array must NOT be trimmed.
+	for _, want := range []string{
+		"try os.writeArrayUnsigned(8, self.dyn);",
+		"try os.writeArrayFp32(9, self.dynf);",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("dynamic array must not be trimmed: missing %q", want)
+		}
+	}
+	for _, notWant := range []string{
+		"_trimTail(self.dyn)",
+		"_trimTail(self.dynf)",
+	} {
+		if strings.Contains(m, notWant) {
+			t.Errorf("dynamic array must not be trimmed, found %q", notWant)
+		}
+	}
+
+	// A nested array row is a wrapper-sequence element, not a `count: N` field:
+	// it writes the loop variable straight through, untrimmed.
+	if !strings.Contains(m, "try os.writeArrayUnsigned(@intCast(_i0), _e0);") {
+		t.Error("nested array row must not be trimmed")
+	}
+	if strings.Contains(m, "_trimTail(_e0)") {
+		t.Error("nested array row must not be trimmed, found _trimTail(_e0)")
+	}
+	// A string-element array is a wrapper sequence: no native array to trim.
+	if strings.Contains(m, "_trimTail(self.strs") {
+		t.Error("wrapper-sequence array must not be trimmed")
+	}
+}
+
+// TestZigFixedArrayDefaultReset: a `count: N` array decodes to exactly N
+// elements -- M from the wire, the ELEMENT default (zero) at [M,N)
+// (MESSAGE_SPEC S3). The [N]T destination starts at the field's declaration
+// default, so a field with a non-zero SCHEMA default must be cleared on
+// arrayBegin: otherwise the tail the encoder trimmed off would decode back as
+// that schema default (e.g. default [1,2,3] on count:5, value [1,2,0,0,0]
+// encodes to the 2-element wire [1,2] and would decode as [1,2,3,0,0]).
+//
+// A field with no schema default already declares an all-zero array, so it needs
+// no reset and its generated code stays unchanged.
+func TestZigFixedArrayDefaultReset(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      d:     { id: 1, type: array, items: { type: u32, count: 5 }, default: [1, 2, 3] }
+      zeros: { id: 2, type: array, items: { type: u32, count: 5 }, default: [0, 0] }
+      plain: { id: 3, type: array, items: { type: u32, count: 5 } }
+      f:     { id: 4, type: array, items: { type: fp32, count: 3 }, default: [1.5] }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	// The schema default is tail-padded to exactly N in the declaration.
+	for _, want := range []string{
+		"d: [5]u32 = .{ 1, 2, 3, 0, 0 },",
+		"f: [3]f32 = .{ 1.5, 0.0, 0.0 },",
+		"plain: [5]u32 = @splat(0),",
+		// A non-zero schema default is cleared to the element default first.
+		"1 => self.m.d = @splat(0),",
+		"4 => self.m.f = @splat(0.0),",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing %q", want)
+		}
+	}
+	// An all-zero (or absent) default already matches the element default: no
+	// reset, so those schemas keep their previous generated code.
+	for _, notWant := range []string{
+		"2 => self.m.zeros = @splat(0),",
+		"3 => self.m.plain = @splat(0),",
+	} {
+		if strings.Contains(m, notWant) {
+			t.Errorf("all-zero default needs no reset, found %q", notWant)
+		}
+	}
+}
+
 func TestZigDecodeLimits(t *testing.T) {
 	const src = `
 version: 1

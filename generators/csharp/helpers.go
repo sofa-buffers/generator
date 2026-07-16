@@ -315,6 +315,17 @@ func (g *gen) csNativeArrayLiteral(f *ir.Field) (string, bool) {
 	}
 	vals, ok := f.Default.([]any)
 	if !ok {
+		// A `count: N` native array is fixed-length even with no schema default:
+		// its value is N element defaults, so materialize them. Without this a
+		// fresh (or all-default, hence omitted-on-the-wire) array would decode to
+		// an empty list on this growable backend while the fixed-storage camp
+		// yields N zeros — the same MESSAGE_SPEC §3 divergence as the trailing
+		// default run, reached through the omission path. Constructing from a
+		// zeroed T[N] keeps the emitted source O(1) for a large N.
+		if f.Default == nil && f.HasCount {
+			et := g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
+			return fmt.Sprintf("new List<%s>(new %s[%d])", et, et, f.Count), true
+		}
 		return "", false
 	}
 	elemType := g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
@@ -337,7 +348,33 @@ func (g *gen) csNativeArrayLiteral(f *ir.Field) (string, bool) {
 			parts[i] = scalarLit(v)
 		}
 	}
+	parts = g.tailPadLiteral(f, parts, elemType)
 	return fmt.Sprintf("new List<%s>{%s}", elemType, strings.Join(parts, ", ")), true
+}
+
+// tailPadLiteral extends a `count: N` array's schema default to exactly N
+// elements with the element default: the array is fixed-length, so a shorter
+// schema default leaves the trailing elements at the element default, and this
+// backend's initial value must match the fixed-storage camp's zero-filled
+// `[T; N]` / `std::array<T, N>` (MESSAGE_SPEC §3). Dynamic arrays keep the
+// default exactly as written.
+func (g *gen) tailPadLiteral(f *ir.Field, parts []string, elemType string) []string {
+	if !f.HasCount {
+		return parts
+	}
+	zero := "0"
+	switch f.Elem {
+	case ir.KindBool:
+		zero = "false"
+	case ir.KindFP32:
+		zero = "0f"
+	case ir.KindEnum, ir.KindBitfield:
+		zero = "(" + elemType + ")(0)"
+	}
+	for int64(len(parts)) < f.Count {
+		parts = append(parts, zero)
+	}
+	return parts
 }
 
 // csPrimArrayLiteral renders a primitive (numeric/fp) array field's schema
@@ -350,6 +387,12 @@ func (g *gen) csPrimArrayLiteral(f *ir.Field) (string, bool) {
 	}
 	vals, ok := f.Default.([]any)
 	if !ok {
+		// A `count: N` array with no schema default is N element defaults, not an
+		// empty array (see csNativeArrayLiteral). `new T[N]` is zero-filled and
+		// keeps the emitted source O(1) for a large N.
+		if f.Default == nil && f.HasCount {
+			return fmt.Sprintf("new %s[%d]", g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems), f.Count), true
+		}
 		return "", false
 	}
 	elemType := g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
@@ -364,6 +407,7 @@ func (g *gen) csPrimArrayLiteral(f *ir.Field) (string, bool) {
 			parts[i] = scalarLit(v)
 		}
 	}
+	parts = g.tailPadLiteral(f, parts, elemType)
 	return fmt.Sprintf("new %s[]{%s}", elemType, strings.Join(parts, ", ")), true
 }
 

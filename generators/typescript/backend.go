@@ -150,6 +150,18 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("%s", longArrEqHelper)
 		f.blank()
 	}
+	if use.trimTail {
+		f.line("%s", trimTailHelper)
+		f.blank()
+	}
+	if use.trimTailLng {
+		f.line("%s", trimTailLongHelper)
+		f.blank()
+	}
+	if use.countedArr {
+		f.line("%s", padToHelper)
+		f.blank()
+	}
 
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
@@ -320,48 +332,75 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("    if (%s.length !== 0) {", acc)
 		}
-		g.marshalArray(f, "      ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		g.marshalArray(f, "      ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
 		f.line("    }")
 		return
 	}
-	g.marshalArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	g.marshalArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
+}
+
+// trimExpr wraps a native array expression in the trailing-default-run trim a
+// fixed-count array's canonical encoding requires (MESSAGE_SPEC §3): only the
+// elements up to the last non-default one go on the wire, and the decoder
+// rebuilds the rest from the declared count. Only a declared `count: N` array is
+// fixed-length; a dynamic (count-less) array has no N to refill from, so a
+// trailing default element is significant and stays.
+func (g *gen) trimExpr(val string, elem ir.Kind, ref *ir.TypeRef, fixed bool) string {
+	if !fixed {
+		return val
+	}
+	switch elem {
+	case ir.KindU64, ir.KindI64:
+		if g.longArrays() {
+			return fmt.Sprintf("_trimTailLong(%s)", val)
+		}
+		return fmt.Sprintf("_trimTail(%s, 0n)", val)
+	case ir.KindEnum:
+		return fmt.Sprintf("_trimTail(%s, 0 as %s)", val, g.typeName(ref.Key))
+	default: // u8/u16/u32, i8/i16/i32, fp32/fp64, bitfield, and the bool 0/1 image
+		return fmt.Sprintf("_trimTail(%s, 0)", val)
+	}
 }
 
 // marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
 // bitfield elements use the native array wire type (enum->signed, bool/bitfield->
 // unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
 // whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
-// arrays.
-func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+// arrays. `fixed` marks a declared `count: N` field, whose trailing default run
+// is trimmed off the wire (MESSAGE_SPEC §3).
+func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
 	ev := fmt.Sprintf("_e%d", depth)
 	iv := fmt.Sprintf("_i%d", depth)
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32:
-		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
+		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindU64:
 		if g.longArrays() {
-			f.line("%sos.writeUnsignedArrayLong(%s, %s);", ind, idExpr, val)
+			f.line("%sos.writeUnsignedArrayLong(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 		} else {
-			f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
+			f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 		}
 	case ir.KindI8, ir.KindI16, ir.KindI32:
-		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
+		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindI64:
 		if g.longArrays() {
-			f.line("%sos.writeSignedArrayLong(%s, %s);", ind, idExpr, val)
+			f.line("%sos.writeSignedArrayLong(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 		} else {
-			f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
+			f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 		}
 	case ir.KindEnum:
-		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
+		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindBool:
-		f.line("%sos.writeUnsignedArray(%s, %s.map((%s) => (%s ? 1 : 0)));", ind, idExpr, val, ev, ev)
+		// Trimming the 0/1 image is equivalent to trimming the booleans
+		// (false <-> 0), and keeps the compare off the object-ish boolean path.
+		img := fmt.Sprintf("%s.map((%s) => (%s ? 1 : 0))", val, ev, ev)
+		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, g.trimExpr(img, ir.KindU8, nil, fixed))
 	case ir.KindBitfield:
-		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
+		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindFP32:
-		f.line("%sos.writeFp32Array(%s, %s);", ind, idExpr, val)
+		f.line("%sos.writeFp32Array(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindFP64:
-		f.line("%sos.writeFp64Array(%s, %s);", ind, idExpr, val)
+		f.line("%sos.writeFp64Array(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindString:
 		// Leaf sequence: an indexed for (not .forEach) avoids a per-marshal closure
 		// allocation and inlines the monomorphic write body. A string element is a
@@ -396,7 +435,10 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindArray:
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
 		f.line("%s%s.forEach((%s, %s) => {", ind, val, ev, iv)
-		g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		// A nested row is a wrapper-sequence element, not a `count: N` field: the
+		// trailing-default-run rule is scoped to fields (MESSAGE_SPEC §3), so rows
+		// are never trimmed.
+		g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
 		f.line("%s});", ind)
 		f.line("%sos.writeSequenceEnd();", ind)
 	}

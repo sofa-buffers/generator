@@ -82,6 +82,8 @@ func (g *gen) module(s *ir.Schema) []byte {
 	f.line("namespace %s;", g.ns)
 	f.blank()
 
+	g.emitFixedHelpers(f, s)
+
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		switch nt.Category {
@@ -101,6 +103,94 @@ func (g *gen) module(s *ir.Schema) []byte {
 		g.emitClass(f, exported(m.Name), m.Summary, m.Fields, true)
 	}
 	return f.bytes()
+}
+
+// fixedTrimKinds reports which trailing-default-run trim helpers the schema
+// actually needs: the generic one (integer/enum/bitfield/boolean elements, whose
+// wire image is an integer array) and the two float ones. Only a top-level
+// `count: N` field with a NATIVE element is fixed-length; nested array-of-array
+// rows and wrapper-sequence elements never trim (MESSAGE_SPEC §3).
+func fixedTrimKinds(s *ir.Schema) (gen32, f32, f64 bool) {
+	scan := func(fields []*ir.Field) {
+		for _, fld := range fields {
+			if fld.Kind != ir.KindArray || !fld.HasCount || !nativeArrayElem(fld.Elem) {
+				continue
+			}
+			switch fld.Elem {
+			case ir.KindFP32:
+				f32 = true
+			case ir.KindFP64:
+				f64 = true
+			default:
+				gen32 = true
+			}
+		}
+	}
+	for _, key := range s.NamedOrder {
+		if nt := s.Named[key]; nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+			scan(nt.Fields)
+		}
+	}
+	for _, m := range s.Messages {
+		scan(m.Fields)
+	}
+	return
+}
+
+// emitFixedHelpers emits the trailing-default-run trim helpers a fixed-count
+// (`count: N`) native array's canonical encoding needs (MESSAGE_SPEC §3): the
+// wire carries only elements [0, M'), where M' is one past the last element that
+// differs from the element default, and the decoder rebuilds [M', N) from the
+// schema count. Elements compare by BIT PATTERN, not by ==, so a trailing -0.0
+// (which == 0.0 in C#) survives the round-trip instead of being trimmed to +0.0,
+// and a NaN is never mistaken for the default. Nothing is emitted for a schema
+// with no fixed-count native array.
+func (g *gen) emitFixedHelpers(f *cfile, s *ir.Schema) {
+	genT, f32, f64 := fixedTrimKinds(s)
+	if !genT && !f32 && !f64 {
+		return
+	}
+	f.line("// Trailing-default-run trim for fixed-count (`count: N`) native arrays:")
+	f.line("// the canonical wire carries only elements [0, M'), where M' is one past")
+	f.line("// the last non-default element; the decoder rebuilds [M', N) from the")
+	f.line("// schema count (MESSAGE_SPEC S3). Dynamic (count-less) arrays never trim.")
+	f.line("internal static class SofabFixedArray {")
+	if genT {
+		// Integer/enum/bitfield/boolean elements reach here as their integer wire
+		// image, where EqualityComparer<T> is exact bit-pattern equality.
+		f.line("    internal static T[] TrimTail<T>(T[] a) where T : struct {")
+		f.line("        int n = a.Length;")
+		f.line("        var zero = default(T);")
+		f.line("        var eq = EqualityComparer<T>.Default;")
+		f.line("        while (n > 0 && eq.Equals(a[n - 1], zero)) n--;")
+		f.line("        if (n == a.Length) return a;")
+		f.line("        var outp = new T[n];")
+		f.line("        Array.Copy(a, outp, n);")
+		f.line("        return outp;")
+		f.line("    }")
+	}
+	if f32 {
+		f.line("    internal static float[] TrimTailF32(float[] a) {")
+		f.line("        int n = a.Length;")
+		f.line("        while (n > 0 && BitConverter.SingleToInt32Bits(a[n - 1]) == 0) n--;")
+		f.line("        if (n == a.Length) return a;")
+		f.line("        var outp = new float[n];")
+		f.line("        Array.Copy(a, outp, n);")
+		f.line("        return outp;")
+		f.line("    }")
+	}
+	if f64 {
+		f.line("    internal static double[] TrimTailF64(double[] a) {")
+		f.line("        int n = a.Length;")
+		f.line("        while (n > 0 && BitConverter.DoubleToInt64Bits(a[n - 1]) == 0) n--;")
+		f.line("        if (n == a.Length) return a;")
+		f.line("        var outp = new double[n];")
+		f.line("        Array.Copy(a, outp, n);")
+		f.line("        return outp;")
+		f.line("    }")
+	}
+	f.line("}")
+	f.blank()
 }
 
 func (g *gen) emitEnum(f *cfile, nt *ir.NamedType) {
@@ -133,6 +223,16 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 			f.line("    [Obsolete]")
 		}
 		f.line("    public %s %s%s;", g.csType(fld), csIdent(fld.Name), g.csInit(fld))
+	}
+	// Hoist each native array's omit-compare default into a static: Marshal only
+	// ever reads it, so one shared instance suffices and encode stops allocating
+	// a fresh literal (a `count: N` field's default is N elements long — for a
+	// large N that per-call allocation would dominate). The mutable per-object
+	// initializer above stays a fresh allocation.
+	for _, fld := range fields {
+		if def, ok := g.csArrayCompareDefault(fld); ok {
+			f.line("    private static readonly %s %s = %s;", g.csType(fld), arrDefName(fld), def)
+		}
 	}
 	f.blank()
 
@@ -278,6 +378,24 @@ func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
 	f.line("        if (%s != %s) { %s }", acc, g.csDefaultValue(fld), write)
 }
 
+// arrDefName is the static holding a native array field's omit-compare default.
+func arrDefName(fld *ir.Field) string { return "_arrdef_" + fld.Name }
+
+// csArrayCompareDefault is the literal a native array field's value is compared
+// against for whole-field omission, and ("", false) when the field has no
+// materialized default (a dynamic array with no schema default, or a
+// wrapper-sequence array, which is never whole-omitted). It is exactly the
+// field initializer, so an untouched field always compares equal and is omitted.
+func (g *gen) csArrayCompareDefault(fld *ir.Field) (string, bool) {
+	if fld.Kind != ir.KindArray {
+		return "", false
+	}
+	if primArrayElem(fld.Elem) {
+		return g.csPrimArrayLiteral(fld)
+	}
+	return g.csNativeArrayLiteral(fld)
+}
+
 func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in the field initializer), else when empty. A composite/
@@ -285,26 +403,46 @@ func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
 	if primArrayElem(fld.Elem) {
 		// Primitive array (T[]): written straight to the OStream overload with
 		// no List.ToArray temporary.
-		if def, ok := g.csPrimArrayLiteral(fld); ok {
-			f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", acc, def)
+		if _, ok := g.csArrayCompareDefault(fld); ok {
+			f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", acc, arrDefName(fld))
 		} else {
 			f.line("        if (%s != null && %s.Length != 0) {", acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, fld.HasCount)
 		f.line("        }")
 		return
 	}
 	if nativeArrayElem(fld.Elem) {
-		if def, ok := g.csNativeArrayLiteral(fld); ok {
-			f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", acc, def)
+		if _, ok := g.csArrayCompareDefault(fld); ok {
+			f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", acc, arrDefName(fld))
 		} else {
 			f.line("        if (%s.Count != 0) {", acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, fld.HasCount)
 		f.line("        }")
 		return
 	}
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false)
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, fld.HasCount)
+}
+
+// trimExpr wraps a native array expression in the trailing-default-run trim a
+// fixed-count array's canonical encoding requires (MESSAGE_SPEC §3). Only a
+// declared `count: N` array is fixed-length; a dynamic (count-less) array has no
+// N to refill from, so a trailing default element is significant and stays.
+// `elem` is the kind of the expression's ELEMENTS as already lowered to the wire
+// image (bool/enum/bitfield arrive here as their integer conversion).
+func trimExpr(val string, elem ir.Kind, fixed bool) string {
+	if !fixed {
+		return val
+	}
+	switch elem {
+	case ir.KindFP32:
+		return fmt.Sprintf("SofabFixedArray.TrimTailF32(%s)", val)
+	case ir.KindFP64:
+		return fmt.Sprintf("SofabFixedArray.TrimTailF64(%s)", val)
+	default:
+		return fmt.Sprintf("SofabFixedArray.TrimTail(%s)", val)
+	}
 }
 
 // marshalArray writes the list `val` as field `idExpr`. Numeric/enum/boolean/
@@ -314,8 +452,10 @@ func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
 // ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested arrays,
 // depth-suffixing the loop var to avoid collisions. isPrim marks `val` as a
 // primitive T[] field (written directly); inner rows of nested arrays stay
-// List<T> and bridge via ToArray.
-func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, isPrim bool) {
+// List<T> and bridge via ToArray. `fixed` marks `val` as a top-level `count: N`
+// field, whose trailing default run is trimmed off (MESSAGE_SPEC §3); nested
+// recursion passes false — an inner row of an array-of-array is not fixed.
+func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, isPrim, fixed bool) {
 	iv := fmt.Sprintf("_i%d", depth)
 	arr := val + ".ToArray()"
 	if isPrim {
@@ -323,21 +463,27 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("%sos.WriteArrayUnsigned(%s, %s);", ind, idExpr, arr)
+		f.line("%sos.WriteArrayUnsigned(%s, %s);", ind, idExpr, trimExpr(arr, elem, fixed))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("%sos.WriteArraySigned(%s, %s);", ind, idExpr, arr)
+		f.line("%sos.WriteArraySigned(%s, %s);", ind, idExpr, trimExpr(arr, elem, fixed))
 	case ir.KindFP32:
-		f.line("%sos.WriteArrayFp32(%s, %s);", ind, idExpr, arr)
+		f.line("%sos.WriteArrayFp32(%s, %s);", ind, idExpr, trimExpr(arr, elem, fixed))
 	case ir.KindFP64:
-		f.line("%sos.WriteArrayFp64(%s, %s);", ind, idExpr, arr)
+		f.line("%sos.WriteArrayFp64(%s, %s);", ind, idExpr, trimExpr(arr, elem, fixed))
 	case ir.KindEnum:
 		// enum -> signed array at the enum's backing width (matches Go's typed array).
-		f.line("%sos.WriteArraySigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, enumBacking(ref.Target))
+		// Trimming the converted integer image is equivalent to trimming the enums
+		// (the element default is the 0 constant <-> integer 0).
+		conv := fmt.Sprintf("Array.ConvertAll(%s.ToArray(), _x => (%s)_x)", val, enumBacking(ref.Target))
+		f.line("%sos.WriteArraySigned(%s, %s);", ind, idExpr, trimExpr(conv, ir.KindI64, fixed))
 	case ir.KindBitfield:
-		f.line("%sos.WriteArrayUnsigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, bitfieldBacking(ref.Target))
+		conv := fmt.Sprintf("Array.ConvertAll(%s.ToArray(), _x => (%s)_x)", val, bitfieldBacking(ref.Target))
+		f.line("%sos.WriteArrayUnsigned(%s, %s);", ind, idExpr, trimExpr(conv, ir.KindU64, fixed))
 	case ir.KindBool:
-		// boolean -> unsigned u8 array of 0/1.
-		f.line("%sos.WriteArrayUnsigned(%s, Array.ConvertAll(%s.ToArray(), _x => _x ? (byte)1 : (byte)0));", ind, idExpr, val)
+		// boolean -> unsigned u8 array of 0/1. Trimming the 0/1 image is equivalent
+		// to trimming the bools (false <-> 0).
+		conv := fmt.Sprintf("Array.ConvertAll(%s.ToArray(), _x => _x ? (byte)1 : (byte)0)", val)
+		f.line("%sos.WriteArrayUnsigned(%s, %s);", ind, idExpr, trimExpr(conv, ir.KindU8, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
@@ -359,7 +505,7 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindArray:
 		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) {", ind, iv, iv, val, iv)
-		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false)
+		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false, false)
 		f.line("%s}", ind)
 		f.line("%sos.WriteSequenceEnd();", ind)
 	}

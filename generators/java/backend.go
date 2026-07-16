@@ -289,7 +289,7 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("        if (%s != null && %s.length != 0) {", acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, fld.HasCount)
 		f.line("        }")
 		return
 	}
@@ -299,11 +299,31 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("        if (%s != null && !%s.isEmpty()) {", acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, fld.HasCount)
 		f.line("        }")
 		return
 	}
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false)
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, fld.HasCount)
+}
+
+// trimExpr wraps a native array expression in the trailing-default-run trim a
+// fixed-count array's canonical encoding requires (MESSAGE_SPEC §3). Only a
+// declared `count: N` array is fixed-length; a dynamic (count-less) array has no
+// N to refill from, so a trailing default element is significant and stays.
+// Elements compare by BIT PATTERN, not by ==, so a trailing -0.0 (which == 0.0
+// in Java) survives the round-trip instead of being silently trimmed to +0.0.
+func trimExpr(val string, elem ir.Kind, fixed bool) string {
+	if !fixed {
+		return val
+	}
+	switch elem {
+	case ir.KindFP32:
+		return "Sbuf.trimTailF32(" + val + ")"
+	case ir.KindFP64:
+		return "Sbuf.trimTailF64(" + val + ")"
+	default: // long-backed: integers, enum, bitfield, and the bool 0/1 image
+		return "Sbuf.trimTail(" + val + ")"
+	}
 }
 
 // marshalArray writes the array val as field idExpr. Numeric/enum/boolean/
@@ -316,7 +336,11 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 // false, `val` is a boxed List and is unboxed via a Sbuf.to*Array temporary —
 // the case for boolean arrays and for a nested array's inner rows (which stay
 // List<...>).
-func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, prim bool) {
+// fixed is true only for a top-level `count: N` array FIELD: its trailing run of
+// default elements is elided on the wire and rebuilt by the decoder from the
+// schema count (MESSAGE_SPEC §3). Nested rows of an array-of-array are not
+// fixed-length in that sense, so the recursion below passes false.
+func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, prim, fixed bool) {
 	iv := fmt.Sprintf("_i%d", depth)
 	longs := "Sbuf.toLongArray(" + val + ")"
 	floats := "Sbuf.toFloatArray(" + val + ")"
@@ -326,15 +350,16 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, longs)
+		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, trimExpr(longs, elem, fixed))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		f.line("%sos.writeArraySigned(%s, %s);", ind, idExpr, longs)
+		f.line("%sos.writeArraySigned(%s, %s);", ind, idExpr, trimExpr(longs, elem, fixed))
 	case ir.KindBool:
-		f.line("%sos.writeArrayUnsigned(%s, Sbuf.boolToLongArray(%s));", ind, idExpr, val)
+		// Trimming the 0/1 image is equivalent to trimming the booleans (false <-> 0).
+		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, trimExpr("Sbuf.boolToLongArray("+val+")", ir.KindU8, fixed))
 	case ir.KindFP32:
-		f.line("%sos.writeArrayFp32(%s, %s);", ind, idExpr, floats)
+		f.line("%sos.writeArrayFp32(%s, %s);", ind, idExpr, trimExpr(floats, elem, fixed))
 	case ir.KindFP64:
-		f.line("%sos.writeArrayFp64(%s, %s);", ind, idExpr, doubles)
+		f.line("%sos.writeArrayFp64(%s, %s);", ind, idExpr, trimExpr(doubles, elem, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
@@ -356,7 +381,7 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindArray:
 		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) {", ind, iv, iv, val, iv)
-		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s.get(%s)", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false)
+		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s.get(%s)", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false, false)
 		f.line("%s}", ind)
 		f.line("%sos.writeSequenceEnd();", ind)
 	}

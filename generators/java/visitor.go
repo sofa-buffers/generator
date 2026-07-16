@@ -245,7 +245,13 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			case isUnsignedElem(fld.Elem) || fld.Elem == ir.KindBitfield:
 				return "index", true // primitive long[] fill
 			case fld.Elem == ir.KindBool:
-				return "addBool", true // boolean array stays List<Boolean>
+				// A boolean array stays a List<Boolean>. A fixed-count one is
+				// pre-filled to N `false` at arrayBegin, so its M wire elements
+				// overwrite [0, M) by index instead of appending (MESSAGE_SPEC §3).
+				if fld.HasCount {
+					return "setBool", true
+				}
+				return "addBool", true
 			}
 		}
 		return "", false
@@ -402,11 +408,28 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			} else if limArr {
 				guard = limitThrowGuard("count > MAX_DYN_ARRAY_COUNT", fld.Name, "array count above configured limit", g.limits.arrayCount) + " "
 			}
+			// A `count: N` array is FIXED-LENGTH: the wire may carry M <= N
+			// elements and positions [M, N) are the element default, so the
+			// container is materialized at exactly N up front and the elided
+			// trailing default run needs no separate fill pass — Java
+			// zero-initializes a primitive array, and the boolean List is
+			// pre-filled with `false` (MESSAGE_SPEC §3). N comes from the schema,
+			// not the wire, so this eager sizing is not the untrusted-count
+			// allocation of #96; the guard above already rejects count > N. Only a
+			// count-less (dynamic) array keeps the lazily grown reservation.
+			target := fr.path + "." + javaIdent(fld.Name)
 			if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) {
-				target := fr.path + "." + javaIdent(fld.Name)
-				arms = append(arms, jcase(fld.ID, guard+target+" = new "+primArrayBase(fld.Elem)+"[Math.min(count, ARRAY_INIT_CAP)]"))
+				if fld.HasCount {
+					arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sacap = %d; %s = new %s[%d]", guard, fld.Count, target, primArrayBase(fld.Elem), fld.Count)))
+				} else {
+					arms = append(arms, jcase(fld.ID, guard+target+" = new "+primArrayBase(fld.Elem)+"[Math.min(count, ARRAY_INIT_CAP)]"))
+				}
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) { // boolean List
-				arms = append(arms, jcase(fld.ID, guard+fr.path+"."+javaIdent(fld.Name)+".clear()"))
+				if fld.HasCount {
+					arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sSbuf.fillFalse(%s, %d)", guard, target, fld.Count)))
+				} else {
+					arms = append(arms, jcase(fld.ID, guard+target+".clear()"))
+				}
 			}
 		}
 		if len(arms) > 0 {
@@ -485,7 +508,8 @@ func primArrayBasesUsed(fs []frame) []string {
 }
 
 // emitScalarCb writes a callback that routes (cur,id) to a field assignment or a
-// list .add. action() returns "= value" / "add" / "addBool" / "= value != 0".
+// list .add. action() returns "= value" / "add" / "addBool" / "setBool" /
+// "index" / "= value != 0".
 // Native-matrix frames whose inner element matches this callback append the
 // decoded value to the current row (no id switch: rows arrive index-ordered).
 func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*ir.Field) (string, bool)) {
@@ -515,8 +539,13 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 				stmt = target + ".add(value)"
 			case "addBool":
 				stmt = target + ".add(value != 0)"
+			case "setBool":
+				// Fixed-count: the List is already sized to the schema count.
+				stmt = target + ".set(ai++, value != 0)"
 			case "index":
 				// Grow the backing array on demand (never trust the wire count).
+				// A fixed-count array is already sized to the schema count, so
+				// ensureCap is a no-op there and the zero tail survives.
 				stmt = target + " = ensureCap(" + target + ", ai, acap); " + target + "[ai++] = value"
 			default:
 				stmt = target + " " + act

@@ -146,10 +146,12 @@ func blobHasNonEmptyDefault(f *ir.Field) bool {
 // helperUse records which module-level helpers/imports the schema's emitted
 // classes actually reference, so unused ones are not emitted.
 type helperUse struct {
-	arrEq      bool // element-wise !== compare: blob or non-Long native array with a value default
-	longArrEq  bool // (low, high) word compare: Long-backed 64-bit array with a value default
-	long       bool // any Long-backed field -> import Long from the corelib
-	countedArr bool // count-bearing native array -> import SofabError for the over-count reject (generator#100)
+	arrEq       bool // element-wise !== compare: blob or non-Long native array with a value default
+	longArrEq   bool // (low, high) word compare: Long-backed 64-bit array with a value default
+	long        bool // any Long-backed field -> import Long from the corelib
+	countedArr  bool // count-bearing native array -> import SofabError for the over-count reject (generator#100)
+	trimTail    bool // fixed-count non-Long native array -> encode-side trailing-default-run trim
+	trimTailLng bool // fixed-count Long-backed native array -> Long flavour of the trim
 }
 
 // scanHelpers walks every emitted class's fields and reports which helpers the
@@ -169,6 +171,13 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				if fld.HasCount {
 					use.countedArr = true
+					// The fixed-count trailing-default-run rule needs the trim on
+					// encode and _padTo on decode (_padTo rides on countedArr).
+					if g.longBacked(fld) {
+						use.trimTailLng = true
+					} else {
+						use.trimTail = true
+					}
 				}
 				if _, ok := g.nativeArrayDefault(fld); ok {
 					if g.longBacked(fld) {
@@ -366,6 +375,9 @@ func (g *gen) tsDefault(f *ir.Field) string {
 		// an omitted (default-valued) array reconstructs correctly on decode and so
 		// marshal can compare against it. Composite arrays are wrapper sequences
 		// (always framed) and start empty.
+		// A `count: N` native array is fixed-length even with no schema default:
+		// its value is N element defaults, so nativeArrayDefault materializes
+		// them (MESSAGE_SPEC §3).
 		if nativeArrayElem(f.Elem) {
 			if lit, ok := g.nativeArrayDefault(f); ok {
 				return lit
@@ -376,14 +388,37 @@ func (g *gen) tsDefault(f *ir.Field) string {
 	return "undefined as never"
 }
 
-// nativeArrayDefault renders a native scalar array's schema default as a TS array
-// literal; ("", false) when there is no default. u64/i64 elements are bigint
-// literals, enum elements are cast to the enum type, booleans/floats/integers are
-// their JSON-native form.
+// nativeArrayDefault renders a native scalar array's default as a TS array
+// literal; ("", false) when there is none. u64/i64 elements are bigint literals
+// (Long.fromValue under the Long-backed modes), enum elements are cast to the
+// enum type, booleans/floats/integers are their JSON-native form.
+//
+// A `count: N` array is exactly N elements long (MESSAGE_SPEC §3), so its
+// default is tail-padded to N with the element default — and a counted array
+// with NO schema default still has one: N element defaults. Without this a
+// fresh (or all-default, hence omitted-on-the-wire) array would materialize
+// empty on this growable backend while the fixed-storage camp yields N zeros —
+// the same §3 divergence as the trailing default run, reached through the
+// omission path without any array touching the wire.
 func (g *gen) nativeArrayDefault(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
 	if !ok {
-		return "", false
+		// No schema default: only a counted array has an implied one.
+		if f.Default != nil || !f.HasCount {
+			return "", false
+		}
+	}
+	// Pad with the element's zero value and render it through the same per-kind
+	// switch as a listed one, so every representation mode stays consistent.
+	// Copy first: appending to the IR's own slice could write past its length
+	// into shared backing storage.
+	vals = append([]any(nil), vals...)
+	for int64(len(vals)) < f.Count {
+		if f.Elem == ir.KindBool {
+			vals = append(vals, false)
+		} else {
+			vals = append(vals, 0)
+		}
 	}
 	parts := make([]string, len(vals))
 	for i, v := range vals {

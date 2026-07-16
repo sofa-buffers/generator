@@ -101,11 +101,16 @@ func (g *gen) module(s *ir.Schema) []byte {
 	// (generator#100), so import it only when a count-bearing native array
 	// exists — an unconditional import would be unused for other schemas.
 	if schemaHasCountedNativeArray(s) {
+		if schemaHasCountedFloatArray(s) {
+			f.line("import math")
+		}
 		f.line("from sofab import Encoder, Decoder, SofaDecodeError, WireType")
 	} else {
 		f.line("from sofab import Encoder, Decoder, WireType")
 	}
 	f.blank()
+
+	g.emitFixedArrayHelpers(f, s)
 
 	if g.limits.any() {
 		f.line("# Receiver-side decode limits, baked from the sofabgen config")
@@ -172,6 +177,80 @@ func schemaHasCountedNativeArray(s *ir.Schema) bool {
 		}
 	}
 	return false
+}
+
+// schemaHasCountedFloatArray reports whether any field is a fixed-count fp32/
+// fp64 array — the only case whose trim needs the bit-pattern (signed-zero)
+// comparison, and so the only case that needs `import math`.
+func schemaHasCountedFloatArray(s *ir.Schema) bool {
+	return schemaHasField(s, func(fld *ir.Field) bool {
+		return fld.Kind == ir.KindArray && fld.HasCount &&
+			(fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64)
+	})
+}
+
+// schemaHasField reports whether any message or named-type field satisfies pred.
+func schemaHasField(s *ir.Schema, pred func(*ir.Field) bool) bool {
+	any := func(fields []*ir.Field) bool {
+		for _, fld := range fields {
+			if pred(fld) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, key := range s.NamedOrder {
+		if any(s.Named[key].Fields) {
+			return true
+		}
+	}
+	for _, m := range s.Messages {
+		if any(m.Fields) {
+			return true
+		}
+	}
+	return false
+}
+
+// emitFixedArrayHelpers emits the module-private helpers a fixed-count (`count:
+// N`) native array's canonical encoding needs (MESSAGE_SPEC §3): _trim_tail /
+// _trim_tail_float drop the trailing element-default run on encode, _pad_to
+// rebuilds it on decode. Emitted only when the schema actually has such a
+// field, so other schemas keep a helper-free module.
+func (g *gen) emitFixedArrayHelpers(f *pyfile, s *ir.Schema) {
+	if !schemaHasCountedNativeArray(s) {
+		return
+	}
+	f.line("def _trim_tail(a: list, zero) -> list:")
+	f.line(`    """Return a[:M'], M' being one past the last non-default element (0 if all`)
+	f.line("    default). A fixed-count array's canonical wire carries exactly those M'")
+	f.line("    elements; the decoder rebuilds the trailing default run from the schema")
+	f.line(`    count (MESSAGE_SPEC S3)."""`)
+	f.line("    n = len(a)")
+	f.line("    while n > 0 and a[n - 1] == zero:")
+	f.line("        n -= 1")
+	f.line("    return a[:n]")
+	f.blank()
+	if schemaHasCountedFloatArray(s) {
+		f.line("def _trim_tail_float(a: list) -> list:")
+		f.line(`    """_trim_tail for floats, comparing by BIT PATTERN rather than ==: a`)
+		f.line("    trailing -0.0 (which == 0.0) and a trailing NaN are distinct values and")
+		f.line(`    must survive the round-trip instead of being trimmed to +0.0."""`)
+		f.line("    n = len(a)")
+		f.line("    while n > 0 and a[n - 1] == 0.0 and math.copysign(1.0, a[n - 1]) > 0.0:")
+		f.line("        n -= 1")
+		f.line("    return a[:n]")
+		f.blank()
+	}
+	f.line("def _pad_to(a: list, n: int, zero) -> list:")
+	f.line(`    """Return a grown to exactly n elements with the element default. A`)
+	f.line("    fixed-count array decodes to exactly its schema count regardless of the")
+	f.line("    wire count, so the trailing default run the encoder elided is")
+	f.line(`    materialized here (MESSAGE_SPEC S3)."""`)
+	f.line("    if len(a) >= n:")
+	f.line("        return a")
+	f.line("    return a + [zero] * (n - len(a))")
+	f.blank()
 }
 
 func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
@@ -370,15 +449,33 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
 	// (materialized in the dataclass), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence and is always framed (never whole-omitted).
 	if isNativeArrayElem(fld.Elem) {
-		if lit, ok := g.pyNativeArrayLiteral(fld); ok {
+		if lit, ok := g.pyNativeArrayDefault(fld); ok {
 			f.line("        if %s != %s:", acc, lit)
 		} else {
 			f.line("        if len(%s) != 0:", acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
 		return
 	}
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
+}
+
+// trimExpr wraps a native array expression in the trailing-default-run trim a
+// fixed-count array's canonical encoding requires (MESSAGE_SPEC §3). Only a
+// declared `count: N` array is fixed-length; a dynamic (count-less) array has no
+// N to refill from, so a trailing default element is significant and stays.
+func trimExpr(val string, elem ir.Kind, fixed bool) string {
+	if !fixed {
+		return val
+	}
+	switch elem {
+	case ir.KindFP32, ir.KindFP64:
+		return fmt.Sprintf("_trim_tail_float(%s)", val)
+	default:
+		// enum/bitfield/bool have already been lowered to their int image, whose
+		// zero is the element default; ints compare by value == bit pattern.
+		return fmt.Sprintf("_trim_tail(%s, 0)", val)
+	}
 }
 
 // marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
@@ -386,24 +483,25 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
 // unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
 // whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
 // arrays.
-func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, val)
+		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, trimExpr(val, elem, fixed))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("%se.write_signed_array(%s, %s)", ind, idExpr, val)
+		f.line("%se.write_signed_array(%s, %s)", ind, idExpr, trimExpr(val, elem, fixed))
 	case ir.KindEnum:
-		f.line("%se.write_signed_array(%s, [int(_v) for _v in %s])", ind, idExpr, val)
+		f.line("%se.write_signed_array(%s, %s)", ind, idExpr, trimExpr(fmt.Sprintf("[int(_v) for _v in %s]", val), elem, fixed))
 	case ir.KindBool:
-		f.line("%se.write_unsigned_array(%s, [1 if _v else 0 for _v in %s])", ind, idExpr, val)
+		// Trimming the 0/1 image is equivalent to trimming the bools (False <-> 0).
+		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, trimExpr(fmt.Sprintf("[1 if _v else 0 for _v in %s]", val), elem, fixed))
 	case ir.KindBitfield:
-		f.line("%se.write_unsigned_array(%s, [int(_v) for _v in %s])", ind, idExpr, val)
+		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, trimExpr(fmt.Sprintf("[int(_v) for _v in %s]", val), elem, fixed))
 	case ir.KindFP32:
-		f.line("%se.write_float32_array(%s, %s)", ind, idExpr, val)
+		f.line("%se.write_float32_array(%s, %s)", ind, idExpr, trimExpr(val, elem, fixed))
 	case ir.KindFP64:
-		f.line("%se.write_float64_array(%s, %s)", ind, idExpr, val)
+		f.line("%se.write_float64_array(%s, %s)", ind, idExpr, trimExpr(val, elem, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
@@ -430,7 +528,10 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindArray:
 		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
-		g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		// A nested array-of-array row is an ir.ArrayElem, not a field: the
+		// fixed-length rule is scoped to top-level array FIELDS, so a row never
+		// trims (MESSAGE_SPEC §3).
+		g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
 		f.line("%se.write_sequence_end()", ind)
 	}
 }
@@ -467,6 +568,25 @@ func (g *gen) emitUnmarshalArray(f *pyfile, fld *ir.Field, acc string) {
 	if fld.HasCount && isNativeArrayElem(fld.Elem) {
 		f.line("                if len(%s) > %d:", acc, fld.Count)
 		f.line(`                    raise SofaDecodeError("%s: array count above schema capacity %d")`, fld.Name, fld.Count)
+		// A `count: N` array is fixed-length: the wire may carry M <= N elements,
+		// and positions [M, N) are the element default. A growable container must
+		// materialize them so the decoded value has exactly N elements on every
+		// storage model (MESSAGE_SPEC §3).
+		f.line("                %s = _pad_to(%s, %d, %s)", acc, acc, fld.Count, pyElemZero(fld.Elem))
+	}
+}
+
+// pyElemZero is the element default of a native array element, as the Python
+// value the decode path materializes (enum/bitfield elements decode to their
+// int image, matching unmarshalArray).
+func pyElemZero(elem ir.Kind) string {
+	switch elem {
+	case ir.KindBool:
+		return "False"
+	case ir.KindFP32, ir.KindFP64:
+		return "0.0"
+	default:
+		return "0"
 	}
 }
 
