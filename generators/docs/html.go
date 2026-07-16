@@ -154,6 +154,10 @@ func (g *gen) typeHTML(f *ir.Field) template.HTML {
 	switch f.Kind {
 	case ir.KindArray:
 		return g.arrayHTML(f)
+	case ir.KindMap:
+		// map<K, V>: K/V are the entry struct's key/value fields, rendered
+		// recursively (value may itself be a struct link or a nested map).
+		return template.HTML("map&lt;" + string(g.typeHTML(f.MapKey())) + ", " + string(g.typeHTML(f.MapValue())) + "&gt;")
 	case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
 		return refHTML(f.Kind, f.Ref)
 	case ir.KindString, ir.KindBlob:

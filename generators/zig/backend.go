@@ -29,7 +29,45 @@ func (*Backend) Lang() string { return "zig" }
 
 // Generate emits src/message.zig; project mode adds build.zig + build.zig.zon
 // and a JSON encode/decode harness (src/main.zig).
+// firstMapField returns the name of the first reachable map field (walking
+// messages and named struct/union types), for the not-yet-supported message.
+func firstMapField(s *ir.Schema) (string, bool) {
+	seen := map[string]bool{}
+	var walk func(fields []*ir.Field) (string, bool)
+	walk = func(fields []*ir.Field) (string, bool) {
+		for _, f := range fields {
+			switch f.Kind {
+			case ir.KindMap:
+				return f.Name, true
+			case ir.KindStruct, ir.KindUnion:
+				if !seen[f.Ref.Key] {
+					seen[f.Ref.Key] = true
+					if n, ok := walk(f.Ref.Target.Fields); ok {
+						return n, true
+					}
+				}
+			}
+		}
+		return "", false
+	}
+	for _, m := range s.Messages {
+		if n, ok := walk(m.Fields); ok {
+			return n, true
+		}
+	}
+	return "", false
+}
+
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
+	// Maps need a std.AutoHashMap/StringHashMap (allocator-backed). The canonical
+	// sorted encode requires an allocator inside marshal(), which currently takes
+	// only the OStream; threading one through every marshal signature + call site
+	// (plus the Unmanaged-HashMap wiring) is a follow-up. Reject loudly for now
+	// rather than emit non-deterministic (unsorted) or broken code
+	// (docs/plans/maps.md).
+	if name, ok := firstMapField(s); ok {
+		return nil, fmt.Errorf("map field %q: maps are not yet supported by the zig backend", name)
+	}
 	g := &gen{
 		schema:  s,
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
