@@ -251,8 +251,30 @@ func (g *gen) javaType(f *ir.Field) string {
 			return primArrayBase(f.Elem) + "[]"
 		}
 		return "List<" + g.javaArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">"
+	case ir.KindMap:
+		// map<K,V> -> HashMap; generics need boxed element types. Keys are sorted
+		// on encode for canonical bytes.
+		return fmt.Sprintf("Map<%s, %s>", g.javaBoxedType(f.MapKey()), g.javaBoxedType(f.MapValue()))
 	}
 	return "Object"
+}
+
+// javaBoxedType is the reference (boxed) type of a field, for use as a generic
+// type argument (map key/value). Primitives box to Long/Float/Double/Boolean.
+func (g *gen) javaBoxedType(f *ir.Field) string {
+	switch f.Kind {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum, ir.KindBitfield:
+		return "Long"
+	case ir.KindFP32:
+		return "Float"
+	case ir.KindFP64:
+		return "Double"
+	case ir.KindBool:
+		return "Boolean"
+	default:
+		return g.javaType(f)
+	}
 }
 
 // javaArrayElemType is the boxed element type stored in an array's List<...>.
@@ -281,6 +303,8 @@ func (g *gen) javaArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 
 func (g *gen) javaInit(f *ir.Field) string {
 	switch f.Kind {
+	case ir.KindMap:
+		return " = new HashMap<>()"
 	case ir.KindStruct, ir.KindUnion:
 		return " = new " + g.typeName(f.Ref.Key) + "()"
 	case ir.KindArray:
@@ -438,6 +462,11 @@ func (g *gen) reachable(m *ir.Message) []string {
 			if f.Kind == ir.KindArray {
 				visitElem(f.Elem, f.ElemRef, f.ElemItems)
 			}
+			if f.Kind == ir.KindMap {
+				// The entry struct (key/value) is referenced via ElemRef; addRef
+				// recurses into its fields, covering nested maps/structs.
+				addRef(f.ElemRef)
+			}
 		}
 	}
 	visit(m.Fields)
@@ -499,6 +528,9 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 		}
 		delete(seen, f.Ref.Key)
 		return hdr + inner + 1, true
+	case ir.KindMap:
+		// Unbounded wrapper sequence: fall back to the analytic MAX_SIZE cap.
+		return 0, false
 	}
 	return hdr, true
 }

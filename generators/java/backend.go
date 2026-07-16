@@ -269,11 +269,32 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
 		return
+	case ir.KindMap:
+		g.emitMarshalMap(f, fld, acc)
+		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default.
 	f.line("        if (%s) { %s }", g.javaOmitCond(fld), write)
+}
+
+// emitMarshalMap writes a map as a wrapper sequence of {key,value} entry classes
+// (MESSAGE_SPEC S5.4), reusing the entry class's own marshal. HashMap is
+// unordered, so keys are sorted for canonical, deterministic bytes; the child id
+// is the 0-based entry index.
+func (g *gen) emitMarshalMap(f *jfile, fld *ir.Field, acc string) {
+	entry := g.typeName(fld.ElemRef.Key)
+	keyType := g.javaBoxedType(fld.MapKey())
+	kName, vName := javaIdent(fld.MapKey().Name), javaIdent(fld.MapValue().Name)
+	f.line("        os.writeSequenceBegin(%d);", fld.ID)
+	f.line("        { java.util.List<%s> _ks = new java.util.ArrayList<>(%s.keySet()); java.util.Collections.sort(_ks); int _i = 0;", keyType, acc)
+	f.line("          for (%s _k : _ks) {", keyType)
+	f.line("            os.writeSequenceBegin(_i++);")
+	f.line("            %s _e = new %s(); _e.%s = _k; _e.%s = %s.get(_k); _e.marshal(os);", entry, entry, kName, vName, acc)
+	f.line("            os.writeSequenceEnd();")
+	f.line("          } }")
+	f.line("        os.writeSequenceEnd();")
 }
 
 func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {

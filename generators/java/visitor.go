@@ -3,6 +3,7 @@ package java
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -16,6 +17,7 @@ const (
 	fkSeqObj                     // struct/union array: sequenceBegin adds an element
 	fkNativeMat                  // nested array, native inner: arrayBegin/arrayXxx per row
 	fkSeqMat                     // nested array, sequence inner: sequenceBegin adds a row
+	fkMap                        // map: per-element sequence resets a scratch entry; entry-end puts into the Map
 )
 
 type frame struct {
@@ -34,6 +36,10 @@ type frame struct {
 	// schema bounds, for the receiver-side decode limits (generator#102):
 	elemMaxHas    bool // fkSeqLeaf: the string/blob element declares a maxlen
 	innerHasCount bool // fkNativeMat: the inner array declares a count
+	// fkMap only: scratch is the visitor field the entry decodes into
+	// (self.<scratch>); listExpr is the Map insert target; childLoc is the entry
+	// object scope; elemType is the entry class. The entry is put on its sequenceEnd.
+	scratch string
 }
 
 func (g *gen) frames(m *ir.Message) []frame {
@@ -48,6 +54,21 @@ func (g *gen) frames(m *ir.Message) []frame {
 				walk(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
 				addArray(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas)
+			case fld.Kind == ir.KindMap:
+				// A map decodes into a scratch entry; entry fields live under
+				// self.<scratch> and on the entry sequenceEnd it is put into the Map
+				// at listExpr. A nested-map value recurses with scratch as its base.
+				mapLoc := loc + "_" + fld.Name
+				scratch := "sc_" + strings.ToLower(mapLoc)
+				out = append(out, frame{
+					kind:     fkMap,
+					loc:      mapLoc,
+					listExpr: path + "." + javaIdent(fld.Name), // Map insert target
+					childLoc: mapLoc + "_e",
+					elemType: g.typeName(fld.ElemRef.Key),
+					scratch:  scratch,
+				})
+				walk(mapLoc+"_e", scratch, fld.ElemRef.Target.Fields)
 			}
 		}
 	}
@@ -228,6 +249,17 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		if limBlob {
 			f.line("    static final long MAX_DYN_BLOB_LEN = %dL;", g.limits.blobLen)
 		}
+	}
+	// Per-map scratch entries: each map decodes one entry at a time into its
+	// scratch, then puts it into the Map on the entry's sequenceEnd.
+	var mapFrames []frame
+	for _, fr := range fs {
+		if fr.kind == fkMap {
+			mapFrames = append(mapFrames, fr)
+		}
+	}
+	for _, fr := range mapFrames {
+		f.line("    private %s %s = new %s();", fr.elemType, fr.scratch, fr.elemType)
 	}
 	f.line("    %sVisitor(%s msg) { m = msg; }", name, name)
 	f.blank()
@@ -450,6 +482,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			f.line("        case %d: %s.add(new %s()); cur = %d; break;", fr.idx, fr.listExpr, fr.elemType, locIndex(fs, fr.childLoc))
 		case fkSeqMat:
 			f.line("        case %d: %s.add(new ArrayList<>()); cur = %d; break;", fr.idx, fr.listExpr, locIndex(fs, fr.childLoc))
+		case fkMap:
+			// A per-entry sequence begins: reset the scratch entry, descend to its fields.
+			f.line("        case %d: %s = new %s(); cur = %d; break;", fr.idx, fr.scratch, fr.elemType, locIndex(fs, fr.childLoc))
 		case fkNormal:
 			var arms []string
 			for _, fld := range fr.fields {
@@ -457,6 +492,8 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 				case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 					arms = append(arms, jcase(fld.ID, "cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
 				case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
+					arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+".clear(); cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
+				case fld.Kind == ir.KindMap:
 					arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+".clear(); cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
 				}
 			}
@@ -467,7 +504,20 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	}
 	f.line("        }")
 	f.line("    }")
-	f.line("    public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
+	if len(mapFrames) > 0 {
+		// A map entry's sequence ended: put the finished scratch entry into the Map
+		// (last write wins on a duplicate key).
+		f.line("    public void sequenceEnd() {")
+		f.line("        switch (cur) {")
+		for _, fr := range mapFrames {
+			f.line("        case %d: %s.put(%s.%s, %s.%s); break;", locIndex(fs, fr.childLoc), fr.listExpr, fr.scratch, javaIdent("key"), fr.scratch, javaIdent("value"))
+		}
+		f.line("        }")
+		f.line("        cur = sp > 0 ? stk[--sp] : 0;")
+		f.line("    }")
+	} else {
+		f.line("    public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
+	}
 	// Lazy-growth helper(s): enlarge the backing array to hold index `i`, doubling
 	// but never exceeding `cap` (the declared element count) so a valid array ends
 	// exactly right-sized. Growth tracks elements actually delivered, so an

@@ -391,3 +391,56 @@ messages:
 		t.Error("M.java: dynamic array must keep its length!=0 omission guard")
 	}
 }
+
+func TestJavaMapField(t *testing.T) {
+	src := `
+version: 1
+messages:
+  M:
+    payload:
+      counts: { type: map, id: 1, key: { type: string, maxlen: 32 }, value: { type: u32 }, count: 128 }
+      nested:
+        type: map
+        id: 2
+        key: { type: u32 }
+        value: { type: map, key: { type: u32 }, value: { type: u8 } }
+`
+	doc, err := parser.Parse([]byte(src), "map.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(s, map[string]any{"package": "message"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var m string
+	for _, f := range files {
+		if strings.HasSuffix(f.Path, "M.java") {
+			m = string(f.Content)
+		}
+	}
+	for _, want := range []string{
+		"public Map<String, Long> counts = new HashMap<>();",                                  // surface container (boxed generics)
+		"public Map<Long, Map<Long, Long>> nested = new HashMap<>();",                         // nested map value
+		"java.util.Collections.sort(_ks);",                                                    // canonical-order encode (HashMap unordered)
+		"MCountsEntry _e = new MCountsEntry(); _e.key = _k; _e.value = this.counts.get(_k);",  // entry-class reuse on marshal
+		"private MCountsEntry sc_root_counts = new MCountsEntry();",                           // per-map scratch entry on the visitor
+		"m.counts.put(sc_root_counts.key, sc_root_counts.value);",                             // put on entry-end
+		"sc_root_nested.value.put(sc_root_nested_e_value.key, sc_root_nested_e_value.value);", // nested put into outer scratch
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing %q", want)
+		}
+	}
+}
