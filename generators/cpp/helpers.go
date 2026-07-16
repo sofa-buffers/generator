@@ -342,6 +342,45 @@ func (g *gen) cppArrayElemLit(elem ir.Kind, ref *ir.TypeRef, v any) string {
 	}
 }
 
+// cppFixedArrayNeedsReset reports whether a fixed native array field's decode
+// must clear the member to the element default before the wire elements land.
+//
+// A `count: N` array decodes to exactly N elements: M from the wire, the ELEMENT
+// default (zero) at [M,N) (MESSAGE_SPEC §3). The std::array<T,N> member starts at
+// the field's *declaration* default, so with a non-zero SCHEMA default the tail
+// the corelib's span read never touches would wrongly keep that schema default:
+// with `default: [1,2,3]` on `count: 5`, a value of [1,2,0,0,0] encodes (trimmed)
+// to the 2-element wire [1,2] and would decode back as [1,2,3,0,0] — a corrupted
+// round-trip. Clearing first makes the tail the element default.
+//
+// The schema default is the value of an ABSENT field (sparse omission,
+// MESSAGE_SPEC S2); it is reconstructed from the member's construction default
+// and is untouched by this reset, which only runs once the field is PRESENT.
+//
+// A field with no schema default (or an all-zero one) already declares an
+// all-zero array, so it needs no reset and its generated code is unchanged.
+func (g *gen) cppFixedArrayNeedsReset(f *ir.Field) bool {
+	if f.Kind != ir.KindArray || !isNativeArrayElem(f.Elem) {
+		return false
+	}
+	// Only fixed storage: a count-less array lowers to a std::vector that decode
+	// resizes to the wire count, so it has no stale tail to clear.
+	if g.dynNativeArray(f.Elem, f.Count) || f.Count <= 0 {
+		return false
+	}
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return false
+	}
+	zero := g.cppArrayElemLit(f.Elem, f.ElemRef, 0)
+	for _, v := range vals {
+		if g.cppArrayElemLit(f.Elem, f.ElemRef, v) != zero {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {
 	v, ok := asInt(def)
 	if !ok {
@@ -531,6 +570,33 @@ struct _FixedStrSeq : sofab::IStreamMessage {
         if (_size) is.read(s);
     }
 };`
+
+// cppTrimPrelude is emitted for BOTH corelibs. _trimTail returns a view of a's
+// leading elements [0, M'), where M' is one past the last element that differs
+// from the element default (0 / 0.0 / false for every native kind; M' == 0 when
+// every element is the default). A `count: N` array is FIXED-LENGTH, so its
+// canonical wire carries exactly those M' elements and the decoder rebuilds the
+// trailing default run from the schema count (MESSAGE_SPEC §3) — handing the
+// whole std::array to the corelib would emit that run instead.
+//
+// Elements compare by BIT PATTERN (memcmp against a value-initialized element),
+// never by ==: -0.0 == 0.0 is true in C++, but -0.0 is a distinct value that
+// must survive the round-trip rather than be silently trimmed to +0.0; a NaN
+// likewise never matches the default. Every element type reaching this helper is
+// an integer / float / enum backing type, none of which have padding bits, so a
+// byte compare is exactly a value-with-sign compare.
+//
+// Non-owning and non-allocating (the span borrows the caller's storage), so the
+// heap-free (corelib: c-cpp) profile uses the same helper. Unused template, so
+// it costs nothing when a message has no fixed-count native array.
+const cppTrimPrelude = `template <typename C>
+std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {
+    using _T = typename C::value_type;
+    const _T _z{};
+    std::size_t _n = _a.size();
+    while (_n > 0 && std::memcmp(&_a[_n - 1], &_z, sizeof(_T)) == 0) --_n;
+    return std::span<const _T>(_a.data(), _n);
+}`
 
 // _StrSeq / _BlobSeq collect the elements of a string / blob wrapper-sequence
 // array. Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)

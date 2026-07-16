@@ -154,6 +154,10 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.line("#include <string>")
 	f.line("#include <vector>")
 	f.line("#include <array>")
+	// <span>/<cstring>/<cstddef> back the _trimTail fixed-count encode helper.
+	f.line("#include <span>")
+	f.line("#include <cstring>")
+	f.line("#include <cstddef>")
 	f.line("#include %q", "sofab/sofab.hpp")
 	f.blank()
 	f.line("static_assert(sofab::API_VERSION == 1,")
@@ -176,6 +180,9 @@ func (g *gen) header(m *ir.Message) []byte {
 		f.line("%s", cppFixedPrelude)
 	}
 	f.line("%s", cppMsgSeqPrelude)
+	// _trimTail (fixed-count encode trim, MESSAGE_SPEC §3) is corelib-agnostic:
+	// both wrappers take a std::span through the same templated OStream::write.
+	f.line("%s", cppTrimPrelude)
 	f.line("#endif")
 	f.blank()
 
@@ -518,11 +525,25 @@ func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
 	if isNativeArrayElem(fld.Elem) {
 		def := g.cppArrayContainer(fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax) + g.cppDefault(fld)
 		f.line("        if (%s != %s) {", acc, def)
-		g.serializeArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0)
+		g.serializeArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 0)
 		f.line("        }")
 		return
 	}
-	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0)
+	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 0)
+}
+
+// trimExpr wraps a native array expression in the trailing-default-run trim a
+// fixed-count array's canonical encoding requires (MESSAGE_SPEC §3): the corelib
+// writes the whole container it is handed (std::array<T,N>::size() == N), so the
+// value must be narrowed to a span of its non-default prefix first. Only a
+// declared `count: N` array is fixed-length; a dynamic (count-less) array has no
+// N to refill from at decode, so a trailing default element is significant and
+// stays.
+func (g *gen) trimExpr(val string, trim bool) string {
+	if !trim {
+		return val
+	}
+	return fmt.Sprintf("_trimTail(%s)", val)
 }
 
 // serializeArray writes an array value as field idExpr, mirroring the Go/Python
@@ -531,7 +552,10 @@ func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
 // temporary native array; string/blob/struct/union/nested-array elements lower
 // to a wrapper sequence whose child ids are the 0-based index. Recurses for
 // nested arrays, depth-suffixing loop vars to avoid collisions.
-func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, depth int) {
+//
+// trim requests the fixed-count trailing-default-run trim (MESSAGE_SPEC §3); it
+// is set only for a top-level `count: N` native-array field.
+func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, trim bool, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	tv := fmt.Sprintf("_t%d", depth)
@@ -539,25 +563,30 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindFP32, ir.KindFP64, ir.KindBitfield:
-		f.line("%s(void)os.write(%s, %s);", ind, idExpr, val)
+		f.line("%s(void)os.write(%s, %s);", ind, idExpr, g.trimExpr(val, trim))
 	case ir.KindEnum:
 		bk := enumBacking(ref.Target)
 		if g.dynNativeArray(elem, count) {
 			// Count-less enum array (heap): the temp is sized to the value's length,
 			// not a compile-time count.
 			f.line("%s{ std::vector<%s> %s(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
-				ind, bk, tv, val, iv, iv, val, iv, tv, iv, bk, val, iv, idExpr, tv)
+				ind, bk, tv, val, iv, iv, val, iv, tv, iv, bk, val, iv, idExpr, g.trimExpr(tv, trim))
 		} else {
+			// The enum values are converted through a native-typed temporary before
+			// the write, so the trim applies to that image: enum default 0 maps to
+			// backing 0, so trimming the converted image is exactly trimming the
+			// source's trailing default run.
 			f.line("%s{ std::array<%s, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
-				ind, bk, count, tv, iv, iv, count, iv, tv, iv, bk, val, iv, idExpr, tv)
+				ind, bk, count, tv, iv, iv, count, iv, tv, iv, bk, val, iv, idExpr, g.trimExpr(tv, trim))
 		}
 	case ir.KindBool:
 		if g.dynNativeArray(elem, count) {
 			f.line("%s{ std::vector<std::uint8_t> %s(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
-				ind, tv, val, iv, iv, val, iv, tv, iv, val, iv, idExpr, tv)
+				ind, tv, val, iv, iv, val, iv, tv, iv, val, iv, idExpr, g.trimExpr(tv, trim))
 		} else {
+			// Trimming the 0/1 image is equivalent to trimming the bools (false <-> 0).
 			f.line("%s{ std::array<std::uint8_t, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
-				ind, count, tv, iv, iv, count, iv, tv, iv, val, iv, idExpr, tv)
+				ind, count, tv, iv, iv, count, iv, tv, iv, val, iv, idExpr, g.trimExpr(tv, trim))
 		}
 	case ir.KindBlob:
 		// A blob element is a leaf: omit it when it equals the element default
@@ -583,7 +612,10 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 	case ir.KindArray:
 		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
 		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) {", ind, iv, ev, val)
-		g.serializeArray(f, ind+"    ", fmt.Sprintf("%s++", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, depth+1)
+		// A nested row is a wrapper-sequence element, not a `count: N` field: the
+		// trailing-default-run rule is scoped to fields (MESSAGE_SPEC §3), so rows
+		// are never trimmed.
+		g.serializeArray(f, ind+"    ", fmt.Sprintf("%s++", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, false, depth+1)
 		f.line("%s} }", ind)
 		f.line("%s(void)os.sequenceEnd();", ind)
 	}
@@ -670,6 +702,17 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// delivered bytes, so they need no guard.
 		if !g.clib && !fld.HasCount && isNativeArrayElem(fld.Elem) && g.limArrHas {
 			f.line("            if (_count > SOFAB_MAX_DYN_ARRAY_COUNT) { is.exceedLimit(); return; }")
+		}
+		// A fixed std::array<T,N> whose declaration default is a non-zero schema
+		// default: clear it so the elements the encoder trimmed off the tail decode
+		// as the ELEMENT default, not as that schema default (MESSAGE_SPEC §3 — see
+		// cppFixedArrayNeedsReset). Emitted after the guards so a rejected message
+		// never mutates the target, and before the read so the corelib-c-cpp
+		// wrapper's deferred fill still lands on top. Assigning an empty braced
+		// initializer value-initializes in place: no allocation, so the heap-free
+		// profile uses the same reset.
+		if g.cppFixedArrayNeedsReset(fld) {
+			f.line("            %s = {};", acc)
 		}
 		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0)
 	}

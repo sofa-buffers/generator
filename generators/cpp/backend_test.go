@@ -511,3 +511,174 @@ func TestCppMetadataDocs(t *testing.T) {
 		t.Errorf("flag without a schema default must not carry a default note:\n%s", h)
 	}
 }
+
+// trimSrc is a def covering every native element family behind a `count: N`
+// (trimmed) plus a nested matrix row and, on the heap profile, a count-less
+// array (both untrimmed).
+const trimSrc = "version: 1\nmessages:\n  M:\n    payload:\n" +
+	"      u32s: { id: 0, type: array, items: { type: u32, count: 5 } }\n" +
+	"      f32s: { id: 1, type: array, items: { type: fp32, count: 3 } }\n" +
+	"      ens: { id: 2, type: array, items: { type: enum, count: 3, enum: { a: 0, b: 1 } } }\n" +
+	"      bls: { id: 3, type: array, items: { type: boolean, count: 4 } }\n" +
+	"      matrix: { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }\n"
+
+// TestCppFixedCountTrimsTrailingDefaultRun: a `count: N` native array is
+// FIXED-LENGTH, so its canonical wire carries only elements [0, M') — M' being
+// one past the last non-default element — and the decoder rebuilds [M', N) from
+// the schema count (MESSAGE_SPEC §3, finding F-0010). Handing the whole
+// std::array<T,N> to the corelib emits the trailing default run, because the
+// span-based write takes .size() == N. Both corelibs take a std::span through
+// the same templated OStream::write, so both profiles trim identically.
+func TestCppFixedCountTrimsTrailingDefaultRun(t *testing.T) {
+	for _, corelib := range []string{"cpp", "c-cpp"} {
+		t.Run(corelib, func(t *testing.T) {
+			h, err := genHeader(t, trimSrc, "m.hpp", map[string]any{"namespace": "sofabuffers", "corelib": corelib})
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			for _, want := range []string{
+				// The helper is emitted for both corelibs, inside the shared prelude
+				// guard, and returns a non-owning span (heap-free).
+				"std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {",
+				// Bit-pattern compare, never ==: a trailing -0.0 (== 0.0) must survive.
+				"std::memcmp(&_a[_n - 1], &_z, sizeof(_T)) == 0",
+				// Numeric + float fields trim in place.
+				"(void)os.write(0, _trimTail(u32s));",
+				"(void)os.write(1, _trimTail(f32s));",
+				// Enum/bool value-convert through a native temp; the converted image is
+				// trimmed (enum default 0 -> backing 0, false -> 0).
+				"(void)os.write(2, _trimTail(_t0)); }",
+				"(void)os.write(3, _trimTail(_t0)); }",
+			} {
+				if !strings.Contains(h, want) {
+					t.Errorf("[%s] header missing %q:\n%s", corelib, want, h)
+				}
+			}
+			// A nested matrix row is a wrapper-sequence element, not a `count: N`
+			// field: the rule is scoped to fields, so rows are never trimmed.
+			if !strings.Contains(h, "(void)os.write(_i0++, _e0);") {
+				t.Errorf("[%s] nested array row must not be trimmed:\n%s", corelib, h)
+			}
+			// Decode is unchanged: the fixed std::array already materializes N
+			// elements, zero-filled by the in-class initializer, so [M, N) is already
+			// the element default. Over-count stays INVALID on the heap profile.
+			if !strings.Contains(h, "std::array<std::uint32_t, 5> u32s = {};") {
+				t.Errorf("[%s] fixed-count array must stay a zero-filled std::array:\n%s", corelib, h)
+			}
+			if !strings.Contains(h, "is.read(u32s);") {
+				t.Errorf("[%s] fixed-count decode must read the whole array:\n%s", corelib, h)
+			}
+		})
+	}
+}
+
+// TestCppDynamicArrayNotTrimmed: a count-less (dynamic) array has no schema N to
+// refill from at decode, so a trailing default element is SIGNIFICANT and must
+// reach the wire. Only the heap profile has dynamic arrays (the fixed profile
+// rejects an unbounded array in checkBounded).
+func TestCppDynamicArrayNotTrimmed(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      dyn: { id: 0, type: array, items: { type: u32 } }\n" +
+		"      dynf: { id: 1, type: array, items: { type: fp32 } }\n" +
+		"      dynen: { id: 2, type: array, items: { type: enum, enum: { a: 0, b: 1 } } }\n" +
+		"      dynbl: { id: 3, type: array, items: { type: boolean } }\n" +
+		"      fixed: { id: 4, type: array, items: { type: u32, count: 4 } }\n"
+	h, err := genHeader(t, src, "m.hpp", map[string]any{"namespace": "sofabuffers", "corelib": "cpp"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"(void)os.write(0, dyn);",
+		"(void)os.write(1, dynf);",
+		"(void)os.write(2, _t0); }",
+		"(void)os.write(3, _t0); }",
+		"(void)os.write(4, _trimTail(fixed));", // the counted one still trims
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("header missing %q:\n%s", want, h)
+		}
+	}
+	for _, bad := range []string{"_trimTail(dyn)", "_trimTail(dynf)"} {
+		if strings.Contains(h, bad) {
+			t.Errorf("dynamic array must not be trimmed, found %q:\n%s", bad, h)
+		}
+	}
+}
+
+// TestCppFixedCountResetsSchemaDefaultTail: a `count: N` array decodes to N
+// elements — M from the wire, the ELEMENT default (zero) at [M,N) (MESSAGE_SPEC
+// §3). The std::array member starts at the field's *declaration* default, so a
+// non-zero SCHEMA default would leak into the tail the corelib's span read never
+// touches: `default: [1,2,3]` on `count: 5` decoding a 2-element wire [1,2] would
+// yield [1,2,3,0,0] instead of [1,2,0,0,0]. The encode trim (F-0010) is what
+// makes that short wire reachable, so the reset ships with it.
+//
+// The reset is gated on a non-zero schema default: every other schema's decode
+// stays byte-identical.
+func TestCppFixedCountResetsSchemaDefaultTail(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: { id: 0, type: array, items: { type: u32, count: 5 } }\n" + // no default
+		"      b: { id: 1, type: array, items: { type: u32, count: 3 }, default: [0, 0, 0] }\n" + // all-zero default
+		"      c: { id: 2, type: array, items: { type: u32, count: 5 }, default: [1, 2, 3] }\n" + // non-zero default
+		"      d: { id: 3, type: array, items: { type: fp32, count: 3 }, default: [1.5, 0.0] }\n" + // non-zero fp default
+		"      e: { id: 4, type: array, items: { type: boolean, count: 3 }, default: [true, false] }\n" // non-zero bool default
+	for _, corelib := range []string{"cpp", "c-cpp"} {
+		t.Run(corelib, func(t *testing.T) {
+			h, err := genHeader(t, src, "m.hpp", map[string]any{"namespace": "sofabuffers", "corelib": corelib})
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			// The member still declares the schema default: an ABSENT field must
+			// reconstruct to it (sparse-omission contract, MESSAGE_SPEC S2).
+			if !strings.Contains(h, "std::array<std::uint32_t, 5> c = {1, 2, 3};") {
+				t.Errorf("[%s] schema default must stay the member's declaration default:\n%s", corelib, h)
+			}
+			// A non-zero schema default resets on decode, after the over-count guard
+			// (a rejected message must not mutate the target) and before the read.
+			for _, want := range []string{"\n            c = {};", "\n            d = {};", "\n            e = {};"} {
+				if !strings.Contains(h, want) {
+					t.Errorf("[%s] missing fixed-array reset %q:\n%s", corelib, want, h)
+				}
+			}
+			if !g_containsInOrder(h, "if (_count > 5) { is.invalidate(); return; }", "\n            c = {};", "is.read(c);") && corelib == "cpp" {
+				t.Errorf("[%s] reset must sit between the over-count guard and the read:\n%s", corelib, h)
+			}
+			// A field with no schema default, or an all-zero one, already declares an
+			// all-zero array: no reset, generated code unchanged.
+			for _, bad := range []string{"\n            a = {};", "\n            b = {};"} {
+				if strings.Contains(h, bad) {
+					t.Errorf("[%s] zero/absent-default array must not emit a reset, found %q:\n%s", corelib, bad, h)
+				}
+			}
+		})
+	}
+}
+
+// TestCppDynamicArrayNoReset: a count-less array lowers to a std::vector that
+// decode resizes to the wire count, so it has no stale tail and needs no reset.
+func TestCppDynamicArrayNoReset(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      dyn: { id: 0, type: array, items: { type: u32 }, default: [1, 2, 3] }\n"
+	h, err := genHeader(t, src, "m.hpp", map[string]any{"namespace": "sofabuffers", "corelib": "cpp"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if strings.Contains(h, "\n            dyn = {};") {
+		t.Errorf("dynamic array must not emit a reset:\n%s", h)
+	}
+	if !strings.Contains(h, "dyn.resize(_count); is.read(dyn);") {
+		t.Errorf("dynamic array should resize to the wire count:\n%s", h)
+	}
+}
+
+// g_containsInOrder reports whether the needles appear in s in the given order.
+func g_containsInOrder(s string, needles ...string) bool {
+	for _, n := range needles {
+		i := strings.Index(s, n)
+		if i < 0 {
+			return false
+		}
+		s = s[i+len(n):]
+	}
+	return true
+}
