@@ -371,6 +371,9 @@ func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
 		return
+	case ir.KindMap:
+		g.emitMarshalMap(f, fld, acc)
+		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
@@ -394,6 +397,24 @@ func (g *gen) csArrayCompareDefault(fld *ir.Field) (string, bool) {
 		return g.csPrimArrayLiteral(fld)
 	}
 	return g.csNativeArrayLiteral(fld)
+}
+
+// emitMarshalMap writes a map as a wrapper sequence of {key,value} entry classes
+// (MESSAGE_SPEC S5.4), reusing the entry class's own Marshal. Dictionary is
+// unordered, so keys are sorted for canonical, deterministic bytes; the child id
+// is the 0-based entry index.
+func (g *gen) emitMarshalMap(f *cfile, fld *ir.Field, acc string) {
+	entry := g.typeName(fld.ElemRef.Key)
+	keyType := g.csType(fld.MapKey())
+	kName, vName := csIdent(fld.MapKey().Name), csIdent(fld.MapValue().Name)
+	f.line("        os.WriteSequenceBegin(%d);", fld.ID)
+	f.line("        { var _ks = new List<%s>(%s.Keys); _ks.Sort(); int _i = 0;", keyType, acc)
+	f.line("          foreach (var _k in _ks) {")
+	f.line("            os.WriteSequenceBegin(_i++);")
+	f.line("            var _e = new %s(); _e.%s = _k; _e.%s = %s[_k]; _e.Marshal(os);", entry, kName, vName, acc)
+	f.line("            os.WriteSequenceEnd();")
+	f.line("          } }")
+	f.line("        os.WriteSequenceEnd();")
 }
 
 func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {

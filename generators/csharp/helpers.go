@@ -179,6 +179,9 @@ func (g *gen) csType(f *ir.Field) string {
 			return g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + "[]"
 		}
 		return "List<" + g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">"
+	case ir.KindMap:
+		// map<K,V> -> Dictionary. Keys are sorted on encode for canonical bytes.
+		return fmt.Sprintf("Dictionary<%s, %s>", g.csType(f.MapKey()), g.csType(f.MapValue()))
 	}
 	return "object"
 }
@@ -232,7 +235,7 @@ func numCsType(k ir.Kind) string {
 // csInit returns the field initializer (" = ...") or "" for plain default.
 func (g *gen) csInit(f *ir.Field) string {
 	switch f.Kind {
-	case ir.KindStruct, ir.KindUnion:
+	case ir.KindStruct, ir.KindUnion, ir.KindMap:
 		return " = new()"
 	case ir.KindArray:
 		// A NATIVE scalar array is a leaf field: materialize its default so an
@@ -559,6 +562,9 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 		}
 		delete(seen, f.Ref.Key)
 		return hdr + inner + 1, true
+	case ir.KindMap:
+		// Unbounded wrapper sequence: fall back to the analytic MAX_SIZE cap.
+		return 0, false
 	}
 	return hdr, true
 }

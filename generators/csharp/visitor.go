@@ -2,6 +2,7 @@ package csharp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -24,6 +25,13 @@ type frame struct {
 	items    *ir.ArrayElem // nested-array element descriptor
 	childLoc string        // struct/union element or sequence-nested inner-array scope
 	elemDyn  bool          // string/blob element without a schema maxlen (generator#102)
+	// map scope (isMap == true): path is the Dictionary insert target; scratch is
+	// the visitor field the entry decodes into (self.<scratch>); childLoc is the
+	// entry object scope; scratchType is the entry class. The entry is inserted on
+	// its SequenceEnd.
+	isMap       bool
+	scratch     string
+	scratchType string
 }
 
 func (g *gen) frames(m *ir.Message) []frame {
@@ -39,6 +47,21 @@ func (g *gen) frames(m *ir.Message) []frame {
 				walkObj(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
 				walkArr(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, !fld.ElemMaxHas)
+			case fld.Kind == ir.KindMap:
+				// A map decodes into a scratch entry; the entry's fields live under
+				// self.<scratch> and on the entry SequenceEnd it is inserted into the
+				// Dictionary at path. A nested-map value recurses with scratch as base.
+				mapLoc := loc + "_" + fld.Name
+				scratch := "sc_" + strings.ToLower(mapLoc)
+				out = append(out, frame{
+					loc:         mapLoc,
+					path:        path + "." + csIdent(fld.Name), // Dictionary insert target
+					isMap:       true,
+					childLoc:    mapLoc + "_e",
+					scratch:     scratch,
+					scratchType: g.typeName(fld.ElemRef.Key),
+				})
+				walkObj(mapLoc+"_e", scratch, fld.ElemRef.Target.Fields)
 			}
 		}
 	}
@@ -172,6 +195,17 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("    public %sVisitor(%s msg) { m = msg; }", name, name)
 	for i, fr := range fs {
 		f.line("    private const int %s = %d;", fr.loc, i)
+	}
+	// Per-map scratch entries: each map decodes one entry at a time into its
+	// scratch, then inserts it into the Dictionary on the entry's SequenceEnd.
+	var mapFrames []frame
+	for _, fr := range fs {
+		if fr.isMap {
+			mapFrames = append(mapFrames, fr)
+		}
+	}
+	for _, fr := range mapFrames {
+		f.line("    private %s %s = new();", fr.scratchType, fr.scratch)
 	}
 	if limArr || limStr || limBlob {
 		// Receiver-side decode limits (generator#102): configured caps on the
@@ -403,6 +437,11 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("        stk[sp++] = cur;")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
+		if fr.isMap {
+			// A per-entry sequence begins: reset the scratch entry, descend to its fields.
+			f.line("            case (%s, _): %s = new %s(); cur = %s; break;", fr.loc, fr.scratch, fr.scratchType, fr.childLoc)
+			continue
+		}
 		if fr.isArr {
 			switch {
 			case fr.elem == ir.KindStruct || fr.elem == ir.KindUnion:
@@ -418,12 +457,28 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				f.line("            case (%s, %d): cur = %s; break;", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
 				f.line("            case (%s, %d): %s.%s.Clear(); cur = %s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), fr.loc+"_"+fld.Name)
+			case fld.Kind == ir.KindMap:
+				// The map field begins: clear the Dictionary, descend to the map scope.
+				f.line("            case (%s, %d): %s.%s.Clear(); cur = %s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), fr.loc+"_"+fld.Name)
 			}
 		}
 	}
 	f.line("        }")
 	f.line("    }")
-	f.line("    public void SequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
+	if len(mapFrames) > 0 {
+		// A map entry's sequence ended: move the finished scratch entry into the
+		// Dictionary (last write wins on a duplicate key).
+		f.line("    public void SequenceEnd() {")
+		f.line("        switch (cur) {")
+		for _, fr := range mapFrames {
+			f.line("            case %s: %s[%s.%s] = %s.%s; break;", fr.childLoc, fr.path, fr.scratch, csIdent("key"), fr.scratch, csIdent("value"))
+		}
+		f.line("        }")
+		f.line("        cur = sp > 0 ? stk[--sp] : 0;")
+		f.line("    }")
+	} else {
+		f.line("    public void SequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
+	}
 	if dynPrim {
 		// Lazy-growth helper: enlarge the backing array to hold index `i`,
 		// doubling but never past `cap` (the wire count), so growth tracks

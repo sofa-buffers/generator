@@ -403,3 +403,32 @@ messages:
 		}
 	}
 }
+
+func TestCsMapField(t *testing.T) {
+	src := `
+version: 1
+messages:
+  M:
+    payload:
+      counts: { type: map, id: 1, key: { type: string, maxlen: 32 }, value: { type: u32 }, count: 128 }
+      nested:
+        type: map
+        id: 2
+        key: { type: u32 }
+        value: { type: map, key: { type: u32 }, value: { type: u8 } }
+`
+	m := buildModule(t, []byte(src), "map.yaml", map[string]any{})
+	for _, want := range []string{
+		"public Dictionary<string, uint> counts = new();",                // surface container
+		"public Dictionary<uint, Dictionary<uint, byte>> nested = new();", // nested map value
+		"_ks.Sort();",                                                     // canonical-order encode (Dictionary is unordered)
+		"var _e = new MCountsEntry(); _e.key = _k; _e.value = this.counts[_k];", // entry-class reuse on marshal
+		"private MCountsEntry sc_root_counts = new();",                    // per-map scratch entry on the visitor
+		"m.counts[sc_root_counts.key] = sc_root_counts.value;",            // insert on entry-end
+		"sc_root_nested.value[sc_root_nested_e_value.key] = sc_root_nested_e_value.value;", // nested insert into outer scratch
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q", want)
+		}
+	}
+}
