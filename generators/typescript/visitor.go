@@ -99,6 +99,20 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		f.line("        %s = arr;", acc)
 		f.line("        break;")
 		f.line("      }")
+	case ir.KindMap:
+		// A map is a wrapper sequence of {key,value} entry classes: each entry's
+		// opening header is read by readHeader(), decodeFrom consumes it to its
+		// SequenceEnd, then the pair is set (last write wins on a duplicate key).
+		entry := g.typeName(x.ElemRef.Key)
+		f.line("      case %d: {", x.ID)
+		f.line("        const _m: %s = new Map();", g.tsType(x))
+		f.line("        while (c.readHeader()) {")
+		f.line("          const _e = %s.decodeFrom(c);", entry)
+		f.line("          _m.set(_e.%s, _e.%s);", x.MapKey().Name, x.MapValue().Name)
+		f.line("        }")
+		f.line("        %s = _m;", acc)
+		f.line("        break;")
+		f.line("      }")
 	}
 }
 

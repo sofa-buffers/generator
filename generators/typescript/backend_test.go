@@ -518,3 +518,32 @@ func TestTSInt64Default(t *testing.T) {
 		}
 	}
 }
+
+func TestTSMapField(t *testing.T) {
+	src := `
+version: 1
+messages:
+  M:
+    payload:
+      counts: { type: map, id: 1, key: { type: string, maxlen: 32 }, value: { type: u32 }, count: 128 }
+      nested:
+        type: map
+        id: 2
+        key: { type: u32 }
+        value: { type: map, key: { type: u32 }, value: { type: u8 } }
+`
+	m := genTSWith(t, src, map[string]any{})
+	for _, want := range []string{
+		"counts: Map<string, number> = new Map();",           // surface container
+		"nested: Map<number, Map<number, number>> = new Map();", // nested map value
+		"Array.from(this.counts.keys()).sort(",               // canonical-order encode
+		"const _e = new MCountsEntry();",                     // entry-class reuse on marshal
+		"const _m: Map<string, number> = new Map();",         // decode collector
+		"_m.set(_e.key, _e.value);",                          // build map on decode
+		"MCountsEntry.decodeFrom(c)",                         // entry decode via decodeFrom
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.ts missing %q", want)
+		}
+	}
+}

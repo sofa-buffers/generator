@@ -307,6 +307,9 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
 		return
+	case ir.KindMap:
+		g.emitMarshalMap(f, fld, acc)
+		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
@@ -314,6 +317,29 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 	f.line("    if (%s !== %s) {", acc, g.tsDefault(fld))
 	f.line("      %s", write)
 	f.line("    }")
+}
+
+// emitMarshalMap writes a map as a wrapper sequence of {key,value} entry classes
+// (MESSAGE_SPEC S5.4), reusing the entry class's own marshal. A JS Map preserves
+// insertion order, so keys are sorted for canonical, deterministic bytes; the
+// child id is the 0-based entry index.
+func (g *gen) emitMarshalMap(f *tsfile, fld *ir.Field, acc string) {
+	entry := g.typeName(fld.ElemRef.Key)
+	kName, vName := fld.MapKey().Name, fld.MapValue().Name
+	f.line("    os.writeSequenceBegin(%d);", fld.ID)
+	f.line("    {")
+	f.line("      const _ks = Array.from(%s.keys()).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));", acc)
+	f.line("      let _i = 0;")
+	f.line("      for (const _k of _ks) {")
+	f.line("        os.writeSequenceBegin(_i++);")
+	f.line("        const _e = new %s();", entry)
+	f.line("        _e.%s = _k;", kName)
+	f.line("        _e.%s = %s.get(_k)!;", vName, acc)
+	f.line("        _e.marshal(os);")
+	f.line("        os.writeSequenceEnd();")
+	f.line("      }")
+	f.line("    }")
+	f.line("    os.writeSequenceEnd();")
 }
 
 func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {

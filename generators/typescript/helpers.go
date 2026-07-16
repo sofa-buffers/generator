@@ -289,6 +289,10 @@ func (g *gen) tsType(f *ir.Field) string {
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
 		return g.tsArrayType(f.Elem, f.ElemRef, f.ElemItems)
+	case ir.KindMap:
+		// map<K,V> -> Map. Keys are bigint/number/string/enum (never Long objects,
+		// which would key by identity), so a JS Map keys them by value.
+		return fmt.Sprintf("Map<%s, %s>", g.tsType(f.MapKey()), g.tsType(f.MapValue()))
 	}
 	return "unknown"
 }
@@ -384,6 +388,8 @@ func (g *gen) tsDefault(f *ir.Field) string {
 			}
 		}
 		return "[]"
+	case ir.KindMap:
+		return "new Map()"
 	}
 	return "undefined as never"
 }
