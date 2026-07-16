@@ -4,6 +4,9 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <span>
+#include <cstring>
+#include <cstddef>
 #include "sofab/sofab.hpp"
 
 static_assert(sofab::API_VERSION == 1,
@@ -46,6 +49,14 @@ struct _MsgSeq : sofab::IStreamMessage {
         is.read(row);
     }
 };
+template <typename C>
+std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {
+    using _T = typename C::value_type;
+    const _T _z{};
+    std::size_t _n = _a.size();
+    while (_n > 0 && std::memcmp(&_a[_n - 1], &_z, sizeof(_T)) == 0) --_n;
+    return std::span<const _T>(_a.data(), _n);
+}
 #endif
 
 struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {

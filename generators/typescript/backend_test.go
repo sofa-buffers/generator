@@ -129,25 +129,31 @@ func TestTSInt64Long(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "long"})
 	for _, want := range []string{
 		`import { OStream, Cursor, Long, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`,
-		// Long[] backing field + accessor pair; setter converts once.
-		"private _us: Long[] = [];",
+		// Long[] backing field + accessor pair; setter converts once. us is
+		// `count: 8`, so its implied default is 8 Long zeros (issue#136).
+		"private _us: Long[] = [Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n)];",
 		"get us(): Long[] { return this._us; }",
 		"set us(vals: readonly (Long | bigint | number)[]) { this._us = vals.map(Long.fromValue); }",
 		// Nested array: Long[][] with a per-row setter conversion.
 		"private _rows: Long[][] = [];",
 		"set rows(vals: readonly (readonly (Long | bigint | number)[])[]) { this._rows = vals.map((_v0) => _v0.map(Long.fromValue)); }",
 		// Marshal reads the backing field; 64-bit arrays use the Long writers.
-		"if (this._us.length !== 0) {",
-		"os.writeUnsignedArrayLong(0, this._us);",
-		"os.writeSignedArrayLong(1, this._is);",
+		// These are `count: N` fields, so the trailing default run is trimmed
+		// (issue#136) by the Long flavour of the trim (word-pair compare). The
+		// omission guard compares against the implied N-element default.
+		"if (!longArrEq(this._us, [Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n)])) {",
+		"os.writeUnsignedArrayLong(0, _trimTailLong(this._us));",
+		"os.writeSignedArrayLong(1, _trimTailLong(this._is));",
+		"function _trimTailLong(a: readonly Long[]): readonly Long[] {",
 		// Defaulted Long array: materialized Long default + longArrEq guard.
 		`private _ud: Long[] = [Long.fromValue(1n), Long.fromValue(18446744073709551615n)];`,
 		"if (!longArrEq(this._ud, [Long.fromValue(1n), Long.fromValue(18446744073709551615n)])) {",
 		"function longArrEq(a: readonly Long[], b: readonly Long[]): boolean {",
 		// Decode bypasses the setter (readers return canonical Long[]); a wire
-		// count above the schema capacity rejects as INVALID (generator#100).
-		`case 0: { const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _a; break; }`,
-		`case 1: { const _a = c.readSignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "is: array count above schema capacity 8"); o._is = _a; break; }`,
+		// count above the schema capacity rejects as INVALID (generator#100), and a
+		// wire count below it refills the elided trailing default run (issue#136).
+		`case 0: { const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.fromValue(0)); break; }`,
+		`case 1: { const _a = c.readSignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "is: array count above schema capacity 8"); o._is = _padTo(_a, 8, Long.fromValue(0)); break; }`,
 		// toJSON prints via Long.toString with the schema signedness.
 		`"us": this._us.map((_x0) => _x0.toString(false)),`,
 		`"is": this._is.map((_x0) => _x0.toString(true)),`,
@@ -173,8 +179,8 @@ func TestTSInt64Number(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "number"})
 	for _, want := range []string{
 		// Arrays are Long-backed exactly as in long mode.
-		"os.writeUnsignedArrayLong(0, this._us);",
-		`case 0: { const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _a; break; }`,
+		"os.writeUnsignedArrayLong(0, _trimTailLong(this._us));",
+		`case 0: { const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.fromValue(0)); break; }`,
 		// Scalars are plain numbers: number default, !== 0 guard, Number() decode.
 		"u: number = 0;",
 		"i: number = -7;",
@@ -240,6 +246,204 @@ messages:
 	}
 }
 
+// fixedCountDef pairs a `count: N` field with a dynamic (count-less) one for
+// every native element kind the trailing-default-run rule touches, plus a
+// nested array-of-array and a non-native (string) element array — neither of
+// which is in scope.
+const fixedCountDef = `
+version: 1
+$defs:
+  enum:
+    Mode: { Off: { value: 0 }, Active: { value: 1 } }
+  bitfield:
+    Flags: { ready: { pos: 0 } }
+messages:
+  m:
+    payload:
+      fu32:  { id: 0, type: array, items: { type: u32, count: 5 } }
+      du32:  { id: 1, type: array, items: { type: u32 } }
+      fi16:  { id: 2, type: array, items: { type: i16, count: 3 } }
+      ffp32: { id: 3, type: array, items: { type: fp32, count: 3 } }
+      ffp64: { id: 4, type: array, items: { type: fp64, count: 3 } }
+      dfp64: { id: 5, type: array, items: { type: fp64 } }
+      fbool: { id: 6, type: array, items: { type: boolean, count: 4 } }
+      dbool: { id: 7, type: array, items: { type: boolean } }
+      fenum: { id: 8, type: array, items: { type: enum, count: 2, enum: { $ref: "#/$defs/enum/Mode" } } }
+      fbits: { id: 9, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Flags" } } }
+      rows:  { id: 10, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+      fstr:  { id: 11, type: array, items: { type: string, count: 2, maxlen: 8 } }
+`
+
+// TestTSFixedCountTrailingDefaultRun: a `count: N` native array is FIXED-LENGTH
+// (MESSAGE_SPEC §3) — the encoder emits only through the last non-default
+// element and the decoder refills [M, N) with the element default (issue#136).
+// Dynamic arrays keep every element (a trailing default is significant there),
+// and neither nested rows nor wrapper-sequence (string) element arrays are in
+// scope.
+func TestTSFixedCountTrailingDefaultRun(t *testing.T) {
+	mod := genTSWith(t, fixedCountDef, map[string]any{})
+	for _, want := range []string{
+		// Encode: fixed-count native arrays trim, one form per element kind.
+		"os.writeUnsignedArray(0, _trimTail(this.fu32, 0));",
+		"os.writeSignedArray(2, _trimTail(this.fi16, 0));",
+		"os.writeFp32Array(3, _trimTail(this.ffp32, 0));",
+		"os.writeFp64Array(4, _trimTail(this.ffp64, 0));",
+		"os.writeUnsignedArray(6, _trimTail(this.fbool.map((_e0) => (_e0 ? 1 : 0)), 0));",
+		"os.writeSignedArray(8, _trimTail(this.fenum, 0 as EnumMode));",
+		"os.writeUnsignedArray(9, _trimTail(this.fbits, 0));",
+		// Decode: refill to exactly the schema count, after the over-count reject.
+		`case 0: { const _a = c.readUnsignedArray() as number[]; if (_a.length > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); o.fu32 = _padTo(_a, 5, 0); break; }`,
+		`o.ffp64 = _padTo(_a, 3, 0); break; }`,
+		`o.fbool = _padTo(_a, 4, false); break; }`,
+		`o.fenum = _padTo(_a, 2, 0 as EnumMode); break; }`,
+		// The default test is a BIT-PATTERN compare (Object.is), so a trailing
+		// -0 / NaN is not a default and is never trimmed away.
+		"while (n > 0 && Object.is(a[n - 1], zero)) n--;",
+		"function _padTo<T>(a: T[], n: number, zero: T): T[] {",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("fixed-count message.ts missing %q", want)
+		}
+	}
+	for _, gone := range []string{
+		// Dynamic (count-less) arrays: no trim on encode, no refill on decode.
+		"_trimTail(this.du32", "_trimTail(this.dfp64", "_trimTail(this.dbool",
+		"os.writeUnsignedArray(1, _trimTail", "os.writeFp64Array(5, _trimTail",
+		"o.du32 = _padTo", "o.dfp64 = _padTo", "o.dbool = _padTo",
+		// A nested row is not a field: rows are never trimmed.
+		"_trimTail(_e0", "_trimTail(_e1",
+		// === would trim a trailing -0.0 (bit-pattern-distinct from +0.0).
+		"=== 0) n--", "!== 0) n--",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("fixed-count message.ts should not emit %q", gone)
+		}
+	}
+	// Dynamic arrays keep their plain writer call unchanged.
+	for _, want := range []string{
+		"os.writeUnsignedArray(1, this.du32);",
+		"os.writeFp64Array(5, this.dfp64);",
+		"os.writeUnsignedArray(7, this.dbool.map((_e0) => (_e0 ? 1 : 0)));",
+		// Nested rows lower to the untrimmed inner writer.
+		"os.writeUnsignedArray(_i0, _e0);",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("fixed-count message.ts missing unchanged dynamic form %q", want)
+		}
+	}
+	// A wrapper-sequence (string) element array is out of scope even with count.
+	if strings.Contains(mod, "_trimTail(this.fstr") || strings.Contains(mod, "o.fstr = _padTo") {
+		t.Error("string-element arrays are wrapper sequences: must not trim/pad")
+	}
+}
+
+// fixedDefaultDef pairs counted arrays that have no schema default, a SHORT
+// schema default, and an exactly-N default, against a dynamic control.
+const fixedDefaultDef = `
+version: 1
+$defs:
+  enum:
+    Mode: { Off: { value: 0 }, Active: { value: 1 } }
+messages:
+  m:
+    payload:
+      none:  { id: 0, type: array, items: { type: u32, count: 5 } }
+      short: { id: 1, type: array, items: { type: u32, count: 5 }, default: [1, 2] }
+      exact: { id: 2, type: array, items: { type: u32, count: 3 }, default: [1, 2, 3] }
+      dyn:   { id: 3, type: array, items: { type: u32 } }
+      dynd:  { id: 4, type: array, items: { type: u32 }, default: [1, 2] }
+      fb:    { id: 5, type: array, items: { type: boolean, count: 3 }, default: [true] }
+      ff:    { id: 6, type: array, items: { type: fp64, count: 2 } }
+      fe:    { id: 7, type: array, items: { type: enum, count: 2, enum: { $ref: "#/$defs/enum/Mode" } } }
+      fu64:  { id: 8, type: array, items: { type: u64, count: 3 }, default: [1] }
+      strs:  { id: 9, type: array, items: { type: string, count: 2, maxlen: 8 } }
+`
+
+// TestTSFixedCountDefaultLength: a `count: N` array is FIXED-LENGTH, so its
+// value is always exactly N elements (MESSAGE_SPEC §3) — with no schema default
+// that is N element defaults, and a short schema default is tail-padded to N.
+// This matches the fixed-storage backends' zero-filled `[T; N]`. Reached through
+// the omission path: an all-default array never touches the wire, so without the
+// materialized default it would decode back empty here and as N zeros there.
+func TestTSFixedCountDefaultLength(t *testing.T) {
+	mod := genTSWith(t, fixedDefaultDef, map[string]any{})
+	for _, want := range []string{
+		// No schema default -> N element defaults, per element kind.
+		"none: number[] = [0, 0, 0, 0, 0];",
+		"ff: number[] = [0, 0];",
+		"fe: EnumMode[] = [(0 as EnumMode), (0 as EnumMode)];",
+		// Short schema default -> tail-padded to N.
+		"short: number[] = [1, 2, 0, 0, 0];",
+		"fb: boolean[] = [true, false, false];",
+		"fu64: bigint[] = [1n, 0n, 0n];",
+		// Exactly-N default is unchanged.
+		"exact: number[] = [1, 2, 3];",
+		// The omission guard compares against that same materialized default, so
+		// an all-default fixed array is omitted whole (no bytes at all).
+		"if (!arrEq(this.none, [0, 0, 0, 0, 0])) {",
+		"if (!arrEq(this.short, [1, 2, 0, 0, 0])) {",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("fixed-default message.ts missing %q", want)
+		}
+	}
+	for _, gone := range []string{
+		// Dynamic arrays are NOT fixed-length: no synthesized default, no padding.
+		"dyn: number[] = [0",
+		"dynd: number[] = [1, 2, 0",
+		// A string-element array is a wrapper sequence: still starts empty.
+		"strs: string[] = [\"\"",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("fixed-default message.ts should not emit %q", gone)
+		}
+	}
+	for _, want := range []string{
+		"dyn: number[] = [];",      // no default, dynamic -> empty
+		"dynd: number[] = [1, 2];", // dynamic default kept verbatim (not padded)
+		"strs: string[] = [];",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("fixed-default message.ts missing unchanged dynamic form %q", want)
+		}
+	}
+}
+
+// TestTSFixedCountDefaultLong: the Long-backed 64-bit modes materialize the same
+// N-element default as Long values (and compare it with longArrEq).
+func TestTSFixedCountDefaultLong(t *testing.T) {
+	for _, mode := range []string{"long", "number"} {
+		mod := genTSWith(t, fixedDefaultDef, map[string]any{"int64": mode})
+		for _, want := range []string{
+			"private _fu64: Long[] = [Long.fromValue(1n), Long.fromValue(0n), Long.fromValue(0n)];",
+			"if (!longArrEq(this._fu64, [Long.fromValue(1n), Long.fromValue(0n), Long.fromValue(0n)])) {",
+		} {
+			if !strings.Contains(mod, want) {
+				t.Errorf("int64: %s fixed-default message.ts missing %q", mode, want)
+			}
+		}
+	}
+}
+
+// TestTSNoFixedCountNoHelpers: a schema without any fixed-count native array
+// must not carry the trim/pad helpers (they would be dead code).
+func TestTSNoFixedCountNoHelpers(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  dyn:
+    payload:
+      a: { id: 0, type: array, items: { type: u32 } }
+      s: { id: 1, type: string }
+`
+	mod := genTSWith(t, src, map[string]any{})
+	for _, gone := range []string{"_trimTail", "_trimTailLong", "_padTo"} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("schema with no fixed-count array must not emit %q", gone)
+		}
+	}
+}
+
 // metaDef exercises the metadata-comment surface: an enum with per-const
 // descriptions, a bitfield with a defaulted and a non-defaulted flag, a
 // deprecated field, and a field carrying a description + unit.
@@ -297,9 +501,12 @@ func TestTSInt64Default(t *testing.T) {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
 			`import { OStream, Cursor, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`,
-			"us: bigint[] = [];",
-			"os.writeUnsignedArray(0, this.us);",
-			`case 0: { const _a = c.readUnsignedArray() as bigint[]; if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o.us = _a; break; }`,
+			// count: 8 with no schema default -> 8 element defaults (issue#136).
+			"us: bigint[] = [0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n];",
+			// count: 8 -> the trailing default run is trimmed on encode and
+			// refilled on decode; the bigint element default is 0n (issue#136).
+			"os.writeUnsignedArray(0, _trimTail(this.us, 0n));",
+			`case 0: { const _a = c.readUnsignedArray() as bigint[]; if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o.us = _padTo(_a, 8, 0n); break; }`,
 			"u: bigint = 0n;",
 		} {
 			if !strings.Contains(mod, want) {

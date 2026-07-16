@@ -170,7 +170,7 @@ it; floats additionally allow `decimals` 0–15. All identifiers match
 | Blob | `blob` | optional `maxlen` (caps **decoded** bytes), `default` is base64 |
 | Enum | `type: enum` + `enum: {NAME: int \| {value,description}}` or `{$ref}` | values **signed 32-bit**, may be negative; `default` must be a declared value |
 | Bitfield | `type: bitfield` + `bits: {FLAG: {pos 0–63, default?}}` or `{$ref}` | each `pos` unique |
-| Array | `type: array` + `items: {type, count?, ...}` | element `type` ∈ numeric \| `string` \| `blob` \| `boolean` \| `enum` \| `bitfield` \| `struct` \| `union` \| `array` (composite/nested elements carry their own `fields`/`oneof`/`enum`/`bits`/`items`); `count` is the **optional** capacity (max), so `default` length ≤ `count`; `maxlen` only for string/blob elements |
+| Array | `type: array` + `items: {type, count?, ...}` | element `type` ∈ numeric \| `string` \| `blob` \| `boolean` \| `enum` \| `bitfield` \| `struct` \| `union` \| `array` (composite/nested elements carry their own `fields`/`oneof`/`enum`/`bits`/`items`); `count` is **optional** — when present the array is **fixed-length `N`** (exactly `N` logical elements, §11 *fixed-count arrays*), so `default` length ≤ `count` and the unlisted trailing elements are the element default; without it the array is dynamic; `maxlen` only for string/blob elements |
 | Struct | `type: struct` + `fields: {...}` or `{$ref}` | nested; **own id scope** |
 | Union | `type: union` + `oneof: {...}` or `{$ref}`, optional `default_id` | exactly one option; **own id scope** |
 
@@ -223,8 +223,9 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
    and validate the *resolved* tree (a dangling ref fails fast), but lower the
    *unresolved* document so a shared `$defs` type stays a single generated type.
 3. **`$data` cross-field rules** (no stock validator runs these): string
-   `default` length ≤ `maxlen`; array `default` length ≤ `items.count` (count is
-   the optional capacity). All six custom keywords recurse into composite array
+   `default` length ≤ `maxlen`; array `default` length ≤ `items.count` (a
+   shorter `default` leaves the trailing elements at the element default — the
+   array is still exactly `count` elements long, §11). All six custom keywords recurse into composite array
    elements (e.g. an array-of-struct element's fields get `uniqueIds`). Array
    `default` elements are additionally validated **per element** (type/range
    check, base64 decode for blob elements, enum membership).
@@ -621,8 +622,9 @@ so their backends must surface it explicitly:
 
 #### Decode verdict: over-count scalar arrays are INVALID (all families)
 
-MESSAGE_SPEC §3 makes a scalar-array field's schema `count` its capacity **N**
-(the wire carries the actual element count, `0..N`), and §7 classifies "a
+MESSAGE_SPEC §3 makes a scalar-array field's schema `count` its **fixed length
+N** (the wire carries `0..N` elements; a short wire count means the rest are the
+element default — §11 *fixed-count arrays*), and §7 classifies "a
 length or count above its maximum" as **INVALID** — silently accepting it is
 non-conformant. Every generated decoder therefore **rejects** a scalar array
 whose wire element count exceeds N: the whole decode fails with the backend's
@@ -764,6 +766,69 @@ metadata above. The `docs` target renders the same metadata as HTML page content
 
 ## 11. Cross-cutting design decisions
 
+- **Fixed-count arrays: the trailing-default-run rule** (MESSAGE_SPEC §3,
+  adopted in documentation#18; generator#136 / Crucible F-0010). A field
+  declared `count: N` is a **fixed-length** array of exactly `N` logical
+  elements — `count` is its *length*, not a capacity the value may fall short
+  of. A wire count `M < N` denotes an array whose last `N − M` elements equal
+  the **element default**. This binds both directions, and independently of a
+  backend's storage model:
+  - **Encode (every backend).** The canonical wire carries
+    `M' = 1 + index of the last element that differs from the element default`
+    (`M' = 0` when all are default); the trailing default run **must not** be
+    emitted. So `[7,8,9]` in a `count: 5` u32 field encodes as `23 03 07 08 09`,
+    never `23 05 07 08 09 00 00`. This is the array-level analogue of the
+    sparse-canonical field rule below.
+  - **Decode (every backend).** A decoder **must** materialize exactly `N`
+    elements — the `M` wire elements at `[0, M)`, element defaults at `[M, N)` —
+    so a pre-sized fixed array (`T[N]`, `std::array<T,N>`, `[T; N]`, `[N]T`) and
+    a growable list (`[]T`, `list`, `long[]`, `T[]`) recover the same value.
+    Fixed-storage backends get this from zero-initialized storage; growable
+    backends must pad explicitly.
+  - **"Equals the element default" means BIT-PATTERN equality, not `==`.**
+    `-0.0 == 0.0` is true in every target language, so a numeric compare would
+    trim a trailing `-0.0` and the decoder would rebuild it as `+0.0` — silent
+    round-trip data loss. The shared vectors deliberately treat `0.0` and `-0.0`
+    as distinct (`array_fp32_specials`), so the compare is on bits
+    (`math.Float64bits`, `f64::to_bits`, `Double.doubleToRawLongBits`,
+    `Object.is`, `@bitCast`, …). This also keeps NaN (bits ≠ 0) off the trim.
+  - **Dynamic (count-less) arrays are exempt** — there is no `N` to refill from,
+    so a trailing default element is significant and stays on the wire: `[7,0]`
+    encodes as count 2. Nested array-of-array **rows** are wrapper-sequence
+    elements, not `count: N` fields, and are likewise not trimmed.
+  - **Scope: native (count-prefixed) arrays only** — `u8…u64`, `i8…i64`,
+    `fp32`/`fp64`, `boolean`, `enum`, `bitfield`. String/blob/struct/union
+    element arrays are wrapper sequences with no wire count; their sparse
+    element-id gaps already carry the same meaning (§9.1).
+  - **`[M, N)` is the ELEMENT default, not the field's schema default.** A
+    schema `default:` describes the whole field when the field is *absent* from
+    the wire; once the field is *present* with count `M`, the trailing positions
+    are zero. Backends that decode into **pre-initialized fixed storage** must
+    therefore reset it: `std::array<T,N> f{1,2,3,0,0}` filled with only `M = 2`
+    wire elements would otherwise leak the schema default's `3` into position 2
+    (`[1,2,0,0,0]` → `23 02 01 02` → `[1,2,3,0,0]`). `cpp`/`rust`/`zig` emit that
+    reset at `array_begin`, **only** when the schema default is non-zero, so
+    every other schema's generated code is byte-identical. Growable backends are
+    immune — they replace the container wholesale on decode.
+  - **`c` satisfies the rule from the corelib, not from generated code**
+    (generator#136). It emits no encode *or* decode statements at all — only a
+    descriptor table that `corelib-c-cpp` walks — and
+    `SOFAB_OBJECT_FIELD_ARRAY` derives the element count structurally as
+    `sizeof(member) / sizeof(member[0]) == N`, with no used-length slot, so
+    neither half has a seam in generated code. Both therefore live in
+    `corelib-c-cpp` (corelib-c-cpp#87): `object.c` trims the trailing zero-element
+    run on encode, and `_bind_array_count` clears `[M, N)` on decode. The trim sits
+    on the C-only descriptor path deliberately — **not** in the
+    `sofab_ostream_write_array_of_*` writers, which the C++ wrapper calls directly
+    with dynamic `std::vector`s whose trailing defaults are significant. Generated
+    C is only canonical against a corelib carrying that fix; against an older one
+    it still interoperates (§3 requires decoders to accept a non-canonical
+    encoding). See `docs/generator/c.md`.
+  - **Why `cpp`/`rust`/`zig` keep their own `array_begin` reset** even though the
+    `c-cpp` profile now also gets the `[M, N)` clear from `corelib-c-cpp`: pure
+    `corelib: cpp`, `corelib-rs` and `corelib-zig` are separate libraries without
+    it, and the backends emit one code path per profile. Where it is redundant it
+    is free.
 - **Sparse-canonical encoding** — encoding is **always** sparse (no config
   toggle, MESSAGE_SPEC §2): a field equal to its effective default (schema
   `default:`, else type-zero) is skipped on encode and reconstructed on decode.

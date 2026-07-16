@@ -79,9 +79,13 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			// A wire element count above the schema `count` capacity is INVALID
 			// per MESSAGE_SPEC §3+§7 — reject the whole message, never keep-all
 			// (generator#100). Count-less (dynamic) arrays have no bound.
+			// A `count: N` array is fixed-length: a wire count M < N means the
+			// elements at [M, N) are the element default, which the encoder does
+			// not transmit. Materialize them so the decoded field always has
+			// exactly N elements (MESSAGE_SPEC §3).
 			if x.HasCount {
-				f.line("      case %d: { const _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s = _a; break; }",
-					x.ID, g.nativeArrayRead(x.Elem, x.ElemRef), x.Count, x.Name, x.Count, acc)
+				f.line("      case %d: { const _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s = _padTo(_a, %d, %s); break; }",
+					x.ID, g.nativeArrayRead(x.Elem, x.ElemRef), x.Count, x.Name, x.Count, acc, x.Count, g.elemZero(x))
 				return
 			}
 			f.line("      case %d: %s = %s; break;", x.ID, acc, g.nativeArrayRead(x.Elem, x.ElemRef))
@@ -95,6 +99,26 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		f.line("        %s = arr;", acc)
 		f.line("        break;")
 		f.line("      }")
+	}
+}
+
+// elemZero renders a native array field's element default — zero for every
+// native element kind — as the value _padTo fills a fixed-count array's elided
+// trailing run with. A Long is immutable, so one shared zero instance is safe
+// across the padded slots.
+func (g *gen) elemZero(x *ir.Field) string {
+	switch x.Elem {
+	case ir.KindU64, ir.KindI64:
+		if g.longArrays() {
+			return "Long.fromValue(0)"
+		}
+		return "0n"
+	case ir.KindBool:
+		return "false"
+	case ir.KindEnum:
+		return "0 as " + g.typeName(x.ElemRef.Key)
+	default: // u8/u16/u32, i8/i16/i32, fp32/fp64, bitfield
+		return "0"
 	}
 }
 
@@ -196,6 +220,46 @@ function arrEq(a: ArrayLike<unknown>, b: ArrayLike<unknown>): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
+}`
+
+// trimTailHelper is the encode-side trailing-default-run trim a fixed-count
+// (`count: N`) native array's canonical wire requires: only the elements up to
+// the last non-default one are emitted, and the decoder rebuilds the rest from
+// the schema count. Elements compare by BIT PATTERN (Object.is), never by ===:
+// -0 === 0 is true, so === would silently trim a trailing -0 to +0; Object.is
+// also keeps a trailing NaN (never the default) on the wire.
+const trimTailHelper = `// _trimTail returns a's leading run up to and including the last element that
+// differs from the element default, i.e. it drops the trailing default run. Used
+// only for fixed-count arrays, whose declared count lets the decoder rebuild the
+// dropped run. Elements compare with Object.is (bit pattern), so a trailing -0 or
+// NaN is not a default and survives the round-trip.
+function _trimTail<T>(a: readonly T[], zero: T): readonly T[] {
+  let n = a.length;
+  while (n > 0 && Object.is(a[n - 1], zero)) n--;
+  return n === a.length ? a : a.slice(0, n);
+}`
+
+// trimTailLongHelper is the Long[] flavour of the trim: a Long is an object
+// identity, so the element default is tested by (low, high) word pair (Object.is
+// would compare references and never match).
+const trimTailLongHelper = `// _trimTailLong is _trimTail for Long[]: the element default (zero) is tested by
+// (low, high) word pair, since Long objects are identities.
+function _trimTailLong(a: readonly Long[]): readonly Long[] {
+  let n = a.length;
+  while (n > 0 && a[n - 1]!.low === 0 && a[n - 1]!.high === 0) n--;
+  return n === a.length ? a : a.slice(0, n);
+}`
+
+// padToHelper is the decode-side counterpart of the trim: a fixed-count array
+// decodes to exactly its schema count, so the trailing default run the encoder
+// elided is materialized back. The corelib readers hand back a freshly allocated
+// plain array, so the grow is in place.
+const padToHelper = `// _padTo grows a to exactly n elements with the element default. A fixed-count
+// array always decodes to its schema count: a wire count M < N means the elements
+// at [M, N) are the element default, which the encoder does not transmit.
+function _padTo<T>(a: T[], n: number, zero: T): T[] {
+  while (a.length < n) a.push(zero);
+  return a;
 }`
 
 // longArrEqHelper is the Long[] flavour of arrEq: Long elements are object

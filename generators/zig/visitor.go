@@ -589,7 +589,20 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string) {
 		case fkStruct:
 			fa := frameArms{fr: fr}
 			for _, fld := range fr.fields {
+				if g.zigFixedArrayNeedsReset(fld) {
+					// A fixed [N]T whose declaration default is the schema
+					// default: clear it so the elements the encoder trimmed off
+					// the tail decode as the element default, not as that schema
+					// default (MESSAGE_SPEC S3 -- see zigFixedArrayNeedsReset).
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s.%s = @splat(%s),",
+						fld.ID, fr.path, zigIdent(fld.Name), zigElemZero(fld.Elem)))
+					// The reset reads only `id`: a fixed array's storage is the
+					// schema count, so the wire count is not consumed here.
+					idUsed = true
+					continue
+				}
 				if g.dynNativeArray(fld) {
+					idUsed, countUsed = true, true
 					elem := g.zigArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems)
 					body := fmt.Sprintf("%s.%s = _allocN(%s, self.alloc, count)", fr.path, zigIdent(fld.Name), elem)
 					if g.limits.arrayHas {
@@ -604,7 +617,6 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string) {
 				}
 			}
 			if len(fa.arms) > 0 {
-				idUsed, countUsed = true, true
 				all = append(all, fa)
 			}
 		case fkNestedNative:

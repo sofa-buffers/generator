@@ -167,6 +167,169 @@ messages:
 	}
 }
 
+// TestPythonFixedCountTrailingDefaultRun: a `count: N` native array is
+// FIXED-LENGTH (MESSAGE_SPEC §3) — encode elides the trailing element-default
+// run, decode rebuilds it out to N. A dynamic (count-less) array has no N to
+// refill from, so its trailing default is significant and must survive
+// untouched (generator#136 / F-0010).
+func TestPythonFixedCountTrailingDefaultRun(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  enum:
+    Mode: { Off: { value: 0 }, Active: { value: 1 } }
+messages:
+  T:
+    payload:
+      fixedU32:  { id: 0, type: array, items: { type: u32, count: 5 } }
+      fixedI16:  { id: 1, type: array, items: { type: i16, count: 3 } }
+      fixedF32:  { id: 2, type: array, items: { type: fp32, count: 2 } }
+      fixedF64:  { id: 3, type: array, items: { type: fp64, count: 2 } }
+      fixedBool: { id: 4, type: array, items: { type: boolean, count: 4 } }
+      fixedEnum: { id: 5, type: array, items: { type: enum, enum: { $ref: "#/$defs/enum/Mode" }, count: 2 } }
+      dynU32:    { id: 6, type: array, items: { type: u32 } }
+      dynStrs:   { id: 7, type: array, items: { type: string } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		// helpers + the math import the float trim's bit-pattern compare needs
+		"import math",
+		"def _trim_tail(a: list, zero) -> list:",
+		"def _trim_tail_float(a: list) -> list:",
+		"def _pad_to(a: list, n: int, zero) -> list:",
+		// encode: fixed native arrays trim their trailing default run
+		"e.write_unsigned_array(0, _trim_tail(self.fixedU32, 0))",
+		"e.write_signed_array(1, _trim_tail(self.fixedI16, 0))",
+		"e.write_float32_array(2, _trim_tail_float(self.fixedF32))",
+		"e.write_float64_array(3, _trim_tail_float(self.fixedF64))",
+		"e.write_unsigned_array(4, _trim_tail([1 if _v else 0 for _v in self.fixedBool], 0))",
+		"e.write_signed_array(5, _trim_tail([int(_v) for _v in self.fixedEnum], 0))",
+		// decode: fixed native arrays refill to exactly the schema count
+		"self.fixedU32 = _pad_to(self.fixedU32, 5, 0)",
+		"self.fixedI16 = _pad_to(self.fixedI16, 3, 0)",
+		"self.fixedF32 = _pad_to(self.fixedF32, 2, 0.0)",
+		"self.fixedF64 = _pad_to(self.fixedF64, 2, 0.0)",
+		"self.fixedBool = _pad_to(self.fixedBool, 4, False)",
+		"self.fixedEnum = _pad_to(self.fixedEnum, 2, 0)",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q", want)
+		}
+	}
+	for _, bad := range []string{
+		// dynamic arrays: no trim on encode, no fill on decode
+		"e.write_unsigned_array(6, _trim_tail(self.dynU32, 0))",
+		"_pad_to(self.dynU32",
+		"_pad_to(self.dynStrs",
+	} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("message.py must not contain %q (dynamic arrays are unchanged)", bad)
+		}
+	}
+	if !strings.Contains(mod, "e.write_unsigned_array(6, self.dynU32)") {
+		t.Error("dynamic u32 array must encode untrimmed")
+	}
+	// The over-count guard must still reject M > N (generator#100).
+	if !strings.Contains(mod, "if len(self.fixedU32) > 5:") {
+		t.Error("over-count SofaDecodeError guard regressed")
+	}
+}
+
+// TestPythonFixedCountDefaultIsNElements: a `count: N` native array is
+// fixed-length, so its VALUE is always N elements — with no schema default that
+// is N element defaults, and a short schema default leaves the unlisted trailing
+// elements at the element default. Without this a fresh (or all-default, hence
+// omitted) array would be an empty list here while the fixed-storage camp
+// (`[T; N]` / `std::array<T, N>`) yields N zeros — the same MESSAGE_SPEC §3
+// divergence as the trailing default run, reached through the omission path
+// (generator#136 / F-0010).
+func TestPythonFixedCountDefaultIsNElements(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  enum:
+    Mode: { Off: { value: 0 }, Active: { value: 1 } }
+messages:
+  T:
+    payload:
+      noDflt:    { id: 0, type: array, items: { type: u32, count: 5 } }
+      shortDflt: { id: 1, type: array, items: { type: u32, count: 5 }, default: [1, 2] }
+      fullDflt:  { id: 2, type: array, items: { type: i32, count: 3 }, default: [1, 2, 3] }
+      fixedF64:  { id: 3, type: array, items: { type: fp64, count: 3 } }
+      fixedBool: { id: 4, type: array, items: { type: boolean, count: 4 } }
+      fixedEnum: { id: 5, type: array, items: { type: enum, enum: { $ref: "#/$defs/enum/Mode" }, count: 2 } }
+      dynU32:    { id: 6, type: array, items: { type: u32 } }
+      dynStrs:   { id: 7, type: array, items: { type: string } }
+      fixedStrs: { id: 8, type: array, items: { type: string, count: 3 } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		// no schema default -> N element defaults, per element kind
+		"noDflt: list[int] = field(default_factory=lambda: [0, 0, 0, 0, 0])",
+		"fixedF64: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])",
+		"fixedBool: list[bool] = field(default_factory=lambda: [False, False, False, False])",
+		"fixedEnum: list[EnumMode] = field(default_factory=lambda: [0, 0])",
+		// a short schema default is tail-padded to N
+		"shortDflt: list[int] = field(default_factory=lambda: [1, 2, 0, 0, 0])",
+		// an already-N-long default is unchanged
+		"fullDflt: list[int] = field(default_factory=lambda: [1, 2, 3])",
+		// marshal's omit-when-default compare must use the SAME padded literal,
+		// so an all-default (fresh) object still omits the field entirely.
+		"if self.noDflt != [0, 0, 0, 0, 0]:",
+		"if self.shortDflt != [1, 2, 0, 0, 0]:",
+		"if self.fixedBool != [False, False, False, False]:",
+		// dynamic + wrapper-sequence arrays keep starting empty
+		"dynU32: list[int] = field(default_factory=list)",
+		"dynStrs: list[str] = field(default_factory=list)",
+		"fixedStrs: list[str] = field(default_factory=list)",
+		"if len(self.dynU32) != 0:",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q", want)
+		}
+	}
+	// A dynamic native array has no N to pad to, so it must not gain a literal
+	// default (that would also flip its marshal gate).
+	if strings.Contains(mod, "dynU32: list[int] = field(default_factory=lambda:") {
+		t.Error("a count-less array must not get a materialized default")
+	}
+}
+
+// A schema whose only fixed-count native arrays are integral must not emit the
+// float trim helper or import math (they would be dead code).
+func TestPythonFixedCountNoFloatHelperWhenUnused(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  T:
+    payload:
+      fixedU32: { id: 0, type: array, items: { type: u32, count: 3 } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, bad := range []string{"import math", "_trim_tail_float"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("message.py must not contain %q for an all-integral schema", bad)
+		}
+	}
+}
+
+// A schema with no fixed-count native array must not emit the helpers at all.
+func TestPythonNoFixedArrayHelpersWhenUnused(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  T:
+    payload:
+      dynU32: { id: 0, type: array, items: { type: u32 } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, bad := range []string{"_trim_tail", "_pad_to", "import math"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("message.py must not contain %q when no fixed-count array exists", bad)
+		}
+	}
+}
+
 func TestPythonSyntaxValid(t *testing.T) {
 	py, err := exec.LookPath("python3")
 	if err != nil {

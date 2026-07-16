@@ -118,6 +118,7 @@ func (g *gen) hasObject() bool {
 func (g *gen) preludeFile() []byte {
 	f := newGoFile(g.pkg)
 	f.imp(corelibImport)
+	f.imp("math")
 	f.line(`// _visitorBase supplies no-op defaults for every sofab.Visitor method, so a
 // generated object overrides only the callbacks its fields actually use.
 type _visitorBase struct{}
@@ -151,6 +152,48 @@ func _narrowS[T ~int8 | ~int16 | ~int32 | ~int64](v []int64) []T {
 		out[i] = T(x)
 	}
 	return out
+}
+
+// _trimTail / _trimTailF32 / _trimTailF64 return a[:M'], where M' is one past the
+// last element that differs from the element default (0 if every element is the
+// default). A fixed-count array's canonical wire carries exactly those M'
+// elements; the decoder rebuilds the trailing default run from the schema count
+// (MESSAGE_SPEC S3). Elements compare by BIT PATTERN, not by ==, so a trailing
+// -0.0 (which == 0.0) survives the round-trip instead of being silently trimmed
+// to +0.0.
+func _trimTail[T comparable](a []T, zero T) []T {
+	n := len(a)
+	for n > 0 && a[n-1] == zero {
+		n--
+	}
+	return a[:n]
+}
+
+func _trimTailF32(a []float32) []float32 {
+	n := len(a)
+	for n > 0 && math.Float32bits(a[n-1]) == 0 {
+		n--
+	}
+	return a[:n]
+}
+
+func _trimTailF64(a []float64) []float64 {
+	n := len(a)
+	for n > 0 && math.Float64bits(a[n-1]) == 0 {
+		n--
+	}
+	return a[:n]
+}
+
+// _padTo grows a to exactly n elements with the element default. A fixed-count
+// array decodes to exactly its schema count regardless of the wire count, so a
+// growable container must materialize the trailing default run the encoder
+// elided (MESSAGE_SPEC S3).
+func _padTo[T any](a []T, n int, zero T) []T {
+	for len(a) < n {
+		a = append(a, zero)
+	}
+	return a
 }
 
 // _strSeq / _bytesSeq collect the elements of a string / blob array. Elements are
@@ -505,11 +548,33 @@ func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc string) {
 		} else {
 			f.line("\tif len(%s) != 0 {", acc)
 		}
-		g.marshalArray(f, "\t\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		g.marshalArray(f, "\t\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
 		f.line("\t}")
 		return
 	}
-	g.marshalArray(f, "\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	g.marshalArray(f, "\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
+}
+
+// trimExpr wraps a native array expression in the trailing-default-run trim a
+// fixed-count array's canonical encoding requires (MESSAGE_SPEC §3). Only a
+// declared `count: N` array is fixed-length; a dynamic (count-less) array has no
+// N to refill from, so a trailing default element is significant and stays.
+func (g *gen) trimExpr(val string, elem ir.Kind, ref *ir.TypeRef, fixed bool) string {
+	if !fixed {
+		return val
+	}
+	switch elem {
+	case ir.KindFP32:
+		return fmt.Sprintf("_trimTailF32(%s)", val)
+	case ir.KindFP64:
+		return fmt.Sprintf("_trimTailF64(%s)", val)
+	case ir.KindBool:
+		return fmt.Sprintf("_trimTail(%s, false)", val)
+	case ir.KindEnum, ir.KindBitfield:
+		return fmt.Sprintf("_trimTail(%s, %s(0))", val, g.typeName(ref.Key))
+	default:
+		return fmt.Sprintf("_trimTail(%s, 0)", val)
+	}
 }
 
 // marshalArray writes the array val as field idExpr. Numeric/enum/boolean/
@@ -517,16 +582,17 @@ func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc string) {
 // unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
 // whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
 // arrays, depth-suffixing loop vars to avoid collisions.
-func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		f.line("%ssofab.WriteUnsignedArray(e, %s, %s)", ind, idExpr, val)
+		f.line("%ssofab.WriteUnsignedArray(e, %s, %s)", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		f.line("%ssofab.WriteSignedArray(e, %s, %s)", ind, idExpr, val)
+		f.line("%ssofab.WriteSignedArray(e, %s, %s)", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindBool:
 		// bool is outside the integer array constraint; lower to 0/1 unsigned.
+		// Trimming the 0/1 image is equivalent to trimming the bools (false <-> 0).
 		bv := fmt.Sprintf("_b%d", depth)
 		f.line("%s{", ind)
 		f.line("%s\t%s := make([]uint8, len(%s))", ind, bv, val)
@@ -535,12 +601,12 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%s\t\t\t%s[%s] = 1", ind, bv, iv)
 		f.line("%s\t\t}", ind)
 		f.line("%s\t}", ind)
-		f.line("%s\tsofab.WriteUnsignedArray(e, %s, %s)", ind, idExpr, bv)
+		f.line("%s\tsofab.WriteUnsignedArray(e, %s, %s)", ind, idExpr, g.trimExpr(bv, ir.KindU8, nil, fixed))
 		f.line("%s}", ind)
 	case ir.KindFP32:
-		f.line("%se.WriteFloat32Array(%s, %s)", ind, idExpr, val)
+		f.line("%se.WriteFloat32Array(%s, %s)", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindFP64:
-		f.line("%se.WriteFloat64Array(%s, %s)", ind, idExpr, val)
+		f.line("%se.WriteFloat64Array(%s, %s)", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
@@ -572,7 +638,10 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindArray:
 		f.line("%se.WriteSequenceBegin(%s)", ind, idExpr)
 		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
-		g.marshalArray(f, ind+"\t", fmt.Sprintf("sofab.ID(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		// A nested row is a wrapper-sequence element, not a `count: N` field: the
+		// trailing-default-run rule is scoped to fields (MESSAGE_SPEC §3), so rows
+		// are never trimmed.
+		g.marshalArray(f, ind+"\t", fmt.Sprintf("sofab.ID(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
 		f.line("%s}", ind)
 		f.line("%se.WriteSequenceEnd()", ind)
 	}
@@ -627,15 +696,20 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			if fld.HasCount {
 				guard = fmt.Sprintf("if len(v) > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", fld.Count)
 			}
+			// A `count: N` array is fixed-length: the wire may carry M <= N
+			// elements, and positions [M, N) are the element default. A growable
+			// container must materialize them so the decoded value has exactly N
+			// elements on every storage model (MESSAGE_SPEC §3).
+			fill := g.padStmt(acc, fld)
 			switch {
 			case isUnsignedNativeArray(fld.Elem):
-				uArr = append(uArr, arm(fld.ID, guard+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
+				uArr = append(uArr, arm(fld.ID, guard+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)+fill))
 			case isSignedNativeArray(fld.Elem):
-				sArr = append(sArr, arm(fld.ID, guard+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
+				sArr = append(sArr, arm(fld.ID, guard+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)+fill))
 			case fld.Elem == ir.KindFP32:
-				f32Arr = append(f32Arr, arm(fld.ID, guard+acc+" = v"))
+				f32Arr = append(f32Arr, arm(fld.ID, guard+acc+" = v"+fill))
 			case fld.Elem == ir.KindFP64:
-				f64Arr = append(f64Arr, arm(fld.ID, guard+acc+" = v"))
+				f64Arr = append(f64Arr, arm(fld.ID, guard+acc+" = v"+fill))
 			default: // wrapper-sequence array (string/blob/struct/union/nested)
 				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s = %s[:0]\n\t\treturn %s, nil", acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems))))
 			}
@@ -682,6 +756,27 @@ func emitIDSwitch(f *gofile, recv, sig string, arms []string) {
 	f.line("\treturn nil")
 	f.line("}")
 	f.blank()
+}
+
+// padStmt is the statement (prefixed with a newline+indent, or "" when the field
+// is dynamic) that fills a decoded fixed-count array's elided trailing default
+// run back out to the schema count.
+func (g *gen) padStmt(acc string, fld *ir.Field) string {
+	if !fld.HasCount {
+		return ""
+	}
+	var zero string
+	switch fld.Elem {
+	case ir.KindBool:
+		zero = "false"
+	case ir.KindFP32, ir.KindFP64:
+		zero = "0"
+	case ir.KindEnum, ir.KindBitfield:
+		zero = g.typeName(fld.ElemRef.Key) + "(0)"
+	default:
+		zero = "0"
+	}
+	return fmt.Sprintf("\n\t\t%s = _padTo(%s, %d, %s)", acc, acc, fld.Count, zero)
 }
 
 // narrowArrayStmt assigns a widened native array (v) into the field, narrowing to

@@ -90,12 +90,29 @@ func hasDynPrimArray(fs []frame) bool {
 }
 
 // primFill is the statement filling the next slot of the primitive array field
-// `target`. A schema-bounded array was allocated exactly by ArrayBegin (its
-// generator#100 guard bounds the count); a count-less array starts small and
-// grows on demand via EnsureCap, so an untrusted wire count never allocates.
+// `target`. A fixed-count array was allocated at exactly its schema count N by
+// ArrayBegin (its generator#100 guard rejects a wire count above N), so the
+// wire's M <= N elements land in place and C#'s zero-initialization already
+// leaves [M, N) at the element default the encoder elided (MESSAGE_SPEC §3). A
+// count-less array starts small and grows on demand via EnsureCap, so an
+// untrusted wire count never allocates.
 func primFill(target string, fld *ir.Field, rhs string) string {
 	if !fld.HasCount {
 		return fmt.Sprintf("%s = EnsureCap(%s, ai, acap); %s[ai++] = %s;", target, target, target, rhs)
+	}
+	return fmt.Sprintf("%s[ai++] = %s;", target, rhs)
+}
+
+// nativeListFill is the statement filling the next slot of a native List<T>
+// array field `target` (boolean/enum/bitfield elements — these value-convert
+// element-wise and so stay List<T>, cf. primArrayElem). A fixed-count list was
+// pre-filled to exactly N element defaults by ArrayBegin, so the wire's M <= N
+// elements overwrite [0, M) by index and the trailing default run [M, N) the
+// encoder elided is already materialized (MESSAGE_SPEC §3). A dynamic array
+// appends: its length is exactly the wire count.
+func nativeListFill(target string, fld *ir.Field, rhs string) string {
+	if !fld.HasCount {
+		return fmt.Sprintf("%s.Add(%s);", target, rhs)
 	}
 	return fmt.Sprintf("%s[ai++] = %s;", target, rhs)
 }
@@ -197,7 +214,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && unsignedArrayElem(fld.Elem):
 				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			case fld.Kind == ir.KindArray && unsignedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s.%s.Add(%s); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), fld, g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			}
 		}
 	}
@@ -224,7 +241,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && signedArrayElem(fld.Elem):
 				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			case fld.Kind == ir.KindArray && signedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s.%s.Add(%s); break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), fld, g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			}
 		}
 	}
@@ -350,13 +367,26 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 					fld.Name, g.limits.arrayCount)
 			}
 			if fld.Kind == ir.KindArray && primArrayElem(fld.Elem) {
-				alloc := "new %s[count]"
+				// A `count: N` array is FIXED-LENGTH: allocate exactly N (not the
+				// wire count M <= N, which the guard above already bounds). C#
+				// zero-initializes, so [M, N) is the element default the encoder
+				// elided and Length is N on every decode (MESSAGE_SPEC §3).
+				alloc := fmt.Sprintf("new %%s[%d]", fld.Count)
 				if !fld.HasCount {
 					alloc = "new %s[Math.Min(count, ArrayInitCap)]"
 				}
 				f.line("            case (%s, %d): %s%s.%s = "+alloc+"; break;", fr.loc, fld.ID, guard, fr.path, csIdent(fld.Name), g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
-				f.line("            case (%s, %d): %s%s.%s.Clear(); break;", fr.loc, fld.ID, guard, fr.path, csIdent(fld.Name))
+				acc := fr.path + "." + csIdent(fld.Name)
+				if fld.HasCount {
+					// Fixed-length List<T>: pre-fill the schema count with element
+					// defaults; the wire's M <= N elements then overwrite [0, M) by
+					// index (nativeListFill) and [M, N) stays default.
+					f.line("            case (%s, %d): %s%s.Clear(); for (int _p = 0; _p < %d; _p++) %s.Add(default(%s)); break;",
+						fr.loc, fld.ID, guard, acc, fld.Count, acc, g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
+				} else {
+					f.line("            case (%s, %d): %s%s.Clear(); break;", fr.loc, fld.ID, guard, acc)
+				}
 			}
 		}
 	}

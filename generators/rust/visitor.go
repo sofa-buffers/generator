@@ -549,7 +549,20 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
 						if _, _, ok := g.fixedNativeArray(fld); ok {
-							continue // fixed [T; N]: nothing to clear
+							// A fixed `[T; N]` is pre-allocated in the struct default, so
+							// the M wire elements store straight into it and no clear is
+							// needed to make room. But the encoder trims the trailing
+							// default run (MESSAGE_SPEC S3), so positions [M, N) are never
+							// stored and must read back as the ELEMENT default (zero). A
+							// non-zero schema `default:` would otherwise leak through that
+							// untouched tail, so wipe it to the zero image first. Reaching
+							// array_begin means the field is PRESENT on the wire, so this
+							// never disturbs the sparse-omission contract: an ABSENT field
+							// keeps its full schema default.
+							if zero, need := g.rustFixedArrayNeedsReset(fld); need {
+								f.line("            (_Loc::%s, %d) => %s.%s = %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), zero)
+							}
+							continue
 						}
 						// Unbounded array under an active receiver cap (generator#102):
 						// reject an over-cap wire count at the header, before any

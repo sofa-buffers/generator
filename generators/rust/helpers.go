@@ -345,6 +345,39 @@ func (g *gen) fixedNativeArray(f *ir.Field) (elem string, n int64, ok bool) {
 	return g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax), f.Count, true
 }
 
+// trimKinds reports which trailing-default-run trim helpers the schema needs
+// (MESSAGE_SPEC §3): the generic _trim_tail (integer/bool/enum/bitfield
+// elements, which lower to an int or to a 0/1 u8 image) and the bit-pattern
+// float variants. Only a top-level `count: N` native array field is trimmed, so
+// only those are scanned; every field of the crate appears exactly once here,
+// since module() emits one struct per named type plus one per message.
+func (g *gen) trimKinds(s *ir.Schema) (anyInt, anyF32, anyF64 bool) {
+	scan := func(fields []*ir.Field) {
+		for _, f := range fields {
+			if _, _, ok := g.fixedNativeArray(f); !ok {
+				continue
+			}
+			switch f.Elem {
+			case ir.KindFP32:
+				anyF32 = true
+			case ir.KindFP64:
+				anyF64 = true
+			default:
+				anyInt = true
+			}
+		}
+	}
+	for _, key := range s.NamedOrder {
+		if nt := s.Named[key]; nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+			scan(nt.Fields)
+		}
+	}
+	for _, m := range s.Messages {
+		scan(m.Fields)
+	}
+	return
+}
+
 // rustStr / rustBlob / rustSeq map a variable-length string, blob, or wrapper
 // sequence to its storage type per profile: std String/Vec (default), fixed
 // heapless::String<N>/Vec<T,N> sized from the schema (no_std), or an alloc heap
@@ -389,21 +422,11 @@ func (g *gen) rustSeq(elem string, hasCount bool, count int64) string {
 // so both backends encode the same N elements). With no default it is the
 // type-zero repeat literal (`[0; N]` / `[0.0; N]` / `[false; N]`).
 func (g *gen) rustFixedArrayDefault(f *ir.Field, elem string, n int64) string {
-	zero := "0"
-	switch f.Elem {
-	case ir.KindFP32, ir.KindFP64:
-		zero = "0.0"
-	case ir.KindBool:
-		zero = "false"
-	}
+	zero := rustElemZeroLit(f.Elem)
 	if vals, ok := f.Default.([]any); ok {
 		parts := make([]string, 0, n)
 		for _, v := range vals {
-			if f.Elem == ir.KindFP32 || f.Elem == ir.KindFP64 {
-				parts = append(parts, rustFloat(v))
-			} else {
-				parts = append(parts, fmt.Sprintf("%v", v))
-			}
+			parts = append(parts, rustElemLit(f.Elem, v))
 		}
 		for int64(len(parts)) < n {
 			parts = append(parts, zero)
@@ -411,6 +434,66 @@ func (g *gen) rustFixedArrayDefault(f *ir.Field, elem string, n int64) string {
 		return "[" + strings.Join(parts, ", ") + "]"
 	}
 	return fmt.Sprintf("[%s; %d]", zero, n)
+}
+
+// rustElemZeroLit / rustElemLit render a native array element's zero literal and
+// a schema-default element literal. They are the single source of truth for both
+// the Default image and the needs-reset test, so the two cannot disagree.
+func rustElemZeroLit(k ir.Kind) string {
+	switch k {
+	case ir.KindFP32, ir.KindFP64:
+		return "0.0"
+	case ir.KindBool:
+		return "false"
+	default:
+		return "0"
+	}
+}
+
+func rustElemLit(k ir.Kind, v any) string {
+	if k == ir.KindFP32 || k == ir.KindFP64 {
+		return rustFloat(v)
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// rustFixedArrayZero renders the all-element-default image of a fixed native
+// array `[elem; N]` (`[0; N]` / `[0.0; N]` / `[false; N]`). This is what a
+// short wire count decodes the tail to (MESSAGE_SPEC §3: elements [M, N) are the
+// ELEMENT default), which is not the same as the field's Default image once the
+// field carries a schema `default:`.
+func (g *gen) rustFixedArrayZero(f *ir.Field, n int64) string {
+	return fmt.Sprintf("[%s; %d]", rustElemZeroLit(f.Elem), n)
+}
+
+// rustFixedArrayNeedsReset reports whether a fixed native array's Default image
+// differs from its all-element-default image — i.e. whether the field carries a
+// non-zero schema `default:`. Only such a field needs decode's array_begin to
+// wipe the constructor image before the M wire elements are stored: positions
+// [M, N) must read back as the ELEMENT default, and the schema default would
+// otherwise leak through the untouched tail. Returns the zero image to reset to.
+// Gating on this keeps every other schema's generated code byte-identical.
+func (g *gen) rustFixedArrayNeedsReset(f *ir.Field) (zeroImage string, need bool) {
+	_, n, ok := g.fixedNativeArray(f)
+	if !ok {
+		return "", false
+	}
+	zero := g.rustFixedArrayZero(f, n)
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return zero, false // no schema default: the constructor is already the zero image
+	}
+	// Compare element-wise rather than against the rendered image: an explicit
+	// all-zero default (`[0, 0, 0]`) is semantically the zero image even though it
+	// renders differently from the `[0; N]` repeat literal, and must not pay for a
+	// reset. A -0.0 default does need one: [M, N) must read back as +0.0.
+	elemZero := rustElemZeroLit(f.Elem)
+	for _, v := range vals {
+		if rustElemLit(f.Elem, v) != elemZero {
+			return zero, true
+		}
+	}
+	return zero, false
 }
 
 func (g *gen) rustType(f *ir.Field) string {

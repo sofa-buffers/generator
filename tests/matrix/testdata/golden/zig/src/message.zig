@@ -168,6 +168,28 @@ fn _putc(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s)), inv: *bool) void {
     i.* += 1;
 }
 
+/// Trim the trailing run of element-default elements off a fixed-count
+/// native array: returns a[0..M'], where M' is one past the last element
+/// that differs from the element default (0 when every element is the
+/// default). A `count: N` array is fixed-length, so the canonical wire
+/// carries only those M' elements and the decoder rebuilds the trailing
+/// default run from the schema count (MESSAGE_SPEC S3). A dynamic
+/// (count-less) array has no N to refill from and is never trimmed.
+///
+/// Elements compare by BIT PATTERN (the element's byte image), never by
+/// ==: a trailing -0.0 (which == 0.0) must survive the round-trip instead
+/// of being silently trimmed to +0.0, and a NaN is never a default. Every
+/// native element type (u8..u64, i8..i64, f32, f64, bool, and the enum/
+/// bitfield integer backings) is padding-free, so the byte image is exact.
+///
+/// `a` is a fixed field's `[0..]` (a *const [N]T) or its sliceAsBytes
+/// image, so the result is always a slice, never the pointer-to-array.
+fn _trimTail(a: anytype) []const std.meta.Elem(@TypeOf(a)) {
+    var n = a.len;
+    while (n > 0 and std.mem.allEqual(u8, std.mem.asBytes(&a[n - 1]), 0)) : (n -= 1) {}
+    return a[0..n];
+}
+
 /// Mutable pointer to the last element of a decode-allocated slice.
 fn _last(s: anytype) *std.meta.Elem(@TypeOf(s)) {
     return @constCast(&s[s.len - 1]);

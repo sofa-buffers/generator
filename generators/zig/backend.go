@@ -358,11 +358,24 @@ func (g *gen) emitMarshalArray(f *zfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("        if (%s.len != 0) {", val)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), val, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), val, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
 		f.line("        }")
 		return
 	}
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, false, 0)
+}
+
+// trimExpr wraps a native array expression in the trailing-default-run trim that
+// a fixed-count array's canonical encoding requires (MESSAGE_SPEC S3): only the
+// elements up to the last non-default one are emitted, and the decoder rebuilds
+// the trailing default run from the schema count. Only a declared `count: N`
+// array is fixed-length; a dynamic (count-less) array has no N to refill from,
+// so a trailing default element is significant and stays.
+func trimExpr(val string, fixed bool) string {
+	if !fixed {
+		return val
+	}
+	return fmt.Sprintf("_trimTail(%s)", val)
 }
 
 // marshalArray writes the array val (a slice-like expression) as field idExpr.
@@ -371,25 +384,30 @@ func (g *gen) emitMarshalArray(f *zfile, fld *ir.Field, acc string) {
 // via its byte representation; string/blob/struct/union/array elements lower
 // to a wrapper sequence whose child ids are the 0-based index (MESSAGE_SPEC
 // S5.1). Recurses for nested arrays, depth-suffixing loop vars.
-func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+//
+// fixed marks val as a `count: N` array FIELD, whose canonical wire drops the
+// trailing run of default elements (MESSAGE_SPEC S3, see trimExpr).
+func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		// bitfield backing is an unsigned int, so it writes directly.
-		f.line("%stry os.writeArrayUnsigned(%s, %s);", ind, idExpr, val)
+		f.line("%stry os.writeArrayUnsigned(%s, %s);", ind, idExpr, trimExpr(val, fixed))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		// enum backing is a signed int, so it writes directly.
-		f.line("%stry os.writeArraySigned(%s, %s);", ind, idExpr, val)
+		f.line("%stry os.writeArraySigned(%s, %s);", ind, idExpr, trimExpr(val, fixed))
 	case ir.KindBool:
 		// bool has no array wire type; it lowers to a 0/1 unsigned array. A
 		// Zig bool is one byte holding exactly 0 or 1, so the slice's byte
 		// view is already the element list -- no temporary, no allocator.
-		f.line("%stry os.writeArrayUnsigned(%s, std.mem.sliceAsBytes(%s));", ind, idExpr, val)
+		// Trimming the 0/1 byte image is equivalent to trimming the bools
+		// (false <-> 0).
+		f.line("%stry os.writeArrayUnsigned(%s, %s);", ind, idExpr, trimExpr(fmt.Sprintf("std.mem.sliceAsBytes(%s)", val), fixed))
 	case ir.KindFP32:
-		f.line("%stry os.writeArrayFp32(%s, %s);", ind, idExpr, val)
+		f.line("%stry os.writeArrayFp32(%s, %s);", ind, idExpr, trimExpr(val, fixed))
 	case ir.KindFP64:
-		f.line("%stry os.writeArrayFp64(%s, %s);", ind, idExpr, val)
+		f.line("%stry os.writeArrayFp64(%s, %s);", ind, idExpr, trimExpr(val, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element
 		// default (empty), leaving an id gap the decoder restores.
@@ -415,7 +433,11 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindArray:
 		f.line("%stry os.writeSequenceBegin(%s);", ind, idExpr)
 		f.line("%sfor (%s, 0..) |%s, %s| {", ind, val, ev, iv)
-		g.marshalArray(f, ind+"    ", fmt.Sprintf("@intCast(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+		// A nested row is a wrapper-sequence element, not a `count: N` field:
+		// the trailing-default-run rule is scoped to fields (MESSAGE_SPEC S3),
+		// so rows are never trimmed. (A nested array is always a slice anyway --
+		// only a direct field lowers to a fixed [N]T.)
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("@intCast(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
 		f.line("%s}", ind)
 		f.line("%stry os.writeSequenceEnd();", ind)
 	}
@@ -488,6 +510,28 @@ func (g *gen) emitSupport(f *zfile, dynAlloc bool) {
 	f.line("    }")
 	f.line("    @constCast(&s[i.*]).* = v;")
 	f.line("    i.* += 1;")
+	f.line("}")
+	f.blank()
+	f.line("/// Trim the trailing run of element-default elements off a fixed-count")
+	f.line("/// native array: returns a[0..M'], where M' is one past the last element")
+	f.line("/// that differs from the element default (0 when every element is the")
+	f.line("/// default). A `count: N` array is fixed-length, so the canonical wire")
+	f.line("/// carries only those M' elements and the decoder rebuilds the trailing")
+	f.line("/// default run from the schema count (MESSAGE_SPEC S3). A dynamic")
+	f.line("/// (count-less) array has no N to refill from and is never trimmed.")
+	f.line("///")
+	f.line("/// Elements compare by BIT PATTERN (the element's byte image), never by")
+	f.line("/// ==: a trailing -0.0 (which == 0.0) must survive the round-trip instead")
+	f.line("/// of being silently trimmed to +0.0, and a NaN is never a default. Every")
+	f.line("/// native element type (u8..u64, i8..i64, f32, f64, bool, and the enum/")
+	f.line("/// bitfield integer backings) is padding-free, so the byte image is exact.")
+	f.line("///")
+	f.line("/// `a` is a fixed field's `[0..]` (a *const [N]T) or its sliceAsBytes")
+	f.line("/// image, so the result is always a slice, never the pointer-to-array.")
+	f.line("fn _trimTail(a: anytype) []const std.meta.Elem(@TypeOf(a)) {")
+	f.line("    var n = a.len;")
+	f.line("    while (n > 0 and std.mem.allEqual(u8, std.mem.asBytes(&a[n - 1]), 0)) : (n -= 1) {}")
+	f.line("    return a[0..n];")
 	f.line("}")
 	f.blank()
 	f.line("/// Mutable pointer to the last element of a decode-allocated slice.")

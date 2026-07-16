@@ -146,12 +146,15 @@ func (g *gen) pyDefault(f *ir.Field) string {
 	case ir.KindArray:
 		// A NATIVE scalar array is a leaf field: materialize its schema default so
 		// an omitted default array reconstructs correctly and marshal can compare
-		// against it. Composite arrays are wrapper sequences (always framed) and
-		// start empty.
-		if isNativeArrayElem(f.Elem) {
-			if lit, ok := g.pyNativeArrayLiteral(f); ok {
-				return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
-			}
+		// against it. A `count: N` native array is fixed-length even with NO schema
+		// default: its value is N element defaults, so materialize those too.
+		// Without this a fresh (or all-default, hence omitted-on-the-wire) array
+		// would be an empty list on this growable backend while the fixed-storage
+		// camp yields N zeros — the same MESSAGE_SPEC §3 divergence as the trailing
+		// default run, reached through the omission path. Composite arrays are
+		// wrapper sequences (always framed) and start empty.
+		if lit, ok := g.pyNativeArrayDefault(f); ok {
+			return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
 		}
 		return "field(default_factory=list)"
 	}
@@ -172,11 +175,26 @@ func isNativeArrayElem(elem ir.Kind) bool {
 	return false
 }
 
-// pyNativeArrayLiteral renders a native scalar array's schema default as a Python
-// list literal ([...]); ("", false) when there is no default.
+// pyNativeArrayDefault renders a native array field's materialized default as a
+// Python list literal; ("", false) when the field has no materialized default (a
+// wrapper-sequence array, or a dynamic array with no schema default — both start
+// empty). It is the single gate for "does this array have a default literal?",
+// shared by the dataclass field default and marshal's omit-when-default compare,
+// which must agree exactly.
+func (g *gen) pyNativeArrayDefault(f *ir.Field) (string, bool) {
+	if !isNativeArrayElem(f.Elem) || (f.Default == nil && !f.HasCount) {
+		return "", false
+	}
+	return g.pyNativeArrayLiteral(f)
+}
+
+// pyNativeArrayLiteral renders a native scalar array's default as a Python list
+// literal ([...]); ("", false) when there is no default. A `count: N` array with
+// no schema default has one anyway — N element defaults — so a nil Default is
+// not a miss for it (callers gate on HasCount).
 func (g *gen) pyNativeArrayLiteral(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
-	if !ok {
+	if !ok && f.Default != nil {
 		return "", false
 	}
 	parts := make([]string, len(vals))
@@ -190,6 +208,15 @@ func (g *gen) pyNativeArrayLiteral(f *ir.Field) (string, bool) {
 			continue
 		}
 		parts[i] = scalarLit(v)
+	}
+	// A `count: N` array is exactly N elements long: a shorter schema default
+	// leaves the trailing ones at the element default. Tail-pad to N so this
+	// backend's initial value matches the fixed-storage camp's zero-filled
+	// `[T; N]` / `std::array<T, N>` (MESSAGE_SPEC §3).
+	if f.HasCount {
+		for int64(len(parts)) < f.Count {
+			parts = append(parts, pyElemZero(f.Elem))
+		}
 	}
 	return "[" + strings.Join(parts, ", ") + "]", true
 }

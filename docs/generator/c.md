@@ -34,8 +34,57 @@ model has no dynamic-container fallback
 Unlike the C++ `c-cpp` and Rust `no_std` fixed-capacity profiles there is **no
 `allow_dynamic` escape** for C: a schema with a genuinely dynamic collection (a
 `count`-less map, say) is a heap-target schema, and must be given explicit
-capacities before it can be generated for C. `count` never goes on the wire, so
-adding one keeps the encoding byte-identical to every other target.
+capacities before it can be generated for C. `count` itself never goes on the
+wire — but it is **not** encoding-neutral: it makes the array fixed-length `N`,
+which changes what the canonical wire carries (see below).
+
+## Fixed-count arrays: the S3 rule lives in the corelib, not in generated code
+
+MESSAGE_SPEC §3 makes `count: N` a **fixed-length** array of exactly `N`
+elements: the canonical encoding **elides the trailing default run**, and a
+decoder refills `[M, N)` from the **element** default (ARCHITECTURE §11,
+*fixed-count arrays*). `[7,8,9]` in a `count: 5` u32 field encodes as
+`23 03 07 08 09`, not `23 05 07 08 09 00 00`.
+
+C is the one target where **neither half is emitted by the generator**. Every
+other backend writes its own array call and hands the corelib a trimmed
+slice/span; C emits only a struct plus a static descriptor table, and
+`SOFAB_OBJECT_FIELD_ARRAY` derives the element count *structurally* —
+
+```c
+#define SOFAB_OBJECT_FIELD_ARRAY(id, obj, field, type) \
+    { id, offsetof(obj, field), sizeof(((obj *)0)->field), 0, type, \
+      (sizeof(((obj *)0)->field[0]) & 0xF) }
+```
+
+— so `object.c` sees `field->size / field->element_size == N` and there is no
+used-length slot, and no generated statement, to trim through. The rule is
+therefore implemented **in `corelib-c-cpp`** (generator#136 / Crucible F-0010,
+fixed by corelib-c-cpp#87):
+
+- **encode** — `object.c` trims the trailing all-zero element run before calling
+  the array writer. It lives on the C-only descriptor path and **not** in the
+  `sofab_ostream_write_array_of_*` writers, which the C++ wrapper calls directly
+  with dynamic `std::vector`s that have no `N` to refill from and so must keep
+  their trailing defaults.
+- **decode** — `_bind_array_count` (`istream.c`) accepts `M <= N`, rejects
+  `M > N` with `SOFAB_RET_E_INVALID_MSG`, and clears `[M, N)` to the element
+  default. The clear matters because `<prefix>_init` seeds the destination from
+  the **schema** default image, which describes the whole field only when the
+  field is *absent*; without it a `count: 5, default: [1,2,3]` field would decode
+  `23 02 01 02` as `[1,2,3,0,0]` instead of `[1,2,0,0,0]`.
+
+**Minimum corelib.** Generated C is only canonical against a `corelib-c-cpp` that
+carries corelib-c-cpp#87. Against an older one the generated sources still
+compile and interoperate — a decoder must accept a non-canonical encoding that
+carries trailing default elements (§3) — but C's own output keeps the trailing
+run, and a short wire count leaks the schema default.
+
+**Consequence for `corelib: c-cpp`.** The C++ wrapper shares `istream.c`, so that
+profile now gets the `[M, N)` clear from the corelib *as well as* from the
+`array_begin` reset the generator emits. The generated reset is kept regardless:
+it is what makes the pure `corelib: cpp` (heap) profile correct, since that is a
+different library without this fix, and it costs nothing where it is redundant.
 
 ## Struct member order (widest-first)
 

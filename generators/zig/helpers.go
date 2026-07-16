@@ -315,16 +315,51 @@ func (g *gen) zigNativeArrayParts(f *ir.Field) (string, bool) {
 	}
 	parts := make([]string, len(vals))
 	for i, v := range vals {
-		switch f.Elem {
-		case ir.KindBool:
-			parts[i] = fmt.Sprintf("%v", v)
-		case ir.KindFP32, ir.KindFP64:
-			parts[i] = zigFloat(v)
-		default: // numeric / enum / bitfield (int64 or a decimal string)
-			parts[i] = fmt.Sprintf("%v", v)
-		}
+		parts[i] = zigElemLit(f.Elem, v)
 	}
 	return strings.Join(parts, ", "), true
+}
+
+// zigElemLit renders one native array element literal: fp gets a decimal point,
+// bool renders as true/false, numeric/enum/bitfield as an int64 or a decimal
+// string.
+func zigElemLit(elem ir.Kind, v any) string {
+	switch elem {
+	case ir.KindFP32, ir.KindFP64:
+		return zigFloat(v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// zigFixedArrayNeedsReset reports whether a fixed native array field's decode
+// must clear the destination on arrayBegin before the wire elements land.
+//
+// A `count: N` array decodes to exactly N elements: M from the wire, the ELEMENT
+// default (zero) at [M,N) (MESSAGE_SPEC S3). The [N]T destination starts at the
+// field's declaration default, so with a non-zero SCHEMA default the untouched
+// tail would wrongly keep that schema default: with `default: [1,2,3]` on
+// `count: 5`, a value of [1,2,0,0,0] encodes (trimmed) to the 2-element wire
+// [1,2] and would decode back as [1,2,3,0,0] -- a corrupted round-trip. Clearing
+// first makes the tail the element default, matching the other backends.
+//
+// A field with no schema default (or an all-zero one) already declares an
+// all-zero array, so it needs no reset and its generated code is unchanged.
+func (g *gen) zigFixedArrayNeedsReset(f *ir.Field) bool {
+	if _, _, ok := g.fixedNativeArray(f); !ok {
+		return false
+	}
+	vals, ok := f.Default.([]any)
+	if !ok {
+		return false
+	}
+	zero := zigElemZero(f.Elem)
+	for _, v := range vals {
+		if zigElemLit(f.Elem, v) != zero {
+			return true
+		}
+	}
+	return false
 }
 
 // zigFixedArrayDefault renders the initializer of a fixed native array [N]T.

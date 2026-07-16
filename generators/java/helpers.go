@@ -71,16 +71,44 @@ func (g *gen) javaDefaultValue(f *ir.Field) string {
 // immutable-List expression (List.of(...)); ("", false) when there is no default.
 // It is used both to materialize the field default and, in marshal, as the RHS to
 // compare against for whole-array omission.
+//
+// A `count: N` array is fixed-length, so its value is ALWAYS exactly N elements:
+// a short schema default leaves the trailing ones at the element default, and no
+// schema default at all still means N element defaults. Both are tail-padded to N
+// here. Without this a fresh (or all-default, hence omitted-on-the-wire) array
+// would materialize shorter than N on this growable backend while the
+// fixed-storage camp yields N zeros — the same MESSAGE_SPEC §3 divergence as the
+// trailing default run, reached through the omission path (F-0010).
 func (g *gen) javaNativeArrayLiteral(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
-	if !ok {
-		return "", false
+	if !ok && (f.Default != nil || !f.HasCount) {
+		return "", false // dynamic and/or non-array default: no literal
 	}
 	parts := make([]string, len(vals))
 	for i, v := range vals {
 		parts[i] = g.javaArrayElemLit(f.Elem, v)
 	}
+	if f.HasCount {
+		for int64(len(parts)) < f.Count {
+			parts = append(parts, g.javaArrayZeroLit(f.Elem))
+		}
+	}
 	return "List.of(" + strings.Join(parts, ", ") + ")", true
+}
+
+// javaArrayZeroLit is the element default (zero for every native kind) as a boxed
+// Java literal, used to tail-pad a fixed-count array's default out to N.
+func (g *gen) javaArrayZeroLit(elem ir.Kind) string {
+	switch elem {
+	case ir.KindBool:
+		return "false"
+	case ir.KindFP32:
+		return "0.0f"
+	case ir.KindFP64:
+		return "0.0"
+	default: // integers, enum, bitfield -> Long
+		return "0L"
+	}
 }
 
 // javaArrayElemLit renders one native array element default as a boxed Java
@@ -162,12 +190,24 @@ func primArrayBase(k ir.Kind) string {
 // javaPrimArrayLiteral renders a primitive array field's schema default as a
 // `new long[]{...}` / `new float[]{...}` / `new double[]{...}` literal of exactly
 // `count` elements — the schema values tail-padded with the element zero (a fixed
-// array always has `count` elements on the wire, so a short default must be
-// zero-filled to match C++/Rust). ("", false) when there is no default.
+// array always has `count` elements, so a short default must be zero-filled to
+// match C++/Rust). ("", false) when there is no default.
+//
+// A `count: N` array with NO schema default is still fixed-length: its value is N
+// element defaults, rendered as the compact zero-filled `new long[N]` rather than
+// an N-element literal. Without this a fresh (or all-default, hence
+// omitted-on-the-wire) array would materialize empty on this growable backend
+// while the fixed-storage camp yields N zeros — the same MESSAGE_SPEC §3
+// divergence as the trailing default run, reached through the omission path
+// (F-0010). A dynamic (count-less) array has no N and keeps the shared
+// zero-length default.
 func (g *gen) javaPrimArrayLiteral(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
 	if !ok {
-		return "", false
+		if f.Default != nil || !f.HasCount {
+			return "", false
+		}
+		return fmt.Sprintf("new %s[%d]", primArrayBase(f.Elem), f.Count), true
 	}
 	base := primArrayBase(f.Elem)
 	zero := "0"
@@ -540,6 +580,23 @@ final class Sbuf {
     static long[] boolToLongArray(List<Boolean> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i) ? 1 : 0; return a; }
     static float[] toFloatArray(List<Float> l) { float[] a = new float[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
     static double[] toDoubleArray(List<Double> l) { double[] a = new double[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
+
+    // fillFalse resets l to exactly n false elements. A fixed-count boolean
+    // array decodes to exactly its schema count regardless of the wire count, so
+    // the growable List materializes the trailing default run the encoder elided
+    // and the arriving elements overwrite [0, M) by index (MESSAGE_SPEC 3).
+    static void fillFalse(List<Boolean> l, int n) { l.clear(); for (int i = 0; i < n; i++) l.add(false); }
+
+    // trimTail / trimTailF32 / trimTailF64 return a's first M' elements, where M'
+    // is one past the last element that differs from the element default (0 when
+    // every element is the default). A fixed-count array's canonical wire carries
+    // exactly those M' elements; the decoder rebuilds the trailing default run
+    // from the schema count (MESSAGE_SPEC 3). Elements compare by BIT PATTERN,
+    // not by ==, so a trailing -0.0 (which == 0.0) and a NaN survive the
+    // round-trip instead of being silently trimmed away.
+    static long[] trimTail(long[] a) { int n = a.length; while (n > 0 && a[n - 1] == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
+    static float[] trimTailF32(float[] a) { int n = a.length; while (n > 0 && Float.floatToRawIntBits(a[n - 1]) == 0) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
+    static double[] trimTailF64(double[] a) { int n = a.length; while (n > 0 && Double.doubleToRawLongBits(a[n - 1]) == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
 }
 `, g.banner, spdx, g.pkg))
 }
