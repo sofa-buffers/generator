@@ -47,6 +47,10 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 			return 0, false
 		}
 		return hdr + inner + 1, true
+	case ir.KindMap:
+		// An unbounded wrapper sequence: not statically sizeable, so fall back to
+		// the analytic MAX_SIZE cap (like an unbounded string/array).
+		return 0, false
 	}
 	return hdr, true
 }

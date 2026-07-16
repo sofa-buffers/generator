@@ -42,6 +42,14 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	// std::vector/std::string). The pure corelib-cpp path keeps dynamic containers.
 	fixed := clib
 	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: clib, fixed: fixed, allowDynamic: cfgBool(cfg, "allow_dynamic", false)}
+	// Maps target the pure corelib-cpp (std::map). The fixed-capacity c-cpp wrapper
+	// needs a heap-free map container (no sofab::FixedMap yet); reject it loudly
+	// rather than emit broken code (see docs/plans/maps.md §7.2).
+	if clib {
+		if name, ok := firstMapField(s); ok {
+			return nil, fmt.Errorf("map field %q: maps are not yet supported for corelib: c-cpp", name)
+		}
+	}
 	if fixed {
 		if err := g.checkBounded(s); err != nil {
 			return nil, err
@@ -57,6 +65,38 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	}
 	return files, nil
 }
+
+// firstMapField returns the name of the first reachable map field (walking
+// messages and named struct/union types), for the c-cpp rejection message.
+func firstMapField(s *ir.Schema) (string, bool) {
+	seen := map[string]bool{}
+	var walk func(fields []*ir.Field) (string, bool)
+	walk = func(fields []*ir.Field) (string, bool) {
+		for _, f := range fields {
+			switch f.Kind {
+			case ir.KindMap:
+				return f.Name, true
+			case ir.KindStruct, ir.KindUnion:
+				if !seen[f.Ref.Key] {
+					seen[f.Ref.Key] = true
+					if n, ok := walk(f.Ref.Target.Fields); ok {
+						return n, true
+					}
+				}
+			}
+		}
+		return "", false
+	}
+	for _, m := range s.Messages {
+		if n, ok := walk(m.Fields); ok {
+			return n, true
+		}
+	}
+	return "", false
+}
+
+// hasMap reports whether the schema has any reachable map field.
+func hasMap(s *ir.Schema) bool { _, ok := firstMapField(s); return ok }
 
 type gen struct {
 	schema  *ir.Schema
@@ -158,6 +198,9 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.line("#include <span>")
 	f.line("#include <cstring>")
 	f.line("#include <cstddef>")
+	if hasMap(g.schema) {
+		f.line("#include <map>")
+	}
 	f.line("#include %q", "sofab/sofab.hpp")
 	f.blank()
 	f.line("static_assert(sofab::API_VERSION == 1,")
@@ -183,6 +226,10 @@ func (g *gen) header(m *ir.Message) []byte {
 	// _trimTail (fixed-count encode trim, MESSAGE_SPEC §3) is corelib-agnostic:
 	// both wrappers take a std::span through the same templated OStream::write.
 	f.line("%s", cppTrimPrelude)
+	// Map collector: corelib: cpp only (the c-cpp path rejects maps).
+	if !g.clib && hasMap(g.schema) {
+		f.line("%s", cppMapSeqPrelude)
+	}
 	f.line("#endif")
 	f.blank()
 
@@ -510,6 +557,9 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 	case ir.KindArray:
 		g.emitSerializeArray(f, fld, acc)
 		return
+	case ir.KindMap:
+		g.emitSerializeMap(f, fld, acc)
+		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default.
 	// Sparse encoding is canonical (MESSAGE_SPEC S2); the decoder reconstructs the
@@ -544,6 +594,18 @@ func (g *gen) trimExpr(val string, trim bool) string {
 		return val
 	}
 	return fmt.Sprintf("_trimTail(%s)", val)
+}
+
+// emitSerializeMap writes a map as a wrapper sequence of {key,value} entry
+// structs (MESSAGE_SPEC S5.4), reusing the entry struct's own serialize.
+// std::map iterates in sorted key order, so the bytes are canonical and
+// deterministic; the child id is the 0-based entry index.
+func (g *gen) emitSerializeMap(f *hfile, fld *ir.Field, acc string) {
+	entry := g.typeName(fld.ElemRef.Key)
+	f.line("        (void)os.sequenceBegin(%d);", fld.ID)
+	f.line("        { sofab::id _i = 0; for (const auto &_kv : %s) { %s _e; _e.%s = _kv.first; _e.%s = _kv.second; (void)os.write(_i++, _e); } }",
+		acc, entry, cppIdent(fld.MapKey().Name), cppIdent(fld.MapValue().Name))
+	f.line("        (void)os.sequenceEnd();")
 }
 
 // serializeArray writes an array value as field idExpr, mirroring the Go/Python
@@ -715,6 +777,10 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			f.line("            %s = {};", acc)
 		}
 		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0)
+	case ir.KindMap:
+		// A map is a wrapper sequence of entry structs; the _MapSeq collector
+		// decodes each entry and inserts it into the std::map.
+		f.line("            { _MapSeq<%s, %s> _r; _r.out = &%s; is.read(_r); }", g.cppType(fld), g.typeName(fld.ElemRef.Key), acc)
 	}
 }
 
@@ -927,6 +993,12 @@ func (g *gen) reachable(m *ir.Message) []string {
 		for _, f := range fields {
 			if f.Kind == ir.KindArray {
 				visitArray(f.Elem, f.ElemRef, f.ElemItems)
+				continue
+			}
+			if f.Kind == ir.KindMap {
+				// A map's entry struct (key/value) is referenced via ElemRef; addRef
+				// recurses into its fields, so nested maps/structs are covered.
+				addRef(f.ElemRef)
 				continue
 			}
 			addRef(f.Ref)

@@ -115,6 +115,10 @@ func (g *gen) cppType(f *ir.Field) string {
 		return bitfieldBacking(f.Ref.Target)
 	case ir.KindArray:
 		return g.cppArrayContainer(f.Elem, f.ElemRef, f.ElemItems, f.Count, f.ElemMaxHas, f.ElemMax)
+	case ir.KindMap:
+		// map<K,V> -> std::map (sorted iteration gives canonical encode order for
+		// free). corelib: cpp only; the c-cpp fixed profile rejects maps.
+		return fmt.Sprintf("std::map<%s, %s>", g.cppType(f.MapKey()), g.cppType(f.MapValue()))
 	}
 	return "void"
 }
@@ -514,6 +518,20 @@ struct _MsgSeq : sofab::IStreamMessage {
             row.resize(_count);
         }
         is.read(row);
+    }
+};`
+
+// cppMapSeqPrelude decodes a map's wrapper sequence of {key,value} entry structs
+// (MESSAGE_SPEC S5.4) into a std::map: each child sequence decodes one Entry
+// (corelib-cpp is synchronous, so the temp is fully filled after is.read) and is
+// moved into the map (last write wins on a duplicate key). corelib: cpp only.
+const cppMapSeqPrelude = `template <typename Map, typename Entry>
+struct _MapSeq : sofab::IStreamMessage {
+    Map *out = nullptr;
+    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
+        Entry _e;
+        is.read(_e);
+        (*out)[_e.key] = std::move(_e.value);
     }
 };`
 

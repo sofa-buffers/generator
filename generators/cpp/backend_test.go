@@ -682,3 +682,41 @@ func g_containsInOrder(s string, needles ...string) bool {
 	}
 	return true
 }
+
+const cppMapSchema = `
+version: 1
+messages:
+  M:
+    payload:
+      counts: { type: map, id: 1, key: { type: string, maxlen: 32 }, value: { type: u32 }, count: 128 }
+      nested:
+        type: map
+        id: 2
+        key: { type: u32 }
+        value: { type: map, key: { type: u32 }, value: { type: u8 } }
+`
+
+func TestCppMapField(t *testing.T) {
+	// corelib: cpp (default): std::map surface + _MapSeq child-visitor decode.
+	h := headerFromYAML(t, cppMapSchema, "m.hpp")
+	for _, want := range []string{
+		"#include <map>", // include emitted only when a map is present
+		"std::map<std::string, std::uint32_t> counts",                           // surface container
+		"std::map<std::uint32_t, std::map<std::uint32_t, std::uint8_t>> nested", // nested map value
+		"struct _MapSeq",                 // shared collector prelude
+		"for (const auto &_kv : counts)", // sorted (std::map) canonical-order encode
+		"MCountsEntry _e; _e.key = _kv.first; _e.value = _kv.second;", // entry-struct reuse on serialize
+		"_MapSeq<std::map<std::string, std::uint32_t>, MCountsEntry>", // decode collector
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.hpp (cpp) missing %q", want)
+		}
+	}
+}
+
+func TestCppMapCcppRejected(t *testing.T) {
+	_, err := fixedHeader(t, cppMapSchema, "m.hpp", nil)
+	if err == nil || !strings.Contains(err.Error(), "not yet supported for corelib: c-cpp") {
+		t.Fatalf("expected c-cpp map rejection, got %v", err)
+	}
+}
