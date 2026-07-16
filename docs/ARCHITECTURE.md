@@ -800,16 +800,31 @@ metadata above. The `docs` target renders the same metadata as HTML page content
     `fp32`/`fp64`, `boolean`, `enum`, `bitfield`. String/blob/struct/union
     element arrays are wrapper sequences with no wire count; their sparse
     element-id gaps already carry the same meaning (§9.1).
-  - **The `c` backend is a known exception** (generator#136). It emits no encode
-    code at all — it emits a descriptor table and `corelib-c-cpp` walks it, and
-    `SOFAB_OBJECT_FIELD_ARRAY` derives the element count structurally as
-    `sizeof(member) / sizeof(member[0]) == N`, with no used-length slot. So the
-    trim is **not expressible in generated C** and needs a corelib change (the
-    array analogue of `SOFAB_OBJECT_FIELD_BLOB_SIZED`, which exists for exactly
-    this reason for blobs — issue #128). C *decode* is already conformant:
-    `_bind_array_count` accepts `M ≤ N` and leaves the trailing slots at their
-    init/default values, so C interoperates with the canonical wire the other
-    backends now emit; only C's own encode still emits the trailing run.
+  - **`[M, N)` is the ELEMENT default, not the field's schema default.** A
+    schema `default:` describes the whole field when the field is *absent* from
+    the wire; once the field is *present* with count `M`, the trailing positions
+    are zero. Backends that decode into **pre-initialized fixed storage** must
+    therefore reset it: `std::array<T,N> f{1,2,3,0,0}` filled with only `M = 2`
+    wire elements would otherwise leak the schema default's `3` into position 2
+    (`[1,2,0,0,0]` → `23 02 01 02` → `[1,2,3,0,0]`). `cpp`/`rust`/`zig` emit that
+    reset at `array_begin`, **only** when the schema default is non-zero, so
+    every other schema's generated code is byte-identical. Growable backends are
+    immune — they replace the container wholesale on decode.
+  - **The `c` backend is a known exception on both counts** (generator#136). It
+    emits no encode *or* decode statements at all — it emits a descriptor table
+    and `corelib-c-cpp` walks it — so neither fix has a seam in generated code:
+    1. *Encode.* `SOFAB_OBJECT_FIELD_ARRAY` derives the element count
+       structurally as `sizeof(member) / sizeof(member[0]) == N`, with no
+       used-length slot, so `object.c` always writes `N`. Needs the array
+       analogue of `SOFAB_OBJECT_FIELD_BLOB_SIZED` (which exists for exactly this
+       reason for blobs — issue #128), or a trailing-zero trim inside the
+       corelib's array writer (sound there, since every C array is fixed-count by
+       construction).
+    2. *Decode.* `_bind_array_count` accepts `M ≤ N` (so C **does** read the
+       canonical compact wire and is not cut off from the family) but leaves
+       `[M, N)` at the `<prefix>_init` values — i.e. the schema default, not the
+       element default. Same leak as above, no generated seam to fix it.
+    Both are corelib-side; see `docs/generator/c.md`.
 - **Sparse-canonical encoding** — encoding is **always** sparse (no config
   toggle, MESSAGE_SPEC §2): a field equal to its effective default (schema
   `default:`, else type-zero) is skipped on encode and reconstructed on decode.

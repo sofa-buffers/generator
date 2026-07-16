@@ -66,13 +66,29 @@ issue #128). Since every C array is fixed-count by construction (`count`-less is
 rejected above), the corelib could equivalently trim the trailing zero-element
 run in its array writer with no schema knowledge at all.
 
-**Decode is already conformant**, so this is an encode-side divergence only, not
-an interop break: `_bind_array_count` accepts any wire count `M <= N` and leaves
-the trailing slots at their init/default values (call `<prefix>_init` first —
-that is what seeds the defaults), and rejects `M > N` with
-`SOFAB_RET_E_INVALID_MSG`. C therefore reads the canonical compact wire the other
-backends emit and reconstructs the full `N` elements correctly; only C's own
-output still carries the trailing default run.
+**Decode is conformant only for a zero (or absent) schema default.**
+`_bind_array_count` accepts any wire count `M <= N` and rejects `M > N` with
+`SOFAB_RET_E_INVALID_MSG`, so C reads the canonical compact wire the other
+backends emit and rebuilds the full `N` elements. But it leaves the trailing
+slots "at their init/default values" — and `<prefix>_init` seeds those from the
+**schema** default image. §3 requires `[M, N)` to be the **element** default
+(zero); the schema default describes the whole field only when the field is
+*absent*. So a non-zero schema default leaks back on a short wire count:
+
+```
+count: 5, default: [1, 2, 3]        // init -> {1,2,3,0,0}
+wire 23 02 01 02                    // the canonical trim of the value [1,2,0,0,0]
+decoded -> [1,2,3,0,0]              // WRONG: the schema default's 3 survived
+expected -> [1,2,0,0,0]
+```
+
+This is a **second corelib-side gap** (the generator emits no decode statements
+for C either). It is pre-existing and already reachable — the growable backends
+have always written a compact count — not something the encode trim introduced.
+`cpp`/`rust`/`zig` had the identical latent bug in their `std::array`/`[T; N]`/
+`[N]T` storage and fix it in generated code by resetting the array to the element
+default at `array_begin` when (and only when) the schema default is non-zero; C
+has no such seam.
 
 ## Struct member order (widest-first)
 
