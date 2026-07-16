@@ -14,4 +14,21 @@ final class Sbuf {
     static long[] boolToLongArray(List<Boolean> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i) ? 1 : 0; return a; }
     static float[] toFloatArray(List<Float> l) { float[] a = new float[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
     static double[] toDoubleArray(List<Double> l) { double[] a = new double[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
+
+    // fillFalse resets l to exactly n false elements. A fixed-count boolean
+    // array decodes to exactly its schema count regardless of the wire count, so
+    // the growable List materializes the trailing default run the encoder elided
+    // and the arriving elements overwrite [0, M) by index (MESSAGE_SPEC 3).
+    static void fillFalse(List<Boolean> l, int n) { l.clear(); for (int i = 0; i < n; i++) l.add(false); }
+
+    // trimTail / trimTailF32 / trimTailF64 return a's first M' elements, where M'
+    // is one past the last element that differs from the element default (0 when
+    // every element is the default). A fixed-count array's canonical wire carries
+    // exactly those M' elements; the decoder rebuilds the trailing default run
+    // from the schema count (MESSAGE_SPEC 3). Elements compare by BIT PATTERN,
+    // not by ==, so a trailing -0.0 (which == 0.0) and a NaN survive the
+    // round-trip instead of being silently trimmed away.
+    static long[] trimTail(long[] a) { int n = a.length; while (n > 0 && a[n - 1] == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
+    static float[] trimTailF32(float[] a) { int n = a.length; while (n > 0 && Float.floatToRawIntBits(a[n - 1]) == 0) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
+    static double[] trimTailF64(double[] a) { int n = a.length; while (n > 0 && Double.doubleToRawLongBits(a[n - 1]) == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
 }
