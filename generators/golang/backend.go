@@ -309,6 +309,37 @@ type _seqSeq[T any] struct {
 func (s *_seqSeq[T]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
 	*s.out = append(*s.out, nil)
 	return s.mk(&(*s.out)[len(*s.out)-1]), nil
+}
+
+// _mapSeq collects a map's entries: a map lowers to a wrapper sequence of
+// {key,value} entry structs (MESSAGE_SPEC S5.4). Each entry decodes into a fresh
+// E (PE is *E and a Visitor); on the wrapper's EndSequence every entry is
+// inserted into the target map via get (last write wins on a duplicate key).
+type _mapSeq[K comparable, V any, E any, PE interface {
+	*E
+	sofab.Visitor
+}] struct {
+	_visitorBase
+	out *map[K]V
+	tmp []E
+	get func(*E) (K, V)
+}
+
+func (s *_mapSeq[K, V, E, PE]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
+	var zero E
+	s.tmp = append(s.tmp, zero)
+	return PE(&s.tmp[len(s.tmp)-1]), nil
+}
+
+func (s *_mapSeq[K, V, E, PE]) EndSequence() error {
+	if *s.out == nil {
+		*s.out = make(map[K]V, len(s.tmp))
+	}
+	for i := range s.tmp {
+		k, v := s.get(&s.tmp[i])
+		(*s.out)[k] = v
+	}
+	return nil
 }`)
 	if g.limits.any() {
 		f.blank()
@@ -510,6 +541,9 @@ func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
 		return
+	case ir.KindMap:
+		g.emitMarshalMap(f, fld, acc)
+		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
@@ -575,6 +609,42 @@ func (g *gen) trimExpr(val string, elem ir.Kind, ref *ir.TypeRef, fixed bool) st
 	default:
 		return fmt.Sprintf("_trimTail(%s, 0)", val)
 	}
+}
+
+// emitMarshalMap writes a map as a wrapper sequence of {key,value} entry
+// structs (MESSAGE_SPEC §5.4), reusing the hoisted entry struct's own marshal.
+// Entries are emitted in canonical key order (sorted) so the bytes are
+// deterministic and identical across languages despite Go's randomized map
+// iteration; the child id is the 0-based entry index.
+func (g *gen) emitMarshalMap(f *gofile, fld *ir.Field, acc string) {
+	f.imp("sort")
+	entry := g.typeName(fld.ElemRef.Key)
+	keyType := g.goType(fld.MapKey())
+	kName, vName := goFieldName(fld.MapKey().Name), goFieldName(fld.MapValue().Name)
+	f.line("\te.WriteSequenceBegin(%d)", fld.ID)
+	f.line("\t{")
+	f.line("\t\t_keys := make([]%s, 0, len(%s))", keyType, acc)
+	f.line("\t\tfor _k := range %s {", acc)
+	f.line("\t\t\t_keys = append(_keys, _k)")
+	f.line("\t\t}")
+	f.line("\t\tsort.Slice(_keys, func(_i, _j int) bool { return %s })", goMapLess("_keys[_i]", "_keys[_j]", fld.MapKey().Kind))
+	f.line("\t\tfor _idx, _k := range _keys {")
+	f.line("\t\t\te.WriteSequenceBegin(sofab.ID(_idx))")
+	f.line("\t\t\t_entry := %s{%s: _k, %s: %s[_k]}", entry, kName, vName, acc)
+	f.line("\t\t\t_entry.marshal(e)")
+	f.line("\t\t\te.WriteSequenceEnd()")
+	f.line("\t\t}")
+	f.line("\t}")
+	f.line("\te.WriteSequenceEnd()")
+}
+
+// goMapLess renders the canonical-order "less" comparison for a map key of the
+// given kind. bool has no `<`; every other allowed key type (int/enum/string) does.
+func goMapLess(a, b string, key ir.Kind) string {
+	if key == ir.KindBool {
+		return fmt.Sprintf("!%s && %s", a, b) // false < true
+	}
+	return fmt.Sprintf("%s < %s", a, b)
 }
 
 // marshalArray writes the array val as field idExpr. Numeric/enum/boolean/
@@ -688,6 +758,10 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			blob = append(blob, arm(fld.ID, acc+" = append([]byte(nil), v...)"))
 		case ir.KindStruct, ir.KindUnion:
 			seq = append(seq, arm(fld.ID, fmt.Sprintf("return &%s, nil", acc)))
+		case ir.KindMap:
+			// A map is a wrapper sequence of entry structs; collect them and build
+			// the map on the wrapper's EndSequence (see _mapSeq).
+			seq = append(seq, arm(fld.ID, fmt.Sprintf("return %s, nil", g.mapCollector("&"+acc, fld))))
 		case ir.KindArray:
 			// A wire element count above the schema `count` capacity is INVALID
 			// per MESSAGE_SPEC §3+§7 — reject, never clamp or keep-all
@@ -824,6 +898,17 @@ func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *i
 		return fmt.Sprintf("&_seqSeq[%s]{out: %s, mk: func(p *[]%s) sofab.Visitor { return %s }}", inner, ptr, inner, mk)
 	}
 	return "_visitorBase{}"
+}
+
+// mapCollector returns the _mapSeq that decodes a map's wrapper sequence into the
+// map at ptr, extracting (key,value) from each decoded entry struct.
+func (g *gen) mapCollector(ptr string, fld *ir.Field) string {
+	entry := g.typeName(fld.ElemRef.Key)
+	keyType := g.goType(fld.MapKey())
+	valType := g.goType(fld.MapValue())
+	kName, vName := goFieldName(fld.MapKey().Name), goFieldName(fld.MapValue().Name)
+	return fmt.Sprintf("&_mapSeq[%s, %s, %s, *%s]{out: %s, get: func(_e *%s) (%s, %s) { return _e.%s, _e.%s }}",
+		keyType, valType, entry, entry, ptr, entry, keyType, valType, kName, vName)
 }
 
 // matrixCollector builds the row collector for an array whose elements are native

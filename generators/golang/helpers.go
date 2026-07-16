@@ -111,6 +111,9 @@ func (g *gen) goType(f *ir.Field) string {
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
 		return "[]" + g.goArrayElem(f.Elem, f.ElemRef, f.ElemItems)
+	case ir.KindMap:
+		// map<K,V>: K/V are the entry struct's key(id 0)/value(id 1) fields.
+		return fmt.Sprintf("map[%s]%s", g.goType(f.MapKey()), g.goType(f.MapValue()))
 	}
 	return "any"
 }

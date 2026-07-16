@@ -318,3 +318,44 @@ messages:
 		t.Error("unset limits must emit no limit plumbing")
 	}
 }
+
+func TestGoMapField(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  M:
+    payload:
+      counts: { type: map, id: 1, key: { type: string, maxlen: 32 }, value: { type: u32 }, count: 128 }
+      nested:
+        type: map
+        id: 2
+        key: { type: u32 }
+        value: { type: map, key: { type: u32 }, value: { type: u8 } }
+`)
+	files := genGo(t, s, map[string]any{})
+	msg := files["m.go"]
+	for _, want := range []string{
+		"Counts map[string]uint32",              // surface container
+		"Nested map[uint32]map[uint32]uint8",    // nested map value
+		"sort.Slice(_keys",                      // canonical-order encode
+		"_entry := MCountsEntry{Key: _k, Value: m.Counts[_k]}", // entry-struct reuse on marshal
+		"_mapSeq[string, uint32, MCountsEntry, *MCountsEntry]", // decode collector
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("m.go missing %q", want)
+		}
+	}
+	// The shared collector type is emitted once in the prelude.
+	if !strings.Contains(files["sofab_visitor.go"], "type _mapSeq[") {
+		t.Error("prelude missing _mapSeq collector")
+	}
+	// Everything must be valid Go.
+	fset := token.NewFileSet()
+	for path, src := range files {
+		if strings.HasSuffix(path, ".go") {
+			if _, err := goparser.ParseFile(fset, path, []byte(src), goparser.AllErrors); err != nil {
+				t.Errorf("generated %s is not valid Go: %v", path, err)
+			}
+		}
+	}
+}

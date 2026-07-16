@@ -198,3 +198,34 @@ func (s *_seqSeq[T]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
 	*s.out = append(*s.out, nil)
 	return s.mk(&(*s.out)[len(*s.out)-1]), nil
 }
+
+// _mapSeq collects a map's entries: a map lowers to a wrapper sequence of
+// {key,value} entry structs (MESSAGE_SPEC S5.4). Each entry decodes into a fresh
+// E (PE is *E and a Visitor); on the wrapper's EndSequence every entry is
+// inserted into the target map via get (last write wins on a duplicate key).
+type _mapSeq[K comparable, V any, E any, PE interface {
+	*E
+	sofab.Visitor
+}] struct {
+	_visitorBase
+	out *map[K]V
+	tmp []E
+	get func(*E) (K, V)
+}
+
+func (s *_mapSeq[K, V, E, PE]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
+	var zero E
+	s.tmp = append(s.tmp, zero)
+	return PE(&s.tmp[len(s.tmp)-1]), nil
+}
+
+func (s *_mapSeq[K, V, E, PE]) EndSequence() error {
+	if *s.out == nil {
+		*s.out = make(map[K]V, len(s.tmp))
+	}
+	for i := range s.tmp {
+		k, v := s.get(&s.tmp[i])
+		(*s.out)[k] = v
+	}
+	return nil
+}
