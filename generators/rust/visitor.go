@@ -16,6 +16,7 @@ const (
 	fkStructArr                     // array of struct/union: per-element sequence pushes a default and descends
 	fkNestedNative                  // array of native array: array_begin pushes an inner Vec, elements push to the last
 	fkArrArr                        // array of (string/blob/struct/nested) array: per-element sequence descends
+	fkMap                           // map: per-element sequence resets a scratch entry; entry-end inserts into the BTreeMap
 )
 
 // frame is one sequence container reachable from a message. loc is the _Loc
@@ -25,9 +26,14 @@ type frame struct {
 	path     string
 	kind     frameKind
 	fields   []*ir.Field // fkStruct
-	elemLoc  string      // fkStructArr, fkArrArr: location to descend to on a per-element sequence_begin
+	elemLoc  string      // fkStructArr, fkArrArr, fkMap: location to descend to on a per-element sequence_begin
 	elemKind ir.Kind     // fkSeqArr: string/blob element; fkNestedNative: inner native element kind
 	elemRef  *ir.TypeRef // fkNestedNative: enum/bitfield backing type
+	// fkMap only: scratch is the V accessor of the single scratch entry the map
+	// decodes into (self.<scratch>); scratchType is the entry struct type. path is
+	// the BTreeMap insert target, and the entry is inserted on its sequence_end.
+	scratch     string
+	scratchType string
 	// elemDyn marks a schema-unbounded element, the target of the receiver-side
 	// decode limits (generator#102): fkSeqArr — the string/blob element has no
 	// maxlen; fkNestedNative — the inner native array has no count.
@@ -72,6 +78,22 @@ func (g *gen) frames(m *ir.Message) []frame {
 				walkFields(cl, path+"."+rustIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
 				addArray(loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas)
+			case fld.Kind == ir.KindMap:
+				// A map decodes into a single scratch entry per element; the entry's
+				// fields live under self.<scratch>, and on the entry's sequence_end it
+				// is inserted into the BTreeMap at path. The entry's own value may be a
+				// struct/array/nested map, so recurse with the scratch as the base path.
+				childLoc := loc + "_" + fld.Name
+				scratch := "sc_" + strings.ToLower(childLoc)
+				out = append(out, frame{
+					loc:         childLoc,
+					path:        path + "." + rustIdent(fld.Name), // BTreeMap insert target
+					kind:        fkMap,
+					elemLoc:     childLoc + "_e",
+					scratch:     scratch,
+					scratchType: g.typeName(fld.ElemRef.Key),
+				})
+				walkFields(childLoc+"_e", "self."+scratch, fld.ElemRef.Target.Fields)
 			}
 		}
 	}
@@ -169,6 +191,19 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	use := visitorUseOf(fs)
 
+	// Map fields decode into a per-map scratch entry (self.<scratch>); collect them
+	// for the V scratch declarations, their inits, and the entry-end insert arms.
+	var mapFrames []frame
+	for _, fr := range fs {
+		if fr.kind == fkMap {
+			mapFrames = append(mapFrames, fr)
+		}
+	}
+	scratchInit := ""
+	for _, fr := range mapFrames {
+		scratchInit += fmt.Sprintf(" %s: Default::default(),", fr.scratch)
+	}
+
 	// no_std string/blob accumulation buffer: reconstructs a payload split across
 	// feed chunks (generator#81), matching the std profile's `acc`. Sized to the
 	// message's max encoded size (a safe bound on any single payload); an
@@ -209,7 +244,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if g.limits.any() {
 		limInit = " lim: false,"
 	}
-	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false,%s ai: 0 };", limInit)
+	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false,%s%s ai: 0 };", limInit, scratchInit)
 	if g.noStd {
 		if needAcc {
 			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, err: false, inv: false, ai: 0 };", accNew)
@@ -306,6 +341,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		f.line("    lim: bool,")
 	}
 	f.line("    ai: usize, // index into the fixed native array currently being filled")
+	// Per-map scratch entries: each map decodes one entry at a time into its
+	// scratch, then inserts it into the BTreeMap on the entry's sequence_end.
+	for _, fr := range mapFrames {
+		f.line("    %s: %s,", fr.scratch, fr.scratchType)
+	}
 	f.line("}")
 	f.blank()
 
@@ -603,18 +643,37 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 						f.line("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
 					case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
 						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.loc+"_"+fld.Name)
+					case fld.Kind == ir.KindMap:
+						// The map field begins: clear the BTreeMap, descend to the map loc
+						// (where each element is a per-entry sequence).
+						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.loc+"_"+fld.Name)
 					}
 				}
 			case fkStructArr:
 				f.line("            (_Loc::%s, _) => { %s _Loc::%s },", fr.loc, g.pushStmt(fr.path, "Default::default()"), fr.elemLoc)
 			case fkArrArr:
 				f.line("            (_Loc::%s, _) => { %s _Loc::%s },", fr.loc, g.pushStmt(fr.path, g.innerNew()), fr.elemLoc)
+			case fkMap:
+				// A per-entry sequence begins: reset the scratch entry and descend to
+				// the entry's fields.
+				f.line("            (_Loc::%s, _) => { self.%s = Default::default(); _Loc::%s },", fr.loc, fr.scratch, fr.elemLoc)
 			}
 		}
 		f.line("            _ => self.cur,")
 		f.line("        };")
 		f.line("    }")
 		f.line("    fn sequence_end(&mut self) {")
+		if len(mapFrames) > 0 {
+			// A map entry's sequence just ended: move the finished scratch entry into
+			// the BTreeMap (last write wins on a duplicate key).
+			f.line("        match self.cur {")
+			for _, fr := range mapFrames {
+				f.line("            _Loc::%s => { let _e = core::mem::take(&mut self.%s); %s.insert(_e.%s, _e.%s); }",
+					fr.elemLoc, fr.scratch, fr.path, rustIdent("key"), rustIdent("value"))
+			}
+			f.line("            _ => {}")
+			f.line("        }")
+		}
 		f.line("        self.cur = self.stack.pop().unwrap_or(_Loc::Root);")
 		f.line("    }")
 	}

@@ -48,6 +48,15 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if g.std() {
 		g.limits = resolveLimits(s, cfg)
 	}
+	// Maps currently target the std corelib-rs only (BTreeMap surface). The
+	// heap-free profile needs a fixed-capacity map container (heapless), which is a
+	// follow-up (see docs/plans/maps.md §7.2); reject it loudly rather than emit
+	// broken code.
+	if !g.std() {
+		if name, ok := firstMapField(s); ok {
+			return nil, fmt.Errorf("map field %q: maps are not yet supported for corelib: rs-no-std", name)
+		}
+	}
 	if noStd {
 		// The heap-free profile lowers every field to fixed-capacity heapless
 		// storage sized from the schema; a field with no maxlen/count cannot be
@@ -162,6 +171,38 @@ func (g *gen) usesAlloc(s *ir.Schema) bool {
 	return found
 }
 
+// firstMapField returns the name of the first reachable map field (walking
+// messages and named struct/union types), for the no_std rejection message.
+func firstMapField(s *ir.Schema) (string, bool) {
+	seen := map[string]bool{}
+	var walk func(fields []*ir.Field) (string, bool)
+	walk = func(fields []*ir.Field) (string, bool) {
+		for _, f := range fields {
+			switch f.Kind {
+			case ir.KindMap:
+				return f.Name, true
+			case ir.KindStruct, ir.KindUnion:
+				if !seen[f.Ref.Key] {
+					seen[f.Ref.Key] = true
+					if n, ok := walk(f.Ref.Target.Fields); ok {
+						return n, true
+					}
+				}
+			}
+		}
+		return "", false
+	}
+	for _, m := range s.Messages {
+		if n, ok := walk(m.Fields); ok {
+			return n, true
+		}
+	}
+	return "", false
+}
+
+// hasMap reports whether the schema has any reachable map field.
+func hasMap(s *ir.Schema) bool { _, ok := firstMapField(s); return ok }
+
 type rfile struct{ b strings.Builder }
 
 func (f *rfile) line(format string, args ...any) {
@@ -182,6 +223,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 	// only when the schema has a scalar array); it is gated behind the no-std
 	// `array` feature, so it is imported there on demand, not crate-wide.
 	f.line("use sofab::{OStream, IStream, Visitor, Id, Unsigned, Signed};")
+	// Map fields lower to a BTreeMap surface (std corelib-rs only; sorted iteration
+	// gives canonical encode order). Only emitted when the schema uses a map.
+	if hasMap(g.schema) {
+		f.line("use std::collections::BTreeMap;")
+	}
 	// serde is optional under no_std: the derives are gated behind a `serde` cargo
 	// feature (off in the heap-free firmware build, on for the JSON harness), so the
 	// import must be gated too. The std profile always derives serde.
@@ -509,11 +555,29 @@ func (g *gen) emitMarshal(f *rfile, fld *ir.Field) {
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
 		return
+	case ir.KindMap:
+		g.emitMarshalMap(f, fld, acc)
+		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default.
 	f.line("        if %s { %s }", g.rustLeafNe(acc, fld), write)
+}
+
+// emitMarshalMap writes a map as a wrapper sequence of {key,value} entry structs
+// (MESSAGE_SPEC S5.4), reusing the hoisted entry struct's own marshal. BTreeMap
+// already iterates in sorted key order, so the bytes are canonical and
+// deterministic; the child id is the 0-based entry index.
+func (g *gen) emitMarshalMap(f *rfile, fld *ir.Field, acc string) {
+	entry := g.typeName(fld.ElemRef.Key)
+	kName, vName := rustIdent(fld.MapKey().Name), rustIdent(fld.MapValue().Name)
+	f.line("        let _ = os.write_sequence_begin(%d);", fld.ID)
+	f.line("        for (_i, (_k, _v)) in %s.iter().enumerate() {", acc)
+	f.line("            let _e = %s { %s: _k.clone(), %s: _v.clone() };", entry, kName, vName)
+	f.line("            let _ = os.write_sequence_begin(_i as Id); _e.marshal(os); let _ = os.write_sequence_end();")
+	f.line("        }")
+	f.line("        let _ = os.write_sequence_end();")
 }
 
 func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {

@@ -574,3 +574,77 @@ messages:
 		}
 	}
 }
+
+// moduleFromYAMLErr is like moduleFromYAML but returns Generate's error instead
+// of failing the test, so a rejection (e.g. maps under corelib: rs-no-std) can
+// be asserted.
+func moduleFromYAMLErr(t *testing.T, src string, cfg map[string]any) (string, error) {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "vec.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(s, cfg)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range files {
+		if f.Path == "src/message.rs" {
+			return string(f.Content), nil
+		}
+	}
+	return "", nil
+}
+
+const mapSchema = `
+version: 1
+messages:
+  M:
+    payload:
+      counts: { type: map, id: 1, key: { type: string, maxlen: 32 }, value: { type: u32 }, count: 128 }
+      nested:
+        type: map
+        id: 2
+        key: { type: u32 }
+        value: { type: map, key: { type: u32 }, value: { type: u8 } }
+`
+
+func TestRustMapField(t *testing.T) {
+	// std corelib-rs: BTreeMap surface + scratch-entry flat-visitor decode.
+	m, err := moduleFromYAMLErr(t, mapSchema, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"use std::collections::BTreeMap;",              // import emitted only when a map is present
+		"pub counts: BTreeMap<String, u32>",            // surface container
+		"pub nested: BTreeMap<u32, BTreeMap<u32, u8>>", // nested map value
+		"for (_i, (_k, _v)) in self.counts.iter()",     // sorted (BTreeMap) canonical-order encode
+		"let _e = MCountsEntry { key: _k.clone(), value: _v.clone() };", // entry-struct reuse on marshal
+		"sc_root_counts: MCountsEntry,",                      // per-map scratch entry on the visitor
+		"self.m.counts.insert(_e.key, _e.value);",           // insert on entry-end
+		"self.sc_root_nested.value.insert(_e.key, _e.value);", // nested map inserts into the outer scratch
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.rs (rs) missing %q", want)
+		}
+	}
+}
+
+func TestRustMapNoStdRejected(t *testing.T) {
+	_, err := moduleFromYAMLErr(t, mapSchema, map[string]any{"corelib": "rs-no-std"})
+	if err == nil || !strings.Contains(err.Error(), "not yet supported for corelib: rs-no-std") {
+		t.Fatalf("expected no_std map rejection, got %v", err)
+	}
+}

@@ -521,6 +521,10 @@ func (g *gen) rustType(f *ir.Field) string {
 			return fmt.Sprintf("[%s; %d]", elem, n)
 		}
 		return g.rustSeq(g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax), f.HasCount, f.Count)
+	case ir.KindMap:
+		// map<K,V> -> BTreeMap: sorted iteration gives canonical encode order for
+		// free. K/V are the entry struct's key(id 0)/value(id 1) field types.
+		return fmt.Sprintf("BTreeMap<%s, %s>", g.rustType(f.MapKey()), g.rustType(f.MapValue()))
 	}
 	return "()"
 }
@@ -726,6 +730,10 @@ func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
 		return hdr + varintLen(uint64(f.Maxlen)<<3) + f.Maxlen, true
 	case ir.KindArray:
 		return g.arrayCost(hdr, f.Elem, f.ElemRef, f.ElemItems, f.Count, f.ElemMaxHas, f.ElemMax, seen)
+	case ir.KindMap:
+		// A map is an unbounded wrapper sequence; like an unbounded string/array it
+		// is not statically sizeable, so fall back to the analytic MAX_SIZE cap.
+		return 0, false
 	case ir.KindStruct, ir.KindUnion:
 		if seen[f.Ref.Key] {
 			return 0, false
