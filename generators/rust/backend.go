@@ -219,6 +219,8 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.blank()
 	}
 
+	g.emitTrimHelpers(f, s)
+
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		switch nt.Category {
@@ -238,6 +240,47 @@ func (g *gen) module(s *ir.Schema) []byte {
 		g.emitStruct(f, exported(m.Name), m.Fields, true, m.Summary)
 	}
 	return f.bytes()
+}
+
+// emitTrimHelpers emits the trailing-default-run trim helpers a fixed-count
+// native array needs on encode (MESSAGE_SPEC §3). They are `core`-only (slice
+// len/index plus f32/f64::to_bits) and allocate nothing — `&a[..n]` reborrows —
+// so the same code serves the std and the #![no_std] profile.
+func (g *gen) emitTrimHelpers(f *rfile, s *ir.Schema) {
+	anyInt, anyF32, anyF64 := g.trimKinds(s)
+	if !anyInt && !anyF32 && !anyF64 {
+		return
+	}
+	f.line("// _trim_tail / _trim_tail_f32 / _trim_tail_f64 return &a[..M'], where M' is one")
+	f.line("// past the last element that differs from the element default (0 when every")
+	f.line("// element is the default). A `count: N` array is fixed-length: its canonical wire")
+	f.line("// carries exactly those M' elements and the decoder rebuilds the trailing default")
+	f.line("// run from the schema count (MESSAGE_SPEC S3). A dynamic (count-less) array has")
+	f.line("// no N to refill from, so it is never trimmed. Floats compare by BIT PATTERN, not")
+	f.line("// by ==, so a trailing -0.0 (which == 0.0) survives the round-trip instead of")
+	f.line("// being silently trimmed to +0.0, and a NaN is never taken for the default.")
+	if anyInt {
+		f.line("fn _trim_tail<T: PartialEq + Copy>(a: &[T], zero: T) -> &[T] {")
+		f.line("    let mut n = a.len();")
+		f.line("    while n > 0 && a[n - 1] == zero { n -= 1; }")
+		f.line("    &a[..n]")
+		f.line("}")
+	}
+	if anyF32 {
+		f.line("fn _trim_tail_f32(a: &[f32]) -> &[f32] {")
+		f.line("    let mut n = a.len();")
+		f.line("    while n > 0 && f32::to_bits(a[n - 1]) == 0 { n -= 1; }")
+		f.line("    &a[..n]")
+		f.line("}")
+	}
+	if anyF64 {
+		f.line("fn _trim_tail_f64(a: &[f64]) -> &[f64] {")
+		f.line("    let mut n = a.len();")
+		f.line("    while n > 0 && f64::to_bits(a[n - 1]) == 0 { n -= 1; }")
+		f.line("    &a[..n]")
+		f.line("}")
+	}
+	f.blank()
 }
 
 func (g *gen) emitEnum(f *rfile, nt *ir.NamedType) {
@@ -488,11 +531,33 @@ func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("        if !%s.is_empty() {", acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 0)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.HasCount, 0)
 		f.line("        }")
 		return
 	}
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 0)
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.HasCount, 0)
+}
+
+// trimExpr renders the `&[T]` argument for a native array write, applying the
+// trailing-default-run trim a fixed-count array's canonical encoding requires
+// (MESSAGE_SPEC §3). Only a declared `count: N` array is fixed-length; a dynamic
+// (count-less) array has no N to refill from, so a trailing default element is
+// significant and stays. The `[..]` reborrow is what lets a `[T; N]` field and a
+// `Vec<T>` field share one call shape.
+func (g *gen) trimExpr(val string, elem ir.Kind, fixed bool) string {
+	if !fixed {
+		return "&" + val
+	}
+	switch elem {
+	case ir.KindFP32:
+		return fmt.Sprintf("_trim_tail_f32(&%s[..])", val)
+	case ir.KindFP64:
+		return fmt.Sprintf("_trim_tail_f64(&%s[..])", val)
+	default:
+		// Integer/enum/bitfield elements are ints (bool arrives here as its 0/1 u8
+		// image), so the unsuffixed 0 infers to the element type.
+		return fmt.Sprintf("_trim_tail(&%s[..], 0)", val)
+	}
 }
 
 // marshalArray writes the array val as field idExpr. Numeric/enum/bitfield
@@ -501,33 +566,40 @@ func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
 // array elements lower to a wrapper sequence whose child ids are the 0-based
 // index (per MESSAGE_SPEC). Recurses for nested arrays, depth-suffixing loop vars
 // to avoid collisions.
-func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount bool, depth int) {
+// fixed marks val as a top-level `count: N` array field, whose native elements
+// are trimmed of their trailing default run (MESSAGE_SPEC §3). It is distinct
+// from hasCount, which only selects the storage shape: a nested array-of-array
+// row is `count:`-shaped storage but is not a fixed-length field, so the
+// recursion passes fixed=false.
+func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, fixed bool, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	tv := fmt.Sprintf("_t%d", depth)
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		// bitfield backing is an unsigned int (UnsignedElem), so it writes directly.
-		f.line("%slet _ = os.write_array_unsigned(%s, &%s);", ind, idExpr, val)
+		f.line("%slet _ = os.write_array_unsigned(%s, %s);", ind, idExpr, g.trimExpr(val, elem, fixed))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		// enum backing is a signed int (SignedElem), so it writes directly.
-		f.line("%slet _ = os.write_array_signed(%s, &%s);", ind, idExpr, val)
+		f.line("%slet _ = os.write_array_signed(%s, %s);", ind, idExpr, g.trimExpr(val, elem, fixed))
 	case ir.KindBool:
 		// bool is not an array element type; lower to a 0/1 unsigned array. The
 		// no_std profile avoids the heap collect: a fixed array maps in place via
 		// core::array::from_fn, a dynamic (allow_dynamic) one collects into alloc.
+		// Trimming the 0/1 image is equivalent to trimming the bools (false <-> 0).
+		bt := g.trimExpr(tv, ir.KindU8, fixed)
 		switch {
 		case !g.noStd:
-			f.line("%s{ let %s: Vec<u8> = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, val, idExpr, tv)
+			f.line("%s{ let %s: Vec<u8> = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, %s); }", ind, tv, val, idExpr, bt)
 		case hasCount:
-			f.line("%s{ let %s: [u8; %d] = core::array::from_fn(|_k| %s[_k] as u8); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, count, val, idExpr, tv)
+			f.line("%s{ let %s: [u8; %d] = core::array::from_fn(|_k| %s[_k] as u8); let _ = os.write_array_unsigned(%s, %s); }", ind, tv, count, val, idExpr, bt)
 		default:
-			f.line("%s{ let %s: alloc::vec::Vec<u8> = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, val, idExpr, tv)
+			f.line("%s{ let %s: alloc::vec::Vec<u8> = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, %s); }", ind, tv, val, idExpr, bt)
 		}
 	case ir.KindFP32:
-		f.line("%slet _ = os.write_array_fp32(%s, &%s);", ind, idExpr, val)
+		f.line("%slet _ = os.write_array_fp32(%s, %s);", ind, idExpr, g.trimExpr(val, elem, fixed))
 	case ir.KindFP64:
-		f.line("%slet _ = os.write_array_fp64(%s, &%s);", ind, idExpr, val)
+		f.line("%slet _ = os.write_array_fp64(%s, %s);", ind, idExpr, g.trimExpr(val, elem, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
@@ -549,7 +621,8 @@ func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindArray:
 		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
-		g.marshalArray(f, ind+"    ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, depth+1)
+		// A nested row is not a fixed-length *field*, so it keeps every element.
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, false, depth+1)
 		f.line("%s}", ind)
 		f.line("%slet _ = os.write_sequence_end();", ind)
 	}

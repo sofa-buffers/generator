@@ -362,3 +362,215 @@ func TestRustDeterministic(t *testing.T) {
 		t.Fatal("Rust generation not deterministic")
 	}
 }
+
+// moduleFromYAML runs the full parse->validate->IR pipeline over an inline
+// schema and returns the generated src/message.rs.
+func moduleFromYAML(t *testing.T, src string, cfg map[string]any) string {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "inline.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(s, cfg)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, f := range files {
+		if f.Path == "src/message.rs" {
+			return string(f.Content)
+		}
+	}
+	t.Fatal("no module")
+	return ""
+}
+
+// A `count: N` array is fixed-length: the encoder emits only the elements up to
+// the last non-default one and the decoder rebuilds the trailing default run
+// from N (MESSAGE_SPEC §3). A dynamic (count-less) array has no N to refill
+// from, so its trailing default elements are significant and must survive.
+func TestRustTrimsFixedCountArraysOnly(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      fixedu:  { id: 0, type: array, items: { type: u32, count: 5 } }
+      fixedi:  { id: 1, type: array, items: { type: i16, count: 4 } }
+      fixedf32: { id: 2, type: array, items: { type: fp32, count: 3 } }
+      fixedf64: { id: 3, type: array, items: { type: fp64, count: 3 } }
+      fixedb:  { id: 4, type: array, items: { type: boolean, count: 3 } }
+      dynu:    { id: 5, type: array, items: { type: u32 } }
+      dynf32:  { id: 6, type: array, items: { type: fp32 } }
+`
+	for _, cfg := range []map[string]any{
+		{}, // std corelib-rs
+		{"corelib": "rs-no-std", "allow_dynamic": true}, // #![no_std] + heapless
+		{"corelib": "rs-no-std", "no_std": false},       // no-std corelib, std crate
+	} {
+		m := moduleFromYAML(t, src, cfg)
+		for _, want := range []string{
+			// Fixed-count native arrays are trimmed, per element family.
+			"os.write_array_unsigned(0, _trim_tail(&self.fixedu[..], 0))",
+			"os.write_array_signed(1, _trim_tail(&self.fixedi[..], 0))",
+			"os.write_array_fp32(2, _trim_tail_f32(&self.fixedf32[..]))",
+			"os.write_array_fp64(3, _trim_tail_f64(&self.fixedf64[..]))",
+			// bool trims its 0/1 u8 image (false <-> 0).
+			"os.write_array_unsigned(4, _trim_tail(&_t0[..], 0))",
+			// Dynamic arrays keep every element.
+			"os.write_array_unsigned(5, &self.dynu)",
+			"os.write_array_fp32(6, &self.dynf32)",
+			// Floats compare by bit pattern so a trailing -0.0 is not trimmed.
+			"while n > 0 && f32::to_bits(a[n - 1]) == 0 { n -= 1; }",
+			"while n > 0 && f64::to_bits(a[n - 1]) == 0 { n -= 1; }",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing %q", cfg, want)
+			}
+		}
+		// The helpers borrow rather than allocate and touch no std/alloc path, so
+		// the same text serves the #![no_std] crate.
+		for _, want := range []string{
+			"fn _trim_tail<T: PartialEq + Copy>(a: &[T], zero: T) -> &[T] {\n    let mut n = a.len();\n    while n > 0 && a[n - 1] == zero { n -= 1; }\n    &a[..n]\n}",
+			"fn _trim_tail_f32(a: &[f32]) -> &[f32] {",
+			"fn _trim_tail_f64(a: &[f64]) -> &[f64] {",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing helper %q", cfg, want)
+			}
+		}
+		for _, bad := range []string{"_trim_tail(&self.dynu", "_trim_tail_f32(&self.dynf32"} {
+			if strings.Contains(m, bad) {
+				t.Errorf("message.rs (%v) must not contain %q", cfg, bad)
+			}
+		}
+	}
+}
+
+// The trim helpers are emitted only for the element families the schema uses,
+// and not at all for a schema with no fixed-count native array.
+func TestRustTrimHelpersGatedOnUse(t *testing.T) {
+	const noFixed = `
+version: 1
+messages:
+  m:
+    payload:
+      dynu: { id: 0, type: array, items: { type: u32 } }
+`
+	if m := moduleFromYAML(t, noFixed, map[string]any{}); strings.Contains(m, "_trim_tail") {
+		t.Error("no fixed-count array: trim helpers must not be emitted")
+	}
+	const onlyU = `
+version: 1
+messages:
+  m:
+    payload:
+      fixedu: { id: 0, type: array, items: { type: u32, count: 4 } }
+`
+	m := moduleFromYAML(t, onlyU, map[string]any{})
+	if !strings.Contains(m, "fn _trim_tail<T: PartialEq + Copy>") {
+		t.Error("integer fixed-count array: _trim_tail must be emitted")
+	}
+	for _, bad := range []string{"fn _trim_tail_f32", "fn _trim_tail_f64"} {
+		if strings.Contains(m, bad) {
+			t.Errorf("no float fixed-count array: %q must not be emitted", bad)
+		}
+	}
+}
+
+// A nested array-of-array row has `count:`-shaped storage but is not a
+// fixed-length field, so its elements are never trimmed.
+func TestRustNestedArrayRowsNotTrimmed(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      grid: { id: 0, type: array, items: { type: array, items: { type: u32, count: 3 } } }
+`
+	m := moduleFromYAML(t, src, map[string]any{})
+	if strings.Contains(m, "_trim_tail") {
+		t.Errorf("nested array row must not be trimmed:\n%s", m)
+	}
+}
+
+// A `count: N` array's Default image must be exactly N elements: a short schema
+// default is tail-padded with the element default, and a default-less field is
+// the zero repeat literal. (A default longer than N is rejected upstream by
+// parser.Validate, so N is always the rendered length.) This is what makes the
+// decode-side trailing-default run well defined (MESSAGE_SPEC §3).
+func TestRustFixedArrayDefaultIsExactlyN(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      short: { id: 0, type: array, items: { type: u32, count: 5 }, default: [1, 2] }
+      none:  { id: 1, type: array, items: { type: u32, count: 3 } }
+      fullf: { id: 2, type: array, items: { type: fp32, count: 2 }, default: [1.5] }
+      boolp: { id: 3, type: array, items: { type: boolean, count: 3 }, default: [true] }
+`
+	m := moduleFromYAML(t, src, map[string]any{})
+	for _, want := range []string{
+		"short: [1, 2, 0, 0, 0],",
+		"none: [0; 3],",
+		"fullf: [1.5, 0.0],",
+		"boolp: [true, false, false],",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.rs missing %q", want)
+		}
+	}
+}
+
+// Decode side of MESSAGE_SPEC S3: the encoder trims the trailing default run, so
+// positions [M, N) of a PRESENT fixed-count array are never stored and must read
+// back as the ELEMENT default (zero). A non-zero schema `default:` would leak
+// through that untouched tail, so array_begin wipes it first. The reset is
+// emitted only where it is needed, so every other schema stays byte-identical.
+func TestRustFixedArrayResetsNonZeroDefaultOnDecode(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      defd:   { id: 0, type: array, items: { type: u32, count: 5 }, default: [1, 2, 3] }
+      zerod:  { id: 1, type: array, items: { type: u32, count: 3 }, default: [0, 0, 0] }
+      nodef:  { id: 2, type: array, items: { type: u32, count: 3 } }
+      fdef:   { id: 3, type: array, items: { type: fp32, count: 3 }, default: [1.5] }
+      bdef:   { id: 4, type: array, items: { type: boolean, count: 3 }, default: [true] }
+`
+	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
+		m := moduleFromYAML(t, src, cfg)
+		// Non-zero defaults reset to the element-default image on array_begin.
+		for _, want := range []string{
+			"(_Loc::Root, 0) => self.m.defd = [0; 5],",
+			"(_Loc::Root, 3) => self.m.fdef = [0.0; 3],",
+			"(_Loc::Root, 4) => self.m.bdef = [false; 3],",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing reset %q", cfg, want)
+			}
+		}
+		// An all-zero or absent default already reads back as zero: no reset, so
+		// these schemas' generated code is unchanged.
+		for _, bad := range []string{
+			"self.m.zerod = [0; 3]",
+			"self.m.nodef = [0; 3]",
+		} {
+			if strings.Contains(m, bad) {
+				t.Errorf("message.rs (%v) must not emit a redundant reset %q", cfg, bad)
+			}
+		}
+	}
+}
