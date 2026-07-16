@@ -444,3 +444,32 @@ func keys(m map[string]string) []string {
 	}
 	return k
 }
+
+func TestCMapRejected(t *testing.T) {
+	src := `
+version: 1
+messages:
+  M:
+    payload:
+      counts: { type: map, id: 1, key: { type: u32 }, value: { type: u8 }, count: 8 }
+`
+	doc, err := parser.Parse([]byte(src), "map.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Backend{}).Generate(s, map[string]any{}); err == nil ||
+		!strings.Contains(err.Error(), "not yet supported by the c backend") {
+		t.Fatalf("expected c map rejection, got %v", err)
+	}
+}

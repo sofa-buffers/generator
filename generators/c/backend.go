@@ -29,8 +29,45 @@ func (*Backend) Lang() string { return "c" }
 // cfg["emit"] == "project" it additionally scaffolds a buildable root project
 // (build files + devcontainer wiring + encode/decode harness, §9.1), with the
 // message sources placed under generated/.
+// firstMapField returns the name of the first reachable map field (walking
+// messages and named struct/union types), for the not-yet-supported message.
+func firstMapField(s *ir.Schema) (string, bool) {
+	seen := map[string]bool{}
+	var walk func(fields []*ir.Field) (string, bool)
+	walk = func(fields []*ir.Field) (string, bool) {
+		for _, f := range fields {
+			switch f.Kind {
+			case ir.KindMap:
+				return f.Name, true
+			case ir.KindStruct, ir.KindUnion:
+				if !seen[f.Ref.Key] {
+					seen[f.Ref.Key] = true
+					if n, ok := walk(f.Ref.Target.Fields); ok {
+						return n, true
+					}
+				}
+			}
+		}
+		return "", false
+	}
+	for _, m := range s.Messages {
+		if n, ok := walk(m.Fields); ok {
+			return n, true
+		}
+	}
+	return "", false
+}
+
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "message_"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
+	// The C object model has no dynamic containers; a map would be a fixed-capacity
+	// association array of {key,value} slots + a used-length, driven by the static
+	// descriptor table (sized keys like the sized-blob mechanism). That is a
+	// follow-up; reject maps for now rather than emit broken code
+	// (docs/plans/maps.md §7.2).
+	if name, ok := firstMapField(s); ok {
+		return nil, fmt.Errorf("map field %q: maps are not yet supported by the c backend", name)
+	}
 	if err := checkBounded(s); err != nil {
 		return nil, err
 	}
