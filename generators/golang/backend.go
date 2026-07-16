@@ -158,7 +158,7 @@ func _narrowS[T ~int8 | ~int16 | ~int32 | ~int64](v []int64) []T {
 // last element that differs from the element default (0 if every element is the
 // default). A fixed-count array's canonical wire carries exactly those M'
 // elements; the decoder rebuilds the trailing default run from the schema count
-// (MESSAGE_SPEC §3). Elements compare by BIT PATTERN, not by ==, so a trailing
+// (MESSAGE_SPEC S3). Elements compare by BIT PATTERN, not by ==, so a trailing
 // -0.0 (which == 0.0) survives the round-trip instead of being silently trimmed
 // to +0.0.
 func _trimTail[T comparable](a []T, zero T) []T {
@@ -188,7 +188,7 @@ func _trimTailF64(a []float64) []float64 {
 // _padTo grows a to exactly n elements with the element default. A fixed-count
 // array decodes to exactly its schema count regardless of the wire count, so a
 // growable container must materialize the trailing default run the encoder
-// elided (MESSAGE_SPEC §3).
+// elided (MESSAGE_SPEC S3).
 func _padTo[T any](a []T, n int, zero T) []T {
 	for len(a) < n {
 		a = append(a, zero)
