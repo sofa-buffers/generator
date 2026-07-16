@@ -1,0 +1,104 @@
+{
+  "$comment": "DRAFT fragments to merge into schema/sofabuffers-schema-v1.json to add the `map` type. This is NOT a standalone schema - each numbered key below says exactly where its fragment slots into the existing file. Companion to docs/plans/maps.md. draft-07, closed objects, matching the existing style.",
+
+  "1_add_map_to_field_type_enum": {
+    "$comment": "At #/$defs/field/properties/type/enum -- append the string \"map\" to the existing list (u8..union).",
+    "append_enum_value": "map"
+  },
+
+  "2_add_map_to_arrayItems_type_enum": {
+    "$comment": "At #/$defs/arrayItems/properties/type/enum -- append \"map\" so a map is also a valid array element and map value.",
+    "append_enum_value": "map"
+  },
+
+  "3_new_def_mapKey": {
+    "$comment": "Add as a new entry under the top-level #/$defs (next to `enum`, `bitfield`, `struct`, `union`). Restricts a map key to hashable/comparable leaves; float/blob/composite keys are rejected structurally and named by the `mapKeyType` custom keyword.",
+    "mapKey": {
+      "type": "object",
+      "description": "Map key element. Keys are restricted to hashable/comparable leaf types so every target lowers them onto a native map key.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Key element type. Excludes fp32/fp64 (equality/NaN hazard), blob, struct, union, array, map.",
+          "enum": ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "boolean", "string", "enum"]
+        },
+        "maxlen": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "Maximum byte length of a string key. Only valid when type is string; required by fixed-storage targets so the key slot can be pre-sized."
+        },
+        "enum": {
+          "description": "Member definitions when type is enum.",
+          "oneOf": [
+            { "$ref": "#/$defs/enum" },
+            {
+              "type": "object",
+              "properties": { "$ref": { "type": "string", "description": "Reference to a predefined enum in $defs." } },
+              "required": ["$ref"],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": ["type"],
+      "additionalProperties": false,
+      "mapKeyType": true,
+      "allOf": [
+        { "if": { "required": ["maxlen"] }, "then": { "properties": { "type": { "enum": ["string"] } } } },
+        { "if": { "properties": { "type": { "const": "enum" } }, "required": ["type"] }, "then": { "required": ["enum"] } },
+        { "if": { "required": ["enum"] }, "then": { "properties": { "type": { "const": "enum" } } } }
+      ]
+    }
+  },
+
+  "4_field_map_branch": {
+    "$comment": "Append this if/then to the `allOf` array inside #/$defs/field (the same list that holds the u8/string/array/struct/union branches). Closed to key/value/count + shared metadata.",
+    "if": { "properties": { "type": { "const": "map" } } },
+    "then": {
+      "properties": {
+        "id": { "$ref": "#/$defs/types/id" },
+        "type": {},
+        "key": { "$ref": "#/$defs/mapKey" },
+        "value": { "$ref": "#/$defs/arrayItems" },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "Capacity: maximum entry count. Optional, but required by fixed-storage targets (C always; C++ c-cpp / Rust no_std unless allow_dynamic) so the entry array can be pre-sized. The wire may carry 0..count entries; never appears on the wire. Also governs the receiver-side decode cap (max_dyn_map_entries)."
+        },
+        "description": {},
+        "deprecated": {}
+      },
+      "required": ["key", "value"],
+      "additionalProperties": false
+    }
+  },
+
+  "5_field_reverse_guards": {
+    "$comment": "Also append these to #/$defs/field/allOf. Defensive twins of the per-type additionalProperties:false closures, giving a clear `must be type: map` error (the field object itself is additionalProperties:true).",
+    "guards": [
+      { "if": { "required": ["key"] }, "then": { "properties": { "type": { "const": "map" } } } },
+      { "if": { "required": ["value"] }, "then": { "properties": { "type": { "const": "map" } } } },
+      { "if": { "required": ["count"] }, "then": { "properties": { "type": { "const": "map" } } } }
+    ]
+  },
+
+  "6_arrayItems_map_support": {
+    "$comment": "Lets a map be an array element (array-of-map) and a map value (map-valued map). (a) add these two properties to #/$defs/arrayItems/properties; (b) append the if/then guards to #/$defs/arrayItems/allOf. arrayItems already carries `count` (the element/dimension capacity), which for a map element is its entry capacity - no new key needed there.",
+    "properties_to_add": {
+      "key": { "$ref": "#/$defs/mapKey" },
+      "value": { "$ref": "#/$defs/arrayItems" }
+    },
+    "allOf_to_add": [
+      { "if": { "properties": { "type": { "const": "map" } }, "required": ["type"] }, "then": { "required": ["key", "value"] } },
+      { "if": { "required": ["key"] }, "then": { "properties": { "type": { "const": "map" } } } },
+      { "if": { "required": ["value"] }, "then": { "properties": { "type": { "const": "map" } } } }
+    ]
+  },
+
+  "7_custom_keyword_mapKeyType": {
+    "$comment": "New custom validation keyword to add to the reference validator (schema/README.md Validation + ARCHITECTURE 5), alongside uniqueIds/defaultMatchesEnum/etc. The `enum` in mapKey rejects a bad key type structurally; this keyword produces the located, human error naming the field.",
+    "spec": "mapKeyType (attached to #/$defs/mapKey): the key element `type` MUST be one of u8,u16,u32,u64,i8,i16,i32,i64,boolean,string,enum. On violation, fail closed with the offending field's location (message/struct path + field name), like the other custom keywords. Runs after $ref resolution so a {$ref} enum key is checked as an enum."
+  }
+}
