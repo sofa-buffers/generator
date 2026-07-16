@@ -235,6 +235,15 @@ func (g *gen) defaultLiteral(f *ir.Field) (string, bool) {
 		if f.Kind == ir.KindBitfield {
 			return g.bitfieldDefault(f)
 		}
+		// A `count: N` native array is fixed-length even with no schema default:
+		// its value is N element defaults, so materialize them. Without this a
+		// fresh (or all-default, hence omitted-on-the-wire) array would decode to
+		// an empty slice on this growable backend while the fixed-storage camp
+		// yields N zeros — the same MESSAGE_SPEC §3 divergence as the trailing
+		// default run, reached through the omission path.
+		if f.Kind == ir.KindArray && isNativeArrayElem(f.Elem) && f.HasCount {
+			return g.nativeArrayLiteral(f)
+		}
 		return "", false
 	}
 	switch f.Kind {
@@ -302,7 +311,7 @@ func isNativeArrayElem(elem ir.Kind) bool {
 // slice literal ([]T{...}); ("", false) when there is no default.
 func (g *gen) nativeArrayLiteral(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
-	if !ok {
+	if !ok && f.Default != nil {
 		return "", false
 	}
 	parts := make([]string, len(vals))
@@ -312,6 +321,19 @@ func (g *gen) nativeArrayLiteral(f *ir.Field) (string, bool) {
 			parts[i] = fmt.Sprintf("%v", v)
 		default: // numeric / enum / bitfield: an untyped constant converts in []T
 			parts[i] = scalarLit(v)
+		}
+	}
+	// A `count: N` array is exactly N elements long: a shorter schema default
+	// leaves the trailing ones at the element default. Tail-pad to N so this
+	// backend's initial value matches the fixed-storage camp's zero-filled
+	// `[T; N]` / `std::array<T, N>` (MESSAGE_SPEC §3).
+	if f.HasCount {
+		zero := "0"
+		if f.Elem == ir.KindBool {
+			zero = "false"
+		}
+		for int64(len(parts)) < f.Count {
+			parts = append(parts, zero)
 		}
 	}
 	return fmt.Sprintf("[]%s{%s}", g.goArrayElem(f.Elem, f.ElemRef, f.ElemItems), strings.Join(parts, ", ")), true
