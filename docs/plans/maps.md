@@ -12,6 +12,31 @@
 
 ---
 
+## 0. Implementation status (this branch)
+
+Core lowering (IR + Model + validator) landed; `map` rides the existing
+array-of-struct wire path. Per backend:
+
+| Backend | Surface | Status |
+|---|---|---|
+| Go | `map[K]V` | ✅ implemented + round-trip proven |
+| Rust `rs` | `BTreeMap` | ✅ implemented + round-trip; `rs-no-std` rejected (follow-up) |
+| C++ `cpp` | `std::map` | ✅ implemented + round-trip; `c-cpp` rejected (follow-up) |
+| C# | `Dictionary` | ✅ implemented + round-trip |
+| Java | `HashMap` | ✅ implemented + round-trip |
+| Python | `dict` | ✅ implemented + round-trip |
+| TypeScript | `Map` | ✅ codegen; runtime round-trip pending a corelib-ts build |
+| docs | `map<K,V>` | ✅ rendered in the HTML reference |
+| Zig | `AutoHashMap`/`StringHashMap` | ⏸ deferred — `marshal()` has no allocator for canonical sorting |
+| C | assoc-array | ⏸ deferred — no dynamic containers (footprint) |
+
+Go/Rust/C++/C#/Java/Python all produce **byte-identical** output for the shared
+demo (ASCII keys) — cross-language interop confirmed. Non-ASCII string-key
+ordering still needs a normative UTF-8-byte sort in every backend (see §4);
+today each backend uses its language's natural sort (ASCII-correct).
+
+---
+
 ## 1. Headline finding
 
 **A map needs no wire-format change and no change to any corelib's byte codec.**
