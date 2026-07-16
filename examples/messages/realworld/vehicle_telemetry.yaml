@@ -11,6 +11,16 @@
 #     across files), all resolved to the same shared types.
 #   * Field ids are stable; a decoder skips unknown ids, so new fields can be
 #     added without breaking older readers (forward/backward compatible).
+#
+# Between them the three files exercise the full type/feature surface: every
+# scalar (u8..u64, i8..i64, fp32/fp64, boolean), string and blob, enum (both
+# member forms), bitfield (with per-flag defaults), struct, union (standalone
+# and as an array element), and arrays of every element kind — scalar, string,
+# blob, struct, enum, boolean, bitfield, union, and array (a matrix) — plus the
+# per-field metadata: id, description, unit, decimals, deprecated, maxlen, count
+# and defaults (scalar, string, blob, float, i64-as-string, and array).
+# Every array is bounded (`count`) and every string/blob has `maxlen`, so this
+# schema also generates for the heap-less targets (C, and the no_std profiles).
 version: 1
 messages:
   VehicleTelemetry:
@@ -31,9 +41,78 @@ messages:
       faults:       { id: 8, type: bitfield, bits: { $ref: 'diagnostics.yaml#/$defs/bitfield/FaultFlags' } }
       battery_pct:  { id: 9, type: u8, unit: "%", default: 100, description: "State of charge / fuel level" }
       odometer_m:   { id: 10, type: u64, unit: m }
-      tire_kpa:     { id: 11, type: array, items: { type: u16, count: 4 }, description: "Tire pressure FL, FR, RL, RR" }
+      # A fixed scalar array with an array `default` (nominal cold pressure).
+      tire_kpa:     { id: 11, type: array, items: { type: u16, count: 4 }, default: [250, 250, 250, 250], description: "Tire pressure FL, FR, RL, RR" }
 
       # A single struct field; transitively pulls GeoPoint + Timestamp via $ref.
       active_code:  { id: 12, type: struct, fields: { $ref: 'diagnostics.yaml#/$defs/struct/DiagnosticCode' }, description: "Most recent diagnostic trouble code" }
 
       legacy_rpm:   { id: 13, type: u32, unit: rpm, deprecated: true, description: "Deprecated: use the dedicated powertrain stream" }
+
+      # --- Signed integers -----------------------------------------------------
+      # Temperatures and net power are naturally signed. `net_power_w` is negative
+      # while charging; `trip_energy_wh` uses the string form for its default so
+      # the exact 64-bit value survives (a JSON number would round past 2^53).
+      cabin_temp_c:    { id: 14, type: i8,  unit: degC, default: 21, description: "Cabin temperature" }
+      motor_torque_nm: { id: 15, type: i16, unit: Nm, description: "Signed axle torque (negative = regen braking)" }
+      net_power_w:     { id: 16, type: i32, unit: W, description: "Net battery power; positive = discharge, negative = charge" }
+      trip_energy_wh: { id: 17, type: i64, unit: Wh, default: "0", description: "Signed net energy since trip start" }
+
+      # --- Boolean, string default, blob (with default) ------------------------
+      charging:       { id: 18, type: boolean, default: false, description: "HV battery is charging" }
+      firmware_ver:   { id: 19, type: string, maxlen: 16, default: "0.0.0", description: "Running firmware version" }
+      firmware_sig:   { id: 20, type: blob, maxlen: 32, default: "AAAAAA==", description: "Firmware image signature (opaque bytes)" }
+
+      # --- Bitfield-with-defaults and union, both via cross-file $ref ----------
+      features:       { id: 21, type: bitfield, bits: { $ref: 'diagnostics.yaml#/$defs/bitfield/Features' }, description: "Enabled driver-assist features" }
+      aux_sensor:     { id: 22, type: union, default_id: 0, oneof: { $ref: 'diagnostics.yaml#/$defs/union/SensorSample' }, description: "One auxiliary sensor sample (analog | digital | counter)" }
+
+      # A float with a `default` and a `decimals` precision hint.
+      battery_temp_c: { id: 23, type: fp32, unit: degC, decimals: 1, default: 20.0, description: "HV battery pack temperature" }
+
+      # --- Arrays of composite element types -----------------------------------
+      # Array of structs: a bounded history of trouble codes. Each element is a
+      # DiagnosticCode, so this transitively nests Timestamp + GeoPoint per entry.
+      recent_codes:
+        id: 24
+        type: array
+        description: "Up to 4 most-recent diagnostic trouble codes"
+        items:
+          type: struct
+          count: 4
+          fields: { $ref: 'diagnostics.yaml#/$defs/struct/DiagnosticCode' }
+
+      # Array of arrays (matrix): per-module battery cell voltages.
+      cell_mv:
+        id: 25
+        type: array
+        description: "Cell voltages (mV) for up to 4 modules of up to 8 cells each"
+        items:
+          type: array
+          count: 4
+          items: { type: u16, count: 8 }
+
+      # Array of strings (bounded count + per-element maxlen).
+      warnings:     { id: 26, type: array, items: { type: string, count: 4, maxlen: 24 }, description: "Human-readable warning labels" }
+      # Array of blobs: an opaque signature per on-board ECU.
+      ecu_sigs:     { id: 27, type: array, items: { type: blob, count: 3, maxlen: 8 }, description: "Per-ECU firmware fingerprints" }
+      # Array of enums (via $ref): recent gear selections.
+      gear_history: { id: 28, type: array, items: { type: enum, count: 8, enum: { $ref: 'diagnostics.yaml#/$defs/enum/Gear' } }, description: "Recent gear selections, newest last" }
+      # Array of booleans: one flag per door.
+      doors_open:   { id: 29, type: array, items: { type: boolean, count: 4 }, description: "Door open state: FL, FR, RL, RR" }
+      # Array of bitfields (via $ref): warning lights attributed per wheel.
+      wheel_faults: { id: 30, type: array, items: { type: bitfield, count: 4, bits: { $ref: 'diagnostics.yaml#/$defs/bitfield/FaultFlags' } }, description: "Per-wheel fault flags" }
+
+      # Array of unions (inline): a hybrid may report several energy sources, each
+      # either an electric or a combustion reading.
+      energy_sources:
+        id: 31
+        type: array
+        description: "Up to 2 active energy sources (electric | combustion)"
+        items:
+          type: union
+          count: 2
+          default_id: 0
+          oneof:
+            electric:   { id: 0, type: fp32, unit: kWh, description: "Remaining battery energy" }
+            combustion: { id: 1, type: fp32, unit: L,   description: "Remaining fuel volume" }

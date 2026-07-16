@@ -7,11 +7,12 @@
 version: 1
 $defs:
   struct:
-    # A WGS-84 geographic position.
+    # A WGS-84 geographic position. `decimals` is a precision hint for tooling and
+    # docs (never on the wire): 7 places ~ 1 cm of latitude/longitude resolution.
     GeoPoint:
-      latitude:  { id: 0, type: fp64, unit: deg, description: "WGS-84 latitude in decimal degrees" }
-      longitude: { id: 1, type: fp64, unit: deg, description: "WGS-84 longitude in decimal degrees" }
-      altitude:  { id: 2, type: fp32, unit: m,   description: "Metres above mean sea level" }
+      latitude:  { id: 0, type: fp64, unit: deg, decimals: 7, description: "WGS-84 latitude in decimal degrees" }
+      longitude: { id: 1, type: fp64, unit: deg, decimals: 7, description: "WGS-84 longitude in decimal degrees" }
+      altitude:  { id: 2, type: fp32, unit: m,   decimals: 1, description: "Metres above mean sea level" }
 
     # A 3-component vector (used for both velocity and acceleration).
     Vector3:
