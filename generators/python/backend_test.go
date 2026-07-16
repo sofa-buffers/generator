@@ -478,3 +478,30 @@ func scalarJSON(op, rawValue string) (string, bool) {
 	}
 	return "", false
 }
+
+func TestPyMapField(t *testing.T) {
+	s := schema(t, `
+version: 1
+messages:
+  M:
+    payload:
+      counts: { type: map, id: 1, key: { type: string, maxlen: 32 }, value: { type: u32 }, count: 128 }
+      nested:
+        type: map
+        id: 2
+        key: { type: u32 }
+        value: { type: map, key: { type: u32 }, value: { type: u8 } }
+`)
+	m := string(genPy(t, s, map[string]any{})["message.py"])
+	for _, want := range []string{
+		"counts: dict[str, int] = field(default_factory=dict)",   // surface annotation + default
+		"nested: dict[int, dict[int, int]] = field(default_factory=dict)", // nested map value
+		"for _i, _k in enumerate(sorted(self.counts)):",          // canonical-order encode
+		"_entry = MCountsEntry()",                                // entry dataclass reuse
+		"self.counts[_entry.key] = _entry.value",                 // build dict on decode
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.py missing %q", want)
+		}
+	}
+}

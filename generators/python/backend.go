@@ -436,6 +436,9 @@ func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
 		return
+	case ir.KindMap:
+		g.emitMarshalMap(f, fld, acc)
+		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
@@ -536,6 +539,38 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 	}
 }
 
+// emitMarshalMap writes a map as a wrapper sequence of {key,value} entry
+// dataclasses (MESSAGE_SPEC S5.4), reusing the entry's own _marshal. Keys are
+// sorted for canonical, deterministic bytes; the child id is the entry index.
+func (g *gen) emitMarshalMap(f *pyfile, fld *ir.Field, acc string) {
+	entry := g.typeName(fld.ElemRef.Key)
+	kName, vName := pyIdent(fld.MapKey().Name), pyIdent(fld.MapValue().Name)
+	f.line("        e.write_sequence_begin(%d)", fld.ID)
+	f.line("        for _i, _k in enumerate(sorted(%s)):", acc)
+	f.line("            e.write_sequence_begin(_i)")
+	f.line("            _entry = %s()", entry)
+	f.line("            _entry.%s = _k", kName)
+	f.line("            _entry.%s = %s[_k]", vName, acc)
+	f.line("            _entry._marshal(e)")
+	f.line("            e.write_sequence_end()")
+	f.line("        e.write_sequence_end()")
+}
+
+// emitUnmarshalMap reads a map's wrapper sequence of entry dataclasses into a
+// dict (last write wins on a duplicate key), mirroring the struct-array reader.
+func (g *gen) emitUnmarshalMap(f *pyfile, fld *ir.Field, acc string) {
+	entry := g.typeName(fld.ElemRef.Key)
+	kName, vName := pyIdent(fld.MapKey().Name), pyIdent(fld.MapValue().Name)
+	f.line("                %s = {}", acc)
+	f.line("                while True:")
+	f.line("                    _ef = d.next()")
+	f.line("                    if _ef is None or _ef.type == WireType.SEQUENCE_END:")
+	f.line("                        break")
+	f.line("                    _entry = %s()", entry)
+	f.line("                    _entry._unmarshal(d)")
+	f.line("                    %s[_entry.%s] = _entry.%s", acc, kName, vName)
+}
+
 func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 	acc := "self." + pyIdent(fld.Name)
 	switch fld.Kind {
@@ -557,6 +592,8 @@ func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 		f.line("                %s._unmarshal(d)", acc)
 	case ir.KindArray:
 		g.emitUnmarshalArray(f, fld, acc)
+	case ir.KindMap:
+		g.emitUnmarshalMap(f, fld, acc)
 	}
 }
 

@@ -76,6 +76,8 @@ func (g *gen) pyAnnot(f *ir.Field) string {
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
 		return g.pyArrayAnnot(f.Elem, f.ElemRef, f.ElemItems)
+	case ir.KindMap:
+		return fmt.Sprintf("dict[%s, %s]", g.pyAnnot(f.MapKey()), g.pyAnnot(f.MapValue()))
 	default: // integers
 		return "int"
 	}
@@ -157,6 +159,8 @@ func (g *gen) pyDefault(f *ir.Field) string {
 			return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
 		}
 		return "field(default_factory=list)"
+	case ir.KindMap:
+		return "field(default_factory=dict)"
 	}
 	return "None"
 }
