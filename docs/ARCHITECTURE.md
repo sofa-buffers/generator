@@ -810,21 +810,25 @@ metadata above. The `docs` target renders the same metadata as HTML page content
     reset at `array_begin`, **only** when the schema default is non-zero, so
     every other schema's generated code is byte-identical. Growable backends are
     immune — they replace the container wholesale on decode.
-  - **The `c` backend is a known exception on both counts** (generator#136). It
-    emits no encode *or* decode statements at all — it emits a descriptor table
-    and `corelib-c-cpp` walks it — so neither fix has a seam in generated code:
-    1. *Encode.* `SOFAB_OBJECT_FIELD_ARRAY` derives the element count
-       structurally as `sizeof(member) / sizeof(member[0]) == N`, with no
-       used-length slot, so `object.c` always writes `N`. Needs the array
-       analogue of `SOFAB_OBJECT_FIELD_BLOB_SIZED` (which exists for exactly this
-       reason for blobs — issue #128), or a trailing-zero trim inside the
-       corelib's array writer (sound there, since every C array is fixed-count by
-       construction).
-    2. *Decode.* `_bind_array_count` accepts `M ≤ N` (so C **does** read the
-       canonical compact wire and is not cut off from the family) but leaves
-       `[M, N)` at the `<prefix>_init` values — i.e. the schema default, not the
-       element default. Same leak as above, no generated seam to fix it.
-    Both are corelib-side; see `docs/generator/c.md`.
+  - **`c` satisfies the rule from the corelib, not from generated code**
+    (generator#136). It emits no encode *or* decode statements at all — only a
+    descriptor table that `corelib-c-cpp` walks — and
+    `SOFAB_OBJECT_FIELD_ARRAY` derives the element count structurally as
+    `sizeof(member) / sizeof(member[0]) == N`, with no used-length slot, so
+    neither half has a seam in generated code. Both therefore live in
+    `corelib-c-cpp` (corelib-c-cpp#87): `object.c` trims the trailing zero-element
+    run on encode, and `_bind_array_count` clears `[M, N)` on decode. The trim sits
+    on the C-only descriptor path deliberately — **not** in the
+    `sofab_ostream_write_array_of_*` writers, which the C++ wrapper calls directly
+    with dynamic `std::vector`s whose trailing defaults are significant. Generated
+    C is only canonical against a corelib carrying that fix; against an older one
+    it still interoperates (§3 requires decoders to accept a non-canonical
+    encoding). See `docs/generator/c.md`.
+  - **Why `cpp`/`rust`/`zig` keep their own `array_begin` reset** even though the
+    `c-cpp` profile now also gets the `[M, N)` clear from `corelib-c-cpp`: pure
+    `corelib: cpp`, `corelib-rs` and `corelib-zig` are separate libraries without
+    it, and the backends emit one code path per profile. Where it is redundant it
+    is free.
 - **Sparse-canonical encoding** — encoding is **always** sparse (no config
   toggle, MESSAGE_SPEC §2): a field equal to its effective default (schema
   `default:`, else type-zero) is skipped on encode and reconstructed on decode.

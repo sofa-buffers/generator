@@ -38,17 +38,17 @@ capacities before it can be generated for C. `count` itself never goes on the
 wire — but it is **not** encoding-neutral: it makes the array fixed-length `N`,
 which changes what the canonical wire carries (see below).
 
-## Known gap: the trailing-default-run rule is not implemented on encode
+## Fixed-count arrays: the S3 rule lives in the corelib, not in generated code
 
 MESSAGE_SPEC §3 makes `count: N` a **fixed-length** array of exactly `N`
-elements, and requires the canonical encoding to **elide the trailing default
-run** — `[7,8,9]` in a `count: 5` u32 field must encode as `23 03 07 08 09`, not
-`23 05 07 08 09 00 00` (ARCHITECTURE §11, *fixed-count arrays*).
+elements: the canonical encoding **elides the trailing default run**, and a
+decoder refills `[M, N)` from the **element** default (ARCHITECTURE §11,
+*fixed-count arrays*). `[7,8,9]` in a `count: 5` u32 field encodes as
+`23 03 07 08 09`, not `23 05 07 08 09 00 00`.
 
-**C does not do this, and the gap is not fixable in the generator**
-(generator#136 / Crucible F-0010). Every other backend emits its own array write
-call and can hand the corelib a trimmed slice/span. C does not: it emits a struct
-plus a static descriptor table and `corelib-c-cpp` walks it, and
+C is the one target where **neither half is emitted by the generator**. Every
+other backend writes its own array call and hands the corelib a trimmed
+slice/span; C emits only a struct plus a static descriptor table, and
 `SOFAB_OBJECT_FIELD_ARRAY` derives the element count *structurally* —
 
 ```c
@@ -57,38 +57,34 @@ plus a static descriptor table and `corelib-c-cpp` walks it, and
       (sizeof(((obj *)0)->field[0]) & 0xF) }
 ```
 
-— so `object.c` encodes exactly `field->size / field->element_size == N`
-elements. The descriptor has **no used-length slot** for arrays, and generated C
-emits no encode statement to trim. Closing this needs a **corelib** change: the
-array analogue of `SOFAB_OBJECT_FIELD_BLOB_SIZED`, which exists for precisely
-this reason for blobs (a bare `uint8_t[N]` cannot represent "3 of a possible 4",
-issue #128). Since every C array is fixed-count by construction (`count`-less is
-rejected above), the corelib could equivalently trim the trailing zero-element
-run in its array writer with no schema knowledge at all.
+— so `object.c` sees `field->size / field->element_size == N` and there is no
+used-length slot, and no generated statement, to trim through. The rule is
+therefore implemented **in `corelib-c-cpp`** (generator#136 / Crucible F-0010,
+fixed by corelib-c-cpp#87):
 
-**Decode is conformant only for a zero (or absent) schema default.**
-`_bind_array_count` accepts any wire count `M <= N` and rejects `M > N` with
-`SOFAB_RET_E_INVALID_MSG`, so C reads the canonical compact wire the other
-backends emit and rebuilds the full `N` elements. But it leaves the trailing
-slots "at their init/default values" — and `<prefix>_init` seeds those from the
-**schema** default image. §3 requires `[M, N)` to be the **element** default
-(zero); the schema default describes the whole field only when the field is
-*absent*. So a non-zero schema default leaks back on a short wire count:
+- **encode** — `object.c` trims the trailing all-zero element run before calling
+  the array writer. It lives on the C-only descriptor path and **not** in the
+  `sofab_ostream_write_array_of_*` writers, which the C++ wrapper calls directly
+  with dynamic `std::vector`s that have no `N` to refill from and so must keep
+  their trailing defaults.
+- **decode** — `_bind_array_count` (`istream.c`) accepts `M <= N`, rejects
+  `M > N` with `SOFAB_RET_E_INVALID_MSG`, and clears `[M, N)` to the element
+  default. The clear matters because `<prefix>_init` seeds the destination from
+  the **schema** default image, which describes the whole field only when the
+  field is *absent*; without it a `count: 5, default: [1,2,3]` field would decode
+  `23 02 01 02` as `[1,2,3,0,0]` instead of `[1,2,0,0,0]`.
 
-```
-count: 5, default: [1, 2, 3]        // init -> {1,2,3,0,0}
-wire 23 02 01 02                    // the canonical trim of the value [1,2,0,0,0]
-decoded -> [1,2,3,0,0]              // WRONG: the schema default's 3 survived
-expected -> [1,2,0,0,0]
-```
+**Minimum corelib.** Generated C is only canonical against a `corelib-c-cpp` that
+carries corelib-c-cpp#87. Against an older one the generated sources still
+compile and interoperate — a decoder must accept a non-canonical encoding that
+carries trailing default elements (§3) — but C's own output keeps the trailing
+run, and a short wire count leaks the schema default.
 
-This is a **second corelib-side gap** (the generator emits no decode statements
-for C either). It is pre-existing and already reachable — the growable backends
-have always written a compact count — not something the encode trim introduced.
-`cpp`/`rust`/`zig` had the identical latent bug in their `std::array`/`[T; N]`/
-`[N]T` storage and fix it in generated code by resetting the array to the element
-default at `array_begin` when (and only when) the schema default is non-zero; C
-has no such seam.
+**Consequence for `corelib: c-cpp`.** The C++ wrapper shares `istream.c`, so that
+profile now gets the `[M, N)` clear from the corelib *as well as* from the
+`array_begin` reset the generator emits. The generated reset is kept regardless:
+it is what makes the pure `corelib: cpp` (heap) profile correct, since that is a
+different library without this fix, and it costs nothing where it is redundant.
 
 ## Struct member order (widest-first)
 
