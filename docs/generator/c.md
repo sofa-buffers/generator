@@ -34,8 +34,45 @@ model has no dynamic-container fallback
 Unlike the C++ `c-cpp` and Rust `no_std` fixed-capacity profiles there is **no
 `allow_dynamic` escape** for C: a schema with a genuinely dynamic collection (a
 `count`-less map, say) is a heap-target schema, and must be given explicit
-capacities before it can be generated for C. `count` never goes on the wire, so
-adding one keeps the encoding byte-identical to every other target.
+capacities before it can be generated for C. `count` itself never goes on the
+wire — but it is **not** encoding-neutral: it makes the array fixed-length `N`,
+which changes what the canonical wire carries (see below).
+
+## Known gap: the trailing-default-run rule is not implemented on encode
+
+MESSAGE_SPEC §3 makes `count: N` a **fixed-length** array of exactly `N`
+elements, and requires the canonical encoding to **elide the trailing default
+run** — `[7,8,9]` in a `count: 5` u32 field must encode as `23 03 07 08 09`, not
+`23 05 07 08 09 00 00` (ARCHITECTURE §11, *fixed-count arrays*).
+
+**C does not do this, and the gap is not fixable in the generator**
+(generator#136 / Crucible F-0010). Every other backend emits its own array write
+call and can hand the corelib a trimmed slice/span. C does not: it emits a struct
+plus a static descriptor table and `corelib-c-cpp` walks it, and
+`SOFAB_OBJECT_FIELD_ARRAY` derives the element count *structurally* —
+
+```c
+#define SOFAB_OBJECT_FIELD_ARRAY(id, obj, field, type) \
+    { id, offsetof(obj, field), sizeof(((obj *)0)->field), 0, type, \
+      (sizeof(((obj *)0)->field[0]) & 0xF) }
+```
+
+— so `object.c` encodes exactly `field->size / field->element_size == N`
+elements. The descriptor has **no used-length slot** for arrays, and generated C
+emits no encode statement to trim. Closing this needs a **corelib** change: the
+array analogue of `SOFAB_OBJECT_FIELD_BLOB_SIZED`, which exists for precisely
+this reason for blobs (a bare `uint8_t[N]` cannot represent "3 of a possible 4",
+issue #128). Since every C array is fixed-count by construction (`count`-less is
+rejected above), the corelib could equivalently trim the trailing zero-element
+run in its array writer with no schema knowledge at all.
+
+**Decode is already conformant**, so this is an encode-side divergence only, not
+an interop break: `_bind_array_count` accepts any wire count `M <= N` and leaves
+the trailing slots at their init/default values (call `<prefix>_init` first —
+that is what seeds the defaults), and rejects `M > N` with
+`SOFAB_RET_E_INVALID_MSG`. C therefore reads the canonical compact wire the other
+backends emit and reconstructs the full `N` elements correctly; only C's own
+output still carries the trailing default run.
 
 ## Struct member order (widest-first)
 
