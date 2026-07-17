@@ -177,6 +177,18 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		}
 		f.line("    public %s %s%s;", g.javaType(fld), javaIdent(fld.Name), g.javaInit(fld))
 	}
+	// Hoist each native array's omit-compare default into a static: marshal only
+	// ever reads it (Arrays.equals / List.equals), so one shared instance suffices
+	// and encode stops allocating a fresh `new T[n]` literal on every call (issue
+	// #146 -- a `count: N` field's default is N elements, so for a large N or many
+	// array fields that per-encode garbage dominates). The mutable per-object
+	// initializer above stays a fresh allocation; this static is read-only. Mirrors
+	// the C# backend's `_arrdef_*` statics.
+	for _, fld := range fields {
+		if def, ok := g.javaArrayCompareDefault(fld); ok {
+			f.line("    private static final %s %s = %s;", g.javaType(fld), javaArrDefName(fld), def)
+		}
+	}
 	f.blank()
 
 	// marshal
@@ -284,8 +296,8 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 		// Primitive array (long[]/float[]/double[]): omit when equal to its default
 		// (Arrays.equals), else when empty; write straight to the OStream primitive
 		// overload with no Sbuf box/unbox temporary.
-		if lit, ok := g.javaPrimArrayLiteral(fld); ok {
-			f.line("        if (!java.util.Arrays.equals(%s, %s)) {", acc, lit)
+		if _, ok := g.javaPrimArrayLiteral(fld); ok {
+			f.line("        if (!java.util.Arrays.equals(%s, %s)) {", acc, javaArrDefName(fld))
 		} else {
 			f.line("        if (%s != null && %s.length != 0) {", acc, acc)
 		}
@@ -294,8 +306,8 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 		return
 	}
 	if nativeArrayElem(fld.Elem) { // boolean array (boxed List<Boolean>)
-		if def, ok := g.javaNativeArrayLiteral(fld); ok {
-			f.line("        if (!%s.equals(%s)) {", def, acc)
+		if _, ok := g.javaNativeArrayLiteral(fld); ok {
+			f.line("        if (!%s.equals(%s)) {", javaArrDefName(fld), acc)
 		} else {
 			f.line("        if (%s != null && !%s.isEmpty()) {", acc, acc)
 		}
@@ -304,6 +316,28 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 		return
 	}
 	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, fld.HasCount)
+}
+
+// javaArrDefName is the static field holding a native array field's omit-compare
+// default (issue #146).
+func javaArrDefName(fld *ir.Field) string { return "_arrdef_" + fld.Name }
+
+// javaArrayCompareDefault is the literal a native array field's value is compared
+// against for whole-field omission, and ("", false) when the field has no
+// materialized default (a dynamic array with no schema default, or a
+// wrapper-sequence array, which is never whole-omitted). It is exactly the field
+// initializer, so an untouched field always compares equal and is omitted.
+func (g *gen) javaArrayCompareDefault(fld *ir.Field) (string, bool) {
+	if fld.Kind != ir.KindArray {
+		return "", false
+	}
+	if primitiveArrayElem(fld.Elem) {
+		return g.javaPrimArrayLiteral(fld)
+	}
+	if nativeArrayElem(fld.Elem) {
+		return g.javaNativeArrayLiteral(fld)
+	}
+	return "", false
 }
 
 // trimExpr wraps a native array expression in the trailing-default-run trim a

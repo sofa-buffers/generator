@@ -62,7 +62,8 @@ func TestJavaStructural(t *testing.T) {
 		"public float[] somefloatarray = new float[]{0.0f, -1.5f, 3.25f};",                            // primitive fp array
 		"public long[] someenumarray = new long[]{2L, 1L, 0L, 0};",                                    // short default tail-padded to count
 		"os.writeArrayUnsigned(15, Sbuf.trimTail(this.someuintarray));",                               // direct write, no Sbuf box; count: 4 -> trailing default run elided (#136)
-		"if (!java.util.Arrays.equals(this.someuintarray, new long[]{0L, 1L, 1000L, 4294967295L})) {", // Arrays.equals guard
+		"private static final long[] _arrdef_someuintarray = new long[]{0L, 1L, 1000L, 4294967295L};", // omit-default hoisted to a static (#146)
+		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",                  // guard reads the static -- no per-encode new long[] (#146)
 		"m.someuintarray = ensureCap(m.someuintarray, ai, acap); m.someuintarray[ai++] = value;",      // grow-on-demand indexed decode (#96)
 		"case 15: if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"someuintarray: array count above schema capacity 4\")); acap = 4; m.someuintarray = new long[4]; break;", // over-count rejected (#100); fixed count -> materialize exactly N, zero tail (#136)
 		"private static long[] ensureCap(long[] a, int i, int cap) {",   // lazy-growth helper
@@ -429,9 +430,12 @@ messages:
 		"public List<Boolean> db = new ArrayList<>();",
 
 		// --- the synthesized default doubles as the whole-field omission guard, so
-		// an all-default fixed array is omitted entirely (encodes to no bytes).
-		"if (!java.util.Arrays.equals(this.fu, new long[5])) {",
-		"if (!List.of(false, false, false).equals(this.fb)) {",
+		// an all-default fixed array is omitted entirely (encodes to no bytes). The
+		// default is hoisted to a static (#146) so the guard allocates nothing.
+		"private static final long[] _arrdef_fu = new long[5];",
+		"if (!java.util.Arrays.equals(this.fu, _arrdef_fu)) {",
+		"private static final List<Boolean> _arrdef_fb = List.of(false, false, false);",
+		"if (!_arrdef_fb.equals(this.fb)) {",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing %q", want)
@@ -444,6 +448,10 @@ messages:
 		"public long[] du = new long[",
 		"public List<Boolean> db = new ArrayList<>(List.of(",
 		"java.util.Arrays.equals(this.du",
+		// #146: the omit guard must not allocate a throwaway array per encode --
+		// no `new T[...]` literal inside an Arrays.equals / List.of compare.
+		"Arrays.equals(this.fu, new long[",
+		"List.of(false, false, false).equals(this.fb)",
 	} {
 		if strings.Contains(m, unwanted) {
 			t.Errorf("M.java must not contain %q (dynamic arrays keep the empty default)", unwanted)
