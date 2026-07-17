@@ -164,6 +164,10 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("%s", padToHelper)
 		f.blank()
 	}
+	if use.strMaxlen {
+		f.line("%s", utf8LenHelper)
+		f.blank()
+	}
 
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]

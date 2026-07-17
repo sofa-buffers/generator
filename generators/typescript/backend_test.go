@@ -118,10 +118,13 @@ func TestTSMaxlenReject(t *testing.T) {
 	}
 	for _, want := range []string{
 		// (b) Scalar string + blob reject on an over-length byte check.
-		`case 0: { const _s = c.readString(); if (new TextEncoder().encode(_s).length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); o.s = _s; break; }`,
+		`case 0: { const _s = c.readString(); if (_utf8Len(_s) > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); o.s = _s; break; }`,
 		`case 1: { const _b = c.readBlob(); if (_b.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8"); o.b = _b; break; }`,
 		// (c) A bounded wrapper-string element rejects on its element maxlen.
-		`const _s = c.readString(); if (new TextEncoder().encode(_s).length > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 5"); arr[_id] = _s;`,
+		`const _s = c.readString(); if (_utf8Len(_s) > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 5"); arr[_id] = _s;`,
+		// (e) The allocation-free byte-length helper is emitted once for the bounded
+		// strings above, replacing the per-decode TextEncoder allocation (issue #153).
+		"function _utf8Len(s: string): number {",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing maxlen guard %q\n%s", want, mod)
@@ -130,6 +133,10 @@ func TestTSMaxlenReject(t *testing.T) {
 	// (d) An unbounded string keeps the bare read (never truncated, no guard).
 	if !strings.Contains(mod, "case 2: o.u = c.readString(); break;") {
 		t.Errorf("unbounded string must keep the bare read:\n%s", mod)
+	}
+	// (f) The per-decode TextEncoder allocation is gone from the hot path (issue #153).
+	if strings.Contains(mod, "TextEncoder") {
+		t.Errorf("decode maxlen check must not allocate a TextEncoder per string (issue #153):\n%s", mod)
 	}
 }
 
@@ -146,7 +153,7 @@ func TestTSStructural(t *testing.T) {
 		"switch (c.id) {",                                               // one switch per type
 		"default: c.skip(c.wire); break;",                               // forward-compat skip
 		"o.somestruct = MyfirstmessageSomestruct.decodeFrom(c); break;", // nested message recursion
-		`while (c.readHeader()) { if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); const _s = c.readString(); if (new TextEncoder().encode(_s).length > 16) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 16"); arr[_id] = _s; }`, // id-aware string-list sequence, over-index + over-maxlen rejected (MESSAGE_SPEC S2/S5.1/S7/S7.1, #142)
+		`while (c.readHeader()) { if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); const _s = c.readString(); if (_utf8Len(_s) > 16) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 16"); arr[_id] = _s; }`, // id-aware string-list sequence, over-index + over-maxlen rejected (MESSAGE_SPEC S2/S5.1/S7/S7.1, #142)
 		"o.someu64 = c.readUnsigned() as bigint; break;", // u64 -> bigint, number-first
 		"os.writeSequenceBegin(",                         // nested framing (marshal unchanged)
 		"export enum MyfirstmessageSomeenum {",
