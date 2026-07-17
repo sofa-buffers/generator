@@ -655,7 +655,7 @@ The infallible best-effort entry points kept for back-compat (Rust/C++
 `decode`) still discard the verdict; the fallible path is authoritative, and
 the conformance harnesses assert the reject through it (§12).
 
-#### Decode verdict: over-index wrapper-array elements are INVALID (heap families)
+#### Decode verdict: over-index wrapper-array elements are INVALID (all targets)
 
 The **sequence-form analogue** of the over-count scalar rule (generator#142).
 A `string`/`blob`/`struct`/`union` element array with a schema `count: N` lowers
@@ -685,23 +685,34 @@ splits exactly like the scalar case:
   `maxlen` no_std reject below — the same "a declared bound binds every target,
   regardless of memory model" rule (§7.1). A `struct`/`union` over-index on no_std
   remains a drop (a separate axis, not part of F-0013).
-- **C and C++ `c-cpp` still drop** — bounded by their inline container capacity
-  (the issue#126 guard in `_FixedStrSeq`/`_FixedBlobSeq`), an over-index element
-  has no slot and is skipped, so decode completes rather than rejecting. This is a
-  §7.1 verdict violation the generator **cannot** fix on its own, and — unlike the
-  over-`maxlen` case — the C runtime's existing capacity check does **not** reach
-  it. The over-`maxlen` reject (corelib-c-cpp#90) works because a `maxlen` maps to
-  the read's *buffer capacity*, and the C core already rejects a wire
-  `length > target_len` (`istream.c`); the generated code just passes the bound as
-  the capacity. An over-index is an element-*count* bound: a fixed-count
-  `string`/`blob` array lowers to a **wrapper sequence**, whose elements the core
-  delivers one at a time by `id` — it never learns the schema `count`, so no
-  capacity check fires. The c-cpp `IStreamImpl` exposes no `invalidate()` hook and
-  the C field callback is `void`, so a callback that *does* know the count (`id >=
-  N`) has no channel to make `feed()` return `INVALID`. The allocation is bounded
-  by construction either way, so the DoS never reached them; only the verdict
-  diverges. Tracked as **corelib-c-cpp#92** (add a callback→decoder abort channel;
-  a genuinely new affordance, not covered by the #90 capacity-check fix).
+  Why this needs a corelib affordance at all (and the over-`maxlen` case did not):
+  an over-index is an element-*count* bound, not a byte bound. The over-`maxlen`
+  reject (corelib-c-cpp#90) rides the C runtime's existing capacity check — a
+  `maxlen` maps to the read's *buffer capacity*, and the core already rejects a wire
+  `length > target_len` (`istream.c`), so the generated code just passes the bound
+  as the capacity. But a fixed-count `string`/`blob` array lowers to a **wrapper
+  sequence**, whose elements the core delivers one at a time by `id`; it never
+  learns the schema `count`, so no capacity check fires. Only the callback knows
+  `id >= N`, and it needs a channel to turn that into an `INVALID` verdict — the
+  `sofab_istream_invalidate` abort primitive added in **corelib-c-cpp#92**.
+- **C++ `c-cpp` now rejects** — with the #92 abort channel in place, the
+  `_FixedStrSeq`/`_FixedBlobSeq` capacity guard calls `is.invalidate()` (in place of
+  issue#126's silent `return`), so an over-index element is `INVALID`, converging
+  with pure `cpp` and the heap families (generator#149). The reject still returns
+  before the fill loop, so the issue#126 no-hang guarantee is preserved.
+- **C now rejects** — the pure `c` target is descriptor-driven: its decode loop is
+  the corelib's `object.c: sofab_object_field_cb`, which matches an element by
+  scanning the descriptor's `field_list` for the id. A message skips an unmatched
+  (unknown, forward-compat) id, but a fixed-count sequence **holder** — whose
+  fields are exactly the element slots `0..N-1` — must reject an unmatched id as
+  over-index. **corelib-c-cpp#94** added a `fixed_seq` descriptor flag (macro
+  `SOFAB_OBJECT_DESCR_SEQ`) that makes `object.c` call `sofab_istream_invalidate`
+  on an unmatched id; the generator now emits that macro for every holder
+  (`buildHolder` sets `objectPlan.fixedSeq`), while messages and the elements' own
+  struct/union type descriptors keep the plain `SOFAB_OBJECT_DESCR` skip form. So
+  an over-index element is `INVALID`, converging the last F-0013 profile
+  (generator#149). The reject is the corelib's, before any slot grows, so the
+  issue#126 no-hang property is unaffected.
 
 #### Decode verdict: over-`maxlen` strings/blobs are INVALID (every target)
 

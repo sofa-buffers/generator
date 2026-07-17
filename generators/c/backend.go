@@ -86,6 +86,13 @@ type objectPlan struct {
 	// both of which warn under -Wdeprecated-declarations; emitDescriptor wraps its
 	// output in a diagnostic push/pop when this is set.
 	hasDeprecated bool
+	// fixedSeq marks a synthetic fixed-count sequence holder (buildHolder): its
+	// fields are the element slots 0..field_count-1 of a bounded string/blob/
+	// struct/union/nested array. emitDescriptor emits SOFAB_OBJECT_DESCR_SEQ so the
+	// corelib rejects an over-index element id (>= N) as INVALID instead of skipping
+	// it like an unknown message field (MESSAGE_SPEC §7/§7.1, generator#149 /
+	// corelib-c-cpp#94). A message / struct / union object leaves this false.
+	fixedSeq bool
 }
 
 // defaultInit is one designated-initializer entry (".field = expr") in an
@@ -298,7 +305,9 @@ func isHolderElem(k ir.Kind) bool {
 // (a fixlen field each), struct/union (a nested sequence each) and nested arrays
 // (an inner array, or an inner holder sequence, each). Recurses for deep nesting.
 func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPlan, order *[]string) *objectPlan {
-	p := &objectPlan{key: key, cType: g.cType(key, "elems"), descr: g.descrSym(key)}
+	// A holder's fields are the fixed element slots 0..N-1, so an over-index element
+	// id (>= N) is INVALID, not an unknown-field skip: mark it a fixed-seq holder.
+	p := &objectPlan{key: key, cType: g.cType(key, "elems"), descr: g.descrSym(key), fixedSeq: true}
 	// checkBounded guarantees a count on every array, so the capacity is the
 	// schema count directly (no zero-sizing fallback).
 	cap := spec.count
@@ -518,6 +527,8 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 	// compares against zero and costs no .rodata. Designated initializers are
 	// order-independent, so the widest-first member reordering is irrelevant.
 	if len(p.defaults) > 0 {
+		// A holder (fixedSeq) never carries a defaults image (its elements default to
+		// empty/zero), so WITH_DEFAULTS and SEQ are mutually exclusive in practice.
 		c.line("static const %s %s = {", p.cType, g.defaultsSym(p.key))
 		for _, d := range p.defaults {
 			c.line("    .%s = %s,", d.ident, d.expr)
@@ -525,6 +536,9 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 		c.line("};")
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(%s, %d, %s, %d, &%s);",
 			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, g.defaultsSym(p.key))
+	} else if p.fixedSeq {
+		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_SEQ(%s, %d, %s, %d);",
+			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount)
 	} else {
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR(%s, %d, %s, %d);",
 			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount)

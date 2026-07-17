@@ -114,25 +114,24 @@ run_variant() {
     [ "$rc" -eq 124 ] && { echo "FAIL: [$label] decode hung on over-capacity sequence element (issue #126)"; exit 1; }
     echo "==> [$label] no-hang OK"
 
-    # Over-index wrapper array (generator#142): the sequence-form analogue of the
-    # over-count scalar reject above. somestringarray (id 18) declares count: 5; a
-    # well-formed string element at wire index 5 (>= N) is INVALID per MESSAGE_SPEC
-    # S5.1/S7 -- the heap profile's generated _StrSeq rejects it with
-    # is.invalidate() before growing (which also bounds an over-index
-    # amplification DoS). The fixed c-cpp profile instead drops the element into
-    # its capacity-bounded InlineVector (issue #126, decode still completes), so
-    # this reject assertion is pure-corelib-cpp only. Wire: 96 01 (sequence_begin
-    # id 18) 2a (string id 5) 0a 78 (fixlen "x") 07 (sequence_end).
+    # Over-index wrapper array (generator#142, #149): the sequence-form analogue of
+    # the over-count scalar reject above. somestringarray (id 18) declares count: 5;
+    # a well-formed string element at wire index 5 (>= N) is INVALID per MESSAGE_SPEC
+    # S5.1/S7. BOTH profiles reject: the heap _StrSeq and the c-cpp fixed-capacity
+    # _FixedStrSeq/_FixedBlobSeq both call is.invalidate() before growing (which also
+    # bounds an over-index amplification DoS) -- c-cpp via the callback→decoder abort
+    # channel added in corelib-c-cpp#92 (generator#149 / F-0013). Wire: 96 01
+    # (sequence_begin id 18) 2a (string id 5) 0a 78 (fixlen "x") 07 (sequence_end).
     printf '\226\001\052\012\170\007' > "$WORK/overindex.bin"
     printf '\226\001\042\012\170\007' > "$WORK/overindex_control.bin"
-    if [ -z "$corelib" ]; then
-        echo "==> [$label] over-index wrapper array must reject (generator#142)"
-        if "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overindex.bin" >/dev/null 2>&1; then
-            echo "FAIL: [$label] over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
-        fi
-        "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: [$label] control (index 4 < 5) must decode"; exit 1; }
-        echo "==> [$label] over-index reject OK"
+    echo "==> [$label] over-index wrapper array must reject (generator#142, #149)"
+    if "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overindex.bin" >/dev/null 2>&1; then
+        echo "FAIL: [$label] over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
+    fi
+    "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: [$label] control (index 4 < 5) must decode"; exit 1; }
+    echo "==> [$label] over-index reject OK"
 
+    if [ -z "$corelib" ]; then
         # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
         # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
         # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;

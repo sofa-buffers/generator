@@ -365,6 +365,49 @@ messages:
 	}
 }
 
+// TestOverIndexSeqHolderDescriptor: a fixed-count string/blob/struct wrapper
+// array lowers to a synthetic element-slot holder (`_elems`), which must be
+// emitted as SOFAB_OBJECT_DESCR_SEQ so the corelib rejects an over-index element
+// id (>= N) as INVALID instead of skipping it (MESSAGE_SPEC §7/§7.1, generator#149
+// / corelib-c-cpp#94). The message object and the struct element's *own* type
+// descriptor (`_elem`) are ordinary objects — unknown ids there are
+// forward-compat skips — so they keep the plain SOFAB_OBJECT_DESCR form.
+func TestOverIndexSeqHolderDescriptor(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      sa: { id: 0, type: array, items: { type: string, count: 4, maxlen: 8 } }
+      ba: { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 8 } }
+      pa: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }
+`)
+	c := files["m.c"]
+	for _, want := range []string{
+		"_sa_elems = SOFAB_OBJECT_DESCR_SEQ(", // string holder
+		"_ba_elems = SOFAB_OBJECT_DESCR_SEQ(", // blob holder
+		"_pa_elems = SOFAB_OBJECT_DESCR_SEQ(", // struct holder
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c holder descriptor not marked fixed-seq: missing %q:\n%s", want, c)
+		}
+	}
+	// The message object and the struct element's own descriptor stay plain: an
+	// unknown id there is a valid forward-compat skip, not an over-index reject.
+	for _, want := range []string{
+		"_message_m = SOFAB_OBJECT_DESCR(", // the message itself
+		"_pa_elem = SOFAB_OBJECT_DESCR(",   // struct element type descriptor
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c non-holder object must use plain SOFAB_OBJECT_DESCR: missing %q:\n%s", want, c)
+		}
+	}
+	// A holder must never be the SEQ *and* skip form at once.
+	if strings.Contains(c, "_elems = SOFAB_OBJECT_DESCR(") {
+		t.Errorf("m.c holder emitted as a plain (skip) descriptor:\n%s", c)
+	}
+}
+
 // TestDeprecatedFieldRendering: a field marked deprecated must (a) carry the
 // native __attribute__((deprecated)) marker on its struct member and a Doxygen
 // @deprecated note in the member's doc comment, and (b) keep the generated .c
