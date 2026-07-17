@@ -73,9 +73,26 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	case ir.KindFP64:
 		f.line("      case %d: %s = c.readFp64(); break;", x.ID, acc)
 	case ir.KindString:
-		f.line("      case %d: %s = c.readString(); break;", x.ID, acc)
+		// A wire string longer than its schema maxlen is malformed input: reject the
+		// whole message rather than silently truncate (MESSAGE_SPEC §7.1). "Length"
+		// is the UTF-8 BYTE length; the cursor hands back only the decoded string, so
+		// re-encode to measure it. An unbounded string keeps the bare read.
+		if x.HasMaxlen {
+			f.line("      case %d: { const _s = c.readString(); if (new TextEncoder().encode(_s).length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: string byte length above schema maxlen %d\"); %s = _s; break; }",
+				x.ID, x.Maxlen, x.Name, x.Maxlen, acc)
+		} else {
+			f.line("      case %d: %s = c.readString(); break;", x.ID, acc)
+		}
 	case ir.KindBlob:
-		f.line("      case %d: %s = c.readBlob(); break;", x.ID, acc)
+		// A wire blob longer than its schema maxlen is malformed: reject, never
+		// truncate (MESSAGE_SPEC §7.1). readBlob returns a Uint8Array view whose
+		// .length is the exact wire byte length. An unbounded blob keeps the bare read.
+		if x.HasMaxlen {
+			f.line("      case %d: { const _b = c.readBlob(); if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: blob byte length above schema maxlen %d\"); %s = _b; break; }",
+				x.ID, x.Maxlen, x.Name, x.Maxlen, acc)
+		} else {
+			f.line("      case %d: %s = c.readBlob(); break;", x.ID, acc)
+		}
 	case ir.KindStruct, ir.KindUnion:
 		f.line("      case %d: %s = %s.decodeFrom(c); break;", x.ID, acc, g.typeName(x.Ref.Key))
 	case ir.KindArray:
@@ -99,7 +116,7 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// readHeader. Loop until the sequence-end (readHeader() -> false).
 		f.line("      case %d: {", x.ID)
 		f.line("        const arr: %s = [];", g.tsType(x))
-		f.line("        while (c.readHeader()) { %s }", g.seqCollectBody("arr", x.Elem, x.ElemRef, x.ElemItems, capOf(x.HasCount, x.Count)))
+		f.line("        while (c.readHeader()) { %s }", g.seqCollectBody("arr", x.Elem, x.ElemRef, x.ElemItems, capOf(x.HasCount, x.Count), x.ElemMaxHas, x.ElemMax))
 		f.line("        %s = arr;", acc)
 		f.line("        break;")
 		f.line("      }")
@@ -178,7 +195,7 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 		}
 		rowT := g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems)
 		return "((): " + rowT + "[] => { const _r: " + rowT + "[] = []; while (c.readHeader()) { " +
-			g.seqCollectBody("_r", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count)) + " } return _r; })()"
+			g.seqCollectBody("_r", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax) + " } return _r; })()"
 	}
 	return "undefined as never"
 }
@@ -198,7 +215,7 @@ func capOf(hasCount bool, count int64) int64 {
 // wire, so we grow arr with the element default ("" / empty bytes) and place the
 // value at its id, restoring any gap. Composite elements (struct/union/nested-
 // array) are always framed, never omitted, so they push in arrival order.
-func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64) string {
+func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64, maxHas bool, maxVal int64) string {
 	// Fixed-count wrapper array: an element id >= N is INVALID (MESSAGE_SPEC
 	// §5.1/§7 — issue #142), rejected before the array grows, which also bounds an
 	// over-index heap-amplification fill. A dynamic array keeps every index.
@@ -208,8 +225,24 @@ func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *i
 	}
 	switch elem {
 	case ir.KindString:
+		// A bounded string element that overruns its schema maxlen is malformed:
+		// reject, never truncate (MESSAGE_SPEC §7.1). "Length" is the UTF-8 byte
+		// length, measured by re-encoding the decoded string.
+		if maxHas {
+			return guard + "const _id = c.id; while (" + arr + `.length <= _id) ` + arr + `.push(""); const _s = c.readString(); ` +
+				fmt.Sprintf(`if (new TextEncoder().encode(_s).length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s element: string byte length above schema maxlen %d"); `, maxVal, arr, maxVal) +
+				arr + "[_id] = _s;"
+		}
 		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + `.push(""); ` + arr + "[_id] = c.readString();"
 	case ir.KindBlob:
+		// A bounded blob element that overruns its schema maxlen is malformed:
+		// reject, never truncate (MESSAGE_SPEC §7.1). readBlob's Uint8Array .length
+		// is the exact wire byte length.
+		if maxHas {
+			return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); const _b = c.readBlob(); " +
+				fmt.Sprintf(`if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s element: blob byte length above schema maxlen %d"); `, maxVal, arr, maxVal) +
+				arr + "[_id] = _b;"
+		}
 		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); " + arr + "[_id] = c.readBlob();"
 	default:
 		return guard + arr + ".push(" + g.elemDecode(elem, ref, items) + ");"

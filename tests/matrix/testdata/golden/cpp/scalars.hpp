@@ -19,9 +19,11 @@ namespace message {
 struct _StrSeq : sofab::IStreamMessage {
     std::vector<std::string> &out;
     long _cap;
-    explicit _StrSeq(std::vector<std::string> &o, long cap = -1) : out(o), _cap(cap) {}
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
+    long _emax;
+    explicit _StrSeq(std::vector<std::string> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
         if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
+        if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }
         std::string _s; is.read(_s);
         while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
         out[id] = std::move(_s);
@@ -30,9 +32,11 @@ struct _StrSeq : sofab::IStreamMessage {
 struct _BlobSeq : sofab::IStreamMessage {
     std::vector<std::vector<std::uint8_t>> &out;
     long _cap;
-    explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o, long cap = -1) : out(o), _cap(cap) {}
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
+    long _emax;
+    explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
         if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
+        if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }
         std::string _s; is.read(_s);
         while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
         out[id].assign(_s.begin(), _s.end());

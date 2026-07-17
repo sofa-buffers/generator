@@ -31,7 +31,12 @@ verdicts apply: `InvalidMsg` (over-schema count), then `LimitExceeded`, then
 analogue (generator#142): a `string`/`blob`/`struct`/`union` element array with
 a schema `count: N` sets the same `inv` flag when a wire element id is `≥ N`,
 before the `Vec` grows. Under `corelib: rs-no-std` that element is instead
-dropped into the capacity-bounded `heapless::Vec` (issue #126).
+dropped into the capacity-bounded `heapless::Vec` (issue #126). The `inv` flag
+likewise carries the **over-`maxlen`** reject (Option B, MESSAGE_SPEC §7.1): a
+`string`/`blob` (scalar or wrapper element) whose wire byte length exceeds its
+schema `maxlen` sets `inv` at the length header, on **both** profiles — on
+`no_std` the guard fires ahead of the heapless `BufferFull` path, so an
+over-`maxlen` value is `InvalidMsg`, not a capacity error.
 
 **std profile only.** The limits apply to `corelib: rs` (std). Under
 `corelib: rs-no-std` the keys are inert: heapless storage is statically

@@ -38,6 +38,10 @@ type frame struct {
 	// also bounds an over-index heap-amplification fill. Set on the array frames
 	// (fkSeqArr / fkStructArr / fkArrArr).
 	cap int64
+	// emax is the fkSeqArr string/blob element's schema maxlen L (-1 == no bound):
+	// an element whose wire byte length exceeds L is INVALID (MESSAGE_SPEC §7.1),
+	// rejected before the read, never truncated.
+	emax int64
 }
 
 // capOf maps a schema fixed-count bound to a frame's cap: N when the array
@@ -45,6 +49,15 @@ type frame struct {
 func capOf(hasCount bool, count int64) int64 {
 	if hasCount {
 		return count
+	}
+	return -1
+}
+
+// boundOf maps a schema maxlen/count presence+value to its bound: L when
+// present, -1 (unbounded) otherwise.
+func boundOf(has bool, v int64) int64 {
+	if has {
+		return v
 	}
 	return -1
 }
@@ -102,7 +115,7 @@ func isNativeArrayElem(k ir.Kind) bool {
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walkFields func(loc, path string, fields []*ir.Field)
-	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64)
+	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64)
 
 	walkFields = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields})
@@ -112,7 +125,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 				cl := loc + "_" + fld.Name
 				walkFields(cl, path+"."+rustIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, capOf(fld.HasCount, fld.Count))
+				addArray(loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -121,10 +134,10 @@ func (g *gen) frames(m *ir.Message) []frame {
 	// (loc, path) and whose element is (elem, ref, items). elemMaxHas is the
 	// string/blob element's maxlen presence (unused for other element kinds); cap
 	// is the array's schema fixed-count bound (-1 == dynamic).
-	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64) {
+	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64) {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDyn: !elemMaxHas, cap: cap})
+			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDyn: !elemMaxHas, cap: cap, emax: boundOf(elemMaxHas, elemMax)})
 		case ir.KindStruct, ir.KindUnion:
 			el := loc + "_e"
 			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el, cap: cap})
@@ -139,7 +152,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			} else {
 				el := loc + "_e"
 				out = append(out, frame{loc: loc, path: path, kind: fkArrArr, elemLoc: el, cap: cap})
-				addArray(el, path+".last_mut().unwrap()", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, capOf(items.HasCount, items.Count))
+				addArray(el, path+".last_mut().unwrap()", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -455,6 +468,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.str {
 		// string: scalar strings + string-array elements
 		f.line("    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
+		g.emitMaxlenGuard(f, fs, ir.KindString)
 		if g.limits.stringHas {
 			g.emitLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN")
 		}
@@ -521,6 +535,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.blob {
 		// blob: scalar blobs + blob-array elements
 		f.line("    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
+		g.emitMaxlenGuard(f, fs, ir.KindBlob)
 		if g.limits.blobHas {
 			g.emitLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN")
 		}
@@ -693,6 +708,39 @@ func (g *gen) emitLimitGuard(f *rfile, fs []frame, kind ir.Kind, constName strin
 	}
 	f.line("        // Unbounded fields under an active receiver cap:")
 	f.line("        // reject an over-cap declared total before any bytes accumulate.")
+	f.line("        match (self.cur, id) {")
+	for _, a := range arms {
+		f.line("%s", a)
+	}
+	f.line("            _ => {}")
+	f.line("        }")
+}
+
+// emitMaxlenGuard emits the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
+// of the string/blob callback, the bounded-field twin of emitLimitGuard: every
+// field of that kind with a schema `maxlen` (scalar fields and wrapper-sequence
+// elements alike) gets a (loc, id) arm that rejects a declared `total` above its
+// own maxlen with the sticky `inv` flag (Error::InvalidMsg) — before any bytes
+// accumulate and never truncated. Emitted on BOTH profiles: on no_std it also
+// supersedes the heapless BufferFull path so the outcome is INVALID, not a
+// capacity error.
+func (g *gen) emitMaxlenGuard(f *rfile, fs []frame, kind ir.Kind) {
+	var arms []string
+	for _, fr := range fs {
+		if fr.kind == fkSeqArr && fr.elemKind == kind && fr.emax >= 0 {
+			arms = append(arms, fmt.Sprintf("            (_Loc::%s, _) => if total > %d { self.inv = true; return; },", fr.loc, fr.emax))
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == kind && fld.HasMaxlen {
+				arms = append(arms, fmt.Sprintf("            (_Loc::%s, %d) => if total > %d { self.inv = true; return; },", fr.loc, fld.ID, fld.Maxlen))
+			}
+		}
+	}
+	if len(arms) == 0 {
+		return
+	}
+	f.line("        // Bounded fields: a wire byte length above the schema maxlen is")
+	f.line("        // malformed input, INVALID before any bytes accumulate (never truncated).")
 	f.line("        match (self.cur, id) {")
 	for _, a := range arms {
 		f.line("%s", a)

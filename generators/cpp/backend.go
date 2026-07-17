@@ -393,8 +393,11 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		sizeParam = "std::size_t _size"
 	} else {
 		for _, fld := range fields {
-			if fld.Kind == ir.KindString && !fld.HasMaxlen && g.limStrHas ||
-				fld.Kind == ir.KindBlob && !fld.HasMaxlen && g.limBlobHas {
+			// _size is read by the unbounded #102 limit guard (no maxlen + a
+			// configured cap) and by the bounded schema-maxlen reject (MESSAGE_SPEC
+			// S7.1) — both string and blob.
+			if (fld.Kind == ir.KindString || fld.Kind == ir.KindBlob) &&
+				(fld.HasMaxlen || (!fld.HasMaxlen && (g.limStrHas && fld.Kind == ir.KindString || g.limBlobHas && fld.Kind == ir.KindBlob))) {
 				sizeParam = "std::size_t _size"
 				break
 			}
@@ -635,6 +638,12 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		if !g.clib && !fld.HasMaxlen && g.limStrHas {
 			f.line("            if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }")
 		}
+		// Bounded string on the heap profile: a wire byte length above the schema
+		// maxlen is malformed input, INVALID for every target (MESSAGE_SPEC S7.1),
+		// rejected before the read and never truncated to the bound.
+		if !g.clib && fld.HasMaxlen {
+			f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
+		}
 		if g.fixed && fld.HasMaxlen {
 			// FixedString: set_len fixes the logical length (and the trailing NUL);
 			// read binds data()/size() via the same read_string_noterm path.
@@ -654,6 +663,11 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// Unbounded blob cap: same policy guard as the string case above (#102).
 		if !g.clib && !fld.HasMaxlen && g.limBlobHas {
 			f.line("            if (_size > SOFAB_MAX_DYN_BLOB_LEN) { is.exceedLimit(); return; }")
+		}
+		// Bounded blob on the heap profile: same schema-maxlen reject as the string
+		// case above (MESSAGE_SPEC S7.1) -- INVALID, before the read, never clamped.
+		if !g.clib && fld.HasMaxlen {
+			f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
 		}
 		if g.fixed && fld.HasMaxlen {
 			// FixedBytes: bound the inline buffer's logical length, then bind the
@@ -725,6 +739,15 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 // address for a deferred pass, so its enum/boolean arrays read in place (a temp
 // would dangle) and the target vector is reserved so an emplace never moves a
 // still-unfilled bound element.
+// elemMaxOr returns a string/blob wrapper element's schema maxlen bound (L) when
+// present, else -1 (no bound), for the _StrSeq/_BlobSeq collectors' _emax guard.
+func elemMaxOr(has bool, m int64) int64 {
+	if has {
+		return m
+	}
+	return -1
+}
+
 func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, elemMaxHas bool, elemMax int64, depth int) {
 	tv := fmt.Sprintf("_t%d", depth)
 	iv := fmt.Sprintf("_i%d", depth)
@@ -781,7 +804,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
-			f.line("%s{ _StrSeq %s{%s, %d}; is.read(%s); }", ind, rv, target, cap, rv)
+			f.line("%s{ _StrSeq %s{%s, %d, %d}; is.read(%s); }", ind, rv, target, cap, elemMaxOr(elemMaxHas, elemMax), rv)
 		}
 	case ir.KindBlob:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
@@ -793,7 +816,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
-			f.line("%s{ _BlobSeq %s{%s, %d}; is.read(%s); }", ind, rv, target, cap, rv)
+			f.line("%s{ _BlobSeq %s{%s, %d, %d}; is.read(%s); }", ind, rv, target, cap, elemMaxOr(elemMaxHas, elemMax), rv)
 		}
 	case ir.KindStruct, ir.KindUnion:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)

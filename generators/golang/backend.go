@@ -204,14 +204,21 @@ func _padTo[T any](a []T, n int, zero T) []T {
 // >= N is a schema-bound violation (MESSAGE_SPEC S5.1/S7 - an index at or past
 // the fixed count is INVALID, never grown-into), rejected before the slice grows,
 // which also bounds the id-keyed fill against an over-index amplification DoS.
+// emax is the schema element maxlen bound (-1 == unbounded): an element whose
+// wire byte length exceeds emax is malformed input (MESSAGE_SPEC S7.1),
+// rejected as INVALID before the slice grows - never silently truncated.
 type _strSeq struct {
 	_visitorBase
-	out *[]string
-	cap int
+	out  *[]string
+	cap  int
+	emax int
 }
 
 func (s *_strSeq) String(id sofab.ID, v string) error {
 	if s.cap >= 0 && int(id) >= s.cap {
+		return sofab.ErrInvalidMsg
+	}
+	if s.emax >= 0 && len(v) > s.emax {
 		return sofab.ErrInvalidMsg
 	}
 	for len(*s.out) <= int(id) {
@@ -223,12 +230,16 @@ func (s *_strSeq) String(id sofab.ID, v string) error {
 
 type _bytesSeq struct {
 	_visitorBase
-	out *[][]byte
-	cap int
+	out  *[][]byte
+	cap  int
+	emax int
 }
 
 func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
 	if s.cap >= 0 && int(id) >= s.cap {
+		return sofab.ErrInvalidMsg
+	}
+	if s.emax >= 0 && len(v) > s.emax {
 		return sofab.ErrInvalidMsg
 	}
 	for len(*s.out) <= int(id) {
@@ -703,6 +714,14 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	var seq []string
 
 	arm := func(id int64, body string) string { return fmt.Sprintf("case %d:\n%s", id, body) }
+	// maxlenGuard rejects a scalar string/blob whose wire byte length exceeds the
+	// schema maxlen as INVALID (MESSAGE_SPEC §7.1); "" when the field is unbounded.
+	maxlenGuard := func(has bool, max int64) string {
+		if !has {
+			return ""
+		}
+		return fmt.Sprintf("if len(v) > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", max)
+	}
 	for _, fld := range fields {
 		acc := "m." + goFieldName(fld.Name)
 		switch fld.Kind {
@@ -721,10 +740,12 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 		case ir.KindFP64:
 			f64 = append(f64, arm(fld.ID, acc+" = v"))
 		case ir.KindString:
-			str = append(str, arm(fld.ID, acc+" = v"))
+			// A wire byte length above the schema maxlen is malformed input
+			// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate.
+			str = append(str, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+acc+" = v"))
 		case ir.KindBlob:
 			// v aliases the decode buffer (AcceptBytes) — copy what we keep.
-			blob = append(blob, arm(fld.ID, acc+" = append([]byte(nil), v...)"))
+			blob = append(blob, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+acc+" = append([]byte(nil), v...)"))
 		case ir.KindStruct, ir.KindUnion:
 			seq = append(seq, arm(fld.ID, fmt.Sprintf("return &%s, nil", acc)))
 		case ir.KindArray:
@@ -750,7 +771,7 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			case fld.Elem == ir.KindFP64:
 				f64Arr = append(f64Arr, arm(fld.ID, guard+acc+" = v"+fill))
 			default: // wrapper-sequence array (string/blob/struct/union/nested)
-				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s = %s[:0]\n\t\treturn %s, nil", acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count)))))
+				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s = %s[:0]\n\t\treturn %s, nil", acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), emaxOf(fld.ElemMaxHas, fld.ElemMax)))))
 			}
 		}
 	}
@@ -843,12 +864,12 @@ func (g *gen) narrowArrayStmt(acc string, elem ir.Kind, ref *ir.TypeRef) string 
 // arrayCollector returns an expression constructing the sofab.Visitor that
 // collects a wrapper-sequence array's elements into the slice at ptr (an address
 // expression like "&m.Field" or a "*[]T" pointer). It recurses for nested arrays.
-func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64) string {
+func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64) string {
 	switch elem {
 	case ir.KindString:
-		return fmt.Sprintf("&_strSeq{out: %s, cap: %d}", ptr, cap)
+		return fmt.Sprintf("&_strSeq{out: %s, cap: %d, emax: %d}", ptr, cap, emax)
 	case ir.KindBlob:
-		return fmt.Sprintf("&_bytesSeq{out: %s, cap: %d}", ptr, cap)
+		return fmt.Sprintf("&_bytesSeq{out: %s, cap: %d, emax: %d}", ptr, cap, emax)
 	case ir.KindStruct, ir.KindUnion:
 		t := g.typeName(ref.Key)
 		return fmt.Sprintf("&_objSeq[%s, *%s]{out: %s, cap: %d}", t, t, ptr, cap)
@@ -860,7 +881,7 @@ func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *i
 		// collected into an inner slice by a recursively-built collector. The
 		// inner collector carries the inner array's own count bound.
 		inner := g.goArrayElem(items.Elem, items.ElemRef, items.ElemItems)
-		mk := g.arrayCollector("p", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count))
+		mk := g.arrayCollector("p", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), emaxOf(items.ElemMaxHas, items.ElemMax))
 		return fmt.Sprintf("&_seqSeq[%s]{out: %s, mk: func(p *[]%s) sofab.Visitor { return %s }}", inner, ptr, inner, mk)
 	}
 	return "_visitorBase{}"
@@ -871,6 +892,16 @@ func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *i
 func capOf(hasCount bool, count int64) int64 {
 	if hasCount {
 		return count
+	}
+	return -1
+}
+
+// emaxOf maps a string/blob element maxlen bound to the collector's emax field:
+// the maxlen when present, -1 (unbounded) otherwise. A wrapper element longer
+// than emax is malformed input (MESSAGE_SPEC §7.1), rejected as INVALID.
+func emaxOf(hasMax bool, max int64) int64 {
+	if hasMax {
+		return max
 	}
 	return -1
 }

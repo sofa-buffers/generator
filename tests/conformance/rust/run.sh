@@ -101,6 +101,21 @@ run_variant() {
         echo "==> [$label] over-index reject OK"
     fi
 
+    # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
+    # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
+    # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;
+    # control is 16 bytes. Both profiles reject: the generated maxlen guard sets
+    # self.inv on std AND no_std (the no_std guard supersedes the heapless
+    # BufferFull path, so the outcome is INVALID, not a capacity error).
+    echo "==> [$label] over-maxlen string/blob must reject (Option B, S7.1)"
+    printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
+    printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
+    if (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overmaxlen.bin" >/dev/null 2>&1); then
+        echo "FAIL: [$label] over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
+    fi
+    (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overmaxlen_control.bin" >/dev/null) || { echo "FAIL: [$label] control (16 == maxlen) must decode"; exit 1; }
+    echo "==> [$label] over-maxlen reject OK"
+
     echo "==> [$label] shared-vector byte-exact conformance"
     python3 "$ROOT/tests/conformance/rust/check_vectors.py" "$corelib/assets/test_vectors.json" "$WORK/conf-$label"
 

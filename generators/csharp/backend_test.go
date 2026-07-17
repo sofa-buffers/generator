@@ -76,6 +76,34 @@ func TestCsOverIndexWrapperArray(t *testing.T) {
 	}
 }
 
+// TestCsMaxlenReject: a bounded string/blob whose wire byte length exceeds its
+// schema maxlen is malformed input, rejected as INVALID at the `total` length
+// header (MESSAGE_SPEC §7.1) — for scalar fields and wrapper-array elements
+// alike, never truncated. An unbounded field gets no maxlen arm.
+func TestCsMaxlenReject(t *testing.T) {
+	src := []byte("version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s:  { id: 0, type: string, maxlen: 8 }\n" +
+		"      b:  { id: 1, type: blob, maxlen: 8 }\n" +
+		"      ws: { id: 2, type: array, items: { type: string, maxlen: 5 } }\n" +
+		"      us: { id: 3, type: string }\n")
+	m := buildModule(t, src, "in.yaml", map[string]any{"namespace": "S"})
+	for _, want := range []string{
+		// Bounded scalar string + blob: per-field maxlen check at `total`.
+		`case (Root, 0): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "s: string length above schema maxlen 8"); break;`,
+		`case (Root, 1): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "b: blob length above schema maxlen 8"); break;`,
+		// Bounded wrapper string element: keyed by the array location, element id agnostic.
+		`case (Root_ws, _): if (total > 5) throw new SofabException(SofabError.InvalidMessage, "Root_ws element: string length above schema maxlen 5"); break;`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing maxlen guard %q\n%s", want, m)
+		}
+	}
+	// The unbounded string carries no maxlen reject (only its plain store arm).
+	if strings.Contains(m, "us: string length above schema maxlen") {
+		t.Errorf("unbounded string must not carry a maxlen guard:\n%s", m)
+	}
+}
+
 func TestCsStructural(t *testing.T) {
 	m := exampleModule(t)
 	for _, want := range []string{

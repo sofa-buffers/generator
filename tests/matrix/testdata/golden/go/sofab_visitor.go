@@ -92,14 +92,21 @@ func _padTo[T any](a []T, n int, zero T) []T {
 // >= N is a schema-bound violation (MESSAGE_SPEC S5.1/S7 - an index at or past
 // the fixed count is INVALID, never grown-into), rejected before the slice grows,
 // which also bounds the id-keyed fill against an over-index amplification DoS.
+// emax is the schema element maxlen bound (-1 == unbounded): an element whose
+// wire byte length exceeds emax is malformed input (MESSAGE_SPEC S7.1),
+// rejected as INVALID before the slice grows - never silently truncated.
 type _strSeq struct {
 	_visitorBase
-	out *[]string
-	cap int
+	out  *[]string
+	cap  int
+	emax int
 }
 
 func (s *_strSeq) String(id sofab.ID, v string) error {
 	if s.cap >= 0 && int(id) >= s.cap {
+		return sofab.ErrInvalidMsg
+	}
+	if s.emax >= 0 && len(v) > s.emax {
 		return sofab.ErrInvalidMsg
 	}
 	for len(*s.out) <= int(id) {
@@ -111,12 +118,16 @@ func (s *_strSeq) String(id sofab.ID, v string) error {
 
 type _bytesSeq struct {
 	_visitorBase
-	out *[][]byte
-	cap int
+	out  *[][]byte
+	cap  int
+	emax int
 }
 
 func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
 	if s.cap >= 0 && int(id) >= s.cap {
+		return sofab.ErrInvalidMsg
+	}
+	if s.emax >= 0 && len(v) > s.emax {
 		return sofab.ErrInvalidMsg
 	}
 	for len(*s.out) <= int(id) {

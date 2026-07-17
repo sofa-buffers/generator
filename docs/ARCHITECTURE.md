@@ -684,6 +684,35 @@ splits exactly like the scalar case:
   families' `INVALID` verdict; the allocation is bounded by construction either
   way, so the DoS never reached them.
 
+#### Decode verdict: over-`maxlen` strings/blobs are INVALID (every target)
+
+The length axis of the same rule (generator "Option B"). MESSAGE_SPEC §7 + **§7.1
+("a declared bound binds every target")** make a `maxlen: L` on a `string`/`blob`
+a **wire-validity bound**, not a sizing hint: a value whose wire byte length
+exceeds `L` is malformed input and **MUST** be reported as `INVALID` on *every*
+target, **never silently truncated to `L`** — "two conformant implementations
+MUST agree on which messages are valid," regardless of allocation strategy.
+
+- **Heap families reject** — the 9 heap backends now emit a per-field guard at
+  the length header (`wire byte length > L → INVALID`) for every bounded
+  string/blob, scalar field *and* wrapper-array element, using the same INVALID
+  channel as the over-count/over-index guards. It is the **bounded-field twin**
+  of the receiver-side `max_dyn_*` limit guards (§9.5): those reject an
+  *unbounded* field's length as `LimitExceeded` (policy); this rejects a *bounded*
+  field's length as `INVALID` (schema validity). A field is one or the other, so
+  they never both fire. Byte length is compared, not character count (a multibyte
+  UTF-8 string can exceed `L` bytes while under it in characters).
+- **`no_std` Rust also rejects `INVALID`** — its `heapless::String<N>`/`Vec<u8,N>`
+  already detected the over-capacity truncation (setting the `BufferFull`/`err`
+  flag), but the generated maxlen guard now fires first and sets the `inv` flag,
+  so the outcome is `INVALID` (not a capacity error) — converging with the heap
+  families. No corelib change was needed.
+- **C and C++ `c-cpp` still clamp** — corelib-c-cpp's `FixedString`/`FixedBytes`
+  `set_len` truncates to `N` (`len_ = n > N ? N : n`), so an over-`maxlen` value
+  is silently accepted, shortened. This is a §7.1 violation the generator cannot
+  fix on its own — the c-cpp `IStreamImpl` exposes no `invalidate()` hook (the
+  same gap the over-index reject hit) — so it is tracked as **corelib-c-cpp#90**.
+
 ### 9.4 Capability / value-width model
 
 Footprint-tunable corelibs gate wire types behind build switches; the generator
