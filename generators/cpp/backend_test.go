@@ -265,20 +265,20 @@ func TestCppFixedContainers(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"sofab::FixedBytes<16> bl = {};",                                      // scalar blob -> fixed
-		"sofab::FixedString<8> s = \"\";",                                     // bounded string -> FixedString
-		"std::array<std::uint32_t, 4> nums = {};",                             // native array unchanged
-		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",            // blob sequence -> inline
-		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",           // string sequence -> inline
-		"sofab::InlineVector<MPtsElem",                                        // struct sequence -> inline (prefix)
-		"if (bl != sofab::FixedBytes<16>{}) {",                                // blob default-compare typed
-		"s.set_len(_size); if (_size) is.read(s);",                            // FixedString decode
-		"bl.set_len(_size); is.read(bl.data(), bl.size());",                   // FixedBytes decode: clamped size, not raw _size (issue #95)
-		"static _FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",  // blob-seq collector
-		"static _FixedStrSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
-		"static _MsgSeqFixed<sofab::InlineVector<",                            // struct-seq collector
+		"sofab::FixedBytes<16> bl = {};",                                                    // scalar blob -> fixed
+		"sofab::FixedString<8> s = \"\";",                                                   // bounded string -> FixedString
+		"std::array<std::uint32_t, 4> nums = {};",                                           // native array unchanged
+		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",                          // blob sequence -> inline
+		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",                         // string sequence -> inline
+		"sofab::InlineVector<MPtsElem",                                                      // struct sequence -> inline (prefix)
+		"if (bl != sofab::FixedBytes<16>{}) {",                                              // blob default-compare typed
+		"s.set_len(_size); if (_size) is.read(s);",                                          // FixedString decode
+		"bl.set_len(_size); is.read(bl.data(), bl.size());",                                 // FixedBytes decode: clamped size, not raw _size (issue #95)
+		"static _FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",                // blob-seq collector
+		"static _FixedStrSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>",               // string-seq collector
+		"static _MsgSeqFixed<sofab::InlineVector<",                                          // struct-seq collector
 		"if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }", // over-index element rejected INVALID (generator#149), no infinite loop (issue #126)
-		"std::size_t encodeTo(std::uint8_t *dst",                              // heap-free encode
+		"std::size_t encodeTo(std::uint8_t *dst",                                            // heap-free encode
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("fixed header missing %q", want)
