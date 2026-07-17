@@ -2,6 +2,7 @@ package zig
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -75,6 +76,68 @@ const zigReadme = "# Generated SofaBuffers Zig package\n\n" +
 
 // ---- JSON harness -----------------------------------------------------------
 
+// emitBench emits the Callgrind workload entry points (tests/bench, ARCHITECTURE
+// §15). Each run_<workload> performs EXACTLY ONE op and is `export fn` (unmangled,
+// external) + @call(.never_inline), so
+//
+//	valgrind --tool=callgrind --collect-atstart=no --toggle-collect=run_<workload>
+//
+// collects that single op and nothing else — process start, JSON parsing and the
+// decode input's pre-encode all happen in benchMain, before collection is toggled
+// on. Same shape as corelib-zig/bench.
+//
+// The never_inline barrier is on the wrapper only, so encode/decode and the corelib
+// still inline into it — that inlining is the cost being measured. std.mem.
+// doNotOptimizeAway keeps the results live.
+func (g *gen) emitBench(f *zfile, s *ir.Schema) {
+	for _, m := range s.Messages {
+		mt := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		f.line("var _bench_%s_in: message.%s = undefined;", low, mt)
+		f.line("var _bench_%s_wire: []const u8 = &[_]u8{};", low)
+		f.line("var _bench_%s_alloc: std.mem.Allocator = undefined;", low)
+		f.blank()
+		f.line("export fn run_encode_%s() void {", low)
+		f.line("    _bench_%s_wire = _bench_%s_in.encode(_bench_%s_alloc) catch &[_]u8{};", low, low, low)
+		f.line("    std.mem.doNotOptimizeAway(&_bench_%s_wire);", low)
+		f.line("}")
+		f.blank()
+		f.line("export fn run_decode_%s() void {", low)
+		f.line("    const obj = message.%s.decode(_bench_%s_alloc, _bench_%s_wire) catch return;", mt, low, low)
+		f.line("    std.mem.doNotOptimizeAway(&obj);")
+		f.line("}")
+		f.blank()
+	}
+
+	f.line("// benchMain runs one op of <workload>. Everything here is setup; only the")
+	f.line("// run_* call is collected.")
+	f.line("fn benchMain(alloc: std.mem.Allocator, w: []const u8, input: []const u8) !void {")
+	for _, m := range s.Messages {
+		mt := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		f.line("    if (std.mem.eql(u8, w, \"encode_%s\") or std.mem.eql(u8, w, \"decode_%s\")) {", low, low)
+		f.line("        const v = try std.json.parseFromSliceLeaky(std.json.Value, alloc, input, .{});")
+		f.line("        _bench_%s_alloc = alloc;", low)
+		f.line("        _bench_%s_in = fromJson_%s(alloc, v);", low, mt)
+		// @call(.never_inline) at the CALL SITE, not just `export fn`: ReleaseFast
+		// happily inlines the body into benchMain and leaves the exported symbol as
+		// an unreferenced copy, so --toggle-collect matches a function that is never
+		// entered and callgrind silently reports Ir = 0.
+		f.line("        if (std.mem.eql(u8, w, \"encode_%s\")) {", low)
+		f.line("            @call(.never_inline, run_encode_%s, .{});", low)
+		f.line("        } else {")
+		f.line("            @call(.never_inline, run_encode_%s, .{}); // setup: the decode input (not collected)", low)
+		f.line("            @call(.never_inline, run_decode_%s, .{});", low)
+		f.line("        }")
+		f.line("        std.debug.print(\"BYTES={d}\\n\", .{_bench_%s_wire.len});", low)
+		f.line("        return;")
+		f.line("    }")
+	}
+	f.line("    std.process.exit(2);")
+	f.line("}")
+	f.blank()
+}
+
 // harness emits src/main.zig: a stdin/stdout JSON encode/decode driver with
 // hand-rolled JSON mapping per generated type. std.json's dynamic Value is
 // used for parsing (its number_string form keeps u64 values above 2^53
@@ -102,6 +165,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		g.emitJSON(f, exported(m.Name), m.Fields)
 	}
 
+	g.emitBench(f, s)
 	f.line("pub fn main(init: std.process.Init) !void {")
 	f.line("    const alloc = init.arena.allocator();")
 	f.line("    var args = std.process.Args.Iterator.init(init.minimal.args);")
@@ -115,6 +179,12 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    var wbuf: [4096]u8 = undefined;")
 	f.line("    var stdout = std.Io.File.stdout().writer(init.io, &wbuf);")
 	f.line("    const out = &stdout.interface;")
+	f.blank()
+	f.line("    // `bench <workload>` takes a workload, not a message name.")
+	f.line("    if (std.mem.eql(u8, mode, \"bench\")) {")
+	f.line("        try benchMain(alloc, name, input);")
+	f.line("        return;")
+	f.line("    }")
 	f.blank()
 	for _, m := range s.Messages {
 		mt := exported(m.Name)

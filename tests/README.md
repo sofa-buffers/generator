@@ -1,11 +1,21 @@
 # Tests
 
-Two tiers, by what they need to run:
+Three tiers, by what they need to run:
 
 | Tier | Where | Needs | Run |
 |------|-------|-------|-----|
 | **Hermetic matrix tests** | [`matrix/`](matrix/) | just Go | `go test ./tests/matrix/` |
 | **Per-language conformance harnesses** | [`conformance/<lang>/`](conformance/) | that language's toolchain + its corelib | `./tests/conformance/<lang>/run.sh` |
+| **Performance & footprint bench** | [`bench/`](bench/) | valgrind, the cross toolchains, every corelib | `./tests/bench/run.sh` |
+
+Tiers 1 and 2 are red/green. Tier 3 is different: it regenerates a **committed**
+`bench/results.txt`, and the *diff* is the result — a generator change that costs or
+saves shows up in the PR next to the code that caused it.
+
+Tier 2 and tier 3 must not be merged, though they look similar. They want opposite
+builds: conformance builds unoptimized (it is checking behaviour), the bench builds
+`-O3`/`-Os` — ARCHITECTURE §8 makes bounds checks debug-only assertions, so a debug
+build measures code that never ships.
 
 ```
 tests/
@@ -31,6 +41,15 @@ tests/
 │   ├── rust/     { run.sh, check_vectors.py }
 │   ├── typescript/ { run.sh, check_vectors.py }
 │   └── zig/      { run.sh, check_vectors.py }
+│
+├── bench/                  # Tier 3 — Ir/op + footprint of the generated code (ARCHITECTURE §15)
+│   ├── run.sh              #   regenerates results.txt; --rows <ids> to iterate on one row
+│   ├── results.txt         #   COMMITTED — the artifact; `git diff` it
+│   ├── rows.json           #   the 12 (language x corelib) rows + their arches/reps
+│   ├── payload/            #   the saturated JSON payload every row encodes
+│   ├── lang/<lang>.sh      #   per-language build + measure recipes
+│   ├── lib/                #   callgrind.sh (toggle/subtract + validity gates), size.sh, format.py
+│   └── README.md           #   the measurement contract, and what it does NOT measure
 │
 └── gen-artifacts.sh        # shared: generate example sources per language (CI artifacts)
 ```
@@ -85,6 +104,32 @@ shared `assets/test_vectors.json` and asserts byte-exact output.
 ```
 
 Each harness maps to a CI job named `lang-<x>` in `.github/workflows/ci.yml`.
+
+## Tier 3 — `bench/` (performance & footprint)
+
+Answers "what did my generator change cost?". `results.txt` is committed, so:
+
+```sh
+./tests/bench/run.sh                 # regenerate everything
+./tests/bench/run.sh --rows c,zig    # just these rows; the rest keep their values
+git diff tests/bench/results.txt     # <- the result
+```
+
+Two metrics: **Ir/op** (instructions retired under Callgrind — machine-independent,
+which is what makes it committable) for all 12 (language × corelib) rows, and
+**`.text`/`.data`/`.bss`** for the three `footprint` rows, cross-compiled to the
+embedded targets those profiles actually ship to (ARMv6-M, ARMv7-M+fp.dp, RV32IMC,
+thumbv6m).
+
+Corelibs are cloned unpinned, exactly as tier 2 does — a corelib has to match the
+generated code built against it. Their SHAs and the toolchain versions go in the
+`results.txt` header instead, so a moved number with an unmoved header means the
+generator did it. Override with the same env vars tier 2 uses
+(`SOFAB_C_CORELIB=...`).
+
+Read [`bench/README.md`](bench/) before changing anything there — it documents the
+measurement contract and several traps that silently produce plausible-looking wrong
+numbers.
 
 ## `gen-artifacts.sh`
 

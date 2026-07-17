@@ -35,6 +35,16 @@ guides in [`decode-design.md`](decode-design.md). The cross-language **benchmark
 analysis** (measured before/after, the standings it came from) lives in the arena
 repo under `docs/perf/bottlenecks.md`.
 
+> **Regression tracking now lives in-repo.** The standings below were measured by
+> hand in the arena and are a snapshot; nothing kept them true. Since then
+> [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15) records instructions/op per
+> (language × corelib) row and embedded `.text` for the footprint profiles in a
+> **committed** `results.txt`, so a codegen change that costs or saves now shows up
+> as a diff in the PR that caused it. The two are complementary, not comparable: the
+> arena measures wall-clock MB/s against Protobuf on one canonical message; the bench
+> measures machine-independent Ir/op of the generated code for
+> `vehicle_telemetry.yaml`. Do not put their numbers in the same table.
+
 ## The patches
 
 | # | language | change | generator files | measured (arena) |

@@ -29,3 +29,11 @@ targets:
   java:
     package: com.myproj.messages
 ```
+
+## Benchmark row
+
+Row `java` in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with
+the **subtract** method. Tracked: Ir/op.
+
+Change codegen here, then `./tests/bench/run.sh` and read the diff in
+`tests/bench/results.txt`.

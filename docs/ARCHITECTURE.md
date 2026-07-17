@@ -1034,6 +1034,16 @@ A reimplementation is **conformant** when it reproduces these gates:
    dedicated matrix suites for sparse omission (`omit_test.go`), shared refs
    (`refs_test.go`), the multi-file real-world example (`realworld_test.go`),
    ASCII output, and doc comments (§8).
+8. **Performance & footprint** (`tests/bench/`, §15) — the committed
+   `tests/bench/results.txt` records instructions/op (Callgrind) per (language ×
+   corelib) row and the `.text`/`.data`/`.bss` of the generated code
+   cross-compiled to the embedded targets the `footprint` profiles ship to.
+   Regenerated with `tests/bench/run.sh`; the **diff** is the gate — a generator
+   change that costs or saves shows up in the PR next to the code that caused it.
+   Unlike gates 1–7 this is read by a human rather than being red/green, and it is
+   deliberately **not** merged with gate 2: conformance builds unoptimized against a
+   moving corelib, the bench builds `-O3`/`-Os` (§8 makes bounds checks debug-only
+   assertions, so a debug build measures code that never ships).
 
 ---
 
@@ -1060,7 +1070,8 @@ docs/                    ARCHITECTURE.md (this — living source of truth), gene
 examples/                example config + message definitions (incl. the multi-file realworld/ set)
 assets/                  project logo/icon (README images)
 tests/                   conformance/<lang>/run.sh harnesses + matrix/ hermetic Go tests (+ README);
-                         gen-artifacts.sh builds the per-language CI artifact bundle
+                         gen-artifacts.sh builds the per-language CI artifact bundle;
+                         bench/ Ir/op + footprint of the generated code (§15; committed results.txt)
 .github/workflows/       ci.yml (hermetic + lang-<x> jobs), release.yml
 ```
 
@@ -1092,6 +1103,64 @@ removed from the config schema — embedded C++ shipped as the `cpp` target's
 4. Add a project/harness template, corpus coverage, and a `tests/conformance/<lang>/run.sh`
    (generate → build → round-trip → byte-exact vectors) plus a gated unit test.
 5. Add a `lang-<x>` CI job running the harness.
+6. Add the `bench` verb to the project harness and a row to `tests/bench/rows.json`
+   + a `tests/bench/lang/<x>.sh` recipe, then regenerate `tests/bench/results.txt`
+   (§15).
 
 A language milestone lands on `main` only when its tests + CI job are green, and
 this document is updated to match.
+
+---
+
+## 15. Benchmark harness — instructions/op & footprint
+
+`tests/bench/` measures what a generator change costs. The artifact is the
+**committed** `tests/bench/results.txt`: change the generator, run
+`tests/bench/run.sh`, and `git diff` shows the impact next to the code that caused
+it. Gate #8 of §12. Full detail — including the traps — is in `tests/bench/README.md`.
+
+**What is measured** is the *whole package*: generated code plus the corelib it
+calls, as it ships. Not the corelib alone (each corelib benches itself), and not the
+generator's own runtime.
+
+**Ir, not wall-clock.** Instructions retired under Callgrind are independent of CPU
+clock and OS scheduling, which is what makes a number stable enough to commit to a
+file at all. Determinism is therefore a hard requirement here, not a nicety: a file
+that wobbles when nothing changed is one nobody regenerates.
+
+**The corelib is deliberately not pinned.** It is cloned from its default branch, as
+conformance does, because a corelib must match the generated code built against it —
+pinning would break the bench on exactly the commits that adopt a new corelib API.
+Provenance replaces pinning: corelib SHAs and toolchain versions live in the
+`results.txt` header. Header unchanged + a number moved ⇒ the generator did it. The
+cost is that absolute numbers are not comparable across days; this is a diff tool.
+
+**Two isolation methods**, split by whether a native symbol exists to collect on.
+Both mirror the corelibs' own `bench/run_callgrind.sh`, which every corelib ships:
+
+* **`toggle`** (c, cpp, rust, go, zig) — `--collect-atstart=no
+  --toggle-collect=run_<workload>` around a single op. The `run_<w>` wrapper is
+  `noinline` with external linkage. The barrier is on the **wrapper only**, so the
+  corelib still inlines into the generated code — that inlining is the cost being
+  measured.
+* **`subtract`** (java, python, ts, csharp) — no native symbol (JIT'd/interpreted),
+  so run at two rep counts and subtract: `Ir/op = (Ir(R2) − Ir(R1)) / (R2 − R1)`,
+  cancelling startup, class loading and JIT compilation exactly. Needs a fixed
+  warmup in the harness plus per-runtime pinning (EpsilonGC, `-XX:-TieredCompilation`,
+  `-XX:hashCode=2`, …) so the two runs differ in nothing but the rep count.
+
+**The `bench` verb is generated**, part of the `emit: project` backend contract (§8),
+IR-driven like `encode`/`decode` and needing no new config key. Hand-written drivers
+were rejected: one cannot compile against two generator revisions, and the
+API-changing commits are precisely the ones worth measuring.
+
+**Validity is enforced, not assumed.** A `--toggle-collect` matching no symbol is not
+an error — callgrind silently reports `Ir = 0`, which reads as an infinite speedup —
+so `ir_toggle` refuses zero. And two rep points cannot distinguish a real slope from a
+JIT tier transition, so `ir_subtract` takes three and refuses unless the slopes agree
+to 1%.
+
+**Not measured / known gaps** (properties of the targets, not the harness): the C++
+`footprint` profile cannot build freestanding (the generated header pulls in
+`<string>`/`<vector>`, the gap `docs/plans/cpp-embedded-footprint.md` closes), and
+AVR cannot host any fp64 schema. Both are recorded in `tests/bench/README.md`.

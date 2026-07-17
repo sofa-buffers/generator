@@ -81,3 +81,11 @@ Measured on the full-scale arena message (best-of-3, corelib-ts #19/#20):
 | `bigint` | 25.5 | 0.66 | 39.2 | 0.90 |
 | `long` | 38.0 | 0.95 | 47.3 | 1.17 |
 | `number` | 40.2 | 1.04 | 50.8 | 1.18 |
+
+## Benchmark row
+
+Row `ts-bigint` and `ts-long` (one per `int64` mode) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with
+the **subtract** method. Tracked: Ir/op.
+
+Change codegen here, then `./tests/bench/run.sh` and read the diff in
+`tests/bench/results.txt`.

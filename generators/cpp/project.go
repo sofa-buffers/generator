@@ -8,6 +8,72 @@ import (
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
+// emitBench emits the Callgrind workload entry points (tests/bench, ARCHITECTURE
+// §15). Each run_<workload> performs EXACTLY ONE op and is noinline with external
+// linkage, so
+//
+//	valgrind --tool=callgrind --collect-atstart=no --toggle-collect=run_<workload>
+//
+// collects that single op and nothing else — process start, JSON parsing and the
+// decode input's pre-encode all happen in bench_main, before collection is toggled
+// on. Same shape as corelib-c-cpp/bench/cpp/bench.cpp.
+//
+// extern "C" keeps the symbol unmangled so --toggle-collect can name it without a
+// C++ mangling pattern. The barrier is on the wrapper only: encode/try_decode and
+// the corelib still inline into it, which is the cost being measured.
+func (g *gen) emitBench(f *hfile, s *ir.Schema) {
+	for _, m := range s.Messages {
+		mt := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		f.line("static %s _bench_%s_in;", mt, low)
+		f.line("static %s _bench_%s_out;", mt, low)
+		f.line("static std::vector<std::uint8_t> _bench_%s_wire;", low)
+		f.blank()
+		f.line("extern \"C\" __attribute__((noinline)) void run_encode_%s() {", low)
+		f.line("    _bench_%s_wire = _bench_%s_in.encode();", low, low)
+		f.line("}")
+		f.blank()
+		f.line("extern \"C\" __attribute__((noinline)) void run_decode_%s() {", low)
+		f.line("    (void)%s::try_decode(_bench_%s_wire.data(), _bench_%s_wire.size(), _bench_%s_out);", mt, low, low, low)
+		f.line("}")
+		f.blank()
+	}
+
+	f.line("// bench_main runs one op of <workload>. Everything here is setup and")
+	f.line("// observation; only the run_* call is collected.")
+	f.line("static int bench_main(const std::string &w, const std::string &in) {")
+	f.line("    char err[128];")
+	f.line("    sofab_json_t *root = sofab_json_parse(in.data(), in.size(), err, sizeof(err));")
+	f.line("    if (!root) { std::cerr << \"json: \" << err << \"\\n\"; return 1; }")
+	f.line("    unsigned long long sink = 0;")
+	for _, m := range s.Messages {
+		low := strings.ToLower(m.Name)
+		f.line("    if (w == \"encode_%s\" || w == \"decode_%s\") {", low, low)
+		f.line("        from_json(root, _bench_%s_in); sofab_json_free(root);", low)
+		f.line("        if (w == \"encode_%s\") {", low)
+		f.line("            run_encode_%s();", low)
+		f.line("        } else {")
+		f.line("            run_encode_%s();  // setup: the decode input (not collected)", low)
+		f.line("            run_decode_%s();", low)
+		f.line("        }")
+		f.line("        // Observe both results after collection stops, so neither op can be")
+		f.line("        // optimized away but the folding costs no measured instructions.")
+		f.line("        for (auto b : _bench_%s_wire) sink = sink * 31u + b;", low)
+		f.line("        { std::ostringstream o; to_json(_bench_%s_out, o); sink += o.str().size(); }", low)
+		f.line("        std::cerr << \"sink=\" << sink << \" BYTES=\" << _bench_%s_wire.size() << \"\\n\";", low)
+		f.line("        std::cerr << \"wire_hex=\";")
+		f.line("        for (auto b : _bench_%s_wire) { char h[3]; std::snprintf(h, sizeof(h), \"%%02x\", b); std::cerr << h; }", low)
+		f.line("        std::cerr << \"\\n\";")
+		f.line("        return 0;")
+		f.line("    }")
+	}
+	f.line("    sofab_json_free(root);")
+	f.line("    std::cerr << \"unknown workload: \" << w << \"\\n\";")
+	f.line("    return 2;")
+	f.line("}")
+	f.blank()
+}
+
 // projectFiles scaffolds a buildable C++ project: an encode/decode JSON harness
 // (json.hpp keeps the JSON dependency out of the message headers) + a Makefile.
 // The harness reuses corelib-c-cpp's vendored sofab_test_json reader for input
@@ -303,14 +369,19 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 	f.line("#include <sstream>")
 	f.line("#include <string>")
 	f.line("#include <cstring>")
+	f.line("#include <cstdio>")
+	f.line("#include <vector>")
 	f.blank()
 	f.line("using namespace %s;", g.ns)
 	f.blank()
+	g.emitBench(f, s)
 	f.line("int main(int argc, char **argv) {")
-	f.line("    if (argc < 2) { std::cerr << \"usage: harness <encode|decode> [Message]\\n\"; return 2; }")
+	f.line("    if (argc < 2) { std::cerr << \"usage: harness <encode|decode|bench> [Message|workload]\\n\"; return 2; }")
 	f.line("    std::string mode = argv[1];")
 	f.line("    std::string msg = argc > 2 ? argv[2] : %q;", defaultMessage(s))
 	f.line("    std::ostringstream _in; _in << std::cin.rdbuf(); std::string in = _in.str();")
+	f.line("    // `bench <workload>` takes a workload, not a message name.")
+	f.line("    if (mode == \"bench\") { return bench_main(argc > 2 ? argv[2] : \"\", in); }")
 	for i, m := range s.Messages {
 		kw := "if"
 		if i > 0 {

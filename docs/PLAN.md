@@ -434,6 +434,8 @@ There are really only **two optimization axes**, and every backend sits on one o
 
 Each corelib ships benchmarks (`bench/`, `benches/`, `perfbench.py`, …). Wire generated-code round-trips into those harnesses and track encode/decode throughput + (for C/C++/Rust) instruction counts via Callgrind and binary size, so the "optimized" claim is regression-tested in CI, not assumed.
 
+> Delivered as `tests/bench/` — see ARCHITECTURE §15. It reuses the corelibs' own Callgrind method rather than their harnesses, and reaches wider than this item asked: Ir/op for **all** targets (not just C/C++/Rust — the JIT/interpreted ones use rep-count subtraction), and footprint cross-compiled to the embedded targets rather than host binary size. The result is a committed `results.txt` read as a diff, rather than a red/green CI gate.
+
 ---
 
 ## 7. Configuration

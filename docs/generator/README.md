@@ -14,7 +14,7 @@ target; a per-target value overrides the `generic` value for that target
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `emit` | `sources` \| `project` | `sources` | `sources`: just the message-type source files. `project`: additionally scaffold a buildable project (build files + the canonical-JSON conformance harness). Also settable per target. |
+| `emit` | `sources` \| `project` | `sources` | `sources`: just the message-type source files. `project`: additionally scaffold a buildable project (build files + the canonical-JSON conformance harness, which also carries the `bench` verb `tests/bench` drives — see ARCHITECTURE §15). Also settable per target. |
 | `namespace` | string | per-language | Namespace wrapping the generated types, for targets that have one (C++, C#). Deliberately not defaulted generically — each backend applies its idiomatic default (C++ `message`, C# `Message`). |
 | `input_dir` | string | — | Directory of message definitions to generate from. The CLI `--in` flag overrides it. |
 | `output_dir` | string | — | Directory the generated files are written to. The CLI `--out` flag overrides it. |

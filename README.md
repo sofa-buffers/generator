@@ -56,8 +56,14 @@ Examples:
 - [`examples/messages/realworld/`](examples/messages/realworld/) — a realistic connected-vehicle
   telemetry schema split across **multiple files** with cross-file `$ref`.
 
-Each backend has a one-command conformance harness at `tests/<lang>/run.sh` that
-generates the example, builds it against the real corelib, and round-trips it.
+Each backend has a one-command conformance harness at
+`tests/conformance/<lang>/run.sh` that generates the example, builds it against the
+real corelib, and round-trips it.
+
+The "minimal-footprint vs. maximum-throughput" claim below is measured, not
+asserted: [`tests/bench/`](tests/bench/) records instructions/op and embedded
+`.text` for every (language × corelib) combination in a committed `results.txt`, so
+a codegen change that costs or saves shows up as a diff.
 
 ### What it does
 
@@ -123,7 +129,7 @@ sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|zig
 ├── internal/          # parser, validator, IR, analysis, generation pipeline
 ├── schema/            # the message-definition JSON Schema (draft-07)
 ├── examples/          # example definitions (config/ + messages/)
-├── tests/             # per-language conformance harnesses (tests/<lang>/run.sh)
+├── tests/             # conformance harnesses, the hermetic matrix, and bench/ (Ir/op + footprint)
 ├── docs/              # architecture & design
 ├── assets/            # logo & icon
 ├── .devcontainer/     # Go toolchain dev container

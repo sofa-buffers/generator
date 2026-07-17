@@ -106,3 +106,11 @@ the fields of a default-layout struct itself, so no widest-first reordering
 is applied.
 
 [`corelib-zig`]: https://github.com/sofa-buffers/corelib-zig
+
+## Benchmark row
+
+Row `zig` in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with
+the **toggle** method. Tracked: Ir/op.
+
+Change codegen here, then `./tests/bench/run.sh` and read the diff in
+`tests/bench/results.txt`.

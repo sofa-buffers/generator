@@ -1,6 +1,8 @@
 package csharp
 
 import (
+	"strings"
+
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -59,14 +61,19 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.blank()
 	f.line("static class Program {")
 	f.line("    static readonly JsonSerializerOptions Opts = new() { IncludeFields = true, Converters = { new ByteArrayConverter() } };")
+	g.emitBenchBody(f, s)
 	f.line("    static int Main(string[] args) {")
-	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|trydecode> [Message]\"); return 2; }")
+	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|trydecode|bench> [Message|workload]\"); return 2; }")
 	f.line("        string mode = args[0];")
 	f.line("        string name = args.Length > 1 ? args[1] : %q;", defaultMessage(s))
 	f.line("        using var ms = new MemoryStream();")
 	f.line("        using (var stdin = Console.OpenStandardInput()) stdin.CopyTo(ms);")
 	f.line("        var input = ms.ToArray();")
 	f.line("        var stdout = Console.OpenStandardOutput();")
+	f.line("        // `bench <workload> <reps>` takes a workload, not a message name.")
+	f.line("        if (mode == \"bench\") {")
+	f.line("            return BenchMain(name, args.Length > 2 ? int.Parse(args[2]) : 1000, input);")
+	f.line("        }")
 	f.line("        switch (name) {")
 	for _, m := range s.Messages {
 		mt := exported(m.Name)
@@ -94,6 +101,83 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    }")
 	f.line("}")
 	return f.bytes()
+}
+
+// benchSinkField names one cheap integer scalar of m, folded in the bench loop so
+// the decode cannot be elided. It runs inside the measured loop, so it must stay
+// cheap -- serializing would be counted as decode cost.
+func benchSinkField(m *ir.Message) string {
+	for _, f := range m.Fields {
+		switch f.Kind {
+		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+			ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+			return csIdent(f.Name)
+		}
+	}
+	return ""
+}
+
+// emitBenchBody emits the `bench <workload> <reps>` entry point (tests/bench,
+// ARCHITECTURE §15).
+//
+// The CLR JIT-compiles the hot path at runtime, so there is no native symbol to
+// --toggle-collect on. This is the `subtract` method: tests/bench runs the same
+// workload at two rep counts and subtracts the totals,
+//
+//	Ir/op = ( Ir(R2) - Ir(R1) ) / ( R2 - R1 )
+//
+// which cancels CLR startup, assembly loading, JIT compilation and setup exactly.
+//
+// That only holds if the two runs differ in NOTHING but the rep count, which needs
+// both halves of the contract:
+//   - here: a FIXED warmup, independent of reps, so the hot methods are already
+//     compiled before the measured loop and every measured op runs at steady cost;
+//   - in tests/bench/lang/csharp.sh: DOTNET_TieredCompilation=0 (one tier, no mid-run
+//     transition) and a gen0 large enough that a bounded run never collects.
+//
+// Ported from corelib-cs/bench/run_callgrind.sh.
+func (g *gen) emitBenchBody(f *cfile, s *ir.Schema) {
+	f.line("    // Fixed warmup ops per run, independent of `reps`, so it cancels in the")
+	f.line("    // subtraction while leaving the measured ops at steady, fully-JITted cost.")
+	f.line("    static readonly int Warmup = int.TryParse(Environment.GetEnvironmentVariable(\"SOFAB_BENCH_WARMUP\"), out var _w) ? _w : 5000;")
+	f.line("    static long benchSink = 0;")
+	f.blank()
+	f.line("    static int BenchMain(string w, int reps, byte[] input) {")
+	for _, m := range s.Messages {
+		mt := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		f.line("        if (w == \"encode_%s\" || w == \"decode_%s\") {", low, low)
+		f.line("            var obj = JsonSerializer.Deserialize<%s>(input, Opts);", mt)
+		f.line("            var wire = obj.Encode(); // setup: the decode input")
+		f.line("            bool enc = w == \"encode_%s\";", low)
+		f.line("            for (int i = 0; i < Warmup; i++) BenchOp_%s(enc, obj, wire);", low)
+		f.line("            for (int i = 0; i < reps; i++) BenchOp_%s(enc, obj, wire);", low)
+		f.line("            Console.Error.WriteLine($\"sink={benchSink} bytes={wire.Length}\");")
+		f.line("            Console.Error.WriteLine($\"wire_hex={Convert.ToHexString(wire).ToLowerInvariant()}\");")
+		f.line("            return 0;")
+		f.line("        }")
+	}
+	f.line("        Console.Error.WriteLine($\"unknown workload: {w}\");")
+	f.line("        return 2;")
+	f.line("    }")
+	f.blank()
+	for _, m := range s.Messages {
+		mt := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		sink := benchSinkField(m)
+		f.line("    static void BenchOp_%s(bool enc, %s obj, byte[] wire) {", low, mt)
+		f.line("        if (enc) {")
+		f.line("            benchSink ^= obj.Encode().Length;")
+		f.line("        } else {")
+		if sink != "" {
+			f.line("            benchSink ^= (long)%s.Decode(wire).%s;", mt, sink)
+		} else {
+			f.line("            benchSink ^= %s.Decode(wire).GetHashCode();", mt)
+		}
+		f.line("        }")
+		f.line("    }")
+		f.blank()
+	}
 }
 
 func defaultMessage(s *ir.Schema) string {

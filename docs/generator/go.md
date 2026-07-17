@@ -30,3 +30,11 @@ of equal alignment keep their schema order. This affects **declaration order
 only** — encode walks the schema/field-id order, so the wire bytes are
 byte-identical to every other target. Construct values with keyed struct
 literals (`Point{X: 1, Y: 2}`), not positionally.
+
+## Benchmark row
+
+Row `go` in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with
+the **toggle (symbol `main.run_<workload>`)** method. Tracked: Ir/op.
+
+Change codegen here, then `./tests/bench/run.sh` and read the diff in
+`tests/bench/results.txt`.

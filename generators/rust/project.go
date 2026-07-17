@@ -7,6 +7,72 @@ import (
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
+// emitBench emits the Callgrind workload entry points (tests/bench, ARCHITECTURE
+// §15). Each run_<workload> performs EXACTLY ONE op and is #[inline(never)] +
+// #[no_mangle], so
+//
+//	valgrind --tool=callgrind --collect-atstart=no --toggle-collect=run_<workload>
+//
+// collects that single op and nothing else — process start, JSON parsing and the
+// decode input's pre-encode all happen in bench_main, before collection is toggled
+// on. Same shape as corelib-rs-no-std/benches/bench.rs.
+//
+// black_box keeps the op from being elided or const-folded. inline(never) is on the
+// wrapper only, so encode/try_decode and the corelib still inline into it — that
+// inlining is the cost being measured.
+func (g *gen) emitBench(f *rfile, s *ir.Schema) {
+	for _, m := range s.Messages {
+		mt := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		// Returns the byte count, not the buffer: encode()'s type differs by profile
+		// (Vec<u8> with corelib rs, heapless::Vec<u8, MAX_SIZE> with rs-no-std), and
+		// usize is the same in both. black_box(&out) keeps the buffer live so the
+		// encode cannot be reduced to just its length. bench_main re-encodes outside
+		// the collected region for the sink/hex.
+		f.line("#[inline(never)]")
+		f.line("#[no_mangle]")
+		f.line("pub fn run_encode_%s(obj: &%s) -> usize {", low, mt)
+		f.line("    let out = black_box(obj).encode();")
+		f.line("    black_box(&out);")
+		f.line("    out.len()")
+		f.line("}")
+		f.blank()
+		f.line("#[inline(never)]")
+		f.line("#[no_mangle]")
+		f.line("pub fn run_decode_%s(wire: &[u8]) -> %s {", low, mt)
+		f.line("    black_box(%s::try_decode(black_box(wire)).expect(\"decode\"))", mt)
+		f.line("}")
+		f.blank()
+	}
+
+	f.line("// bench_main runs one op of <workload>. Everything here is setup and")
+	f.line("// observation; only the run_* call is collected.")
+	f.line("fn bench_main(w: &str, input: &[u8]) -> i32 {")
+	for _, m := range s.Messages {
+		mt := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		f.line("    if w == \"encode_%s\" || w == \"decode_%s\" {", low, low)
+		f.line("        let obj: %s = serde_json::from_slice(input).expect(\"json\");", mt)
+		f.line("        let wire = obj.encode(); // setup: the decode input (not collected)")
+		f.line("        let mut sink: u64 = 0;")
+		f.line("        if w == \"encode_%s\" {", low)
+		f.line("            sink = sink.wrapping_add(run_encode_%s(&obj) as u64);", low)
+		f.line("        } else {")
+		f.line("            let out = run_decode_%s(&wire);", low)
+		f.line("            sink = sink.wrapping_add(serde_json::to_vec(&out).map(|v| v.len() as u64).unwrap_or(0));")
+		f.line("        }")
+		f.line("        eprintln!(\"sink={} BYTES={}\", sink, wire.len());")
+		f.line("        let hex: String = wire.iter().map(|b| format!(\"{:02x}\", b)).collect();")
+		f.line("        eprintln!(\"wire_hex={}\", hex);")
+		f.line("        return 0;")
+		f.line("    }")
+	}
+	f.line("    eprintln!(\"unknown workload: {}\", w);")
+	f.line("    2")
+	f.line("}")
+	f.blank()
+}
+
 // projectFiles scaffolds a buildable Cargo binary with a serde-json encode/decode
 // harness over the selected Rust corelib: corelib-rs-no-std with only the wire
 // types the schema needs (default), or the always-on std corelib-rs.
@@ -132,13 +198,19 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("use message::*;")
 	}
 	f.line("use std::io::{Read, Write};")
+	f.line("use std::hint::black_box;")
 	f.blank()
+	g.emitBench(f, s)
 	f.line("fn main() {")
 	f.line("    let args: Vec<String> = std::env::args().collect();")
 	f.line("    let mode = args.get(1).map(|s| s.as_str()).unwrap_or(\"\");")
 	f.line("    let name = args.get(2).map(|s| s.as_str()).unwrap_or(%q);", defaultMessage(s))
 	f.line("    let mut input = Vec::new();")
 	f.line("    std::io::stdin().read_to_end(&mut input).unwrap();")
+	f.line("    // `bench <workload>` takes a workload, not a message name.")
+	f.line("    if mode == \"bench\" {")
+	f.line("        std::process::exit(bench_main(args.get(2).map(|s| s.as_str()).unwrap_or(\"\"), &input));")
+	f.line("    }")
 	f.line("    match name {")
 	for _, m := range s.Messages {
 		mt := exported(m.Name)
