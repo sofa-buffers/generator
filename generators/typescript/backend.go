@@ -115,6 +115,12 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	use := g.scanHelpers(s)
 	imports := []string{"OStream", "Cursor"}
+	if decodesAnyField(s) {
+		// The per-field wire-type guard in the pull decoder (issue #160) references
+		// WireType; only classes with at least one decode case use it, so a
+		// field-less schema (enums/bitfields only) keeps the import out.
+		imports = append(imports, "WireType")
+	}
 	if use.long {
 		imports = append(imports, "Long")
 	}
@@ -188,6 +194,24 @@ func (g *gen) module(s *ir.Schema) []byte {
 		g.emitClass(f, exported(m.Name), m.Summary, m.Fields)
 	}
 	return f.bytes()
+}
+
+// decodesAnyField reports whether any emitted class (message, struct or union)
+// has at least one field, i.e. whether decodeFrom emits any switch case and thus
+// the WireType-guarded import is needed. Enums and bitfields carry no fields.
+func decodesAnyField(s *ir.Schema) bool {
+	for _, m := range s.Messages {
+		if len(m.Fields) > 0 {
+			return true
+		}
+	}
+	for _, key := range s.NamedOrder {
+		nt := s.Named[key]
+		if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && len(nt.Fields) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *gen) emitEnum(f *tsfile, nt *ir.NamedType) {
