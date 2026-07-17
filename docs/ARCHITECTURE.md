@@ -677,12 +677,31 @@ splits exactly like the scalar case:
   thrown `SofabException`/`SofabError` / `SofaDecodeError`). A dynamic wrapper
   array (no `count`) has no `N` and keeps every delivered index — its length is
   *highest present id + 1* (§5.1).
-- **Fixed-storage families drop** — C, C++ `c-cpp`, `no_std` Rust are bounded by
-  their inline container capacity (the issue#126 guard): an over-index element
-  has no slot and is skipped, so decode still completes rather than rejecting.
-  This is the one place the fixed profiles do **not** converge on the heap
-  families' `INVALID` verdict; the allocation is bounded by construction either
-  way, so the DoS never reached them.
+- **`no_std` Rust also rejects (string/blob)** — the generated `id >= N` guard is
+  now emitted on the no_std profile too for `string`/`blob` wrapper elements: it
+  fires ahead of the heapless `Vec<_, N>` capacity drop (issue#126) and sets the
+  sticky `inv` flag, so the outcome is `INVALID`, converging with the heap
+  families (generator#149 / F-0013). This is the index-axis twin of the over-
+  `maxlen` no_std reject below — the same "a declared bound binds every target,
+  regardless of memory model" rule (§7.1). A `struct`/`union` over-index on no_std
+  remains a drop (a separate axis, not part of F-0013).
+- **C and C++ `c-cpp` still drop** — bounded by their inline container capacity
+  (the issue#126 guard in `_FixedStrSeq`/`_FixedBlobSeq`), an over-index element
+  has no slot and is skipped, so decode completes rather than rejecting. This is a
+  §7.1 verdict violation the generator **cannot** fix on its own, and — unlike the
+  over-`maxlen` case — the C runtime's existing capacity check does **not** reach
+  it. The over-`maxlen` reject (corelib-c-cpp#90) works because a `maxlen` maps to
+  the read's *buffer capacity*, and the C core already rejects a wire
+  `length > target_len` (`istream.c`); the generated code just passes the bound as
+  the capacity. An over-index is an element-*count* bound: a fixed-count
+  `string`/`blob` array lowers to a **wrapper sequence**, whose elements the core
+  delivers one at a time by `id` — it never learns the schema `count`, so no
+  capacity check fires. The c-cpp `IStreamImpl` exposes no `invalidate()` hook and
+  the C field callback is `void`, so a callback that *does* know the count (`id >=
+  N`) has no channel to make `feed()` return `INVALID`. The allocation is bounded
+  by construction either way, so the DoS never reached them; only the verdict
+  diverges. Tracked as **corelib-c-cpp#92** (add a callback→decoder abort channel;
+  a genuinely new affordance, not covered by the #90 capacity-check fix).
 
 #### Decode verdict: over-`maxlen` strings/blobs are INVALID (every target)
 
