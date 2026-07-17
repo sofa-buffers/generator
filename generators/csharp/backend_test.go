@@ -119,7 +119,8 @@ func TestCsStructural(t *testing.T) {
 		"public ulong someu64 = 18446744073709551615UL;",
 		"public enum MyfirstmessageSomeenum : sbyte {",
 		"if (offset == 0 && chunkLength >= total) {", // string/blob single-shot fast path
-		"_s = Encoding.UTF8.GetString(data, chunkOffset, total);",
+		"_s = _Utf8(data, chunkOffset, total);",      // strict UTF-8: invalid -> INVALID (issue #85)
+		"new System.Text.UTF8Encoding(false, true)",  // throwOnInvalidBytes, never lossy U+FFFD
 		"System.Array.Copy(data, chunkOffset, _b, 0, total);",
 		// over-count scalar array rejected as INVALID before the (untrusted-count) allocation (#100)
 		"if (count > 4) throw new SofabException(SofabError.InvalidMessage, \"someuintarray: array count above schema capacity 4\"); ",

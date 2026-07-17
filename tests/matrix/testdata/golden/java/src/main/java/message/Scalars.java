@@ -93,15 +93,25 @@ class ScalarsVisitor implements Visitor {
         } break;
         }
     }
+    private static String _utf8(byte[] b, int off, int len) {
+        try {
+            return java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(b, off, len)).toString();
+        } catch (java.nio.charset.CharacterCodingException _e) {
+            throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "string: invalid UTF-8"));
+        }
+    }
     public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
         String _s;
         if (offset == 0 && chunkLength >= total) {
-            _s = new String(data, chunkOffset, total, java.nio.charset.StandardCharsets.UTF_8);
+            _s = _utf8(data, chunkOffset, total);
         } else {
             if (acc == null) acc = new java.io.ByteArrayOutputStream();
             acc.write(data, chunkOffset, chunkLength);
             if (acc.size() < total) return;
-            _s = new String(acc.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+            _s = _utf8(acc.toByteArray(), 0, total);
             acc.reset();
         }
         switch (cur) {

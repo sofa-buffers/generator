@@ -546,13 +546,31 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	}
 	var all []frameArms
 	totalUsed := false
+	// Strict UTF-8 (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4): a `string` payload is
+	// UTF-8. Zig's string is a borrowed byte slice (byte-container), so the corelib
+	// exposes `utf8_valid(bytes)` and generated code emits an UNCONDITIONAL call to
+	// it at the materialization site — the SOFAB_STRICT_UTF8 gate lives inside the
+	// primitive (folds to true when compiled off), so this code is identical across
+	// build configs. Invalid UTF-8 is the INVALID outcome (self.inv). `blob` is
+	// opaque bytes and is stored verbatim. Skipped fields hit the switch `else`
+	// arms and are never validated (§6.4). mat() wraps only the materialization.
+	mat := func(store string) string {
+		if kind != ir.KindString {
+			return store
+		}
+		return "if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { " + store + " }"
+	}
 	for _, fr := range fs {
 		if fr.kind == fkSeqArr && fr.elemKind == kind {
 			set := fmt.Sprintf("_setElem([]const u8, self.alloc, &(%s), id, \"\", chunk)", fr.path)
 			// stmt is the placement as a single statement (trailing ;), for use
-			// inside an { ... } block; body is the raw arm expression.
-			stmt := set + ";"
+			// inside an { ... } block; body is the raw arm expression. For a string
+			// element the materialization is UTF-8-validated (mat); blob is verbatim.
+			stmt := mat(set + ";")
 			body := set
+			if kind == ir.KindString {
+				body = stmt
+			}
 			if active && fr.elemDynLen {
 				totalUsed = true
 				body = fmt.Sprintf("if (total > %s) { self.lim = true; } else { %s }", capName, stmt)
@@ -584,19 +602,25 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 				continue
 			}
 			acc := fr.path + "." + zigIdent(fld.Name)
+			store := acc + " = chunk;"
 			switch {
 			case fld.HasMaxlen:
 				// Bounded scalar string/blob: a wire byte length above the schema
 				// maxlen is malformed input, rejected as INVALID before the value
-				// is stored, never truncated (MESSAGE_SPEC §7.1).
+				// is stored, never truncated (MESSAGE_SPEC §7.1). A string is then
+				// UTF-8-validated at the store (mat); blob is stored verbatim.
 				totalUsed = true
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %d) { self.inv = true; } else { %s = chunk; },", fld.ID, fld.Maxlen, acc))
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %d) { self.inv = true; } else { %s },", fld.ID, fld.Maxlen, mat(store)))
 			case active:
 				// Unbounded scalar: keep the configured #102 decode-limit behavior.
 				totalUsed = true
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %s) { self.lim = true; } else { %s = chunk; },", fld.ID, capName, acc))
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %s) { self.lim = true; } else { %s },", fld.ID, capName, mat(store)))
 			default:
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = chunk,", fld.ID, acc))
+				if kind == ir.KindString {
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, mat(store)))
+				} else {
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = chunk,", fld.ID, acc))
+				}
 			}
 		}
 		if len(fa.arms) > 0 {
