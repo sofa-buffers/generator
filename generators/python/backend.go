@@ -597,13 +597,16 @@ func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 	case ir.KindFP64:
 		f.line("                %s = d.float64()", acc)
 	case ir.KindString:
-		f.line("                %s = d.string()", acc)
-		// A bounded string whose decoded UTF-8 BYTE length exceeds its schema
-		// maxlen is malformed input — reject, never truncate (MESSAGE_SPEC §7.1).
+		// A bounded string whose UTF-8 BYTE length exceeds its schema maxlen is
+		// malformed input — reject, never truncate (MESSAGE_SPEC §7.1). Bound
+		// against the exact wire byte length the decoder already parsed
+		// (d.fixlen_len(), a non-consuming peek), checked before the string is
+		// materialized — never re-encode the decoded str to measure it.
 		if fld.HasMaxlen {
-			f.line(`                if len(%s.encode("utf-8")) > %d:`, acc, fld.Maxlen)
+			f.line("                if d.fixlen_len() > %d:", fld.Maxlen)
 			f.line(`                    raise SofaDecodeError("%s: string byte length above schema maxlen %d")`, fld.Name, fld.Maxlen)
 		}
+		f.line("                %s = d.string()", acc)
 	case ir.KindBlob:
 		f.line("                %s = d.bytes()", acc)
 		// A bounded blob whose decoded byte length exceeds its schema maxlen is
@@ -695,13 +698,15 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *i
 			// with the element default "" (MESSAGE_SPEC S2).
 			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
 			f.line(`%s        %s.append("")`, ind, target)
-			f.line("%s    %s[%s.id] = d.string()", ind, target, ef)
 			// A bounded string element whose UTF-8 BYTE length exceeds the element
-			// maxlen is malformed — reject, never truncate (MESSAGE_SPEC §7.1).
+			// maxlen is malformed — reject, never truncate (MESSAGE_SPEC §7.1). Bound
+			// against the wire byte length (non-consuming peek) before the element is
+			// materialized — never re-encode the decoded str to measure it.
 			if elemMaxHas {
-				f.line(`%s    if len(%s[%s.id].encode("utf-8")) > %d:`, ind, target, ef, elemMax)
+				f.line(`%s    if d.fixlen_len() > %d:`, ind, elemMax)
 				f.line(`%s        raise SofaDecodeError("%s: string element byte length above schema maxlen %d")`, ind, target, elemMax)
 			}
+			f.line("%s    %s[%s.id] = d.string()", ind, target, ef)
 		case ir.KindBlob:
 			// A blob element is keyed by index id: a default (empty) element is
 			// omitted on the wire, so place the value at its id and fill any gap

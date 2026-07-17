@@ -193,14 +193,15 @@ messages:
 	}
 
 	for _, want := range []string{
-		// (b) scalar string: compare UTF-8 BYTE length, not char count.
-		`if len(self.s.encode("utf-8")) > 8:`,
+		// (b) scalar string: bound the wire byte length (non-consuming peek), not a
+		// re-encode of the decoded str (#155).
+		`if d.fixlen_len() > 8:`,
 		`raise SofaDecodeError("s: string byte length above schema maxlen 8")`,
 		// (b) scalar blob: byte length of the bytes value.
 		`if len(self.b) > 8:`,
 		`raise SofaDecodeError("b: blob byte length above schema maxlen 8")`,
-		// (c) bounded wrapper string element (maxlen 5), BYTE length.
-		`if len(self.arr[_ef0.id].encode("utf-8")) > 5:`,
+		// (c) bounded wrapper string element (maxlen 5): wire byte length peek.
+		`if d.fixlen_len() > 5:`,
 		`raise SofaDecodeError("self.arr: string element byte length above schema maxlen 5")`,
 	} {
 		if !strings.Contains(mod, want) {
@@ -208,9 +209,14 @@ messages:
 		}
 	}
 
-	// (d) the unbounded string field carries no maxlen guard.
-	if strings.Contains(mod, `self.us.encode("utf-8")`) {
-		t.Error("unbounded string must not carry a maxlen guard")
+	// (d) the string maxlen check must never re-encode the decoded str (#155).
+	if strings.Contains(mod, `.encode("utf-8")`) {
+		t.Error(`string maxlen check must not re-encode via .encode("utf-8") (#155)`)
+	}
+
+	// (e) the unbounded string field carries no maxlen guard.
+	if strings.Contains(mod, `raise SofaDecodeError("us:`) {
+		t.Error("unbounded string must not raise a maxlen SofaDecodeError")
 	}
 	if strings.Contains(mod, `raise SofaDecodeError("us:`) {
 		t.Error("unbounded string must not raise a maxlen SofaDecodeError")
