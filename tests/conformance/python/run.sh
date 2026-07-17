@@ -63,6 +63,18 @@ fi
 (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
 echo "==> over-index reject OK"
 
+# Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12) declares
+# maxlen: 16. A 17-byte blob exceeds it -> INVALID, never truncated. Wire: 62 (blob
+# id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes; control is 16 bytes.
+echo "==> over-maxlen string/blob must reject (Option B, S7.1)"
+printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
+printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
+if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overmaxlen.bin" >/dev/null 2>&1; then
+    echo "FAIL: over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
+fi
+(cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
+echo "==> over-maxlen reject OK"
+
 # Receiver-side decode limits (generator#102): max_dyn_array_count: 4 caps a
 # count-less (schema-unbounded) u64 array. Wire header 0x03 = id 0, unsigned
 # array; a wire count of 5 MUST fail decode with the corelib limit error,

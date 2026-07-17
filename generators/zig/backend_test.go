@@ -78,7 +78,7 @@ func TestZigStructural(t *testing.T) {
 		"_putc(&self.m.someuintarray, &self.ai,",                                              // capacity-checked indexed store (generator#100)
 		"if (v.inv) return error.InvalidMessage;",                                             // over-count array rejected as INVALID (generator#100)
 		"if (offset != 0) return;",                                                            // single-shot payload guard
-		"self.m.somestring = chunk,",                                                          // zero-copy string decode
+		"if (total > 50) { self.inv = true; } else { self.m.somestring = chunk; },",           // bounded string: over-maxlen -> INVALID (MESSAGE_SPEC §7.1), else zero-copy
 		"/// Unsigned 8-bit integer",                                                          // descriptions as doc comments
 	} {
 		if !strings.Contains(m, want) {
@@ -165,8 +165,10 @@ messages:
 	}
 	m := string(files[0].Content)
 	for _, want := range []string{
-		`.root_bs => if (id >= 4) { self.inv = true; } else { _setElem`,         // bounded string
-		`.root_bb => if (id >= 3) { self.inv = true; } else { _setElem`,         // bounded blob
+		// The count:N over-index guard (#142) wraps the maxlen:16 over-length
+		// element reject (MESSAGE_SPEC §7.1); both flag self.inv before _setElem grows.
+		`.root_bs => if (id >= 4) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { _setElem`,
+		`.root_bb => if (id >= 3) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { _setElem`,
 		`.root_bp => blk: { if (id >= 2) self.inv = true; break :blk if (_grow`, // bounded struct
 		`if (v.inv) return error.InvalidMessage;`,                               // surfaced as INVALID
 	} {
@@ -177,6 +179,52 @@ messages:
 	// The dynamic string array keeps every index — its arm is a bare _setElem.
 	if !strings.Contains(m, `.root_ds => _setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk),`) {
 		t.Errorf("dynamic string array must not carry an over-index guard:\n%s", m)
+	}
+}
+
+// TestZigMaxlenReject: a bounded string/blob whose wire byte length exceeds its
+// schema maxlen is malformed input, rejected as INVALID (self.inv, surfaced as
+// error.InvalidMessage) at the length header before the value is stored, never
+// truncated (MESSAGE_SPEC §7.1). Covers a scalar string and blob, a bounded
+// wrapper string element, and asserts an unbounded string carries no maxlen
+// guard.
+func TestZigMaxlenReject(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      bs: { id: 0, type: string, maxlen: 8 }
+      bb: { id: 1, type: blob,   maxlen: 8 }
+      ws: { id: 2, type: array,  items: { type: string, maxlen: 5 } }
+      us: { id: 3, type: string }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	for _, want := range []string{
+		// Bounded scalar string and blob: reject over-maxlen before storing.
+		`0 => if (total > 8) { self.inv = true; } else { self.m.bs = chunk; },`,
+		`1 => if (total > 8) { self.inv = true; } else { self.m.bb = chunk; },`,
+		// Bounded wrapper string element: guard wraps the _setElem placement.
+		`if (total > 5) { self.inv = true; } else { _setElem([]const u8, self.alloc, &(self.m.ws), id, "", chunk); }`,
+		// Surfaced as INVALID.
+		`if (v.inv) return error.InvalidMessage;`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing maxlen guard %q:\n%s", want, m)
+		}
+	}
+	// The unbounded scalar string (no maxlen, no configured limit) stores the
+	// borrowed chunk straight through — no maxlen guard, no self.inv.
+	if !strings.Contains(m, `3 => self.m.us = chunk,`) {
+		t.Errorf("unbounded string must store straight through:\n%s", m)
+	}
+	// With no maxlen and no configured limits, no length guard exists at all.
+	if strings.Contains(m, "self.lim") {
+		t.Errorf("no configured limit -> no lim plumbing expected:\n%s", m)
 	}
 }
 

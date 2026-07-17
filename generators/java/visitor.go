@@ -39,6 +39,11 @@ type frame struct {
 	// §5.1/§7 — issue #142), rejected as INVALID before the List grows, which also
 	// bounds an over-index heap-amplification fill. Set on fkSeqLeaf/fkSeqObj/fkSeqMat.
 	cap int64
+	// emax is the fkSeqLeaf string/blob element's schema maxlen L (-1 == no
+	// bound): an element whose wire byte length exceeds L is malformed input,
+	// rejected as INVALID (MESSAGE_SPEC §7.1) before any bytes accumulate, never
+	// truncated. Set on fkSeqLeaf.
+	emax int64
 }
 
 // capOf maps a schema fixed-count bound to a frame's cap: N when the array
@@ -50,10 +55,19 @@ func capOf(hasCount bool, count int64) int64 {
 	return -1
 }
 
+// boundOf maps a schema string/blob maxlen to a frame's emax: L when the
+// element declares a maxlen, -1 (unbounded) otherwise.
+func boundOf(hasMax bool, max int64) int64 {
+	if hasMax {
+		return max
+	}
+	return -1
+}
+
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walk func(loc, path string, fields []*ir.Field)
-	var addArray func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64)
+	var addArray func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax, cap int64)
 	walk = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{kind: fkNormal, loc: loc, path: path, fields: fields})
 		for _, fld := range fields {
@@ -61,7 +75,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				walk(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, capOf(fld.HasCount, fld.Count))
+				addArray(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -69,11 +83,11 @@ func (g *gen) frames(m *ir.Message) []frame {
 	// sequence-typed array (string/blob/struct/union/nested). listExpr is the List
 	// accessor the frame collects into; `get` reaches the just-added last element;
 	// cap is the array's schema fixed-count bound (-1 == dynamic).
-	addArray = func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64) {
+	addArray = func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax, cap int64) {
 		get := listExpr + ".get(" + listExpr + ".size()-1)"
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			out = append(out, frame{kind: fkSeqLeaf, loc: loc, listExpr: listExpr, elemKind: elem, elemMaxHas: elemMaxHas, cap: cap})
+			out = append(out, frame{kind: fkSeqLeaf, loc: loc, listExpr: listExpr, elemKind: elem, elemMaxHas: elemMaxHas, cap: cap, emax: boundOf(elemMaxHas, elemMax)})
 		case ir.KindStruct, ir.KindUnion:
 			elemLoc := loc + "_e"
 			out = append(out, frame{kind: fkSeqObj, loc: loc, listExpr: listExpr, childLoc: elemLoc, elemType: g.typeName(ref.Key), cap: cap})
@@ -84,7 +98,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			} else {
 				innerLoc := loc + "_e"
 				out = append(out, frame{kind: fkSeqMat, loc: loc, listExpr: listExpr, childLoc: innerLoc, cap: cap})
-				addArray(innerLoc, get, items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, capOf(items.HasCount, items.Count))
+				addArray(innerLoc, get, items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -213,6 +227,73 @@ func (g *gen) emitLenLimitGuard(f *jfile, fs []frame, kind ir.Kind, constName, n
 	f.line("        }")
 }
 
+// maxlenThrow renders the schema-maxlen rejection (MESSAGE_SPEC §7.1): a bounded
+// string/blob whose wire byte length exceeds its declared maxlen is malformed
+// input, so it fails the decode with INVALID_MSG — the same unchecked-wrapper
+// channel java uses for the generator#100/#142 schema guards (a Visitor callback
+// cannot throw the checked SofabException), kept distinct from the generator#102
+// LIMIT_EXCEEDED receiver-policy cap on schema-unbounded fields.
+func maxlenThrow(name, noun string, max int64) string {
+	return fmt.Sprintf("throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"%s: %s above schema maxlen %d\"));",
+		name, noun, max)
+}
+
+// emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
+// of the string()/blob() callback, the bounded-field twin of emitLenLimitGuard:
+// every field of this kind that declares a schema `maxlen` (scalar fields and
+// wrapper-sequence elements alike) gets a (cur, id) arm that rejects a declared
+// `total` above its own maxlen with INVALID_MSG — before any byte is accumulated,
+// so an oversized split payload is rejected on its first chunk, and never
+// truncated. Schema-unbounded fields fall through unaffected (governed by their
+// own generator#102 configured limit). Emitted unconditionally: with no bounded
+// field of this kind the guard is absent, leaving the output byte-identical.
+func (g *gen) emitMaxlenGuard(f *jfile, fs []frame, kind ir.Kind, noun string) {
+	// Detect whether any bounded field of this kind exists before emitting.
+	any := false
+	for _, fr := range fs {
+		if fr.kind == fkSeqLeaf && fr.elemKind == kind && fr.emax >= 0 {
+			any = true
+		}
+		if fr.kind == fkNormal {
+			for _, fld := range fr.fields {
+				if fld.Kind == kind && fld.HasMaxlen {
+					any = true
+				}
+			}
+		}
+	}
+	if !any {
+		return
+	}
+	f.line("        // Bounded fields (schema maxlen): a wire byte length above the")
+	f.line("        // declared maxlen is malformed input, INVALID before any byte is")
+	f.line("        // accumulated -- never a truncation.")
+	f.line("        switch (cur) {")
+	for _, fr := range fs {
+		if fr.kind == fkSeqLeaf && fr.elemKind == kind && fr.emax >= 0 {
+			f.line("        case %d: if (total > %d) %s break;", fr.idx, fr.emax, maxlenThrow(locName(fr.loc)+" element", noun, fr.emax))
+			continue
+		}
+		if fr.kind != fkNormal {
+			continue
+		}
+		var arms []string
+		for _, fld := range fr.fields {
+			if fld.Kind == kind && fld.HasMaxlen {
+				arms = append(arms, fmt.Sprintf("case %d: if (total > %d) %s break;", fld.ID, fld.Maxlen, maxlenThrow(fld.Name, noun, fld.Maxlen)))
+			}
+		}
+		if len(arms) > 0 {
+			f.line("        case %d: switch (id) {", fr.idx)
+			for _, a := range arms {
+				f.line("            %s", a)
+			}
+			f.line("        } break;")
+		}
+	}
+	f.line("        }")
+}
+
 func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	primBases := primArrayBasesUsed(fs) // "long"/"float"/"double" element bases needing lazy growth
@@ -318,6 +399,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	if limStr {
 		g.emitLenLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN", "string length", g.limits.stringLen)
 	}
+	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
 	f.line("        String _s;")
 	f.line("        if (offset == 0 && chunkLength >= total) {")
 	f.line("            _s = new String(data, chunkOffset, total, java.nio.charset.StandardCharsets.UTF_8);")
@@ -358,6 +440,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	if limBlob {
 		g.emitLenLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN", "blob length", g.limits.blobLen)
 	}
+	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
 	f.line("        byte[] _b;")
 	f.line("        if (offset == 0 && chunkLength >= total) {")
 	f.line("            _b = java.util.Arrays.copyOfRange(data, chunkOffset, chunkOffset + total);")

@@ -205,11 +205,11 @@ func TestCppOverIndexWrapperArray(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"{ _StrSeq _r0{bs, 4}; is.read(_r0); }",  // bounded string -> cap 4
-		"{ _BlobSeq _r0{bb, 3}; is.read(_r0); }", // bounded blob   -> cap 3
-		"_r0.cap = 2;",                           // bounded struct -> _MsgSeq cap 2
-		"{ _StrSeq _r0{ds, -1}; is.read(_r0); }", // dynamic string -> unbounded
-		"_r0.cap = -1;",                          // dynamic struct -> unbounded
+		"{ _StrSeq _r0{bs, 4, 16}; is.read(_r0); }",  // bounded string -> cap 4, elem maxlen 16
+		"{ _BlobSeq _r0{bb, 3, 16}; is.read(_r0); }", // bounded blob -> cap 3, elem maxlen 16
+		"_r0.cap = 2;", // bounded struct -> _MsgSeq cap 2
+		"{ _StrSeq _r0{ds, -1, -1}; is.read(_r0); }", // dynamic string -> unbounded cap + maxlen
+		"_r0.cap = -1;", // dynamic struct -> unbounded
 		// the guards themselves, in the shared preludes:
 		"if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }",
 		"if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
@@ -217,6 +217,34 @@ func TestCppOverIndexWrapperArray(t *testing.T) {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap over-index guard missing %q:\n%s", want, h)
 		}
+	}
+}
+
+// TestCppMaxlenReject: on the heap profile a bounded string/blob (scalar or
+// wrapper-array element) rejects a wire byte length above its schema maxlen as
+// INVALID before the read (MESSAGE_SPEC §7.1). Unbounded fields get no such guard.
+func TestCppMaxlenReject(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s:  { id: 0, type: string, maxlen: 8 }\n" + // bounded scalar string
+		"      b:  { id: 1, type: blob,   maxlen: 8 }\n" + // bounded scalar blob
+		"      sa: { id: 2, type: array, items: { type: string, count: 3, maxlen: 5 } }\n" + // bounded wrapper string
+		"      ds: { id: 3, type: string }\n" // unbounded string
+	h, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"if (_size > 8) { is.invalidate(); return; }",                                             // scalar string + blob both cap 8
+		"{ _StrSeq _r0{sa, 3, 5}; is.read(_r0); }",                                                // wrapper string: cap 3, elem maxlen 5
+		"if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }", // element guard
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("heap maxlen guard missing %q:\n%s", want, h)
+		}
+	}
+	// The unbounded string field must not carry a maxlen guard.
+	if strings.Contains(h, "is.read(ds)") && strings.Contains(h, "_size > -1") {
+		t.Error("unbounded string must not carry a maxlen guard")
 	}
 }
 

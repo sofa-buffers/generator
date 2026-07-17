@@ -132,6 +132,20 @@ run_variant() {
         fi
         "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: [$label] control (index 4 < 5) must decode"; exit 1; }
         echo "==> [$label] over-index reject OK"
+
+        # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
+        # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
+        # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;
+        # control is 16 bytes. Pure corelib-cpp only: the c-cpp FixedBytes profile
+        # currently clamps to N (corelib-c-cpp#90), so it would accept the truncation.
+        echo "==> [$label] over-maxlen string/blob must reject (Option B, S7.1)"
+        printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
+        printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
+        if "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overmaxlen.bin" >/dev/null 2>&1; then
+            echo "FAIL: [$label] over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
+        fi
+        "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: [$label] control (16 == maxlen) must decode"; exit 1; }
+        echo "==> [$label] over-maxlen reject OK"
     fi
 
     echo "==> [$label] shared-vector byte-exact conformance"

@@ -164,6 +164,59 @@ messages:
 	}
 }
 
+// TestPythonMaxlenReject: a bounded (maxlen) string/blob whose wire BYTE length
+// exceeds its schema maxlen is malformed and MUST raise SofaDecodeError on
+// decode — never silently truncated (MESSAGE_SPEC §7.1). Covers scalar fields
+// and (dynamic) wrapper-array string elements. The schema below has NO counted
+// native array and NO counted wrapper array, so the maxlen guard is the ONLY
+// thing pulling in SofaDecodeError — a regression check on the on-demand import
+// (a bounded-string-only schema that missed the import would NameError at
+// decode).
+func TestPythonMaxlenReject(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      s:   { id: 0, type: string, maxlen: 8 }
+      b:   { id: 1, type: blob,   maxlen: 8 }
+      arr: { id: 2, type: array, items: { type: string, maxlen: 5 } }
+      us:  { id: 3, type: string }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+
+	// (a) The maxlen guard raises SofaDecodeError, so the on-demand import MUST be
+	// present even though this schema has no counted native/wrapper array — the
+	// import bug this test guards against.
+	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType") {
+		t.Error("message.py must import SofaDecodeError for the maxlen guard (else NameError at decode)")
+	}
+
+	for _, want := range []string{
+		// (b) scalar string: compare UTF-8 BYTE length, not char count.
+		`if len(self.s.encode("utf-8")) > 8:`,
+		`raise SofaDecodeError("s: string byte length above schema maxlen 8")`,
+		// (b) scalar blob: byte length of the bytes value.
+		`if len(self.b) > 8:`,
+		`raise SofaDecodeError("b: blob byte length above schema maxlen 8")`,
+		// (c) bounded wrapper string element (maxlen 5), BYTE length.
+		`if len(self.arr[_ef0.id].encode("utf-8")) > 5:`,
+		`raise SofaDecodeError("self.arr: string element byte length above schema maxlen 5")`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing maxlen guard %q", want)
+		}
+	}
+
+	// (d) the unbounded string field carries no maxlen guard.
+	if strings.Contains(mod, `self.us.encode("utf-8")`) {
+		t.Error("unbounded string must not carry a maxlen guard")
+	}
+	if strings.Contains(mod, `raise SofaDecodeError("us:`) {
+		t.Error("unbounded string must not raise a maxlen SofaDecodeError")
+	}
+}
+
 func TestPythonMetadataDocs(t *testing.T) {
 	const src = `
 version: 1

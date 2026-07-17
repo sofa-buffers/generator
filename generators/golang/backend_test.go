@@ -92,10 +92,10 @@ func TestGoOverIndexWrapperArray(t *testing.T) {
 	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
 	msg := files["m.go"]
 	for _, want := range []string{
-		"&_strSeq{out: &m.Bs, cap: 4}",   // bounded string -> cap 4
-		"&_bytesSeq{out: &m.Bb, cap: 3}", // bounded blob   -> cap 3
-		"cap: 2}",                        // bounded struct -> _objSeq cap 2
-		"&_strSeq{out: &m.Ds, cap: -1}",  // dynamic string -> unbounded
+		"&_strSeq{out: &m.Bs, cap: 4, emax: 16}",   // bounded string -> cap 4, maxlen 16
+		"&_bytesSeq{out: &m.Bb, cap: 3, emax: 16}", // bounded blob   -> cap 3, maxlen 16
+		"cap: 2}", // bounded struct -> _objSeq cap 2
+		"&_strSeq{out: &m.Ds, cap: -1, emax: -1}", // dynamic string -> unbounded, no maxlen
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("m.go missing %q:\n%s", want, msg)
@@ -109,6 +109,47 @@ func TestGoOverIndexWrapperArray(t *testing.T) {
 	} {
 		if !strings.Contains(prelude, want) {
 			t.Errorf("sofab_visitor.go missing over-index guard %q", want)
+		}
+	}
+}
+
+// TestGoMaxlenReject verifies MESSAGE_SPEC §7.1: a bounded string/blob whose
+// wire byte length exceeds its schema maxlen is rejected as INVALID (never
+// truncated) — for scalar fields and wrapper-array elements alike. Unbounded
+// fields carry no guard.
+func TestGoMaxlenReject(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s:  { id: 0, type: string, maxlen: 8 }\n" +
+		"      b:  { id: 1, type: blob,   maxlen: 8 }\n" +
+		"      u:  { id: 2, type: string }\n" +
+		"      ws: { id: 3, type: array, items: { type: string, maxlen: 5 } }\n"
+	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
+	msg := files["m.go"]
+	for _, want := range []string{
+		"if len(v) > 8 {",                        // scalar string + blob guard
+		"return sofab.ErrInvalidMsg",             // both scalar and wrapper reject with this
+		"&_strSeq{out: &m.Ws, cap: -1, emax: 5}", // wrapper element maxlen threaded as emax
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("m.go missing %q:\n%s", want, msg)
+		}
+	}
+	// The scalar guard must fire for the bounded string (id 0) and blob (id 1) —
+	// once in String and once in Bytes — but NOT for the unbounded string (id 2).
+	if got := strings.Count(msg, "if len(v) > 8 {"); got != 2 {
+		t.Errorf("expected exactly 2 scalar maxlen guards (string+blob), got %d:\n%s", got, msg)
+	}
+	if !strings.Contains(msg, "case 2:\n\t\tm.U = v") {
+		t.Errorf("m.go: unbounded string (id 2) must store without a maxlen guard:\n%s", msg)
+	}
+	// The wrapper-element guard lives in the shared prelude.
+	prelude := files["sofab_visitor.go"]
+	for _, want := range []string{
+		"emax int",
+		"if s.emax >= 0 && len(v) > s.emax {",
+	} {
+		if !strings.Contains(prelude, want) {
+			t.Errorf("sofab_visitor.go missing wrapper maxlen guard %q", want)
 		}
 	}
 }

@@ -151,6 +151,7 @@ type helperUse struct {
 	long        bool // any Long-backed field -> import Long from the corelib
 	countedArr  bool // count-bearing native array -> import SofabError for the over-count reject (generator#100)
 	overIdxArr  bool // count-bearing wrapper array -> import SofabError for the over-index reject (generator#142)
+	maxlenField bool // bounded string/blob (scalar or wrapper element) -> import SofabError for the over-maxlen reject (MESSAGE_SPEC §7.1)
 	trimTail    bool // fixed-count non-Long native array -> encode-side trailing-default-run trim
 	trimTailLng bool // fixed-count Long-backed native array -> Long flavour of the trim
 }
@@ -165,6 +166,19 @@ func arrayOverIndexed(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool {
 	}
 	if elem == ir.KindArray && items != nil {
 		return arrayOverIndexed(items.Elem, items.ElemItems, items.HasCount)
+	}
+	return false
+}
+
+// arrayHasBoundedStrBlob reports whether an array field (recursively through
+// nested element items) has a string/blob element carrying a schema maxlen — the
+// shape whose decode emits the over-maxlen SofabError guard (MESSAGE_SPEC §7.1).
+func arrayHasBoundedStrBlob(elem ir.Kind, items *ir.ArrayElem, elemMaxHas bool) bool {
+	if (elem == ir.KindString || elem == ir.KindBlob) && elemMaxHas {
+		return true
+	}
+	if elem == ir.KindArray && items != nil {
+		return arrayHasBoundedStrBlob(items.Elem, items.ElemItems, items.ElemMaxHas)
 	}
 	return false
 }
@@ -185,6 +199,14 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 			}
 			if fld.Kind == ir.KindArray && arrayOverIndexed(fld.Elem, fld.ElemItems, fld.HasCount) {
 				use.overIdxArr = true
+			}
+			// A bounded string/blob (scalar field or wrapper element) decodes with an
+			// over-maxlen reject that throws SofabError (MESSAGE_SPEC §7.1).
+			if (fld.Kind == ir.KindString || fld.Kind == ir.KindBlob) && fld.HasMaxlen {
+				use.maxlenField = true
+			}
+			if fld.Kind == ir.KindArray && arrayHasBoundedStrBlob(fld.Elem, fld.ElemItems, fld.ElemMaxHas) {
+				use.maxlenField = true
 			}
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				if fld.HasCount {

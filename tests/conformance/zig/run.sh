@@ -93,6 +93,18 @@ fi
 "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
 echo "==> over-index reject OK"
 
+# Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12) declares
+# maxlen: 16. A 17-byte blob exceeds it -> INVALID, never truncated. Wire: 62 (blob
+# id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes; control is 16 bytes.
+echo "==> over-maxlen string/blob must reject (Option B, S7.1)"
+printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
+printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
+if "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/overmaxlen.bin" >/dev/null 2>&1; then
+    echo "FAIL: over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
+fi
+"$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
+echo "==> over-maxlen reject OK"
+
 # Decode outcome tri-state (MESSAGE_SPEC §7, generator#120): corelib-zig
 # reports INCOMPLETE as a non-error `Status` from feed(); the generated
 # one-shot decode() owns end-of-input, so a trailing .incomplete must fail

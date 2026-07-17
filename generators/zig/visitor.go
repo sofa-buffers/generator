@@ -43,6 +43,12 @@ type frame struct {
 	// bounds an over-index heap-amplification fill. Set on fkSeqArr / fkStructArr /
 	// fkArrArr.
 	cap int64
+
+	// emax is the fkSeqArr string/blob element's schema maxlen L (-1 == no bound):
+	// a wire byte length above L is malformed input, rejected as INVALID
+	// (self.inv) before the value is stored, never truncated (MESSAGE_SPEC §7.1) —
+	// the wrapper-element twin of the scalar-field maxlen reject.
+	emax int64
 }
 
 // capOf maps a schema fixed-count bound to a frame's cap: N when the array
@@ -54,11 +60,20 @@ func capOf(hasCount bool, count int64) int64 {
 	return -1
 }
 
+// boundOf maps a schema maxlen presence+value to a frame's emax bound: L when
+// the element declares a maxlen, -1 (unbounded) otherwise.
+func boundOf(has bool, v int64) int64 {
+	if has {
+		return v
+	}
+	return -1
+}
+
 // frames walks a message and returns every sequence container, root first.
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walkFields func(loc, path string, fields []*ir.Field)
-	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64)
+	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64)
 
 	walkFields = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields})
@@ -68,7 +83,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 				cl := loc + "_" + fld.Name
 				walkFields(cl, path+"."+zigIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+zigIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, capOf(fld.HasCount, fld.Count))
+				addArray(loc+"_"+fld.Name, path+"."+zigIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -77,10 +92,10 @@ func (g *gen) frames(m *ir.Message) []frame {
 	// at (loc, path) and whose element is (elem, ref, items); elemMaxHas is the
 	// element's schema maxlen presence (string/blob elements only); cap is the
 	// array's schema fixed-count bound (-1 == dynamic).
-	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64) {
+	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64) {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDynLen: !elemMaxHas, cap: cap})
+			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDynLen: !elemMaxHas, cap: cap, emax: boundOf(elemMaxHas, elemMax)})
 		case ir.KindStruct, ir.KindUnion:
 			el := loc + "_e"
 			out = append(out, frame{
@@ -107,7 +122,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 					loc: loc, path: path, kind: fkArrArr, elemLoc: el,
 					elemType: "[]const " + inner, elemFill: "&.{}", cap: cap,
 				})
-				addArray(el, "_last("+path+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, capOf(items.HasCount, items.Count))
+				addArray(el, "_last("+path+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -543,6 +558,15 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 				body = fmt.Sprintf("if (total > %s) { self.lim = true; } else { %s }", capName, stmt)
 				stmt = body
 			}
+			// Bounded element (schema maxlen): a wire byte length above the maxlen
+			// is malformed input, rejected as INVALID before the value is stored,
+			// never truncated (MESSAGE_SPEC §7.1). Mutually exclusive with the #102
+			// limit guard above, which only fires on an unbounded element.
+			if fr.emax >= 0 {
+				totalUsed = true
+				body = fmt.Sprintf("if (total > %d) { self.inv = true; } else { %s }", fr.emax, stmt)
+				stmt = body
+			}
 			// Fixed-count wrapper array: reject an element id >= N as INVALID
 			// (MESSAGE_SPEC §5.1/§7 — issue #142) before _setElem grows the slice,
 			// which also bounds an over-index heap-amplification fill.
@@ -560,10 +584,18 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 				continue
 			}
 			acc := fr.path + "." + zigIdent(fld.Name)
-			if active && !fld.HasMaxlen {
+			switch {
+			case fld.HasMaxlen:
+				// Bounded scalar string/blob: a wire byte length above the schema
+				// maxlen is malformed input, rejected as INVALID before the value
+				// is stored, never truncated (MESSAGE_SPEC §7.1).
+				totalUsed = true
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %d) { self.inv = true; } else { %s = chunk; },", fld.ID, fld.Maxlen, acc))
+			case active:
+				// Unbounded scalar: keep the configured #102 decode-limit behavior.
 				totalUsed = true
 				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %s) { self.lim = true; } else { %s = chunk; },", fld.ID, capName, acc))
-			} else {
+			default:
 				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = chunk,", fld.ID, acc))
 			}
 		}

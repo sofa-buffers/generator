@@ -104,7 +104,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if schemaHasCountedFloatArray(s) {
 		f.line("import math")
 	}
-	if schemaHasCountedNativeArray(s) || schemaHasCountedWrapperArray(s) {
+	if schemaHasCountedNativeArray(s) || schemaHasCountedWrapperArray(s) || schemaHasMaxlenStringBlob(s) {
 		f.line("from sofab import Encoder, Decoder, SofaDecodeError, WireType")
 	} else {
 		f.line("from sofab import Encoder, Decoder, WireType")
@@ -197,6 +197,32 @@ func schemaHasCountedWrapperArray(s *ir.Schema) bool {
 	}
 	return schemaHasField(s, func(fld *ir.Field) bool {
 		return fld.Kind == ir.KindArray && arrHas(fld.Elem, fld.ElemItems, fld.HasCount)
+	})
+}
+
+// schemaHasMaxlenStringBlob reports whether any field (recursively through
+// nested-array element items) is a bounded (maxlen) string/blob — a scalar
+// string/blob carrying a schema `maxlen`, or a string/blob array element
+// carrying an element maxlen — the fields whose decode emits the over-length
+// SofaDecodeError guard (MESSAGE_SPEC §7.1). Kept in lockstep with the import
+// condition: a schema that rejects only on a bounded string/blob still needs
+// SofaDecodeError imported.
+func schemaHasMaxlenStringBlob(s *ir.Schema) bool {
+	var arrHas func(elem ir.Kind, items *ir.ArrayElem, elemMaxHas bool) bool
+	arrHas = func(elem ir.Kind, items *ir.ArrayElem, elemMaxHas bool) bool {
+		if elemMaxHas && (elem == ir.KindString || elem == ir.KindBlob) {
+			return true
+		}
+		if elem == ir.KindArray && items != nil {
+			return arrHas(items.Elem, items.ElemItems, items.ElemMaxHas)
+		}
+		return false
+	}
+	return schemaHasField(s, func(fld *ir.Field) bool {
+		if (fld.Kind == ir.KindString || fld.Kind == ir.KindBlob) && fld.HasMaxlen {
+			return true
+		}
+		return fld.Kind == ir.KindArray && arrHas(fld.Elem, fld.ElemItems, fld.ElemMaxHas)
 	})
 }
 
@@ -572,8 +598,20 @@ func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 		f.line("                %s = d.float64()", acc)
 	case ir.KindString:
 		f.line("                %s = d.string()", acc)
+		// A bounded string whose decoded UTF-8 BYTE length exceeds its schema
+		// maxlen is malformed input — reject, never truncate (MESSAGE_SPEC §7.1).
+		if fld.HasMaxlen {
+			f.line(`                if len(%s.encode("utf-8")) > %d:`, acc, fld.Maxlen)
+			f.line(`                    raise SofaDecodeError("%s: string byte length above schema maxlen %d")`, fld.Name, fld.Maxlen)
+		}
 	case ir.KindBlob:
 		f.line("                %s = d.bytes()", acc)
+		// A bounded blob whose decoded byte length exceeds its schema maxlen is
+		// malformed input — reject, never truncate (MESSAGE_SPEC §7.1).
+		if fld.HasMaxlen {
+			f.line("                if len(%s) > %d:", acc, fld.Maxlen)
+			f.line(`                    raise SofaDecodeError("%s: blob byte length above schema maxlen %d")`, fld.Name, fld.Maxlen)
+		}
 	case ir.KindStruct, ir.KindUnion:
 		f.line("                %s._unmarshal(d)", acc)
 	case ir.KindArray:
@@ -591,7 +629,7 @@ func capOf(hasCount bool, count int64) int64 {
 }
 
 func (g *gen) emitUnmarshalArray(f *pyfile, fld *ir.Field, acc string) {
-	g.unmarshalArray(f, "                ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), 0)
+	g.unmarshalArray(f, "                ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax, 0)
 	// A wire element count above the schema `count` capacity is INVALID per
 	// MESSAGE_SPEC §3+§7 — reject the whole message, never keep-all
 	// (generator#100). Count-less (dynamic) arrays have no bound.
@@ -623,7 +661,7 @@ func pyElemZero(elem ir.Kind) string {
 // unmarshalArray reads an array into `target`, mirroring marshalArray: native
 // array readers for numeric/enum/boolean/bitfield elements, a wrapper-sequence
 // loop for string/blob/struct/union/array elements. Recurses for nested arrays.
-func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64, depth int) {
+func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64, elemMaxHas bool, elemMax int64, depth int) {
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("%s%s = d.read_unsigned_array()", ind, target)
@@ -658,6 +696,12 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *i
 			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
 			f.line(`%s        %s.append("")`, ind, target)
 			f.line("%s    %s[%s.id] = d.string()", ind, target, ef)
+			// A bounded string element whose UTF-8 BYTE length exceeds the element
+			// maxlen is malformed — reject, never truncate (MESSAGE_SPEC §7.1).
+			if elemMaxHas {
+				f.line(`%s    if len(%s[%s.id].encode("utf-8")) > %d:`, ind, target, ef, elemMax)
+				f.line(`%s        raise SofaDecodeError("%s: string element byte length above schema maxlen %d")`, ind, target, elemMax)
+			}
 		case ir.KindBlob:
 			// A blob element is keyed by index id: a default (empty) element is
 			// omitted on the wire, so place the value at its id and fill any gap
@@ -665,12 +709,18 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *i
 			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
 			f.line(`%s        %s.append(b"")`, ind, target)
 			f.line("%s    %s[%s.id] = d.bytes()", ind, target, ef)
+			// A bounded blob element whose byte length exceeds the element maxlen
+			// is malformed — reject, never truncate (MESSAGE_SPEC §7.1).
+			if elemMaxHas {
+				f.line("%s    if len(%s[%s.id]) > %d:", ind, target, ef, elemMax)
+				f.line(`%s        raise SofaDecodeError("%s: blob element byte length above schema maxlen %d")`, ind, target, elemMax)
+			}
 		case ir.KindStruct, ir.KindUnion:
 			f.line("%s    %s = %s()", ind, ev, g.typeName(ref.Key))
 			f.line("%s    %s._unmarshal(d)", ind, ev)
 			f.line("%s    %s.append(%s)", ind, target, ev)
 		case ir.KindArray:
-			g.unmarshalArray(f, ind+"    ", ev, items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), depth+1)
+			g.unmarshalArray(f, ind+"    ", ev, items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax, depth+1)
 			f.line("%s    %s.append(%s)", ind, target, ev)
 		}
 	}

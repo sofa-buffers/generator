@@ -90,6 +90,49 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 	}
 }
 
+// TestTSMaxlenReject: a string/blob whose wire byte length exceeds its schema
+// maxlen is malformed and MUST be rejected as INVALID, never truncated
+// (MESSAGE_SPEC §7.1). Covers scalar fields and bounded wrapper-string elements;
+// an unbounded field keeps the bare read.
+func TestTSMaxlenReject(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s:  { id: 0, type: string, maxlen: 8 }\n" +
+		"      b:  { id: 1, type: blob,   maxlen: 8 }\n" +
+		"      u:  { id: 2, type: string }\n" +
+		"      es: { id: 3, type: array, items: { type: string, maxlen: 5 } }\n"
+	files, err := (&Backend{}).Generate(schema(t, src), map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var mod string
+	for _, f := range files {
+		if f.Path == "message.ts" {
+			mod = string(f.Content)
+		}
+	}
+	// (a) A bounded string is the ONLY reject here (no counted/over-index array),
+	// so the on-demand SofabError import MUST still fire — missing it is a tsc /
+	// ReferenceError at decode. This is the import-gating regression guard.
+	if !strings.Contains(mod, "SofabError, SofabErrorCode") {
+		t.Errorf("message.ts must import SofabError/SofabErrorCode for the maxlen guard:\n%s", mod[:min(len(mod), 200)])
+	}
+	for _, want := range []string{
+		// (b) Scalar string + blob reject on an over-length byte check.
+		`case 0: { const _s = c.readString(); if (new TextEncoder().encode(_s).length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); o.s = _s; break; }`,
+		`case 1: { const _b = c.readBlob(); if (_b.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8"); o.b = _b; break; }`,
+		// (c) A bounded wrapper-string element rejects on its element maxlen.
+		`const _s = c.readString(); if (new TextEncoder().encode(_s).length > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 5"); arr[_id] = _s;`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing maxlen guard %q\n%s", want, mod)
+		}
+	}
+	// (d) An unbounded string keeps the bare read (never truncated, no guard).
+	if !strings.Contains(mod, "case 2: o.u = c.readString(); break;") {
+		t.Errorf("unbounded string must keep the bare read:\n%s", mod)
+	}
+}
+
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
@@ -103,7 +146,7 @@ func TestTSStructural(t *testing.T) {
 		"switch (c.id) {",                                               // one switch per type
 		"default: c.skip(c.wire); break;",                               // forward-compat skip
 		"o.somestruct = MyfirstmessageSomestruct.decodeFrom(c); break;", // nested message recursion
-		`while (c.readHeader()) { if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(); }`, // id-aware string-list sequence, over-index rejected (MESSAGE_SPEC S2/S5.1/S7, #142)
+		`while (c.readHeader()) { if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); const _s = c.readString(); if (new TextEncoder().encode(_s).length > 16) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 16"); arr[_id] = _s; }`, // id-aware string-list sequence, over-index + over-maxlen rejected (MESSAGE_SPEC S2/S5.1/S7/S7.1, #142)
 		"o.someu64 = c.readUnsigned() as bigint; break;", // u64 -> bigint, number-first
 		"os.writeSequenceBegin(",                         // nested framing (marshal unchanged)
 		"export enum MyfirstmessageSomeenum {",

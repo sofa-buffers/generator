@@ -230,6 +230,41 @@ messages:
 	}
 }
 
+// TestJavaMaxlenReject: a bounded string/blob (schema maxlen) whose wire byte
+// length exceeds its maxlen is malformed input (MESSAGE_SPEC §7.1) and must be
+// rejected as INVALID_MSG at the length header, before any byte accumulates --
+// never truncated. This covers scalar fields and wrapper-array string/blob
+// elements alike. A schema-unbounded field carries no maxlen guard (it keeps
+// only the generator#102 configured-limit behavior).
+func TestJavaMaxlenReject(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s:   { id: 0, type: string, maxlen: 8 }\n" +
+		"      b:   { id: 1, type: blob,   maxlen: 8 }\n" +
+		"      u:   { id: 2, type: string }\n" +
+		"      arr: { id: 3, type: array, items: { type: string, maxlen: 5 } }\n"
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+	for _, want := range []string{
+		// Bounded scalar string: reject total > maxlen at the top of string().
+		`case 0: if (total > 8) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "s: string length above schema maxlen 8")); break;`,
+		// Bounded scalar blob: reject total > maxlen at the top of blob().
+		`case 1: if (total > 8) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "b: blob length above schema maxlen 8")); break;`,
+		// Bounded wrapper string element: reject total > element maxlen.
+		`if (total > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "arr element: string length above schema maxlen 5")); break;`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing maxlen reject %q", want)
+		}
+	}
+	// The unbounded string `u` (id 2) gets no maxlen guard.
+	if strings.Contains(m, `"u: string length above schema maxlen`) {
+		t.Error("unbounded string must not carry a maxlen guard")
+	}
+	// No config limits set -> no configured-limit plumbing, only the maxlen guards.
+	if strings.Contains(m, "MAX_DYN") || strings.Contains(m, "LIMIT_EXCEEDED") {
+		t.Error("unset limits must emit no configured-limit plumbing")
+	}
+}
+
 // A `count: N` array is FIXED-LENGTH (MESSAGE_SPEC §3, finding F-0010): the
 // encoder elides the trailing run of default elements and the decoder rebuilds
 // it from the schema count, so the decoded value always has exactly N elements.

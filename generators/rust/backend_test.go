@@ -440,6 +440,42 @@ messages:
 	}
 }
 
+// TestRustMaxlenReject: a bounded string/blob (scalar or wrapper-array element)
+// rejects a wire byte length above its schema maxlen as INVALID (self.inv) before
+// the read, never truncated (MESSAGE_SPEC §7.1). Emitted on BOTH profiles — on
+// no_std the guard supersedes the heapless BufferFull path (outcome is INVALID).
+func TestRustMaxlenReject(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      s:  { id: 0, type: string, maxlen: 8 }
+      b:  { id: 1, type: blob,   maxlen: 8 }
+      sa: { id: 2, type: array, items: { type: string, count: 3, maxlen: 5 } }
+      ds: { id: 3, type: string }
+`
+	for _, cfg := range []map[string]any{
+		{}, // std
+		{"corelib": "rs-no-std", "no_std": true, "allow_dynamic": true}, // no_std must also reject as INVALID
+	} {
+		m := moduleFromYAML(t, src, cfg)
+		for _, want := range []string{
+			"(_Loc::Root, 0) => if total > 8 { self.inv = true; return; },",    // scalar string
+			"(_Loc::Root, 1) => if total > 8 { self.inv = true; return; },",    // scalar blob
+			"(_Loc::Root_sa, _) => if total > 5 { self.inv = true; return; },", // wrapper string element
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing maxlen guard %q", cfg, want)
+			}
+		}
+		// The unbounded string field ds carries no maxlen guard.
+		if strings.Contains(m, "(_Loc::Root, 3) => if total >") {
+			t.Errorf("(%v) unbounded string must not carry a maxlen guard", cfg)
+		}
+	}
+}
+
 func TestRustTrimsFixedCountArraysOnly(t *testing.T) {
 	const src = `
 version: 1

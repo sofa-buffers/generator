@@ -29,6 +29,11 @@ type frame struct {
 	// §5.1/§7 — issue #142), rejected as INVALID before the List grows, which also
 	// bounds an over-index heap-amplification fill.
 	cap int64
+	// emax is a string/blob element's schema maxlen L (-1 == no bound): an element
+	// whose wire byte length exceeds L is malformed input, INVALID (MESSAGE_SPEC
+	// §7.1), rejected at the length header before any bytes accumulate — never
+	// truncated.
+	emax int64
 }
 
 // capOf maps a schema fixed-count bound to a frame's cap: N when the array
@@ -36,6 +41,15 @@ type frame struct {
 func capOf(hasCount bool, count int64) int64 {
 	if hasCount {
 		return count
+	}
+	return -1
+}
+
+// boundOf maps a schema maxlen presence+value to its bound: L when present, -1
+// (unbounded) otherwise.
+func boundOf(has bool, v int64) int64 {
+	if has {
+		return v
 	}
 	return -1
 }
@@ -54,7 +68,7 @@ func (g *gen) overIndexGuard(cap int64, loc string) string {
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walkObj func(loc, path string, fields []*ir.Field)
-	var walkArr func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemDyn bool, cap int64)
+	var walkArr func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemDyn bool, cap, emax int64)
 
 	walkObj = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{loc: loc, path: path, fields: fields})
@@ -63,7 +77,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				walkObj(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				walkArr(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, !fld.ElemMaxHas, capOf(fld.HasCount, fld.Count))
+				walkArr(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, !fld.ElemMaxHas, capOf(fld.HasCount, fld.Count), boundOf(fld.ElemMaxHas, fld.ElemMax))
 			}
 		}
 	}
@@ -71,9 +85,10 @@ func (g *gen) frames(m *ir.Message) []frame {
 	// walkArr registers the array scope entered on SequenceBegin(field/index),
 	// plus any child scope its elements descend into. elemDyn marks a string/
 	// blob element scope whose elements carry no schema maxlen (generator#102);
-	// cap is the array's schema fixed-count bound (-1 == dynamic).
-	walkArr = func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemDyn bool, cap int64) {
-		fr := frame{loc: loc, path: list, isArr: true, elem: elem, ref: ref, items: items, cap: cap}
+	// cap is the array's schema fixed-count bound (-1 == dynamic); emax is the
+	// string/blob element's schema maxlen (-1 == unbounded).
+	walkArr = func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemDyn bool, cap, emax int64) {
+		fr := frame{loc: loc, path: list, isArr: true, elem: elem, ref: ref, items: items, cap: cap, emax: emax}
 		switch elem {
 		case ir.KindStruct, ir.KindUnion:
 			fr.childLoc = loc + "_e"
@@ -83,7 +98,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			if seqArrayElem(items.Elem) {
 				fr.childLoc = loc + "_e"
 				out = append(out, fr)
-				walkArr(fr.childLoc, lastElem(list), items.Elem, items.ElemRef, items.ElemItems, !items.ElemMaxHas, capOf(items.HasCount, items.Count))
+				walkArr(fr.childLoc, lastElem(list), items.Elem, items.ElemRef, items.ElemItems, !items.ElemMaxHas, capOf(items.HasCount, items.Count), boundOf(items.ElemMaxHas, items.ElemMax))
 			} else {
 				out = append(out, fr) // native inner rows collected in place
 			}
@@ -165,6 +180,40 @@ func (g *gen) emitLenGuard(f *cfile, fs []frame, kind ir.Kind, constName, what s
 		}
 	}
 	f.line("            }")
+	f.line("        }")
+}
+
+// emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
+// of the String/Blob callback, the bounded-field twin of emitLenGuard: every
+// field of that kind with a schema `maxlen` (scalar fields and wrapper-sequence
+// elements alike) gets a (loc, id) arm that throws InvalidMessage when the wire
+// `total` exceeds its own maxlen — checked at the length header before any bytes
+// accumulate (single-shot and chunked paths alike), never truncated. Unbounded
+// fields get no arm: the generator#102 configured limit governs them. Each
+// bounded field carries a distinct maxlen, so the arms compare per-arm rather
+// than sharing one outer `if` (unlike emitLenGuard's single constant cap).
+func (g *gen) emitMaxlenGuard(f *cfile, fs []frame, kind ir.Kind, what string) {
+	var arms []string
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == kind && fr.emax >= 0 {
+				arms = append(arms, fmt.Sprintf("            case (%s, _): if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s element: %s above schema maxlen %d\"); break;", fr.loc, fr.emax, fr.loc, what, fr.emax))
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == kind && fld.HasMaxlen {
+				arms = append(arms, fmt.Sprintf("            case (%s, %d): if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s: %s above schema maxlen %d\"); break;", fr.loc, fld.ID, fld.Maxlen, fld.Name, what, fld.Maxlen))
+			}
+		}
+	}
+	if len(arms) == 0 {
+		return
+	}
+	f.line("        switch ((cur, id)) {")
+	for _, a := range arms {
+		f.line("%s", a)
+	}
 	f.line("        }")
 }
 
@@ -281,6 +330,10 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// straight from the contiguous input slice; the per-byte List<byte> accumulator
 	// is only the fallback for a genuinely split payload.
 	f.line("    public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
+	// MESSAGE_SPEC §7.1: a bounded string whose wire byte length exceeds its
+	// schema maxlen is malformed input, rejected as INVALID at the `total` header
+	// before any bytes accumulate (never truncated).
+	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
 	if limStr {
 		// generator#102: reject an over-cap unbounded string at its `total`
 		// header, before the fast path decodes or the accumulator grows.
@@ -318,6 +371,10 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 
 	// Blob. Single-shot on the whole-in-one-chunk fast path (see String).
 	f.line("    public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
+	// MESSAGE_SPEC §7.1: a bounded blob whose wire byte length exceeds its schema
+	// maxlen is malformed input, rejected as INVALID at the `total` header before
+	// any bytes accumulate (never truncated).
+	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
 	if limBlob {
 		// generator#102: reject an over-cap unbounded blob at its `total`
 		// header, before the fast path allocates or the accumulator grows.

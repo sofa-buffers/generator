@@ -67,6 +67,22 @@ fi
 (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null) || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
 echo "==> over-index reject OK"
 
+# Over-maxlen scalar blob (generator Option B / MESSAGE_SPEC S7.1): someblob (id 12)
+# declares maxlen: 16. A wire byte length above the schema maxlen is malformed input,
+# INVALID for every target, never truncated. Wire:
+#   62      blob, field id 12 ((12<<3)|2)
+#   8b 01   fixlen word (varint): byte length 17, blob subtype 3 ((17<<3)|3)
+#   01 x17  the 17-byte payload
+# The control is a 16-byte blob (== maxlen), which still decodes.
+echo "==> over-maxlen string/blob must reject (Option B, S7.1)"
+printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
+printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
+if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/overmaxlen.bin" >/dev/null 2>&1); then
+    echo "FAIL: over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
+fi
+(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/overmaxlen_control.bin" >/dev/null) || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
+echo "==> over-maxlen reject OK"
+
 echo "==> receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn102.yaml" <<'YAML'
 version: 1
