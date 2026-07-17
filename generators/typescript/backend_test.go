@@ -50,6 +50,46 @@ func genTS(t *testing.T) string {
 	return ""
 }
 
+// TestTSOverIndexWrapperArray: a fixed-count wrapper array (string/blob/struct
+// elements) throws InvalidMsg for an element id >= N before the array grows
+// (issue #142 / MESSAGE_SPEC §5.1/§7). A dynamic array keeps every index.
+func TestTSOverIndexWrapperArray(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
+		"      bb: { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 16 } }\n" +
+		"      bp: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n" +
+		"      ds: { id: 3, type: array, items: { type: string } }\n"
+	files, err := (&Backend{}).Generate(schema(t, src), map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var mod string
+	for _, f := range files {
+		if f.Path == "message.ts" {
+			mod = string(f.Content)
+		}
+	}
+	// The over-index guard throws SofabError, so the on-demand import MUST be
+	// emitted even for a wrapper-only schema with no scalar over-count array (the
+	// #100 case) — missing it is a ReferenceError / tsc failure at decode.
+	if !strings.Contains(mod, "SofabError, SofabErrorCode") {
+		t.Errorf("message.ts must import SofabError/SofabErrorCode for the over-index guard:\n%s", mod[:min(len(mod), 200)])
+	}
+	for _, want := range []string{
+		`if (c.id >= 4) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 4"); const _id = c.id; while (arr.length <= _id) arr.push("");`,
+		`if (c.id >= 3) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 3"); const _id = c.id; while (arr.length <= _id) arr.push(new Uint8Array());`,
+		`if (c.id >= 2) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 2"); arr.push(MBpElem.decodeFrom(c));`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing over-index guard %q", want)
+		}
+	}
+	// Dynamic string array keeps every index (bare fill, no guard).
+	if !strings.Contains(mod, `while (c.readHeader()) { const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(); }`) {
+		t.Errorf("dynamic string array must not carry an over-index guard:\n%s", mod)
+	}
+}
+
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
@@ -63,9 +103,9 @@ func TestTSStructural(t *testing.T) {
 		"switch (c.id) {",                                               // one switch per type
 		"default: c.skip(c.wire); break;",                               // forward-compat skip
 		"o.somestruct = MyfirstmessageSomestruct.decodeFrom(c); break;", // nested message recursion
-		`while (c.readHeader()) { const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(); }`, // id-aware string-list sequence (MESSAGE_SPEC S2)
-		"o.someu64 = c.readUnsigned() as bigint; break;",                                                                  // u64 -> bigint, number-first
-		"os.writeSequenceBegin(", // nested framing (marshal unchanged)
+		`while (c.readHeader()) { if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(); }`, // id-aware string-list sequence, over-index rejected (MESSAGE_SPEC S2/S5.1/S7, #142)
+		"o.someu64 = c.readUnsigned() as bigint; break;", // u64 -> bigint, number-first
+		"os.writeSequenceBegin(",                         // nested framing (marshal unchanged)
 		"export enum MyfirstmessageSomeenum {",
 	} {
 		if !strings.Contains(mod, want) {

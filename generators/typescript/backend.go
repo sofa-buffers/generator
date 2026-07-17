@@ -118,8 +118,9 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if use.long {
 		imports = append(imports, "Long")
 	}
-	if use.countedArr {
-		// Only the over-count scalar-array reject (generator#100) throws.
+	if use.countedArr || use.overIdxArr {
+		// The over-count scalar-array reject (generator#100) and the over-index
+		// wrapper-array reject (generator#142) both throw SofabError.
 		imports = append(imports, "SofabError", "SofabErrorCode")
 	}
 	f.line("import { %s } from %q;", strings.Join(imports, ", "), corelibPkg)

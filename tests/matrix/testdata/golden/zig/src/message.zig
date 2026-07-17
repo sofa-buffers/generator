@@ -60,9 +60,9 @@ pub const Scalars = struct {
         var m: Scalars = .{};
         var v: _dec_Scalars = .{ .m = &m, .alloc = alloc };
         const st = try sofab.decode(data, &v);
-        // A scalar array carried more elements than its schema count:
-        // an element count above the schema capacity is invalid and is
-        // rejected, never clamped.
+        // A scalar array over its schema count, or a wrapper-array element
+        // id at/beyond the schema count: an index above the schema capacity
+        // is invalid and is rejected, never clamped.
         if (v.inv) return error.InvalidMessage;
         // The bytes end inside a field or an open sequence: INCOMPLETE.
         // This wrapper decodes a whole buffer, so a trailing .incomplete
@@ -78,7 +78,7 @@ const _dec_Scalars = struct {
     m: *Scalars,
     alloc: std.mem.Allocator,
     cur: _Loc = .root,
-    inv: bool = false, // a scalar array overflowed its schema count -> INVALID
+    inv: bool = false, // a scalar array over its schema count, or a wrapper element id >= count -> INVALID
 
     const _Loc = enum {
         root,

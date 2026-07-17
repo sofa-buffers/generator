@@ -36,13 +36,29 @@ type frame struct {
 	// (generator#102): only unbounded fields are guarded.
 	elemDynLen   bool // fkSeqArr: element string/blob has no schema maxlen
 	elemDynCount bool // fkNestedNative: inner native array has no schema count
+
+	// cap is the wrapper array's schema fixed-count bound N (-1 == dynamic/no
+	// count): an element id >= N is a schema-bound violation (MESSAGE_SPEC
+	// §5.1/§7), rejected as INVALID (self.inv) before the slice grows — which also
+	// bounds an over-index heap-amplification fill. Set on fkSeqArr / fkStructArr /
+	// fkArrArr.
+	cap int64
+}
+
+// capOf maps a schema fixed-count bound to a frame's cap: N when the array
+// declares a count, -1 (dynamic/unbounded) otherwise.
+func capOf(hasCount bool, count int64) int64 {
+	if hasCount {
+		return count
+	}
+	return -1
 }
 
 // frames walks a message and returns every sequence container, root first.
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walkFields func(loc, path string, fields []*ir.Field)
-	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool)
+	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64)
 
 	walkFields = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields})
@@ -52,45 +68,46 @@ func (g *gen) frames(m *ir.Message) []frame {
 				cl := loc + "_" + fld.Name
 				walkFields(cl, path+"."+zigIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+zigIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas)
+				addArray(loc+"_"+fld.Name, path+"."+zigIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
 
 	// addArray builds the frame(s) for a wrapper-sequence array whose slice is
 	// at (loc, path) and whose element is (elem, ref, items); elemMaxHas is the
-	// element's schema maxlen presence (string/blob elements only).
-	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool) {
+	// element's schema maxlen presence (string/blob elements only); cap is the
+	// array's schema fixed-count bound (-1 == dynamic).
+	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64) {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDynLen: !elemMaxHas})
+			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDynLen: !elemMaxHas, cap: cap})
 		case ir.KindStruct, ir.KindUnion:
 			el := loc + "_e"
 			out = append(out, frame{
 				loc: loc, path: path, kind: fkStructArr, elemLoc: el,
-				elemType: g.typeName(ref.Key), elemFill: ".{}",
+				elemType: g.typeName(ref.Key), elemFill: ".{}", cap: cap,
 			})
 			walkFields(el, "_last("+path+")", ref.Target.Fields)
 		case ir.KindArray:
 			// The element is an inner array (items). A native inner array is
 			// handled by a single wrapper frame (arrayBegin appends a fresh
 			// inner slice, elements land in the last one); a wrapper inner
-			// array descends recursively.
+			// array descends recursively with its own inner count bound.
 			inner := g.zigArrayElem(items.Elem, items.ElemRef, items.ElemItems)
 			if isNativeArrayElem(items.Elem) {
 				out = append(out, frame{
 					loc: loc, path: path, kind: fkNestedNative,
 					elemKind: items.Elem, elemRef: items.ElemRef,
 					elemType: "[]const " + inner, elemFill: "&.{}",
-					elemDynCount: !items.HasCount,
+					elemDynCount: !items.HasCount, cap: cap,
 				})
 			} else {
 				el := loc + "_e"
 				out = append(out, frame{
 					loc: loc, path: path, kind: fkArrArr, elemLoc: el,
-					elemType: "[]const " + inner, elemFill: "&.{}",
+					elemType: "[]const " + inner, elemFill: "&.{}", cap: cap,
 				})
-				addArray(el, "_last("+path+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas)
+				addArray(el, "_last("+path+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -270,7 +287,7 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	// Sticky malformed-message flag: a fixed native array received more
 	// elements than its schema count (generator#100); decode() then rejects
 	// with error.InvalidMessage. Always present so decode() can check it.
-	f.line("    inv: bool = false, // a scalar array overflowed its schema count -> INVALID")
+	f.line("    inv: bool = false, // a scalar array over its schema count, or a wrapper element id >= count -> INVALID")
 	// Sticky decode-limit flag (generator#102): an unbounded field exceeded a
 	// configured max_dyn_* cap; decode() then rejects with error.LimitExceeded.
 	if g.msgLimitGuards(fields) {
@@ -516,10 +533,21 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	totalUsed := false
 	for _, fr := range fs {
 		if fr.kind == fkSeqArr && fr.elemKind == kind {
-			body := fmt.Sprintf("_setElem([]const u8, self.alloc, &(%s), id, \"\", chunk)", fr.path)
+			set := fmt.Sprintf("_setElem([]const u8, self.alloc, &(%s), id, \"\", chunk)", fr.path)
+			// stmt is the placement as a single statement (trailing ;), for use
+			// inside an { ... } block; body is the raw arm expression.
+			stmt := set + ";"
+			body := set
 			if active && fr.elemDynLen {
 				totalUsed = true
-				body = fmt.Sprintf("if (total > %s) { self.lim = true; } else { %s; }", capName, body)
+				body = fmt.Sprintf("if (total > %s) { self.lim = true; } else { %s }", capName, stmt)
+				stmt = body
+			}
+			// Fixed-count wrapper array: reject an element id >= N as INVALID
+			// (MESSAGE_SPEC §5.1/§7 — issue #142) before _setElem grows the slice,
+			// which also bounds an over-index heap-amplification fill.
+			if fr.cap >= 0 {
+				body = fmt.Sprintf("if (id >= %d) { self.inv = true; } else { %s }", fr.cap, stmt)
 			}
 			all = append(all, frameArms{fr: fr, body: body})
 		}
@@ -693,8 +721,18 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 				all = append(all, fa)
 			}
 		case fkStructArr, fkArrArr:
-			body := fmt.Sprintf("if (_grow(%s, self.alloc, &(%s), %s.len + 1, %s)) .%s else .dead",
+			grow := fmt.Sprintf("if (_grow(%s, self.alloc, &(%s), %s.len + 1, %s)) .%s else .dead",
 				fr.elemType, fr.path, fr.path, fr.elemFill, fr.elemLoc)
+			body := grow
+			// Fixed-count wrapper array: a struct/union/nested-array element arrives
+			// in dense arrival order, so id == the appended index; an id >= N marks
+			// the decode INVALID (MESSAGE_SPEC §5.1/§7 — issue #142). The element is
+			// still appended (bounded by the real wire elements, no amplification) so
+			// the descended element location stays valid.
+			if fr.cap >= 0 {
+				idUsed = true
+				body = fmt.Sprintf("blk: { if (id >= %d) self.inv = true; break :blk %s; }", fr.cap, grow)
+			}
 			all = append(all, frameArms{fr: fr, body: body})
 		}
 	}

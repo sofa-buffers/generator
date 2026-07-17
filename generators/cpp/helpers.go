@@ -504,7 +504,13 @@ func byteList(b []byte) string {
 const cppMsgSeqPrelude = `template <typename T>
 struct _MsgSeq : sofab::IStreamMessage {
     std::vector<T> *out = nullptr;
-    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t _count) noexcept override {
+    // Schema fixed-count bound N (-1 == dynamic/unbounded). An element id >= N is
+    // a schema-bound violation (MESSAGE_SPEC S5.1/S7: an index at or past the
+    // fixed count is INVALID, never grown-into) - reject before emplacing, which
+    // also bounds the allocation against an over-index heap-amplification DoS.
+    long cap = -1;
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t _count) noexcept override {
+        if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }
         T &row = out->emplace_back();
         // A count-less native-array row (matrix with dynamic rows) is a std::vector
         // that the corelib's span read fills only up to its current size, so size it
@@ -603,10 +609,18 @@ std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {
 // element is omitted on the wire, so each value is placed at its id and any gap
 // is grown with the element default ("" / empty blob) rather than appended in
 // arrival order.
+//
+// cap is the schema fixed-count bound N (-1 == dynamic/unbounded): an element id
+// >= N is a schema-bound violation (MESSAGE_SPEC S5.1/S7 — an index at or past
+// the fixed count is INVALID, never grown-into), rejected before the container
+// grows, which also caps the allocation against an over-index heap-amplification
+// DoS. A dynamic array (no schema count) keeps every delivered index.
 const cppPrelude = `struct _StrSeq : sofab::IStreamMessage {
     std::vector<std::string> &out;
-    explicit _StrSeq(std::vector<std::string> &o) : out(o) {}
+    long _cap;
+    explicit _StrSeq(std::vector<std::string> &o, long cap = -1) : out(o), _cap(cap) {}
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
+        if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
         std::string _s; is.read(_s);
         while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
         out[id] = std::move(_s);
@@ -614,8 +628,10 @@ const cppPrelude = `struct _StrSeq : sofab::IStreamMessage {
 };
 struct _BlobSeq : sofab::IStreamMessage {
     std::vector<std::vector<std::uint8_t>> &out;
-    explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o) : out(o) {}
+    long _cap;
+    explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o, long cap = -1) : out(o), _cap(cap) {}
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
+        if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
         std::string _s; is.read(_s);
         while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
         out[id].assign(_s.begin(), _s.end());

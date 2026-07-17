@@ -89,7 +89,10 @@ Two receiver-side protections cover those unbounded fields on decode:
   table): enforcement lives entirely in the generated decoder — the corelib
   only defines `error.LimitExceeded`. Guards are per-field, emitted only for
   schema-unbounded fields, and feed a sticky `lim` flag checked after the
-  generator#100 `inv` flag (`InvalidMessage` takes precedence).
+  generator#100 `inv` flag (`InvalidMessage` takes precedence). The same `inv`
+  flag carries the **wrapper-array** over-index reject (generator#142): a
+  `string`/`blob`/`struct`/`union` element array with `count: N` sets `inv` when
+  a wire element id is `≥ N`, before the slice grows.
 - **Capped eager allocation** (always on): a dynamic native array's wire
   count is untrusted until its elements actually arrive, so `decode()`
   allocates at most 1024 elements up front and grows geometrically (never

@@ -51,6 +51,31 @@ func exampleModule(t *testing.T) string {
 	return buildModule(t, b, "example.yaml", map[string]any{"namespace": "Sofabuffers"})
 }
 
+// TestCsOverIndexWrapperArray: a fixed-count wrapper array (string/blob/struct
+// elements) throws InvalidMessage for an element id >= N before the List grows
+// (issue #142 / MESSAGE_SPEC §5.1/§7). A dynamic array keeps every index.
+func TestCsOverIndexWrapperArray(t *testing.T) {
+	src := []byte("version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
+		"      bb: { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 16 } }\n" +
+		"      bp: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n" +
+		"      ds: { id: 3, type: array, items: { type: string } }\n")
+	m := buildModule(t, src, "in.yaml", map[string]any{"namespace": "S"})
+	for _, want := range []string{
+		`case (Root_bs, _): if (id >= 4) throw new SofabException(SofabError.InvalidMessage,`,
+		`case (Root_bb, _): if (id >= 3) throw new SofabException(SofabError.InvalidMessage,`,
+		`case (Root_bp, _): if (id >= 2) throw new SofabException(SofabError.InvalidMessage,`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing over-index guard %q", want)
+		}
+	}
+	// Dynamic string array keeps every index (bare grow, no throw).
+	if !strings.Contains(m, `case (Root_ds, _): while (m.ds.Count <= id) m.ds.Add(""); m.ds[id] = _s; break;`) {
+		t.Errorf("dynamic string array must not carry an over-index guard:\n%s", m)
+	}
+}
+
 func TestCsStructural(t *testing.T) {
 	m := exampleModule(t)
 	for _, want := range []string{

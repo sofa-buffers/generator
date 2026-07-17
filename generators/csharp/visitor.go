@@ -24,12 +24,37 @@ type frame struct {
 	items    *ir.ArrayElem // nested-array element descriptor
 	childLoc string        // struct/union element or sequence-nested inner-array scope
 	elemDyn  bool          // string/blob element without a schema maxlen (generator#102)
+	// cap is the wrapper array's schema fixed-count bound N (-1 == dynamic/no
+	// count): a wrapper element id >= N is a schema-bound violation (MESSAGE_SPEC
+	// §5.1/§7 — issue #142), rejected as INVALID before the List grows, which also
+	// bounds an over-index heap-amplification fill.
+	cap int64
+}
+
+// capOf maps a schema fixed-count bound to a frame's cap: N when the array
+// declares a count, -1 (dynamic/unbounded) otherwise.
+func capOf(hasCount bool, count int64) int64 {
+	if hasCount {
+		return count
+	}
+	return -1
+}
+
+// overIndexGuard returns the reject clause for a fixed-count wrapper array: an
+// element id >= N throws InvalidMessage (aborting decode) before the List grows
+// (MESSAGE_SPEC §5.1/§7 — issue #142), which also bounds an over-index
+// heap-amplification fill. Empty for a dynamic array (cap == -1).
+func (g *gen) overIndexGuard(cap int64, loc string) string {
+	if cap < 0 {
+		return ""
+	}
+	return fmt.Sprintf("if (id >= %d) throw new SofabException(SofabError.InvalidMessage, \"%s element: array index above schema capacity %d\"); ", cap, loc, cap)
 }
 
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walkObj func(loc, path string, fields []*ir.Field)
-	var walkArr func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemDyn bool)
+	var walkArr func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemDyn bool, cap int64)
 
 	walkObj = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{loc: loc, path: path, fields: fields})
@@ -38,16 +63,17 @@ func (g *gen) frames(m *ir.Message) []frame {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				walkObj(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				walkArr(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, !fld.ElemMaxHas)
+				walkArr(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, !fld.ElemMaxHas, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
 
 	// walkArr registers the array scope entered on SequenceBegin(field/index),
 	// plus any child scope its elements descend into. elemDyn marks a string/
-	// blob element scope whose elements carry no schema maxlen (generator#102).
-	walkArr = func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemDyn bool) {
-		fr := frame{loc: loc, path: list, isArr: true, elem: elem, ref: ref, items: items}
+	// blob element scope whose elements carry no schema maxlen (generator#102);
+	// cap is the array's schema fixed-count bound (-1 == dynamic).
+	walkArr = func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemDyn bool, cap int64) {
+		fr := frame{loc: loc, path: list, isArr: true, elem: elem, ref: ref, items: items, cap: cap}
 		switch elem {
 		case ir.KindStruct, ir.KindUnion:
 			fr.childLoc = loc + "_e"
@@ -57,7 +83,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			if seqArrayElem(items.Elem) {
 				fr.childLoc = loc + "_e"
 				out = append(out, fr)
-				walkArr(fr.childLoc, lastElem(list), items.Elem, items.ElemRef, items.ElemItems, !items.ElemMaxHas)
+				walkArr(fr.childLoc, lastElem(list), items.Elem, items.ElemRef, items.ElemItems, !items.ElemMaxHas, capOf(items.HasCount, items.Count))
 			} else {
 				out = append(out, fr) // native inner rows collected in place
 			}
@@ -277,7 +303,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
 				// element is omitted on the wire, so place each value at its id and
 				// grow the list, filling any gap with the element default ("").
-				f.line("            case (%s, _): while (%s.Count <= id) %s.Add(\"\"); %s[id] = _s; break;", fr.loc, fr.path, fr.path, fr.path)
+				f.line("            case (%s, _): %swhile (%s.Count <= id) %s.Add(\"\"); %s[id] = _s; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, fr.path)
 			}
 			continue
 		}
@@ -315,7 +341,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
 				// element is omitted on the wire, so place each value at its id and
 				// grow the list, filling any gap with the element default (empty bytes).
-				f.line("            case (%s, _): while (%s.Count <= id) %s.Add(Array.Empty<byte>()); %s[id] = _b; break;", fr.loc, fr.path, fr.path, fr.path)
+				f.line("            case (%s, _): %swhile (%s.Count <= id) %s.Add(Array.Empty<byte>()); %s[id] = _b; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, fr.path)
 			}
 			continue
 		}
@@ -406,9 +432,9 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		if fr.isArr {
 			switch {
 			case fr.elem == ir.KindStruct || fr.elem == ir.KindUnion:
-				f.line("            case (%s, _): %s.Add(new %s()); cur = %s; break;", fr.loc, fr.path, g.typeName(fr.ref.Key), fr.childLoc)
+				f.line("            case (%s, _): %s%s.Add(new %s()); cur = %s; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, g.typeName(fr.ref.Key), fr.childLoc)
 			case fr.elem == ir.KindArray && seqArrayElem(fr.items.Elem):
-				f.line("            case (%s, _): %s.Add(new List<%s>()); cur = %s; break;", fr.loc, fr.path, g.csArrayElemType(fr.items.Elem, fr.items.ElemRef, fr.items.ElemItems), fr.childLoc)
+				f.line("            case (%s, _): %s%s.Add(new List<%s>()); cur = %s; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, g.csArrayElemType(fr.items.Elem, fr.items.ElemRef, fr.items.ElemItems), fr.childLoc)
 			}
 			continue
 		}

@@ -200,12 +200,20 @@ func _padTo[T any](a []T, n int, zero T) []T {
 // keyed by index id: a default (empty) element is omitted on the
 // wire, so we place each value at its id and fill any gap with the element default
 // ("" / nil). Blob copies (the corelib value aliases the decode buffer).
+// cap is the schema fixed-count bound N (-1 == dynamic/unbounded): an element id
+// >= N is a schema-bound violation (MESSAGE_SPEC S5.1/S7 - an index at or past
+// the fixed count is INVALID, never grown-into), rejected before the slice grows,
+// which also bounds the id-keyed fill against an over-index amplification DoS.
 type _strSeq struct {
 	_visitorBase
 	out *[]string
+	cap int
 }
 
 func (s *_strSeq) String(id sofab.ID, v string) error {
+	if s.cap >= 0 && int(id) >= s.cap {
+		return sofab.ErrInvalidMsg
+	}
 	for len(*s.out) <= int(id) {
 		*s.out = append(*s.out, "")
 	}
@@ -216,9 +224,13 @@ func (s *_strSeq) String(id sofab.ID, v string) error {
 type _bytesSeq struct {
 	_visitorBase
 	out *[][]byte
+	cap int
 }
 
 func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
+	if s.cap >= 0 && int(id) >= s.cap {
+		return sofab.ErrInvalidMsg
+	}
 	for len(*s.out) <= int(id) {
 		*s.out = append(*s.out, nil)
 	}
@@ -227,16 +239,22 @@ func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
 }
 
 // _objSeq collects the elements of a struct/union array: each element is a nested
-// sequence decoded into a freshly appended T (PT is *T and a Visitor).
+// sequence decoded into a freshly appended T (PT is *T and a Visitor). Elements
+// arrive in ascending index order with no gaps, so appending tracks the index;
+// an element id >= cap (schema count N) is still rejected as INVALID (S5.1/S7).
 type _objSeq[T any, PT interface {
 	*T
 	sofab.Visitor
 }] struct {
 	_visitorBase
 	out *[]T
+	cap int
 }
 
-func (s *_objSeq[T, PT]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
+func (s *_objSeq[T, PT]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
+	if s.cap >= 0 && int(id) >= s.cap {
+		return nil, sofab.ErrInvalidMsg
+	}
 	var zero T
 	*s.out = append(*s.out, zero)
 	return PT(&(*s.out)[len(*s.out)-1]), nil
@@ -732,7 +750,7 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			case fld.Elem == ir.KindFP64:
 				f64Arr = append(f64Arr, arm(fld.ID, guard+acc+" = v"+fill))
 			default: // wrapper-sequence array (string/blob/struct/union/nested)
-				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s = %s[:0]\n\t\treturn %s, nil", acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems))))
+				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s = %s[:0]\n\t\treturn %s, nil", acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count)))))
 			}
 		}
 	}
@@ -825,26 +843,36 @@ func (g *gen) narrowArrayStmt(acc string, elem ir.Kind, ref *ir.TypeRef) string 
 // arrayCollector returns an expression constructing the sofab.Visitor that
 // collects a wrapper-sequence array's elements into the slice at ptr (an address
 // expression like "&m.Field" or a "*[]T" pointer). It recurses for nested arrays.
-func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64) string {
 	switch elem {
 	case ir.KindString:
-		return fmt.Sprintf("&_strSeq{out: %s}", ptr)
+		return fmt.Sprintf("&_strSeq{out: %s, cap: %d}", ptr, cap)
 	case ir.KindBlob:
-		return fmt.Sprintf("&_bytesSeq{out: %s}", ptr)
+		return fmt.Sprintf("&_bytesSeq{out: %s, cap: %d}", ptr, cap)
 	case ir.KindStruct, ir.KindUnion:
 		t := g.typeName(ref.Key)
-		return fmt.Sprintf("&_objSeq[%s, *%s]{out: %s}", t, t, ptr)
+		return fmt.Sprintf("&_objSeq[%s, *%s]{out: %s, cap: %d}", t, t, ptr, cap)
 	case ir.KindArray:
 		if isNativeArrayElem(items.Elem) {
 			return g.matrixCollector(ptr, items.Elem, items.ElemRef)
 		}
 		// Array of wrapper-sequence arrays: each element is itself a sequence
-		// collected into an inner slice by a recursively-built collector.
+		// collected into an inner slice by a recursively-built collector. The
+		// inner collector carries the inner array's own count bound.
 		inner := g.goArrayElem(items.Elem, items.ElemRef, items.ElemItems)
-		mk := g.arrayCollector("p", items.Elem, items.ElemRef, items.ElemItems)
+		mk := g.arrayCollector("p", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count))
 		return fmt.Sprintf("&_seqSeq[%s]{out: %s, mk: func(p *[]%s) sofab.Visitor { return %s }}", inner, ptr, inner, mk)
 	}
 	return "_visitorBase{}"
+}
+
+// capOf maps a schema fixed-count bound to the collector's cap field: N when the
+// array declares a count, -1 (dynamic/unbounded) otherwise.
+func capOf(hasCount bool, count int64) int64 {
+	if hasCount {
+		return count
+	}
+	return -1
 }
 
 // matrixCollector builds the row collector for an array whose elements are native

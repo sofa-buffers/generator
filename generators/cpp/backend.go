@@ -714,7 +714,7 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		if g.cppFixedArrayNeedsReset(fld) {
 			f.line("            %s = {};", acc)
 		}
-		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0)
+		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.ElemMaxHas, fld.ElemMax, 0)
 	}
 }
 
@@ -725,10 +725,17 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 // address for a deferred pass, so its enum/boolean arrays read in place (a temp
 // would dangle) and the target vector is reserved so an emplace never moves a
 // still-unfilled bound element.
-func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64, depth int) {
+func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, elemMaxHas bool, elemMax int64, depth int) {
 	tv := fmt.Sprintf("_t%d", depth)
 	iv := fmt.Sprintf("_i%d", depth)
 	rv := fmt.Sprintf("_r%d", depth)
+	// Fixed-count wrapper array: an element id >= N is INVALID (MESSAGE_SPEC
+	// S5.1/S7). cap is that bound N handed to the collector; -1 == dynamic (no
+	// schema count), which keeps every delivered index.
+	cap := int64(-1)
+	if hasCount {
+		cap = count
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
@@ -774,7 +781,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
-			f.line("%s{ _StrSeq %s{%s}; is.read(%s); }", ind, rv, target, rv)
+			f.line("%s{ _StrSeq %s{%s, %d}; is.read(%s); }", ind, rv, target, cap, rv)
 		}
 	case ir.KindBlob:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
@@ -786,15 +793,15 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
-			f.line("%s{ _BlobSeq %s{%s}; is.read(%s); }", ind, rv, target, rv)
+			f.line("%s{ _BlobSeq %s{%s, %d}; is.read(%s); }", ind, rv, target, cap, rv)
 		}
 	case ir.KindStruct, ir.KindUnion:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
-		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, rv, cont)
+		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, cap, rv, cont)
 	case ir.KindArray:
 		inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
-		g.deserializeSeqInto(f, ind, target, inner, count, rv, cont)
+		g.deserializeSeqInto(f, ind, target, inner, count, cap, rv, cont)
 	}
 }
 
@@ -804,11 +811,13 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 // visitor after this call returns, so its visitor gets static storage; a fixed
 // count also reserves the target up front so an emplace never reallocates a
 // still-bound element (a dynamic sequence cannot be pre-sized this way).
-func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count int64, rv, container string) {
+func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, cap int64, rv, container string) {
 	if strings.HasPrefix(container, "sofab::InlineVector") {
 		// Fixed inline sequence: the visitor emplaces into the next inline slot
 		// (address-stable, no reserve/reallocation). Static for the same deferred
-		// reason as the dynamic clib path.
+		// reason as the dynamic clib path. The InlineVector<_,N> capacity is the
+		// schema count, so _MsgSeqFixed's own >= capacity() guard rejects an
+		// over-index element — no separate cap needed here.
 		f.line("%s{ static _MsgSeqFixed<%s> %s; %s.out = &%s; is.read(%s); }", ind, container, rv, rv, target, rv)
 		return
 	}
@@ -817,10 +826,13 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count i
 		if count > 0 {
 			reserve = fmt.Sprintf(" %s.reserve(%d);", target, count)
 		}
-		f.line("%s{ static _MsgSeq<%s> %s; %s.out = &%s;%s is.read(%s); }", ind, elemType, rv, rv, target, reserve, rv)
+		// The c-cpp wrapper's own istream rejects a count/capacity mismatch, so the
+		// heap fallback (allow_dynamic) is the only clib path reaching here; a fixed
+		// count still bounds the index via cap below.
+		f.line("%s{ static _MsgSeq<%s> %s; %s.out = &%s;%s %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, reserve, rv, cap, rv)
 		return
 	}
-	f.line("%s{ _MsgSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, elemType, rv, rv, target, rv)
+	f.line("%s{ _MsgSeq<%s> %s; %s.out = &%s; %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, rv, cap, rv)
 }
 
 // checkBounded enforces the fixed-capacity (embedded) profile's unbounded-field

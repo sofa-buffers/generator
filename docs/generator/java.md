@@ -19,7 +19,10 @@ output — when the schema has no unbounded field of its kind. A limit violation
 surfaces from `decode()` as a `RuntimeException` and from `tryDecode()` as a
 `java.io.UncheckedIOException`, in both cases wrapping the
 `SofabException(LIMIT_EXCEEDED)` cause (same shape as the generator#100
-over-count rejection).
+over-count rejection). The over-count reject's wrapper-array analogue
+(generator#142) throws `SofabException(INVALID_MSG)` the same way when a
+`string`/`blob`/`struct`/`union` element array with `count: N` sees a wire
+element id `≥ N`, before the `List` grows.
 
 ```yaml
 targets:

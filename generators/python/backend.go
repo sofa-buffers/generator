@@ -97,13 +97,14 @@ func (g *gen) module(s *ir.Schema) []byte {
 	f.line("import io")
 	f.line("from dataclasses import dataclass, field")
 	f.line("from enum import IntEnum")
-	// SofaDecodeError is raised only by the over-count scalar-array guard
-	// (generator#100), so import it only when a count-bearing native array
-	// exists — an unconditional import would be unused for other schemas.
-	if schemaHasCountedNativeArray(s) {
-		if schemaHasCountedFloatArray(s) {
-			f.line("import math")
-		}
+	// SofaDecodeError is raised by the over-count scalar-array guard
+	// (generator#100) and the over-index wrapper-array guard (generator#142), so
+	// import it only when a fixed-count array of either kind exists — an
+	// unconditional import would be unused for other schemas.
+	if schemaHasCountedFloatArray(s) {
+		f.line("import math")
+	}
+	if schemaHasCountedNativeArray(s) || schemaHasCountedWrapperArray(s) {
 		f.line("from sofab import Encoder, Decoder, SofaDecodeError, WireType")
 	} else {
 		f.line("from sofab import Encoder, Decoder, WireType")
@@ -177,6 +178,26 @@ func schemaHasCountedNativeArray(s *ir.Schema) bool {
 		}
 	}
 	return false
+}
+
+// schemaHasCountedWrapperArray reports whether any field (recursively through
+// nested-array element items) is a fixed-count wrapper-sequence array —
+// string/blob/struct/union/nested-array elements with a schema `count` — the
+// fields whose decode emits the over-index SofaDecodeError guard (generator#142).
+func schemaHasCountedWrapperArray(s *ir.Schema) bool {
+	var arrHas func(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool
+	arrHas = func(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool {
+		if hasCount && !isNativeArrayElem(elem) {
+			return true
+		}
+		if elem == ir.KindArray && items != nil {
+			return arrHas(items.Elem, items.ElemItems, items.HasCount)
+		}
+		return false
+	}
+	return schemaHasField(s, func(fld *ir.Field) bool {
+		return fld.Kind == ir.KindArray && arrHas(fld.Elem, fld.ElemItems, fld.HasCount)
+	})
 }
 
 // schemaHasCountedFloatArray reports whether any field is a fixed-count fp32/
@@ -560,8 +581,17 @@ func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 	}
 }
 
+// capOf maps a schema fixed-count bound to a wrapper array's cap: N when the
+// array declares a count, -1 (dynamic/unbounded) otherwise.
+func capOf(hasCount bool, count int64) int64 {
+	if hasCount {
+		return count
+	}
+	return -1
+}
+
 func (g *gen) emitUnmarshalArray(f *pyfile, fld *ir.Field, acc string) {
-	g.unmarshalArray(f, "                ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+	g.unmarshalArray(f, "                ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), 0)
 	// A wire element count above the schema `count` capacity is INVALID per
 	// MESSAGE_SPEC §3+§7 — reject the whole message, never keep-all
 	// (generator#100). Count-less (dynamic) arrays have no bound.
@@ -593,7 +623,7 @@ func pyElemZero(elem ir.Kind) string {
 // unmarshalArray reads an array into `target`, mirroring marshalArray: native
 // array readers for numeric/enum/boolean/bitfield elements, a wrapper-sequence
 // loop for string/blob/struct/union/array elements. Recurses for nested arrays.
-func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
+func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64, depth int) {
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("%s%s = d.read_unsigned_array()", ind, target)
@@ -613,6 +643,13 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *i
 		f.line("%s    %s = d.next()", ind, ef)
 		f.line("%s    if %s is None or %s.type == WireType.SEQUENCE_END:", ind, ef, ef)
 		f.line("%s        break", ind)
+		// Fixed-count wrapper array: an element id >= N is INVALID (MESSAGE_SPEC
+		// §5.1/§7 — issue #142), rejected before the list grows, which also bounds
+		// an over-index heap-amplification fill. A dynamic array keeps every index.
+		if cap >= 0 {
+			f.line("%s    if %s.id >= %d:", ind, ef, cap)
+			f.line(`%s        raise SofaDecodeError("%s: array index above schema capacity %d")`, ind, target, cap)
+		}
 		switch elem {
 		case ir.KindString:
 			// A string element is keyed by index id: a default (empty) element is
@@ -633,7 +670,7 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *i
 			f.line("%s    %s._unmarshal(d)", ind, ev)
 			f.line("%s    %s.append(%s)", ind, target, ev)
 		case ir.KindArray:
-			g.unmarshalArray(f, ind+"    ", ev, items.Elem, items.ElemRef, items.ElemItems, depth+1)
+			g.unmarshalArray(f, ind+"    ", ev, items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), depth+1)
 			f.line("%s    %s.append(%s)", ind, target, ev)
 		}
 	}

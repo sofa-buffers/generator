@@ -34,12 +34,26 @@ type frame struct {
 	// schema bounds, for the receiver-side decode limits (generator#102):
 	elemMaxHas    bool // fkSeqLeaf: the string/blob element declares a maxlen
 	innerHasCount bool // fkNativeMat: the inner array declares a count
+	// cap is the wrapper array's schema fixed-count bound N (-1 == dynamic/no
+	// count): a wrapper element id >= N is a schema-bound violation (MESSAGE_SPEC
+	// §5.1/§7 — issue #142), rejected as INVALID before the List grows, which also
+	// bounds an over-index heap-amplification fill. Set on fkSeqLeaf/fkSeqObj/fkSeqMat.
+	cap int64
+}
+
+// capOf maps a schema fixed-count bound to a frame's cap: N when the array
+// declares a count, -1 (dynamic/unbounded) otherwise.
+func capOf(hasCount bool, count int64) int64 {
+	if hasCount {
+		return count
+	}
+	return -1
 }
 
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walk func(loc, path string, fields []*ir.Field)
-	var addArray func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool)
+	var addArray func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64)
 	walk = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{kind: fkNormal, loc: loc, path: path, fields: fields})
 		for _, fld := range fields {
@@ -47,29 +61,30 @@ func (g *gen) frames(m *ir.Message) []frame {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				walk(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas)
+				addArray(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
 	// addArray registers the frame(s) entered inside the wrapper sequence of a
 	// sequence-typed array (string/blob/struct/union/nested). listExpr is the List
-	// accessor the frame collects into; `get` reaches the just-added last element.
-	addArray = func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool) {
+	// accessor the frame collects into; `get` reaches the just-added last element;
+	// cap is the array's schema fixed-count bound (-1 == dynamic).
+	addArray = func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64) {
 		get := listExpr + ".get(" + listExpr + ".size()-1)"
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			out = append(out, frame{kind: fkSeqLeaf, loc: loc, listExpr: listExpr, elemKind: elem, elemMaxHas: elemMaxHas})
+			out = append(out, frame{kind: fkSeqLeaf, loc: loc, listExpr: listExpr, elemKind: elem, elemMaxHas: elemMaxHas, cap: cap})
 		case ir.KindStruct, ir.KindUnion:
 			elemLoc := loc + "_e"
-			out = append(out, frame{kind: fkSeqObj, loc: loc, listExpr: listExpr, childLoc: elemLoc, elemType: g.typeName(ref.Key)})
+			out = append(out, frame{kind: fkSeqObj, loc: loc, listExpr: listExpr, childLoc: elemLoc, elemType: g.typeName(ref.Key), cap: cap})
 			walk(elemLoc, get, ref.Target.Fields)
 		case ir.KindArray:
 			if nativeArrayElem(items.Elem) {
 				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerRef: items.ElemRef, innerHasCount: items.HasCount})
 			} else {
 				innerLoc := loc + "_e"
-				out = append(out, frame{kind: fkSeqMat, loc: loc, listExpr: listExpr, childLoc: innerLoc})
-				addArray(innerLoc, get, items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas)
+				out = append(out, frame{kind: fkSeqMat, loc: loc, listExpr: listExpr, childLoc: innerLoc, cap: cap})
+				addArray(innerLoc, get, items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -78,6 +93,17 @@ func (g *gen) frames(m *ir.Message) []frame {
 		out[i].idx = i
 	}
 	return out
+}
+
+// overIndexGuard returns the reject clause for a fixed-count wrapper array: an
+// element id >= N throws INVALID_MSG (aborting decode) before the List grows
+// (MESSAGE_SPEC §5.1/§7 — issue #142), which also bounds an over-index
+// heap-amplification fill. Empty for a dynamic array (cap == -1).
+func overIndexGuard(cap int64, name string) string {
+	if cap < 0 {
+		return ""
+	}
+	return fmt.Sprintf("if (id >= %d) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"%s element: array index above schema capacity %d\")); ", cap, name, cap)
 }
 
 // locIndex maps a loc name to its index (for sequenceBegin targets).
@@ -308,7 +334,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
 			// element is omitted on the wire, so place the value at its id and fill
 			// any gap with the element default ("").
-			f.line("        case %d: while (%s.size() <= id) %s.add(\"\"); %s.set(id, _s); break;", fr.idx, fr.listExpr, fr.listExpr, fr.listExpr)
+			f.line("        case %d: %swhile (%s.size() <= id) %s.add(\"\"); %s.set(id, _s); break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -348,7 +374,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
 			// element is omitted on the wire, so place the value at its id and fill
 			// any gap with the element default (empty bytes).
-			f.line("        case %d: while (%s.size() <= id) %s.add(new byte[0]); %s.set(id, _b); break;", fr.idx, fr.listExpr, fr.listExpr, fr.listExpr)
+			f.line("        case %d: %swhile (%s.size() <= id) %s.add(new byte[0]); %s.set(id, _b); break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -447,9 +473,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		switch fr.kind {
 		case fkSeqObj:
-			f.line("        case %d: %s.add(new %s()); cur = %d; break;", fr.idx, fr.listExpr, fr.elemType, locIndex(fs, fr.childLoc))
+			f.line("        case %d: %s%s.add(new %s()); cur = %d; break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.elemType, locIndex(fs, fr.childLoc))
 		case fkSeqMat:
-			f.line("        case %d: %s.add(new ArrayList<>()); cur = %d; break;", fr.idx, fr.listExpr, locIndex(fs, fr.childLoc))
+			f.line("        case %d: %s%s.add(new ArrayList<>()); cur = %d; break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, locIndex(fs, fr.childLoc))
 		case fkNormal:
 			var arms []string
 			for _, fld := range fr.fields {
