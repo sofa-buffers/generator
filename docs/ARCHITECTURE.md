@@ -586,6 +586,13 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    readFp64Array`); a nested message recurses into `Child.decodeFrom(c)` (which
    consumes through its own `SequenceEnd`), a wrapper-sequence array loops
    `readHeader` pushing elements, and `default: c.skip(c.wire)` drops unknown ids.
+   Each `case` first **frames the field by the header wire type**: a header whose
+   `c.wire` differs from the field's schema type is routed through `c.skip(c.wire)`
+   — exactly like an unknown id — rather than calling the schema-typed reader,
+   which would consume the wrong byte count and desynchronize the stream
+   (generator#160). This makes the pull decoder match the wire-type dispatch the
+   corelib performs for every other backend: a mismatched header is rejected as
+   `INVALID` (or reported `INCOMPLETE`) by the corelib, never silently misread.
    Because the only caller of each reader is that one per-type decoder, V8 keeps
    the call sites monomorphic and inlines the loop — replacing the earlier
    push/visitor path, whose shared call sites went **megamorphic** across the

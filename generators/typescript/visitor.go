@@ -47,31 +47,41 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	// readers produce canonical Long[], so the setter's fromValue pass (and its
 	// array copy) would be pure overhead on the hot path.
 	acc := g.storage("o", x)
+	// Frame each field by the header wire type before reading (issue #160). The
+	// schema-typed readers assume they are only called for their matching wire
+	// type; a header whose wire type differs is skip()'d like an unknown id, which
+	// keeps the cursor synced and lets the corelib reject malformed framing as
+	// INVALID (or report truncation as INCOMPLETE) — the same framing every other
+	// backend gets for free by driving the corelib's wire-type dispatch. Without
+	// the guard a mismatched header (e.g. an array-fixlen header on a u8 field)
+	// selects the wrong reader and desynchronizes the whole stream.
+	ew := g.expectedWire(x)
+	guard := fmt.Sprintf("if (c.wire !== %s) { c.skip(c.wire); break; } ", ew)
 	switch x.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindBitfield:
-		f.line("      case %d: %s = Number(c.readUnsigned()); break;", x.ID, acc)
+		f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
 	case ir.KindU64:
 		if g.numberScalars() {
-			f.line("      case %d: %s = Number(c.readUnsigned()); break;", x.ID, acc)
+			f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
 		} else {
-			f.line("      case %d: %s = c.readUnsigned() as bigint; break;", x.ID, acc)
+			f.line("      case %d: %s%s = c.readUnsigned() as bigint; break;", x.ID, guard, acc)
 		}
 	case ir.KindBool:
-		f.line("      case %d: %s = Boolean(c.readUnsigned()); break;", x.ID, acc)
+		f.line("      case %d: %s%s = Boolean(c.readUnsigned()); break;", x.ID, guard, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32:
-		f.line("      case %d: %s = Number(c.readSigned()); break;", x.ID, acc)
+		f.line("      case %d: %s%s = Number(c.readSigned()); break;", x.ID, guard, acc)
 	case ir.KindI64:
 		if g.numberScalars() {
-			f.line("      case %d: %s = Number(c.readSigned()); break;", x.ID, acc)
+			f.line("      case %d: %s%s = Number(c.readSigned()); break;", x.ID, guard, acc)
 		} else {
-			f.line("      case %d: %s = c.readSigned() as bigint; break;", x.ID, acc)
+			f.line("      case %d: %s%s = c.readSigned() as bigint; break;", x.ID, guard, acc)
 		}
 	case ir.KindEnum:
-		f.line("      case %d: %s = Number(c.readSigned()) as %s; break;", x.ID, acc, g.typeName(x.Ref.Key))
+		f.line("      case %d: %s%s = Number(c.readSigned()) as %s; break;", x.ID, guard, acc, g.typeName(x.Ref.Key))
 	case ir.KindFP32:
-		f.line("      case %d: %s = c.readFp32(); break;", x.ID, acc)
+		f.line("      case %d: %s%s = c.readFp32(); break;", x.ID, guard, acc)
 	case ir.KindFP64:
-		f.line("      case %d: %s = c.readFp64(); break;", x.ID, acc)
+		f.line("      case %d: %s%s = c.readFp64(); break;", x.ID, guard, acc)
 	case ir.KindString:
 		// A wire string longer than its schema maxlen is malformed input: reject the
 		// whole message rather than silently truncate (MESSAGE_SPEC §7.1). "Length"
@@ -80,23 +90,23 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// re-encoding via TextEncoder in the hot loop. An unbounded string keeps the
 		// bare read.
 		if x.HasMaxlen {
-			f.line("      case %d: { const _s = c.readString(); if (_utf8Len(_s) > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: string byte length above schema maxlen %d\"); %s = _s; break; }",
-				x.ID, x.Maxlen, x.Name, x.Maxlen, acc)
+			f.line("      case %d: { %sconst _s = c.readString(); if (_utf8Len(_s) > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: string byte length above schema maxlen %d\"); %s = _s; break; }",
+				x.ID, guard, x.Maxlen, x.Name, x.Maxlen, acc)
 		} else {
-			f.line("      case %d: %s = c.readString(); break;", x.ID, acc)
+			f.line("      case %d: %s%s = c.readString(); break;", x.ID, guard, acc)
 		}
 	case ir.KindBlob:
 		// A wire blob longer than its schema maxlen is malformed: reject, never
 		// truncate (MESSAGE_SPEC §7.1). readBlob returns a Uint8Array view whose
 		// .length is the exact wire byte length. An unbounded blob keeps the bare read.
 		if x.HasMaxlen {
-			f.line("      case %d: { const _b = c.readBlob(); if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: blob byte length above schema maxlen %d\"); %s = _b; break; }",
-				x.ID, x.Maxlen, x.Name, x.Maxlen, acc)
+			f.line("      case %d: { %sconst _b = c.readBlob(); if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: blob byte length above schema maxlen %d\"); %s = _b; break; }",
+				x.ID, guard, x.Maxlen, x.Name, x.Maxlen, acc)
 		} else {
-			f.line("      case %d: %s = c.readBlob(); break;", x.ID, acc)
+			f.line("      case %d: %s%s = c.readBlob(); break;", x.ID, guard, acc)
 		}
 	case ir.KindStruct, ir.KindUnion:
-		f.line("      case %d: %s = %s.decodeFrom(c); break;", x.ID, acc, g.typeName(x.Ref.Key))
+		f.line("      case %d: %s%s = %s.decodeFrom(c); break;", x.ID, guard, acc, g.typeName(x.Ref.Key))
 	case ir.KindArray:
 		if nativeArrayElem(x.Elem) {
 			// A wire element count above the schema `count` capacity is INVALID
@@ -107,21 +117,63 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			// not transmit. Materialize them so the decoded field always has
 			// exactly N elements (MESSAGE_SPEC §3).
 			if x.HasCount {
-				f.line("      case %d: { const _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s = _padTo(_a, %d, %s); break; }",
-					x.ID, g.nativeArrayRead(x.Elem, x.ElemRef), x.Count, x.Name, x.Count, acc, x.Count, g.elemZero(x))
+				f.line("      case %d: { %sconst _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s = _padTo(_a, %d, %s); break; }",
+					x.ID, guard, g.nativeArrayRead(x.Elem, x.ElemRef), x.Count, x.Name, x.Count, acc, x.Count, g.elemZero(x))
 				return
 			}
-			f.line("      case %d: %s = %s; break;", x.ID, acc, g.nativeArrayRead(x.Elem, x.ElemRef))
+			f.line("      case %d: %s%s = %s; break;", x.ID, guard, acc, g.nativeArrayRead(x.Elem, x.ElemRef))
 			return
 		}
 		// Composite array: a wrapper sequence whose elements arrive one per
 		// readHeader. Loop until the sequence-end (readHeader() -> false).
 		f.line("      case %d: {", x.ID)
+		f.line("        if (c.wire !== %s) { c.skip(c.wire); break; }", ew)
 		f.line("        const arr: %s = [];", g.tsType(x))
 		f.line("        while (c.readHeader()) { %s }", g.seqCollectBody("arr", x.Elem, x.ElemRef, x.ElemItems, capOf(x.HasCount, x.Count), x.ElemMaxHas, x.ElemMax))
 		f.line("        %s = arr;", acc)
 		f.line("        break;")
 		f.line("      }")
+	}
+}
+
+// expectedWire returns the WireType member a field's header must carry for its
+// schema-typed reader to be the right one (issue #160). It mirrors the encode
+// side (emitMarshal / marshalArray): unsigned integers, bool and bitfield ->
+// Unsigned; signed integers and enum -> Signed; fp32/fp64, string and blob ->
+// Fixlen; nested messages and composite arrays -> SequenceStart; native scalar
+// arrays -> the matching Array* wire type. A header whose wire type differs is
+// framed and skipped rather than misread.
+func (g *gen) expectedWire(x *ir.Field) string {
+	switch x.Kind {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBool, ir.KindBitfield:
+		return "WireType.Unsigned"
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		return "WireType.Signed"
+	case ir.KindFP32, ir.KindFP64, ir.KindString, ir.KindBlob:
+		return "WireType.Fixlen"
+	case ir.KindStruct, ir.KindUnion:
+		return "WireType.SequenceStart"
+	case ir.KindArray:
+		if nativeArrayElem(x.Elem) {
+			return arrayWire(x.Elem)
+		}
+		return "WireType.SequenceStart"
+	}
+	return "WireType.SequenceStart" // unreachable: keeps the switch total
+}
+
+// arrayWire returns the native scalar-array wire type for an element kind,
+// mirroring marshalArray's writer choice: signed integers and enum ->
+// ArraySigned, fp32/fp64 -> ArrayFixlen, everything else (unsigned integers,
+// bool, bitfield) -> ArrayUnsigned.
+func arrayWire(elem ir.Kind) string {
+	switch elem {
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		return "WireType.ArraySigned"
+	case ir.KindFP32, ir.KindFP64:
+		return "WireType.ArrayFixlen"
+	default: // u8/u16/u32/u64, bool, bitfield
+		return "WireType.ArrayUnsigned"
 	}
 }
 
