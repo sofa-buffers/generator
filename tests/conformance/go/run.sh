@@ -49,6 +49,24 @@ fi
 (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/control.bin" >/dev/null) || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+# Over-index wrapper array (generator#142): somestringarray declares count: 5
+# (id 18). A string element carrying a wire index >= 5 is a schema-bound
+# violation -- MESSAGE_SPEC S5.1/S7 make it INVALID for every target, never
+# grown-into (this also bounds an over-index heap-amplification DoS). Wire:
+#   96 01  sequence_begin, id 18 ((18<<3)|6, varint)
+#   2a     string, id 5  ((5<<3)|2) -- over-index (>= count 5)
+#   0a 78  fixlen word (len 1, subtype string) + "x"
+#   07     sequence_end
+# The control places the same element at id 4 (< 5), which still decodes.
+echo "==> over-index wrapper array must reject (generator#142)"
+printf '\226\001\052\012\170\007' > "$WORK/overindex.bin"
+printf '\226\001\042\012\170\007' > "$WORK/overindex_control.bin"
+if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/overindex.bin" >/dev/null 2>&1); then
+    echo "FAIL: over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
+fi
+(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null) || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
+echo "==> over-index reject OK"
+
 echo "==> receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn102.yaml" <<'YAML'
 version: 1

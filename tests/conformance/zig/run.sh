@@ -79,6 +79,20 @@ fi
 "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+# Over-index wrapper array (generator#142): somestringarray declares count: 5
+# (id 18). A string element with a wire index >= 5 is INVALID for every target
+# (MESSAGE_SPEC S5.1/S7), never grown-into -- which also bounds an over-index
+# heap-amplification DoS. Wire: 96 01 (sequence_begin id 18) 2a (string id 5,
+# over-index) 0a 78 (fixlen "x") 07 (sequence_end); control puts it at id 4.
+echo "==> over-index wrapper array must reject (generator#142)"
+printf '\226\001\052\012\170\007' > "$WORK/overindex.bin"
+printf '\226\001\042\012\170\007' > "$WORK/overindex_control.bin"
+if "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/overindex.bin" >/dev/null 2>&1; then
+    echo "FAIL: over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
+fi
+"$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
+echo "==> over-index reject OK"
+
 # Decode outcome tri-state (MESSAGE_SPEC §7, generator#120): corelib-zig
 # reports INCOMPLETE as a non-error `Status` from feed(); the generated
 # one-shot decode() owns end-of-input, so a trailing .incomplete must fail

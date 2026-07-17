@@ -655,6 +655,35 @@ The infallible best-effort entry points kept for back-compat (Rust/C++
 `decode`) still discard the verdict; the fallible path is authoritative, and
 the conformance harnesses assert the reject through it (§12).
 
+#### Decode verdict: over-index wrapper-array elements are INVALID (heap families)
+
+The **sequence-form analogue** of the over-count scalar rule (generator#142).
+A `string`/`blob`/`struct`/`union` element array with a schema `count: N` lowers
+to a wrapper sequence whose child ids are the 0-based element index (§4, §9.2). An
+element whose wire id is `≥ N` is a schema-bound violation: MESSAGE_SPEC §5.1
+recovers a fixed-count wrapper array's length as **`N` for every target** (a
+growable-list target default-fills to `N` exactly like a pre-sized one) and §7
+makes an element id `≥ N` **`INVALID`**, *never silently truncated to `N`*. The
+generated decoder therefore **rejects** an over-index element **before** growing
+the container — which also bounds the fill: the id is an unbounded varint, so an
+unguarded id-keyed grow materialised `id+1` elements and turned a ~9-byte message
+into an arbitrarily large allocation (a heap-amplification DoS). Who enforces it
+splits exactly like the scalar case:
+
+- **Heap families reject** — the 9 heap backends (`go`, `rust` std, `cpp`
+  `corelib-cpp`, both Python, `java`, `typescript`, `csharp`, `zig`) emit a
+  per-element `id >= N` guard using the same INVALID channel as the scalar
+  over-count guard (`is.invalidate()` / sticky `inv` / `ErrInvalidMsg` /
+  thrown `SofabException`/`SofabError` / `SofaDecodeError`). A dynamic wrapper
+  array (no `count`) has no `N` and keeps every delivered index — its length is
+  *highest present id + 1* (§5.1).
+- **Fixed-storage families drop** — C, C++ `c-cpp`, `no_std` Rust are bounded by
+  their inline container capacity (the issue#126 guard): an over-index element
+  has no slot and is skipped, so decode still completes rather than rejecting.
+  This is the one place the fixed profiles do **not** converge on the heap
+  families' `INVALID` verdict; the allocation is bounded by construction either
+  way, so the DoS never reached them.
+
 ### 9.4 Capability / value-width model
 
 Footprint-tunable corelibs gate wire types behind build switches; the generator
@@ -698,15 +727,29 @@ code as named constants. The rules, normative for every backend:
 - The check runs at the count/length **header**, before any allocation or
   buffering — a claimed oversize fails fast even if the payload never arrives.
 - A corelib never invents its own default cap; absent limits = current
-  behavior. Wrapper-sequence arrays carry no count header and grow only with
-  delivered bytes, so they need no *allocation* guard (no amplification) — but
-  on a statically bounded profile they still need a *capacity* guard against a
-  different DoS: a fixed-capacity string/blob-array collector that placed an
-  element at its wire index by growing an `InlineVector<T,N>` looped forever
-  once full (its `emplace_back()` no-ops at `N`), so an untrusted index `id >= N`
-  hangs the decoder. The generated per-element loop is bounded by the container
-  capacity; an over-capacity index is dropped (its payload skipped, as for a
-  native-array over-count, §5.1). C++ `corelib: c-cpp`, issue #126, DoS.
+  behavior. A wrapper-sequence array carries no count *header*, but its elements
+  are keyed by an unbounded varint **index** and an id-keyed collector grows the
+  container to `id+1` — so a single over-index element **is** an amplification
+  vector (a ~9-byte message forcing an arbitrarily large allocation), not the
+  header-driven kind the config caps guard. Two cases, by whether the field is
+  schema-bounded:
+  - **Bounded (`count: N`)** — the over-index element is INVALID and rejected
+    *before* the grow (generator#142, §9.3 above): this both fixes the verdict
+    and bounds the allocation on the heap families. The fixed-storage profiles
+    were already capacity-bounded and drop it: a fixed-capacity string/blob-array
+    collector that placed an element at its wire index by growing an
+    `InlineVector<T,N>` looped forever once full (its `emplace_back()` no-ops at
+    `N`), so an untrusted `id >= N` hung the decoder (C++ `corelib: c-cpp`, issue
+    #126); the generated per-element loop is now bounded by the container
+    capacity and an over-capacity index is dropped (payload skipped, as for a
+    native-array over-count, §5.1).
+  - **Dynamic (no `count`)** — the array legitimately grows to *highest present
+    id + 1* (§5.1), and the config caps' array-count key targets the count
+    *header* of a native array, not a wrapper index, so a dynamic wrapper array's
+    index growth is **not** currently capped. Its per-element string/blob
+    *length* still is (the `total`-header guard below), so total memory tracks
+    delivered bytes; an index-only amplifier against a dynamic wrapper array is a
+    known residual, tracked separately from #142.
 
 Enforcement by family: **generated visitor guards** (Rust std, Java, C#, Zig,
 pure C++ — the corelib callback exposes `count`/`total` pre-allocation; the

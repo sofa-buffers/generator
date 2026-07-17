@@ -125,6 +125,35 @@ messages:
 
 // genJavaFromYAML generates from an inline definition and returns the emitted
 // files keyed by path.
+// TestJavaOverIndexWrapperArray: a fixed-count wrapper array (string/blob/struct
+// elements) throws INVALID_MSG for an element id >= N before the List grows
+// (issue #142 / MESSAGE_SPEC §5.1/§7). A dynamic array keeps every index.
+func TestJavaOverIndexWrapperArray(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
+		"      bb: { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 16 } }\n" +
+		"      bp: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n" +
+		"      ds: { id: 3, type: array, items: { type: string } }\n"
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+	for _, want := range []string{
+		`if (id >= 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_bs element: array index above schema capacity 4")); while (m.bs.size() <= id)`,
+		`if (id >= 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_bb element: array index above schema capacity 3")); while (m.bb.size() <= id)`,
+		`if (id >= 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_bp element: array index above schema capacity 2")); m.bp.add(new`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing over-index guard %q", want)
+		}
+	}
+	// Dynamic string array keeps every index (bare grow).
+	if !strings.Contains(m, `while (m.ds.size() <= id) m.ds.add(""); m.ds.set(id, _s); break;`) ||
+		strings.Contains(m, `array index above schema capacity`+" ds") {
+		// ensure ds arm has no guard prefix
+		if strings.Contains(m, `INVALID_MSG, "Root_ds element`) {
+			t.Errorf("dynamic string array must not carry an over-index guard")
+		}
+	}
+}
+
 func genJavaFromYAML(t *testing.T, src string, cfg map[string]any) map[string]string {
 	t.Helper()
 	doc, err := parser.Parse([]byte(src), "dyn.yaml")

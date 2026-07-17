@@ -399,6 +399,47 @@ func moduleFromYAML(t *testing.T, src string, cfg map[string]any) string {
 // the last non-default one and the decoder rebuilds the trailing default run
 // from N (MESSAGE_SPEC §3). A dynamic (count-less) array has no N to refill
 // from, so its trailing default elements are significant and must survive.
+// TestRustOverIndexWrapperArray: on the std profile a fixed-count wrapper array
+// (string/blob/struct elements) rejects an element id >= N as INVALID (self.inv,
+// surfaced as Error::InvalidMsg) before the Vec grows (issue #142 / MESSAGE_SPEC
+// §5.1/§7). A dynamic array keeps every index. The no_std (heapless) profile is
+// capacity-bounded and drops the element instead, so it emits no such guard.
+func TestRustOverIndexWrapperArray(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }
+      bb: { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 16 } }
+      bp: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }
+      ds: { id: 3, type: array, items: { type: string } }
+`
+	// std profile: rejects.
+	m := moduleFromYAML(t, src, map[string]any{})
+	for _, want := range []string{
+		"if id as usize >= 4 { self.inv = true; return; } while self.m.bs.len()",       // bounded string
+		"if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len()",       // bounded blob
+		"self.m.bp.push(Default::default()); if id as usize >= 2 { self.inv = true; }", // bounded struct
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("std message.rs missing over-index guard %q", want)
+		}
+	}
+	// Dynamic string array keeps every index (no guard on the ds arm).
+	if strings.Contains(m, "self.m.ds.len() <= id as usize") && strings.Contains(m, "ds.len() <= id as usize { self.m.ds.push(Default::default()); } self.m.ds[id as usize] = _s; }") {
+		// ds fill present; ensure it is NOT preceded by an inv guard on the same arm.
+		if strings.Contains(m, "self.inv = true; return; } while self.m.ds.len()") {
+			t.Errorf("dynamic string array must not carry an over-index guard")
+		}
+	}
+	// no_std profile: capacity-bounded, drops — no over-index inv guard at all.
+	mn := moduleFromYAML(t, src, map[string]any{"corelib": "rs-no-std", "allow_dynamic": true})
+	if strings.Contains(mn, "self.inv = true; return; } while") {
+		t.Errorf("no_std profile must not emit an over-index reject (heapless drops):\n%s", mn)
+	}
+}
+
 func TestRustTrimsFixedCountArraysOnly(t *testing.T) {
 	const src = `
 version: 1

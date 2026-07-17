@@ -189,6 +189,37 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 	}
 }
 
+// TestCppOverIndexWrapperArray: a fixed-count wrapper array (string/blob/struct
+// elements) rejects an element id >= N as INVALID before growing the heap
+// container (issue #142 / MESSAGE_SPEC §5.1/§7). A dynamic wrapper array (no
+// count) keeps every delivered index, so its collector cap is -1.
+func TestCppOverIndexWrapperArray(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" + // bounded string wrapper
+		"      bb: { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 16 } }\n" + // bounded blob wrapper
+		"      bp: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n" + // bounded struct wrapper
+		"      ds: { id: 3, type: array, items: { type: string } }\n" + // dynamic string wrapper
+		"      dp: { id: 4, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }\n" // dynamic struct wrapper
+	h, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"{ _StrSeq _r0{bs, 4}; is.read(_r0); }",  // bounded string -> cap 4
+		"{ _BlobSeq _r0{bb, 3}; is.read(_r0); }", // bounded blob   -> cap 3
+		"_r0.cap = 2;",                           // bounded struct -> _MsgSeq cap 2
+		"{ _StrSeq _r0{ds, -1}; is.read(_r0); }", // dynamic string -> unbounded
+		"_r0.cap = -1;",                          // dynamic struct -> unbounded
+		// the guards themselves, in the shared preludes:
+		"if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }",
+		"if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("heap over-index guard missing %q:\n%s", want, h)
+		}
+	}
+}
+
 // TestCppFixedContainers: corelib: c-cpp lowers bounded strings, blobs, and
 // struct/matrix/string/blob sequences to heap-free, schema-sized storage. Wire
 // bytes are unchanged (proven separately by the conformance run) — this asserts
@@ -225,10 +256,14 @@ func TestCppFixedContainers(t *testing.T) {
 			t.Errorf("fixed header missing %q", want)
 		}
 	}
-	// The clib wrapper emits no over-count guard: the C runtime itself rejects a
-	// count/capacity mismatch with SOFAB_RET_E_INVALID_MSG (generator#100).
-	if strings.Contains(h, "is.invalidate()") {
-		t.Error("corelib: c-cpp must not emit is.invalidate() (C runtime already rejects over-count)")
+	// The clib wrapper emits no scalar over-count field guard: the C runtime itself
+	// rejects a count/capacity mismatch with SOFAB_RET_E_INVALID_MSG (generator#100).
+	// (The shared _MsgSeq prelude carries an over-index invalidate() for the heap
+	// allow_dynamic path, but a fixed field decodes via the inline collectors whose
+	// own >= capacity() guard drops the element, issue #126, and a dynamic field
+	// gets cap = -1, so that invalidate() never fires on this profile.)
+	if strings.Contains(h, "if (_count >") {
+		t.Error("corelib: c-cpp must not emit a scalar over-count guard (C runtime already rejects over-count)")
 	}
 	// No std::string / std::vector member for the bounded string/blob fields.
 	if strings.Contains(h, "std::string s ") || strings.Contains(h, "std::vector<std::uint8_t> bl") ||

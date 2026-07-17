@@ -49,6 +49,20 @@ fi
 (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+# Over-index wrapper array (generator#142): somestringarray declares count: 5
+# (id 18). A string element with a wire index >= 5 is INVALID for every target
+# (MESSAGE_SPEC S5.1/S7), never grown-into -- which also bounds an over-index
+# heap-amplification DoS. Wire: 96 01 (sequence_begin id 18) 2a (string id 5,
+# over-index) 0a 78 (fixlen "x") 07 (sequence_end); control puts it at id 4.
+echo "==> over-index wrapper array must reject (generator#142)"
+printf '\226\001\052\012\170\007' > "$WORK/overindex.bin"
+printf '\226\001\042\012\170\007' > "$WORK/overindex_control.bin"
+if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overindex.bin" >/dev/null 2>&1; then
+    echo "FAIL: over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
+fi
+(cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
+echo "==> over-index reject OK"
+
 # Receiver-side decode limits (generator#102): max_dyn_array_count: 4 caps a
 # count-less (schema-unbounded) u64 array. Wire header 0x03 = id 0, unsigned
 # array; a wire count of 5 MUST fail decode with the corelib limit error,

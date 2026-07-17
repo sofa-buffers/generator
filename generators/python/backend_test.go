@@ -127,6 +127,43 @@ messages:
 // TestPythonMetadataDocs: enum-constant and bitfield-flag descriptions render as
 // Sphinx "#:" attribute comments (flags append a "(default: true/false)" note),
 // and a deprecated field carries a ".. deprecated::" directive in its doc.
+// TestPythonOverIndexWrapperArray: a fixed-count wrapper array (string/blob/
+// struct elements) raises SofaDecodeError for an element id >= N before the list
+// grows (issue #142 / MESSAGE_SPEC §5.1/§7). A dynamic array keeps every index.
+func TestPythonOverIndexWrapperArray(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }
+      bb: { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 16 } }
+      bp: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }
+      ds: { id: 3, type: array, items: { type: string } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	// The over-index guard raises SofaDecodeError, so the on-demand import MUST be
+	// emitted even when the schema has no scalar over-count array (the #100 case) —
+	// a wrapper-only schema like this one. Missing it is a NameError at decode time.
+	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType") {
+		t.Error("message.py must import SofaDecodeError for the over-index guard (else NameError at decode)")
+	}
+	for _, want := range []string{
+		`if _ef0.id >= 4:`,
+		`raise SofaDecodeError("self.bs: array index above schema capacity 4")`,
+		`raise SofaDecodeError("self.bb: array index above schema capacity 3")`,
+		`raise SofaDecodeError("self.bp: array index above schema capacity 2")`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing over-index guard %q", want)
+		}
+	}
+	// Dynamic string array keeps every index — no guard raised for it.
+	if strings.Contains(mod, `raise SofaDecodeError("self.ds: array index above schema capacity`) {
+		t.Errorf("dynamic string array must not carry an over-index guard")
+	}
+}
+
 func TestPythonMetadataDocs(t *testing.T) {
 	const src = `
 version: 1

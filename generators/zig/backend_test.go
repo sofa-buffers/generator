@@ -143,6 +143,43 @@ func buildSchema(t *testing.T, src string) *ir.Schema {
 //     is scoped to fields, and a nested row is a slice anyway;
 //   - a wrapper-sequence element array (string/blob/struct) has no native array
 //     to trim at all.
+//
+// TestZigOverIndexWrapperArray: a fixed-count wrapper array (string/blob/struct
+// elements) rejects an element id >= N as INVALID (self.inv, surfaced as
+// error.InvalidMessage) before the slice grows (issue #142 / MESSAGE_SPEC
+// §5.1/§7). A dynamic array (no count) keeps every index.
+func TestZigOverIndexWrapperArray(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }
+      bb: { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 16 } }
+      bp: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }
+      ds: { id: 3, type: array, items: { type: string } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	for _, want := range []string{
+		`.root_bs => if (id >= 4) { self.inv = true; } else { _setElem`,         // bounded string
+		`.root_bb => if (id >= 3) { self.inv = true; } else { _setElem`,         // bounded blob
+		`.root_bp => blk: { if (id >= 2) self.inv = true; break :blk if (_grow`, // bounded struct
+		`if (v.inv) return error.InvalidMessage;`,                               // surfaced as INVALID
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing over-index guard %q", want)
+		}
+	}
+	// The dynamic string array keeps every index — its arm is a bare _setElem.
+	if !strings.Contains(m, `.root_ds => _setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk),`) {
+		t.Errorf("dynamic string array must not carry an over-index guard:\n%s", m)
+	}
+}
+
 func TestZigFixedArrayTrailingDefaultRun(t *testing.T) {
 	s := buildSchema(t, `
 version: 1

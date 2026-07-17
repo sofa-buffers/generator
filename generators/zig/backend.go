@@ -280,9 +280,9 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 		f.line("        var m: %s = .{};", name)
 		f.line("        var v: _dec_%s = .{ .m = &m, .alloc = alloc };", name)
 		f.line("        const st = try sofab.decode(data, &v);")
-		f.line("        // A scalar array carried more elements than its schema count:")
-		f.line("        // an element count above the schema capacity is invalid and is")
-		f.line("        // rejected, never clamped.")
+		f.line("        // A scalar array over its schema count, or a wrapper-array element")
+		f.line("        // id at/beyond the schema count: an index above the schema capacity")
+		f.line("        // is invalid and is rejected, never clamped.")
 		f.line("        if (v.inv) return error.InvalidMessage;")
 		if g.msgLimitGuards(fields) {
 			f.line("        // An unbounded field exceeded a receiver-configured decode limit")

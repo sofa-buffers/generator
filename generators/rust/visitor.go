@@ -32,6 +32,47 @@ type frame struct {
 	// decode limits (generator#102): fkSeqArr — the string/blob element has no
 	// maxlen; fkNestedNative — the inner native array has no count.
 	elemDyn bool
+	// cap is the wrapper array's schema fixed-count bound N (-1 == dynamic/no
+	// count): a wrapper element id >= N is a schema-bound violation (MESSAGE_SPEC
+	// §5.1/§7), rejected as INVALID (self.inv = true) before the Vec grows — which
+	// also bounds an over-index heap-amplification fill. Set on the array frames
+	// (fkSeqArr / fkStructArr / fkArrArr).
+	cap int64
+}
+
+// capOf maps a schema fixed-count bound to a frame's cap: N when the array
+// declares a count, -1 (dynamic/unbounded) otherwise.
+func capOf(hasCount bool, count int64) int64 {
+	if hasCount {
+		return count
+	}
+	return -1
+}
+
+// overIndexGuard returns the std-profile reject clause for a fixed-count wrapper
+// array: an element id >= N sets self.inv (surfaced as Error::InvalidMsg) and
+// returns before the Vec grows (MESSAGE_SPEC §5.1/§7 — issue #142), which also
+// bounds an over-index heap-amplification fill. Empty for a dynamic array
+// (cap == -1) and never emitted on the no_std profile (heapless Vec<_, N> is
+// capacity-bounded and drops an over-index element, issue #126).
+func overIndexGuard(cap int64) string {
+	if cap < 0 {
+		return ""
+	}
+	return fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", cap)
+}
+
+// overIndexMark is the sequence_begin variant of overIndexGuard for struct/union
+// and nested-array wrapper elements: those append in arrival order (dense, no
+// id-keyed growth, so no amplification), so the fresh element is still pushed —
+// keeping the descended element location's last_mut() valid — but an id >= N
+// marks the decode INVALID (§5.1/§7). std profile only; on no_std the heapless
+// Vec<_, N> is capacity-bounded and drops the element (issue #126).
+func (g *gen) overIndexMark(cap int64) string {
+	if g.noStd || cap < 0 {
+		return ""
+	}
+	return fmt.Sprintf("if id as usize >= %d { self.inv = true; } ", cap)
 }
 
 // isWrapperElem reports whether an array element lowers to a wrapper sequence
@@ -61,7 +102,7 @@ func isNativeArrayElem(k ir.Kind) bool {
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walkFields func(loc, path string, fields []*ir.Field)
-	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool)
+	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64)
 
 	walkFields = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields})
@@ -71,32 +112,34 @@ func (g *gen) frames(m *ir.Message) []frame {
 				cl := loc + "_" + fld.Name
 				walkFields(cl, path+"."+rustIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas)
+				addArray(loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
 
 	// addArray builds the frame(s) for a wrapper-sequence array whose Vec is at
 	// (loc, path) and whose element is (elem, ref, items). elemMaxHas is the
-	// string/blob element's maxlen presence (unused for other element kinds).
-	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool) {
+	// string/blob element's maxlen presence (unused for other element kinds); cap
+	// is the array's schema fixed-count bound (-1 == dynamic).
+	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, cap int64) {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDyn: !elemMaxHas})
+			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDyn: !elemMaxHas, cap: cap})
 		case ir.KindStruct, ir.KindUnion:
 			el := loc + "_e"
-			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el})
+			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el, cap: cap})
 			walkFields(el, path+".last_mut().unwrap()", ref.Target.Fields)
 		case ir.KindArray:
 			// The element is an inner array (items). A native inner array is handled
 			// by a single wrapper frame (array_begin pushes a new inner Vec, elements
-			// push to the last); a wrapper inner array descends recursively.
+			// push to the last); a wrapper inner array descends recursively with its
+			// own inner count bound.
 			if isNativeArrayElem(items.Elem) {
-				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef, elemDyn: !items.HasCount})
+				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef, elemDyn: !items.HasCount, cap: cap})
 			} else {
 				el := loc + "_e"
-				out = append(out, frame{loc: loc, path: path, kind: fkArrArr, elemLoc: el})
-				addArray(el, path+".last_mut().unwrap()", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas)
+				out = append(out, frame{loc: loc, path: path, kind: fkArrArr, elemLoc: el, cap: cap})
+				addArray(el, path+".last_mut().unwrap()", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -461,7 +504,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-					f.line("            (_Loc::%s, _) => { %s %s[id as usize] = _s; }", fr.loc, g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _s; }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -519,7 +562,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => { %s %s[id as usize] = _b; }", fr.loc, g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _b; }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
@@ -606,9 +649,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 					}
 				}
 			case fkStructArr:
-				f.line("            (_Loc::%s, _) => { %s _Loc::%s },", fr.loc, g.pushStmt(fr.path, "Default::default()"), fr.elemLoc)
+				f.line("            (_Loc::%s, _) => { %s %s_Loc::%s },", fr.loc, g.pushStmt(fr.path, "Default::default()"), g.overIndexMark(fr.cap), fr.elemLoc)
 			case fkArrArr:
-				f.line("            (_Loc::%s, _) => { %s _Loc::%s },", fr.loc, g.pushStmt(fr.path, g.innerNew()), fr.elemLoc)
+				f.line("            (_Loc::%s, _) => { %s %s_Loc::%s },", fr.loc, g.pushStmt(fr.path, g.innerNew()), g.overIndexMark(fr.cap), fr.elemLoc)
 			}
 		}
 		f.line("            _ => self.cur,")

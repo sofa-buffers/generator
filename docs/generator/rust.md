@@ -27,7 +27,11 @@ declared total **at the header, before any elements or bytes accumulate**;
 exceeding a cap makes `try_decode` return `sofab::Error::LimitExceeded` — never
 a clamp. The best-effort `decode()` is unchanged. Precedence when several
 verdicts apply: `InvalidMsg` (over-schema count), then `LimitExceeded`, then
-`BufferFull`.
+`BufferFull`. The `InvalidMsg` verdict also covers the **wrapper-array**
+analogue (generator#142): a `string`/`blob`/`struct`/`union` element array with
+a schema `count: N` sets the same `inv` flag when a wire element id is `≥ N`,
+before the `Vec` grows. Under `corelib: rs-no-std` that element is instead
+dropped into the capacity-bounded `heapless::Vec` (issue #126).
 
 **std profile only.** The limits apply to `corelib: rs` (std). Under
 `corelib: rs-no-std` the keys are inert: heapless storage is statically

@@ -150,8 +150,23 @@ type helperUse struct {
 	longArrEq   bool // (low, high) word compare: Long-backed 64-bit array with a value default
 	long        bool // any Long-backed field -> import Long from the corelib
 	countedArr  bool // count-bearing native array -> import SofabError for the over-count reject (generator#100)
+	overIdxArr  bool // count-bearing wrapper array -> import SofabError for the over-index reject (generator#142)
 	trimTail    bool // fixed-count non-Long native array -> encode-side trailing-default-run trim
 	trimTailLng bool // fixed-count Long-backed native array -> Long flavour of the trim
+}
+
+// arrayOverIndexed reports whether an array field (recursively through nested
+// element items) is a fixed-count wrapper-sequence array (string/blob/struct/
+// union/nested-array element) — the shape whose decode emits the generator#142
+// over-index SofabError guard.
+func arrayOverIndexed(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool {
+	if hasCount && !nativeArrayElem(elem) {
+		return true
+	}
+	if elem == ir.KindArray && items != nil {
+		return arrayOverIndexed(items.Elem, items.ElemItems, items.HasCount)
+	}
+	return false
 }
 
 // scanHelpers walks every emitted class's fields and reports which helpers the
@@ -167,6 +182,9 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 			}
 			if g.longBacked(fld) {
 				use.long = true
+			}
+			if fld.Kind == ir.KindArray && arrayOverIndexed(fld.Elem, fld.ElemItems, fld.HasCount) {
+				use.overIdxArr = true
 			}
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				if fld.HasCount {

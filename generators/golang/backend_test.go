@@ -78,6 +78,41 @@ func TestGeneratedGoParses(t *testing.T) {
 	}
 }
 
+// TestGoOverIndexWrapperArray: a fixed-count wrapper array (string/blob/struct
+// elements) threads its schema count N into the collector as cap, so an element
+// id >= N is rejected as INVALID before the slice grows (issue #142 /
+// MESSAGE_SPEC §5.1/§7). A dynamic wrapper array (no count) gets cap -1.
+func TestGoOverIndexWrapperArray(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
+		"      bb: { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 16 } }\n" +
+		"      bp: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n" +
+		"      ds: { id: 3, type: array, items: { type: string } }\n" +
+		"      dp: { id: 4, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }\n"
+	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
+	msg := files["m.go"]
+	for _, want := range []string{
+		"&_strSeq{out: &m.Bs, cap: 4}",   // bounded string -> cap 4
+		"&_bytesSeq{out: &m.Bb, cap: 3}", // bounded blob   -> cap 3
+		"cap: 2}",                        // bounded struct -> _objSeq cap 2
+		"&_strSeq{out: &m.Ds, cap: -1}",  // dynamic string -> unbounded
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("m.go missing %q:\n%s", want, msg)
+		}
+	}
+	// The guards live in the shared prelude.
+	prelude := files["sofab_visitor.go"]
+	for _, want := range []string{
+		"if s.cap >= 0 && int(id) >= s.cap {",
+		"return sofab.ErrInvalidMsg",
+	} {
+		if !strings.Contains(prelude, want) {
+			t.Errorf("sofab_visitor.go missing over-index guard %q", want)
+		}
+	}
+}
+
 func TestGoStructuralInvariants(t *testing.T) {
 	files := genGo(t, exampleSchema(t), map[string]any{"package": "messages"})
 	msg := files["myfirstmessage.go"]

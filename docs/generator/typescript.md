@@ -26,8 +26,10 @@ object. Exceeding a cap throws `SofabError` with code
 `SofabErrorCode.LimitExceeded` at the count/length header — never a clamp or
 truncation. Each cap is raised to the largest schema bound of its kind, so a
 schema-bounded field larger than the cap stays governed by its own bound alone
-(its over-schema counts are still rejected by the generator#100 guard). A key
-whose kind has no unbounded field in the schema is inert and emits nothing;
+(its over-schema counts are still rejected by the generator#100 guard, and a
+`string`/`blob`/`struct`/`union` element array by the generator#142 over-index
+guard that throws `SofabError(InvalidMsg)` when a wire element id is `≥ count`).
+A key whose kind has no unbounded field in the schema is inert and emits nothing;
 with no keys set the output is byte-identical to previous releases. The
 plumbing is independent of the `int64` mode.
 

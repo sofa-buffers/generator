@@ -88,12 +88,20 @@ func _padTo[T any](a []T, n int, zero T) []T {
 // keyed by index id: a default (empty) element is omitted on the
 // wire, so we place each value at its id and fill any gap with the element default
 // ("" / nil). Blob copies (the corelib value aliases the decode buffer).
+// cap is the schema fixed-count bound N (-1 == dynamic/unbounded): an element id
+// >= N is a schema-bound violation (MESSAGE_SPEC S5.1/S7 - an index at or past
+// the fixed count is INVALID, never grown-into), rejected before the slice grows,
+// which also bounds the id-keyed fill against an over-index amplification DoS.
 type _strSeq struct {
 	_visitorBase
 	out *[]string
+	cap int
 }
 
 func (s *_strSeq) String(id sofab.ID, v string) error {
+	if s.cap >= 0 && int(id) >= s.cap {
+		return sofab.ErrInvalidMsg
+	}
 	for len(*s.out) <= int(id) {
 		*s.out = append(*s.out, "")
 	}
@@ -104,9 +112,13 @@ func (s *_strSeq) String(id sofab.ID, v string) error {
 type _bytesSeq struct {
 	_visitorBase
 	out *[][]byte
+	cap int
 }
 
 func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
+	if s.cap >= 0 && int(id) >= s.cap {
+		return sofab.ErrInvalidMsg
+	}
 	for len(*s.out) <= int(id) {
 		*s.out = append(*s.out, nil)
 	}
@@ -115,16 +127,22 @@ func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
 }
 
 // _objSeq collects the elements of a struct/union array: each element is a nested
-// sequence decoded into a freshly appended T (PT is *T and a Visitor).
+// sequence decoded into a freshly appended T (PT is *T and a Visitor). Elements
+// arrive in ascending index order with no gaps, so appending tracks the index;
+// an element id >= cap (schema count N) is still rejected as INVALID (S5.1/S7).
 type _objSeq[T any, PT interface {
 	*T
 	sofab.Visitor
 }] struct {
 	_visitorBase
 	out *[]T
+	cap int
 }
 
-func (s *_objSeq[T, PT]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
+func (s *_objSeq[T, PT]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
+	if s.cap >= 0 && int(id) >= s.cap {
+		return nil, sofab.ErrInvalidMsg
+	}
 	var zero T
 	*s.out = append(*s.out, zero)
 	return PT(&(*s.out)[len(*s.out)-1]), nil

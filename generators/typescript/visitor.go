@@ -1,6 +1,10 @@
 package typescript
 
-import "github.com/sofa-buffers/generator/internal/ir"
+import (
+	"fmt"
+
+	"github.com/sofa-buffers/generator/internal/ir"
+)
 
 // emitDecode generates the message's decode surface: a static decode(bytes)
 // entry plus a monomorphic pull decoder decodeFrom(c: Cursor). One switch(id)
@@ -95,7 +99,7 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// readHeader. Loop until the sequence-end (readHeader() -> false).
 		f.line("      case %d: {", x.ID)
 		f.line("        const arr: %s = [];", g.tsType(x))
-		f.line("        while (c.readHeader()) { %s }", g.seqCollectBody("arr", x.Elem, x.ElemRef, x.ElemItems))
+		f.line("        while (c.readHeader()) { %s }", g.seqCollectBody("arr", x.Elem, x.ElemRef, x.ElemItems, capOf(x.HasCount, x.Count)))
 		f.line("        %s = arr;", acc)
 		f.line("        break;")
 		f.line("      }")
@@ -174,9 +178,18 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 		}
 		rowT := g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems)
 		return "((): " + rowT + "[] => { const _r: " + rowT + "[] = []; while (c.readHeader()) { " +
-			g.seqCollectBody("_r", items.Elem, items.ElemRef, items.ElemItems) + " } return _r; })()"
+			g.seqCollectBody("_r", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count)) + " } return _r; })()"
 	}
 	return "undefined as never"
+}
+
+// capOf maps a schema fixed-count bound to a wrapper array's cap: N when the
+// array declares a count, -1 (dynamic/unbounded) otherwise.
+func capOf(hasCount bool, count int64) int64 {
+	if hasCount {
+		return count
+	}
+	return -1
 }
 
 // seqCollectBody returns the body of a `while (c.readHeader()) { ... }` loop that
@@ -185,14 +198,21 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 // wire, so we grow arr with the element default ("" / empty bytes) and place the
 // value at its id, restoring any gap. Composite elements (struct/union/nested-
 // array) are always framed, never omitted, so they push in arrival order.
-func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64) string {
+	// Fixed-count wrapper array: an element id >= N is INVALID (MESSAGE_SPEC
+	// §5.1/§7 — issue #142), rejected before the array grows, which also bounds an
+	// over-index heap-amplification fill. A dynamic array keeps every index.
+	guard := ""
+	if cap >= 0 {
+		guard = fmt.Sprintf(`if (c.id >= %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s: array index above schema capacity %d"); `, cap, arr, cap)
+	}
 	switch elem {
 	case ir.KindString:
-		return "const _id = c.id; while (" + arr + ".length <= _id) " + arr + `.push(""); ` + arr + "[_id] = c.readString();"
+		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + `.push(""); ` + arr + "[_id] = c.readString();"
 	case ir.KindBlob:
-		return "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); " + arr + "[_id] = c.readBlob();"
+		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); " + arr + "[_id] = c.readBlob();"
 	default:
-		return arr + ".push(" + g.elemDecode(elem, ref, items) + ");"
+		return guard + arr + ".push(" + g.elemDecode(elem, ref, items) + ");"
 	}
 }
 
