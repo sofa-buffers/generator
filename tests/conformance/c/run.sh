@@ -76,6 +76,22 @@ echo "$OUT" | grep -q '"someblob":\[10,20,30\]' || { echo "FAIL: blob round-trip
 echo "$OUT" | grep -q '"someblobarray":\[\[1\],\[2\],\[3\]\]' || { echo "FAIL: blob-array element padded/dropped (issue #130)"; exit 1; }
 echo "==> project harness round-trip OK"
 
+# Over-index wrapper array (generator#149 / F-0013): somestringarray (id 18)
+# declares count: 5, lowering to a fixed-count sequence holder (element slots
+# 0..4). A well-formed string element at wire index 5 (>= N) is INVALID per
+# MESSAGE_SPEC S5.1/S7 -- the descriptor is emitted as SOFAB_OBJECT_DESCR_SEQ, so
+# object.c rejects the unmatched element id via sofab_istream_invalidate
+# (corelib-c-cpp#94) rather than skipping it. Wire: 96 01 (sequence_begin id 18)
+# 2a (string id 5) 0a 78 (fixlen "x") 07 (sequence_end); control uses index 4.
+echo "==> over-index wrapper array must reject (generator#149)"
+printf '\226\001\052\012\170\007' > "$WORK/overindex.bin"
+printf '\226\001\042\012\170\007' > "$WORK/overindex_control.bin"
+if "$WORK/proj/harness/harness" decode < "$WORK/overindex.bin" >/dev/null 2>&1; then
+    echo "FAIL: over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
+fi
+"$WORK/proj/harness/harness" decode < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
+echo "==> over-index reject OK"
+
 # issue #128: a scalar/struct-field blob carries a used-length, so every length
 # 0..maxlen round-trips byte-exactly — including an all-zero blob (previously
 # dropped to empty) and a single 0x00 (previously collapsed). Blobs are skipped by

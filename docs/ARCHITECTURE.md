@@ -655,7 +655,7 @@ The infallible best-effort entry points kept for back-compat (Rust/C++
 `decode`) still discard the verdict; the fallible path is authoritative, and
 the conformance harnesses assert the reject through it (§12).
 
-#### Decode verdict: over-index wrapper-array elements are INVALID (heap families)
+#### Decode verdict: over-index wrapper-array elements are INVALID (all targets)
 
 The **sequence-form analogue** of the over-count scalar rule (generator#142).
 A `string`/`blob`/`struct`/`union` element array with a schema `count: N` lowers
@@ -700,16 +700,19 @@ splits exactly like the scalar case:
   issue#126's silent `return`), so an over-index element is `INVALID`, converging
   with pure `cpp` and the heap families (generator#149). The reject still returns
   before the fill loop, so the issue#126 no-hang guarantee is preserved.
-- **C still drops** — the pure `c` target is descriptor-driven: its decode loop is
-  the corelib's `object.c: sofab_object_field_cb`, which skips an unmatched element
-  id exactly as it skips an unknown (forward-compat) message field. #92 wired the
-  abort primitive only into the streaming / C++ path, not `object.c`, so an
-  over-index element is still accepted + dropped. The generator emits no field
-  callback here (only static descriptors), so it **cannot** inject the reject; it
-  needs `object.c` to mark fixed-count sequence holders and call
-  `sofab_istream_invalidate` on an unmatched id. Tracked as **corelib-c-cpp#94**
-  (then a one-line generator follow-up to emit the holder flag). The allocation is
-  bounded by construction, so the DoS never reached it; only the verdict diverges.
+- **C now rejects** — the pure `c` target is descriptor-driven: its decode loop is
+  the corelib's `object.c: sofab_object_field_cb`, which matches an element by
+  scanning the descriptor's `field_list` for the id. A message skips an unmatched
+  (unknown, forward-compat) id, but a fixed-count sequence **holder** — whose
+  fields are exactly the element slots `0..N-1` — must reject an unmatched id as
+  over-index. **corelib-c-cpp#94** added a `fixed_seq` descriptor flag (macro
+  `SOFAB_OBJECT_DESCR_SEQ`) that makes `object.c` call `sofab_istream_invalidate`
+  on an unmatched id; the generator now emits that macro for every holder
+  (`buildHolder` sets `objectPlan.fixedSeq`), while messages and the elements' own
+  struct/union type descriptors keep the plain `SOFAB_OBJECT_DESCR` skip form. So
+  an over-index element is `INVALID`, converging the last F-0013 profile
+  (generator#149). The reject is the corelib's, before any slot grows, so the
+  issue#126 no-hang property is unaffected.
 
 #### Decode verdict: over-`maxlen` strings/blobs are INVALID (every target)
 
