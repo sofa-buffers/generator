@@ -76,9 +76,11 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// A wire string longer than its schema maxlen is malformed input: reject the
 		// whole message rather than silently truncate (MESSAGE_SPEC §7.1). "Length"
 		// is the UTF-8 BYTE length; the cursor hands back only the decoded string, so
-		// re-encode to measure it. An unbounded string keeps the bare read.
+		// count its bytes with the allocation-free _utf8Len (issue #153) rather than
+		// re-encoding via TextEncoder in the hot loop. An unbounded string keeps the
+		// bare read.
 		if x.HasMaxlen {
-			f.line("      case %d: { const _s = c.readString(); if (new TextEncoder().encode(_s).length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: string byte length above schema maxlen %d\"); %s = _s; break; }",
+			f.line("      case %d: { const _s = c.readString(); if (_utf8Len(_s) > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: string byte length above schema maxlen %d\"); %s = _s; break; }",
 				x.ID, x.Maxlen, x.Name, x.Maxlen, acc)
 		} else {
 			f.line("      case %d: %s = c.readString(); break;", x.ID, acc)
@@ -227,10 +229,11 @@ func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *i
 	case ir.KindString:
 		// A bounded string element that overruns its schema maxlen is malformed:
 		// reject, never truncate (MESSAGE_SPEC §7.1). "Length" is the UTF-8 byte
-		// length, measured by re-encoding the decoded string.
+		// length, counted by the allocation-free _utf8Len rather than re-encoding the
+		// decoded string via TextEncoder in the hot loop (issue #153).
 		if maxHas {
 			return guard + "const _id = c.id; while (" + arr + `.length <= _id) ` + arr + `.push(""); const _s = c.readString(); ` +
-				fmt.Sprintf(`if (new TextEncoder().encode(_s).length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s element: string byte length above schema maxlen %d"); `, maxVal, arr, maxVal) +
+				fmt.Sprintf(`if (_utf8Len(_s) > %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s element: string byte length above schema maxlen %d"); `, maxVal, arr, maxVal) +
 				arr + "[_id] = _s;"
 		}
 		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + `.push(""); ` + arr + "[_id] = c.readString();"
@@ -313,6 +316,28 @@ const padToHelper = `// _padTo grows a to exactly n elements with the element de
 function _padTo<T>(a: T[], n: number, zero: T): T[] {
   while (a.length < n) a.push(zero);
   return a;
+}`
+
+// utf8LenHelper counts a string's UTF-8 byte length without allocating — no
+// TextEncoder, no throwaway Uint8Array — for the decode-side maxlen check on a
+// bounded string field (MESSAGE_SPEC §7.1, issue #153). It is byte-for-byte
+// identical to `new TextEncoder().encode(s).length`: an unpaired surrogate counts
+// as the 3-byte U+FFFD replacement, matching what the corelib's TextDecoder
+// produced, so validation semantics are unchanged. Emitted only when some bounded
+// string field decodes (blob maxlen checks read the wire Uint8Array .length).
+const utf8LenHelper = `// _utf8Len returns the UTF-8 byte length of s without allocating (mirrors what the
+// encode path already does). Used to bound a decoded string against its schema
+// maxlen on the hot decode path (issue #153).
+function _utf8Len(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { n += 4; i++; }
+    else n += 3;
+  }
+  return n;
 }`
 
 // longArrEqHelper is the Long[] flavour of arrEq: Long elements are object

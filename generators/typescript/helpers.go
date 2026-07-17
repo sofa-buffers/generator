@@ -152,6 +152,7 @@ type helperUse struct {
 	countedArr  bool // count-bearing native array -> import SofabError for the over-count reject (generator#100)
 	overIdxArr  bool // count-bearing wrapper array -> import SofabError for the over-index reject (generator#142)
 	maxlenField bool // bounded string/blob (scalar or wrapper element) -> import SofabError for the over-maxlen reject (MESSAGE_SPEC §7.1)
+	strMaxlen   bool // bounded string (scalar or wrapper element) -> emit the allocation-free _utf8Len helper for its decode-side maxlen check (blobs measure .length directly)
 	trimTail    bool // fixed-count non-Long native array -> encode-side trailing-default-run trim
 	trimTailLng bool // fixed-count Long-backed native array -> Long flavour of the trim
 }
@@ -183,6 +184,19 @@ func arrayHasBoundedStrBlob(elem ir.Kind, items *ir.ArrayElem, elemMaxHas bool) 
 	return false
 }
 
+// arrayHasBoundedString is arrayHasBoundedStrBlob restricted to string elements:
+// only a bounded *string* element needs the allocation-free _utf8Len helper on
+// decode (a bounded blob element measures its wire byte length via .length).
+func arrayHasBoundedString(elem ir.Kind, items *ir.ArrayElem, elemMaxHas bool) bool {
+	if elem == ir.KindString && elemMaxHas {
+		return true
+	}
+	if elem == ir.KindArray && items != nil {
+		return arrayHasBoundedString(items.Elem, items.ElemItems, items.ElemMaxHas)
+	}
+	return false
+}
+
 // scanHelpers walks every emitted class's fields and reports which helpers the
 // module needs. A Long-backed array with a value default needs longArrEq (Long
 // identity !== fails element-wise compare); other defaulted leaf arrays/blobs
@@ -207,6 +221,14 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 			}
 			if fld.Kind == ir.KindArray && arrayHasBoundedStrBlob(fld.Elem, fld.ElemItems, fld.ElemMaxHas) {
 				use.maxlenField = true
+			}
+			// A bounded string (scalar or wrapper element) decodes its maxlen check
+			// via the allocation-free _utf8Len helper (issue #153).
+			if fld.Kind == ir.KindString && fld.HasMaxlen {
+				use.strMaxlen = true
+			}
+			if fld.Kind == ir.KindArray && arrayHasBoundedString(fld.Elem, fld.ElemItems, fld.ElemMaxHas) {
+				use.strMaxlen = true
 			}
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				if fld.HasCount {
