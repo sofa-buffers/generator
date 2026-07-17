@@ -277,7 +277,7 @@ func TestCppFixedContainers(t *testing.T) {
 		"static _FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",  // blob-seq collector
 		"static _FixedStrSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
 		"static _MsgSeqFixed<sofab::InlineVector<",                            // struct-seq collector
-		"if (static_cast<std::size_t>(id) >= out->capacity()) return;",        // over-capacity element dropped, no infinite loop (issue #126)
+		"if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }", // over-index element rejected INVALID (generator#149), no infinite loop (issue #126)
 		"std::size_t encodeTo(std::uint8_t *dst",                              // heap-free encode
 	} {
 		if !strings.Contains(h, want) {
@@ -286,10 +286,10 @@ func TestCppFixedContainers(t *testing.T) {
 	}
 	// The clib wrapper emits no scalar over-count field guard: the C runtime itself
 	// rejects a count/capacity mismatch with SOFAB_RET_E_INVALID_MSG (generator#100).
-	// (The shared _MsgSeq prelude carries an over-index invalidate() for the heap
-	// allow_dynamic path, but a fixed field decodes via the inline collectors whose
-	// own >= capacity() guard drops the element, issue #126, and a dynamic field
-	// gets cap = -1, so that invalidate() never fires on this profile.)
+	// (String/blob fixed fields decode via the inline collectors, whose own
+	// >= capacity() guard now rejects an over-index element via is.invalidate()
+	// — the callback→decoder abort channel c-cpp gained in corelib-c-cpp#92
+	// (generator#149) — instead of #126's silent drop.)
 	if strings.Contains(h, "if (_count >") {
 		t.Error("corelib: c-cpp must not emit a scalar over-count guard (C runtime already rejects over-count)")
 	}
