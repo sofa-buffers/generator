@@ -146,3 +146,11 @@ Members of equal alignment keep their schema order. This affects **declaration
 order only** — encode iterates the schema/field-id order, so the wire bytes are
 byte-identical to every other target. Initialize members by name (designated
 initializers or assignment), not with positional aggregate initialization.
+
+## Benchmark row
+
+Row `cpp-cpp` (corelib `cpp`) and `cpp-c-cpp` (corelib `c-cpp`) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with
+the **toggle** method. Tracked: Ir/op for both; `cpp-c-cpp` also `.text`/`.data`/`.bss` on ARMv6-M and ARMv7-M+fp.dp.
+
+Change codegen here, then `./tests/bench/run.sh` and read the diff in
+`tests/bench/results.txt`.

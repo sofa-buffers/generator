@@ -1,0 +1,193 @@
+{
+  "//": "@see tests/bench/README.md. One entry per (language x corelib) row. `archs` lists the",
+  "//": "footprint targets that row can actually build for; `[]` means the row has no footprint",
+  "//": "metric (maxspeed profiles are Ir/op only). Keep sorted by id — results.txt is sorted too.",
+
+  "schema": "examples/messages/realworld/vehicle_telemetry.yaml",
+
+  "//reps": "`subtract` rows only: the two rep counts whose totals are subtracted. These are",
+  "//reps ": "a TRADE-OFF and are per-row on purpose -- do not copy one row's value to another.",
+  "//reps  ": "  Bigger delta = less noise. The delta carries the signal and fixed per-run noise",
+  "//reps   ": "  is divided by it. At a delta of 1000 ops java decode came out 2-5% off affine",
+  "//reps    ": "  (rejected by the gate, and irreproducible run to run); at 100000 it is 0.03%.",
+  "//reps     ": "  Bigger delta = quadratically more wall clock. Every rep runs under valgrind, so",
+  "//reps      ": "  cost is reps x Ir/op. Java is ~17k Ir/op and 110000 reps is ~1 min; python is",
+  "//reps       ": "  ~840k Ir/op, where the same reps would be ~20 min PER POINT (and there are 3).",
+  "//reps        ": "So scale reps INVERSELY with the row's Ir/op: just large enough to pass the",
+  "//reps         ": "affineness gate. A JIT row needs a big delta (it must out-weigh tier noise); a",
+  "//reps          ": "deterministic interpreter like CPython passes at 0.0004% with a tiny one.",
+  "//reps           ": "If a row fails the gate, raise its reps before touching anything else.",
+
+  "//cxx_flags": "Same as `flags` minus -ffreestanding. The C++ footprint profile CANNOT",
+  "//cxx_flags ": "build freestanding today: the generated .hpp includes <string>/<vector>, and",
+  "//cxx_flags  ": "libstdc++ rejects those with #error \"This header is not available in freestanding",
+  "//cxx_flags   ": "mode.\" That is the gap docs/plans/cpp-embedded-footprint.md exists to close",
+  "//cxx_flags    ": "(FixedString<N>/FixedBytes sized from schema maxlen). Until it lands, the cpp rows",
+  "//cxx_flags     ": "are measured hosted-headers-on-bare-metal-arch, so treat them as a bloat tracker",
+  "//cxx_flags      ": "rather than a flash budget. When it lands, drop cxx_flags and expect a step down.",
+
+  "archs": {
+    "ARMv6-m": {
+      "cc": "arm-none-eabi-gcc",
+      "cxx": "arm-none-eabi-g++",
+      "size": "arm-none-eabi-size",
+      "flags": "-march=armv6-m -mtune=cortex-m0 -mthumb -mno-unaligned-access -ffreestanding",
+      "cxx_flags": "-march=armv6-m -mtune=cortex-m0 -mthumb -mno-unaligned-access",
+      "note": "Cortex-M0"
+    },
+    "ARMv7-m+fp.dp": {
+      "cc": "arm-none-eabi-gcc",
+      "cxx": "arm-none-eabi-g++",
+      "size": "arm-none-eabi-size",
+      "flags": "-march=armv7e-m+fp.dp -mtune=cortex-m7 -mthumb -mno-unaligned-access -ffreestanding",
+      "cxx_flags": "-march=armv7e-m+fp.dp -mtune=cortex-m7 -mthumb -mno-unaligned-access",
+      "note": "Cortex-M7"
+    },
+    "RV32IMC": {
+      "cc": "riscv64-unknown-elf-gcc",
+      "cxx": "riscv64-unknown-elf-g++",
+      "size": "riscv64-unknown-elf-size",
+      "flags": "-march=rv32imc -mabi=ilp32 --specs=picolibc.specs",
+      "note": "no bare-metal C++ stdlib is packaged, so C only"
+    },
+    "thumbv6m": {
+      "rust_target": "thumbv6m-none-eabi",
+      "note": "Cortex-M0; matches corelib-rs-no-std/tools/footprint.sh"
+    }
+  },
+
+  "rows": [
+    {
+      "id": "c",
+      "lang": "c",
+      "corelib": "corelib-c-cpp",
+      "corelib_env": "SOFAB_C_CORELIB",
+      "profile": "footprint",
+      "method": "toggle",
+      "config": "",
+      "archs": ["ARMv6-m", "ARMv7-m+fp.dp", "RV32IMC"]
+    },
+    {
+      "id": "cpp-c-cpp",
+      "lang": "cpp",
+      "corelib": "corelib-c-cpp",
+      "corelib_env": "SOFAB_C_DIR",
+      "profile": "footprint",
+      "method": "toggle",
+      "config": "targets: { cpp: { corelib: c-cpp } }",
+      "archs": ["ARMv6-m", "ARMv7-m+fp.dp"]
+    },
+    {
+      "id": "rust-rs-no-std",
+      "lang": "rust",
+      "corelib": "corelib-rs-no-std",
+      "corelib_env": "SOFAB_RS_CORELIB",
+      "profile": "footprint",
+      "method": "toggle",
+      "config": "generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }",
+      "archs": ["thumbv6m"]
+    },
+    {
+      "id": "cpp-cpp",
+      "lang": "cpp",
+      "corelib": "corelib-cpp",
+      "corelib_env": "SOFAB_CPP_DIR",
+      "profile": "maxspeed",
+      "method": "toggle",
+      "config": "",
+      "archs": []
+    },
+    {
+      "id": "rust-rs",
+      "lang": "rust",
+      "corelib": "corelib-rs",
+      "corelib_env": "SOFAB_RS_STD_CORELIB",
+      "profile": "maxspeed",
+      "method": "toggle",
+      "config": "generic: { emit: project }\ntargets: { rust: { corelib: rs } }",
+      "archs": []
+    },
+    {
+      "id": "zig",
+      "lang": "zig",
+      "corelib": "corelib-zig",
+      "corelib_env": "SOFAB_ZIG_CORELIB",
+      "profile": "maxspeed",
+      "method": "toggle",
+      "config": "generic: { emit: project }",
+      "archs": []
+    },
+    {
+      "id": "go",
+      "lang": "go",
+      "corelib": "corelib-go",
+      "corelib_env": "SOFAB_GO_CORELIB",
+      "profile": "maxspeed",
+      "method": "toggle",
+      "config": "generic: { emit: project }",
+      "archs": []
+    },
+    {
+      "id": "java",
+      "lang": "java",
+      "corelib": "corelib-java",
+      "corelib_env": "SOFAB_JAVA_CORELIB",
+      "profile": "maxspeed",
+      "method": "subtract",
+      "reps": "10000 110000",
+      "config": "generic: { emit: project }",
+      "archs": []
+    },
+    {
+      "id": "csharp",
+      "lang": "csharp",
+      "corelib": "corelib-cs",
+      "corelib_env": "SOFAB_CS_CORELIB",
+      "profile": "maxspeed",
+      "method": "subtract",
+      "reps": "10000 110000",
+      "config": "generic: { emit: project }",
+      "archs": []
+    },
+    {
+      "id": "python",
+      "lang": "python",
+      "corelib": "corelib-py",
+      "corelib_env": "SOFAB_PY_CORELIB",
+      "profile": "maxspeed",
+      "method": "subtract",
+      "//": "CPython has no JIT, so a small delta suffices: validated at 0.0004% affine.",
+      "reps": "500 3000",
+      "config": "generic: { emit: project }",
+      "archs": []
+    },
+    {
+      "//ts": "ts measures the V8 BASELINE tier (--max-opt=1 in lang/typescript.sh), not",
+      "//ts1": "fully-optimized TurboFan. Default V8 tiering makes Ir non-monotonic in reps and",
+      "//ts2": "the affineness gate rejects it; capping at the baseline JIT removes the tier",
+      "//ts3": "transition and makes the subtraction affine to 0.03% at warmup 2000, reps",
+      "//ts4": "500/3000. A stable relative reference, not the absolute-fastest production",
+      "//ts5": "number. See lang/typescript.sh for the full flag rationale.",
+      "id": "ts-bigint",
+      "lang": "typescript",
+      "corelib": "corelib-ts",
+      "corelib_env": "SOFAB_TS_CORELIB",
+      "profile": "maxspeed",
+      "method": "subtract",
+      "reps": "500 3000",
+      "config": "generic: { emit: project }\ntargets: { typescript: { int64: bigint } }",
+      "archs": []
+    },
+    {
+      "id": "ts-long",
+      "lang": "typescript",
+      "corelib": "corelib-ts",
+      "corelib_env": "SOFAB_TS_CORELIB",
+      "profile": "maxspeed",
+      "method": "subtract",
+      "reps": "500 3000",
+      "config": "generic: { emit: project }\ntargets: { typescript: { int64: long } }",
+      "archs": []
+    }
+  ]
+}

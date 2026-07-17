@@ -157,3 +157,11 @@ items[i].len)`, so a sub-`maxlen` element keeps its exact length. A `used_len ==
 element is omitted by index, so an empty element round-trips in place (the gap is
 preserved). A `string` array element stays `char items[count][maxlen + 1]` — it
 recovers its length from the NUL, so it needs no companion.
+
+## Benchmark row
+
+Row `c` in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with
+the **toggle** method. Tracked: Ir/op + `.text`/`.data`/`.bss` on ARMv6-M, ARMv7-M+fp.dp, RV32IMC.
+
+Change codegen here, then `./tests/bench/run.sh` and read the diff in
+`tests/bench/results.txt`.

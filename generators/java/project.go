@@ -61,6 +61,88 @@ func (g *gen) pom() string {
 `
 }
 
+// benchSinkField names one cheap integer scalar of m, folded in the bench loop so
+// the decode cannot be elided. It runs inside the measured loop, so it must stay
+// cheap -- Json.to() would be counted as decode cost.
+func benchSinkField(m *ir.Message) string {
+	for _, f := range m.Fields {
+		switch f.Kind {
+		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+			ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+			return f.Name
+		}
+	}
+	return ""
+}
+
+// emitBench emits the `bench <workload> <reps>` entry point (tests/bench,
+// ARCHITECTURE §15).
+//
+// The JVM JIT-compiles the hot path at runtime, so there is no native symbol to
+// --toggle-collect on. This is the `subtract` method: tests/bench runs the same
+// workload at two rep counts and subtracts the totals,
+//
+//	Ir/op = ( Ir(R2) - Ir(R1) ) / ( R2 - R1 )
+//
+// which cancels JVM startup, class loading, JIT compilation and setup exactly.
+//
+// That only holds if the two runs differ in NOTHING but the rep count, which needs
+// both halves of the contract:
+//   - here: a FIXED warmup, independent of reps, so the hot methods reach their
+//     final tier BEFORE the measured loop and every measured op runs at steady cost;
+//   - in tests/bench/lang/java.sh: -XX:-TieredCompilation (one tier, no mid-run
+//     transition), -XX:+UseEpsilonGC with a fixed heap (no GC at all), and
+//     -XX:hashCode=2 (identity hashes are otherwise seeded per-run).
+//
+// Ported from corelib-java/src/main/java/org/sofabuffers/sofab/bench/Callgrind.java.
+func (g *gen) emitBench(f *jfile, s *ir.Schema) {
+	f.line("    // Fixed warmup ops per run, independent of `reps`, so it cancels in the")
+	f.line("    // subtraction while leaving the measured ops at steady, fully-JITted cost.")
+	f.line("    private static final int WARMUP = Integer.getInteger(\"sofab.warmup\", 5000);")
+	f.line("    private static long benchSink = 0;")
+	f.blank()
+	f.line("    static int benchMain(String w, int reps, byte[] input) throws Exception {")
+	for _, m := range s.Messages {
+		mt := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		f.line("        if (w.equals(\"encode_%s\") || w.equals(\"decode_%s\")) {", low, low)
+		f.line("            JsonObject j = JsonParser.parseString(new String(input, StandardCharsets.UTF_8)).getAsJsonObject();")
+		f.line("            %s obj = new %s(); Json.from(j, obj);", mt, mt)
+		f.line("            byte[] wire = obj.encode(); // setup: the decode input")
+		f.line("            boolean enc = w.equals(\"encode_%s\");", low)
+		f.line("            for (int i = 0; i < WARMUP; i++) benchOp_%s(enc, obj, wire);", low)
+		f.line("            for (int i = 0; i < reps; i++) benchOp_%s(enc, obj, wire);", low)
+		f.line("            System.err.println(\"sink=\" + benchSink + \" bytes=\" + wire.length);")
+		f.line("            StringBuilder hx = new StringBuilder();")
+		f.line("            for (byte b : wire) hx.append(String.format(\"%%02x\", b));")
+		f.line("            System.err.println(\"wire_hex=\" + hx);")
+		f.line("            return 0;")
+		f.line("        }")
+	}
+	f.line("        System.err.println(\"unknown workload: \" + w);")
+	f.line("        return 2;")
+	f.line("    }")
+	f.blank()
+
+	for _, m := range s.Messages {
+		mt := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		sink := benchSinkField(m)
+		f.line("    private static void benchOp_%s(boolean enc, %s obj, byte[] wire) {", low, mt)
+		f.line("        if (enc) {")
+		f.line("            benchSink ^= obj.encode().length;")
+		f.line("        } else {")
+		if sink != "" {
+			f.line("            benchSink ^= %s.decode(wire).%s;", mt, sink)
+		} else {
+			f.line("            benchSink ^= %s.decode(wire).hashCode();", mt)
+		}
+		f.line("        }")
+		f.line("    }")
+		f.blank()
+	}
+}
+
 func (g *gen) mainHarness(s *ir.Schema) []byte {
 	f := &jfile{}
 	g.header(f)
@@ -70,12 +152,17 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 	f.line("import java.nio.charset.StandardCharsets;")
 	f.blank()
 	f.line("public class Main {")
+	g.emitBench(f, s)
 	f.line("    public static void main(String[] args) throws Exception {")
 	f.line("        String mode = args.length > 0 ? args[0] : \"\";")
 	f.line("        String name = args.length > 1 ? args[1] : %q;", defaultMessage(s))
 	f.line("        ByteArrayOutputStream bos = new ByteArrayOutputStream();")
 	f.line("        byte[] tmp = new byte[8192]; int n; while ((n = System.in.read(tmp)) > 0) bos.write(tmp, 0, n);")
 	f.line("        byte[] input = bos.toByteArray();")
+	f.line("        // `bench <workload> <reps>` takes a workload, not a message name.")
+	f.line("        if (mode.equals(\"bench\")) {")
+	f.line("            System.exit(benchMain(name, args.length > 2 ? Integer.parseInt(args[2]) : 1000, input));")
+	f.line("        }")
 	f.line("        switch (name) {")
 	for _, m := range s.Messages {
 		mt := exported(m.Name)

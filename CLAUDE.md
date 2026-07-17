@@ -43,6 +43,12 @@ These correspond to the two optimization axes in ARCHITECTURE §1 ("Design
 principles"). Existing placements: footprint = `c`, `cpp` with
 `corelib: c-cpp`, `rust` with `corelib: rs-no-std`; maxspeed = everything else.
 
+Both axes are **measured**, not asserted — `tests/bench/results.txt` (ARCHITECTURE
+§15) records instructions/op for every row and, for the footprint rows,
+`.text`/`.data`/`.bss` cross-compiled to the embedded targets they ship to. If you
+change codegen, regenerate it with `tests/bench/run.sh` and read the diff: that is
+how a claim on either axis is checked.
+
 ## Reference implementations
 
 For additional context and implementation guidance, use an existing generator
@@ -67,7 +73,9 @@ Every implementation of a new target/corelib must include **all** of:
    conformance harness `tests/conformance/<lang>/run.sh`
    (generate → build → round-trip → byte-exact shared vectors), plus a
    `lang-<x>` CI job. The corelib repo (`corelib-<lang>`) needs its own full
-   test suite against the shared vectors.
+   test suite against the shared vectors. Also a `tests/bench/` row: the `bench`
+   verb in the project harness, an entry in `rows.json`, a `lang/<x>.sh` recipe,
+   and a regenerated `results.txt` (ARCHITECTURE §15).
 3. **Documentation updates** — a new `docs/generator/<lang>.md`, and updates to
    every existing doc that enumerates targets (README, `generators/README.md`,
    ARCHITECTURE §10 table, config schema docs).

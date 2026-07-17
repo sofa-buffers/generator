@@ -12,6 +12,10 @@
 # Generated output (default config output_dir)
 /generated/
 
+# Python bytecode (tests/bench/lib/format.py, tests/conformance/*/check_vectors.py)
+__pycache__/
+*.pyc
+
 # Editor / OS
 .DS_Store
 

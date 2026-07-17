@@ -123,3 +123,11 @@ padding.
 
 [`corelib-rs-no-std`]: https://github.com/sofa-buffers/corelib-rs-no-std
 [`corelib-rs`]: https://github.com/sofa-buffers/corelib-rs
+
+## Benchmark row
+
+Row `rust-rs` (corelib `rs`) and `rust-rs-no-std` (corelib `rs-no-std`) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with
+the **toggle** method. Tracked: Ir/op for both; `rust-rs-no-std` also `.text`/`.data`/`.bss` on thumbv6m.
+
+Change codegen here, then `./tests/bench/run.sh` and read the diff in
+`tests/bench/results.txt`.

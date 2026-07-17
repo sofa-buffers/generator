@@ -329,9 +329,95 @@ func (g *gen) arrayValueFromJSON(h *cfile, spec arraySpec, acc, jnode, ind strin
 	h.line("%s}", ind)
 }
 
+// emitBench emits the Callgrind workload entry points (tests/bench, ARCHITECTURE
+// §15). Each run_<workload> performs EXACTLY ONE op and is noinline with external
+// linkage, so
+//
+//	valgrind --tool=callgrind --collect-atstart=no --toggle-collect=run_<workload>
+//
+// collects the instructions retired for that single op and nothing else — process
+// start, JSON parsing and the decode input's pre-encode all happen in main, before
+// collection is toggled on. Same shape as corelib-c-cpp/bench/c/bench.c.
+//
+// The barrier is on the wrapper only: message_<m>_encode and the corelib calls
+// inside it still inline freely, which is the cost being measured.
+func (g *gen) emitBench(h *cfile, s *ir.Schema) {
+	h.line("/* ---- bench workloads (one op each; see tests/bench/README.md) ---- */")
+	for _, m := range s.Messages {
+		ct := g.cType("message/"+m.Name, m.Name)
+		pfx := g.prefix + strings.ToLower(m.Name)
+		low := strings.ToLower(m.Name)
+		maxSize := strings.ToUpper(g.prefix + m.Name + "_MAX_SIZE")
+
+		// File-scope state: keeps the measured buffers off the stack (so stack
+		// setup is not part of the op) and lets main observe the results after
+		// collection stops, which is what stops the op being optimized away.
+		h.line("static %s _bench_%s_in;", ct, low)
+		h.line("static %s _bench_%s_out;", ct, low)
+		h.line("static unsigned char _bench_%s_wire[%s];", low, maxSize)
+		h.line("static size_t _bench_%s_wire_len;", low)
+		h.blank()
+		h.line("__attribute__((noinline)) void run_encode_%s(void) {", low)
+		h.line("    size_t used = 0;")
+		h.line("    if (%s_encode(&_bench_%s_in, _bench_%s_wire, sizeof(_bench_%s_wire), &used) != SOFAB_RET_OK) used = 0;", pfx, low, low, low)
+		h.line("    _bench_%s_wire_len = used;", low)
+		h.line("}")
+		h.blank()
+		h.line("__attribute__((noinline)) void run_decode_%s(void) {", low)
+		h.line("    %s_init(&_bench_%s_out);", pfx, low)
+		h.line("    (void)%s_decode(&_bench_%s_out, _bench_%s_wire, _bench_%s_wire_len);", pfx, low, low, low)
+		h.line("}")
+		h.blank()
+	}
+}
+
+// emitBenchMain emits the `bench <workload>` dispatcher. Everything here is setup
+// and observation; the only collected code is the run_<workload> call itself.
+func (g *gen) emitBenchMain(h *cfile, s *ir.Schema) {
+	h.line("static int bench_main(const char *w, const unsigned char *in, size_t len) {")
+	h.line("    char err[128];")
+	h.line("    sofab_json_t *root = sofab_json_parse((const char *)in, len, err, sizeof(err));")
+	h.line(`    if (!root) { fprintf(stderr, "json: %%s\n", err); return 1; }`)
+	h.line("    unsigned long long sink = 0;")
+	h.line("    size_t i;")
+	for _, m := range s.Messages {
+		low := strings.ToLower(m.Name)
+		pfx := g.prefix + low
+		fn := g.jsonFnName(m.Name)
+		h.line(`    if (strcmp(w, "encode_%s") == 0 || strcmp(w, "decode_%s") == 0) {`, low, low)
+		h.line("        %s_init(&_bench_%s_in);", pfx, low)
+		h.line("        %s_from_json(root, &_bench_%s_in);", fn, low)
+		h.line("        sofab_json_free(root);")
+		h.line(`        if (strcmp(w, "encode_%s") == 0) {`, low)
+		h.line("            run_encode_%s();", low)
+		h.line("        } else {")
+		h.line("            run_encode_%s();  /* setup: the decode input (not collected) */", low)
+		h.line("            run_decode_%s();", low)
+		h.line("        }")
+		h.line("        /* Observe both results after collection stops, so neither op can be")
+		h.line("           optimized away but the folding costs no measured instructions. */")
+		h.line("        { const unsigned char *p = (const unsigned char *)&_bench_%s_out;", low)
+		h.line("          for (i = 0; i < sizeof(_bench_%s_out); i++) sink += p[i]; }", low)
+		h.line("        for (i = 0; i < _bench_%s_wire_len; i++) sink = sink * 31u + _bench_%s_wire[i];", low, low)
+		h.line(`        fprintf(stderr, "sink=%%llu BYTES=%%zu\n", sink, _bench_%s_wire_len);`, low)
+		h.line(`        fputs("wire_hex=", stderr);`)
+		h.line("        for (i = 0; i < _bench_%s_wire_len; i++) fprintf(stderr, \"%%02x\", _bench_%s_wire[i]);", low, low)
+		h.line(`        fputc('\n', stderr);`)
+		h.line("        return 0;")
+		h.line("    }")
+	}
+	h.line("    sofab_json_free(root);")
+	h.line(`    fprintf(stderr, "unknown workload: %%s\n", w);`)
+	h.line("    return 2;")
+	h.line("}")
+	h.blank()
+}
+
 func (g *gen) emitMain(h *cfile, s *ir.Schema) {
+	g.emitBench(h, s)
+	g.emitBenchMain(h, s)
 	h.line("int main(int argc, char **argv) {")
-	h.line("    if (argc < 2) { fprintf(stderr, \"usage: %%s <encode|decode> [Message]\\n\", argv[0]); return 2; }")
+	h.line("    if (argc < 2) { fprintf(stderr, \"usage: %%s <encode|decode|bench> [Message|workload]\\n\", argv[0]); return 2; }")
 	h.line("    const char *mode = argv[1];")
 	h.line(`    const char *msg = argc > 2 ? argv[2] : %q;`, s.Messages[0].Name)
 	h.line("    (void)msg;")
@@ -340,6 +426,13 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 	h.line("    size_t cap = 65536, len = 0; unsigned char *in = malloc(cap);")
 	h.line("    for (;;) { if (len == cap) { cap *= 2; in = realloc(in, cap); }")
 	h.line("        size_t n = fread(in + len, 1, cap - len, stdin); len += n; if (n == 0) break; }")
+	h.blank()
+	h.line("    /* `bench <workload>` takes a workload, not a message name. */")
+	h.line(`    if (strcmp(mode, "bench") == 0) {`)
+	h.line("        int rc = bench_main(argc > 2 ? argv[2] : \"\", in, len);")
+	h.line("        free(in);")
+	h.line("        return rc;")
+	h.line("    }")
 	h.blank()
 	for i, m := range s.Messages {
 		ct := g.cType("message/"+m.Name, m.Name)

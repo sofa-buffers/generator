@@ -44,9 +44,88 @@ func (g *gen) readme(s *ir.Schema) string {
 	return b.String()
 }
 
+// emitBench emits the Callgrind workload entry points (tests/bench, ARCHITECTURE
+// §15). Each run_<workload> performs EXACTLY ONE op and is //go:noinline, so
+//
+//	valgrind --tool=callgrind --collect-atstart=no --toggle-collect=main.run_<workload>
+//
+// collects that single op and nothing else — process start, JSON parsing and the
+// decode input's pre-encode all happen before collection is toggled on. Same shape
+// as corelib-go/bench/run_callgrind.sh, which toggles on the same mangled name.
+//
+// noinline is on the wrapper only, so Encode/Decode and the corelib inline into it
+// as usual — that inlining is the cost being measured.
+func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
+	f.line("// Bench state at package scope: the results outlive the measured call so")
+	f.line("// main can observe them after collection stops, which is what keeps the op")
+	f.line("// from being optimized away. See tests/bench/README.md.")
+	for _, m := range s.Messages {
+		typeName := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		f.line("var bench%sIn *%s.%s", typeName, pkgAlias, typeName)
+		f.line("var bench%sWire []byte", typeName)
+		f.line("var bench%sOut *%s.%s", typeName, pkgAlias, typeName)
+		f.blank()
+		f.line("//go:noinline")
+		f.line("func run_encode_%s() {", low)
+		f.line("\tb, err := bench%sIn.Encode()", typeName)
+		f.line("\tif err != nil {")
+		f.line("\t\tfail(err)")
+		f.line("\t}")
+		f.line("\tbench%sWire = b", typeName)
+		f.line("}")
+		f.blank()
+		f.line("//go:noinline")
+		f.line("func run_decode_%s() {", low)
+		f.line("\tobj, err := %s.Decode%s(bench%sWire)", pkgAlias, typeName, typeName)
+		f.line("\tif err != nil {")
+		f.line("\t\tfail(err)")
+		f.line("\t}")
+		f.line("\tbench%sOut = obj", typeName)
+		f.line("}")
+		f.blank()
+	}
+
+	f.line("// benchMain runs one op of <workload>. Everything here is setup and")
+	f.line("// observation; only the run_* call is collected.")
+	f.line("func benchMain(w string, in []byte) int {")
+	for _, m := range s.Messages {
+		typeName := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		f.line("\tif w == \"encode_%s\" || w == \"decode_%s\" {", low, low)
+		f.line("\t\tbench%sIn = %s.New%s()", typeName, pkgAlias, typeName)
+		f.line("\t\tif err := json.Unmarshal(in, bench%sIn); err != nil {", typeName)
+		f.line("\t\t\tfail(err)")
+		f.line("\t\t}")
+		f.line("\t\tif w == \"encode_%s\" {", low)
+		f.line("\t\t\trun_encode_%s()", low)
+		f.line("\t\t} else {")
+		f.line("\t\t\trun_encode_%s() // setup: the decode input (not collected)", low)
+		f.line("\t\t\trun_decode_%s()", low)
+		f.line("\t\t}")
+		f.line("\t\tvar sink uint64")
+		f.line("\t\tfor _, c := range bench%sWire {", typeName)
+		f.line("\t\t\tsink = sink*31 + uint64(c)")
+		f.line("\t\t}")
+		f.line("\t\tif bench%sOut != nil {", typeName)
+		f.line("\t\t\tj, _ := json.Marshal(bench%sOut)", typeName)
+		f.line("\t\t\tsink += uint64(len(j))")
+		f.line("\t\t}")
+		f.line("\t\tfmt.Fprintf(os.Stderr, \"sink=%%d BYTES=%%d\\n\", sink, len(bench%sWire))", typeName)
+		f.line("\t\tfmt.Fprintf(os.Stderr, \"wire_hex=%%s\\n\", hex.EncodeToString(bench%sWire))", typeName)
+		f.line("\t\treturn 0")
+		f.line("\t}")
+	}
+	f.line("\tfmt.Fprintf(os.Stderr, \"unknown workload: %%s\\n\", w)")
+	f.line("\treturn 2")
+	f.line("}")
+	f.blank()
+}
+
 // harness emits the uniform encode/decode JSON CLI for the Go module.
 func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	f := newGoFile("main")
+	f.imp("encoding/hex")
 	f.imp("encoding/json")
 	f.imp("fmt")
 	f.imp("io")
@@ -54,6 +133,7 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	f.imp(modPath + "/" + g.pkg)
 
 	pkgAlias := g.pkg
+	g.emitBench(f, s, pkgAlias)
 	f.line("func main() {")
 	f.line("\tif len(os.Args) < 2 {")
 	f.line("\t\tfmt.Fprintln(os.Stderr, \"usage: harness <encode|decode> [Message]\")")
@@ -65,6 +145,14 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	f.line("\t\tmsg = os.Args[2]")
 	f.line("\t}")
 	f.line("\tin, _ := io.ReadAll(os.Stdin)")
+	f.line("\t// `bench <workload>` takes a workload, not a message name.")
+	f.line("\tif mode == \"bench\" {")
+	f.line("\t\tw := \"\"")
+	f.line("\t\tif len(os.Args) > 2 {")
+	f.line("\t\t\tw = os.Args[2]")
+	f.line("\t\t}")
+	f.line("\t\tos.Exit(benchMain(w, in))")
+	f.line("\t}")
 	f.line("\tswitch msg {")
 	for _, m := range s.Messages {
 		typeName := exported(m.Name)

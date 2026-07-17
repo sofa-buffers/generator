@@ -1,0 +1,64 @@
+{
+  "vehicle_id": "WVWZZZ1JZXW000001",
+  "captured_at": { "seconds": 1752739200, "nanos": 123456789 },
+  "location": { "latitude": 48.1372159, "longitude": 11.5755679, "altitude": 519.5 },
+  "heading_deg": 137.25,
+  "velocity": { "x": 12.5, "y": -3.25, "z": 0.125 },
+  "acceleration": { "x": 0.75, "y": -1.5, "z": 9.8125 },
+  "speed_kph": 88.5,
+  "gear": 3,
+  "faults": 31,
+  "battery_pct": 73,
+  "odometer_m": 123456789012,
+  "tire_kpa": [231, 233, 229, 235],
+  "active_code": {
+    "code": "P0301",
+    "occurred": { "seconds": 1752739100, "nanos": 42 },
+    "where": { "latitude": 48.1000001, "longitude": 11.5000002, "altitude": 500.25 }
+  },
+  "legacy_rpm": 2450,
+  "cabin_temp_c": -7,
+  "motor_torque_nm": -320,
+  "net_power_w": -15500,
+  "trip_energy_wh": -987654321012,
+  "charging": true,
+  "firmware_ver": "3.14.159",
+  "firmware_sig": [
+    17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255, 1,
+    2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 121, 98, 219, 77, 42
+  ],
+  "features": 15,
+  "aux_sensor": { "analog": 3.875 },
+  "battery_temp_c": 41.5,
+  "recent_codes": [
+    { "code": "P0301", "occurred": { "seconds": 1752739001, "nanos": 111 },
+      "where": { "latitude": 48.11, "longitude": 11.51, "altitude": 501.5 } },
+    { "code": "P0420", "occurred": { "seconds": 1752739002, "nanos": 222 },
+      "where": { "latitude": 48.12, "longitude": 11.52, "altitude": 502.5 } },
+    { "code": "C1234", "occurred": { "seconds": 1752739003, "nanos": 333 },
+      "where": { "latitude": 48.13, "longitude": 11.53, "altitude": 503.5 } },
+    { "code": "U0100", "occurred": { "seconds": 1752739004, "nanos": 444 },
+      "where": { "latitude": 48.14, "longitude": 11.54, "altitude": 504.5 } }
+  ],
+  "cell_mv": [
+    [3711, 3712, 3713, 3714, 3715, 3716, 3717, 3718],
+    [3721, 3722, 3723, 3724, 3725, 3726, 3727, 3728],
+    [3731, 3732, 3733, 3734, 3735, 3736, 3737, 3738],
+    [3741, 3742, 3743, 3744, 3745, 3746, 3747, 3748]
+  ],
+  "warnings": [
+    "tire pressure front left",
+    "hv battery derated",
+    "lane assist unavailable",
+    "service due in 500 km"
+  ],
+  "ecu_sigs": [
+    [1, 2, 3, 4, 5, 6, 7, 8],
+    [17, 18, 19, 20, 21, 22, 23, 24],
+    [33, 34, 35, 36, 37, 38, 39, 40]
+  ],
+  "gear_history": [0, 1, 2, 3, 4, 3, 2, 1],
+  "doors_open": [true, true, true, true],
+  "wheel_faults": [31, 30, 29, 28],
+  "energy_sources": [{ "electric": 42.5 }, { "combustion": 31.25 }]
+}

@@ -11,6 +11,20 @@ All file:function references are to this repo. All "before" C++ snippets are the
 **actual generated output** for `examples/messages/example.yaml` in `c-cpp`
 mode (regenerated during analysis; header = `myfirstmessage.hpp`).
 
+> **This is now measurable.** §3's `.text` inventory below was hand-reasoned;
+> [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15) now cross-compiles the
+> `cpp-c-cpp` row to ARMv6-M / ARMv7-M+fp.dp and records `.text`/`.data`/`.bss` in a
+> committed `results.txt`, so this plan's effect can be read off a diff rather than
+> argued. Two current readings are worth having in mind as the baseline:
+>
+> * the row measures **`bss = 180`** — static RAM in a profile that advertises none;
+> * it cannot be built `-ffreestanding` at all, because the emitted header pulls in
+>   `<string>`/`<vector>` and libstdc++ rejects those on a bare-metal target
+>   (*"This header is not available in freestanding mode"*). `tests/bench` therefore
+>   drops `-ffreestanding` for the cpp rows and treats them as a bloat tracker
+>   rather than a flash budget. **Landing this plan should let that flag come back**
+>   — that is the acceptance test, and the number should step down when it does.
+
 ---
 
 ## 1. How `c-cpp` mode is selected and where it diverges

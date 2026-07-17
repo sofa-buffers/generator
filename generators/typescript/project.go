@@ -59,14 +59,60 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	}
 	f.line("};")
 	f.blank()
+	f.line("// benchMain - see tests/bench/README.md.")
+	f.line("//")
+	f.line("// V8 JIT-compiles the hot path at runtime, so there is no native symbol to")
+	f.line("// --toggle-collect on. This is the `subtract` method instead: tests/bench runs")
+	f.line("// the same workload at two rep counts and subtracts the totals,")
+	f.line("//   Ir/op = ( Ir(R2) - Ir(R1) ) / ( R2 - R1 )")
+	f.line("// which cancels node startup, module loading, JIT compilation and JSON parsing")
+	f.line("// exactly. It only holds if the two runs differ in NOTHING but the rep count,")
+	f.line("// hence `node --predictable` in the bench recipe. Same shape as")
+	f.line("// corelib-ts/bench/run_callgrind.sh.")
+	f.line("const BENCH_WARMUP = Number(process.env.SOFAB_BENCH_WARMUP ?? 5000);")
+	f.blank()
+	f.line("async function benchMain(w: string, reps: number, input: Buffer): Promise<number> {")
+	f.line("  const { OStream } = await import(%q);", corelibPkg)
+	for _, m := range s.Messages {
+		mt := exported(m.Name)
+		low := strings.ToLower(m.Name)
+		f.line("  if (w === \"encode_%s\" || w === \"decode_%s\") {", low, low)
+		f.line("    const obj = M.%s.fromJSON(JSON.parse(input.toString(\"utf8\")));", mt)
+		f.line("    const setup = new OStream(); obj.marshal(setup);")
+		f.line("    const wire = setup.bytes(); // setup: the decode input")
+		f.line("    let sink = 0;")
+		// A cheap integer scalar, not toJSON(): the fold runs inside the measured
+		// loop, so anything heavier would be counted as decode cost.
+		f.line("    const body = w === \"encode_%s\"", low)
+		f.line("      ? () => { const os = new OStream(); obj.marshal(os); sink ^= os.bytes().length; }")
+		f.line("      : () => { sink ^= Number(M.%s.decode(wire).%s); };", mt, benchSinkField(m))
+		f.line("    // Fixed warmup, independent of `reps`, so it cancels in the subtraction")
+		f.line("    // (corelib-java/.../Callgrind.java does the same). Without it V8 tiers up")
+		f.line("    // DURING the measured loop and Ir stops being affine in reps -- the two")
+		f.line("    // rep points then measure the JIT rather than the code.")
+		f.line("    for (let i = 0; i < BENCH_WARMUP; i++) body();")
+		f.line("    for (let i = 0; i < reps; i++) body();")
+		f.line("    process.stderr.write(`sink=${sink} bytes=${wire.length}\\n`);")
+		f.line("    process.stderr.write(`wire_hex=${Buffer.from(wire).toString(\"hex\")}\\n`);")
+		f.line("    return 0;")
+		f.line("  }")
+	}
+	f.line("  process.stderr.write(`unknown workload: ${w}\\n`);")
+	f.line("  return 2;")
+	f.line("}")
+	f.blank()
 	f.line("async function main(): Promise<number> {")
 	f.line("  const mode = process.argv[2];")
 	f.line("  const name = process.argv[3] ?? %q;", defaultMessage(s))
-	f.line("  const cls = MESSAGES[name];")
-	f.line("  if (!cls) { process.stderr.write(\"unknown message\\n\"); return 2; }")
 	f.line("  const chunks: Uint8Array[] = [];")
 	f.line("  for await (const c of process.stdin) chunks.push(c as Uint8Array);")
 	f.line("  const input = Buffer.concat(chunks);")
+	f.line("  // `bench <workload> <reps>` takes a workload, not a message name.")
+	f.line("  if (mode === \"bench\") {")
+	f.line("    return await benchMain(name, Number(process.argv[4] ?? 1000), input);")
+	f.line("  }")
+	f.line("  const cls = MESSAGES[name];")
+	f.line("  if (!cls) { process.stderr.write(\"unknown message\\n\"); return 2; }")
 	f.line("  if (mode === \"encode\") {")
 	f.line("    const obj = cls.fromJSON(JSON.parse(input.toString(\"utf8\")));")
 	f.line("    const os = new (await import(%q)).OStream();", corelibPkg)
@@ -81,6 +127,25 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.blank()
 	f.line("main().then((c) => process.exit(c));")
 	return f.bytes()
+}
+
+// benchSinkField names one cheap integer scalar of m, folded in the bench loop so
+// the decode cannot be elided. Prefers a narrow int: with `int64: bigint` a u64/i64
+// field would fold through BigInt and add cost that is not decode cost.
+func benchSinkField(m *ir.Message) string {
+	for _, f := range m.Fields {
+		switch f.Kind {
+		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32:
+			return f.Name
+		}
+	}
+	for _, f := range m.Fields {
+		switch f.Kind {
+		case ir.KindU64, ir.KindI64:
+			return f.Name
+		}
+	}
+	return m.Fields[0].Name
 }
 
 func defaultMessage(s *ir.Schema) string {

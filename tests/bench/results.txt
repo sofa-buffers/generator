@@ -1,0 +1,42 @@
+# sofabgen bench results — regenerate with tests/bench/run.sh
+#
+# Cost of the GENERATED code plus the corelib it calls. Lower is better. This is a
+# DIFF tool: change the generator, re-run, read `git diff`. See tests/bench/README.md.
+#
+#   Ir/op     instructions retired for ONE op (Callgrind). Independent of CPU clock
+#             and OS scheduling, so it compares across machines. Host x86-64, -O3.
+#             A cell holds its value until a reading moves >0.3% (the JIT rows are
+#             not bit-reproducible), so noise cannot dirty this file. See README.
+#   footprint .text/.data/.bss in bytes, -Os, cross-compiled to the targets the
+#             footprint profiles actually ship to.
+#
+# schema:  examples/messages/realworld/vehicle_telemetry.yaml  sha256 b21d6b15900a
+#
+# Numbers shift when anything below shifts. Check here FIRST: if the header is
+# unchanged and a number moved, the generator caused it.
+# toolchain: gcc 15.2.0 | arm-none-eabi-gcc 14.2.1 | riscv64-unknown-elf-gcc 14.2.0 | rustc 1.97.1
+# corelib:   c-cpp 5f9e8f9 | cpp 67ad775 | cs a2f5d66 | go 097d379 | java f9aff01 | py 9522bcc | rs 7b453d8 | rs-no-std b02f373 | ts 18e91be | zig 0f861e4
+#
+## instruction cost
+row              profile    method    encode_ir/op  decode_ir/op
+c                footprint  toggle    19529         39684
+cpp-c-cpp        footprint  toggle    29812         36166
+cpp-cpp          maxspeed   toggle    12311         32790
+csharp           maxspeed   subtract  42386         72227
+go               maxspeed   toggle    28062         38513
+java             maxspeed   subtract  16333         35464
+python           maxspeed   subtract  837708        2052221
+rust-rs          maxspeed   toggle    10021         24886
+rust-rs-no-std   footprint  toggle    10321         32876
+ts-bigint        maxspeed   subtract  742014        740794
+ts-long          maxspeed   subtract  742021        740798
+zig              maxspeed   toggle    9682          17832
+
+## footprint
+row              profile    arch            text    data   bss
+c                footprint  ARMv6-m         1636    0      0
+c                footprint  ARMv7-m+fp.dp   1636    0      0
+c                footprint  RV32IMC         1706    0      0
+cpp-c-cpp        footprint  ARMv6-m         5347    0      180
+cpp-c-cpp        footprint  ARMv7-m+fp.dp   5109    0      180
+rust-rs-no-std   footprint  thumbv6m        8289    0      0
