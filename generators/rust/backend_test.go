@@ -402,8 +402,12 @@ func moduleFromYAML(t *testing.T, src string, cfg map[string]any) string {
 // TestRustOverIndexWrapperArray: on the std profile a fixed-count wrapper array
 // (string/blob/struct elements) rejects an element id >= N as INVALID (self.inv,
 // surfaced as Error::InvalidMsg) before the Vec grows (issue #142 / MESSAGE_SPEC
-// §5.1/§7). A dynamic array keeps every index. The no_std (heapless) profile is
-// capacity-bounded and drops the element instead, so it emits no such guard.
+// §5.1/§7). A dynamic array keeps every index. On the no_std (heapless) profile a
+// string/blob element now rejects the same way — the guard fires ahead of the
+// heapless capacity drop, so the verdict matches std instead of silently dropping
+// (issue #149 / F-0013 / MESSAGE_SPEC §7.1). A dynamic array still keeps every
+// index, and a struct-element over-index remains a separate axis (still dropped
+// on no_std, tracked apart from F-0013).
 func TestRustOverIndexWrapperArray(t *testing.T) {
 	const src = `
 version: 1
@@ -433,10 +437,21 @@ messages:
 			t.Errorf("dynamic string array must not carry an over-index guard")
 		}
 	}
-	// no_std profile: capacity-bounded, drops — no over-index inv guard at all.
+	// no_std profile: a string/blob element rejects an over-index id ahead of the
+	// heapless capacity drop, converging with std (issue #149 / F-0013).
 	mn := moduleFromYAML(t, src, map[string]any{"corelib": "rs-no-std", "allow_dynamic": true})
-	if strings.Contains(mn, "self.inv = true; return; } while") {
-		t.Errorf("no_std profile must not emit an over-index reject (heapless drops):\n%s", mn)
+	for _, want := range []string{
+		"if id as usize >= 4 { self.inv = true; return; } while self.m.bs.len()", // bounded string
+		"if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len()", // bounded blob
+	} {
+		if !strings.Contains(mn, want) {
+			t.Errorf("no_std message.rs missing over-index guard %q:\n%s", want, mn)
+		}
+	}
+	// Dynamic string array (ds) is the alloc fallback under allow_dynamic (cap -1),
+	// so it still carries no over-index guard.
+	if strings.Contains(mn, "self.inv = true; return; } while self.m.ds.len()") {
+		t.Errorf("no_std dynamic string array must not carry an over-index guard:\n%s", mn)
 	}
 }
 

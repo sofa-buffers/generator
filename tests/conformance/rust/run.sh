@@ -81,25 +81,24 @@ run_variant() {
     (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/control.bin" >/dev/null) || { echo "FAIL: [$label] control (count == 4) must decode"; exit 1; }
     echo "==> [$label] over-count reject OK"
 
-    # Over-index wrapper array (generator#142): the sequence-form analogue of the
-    # over-count scalar reject above. somestringarray (id 18) declares count: 5; a
-    # well-formed string element at wire index 5 (>= N) is INVALID per MESSAGE_SPEC
-    # S5.1/S7 -- the std profile's generated visitor sets self.inv (surfaced as
-    # Error::InvalidMsg) before the Vec grows (which also bounds an over-index
-    # amplification DoS). The no_std profile instead drops the element into its
-    # capacity-bounded heapless::Vec (issue #126), so this reject assertion is the
-    # std corelib-rs only. Wire: 96 01 (sequence_begin id 18) 2a (string id 5)
-    # 0a 78 (fixlen "x") 07 (sequence_end).
+    # Over-index wrapper array (generator#142, #149): the sequence-form analogue of
+    # the over-count scalar reject above. somestringarray (id 18) declares count: 5;
+    # a well-formed string element at wire index 5 (>= N) is INVALID per MESSAGE_SPEC
+    # S5.1/S7 -- the generated visitor sets self.inv (surfaced as Error::InvalidMsg)
+    # before the Vec grows (which also bounds an over-index amplification DoS). Both
+    # profiles reject: on no_std the over-index guard fires ahead of the heapless
+    # capacity drop (issue #126), so the outcome is INVALID, not a silent drop --
+    # the fixed-capacity convergence MESSAGE_SPEC S7.1 requires (issue #149 /
+    # F-0013). Wire: 96 01 (sequence_begin id 18) 2a (string id 5) 0a 78 (fixlen
+    # "x") 07 (sequence_end).
     printf '\226\001\052\012\170\007' > "$WORK/overindex.bin"
     printf '\226\001\042\012\170\007' > "$WORK/overindex_control.bin"
-    if [ "$label" = "rs" ]; then
-        echo "==> [$label] over-index wrapper array must reject (generator#142)"
-        if (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overindex.bin" >/dev/null 2>&1); then
-            echo "FAIL: [$label] over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
-        fi
-        (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null) || { echo "FAIL: [$label] control (index 4 < 5) must decode"; exit 1; }
-        echo "==> [$label] over-index reject OK"
+    echo "==> [$label] over-index wrapper array must reject (generator#142, #149)"
+    if (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overindex.bin" >/dev/null 2>&1); then
+        echo "FAIL: [$label] over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
     fi
+    (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null) || { echo "FAIL: [$label] control (index 4 < 5) must decode"; exit 1; }
+    echo "==> [$label] over-index reject OK"
 
     # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
     # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.

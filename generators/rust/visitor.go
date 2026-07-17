@@ -62,12 +62,15 @@ func boundOf(has bool, v int64) int64 {
 	return -1
 }
 
-// overIndexGuard returns the std-profile reject clause for a fixed-count wrapper
+// overIndexGuard returns the reject clause for a fixed-count string/blob wrapper
 // array: an element id >= N sets self.inv (surfaced as Error::InvalidMsg) and
 // returns before the Vec grows (MESSAGE_SPEC §5.1/§7 — issue #142), which also
 // bounds an over-index heap-amplification fill. Empty for a dynamic array
-// (cap == -1) and never emitted on the no_std profile (heapless Vec<_, N> is
-// capacity-bounded and drops an over-index element, issue #126).
+// (cap == -1). Emitted on BOTH profiles: on no_std it fires ahead of the heapless
+// Vec<_, N> capacity drop (issue #126), so an over-index element is INVALID, not
+// silently dropped — the fixed-capacity twin of the over-maxlen reject
+// (emitMaxlenGuard) and the convergence §7.1 requires across memory models
+// (issue #149 / F-0013).
 func overIndexGuard(cap int64) string {
 	if cap < 0 {
 		return ""
@@ -489,7 +492,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-					f.line("            (_Loc::%s, _) => { %s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } }", fr.loc, g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -553,7 +556,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => { %s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } }", fr.loc, g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
