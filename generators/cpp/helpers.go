@@ -501,7 +501,18 @@ func byteList(b []byte) string {
 // the visitor after deserialize returns, so on that path the visitor is given
 // static storage (a bound stack local would be a use-after-return). Unused
 // template, so it costs nothing when a message has no such array.
-const cppMsgSeqPrelude = `template <typename T>
+//
+// The over-index reject (cap guard) differs by corelib: pure corelib-cpp calls
+// IStreamImpl::invalidate() (INVALID, #142); the c-cpp wrapper's IStreamImpl has
+// no such hook and only ever instantiates _MsgSeq for an allow_dynamic (dynamic,
+// cap == -1) field, so its guard is an inert drop that must still compile — the
+// call would be diagnosed eagerly (gcc -Wtemplate-body) even though never taken.
+func cppMsgSeqPreludeSrc(clib bool) string {
+	reject := "is.invalidate(); return;"
+	if clib {
+		reject = "return;"
+	}
+	return `template <typename T>
 struct _MsgSeq : sofab::IStreamMessage {
     std::vector<T> *out = nullptr;
     // Schema fixed-count bound N (-1 == dynamic/unbounded). An element id >= N is
@@ -510,7 +521,7 @@ struct _MsgSeq : sofab::IStreamMessage {
     // also bounds the allocation against an over-index heap-amplification DoS.
     long cap = -1;
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t _count) noexcept override {
-        if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }
+        if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { ` + reject + ` }
         T &row = out->emplace_back();
         // A count-less native-array row (matrix with dynamic rows) is a std::vector
         // that the corelib's span read fills only up to its current size, so size it
@@ -522,6 +533,7 @@ struct _MsgSeq : sofab::IStreamMessage {
         is.read(row);
     }
 };`
+}
 
 // cppFixedPrelude is emitted only for the fixed-capacity (embedded) path
 // (corelib: c-cpp). The heap-free containers it decodes into —

@@ -179,7 +179,7 @@ func (g *gen) header(m *ir.Message) []byte {
 	if g.fixed {
 		f.line("%s", cppFixedPrelude)
 	}
-	f.line("%s", cppMsgSeqPrelude)
+	f.line("%s", cppMsgSeqPreludeSrc(g.clib))
 	// _trimTail (fixed-count encode trim, MESSAGE_SPEC §3) is corelib-agnostic:
 	// both wrappers take a std::span through the same templated OStream::write.
 	f.line("%s", cppTrimPrelude)
