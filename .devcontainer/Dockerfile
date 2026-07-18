@@ -47,18 +47,47 @@ RUN ZIG_ARCH="$(dpkg --print-architecture)" \
 # Language toolchains for the per-language conformance harnesses
 # (tests/conformance/<lang>/run.sh). C/C++ (gcc/g++/make) come from
 # build-essential above; Go and Zig are installed above; Node (TypeScript) is
-# installed below. This adds Python,
-# Rust (cargo/rustc), and Java + Maven; the .NET SDK (C#) is installed separately
-# below because Ubuntu 24.04's apt only carries .NET 8 while the generated C#
-# project targets net9.0.
+# installed below. This adds Python and Java + Maven; Rust is installed via
+# rustup below (the footprint bench needs bare-metal targets apt rustc cannot
+# add); the .NET SDK (C#) is installed separately below because Ubuntu 24.04's
+# apt only carries .NET 8 while the generated C# project targets net9.0.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
-        cargo \
-        rustc \
         default-jdk \
         maven \
     && rm -rf /var/lib/apt/lists/*
 ENV JAVA_HOME=/usr/lib/jvm/default-java
+
+# Rust via rustup (not apt cargo/rustc). The conformance harnesses only need
+# host cargo/rustc, but the footprint bench (tests/bench/lang/rust.sh) links the
+# generated crate for thumbv6m-none-eabi and sizes it with llvm-size, which
+# require `rustup target add thumbv6m-none-eabi` and the llvm-tools-preview
+# component — apt's rustc has no way to add either. One rustup toolchain serves
+# both harnesses.
+ENV RUSTUP_HOME=/root/.rustup CARGO_HOME=/root/.cargo
+ENV PATH=/root/.cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+       | sh -s -- -y --default-toolchain stable --profile minimal \
+    && rustup component add llvm-tools-preview \
+    && rustup target add thumbv6m-none-eabi
+
+# Bench toolchain (tests/bench/run.sh, ARCHITECTURE §15). Not needed by the
+# conformance harnesses, but the bench measures two axes that need extra tools:
+#   * Ir/op via Callgrind for every row            -> valgrind
+#   * footprint (.text/.data/.bss) cross-compiled to the embedded targets the
+#     footprint profiles ship to (rows c, cpp-c-cpp) -> arm-none-eabi and
+#     riscv64-unknown-elf GCC + binutils (`size`); picolibc supplies the RISC-V
+#     freestanding headers. (The rust-rs-no-std footprint uses the rustup
+#     thumbv6m target added above.)
+# Without these a bench run records `!` for the affected cells and overwrites the
+# committed results.txt (tests/bench/lib/format.py does not preserve prior values
+# on a failed measurement).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        valgrind \
+        gcc-arm-none-eabi \
+        gcc-riscv64-unknown-elf \
+        picolibc-riscv64-unknown-elf \
+    && rm -rf /var/lib/apt/lists/*
 
 # .NET SDK 9 — the generated C# project and corelib-cs target net9.0, which
 # Ubuntu 24.04's apt does not provide, so install it from Microsoft's official
