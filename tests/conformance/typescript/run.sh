@@ -36,7 +36,10 @@ generic: { emit: project }
 targets: { typescript: {} }
 YAML
 
-gen() { ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang typescript --in "$1" --out "$2" ); }
+# gen <def> <outdir> [config]  — config defaults to the shared $WORK/cfg.yaml.
+# The int64-mode loop MUST pass its own config: without it every mode project is
+# generated with the default (bigint) and the mode comparison is vacuous.
+gen() { ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang typescript --in "$1" --out "$2" ); }
 
 echo "==> generating example + conformance projects"
 gen "$ROOT/examples/messages/example.yaml" "$WORK/ex"
@@ -151,7 +154,7 @@ for mode in bigint long number; do
 generic: { emit: project }
 targets: { typescript: { int64: $mode } }
 YAML
-    gen "$WORK/i64.yaml" "$WORK/i64-$mode"
+    gen "$WORK/i64.yaml" "$WORK/i64-$mode" "$WORK/cfg_$mode.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/i64-$mode/node_modules"
 done
 ( cd "$WORK/i64-long" && npx tsc --noEmit )
