@@ -93,15 +93,26 @@ class ScalarsVisitor implements Visitor {
         } break;
         }
     }
-    private static String _utf8(byte[] b, int off, int len) {
-        try {
-            return java.nio.charset.StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
-                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
-                .decode(java.nio.ByteBuffer.wrap(b, off, len)).toString();
-        } catch (java.nio.charset.CharacterCodingException _e) {
-            throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "string: invalid UTF-8"));
+    private static boolean _utf8ok(byte[] b, int i, int end) {
+        while (i < end) {
+            int c = b[i] & 0xff;
+            if (c < 0x80) { i++; continue; }
+            int n, lo, hi;
+            if (c < 0xC2) return false;
+            else if (c < 0xE0) { n = 1; lo = 0x80; hi = 0xBF; }
+            else if (c < 0xF0) { n = 2; lo = (c == 0xE0) ? 0xA0 : 0x80; hi = (c == 0xED) ? 0x9F : 0xBF; }
+            else if (c < 0xF5) { n = 3; lo = (c == 0xF0) ? 0x90 : 0x80; hi = (c == 0xF4) ? 0x8F : 0xBF; }
+            else return false;
+            if (i + n >= end) return false;
+            int cc = b[i + 1] & 0xff; if (cc < lo || cc > hi) return false;
+            for (int k = 2; k <= n; k++) { cc = b[i + k] & 0xff; if (cc < 0x80 || cc > 0xBF) return false; }
+            i += n + 1;
         }
+        return true;
+    }
+    private static String _utf8(byte[] b, int off, int len) {
+        if (_utf8ok(b, off, off + len)) return new String(b, off, len, java.nio.charset.StandardCharsets.UTF_8);
+        throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "string: invalid UTF-8"));
     }
     public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
         String _s;
