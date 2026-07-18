@@ -270,7 +270,7 @@ func TestTSInt64Long(t *testing.T) {
 		`import { OStream, Cursor, WireType, Long, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once. us is
 		// `count: 8`, so its implied default is 8 Long zeros (issue#136).
-		"private _us: Long[] = [Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n)];",
+		"private _us: Long[] = [Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO];",
 		"get us(): Long[] { return this._us; }",
 		"set us(vals: readonly (Long | bigint | number)[]) { this._us = vals.map(Long.fromValue); }",
 		// Nested array: Long[][] with a per-row setter conversion.
@@ -280,7 +280,7 @@ func TestTSInt64Long(t *testing.T) {
 		// These are `count: N` fields, so the trailing default run is trimmed
 		// (issue#136) by the Long flavour of the trim (word-pair compare). The
 		// omission guard compares against the implied N-element default.
-		"if (!longArrEq(this._us, [Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n), Long.fromValue(0n)])) {",
+		"if (!longArrEq(this._us, [Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO])) {",
 		"os.writeUnsignedArrayLong(0, _trimTailLong(this._us));",
 		"os.writeSignedArrayLong(1, _trimTailLong(this._is));",
 		"function _trimTailLong(a: readonly Long[]): readonly Long[] {",
@@ -291,8 +291,8 @@ func TestTSInt64Long(t *testing.T) {
 		// Decode bypasses the setter (readers return canonical Long[]); a wire
 		// count above the schema capacity rejects as INVALID (generator#100), and a
 		// wire count below it refills the elided trailing default run (issue#136).
-		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.fromValue(0)); break; }`,
-		`case 1: { if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } const _a = c.readSignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "is: array count above schema capacity 8"); o._is = _padTo(_a, 8, Long.fromValue(0)); break; }`,
+		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.ZERO); break; }`,
+		`case 1: { if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } const _a = c.readSignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "is: array count above schema capacity 8"); o._is = _padTo(_a, 8, Long.ZERO); break; }`,
 		// toJSON prints via Long.toString with the schema signedness.
 		`"us": this._us.map((_x0) => _x0.toString(false)),`,
 		`"is": this._is.map((_x0) => _x0.toString(true)),`,
@@ -319,7 +319,7 @@ func TestTSInt64Number(t *testing.T) {
 	for _, want := range []string{
 		// Arrays are Long-backed exactly as in long mode.
 		"os.writeUnsignedArrayLong(0, _trimTailLong(this._us));",
-		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.fromValue(0)); break; }`,
+		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.ZERO); break; }`,
 		// Scalars are plain numbers: number default, !== 0 guard, Number() decode.
 		"u: number = 0;",
 		"i: number = -7;",
@@ -554,8 +554,8 @@ func TestTSFixedCountDefaultLong(t *testing.T) {
 	for _, mode := range []string{"long", "number"} {
 		mod := genTSWith(t, fixedDefaultDef, map[string]any{"int64": mode})
 		for _, want := range []string{
-			"private _fu64: Long[] = [Long.fromValue(1n), Long.fromValue(0n), Long.fromValue(0n)];",
-			"if (!longArrEq(this._fu64, [Long.fromValue(1n), Long.fromValue(0n), Long.fromValue(0n)])) {",
+			"private _fu64: Long[] = [Long.fromValue(1n), Long.ZERO, Long.ZERO];",
+			"if (!longArrEq(this._fu64, [Long.fromValue(1n), Long.ZERO, Long.ZERO])) {",
 		} {
 			if !strings.Contains(mod, want) {
 				t.Errorf("int64: %s fixed-default message.ts missing %q", mode, want)
