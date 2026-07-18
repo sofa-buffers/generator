@@ -114,3 +114,16 @@ the **toggle** method. Tracked: Ir/op.
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+## Strict UTF-8 (issue #85)
+
+A `string` is a borrowed `[]const u8` slice (byte-container), materialized in
+generated code — so the corelib exposes a `utf8_valid(bytes)` primitive and the
+string visitor emits an **unconditional** call at the store site
+(`if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { … }` → `INVALID`,
+surfaced as `error.InvalidMessage`). The `SOFAB_STRICT_UTF8` gate lives **inside**
+the primitive (a Zig build feature; folds to `true` when compiled off), so generated
+code is identical across build configs and flipping the flag never regenerates it
+(MESSAGE_SPEC §8 / CORELIB_PLAN §6.4). The wrap is emitted for `string` only —
+`blob` is opaque bytes, stored verbatim. Skipped fields hit the switch `else` arms
+and are never validated. Encode-side strictness is corelib-side (`OStream.writeString`).

@@ -79,15 +79,16 @@ func TestRustStructural(t *testing.T) {
 		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                                                      // omit-guard is a default compare
 		"if self.ai < 4 { self.m.someuintarray[self.ai] = value as u32; self.ai += 1; } else { self.inv = true; }", // bounds-checked store (generator#78); over-count rejects (generator#100)
 		"ai: usize", // fill index on the visitor
-		"if offset == 0 && chunk.len() >= total {",                                        // string/blob single-shot fast path
-		"core::str::from_utf8(&chunk[..total]).map(|s| s.to_owned()).unwrap_or_default()", // invalid UTF-8 -> empty, agrees with no_std (generator#80)
+		"if offset == 0 && chunk.len() >= total {", // string/blob single-shot fast path
+		"match core::str::from_utf8(&chunk[..total]) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }", // strict UTF-8: invalid -> INVALID (issue #85, subsumes #80)
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs (rs) missing %q", want)
 		}
 	}
 	// String/blob arrays and array-of-array stay heap Vec (not fixed).
-	// from_utf8_lossy (U+FFFD) would diverge from no_std's empty-on-invalid (generator#80).
+	// Lossy from_utf8_lossy (U+FFFD) is forbidden in every mode (MESSAGE_SPEC §8);
+	// strict from_utf8 -> INVALID makes std and no_std agree (issue #85, subsumes #80).
 	for _, notWant := range []string{
 		"pub someuintarray: Vec<u32>",
 		"someuintarray.push(",
@@ -115,18 +116,19 @@ func TestRustStructural(t *testing.T) {
 	// The no_std profile lowers bounded fields to fixed-capacity heapless storage
 	// (serde gated behind a feature), and keeps an alloc fallback for unbounded ones.
 	for _, want := range []string{
-		"#[cfg(feature = \"serde\")]",                                      // serde import gated
-		"#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]", // serde derive gated
-		"pub somestring: heapless::String<50>,",                            // bounded string -> heapless
-		"pub someblob: heapless::Vec<u8, 16>,",                             // bounded blob -> heapless
-		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",     // string array -> inline
-		"pub somemap: alloc::vec::Vec<",                                    // unbounded -> alloc fallback
-		"pub fn encode(&self) -> heapless::Vec<u8,",                        // heap-free encode
-		"stack: heapless::Vec<_Loc,",                                       // bounded decode stack
-		"if self.somestring.as_str() != \"\" {",                            // string omit via as_str
-		"let _ = self.acc.extend_from_slice(chunk);",                       // accumulates a chunked string/blob (generator#81)
-		"if offset == 0 && chunk.len() >= total {",                         // single-shot fast path, now in no_std too
-		"self.err = true;",                                                 // fixed-capacity overflow flagged in the fill (generator#82)
+		"#[cfg(feature = \"serde\")]",                                                                       // serde import gated
+		"#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]",                                  // serde derive gated
+		"pub somestring: heapless::String<50>,",                                                             // bounded string -> heapless
+		"pub someblob: heapless::Vec<u8, 16>,",                                                              // bounded blob -> heapless
+		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",                                      // string array -> inline
+		"pub somemap: alloc::vec::Vec<",                                                                     // unbounded -> alloc fallback
+		"pub fn encode(&self) -> heapless::Vec<u8,",                                                         // heap-free encode
+		"stack: heapless::Vec<_Loc,",                                                                        // bounded decode stack
+		"if self.somestring.as_str() != \"\" {",                                                             // string omit via as_str
+		"let _ = self.acc.extend_from_slice(chunk);",                                                        // accumulates a chunked string/blob (generator#81)
+		"if offset == 0 && chunk.len() >= total {",                                                          // single-shot fast path, now in no_std too
+		"match core::str::from_utf8(&chunk[..total]) { Ok(_v) => _v, Err(_) => { self.inv = true; \"\" } }", // strict UTF-8 -> INVALID, agrees with std (issue #85)
+		"self.err = true;",                                                                                  // fixed-capacity overflow flagged in the fill (generator#82)
 	} {
 		if !strings.Contains(n, want) {
 			t.Errorf("no_std message.rs missing %q", want)

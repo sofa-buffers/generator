@@ -326,6 +326,18 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	g.emitFloatVisit(f, fs, ir.KindFP32, "Fp32", "float")
 	g.emitFloatVisit(f, fs, ir.KindFP64, "Fp64", "double")
 
+	// Strict UTF-8 decode (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4): a `string` is
+	// UTF-8 and C#'s string is a Unicode type, so it is always strict. The default
+	// `Encoding.UTF8` is LOSSY (replacement-fallback → U+FFFD), which §8 forbids in
+	// every mode; a throwOnInvalidBytes encoding rejects invalid bytes as the
+	// INVALID decode outcome. Validity is a property of the complete payload, so
+	// the check runs once the full `total` bytes are present.
+	f.line("    private static readonly System.Text.UTF8Encoding _strictUtf8 = new System.Text.UTF8Encoding(false, true);")
+	f.line("    private static string _Utf8(byte[] b, int off, int len) {")
+	f.line("        try { return _strictUtf8.GetString(b, off, len); }")
+	f.line("        catch (System.Text.DecoderFallbackException) { throw new SofabException(SofabError.InvalidMessage, \"string: invalid UTF-8\"); }")
+	f.line("    }")
+
 	// String. Single-shot: when the whole payload arrives in one chunk, decode
 	// straight from the contiguous input slice; the per-byte List<byte> accumulator
 	// is only the fallback for a genuinely split payload.
@@ -341,12 +353,12 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	}
 	f.line("        string _s;")
 	f.line("        if (offset == 0 && chunkLength >= total) {")
-	f.line("            _s = Encoding.UTF8.GetString(data, chunkOffset, total);")
+	f.line("            _s = _Utf8(data, chunkOffset, total);")
 	f.line("        } else {")
 	f.line("            acc ??= new List<byte>();")
 	f.line("            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
 	f.line("            if (acc.Count < total) return;")
-	f.line("            _s = Encoding.UTF8.GetString(acc.ToArray());")
+	f.line("            _s = _Utf8(acc.ToArray(), 0, total);")
 	f.line("            acc.Clear();")
 	f.line("        }")
 	f.line("        switch ((cur, id)) {")

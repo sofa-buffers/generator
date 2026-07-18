@@ -37,3 +37,14 @@ the **subtract** method. Tracked: Ir/op.
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+## Strict UTF-8 (issue #85)
+
+`String` is a Unicode type, so it is **always strict** (MESSAGE_SPEC §8 /
+CORELIB_PLAN §6.4) — no config key in generated code. The platform
+`new String(bytes, UTF_8)` is **lossy** (substitutes `U+FFFD`), which §8 forbids in
+every mode, so the visitor decodes through a generated `_utf8(...)` helper backed by
+a REPORTing `CharsetDecoder` (`onMalformedInput`/`onUnmappableCharacter` =
+`REPORT`); a `CharacterCodingException` becomes `SofabException(INVALID_MSG)` — the
+same channel as the over-count guards. The check runs once the full `total` bytes
+are present. Encode-side strictness is corelib-side (`OStream.writeString`).

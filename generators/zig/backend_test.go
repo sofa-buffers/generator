@@ -78,8 +78,8 @@ func TestZigStructural(t *testing.T) {
 		"_putc(&self.m.someuintarray, &self.ai,",                                              // capacity-checked indexed store (generator#100)
 		"if (v.inv) return error.InvalidMessage;",                                             // over-count array rejected as INVALID (generator#100)
 		"if (offset != 0) return;",                                                            // single-shot payload guard
-		"if (total > 50) { self.inv = true; } else { self.m.somestring = chunk; },",           // bounded string: over-maxlen -> INVALID (MESSAGE_SPEC §7.1), else zero-copy
-		"/// Unsigned 8-bit integer",                                                          // descriptions as doc comments
+		"if (total > 50) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.somestring = chunk; } },", // bounded string: over-maxlen -> INVALID (§7.1); strict UTF-8 -> INVALID (issue #85); else zero-copy
+		"/// Unsigned 8-bit integer", // descriptions as doc comments
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.zig missing %q", want)
@@ -167,17 +167,18 @@ messages:
 	for _, want := range []string{
 		// The count:N over-index guard (#142) wraps the maxlen:16 over-length
 		// element reject (MESSAGE_SPEC §7.1); both flag self.inv before _setElem grows.
-		`.root_bs => if (id >= 4) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { _setElem`,
-		`.root_bb => if (id >= 3) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { _setElem`,
-		`.root_bp => blk: { if (id >= 2) self.inv = true; break :blk if (_grow`, // bounded struct
-		`if (v.inv) return error.InvalidMessage;`,                               // surfaced as INVALID
+		`.root_bs => if (id >= 4) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { _setElem`, // string element: strict UTF-8 wraps the store
+		`.root_bb => if (id >= 3) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { _setElem`,                                                           // blob element: opaque, stored verbatim
+		`.root_bp => blk: { if (id >= 2) self.inv = true; break :blk if (_grow`,                                                                                               // bounded struct
+		`if (v.inv) return error.InvalidMessage;`, // surfaced as INVALID
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.zig missing over-index guard %q", want)
 		}
 	}
-	// The dynamic string array keeps every index — its arm is a bare _setElem.
-	if !strings.Contains(m, `.root_ds => _setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk),`) {
+	// The dynamic string array keeps every index (no over-index guard); its store
+	// is still strict-UTF-8-wrapped (issue #85) since a string element is materialized.
+	if !strings.Contains(m, `.root_ds => if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { _setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk); },`) {
 		t.Errorf("dynamic string array must not carry an over-index guard:\n%s", m)
 	}
 }
@@ -206,10 +207,10 @@ messages:
 	m := string(files[0].Content)
 	for _, want := range []string{
 		// Bounded scalar string and blob: reject over-maxlen before storing.
-		`0 => if (total > 8) { self.inv = true; } else { self.m.bs = chunk; },`,
-		`1 => if (total > 8) { self.inv = true; } else { self.m.bb = chunk; },`,
-		// Bounded wrapper string element: guard wraps the _setElem placement.
-		`if (total > 5) { self.inv = true; } else { _setElem([]const u8, self.alloc, &(self.m.ws), id, "", chunk); }`,
+		`0 => if (total > 8) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.bs = chunk; } },`, // string: strict UTF-8 wraps the store
+		`1 => if (total > 8) { self.inv = true; } else { self.m.bb = chunk; },`,                                                             // blob: opaque, verbatim
+		// Bounded wrapper string element: maxlen guard, then strict UTF-8, wrap the _setElem placement.
+		`if (total > 5) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { _setElem([]const u8, self.alloc, &(self.m.ws), id, "", chunk); } }`,
 		// Surfaced as INVALID.
 		`if (v.inv) return error.InvalidMessage;`,
 	} {
@@ -217,10 +218,11 @@ messages:
 			t.Errorf("message.zig missing maxlen guard %q:\n%s", want, m)
 		}
 	}
-	// The unbounded scalar string (no maxlen, no configured limit) stores the
-	// borrowed chunk straight through — no maxlen guard, no self.inv.
-	if !strings.Contains(m, `3 => self.m.us = chunk,`) {
-		t.Errorf("unbounded string must store straight through:\n%s", m)
+	// The unbounded scalar string (no maxlen, no configured limit) has no length
+	// guard, but its store is still strict-UTF-8-wrapped (issue #85): invalid
+	// UTF-8 is INVALID (self.inv), never lossy — applies to unbounded strings too.
+	if !strings.Contains(m, `3 => if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.us = chunk; },`) {
+		t.Errorf("unbounded string must store straight through (utf8-checked):\n%s", m)
 	}
 	// With no maxlen and no configured limits, no length guard exists at all.
 	if strings.Contains(m, "self.lim") {
@@ -402,7 +404,7 @@ messages:
 		// Unbounded fields are guarded at the count/length header, before the
 		// field's storage is taken.
 		"1 => if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.arr = _allocN(u64, self.alloc, count); },",
-		"0 => if (total > max_dyn_string_len) { self.lim = true; } else { self.m.s = chunk; },",
+		"0 => if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.s = chunk; } },",
 		// InvalidMessage (generator#100) takes precedence over LimitExceeded.
 		"if (v.inv) return error.InvalidMessage;",
 		"if (v.lim) return error.LimitExceeded;",

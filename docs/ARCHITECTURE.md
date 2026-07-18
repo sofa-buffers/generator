@@ -750,6 +750,47 @@ MUST agree on which messages are valid," regardless of allocation strategy.
   fix on its own — the c-cpp `IStreamImpl` exposes no `invalidate()` hook (the
   same gap the over-index reject hit) — so it is tracked as **corelib-c-cpp#90**.
 
+#### Decode verdict: invalid-UTF-8 strings are INVALID (strict, config-gated)
+
+MESSAGE_SPEC §8 + CORELIB_PLAN §6.4 make a `string` **UTF-8 text** (`blob` is the
+type for opaque bytes): an invalid-UTF-8 `string` that is *materialized* is the
+`INVALID` decode outcome, enforced symmetrically (encode refuses non-UTF-8 with
+`InvalidArgument`). The check is gated behind the corelib option **`SOFAB_STRICT_UTF8`
+(default ON)** — a *validation policy, never a wire-format switch*, so peers with
+different settings still interoperate on all valid data. **No silent U+FFFD in any
+mode**: lossy replacement mutates the payload and breaks the byte-exact round-trip,
+so it is forbidden. Skipped fields are never validated (validation runs only where a
+string is read into a destination). Where the string is materialized decides where
+the generator carries responsibility:
+
+- **Codegen-materialized Unicode targets (Rust, Java, C#) are always strict** — a
+  Unicode string type cannot hold non-UTF-8 bytes, so its only non-mutating option
+  is the strict constructor and the option is a documented no-op (always ON). The
+  generator emits the strict path directly: Rust `core::str::from_utf8` (Err → the
+  sticky `inv` flag → `InvalidMsg`; the two Rust profiles now agree, **subsuming
+  #80**), Java a REPORTing `CharsetDecoder` (the platform `new String(…, UTF_8)` is
+  lossy), C# a `UTF8Encoding(throwOnInvalidBytes: true)` (`Encoding.UTF8.GetString`
+  is lossy) — invalid bytes throw the same `INVALID_MSG` channel as the over-count
+  guards. No config key is threaded into generated code.
+- **Codegen-materialized byte-container target (Zig)** — the borrowed `[]const u8`
+  slice is zero-copy, so the corelib exposes a `utf8_valid(bytes)` primitive and the
+  generator emits an **unconditional** call at the materialization site (`!sofab
+  .utf8_valid(chunk) → self.inv`); the `SOFAB_STRICT_UTF8` gate lives inside the
+  primitive (folds to `true` when compiled off), so generated code is identical
+  across build configs and flipping the flag never regenerates it. `blob` elements
+  are stored verbatim — the wrap is emitted only for `string`.
+- **Corelib-materialized targets (c, cpp, go, py, ts)** build the string inside the
+  corelib, so the check is corelib-internal; the generator emits no UTF-8 code for
+  them. Encode-side strictness is corelib-side for **every** target (the generator
+  encodes via `os.writeString(id, value)` into the corelib's OStream).
+
+The validator is a real UTF-8 validator (rejects overlong forms incl. `C0 80`,
+surrogates `U+D800`–`U+DFFF`, and code points above `U+10FFFF`; permits embedded
+`U+0000`), and validity is a property of the **complete** payload — a multi-byte
+sequence split at a chunk boundary stays `INCOMPLETE`, only a truncated-at-end or
+malformed payload is `INVALID` (§5.2 anti-folding). This is tracked family-wide as
+**issue #85**; conformance and the differential fuzzer run with the check ON.
+
 ### 9.4 Capability / value-width model
 
 Footprint-tunable corelibs gate wire types behind build switches; the generator

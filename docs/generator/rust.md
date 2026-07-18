@@ -131,3 +131,14 @@ the **toggle** method. Tracked: Ir/op for both; `rust-rs-no-std` also `.text`/`.
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+## Strict UTF-8 (issue #85)
+
+`String` is a Unicode type, so it is **always strict** (MESSAGE_SPEC §8 /
+CORELIB_PLAN §6.4) — there is no config key in generated code. The string visitor
+materializes with `core::str::from_utf8` and, on `Err`, sets the sticky `inv` flag
+so `try_decode` returns `Error::InvalidMsg` (`INVALID`) — never a lossy
+`from_utf8_lossy`/`U+FFFD`, never empty. The `std` and `no_std` profiles use the
+same strict path and now agree on invalid input, **subsuming #80**. Validity is a
+property of the complete payload: a split multi-byte sequence stays `INCOMPLETE`.
+Encode-side strictness is corelib-side (`OStream::write_string`).

@@ -393,6 +393,23 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		return "", false
 	})
 
+	// Strict UTF-8 decode (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4): a `string` is
+	// UTF-8 and Java's String is a Unicode type, so it is always strict — the
+	// platform `new String(bytes, UTF_8)` is LOSSY (substitutes U+FFFD), which
+	// §8 forbids in every mode. A REPORTing CharsetDecoder rejects invalid bytes
+	// as the INVALID decode outcome (INVALID_MSG). Validity is a property of the
+	// complete payload, so the check runs once the full `total` bytes are present.
+	f.line("    private static String _utf8(byte[] b, int off, int len) {")
+	f.line("        try {")
+	f.line("            return java.nio.charset.StandardCharsets.UTF_8.newDecoder()")
+	f.line("                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)")
+	f.line("                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)")
+	f.line("                .decode(java.nio.ByteBuffer.wrap(b, off, len)).toString();")
+	f.line("        } catch (java.nio.charset.CharacterCodingException _e) {")
+	f.line("            throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"string: invalid UTF-8\"));")
+	f.line("        }")
+	f.line("    }")
+
 	// string. Single-shot: when the whole payload arrives in one chunk, decode
 	// straight from the input slice, skipping the (synchronized) ByteArrayOutputStream.
 	f.line("    public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
@@ -402,12 +419,12 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
 	f.line("        String _s;")
 	f.line("        if (offset == 0 && chunkLength >= total) {")
-	f.line("            _s = new String(data, chunkOffset, total, java.nio.charset.StandardCharsets.UTF_8);")
+	f.line("            _s = _utf8(data, chunkOffset, total);")
 	f.line("        } else {")
 	f.line("            if (acc == null) acc = new java.io.ByteArrayOutputStream();")
 	f.line("            acc.write(data, chunkOffset, chunkLength);")
 	f.line("            if (acc.size() < total) return;")
-	f.line("            _s = new String(acc.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);")
+	f.line("            _s = _utf8(acc.toByteArray(), 0, total);")
 	f.line("            acc.reset();")
 	f.line("        }")
 	f.line("        switch (cur) {")
