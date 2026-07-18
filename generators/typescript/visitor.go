@@ -185,7 +185,7 @@ func (g *gen) elemZero(x *ir.Field) string {
 	switch x.Elem {
 	case ir.KindU64, ir.KindI64:
 		if g.longArrays() {
-			return "Long.fromValue(0)"
+			return "Long.ZERO"
 		}
 		return "0n"
 	case ir.KindBool:

@@ -487,7 +487,15 @@ func (g *gen) nativeArrayDefault(f *ir.Field) (string, bool) {
 		switch f.Elem {
 		case ir.KindU64, ir.KindI64:
 			if g.longArrays() {
-				parts[i] = "Long.fromValue(" + scalarLit(v) + "n)"
+				// The zero default is by far the common case (every fixed-count
+				// array's elided trailing run, and all-zero defaults); reuse the
+				// shared immutable Long.ZERO instead of Long.fromValue(0n), which
+				// would run bigint arithmetic per element on construction.
+				if scalarLit(v) == "0" {
+					parts[i] = "Long.ZERO"
+				} else {
+					parts[i] = "Long.fromValue(" + scalarLit(v) + "n)"
+				}
 			} else {
 				parts[i] = scalarLit(v) + "n"
 			}
