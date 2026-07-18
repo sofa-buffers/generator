@@ -271,6 +271,24 @@ func TestJavaMaxlenReject(t *testing.T) {
 // it from the schema count, so the decoded value always has exactly N elements.
 // A dynamic (count-less) array has no N to refill from — a trailing default
 // element is significant there and must survive untouched.
+// The UTF-8 validator takes an EXCLUSIVE END index (`_utf8ok(b, i, end)`) while
+// its caller `_utf8` takes an (offset, length) pair, so the call must convert:
+// `off + len`, never `len`. Passing `len` scans the wrong range, and in the
+// single-shot decode path — `_utf8(data, chunkOffset, total)`, where
+// `chunkOffset` is non-zero for any field that is not first in the buffer —
+// `chunkOffset >= total` makes the loop body never run, so the validator
+// returns true for every input and strict UTF-8 (#85) is silently bypassed.
+func TestJavaUtf8ValidatorRange(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n      s: { id: 0, type: string }\n"
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+	if !strings.Contains(m, "if (_utf8ok(b, off, off + len))") {
+		t.Error("_utf8 must pass an exclusive end index (off + len) to _utf8ok")
+	}
+	if strings.Contains(m, "_utf8ok(b, off, len)") {
+		t.Error("_utf8ok called with a length where an exclusive end index is required")
+	}
+}
+
 func TestJavaFixedCountTrailingDefaultRun(t *testing.T) {
 	const src = `
 version: 1
