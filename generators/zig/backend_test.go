@@ -79,7 +79,7 @@ func TestZigStructural(t *testing.T) {
 		"if (v.inv) return error.InvalidMessage;",                                             // over-count array rejected as INVALID (generator#100)
 		"if (offset != 0) return;",                                                            // single-shot payload guard
 		"if (total > 50) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.somestring = chunk; } },", // bounded string: over-maxlen -> INVALID (§7.1); strict UTF-8 -> INVALID (issue #85); else zero-copy
-		"/// Unsigned 8-bit integer",                                                          // descriptions as doc comments
+		"/// Unsigned 8-bit integer", // descriptions as doc comments
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.zig missing %q", want)
@@ -168,9 +168,9 @@ messages:
 		// The count:N over-index guard (#142) wraps the maxlen:16 over-length
 		// element reject (MESSAGE_SPEC §7.1); both flag self.inv before _setElem grows.
 		`.root_bs => if (id >= 4) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { _setElem`, // string element: strict UTF-8 wraps the store
-		`.root_bb => if (id >= 3) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { _setElem`,                                          // blob element: opaque, stored verbatim
-		`.root_bp => blk: { if (id >= 2) self.inv = true; break :blk if (_grow`, // bounded struct
-		`if (v.inv) return error.InvalidMessage;`,                               // surfaced as INVALID
+		`.root_bb => if (id >= 3) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { _setElem`,                                                           // blob element: opaque, stored verbatim
+		`.root_bp => blk: { if (id >= 2) self.inv = true; break :blk if (_grow`,                                                                                               // bounded struct
+		`if (v.inv) return error.InvalidMessage;`, // surfaced as INVALID
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.zig missing over-index guard %q", want)
