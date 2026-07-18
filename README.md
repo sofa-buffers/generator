@@ -132,7 +132,7 @@ sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|zig
 ├── tests/             # conformance harnesses, the hermetic matrix, and bench/ (Ir/op + footprint)
 ├── docs/              # architecture & design
 ├── assets/            # logo & icon
-├── .devcontainer/     # Go toolchain dev container
+├── .devcontainer/     # dev container: Go + the conformance-harness toolchains
 └── LICENSE            # MIT
 ```
 
@@ -144,8 +144,10 @@ ids, `$ref`-able `$defs`, and the custom keywords `uniqueIds` and
 
 ## Development
 
-A `.devcontainer` (Ubuntu 24.04 + Go) is provided. To use it locally, copy the
-secrets template first (the real `.env` is gitignored):
+A `.devcontainer` (Ubuntu 26.04 + Go, plus the toolchains the per-language
+conformance harnesses shell out to: C/C++, Zig, Rust, Java/Maven, .NET, Python,
+Node) is provided. To use it locally, copy the secrets template first (the real
+`.env` is gitignored):
 
 ```sh
 cp .devcontainer/.env.example .devcontainer/.env
