@@ -796,17 +796,25 @@ by family (generator#174, Crucible F-0020):
 - **C++ over the `c-cpp` corelib is unguarded.** That path drives `istream.c`
   (not the object API), and the c-cpp `IStreamImpl` exposes no `wire()`/
   `fixType()` accessor, so the generator has nothing to compare against — the
-  same shape of gap as the over-`maxlen` clamp above. Needs the corelib-cpp#43
-  treatment applied to corelib-c-cpp's C++ layer.
+  same shape of gap as the over-`maxlen` clamp above. Observably, a mismatched
+  header **fails the whole decode** here (`istream.c` returns `E_USAGE`, which
+  corelib-c-cpp#101 deliberately left in place for genuine streaming-API misuse)
+  rather than mis-decoding as pure C++ did. Needs the corelib-cpp#43 treatment
+  applied to corelib-c-cpp's C++ layer — tracked as **corelib-c-cpp#104**; the
+  generator's guard is already written and merely gated on the corelib
+  selection, so closing it is a matter of dropping that gate.
 - **TypeScript does not check the fixlen subtype.** `Cursor` exposes `id` and
   `wire` but no subtype accessor; the subtype is read *inside* `readFp32`/
   `readFp64`/`readString`/`readBlob`, which throw on a mismatch. So a header that
   is `Fixlen` but carries the wrong subtype (e.g. a `string`-subtype word on an
   `fp64` field) passes the generated guard and then **fails the whole decode**
   instead of skipping the field — the same wrong outcome Python had before
-  generator#174, one level down. Fixing it needs a corelib-ts `fixType()` (or an
-  equivalent peek), after which the guard extends exactly as Python's and C++'s
-  did. Predates generator#174 and is not introduced by it.
+  generator#174, one level down. Fixing it needs a corelib-ts subtype accessor
+  (a `fixSub` field beside `wire`, or a `fixType()` peek) — tracked as
+  **corelib-ts#58** — after which the guard extends exactly as Python's and
+  C++'s did. Predates generator#174 and is not introduced by it. Every other
+  corelib can already answer this: corelib-py's `Field.subtype`, corelib-cpp's
+  `fixType()`, and the C object API's `0x3F` mask.
 
 #### Decode verdict: a repeated field id — scopes merge, wrappers replace (§7.4)
 
