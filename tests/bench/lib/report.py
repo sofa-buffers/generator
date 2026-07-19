@@ -36,23 +36,36 @@ IR_METHODS = ("toggle", "subtract")
 
 
 def parse(path):
-    """-> (ir, sizes, toolchain, corelib). ir: {row: (enc, dec)} as strings."""
-    ir, sizes, tool, core = {}, {}, None, None
+    """-> (ir, sizes, toolchain, corelib).
+
+    ir: {row: (enc, dec)}; sizes: {(row, arch): (text, data, bss)};
+    toolchain: {tool: version} from the `## toolchain` table.
+    """
+    ir, sizes, tools, toolrows, core = {}, {}, {}, {}, None
+    section = None
     for line in Path(path).read_text().splitlines():
-        if line.startswith("# toolchain:"):
-            tool = line.split(":", 1)[1].strip()
-            continue
         if line.startswith("# corelib:"):
             core = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("## "):
+            section = line[3:].strip()
             continue
         if line.startswith("#") or not line.strip() or line.startswith("row"):
             continue
         f = line.split()
+        if section == "toolchain":
+            if len(f) >= 2 and f[0] != "tool":
+                tools[f[0]] = f[1]
+                # "all" is format.py's shorthand for "built every row"; None here
+                # means universal, so the per-row filter below always matches it.
+                toolrows[f[0]] = (None if len(f) > 2 and f[2] == "all"
+                                  else set(f[2].split(",")) if len(f) > 2 else set())
+            continue
         if len(f) == 5 and f[2] in IR_METHODS:
             ir[f[0]] = (f[3], f[4])
         elif len(f) == 6 and f[2] not in IR_METHODS:
             sizes[(f[0], f[2])] = (f[3], f[4], f[5])
-    return ir, sizes, tool, core
+    return ir, sizes, tools, toolrows, core
 
 
 def pct(old, new):
@@ -66,24 +79,16 @@ def pct(old, new):
     return (n - o) / o * 100.0
 
 
-def tool_diff(a, b):
-    """Entries that differ between two '# toolchain:' lines, as (name, old, new)."""
-    def split(s):
-        out = {}
-        for part in (s or "").split("|"):
-            part = part.strip()
-            if not part:
-                continue
-            name, _, ver = part.rpartition(" ")
-            out[name.strip() or part] = ver.strip()
-        return out
+def tool_diff(old, new, rows_of):
+    """Differing toolchain entries as (name, committed, measured).
 
-    old, new = split(a), split(b)
-    # Only tools the measured run actually used. A row's job installs what that row
-    # needs, so the cross compilers are absent from (say) the go job — reporting
-    # that as a difference would bury the real ones.
-    return [(k, old.get(k, "(not recorded)"), new[k])
-            for k in sorted(new) if old.get(k) != new[k]]
+    Limited to tools that actually built THIS row. Every measured file carries the
+    full table, so without that filter a go artifact would report the C++ or Zig
+    compiler as drifted — true, and irrelevant to the number being judged.
+    """
+    return [(k, old.get(k, "(not recorded)"), v)
+            for k, v in sorted(new.items())
+            if k in rows_of and old.get(k) != v]
 
 
 def main():
@@ -93,7 +98,7 @@ def main():
                     help="measured result files; the row is taken from the filename")
     args = ap.parse_args()
 
-    base_ir, base_sz, base_tool, base_core = parse(args.committed)
+    base_ir, base_sz, base_tool, _base_trows, base_core = parse(args.committed)
 
     failures, outliers, moved, tools_seen = [], [], [], {}
 
@@ -103,12 +108,14 @@ def main():
             continue
         row = m.group(1)
         try:
-            ir, sz, tool, _ = parse(path)
+            ir, sz, tool, trows, _ = parse(path)
         except OSError as e:
             failures.append((row, f"unreadable measured file: {e}"))
             continue
         if tool:
-            tools_seen[row] = tool
+            # Which tools built THIS row, per the measured file's own table.
+            tools_seen[row] = (tool, {t for t, rs in trows.items()
+                                      if rs is None or row in rs})
 
         vals = ir.get(row)
         if not vals:
@@ -151,8 +158,8 @@ def main():
     # repeated per row. Collapse to unique (tool, committed, this run) and name the
     # rows only when a difference does not apply to all of them.
     drift = {}
-    for row, t in sorted(tools_seen.items()):
-        for name, old, new in tool_diff(base_tool, t):
+    for row, (t, rows_of) in sorted(tools_seen.items()):
+        for name, old, new in tool_diff(base_tool, t, rows_of):
             drift.setdefault((name, old, new), []).append(row)
     if drift:
         out += [

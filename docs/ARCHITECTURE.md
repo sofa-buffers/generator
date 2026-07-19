@@ -1198,11 +1198,13 @@ with the toolchain comparison for that reason, then separates failed measurement
 from outliers from ordinary movement; it fails the job only on a failed measurement.
 
 The same trap exists *inside* the devcontainer: `PATH` decides whether `cargo` is
-apt's or rustup's, and the two rustc versions move the Rust rows about 8%. Only two
-toolchains (gcc, rustc) appear in the header, so a Go, Node, Java, Zig or Python
-version change moves a row with nothing in the file to show for it — the "header
-unchanged ⇒ the generator did it" rule above holds only for the rows those two
-compilers build. Widening the header is open work.
+apt's or rustup's, and the two rustc versions move the Rust rows about 8%. So the
+file carries a **`## toolchain` table** — every compiler that built a row, its
+version, and which rows it built, derived from `rows.json` so the mapping cannot
+drift from the rows actually present. `(not found)` is recorded rather than omitted:
+a tool that vanished from the environment is exactly the kind of thing that moves a
+number quietly. This is what makes "header unchanged ⇒ the generator did it" true for
+every row rather than only the ones gcc and rustc build.
 
 **Two isolation methods**, split by whether a native symbol exists to collect on.
 Both mirror the corelibs' own `bench/run_callgrind.sh`, which every corelib ships:

@@ -25,12 +25,32 @@ import sys
 from pathlib import Path
 
 # (label, argv) — label is what lands in the header.
-TOOLCHAINS = [
-    ("gcc", ["gcc", "-dumpfullversion"]),
-    ("arm-none-eabi-gcc", ["arm-none-eabi-gcc", "-dumpfullversion"]),
-    ("riscv64-unknown-elf-gcc", ["riscv64-unknown-elf-gcc", "-dumpfullversion"]),
-    ("rustc", ["rustc", "--version"]),
+# What compiled each row. Ir/op is the instruction count of a particular binary, so
+# every one of these moves numbers on unchanged generator and unchanged corelib —
+# recording only the host gcc and rustc (as this did) left five languages able to
+# shift a row with nothing in the file to show for it.
+LANG_TOOLCHAINS = {
+    "c":          [("gcc", ["gcc", "-dumpfullversion"])],
+    "cpp":        [("g++", ["g++", "-dumpfullversion"])],
+    "rust":       [("rustc", ["rustc", "--version"])],
+    "go":         [("go", ["go", "version"])],
+    "zig":        [("zig", ["zig", "version"])],
+    "typescript": [("node", ["node", "--version"])],
+    "python":     [("python3", ["python3", "--version"])],
+    "java":       [("javac", ["javac", "-version"])],
+    "csharp":     [("dotnet", ["dotnet", "--version"])],
+}
+
+# Footprint rows cross-compile, so the arch decides the compiler. Matched on the
+# arch name as it appears in rows.json.
+ARCH_TOOLCHAINS = [
+    ("ARM",   ("arm-none-eabi-gcc", ["arm-none-eabi-gcc", "-dumpfullversion"])),
+    ("RV",    ("riscv64-unknown-elf-gcc", ["riscv64-unknown-elf-gcc", "-dumpfullversion"])),
+    ("thumb", ("rustc", ["rustc", "--version"])),
 ]
+
+# Measures every Ir row, so its own version belongs in the record too.
+HOST_TOOLCHAINS = [("valgrind", ["valgrind", "--version"])]
 
 # Two tables: Ir is one number per row (measured on the host), footprint is one per
 # (row, arch). Keeping them separate beats a wide table full of "-".
@@ -39,6 +59,12 @@ IR_WIDTHS = [17, 11, 10, 14, 13]
 
 SZ_COLS = ["row", "profile", "arch", "text", "data", "bss"]
 SZ_WIDTHS = [17, 11, 16, 8, 7, 6]
+
+# Three columns on purpose: parse_previous() reads any non-# line by field count, so
+# the rows list is comma-joined WITHOUT spaces to keep this table at exactly three
+# fields and clear of the 5-field Ir and 6-field footprint shapes.
+TC_COLS = ["tool", "version", "rows"]
+TC_WIDTHS = [26, 14, 0]
 
 
 def tool_version(argv):
@@ -187,9 +213,30 @@ def main():
     out.append("# Numbers shift when anything below shifts. Check here FIRST: if the header is")
     out.append("# unchanged and a number moved, the generator caused it.")
 
-    tools = [(lbl, tool_version(a)) for lbl, a in TOOLCHAINS]
-    tools = [(lbl, v) for lbl, v in tools if v]
-    out.append("# toolchain: " + " | ".join(f"{lbl} {v}" for lbl, v in tools))
+    # tool -> (argv, rows it built). Built from rows.json so the mapping cannot
+    # drift from the rows actually in the file.
+    used = {}
+    for row in spec["rows"]:
+        for lbl, argv in LANG_TOOLCHAINS.get(row["lang"], []):
+            used.setdefault(lbl, (argv, set()))[1].add(row["id"])
+        for arch in row["archs"]:
+            for prefix, (lbl, argv) in ARCH_TOOLCHAINS:
+                if arch.startswith(prefix):
+                    used.setdefault(lbl, (argv, set()))[1].add(row["id"])
+    for lbl, argv in HOST_TOOLCHAINS:
+        used.setdefault(lbl, (argv, {r["id"] for r in spec["rows"]}))
+
+    all_ids = {r["id"] for r in spec["rows"]}
+    toolchain_rows = []
+    for lbl in sorted(used):
+        argv, rows_ = used[lbl]
+        # "all" keeps the line readable and stops it churning every time a row is
+        # added; readers of this column must treat it as matching any row.
+        where = "all" if rows_ == all_ids else ",".join(sorted(rows_))
+        # "(not found)" is deliberate: a tool that vanished from the environment is
+        # exactly the kind of thing that silently changes a number, so record its
+        # absence rather than dropping the line.
+        toolchain_rows.append((lbl, tool_version(argv) or "(not found)", where))
 
     if args.corelibs and Path(args.corelibs).exists():
         shas = []
@@ -226,6 +273,12 @@ def main():
         if not vals:
             continue
         out.append(fmt([row["id"], row["profile"], row["method"], *vals], IR_WIDTHS))
+
+    out.append("")
+    out.append("## toolchain")
+    out.append(fmt(TC_COLS, TC_WIDTHS))
+    for vals in toolchain_rows:
+        out.append(fmt(vals, TC_WIDTHS))
 
     out.append("")
     out.append("## footprint")
