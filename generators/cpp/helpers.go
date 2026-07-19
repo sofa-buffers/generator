@@ -123,6 +123,70 @@ func (g *gen) cppType(f *ir.Field) string {
 // wire type (numeric/enum/boolean/bitfield): those are stored in a fixed
 // std::array. String/blob/struct/union/nested-array elements lower to a wrapper
 // sequence and are stored in a std::vector (decode appends).
+// cppExpectedWire returns the sofab::Wire member a field's header must carry for
+// its schema-typed read() to be the right one, mirroring the encode side:
+// unsigned integers, bool and bitfield -> Unsigned; signed integers and enum ->
+// Signed; fp32/fp64, string and blob -> Fixlen; nested messages and composite
+// (wrapper) arrays -> SequenceStart; native scalar arrays -> the matching
+// Array* wire type.
+func cppExpectedWire(fld *ir.Field) string {
+	switch fld.Kind {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBool, ir.KindBitfield:
+		return "sofab::Wire::Unsigned"
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		return "sofab::Wire::Signed"
+	case ir.KindFP32, ir.KindFP64, ir.KindString, ir.KindBlob:
+		return "sofab::Wire::Fixlen"
+	case ir.KindStruct, ir.KindUnion:
+		return "sofab::Wire::SequenceStart"
+	case ir.KindArray:
+		if !isNativeArrayElem(fld.Elem) {
+			return "sofab::Wire::SequenceStart"
+		}
+		switch fld.Elem {
+		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+			return "sofab::Wire::ArraySigned"
+		case ir.KindFP32, ir.KindFP64:
+			return "sofab::Wire::ArrayFixlen"
+		default: // u8/u16/u32/u64, bool, bitfield
+			return "sofab::Wire::ArrayUnsigned"
+		}
+	}
+	return "sofab::Wire::SequenceStart" // unreachable: keeps the switch total
+}
+
+// cppFixSubtype returns the sofab::Fix member a fixlen-framed kind must carry,
+// or "" for a kind the wire type alone already settles.
+func cppFixSubtype(k ir.Kind) string {
+	switch k {
+	case ir.KindFP32:
+		return "sofab::Fix::Fp32"
+	case ir.KindFP64:
+		return "sofab::Fix::Fp64"
+	case ir.KindString:
+		return "sofab::Fix::String"
+	case ir.KindBlob:
+		return "sofab::Fix::Blob"
+	}
+	return ""
+}
+
+// cppWireGuard renders the §7.3 condition guarding one case arm: the wire type
+// the declared type maps to, plus the fixlen subtype where the wire type alone
+// is ambiguous (fp32/fp64/string/blob and the fp32/fp64 native arrays, which
+// share Wire::Fixlen / Wire::ArrayFixlen). Returns "" when no guard is needed.
+func cppWireGuard(fld *ir.Field) string {
+	cond := "is.wire() != " + cppExpectedWire(fld)
+	sub := cppFixSubtype(fld.Kind)
+	if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
+		sub = cppFixSubtype(fld.Elem)
+	}
+	if sub != "" {
+		cond += " || is.fixType() != " + sub
+	}
+	return cond
+}
+
 func isNativeArrayElem(k ir.Kind) bool {
 	switch k {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,

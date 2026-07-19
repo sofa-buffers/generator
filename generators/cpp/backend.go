@@ -422,6 +422,18 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.line("        switch (id) {")
 	for _, fld := range fields {
 		f.line("        case %d:", fld.ID)
+		// Frame each field by its header wire type before reading (MESSAGE_SPEC
+		// §7.3). read<T>() documents the precondition that the requested type match
+		// the delivered field's wire type, and does not check it: for an integral T
+		// it pulls a varint and zig-zags on T's signedness alone, so a Signed header
+		// on a u8 field silently yields the raw un-zig-zagged value. Returning
+		// without calling read() makes the driver skip the field, exactly as for an
+		// unknown id. Only the pure-C++ corelib exposes wire()/fixType()
+		// (corelib-cpp#43); the c-cpp footprint corelib has no such accessor, so
+		// that path stays unguarded here (tracked separately).
+		if !g.clib {
+			f.line("            if (%s) break;", cppWireGuard(fld))
+		}
 		g.emitDeserialize(f, fld)
 		f.line("            break;")
 	}
@@ -727,6 +739,16 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// profile uses the same reset.
 		if g.cppFixedArrayNeedsReset(fld) {
 			f.line("            %s = {};", acc)
+		}
+		// A composite array's wrapper sequence IS the array's value (MESSAGE_SPEC
+		// §5), so a field id repeating within one scope REPLACES it whole — unlike a
+		// struct or union, whose re-opened scope continues (§7.4). The collectors
+		// (_StrSeq/_BlobSeq/_MsgSeq and their fixed variants) place by element index
+		// or emplace in arrival order and never reset the target, so without this
+		// clear a second opening merges into the first one's elements. Native scalar
+		// arrays already replace: they read the whole array in one call.
+		if !isNativeArrayElem(fld.Elem) {
+			f.line("            %s.clear();", acc)
 		}
 		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.ElemMaxHas, fld.ElemMax, 0)
 	}

@@ -68,9 +68,13 @@ export class Scalars {
     return Scalars.decodeFrom(new Cursor(bytes));
   }
 
-  // Monomorphic pull decode: one switch(id) reads straight into this type's fields.
   static decodeFrom(c: Cursor): Scalars {
-    const o = new Scalars();
+    return Scalars.decodeInto(c, new Scalars());
+  }
+
+  // Monomorphic pull decode: one switch(id) reads straight into this type's fields.
+  // Decodes into `o` so a re-opened sequence continues its scope.
+  static decodeInto(c: Cursor, o: Scalars): Scalars {
     while (c.readHeader()) {
       switch (c.id) {
       case 0: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.u8min = Number(c.readUnsigned()); break;

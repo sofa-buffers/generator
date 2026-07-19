@@ -87,7 +87,7 @@ func TestTSWireTypeGuard(t *testing.T) {
 		"case 1: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o.b = Number(c.readSigned()); break;",
 		"case 2: if (c.wire !== WireType.Fixlen) { c.skip(c.wire); break; } o.c = c.readString(); break;",
 		"case 3: if (c.wire !== WireType.Fixlen) { c.skip(c.wire); break; } o.d = c.readFp32(); break;",
-		"case 4: if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; } o.e = ", // nested message
+		"case 4: if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; } ME.decodeInto(c, o.e); break;", // nested message, decoded into the existing member (§7.4)
 		"case 5: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.f = c.readUnsignedArray() as number[]; break;",
 		"case 6: if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } o.g = c.readSignedArray() as number[]; break;",
 		"case 7: if (c.wire !== WireType.ArrayFixlen) { c.skip(c.wire); break; } o.h = c.readFp64Array(); break;",
@@ -198,10 +198,14 @@ func TestTSStructural(t *testing.T) {
 		"static decode(bytes: Uint8Array): Myfirstmessage {",
 		"return Myfirstmessage.decodeFrom(new Cursor(bytes));",
 		"static decodeFrom(c: Cursor): Myfirstmessage {",
-		"while (c.readHeader()) {",                                      // monomorphic pull loop
-		"switch (c.id) {",                                               // one switch per type
-		"default: c.skip(c.wire); break;",                               // forward-compat skip
-		"o.somestruct = MyfirstmessageSomestruct.decodeFrom(c); break;", // nested message recursion
+		"while (c.readHeader()) {",        // monomorphic pull loop
+		"switch (c.id) {",                 // one switch per type
+		"default: c.skip(c.wire); break;", // forward-compat skip
+		"static decodeInto(c: Cursor, o: Myfirstmessage): Myfirstmessage {",
+		// Nested message recursion decodes INTO the existing member, so a repeated
+		// field id continues that scope instead of replacing it (MESSAGE_SPEC §7.4,
+		// generator#175).
+		"MyfirstmessageSomestruct.decodeInto(c, o.somestruct); break;",
 		`while (c.readHeader()) { if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); const _s = c.readString(); if (_utf8Len(_s) > 16) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 16"); arr[_id] = _s; }`, // id-aware string-list sequence, over-index + over-maxlen rejected (MESSAGE_SPEC S2/S5.1/S7/S7.1, #142)
 		"o.someu64 = c.readUnsigned() as bigint; break;", // u64 -> bigint, number-first
 		"os.writeSequenceBegin(",                         // nested framing (marshal unchanged)
@@ -655,5 +659,49 @@ func TestTSInt64Default(t *testing.T) {
 		if strings.Contains(mod, "Long") {
 			t.Error("default message.ts should not reference Long")
 		}
+	}
+}
+
+// TestTSDecodeIntoNestedScope pins the MESSAGE_SPEC §7.4 struct/union half
+// (generator#175): a field id repeating within one scope RE-OPENS that scope
+// rather than starting a new one, so children an earlier opening set whose ids do
+// not recur must survive. The decode loop therefore lives in decodeInto(c, o) and
+// nested members decode INTO the existing object; assigning decodeFrom(c)'s fresh
+// object instead discarded the earlier opening.
+func TestTSDecodeIntoNestedScope(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  M:
+    payload:
+      s: { id: 0, type: struct, fields: { a: { id: 0, type: u8 }, b: { id: 1, type: u8 } } }
+      u: { id: 1, type: union, default_id: 0, oneof: { o1: { id: 0, type: u8 }, o2: { id: 1, type: u8 } } }
+      e: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u8 } } } }
+`, map[string]any{})
+	for _, want := range []string{
+		// decodeFrom stays the fresh-object entry point, delegating to decodeInto.
+		"static decodeFrom(c: Cursor): M {",
+		"return M.decodeInto(c, new M());",
+		"static decodeInto(c: Cursor, o: M): M {",
+		// Nested struct and union both decode into the existing member.
+		"MS.decodeInto(c, o.s); break;",
+		"MU.decodeInto(c, o.u); break;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q\n%s", want, mod)
+		}
+	}
+	// A nested member must never be replaced by a fresh object.
+	for _, bad := range []string{
+		"o.s = MS.decodeFrom(c)",
+		"o.u = MU.decodeFrom(c)",
+	} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("message.ts must not replace a nested member (%q):\n%s", bad, mod)
+		}
+	}
+	// A wrapper-array ELEMENT is genuinely new per index, so it keeps decodeFrom.
+	if !strings.Contains(mod, "MEElem.decodeFrom(c)") {
+		t.Errorf("array elements must still use decodeFrom (fresh per index):\n%s", mod)
 	}
 }

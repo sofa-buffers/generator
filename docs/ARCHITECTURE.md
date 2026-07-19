@@ -750,6 +750,101 @@ MUST agree on which messages are valid," regardless of allocation strategy.
   fix on its own — the c-cpp `IStreamImpl` exposes no `invalidate()` hook (the
   same gap the over-index reject hit) — so it is tracked as **corelib-c-cpp#90**.
 
+#### Decode verdict: a contradictory wire type is SKIPPED, not fatal (§7.3)
+
+MESSAGE_SPEC **§7.3** requires a field whose header wire type is not the one its
+declared type maps to (§1) — for `fixlen`, including the **subtype** — to be
+**skipped**, exactly as a field with an unknown id is skipped. It is a framing
+mismatch, not a malformed message: the header itself is well-formed, so the
+decoder stays synced and simply does not deliver that field. Note this is a
+*type* check, never a value-range check — `u8`/`u16`/`u32`/`u64`/`boolean`/`enum`/
+`bitfield` all map to the unsigned-integer wire type, so a header carrying it is
+well-formed for any of them.
+
+The generated readers are **schema-typed**: each case arm calls the reader for the
+field's declared type. That reader assumes it is only invoked for its matching
+wire type, so the dispatch must check before reading. Who does the check differs
+by family (generator#174, Crucible F-0020):
+
+- **Python and C++ (`corelib-cpp`)** — the generated dispatch compares the
+  delivered header against the expected wire type **plus the fixlen subtype**
+  where the wire type alone is ambiguous (`fp32`/`fp64`/`string`/`blob` all share
+  `Fixlen`, and the fp arrays share `ArrayFixlen`), and skips on a mismatch.
+  Without the guard the failure mode is family-specific and *silent* in C++:
+  `read<T>` zig-zags on `T`'s signedness rather than the wire type, so a `Signed`
+  header on a `u8` field yielded the raw un-zig-zagged varint. Python instead
+  failed the *whole* decode, because corelib-py rightly raises `SofaStateError`
+  when a caller asks for a type the field does not carry — a caller error the
+  generated code should never provoke. The C++ guard needs the delivered field's
+  wire type, which `corelib-cpp` exposes as `IStreamImpl::wire()` /
+  `fixType()` (corelib-cpp#43).
+- **C** — the C object API is descriptor-driven, so the corelib makes the
+  decision: `sofab_object_field_cb` compares the descriptor's expected wire opt
+  against the delivered one and leaves `target_ptr` NULL on a mismatch, letting
+  the istream skip the field (corelib-c-cpp#101). No generated guard, and none
+  possible — the generator emits descriptors, not dispatch. Note this covers the
+  **C** target only: C++ over `c-cpp` drives `istream.c` directly, not the object
+  API, so it does not inherit the fix (see the gap below).
+- **TypeScript** — guards on the **wire type only** (issue #161). That settles
+  every non-fixlen kind, but not the fixlen subtype (see the gap below).
+- **Go, Rust, C#, Java, Zig** — already conformant: their decode drivers dispatch
+  on the corelib's own wire-type-tagged delivery, so a contradictory header never
+  reaches a schema-typed reader.
+
+**Two known gaps, both blocked on a corelib accessor the generator cannot supply:**
+
+- **C++ over the `c-cpp` corelib is unguarded.** That path drives `istream.c`
+  (not the object API), and the c-cpp `IStreamImpl` exposes no `wire()`/
+  `fixType()` accessor, so the generator has nothing to compare against — the
+  same shape of gap as the over-`maxlen` clamp above. Needs the corelib-cpp#43
+  treatment applied to corelib-c-cpp's C++ layer.
+- **TypeScript does not check the fixlen subtype.** `Cursor` exposes `id` and
+  `wire` but no subtype accessor; the subtype is read *inside* `readFp32`/
+  `readFp64`/`readString`/`readBlob`, which throw on a mismatch. So a header that
+  is `Fixlen` but carries the wrong subtype (e.g. a `string`-subtype word on an
+  `fp64` field) passes the generated guard and then **fails the whole decode**
+  instead of skipping the field — the same wrong outcome Python had before
+  generator#174, one level down. Fixing it needs a corelib-ts `fixType()` (or an
+  equivalent peek), after which the guard extends exactly as Python's and C++'s
+  did. Predates generator#174 and is not introduced by it.
+
+#### Decode verdict: a repeated field id — scopes merge, wrappers replace (§7.4)
+
+MESSAGE_SPEC **§7.4** defines what a decoder does when a field id repeats within
+one scope: the **last occurrence wins, per field id**. The consequence differs by
+what the field *is*:
+
+- A re-opened **sequence continues its scope** — `struct` and `union` members
+  therefore **merge**, and children set by an earlier opening whose ids do not
+  recur are **retained**.
+- An **array wrapper is the exception**: it *is* the array's value (§5), so a
+  later occurrence **replaces it whole**.
+
+Both halves are decode-side only; encode never emits a repeated id. Who enforces
+them (generator#175, Crucible F-0019):
+
+- **Nested `struct`/`union` must decode *into* the existing member.** Most
+  backends already did (C++ `is.read(nested)`, Go `return &m.Nested, nil`).
+  **TypeScript** did not: its case arm assigned `Child.decodeFrom(c)`, which
+  builds a *fresh* object, so the earlier opening's children were discarded. The
+  decode loop now lives in `decodeInto(c, o)` — `decodeFrom` is the fresh-object
+  entry point that delegates to it — and the nested case calls
+  `Child.decodeInto(c, o.member)`. The member is always constructed (the class
+  declares it with a `new T()` default), so nothing is allocated on that path.
+- **Array wrappers must be cleared before filling.** The **C++** collectors
+  (`_StrSeq`/`_BlobSeq`/`_MsgSeq` and their fixed `InlineVector` variants) place
+  by element index or emplace in arrival order and never reset, so a second
+  opening merged into the first one's elements; the generated case arm now emits
+  a `clear()` before the read. Go already emitted the equivalent
+  (`m.Field = m.Field[:0]`). Native scalar arrays need no clear — they read the
+  whole array in one call, which already replaces.
+- **C** distinguishes the two kinds by the `fixed_seq` flag the generator already
+  emits for every wrapper array (`SOFAB_OBJECT_DESCR_SEQ`, required since
+  corelib-c-cpp#96). That flag is what lets `object.c` reset a wrapper's slots on
+  open while structs and unions keep merging (corelib-c-cpp#101) — so this target
+  needed **no generator change**, only the descriptor kind it already emits. This
+  supersedes the "C needs a new descriptor kind" reading in generator#175.
+
 #### Decode verdict: invalid-UTF-8 strings are INVALID (strict, config-gated)
 
 MESSAGE_SPEC §8 + CORELIB_PLAN §6.4 make a `string` **UTF-8 text** (`blob` is the

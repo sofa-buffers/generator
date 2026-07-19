@@ -92,6 +92,62 @@ fi
 "$WORK/proj/harness/harness" decode < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
 echo "==> over-index reject OK"
 
+# Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose header
+# wire type is not the one its declared type maps to -- for fixlen, including the
+# subtype -- is SKIPPED, exactly like an unknown id. someu8 (id 0) is declared u8
+# (unsigned wire type) and keeps its schema default 7. Wire: 01 = id 0 with wire
+# type SIGNED (1), then the zig-zag varint 06 (= 3); control 00 09 -> 9.
+# The C target needs no generated guard: object.c compares the descriptor's
+# expected wire opt against the delivered one and leaves target_ptr NULL on a
+# mismatch, so the istream skips the field (corelib-c-cpp#101). This pins that the
+# generator keeps emitting descriptors the corelib can make that decision from.
+echo "==> contradictory wire type must skip (MESSAGE_SPEC S7.3, generator#174)"
+printf '\001\006' > "$WORK/wiremismatch.bin"
+printf '\000\011' > "$WORK/wiremismatch_control.bin"
+OUT=$("$WORK/proj/harness/harness" decode < "$WORK/wiremismatch.bin") \
+    || { echo "FAIL: mismatched wire type must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: skipped field must keep its default 7; got: $OUT"; exit 1; }
+OUT=$("$WORK/proj/harness/harness" decode < "$WORK/wiremismatch_control.bin") \
+    || { echo "FAIL: control (correct wire type) must decode"; exit 1; }
+echo "$OUT" | grep -q '"someu8":9' || { echo "FAIL: control must decode to 9; got: $OUT"; exit 1; }
+echo "==> wire-type skip OK"
+
+# Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins per
+# field id. A re-opened sequence CONTINUES its scope, so a struct merges and the
+# children an earlier opening set whose ids do not recur are retained. somestruct
+# (id 20) is opened twice: the first opening sets nestedstring (id 1) to "x", the
+# second opens only the empty nestedstruct (id 2). nestedstring MUST survive.
+# Wire: a6 01 (seq start id 20) 0a 0a 78 (string id 1, len 1, "x") 07 (seq end)
+#       a6 01 (seq start id 20) 16 07 (empty seq id 2) 07 (seq end)
+echo "==> re-opened struct scope must merge (MESSAGE_SPEC S7.4, generator#175)"
+printf '\246\001\012\012\170\007\246\001\026\007\007' > "$WORK/reopen_struct.bin"
+OUT=$("$WORK/proj/harness/harness" decode < "$WORK/reopen_struct.bin") \
+    || { echo "FAIL: re-opened struct must decode"; exit 1; }
+echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: re-opened struct must retain nestedstring \"x\"; got: $OUT"; exit 1; }
+echo "==> struct scope merge OK"
+
+# Repeated field id, array wrapper (MESSAGE_SPEC S7.4 + S5): an array wrapper IS
+# the array's value, so unlike a struct it is REPLACED whole by a later occurrence
+# rather than merged. somestringarray (id 18) is opened twice: elements 0="a" and
+# 1="b" first, then only element 0="c". Element 1 MUST NOT survive as "b".
+# In the C object API a wrapper is distinguished from a struct by the fixed_seq
+# flag the generator already emits (SOFAB_OBJECT_DESCR_SEQ), which is what lets
+# object.c reset the wrapper's slots on open while structs keep merging
+# (corelib-c-cpp#101) -- so this target needs no generated clear, only the
+# descriptor kind it already emits. Slots the second opening does not set fall
+# back to their element defaults, so only element 1 != "b" is asserted.
+# Wire: 96 01 (seq start id 18) 02 0a 61 ("a") 0a 0a 62 ("b") 07 (seq end)
+#       96 01 (seq start id 18) 02 0a 63 ("c") 07 (seq end)
+echo "==> re-opened array wrapper must replace (MESSAGE_SPEC S7.4, generator#175)"
+printf '\226\001\002\012\141\012\012\142\007\226\001\002\012\143\007' > "$WORK/reopen_array.bin"
+OUT=$("$WORK/proj/harness/harness" decode < "$WORK/reopen_array.bin") \
+    || { echo "FAIL: re-opened array wrapper must decode"; exit 1; }
+echo "$OUT" | grep -q '"somestringarray":\["c"' || { echo "FAIL: re-opened array wrapper must start with the second opening's element 0 == \"c\"; got: $OUT"; exit 1; }
+if echo "$OUT" | grep -q '"somestringarray":\["c","b"'; then
+    echo "FAIL: re-opened array wrapper must be replaced, not merged (element \"b\" survived); got: $OUT"; exit 1
+fi
+echo "==> array wrapper replace OK"
+
 # issue #128: a scalar/struct-field blob carries a used-length, so every length
 # 0..maxlen round-trips byte-exactly — including an all-zero blob (previously
 # dropped to empty) and a single 0x00 (previously collapsed). Blobs are skipped by

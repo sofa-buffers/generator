@@ -117,27 +117,35 @@ struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
         switch (id) {
         case 0:
+            if (is.wire() != sofab::Wire::Unsigned) break;
             is.read(u8min);
             break;
         case 1:
+            if (is.wire() != sofab::Wire::Unsigned) break;
             is.read(u8max);
             break;
         case 2:
+            if (is.wire() != sofab::Wire::Unsigned) break;
             is.read(u64max);
             break;
         case 3:
+            if (is.wire() != sofab::Wire::Signed) break;
             is.read(i8min);
             break;
         case 4:
+            if (is.wire() != sofab::Wire::Signed) break;
             is.read(i64min);
             break;
         case 5:
+            if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp32) break;
             is.read(f32);
             break;
         case 6:
+            if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp64) break;
             is.read(f64);
             break;
         case 7:
+            if (is.wire() != sofab::Wire::Unsigned) break;
             is.read(flag);
             break;
         default: break;

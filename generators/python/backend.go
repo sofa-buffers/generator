@@ -104,11 +104,17 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if schemaHasCountedFloatArray(s) {
 		f.line("import math")
 	}
+	names := []string{"Encoder", "Decoder"}
 	if schemaHasCountedNativeArray(s) || schemaHasCountedWrapperArray(s) || schemaHasMaxlenStringBlob(s) {
-		f.line("from sofab import Encoder, Decoder, SofaDecodeError, WireType")
-	} else {
-		f.line("from sofab import Encoder, Decoder, WireType")
+		names = append(names, "SofaDecodeError")
 	}
+	names = append(names, "WireType")
+	// FixlenSubtype is referenced only by the §7.3 guard of a fixlen-framed field;
+	// importing it unconditionally would leave it unused for schemas without one.
+	if schemaHasFixlenField(s) {
+		names = append(names, "FixlenSubtype")
+	}
+	f.line("from sofab import %s", strings.Join(names, ", "))
 	f.blank()
 
 	g.emitFixedArrayHelpers(f, s)
@@ -234,6 +240,84 @@ func schemaHasCountedFloatArray(s *ir.Schema) bool {
 		return fld.Kind == ir.KindArray && fld.HasCount &&
 			(fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64)
 	})
+}
+
+// schemaHasFixlenField reports whether any field's §7.3 guard needs to compare a
+// fixlen subtype — i.e. whether the generated module references FixlenSubtype at
+// all. fp32/fp64/string/blob and their native arrays all share one wire type
+// (FIXLEN / ARRAY_FIXLEN), so only the subtype separates them; every other kind
+// is settled by the wire type alone and needs no import.
+func schemaHasFixlenField(s *ir.Schema) bool {
+	return schemaHasField(s, func(fld *ir.Field) bool {
+		if pyFixlenSubtype(fld.Kind) != "" {
+			return true
+		}
+		return fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) && pyFixlenSubtype(fld.Elem) != ""
+	})
+}
+
+// pyFixlenSubtype returns the FixlenSubtype member a fixlen kind must carry, or
+// "" for a kind that is not fixlen-framed.
+func pyFixlenSubtype(k ir.Kind) string {
+	switch k {
+	case ir.KindFP32:
+		return "FixlenSubtype.FP32"
+	case ir.KindFP64:
+		return "FixlenSubtype.FP64"
+	case ir.KindString:
+		return "FixlenSubtype.STRING"
+	case ir.KindBlob:
+		return "FixlenSubtype.BLOB"
+	}
+	return ""
+}
+
+// pyExpectedWire returns the WireType member a field's header must carry for its
+// schema-typed reader to be the right one, mirroring the encode side
+// (emitMarshal / marshalArray): unsigned integers, bool and bitfield ->
+// UNSIGNED; signed integers and enum -> SIGNED; fp32/fp64, string and blob ->
+// FIXLEN; nested messages and composite (wrapper) arrays -> SEQUENCE_START;
+// native scalar arrays -> the matching ARRAY_* wire type.
+func pyExpectedWire(fld *ir.Field) string {
+	switch fld.Kind {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBool, ir.KindBitfield:
+		return "WireType.UNSIGNED"
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		return "WireType.SIGNED"
+	case ir.KindFP32, ir.KindFP64, ir.KindString, ir.KindBlob:
+		return "WireType.FIXLEN"
+	case ir.KindStruct, ir.KindUnion:
+		return "WireType.SEQUENCE_START"
+	case ir.KindArray:
+		if !isNativeArrayElem(fld.Elem) {
+			return "WireType.SEQUENCE_START"
+		}
+		switch fld.Elem {
+		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+			return "WireType.ARRAY_SIGNED"
+		case ir.KindFP32, ir.KindFP64:
+			return "WireType.ARRAY_FIXLEN"
+		default: // u8/u16/u32/u64, bool, bitfield
+			return "WireType.ARRAY_UNSIGNED"
+		}
+	}
+	return "WireType.SEQUENCE_START" // unreachable: keeps the switch total
+}
+
+// pyWireGuard renders the §7.3 condition a field header must satisfy before its
+// schema-typed reader may run: the wire type the declared type maps to, plus the
+// fixlen subtype where the wire type alone is ambiguous (fp32/fp64/string/blob,
+// and the fp32/fp64 native arrays, which share FIXLEN / ARRAY_FIXLEN).
+func pyWireGuard(fld *ir.Field) string {
+	cond := "fld.type != " + pyExpectedWire(fld)
+	sub := pyFixlenSubtype(fld.Kind)
+	if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
+		sub = pyFixlenSubtype(fld.Elem)
+	}
+	if sub != "" {
+		cond += " or fld.subtype != " + sub
+	}
+	return cond
 }
 
 // schemaHasField reports whether any message or named-type field satisfies pred.
@@ -437,6 +521,17 @@ func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field)
 			kw = "if"
 		}
 		f.line("            %s fld.id == %d:", kw, fld.ID)
+		// Frame each field by its header wire type before reading (MESSAGE_SPEC
+		// §7.3). The schema-typed readers assume they are only called for their
+		// matching wire type — corelib-py raises SofaStateError from _take_scalar /
+		// _take_fixlen when they are not, which is the right answer to a *caller*
+		// error but the wrong outcome here: a field whose header contradicts the
+		// schema must be skipped like an unknown id, not fail the whole decode.
+		// The wire type is already in hand (fld.type is read above), so the guard
+		// costs one comparison and keeps the decoder synced.
+		f.line("                if %s:", pyWireGuard(fld))
+		f.line("                    d.skip()")
+		f.line("                    continue")
 		g.emitUnmarshal(f, fld)
 	}
 	if len(fields) > 0 {
