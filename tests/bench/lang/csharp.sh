@@ -31,37 +31,35 @@ bench_build_ir() {
 }
 
 # bench_cmd_ir <gen_proj> <workload>  — reps are appended by ir_subtract
+#
+# The path filter MUST be `*/bin/Release/*`, not `*Release*`. A Release build leaves
+# FOUR harness.dll under the project — bin/Release/…, obj/Release/…, obj/Release/…/ref
+# and obj/Release/…/refint — and only the bin/ one is a runnable, framework-dependent
+# app with a runtimeconfig.json beside it. The obj/ copies are reference assemblies
+# (metadata only). `find | head -1` returns them in directory order, which is not
+# stable across filesystems: the devcontainer happened to yield bin/ first, the
+# bench.yml runners yielded obj/…/refint first, and running that one aborts with
+# "libhostpolicy.so not found" (~2.5M Ir, identical at every rep count) → zero slope →
+# `!`. Anchoring to bin/ picks the single runnable dll regardless of find order.
+#
+# --roll-forward Major (a host option, before the dll): the harness targets net9.0 and
+# a runner may carry only a newer major runtime, which a framework-dependent app will
+# not cross by default. No-op where a 9.0 runtime is present (the devcontainer).
 bench_cmd_ir() {
     local dll
-    dll="$(find "$1" -name 'harness.dll' -path '*Release*' 2>/dev/null | head -1)"
-    # --roll-forward Major is a host option (before the dll): the harness targets net9.0
-    # and a runner may carry only a newer major runtime. The CLI form is used in
-    # addition to the DOTNET_ROLL_FORWARD env because it has higher precedence in
-    # hostfxr — it wins even in an environment where the env var is not honored, which
-    # is what the bench.yml runners turned out to be.
+    dll="$(find "$1" -name 'harness.dll' -path '*/bin/Release/*' 2>/dev/null | head -1)"
     echo "dotnet --roll-forward Major ${dll:-$1/bin/Release/net9.0/harness.dll} bench $2"
 }
 
 # bench_ir_env <proj> <corelib>
 #
-# DOTNET_ROLL_FORWARD=Major lets the net9.0 harness run on a newer major runtime.
-# The harness targets net9.0 (generators/csharp/project.go), and a framework-dependent
-# app does NOT cross a major version by default: with only the .NET 10 runtime present
-# — as on the bench.yml runners, whose `dotnet` is 10.x and where setup-dotnet's 9.0
-# runtime is not on the resolution path — `dotnet harness.dll` exits 150 ("Framework
-# 'Microsoft.NETCore.App' version '9.0.0' not found") before running a single op. Under
-# Callgrind that aborted launch still writes a `summary:` line (~2.5M Ir, identical for
-# every rep count), so ir_subtract sees a zero slope and the row measures as `!`.
-# Major rolls 9.0 up to the runtime that IS there; where 9.0 exists (the devcontainer)
-# it is a no-op, so the committed numbers are unchanged.
-#
 # DOTNET_EnableAVX512F=0 / DOTNET_PreferredVectorBitWidth=256 cap RyuJIT at AVX2 —
 # defensively, like the zig row's -Dcpu=baseline (lang/zig.sh). .NET 8+ emits AVX-512
 # for the host CPU, the runners (Ice Lake / EPYC) have it, and their Callgrind (3.22)
-# is older than the devcontainer's (3.26); once the app actually runs there, 512-bit
-# codegen it cannot decode would SIGILL. A no-op on the AVX-512-less devcontainer.
+# is older than the devcontainer's (3.26); once the app runs there, 512-bit codegen it
+# cannot decode would SIGILL. A no-op on the AVX-512-less devcontainer.
 bench_ir_env() {
     echo "DOTNET_gcServer=0 DOTNET_TieredCompilation=0 DOTNET_ReadyToRun=0 \
 DOTNET_GCHeapHardLimit=0x100000000 DOTNET_GCgen0size=0x80000000 \
-DOTNET_ROLL_FORWARD=Major DOTNET_EnableAVX512F=0 DOTNET_PreferredVectorBitWidth=256"
+DOTNET_EnableAVX512F=0 DOTNET_PreferredVectorBitWidth=256"
 }

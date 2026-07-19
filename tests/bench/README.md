@@ -187,19 +187,22 @@ exists partly to keep them visible.
     SIGILLs. Baseline is the generic x86-64 that gcc/rustc/go already emit (which is
     why the other native rows are fine) and, as a bonus, makes the row byte-identical
     across the runner and the devcontainer.
-  - **csharp** sets `DOTNET_ROLL_FORWARD=Major` (plus `DOTNET_EnableAVX512F=0`
-    `DOTNET_PreferredVectorBitWidth=256` as an AVX-512 guard like zig's). The harness
-    targets `net9.0`, and a framework-dependent app won't cross a *major* runtime
-    version by default: on a runner whose `dotnet` is 10.x with no 9.0 runtime on the
-    path, `dotnet harness.dll` exits 150 before running an op. Under Callgrind that
-    aborted launch still writes a `summary:` (~2.5M Ir, identical at every rep count),
-    so `ir_subtract` sees a zero slope and reports `!`. `Major` rolls up to the runtime
-    that is present; where 9.0 exists (the devcontainer) it is a no-op.
+  - **csharp** runs the dll matched by `*/bin/Release/*` (not `*Release*`), under
+    `--roll-forward Major` and an AVX-512 guard (`DOTNET_EnableAVX512F=0`
+    `DOTNET_PreferredVectorBitWidth=256`, like zig's). The real fix is the path anchor:
+    a Release build leaves four `harness.dll` (`bin/…` and three under `obj/…`,
+    including the `refint` reference assembly), and `find | head -1` returns them in
+    directory order — not stable across filesystems. The devcontainer hit `bin/` first,
+    the runners hit `obj/…/refint/` first, and that metadata-only assembly has no
+    `runtimeconfig.json`, so the host aborts with "`libhostpolicy.so` not found"
+    (~2.5M Ir, identical at every rep count) → zero slope → `!`. `Major` then lets the
+    `net9.0` app run on a newer major runtime if that is all a runner has.
 
   All of these knobs are no-ops on the AVX-512-less devcontainer, so `results.txt` is
   unchanged but for the zig decode value baseline moved. When a row does fail to
-  measure, the harness now prints the tail of its Callgrind log next to the `!`
-  instead of leaving it silent — which is how the csharp exit-150 was diagnosed.
+  measure, the harness now greps its Callgrind log for the tell-tale lines and prints
+  them next to the `!` instead of leaving it silent — which is what surfaced the
+  `refint` dll after two wrong hypotheses had been chased on the ~2.5M-Ir signature.
 
 
 ## Prereqs

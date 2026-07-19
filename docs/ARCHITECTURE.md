@@ -1353,21 +1353,25 @@ already default to, which is why the other native rows measure clean on the olde
 Valgrind. It also makes zig reproducible across machines (the runner and devcontainer
 now read the row identically), which is the point of Ir/op.
 
-The csharp row sets `DOTNET_ROLL_FORWARD=Major`, plus `DOTNET_EnableAVX512F=0`
-`DOTNET_PreferredVectorBitWidth=256` defensively. The harness targets `net9.0`, and a
-framework-dependent app does not cross a major runtime version by default: on a runner
-whose `dotnet` is 10.x and where the 9.0 runtime is not on the resolution path,
-`dotnet harness.dll` exits 150 ("`Microsoft.NETCore.App` version 9.0.0 not found")
-before running an op. Under Callgrind that aborted launch still writes a `summary:`
-(~2.5M Ir, identical at every rep count), so `ir_subtract` sees a zero slope and the
-row is `!`. `Major` rolls up to whatever runtime is present; where 9.0 exists (the
-devcontainer) it is a no-op. The AVX-512 knobs are the same guard as zig's baseline —
-once the app actually runs on an AVX-512 runner under the older Callgrind, 512-bit
-RyuJIT codegen would SIGILL. All of these are no-ops on the AVX-512-less devcontainer,
-so `results.txt` (generated there) is unchanged but for the one zig row baseline moved.
+The csharp row runs the dll under `*/bin/Release/*`, `--roll-forward Major`, and
+`DOTNET_EnableAVX512F=0` `DOTNET_PreferredVectorBitWidth=256`. The load-bearing fix is
+the path anchor: a Release build leaves four `harness.dll` under the project (`bin/…`
+plus three under `obj/…`, including the `refint` reference assembly), and `find | head
+-1` returns them in *directory order*, which is not stable across filesystems. The
+devcontainer yielded `bin/` first; the runners yielded `obj/…/refint/` first — a
+metadata-only reference assembly with no `runtimeconfig.json`, so the host aborts with
+"`libhostpolicy.so` not found" (~2.5M Ir, identical at every rep count) → zero slope →
+`!`. Anchoring to `bin/` picks the one runnable app regardless of order. `Major` then
+lets that `net9.0` app run on a newer major runtime if that is all the runner has, and
+the AVX-512 knobs are the same guard as zig's baseline (512-bit RyuJIT codegen would
+SIGILL under the runner's older Callgrind). All are no-ops on the devcontainer, so
+`results.txt` (generated there) is unchanged but for the one zig row baseline moved.
 
-A failed measurement is no longer silent: the harness prints the tail of the offending
-Callgrind log next to the `!`, which is how the csharp exit-150 was diagnosed.
+A failed measurement is no longer silent: the harness greps the offending Callgrind
+log for the tell-tale lines and prints them next to the `!` — which is what finally
+surfaced the `refint` dll in the run command after two wrong hypotheses (a Valgrind
+AVX-512 decode failure, then a missing runtime) had been chased on the ~2.5M-Ir
+signature alone.
 
 The same trap exists *inside* the devcontainer: `PATH` decides whether `cargo` is
 apt's or rustup's, and the two rustc versions move the Rust rows about 8%. So the
