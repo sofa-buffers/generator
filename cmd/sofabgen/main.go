@@ -40,7 +40,7 @@ import (
 	_ "github.com/sofa-buffers/generator/generators/zig"
 )
 
-const version = "0.19.0"
+const version = "0.19.1"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
