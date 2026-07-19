@@ -3,9 +3,13 @@
 Detects performance and code-size changes **caused by generator changes**.
 
 ```sh
-tests/bench/run.sh                    # regenerate results.txt
+tests/bench/run.sh                    # regenerate results.txt (in the devcontainer)
 git diff tests/bench/results.txt      # <- the point
 ```
+
+**Run it in the devcontainer, by hand** — same as the benchmark arena: somebody runs
+it and reads the diff. CI never writes this file; see
+[One measuring device](#one-measuring-device).
 
 `results.txt` is committed. Change the generator, re-run, and the cost or saving
 shows up in the PR diff next to the code that caused it. It is a **diff tool**, not
@@ -188,6 +192,45 @@ rustup component add llvm-tools-preview      # llvm-size, rust-lld
 
 `libstdc++-arm-none-eabi-newlib` is easy to miss and its absence looks like "C++
 cannot cross-compile" rather than a missing package.
+
+The devcontainer already carries all of it. Watch `PATH`: with `/root/.cargo/bin`
+missing, `cargo` resolves to apt's instead of rustup's, and the two rustc versions
+move the Rust rows ~8%. The `thumbv6m` footprint fails loudly in that case; the two
+Ir rows do **not** — they just come out wrong.
+
+## One measuring device
+
+Ir/op is the instruction count of a *particular binary*, so it depends on the
+compiler that produced it. A CI runner pins its own toolchain versions, which makes
+it a second measuring device — and two devices disagree about code that did not
+change. Measured: the bench workflow on `ubuntu-24.04` with Go 1.26 read the `go`
+encode row at **56,237** Ir/op; the devcontainer with Go 1.24 read the same commit
+at **24,698**. Neither is wrong. They are different scales.
+
+So one environment owns `results.txt`, and it is the devcontainer. If a diff ever
+needs settling, re-run both sides *here* rather than comparing against a number
+produced somewhere else.
+
+### The workflow is still there, for asking a second opinion
+
+`.github/workflows/bench.yml` runs on **`workflow_dispatch` only**. Use it when a
+local number looks implausible, or to see a row on a toolchain you do not have
+locally. It never writes `results.txt`.
+
+It is not a PR trigger on purpose: since it measures on another scale, it would post
+a large diff on every PR for reasons no PR caused, and a signal that always fires is
+one reviewers learn to skip — worse than no signal, because it costs CI minutes and
+looks like coverage.
+
+Its report (`lib/report.py`) is built around that hazard:
+
+* **Toolchain comparison first.** Whatever differs from the header of the committed
+  file is named before any number, because that alone moves rows.
+* **Failed measurements are their own section**, and the only thing that fails the
+  job. A `!` cell means a broken run, not a slow row — and it would overwrite a
+  committed value if it reached the file.
+* **Outliers (≥5%) are separated from ordinary movement (>0.3%)**, so a doubled row
+  cannot hide in a list of wobbles.
 
 ## The two Ir/op methods
 
