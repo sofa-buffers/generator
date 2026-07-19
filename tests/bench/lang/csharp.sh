@@ -34,7 +34,12 @@ bench_build_ir() {
 bench_cmd_ir() {
     local dll
     dll="$(find "$1" -name 'harness.dll' -path '*Release*' 2>/dev/null | head -1)"
-    echo "dotnet ${dll:-$1/bin/Release/net9.0/harness.dll} bench $2"
+    # --roll-forward Major is a host option (before the dll): the harness targets net9.0
+    # and a runner may carry only a newer major runtime. The CLI form is used in
+    # addition to the DOTNET_ROLL_FORWARD env because it has higher precedence in
+    # hostfxr — it wins even in an environment where the env var is not honored, which
+    # is what the bench.yml runners turned out to be.
+    echo "dotnet --roll-forward Major ${dll:-$1/bin/Release/net9.0/harness.dll} bench $2"
 }
 
 # bench_ir_env <proj> <corelib>
