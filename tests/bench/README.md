@@ -178,6 +178,18 @@ exists partly to keep them visible.
   is a stable relative reference — right for "did my change help?" — but lower-tier
   than production. This is the one row where the measured tier differs from what
   ships; every other row measures the shipping configuration.
+* **The `zig` and `csharp` rows pin their codegen ISA to AVX2** — zig builds
+  `-Dcpu=baseline`, csharp runs with `DOTNET_EnableAVX512F=0`
+  `DOTNET_PreferredVectorBitWidth=256` (see `lang/zig.sh`, `lang/csharp.sh`). Both
+  toolchains (zig's native AOT build, .NET's RyuJIT) otherwise emit AVX-512 for the
+  host CPU. That is fine here — the devcontainer host has no AVX-512, so the knobs are
+  a no-op — but the `bench.yml` runners *do* have it, and their Callgrind (3.22) is
+  older than the devcontainer's (3.26) and cannot decode AVX-512: the run SIGILLs
+  under Valgrind and the row measures as `!`. gcc/rustc/go and the JVM/V8 JITs don't
+  reach for AVX-512, so the other rows are unaffected. Pinning also makes these two
+  rows reproducible across machines, which is the whole premise of Ir/op. When a row
+  does fail to measure, the harness now prints the tail of its Callgrind log next to
+  the `!` instead of leaving it silent.
 
 
 ## Prereqs

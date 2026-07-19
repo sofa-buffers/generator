@@ -29,7 +29,7 @@ rust-rs          maxspeed   toggle    10021         24886
 rust-rs-no-std   footprint  toggle    10321         32876
 ts-bigint        maxspeed   subtract  742014        750503
 ts-long          maxspeed   subtract  742021        750502
-zig              maxspeed   toggle    10411         18638
+zig              maxspeed   toggle    10411         18419
 
 ## toolchain
 tool                      version       rows
