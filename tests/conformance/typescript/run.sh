@@ -157,6 +157,44 @@ if echo "$OUT" | grep -q '"somestringarray":\["c","b"'; then
 fi
 echo "==> array wrapper replace OK"
 
+# Fixlen SUBTYPE mismatch (MESSAGE_SPEC S7.3, generator#174) is deliberately NOT
+# covered here. Under S7.3 a fixlen field's type is its wire type PLUS its
+# subtype, so 4a 0a 78 (id 9 somefp64, Fixlen wire type but STRING subtype) must
+# be skipped and leave the default 3.141592653589793. corelib-ts's Cursor exposes
+# no fixlen-subtype accessor, so the generated guard cannot make that check at
+# all -- the vector fails on this target by construction. Do not re-add it until
+# corelib-ts#58 lands an accessor; the other eight harnesses do assert it.
+
+# S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
+# skipped under S7.3 is not an occurrence for this clause: a correctly typed
+# earlier occurrence survives a mis-typed later one." somestringarray (id 18) is
+# opened correctly with element 0 = "a", then id 18 recurs carrying the UNSIGNED
+# wire type. The mis-typed occurrence is skipped, so the array MUST still hold
+# "a" -- the failure this guards is an EMPTY array, i.e. generated code clearing
+# the wrapper before it checks the wire type.
+# Wire: 96 01 (seq start id 18) 02 0a 61 (string id 0 "a") 07 (seq end)
+#       90 01 (id 18, UNSIGNED) 05
+# Asserted as a prefix: heap profiles render ["a"], fixed-capacity ones pad.
+echo "==> mis-typed later occurrence must not clear the array (MESSAGE_SPEC S7.4, generator#175)"
+printf '\226\001\002\012\141\007\220\001\005' > "$WORK/skipped_occ_array.bin"
+OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/skipped_occ_array.bin" ) \
+    || { echo "FAIL: mis-typed later occurrence must decode, not error"; exit 1; }
+echo "$OUT" | grep -q '"somestringarray":\["a"' || { echo "FAIL: skipped occurrence must not clear the array (element 0 == \"a\" lost); got: $OUT"; exit 1; }
+echo "==> skipped occurrence keeps array OK"
+
+# S7.3 x S7.4, struct: same rule for a struct scope. somestruct (id 20) is opened
+# correctly with nestedstring (id 1) = "x", then id 20 recurs carrying the
+# UNSIGNED wire type. That occurrence is skipped, so nestedstring MUST still
+# be "x" rather than falling back to its default "Nested".
+# Wire: a6 01 (seq start id 20) 0a 0a 78 (string id 1, len 1, "x") 07 (seq end)
+#       a0 01 (id 20, UNSIGNED) 05
+echo "==> mis-typed later occurrence must not clear the struct (MESSAGE_SPEC S7.4, generator#175)"
+printf '\246\001\012\012\170\007\240\001\005' > "$WORK/skipped_occ_struct.bin"
+OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/skipped_occ_struct.bin" ) \
+    || { echo "FAIL: mis-typed later occurrence must decode, not error"; exit 1; }
+echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
+echo "==> skipped occurrence keeps struct OK"
+
 # Receiver-side decode limits (generator#102): a count-less u64 array with
 # max_dyn_array_count: 4 baked into the generated module (id 0 -> header 0x03 =
 # 0<<3 | unsigned-array). A wire count of 5 MUST throw the corelib's

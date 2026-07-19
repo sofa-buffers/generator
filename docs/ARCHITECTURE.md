@@ -787,9 +787,42 @@ by family (generator#174, Crucible F-0020):
   API, so it does not inherit the fix (see the gap below).
 - **TypeScript** — guards on the **wire type only** (issue #161). That settles
   every non-fixlen kind, but not the fixlen subtype (see the gap below).
-- **Go, Rust, C#, Java, Zig** — already conformant: their decode drivers dispatch
-  on the corelib's own wire-type-tagged delivery, so a contradictory header never
-  reaches a schema-typed reader.
+- **Go, Rust (std + `no_std`), C#, Java, Zig** — conformant for free. Their
+  corelibs resolve the fixlen word themselves and dispatch to *distinct typed
+  callbacks* (`Float64` vs `String`, …), each defaulting to a no-op. A
+  contradictory header therefore lands in a different callback, whose id switch
+  has no case for that field, and evaporates. The generator emits no check at
+  all, and cannot get this wrong.
+
+#### Who can satisfy §7.3, and why (audited)
+
+The obligation lands differently depending on **who decides a field's type**, and
+that is a property of the corelib, not of the backend. Three models exist:
+
+| model | corelibs | who checks | §7.3 status |
+|---|---|---|---|
+| **corelib dispatches by type** — the corelib resolves wire type *and* fixlen subtype, then calls a distinctly-typed callback | go, rs, rs-no-std, cs, java, zig | nobody: a mismatch never reaches a schema-typed reader | structural ✅ |
+| **descriptor / object API** — the generator hands the schema to the corelib as a table | c (`c-cpp` object API) | corelib, against the descriptor (mask `0x3F` = wire type + subtype) | ✅ |
+| **generated code pulls by id** — the corelib delivers `(id, …)` and generated code chooses the reader | python, cpp, typescript, cpp-over-`c-cpp` | **generated code**, so the corelib must expose the delivered type at the decision point | ✅ / ✅ / ⚠️ / ❌ |
+
+Only the third model puts the burden on the generator, and it is the only one
+where a gap is possible — the corelib must surface enough type metadata for the
+guard to be written at all. CORELIB_PLAN §5.2 already requires exactly that
+("the decoder notifies the **field handler** … with the field's *identity and
+type metadata*", with **Skip** as a first-class handler outcome), so the two
+gaps below are shortfalls against that existing contract rather than new asks:
+
+- **python** — `Field.type` + `Field.subtype`: sufficient. ✅
+- **cpp** (`corelib-cpp`) — `wire()` + `fixType()` (corelib-cpp#43): sufficient. ✅
+- **typescript** — `Cursor` exposes `wire` but **no subtype accessor**, so the
+  guard covers every non-`fixlen` kind and nothing else. ⚠️ corelib-ts#58.
+- **cpp over `c-cpp`** — no accessor at all, so no guard is emitted. ❌
+  corelib-c-cpp#104.
+
+Measured against four vectors (a `fixlen`-subtype mismatch and its control, plus
+the two §7.4-interaction cases below), every combination passes except those two:
+TypeScript fails only the subtype vector, and `cpp`/`c-cpp` reports **INVALID**
+on *any* contradictory wire type — not just a subtype mismatch.
 
 **Two known gaps, both blocked on a corelib accessor the generator cannot supply:**
 
@@ -852,6 +885,36 @@ them (generator#175, Crucible F-0019):
   open while structs and unions keep merging (corelib-c-cpp#101) — so this target
   needed **no generator change**, only the descriptor kind it already emits. This
   supersedes the "C needs a new descriptor kind" reading in generator#175.
+
+**§7.4 interacts with §7.3, and the ordering is load-bearing.** The spec closes
+the clause with:
+
+> An occurrence skipped under §7.3 is **not** an occurrence for this clause: a
+> correctly typed earlier occurrence survives a mis-typed later one.
+
+For a struct this is free — a skipped occurrence simply never opens the scope.
+For an **array wrapper it is a trap**, because the §7.4 fix is a destructive
+`clear()`: if generated code clears the target *before* consulting the wire type,
+a mis-typed later occurrence silently wipes a valid earlier array — turning a
+loud failure into silent data loss. Every backend therefore places the reset
+behind the type decision, though by different means:
+
+- **cpp** emits the §7.3 guard *above* the clear in the same case arm, so the
+  guard's `break` skips it.
+- **typescript** collects into a fresh local and only publishes it (`o.f = arr`)
+  after the loop, so a skipped occurrence never touches the member.
+- **go, rust, zig, cs, java** put the reset *inside* the sequence-begin callback,
+  which the corelib only invokes for an actual sequence header — so the
+  wire-type dispatch shields it structurally.
+- **c** resets in `object.c`'s `FIELDTYPE_SEQUENCE` case, which sits after the
+  descriptor wire-type check.
+
+The one exception is **cpp over `c-cpp`**, where no guard is emitted and the
+`clear()` is the first statement of the case arm. That is currently masked (the
+decode fails first, corelib-c-cpp#104), but it means the accessor and the guard
+must land together: fixing the INVALID without emitting the guard would convert
+this into the silent-data-loss variant. Dropping the generator's corelib gate
+does both at once, since the guard is emitted above the clear.
 
 #### Decode verdict: invalid-UTF-8 strings are INVALID (strict, config-gated)
 
