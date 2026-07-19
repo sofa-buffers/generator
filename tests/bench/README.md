@@ -178,6 +178,31 @@ exists partly to keep them visible.
   is a stable relative reference — right for "did my change help?" — but lower-tier
   than production. This is the one row where the measured tier differs from what
   ships; every other row measures the shipping configuration.
+* **The `zig` and `csharp` rows carry runner-specific pins** (see `lang/zig.sh`,
+  `lang/csharp.sh`) — for two *different* reasons, both of which made the row measure
+  as `!` on the `bench.yml` runners while measuring clean in the devcontainer.
+  - **zig** builds `-Dcpu=baseline`. `standardTargetOptions` defaults to the host CPU,
+    so an unpinned build on a runner with AVX-512 emits 512-bit instructions the
+    runner's older Callgrind (3.22 vs the devcontainer's 3.26) cannot decode — the run
+    SIGILLs. Baseline is the generic x86-64 that gcc/rustc/go already emit (which is
+    why the other native rows are fine) and, as a bonus, makes the row byte-identical
+    across the runner and the devcontainer.
+  - **csharp** runs the dll matched by `*/bin/Release/*` (not `*Release*`), under
+    `--roll-forward Major` and an AVX-512 guard (`DOTNET_EnableAVX512F=0`
+    `DOTNET_PreferredVectorBitWidth=256`, like zig's). The real fix is the path anchor:
+    a Release build leaves four `harness.dll` (`bin/…` and three under `obj/…`,
+    including the `refint` reference assembly), and `find | head -1` returns them in
+    directory order — not stable across filesystems. The devcontainer hit `bin/` first,
+    the runners hit `obj/…/refint/` first, and that metadata-only assembly has no
+    `runtimeconfig.json`, so the host aborts with "`libhostpolicy.so` not found"
+    (~2.5M Ir, identical at every rep count) → zero slope → `!`. `Major` then lets the
+    `net9.0` app run on a newer major runtime if that is all a runner has.
+
+  All of these knobs are no-ops on the AVX-512-less devcontainer, so `results.txt` is
+  unchanged but for the zig decode value baseline moved. When a row does fail to
+  measure, the harness now greps its Callgrind log for the tell-tale lines and prints
+  them next to the `!` instead of leaving it silent — which is what surfaced the
+  `refint` dll after two wrong hypotheses had been chased on the ~2.5M-Ir signature.
 
 
 ## Prereqs

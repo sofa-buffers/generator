@@ -1341,6 +1341,38 @@ every PR for reasons no PR caused. Its report (`tests/bench/lib/report.py`) lead
 with the toolchain comparison for that reason, then separates failed measurements
 from outliers from ordinary movement; it fails the job only on a failed measurement.
 
+**The `zig` and `csharp` rows carry runner-specific pins** so that the "second
+measuring device" merely *drifts* rather than *fails* — for two different reasons.
+
+The zig row builds `-Dcpu=baseline`. `b.standardTargetOptions` defaults to the host
+CPU, so an unpinned `--release=fast` build on a runner with AVX-512 (the `ubuntu-24.04`
+Ice Lake / EPYC images) emits 512-bit instructions, and that runner's Callgrind (3.22,
+older than the devcontainer's 3.26) cannot decode them: the run SIGILLs under Valgrind
+and the row measures as `!`. Baseline is generic x86-64 — the same ISA gcc/rustc/go
+already default to, which is why the other native rows measure clean on the older
+Valgrind. It also makes zig reproducible across machines (the runner and devcontainer
+now read the row identically), which is the point of Ir/op.
+
+The csharp row runs the dll under `*/bin/Release/*`, `--roll-forward Major`, and
+`DOTNET_EnableAVX512F=0` `DOTNET_PreferredVectorBitWidth=256`. The load-bearing fix is
+the path anchor: a Release build leaves four `harness.dll` under the project (`bin/…`
+plus three under `obj/…`, including the `refint` reference assembly), and `find | head
+-1` returns them in *directory order*, which is not stable across filesystems. The
+devcontainer yielded `bin/` first; the runners yielded `obj/…/refint/` first — a
+metadata-only reference assembly with no `runtimeconfig.json`, so the host aborts with
+"`libhostpolicy.so` not found" (~2.5M Ir, identical at every rep count) → zero slope →
+`!`. Anchoring to `bin/` picks the one runnable app regardless of order. `Major` then
+lets that `net9.0` app run on a newer major runtime if that is all the runner has, and
+the AVX-512 knobs are the same guard as zig's baseline (512-bit RyuJIT codegen would
+SIGILL under the runner's older Callgrind). All are no-ops on the devcontainer, so
+`results.txt` (generated there) is unchanged but for the one zig row baseline moved.
+
+A failed measurement is no longer silent: the harness greps the offending Callgrind
+log for the tell-tale lines and prints them next to the `!` — which is what finally
+surfaced the `refint` dll in the run command after two wrong hypotheses (a Valgrind
+AVX-512 decode failure, then a missing runtime) had been chased on the ~2.5M-Ir
+signature alone.
+
 The same trap exists *inside* the devcontainer: `PATH` decides whether `cargo` is
 apt's or rustup's, and the two rustc versions move the Rust rows about 8%. So the
 file carries a **`## toolchain` table** — every compiler that built a row, its

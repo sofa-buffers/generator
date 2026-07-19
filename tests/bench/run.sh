@@ -149,6 +149,20 @@ $(q "print(next(r['config'] for r in d['rows'] if r['id']=='$id'))" | grep -v '^
 
     if [ -z "$enc" ] || [ -z "$dec" ]; then
         echo "  !! $id ir: measurement failed" >&2
+        # Surface WHY. The callgrind runs write their stderr to $WORK/cg.*.log, which
+        # measure otherwise swallows (2>/dev/null on the subshell) and the EXIT trap
+        # then deletes — so a failed row used to be an inscrutable `!`. A Valgrind that
+        # cannot decode an instruction (e.g. AVX-512 on an older Valgrind) prints here.
+        for lg in "$WORK"/cg.*.log; do
+            [ -s "$lg" ] || continue
+            echo "     --- $(basename "$lg") ---" >&2
+            # A launch/runtime error from the child lands mid-log (Valgrind's own
+            # summary is at the very end, which a plain tail would show instead), so
+            # grep the tell-tale lines first, then the tail as a fallback.
+            grep -iE "not found|must install|framework|roll.?forward|no such|error|exception|fatal|unhandled|not decode|unrecognised|version" "$lg" \
+                | head -n 8 | sed 's/^/     /' >&2
+            tail -n 3 "$lg" | sed 's/^/     /' >&2
+        done
         printf '%s\t!\t!\n' "$id" >> "$IRS"
         return 0
     fi
