@@ -1341,19 +1341,33 @@ every PR for reasons no PR caused. Its report (`tests/bench/lib/report.py`) lead
 with the toolchain comparison for that reason, then separates failed measurements
 from outliers from ordinary movement; it fails the job only on a failed measurement.
 
-**Two rows pin their codegen ISA below the host maximum** so that the "second
-measuring device" merely *drifts* rather than *fails*. The zig row builds
-`-Dcpu=baseline` and the csharp row runs with `DOTNET_EnableAVX512F=0`
-`DOTNET_PreferredVectorBitWidth=256` — because their toolchains (zig's native AOT
-build, .NET's RyuJIT) emit AVX-512 for the host CPU, the `ubuntu-24.04` runners have
-it, and that runner's Callgrind (3.22) is older than the devcontainer's (3.26) and
-cannot decode AVX-512: the run SIGILLs under Valgrind and the row measures as `!`
-instead of a number. gcc/rustc/go and the JVM/V8 JITs don't reach for AVX-512 here,
-so the other rows measure clean on the older Valgrind. The devcontainer host has no
-AVX-512, so these knobs are a no-op where `results.txt` is generated; they exist to
-keep the two aggressive rows decodable — and reproducible across machines, which is
-the point of Ir/op — everywhere else. A failed measurement is no longer silent: the
-harness prints the tail of the offending Callgrind log next to the `!`.
+**The `zig` and `csharp` rows carry runner-specific pins** so that the "second
+measuring device" merely *drifts* rather than *fails* — for two different reasons.
+
+The zig row builds `-Dcpu=baseline`. `b.standardTargetOptions` defaults to the host
+CPU, so an unpinned `--release=fast` build on a runner with AVX-512 (the `ubuntu-24.04`
+Ice Lake / EPYC images) emits 512-bit instructions, and that runner's Callgrind (3.22,
+older than the devcontainer's 3.26) cannot decode them: the run SIGILLs under Valgrind
+and the row measures as `!`. Baseline is generic x86-64 — the same ISA gcc/rustc/go
+already default to, which is why the other native rows measure clean on the older
+Valgrind. It also makes zig reproducible across machines (the runner and devcontainer
+now read the row identically), which is the point of Ir/op.
+
+The csharp row sets `DOTNET_ROLL_FORWARD=Major`, plus `DOTNET_EnableAVX512F=0`
+`DOTNET_PreferredVectorBitWidth=256` defensively. The harness targets `net9.0`, and a
+framework-dependent app does not cross a major runtime version by default: on a runner
+whose `dotnet` is 10.x and where the 9.0 runtime is not on the resolution path,
+`dotnet harness.dll` exits 150 ("`Microsoft.NETCore.App` version 9.0.0 not found")
+before running an op. Under Callgrind that aborted launch still writes a `summary:`
+(~2.5M Ir, identical at every rep count), so `ir_subtract` sees a zero slope and the
+row is `!`. `Major` rolls up to whatever runtime is present; where 9.0 exists (the
+devcontainer) it is a no-op. The AVX-512 knobs are the same guard as zig's baseline —
+once the app actually runs on an AVX-512 runner under the older Callgrind, 512-bit
+RyuJIT codegen would SIGILL. All of these are no-ops on the AVX-512-less devcontainer,
+so `results.txt` (generated there) is unchanged but for the one zig row baseline moved.
+
+A failed measurement is no longer silent: the harness prints the tail of the offending
+Callgrind log next to the `!`, which is how the csharp exit-150 was diagnosed.
 
 The same trap exists *inside* the devcontainer: `PATH` decides whether `cargo` is
 apt's or rustup's, and the two rustc versions move the Rust rows about 8%. So the

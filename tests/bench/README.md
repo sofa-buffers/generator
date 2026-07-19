@@ -178,18 +178,28 @@ exists partly to keep them visible.
   is a stable relative reference — right for "did my change help?" — but lower-tier
   than production. This is the one row where the measured tier differs from what
   ships; every other row measures the shipping configuration.
-* **The `zig` and `csharp` rows pin their codegen ISA to AVX2** — zig builds
-  `-Dcpu=baseline`, csharp runs with `DOTNET_EnableAVX512F=0`
-  `DOTNET_PreferredVectorBitWidth=256` (see `lang/zig.sh`, `lang/csharp.sh`). Both
-  toolchains (zig's native AOT build, .NET's RyuJIT) otherwise emit AVX-512 for the
-  host CPU. That is fine here — the devcontainer host has no AVX-512, so the knobs are
-  a no-op — but the `bench.yml` runners *do* have it, and their Callgrind (3.22) is
-  older than the devcontainer's (3.26) and cannot decode AVX-512: the run SIGILLs
-  under Valgrind and the row measures as `!`. gcc/rustc/go and the JVM/V8 JITs don't
-  reach for AVX-512, so the other rows are unaffected. Pinning also makes these two
-  rows reproducible across machines, which is the whole premise of Ir/op. When a row
-  does fail to measure, the harness now prints the tail of its Callgrind log next to
-  the `!` instead of leaving it silent.
+* **The `zig` and `csharp` rows carry runner-specific pins** (see `lang/zig.sh`,
+  `lang/csharp.sh`) — for two *different* reasons, both of which made the row measure
+  as `!` on the `bench.yml` runners while measuring clean in the devcontainer.
+  - **zig** builds `-Dcpu=baseline`. `standardTargetOptions` defaults to the host CPU,
+    so an unpinned build on a runner with AVX-512 emits 512-bit instructions the
+    runner's older Callgrind (3.22 vs the devcontainer's 3.26) cannot decode — the run
+    SIGILLs. Baseline is the generic x86-64 that gcc/rustc/go already emit (which is
+    why the other native rows are fine) and, as a bonus, makes the row byte-identical
+    across the runner and the devcontainer.
+  - **csharp** sets `DOTNET_ROLL_FORWARD=Major` (plus `DOTNET_EnableAVX512F=0`
+    `DOTNET_PreferredVectorBitWidth=256` as an AVX-512 guard like zig's). The harness
+    targets `net9.0`, and a framework-dependent app won't cross a *major* runtime
+    version by default: on a runner whose `dotnet` is 10.x with no 9.0 runtime on the
+    path, `dotnet harness.dll` exits 150 before running an op. Under Callgrind that
+    aborted launch still writes a `summary:` (~2.5M Ir, identical at every rep count),
+    so `ir_subtract` sees a zero slope and reports `!`. `Major` rolls up to the runtime
+    that is present; where 9.0 exists (the devcontainer) it is a no-op.
+
+  All of these knobs are no-ops on the AVX-512-less devcontainer, so `results.txt` is
+  unchanged but for the zig decode value baseline moved. When a row does fail to
+  measure, the harness now prints the tail of its Callgrind log next to the `!`
+  instead of leaving it silent — which is how the csharp exit-150 was diagnosed.
 
 
 ## Prereqs
