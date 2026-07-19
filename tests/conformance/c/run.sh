@@ -148,6 +148,54 @@ if echo "$OUT" | grep -q '"somestringarray":\["c","b"'; then
 fi
 echo "==> array wrapper replace OK"
 
+# Fixlen SUBTYPE mismatch (MESSAGE_SPEC S7.3, generator#174): for a fixlen field
+# the declared type maps to a wire type PLUS a subtype, so a header that carries
+# the right Fixlen wire type but the WRONG subtype is just as contradictory as a
+# wrong wire type and MUST be SKIPPED like an unknown id. somefp64 (id 9) is
+# declared fp64 and keeps its schema default 3.141592653589793.
+# Wire: 4a (id 9, fixlen) 0a (fixlen word: len 1, STRING subtype) 78 ("x")
+# Control: 4a 41 (fixlen word: len 8, FP64 subtype) + 2.5 little-endian.
+echo "==> fixlen subtype mismatch must skip (MESSAGE_SPEC S7.3, generator#174)"
+printf '\112\012\170' > "$WORK/fixsubtype.bin"
+printf '\112\101\000\000\000\000\000\000\004\100' > "$WORK/fixsubtype_control.bin"
+OUT=$("$WORK/proj/harness/harness" decode < "$WORK/fixsubtype.bin") \
+    || { echo "FAIL: mismatched fixlen subtype must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"somefp64":3.14159265358979' || { echo "FAIL: skipped fixlen field must keep its default 3.141592653589793; got: $OUT"; exit 1; }
+OUT=$("$WORK/proj/harness/harness" decode < "$WORK/fixsubtype_control.bin") \
+    || { echo "FAIL: control (correct fp64 subtype) must decode"; exit 1; }
+echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
+echo "==> fixlen subtype skip OK"
+
+# S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
+# skipped under S7.3 is not an occurrence for this clause: a correctly typed
+# earlier occurrence survives a mis-typed later one." somestringarray (id 18) is
+# opened correctly with element 0 = "a", then id 18 recurs carrying the UNSIGNED
+# wire type. The mis-typed occurrence is skipped, so the array MUST still hold
+# "a" -- the failure this guards is an EMPTY array, i.e. generated code clearing
+# the wrapper before it checks the wire type.
+# Wire: 96 01 (seq start id 18) 02 0a 61 (string id 0 "a") 07 (seq end)
+#       90 01 (id 18, UNSIGNED) 05
+# Asserted as a prefix: heap profiles render ["a"], fixed-capacity ones pad.
+echo "==> mis-typed later occurrence must not clear the array (MESSAGE_SPEC S7.4, generator#175)"
+printf '\226\001\002\012\141\007\220\001\005' > "$WORK/skipped_occ_array.bin"
+OUT=$("$WORK/proj/harness/harness" decode < "$WORK/skipped_occ_array.bin") \
+    || { echo "FAIL: mis-typed later occurrence must decode, not error"; exit 1; }
+echo "$OUT" | grep -q '"somestringarray":\["a"' || { echo "FAIL: skipped occurrence must not clear the array (element 0 == \"a\" lost); got: $OUT"; exit 1; }
+echo "==> skipped occurrence keeps array OK"
+
+# S7.3 x S7.4, struct: same rule for a struct scope. somestruct (id 20) is opened
+# correctly with nestedstring (id 1) = "x", then id 20 recurs carrying the
+# UNSIGNED wire type. That occurrence is skipped, so nestedstring MUST still
+# be "x" rather than falling back to its default "Nested".
+# Wire: a6 01 (seq start id 20) 0a 0a 78 (string id 1, len 1, "x") 07 (seq end)
+#       a0 01 (id 20, UNSIGNED) 05
+echo "==> mis-typed later occurrence must not clear the struct (MESSAGE_SPEC S7.4, generator#175)"
+printf '\246\001\012\012\170\007\240\001\005' > "$WORK/skipped_occ_struct.bin"
+OUT=$("$WORK/proj/harness/harness" decode < "$WORK/skipped_occ_struct.bin") \
+    || { echo "FAIL: mis-typed later occurrence must decode, not error"; exit 1; }
+echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
+echo "==> skipped occurrence keeps struct OK"
+
 # issue #128: a scalar/struct-field blob carries a used-length, so every length
 # 0..maxlen round-trips byte-exactly — including an all-zero blob (previously
 # dropped to empty) and a single 0x00 (previously collapsed). Blobs are skipped by
