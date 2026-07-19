@@ -121,6 +121,13 @@ func (g *gen) module(s *ir.Schema) []byte {
 		// field-less schema (enums/bitfields only) keeps the import out.
 		imports = append(imports, "WireType")
 	}
+	if schemaHasFixlenGuard(s) {
+		// The §7.3 guard on a fixlen-framed field also references FixlenSubtype
+		// (fp32/fp64/string/blob and the fp32/fp64 native arrays share one wire
+		// type, so only the subtype separates them — corelib-ts#58). A schema with
+		// no such field never names it, so keep the import out then.
+		imports = append(imports, "FixlenSubtype")
+	}
 	if use.long {
 		imports = append(imports, "Long")
 	}
@@ -208,6 +215,36 @@ func decodesAnyField(s *ir.Schema) bool {
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && len(nt.Fields) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// schemaHasFixlenGuard reports whether any decoded field's §7.3 guard references
+// FixlenSubtype — a fixlen scalar (fp32/fp64/string/blob) or a native fp32/fp64
+// array, the only kinds the wire type alone does not settle. Mirrors the
+// per-field decision in tsWireGuardCond so the import matches the emitted code.
+func schemaHasFixlenGuard(s *ir.Schema) bool {
+	has := func(fields []*ir.Field) bool {
+		for _, x := range fields {
+			if tsFixSub(x.Kind) != "" {
+				return true
+			}
+			if x.Kind == ir.KindArray && nativeArrayElem(x.Elem) && tsFixSub(x.Elem) != "" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, m := range s.Messages {
+		if has(m.Fields) {
+			return true
+		}
+	}
+	for _, key := range s.NamedOrder {
+		nt := s.Named[key]
+		if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && has(nt.Fields) {
 			return true
 		}
 	}

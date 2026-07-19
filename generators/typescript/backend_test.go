@@ -79,19 +79,21 @@ func TestTSWireTypeGuard(t *testing.T) {
 			mod = string(f.Content)
 		}
 	}
-	if !strings.Contains(mod, `import { OStream, Cursor, WireType }`) {
-		t.Errorf("message.ts missing WireType import:\n%s", mod)
+	if !strings.Contains(mod, `import { OStream, Cursor, WireType, FixlenSubtype }`) {
+		t.Errorf("message.ts missing WireType/FixlenSubtype import:\n%s", mod)
 	}
 	for _, want := range []string{
 		"case 0: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.a = Number(c.readUnsigned()); break;",
 		"case 1: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o.b = Number(c.readSigned()); break;",
-		"case 2: if (c.wire !== WireType.Fixlen) { c.skip(c.wire); break; } o.c = c.readString(); break;",
-		"case 3: if (c.wire !== WireType.Fixlen) { c.skip(c.wire); break; } o.d = c.readFp32(); break;",
+		// fp32/fp64/string/blob share WireType.Fixlen, so the guard also checks the
+		// fixlen subtype (corelib-ts#58); the fp arrays share ArrayFixlen likewise.
+		"case 2: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } o.c = c.readString(); break;",
+		"case 3: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp32) { c.skip(c.wire); break; } o.d = c.readFp32(); break;",
 		"case 4: if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; } ME.decodeInto(c, o.e); break;", // nested message, decoded into the existing member (§7.4)
 		"case 5: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.f = c.readUnsignedArray() as number[]; break;",
 		"case 6: if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } o.g = c.readSignedArray() as number[]; break;",
-		"case 7: if (c.wire !== WireType.ArrayFixlen) { c.skip(c.wire); break; } o.h = c.readFp64Array(); break;",
-		"case 8: {\n        if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; }", // composite array wrapper sequence
+		"case 7: if (c.wire !== WireType.ArrayFixlen || c.fixSub !== FixlenSubtype.Fp64) { c.skip(c.wire); break; } o.h = c.readFp64Array(); break;",
+		"case 8: {\n        if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; }", // composite array wrapper sequence (SequenceStart, no subtype)
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing wire-type guard %q\n%s", want, mod)
@@ -167,8 +169,8 @@ func TestTSMaxlenReject(t *testing.T) {
 	}
 	for _, want := range []string{
 		// (b) Scalar string + blob reject on an over-length byte check.
-		`case 0: { if (c.wire !== WireType.Fixlen) { c.skip(c.wire); break; } const _s = c.readString(); if (_utf8Len(_s) > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); o.s = _s; break; }`,
-		`case 1: { if (c.wire !== WireType.Fixlen) { c.skip(c.wire); break; } const _b = c.readBlob(); if (_b.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8"); o.b = _b; break; }`,
+		`case 0: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } const _s = c.readString(); if (_utf8Len(_s) > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); o.s = _s; break; }`,
+		`case 1: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Blob) { c.skip(c.wire); break; } const _b = c.readBlob(); if (_b.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8"); o.b = _b; break; }`,
 		// (c) A bounded wrapper-string element rejects on its element maxlen.
 		`const _s = c.readString(); if (_utf8Len(_s) > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 5"); arr[_id] = _s;`,
 		// (e) The allocation-free byte-length helper is emitted once for the bounded
@@ -180,7 +182,7 @@ func TestTSMaxlenReject(t *testing.T) {
 		}
 	}
 	// (d) An unbounded string keeps the bare read (never truncated, no guard).
-	if !strings.Contains(mod, "case 2: if (c.wire !== WireType.Fixlen) { c.skip(c.wire); break; } o.u = c.readString(); break;") {
+	if !strings.Contains(mod, "case 2: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } o.u = c.readString(); break;") {
 		t.Errorf("unbounded string must keep the bare read:\n%s", mod)
 	}
 	// (f) The per-decode TextEncoder allocation is gone from the hot path (issue #153).
@@ -192,7 +194,7 @@ func TestTSMaxlenReject(t *testing.T) {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, Cursor, WireType, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`, // over-count reject needs the error type (generator#100)
+		`import { OStream, Cursor, WireType, FixlenSubtype, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard (corelib-ts#58); SofabError: over-count reject (generator#100)
 		"export class Myfirstmessage {",
 		"marshal(os: OStream): void {",
 		"static decode(bytes: Uint8Array): Myfirstmessage {",

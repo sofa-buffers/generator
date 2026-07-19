@@ -793,10 +793,13 @@ messages:
 	}
 }
 
-// TestCppNoWireTypeGuardOnCCpp: the guard needs IStreamImpl::wire()/fixType(),
-// which only corelib-cpp exposes (corelib-cpp#43). The c-cpp wrapper has no such
-// accessor, so that path must not emit the guard — it would not compile.
-func TestCppNoWireTypeGuardOnCCpp(t *testing.T) {
+// TestCppWireTypeGuardOnCCpp: corelib-c-cpp now exposes IStreamImpl::wire() /
+// fixType() with the same sofab::Wire/sofab::Fix surface as corelib-cpp
+// (corelib-c-cpp#104), so the §7.3 guard is emitted for the c-cpp profile too —
+// the same shape as the pure-C++ path. Emitting it is also what makes the §7.4
+// interaction rule hold there: the guard's `break` precedes the array-wrapper
+// clear, so a mis-typed later occurrence cannot wipe a valid earlier array.
+func TestCppWireTypeGuardOnCCpp(t *testing.T) {
 	h, err := fixedHeader(t, `
 version: 1
 messages:
@@ -808,8 +811,13 @@ messages:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(h, "is.wire()") || strings.Contains(h, "is.fixType()") {
-		t.Errorf("c-cpp profile must not emit the wire-type guard (no accessor):\n%s", h)
+	for _, want := range []string{
+		"if (is.wire() != sofab::Wire::Unsigned) break;",
+		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) break;",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("c-cpp profile must emit the §7.3 guard %q\n%s", want, h)
+		}
 	}
 }
 

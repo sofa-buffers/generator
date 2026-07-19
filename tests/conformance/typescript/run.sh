@@ -157,13 +157,23 @@ if echo "$OUT" | grep -q '"somestringarray":\["c","b"'; then
 fi
 echo "==> array wrapper replace OK"
 
-# Fixlen SUBTYPE mismatch (MESSAGE_SPEC S7.3, generator#174) is deliberately NOT
-# covered here. Under S7.3 a fixlen field's type is its wire type PLUS its
-# subtype, so 4a 0a 78 (id 9 somefp64, Fixlen wire type but STRING subtype) must
-# be skipped and leave the default 3.141592653589793. corelib-ts's Cursor exposes
-# no fixlen-subtype accessor, so the generated guard cannot make that check at
-# all -- the vector fails on this target by construction. Do not re-add it until
-# corelib-ts#58 lands an accessor; the other eight harnesses do assert it.
+# Fixlen SUBTYPE mismatch (MESSAGE_SPEC S7.3, generator#174). Under S7.3 a fixlen
+# field's type is its wire type PLUS its subtype, so 4a 0a 78 (id 9 somefp64,
+# Fixlen wire type but STRING subtype) must be SKIPPED and leave the default
+# 3.141592653589793. corelib-ts now records the delivered subtype as Cursor.fixSub
+# (corelib-ts#58), so the generated guard checks `c.fixSub !== FixlenSubtype.Fp64`
+# and skips on a mismatch instead of throwing from the wrong-typed reader.
+# Control 4a 41 <8 bytes 2.5> carries the correct fp64 subtype and must decode to 2.5.
+echo "==> fixlen subtype mismatch must skip (MESSAGE_SPEC S7.3, generator#174)"
+printf '\112\012\170' > "$WORK/subtype_mismatch.bin"
+printf '\112\101\000\000\000\000\000\000\004\100' > "$WORK/subtype_control.bin"
+OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/subtype_mismatch.bin" ) \
+    || { echo "FAIL: fixlen subtype mismatch must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"somefp64":3.14159265358979' || { echo "FAIL: skipped fixlen field must keep its default; got: $OUT"; exit 1; }
+OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/subtype_control.bin" ) \
+    || { echo "FAIL: control (correct fp64 subtype) must decode"; exit 1; }
+echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
+echo "==> fixlen subtype skip OK"
 
 # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
 # skipped under S7.3 is not an occurrence for this clause: a correctly typed
