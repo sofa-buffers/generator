@@ -65,8 +65,8 @@ row's reps** — which tightens its raw jitter — rather than widening the band
 
 ## Reading a diff
 
-The header records the corelib SHAs and toolchain versions the numbers came from.
-Read it first:
+The header records the corelib SHAs and the `## toolchain` table records every
+compiler that built a row. Read both first:
 
 | header | numbers | conclusion |
 | - | - | - |
@@ -196,7 +196,32 @@ cannot cross-compile" rather than a missing package.
 The devcontainer already carries all of it. Watch `PATH`: with `/root/.cargo/bin`
 missing, `cargo` resolves to apt's instead of rustup's, and the two rustc versions
 move the Rust rows ~8%. The `thumbv6m` footprint fails loudly in that case; the two
-Ir rows do **not** — they just come out wrong.
+Ir rows do **not** — they just come out wrong. The `## toolchain` table catches it
+after the fact: the recorded `rustc` version will not be the one you expected.
+
+## The toolchain table
+
+`results.txt` carries a `## toolchain` section — every compiler that built a row,
+its version, and which rows it built:
+
+```
+tool                      version       rows
+gcc                       15.2.0        c
+go                        1.24.4        go
+rustc                     1.97.1        rust-rs,rust-rs-no-std
+valgrind                  3.26.0        all
+```
+
+Ir/op is the instruction count of a *particular binary*, so each of these moves
+numbers on an unchanged generator and an unchanged corelib. Recording only the host
+`gcc` and `rustc` — as this file used to — left five languages able to shift a row
+with nothing to show for it, which is precisely how a Go 1.24 → 1.26 difference once
+read as a doubled `go` encode row.
+
+The row mapping comes from `rows.json`, so it cannot drift from the rows actually in
+the file, and `all` is shorthand for "built every row". A tool that is missing is
+recorded as `(not found)` rather than dropped: its absence is itself a reason a
+number could move.
 
 ## One measuring device
 
@@ -231,6 +256,10 @@ Its report (`lib/report.py`) is built around that hazard:
   committed value if it reached the file.
 * **Outliers (≥5%) are separated from ordinary movement (>0.3%)**, so a doubled row
   cannot hide in a list of wobbles.
+
+It reads the toolchain comparison out of the `## toolchain` table on both sides, and
+filters it to the tools that built the row being judged — a `go` artifact reporting
+that the Zig compiler drifted is true and useless.
 
 ## The two Ir/op methods
 
