@@ -3,9 +3,13 @@
 Detects performance and code-size changes **caused by generator changes**.
 
 ```sh
-tests/bench/run.sh                    # regenerate results.txt
+tests/bench/run.sh                    # regenerate results.txt (in the devcontainer)
 git diff tests/bench/results.txt      # <- the point
 ```
+
+**Run it in the devcontainer, by hand.** There is no CI job for this, on purpose —
+see [One measuring device](#one-measuring-device). Same as the benchmark arena:
+somebody runs it and reads the diff.
 
 `results.txt` is committed. Change the generator, re-run, and the cost or saving
 shows up in the PR diff next to the code that caused it. It is a **diff tool**, not
@@ -188,6 +192,31 @@ rustup component add llvm-tools-preview      # llvm-size, rust-lld
 
 `libstdc++-arm-none-eabi-newlib` is easy to miss and its absence looks like "C++
 cannot cross-compile" rather than a missing package.
+
+The devcontainer already carries all of it. Watch `PATH`: with `/root/.cargo/bin`
+missing, `cargo` resolves to apt's instead of rustup's, and the two rustc versions
+move the Rust rows ~8%. The `thumbv6m` footprint fails loudly in that case; the two
+Ir rows do **not** — they just come out wrong.
+
+## One measuring device
+
+There is no CI job for this bench, and adding one would break it.
+
+Ir/op is the instruction count of a *particular binary*, so it depends on the
+compiler that produced it. A CI runner pins its own toolchain versions, which makes
+it a second measuring device — and two devices disagree about code that did not
+change. Measured here: a CI run on `ubuntu-24.04` with Go 1.26 read the `go` encode
+row at **56,237** Ir/op; the devcontainer with Go 1.24 read the same commit at
+**24,698**. Neither is wrong. They are different scales.
+
+A bench that reports a large diff on every PR, most of it environment, is one
+reviewers learn to skip — worse than no bench, because it costs CI minutes and
+looks like coverage.
+
+So: one environment owns `results.txt`, and it is the devcontainer. Regenerate by
+hand and read the diff, exactly as the benchmark arena is driven. If a diff ever
+needs settling, re-run both sides *here* rather than comparing against a number
+produced somewhere else.
 
 ## The two Ir/op methods
 
