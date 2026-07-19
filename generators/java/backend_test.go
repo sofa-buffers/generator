@@ -266,6 +266,54 @@ func TestJavaMaxlenReject(t *testing.T) {
 	}
 }
 
+// TestJavaArrayAtScalarIdSkipped: MESSAGE_SPEC §7.3 — a field whose header wire
+// type is not the one its declared type maps to is SKIPPED like an unknown id.
+// corelib-java delivers integer-array elements one-by-one through the same
+// unsigned()/signed() callbacks a lone scalar uses, so the id dispatch alone
+// cannot tell an array element from a scalar; arrayBegin must arm a discard
+// counter with the announced count and those two callbacks must drop exactly that
+// many (generator#183). Ids that genuinely declare an integer-element native
+// array disarm it; fp arrays deliver through fp32()/fp64() and stay disarmed.
+func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      u:  { id: 0, type: u8, default: 7 }\n" +
+		"      i:  { id: 1, type: i8, default: 10 }\n" +
+		"      ua: { id: 2, type: array, items: { type: u32, count: 4 } }\n" +
+		"      ia: { id: 3, type: array, items: { type: i32, count: 4 } }\n" +
+		"      fa: { id: 4, type: array, items: { type: fp32, count: 3 } }\n"
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+	for _, want := range []string{
+		// The counter itself.
+		"private int askip = 0;",
+		// Armed at the top of arrayBegin, integer array kinds only.
+		"        askip = 0;\n        if (kind == ArrayKind.UNSIGNED || kind == ArrayKind.SIGNED) {\n            askip = count;\n            switch (cur) {",
+		// The two declared integer arrays (ids 2, 3) disarm it; the fp32 array
+		// (id 4) does not appear -- it cannot reach a scalar arm.
+		"                case 2: case 3: askip = 0; break;",
+		// Discarded at the top of both integer callbacks.
+		"    public void unsigned(int id, long value) {\n        // S7.3 (generator#183)",
+		"    public void signed(int id, long value) {\n        // S7.3 (generator#183)",
+		"        if (askip > 0) { askip--; return; }",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing §7.3 array-skip guard %q", want)
+		}
+	}
+	if strings.Contains(m, "case 2: case 3: case 4: askip = 0") {
+		t.Error("an fp32 array must not disarm the §7.3 counter (its elements go to fp32())")
+	}
+	// The guard belongs to unsigned()/signed() only: the float and payload
+	// callbacks share emitScalarCb / the same file and must stay untouched.
+	for _, cb := range []string{
+		"    public void fp32(int id, float value) {\n        switch (cur) {",
+		"    public void fp64(int id, double value) {\n        switch (cur) {",
+	} {
+		if !strings.Contains(m, cb) {
+			t.Errorf("the §7.3 guard must not be emitted into %q", strings.SplitN(cb, "(", 2)[0])
+		}
+	}
+}
+
 // A `count: N` array is FIXED-LENGTH (MESSAGE_SPEC §3, finding F-0010): the
 // encoder elides the trailing run of default elements and the decoder rebuilds
 // it from the schema count, so the decoded value always has exactly N elements.

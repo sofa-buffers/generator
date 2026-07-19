@@ -107,6 +107,35 @@ OUT=$($H decode myfirstmessage < "$WORK/wiremismatch_control.bin") \
 echo "$OUT" | grep -q '"someu8":9' || { echo "FAIL: control must decode to 9; got: $OUT"; exit 1; }
 echo "==> wire-type skip OK"
 
+# Contradictory ARRAY wire type at a SCALAR id (MESSAGE_SPEC S7.3, generator#183):
+# the integer-array wire types are the residual case of the rule above -- the
+# corelib delivers array elements one-by-one through the very unsigned()/signed()
+# callbacks a lone scalar uses, so a generated visitor that dispatches on the id
+# alone would store the elements instead of skipping them. someu8 (id 0) is
+# declared u8 and MUST keep its schema default 7; somei8 (id 4) is declared i8 and
+# MUST keep its default 10.
+# Wire: 03 = id 0 with wire type ARRAY_UNSIGNED (3), count 01, element 05.
+#       24 = id 4 with wire type ARRAY_SIGNED (4), count 01, element 06 (zig-zag 3).
+# Control: 21 06 is id 4 with the correct SIGNED wire type and must decode to 3.
+echo "==> array wire type at a scalar id must skip (MESSAGE_SPEC S7.3, generator#183)"
+printf '\003\001\005' > "$WORK/arr_at_uscalar.bin"
+printf '\044\001\006' > "$WORK/arr_at_iscalar.bin"
+printf '\041\006' > "$WORK/arr_at_scalar_control.bin"
+OUT=$($H decode myfirstmessage < "$WORK/arr_at_uscalar.bin") \
+    || { echo "FAIL: unsigned array at a u8 scalar id must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: skipped array element must not land in someu8 (default 7); got: $OUT"; exit 1; }
+OUT=$($H decode myfirstmessage < "$WORK/arr_at_iscalar.bin") \
+    || { echo "FAIL: signed array at an i8 scalar id must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"somei8":10' || { echo "FAIL: skipped array element must not land in somei8 (default 10); got: $OUT"; exit 1; }
+OUT=$($H decode myfirstmessage < "$WORK/arr_at_scalar_control.bin") \
+    || { echo "FAIL: control (correct signed wire type) must decode"; exit 1; }
+echo "$OUT" | grep -q '"somei8":3' || { echo "FAIL: control must decode to 3; got: $OUT"; exit 1; }
+# A genuinely declared array must be unaffected: someuintarray (id 15, count 4).
+OUT=$($H decode myfirstmessage < "$WORK/control.bin") \
+    || { echo "FAIL: declared array control must decode"; exit 1; }
+echo "$OUT" | grep -q '"someuintarray":\[1,2,3,4\]' || { echo "FAIL: declared array must still decode to [1,2,3,4]; got: $OUT"; exit 1; }
+echo "==> array-at-scalar skip OK"
+
 # Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins per
 # field id. A re-opened sequence CONTINUES its scope, so a struct merges and the
 # children an earlier opening set whose ids do not recur are retained. somestruct

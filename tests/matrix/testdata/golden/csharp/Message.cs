@@ -56,6 +56,7 @@ internal sealed class ScalarsVisitor : IVisitor {
     private readonly Scalars m;
     private int cur = 0;
     private int ai = 0;                // index into the primitive array currently being filled
+    private int askip = 0;             // elements left to discard from a wire-type-contradictory array
     private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)
     private int sp = 0;
     private List<byte> acc;            // lazy: only split string/blob payloads need it
@@ -63,6 +64,7 @@ internal sealed class ScalarsVisitor : IVisitor {
     private const int Root = 0;
 
     public void Unsigned(int id, ulong value) {
+        if (askip > 0) { askip--; return; }   // discard a contradictory array at a scalar id
         switch ((cur, id)) {
             case (Root, 0): m.u8min = (byte)value; break;
             case (Root, 1): m.u8max = (byte)value; break;
@@ -71,6 +73,7 @@ internal sealed class ScalarsVisitor : IVisitor {
         }
     }
     public void Signed(int id, long value) {
+        if (askip > 0) { askip--; return; }   // discard a contradictory array at a scalar id
         switch ((cur, id)) {
             case (Root, 3): m.i8min = (sbyte)value; break;
             case (Root, 4): m.i64min = (long)value; break;
@@ -122,6 +125,12 @@ internal sealed class ScalarsVisitor : IVisitor {
     }
     public void ArrayBegin(int id, ArrayKind kind, int count) {
         ai = 0;
+        // An integer array header at an id that does not declare an integer
+        // array is a wire-type contradiction: discard its `count` elements,
+        // exactly as an unknown id would be skipped.
+        askip = (kind == ArrayKind.Unsigned || kind == ArrayKind.Signed) ? (cur, id) switch {
+            _ => count,
+        } : 0;
         switch ((cur, id)) {
         }
     }

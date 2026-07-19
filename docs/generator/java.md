@@ -48,3 +48,21 @@ a REPORTing `CharsetDecoder` (`onMalformedInput`/`onUnmappableCharacter` =
 `REPORT`); a `CharacterCodingException` becomes `SofabException(INVALID_MSG)` — the
 same channel as the over-count guards. The check runs once the full `total` bytes
 are present. Encode-side strictness is corelib-side (`OStream.writeString`).
+
+## §7.3: an integer array at a scalar id (issue #183)
+
+MESSAGE_SPEC **§7.3** skips a field whose header wire type contradicts its
+declared type. This backend's corelib settles almost every case *structurally* —
+a mismatched header lands in a differently-typed visitor callback with no case for
+that id — but not one: it streams an integer array's elements through the **same**
+`unsigned()/signed()` callbacks a lone scalar uses, so an integer array header at a
+scalar-declared id of the same signedness would be stored element by element.
+
+The generated visitor therefore carries a skip counter. `arrayBegin` arms
+`askip = count` when the announced kind is the unsigned or signed integer kind
+and the `(scope, id)` pair is **not** a declared integer-element native array;
+the two scalar callbacks then discard while armed. It self-terminates on the
+announced count (no array-end callback needed), survives a chunk boundary (the
+counter lives in the visitor), leaves legitimate arrays untouched, and still
+decodes a real scalar arriving at that id after the array. The fp arrays are never
+armed — their elements go to the float callbacks and cannot reach a scalar arm.

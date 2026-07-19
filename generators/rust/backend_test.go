@@ -222,11 +222,11 @@ messages:
 		"lim: bool,",
 		// Unbounded array: count checked in array_begin before any elements land,
 		// and the element store is dropped once the flag is set.
-		"(_Loc::Root, 1) => { if _count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.arr.clear() },",
+		"(_Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.arr.clear() },",
 		"(_Loc::Root, 1) => { if !self.lim { self.m.arr.push(value as u64); } },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
-		"(_Loc::Root_mat, _) => { if _count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.mat.push(Vec::new()) },",
+		"(_Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.mat.push(Vec::new()) },",
 		"(_Loc::Root_mat, _) => { if !self.lim { self.m.mat.last_mut().unwrap().push(value as u32); } },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
@@ -249,7 +249,7 @@ messages:
 	}
 	// The BOUNDED array (barr, id 2, fixed [i32; 3]) must NOT get a limit guard:
 	// its schema count governs it (generator#100 over-count guard).
-	if strings.Contains(m, "(_Loc::Root, 2) => { if _count > MAX_DYN_ARRAY_COUNT") {
+	if strings.Contains(m, "(_Loc::Root, 2) => { if count > MAX_DYN_ARRAY_COUNT") {
 		t.Error("bounded array barr must not get a limit guard")
 	}
 
@@ -665,6 +665,85 @@ messages:
 			if strings.Contains(m, bad) {
 				t.Errorf("message.rs (%v) must not emit a redundant reset %q", cfg, bad)
 			}
+		}
+	}
+}
+
+// TestRustArrayAtScalarIdSkips: an integer ARRAY header delivered to a
+// SCALAR-declared field id is a wire-type contradiction and must be skipped like
+// an unknown id (MESSAGE_SPEC §7.3, issue #183). corelib-rs streams array
+// elements through the very unsigned()/signed() callbacks a lone scalar uses, so
+// the id dispatch alone cannot tell them apart; array_begin arms `askip` with the
+// announced count and the scalar callbacks discard exactly that many. A
+// legitimately declared integer array disarms it, an fp array never arms it (its
+// elements go to fp32/fp64), and a schema with no integer array at all still
+// emits the guard so a stray array header is skipped.
+func TestRustArrayAtScalarIdSkips(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      u:  { id: 0, type: u8 }
+      i:  { id: 1, type: i32 }
+      ua: { id: 2, type: array, items: { type: u32, count: 4 } }
+      ia: { id: 3, type: array, items: { type: i32, count: 4 } }
+      fa: { id: 4, type: array, items: { type: fp32, count: 4 } }
+`
+	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std", "allow_dynamic": true}} {
+		m := moduleFromYAML(t, src, cfg)
+		for _, want := range []string{
+			"askip: usize,",  // the discard counter
+			"if self.askip > 0 { self.askip -= 1; return; }", // consumed by unsigned() and signed()
+			"self.askip = match kind {",
+			"ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {",
+			"(_Loc::Root, 2) => 0,", // declared u32 array: elements store normally
+			"(_Loc::Root, 3) => 0,", // declared i32 array: likewise
+			"_ => count,",           // every other id (scalar or unknown) discards
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing §7.3 array-at-scalar guard %q:\n%s", cfg, want, m)
+			}
+		}
+		// The fp array is delivered via fp32/fp64, never a scalar callback, so it
+		// must NOT be listed as a disarming arm (arming it would be dead weight).
+		if strings.Contains(m, "(_Loc::Root, 4) => 0,") {
+			t.Errorf("message.rs (%v) must not disarm the §7.3 guard for an fp array", cfg)
+		}
+		// Both scalar callbacks carry the guard, not just one.
+		if n := strings.Count(m, "if self.askip > 0 { self.askip -= 1; return; }"); n != 2 {
+			t.Errorf("message.rs (%v): want the §7.3 guard in both unsigned() and signed(), got %d", cfg, n)
+		}
+	}
+
+	// A schema with no native array at all still needs the guard on the std
+	// profile: corelib-rs compiles every wire type in, so an array header can
+	// still arrive at a scalar id. array_begin is emitted purely to arm it.
+	scalarOnly := moduleFromYAML(t, `
+version: 1
+messages:
+  m: { payload: { u: { id: 0, type: u8 } } }
+`, map[string]any{})
+	for _, want := range []string{
+		"fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {",
+		"self.askip = match kind {",
+	} {
+		if !strings.Contains(scalarOnly, want) {
+			t.Errorf("scalar-only message.rs missing %q:\n%s", want, scalarOnly)
+		}
+	}
+
+	// no_std without the `array` Cargo feature: that corelib cannot decode an
+	// array wire type at all, so no element can reach a scalar callback and the
+	// guard (which would reference the feature-gated ArrayKind) must be absent.
+	nostdScalar := moduleFromYAML(t, `
+version: 1
+messages:
+  m: { payload: { u: { id: 0, type: u8 } } }
+`, map[string]any{"corelib": "rs-no-std"})
+	for _, bad := range []string{"askip", "ArrayKind", "array_begin"} {
+		if strings.Contains(nostdScalar, bad) {
+			t.Errorf("no_std scalar-only message.rs must not reference %q (the `array` feature is off):\n%s", bad, nostdScalar)
 		}
 	}
 }

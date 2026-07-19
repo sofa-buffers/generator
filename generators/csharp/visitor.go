@@ -217,6 +217,51 @@ func (g *gen) emitMaxlenGuard(f *cfile, fs []frame, kind ir.Kind, what string) {
 	f.line("        }")
 }
 
+// emitArraySkipGuard prepends the S7.3 discard clause to Unsigned()/Signed()
+// (generator#183). corelib-cs delivers an integer array element-by-element
+// through the very callback a lone scalar uses, so a field id declared as a
+// SCALAR that receives an integer ARRAY header would otherwise store the
+// elements — the one wire-type contradiction the (cur, id) dispatch cannot
+// detect on its own. ArrayBegin arms askip with the announced element count;
+// here they are discarded one by one, which self-terminates without an
+// array-end callback and works across feed chunk boundaries (askip lives on
+// the visitor).
+func (g *gen) emitArraySkipGuard(f *cfile) {
+	f.line("        if (askip > 0) { askip--; return; }   // discard a contradictory array at a scalar id")
+}
+
+// emitArraySkipArm arms the S7.3 discard counter in ArrayBegin
+// (generator#183). Only integer arrays are armed: their elements land in
+// Unsigned()/Signed(), the callbacks a scalar shares. Every (scope, id) that
+// genuinely declares an integer-element native array — plus every nested
+// native-inner-array scope, whose rows arrive as ArrayBegin(index) — disarms
+// it, so a legitimate array stores normally; everything else (a
+// scalar-declared id, an unknown id, a wrapper-sequence id) discards exactly
+// `count` elements, after which a real scalar at the same id still decodes.
+// Arrays of any other kind (fp) deliver through Fp32/Fp64 and cannot reach a
+// scalar arm, so they are left disarmed.
+func (g *gen) emitArraySkipArm(f *cfile, fs []frame) {
+	f.line("        // An integer array header at an id that does not declare an integer")
+	f.line("        // array is a wire-type contradiction: discard its `count` elements,")
+	f.line("        // exactly as an unknown id would be skipped.")
+	f.line("        askip = (kind == ArrayKind.Unsigned || kind == ArrayKind.Signed) ? (cur, id) switch {")
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == ir.KindArray && intArrayElem(fr.items.Elem) {
+				f.line("            (%s, _) => 0,", fr.loc)
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindArray && intArrayElem(fld.Elem) {
+				f.line("            (%s, %d) => 0,", fr.loc, fld.ID)
+			}
+		}
+	}
+	f.line("            _ => count,")
+	f.line("        } : 0;")
+}
+
 func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	dynPrim := hasDynPrimArray(fs)
@@ -232,6 +277,13 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("    private readonly %s m;", name)
 	f.line("    private int cur = 0;")
 	f.line("    private int ai = 0;                // index into the primitive array currently being filled")
+	// S7.3 array-vs-scalar skip counter (generator#183): an integer array whose id
+	// is declared as a SCALAR is a wire-type contradiction and must be skipped like
+	// an unknown id. corelib-cs delivers array elements through the same
+	// Unsigned()/Signed() callbacks a lone scalar uses, so the (cur, id) dispatch
+	// alone cannot tell them apart; ArrayBegin arms this with the announced element
+	// count and the callbacks discard exactly that many.
+	f.line("    private int askip = 0;             // elements left to discard from a wire-type-contradictory array")
 	if dynPrim {
 		// The wire-supplied element count of a count-less array is untrusted:
 		// never allocate `new T[count]` up front (an out-of-memory DoS, cf.
@@ -270,6 +322,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// Unsigned: u*/bitfield scalars, bool, unsigned array elements (numeric/
 	// boolean/bitfield), and native-nested unsigned inner rows.
 	f.line("    public void Unsigned(int id, ulong value) {")
+	g.emitArraySkipGuard(f)
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {
@@ -299,6 +352,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// Signed: i*/enum scalars, signed array elements (numeric/enum), and
 	// native-nested signed inner rows.
 	f.line("    public void Signed(int id, long value) {")
+	g.emitArraySkipGuard(f)
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {
@@ -430,6 +484,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	if dynPrim {
 		f.line("        acap = count;")
 	}
+	g.emitArraySkipArm(f, fs)
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {

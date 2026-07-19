@@ -56,12 +56,16 @@ class ScalarsVisitor implements Visitor {
     private final Scalars m;
     private int cur = 0;
     private int ai = 0;                 // index into the primitive array currently being filled
+    private int askip = 0;              // elements left to discard from a wire-type-contradictory array (S7.3)
     private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)
     private int sp = 0;
     private java.io.ByteArrayOutputStream acc; // lazy: only split string/blob payloads need it
     ScalarsVisitor(Scalars msg) { m = msg; }
 
     public void unsigned(int id, long value) {
+        // S7.3 (generator#183): drop an element of an integer array whose id
+        // does not declare one -- armed by arrayBegin, self-terminating on count.
+        if (askip > 0) { askip--; return; }
         switch (cur) {
         case 0: switch (id) {
             case 0: m.u8min = value; break;
@@ -72,6 +76,9 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void signed(int id, long value) {
+        // S7.3 (generator#183): drop an element of an integer array whose id
+        // does not declare one -- armed by arrayBegin, self-terminating on count.
+        if (askip > 0) { askip--; return; }
         switch (cur) {
         case 0: switch (id) {
             case 3: m.i8min = value; break;
@@ -144,6 +151,16 @@ class ScalarsVisitor implements Visitor {
     }
     public void arrayBegin(int id, ArrayKind kind, int count) {
         ai = 0;
+        // MESSAGE_SPEC S7.3 (generator#183): an integer array delivered at an id
+        // that does not declare one is a wire-type contradiction -- arm a discard
+        // counter so unsigned()/signed() drop exactly `count` elements. Every id
+        // that really declares an integer-element array disarms it below.
+        askip = 0;
+        if (kind == ArrayKind.UNSIGNED || kind == ArrayKind.SIGNED) {
+            askip = count;
+            switch (cur) {
+            }
+        }
         switch (cur) {
         }
     }

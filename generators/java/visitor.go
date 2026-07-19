@@ -3,6 +3,7 @@ package java
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -294,6 +295,67 @@ func (g *gen) emitMaxlenGuard(f *jfile, fs []frame, kind ir.Kind, noun string) {
 	f.line("        }")
 }
 
+// emitArraySkipArm arms the §7.3 discard counter at the top of arrayBegin
+// (generator#183). Only INTEGER arrays are armed: their elements land in
+// unsigned()/signed(), the very callbacks a lone scalar shares, so an array
+// header at an id whose declared type is a scalar would otherwise be decoded
+// instead of skipped — the one wire-type contradiction the id dispatch cannot
+// detect on its own (MESSAGE_SPEC §7.3: skip it like an unknown id). Every
+// (scope, id) that genuinely declares an integer-element native array disarms
+// the counter, so a legitimate array stores normally; everything else — a
+// scalar-declared id, an unknown id — discards exactly `count` elements, after
+// which a real scalar at the same id still decodes. Fixlen (fp32/fp64) arrays
+// deliver through fp32()/fp64() and can never reach a scalar arm, so ArrayKind
+// .FIXLEN is left disarmed. The counter self-terminates on `count`, so no
+// array-end callback is needed, and it lives in the visitor, so it survives a
+// feed chunk boundary.
+func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
+	f.line("        // MESSAGE_SPEC S7.3 (generator#183): an integer array delivered at an id")
+	f.line("        // that does not declare one is a wire-type contradiction -- arm a discard")
+	f.line("        // counter so unsigned()/signed() drop exactly `count` elements. Every id")
+	f.line("        // that really declares an integer-element array disarms it below.")
+	f.line("        askip = 0;")
+	f.line("        if (kind == ArrayKind.UNSIGNED || kind == ArrayKind.SIGNED) {")
+	f.line("            askip = count;")
+	f.line("            switch (cur) {")
+	for _, fr := range fs {
+		switch fr.kind {
+		case fkNativeMat:
+			// A nested-native row: elements arrive without an id switch, so the
+			// whole frame disarms (integer inner elements only).
+			if fr.innerElem != ir.KindFP32 && fr.innerElem != ir.KindFP64 {
+				f.line("            case %d: askip = 0; break;", fr.idx)
+			}
+		case fkNormal:
+			var ids []string
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) &&
+					fld.Elem != ir.KindFP32 && fld.Elem != ir.KindFP64 {
+					ids = append(ids, fmt.Sprintf("case %d:", fld.ID))
+				}
+			}
+			if len(ids) > 0 {
+				f.line("            case %d: switch (id) {", fr.idx)
+				f.line("                %s askip = 0; break;", strings.Join(ids, " "))
+				f.line("            } break;")
+			}
+		}
+	}
+	f.line("            }")
+	f.line("        }")
+}
+
+// emitArraySkipGuard prepends the §7.3 discard clause to unsigned()/signed()
+// (generator#183): while arrayBegin has an integer array armed, each delivered
+// element is dropped rather than routed by id. Emitted only for those two
+// callbacks — fp32()/fp64() carry fixlen array elements, which never share a
+// dispatch arm with an integer scalar, and string()/blob() are unaffected.
+func (g *gen) emitArraySkipGuard(f *jfile) {
+	f.line("        // S7.3 (generator#183): drop an element of an integer array whose id")
+	f.line("        // does not declare one -- armed by arrayBegin, self-terminating on count.")
+	f.line("        if (askip > 0) { askip--; return; }")
+}
+
 func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	primBases := primArrayBasesUsed(fs) // "long"/"float"/"double" element bases needing lazy growth
@@ -304,6 +366,13 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("    private final %s m;", name)
 	f.line("    private int cur = 0;")
 	f.line("    private int ai = 0;                 // index into the primitive array currently being filled")
+	// §7.3 array-vs-scalar skip counter (generator#183): an integer array whose id
+	// is declared as a SCALAR is a wire-type contradiction and must be skipped like
+	// an unknown id. corelib-java delivers array elements one-by-one through the
+	// same unsigned()/signed() callbacks a lone scalar uses, so the id dispatch
+	// alone cannot tell them apart; arrayBegin arms this with the announced element
+	// count and the two callbacks discard exactly that many.
+	f.line("    private int askip = 0;              // elements left to discard from a wire-type-contradictory array (S7.3)")
 	if hasPrim {
 		// The wire-supplied element count is UNTRUSTED: a malformed message can
 		// claim ~2^31 elements, so we never allocate `new T[count]` up front (that
@@ -523,6 +592,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	if hasPrim {
 		f.line("        acap = count;")
 	}
+	g.emitArraySkipArm(f, fs)
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkNativeMat {
@@ -661,6 +731,9 @@ func primArrayBasesUsed(fs []frame) []string {
 // decoded value to the current row (no id switch: rows arrive index-ordered).
 func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*ir.Field) (string, bool)) {
 	f.line("    public void %s(int id, %s value) {", cb, vtype)
+	if cb == "unsigned" || cb == "signed" {
+		g.emitArraySkipGuard(f)
+	}
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkNativeMat {

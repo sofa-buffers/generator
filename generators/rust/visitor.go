@@ -224,9 +224,68 @@ func visitorUseOf(fs []frame) visitorUse {
 	return u
 }
 
+// emitArraySkipGuard prepends the §7.3 discard clause to unsigned()/signed()
+// (generator#183). corelib-rs delivers an integer array element-by-element
+// through the very callback a lone scalar uses, so a field id declared as a
+// SCALAR that receives an integer ARRAY header would otherwise store the
+// elements — the one wire-type contradiction the id dispatch cannot detect on
+// its own. array_begin arms askip with the announced element count; here they
+// are discarded one by one, which self-terminates without an array-end callback
+// and works across feed chunk boundaries (askip lives in the visitor).
+func (g *gen) emitArraySkipGuard(f *rfile, arrSkip bool) {
+	if !arrSkip {
+		return
+	}
+	f.line("        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id")
+}
+
+// emitArraySkipArm arms the §7.3 discard counter in array_begin
+// (generator#183). Only integer arrays are armed: their elements land in
+// unsigned()/signed(), the callbacks a scalar shares. Every (scope, id) that
+// genuinely declares an integer-element native array disarms it, so a legitimate
+// array stores normally; everything else — a scalar-declared id, an unknown id —
+// discards exactly `count` elements, after which a real scalar at the same id
+// still decodes. Arrays of any other kind (fp) deliver through fp32/fp64 and
+// cannot reach a scalar arm, so they are left disarmed.
+func (g *gen) emitArraySkipArm(f *rfile, fs []frame, arrSkip bool) {
+	if !arrSkip {
+		return
+	}
+	f.line("        self.askip = match kind {")
+	f.line("            ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {")
+	for _, fr := range fs {
+		switch fr.kind {
+		case fkStruct:
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) && fld.Elem != ir.KindFP32 && fld.Elem != ir.KindFP64 {
+					f.line("                (_Loc::%s, %d) => 0,", fr.loc, fld.ID)
+				}
+			}
+		case fkNestedNative:
+			if fr.elemKind != ir.KindFP32 && fr.elemKind != ir.KindFP64 {
+				f.line("                (_Loc::%s, _) => 0,", fr.loc)
+			}
+		}
+	}
+	f.line("                _ => count,")
+	f.line("            },")
+	f.line("            _ => 0,")
+	f.line("        };")
+}
+
 func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	use := visitorUseOf(fs)
+
+	// §7.3 array-vs-scalar skip (generator#183). Emitting it needs an array_begin
+	// override, which the no_std profile can only have when the `array` Cargo
+	// feature is on — and when it is off that corelib cannot decode an array wire
+	// type at all, so no element can reach a scalar callback. corelib-rs (std)
+	// compiles every wire type in unconditionally, so it always needs the guard.
+	arrSkip := !g.noStd || g.hasCap("array")
+	// array_begin is emitted for its own array-target work, and additionally
+	// whenever the §7.3 guard needs a place to arm itself.
+	emitArrayBegin := use.scalarArray || arrSkip
 
 	// no_std string/blob accumulation buffer: reconstructs a payload split across
 	// feed chunks (generator#81), matching the std profile's `acc`. Sized to the
@@ -251,7 +310,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// ArrayKind is gated behind the no-std `array` feature; import it only when an
 	// array_begin override is emitted (i.e. the message has a native array).
 	arrayKind := ""
-	if use.scalarArray {
+	if emitArrayBegin {
 		arrayKind = ", ArrayKind"
 	}
 	f.line("    use sofab::{IStream, Visitor, Id, Unsigned, Signed%s};", arrayKind)
@@ -268,12 +327,16 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if g.limits.any() {
 		limInit = " lim: false,"
 	}
-	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false,%s ai: 0 };", limInit)
+	askipInit := ""
+	if arrSkip {
+		askipInit = ", askip: 0"
+	}
+	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false,%s ai: 0%s };", limInit, askipInit)
 	if g.noStd {
 		if needAcc {
-			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, err: false, inv: false, ai: 0 };", accNew)
+			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, err: false, inv: false, ai: 0%s };", accNew, askipInit)
 		} else {
-			vInit = "let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, err: false, inv: false, ai: 0 };"
+			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, err: false, inv: false, ai: 0%s };", askipInit)
 		}
 	}
 	// Infallible, best-effort decode: kept for back-compat. It discards feed's
@@ -365,6 +428,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		f.line("    lim: bool,")
 	}
 	f.line("    ai: usize, // index into the fixed native array currently being filled")
+	// §7.3 array-vs-scalar skip counter (generator#183): an integer array whose id
+	// is declared as a SCALAR is a wire-type contradiction and must be skipped like
+	// an unknown id. corelib-rs delivers array elements through the same
+	// unsigned()/signed() callbacks a lone scalar uses, so the id dispatch alone
+	// cannot tell them apart; array_begin arms this with the announced element
+	// count and the callbacks discard exactly that many.
+	if arrSkip {
+		f.line("    askip: usize, // elements left to discard from a S7.3-contradictory array")
+	}
 	f.line("}")
 	f.blank()
 
@@ -381,6 +453,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 
 	// unsigned: u*/bitfield scalars, bool, and unsigned/bool/bitfield array elements
 	f.line("    fn unsigned(&mut self, id: Id, value: Unsigned) {")
+	g.emitArraySkipGuard(f, arrSkip)
 	f.line("        match (self.cur, id) {")
 	for _, fr := range fs {
 		switch fr.kind {
@@ -424,6 +497,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 
 	// signed: i*/enum scalars + signed/enum array elements
 	f.line("    fn signed(&mut self, id: Id, value: Signed) {")
+	g.emitArraySkipGuard(f, arrSkip)
 	f.line("        match (self.cur, id) {")
 	for _, fr := range fs {
 		switch fr.kind {
@@ -595,15 +669,16 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		}
 	}
 
-	if use.scalarArray {
+	if emitArrayBegin {
 		// array_begin clears a native-array target (scalar array field) or starts a
 		// fresh inner Vec (nested native array).
 		// Reset the fixed-array fill index for every array. Fixed `[T; N]` fields are
 		// pre-allocated in the struct default, so they need no per-begin action; a
 		// dynamic native array clears its Vec; a nested-native scope pushes a fresh
 		// inner Vec.
-		f.line("    fn array_begin(&mut self, id: Id, _kind: ArrayKind, _count: usize) {")
+		f.line("    fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {")
 		f.line("        self.ai = 0;")
+		g.emitArraySkipArm(f, fs, arrSkip)
 		f.line("        match (self.cur, id) {")
 		for _, fr := range fs {
 			switch fr.kind {
@@ -630,7 +705,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 						// reject an over-cap wire count at the header, before any
 						// elements accumulate.
 						if g.limits.arrayHas && !fld.HasCount {
-							f.line("            (_Loc::%s, %d) => { if _count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s.%s.clear() },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+							f.line("            (_Loc::%s, %d) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s.%s.clear() },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 							continue
 						}
 						f.line("            (_Loc::%s, %d) => %s.%s.clear(),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
@@ -638,7 +713,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				}
 			case fkNestedNative:
 				if g.limits.arrayHas && fr.elemDyn {
-					f.line("            (_Loc::%s, _) => { if _count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s },", fr.loc, g.pushExpr(fr.path, g.innerNew()))
+					f.line("            (_Loc::%s, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s },", fr.loc, g.pushExpr(fr.path, g.innerNew()))
 					continue
 				}
 				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(fr.path, g.innerNew()))
