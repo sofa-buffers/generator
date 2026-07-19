@@ -428,12 +428,13 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// it pulls a varint and zig-zags on T's signedness alone, so a Signed header
 		// on a u8 field silently yields the raw un-zig-zagged value. Returning
 		// without calling read() makes the driver skip the field, exactly as for an
-		// unknown id. Only the pure-C++ corelib exposes wire()/fixType()
-		// (corelib-cpp#43); the c-cpp footprint corelib has no such accessor, so
-		// that path stays unguarded here (tracked separately).
-		if !g.clib {
-			f.line("            if (%s) break;", cppWireGuard(fld))
-		}
+		// unknown id. Both corelibs expose wire()/fixType() with the same
+		// sofab::Wire/sofab::Fix surface (corelib-cpp#43, corelib-c-cpp#104), so the
+		// guard is emitted for both. Emitting it here — above the array-wrapper
+		// clear() below — is also what makes §7.4's interaction rule hold on the
+		// c-cpp path: a mis-typed later occurrence skips before it can wipe a valid
+		// earlier array (an occurrence skipped under §7.3 is not an occurrence).
+		f.line("            if (%s) break;", cppWireGuard(fld))
 		g.emitDeserialize(f, fld)
 		f.line("            break;")
 	}

@@ -65,8 +65,7 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	// backend gets for free by driving the corelib's wire-type dispatch. Without
 	// the guard a mismatched header (e.g. an array-fixlen header on a u8 field)
 	// selects the wrong reader and desynchronizes the whole stream.
-	ew := g.expectedWire(x)
-	guard := fmt.Sprintf("if (c.wire !== %s) { c.skip(c.wire); break; } ", ew)
+	guard := fmt.Sprintf("if (%s) { c.skip(c.wire); break; } ", g.tsWireGuardCond(x))
 	switch x.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindBitfield:
 		f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
@@ -143,7 +142,7 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// Composite array: a wrapper sequence whose elements arrive one per
 		// readHeader. Loop until the sequence-end (readHeader() -> false).
 		f.line("      case %d: {", x.ID)
-		f.line("        if (c.wire !== %s) { c.skip(c.wire); break; }", ew)
+		f.line("        if (%s) { c.skip(c.wire); break; }", g.tsWireGuardCond(x))
 		f.line("        const arr: %s = [];", g.tsType(x))
 		f.line("        while (c.readHeader()) { %s }", g.seqCollectBody("arr", x.Elem, x.ElemRef, x.ElemItems, capOf(x.HasCount, x.Count), x.ElemMaxHas, x.ElemMax))
 		f.line("        %s = arr;", acc)
@@ -191,6 +190,44 @@ func arrayWire(elem ir.Kind) string {
 	default: // u8/u16/u32/u64, bool, bitfield
 		return "WireType.ArrayUnsigned"
 	}
+}
+
+// tsFixSub returns the FixlenSubtype member a fixlen kind must carry, or "" for a
+// kind the wire type alone already settles. fp32/fp64/string/blob all share
+// WireType.Fixlen, and the fp32/fp64 native arrays share WireType.ArrayFixlen, so
+// the subtype is the only thing that separates them — checking the wire type
+// without it lets a wrong-subtype header (e.g. a string word on an fp64 field)
+// pass the guard and then throw from the wrong-typed reader (corelib-ts#58).
+func tsFixSub(k ir.Kind) string {
+	switch k {
+	case ir.KindFP32:
+		return "FixlenSubtype.Fp32"
+	case ir.KindFP64:
+		return "FixlenSubtype.Fp64"
+	case ir.KindString:
+		return "FixlenSubtype.String"
+	case ir.KindBlob:
+		return "FixlenSubtype.Blob"
+	}
+	return ""
+}
+
+// tsWireGuardCond renders the §7.3 condition a field header must satisfy before
+// its schema-typed reader may run: the wire type the declared type maps to, plus
+// the fixlen subtype where the wire type alone is ambiguous. c.fixSub is the
+// companion to c.wire that corelib-ts records at readHeader (corelib-ts#58); it
+// is a non-consuming peek, so an INVALID/INCOMPLETE fixlen word still surfaces
+// from the reader as before.
+func (g *gen) tsWireGuardCond(x *ir.Field) string {
+	cond := "c.wire !== " + g.expectedWire(x)
+	sub := tsFixSub(x.Kind)
+	if x.Kind == ir.KindArray && nativeArrayElem(x.Elem) {
+		sub = tsFixSub(x.Elem)
+	}
+	if sub != "" {
+		cond += " || c.fixSub !== " + sub
+	}
+	return cond
 }
 
 // elemZero renders a native array field's element default — zero for every

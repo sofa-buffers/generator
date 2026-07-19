@@ -803,51 +803,32 @@ that is a property of the corelib, not of the backend. Three models exist:
 |---|---|---|---|
 | **corelib dispatches by type** — the corelib resolves wire type *and* fixlen subtype, then calls a distinctly-typed callback | go, rs, rs-no-std, cs, java, zig | nobody: a mismatch never reaches a schema-typed reader | structural ✅ |
 | **descriptor / object API** — the generator hands the schema to the corelib as a table | c (`c-cpp` object API) | corelib, against the descriptor (mask `0x3F` = wire type + subtype) | ✅ |
-| **generated code pulls by id** — the corelib delivers `(id, …)` and generated code chooses the reader | python, cpp, typescript, cpp-over-`c-cpp` | **generated code**, so the corelib must expose the delivered type at the decision point | ✅ / ✅ / ⚠️ / ❌ |
+| **generated code pulls by id** — the corelib delivers `(id, …)` and generated code chooses the reader | python, cpp, typescript, cpp-over-`c-cpp` | **generated code**, so the corelib must expose the delivered type at the decision point | ✅ all |
 
 Only the third model puts the burden on the generator, and it is the only one
-where a gap is possible — the corelib must surface enough type metadata for the
+where a gap was possible — the corelib must surface enough type metadata for the
 guard to be written at all. CORELIB_PLAN §5.2 already requires exactly that
 ("the decoder notifies the **field handler** … with the field's *identity and
 type metadata*", with **Skip** as a first-class handler outcome), so the two
-gaps below are shortfalls against that existing contract rather than new asks:
+gaps that once existed here were shortfalls against that contract, not missing
+features. Both are now closed:
 
-- **python** — `Field.type` + `Field.subtype`: sufficient. ✅
-- **cpp** (`corelib-cpp`) — `wire()` + `fixType()` (corelib-cpp#43): sufficient. ✅
-- **typescript** — `Cursor` exposes `wire` but **no subtype accessor**, so the
-  guard covers every non-`fixlen` kind and nothing else. ⚠️ corelib-ts#58.
-- **cpp over `c-cpp`** — no accessor at all, so no guard is emitted. ❌
-  corelib-c-cpp#104.
+- **python** — `Field.type` + `Field.subtype`. ✅
+- **cpp** (`corelib-cpp`) — `wire()` + `fixType()` (corelib-cpp#43). ✅
+- **typescript** — `Cursor.wire` plus **`Cursor.fixSub`**, the subtype companion
+  recorded at `readHeader` via a non-consuming peek (corelib-ts#58). The guard
+  emits `c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp64` for a
+  fixlen field, and the same for the `ArrayFixlen` native fp arrays. ✅
+- **cpp over `c-cpp`** — `wire()` + `fixType()`, added with the same
+  `sofab::Wire`/`sofab::Fix` surface as `corelib-cpp` (corelib-c-cpp#104), so the
+  generator emits one guard shape for both C++ corelibs. ✅
 
-Measured against four vectors (a `fixlen`-subtype mismatch and its control, plus
-the two §7.4-interaction cases below), every combination passes except those two:
-TypeScript fails only the subtype vector, and `cpp`/`c-cpp` reports **INVALID**
-on *any* contradictory wire type — not just a subtype mismatch.
-
-**Two known gaps, both blocked on a corelib accessor the generator cannot supply:**
-
-- **C++ over the `c-cpp` corelib is unguarded.** That path drives `istream.c`
-  (not the object API), and the c-cpp `IStreamImpl` exposes no `wire()`/
-  `fixType()` accessor, so the generator has nothing to compare against — the
-  same shape of gap as the over-`maxlen` clamp above. Observably, a mismatched
-  header **fails the whole decode** here (`istream.c` returns `E_USAGE`, which
-  corelib-c-cpp#101 deliberately left in place for genuine streaming-API misuse)
-  rather than mis-decoding as pure C++ did. Needs the corelib-cpp#43 treatment
-  applied to corelib-c-cpp's C++ layer — tracked as **corelib-c-cpp#104**; the
-  generator's guard is already written and merely gated on the corelib
-  selection, so closing it is a matter of dropping that gate.
-- **TypeScript does not check the fixlen subtype.** `Cursor` exposes `id` and
-  `wire` but no subtype accessor; the subtype is read *inside* `readFp32`/
-  `readFp64`/`readString`/`readBlob`, which throw on a mismatch. So a header that
-  is `Fixlen` but carries the wrong subtype (e.g. a `string`-subtype word on an
-  `fp64` field) passes the generated guard and then **fails the whole decode**
-  instead of skipping the field — the same wrong outcome Python had before
-  generator#174, one level down. Fixing it needs a corelib-ts subtype accessor
-  (a `fixSub` field beside `wire`, or a `fixType()` peek) — tracked as
-  **corelib-ts#58** — after which the guard extends exactly as Python's and
-  C++'s did. Predates generator#174 and is not introduced by it. Every other
-  corelib can already answer this: corelib-py's `Field.subtype`, corelib-cpp's
-  `fixType()`, and the C object API's `0x3F` mask.
+All eleven target/corelib combinations now pass the four §7.3/§7.4 vectors (a
+`fixlen`-subtype mismatch and its control, plus the two §7.4-interaction cases
+below). The two combinations that previously failed — TypeScript on the subtype
+vector, and `cpp`/`c-cpp` on *any* contradictory wire type — are covered by the
+corelib accessors above and the generator guards keyed off them; the conformance
+harnesses assert all four on every target, no longer gated.
 
 #### Decode verdict: a repeated field id — scopes merge, wrappers replace (§7.4)
 
@@ -899,8 +880,12 @@ a mis-typed later occurrence silently wipes a valid earlier array — turning a
 loud failure into silent data loss. Every backend therefore places the reset
 behind the type decision, though by different means:
 
-- **cpp** emits the §7.3 guard *above* the clear in the same case arm, so the
-  guard's `break` skips it.
+- **cpp** (both corelibs) emits the §7.3 guard *above* the clear in the same case
+  arm, so the guard's `break` skips it. This is why the c-cpp accessor and the
+  guard had to land together (corelib-c-cpp#104): emitting the guard above the
+  clear fixes the mis-typed-INVALID *and* the interaction at once — fixing only
+  the INVALID would have converted a loud failure into the silent-data-loss
+  variant.
 - **typescript** collects into a fresh local and only publishes it (`o.f = arr`)
   after the loop, so a skipped occurrence never touches the member.
 - **go, rust, zig, cs, java** put the reset *inside* the sequence-begin callback,
@@ -908,13 +893,6 @@ behind the type decision, though by different means:
   wire-type dispatch shields it structurally.
 - **c** resets in `object.c`'s `FIELDTYPE_SEQUENCE` case, which sits after the
   descriptor wire-type check.
-
-The one exception is **cpp over `c-cpp`**, where no guard is emitted and the
-`clear()` is the first statement of the case arm. That is currently masked (the
-decode fails first, corelib-c-cpp#104), but it means the accessor and the guard
-must land together: fixing the INVALID without emitting the guard would convert
-this into the silent-data-loss variant. Dropping the generator's corelib gate
-does both at once, since the guard is emitted above the clear.
 
 #### Decode verdict: invalid-UTF-8 strings are INVALID (strict, config-gated)
 
