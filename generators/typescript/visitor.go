@@ -12,17 +12,27 @@ import (
 // reader call site has a single caller (this per-type decoder), so V8 keeps it
 // monomorphic and inlines the loop — unlike the former push/visitor path, whose
 // shared call sites went megamorphic across the nested message types. A nested
-// message recurses into its own decodeFrom, which consumes through its matching
+// message recurses into its own decodeInto, which consumes through its matching
 // SequenceEnd (readHeader() returns false there); an unknown id is consumed by
 // skip() for forward/backward compatibility.
+//
+// The loop body lives in decodeInto(c, o) rather than decodeFrom so a re-opened
+// nested scope can decode INTO the member an earlier opening already populated
+// (MESSAGE_SPEC §7.4): last occurrence wins per field id, and children the
+// earlier opening set whose ids do not recur are retained. decodeFrom keeps its
+// signature as the fresh-object entry point.
 func (g *gen) emitDecode(f *tsfile, name string, fields []*ir.Field) {
 	f.line("  static decode(bytes: Uint8Array): %s {", name)
 	f.line("    return %s.decodeFrom(new Cursor(bytes%s));", name, g.cursorLimits())
 	f.line("  }")
 	f.blank()
-	f.line("  // Monomorphic pull decode: one switch(id) reads straight into this type's fields.")
 	f.line("  static decodeFrom(c: Cursor): %s {", name)
-	f.line("    const o = new %s();", name)
+	f.line("    return %s.decodeInto(c, new %s());", name, name)
+	f.line("  }")
+	f.blank()
+	f.line("  // Monomorphic pull decode: one switch(id) reads straight into this type's fields.")
+	f.line("  // Decodes into `o` so a re-opened sequence continues its scope.")
+	f.line("  static decodeInto(c: Cursor, o: %s): %s {", name, name)
 	f.line("    while (c.readHeader()) {")
 	f.line("      switch (c.id) {")
 	for _, x := range fields {
@@ -106,7 +116,13 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			f.line("      case %d: %s%s = c.readBlob(); break;", x.ID, guard, acc)
 		}
 	case ir.KindStruct, ir.KindUnion:
-		f.line("      case %d: %s%s = %s.decodeFrom(c); break;", x.ID, guard, acc, g.typeName(x.Ref.Key))
+		// Decode INTO the existing member, never replace it: a field id repeating
+		// within one scope re-opens that scope rather than starting a new one, so
+		// children an earlier opening set whose ids do not recur must survive
+		// (MESSAGE_SPEC §7.4). The member is always constructed (tsDefault emits
+		// `new T()`), so there is nothing to allocate here. Assigning
+		// decodeFrom(c)'s fresh object instead would discard the earlier opening.
+		f.line("      case %d: %s%s.decodeInto(c, %s); break;", x.ID, guard, g.typeName(x.Ref.Key), acc)
 	case ir.KindArray:
 		if nativeArrayElem(x.Elem) {
 			// A wire element count above the schema `count` capacity is INVALID

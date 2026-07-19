@@ -574,3 +574,81 @@ func scalarJSON(op, rawValue string) (string, bool) {
 	}
 	return "", false
 }
+
+// TestPythonWireTypeGuard pins the MESSAGE_SPEC §7.3 guard (generator#174): the
+// generated dispatch compares each field header's wire type — plus the fixlen
+// subtype where the wire type alone is ambiguous — against the type the schema
+// declares, and skips the field like an unknown id on a mismatch. Without it the
+// schema-typed reader is called for a type the field does not carry, which
+// corelib-py correctly rejects with SofaStateError, failing the whole decode.
+func TestPythonWireTypeGuard(t *testing.T) {
+	s := schema(t, `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u8 }
+      b: { id: 1, type: i32 }
+      c: { id: 2, type: boolean }
+      d: { id: 3, type: fp32 }
+      e: { id: 4, type: fp64 }
+      f: { id: 5, type: string, maxlen: 8 }
+      g: { id: 6, type: blob, maxlen: 8 }
+      h: { id: 7, type: struct, fields: { x: { id: 0, type: u8 } } }
+      i: { id: 8, type: array, items: { type: u32, count: 2 } }
+      j: { id: 9, type: array, items: { type: i32, count: 2 } }
+      k: { id: 10, type: array, items: { type: fp32, count: 2 } }
+      l: { id: 11, type: array, items: { type: string, count: 2, maxlen: 4 } }
+`)
+	mod := string(genPy(t, s, map[string]any{})["message.py"])
+	// FixlenSubtype is referenced by the fixlen guards, so it must be imported.
+	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType, FixlenSubtype") {
+		t.Errorf("message.py missing FixlenSubtype import:\n%s", mod)
+	}
+	for _, want := range []string{
+		// Wire type alone settles the integer/bool kinds...
+		"if fld.type != WireType.UNSIGNED:",
+		"if fld.type != WireType.SIGNED:",
+		// ...but fp32/fp64/string/blob all share FIXLEN, so the subtype decides.
+		"if fld.type != WireType.FIXLEN or fld.subtype != FixlenSubtype.FP32:",
+		"if fld.type != WireType.FIXLEN or fld.subtype != FixlenSubtype.FP64:",
+		"if fld.type != WireType.FIXLEN or fld.subtype != FixlenSubtype.STRING:",
+		"if fld.type != WireType.FIXLEN or fld.subtype != FixlenSubtype.BLOB:",
+		// Nested messages and composite (wrapper) arrays open a sequence.
+		"if fld.type != WireType.SEQUENCE_START:",
+		// Native scalar arrays carry the matching ARRAY_* wire type; the fp array
+		// shares ARRAY_FIXLEN with the other fixlen arrays, so it too needs the
+		// subtype.
+		"if fld.type != WireType.ARRAY_UNSIGNED:",
+		"if fld.type != WireType.ARRAY_SIGNED:",
+		"if fld.type != WireType.ARRAY_FIXLEN or fld.subtype != FixlenSubtype.FP32:",
+		// A mismatch skips the field and resumes the loop — never falls through
+		// into the reader below it.
+		"                    d.skip()\n                    continue",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing wire-type guard %q\n%s", want, mod)
+		}
+	}
+}
+
+// TestPythonNoFixlenSubtypeImportWhenUnused keeps the import line honest: a
+// schema with no fixlen-framed field never references FixlenSubtype, so
+// importing it would leave an unused name in every generated module.
+func TestPythonNoFixlenSubtypeImportWhenUnused(t *testing.T) {
+	s := schema(t, `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u8 }
+      b: { id: 1, type: i32 }
+`)
+	mod := string(genPy(t, s, map[string]any{})["message.py"])
+	if strings.Contains(mod, "FixlenSubtype") {
+		t.Errorf("message.py must not import FixlenSubtype when no fixlen field exists:\n%s", mod)
+	}
+	if !strings.Contains(mod, "from sofab import Encoder, Decoder, WireType") {
+		t.Errorf("message.py missing plain import line:\n%s", mod)
+	}
+}

@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 from dataclasses import dataclass, field
 from enum import IntEnum
-from sofab import Encoder, Decoder, WireType
+from sofab import Encoder, Decoder, WireType, FixlenSubtype
 
 @dataclass
 class Scalars:
@@ -40,20 +40,44 @@ class Scalars:
             if fld is None or fld.type == WireType.SEQUENCE_END:
                 return
             if fld.id == 0:
+                if fld.type != WireType.UNSIGNED:
+                    d.skip()
+                    continue
                 self.u8min = d.unsigned()
             elif fld.id == 1:
+                if fld.type != WireType.UNSIGNED:
+                    d.skip()
+                    continue
                 self.u8max = d.unsigned()
             elif fld.id == 2:
+                if fld.type != WireType.UNSIGNED:
+                    d.skip()
+                    continue
                 self.u64max = d.unsigned()
             elif fld.id == 3:
+                if fld.type != WireType.SIGNED:
+                    d.skip()
+                    continue
                 self.i8min = d.signed()
             elif fld.id == 4:
+                if fld.type != WireType.SIGNED:
+                    d.skip()
+                    continue
                 self.i64min = d.signed()
             elif fld.id == 5:
+                if fld.type != WireType.FIXLEN or fld.subtype != FixlenSubtype.FP32:
+                    d.skip()
+                    continue
                 self.f32 = d.float32()
             elif fld.id == 6:
+                if fld.type != WireType.FIXLEN or fld.subtype != FixlenSubtype.FP64:
+                    d.skip()
+                    continue
                 self.f64 = d.float64()
             elif fld.id == 7:
+                if fld.type != WireType.UNSIGNED:
+                    d.skip()
+                    continue
                 self.flag = d.bool()
             else:
                 d.skip()

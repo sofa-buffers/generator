@@ -745,3 +745,109 @@ func g_containsInOrder(s string, needles ...string) bool {
 	}
 	return true
 }
+
+// TestCppWireTypeGuard pins the MESSAGE_SPEC §7.3 guard (generator#174): every
+// case arm compares the delivered field's wire type — plus the fixlen subtype
+// where the wire type alone is ambiguous — before calling read(), and returns
+// without reading on a mismatch so the driver skips the field. read<T>() does not
+// check this itself: for an integral T it zig-zags on T's signedness alone, so a
+// Signed header on a u8 field silently delivered the raw un-zig-zagged varint.
+func TestCppWireTypeGuard(t *testing.T) {
+	h := headerFromYAML(t, `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u8 }
+      b: { id: 1, type: i32 }
+      c: { id: 2, type: boolean }
+      d: { id: 3, type: fp32 }
+      e: { id: 4, type: fp64 }
+      f: { id: 5, type: string, maxlen: 8 }
+      g: { id: 6, type: blob, maxlen: 8 }
+      h: { id: 7, type: struct, fields: { x: { id: 0, type: u8 } } }
+      i: { id: 8, type: array, items: { type: u32, count: 2 } }
+      j: { id: 9, type: array, items: { type: i32, count: 2 } }
+      k: { id: 10, type: array, items: { type: fp64, count: 2 } }
+      l: { id: 11, type: array, items: { type: string, count: 2, maxlen: 4 } }
+`, "m.hpp")
+	for _, want := range []string{
+		"if (is.wire() != sofab::Wire::Unsigned) break;",
+		"if (is.wire() != sofab::Wire::Signed) break;",
+		// fp32/fp64/string/blob share Wire::Fixlen, so the subtype decides.
+		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp32) break;",
+		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp64) break;",
+		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) break;",
+		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) break;",
+		// Nested messages and composite (wrapper) arrays open a sequence.
+		"if (is.wire() != sofab::Wire::SequenceStart) break;",
+		// Native scalar arrays carry the matching Array* wire type; the fp array
+		// shares Wire::ArrayFixlen, so it too needs the subtype.
+		"if (is.wire() != sofab::Wire::ArrayUnsigned) break;",
+		"if (is.wire() != sofab::Wire::ArraySigned) break;",
+		"if (is.wire() != sofab::Wire::ArrayFixlen || is.fixType() != sofab::Fix::Fp64) break;",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.hpp missing wire-type guard %q\n%s", want, h)
+		}
+	}
+}
+
+// TestCppNoWireTypeGuardOnCCpp: the guard needs IStreamImpl::wire()/fixType(),
+// which only corelib-cpp exposes (corelib-cpp#43). The c-cpp wrapper has no such
+// accessor, so that path must not emit the guard — it would not compile.
+func TestCppNoWireTypeGuardOnCCpp(t *testing.T) {
+	h, err := fixedHeader(t, `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u8 }
+      b: { id: 1, type: string, maxlen: 8 }
+`, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(h, "is.wire()") || strings.Contains(h, "is.fixType()") {
+		t.Errorf("c-cpp profile must not emit the wire-type guard (no accessor):\n%s", h)
+	}
+}
+
+// TestCppWrapperArrayCleared pins the MESSAGE_SPEC §7.4 array-wrapper half
+// (generator#175): an array wrapper IS the array's value (§5), so a repeated
+// field id replaces it whole. The collectors place by element index / emplace in
+// arrival order and never reset, so the case arm must clear the target first —
+// otherwise a second opening merges into the first one's elements. Native scalar
+// arrays read the whole array in one call and already replace, so they get no
+// clear.
+func TestCppWrapperArrayCleared(t *testing.T) {
+	h := headerFromYAML(t, `
+version: 1
+messages:
+  M:
+    payload:
+      strs:   { id: 0, type: array, items: { type: string, count: 3, maxlen: 4 } }
+      blobs:  { id: 1, type: array, items: { type: blob, count: 3, maxlen: 4 } }
+      msgs:   { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u8 } } } }
+      native: { id: 3, type: array, items: { type: u32, count: 3 } }
+`, "m.hpp")
+	for _, want := range []string{
+		"strs.clear();",
+		"blobs.clear();",
+		"msgs.clear();",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.hpp missing wrapper-array clear %q\n%s", want, h)
+		}
+	}
+	if strings.Contains(h, "native.clear();") {
+		t.Errorf("native scalar array must not be cleared (its read already replaces):\n%s", h)
+	}
+	// The clear must precede the collector read, not follow it. Anchor on the
+	// read call site (_StrSeq _r0{strs...), not the bare type name — the _StrSeq
+	// struct itself is defined in the prelude far above every case arm.
+	ci, ri := strings.Index(h, "strs.clear();"), strings.Index(h, "_StrSeq _r0{strs")
+	if ci < 0 || ri < 0 || ci > ri {
+		t.Errorf("strs.clear() must be emitted before the _StrSeq read (clear=%d read=%d)\n%s", ci, ri, h)
+	}
+}

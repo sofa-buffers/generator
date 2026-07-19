@@ -102,6 +102,61 @@ fi
 (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
 echo "==> over-maxlen reject OK"
 
+# Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose header
+# wire type is not the one its declared type maps to -- for fixlen, including the
+# subtype -- is SKIPPED, exactly like an unknown id. someu8 (id 0) is declared u8
+# (unsigned wire type) and keeps its schema default 7. Wire: 01 = id 0 with wire
+# type SIGNED (1), then the zig-zag varint 06 (= 3). Control: 00 09 is the same id
+# with the correct unsigned wire type and must decode to 9. A third vector, 06 07,
+# gives the same id a SEQUENCE_START header closed by its SEQUENCE_END: skipping
+# that one has to drain the whole nested sequence, not just a scalar payload.
+echo "==> contradictory wire type must skip (MESSAGE_SPEC S7.3, generator#174)"
+printf '\001\006' > "$WORK/wiremismatch.bin"
+printf '\000\011' > "$WORK/wiremismatch_control.bin"
+printf '\006\007' > "$WORK/wiremismatch_seq.bin"
+OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/wiremismatch.bin" ) \
+    || { echo "FAIL: mismatched wire type must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: skipped field must keep its default 7; got: $OUT"; exit 1; }
+OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/wiremismatch_control.bin" ) \
+    || { echo "FAIL: control (correct wire type) must decode"; exit 1; }
+echo "$OUT" | grep -q '"someu8":9' || { echo "FAIL: control must decode to 9; got: $OUT"; exit 1; }
+OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/wiremismatch_seq.bin" ) \
+    || { echo "FAIL: sequence header on a scalar field must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: skipped sequence must keep the default 7; got: $OUT"; exit 1; }
+echo "==> wire-type skip OK"
+
+# Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins per
+# field id. A re-opened sequence CONTINUES its scope, so a struct merges and the
+# children an earlier opening set whose ids do not recur are retained. somestruct
+# (id 20) is opened twice: the first opening sets nestedstring (id 1) to "x", the
+# second opens only the empty nestedstruct (id 2). nestedstring MUST survive --
+# decoding the re-opening into a fresh object would reset it to "Nested".
+# Wire: a6 01 (seq start id 20) 0a 0a 78 (string id 1, len 1, "x") 07 (seq end)
+#       a6 01 (seq start id 20) 16 07 (empty seq id 2) 07 (seq end)
+echo "==> re-opened struct scope must merge (MESSAGE_SPEC S7.4, generator#175)"
+printf '\246\001\012\012\170\007\246\001\026\007\007' > "$WORK/reopen_struct.bin"
+OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/reopen_struct.bin" ) \
+    || { echo "FAIL: re-opened struct must decode"; exit 1; }
+echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: re-opened struct must retain nestedstring \"x\"; got: $OUT"; exit 1; }
+echo "==> struct scope merge OK"
+
+# Repeated field id, array wrapper (MESSAGE_SPEC S7.4 + S5): an array wrapper IS
+# the array's value, so unlike a struct it is REPLACED whole by a later occurrence
+# rather than merged. somestringarray (id 18) is opened twice: the first opening
+# sets elements 0="a" and 1="b", the second sets only element 0="c". Element 1 MUST
+# NOT survive as "b" -- merging by index is the bug this pins.
+# Wire: 96 01 (seq start id 18) 02 0a 61 (string id 0 "a") 0a 0a 62 (string id 1 "b")
+#       07 (seq end) 96 01 (seq start id 18) 02 0a 63 (string id 0 "c") 07 (seq end)
+echo "==> re-opened array wrapper must replace (MESSAGE_SPEC S7.4, generator#175)"
+printf '\226\001\002\012\141\012\012\142\007\226\001\002\012\143\007' > "$WORK/reopen_array.bin"
+OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/reopen_array.bin" ) \
+    || { echo "FAIL: re-opened array wrapper must decode"; exit 1; }
+echo "$OUT" | grep -q '"somestringarray":\["c"' || { echo "FAIL: re-opened array wrapper must start with the second opening's element 0 == \"c\"; got: $OUT"; exit 1; }
+if echo "$OUT" | grep -q '"somestringarray":\["c","b"'; then
+    echo "FAIL: re-opened array wrapper must be replaced, not merged (element \"b\" survived); got: $OUT"; exit 1
+fi
+echo "==> array wrapper replace OK"
+
 # Receiver-side decode limits (generator#102): a count-less u64 array with
 # max_dyn_array_count: 4 baked into the generated module (id 0 -> header 0x03 =
 # 0<<3 | unsigned-array). A wire count of 5 MUST throw the corelib's
