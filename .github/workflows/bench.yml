@@ -78,7 +78,7 @@ jobs:
         if: matrix.row == 'csharp'
         with: { dotnet-version: "9.0.x" }
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: matrix.row == 'python'
         with: { python-version: "3.14" }
 
