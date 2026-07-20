@@ -79,6 +79,7 @@ const _dec_Scalars = struct {
     alloc: std.mem.Allocator,
     cur: _Loc = .root,
     inv: bool = false, // a scalar array over its schema count, or a wrapper element id >= count -> INVALID
+    askip: usize = 0, // elements left to discard from a S7.3-contradictory array
 
     const _Loc = enum {
         root,
@@ -86,6 +87,7 @@ const _dec_Scalars = struct {
     };
 
     pub fn unsigned(self: *_dec_Scalars, id: sofab.Id, value: sofab.Unsigned) void {
+        if (self.askip > 0) { self.askip -= 1; return; }
         switch (self.cur) {
             .root => switch (id) {
                 0 => self.m.u8min = @truncate(value),
@@ -99,6 +101,7 @@ const _dec_Scalars = struct {
     }
 
     pub fn signed(self: *_dec_Scalars, id: sofab.Id, value: sofab.Signed) void {
+        if (self.askip > 0) { self.askip -= 1; return; }
         switch (self.cur) {
             .root => switch (id) {
                 3 => self.m.i8min = @truncate(value),
@@ -127,6 +130,12 @@ const _dec_Scalars = struct {
             },
             else => {},
         }
+    }
+
+    pub fn arrayBegin(self: *_dec_Scalars, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {
+        self.askip = if (kind == .unsigned or kind == .signed) switch (self.cur) {
+            else => count,
+        } else 0;
     }
 };
 

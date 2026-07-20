@@ -106,6 +106,39 @@ OUT=$($H decode myfirstmessage < "$WORK/wiremismatch_control.bin") \
 echo "$OUT" | grep -q '"someu8":9' || { echo "FAIL: control must decode to 9; got: $OUT"; exit 1; }
 echo "==> wire-type skip OK"
 
+# Contradictory ARRAY wire type at a scalar id (MESSAGE_SPEC S7.3, generator#183):
+# the array wire types are wire types like any other, so an integer ARRAY header
+# at an id declared as a scalar integer is just as contradictory as a signed
+# header at an unsigned field and MUST be SKIPPED. corelib-cs delivers array
+# elements one-by-one through the same Unsigned/Signed callbacks a lone scalar
+# uses, so this is the one contradiction the (scope, id) dispatch cannot see on
+# its own -- the generated visitor arms a skip counter from the ArrayBegin count.
+# someu8 (id 0, default 7): 03 = id 0 with wire type 3 (unsigned ARRAY), 01 count,
+# 05 element -> must stay 7, NOT become 5.
+# somei8 (id 4, default 10): 24 = id 4 with wire type 4 (signed ARRAY), 01 count,
+# 06 element (zig-zag 3) -> must stay 10, NOT become 3.
+# Controls: 21 06 is id 4 with the correct SIGNED scalar wire type (-> 3), and
+# 7b 04 01 02 03 04 is someuintarray (id 15, count 4) legitimately declaring an
+# unsigned array -> [1,2,3,4], which must never be disarmed by the skip counter.
+echo "==> array wire type at a scalar id must skip (MESSAGE_SPEC S7.3, generator#183)"
+printf '\003\001\005' > "$WORK/arr_at_u8.bin"
+printf '\044\001\006' > "$WORK/arr_at_i8.bin"
+printf '\041\006' > "$WORK/arr_at_i8_control.bin"
+printf '\173\004\001\002\003\004' > "$WORK/arr_legit.bin"
+OUT=$($H decode myfirstmessage < "$WORK/arr_at_u8.bin") \
+    || { echo "FAIL: unsigned array at a scalar u8 id must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: skipped array must leave someu8 at its default 7; got: $OUT"; exit 1; }
+OUT=$($H decode myfirstmessage < "$WORK/arr_at_i8.bin") \
+    || { echo "FAIL: signed array at a scalar i8 id must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"somei8":10' || { echo "FAIL: skipped array must leave somei8 at its default 10; got: $OUT"; exit 1; }
+OUT=$($H decode myfirstmessage < "$WORK/arr_at_i8_control.bin") \
+    || { echo "FAIL: control (correct signed scalar wire type) must decode"; exit 1; }
+echo "$OUT" | grep -q '"somei8":3' || { echo "FAIL: control must decode somei8 to 3; got: $OUT"; exit 1; }
+OUT=$($H decode myfirstmessage < "$WORK/arr_legit.bin") \
+    || { echo "FAIL: control (declared unsigned array) must decode"; exit 1; }
+echo "$OUT" | grep -q '"someuintarray":\[1,2,3,4\]' || { echo "FAIL: a declared integer array must still decode to [1,2,3,4]; got: $OUT"; exit 1; }
+echo "==> array-at-scalar skip OK"
+
 # Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins per
 # field id. A re-opened sequence CONTINUES its scope, so a struct merges and the
 # children an earlier opening set whose ids do not recur are retained. somestruct

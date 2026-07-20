@@ -616,6 +616,19 @@ func bitfieldBacking(nt *ir.NamedType) string {
 	}
 }
 
+// hasCap reports whether the schema needs a given sofab feature, i.e. whether
+// the generated Cargo.toml turns it on for the no_std corelib. A feature that is
+// off is compiled out of that corelib entirely, so the generated code must not
+// reference the callbacks it gates.
+func (g *gen) hasCap(cap string) bool {
+	for _, c := range g.capabilities(g.schema) {
+		if c == cap {
+			return true
+		}
+	}
+	return false
+}
+
 // capabilities returns the sofab features the schema needs, for require!() and
 // the generated Cargo.toml.
 func (g *gen) capabilities(s *ir.Schema) []string {

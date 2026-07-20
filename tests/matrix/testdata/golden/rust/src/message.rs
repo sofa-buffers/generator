@@ -59,12 +59,12 @@ impl Scalars {
 
 mod scalars_dec {
     use super::*;
-    use sofab::{IStream, Visitor, Id, Unsigned, Signed};
+    use sofab::{IStream, Visitor, Id, Unsigned, Signed, ArrayKind};
 
     pub fn decode(data: &[u8]) -> Scalars {
         let mut m = Scalars::default();
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0 };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0, askip: 0 };
             let mut is = IStream::new();
             let _ = is.feed(data, &mut v);
         }
@@ -76,7 +76,7 @@ mod scalars_dec {
         let overflow;
         let invalid;
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0 };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0, askip: 0 };
             let mut is = IStream::new();
             is.feed(data, &mut v)?;
             overflow = v.err;
@@ -104,10 +104,12 @@ struct V<'a> {
     err: bool,
     inv: bool,
     ai: usize, // index into the fixed native array currently being filled
+    askip: usize, // elements left to discard from a S7.3-contradictory array
 }
 
 impl<'a> Visitor for V<'a> {
     fn unsigned(&mut self, id: Id, value: Unsigned) {
+        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id
         match (self.cur, id) {
             (_Loc::Root, 0) => self.m.u8min = value as u8,
             (_Loc::Root, 1) => self.m.u8max = value as u8,
@@ -117,6 +119,7 @@ impl<'a> Visitor for V<'a> {
         }
     }
     fn signed(&mut self, id: Id, value: Signed) {
+        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id
         match (self.cur, id) {
             (_Loc::Root, 3) => self.m.i8min = value as i8,
             (_Loc::Root, 4) => self.m.i64min = value as i64,
@@ -132,6 +135,18 @@ impl<'a> Visitor for V<'a> {
     fn fp64(&mut self, id: Id, value: f64) {
         match (self.cur, id) {
             (_Loc::Root, 6) => self.m.f64 = value,
+            _ => {}
+        }
+    }
+    fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {
+        self.ai = 0;
+        self.askip = match kind {
+            ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {
+                _ => count,
+            },
+            _ => 0,
+        };
+        match (self.cur, id) {
             _ => {}
         }
     }

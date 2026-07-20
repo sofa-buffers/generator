@@ -133,6 +133,37 @@ run_variant() {
     echo "$OUT" | grep -q '"someu8":9' || { echo "FAIL: [$label] control must decode to 9; got: $OUT"; exit 1; }
     echo "==> [$label] wire-type skip OK"
 
+    # Integer ARRAY delivered to a SCALAR-declared id (MESSAGE_SPEC S7.3,
+    # generator#183). This is the one wire-type contradiction the generated id
+    # dispatch cannot see on its own: corelib-rs streams array elements through the
+    # very unsigned()/signed() callbacks a lone scalar uses, so without the
+    # array_begin-armed skip counter the element would land in the scalar's arm.
+    # someu8 (id 0, declared u8, default 7) receives an UNSIGNED ARRAY, and somei8
+    # (id 4, declared i8, default 10) a SIGNED ARRAY -- both must be skipped whole.
+    # Wire: 03 = id 0 wire type ARRAY_UNSIGNED (3), 01 = count 1, 05 = element 5.
+    #       24 = id 4 wire type ARRAY_SIGNED (4), 01 = count 1, 06 = zig-zag 3.
+    # Control: 21 06 is id 4 with the correct SIGNED wire type and must decode to 3,
+    # which pins that the counter self-terminates instead of eating later scalars.
+    echo "==> [$label] integer array at a scalar id must skip (MESSAGE_SPEC S7.3, generator#183)"
+    printf '\003\001\005' > "$WORK/arr_at_scalar_u.bin"
+    printf '\044\001\006' > "$WORK/arr_at_scalar_i.bin"
+    printf '\041\006' > "$WORK/arr_at_scalar_control.bin"
+    OUT=$(cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/arr_at_scalar_u.bin") \
+        || { echo "FAIL: [$label] unsigned array at a scalar id must skip, not fail the decode"; exit 1; }
+    echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: [$label] scalar receiving an unsigned array must keep its default 7; got: $OUT"; exit 1; }
+    OUT=$(cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/arr_at_scalar_i.bin") \
+        || { echo "FAIL: [$label] signed array at a scalar id must skip, not fail the decode"; exit 1; }
+    echo "$OUT" | grep -q '"somei8":10' || { echo "FAIL: [$label] scalar receiving a signed array must keep its default 10; got: $OUT"; exit 1; }
+    OUT=$(cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/arr_at_scalar_control.bin") \
+        || { echo "FAIL: [$label] control (correct signed wire type) must decode"; exit 1; }
+    echo "$OUT" | grep -q '"somei8":3' || { echo "FAIL: [$label] control must decode to 3; got: $OUT"; exit 1; }
+    # A legitimate array field is untouched by the skip counter: someuintarray
+    # (id 15) still fills from its own ARRAY_UNSIGNED header.
+    OUT=$(cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/control.bin") \
+        || { echo "FAIL: [$label] legitimate array must still decode"; exit 1; }
+    echo "$OUT" | grep -q '"someuintarray":\[1,2,3,4\]' || { echo "FAIL: [$label] legitimate array must still fill; got: $OUT"; exit 1; }
+    echo "==> [$label] array-at-scalar skip OK"
+
     # Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins
     # per field id. A re-opened sequence CONTINUES its scope, so a struct merges
     # and the children an earlier opening set whose ids do not recur are retained.

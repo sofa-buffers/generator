@@ -581,3 +581,70 @@ func TestZigDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// TestZigArrayAtScalarSkip: an integer ARRAY header delivered to a
+// SCALAR-declared field id is a wire-type contradiction and must be skipped like
+// an unknown id (MESSAGE_SPEC §7.3, issue #183). corelib-zig streams array
+// elements through the very unsigned()/signed() callbacks a lone scalar uses, so
+// the id dispatch alone cannot tell them apart; arrayBegin arms `askip` with the
+// announced count and the scalar callbacks discard exactly that many. A declared
+// integer array disarms it; an fp array never arms it (its elements go to
+// fp32/fp64); and a message with no native array at all still emits arrayBegin
+// purely to arm the guard — with `_` for the unused id, which Zig requires.
+func TestZigArrayAtScalarSkip(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      u:  { id: 0, type: u8 }
+      i:  { id: 1, type: i32 }
+      ua: { id: 2, type: array, items: { type: u32, count: 4 } }
+      ia: { id: 3, type: array, items: { type: i32, count: 4 } }
+      fa: { id: 4, type: array, items: { type: fp32, count: 4 } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	for _, want := range []string{
+		"askip: usize = 0,", // the discard counter
+		"if (self.askip > 0) { self.askip -= 1; return; }",
+		"pub fn arrayBegin(self: *_dec_M, id: sofab.Id, kind: sofab.ArrayKind, count: usize) void {",
+		"self.askip = if (kind == .unsigned or kind == .signed) switch (self.cur) {",
+		"                2 => 0,", // declared u32 array disarms
+		"                3 => 0,", // declared i32 array disarms
+		"                else => count,",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing §7.3 array-at-scalar guard %q:\n%s", want, m)
+		}
+	}
+	// The fp array is delivered via fp32(), never a scalar callback, so it must
+	// not appear as a disarming arm.
+	if strings.Contains(m, "                4 => 0,") {
+		t.Errorf("fp array id must not disarm the §7.3 guard:\n%s", m)
+	}
+	// Both integer callbacks carry the guard, not just one.
+	if n := strings.Count(m, "if (self.askip > 0) { self.askip -= 1; return; }"); n != 2 {
+		t.Errorf("want the §7.3 guard in both unsigned() and signed(), got %d", n)
+	}
+
+	// A message with no native array still needs the guard (corelib-zig can
+	// deliver an array header at any id), and Zig rejects an unused parameter, so
+	// arrayBegin takes `_` for the id it never switches on.
+	sc := buildSchema(t, `
+version: 1
+messages:
+  m: { payload: { u: { id: 0, type: u8 } } }
+`)
+	scf, err := (&Backend{}).Generate(sc, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	scalarOnly := string(scf[0].Content)
+	if !strings.Contains(scalarOnly, "pub fn arrayBegin(self: *_dec_M, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {") {
+		t.Errorf("scalar-only message.zig must emit arrayBegin with an unused id:\n%s", scalarOnly)
+	}
+}

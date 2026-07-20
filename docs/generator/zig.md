@@ -127,3 +127,26 @@ code is identical across build configs and flipping the flag never regenerates i
 (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4). The wrap is emitted for `string` only —
 `blob` is opaque bytes, stored verbatim. Skipped fields hit the switch `else` arms
 and are never validated. Encode-side strictness is corelib-side (`OStream.writeString`).
+
+## §7.3: an integer array at a scalar id (issue #183)
+
+MESSAGE_SPEC **§7.3** skips a field whose header wire type contradicts its
+declared type. This backend's corelib settles almost every case *structurally* —
+a mismatched header lands in a differently-typed visitor callback with no case for
+that id — but not one: it streams an integer array's elements through the **same**
+`unsigned()/signed()` callbacks a lone scalar uses, so an integer array header at a
+scalar-declared id of the same signedness would be stored element by element.
+
+The generated visitor therefore carries a skip counter. `arrayBegin` arms
+`askip = count` when the announced kind is the unsigned or signed integer kind
+and the `(scope, id)` pair is **not** a declared integer-element native array;
+the two scalar callbacks then discard while armed. It self-terminates on the
+announced count (no array-end callback needed), survives a chunk boundary (the
+counter lives in the visitor), leaves legitimate arrays untouched, and still
+decodes a real scalar arriving at that id after the array. The fp arrays are never
+armed — their elements go to the float callbacks and cannot reach a scalar arm.
+
+The corelib calls `arrayBegin` through `@hasDecl`, so emitting it for the guard
+alone is enough — it is now emitted for messages that have no native array at all.
+Zig rejects unused function parameters, so it takes `id` only when the message
+declares an integer array to disarm for; otherwise the parameter stays `_`.

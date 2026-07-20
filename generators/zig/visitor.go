@@ -314,6 +314,15 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	if use.dynAlloc {
 		f.line("    an: usize = 0, // announced wire count of that array (untrusted until its elements arrive)")
 	}
+	// §7.3 array-vs-scalar skip counter (generator#183): corelib-zig streams an
+	// integer array element-by-element through the same unsigned()/signed()
+	// callbacks a lone scalar uses, so a SCALAR-declared id that receives an
+	// integer ARRAY header would otherwise store the elements. arrayBegin arms
+	// this with the announced count and the callbacks discard exactly that many.
+	arrSkip := use.unsigned || use.signed
+	if arrSkip {
+		f.line("    askip: usize = 0, // elements left to discard from a S7.3-contradictory array")
+	}
 	f.blank()
 	f.line("    const _Loc = enum {")
 	for _, fr := range fs {
@@ -340,8 +349,11 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	if use.blob {
 		g.emitPayloadVisit(f, fs, name, ir.KindBlob, "blob")
 	}
-	if use.scalarArray {
-		g.emitArrayBegin(f, fs, name)
+	// arrayBegin is emitted for its own array-target work, and additionally
+	// whenever the §7.3 guard needs a place to arm itself. The corelib calls it
+	// through @hasDecl, so emitting it for the guard alone is enough.
+	if use.scalarArray || arrSkip {
+		g.emitArrayBegin(f, fs, name, arrSkip)
 	}
 	if use.sequence {
 		g.emitSequence(f, fs, name)
@@ -414,6 +426,84 @@ func (g *gen) nestedNativeArm(fr frame, signed bool) string {
 	return fmt.Sprintf("if (%s.len != 0) _put(_last(%s), self.alloc, &self.ai, self.an, %s)", fr.path, fr.path, cast)
 }
 
+// emitArraySkipArm arms the §7.3 discard counter in arrayBegin (generator#183).
+// Only integer arrays are armed: their elements land in unsigned()/signed(), the
+// callbacks a scalar shares. Every (scope, id) that genuinely declares an
+// integer-element native array disarms it, so a legitimate array stores
+// normally; everything else — a scalar-declared id, an unknown id — discards
+// exactly `count` elements, after which a real scalar at the same id still
+// decodes. Arrays of any other kind (fp) deliver through fp32/fp64 and cannot
+// reach a scalar arm, so they are left disarmed.
+// arraySkipIntArray reports whether a field is a native array whose elements
+// arrive through unsigned()/signed() — the arrays the §7.3 guard must let
+// through. fp arrays deliver via fp32/fp64 and can never reach a scalar arm.
+func arraySkipIntArray(elem ir.Kind) bool {
+	return isNativeArrayElem(elem) && elem != ir.KindFP32 && elem != ir.KindFP64
+}
+
+// arraySkipUsesID reports whether the §7.3 skip arm switches on `id`, i.e.
+// whether the message declares any integer-element native array to disarm for.
+// Zig rejects an unused function parameter, so arrayBegin's signature has to
+// know this before the body is emitted.
+func arraySkipUsesID(fs []frame) bool {
+	for _, fr := range fs {
+		if fr.kind != fkStruct {
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindArray && arraySkipIntArray(fld.Elem) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (g *gen) emitArraySkipArm(f *zfile, fs []frame, arrSkip bool) {
+	if !arrSkip {
+		return
+	}
+	type frameArms struct {
+		fr   frame
+		arms []string
+		all  bool // fkNestedNative: the whole scope is a native array
+	}
+	var all []frameArms
+	for _, fr := range fs {
+		switch fr.kind {
+		case fkStruct:
+			fa := frameArms{fr: fr}
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindArray && arraySkipIntArray(fld.Elem) {
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => 0,", fld.ID))
+				}
+			}
+			if len(fa.arms) > 0 {
+				all = append(all, fa)
+			}
+		case fkNestedNative:
+			if fr.elemKind != ir.KindFP32 && fr.elemKind != ir.KindFP64 {
+				all = append(all, frameArms{fr: fr, all: true})
+			}
+		}
+	}
+	f.line("        self.askip = if (kind == .unsigned or kind == .signed) switch (self.cur) {")
+	for _, fa := range all {
+		if fa.all {
+			f.line("            .%s => 0,", fa.fr.loc)
+			continue
+		}
+		f.line("            .%s => switch (id) {", fa.fr.loc)
+		for _, arm := range fa.arms {
+			f.line("                %s", arm)
+		}
+		f.line("                else => count,")
+		f.line("            },")
+	}
+	f.line("            else => count,")
+	f.line("        } else 0;")
+}
+
 func (g *gen) emitIntVisit(f *zfile, fs []frame, name string, signed bool) {
 	cb, vt := "unsigned", "sofab.Unsigned"
 	if signed {
@@ -453,6 +543,10 @@ func (g *gen) emitIntVisit(f *zfile, fs []frame, name string, signed bool) {
 	}
 	f.blank()
 	f.line("    pub fn %s(self: *_dec_%s, %s: sofab.Id, value: %s) void {", cb, name, idParam, vt)
+	// §7.3 (generator#183): discard the elements of an integer array delivered to
+	// a scalar-declared id. arrayBegin armed the count; this self-terminates
+	// without an array-end callback and survives feed chunk boundaries.
+	f.line("        if (self.askip > 0) { self.askip -= 1; return; }")
 	f.line("        switch (self.cur) {")
 	for _, fa := range all {
 		if fa.fr.kind == fkNestedNative {
@@ -660,7 +754,7 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 // With an active max_dyn_array_count (generator#102) every schema-unbounded
 // array checks the announced count first: an over-limit count flags `lim` and
 // skips the field, and decode() then fails with error.LimitExceeded.
-func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string) {
+func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 	type frameArms struct {
 		fr   frame
 		arms []string
@@ -721,9 +815,21 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string) {
 	if countUsed {
 		countParam = "count"
 	}
+	// The §7.3 guard always reads kind and count, and reads id only when the
+	// message has an integer-element native array to disarm for (Zig rejects an
+	// unused parameter, so a message without one keeps `_`).
+	if arrSkip {
+		kindParam, countParam = "kind", "count"
+		if arraySkipUsesID(fs) {
+			idParam = "id"
+		}
+	}
 	f.blank()
 	f.line("    pub fn arrayBegin(self: *_dec_%s, %s: sofab.Id, %s: sofab.ArrayKind, %s: usize) void {", name, idParam, kindParam, countParam)
-	f.line("        self.ai = 0;")
+	if visitorUseOf(fs).scalarArray {
+		f.line("        self.ai = 0;")
+	}
+	g.emitArraySkipArm(f, fs, arrSkip)
 	if visitorUseOf(fs).dynAlloc {
 		f.line("        self.an = count;")
 	}

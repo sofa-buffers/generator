@@ -787,12 +787,53 @@ by family (generator#174, Crucible F-0020):
   API, so it does not inherit the fix (see the gap below).
 - **TypeScript** — guards on the **wire type only** (issue #161). That settles
   every non-fixlen kind, but not the fixlen subtype (see the gap below).
-- **Go, Rust (std + `no_std`), C#, Java, Zig** — conformant for free. Their
-  corelibs resolve the fixlen word themselves and dispatch to *distinct typed
-  callbacks* (`Float64` vs `String`, …), each defaulting to a no-op. A
-  contradictory header therefore lands in a different callback, whose id switch
-  has no case for that field, and evaporates. The generator emits no check at
-  all, and cannot get this wrong.
+- **Go, Rust (std + `no_std`), C#, Java, Zig** — conformant *structurally* for
+  every mismatch but one. Their corelibs resolve the fixlen word themselves and
+  dispatch to *distinct typed callbacks* (`Float64` vs `String`, …), each
+  defaulting to a no-op. A contradictory header therefore lands in a different
+  callback, whose id switch has no case for that field, and evaporates — no
+  generated check, nothing to get wrong. The **one** exception is an integer
+  **array** delivered to a **scalar**-declared id of the same signedness, which
+  needs an explicit guard on five of the six (see below).
+
+#### The one mismatch structural skip cannot catch: an array at a scalar id
+
+For `rs`, `rs-no-std`, `cs`, `java` and `zig` the structural skip has a blind
+spot (generator#183, Crucible F-0021). Those corelibs stream an integer array's
+elements **one by one through the very `unsigned(id, v)` / `signed(id, v)`
+callbacks a lone scalar uses**, announcing `arrayBegin(id, kind, count)` first as
+context. This is a deliberate zero-extra-allocation streaming design —
+`corelib-rs-no-std` and `corelib-zig` depend on it for heap-free decode — but it
+means an `ArrayUnsigned` header at an id declared `u8` delivers its elements into
+the *matching* callback, where the id dispatch stores them. Every other mismatch
+skips because it arrives at a *different* callback; an array of the same
+signedness has no different callback to fall through to. (`go` is unaffected: its
+corelib hands arrays to a distinct array-shaped visitor entry point.)
+
+The fix is **generator-only** — all five corelibs already announce `arrayBegin`
+with the count before any element, so the generated visitor only has to consult
+it. Every backend emits the same two-part shape:
+
+- in the generated `arrayBegin`, arm a per-visitor counter: `askip = count` when
+  the announced `kind` is the unsigned or signed integer kind **and** the
+  `(scope, id)` pair is not a declared integer-element native array; `0`
+  otherwise. Arrays of any other kind (the fp arrays) are never armed — their
+  elements go to `fp32`/`fp64` and can never reach a scalar arm.
+- in `unsigned` / `signed`, discard while armed: `if askip > 0 { askip -= 1;
+  return; }`.
+
+It self-terminates on the announced count, so no array-end callback is needed; it
+survives a feed chunk boundary because the counter lives in the generated visitor
+object; a legitimately declared array is disarmed and stores normally; and a real
+scalar at the same id *after* the array still decodes, because the counter has
+reached zero by then. Two profile-specific wrinkles: under `rs-no-std` the guard
+is emitted only when the schema turns on the `array` Cargo feature (without it
+that corelib cannot decode an array wire type at all, so no element can reach a
+scalar callback, and referencing the feature-gated `ArrayKind` would not
+compile); and Zig rejects unused function parameters, so `arrayBegin` takes `id`
+only when the message has an integer array to disarm for. On the four backends
+whose `arrayBegin` was previously emitted only for messages that *have* a native
+array, it is now emitted whenever the guard needs somewhere to arm itself.
 
 #### Who can satisfy §7.3, and why (audited)
 
@@ -801,7 +842,7 @@ that is a property of the corelib, not of the backend. Three models exist:
 
 | model | corelibs | who checks | §7.3 status |
 |---|---|---|---|
-| **corelib dispatches by type** — the corelib resolves wire type *and* fixlen subtype, then calls a distinctly-typed callback | go, rs, rs-no-std, cs, java, zig | nobody: a mismatch never reaches a schema-typed reader | structural ✅ |
+| **corelib dispatches by type** — the corelib resolves wire type *and* fixlen subtype, then calls a distinctly-typed callback | go, rs, rs-no-std, cs, java, zig | nobody, *except* for an integer array at a scalar id: the five that stream array elements through the scalar callbacks need the generated `askip` guard (generator#183) | structural ✅ + `askip` ✅ |
 | **descriptor / object API** — the generator hands the schema to the corelib as a table | c (`c-cpp` object API) | corelib, against the descriptor (mask `0x3F` = wire type + subtype) | ✅ |
 | **generated code pulls by id** — the corelib delivers `(id, …)` and generated code chooses the reader | python, cpp, typescript, cpp-over-`c-cpp` | **generated code**, so the corelib must expose the delivered type at the decision point | ✅ all |
 
@@ -828,7 +869,11 @@ All eleven target/corelib combinations now pass the four §7.3/§7.4 vectors (a
 below). The two combinations that previously failed — TypeScript on the subtype
 vector, and `cpp`/`c-cpp` on *any* contradictory wire type — are covered by the
 corelib accessors above and the generator guards keyed off them; the conformance
-harnesses assert all four on every target, no longer gated.
+harnesses assert all four on every target, no longer gated. The five backends
+carrying the `askip` guard (`rust`, `rust`/`no_std`, `csharp`, `java`, `zig`)
+additionally assert the array-at-a-scalar-id pair — an unsigned array at a `u8`
+id and a signed array at an `i8` id, each with a correctly-typed control that
+pins the counter's self-termination.
 
 #### Decode verdict: a repeated field id — scopes merge, wrappers replace (§7.4)
 
