@@ -49,8 +49,8 @@ RUN ZIG_ARCH="$(dpkg --print-architecture)" \
 # build-essential above; Go and Zig are installed above; Node (TypeScript) is
 # installed below. This adds Python and Java + Maven; Rust is installed via
 # rustup below (the footprint bench needs bare-metal targets apt rustc cannot
-# add); the .NET SDK (C#) is installed separately below because Ubuntu 24.04's
-# apt only carries .NET 8 while the generated C# project targets net9.0.
+# add); the .NET SDK (C#) is installed separately below because Ubuntu's apt does
+# not carry the .NET versions the generated C# project and corelib-cs target.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         default-jdk \
@@ -76,24 +76,38 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 #   * Ir/op via Callgrind for every row            -> valgrind
 #   * footprint (.text/.data/.bss) cross-compiled to the embedded targets the
 #     footprint profiles ship to (rows c, cpp-c-cpp) -> arm-none-eabi and
-#     riscv64-unknown-elf GCC + binutils (`size`); picolibc supplies the RISC-V
-#     freestanding headers. (The rust-rs-no-std footprint uses the rustup
-#     thumbv6m target added above.)
+#     riscv64-unknown-elf GCC + binutils (`size`). The C library headers each
+#     cross-target needs are NOT pulled in by the bare gcc package under
+#     --no-install-recommends, and the corelib headers include <stdlib.h> et al.
+#     even in the -ffreestanding build, so they must be named explicitly:
+#       - ARM:   libnewlib-arm-none-eabi (C) + libstdc++-arm-none-eabi-newlib
+#                (C++, for the cpp-c-cpp row's arm-none-eabi-g++).
+#       - RISC-V: picolibc-riscv64-unknown-elf.
+#     Without them the cross-compile fails with "stdlib.h: No such file". (The
+#     rust-rs-no-std footprint uses the rustup thumbv6m target added above.)
 # Without these a bench run records `!` for the affected cells and overwrites the
 # committed results.txt (tests/bench/lib/format.py does not preserve prior values
 # on a failed measurement).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         valgrind \
         gcc-arm-none-eabi \
+        libnewlib-arm-none-eabi \
+        libstdc++-arm-none-eabi-newlib \
         gcc-riscv64-unknown-elf \
         picolibc-riscv64-unknown-elf \
     && rm -rf /var/lib/apt/lists/*
 
-# .NET SDK 9 — the generated C# project and corelib-cs target net9.0, which
-# Ubuntu 24.04's apt does not provide, so install it from Microsoft's official
-# script (self-contained under /usr/share/dotnet).
+# .NET SDK 9 + 10 — Ubuntu's apt does not provide either, so install from
+# Microsoft's official script (self-contained under /usr/share/dotnet). BOTH are
+# required: the generated C# harness targets net9.0 (so the net9.0 runtime must be
+# present to run it), while corelib-cs multi-targets net9.0;net10.0 — and an SDK
+# that predates net10.0 cannot even evaluate that TFM (NETSDK1045), so `dotnet
+# build` of the harness fails during restore of the referenced corelib without the
+# .NET 10 SDK. Installing both channels into the same dir yields one `dotnet` that
+# offers the 9.0 and 10.0 SDKs and the 9.0 + 10.0 runtimes.
 RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
     && bash /tmp/dotnet-install.sh --channel 9.0 --install-dir /usr/share/dotnet \
+    && bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/share/dotnet \
     && rm /tmp/dotnet-install.sh \
     && ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet
 ENV DOTNET_ROOT=/usr/share/dotnet
