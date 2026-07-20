@@ -693,7 +693,7 @@ messages:
 	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std", "allow_dynamic": true}} {
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
-			"askip: usize,",  // the discard counter
+			"askip: usize,", // the discard counter
 			"if self.askip > 0 { self.askip -= 1; return; }", // consumed by unsigned() and signed()
 			"self.askip = match kind {",
 			"ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {",
