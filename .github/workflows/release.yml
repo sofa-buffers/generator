@@ -92,10 +92,18 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          set -euo pipefail
           if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
             echo "::warning::NPM_TOKEN secret not set — built the packages but skipping npm publish."
             exit 0
           fi
+          # Fail fast on a bad or mis-scoped token BEFORE publishing anything, so a
+          # broken token can never leave a half-published set.
+          if ! who="$(npm whoami 2>/dev/null)"; then
+            echo "::error::npm auth failed — NPM_TOKEN must be a valid automation/granular token with publish rights to the @sofa-buffers scope."
+            exit 1
+          fi
+          echo "authenticated to npm as: $who"
           # Platform packages FIRST so the main package's optional deps resolve on install.
           for d in packages/*/; do
             npm publish "$d" --access public --provenance
