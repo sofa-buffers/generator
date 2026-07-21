@@ -57,6 +57,7 @@ internal sealed class ScalarsVisitor : IVisitor {
     private int cur = 0;
     private int ai = 0;                // index into the primitive array currently being filled
     private int askip = 0;             // elements left to discard from a wire-type-contradictory array
+    private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)
     private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)
     private int sp = 0;
     private List<byte> acc;            // lazy: only split string/blob payloads need it
@@ -131,6 +132,15 @@ internal sealed class ScalarsVisitor : IVisitor {
         askip = (kind == ArrayKind.Unsigned || kind == ArrayKind.Signed) ? (cur, id) switch {
             _ => count,
         } : 0;
+        afill = kind switch {
+            ArrayKind.Unsigned or ArrayKind.Signed => (cur, id) switch {
+                _ => 0,
+            },
+            ArrayKind.Fixlen => (cur, id) switch {
+                _ => 0,
+            },
+            _ => 0,
+        };
         switch ((cur, id)) {
         }
     }

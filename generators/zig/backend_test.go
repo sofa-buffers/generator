@@ -408,8 +408,9 @@ messages:
 		// InvalidMessage (generator#100) takes precedence over LimitExceeded.
 		"if (v.inv) return error.InvalidMessage;",
 		"if (v.lim) return error.LimitExceeded;",
-		// The schema-bounded array keeps only its generator#100 guard.
-		"2 => _putc(&self.m.barr, &self.ai, @truncate(value), &self.inv),",
+		// The schema-bounded array keeps its generator#100 guard, now behind the
+		// generator#188 fill guard (a bare scalar at this array id is skipped).
+		"2 => { if (self.afill != 0) { self.afill -= 1; _putc(&self.m.barr, &self.ai, @truncate(value), &self.inv); } },",
 		// Hardened eager allocation: cap the untrusted wire count...
 		"const s = a.alloc(T, @min(n, 1024)) catch return &.{};",
 		// ...and grow as elements actually arrive, never past the announced count.

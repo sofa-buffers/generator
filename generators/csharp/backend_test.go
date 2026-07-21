@@ -370,9 +370,9 @@ messages:
 		"m.fb.Clear(); for (int _p = 0; _p < 3; _p++) m.fb.Add(default(bool)); break;",
 		"m.fe.Clear(); for (int _p = 0; _p < 3; _p++) m.fe.Add(default(EnumColor)); break;",
 		"m.fp.Clear(); for (int _p = 0; _p < 2; _p++) m.fp.Add(default(BitfieldPerm)); break;",
-		"case (Root, 5): m.fb[ai++] = value != 0; break;",
-		"case (Root, 6): m.fe[ai++] = (EnumColor)value; break;",
-		"case (Root, 7): m.fp[ai++] = (BitfieldPerm)value; break;",
+		"case (Root, 5): if (afill == 0) break; afill--; m.fb[ai++] = value != 0; break;",
+		"case (Root, 6): if (afill == 0) break; afill--; m.fe[ai++] = (EnumColor)value; break;",
+		"case (Root, 7): if (afill == 0) break; afill--; m.fp[ai++] = (BitfieldPerm)value; break;",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing %q", want)
@@ -393,10 +393,10 @@ messages:
 	for _, want := range []string{
 		"os.WriteArrayUnsigned(1, this.dyn);",
 		"os.WriteArraySigned(8, Array.ConvertAll(this.dyne.ToArray(), _x => (sbyte)_x));",
-		"case (Root, 8): m.dyne.Add((EnumColor)value); break;",
+		"case (Root, 8): if (afill == 0) break; afill--; m.dyne.Add((EnumColor)value); break;",
 		"case (Root, 8): m.dyne.Clear(); break;",
 		"m.dyn = new uint[Math.Min(count, ArrayInitCap)]; break;",
-		"case (Root, 1): m.dyn = EnsureCap(m.dyn, ai, acap); m.dyn[ai++] = (uint)value; break;",
+		"case (Root, 1): if (afill == 0) break; afill--; m.dyn = EnsureCap(m.dyn, ai, acap); m.dyn[ai++] = (uint)value; break;",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing untouched dynamic-array form %q", want)

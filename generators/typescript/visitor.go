@@ -230,6 +230,35 @@ func (g *gen) tsWireGuardCond(x *ir.Field) string {
 	return cond
 }
 
+// tsElemWireGuardCond is tsWireGuardCond for a wrapper-sequence ELEMENT: the
+// §7.3 condition the element header must satisfy before its schema-typed reader
+// runs. A leaf element (string/blob/struct/union) maps by its own kind; a nested
+// native array by its inner element kind (like a native-array field), and a
+// nested composite array by SequenceStart. Built by reusing the field-level
+// mapping through a synthetic field so the two stay in lockstep.
+func (g *gen) tsElemWireGuardCond(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	x := &ir.Field{Kind: elem, Ref: ref}
+	if elem == ir.KindArray {
+		x.Elem = items.Elem
+		x.ElemRef = items.ElemRef
+	}
+	// The wrapper loop is entered after the array field's own header guard, which
+	// narrows c.wire to WireType.SequenceStart; corelib-ts's `wire` reads as a
+	// readonly getter, so TS does not widen it back across c.readHeader() and would
+	// flag `c.wire !== <element wire>` as a no-overlap comparison. `as WireType`
+	// restores the full type — a compile-time-only widen; c.wire is a WireType at
+	// runtime, so the check is unchanged.
+	cond := "(c.wire as WireType) !== " + g.expectedWire(x)
+	sub := tsFixSub(elem)
+	if elem == ir.KindArray && nativeArrayElem(items.Elem) {
+		sub = tsFixSub(items.Elem)
+	}
+	if sub != "" {
+		cond += " || c.fixSub !== " + sub
+	}
+	return cond
+}
+
 // elemZero renders a native array field's element default — zero for every
 // native element kind — as the value _padTo fills a fixed-count array's elided
 // trailing run with. A Long is immutable, so one shared zero instance is safe
@@ -323,12 +352,19 @@ func capOf(hasCount bool, count int64) int64 {
 // value at its id, restoring any gap. Composite elements (struct/union/nested-
 // array) are always framed, never omitted, so they push in arrival order.
 func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64, maxHas bool, maxVal int64) string {
+	// §5.1 makes every wrapper element a normal field with its own (id, type)
+	// header, so §7.3 applies to it: an element whose wire type (or fixlen subtype)
+	// is not the one its declared type maps to is skipped like an unknown id, NOT
+	// fed to the schema-typed reader (which would throw). #174/#160 added this
+	// framing to struct-field dispatch; this is the same guard one position deeper,
+	// on the wrapper-element loop (issue #189). It runs before the over-index check
+	// so a mis-typed element is skipped, not rejected for its id.
+	guard := fmt.Sprintf("if (%s) { c.skip(c.wire); continue; } ", g.tsElemWireGuardCond(elem, ref, items))
 	// Fixed-count wrapper array: an element id >= N is INVALID (MESSAGE_SPEC
 	// §5.1/§7 — issue #142), rejected before the array grows, which also bounds an
 	// over-index heap-amplification fill. A dynamic array keeps every index.
-	guard := ""
 	if cap >= 0 {
-		guard = fmt.Sprintf(`if (c.id >= %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s: array index above schema capacity %d"); `, cap, arr, cap)
+		guard += fmt.Sprintf(`if (c.id >= %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s: array index above schema capacity %d"); `, cap, arr, cap)
 	}
 	switch elem {
 	case ir.KindString:

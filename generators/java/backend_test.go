@@ -283,17 +283,22 @@ func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 		"      fa: { id: 4, type: array, items: { type: fp32, count: 3 } }\n"
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
 	for _, want := range []string{
-		// The counter itself.
+		// The counters themselves (askip: generator#183; afill: generator#188).
 		"private int askip = 0;",
+		"private int afill = 0;",
 		// Armed at the top of arrayBegin, integer array kinds only.
-		"        askip = 0;\n        if (kind == ArrayKind.UNSIGNED || kind == ArrayKind.SIGNED) {\n            askip = count;\n            switch (cur) {",
-		// The two declared integer arrays (ids 2, 3) disarm it; the fp32 array
-		// (id 4) does not appear -- it cannot reach a scalar arm.
-		"                case 2: case 3: askip = 0; break;",
+		"        askip = 0;\n        afill = 0;\n        if (kind == ArrayKind.UNSIGNED || kind == ArrayKind.SIGNED) {\n            askip = count;\n            switch (cur) {",
+		// The two declared integer arrays (ids 2, 3) disarm the skip AND arm the
+		// fill; the fp32 array (id 4) is armed in the separate FIXLEN branch.
+		"                case 2: case 3: askip = 0; afill = count; break;",
+		"        else if (kind == ArrayKind.FIXLEN) {",
+		"                case 4: afill = count; break;",
 		// Discarded at the top of both integer callbacks.
 		"    public void unsigned(int id, long value) {\n        // S7.3 (generator#183)",
 		"    public void signed(int id, long value) {\n        // S7.3 (generator#183)",
 		"        if (askip > 0) { askip--; return; }",
+		// The mirror guard (generator#188) fronts every native-array fill arm.
+		"if (afill == 0) break; afill--; ",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing §7.3 array-skip guard %q", want)

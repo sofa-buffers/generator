@@ -75,16 +75,21 @@ mod scalars_dec {
         let mut m = Scalars::default();
         let overflow;
         let invalid;
+        let fed;
         {
             let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0, askip: 0 };
             let mut is = IStream::new();
-            is.feed(data, &mut v)?;
+            fed = is.feed(data, &mut v);
             overflow = v.err;
             invalid = v.inv;
         }
-        // A scalar array carried more elements than its schema `count`.
-        // An element count above the schema capacity is invalid and is rejected, never clamped.
+        // A scalar array carried more elements than its schema `count`, an
+        // invalid-UTF-8 string, an over-length string/blob, or an over-index
+        // wrapper element: INVALID, and it dominates a truncated tail (S5.2).
         if invalid { return Err(sofab::Error::InvalidMsg); }
+        // No INVALID flag: now surface feed's own verdict (a clean Incomplete
+        // on a truncated-but-otherwise-valid message, or a structural InvalidMsg).
+        fed?;
         // A fixed-capacity field overflowed during the fill:
         // report it rather than return a silently-truncated value.
         if overflow { return Err(sofab::Error::BufferFull); }

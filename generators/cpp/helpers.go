@@ -637,6 +637,9 @@ template <typename Container>
 struct _FixedBlobSeq : sofab::IStreamMessage {
     Container *out = nullptr;
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
+        // S7.3 (issue #189): skip a wrapper element whose wire type/subtype is not a
+        // blob, like an unknown id -- return without read() and the driver skips it.
+        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) { return; }
         if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }
         while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
         auto &b = (*out)[id];
@@ -648,6 +651,9 @@ template <typename Container>
 struct _FixedStrSeq : sofab::IStreamMessage {
     Container *out = nullptr;
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
+        // S7.3 (issue #189): skip a wrapper element whose wire type/subtype is not a
+        // string, like an unknown id -- return without read() and the driver skips it.
+        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) { return; }
         if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }
         while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
         auto &s = (*out)[id];
@@ -704,6 +710,12 @@ const cppPrelude = `struct _StrSeq : sofab::IStreamMessage {
     long _emax;
     explicit _StrSeq(std::vector<std::string> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
+        // MESSAGE_SPEC S5.1 makes every element a normal field, so S7.3 applies: an
+        // element whose wire type/subtype is not a string is skipped like an unknown
+        // id -- returning without read() makes the driver skip it -- checked before
+        // the over-index/maxlen guards so a mis-typed element is skipped, not
+        // rejected for its id (issue #189).
+        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) { return; }
         if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
         if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }
         std::string _s; is.read(_s);
@@ -717,6 +729,9 @@ struct _BlobSeq : sofab::IStreamMessage {
     long _emax;
     explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
+        // S7.3 (issue #189): skip a wrapper element whose wire type/subtype is not a
+        // blob, like an unknown id (see _StrSeq), before the over-index/maxlen guards.
+        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) { return; }
         if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
         if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }
         std::string _s; is.read(_s);

@@ -273,6 +273,45 @@ func (g *gen) emitArraySkipArm(f *rfile, fs []frame, arrSkip bool) {
 	f.line("        };")
 }
 
+// emitArrayFillArm arms the §7.3 fill counter in array_begin (generator#188), the
+// mirror of emitArraySkipArm: armed with the element count at a legitimate
+// native-array position matching the wire array kind (integer arrays under
+// Unsigned/Signed, fp arrays under Fixlen), 0 everywhere else, so a bare scalar
+// at an array id (afill == 0) falls through its fill arm and is skipped.
+// ArrayKind is exactly {Unsigned, Signed, Fixlen}, so the outer match is
+// exhaustive without a wildcard.
+func (g *gen) emitArrayFillArm(f *rfile, fs []frame, fillArm bool) {
+	if !fillArm {
+		return
+	}
+	emit := func(pat string, want func(ir.Kind) bool) {
+		f.line("            %s => match (self.cur, id) {", pat)
+		for _, fr := range fs {
+			switch fr.kind {
+			case fkStruct:
+				for _, fld := range fr.fields {
+					if fld.Kind == ir.KindArray && want(fld.Elem) {
+						f.line("                (_Loc::%s, %d) => count,", fr.loc, fld.ID)
+					}
+				}
+			case fkNestedNative:
+				if want(fr.elemKind) {
+					f.line("                (_Loc::%s, _) => count,", fr.loc)
+				}
+			}
+		}
+		f.line("                _ => 0,")
+		f.line("            },")
+	}
+	// The fp branch matches `_`, not `ArrayKind::Fixlen`: under the no_std profile
+	// the Fixlen variant is feature-gated and may not exist, exactly as
+	// emitArraySkipArm names only Unsigned|Signed and lets `_` cover the rest.
+	f.line("        self.afill = match kind {")
+	emit("ArrayKind::Unsigned | ArrayKind::Signed", func(k ir.Kind) bool { return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64 })
+	emit("_", func(k ir.Kind) bool { return k == ir.KindFP32 || k == ir.KindFP64 })
+	f.line("        };")
+}
+
 func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	use := visitorUseOf(fs)
@@ -331,6 +370,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if arrSkip {
 		askipInit = ", askip: 0"
 	}
+	if use.scalarArray {
+		askipInit += ", afill: 0"
+	}
 	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false,%s ai: 0%s };", limInit, askipInit)
 	if g.noStd {
 		if needAcc {
@@ -363,19 +405,31 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if g.limits.any() {
 		f.line("        let limited;")
 	}
+	// feed's structural verdict is captured, NOT propagated with `?` here: a
+	// message that is both malformed (a schema-bound violation the visitor flagged
+	// in v.inv) AND truncated must report INVALID, because §5.2 makes INVALID
+	// dominate INCOMPLETE ("malformed regardless of what follows"). Propagating the
+	// feed error first would surface the truncation and discard the INVALID signal
+	// (generator#190). So read the sticky flags, apply the INVALID check, and only
+	// then surface feed's Incomplete/InvalidMsg.
+	f.line("        let fed;")
 	f.line("        {")
 	f.line("            %s", vInit)
 	f.line("            let mut is = IStream::new();")
-	f.line("            is.feed(data, &mut v)?;")
+	f.line("            fed = is.feed(data, &mut v);")
 	f.line("            overflow = v.err;")
 	f.line("            invalid = v.inv;")
 	if g.limits.any() {
 		f.line("            limited = v.lim;")
 	}
 	f.line("        }")
-	f.line("        // A scalar array carried more elements than its schema `count`.")
-	f.line("        // An element count above the schema capacity is invalid and is rejected, never clamped.")
+	f.line("        // A scalar array carried more elements than its schema `count`, an")
+	f.line("        // invalid-UTF-8 string, an over-length string/blob, or an over-index")
+	f.line("        // wrapper element: INVALID, and it dominates a truncated tail (S5.2).")
 	f.line("        if invalid { return Err(sofab::Error::InvalidMsg); }")
+	f.line("        // No INVALID flag: now surface feed's own verdict (a clean Incomplete")
+	f.line("        // on a truncated-but-otherwise-valid message, or a structural InvalidMsg).")
+	f.line("        fed?;")
 	if g.limits.any() {
 		f.line("        // An unbounded field exceeded a configured receiver-side decode")
 		f.line("        // limit: reject, never clamp.")
@@ -437,6 +491,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if arrSkip {
 		f.line("    askip: usize, // elements left to discard from a S7.3-contradictory array")
 	}
+	// §7.3 mirror (generator#188): a bare scalar delivered at a native-array id
+	// would land in that array's fill arm as element 0. array_begin arms this with
+	// the announced count at legitimate native-array positions; a fill runs only
+	// while it is positive, so an unarmed bare scalar (afill == 0) is skipped.
+	if use.scalarArray {
+		f.line("    afill: usize, // elements still expected by an armed native-array fill (S7.3)")
+	}
 	f.line("}")
 	f.blank()
 
@@ -488,7 +549,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => %s,", fr.loc, store)
+			f.line("            (_Loc::%s, _) => { %s%s; },", fr.loc, fillGuard, store)
 		}
 	}
 	f.line("            _ => {}")
@@ -528,7 +589,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => %s,", fr.loc, store)
+			f.line("            (_Loc::%s, _) => { %s%s; },", fr.loc, fillGuard, store)
 		}
 	}
 	f.line("            _ => {}")
@@ -679,6 +740,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		f.line("    fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {")
 		f.line("        self.ai = 0;")
 		g.emitArraySkipArm(f, fs, arrSkip)
+		g.emitArrayFillArm(f, fs, use.scalarArray)
 		f.line("        match (self.cur, id) {")
 		for _, fr := range fs {
 			switch fr.kind {
@@ -837,15 +899,22 @@ func (g *gen) emitMaxlenGuard(f *rfile, fs []frame, kind ir.Kind) {
 // INVALID per MESSAGE_SPEC 3+7 and must reject, not clamp (generator#100).
 func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
 	if _, n, ok := g.fixedNativeArray(fld); ok {
-		f.line("            (_Loc::%s, %d) => { if self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } else { self.inv = true; } }", fr.loc, fld.ID, n, fr.path, rustIdent(fld.Name), rhs)
+		f.line("            (_Loc::%s, %d) => { %sif self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } else { self.inv = true; } }", fr.loc, fld.ID, fillGuard, n, fr.path, rustIdent(fld.Name), rhs)
 		return
 	}
 	store := g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs)
 	if g.limits.arrayHas && !fld.HasCount {
 		store = g.limArrayStore(store)
 	}
-	f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, store)
+	f.line("            (_Loc::%s, %d) => { %s%s; },", fr.loc, fld.ID, fillGuard, store)
 }
+
+// fillGuard fronts every native-array fill arm (generator#188): the fill runs
+// only while array_begin has this array armed (afill > 0). A bare scalar at an
+// array id arrives with afill == 0 — no array_begin preceded it — so it returns
+// without storing and is skipped like an unknown id, the mirror of the askip
+// guard that skips an array delivered at a scalar id (MESSAGE_SPEC §7.3).
+const fillGuard = "if self.afill == 0 { return; } self.afill -= 1; "
 
 // limArrayStore wraps an unbounded-array element store so it is dropped once
 // the sticky lim flag is set (generator#102): the over-cap array was rejected
@@ -865,7 +934,7 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => %s,", fr.loc, store)
+			f.line("            (_Loc::%s, _) => { %s%s; },", fr.loc, fillGuard, store)
 			continue
 		}
 		for _, fld := range fr.fields {

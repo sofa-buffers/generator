@@ -57,6 +57,7 @@ class ScalarsVisitor implements Visitor {
     private int cur = 0;
     private int ai = 0;                 // index into the primitive array currently being filled
     private int askip = 0;              // elements left to discard from a wire-type-contradictory array (S7.3)
+    private int afill = 0;              // elements still expected by an armed native-array fill (S7.3)
     private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)
     private int sp = 0;
     private java.io.ByteArrayOutputStream acc; // lazy: only split string/blob payloads need it
@@ -156,8 +157,13 @@ class ScalarsVisitor implements Visitor {
         // counter so unsigned()/signed() drop exactly `count` elements. Every id
         // that really declares an integer-element array disarms it below.
         askip = 0;
+        afill = 0;
         if (kind == ArrayKind.UNSIGNED || kind == ArrayKind.SIGNED) {
             askip = count;
+            switch (cur) {
+            }
+        }
+        else if (kind == ArrayKind.FIXLEN) {
             switch (cur) {
             }
         }
