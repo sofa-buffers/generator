@@ -45,7 +45,7 @@ import (
 // workflow (both build the main module in place, where module version info is
 // absent). It is the authoritative version for release binaries and is bumped
 // per release. See resolveVersion.
-var version = "0.19.4"
+var version = "0.19.5"
 
 // resolveVersion prefers the module version the Go toolchain embeds when the
 // binary is produced by `go install github.com/…/cmd/sofabgen@vX.Y.Z` (or any
