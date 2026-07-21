@@ -135,9 +135,13 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 			t.Errorf("message.ts missing over-index guard %q", want)
 		}
 	}
-	// Dynamic string array keeps every index (bare fill, no guard).
-	if !strings.Contains(mod, `while (c.readHeader()) { const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(); }`) {
-		t.Errorf("dynamic string array must not carry an over-index guard:\n%s", mod)
+	// Dynamic string array keeps every index (no over-index guard), but still
+	// carries the §7.3 wrapper-element wire guard (#189).
+	if !strings.Contains(mod, `while (c.readHeader()) { if ((c.wire as WireType) !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); continue; } const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(); }`) {
+		t.Errorf("dynamic string array must carry the wire guard but no over-index guard:\n%s", mod)
+	}
+	if strings.Contains(mod, `while (c.readHeader()) { const _id = c.id; while (arr.length <= _id) arr.push("");`) {
+		t.Error("dynamic string array must not be missing the §7.3 wrapper-element wire guard (#189)")
 	}
 }
 
@@ -208,7 +212,7 @@ func TestTSStructural(t *testing.T) {
 		// field id continues that scope instead of replacing it (MESSAGE_SPEC §7.4,
 		// generator#175).
 		"MyfirstmessageSomestruct.decodeInto(c, o.somestruct); break;",
-		`while (c.readHeader()) { if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); const _s = c.readString(); if (_utf8Len(_s) > 16) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 16"); arr[_id] = _s; }`, // id-aware string-list sequence, over-index + over-maxlen rejected (MESSAGE_SPEC S2/S5.1/S7/S7.1, #142)
+		`while (c.readHeader()) { if ((c.wire as WireType) !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); continue; } if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); const _s = c.readString(); if (_utf8Len(_s) > 16) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 16"); arr[_id] = _s; }`, // wrapper-element §7.3 wire guard (#189) + id-aware string-list, over-index + over-maxlen rejected (S2/S5.1/S7/S7.1, #142)
 		"o.someu64 = c.readUnsigned() as bigint; break;", // u64 -> bigint, number-first
 		"os.writeSequenceBegin(",                         // nested framing (marshal unchanged)
 		"export enum MyfirstmessageSomeenum {",

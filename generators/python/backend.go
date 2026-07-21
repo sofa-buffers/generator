@@ -320,6 +320,29 @@ func pyWireGuard(fld *ir.Field) string {
 	return cond
 }
 
+// pyElemWireGuard is pyWireGuard for a wrapper-sequence ELEMENT: §5.1 makes each
+// element a normal field, so §7.3 applies — an element whose wire type/subtype
+// contradicts the declared element type is skipped like an unknown id (issue
+// #189), not fed to the schema-typed reader. Named by the element's header
+// variable `ef` (`_ef<depth>`) rather than the field's `fld`, and mapped through
+// a synthetic field so it stays in lockstep with the field-level guard.
+func pyElemWireGuard(ef string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	x := &ir.Field{Kind: elem, Ref: ref}
+	if elem == ir.KindArray {
+		x.Elem = items.Elem
+		x.ElemRef = items.ElemRef
+	}
+	cond := ef + ".type != " + pyExpectedWire(x)
+	sub := pyFixlenSubtype(elem)
+	if elem == ir.KindArray && isNativeArrayElem(items.Elem) {
+		sub = pyFixlenSubtype(items.Elem)
+	}
+	if sub != "" {
+		cond += " or " + ef + ".subtype != " + sub
+	}
+	return cond
+}
+
 // schemaHasField reports whether any message or named-type field satisfies pred.
 func schemaHasField(s *ir.Schema, pred func(*ir.Field) bool) bool {
 	any := func(fields []*ir.Field) bool {
@@ -779,6 +802,13 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *i
 		f.line("%s    %s = d.next()", ind, ef)
 		f.line("%s    if %s is None or %s.type == WireType.SEQUENCE_END:", ind, ef, ef)
 		f.line("%s        break", ind)
+		// §7.3 (issue #189): an element whose wire type/subtype contradicts the
+		// declared element type is skipped like an unknown id — before the
+		// over-index check, so a mis-typed element is skipped, not rejected for its
+		// id — never handed to the schema-typed reader (which would raise).
+		f.line("%s    if %s:", ind, pyElemWireGuard(ef, elem, ref, items))
+		f.line("%s        d.skip()", ind)
+		f.line("%s        continue", ind)
 		// Fixed-count wrapper array: an element id >= N is INVALID (MESSAGE_SPEC
 		// §5.1/§7 — issue #142), rejected before the list grows, which also bounds
 		// an over-index heap-amplification fill. A dynamic array keeps every index.

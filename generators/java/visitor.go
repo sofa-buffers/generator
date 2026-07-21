@@ -315,6 +315,7 @@ func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 	f.line("        // counter so unsigned()/signed() drop exactly `count` elements. Every id")
 	f.line("        // that really declares an integer-element array disarms it below.")
 	f.line("        askip = 0;")
+	f.line("        afill = 0;")
 	f.line("        if (kind == ArrayKind.UNSIGNED || kind == ArrayKind.SIGNED) {")
 	f.line("            askip = count;")
 	f.line("            switch (cur) {")
@@ -322,9 +323,9 @@ func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 		switch fr.kind {
 		case fkNativeMat:
 			// A nested-native row: elements arrive without an id switch, so the
-			// whole frame disarms (integer inner elements only).
+			// whole frame disarms the skip and arms the fill (integer inner only).
 			if fr.innerElem != ir.KindFP32 && fr.innerElem != ir.KindFP64 {
-				f.line("            case %d: askip = 0; break;", fr.idx)
+				f.line("            case %d: askip = 0; afill = count; break;", fr.idx)
 			}
 		case fkNormal:
 			var ids []string
@@ -336,7 +337,34 @@ func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 			}
 			if len(ids) > 0 {
 				f.line("            case %d: switch (id) {", fr.idx)
-				f.line("                %s askip = 0; break;", strings.Join(ids, " "))
+				f.line("                %s askip = 0; afill = count; break;", strings.Join(ids, " "))
+				f.line("            } break;")
+			}
+		}
+	}
+	f.line("            }")
+	f.line("        }")
+	// Fixlen (fp32/fp64) arrays never share a dispatch arm with an integer scalar,
+	// so they need no askip; but their fill arms still must be armed so a bare
+	// fixlen scalar at an fp-array id is skipped, not filled (generator#188).
+	f.line("        else if (kind == ArrayKind.FIXLEN) {")
+	f.line("            switch (cur) {")
+	for _, fr := range fs {
+		switch fr.kind {
+		case fkNativeMat:
+			if fr.innerElem == ir.KindFP32 || fr.innerElem == ir.KindFP64 {
+				f.line("            case %d: afill = count; break;", fr.idx)
+			}
+		case fkNormal:
+			var ids []string
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindArray && (fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64) {
+					ids = append(ids, fmt.Sprintf("case %d:", fld.ID))
+				}
+			}
+			if len(ids) > 0 {
+				f.line("            case %d: switch (id) {", fr.idx)
+				f.line("                %s afill = count; break;", strings.Join(ids, " "))
 				f.line("            } break;")
 			}
 		}
@@ -373,6 +401,14 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	// alone cannot tell them apart; arrayBegin arms this with the announced element
 	// count and the two callbacks discard exactly that many.
 	f.line("    private int askip = 0;              // elements left to discard from a wire-type-contradictory array (S7.3)")
+	// §7.3 mirror (generator#188): a bare scalar delivered at an id whose declared
+	// type is an ARRAY of that scalar's element type is the opposite wire-type
+	// contradiction — the id dispatch would route it into the array-fill arm and
+	// store it as element 0. arrayBegin arms this with the announced element count
+	// at legitimate native-array positions only; a fill arm acts only while it is
+	// positive and decrements it, so a real array (armed by its own arrayBegin)
+	// fills normally while a bare scalar (afill == 0) falls through and is skipped.
+	f.line("    private int afill = 0;              // elements still expected by an armed native-array fill (S7.3)")
 	if hasPrim {
 		// The wire-supplied element count is UNTRUSTED: a malformed message can
 		// claim ~2^31 elements, so we never allocate `new T[count]` up front (that
@@ -739,7 +775,10 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 		if fr.kind == fkNativeMat {
 			if nativeElemCb(fr.innerElem) == cb {
 				row := fr.listExpr + ".get(" + fr.listExpr + ".size()-1)"
-				f.line("        case %d: %s.add(%s); break;", fr.idx, row, matConv(fr.innerElem))
+				// Gated like the fkNormal fills (generator#188): a matrix inner row
+				// is armed by its own arrayBegin; a bare scalar in the matrix scope
+				// (afill == 0) is skipped.
+				f.line("        case %d: if (afill == 0) break; afill--; %s.add(%s); break;", fr.idx, row, matConv(fr.innerElem))
 			}
 			continue
 		}
@@ -753,20 +792,25 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 				continue
 			}
 			target := fr.path + "." + javaIdent(fld.Name)
+			// A fill arm runs only while arrayBegin has this native array armed
+			// (generator#188): a bare scalar at an array id arrives with afill == 0
+			// and is skipped like an unknown id (S7.3). The scalar arms (default)
+			// are never gated — a scalar at a scalar id is exactly right.
+			const fillGuard = "if (afill == 0) break; afill--; "
 			var stmt string
 			switch act {
 			case "add":
-				stmt = target + ".add(value)"
+				stmt = fillGuard + target + ".add(value)"
 			case "addBool":
-				stmt = target + ".add(value != 0)"
+				stmt = fillGuard + target + ".add(value != 0)"
 			case "setBool":
 				// Fixed-count: the List is already sized to the schema count.
-				stmt = target + ".set(ai++, value != 0)"
+				stmt = fillGuard + target + ".set(ai++, value != 0)"
 			case "index":
 				// Grow the backing array on demand (never trust the wire count).
 				// A fixed-count array is already sized to the schema count, so
 				// ensureCap is a no-op there and the zero tail survives.
-				stmt = target + " = ensureCap(" + target + ", ai, acap); " + target + "[ai++] = value"
+				stmt = fillGuard + target + " = ensureCap(" + target + ", ai, acap); " + target + "[ai++] = value"
 			default:
 				stmt = target + " " + act
 			}

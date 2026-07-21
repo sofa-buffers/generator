@@ -61,9 +61,10 @@ func TestRustStructural(t *testing.T) {
 		"pub fn encode(&self) -> Vec<u8>",
 		"pub fn decode(data: &[u8]) -> Self",
 		"pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error>", // fallible entry point (generator#79)
-		"is.feed(data, &mut v)?;",                                      // fallible decode propagates feed's Result
-		"if overflow { return Err(sofab::Error::BufferFull); }",        // fixed-capacity overflow surfaced (generator#82)
-		"if invalid { return Err(sofab::Error::InvalidMsg); }",         // over-count array rejected as INVALID (generator#100)
+		"fed = is.feed(data, &mut v);",                                 // feed's verdict captured, not propagated (generator#190)
+		"if invalid { return Err(sofab::Error::InvalidMsg); }",         // INVALID checked BEFORE feed's error (§5.2, generator#190)
+		"fed?;", // then surface a clean Incomplete / structural InvalidMsg
+		"if overflow { return Err(sofab::Error::BufferFull); }", // fixed-capacity overflow surfaced (generator#82)
 		"err: bool,",                           // sticky overflow flag on the visitor (generator#82)
 		"inv: bool,",                           // sticky malformed-message flag (generator#100)
 		"mod myfirstmessage_dec {",             // isolated decode module
@@ -223,11 +224,11 @@ messages:
 		// Unbounded array: count checked in array_begin before any elements land,
 		// and the element store is dropped once the flag is set.
 		"(_Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.arr.clear() },",
-		"(_Loc::Root, 1) => { if !self.lim { self.m.arr.push(value as u64); } },",
+		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
 		"(_Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.mat.push(Vec::new()) },",
-		"(_Loc::Root_mat, _) => { if !self.lim { self.m.mat.last_mut().unwrap().push(value as u32); } },",
+		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.mat.last_mut().unwrap().push(value as u32); } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
 		"(_Loc::Root, 0) => if total > MAX_DYN_STRING_LEN { self.lim = true; return; },",

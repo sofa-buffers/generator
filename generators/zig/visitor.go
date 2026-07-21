@@ -267,10 +267,15 @@ func (g *gen) msgLimitGuards(fields []*ir.Field) bool {
 // announced count while never trusting that count for the eager allocation.
 func (g *gen) putCall(fr frame, fld *ir.Field, val string) string {
 	acc := fr.path + "." + zigIdent(fld.Name)
+	var inner string
 	if _, _, ok := g.fixedNativeArray(fld); ok {
-		return fmt.Sprintf("_putc(&%s, &self.ai, %s, &self.inv)", acc, val)
+		inner = fmt.Sprintf("_putc(&%s, &self.ai, %s, &self.inv)", acc, val)
+	} else {
+		inner = fmt.Sprintf("_put(&%s, self.alloc, &self.ai, self.an, %s)", acc, val)
 	}
-	return fmt.Sprintf("_put(&%s, self.alloc, &self.ai, self.an, %s)", acc, val)
+	// §7.3 fill guard (generator#188): only fill while arrayBegin has this array
+	// armed; a bare scalar at this id (afill == 0) falls through and is skipped.
+	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; %s; } }", inner)
 }
 
 // storeCast renders the visitor value expression for a numeric destination
@@ -322,6 +327,14 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	arrSkip := use.unsigned || use.signed
 	if arrSkip {
 		f.line("    askip: usize = 0, // elements left to discard from a S7.3-contradictory array")
+	}
+	// §7.3 mirror (generator#188): a bare scalar delivered at a native-array id
+	// would otherwise land in that array's fill arm as element 0. arrayBegin arms
+	// this with the announced count at legitimate native-array positions; a fill
+	// runs only while it is positive, so an unarmed bare scalar (afill == 0) is
+	// skipped like an unknown id.
+	if use.scalarArray {
+		f.line("    afill: usize = 0, // elements still expected by an armed native-array fill (S7.3)")
 	}
 	f.blank()
 	f.line("    const _Loc = enum {")
@@ -421,9 +434,9 @@ func (g *gen) nestedNativeArm(fr frame, signed bool) string {
 			return ""
 		}
 	}
-	// Guard the empty case: if the per-element allocation failed the outer
-	// slice may have no last element to fill.
-	return fmt.Sprintf("if (%s.len != 0) _put(_last(%s), self.alloc, &self.ai, self.an, %s)", fr.path, fr.path, cast)
+	// §7.3 fill guard (generator#188), plus the empty-case guard: if the
+	// per-element allocation failed the outer slice may have no last element.
+	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; if (%s.len != 0) _put(_last(%s), self.alloc, &self.ai, self.an, %s); } }", fr.path, fr.path, cast)
 }
 
 // emitArraySkipArm arms the §7.3 discard counter in arrayBegin (generator#183).
@@ -457,6 +470,67 @@ func arraySkipUsesID(fs []frame) bool {
 		}
 	}
 	return false
+}
+
+// arrayFillUsesID reports whether the §7.3 fill arm switches on `id`, i.e. the
+// message declares any native-element array in a struct scope to arm for.
+func arrayFillUsesID(fs []frame) bool {
+	for _, fr := range fs {
+		if fr.kind != fkStruct {
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// emitArrayFillArm arms the §7.3 fill counter in arrayBegin (generator#188), the
+// mirror of emitArraySkipArm. It is armed at a legitimate native-array position
+// matching the wire array kind — integer arrays under .unsigned/.signed, fp
+// arrays under .fixlen — and 0 elsewhere, so a bare scalar at an array id
+// (afill == 0) falls through its fill arm and is skipped.
+func (g *gen) emitArrayFillArm(f *zfile, fs []frame, fillArm bool) {
+	if !fillArm {
+		return
+	}
+	emit := func(kinds string, want func(ir.Kind) bool) {
+		f.line("            %s => switch (self.cur) {", kinds)
+		for _, fr := range fs {
+			switch fr.kind {
+			case fkStruct:
+				var arms []string
+				for _, fld := range fr.fields {
+					if fld.Kind == ir.KindArray && want(fld.Elem) {
+						arms = append(arms, fmt.Sprintf("%d => count,", fld.ID))
+					}
+				}
+				if len(arms) > 0 {
+					f.line("                .%s => switch (id) {", fr.loc)
+					for _, a := range arms {
+						f.line("                    %s", a)
+					}
+					f.line("                    else => 0,")
+					f.line("                },")
+				}
+			case fkNestedNative:
+				if want(fr.elemKind) {
+					f.line("                .%s => count,", fr.loc)
+				}
+			}
+		}
+		f.line("                else => 0,")
+		f.line("            },")
+	}
+	// ArrayKind is exactly {unsigned, signed, fixlen}; listing all three leaves no
+	// room for an else prong (Zig rejects an unreachable one).
+	f.line("        self.afill = switch (kind) {")
+	emit(".unsigned, .signed", func(k ir.Kind) bool { return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64 })
+	emit(".fixlen", func(k ir.Kind) bool { return k == ir.KindFP32 || k == ir.KindFP64 })
+	f.line("        };")
 }
 
 func (g *gen) emitArraySkipArm(f *zfile, fs []frame, arrSkip bool) {
@@ -824,12 +898,22 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 			idParam = "id"
 		}
 	}
+	// The §7.3 fill arm (generator#188) reads kind and count, and id whenever the
+	// message has any native-element array to arm for (integer or fp).
+	fillArm := visitorUseOf(fs).scalarArray
+	if fillArm {
+		kindParam, countParam = "kind", "count"
+		if arrayFillUsesID(fs) {
+			idParam = "id"
+		}
+	}
 	f.blank()
 	f.line("    pub fn arrayBegin(self: *_dec_%s, %s: sofab.Id, %s: sofab.ArrayKind, %s: usize) void {", name, idParam, kindParam, countParam)
 	if visitorUseOf(fs).scalarArray {
 		f.line("        self.ai = 0;")
 	}
 	g.emitArraySkipArm(f, fs, arrSkip)
+	g.emitArrayFillArm(f, fs, fillArm)
 	if visitorUseOf(fs).dynAlloc {
 		f.line("        self.an = count;")
 	}

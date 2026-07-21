@@ -139,10 +139,17 @@ func hasDynPrimArray(fs []frame) bool {
 // untrusted wire count never allocates.
 func primFill(target string, fld *ir.Field, rhs string) string {
 	if !fld.HasCount {
-		return fmt.Sprintf("%s = EnsureCap(%s, ai, acap); %s[ai++] = %s;", target, target, target, rhs)
+		return fillGuard + fmt.Sprintf("%s = EnsureCap(%s, ai, acap); %s[ai++] = %s;", target, target, target, rhs)
 	}
-	return fmt.Sprintf("%s[ai++] = %s;", target, rhs)
+	return fillGuard + fmt.Sprintf("%s[ai++] = %s;", target, rhs)
 }
+
+// fillGuard fronts every native-array fill arm (generator#188): the fill runs
+// only while ArrayBegin has this array armed (afill > 0). A bare scalar delivered
+// at an array id arrives with afill == 0 — no ArrayBegin preceded it — so it
+// breaks out of the (cur, id) switch and is skipped like an unknown id, the
+// mirror of the askip guard that skips an array at a scalar id (MESSAGE_SPEC §7.3).
+const fillGuard = "if (afill == 0) break; afill--; "
 
 // nativeListFill is the statement filling the next slot of a native List<T>
 // array field `target` (boolean/enum/bitfield elements — these value-convert
@@ -153,9 +160,9 @@ func primFill(target string, fld *ir.Field, rhs string) string {
 // appends: its length is exactly the wire count.
 func nativeListFill(target string, fld *ir.Field, rhs string) string {
 	if !fld.HasCount {
-		return fmt.Sprintf("%s.Add(%s);", target, rhs)
+		return fillGuard + fmt.Sprintf("%s.Add(%s);", target, rhs)
 	}
-	return fmt.Sprintf("%s[ai++] = %s;", target, rhs)
+	return fillGuard + fmt.Sprintf("%s[ai++] = %s;", target, rhs)
 }
 
 // emitLenGuard writes the generator#102 length guard at the top of the String/
@@ -262,6 +269,51 @@ func (g *gen) emitArraySkipArm(f *cfile, fs []frame) {
 	f.line("        } : 0;")
 }
 
+// emitArrayFillArm arms the S7.3 fill counter in ArrayBegin (generator#188), the
+// mirror of emitArraySkipArm. It is armed at a legitimate native-array position
+// whose declared element kind matches the array kind on the wire — integer arrays
+// under Unsigned/Signed, fp arrays under Fixlen — and stays 0 everywhere else, so
+// a bare scalar delivered at an array id (no ArrayBegin, afill == 0) falls through
+// its fill arm and is skipped. Every native element kind is covered because both
+// the integer fills (Unsigned/Signed) and the fp fills (Fp32/Fp64) are gated.
+func (g *gen) emitArrayFillArm(f *cfile, fs []frame) {
+	f.line("        afill = kind switch {")
+	f.line("            ArrayKind.Unsigned or ArrayKind.Signed => (cur, id) switch {")
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == ir.KindArray && intArrayElem(fr.items.Elem) {
+				f.line("                (%s, _) => count,", fr.loc)
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindArray && intArrayElem(fld.Elem) {
+				f.line("                (%s, %d) => count,", fr.loc, fld.ID)
+			}
+		}
+	}
+	f.line("                _ => 0,")
+	f.line("            },")
+	f.line("            ArrayKind.Fixlen => (cur, id) switch {")
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == ir.KindArray && (fr.items.Elem == ir.KindFP32 || fr.items.Elem == ir.KindFP64) {
+				f.line("                (%s, _) => count,", fr.loc)
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindArray && (fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64) {
+				f.line("                (%s, %d) => count,", fr.loc, fld.ID)
+			}
+		}
+	}
+	f.line("                _ => 0,")
+	f.line("            },")
+	f.line("            _ => 0,")
+	f.line("        };")
+}
+
 func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	dynPrim := hasDynPrimArray(fs)
@@ -284,6 +336,11 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// alone cannot tell them apart; ArrayBegin arms this with the announced element
 	// count and the callbacks discard exactly that many.
 	f.line("    private int askip = 0;             // elements left to discard from a wire-type-contradictory array")
+	// S7.3 mirror (generator#188): a bare scalar at an array id would land in the
+	// array-fill arm and be stored as element 0. ArrayBegin arms this with the
+	// element count at legitimate native-array positions; a fill arm runs only
+	// while it is positive, so an unarmed bare scalar (afill == 0) is skipped.
+	f.line("    private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)")
 	if dynPrim {
 		// The wire-supplied element count of a count-less array is untrusted:
 		// never allocate `new T[count]` up front (an out-of-memory DoS, cf.
@@ -327,7 +384,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && unsignedArrayElem(fr.items.Elem) {
-				f.line("            case (%s, _): %s.Add(%s); break;", fr.loc, lastElem(fr.path), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
+				f.line("            case (%s, _): %s%s.Add(%s); break;", fr.loc, fillGuard, lastElem(fr.path), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
 			}
 			continue
 		}
@@ -357,7 +414,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && signedArrayElem(fr.items.Elem) {
-				f.line("            case (%s, _): %s.Add(%s); break;", fr.loc, lastElem(fr.path), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
+				f.line("            case (%s, _): %s%s.Add(%s); break;", fr.loc, fillGuard, lastElem(fr.path), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
 			}
 			continue
 		}
@@ -485,6 +542,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		f.line("        acap = count;")
 	}
 	g.emitArraySkipArm(f, fs)
+	g.emitArrayFillArm(f, fs)
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {
@@ -600,7 +658,7 @@ func (g *gen) emitFloatVisit(f *cfile, fs []frame, kind ir.Kind, cb, ctype strin
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && fr.items.Elem == kind {
-				f.line("            case (%s, _): %s.Add(value); break;", fr.loc, lastElem(fr.path))
+				f.line("            case (%s, _): %s%s.Add(value); break;", fr.loc, fillGuard, lastElem(fr.path))
 			}
 			continue
 		}
