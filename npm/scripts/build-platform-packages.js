@@ -23,10 +23,12 @@ const crypto = require("crypto");
 
 const ROOT = path.join(__dirname, "..");
 const ROOT_PKG = path.join(ROOT, "package.json");
-// Version the packages carry. Defaults to the committed package.json version;
-// --version <x> (or $SOFABGEN_NPM_VERSION) overrides it and rewrites the root
-// package.json so its version + every optionalDependencies pin stay in lockstep
-// with the tag the release workflow publishes from.
+// Version the packages carry. The committed package.json version is a
+// placeholder (0.0.0-dev) — the release tag is the single source of truth.
+// --version <x> (or $SOFABGEN_NPM_VERSION) supplies the real version and
+// rewrites the root package.json so its version + every optionalDependencies
+// pin stay in lockstep with the tag the release workflow publishes from. Without
+// an override, main() refuses to build (the placeholder is not releasable).
 let VERSION = require(ROOT_PKG).version;
 const REPO = "sofa-buffers/generator";
 const OUT = path.join(ROOT, "packages");
@@ -119,6 +121,10 @@ function platformPackageJson(t) {
       url: "git+https://github.com/sofa-buffers/generator.git",
       directory: "npm",
     },
+    // Scoped packages default to `restricted`, which requires a paid npm plan
+    // and fails any publish (incl. the hand-bootstrapped first version) with
+    // E402. Pin public access into the manifest so every publish path is public.
+    publishConfig: { access: "public" },
     // npm installs this package ONLY on a matching host.
     os: [t.platform],
     cpu: [t.arch],
@@ -152,6 +158,16 @@ async function main() {
     VERSION = String(override).replace(/^v/, "");
     rewriteRootPackage(VERSION);
     console.log(`pinned @sofa-buffers/generator + platform deps to ${VERSION}`);
+  }
+
+  // The committed package.json version is a placeholder (0.0.0-dev): the release
+  // tag is the single source of truth. Refuse to build/download against the
+  // placeholder — a real build must pass --version <tag> (or $SOFABGEN_NPM_VERSION).
+  if (/^0\.0\.0-dev$/.test(VERSION)) {
+    throw new Error(
+      "no release version given: pass --version <x> (or set $SOFABGEN_NPM_VERSION); " +
+        "the committed package.json version is a placeholder, not a release version"
+    );
   }
 
   let targets = TARGETS;

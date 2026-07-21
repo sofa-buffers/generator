@@ -11,7 +11,28 @@ permissions:
   contents: write
 
 jobs:
+  # Gate: the release tag is the single source of truth for the version (the
+  # committed npm/package.json carries a 0.0.0-dev placeholder; the npm-publish
+  # job injects the tag version at publish time). Fail fast here if the tag is
+  # not a well-formed vMAJOR.MINOR.PATCH[-prerelease] version, before spending
+  # CI on ten cross-builds and a GitHub release. workflow_dispatch (no tag) skips.
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tag must be a well-formed semantic version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "tag version: $tag_version"
+          # MAJOR.MINOR.PATCH with an optional -prerelease / +build suffix.
+          if ! printf '%s' "$tag_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)*$'; then
+            echo "::error::tag '$GITHUB_REF_NAME' is not a valid vMAJOR.MINOR.PATCH version; refusing to build a release" >&2
+            exit 1
+          fi
+
   build:
+    needs: check-version
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -40,8 +61,16 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
+          set -euo pipefail
+          # The release tag is the single source of truth for the version; inject
+          # it so the binary self-reports the exact tag. Non-tag (workflow_dispatch)
+          # builds keep the compiled-in dev placeholder.
+          version="0.0.0-dev"
+          case "$GITHUB_REF" in
+            refs/tags/v*) version="${GITHUB_REF_NAME#v}" ;;
+          esac
           out="sofabgen-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          go build -trimpath -ldflags "-s -w" -o "dist/$out" ./cmd/sofabgen
+          go build -trimpath -ldflags "-s -w -X main.version=$version" -o "dist/$out" ./cmd/sofabgen
           (cd dist && sha256sum "$out" > "$out.sha256")
       - uses: actions/upload-artifact@v7
         with:
@@ -57,6 +86,21 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Guard — the binary must self-report the tag version
+        run: |
+          set -euo pipefail
+          # Catch a silently no-op'd -ldflags injection (e.g. a renamed/moved
+          # main.version): run the native binary and assert it reports the tag,
+          # not the 0.0.0-dev placeholder. Only the linux-amd64 asset runs here.
+          tag_version="${GITHUB_REF_NAME#v}"
+          bin="dist/sofabgen-linux-amd64"
+          chmod +x "$bin"
+          got="$("$bin" --version)"
+          echo "binary reports: '$got' (expected '$tag_version')"
+          if [ "$got" != "$tag_version" ]; then
+            echo "::error::sofabgen --version ($got) does not match tag ($tag_version); refusing to publish" >&2
+            exit 1
+          fi
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
@@ -95,6 +139,29 @@ jobs:
       - name: Build per-platform packages from the released binaries
         working-directory: npm
         run: node scripts/build-platform-packages.js --from ../dist --version "${{ github.ref_name }}"
+      - name: Guard — every package version must equal the tag version
+        working-directory: npm
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          fail=0
+          check() { # <label> <package.json path>
+            v="$(node -p "require('$2').version")"
+            echo "  $1: $v"
+            if [ "$v" != "$tag_version" ]; then
+              echo "::error::$1 version ($v) does not match tag version ($tag_version)" >&2
+              fail=1
+            fi
+          }
+          echo "expecting version $tag_version"
+          check "@sofa-buffers/generator" ./package.json
+          for d in packages/*/; do
+            check "$(basename "$d")" "./$d/package.json"
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::version injection did not match the release tag; refusing to publish" >&2
+            exit 1
+          fi
       - name: Publish to npm via trusted publishing (OIDC)
         working-directory: npm
         run: |

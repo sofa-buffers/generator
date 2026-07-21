@@ -80,25 +80,31 @@ To build/publish by hand (e.g. the one-time bootstrap, or a backfill):
 ```sh
 cd npm
 # download each binary from the v<version> release, verify its sha256, and write
-# the 9 platform packages into npm/packages/  (or: --from <dir> to copy locally)
-node scripts/build-platform-packages.js
+# the 9 platform packages into npm/packages/  (or: --from <dir> to copy locally).
+# --version is REQUIRED: the committed version is a placeholder (see below).
+node scripts/build-platform-packages.js --version v<version>
 # publish platform packages FIRST, then the main package (so its optional deps resolve)
 for d in packages/*/; do npm publish "$d" --access public; done
 npm publish . --access public
 ```
 
-`--version <x>` overrides the version and rewrites the root `package.json`
+`--version <x>` supplies the real version and rewrites the root `package.json`
 (version + every `optionalDependencies` pin) in lockstep, so the whole set always
-matches the tag the binaries come from.
+matches the tag the binaries come from. Without it the script refuses to run.
 
 ## Version ↔ release coupling
 
-`version` here **must** equal a published GitHub release tag `v<version>` — the
-binaries are downloaded from it. The release workflow enforces this by stamping
-the tag via `--version`; the `npm` smoke workflow enforces it on every PR by
-downloading from the committed version and asserting the launcher reports it. Bump
-`version` (and it alone — the `optionalDependencies` follow via the build script's
-`--version`) only alongside a real release.
+**The release tag `v<version>` is the single source of truth for the version.** The
+committed `version` here is a placeholder (`0.0.0-dev`) and is never published as-is:
+the `npm-publish` job injects the tag at publish time (`build-platform-packages.js
+--version <tag>`), rewriting the version and every `optionalDependencies` pin, so the
+published package version always equals the tag the binaries came from. A guard in
+the workflow asserts this equality across the main package and all platform packages
+before publishing.
+
+So there is **nothing to bump here** for a release — just push the `v<version>` tag.
+The `npm` smoke workflow doesn't read this placeholder either; it resolves the latest
+published release and exercises the production path against that.
 
 ## Publishing prerequisites
 
