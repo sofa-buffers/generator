@@ -81,11 +81,13 @@ internal sealed class ScalarsVisitor : IVisitor {
         }
     }
     public void Fp32(int id, float value) {
+        if (askip > 0) { askip--; return; }   // discard a contradictory array at a scalar id
         switch ((cur, id)) {
             case (Root, 5): m.f32 = value; break;
         }
     }
     public void Fp64(int id, double value) {
+        if (askip > 0) { askip--; return; }   // discard a contradictory array at a scalar id
         switch ((cur, id)) {
             case (Root, 6): m.f64 = value; break;
         }
@@ -126,12 +128,18 @@ internal sealed class ScalarsVisitor : IVisitor {
     }
     public void ArrayBegin(int id, ArrayKind kind, int count) {
         ai = 0;
-        // An integer array header at an id that does not declare an integer
-        // array is a wire-type contradiction: discard its `count` elements,
-        // exactly as an unknown id would be skipped.
-        askip = (kind == ArrayKind.Unsigned || kind == ArrayKind.Signed) ? (cur, id) switch {
-            _ => count,
-        } : 0;
+        // An array header at an id that does not declare a native array of the
+        // matching element kind is a wire-type contradiction: discard its
+        // `count` elements, exactly as an unknown id would be skipped.
+        askip = kind switch {
+            ArrayKind.Unsigned or ArrayKind.Signed => (cur, id) switch {
+                _ => count,
+            },
+            ArrayKind.Fixlen => (cur, id) switch {
+                _ => count,
+            },
+            _ => 0,
+        };
         afill = kind switch {
             ArrayKind.Unsigned or ArrayKind.Signed => (cur, id) switch {
                 _ => 0,

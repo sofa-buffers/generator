@@ -670,15 +670,16 @@ messages:
 	}
 }
 
-// TestRustArrayAtScalarIdSkips: an integer ARRAY header delivered to a
-// SCALAR-declared field id is a wire-type contradiction and must be skipped like
-// an unknown id (MESSAGE_SPEC §7.3, issue #183). corelib-rs streams array
-// elements through the very unsigned()/signed() callbacks a lone scalar uses, so
-// the id dispatch alone cannot tell them apart; array_begin arms `askip` with the
-// announced count and the scalar callbacks discard exactly that many. A
-// legitimately declared integer array disarms it, an fp array never arms it (its
-// elements go to fp32/fp64), and a schema with no integer array at all still
-// emits the guard so a stray array header is skipped.
+// TestRustArrayAtScalarIdSkips: an ARRAY header delivered to a SCALAR-declared
+// field id is a wire-type contradiction and must be skipped like an unknown id
+// (MESSAGE_SPEC §7.3, issues #183 for integers and #193 for fp). corelib-rs
+// streams array elements through the very unsigned()/signed()/fp32()/fp64()
+// callbacks a lone scalar uses, so the id dispatch alone cannot tell them apart;
+// array_begin arms `askip` with the announced count and the scalar callbacks
+// discard exactly that many. A legitimately declared array of the matching
+// element kind disarms it (integer arrays under Unsigned/Signed, fp arrays under
+// Fixlen), and a schema with no native array at all still emits the guard so a
+// stray array header is skipped.
 func TestRustArrayAtScalarIdSkips(t *testing.T) {
 	const src = `
 version: 1
@@ -695,25 +696,23 @@ messages:
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
 			"askip: usize,", // the discard counter
-			"if self.askip > 0 { self.askip -= 1; return; }", // consumed by unsigned() and signed()
+			"if self.askip > 0 { self.askip -= 1; return; }", // consumed by unsigned/signed/fp32/fp64
 			"self.askip = match kind {",
 			"ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {",
 			"(_Loc::Root, 2) => 0,", // declared u32 array: elements store normally
 			"(_Loc::Root, 3) => 0,", // declared i32 array: likewise
+			"(_Loc::Root, 4) => 0,", // declared fp32 array: disarms under the fp (_) branch (#193)
 			"_ => count,",           // every other id (scalar or unknown) discards
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing §7.3 array-at-scalar guard %q:\n%s", cfg, want, m)
 			}
 		}
-		// The fp array is delivered via fp32/fp64, never a scalar callback, so it
-		// must NOT be listed as a disarming arm (arming it would be dead weight).
-		if strings.Contains(m, "(_Loc::Root, 4) => 0,") {
-			t.Errorf("message.rs (%v) must not disarm the §7.3 guard for an fp array", cfg)
-		}
-		// Both scalar callbacks carry the guard, not just one.
-		if n := strings.Count(m, "if self.askip > 0 { self.askip -= 1; return; }"); n != 2 {
-			t.Errorf("message.rs (%v): want the §7.3 guard in both unsigned() and signed(), got %d", cfg, n)
+		// The guard sits in every callback a scalar shares: unsigned(), signed(),
+		// and fp32() (the schema has an fp32 array, so that callback is emitted;
+		// there is no fp64, so three occurrences, not four).
+		if n := strings.Count(m, "if self.askip > 0 { self.askip -= 1; return; }"); n != 3 {
+			t.Errorf("message.rs (%v): want the §7.3 guard in unsigned(), signed() and fp32(), got %d", cfg, n)
 		}
 	}
 

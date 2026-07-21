@@ -64,8 +64,8 @@ class ScalarsVisitor implements Visitor {
     ScalarsVisitor(Scalars msg) { m = msg; }
 
     public void unsigned(int id, long value) {
-        // S7.3 (generator#183): drop an element of an integer array whose id
-        // does not declare one -- armed by arrayBegin, self-terminating on count.
+        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
         switch (cur) {
         case 0: switch (id) {
@@ -77,8 +77,8 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void signed(int id, long value) {
-        // S7.3 (generator#183): drop an element of an integer array whose id
-        // does not declare one -- armed by arrayBegin, self-terminating on count.
+        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
         switch (cur) {
         case 0: switch (id) {
@@ -88,6 +88,9 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void fp32(int id, float value) {
+        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // not declare one -- armed by arrayBegin, self-terminating on count.
+        if (askip > 0) { askip--; return; }
         switch (cur) {
         case 0: switch (id) {
             case 5: m.f32 = value; break;
@@ -95,6 +98,9 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void fp64(int id, double value) {
+        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // not declare one -- armed by arrayBegin, self-terminating on count.
+        if (askip > 0) { askip--; return; }
         switch (cur) {
         case 0: switch (id) {
             case 6: m.f64 = value; break;
@@ -164,6 +170,7 @@ class ScalarsVisitor implements Visitor {
             }
         }
         else if (kind == ArrayKind.FIXLEN) {
+            askip = count;
             switch (cur) {
             }
         }

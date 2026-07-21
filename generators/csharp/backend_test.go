@@ -105,15 +105,15 @@ func TestCsMaxlenReject(t *testing.T) {
 }
 
 // TestCsArrayAtScalarSkip: an integer ARRAY wire type at an id that does not
-// declare an integer array is a wire-type contradiction and must be SKIPPED
-// like an unknown id (MESSAGE_SPEC §7.3 / generator#183). corelib-cs delivers
-// array elements through the same Unsigned/Signed callbacks a lone scalar uses,
-// so the (cur, id) dispatch alone cannot see it: ArrayBegin arms an `askip`
-// counter with the announced element count and the two integer callbacks
-// discard exactly that many. Only ids that genuinely declare an integer-element
-// native array (and nested native inner-array scopes) disarm it; fp arrays
-// deliver through Fp32/Fp64 and can never reach a scalar arm, so they are left
-// armed like any other non-integer-array id.
+// declare a native array of the matching element kind is a wire-type
+// contradiction and must be SKIPPED like an unknown id (MESSAGE_SPEC §7.3 /
+// generator#183 for integers, #193 for fp). corelib-cs delivers array elements
+// through the same Unsigned/Signed/Fp32/Fp64 callbacks a lone scalar uses, so
+// the (cur, id) dispatch alone cannot see it: ArrayBegin arms an `askip` counter
+// with the announced element count and the scalar callbacks discard exactly that
+// many. Only ids that genuinely declare a native array of that element kind (and
+// nested native inner-array scopes) disarm it — integer arrays under
+// Unsigned/Signed, fp arrays under Fixlen.
 func TestCsArrayAtScalarSkip(t *testing.T) {
 	src := []byte("version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      u:  { id: 0, type: u8 }\n" +
@@ -124,32 +124,32 @@ func TestCsArrayAtScalarSkip(t *testing.T) {
 		"      na: { id: 5, type: array, items: { type: array, items: { type: u16, count: 2 }, count: 2 } }\n")
 	m := buildModule(t, src, "in.yaml", map[string]any{"namespace": "S"})
 	for _, want := range []string{
-		// The discard clause heads both integer callbacks.
+		// The discard clause heads every callback a scalar shares.
 		"public void Unsigned(int id, ulong value) {\n        if (askip > 0) { askip--; return; }",
 		"public void Signed(int id, long value) {\n        if (askip > 0) { askip--; return; }",
+		"public void Fp32(int id, float value) {\n        if (askip > 0) { askip--; return; }",
+		"public void Fp64(int id, double value) {\n        if (askip > 0) { askip--; return; }",
 		// Visitor state.
 		"private int askip = 0;",
-		// Armed in ArrayBegin, for the integer array kinds only.
-		"askip = (kind == ArrayKind.Unsigned || kind == ArrayKind.Signed) ? (cur, id) switch {",
-		// Declared integer arrays disarm; so does the nested native inner scope.
-		"            (Root, 2) => 0,",
-		"            (Root, 3) => 0,",
-		"            (Root_na, _) => 0,",
-		// Everything else — scalar ids, fp arrays, unknown ids — discards `count`.
-		"            _ => count,",
-		"        } : 0;",
+		// Armed in ArrayBegin, per array kind.
+		"askip = kind switch {",
+		"            ArrayKind.Unsigned or ArrayKind.Signed => (cur, id) switch {",
+		"            ArrayKind.Fixlen => (cur, id) switch {",
+		// Declared integer arrays disarm under the int arm; so does the nested
+		// native inner scope. The fp32 array disarms under the Fixlen arm (#193).
+		"                (Root, 2) => 0,",
+		"                (Root, 3) => 0,",
+		"                (Root_na, _) => 0,",
+		"                (Root, 4) => 0,",
+		// Everything else — scalar ids, unknown ids — discards `count`.
+		"                _ => count,",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing §7.3 array-skip guard %q\n%s", want, m)
 		}
 	}
-	// The fp32 array must NOT disarm the counter: its elements arrive through
-	// Fp32, so an integer-array header at its id is still a contradiction.
-	if strings.Contains(m, "            (Root, 4) => 0,") {
-		t.Errorf("fp array id must not disarm the array-skip counter:\n%s", m)
-	}
-	// Scalar ids never disarm either.
-	for _, bad := range []string{"            (Root, 0) => 0,", "            (Root, 1) => 0,"} {
+	// Scalar ids never disarm the counter.
+	for _, bad := range []string{"                (Root, 0) => 0,", "                (Root, 1) => 0,"} {
 		if strings.Contains(m, bad) {
 			t.Errorf("scalar id must not disarm the array-skip counter (%q):\n%s", bad, m)
 		}

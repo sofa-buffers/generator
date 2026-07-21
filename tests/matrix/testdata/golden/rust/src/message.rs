@@ -132,12 +132,14 @@ impl<'a> Visitor for V<'a> {
         }
     }
     fn fp32(&mut self, id: Id, value: f32) {
+        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id
         match (self.cur, id) {
             (_Loc::Root, 5) => self.m.f32 = value,
             _ => {}
         }
     }
     fn fp64(&mut self, id: Id, value: f64) {
+        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id
         match (self.cur, id) {
             (_Loc::Root, 6) => self.m.f64 = value,
             _ => {}
@@ -149,7 +151,9 @@ impl<'a> Visitor for V<'a> {
             ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {
                 _ => count,
             },
-            _ => 0,
+            _ => match (self.cur, id) {
+                _ => count,
+            },
         };
         match (self.cur, id) {
             _ => {}

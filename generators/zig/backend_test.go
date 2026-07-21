@@ -583,15 +583,16 @@ func TestZigDeterministic(t *testing.T) {
 	}
 }
 
-// TestZigArrayAtScalarSkip: an integer ARRAY header delivered to a
-// SCALAR-declared field id is a wire-type contradiction and must be skipped like
-// an unknown id (MESSAGE_SPEC §7.3, issue #183). corelib-zig streams array
-// elements through the very unsigned()/signed() callbacks a lone scalar uses, so
-// the id dispatch alone cannot tell them apart; arrayBegin arms `askip` with the
-// announced count and the scalar callbacks discard exactly that many. A declared
-// integer array disarms it; an fp array never arms it (its elements go to
-// fp32/fp64); and a message with no native array at all still emits arrayBegin
-// purely to arm the guard — with `_` for the unused id, which Zig requires.
+// TestZigArrayAtScalarSkip: an ARRAY header delivered to a SCALAR-declared field
+// id is a wire-type contradiction and must be skipped like an unknown id
+// (MESSAGE_SPEC §7.3, issue #183 for integers, #193 for fp). corelib-zig streams
+// array elements through the very unsigned()/signed()/fp32()/fp64() callbacks a
+// lone scalar uses, so the id dispatch alone cannot tell them apart; arrayBegin
+// arms `askip` with the announced count and the scalar callbacks discard exactly
+// that many. A declared array of the matching element kind disarms it — integer
+// arrays under .unsigned/.signed, fp arrays under .fixlen — and a message with no
+// native array at all still emits arrayBegin purely to arm the guard, with `_`
+// for the unused id, which Zig requires.
 func TestZigArrayAtScalarSkip(t *testing.T) {
 	s := buildSchema(t, `
 version: 1
@@ -613,23 +614,23 @@ messages:
 		"askip: usize = 0,", // the discard counter
 		"if (self.askip > 0) { self.askip -= 1; return; }",
 		"pub fn arrayBegin(self: *_dec_M, id: sofab.Id, kind: sofab.ArrayKind, count: usize) void {",
-		"self.askip = if (kind == .unsigned or kind == .signed) switch (self.cur) {",
-		"                2 => 0,", // declared u32 array disarms
-		"                3 => 0,", // declared i32 array disarms
-		"                else => count,",
+		"self.askip = switch (kind) {",
+		"            .unsigned, .signed => switch (self.cur) {",
+		"            .fixlen => switch (self.cur) {",
+		"                    2 => 0,", // declared u32 array disarms under .unsigned/.signed
+		"                    3 => 0,", // declared i32 array disarms
+		"                    4 => 0,", // declared fp32 array disarms under .fixlen (#193)
+		"                    else => count,",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.zig missing §7.3 array-at-scalar guard %q:\n%s", want, m)
 		}
 	}
-	// The fp array is delivered via fp32(), never a scalar callback, so it must
-	// not appear as a disarming arm.
-	if strings.Contains(m, "                4 => 0,") {
-		t.Errorf("fp array id must not disarm the §7.3 guard:\n%s", m)
-	}
-	// Both integer callbacks carry the guard, not just one.
-	if n := strings.Count(m, "if (self.askip > 0) { self.askip -= 1; return; }"); n != 2 {
-		t.Errorf("want the §7.3 guard in both unsigned() and signed(), got %d", n)
+	// The guard sits in every callback a scalar shares: unsigned(), signed() and
+	// fp32() (the schema has an fp32 array, so that callback is emitted; there is
+	// no fp64, so three occurrences).
+	if n := strings.Count(m, "if (self.askip > 0) { self.askip -= 1; return; }"); n != 3 {
+		t.Errorf("want the §7.3 guard in unsigned(), signed() and fp32(), got %d", n)
 	}
 
 	// A message with no native array still needs the guard (corelib-zig can

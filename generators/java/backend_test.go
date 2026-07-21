@@ -268,12 +268,13 @@ func TestJavaMaxlenReject(t *testing.T) {
 
 // TestJavaArrayAtScalarIdSkipped: MESSAGE_SPEC §7.3 — a field whose header wire
 // type is not the one its declared type maps to is SKIPPED like an unknown id.
-// corelib-java delivers integer-array elements one-by-one through the same
-// unsigned()/signed() callbacks a lone scalar uses, so the id dispatch alone
-// cannot tell an array element from a scalar; arrayBegin must arm a discard
-// counter with the announced count and those two callbacks must drop exactly that
-// many (generator#183). Ids that genuinely declare an integer-element native
-// array disarm it; fp arrays deliver through fp32()/fp64() and stay disarmed.
+// corelib-java delivers array elements one-by-one through the same
+// unsigned()/signed()/fp32()/fp64() callbacks a lone scalar uses, so the id
+// dispatch alone cannot tell an array element from a scalar; arrayBegin must arm
+// a discard counter with the announced count and those callbacks must drop
+// exactly that many (generator#183 for integers, #193 for fp). Ids that genuinely
+// declare a native array of the matching element kind disarm it — integer arrays
+// under UNSIGNED/SIGNED, fp arrays under FIXLEN.
 func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      u:  { id: 0, type: u8, default: 7 }\n" +
@@ -286,16 +287,18 @@ func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 		// The counters themselves (askip: generator#183; afill: generator#188).
 		"private int askip = 0;",
 		"private int afill = 0;",
-		// Armed at the top of arrayBegin, integer array kinds only.
+		// Armed at the top of arrayBegin, integer array kinds.
 		"        askip = 0;\n        afill = 0;\n        if (kind == ArrayKind.UNSIGNED || kind == ArrayKind.SIGNED) {\n            askip = count;\n            switch (cur) {",
 		// The two declared integer arrays (ids 2, 3) disarm the skip AND arm the
-		// fill; the fp32 array (id 4) is armed in the separate FIXLEN branch.
+		// fill; the fp32 array (id 4) is armed the same way in the FIXLEN branch.
 		"                case 2: case 3: askip = 0; afill = count; break;",
-		"        else if (kind == ArrayKind.FIXLEN) {",
-		"                case 4: afill = count; break;",
-		// Discarded at the top of both integer callbacks.
-		"    public void unsigned(int id, long value) {\n        // S7.3 (generator#183)",
-		"    public void signed(int id, long value) {\n        // S7.3 (generator#183)",
+		"        else if (kind == ArrayKind.FIXLEN) {\n            askip = count;\n            switch (cur) {",
+		"                case 4: askip = 0; afill = count; break;",
+		// Discarded at the top of every callback an array shares with a scalar.
+		"    public void unsigned(int id, long value) {\n        // S7.3 (generator#183",
+		"    public void signed(int id, long value) {\n        // S7.3 (generator#183",
+		"    public void fp32(int id, float value) {\n        // S7.3 (generator#183",
+		"    public void fp64(int id, double value) {\n        // S7.3 (generator#183",
 		"        if (askip > 0) { askip--; return; }",
 		// The mirror guard (generator#188) fronts every native-array fill arm.
 		"if (afill == 0) break; afill--; ",
@@ -304,18 +307,10 @@ func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 			t.Errorf("M.java missing §7.3 array-skip guard %q", want)
 		}
 	}
+	// The fp32 array is armed in the FIXLEN branch, never grouped with the integer
+	// arm — id 4 must not appear alongside ids 2/3 under UNSIGNED/SIGNED.
 	if strings.Contains(m, "case 2: case 3: case 4: askip = 0") {
-		t.Error("an fp32 array must not disarm the §7.3 counter (its elements go to fp32())")
-	}
-	// The guard belongs to unsigned()/signed() only: the float and payload
-	// callbacks share emitScalarCb / the same file and must stay untouched.
-	for _, cb := range []string{
-		"    public void fp32(int id, float value) {\n        switch (cur) {",
-		"    public void fp64(int id, double value) {\n        switch (cur) {",
-	} {
-		if !strings.Contains(m, cb) {
-			t.Errorf("the §7.3 guard must not be emitted into %q", strings.SplitN(cb, "(", 2)[0])
-		}
+		t.Error("an fp32 array must be armed under FIXLEN, not the integer arm")
 	}
 }
 

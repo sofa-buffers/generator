@@ -225,10 +225,11 @@ func visitorUseOf(fs []frame) visitorUse {
 }
 
 // emitArraySkipGuard prepends the §7.3 discard clause to unsigned()/signed()
-// (generator#183). corelib-rs delivers an integer array element-by-element
-// through the very callback a lone scalar uses, so a field id declared as a
-// SCALAR that receives an integer ARRAY header would otherwise store the
-// elements — the one wire-type contradiction the id dispatch cannot detect on
+// (generator#183) and fp32()/fp64() (generator#193). corelib-rs delivers an
+// array element-by-element through the very callback a lone scalar uses, so a
+// field id declared as a SCALAR that receives an ARRAY header (integer arrays via
+// unsigned/signed, fp arrays via fp32/fp64) would otherwise store the elements —
+// the one wire-type contradiction the id dispatch cannot detect on
 // its own. array_begin arms askip with the announced element count; here they
 // are discarded one by one, which self-terminates without an array-end callback
 // and works across feed chunk boundaries (askip lives in the visitor).
@@ -240,36 +241,40 @@ func (g *gen) emitArraySkipGuard(f *rfile, arrSkip bool) {
 }
 
 // emitArraySkipArm arms the §7.3 discard counter in array_begin
-// (generator#183). Only integer arrays are armed: their elements land in
-// unsigned()/signed(), the callbacks a scalar shares. Every (scope, id) that
-// genuinely declares an integer-element native array disarms it, so a legitimate
-// array stores normally; everything else — a scalar-declared id, an unknown id —
-// discards exactly `count` elements, after which a real scalar at the same id
-// still decodes. Arrays of any other kind (fp) deliver through fp32/fp64 and
-// cannot reach a scalar arm, so they are left disarmed.
+// (generator#183, extended to fp by generator#193). Every array kind whose
+// elements land in a callback a scalar shares is armed: integers land in
+// unsigned()/signed(), fp lands in fp32()/fp64(). Every (scope, id) that
+// genuinely declares a native array of that element kind disarms it (=> 0), so a
+// legitimate array stores normally; everything else — a scalar-declared id, an
+// unknown id — discards exactly `count` elements, after which a real scalar at
+// the same id still decodes. Mirrors emitArrayFillArm: the fp branch matches `_`,
+// not ArrayKind::Fixlen, because the no_std profile feature-gates that variant.
 func (g *gen) emitArraySkipArm(f *rfile, fs []frame, arrSkip bool) {
 	if !arrSkip {
 		return
 	}
-	f.line("        self.askip = match kind {")
-	f.line("            ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {")
-	for _, fr := range fs {
-		switch fr.kind {
-		case fkStruct:
-			for _, fld := range fr.fields {
-				if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) && fld.Elem != ir.KindFP32 && fld.Elem != ir.KindFP64 {
-					f.line("                (_Loc::%s, %d) => 0,", fr.loc, fld.ID)
+	emit := func(pat string, want func(ir.Kind) bool) {
+		f.line("            %s => match (self.cur, id) {", pat)
+		for _, fr := range fs {
+			switch fr.kind {
+			case fkStruct:
+				for _, fld := range fr.fields {
+					if fld.Kind == ir.KindArray && want(fld.Elem) {
+						f.line("                (_Loc::%s, %d) => 0,", fr.loc, fld.ID)
+					}
+				}
+			case fkNestedNative:
+				if want(fr.elemKind) {
+					f.line("                (_Loc::%s, _) => 0,", fr.loc)
 				}
 			}
-		case fkNestedNative:
-			if fr.elemKind != ir.KindFP32 && fr.elemKind != ir.KindFP64 {
-				f.line("                (_Loc::%s, _) => 0,", fr.loc)
-			}
 		}
+		f.line("                _ => count,")
+		f.line("            },")
 	}
-	f.line("                _ => count,")
-	f.line("            },")
-	f.line("            _ => 0,")
+	f.line("        self.askip = match kind {")
+	emit("ArrayKind::Unsigned | ArrayKind::Signed", func(k ir.Kind) bool { return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64 })
+	emit("_", func(k ir.Kind) bool { return k == ir.KindFP32 || k == ir.KindFP64 })
 	f.line("        };")
 }
 
@@ -597,10 +602,10 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("    }")
 
 	if use.fp32 {
-		g.emitFloatVisit(f, fs, ir.KindFP32, "fp32", "f32")
+		g.emitFloatVisit(f, fs, ir.KindFP32, "fp32", "f32", arrSkip)
 	}
 	if use.fp64 {
-		g.emitFloatVisit(f, fs, ir.KindFP64, "fp64", "f64")
+		g.emitFloatVisit(f, fs, ir.KindFP64, "fp64", "f64", arrSkip)
 	}
 
 	if use.str {
@@ -925,8 +930,9 @@ func (g *gen) limArrayStore(expr string) string {
 	return fmt.Sprintf("{ if !self.lim { %s; } }", expr)
 }
 
-func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype string) {
+func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype string, arrSkip bool) {
 	f.line("    fn %s(&mut self, id: Id, value: %s) {", cb, rtype)
+	g.emitArraySkipGuard(f, arrSkip)
 	f.line("        match (self.cur, id) {")
 	for _, fr := range fs {
 		if fr.kind == fkNestedNative && fr.elemKind == kind {

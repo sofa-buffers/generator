@@ -164,6 +164,27 @@ run_variant() {
     echo "$OUT" | grep -q '"someuintarray":\[1,2,3,4\]' || { echo "FAIL: [$label] legitimate array must still fill; got: $OUT"; exit 1; }
     echo "==> [$label] array-at-scalar skip OK"
 
+    # fp ARRAY delivered to a SCALAR-declared fp id (MESSAGE_SPEC S7.3,
+    # generator#193): the fp analogue of the integer case above. corelib-rs streams
+    # a fixlen (fp) array element-by-element through the very fp32()/fp64() callbacks
+    # a lone scalar uses, so without the array_begin-armed skip counter the element
+    # would land in the scalar's arm. somefp64 (id 9, declared fp64, default
+    # 3.141592653589793) receives an fp64 ARRAY and must be skipped whole.
+    # Wire: 4d = id 9 wire type ARRAY_FIXLEN (5), 01 = count 1, 41 = fixlen word
+    #       (len 8, FP64 subtype), then 2.5 little-endian.
+    # Control: 4a 41 + 2.5 is id 9 with the correct scalar FIXLEN wire type and must
+    # decode to 2.5, pinning that the counter self-terminates.
+    echo "==> [$label] fp array at a scalar id must skip (MESSAGE_SPEC S7.3, generator#193)"
+    printf '\115\001\101\000\000\000\000\000\000\004\100' > "$WORK/fp_arr_at_scalar.bin"
+    printf '\112\101\000\000\000\000\000\000\004\100' > "$WORK/fp_arr_at_scalar_control.bin"
+    OUT=$(cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/fp_arr_at_scalar.bin") \
+        || { echo "FAIL: [$label] fp array at a scalar id must skip, not fail the decode"; exit 1; }
+    echo "$OUT" | grep -q '"somefp64":3.14159265358979' || { echo "FAIL: [$label] scalar receiving an fp array must keep its default 3.141592653589793; got: $OUT"; exit 1; }
+    OUT=$(cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/fp_arr_at_scalar_control.bin") \
+        || { echo "FAIL: [$label] control (correct scalar fixlen wire type) must decode"; exit 1; }
+    echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: [$label] control must decode to 2.5; got: $OUT"; exit 1; }
+    echo "==> [$label] fp array-at-scalar skip OK"
+
     # Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins
     # per field id. A re-opened sequence CONTINUES its scope, so a struct merges
     # and the children an earlier opening set whose ids do not recur are retained.
