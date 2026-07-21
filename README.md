@@ -70,6 +70,16 @@ it on `PATH` for later steps:
 - run: sofabgen --version
 ```
 
+For JS/TS projects, install it as a project-local dev dependency from npm — the
+prebuilt binary ships as a per-platform optional dependency (no Go toolchain, no
+`postinstall` download); the package is `@sofa-buffers/generator`, the command is
+`sofabgen` (see [`npm/`](npm/)):
+
+```sh
+npm install --save-dev @sofa-buffers/generator
+npx sofabgen --lang ts --in messages/ --out src/generated/
+```
+
 Examples:
 - [`examples/messages/example.yaml`](examples/messages/example.yaml) — a showcase exercising every
   field kind.
