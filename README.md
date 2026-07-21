@@ -48,7 +48,16 @@ done
 
 Prebuilt static binaries for Linux, Windows and macOS (x86 and ARM, 32- and
 64-bit) are attached to every
-[release](https://github.com/sofa-buffers/generator/releases).
+[release](https://github.com/sofa-buffers/generator/releases). Install the latest
+one — with OS/arch detection and SHA-256 verification — in one line:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sofa-buffers/generator/main/install.sh | sh
+```
+
+Set `SOFABGEN_VERSION=vX.Y.Z` to pin a release or `SOFABGEN_INSTALL_DIR=<dir>` to
+choose the target directory. Prefer the Go toolchain? `go install
+github.com/sofa-buffers/generator/cmd/sofabgen@latest`.
 
 Examples:
 - [`examples/messages/example.yaml`](examples/messages/example.yaml) — a showcase exercising every
