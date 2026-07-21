@@ -1309,8 +1309,42 @@ assets/                  project logo/icon (README images)
 tests/                   conformance/<lang>/run.sh harnesses + matrix/ hermetic Go tests (+ README);
                          gen-artifacts.sh builds the per-language CI artifact bundle;
                          bench/ Ir/op + footprint of the generated code (§15; committed results.txt)
-.github/workflows/       ci.yml (hermetic + lang-<x> jobs), release.yml
+.github/workflows/       ci.yml (hermetic + lang-<x> jobs), release.yml (binaries +
+                         npm-publish), action.yml + npm.yml (distribution smoke tests)
+.github/actions/         setup-sofabgen/ composite action (installs the CLI in CI;
+                         thin wrapper over install.sh)
+install.sh               one-line installer: OS/arch detect + release download +
+                         SHA-256 verify (curl|sh); the action reuses it
+npm/                     npm distribution: bin/sofabgen.js launcher + per-platform
+                         optional-dependency packages built from the release
+                         binaries (scripts/build-platform-packages.js); packages/
+                         is git-ignored (built at publish time)
 ```
+
+**Distribution.** The release workflow (`release.yml`, PLAN §1/M8) is the source of
+truth: on a `v*` tag it cross-compiles the static, CGO-free binary for the nine
+supported OS/arch pairs and attaches each plus a `.sha256` to the GitHub release.
+Everything else is a thin consumer of those assets so there is one artifact set and
+one checksum to trust:
+
+- **`install.sh`** — `curl … | sh` picks the matching asset by `uname`, verifies its
+  checksum, and installs it. Honors `SOFABGEN_VERSION` / `SOFABGEN_INSTALL_DIR`.
+- **`.github/actions/setup-sofabgen`** — a composite action that runs the *same*
+  `install.sh` (from the action's own checked-out ref) and adds the binary to
+  `$GITHUB_PATH`, so downstream CI can `uses:` it instead of hand-rolling downloads.
+- **`go install github.com/sofa-buffers/generator/cmd/sofabgen@vX.Y.Z`** — builds from
+  source; the CLI reports the module version via `runtime/debug.ReadBuildInfo()`
+  (`cmd/sofabgen`), falling back to the compiled-in constant for in-place `go build`
+  and the release workflow. So an install-by-version self-reports that version.
+- **`npm i -D @sofa-buffers/generator`** (`npm/`) — the per-platform
+  optional-dependency pattern (esbuild/swc model): a tiny launcher package pulls in
+  one `@sofa-buffers/generator-<os>-<arch>` (matched by npm via `os`/`cpu`) that
+  ships the corresponding release binary. No download, no `postinstall`; the binary
+  is lockfile-hashed. The `npm-publish` job in `release.yml` builds these from the
+  released binaries (`--version <tag>` keeps the version + optionalDependencies pins
+  in lockstep) and publishes with provenance; `npm.yml` smoke-tests the launcher on
+  every runner OS. npm's package `version` must equal the release tag it downloads
+  from — the invariant both workflows enforce.
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
 nothing; the core depends only on the `generator` *interface*, never on a

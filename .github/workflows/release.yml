@@ -62,3 +62,50 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Publish the npm distribution (@sofa-buffers/generator + the nine per-platform
+  # optional-dependency packages) built from the very binaries just released, so
+  # `npm i -D @sofa-buffers/generator` mirrors the GitHub release. Skips cleanly
+  # if the NPM_TOKEN secret is absent, so npm is opt-in per repository.
+  npm-publish:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      id-token: write # npm provenance (SLSA build attestation)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Build per-platform packages from the released binaries
+        working-directory: npm
+        run: node scripts/build-platform-packages.js --from ../dist --version "${{ github.ref_name }}"
+      - name: Publish to npm
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::warning::NPM_TOKEN secret not set — built the packages but skipping npm publish."
+            exit 0
+          fi
+          # Fail fast on a bad or mis-scoped token BEFORE publishing anything, so a
+          # broken token can never leave a half-published set.
+          if ! who="$(npm whoami 2>/dev/null)"; then
+            echo "::error::npm auth failed — NPM_TOKEN must be a valid automation/granular token with publish rights to the @sofa-buffers scope."
+            exit 1
+          fi
+          echo "authenticated to npm as: $who"
+          # Platform packages FIRST so the main package's optional deps resolve on install.
+          for d in packages/*/; do
+            npm publish "$d" --access public --provenance
+          done
+          npm publish . --access public --provenance
