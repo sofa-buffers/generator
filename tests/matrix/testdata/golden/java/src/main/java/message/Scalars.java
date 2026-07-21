@@ -31,22 +31,37 @@ public class Scalars {
     // marshal() override on the same thread.
     private static final ThreadLocal<byte[]> ENC_BUF =
         ThreadLocal.withInitial(() -> new byte[MAX_SIZE]);
+    // The stream object is per-thread too, reset per call rather than
+    // allocated: it is pure scratch that never outlives encode(), so a
+    // fresh one per call is an allocation the caller cannot observe.
+    private static final ThreadLocal<OStream> ENC_OS =
+        ThreadLocal.withInitial(() -> new OStream(ENC_BUF.get()));
     public byte[] encode() {
         try {
             byte[] buf = ENC_BUF.get();
-            OStream os = new OStream(buf);
+            OStream os = ENC_OS.get();
+            os.reset(buf);
             marshal(os);
             return Arrays.copyOf(buf, os.bytesUsed());
         } catch (IOException e) { throw new RuntimeException(e); }
     }
+    // Per-thread decoder, reset per call rather than allocated (see ENC_OS).
+    // Reset on entry, not exit, so a decode that threw cannot poison the
+    // next one. Do not call decode()/tryDecode() reentrantly from a Visitor
+    // callback on the same thread.
+    private static final ThreadLocal<IStream> DEC_IS =
+        ThreadLocal.withInitial(IStream::new);
     public static Scalars decode(byte[] data) {
         Scalars m = new Scalars();
-        try { new IStream().feed(data, new ScalarsVisitor(m)); }
+        IStream is = DEC_IS.get();
+        is.reset();
+        try { is.feed(data, new ScalarsVisitor(m)); }
         catch (Exception e) { throw new RuntimeException(e); }
         return m;
     }
     public static DecodeStatus tryDecode(byte[] data, Scalars out) throws SofabException {
-        IStream is = new IStream();
+        IStream is = DEC_IS.get();
+        is.reset();
         is.feed(data, new ScalarsVisitor(out));
         return is.status();
     }
