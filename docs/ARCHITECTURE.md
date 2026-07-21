@@ -1342,9 +1342,12 @@ one checksum to trust:
   ships the corresponding release binary. No download, no `postinstall`; the binary
   is lockfile-hashed. The `npm-publish` job in `release.yml` builds these from the
   released binaries (`--version <tag>` keeps the version + optionalDependencies pins
-  in lockstep) and publishes with provenance; `npm.yml` smoke-tests the launcher on
-  every runner OS. npm's package `version` must equal the release tag it downloads
-  from — the invariant both workflows enforce.
+  in lockstep) and publishes via **trusted publishing (OIDC, no token)** with
+  automatic provenance; `npm.yml` smoke-tests the launcher on every runner OS. npm's
+  package `version` must equal the release tag it downloads from — the invariant
+  both workflows enforce. OIDC cannot *create* a package, so each package's
+  first-ever version is bootstrapped once by hand (`npm/README.md`); the workflow
+  publishes all versions after that.
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
 nothing; the core depends only on the `generator` *interface*, never on a

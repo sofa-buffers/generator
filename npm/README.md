@@ -2,9 +2,11 @@
 
 > This packages the `sofabgen` code generator (a Go binary) for npm so it can be
 > used as a project-local dev dependency — no global install, no Go toolchain.
-> Publishing is automated in the release workflow and smoke-tested on
-> Linux/macOS/Windows (`.github/workflows/npm.yml`); it goes live on the first
-> `v*` release run once the `@sofa-buffers`-scoped `NPM_TOKEN` secret is set.
+> Publishing is automated in the release workflow via **npm trusted publishing
+> (OIDC, no token)** and smoke-tested on Linux/macOS/Windows
+> (`.github/workflows/npm.yml`). Each package's first-ever version is bootstrapped
+> once by hand (OIDC cannot create a package); every release after that is
+> automatic.
 
 > **Package name vs. command:** the package is **`@sofa-buffers/generator`** (it
 > matches the GitHub repo), but the CLI command it installs is **`sofabgen`** —
@@ -68,11 +70,12 @@ with `--ignore-scripts`**, the binary is **integrity-hashed in the lockfile** an
 The platform packages are generated from the release binaries — never committed
 (`npm/packages/` is git-ignored). This is **automated** by the `npm-publish` job
 in `.github/workflows/release.yml`: on a `v*` tag it builds the packages from the
-just-released binaries (`--from ../dist --version <tag>`) and publishes them (with
-[provenance](https://docs.npmjs.com/generating-provenance-statements)), platform
-packages first so the main package's optional deps resolve.
+just-released binaries (`--from ../dist --version <tag>`) and publishes them via
+[npm trusted publishing (OIDC)](https://docs.npmjs.com/trusted-publishers/) — no
+token — with automatic [provenance](https://docs.npmjs.com/generating-provenance-statements),
+platform packages first so the main package's optional deps resolve.
 
-To build/publish by hand (e.g. a manual backfill):
+To build/publish by hand (e.g. the one-time bootstrap, or a backfill):
 
 ```sh
 cd npm
