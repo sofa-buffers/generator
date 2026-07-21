@@ -41,11 +41,12 @@ import (
 	_ "github.com/sofa-buffers/generator/generators/zig"
 )
 
-// version is the compiled-in fallback used for local `go build` and the release
-// workflow (both build the main module in place, where module version info is
-// absent). It is the authoritative version for release binaries and is bumped
-// per release. See resolveVersion.
-var version = "0.19.5"
+// version is the compiled-in fallback for builds where module version info is
+// absent (local `go build`/`go run`). The release tag is the single source of
+// truth: the release workflow injects it via -ldflags "-X main.version=<tag>",
+// so release binaries report the exact tag and this placeholder never ships.
+// See resolveVersion.
+var version = "0.0.0-dev"
 
 // resolveVersion prefers the module version the Go toolchain embeds when the
 // binary is produced by `go install github.com/…/cmd/sofabgen@vX.Y.Z` (or any

@@ -1,10 +1,14 @@
 name: npm
 
 # Smoke-tests the npm distribution on every runner OS: build the host's
-# per-platform package from the committed release version (downloads the binary
+# per-platform package from the LATEST published release (downloads the binary
 # and verifies its sha256), assemble an install tree, and run the CLI through the
-# launcher shim. This exercises the exact production path and enforces the
-# invariant that npm/package.json's version corresponds to a real GitHub release.
+# launcher shim. This exercises the exact production path end to end.
+#
+# The committed npm/package.json version is a placeholder (0.0.0-dev): the release
+# tag is the single source of truth, injected at publish time (see
+# npm/scripts/build-platform-packages.js). So this test resolves a real version
+# from the latest GitHub release rather than from the committed manifest.
 on:
   push:
     branches: [main]
@@ -32,6 +36,8 @@ jobs:
 
       - name: Build host package and run the CLI through the launcher
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           case "$RUNNER_OS" in
@@ -50,10 +56,14 @@ jobs:
           echo "host target: $tgt"
 
           cd npm
-          want="$(node -p "require('./package.json').version")"
+          # The committed version is a placeholder; resolve a real version from the
+          # latest published release and test the production path against it.
+          rel="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          want="${rel#v}"
+          echo "latest release: $rel (version $want)"
 
           # Download the matching release binary, verify its checksum, write the package.
-          node scripts/build-platform-packages.js --only "$tgt"
+          node scripts/build-platform-packages.js --only "$tgt" --version "$rel"
 
           # Assemble a node_modules install tree: main package + the one platform package.
           scope="$RUNNER_TEMP/nm/node_modules/@sofa-buffers"

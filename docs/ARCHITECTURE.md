@@ -1325,7 +1325,23 @@ npm/                     npm distribution: bin/sofabgen.js launcher + per-platfo
 truth: on a `v*` tag it cross-compiles the static, CGO-free binary for the nine
 supported OS/arch pairs and attaches each plus a `.sha256` to the GitHub release.
 Everything else is a thin consumer of those assets so there is one artifact set and
-one checksum to trust:
+one checksum to trust.
+
+**The `v*` tag is the single source of truth for the version**, injected into every
+artifact at build/publish time — never hand-maintained in a committed file, so it
+cannot drift:
+
+- The **Go binary** carries a `main.version = "0.0.0-dev"` placeholder; the build
+  step injects the tag via `-ldflags "-X main.version=<tag>"`, so a release binary
+  self-reports the exact tag. Non-tag (`workflow_dispatch`) builds keep the placeholder.
+- The **npm package** carries a `0.0.0-dev` placeholder in `npm/package.json`; the
+  `npm-publish` job injects the tag with `build-platform-packages.js --version <tag>`,
+  rewriting the version and every `optionalDependencies` pin in lockstep.
+- Two guards back this up: `check-version` fails the release early if the tag is not
+  a well-formed `vMAJOR.MINOR.PATCH[-prerelease]`, and after injection the
+  `npm-publish` job asserts every package's version equals the tag before publishing.
+
+The consumers of the release assets:
 
 - **`install.sh`** — `curl … | sh` picks the matching asset by `uname`, verifies its
   checksum, and installs it. Honors `SOFABGEN_VERSION` / `SOFABGEN_INSTALL_DIR`.
@@ -1334,8 +1350,10 @@ one checksum to trust:
   `$GITHUB_PATH`, so downstream CI can `uses:` it instead of hand-rolling downloads.
 - **`go install github.com/sofa-buffers/generator/cmd/sofabgen@vX.Y.Z`** — builds from
   source; the CLI reports the module version via `runtime/debug.ReadBuildInfo()`
-  (`cmd/sofabgen`), falling back to the compiled-in constant for in-place `go build`
-  and the release workflow. So an install-by-version self-reports that version.
+  (`cmd/sofabgen`), so an install-by-version self-reports that version. It falls back
+  to `main.version` only when no module version is present — the release workflow
+  overrides that fallback with `-ldflags "-X main.version=<tag>"`; a plain local
+  `go build` reports the `0.0.0-dev` placeholder.
 - **`npm i -D @sofa-buffers/generator`** (`npm/`) — the per-platform
   optional-dependency pattern (esbuild/swc model): a tiny launcher package pulls in
   one `@sofa-buffers/generator-<os>-<arch>` (matched by npm via `os`/`cpu`) that
@@ -1343,11 +1361,12 @@ one checksum to trust:
   is lockfile-hashed. The `npm-publish` job in `release.yml` builds these from the
   released binaries (`--version <tag>` keeps the version + optionalDependencies pins
   in lockstep) and publishes via **trusted publishing (OIDC, no token)** with
-  automatic provenance; `npm.yml` smoke-tests the launcher on every runner OS. npm's
-  package `version` must equal the release tag it downloads from — the invariant
-  both workflows enforce. OIDC cannot *create* a package, so each package's
-  first-ever version is bootstrapped once by hand (`npm/README.md`); the workflow
-  publishes all versions after that.
+  automatic provenance; `npm.yml` smoke-tests the launcher on every runner OS against
+  the latest published release (the committed version is a placeholder). The published
+  package `version` always equals the release tag because it is injected from it, and
+  the `npm-publish` guard asserts this before publishing. OIDC cannot *create* a
+  package, so each package's first-ever version is bootstrapped once by hand
+  (`npm/README.md`); the workflow publishes all versions after that.
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
 nothing; the core depends only on the `generator` *interface*, never on a
