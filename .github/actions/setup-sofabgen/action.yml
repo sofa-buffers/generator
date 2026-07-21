@@ -1,0 +1,71 @@
+# Composite action that installs the sofabgen CLI on a GitHub-hosted runner and
+# puts it on PATH for subsequent steps.
+#
+# Usage (pin to a release tag or commit for reproducible CI):
+#
+#   - uses: sofa-buffers/generator/.github/actions/setup-sofabgen@v0.19.4
+#     with:
+#       version: v0.19.4   # optional; defaults to the latest release
+#   - run: sofabgen --version
+#
+# It is a thin wrapper over the repository's install.sh so there is a single
+# source of truth for OS/arch detection and checksum verification. The script it
+# runs is the one checked out at the same ref the action is pinned to.
+name: Setup sofabgen
+description: Install the sofabgen SofaBuffers code generator and add it to PATH.
+branding:
+  icon: package
+  color: blue
+
+inputs:
+  version:
+    description: "Release tag to install (e.g. v0.19.4). Defaults to the latest release."
+    required: false
+    default: latest
+  install-dir:
+    description: "Directory to install the binary into. Defaults to a runner-temp dir that is added to PATH."
+    required: false
+    default: ""
+
+outputs:
+  version:
+    description: "The version string reported by the installed binary."
+    value: ${{ steps.install.outputs.version }}
+  path:
+    description: "Absolute path to the installed sofabgen binary."
+    value: ${{ steps.install.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_INSTALL_DIR: ${{ inputs.install-dir }}
+      run: |
+        set -eu
+
+        # Resolve the install directory (default: a fresh runner-temp dir).
+        dir="${INPUT_INSTALL_DIR}"
+        if [ -z "$dir" ]; then
+          dir="${RUNNER_TEMP:-/tmp}/sofabgen-bin"
+        fi
+        mkdir -p "$dir"
+
+        # Pin a version unless the caller asked for "latest".
+        if [ "${INPUT_VERSION}" != "latest" ] && [ -n "${INPUT_VERSION}" ]; then
+          export SOFABGEN_VERSION="${INPUT_VERSION}"
+        fi
+        export SOFABGEN_INSTALL_DIR="$dir"
+
+        # Run the install.sh from this action's checkout (same ref as the action).
+        sh "${GITHUB_ACTION_PATH}/../../../install.sh"
+
+        # Add the binary to PATH for subsequent steps and expose outputs.
+        echo "$dir" >> "$GITHUB_PATH"
+        ext=""
+        case "${RUNNER_OS:-}" in Windows) ext=".exe" ;; esac
+        bin="$dir/sofabgen${ext}"
+        echo "path=$bin" >> "$GITHUB_OUTPUT"
+        echo "version=$("$bin" --version)" >> "$GITHUB_OUTPUT"

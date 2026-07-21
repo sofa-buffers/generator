@@ -1,0 +1,51 @@
+name: Setup Action
+
+# Exercises .github/actions/setup-sofabgen on every runner OS: it must install
+# the CLI, put it on PATH, and report a usable version. Uses the local action
+# (./.github/actions/...) so a PR validates its own copy.
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/actions/setup-sofabgen/**"
+      - ".github/workflows/action.yml"
+      - "install.sh"
+  pull_request:
+    paths:
+      - ".github/actions/setup-sofabgen/**"
+      - ".github/workflows/action.yml"
+      - "install.sh"
+  workflow_dispatch:
+
+jobs:
+  setup-action:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install latest via the action
+        id: latest
+        uses: ./.github/actions/setup-sofabgen
+
+      - name: sofabgen is on PATH
+        shell: bash
+        run: |
+          sofabgen --version
+          echo "action reported: ${{ steps.latest.outputs.version }} at ${{ steps.latest.outputs.path }}"
+
+      - name: Install a pinned version via the action
+        id: pinned
+        uses: ./.github/actions/setup-sofabgen
+        with:
+          version: v0.19.3
+
+      - name: Pinned version matches
+        shell: bash
+        run: |
+          got="$(sofabgen --version)"
+          echo "pinned reported: $got"
+          test "$got" = "0.19.3"

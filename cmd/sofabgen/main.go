@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -40,13 +41,32 @@ import (
 	_ "github.com/sofa-buffers/generator/generators/zig"
 )
 
-const version = "0.19.4"
+// version is the compiled-in fallback used for local `go build` and the release
+// workflow (both build the main module in place, where module version info is
+// absent). It is the authoritative version for release binaries and is bumped
+// per release. See resolveVersion.
+var version = "0.19.4"
+
+// resolveVersion prefers the module version the Go toolchain embeds when the
+// binary is produced by `go install github.com/…/cmd/sofabgen@vX.Y.Z` (or any
+// module-aware build of a tagged version), so an install-by-version reports that
+// version. It falls back to the compiled-in constant when no module version is
+// present ("(devel)" or empty), i.e. local builds and the release workflow.
+func resolveVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if v := bi.Main.Version; v != "" && v != "(devel)" {
+			return strings.TrimPrefix(v, "v")
+		}
+	}
+	return version
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdout, stderr *os.File) int {
+	ver := resolveVersion()
 	fs := flag.NewFlagSet("sofabgen", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
@@ -59,7 +79,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		showVersion  = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "sofabgen %s — SofaBuffers code generator\n\n", version)
+		fmt.Fprintf(stderr, "sofabgen %s — SofaBuffers code generator\n\n", ver)
 		fmt.Fprintf(stderr, "usage: sofabgen --config <file> --lang <target> [--in <dir>] [--out <dir>]\n\n")
 		fs.PrintDefaults()
 	}
@@ -72,7 +92,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 	if *showVersion {
-		fmt.Fprintln(stdout, version)
+		fmt.Fprintln(stdout, ver)
 		return 0
 	}
 

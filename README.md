@@ -57,7 +57,18 @@ curl -fsSL https://raw.githubusercontent.com/sofa-buffers/generator/main/install
 
 Set `SOFABGEN_VERSION=vX.Y.Z` to pin a release or `SOFABGEN_INSTALL_DIR=<dir>` to
 choose the target directory. Prefer the Go toolchain? `go install
-github.com/sofa-buffers/generator/cmd/sofabgen@latest`.
+github.com/sofa-buffers/generator/cmd/sofabgen@latest` (the binary self-reports the
+installed version).
+
+In GitHub Actions, use the bundled composite action — it installs the CLI and puts
+it on `PATH` for later steps:
+
+```yaml
+- uses: sofa-buffers/generator/.github/actions/setup-sofabgen@v0.19.4
+  with:
+    version: v0.19.4   # optional; defaults to the latest release
+- run: sofabgen --version
+```
 
 Examples:
 - [`examples/messages/example.yaml`](examples/messages/example.yaml) — a showcase exercising every
