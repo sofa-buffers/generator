@@ -2,5 +2,13 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "The @sofa-buffers/generator-<platform>-<arch> optionalDependencies carry a 0.0.0-dev placeholder; their real version is injected from the release tag at publish time (single source of truth, see #199). Renovate must not bump these in-tree pins.",
+      "matchDepTypes": ["optionalDependencies"],
+      "matchPackageNames": ["@sofa-buffers/generator-*"],
+      "enabled": false
+    }
   ]
 }
