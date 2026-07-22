@@ -1,5 +1,15 @@
 name: Release
 
+# ⚠️ DO NOT RENAME THIS FILE (release.yml).
+# Its basename is part of the npm trusted-publishing (OIDC) identity: every
+# @sofa-buffers/generator* package on npmjs.com has a Trusted Publisher pinned to
+# repo sofa-buffers/generator + workflow filename "release.yml". Renaming (or
+# moving) this file changes that OIDC claim, npm stops trusting the publish, and
+# the npm-publish job below fails with E404 — the GitHub release still succeeds,
+# so the break is silent to the binary/go-install path. If a rename is ever truly
+# needed, update the Workflow-filename field on the Trusted Publisher of ALL ten
+# packages (main + 9 platform) on npmjs.com first. See the npm-publish job.
+
 # Builds the single, statically-linked, cross-platform sofabgen binaries and
 # attaches them to a GitHub release on a v* tag (PLAN §1, M8).
 on:
@@ -113,8 +123,11 @@ jobs:
   #
   # Auth is npm trusted publishing (OIDC) — no token. npm exchanges the GitHub
   # Actions id-token for a short-lived publish credential; each package must have
-  # a Trusted Publisher configured on npmjs.com (repo sofa-buffers/generator,
-  # workflow release.yml). Provenance is attached automatically. OIDC cannot
+  # a Trusted Publisher configured on npmjs.com pinned to repo
+  # sofa-buffers/generator + workflow filename "release.yml" (with an EMPTY
+  # environment — this job defines none). That workflow filename is a matched part
+  # of the OIDC identity: renaming this file breaks publishing (see the banner at
+  # the top of this file). Provenance is attached automatically. OIDC cannot
   # CREATE a package, so every package's first-ever version is bootstrapped once
   # by hand (see npm/README.md); this job publishes all subsequent versions.
   npm-publish:
