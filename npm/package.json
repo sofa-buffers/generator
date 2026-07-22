@@ -31,7 +31,7 @@
   "optionalDependencies": {
     "@sofa-buffers/generator-linux-x64": "0.0.0-dev",
     "@sofa-buffers/generator-linux-ia32": "0.0.0-dev",
-    "@sofa-buffers/generator-linux-arm64": "0.0.0-dev",
+    "@sofa-buffers/generator-linux-arm64": "0.19.4",
     "@sofa-buffers/generator-linux-arm": "0.0.0-dev",
     "@sofa-buffers/generator-darwin-x64": "0.0.0-dev",
     "@sofa-buffers/generator-darwin-arm64": "0.0.0-dev",
