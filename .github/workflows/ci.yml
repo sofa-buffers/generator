@@ -263,3 +263,45 @@ jobs:
         with:
           name: generated-docs
           path: generated
+
+  # main-branch binary build: cross-compiles the SAME statically-linked sofabgen
+  # binaries the release workflow ships (9 OS/arch pairs), but publishes NO
+  # release -- it uploads them as a single downloadable CI artifact so downstream
+  # consumers (crucible, arena) can pull a fresh build of every push to main
+  # instead of waiting for a tagged release. Gated to main so PRs don't pay for
+  # nine cross-builds. The version is a dev string carrying the short commit SHA
+  # (not a tag), so `sofabgen --version` on these binaries is traceable but never
+  # collides with a real release version.
+  build-binaries:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+      - name: Cross-compile every sofabgen binary
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          version="0.0.0-dev+g$(git rev-parse --short HEAD)"
+          echo "building sofabgen $version"
+          # Same OS/arch set as release.yml's build matrix.
+          targets="linux/amd64 linux/386 linux/arm64 linux/arm darwin/amd64 darwin/arm64 windows/amd64 windows/386 windows/arm64"
+          mkdir -p dist
+          for t in $targets; do
+            goos=${t%/*}; goarch=${t#*/}; ext=""
+            [ "$goos" = windows ] && ext=".exe"
+            out="sofabgen-$goos-$goarch$ext"
+            GOOS=$goos GOARCH=$goarch go build -trimpath \
+              -ldflags "-s -w -X main.version=$version" -o "dist/$out" ./cmd/sofabgen
+            (cd dist && sha256sum "$out" > "$out.sha256")
+            echo "  built $out"
+          done
+      - name: Upload all binaries as one artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sofabgen-binaries
+          path: dist/*
+          if-no-files-found: error
