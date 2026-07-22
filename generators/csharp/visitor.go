@@ -225,10 +225,11 @@ func (g *gen) emitMaxlenGuard(f *cfile, fs []frame, kind ir.Kind, what string) {
 }
 
 // emitArraySkipGuard prepends the S7.3 discard clause to Unsigned()/Signed()
-// (generator#183). corelib-cs delivers an integer array element-by-element
-// through the very callback a lone scalar uses, so a field id declared as a
-// SCALAR that receives an integer ARRAY header would otherwise store the
-// elements — the one wire-type contradiction the (cur, id) dispatch cannot
+// (generator#183) and Fp32()/Fp64() (generator#193). corelib-cs delivers an
+// array element-by-element through the very callback a lone scalar uses, so a
+// field id declared as a SCALAR that receives an ARRAY header (integer arrays via
+// Unsigned/Signed, fp arrays via Fp32/Fp64) would otherwise store the elements —
+// the one wire-type contradiction the (cur, id) dispatch cannot
 // detect on its own. ArrayBegin arms askip with the announced element count;
 // here they are discarded one by one, which self-terminates without an
 // array-end callback and works across feed chunk boundaries (askip lives on
@@ -237,36 +238,42 @@ func (g *gen) emitArraySkipGuard(f *cfile) {
 	f.line("        if (askip > 0) { askip--; return; }   // discard a contradictory array at a scalar id")
 }
 
-// emitArraySkipArm arms the S7.3 discard counter in ArrayBegin
-// (generator#183). Only integer arrays are armed: their elements land in
-// Unsigned()/Signed(), the callbacks a scalar shares. Every (scope, id) that
-// genuinely declares an integer-element native array — plus every nested
-// native-inner-array scope, whose rows arrive as ArrayBegin(index) — disarms
-// it, so a legitimate array stores normally; everything else (a
-// scalar-declared id, an unknown id, a wrapper-sequence id) discards exactly
-// `count` elements, after which a real scalar at the same id still decodes.
-// Arrays of any other kind (fp) deliver through Fp32/Fp64 and cannot reach a
-// scalar arm, so they are left disarmed.
+// emitArraySkipArm arms the S7.3 discard counter in ArrayBegin (generator#183,
+// extended to fp by generator#193). Every array kind whose elements land in a
+// callback a scalar shares is armed: integers land in Unsigned()/Signed(), fp
+// lands in Fp32()/Fp64(). Every (scope, id) that genuinely declares a native
+// array of that element kind — plus every nested native-inner-array scope, whose
+// rows arrive as ArrayBegin(index) — disarms it (=> 0), so a legitimate array
+// stores normally; everything else (a scalar-declared id, an unknown id, a
+// wrapper-sequence id) discards exactly `count` elements, after which a real
+// scalar at the same id still decodes. Mirrors emitArrayFillArm.
 func (g *gen) emitArraySkipArm(f *cfile, fs []frame) {
-	f.line("        // An integer array header at an id that does not declare an integer")
-	f.line("        // array is a wire-type contradiction: discard its `count` elements,")
-	f.line("        // exactly as an unknown id would be skipped.")
-	f.line("        askip = (kind == ArrayKind.Unsigned || kind == ArrayKind.Signed) ? (cur, id) switch {")
-	for _, fr := range fs {
-		if fr.isArr {
-			if fr.elem == ir.KindArray && intArrayElem(fr.items.Elem) {
-				f.line("            (%s, _) => 0,", fr.loc)
+	arm := func(pat string, want func(ir.Kind) bool) {
+		f.line("            %s => (cur, id) switch {", pat)
+		for _, fr := range fs {
+			if fr.isArr {
+				if fr.elem == ir.KindArray && want(fr.items.Elem) {
+					f.line("                (%s, _) => 0,", fr.loc)
+				}
+				continue
 			}
-			continue
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindArray && intArrayElem(fld.Elem) {
-				f.line("            (%s, %d) => 0,", fr.loc, fld.ID)
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindArray && want(fld.Elem) {
+					f.line("                (%s, %d) => 0,", fr.loc, fld.ID)
+				}
 			}
 		}
+		f.line("                _ => count,")
+		f.line("            },")
 	}
-	f.line("            _ => count,")
-	f.line("        } : 0;")
+	f.line("        // An array header at an id that does not declare a native array of the")
+	f.line("        // matching element kind is a wire-type contradiction: discard its")
+	f.line("        // `count` elements, exactly as an unknown id would be skipped.")
+	f.line("        askip = kind switch {")
+	arm("ArrayKind.Unsigned or ArrayKind.Signed", func(k ir.Kind) bool { return intArrayElem(k) })
+	arm("ArrayKind.Fixlen", func(k ir.Kind) bool { return k == ir.KindFP32 || k == ir.KindFP64 })
+	f.line("            _ => 0,")
+	f.line("        };")
 }
 
 // emitArrayFillArm arms the S7.3 fill counter in ArrayBegin (generator#188), the
@@ -654,6 +661,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 
 func (g *gen) emitFloatVisit(f *cfile, fs []frame, kind ir.Kind, cb, ctype string) {
 	f.line("    public void %s(int id, %s value) {", cb, ctype)
+	g.emitArraySkipGuard(f)
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {

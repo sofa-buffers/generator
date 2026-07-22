@@ -113,6 +113,7 @@ const _dec_Scalars = struct {
     }
 
     pub fn fp32(self: *_dec_Scalars, id: sofab.Id, value: f32) void {
+        if (self.askip > 0) { self.askip -= 1; return; }
         switch (self.cur) {
             .root => switch (id) {
                 5 => self.m.f32 = value,
@@ -123,6 +124,7 @@ const _dec_Scalars = struct {
     }
 
     pub fn fp64(self: *_dec_Scalars, id: sofab.Id, value: f64) void {
+        if (self.askip > 0) { self.askip -= 1; return; }
         switch (self.cur) {
             .root => switch (id) {
                 6 => self.m.f64 = value,
@@ -133,9 +135,14 @@ const _dec_Scalars = struct {
     }
 
     pub fn arrayBegin(self: *_dec_Scalars, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {
-        self.askip = if (kind == .unsigned or kind == .signed) switch (self.cur) {
-            else => count,
-        } else 0;
+        self.askip = switch (kind) {
+            .unsigned, .signed => switch (self.cur) {
+                else => count,
+            },
+            .fixlen => switch (self.cur) {
+                else => count,
+            },
+        };
     }
 };
 

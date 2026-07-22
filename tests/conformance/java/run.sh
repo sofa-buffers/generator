@@ -136,6 +136,25 @@ OUT=$($H decode myfirstmessage < "$WORK/control.bin") \
 echo "$OUT" | grep -q '"someuintarray":\[1,2,3,4\]' || { echo "FAIL: declared array must still decode to [1,2,3,4]; got: $OUT"; exit 1; }
 echo "==> array-at-scalar skip OK"
 
+# fp ARRAY delivered to a SCALAR-declared fp id (MESSAGE_SPEC S7.3, generator#193):
+# the fp analogue of the integer case above. corelib-java streams a fixlen (fp)
+# array element-by-element through the very fp32()/fp64() callbacks a lone scalar
+# uses, so without the arrayBegin-armed skip counter the element would land in the
+# scalar's arm. somefp64 (id 9, declared fp64, default 3.141592653589793) receives
+# an fp64 ARRAY and must be skipped whole.
+# Wire: 4d = id 9 wire type ARRAY_FIXLEN (5), 01 = count 1, 41 = fixlen word (len 8,
+#       FP64 subtype), then 2.5 little-endian.
+# Control: 4a 41 + 2.5 is id 9 with the correct scalar FIXLEN wire type -> 2.5.
+printf '\115\001\101\000\000\000\000\000\000\004\100' > "$WORK/fp_arr_at_scalar.bin"
+printf '\112\101\000\000\000\000\000\000\004\100' > "$WORK/fp_arr_at_scalar_control.bin"
+OUT=$($H decode myfirstmessage < "$WORK/fp_arr_at_scalar.bin") \
+    || { echo "FAIL: fp array at a scalar id must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"somefp64":3.14159265358979' || { echo "FAIL: skipped fp array must leave somefp64 at its default 3.141592653589793; got: $OUT"; exit 1; }
+OUT=$($H decode myfirstmessage < "$WORK/fp_arr_at_scalar_control.bin") \
+    || { echo "FAIL: control (correct scalar fixlen wire type) must decode"; exit 1; }
+echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode somefp64 to 2.5; got: $OUT"; exit 1; }
+echo "==> fp array-at-scalar skip OK"
+
 # Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins per
 # field id. A re-opened sequence CONTINUES its scope, so a struct merges and the
 # children an earlier opening set whose ids do not recur are retained. somestruct

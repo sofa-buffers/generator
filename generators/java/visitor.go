@@ -301,14 +301,14 @@ func (g *gen) emitMaxlenGuard(f *jfile, fs []frame, kind ir.Kind, noun string) {
 // header at an id whose declared type is a scalar would otherwise be decoded
 // instead of skipped — the one wire-type contradiction the id dispatch cannot
 // detect on its own (MESSAGE_SPEC §7.3: skip it like an unknown id). Every
-// (scope, id) that genuinely declares an integer-element native array disarms
-// the counter, so a legitimate array stores normally; everything else — a
-// scalar-declared id, an unknown id — discards exactly `count` elements, after
-// which a real scalar at the same id still decodes. Fixlen (fp32/fp64) arrays
-// deliver through fp32()/fp64() and can never reach a scalar arm, so ArrayKind
-// .FIXLEN is left disarmed. The counter self-terminates on `count`, so no
-// array-end callback is needed, and it lives in the visitor, so it survives a
-// feed chunk boundary.
+// (scope, id) that genuinely declares a native array of the matching element
+// kind disarms the counter, so a legitimate array stores normally; everything
+// else — a scalar-declared id, an unknown id — discards exactly `count` elements,
+// after which a real scalar at the same id still decodes. Integer arrays are
+// armed under UNSIGNED/SIGNED (elements land in unsigned()/signed()) and fp
+// arrays under FIXLEN (elements land in fp32()/fp64(), generator#193). The
+// counter self-terminates on `count`, so no array-end callback is needed, and it
+// lives in the visitor, so it survives a feed chunk boundary.
 func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 	f.line("        // MESSAGE_SPEC S7.3 (generator#183): an integer array delivered at an id")
 	f.line("        // that does not declare one is a wire-type contradiction -- arm a discard")
@@ -344,16 +344,18 @@ func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 	}
 	f.line("            }")
 	f.line("        }")
-	// Fixlen (fp32/fp64) arrays never share a dispatch arm with an integer scalar,
-	// so they need no askip; but their fill arms still must be armed so a bare
-	// fixlen scalar at an fp-array id is skipped, not filled (generator#188).
+	// Fixlen (fp32/fp64) arrays deliver through fp32()/fp64(), the callbacks a lone
+	// fp scalar shares (generator#193), so they are armed exactly like the integer
+	// branch: arm the skip counter by default, then disarm at every id that really
+	// declares an fp array (arming its fill instead) so a legitimate array stores.
 	f.line("        else if (kind == ArrayKind.FIXLEN) {")
+	f.line("            askip = count;")
 	f.line("            switch (cur) {")
 	for _, fr := range fs {
 		switch fr.kind {
 		case fkNativeMat:
 			if fr.innerElem == ir.KindFP32 || fr.innerElem == ir.KindFP64 {
-				f.line("            case %d: afill = count; break;", fr.idx)
+				f.line("            case %d: askip = 0; afill = count; break;", fr.idx)
 			}
 		case fkNormal:
 			var ids []string
@@ -364,7 +366,7 @@ func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 			}
 			if len(ids) > 0 {
 				f.line("            case %d: switch (id) {", fr.idx)
-				f.line("                %s afill = count; break;", strings.Join(ids, " "))
+				f.line("                %s askip = 0; afill = count; break;", strings.Join(ids, " "))
 				f.line("            } break;")
 			}
 		}
@@ -374,13 +376,13 @@ func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 }
 
 // emitArraySkipGuard prepends the §7.3 discard clause to unsigned()/signed()
-// (generator#183): while arrayBegin has an integer array armed, each delivered
-// element is dropped rather than routed by id. Emitted only for those two
-// callbacks — fp32()/fp64() carry fixlen array elements, which never share a
-// dispatch arm with an integer scalar, and string()/blob() are unaffected.
+// (generator#183) and fp32()/fp64() (generator#193): while arrayBegin has an
+// array armed at a scalar id, each delivered element is dropped rather than
+// routed by id. Emitted for those four callbacks — the ones an array shares with
+// a lone scalar; string()/blob() are unaffected.
 func (g *gen) emitArraySkipGuard(f *jfile) {
-	f.line("        // S7.3 (generator#183): drop an element of an integer array whose id")
-	f.line("        // does not declare one -- armed by arrayBegin, self-terminating on count.")
+	f.line("        // S7.3 (generator#183/#193): drop an element of an array whose id does")
+	f.line("        // not declare one -- armed by arrayBegin, self-terminating on count.")
 	f.line("        if (askip > 0) { askip--; return; }")
 }
 
@@ -767,7 +769,9 @@ func primArrayBasesUsed(fs []frame) []string {
 // decoded value to the current row (no id switch: rows arrive index-ordered).
 func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*ir.Field) (string, bool)) {
 	f.line("    public void %s(int id, %s value) {", cb, vtype)
-	if cb == "unsigned" || cb == "signed" {
+	// The §7.3 discard guard heads every callback an array shares with a lone
+	// scalar: unsigned/signed for integer arrays, fp32/fp64 for fp arrays (#193).
+	if cb == "unsigned" || cb == "signed" || cb == "fp32" || cb == "fp64" {
 		g.emitArraySkipGuard(f)
 	}
 	f.line("        switch (cur) {")
