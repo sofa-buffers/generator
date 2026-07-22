@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         gnupg \
         xz-utils \
+        unzip \
+        ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain
@@ -44,10 +46,33 @@ RUN ZIG_ARCH="$(dpkg --print-architecture)" \
     && rm /tmp/zig.tar.xz \
     && ln -sf /usr/local/zig/zig /usr/local/bin/zig
 
+# Dart SDK — the Dart backend (generators/dart) has its own conformance harness
+# (tests/conformance/dart/run.sh) and bench row (tests/bench/lang/dart.sh), both
+# of which shell out to `dart pub get`, `dart analyze` and `dart compile exe`.
+# apt carries no Dart package, so install from the official archive (the `stable`
+# channel's `latest`, mirroring the lang-dart CI job's dart-lang/setup-dart
+# `sdk: stable`). Dart ships a .zip only (no tarball), extracted with unzip so the
+# stored unix permissions are preserved; the extra chmod is defensive — some of
+# the SDK's helper binaries (dartvm, utils/gen_snapshot) fail silently without the
+# exec bit, which a zip extractor that drops external attributes would strip.
+RUN DART_ARCH="$(dpkg --print-architecture)" \
+    && case "$DART_ARCH" in \
+         amd64) DART_ARCH=x64 ;; \
+         arm64) DART_ARCH=arm64 ;; \
+         *) echo "unsupported arch for dart: $DART_ARCH" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://storage.googleapis.com/dart-archive/channels/stable/release/latest/sdk/dartsdk-linux-${DART_ARCH}-release.zip" \
+       -o /tmp/dartsdk.zip \
+    && unzip -q /tmp/dartsdk.zip -d /usr/local \
+    && rm /tmp/dartsdk.zip \
+    && chmod -R +x /usr/local/dart-sdk/bin \
+    && ln -sf /usr/local/dart-sdk/bin/dart /usr/local/bin/dart
+ENV PATH=/usr/local/dart-sdk/bin:$PATH
+
 # Language toolchains for the per-language conformance harnesses
 # (tests/conformance/<lang>/run.sh). C/C++ (gcc/g++/make) come from
-# build-essential above; Go and Zig are installed above; Node (TypeScript) is
-# installed below. This adds Python and Java + Maven; Rust is installed via
+# build-essential above; Go, Zig and Dart are installed above; Node (TypeScript)
+# is installed below. This adds Python and Java + Maven; Rust is installed via
 # rustup below (the footprint bench needs bare-metal targets apt rustc cannot
 # add); the .NET SDK (C#) is installed separately below because Ubuntu's apt does
 # not carry the .NET versions the generated C# project and corelib-cs target.
