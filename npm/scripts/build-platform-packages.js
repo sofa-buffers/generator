@@ -11,7 +11,8 @@
 // Each generated package @sofa-buffers/generator-<node-platform>-<node-arch>:
 //   - declares "os"/"cpu" so npm installs only the matching one;
 //   - ships exactly one binary at bin/sofabgen[.exe];
-//   - has NO "bin" field (the binary is exec'd by the main package's launcher).
+//   - has NO "bin" field (the binary is exec'd by the main package's launcher);
+//   - carries a short README.md pointing at the main package (for its npmjs page).
 
 "use strict";
 
@@ -130,8 +131,42 @@ function platformPackageJson(t) {
     cpu: [t.arch],
     // Keep the binary on disk (don't zip) under Yarn PnP.
     preferUnplugged: true,
-    files: [`bin/sofabgen${t.ext || ""}`],
+    files: [`bin/sofabgen${t.ext || ""}`, "README.md"],
   };
+}
+
+// A short README shown on the package's npmjs.com page. These per-platform
+// packages otherwise render with no README (only the main package carries one);
+// this points readers at the main package they should actually install.
+function platformReadme(t) {
+  const name = `@sofa-buffers/generator-${t.platform}-${t.arch}`;
+  return `# ${name}
+
+Prebuilt \`sofabgen\` binary for **${t.platform}/${t.arch}** — a platform-specific
+optional dependency of
+[**@sofa-buffers/generator**](https://www.npmjs.com/package/@sofa-buffers/generator),
+the SofaBuffers code generator.
+
+## Do not install this package directly
+
+Install the main package instead:
+
+\`\`\`sh
+npm install --save-dev @sofa-buffers/generator
+\`\`\`
+
+npm reads each optional dependency's \`os\`/\`cpu\` and installs **only the one**
+matching your host (silently skipping the rest); the launcher in
+\`@sofa-buffers/generator\` then execs the binary this package ships. No download,
+no install script — the binary is lockfile-hashed and reproducible with
+\`npm ci\`.
+
+- **Main package (install this):** https://www.npmjs.com/package/@sofa-buffers/generator
+- **Source & documentation:** https://github.com/sofa-buffers/generator
+
+Released in lockstep with \`@sofa-buffers/generator\`; the version is injected from
+the release tag at publish time. MIT licensed.
+`;
 }
 
 async function buildOne(t, fromDir) {
@@ -142,6 +177,7 @@ async function buildOne(t, fromDir) {
     path.join(dir, "package.json"),
     JSON.stringify(platformPackageJson(t), null, 2) + "\n"
   );
+  fs.writeFileSync(path.join(dir, "README.md"), platformReadme(t));
   const bin = await getBinary(t, fromDir);
   const dest = path.join(binDir, `sofabgen${t.ext || ""}`);
   fs.writeFileSync(dest, bin, { mode: t.ext ? 0o644 : 0o755 });
