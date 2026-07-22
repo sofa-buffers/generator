@@ -1366,7 +1366,7 @@ The consumers of the release assets:
   package `version` always equals the release tag because it is injected from it, and
   the `npm-publish` guard asserts this before publishing. OIDC cannot *create* a
   package, so each package's first-ever version is bootstrapped once by hand
-  (`npm/README.md`); the workflow publishes all versions after that.
+  (`npm/PUBLISHING.md`); the workflow publishes all versions after that.
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
 nothing; the core depends only on the `generator` *interface*, never on a

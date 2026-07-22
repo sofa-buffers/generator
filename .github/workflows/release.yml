@@ -129,7 +129,7 @@ jobs:
   # of the OIDC identity: renaming this file breaks publishing (see the banner at
   # the top of this file). Provenance is attached automatically. OIDC cannot
   # CREATE a package, so every package's first-ever version is bootstrapped once
-  # by hand (see npm/README.md); this job publishes all subsequent versions.
+  # by hand (see npm/PUBLISHING.md); this job publishes all subsequent versions.
   npm-publish:
     needs: release
     runs-on: ubuntu-latest
