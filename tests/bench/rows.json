@@ -1,10 +1,6 @@
 {
-  "//": "@see tests/bench/README.md. One entry per (language x corelib) row. `archs` lists the",
-  "//": "footprint targets that row can actually build for; `[]` means the row has no footprint",
-  "//": "metric (maxspeed profiles are Ir/op only). Keep sorted by id — results.txt is sorted too.",
-
+  "//": "metric (maxspeed profiles are Ir/op only). Keep sorted by id \u2014 results.txt is sorted too.",
   "schema": "examples/messages/realworld/vehicle_telemetry.yaml",
-
   "//reps": "`subtract` rows only: the two rep counts whose totals are subtracted. These are",
   "//reps ": "a TRADE-OFF and are per-row on purpose -- do not copy one row's value to another.",
   "//reps  ": "  Bigger delta = less noise. The delta carries the signal and fixed per-run noise",
@@ -17,7 +13,6 @@
   "//reps         ": "affineness gate. A JIT row needs a big delta (it must out-weigh tier noise); a",
   "//reps          ": "deterministic interpreter like CPython passes at 0.0004% with a tiny one.",
   "//reps           ": "If a row fails the gate, raise its reps before touching anything else.",
-
   "//cxx_flags": "Same as `flags` minus -ffreestanding. The C++ footprint profile CANNOT",
   "//cxx_flags ": "build freestanding today: the generated .hpp includes <string>/<vector>, and",
   "//cxx_flags  ": "libstdc++ rejects those with #error \"This header is not available in freestanding",
@@ -25,7 +20,6 @@
   "//cxx_flags    ": "(FixedString<N>/FixedBytes sized from schema maxlen). Until it lands, the cpp rows",
   "//cxx_flags     ": "are measured hosted-headers-on-bare-metal-arch, so treat them as a bloat tracker",
   "//cxx_flags      ": "rather than a flash budget. When it lands, drop cxx_flags and expect a step down.",
-
   "archs": {
     "ARMv6-m": {
       "cc": "arm-none-eabi-gcc",
@@ -55,7 +49,6 @@
       "note": "Cortex-M0; matches corelib-rs-no-std/tools/footprint.sh"
     }
   },
-
   "rows": [
     {
       "id": "c",
@@ -65,7 +58,11 @@
       "profile": "footprint",
       "method": "toggle",
       "config": "",
-      "archs": ["ARMv6-m", "ARMv7-m+fp.dp", "RV32IMC"]
+      "archs": [
+        "ARMv6-m",
+        "ARMv7-m+fp.dp",
+        "RV32IMC"
+      ]
     },
     {
       "id": "cpp-c-cpp",
@@ -75,7 +72,10 @@
       "profile": "footprint",
       "method": "toggle",
       "config": "targets: { cpp: { corelib: c-cpp } }",
-      "archs": ["ARMv6-m", "ARMv7-m+fp.dp"]
+      "archs": [
+        "ARMv6-m",
+        "ARMv7-m+fp.dp"
+      ]
     },
     {
       "id": "rust-rs-no-std",
@@ -85,7 +85,9 @@
       "profile": "footprint",
       "method": "toggle",
       "config": "generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }",
-      "archs": ["thumbv6m"]
+      "archs": [
+        "thumbv6m"
+      ]
     },
     {
       "id": "cpp-cpp",
@@ -146,6 +148,18 @@
       "profile": "maxspeed",
       "method": "subtract",
       "reps": "10000 110000",
+      "config": "generic: { emit: project }",
+      "archs": []
+    },
+    {
+      "id": "dart",
+      "lang": "dart",
+      "corelib": "corelib-dart",
+      "corelib_env": "SOFAB_DART_CORELIB",
+      "profile": "maxspeed",
+      "method": "subtract",
+      "//": "AOT exe (no JIT tier), so a moderate delta is affine; retune in the devcontainer if the affineness gate rejects it.",
+      "reps": "2000 12000",
       "config": "generic: { emit: project }",
       "archs": []
     },

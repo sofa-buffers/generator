@@ -37,6 +37,7 @@ target; a per-target value overrides the `generic` value for that target
 | `csharp` | [csharp.md](csharp.md) | `namespace` |
 | `typescript` | [typescript.md](typescript.md) | `int64` |
 | `zig` | [zig.md](zig.md) | — |
+| `dart` | [dart.md](dart.md) | — |
 | `docs` | [docs.md](docs.md) | `format` |
 
 > **History.** The schema used to validate a set of *reserved* planning-era
