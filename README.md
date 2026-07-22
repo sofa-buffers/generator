@@ -21,7 +21,7 @@ wire codec with a uniform streaming API — is owned by the corelibs, not the
 generated code.
 
 The generator (`sofabgen`) emits typed code for **C, Go, Python, TypeScript,
-C++, Rust, C#, Java, and Zig**. Every backend is built against its real corelib,
+C++, Rust, C#, Java, Zig, and Dart**. Every backend is built against its real corelib,
 JSON round-trips every field kind, and is byte-exact against the shared wire
 vectors — so code generated for one language interoperates with any other.
 
@@ -35,7 +35,7 @@ go build -o sofabgen ./cmd/sofabgen
 ./sofabgen --lang go --in examples/messages/example.yaml --out out/go
 
 # Generate for every language.
-for lang in c cpp go python typescript rust csharp java zig; do
+for lang in c cpp go python typescript rust csharp java zig dart; do
   ./sofabgen --lang "$lang" --in examples/messages/example.yaml --out "out/$lang"
 done
 
@@ -125,6 +125,7 @@ The generator emits code against one corelib per language:
 | C# / .NET | `corelib-cs` | Max speed |
 | TypeScript | `corelib-ts` | Max speed |
 | Zig | `corelib-zig` | Max speed, zero-copy decode |
+| Dart | `corelib-dart` | Max speed |
 
 Because every corelib speaks the **same wire format**, code generated for one
 language interoperates with code generated for any other for free.
@@ -139,7 +140,7 @@ tables, cross-linked named types — see
 The CLI is deliberately tiny — everything configurable lives in a config file:
 
 ```sh
-sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|zig|docs> \
+sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|zig|dart|docs> \
         [--in <dir>] [--out <dir>]
 ```
 
@@ -155,7 +156,7 @@ sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|zig
 ```
 .
 ├── cmd/sofabgen/        # the `sofabgen` CLI entry point
-├── generators/        # one backend per target (c, cpp, rust, golang, python, java, csharp, typescript, zig, docs)
+├── generators/        # one backend per target (c, cpp, rust, golang, python, java, csharp, typescript, zig, dart, docs)
 ├── internal/          # parser, validator, IR, analysis, generation pipeline
 ├── schema/            # the message-definition JSON Schema (draft-07)
 ├── examples/          # example definitions (config/ + messages/)

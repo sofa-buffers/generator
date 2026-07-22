@@ -14,7 +14,7 @@
 >   code targets).
 > - **Config format** — `schema/sofabgen-config-schema.json` and `docs/generator/`.
 >
-> Status: all 9 language backends (C, C++, Rust, Go, Python, TypeScript, C#, Java, Zig)
+> Status: all 10 language backends (C, C++, Rust, Go, Python, TypeScript, C#, Java, Zig, Dart)
 > plus the non-code `docs` target (self-contained HTML reference page) are
 > implemented and CI-green. Keep this file current — it is updated before
 > every push to `main`.
@@ -99,7 +99,7 @@ never code-generated. All problems are reported at once.
 | Flag | Meaning |
 |---|---|
 | `--config <file>` | Config file (carries all options; §7). |
-| `--lang <target>` | Target backend (`c`, `cpp`, `rust`, `go`, `python`, `java`, `csharp`, `typescript`, `zig`, `docs`). |
+| `--lang <target>` | Target backend (`c`, `cpp`, `rust`, `go`, `python`, `java`, `csharp`, `typescript`, `zig`, `dart`, `docs`). |
 | `--in <file\|dir>` | Definition input (overrides `generic.input_dir`). |
 | `--out <dir>` | Output folder (overrides `generic.output_dir`). |
 | `--print-defaults` | Print the effective resolved config for `--lang` and exit. |
@@ -543,17 +543,29 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    unbounded fields (an `alloc` fallback). A binary can't be `no_std` on a hosted
    target, so the firmware artifact is the lib (`cargo build --lib
    --no-default-features`); the JSON harness bin is a separate `std` target.
-2. **Push child-visitor** (Go). The generated struct implements the corelib's
-   `sofab.Visitor`; `Decode<Msg>` runs `sofab.AcceptBytes(buf, m)`, a zero-copy
-   cursor over the in-memory buffer that calls a typed method per field
+2. **Push child-visitor** (Go, Dart). The generated object drives the corelib's
+   visitor; `Decode<Msg>` runs a zero-copy cursor over the in-memory buffer that
+   calls a typed method per field
    (`Unsigned/Signed/Float32/Float64/String/Bytes`, `*Array` for native arrays
-   delivered widened to 64-bit). Nested scopes descend via `BeginSequence(id)`,
-   which returns the child visitor: the nested object itself (`&m.Field`), or a
-   small collector for a wrapper-sequence array (string/blob/struct/union/matrix
-   elements). A no-op `_visitorBase` embedded in every object supplies defaults
-   so each type overrides only the callbacks it uses. This replaced the earlier
-   pull-parser to avoid per-byte `bufio.ReadByte` calls; the corelib still
-   exposes the pull `Decoder` (family 3) for true streaming callers.
+   delivered widened to 64-bit). Nested scopes descend via `BeginSequence(id)` /
+   `onSequenceStart(id)`, which returns the child visitor: the nested object
+   itself, or a small collector for a wrapper-sequence array
+   (string/blob/struct/union/matrix elements). A no-op base supplies defaults so
+   each type overrides only the callbacks it uses. **Go** — the generated struct
+   *is* the `sofab.Visitor` (a no-op `_visitorBase` embedded in every object);
+   `sofab.AcceptBytes(buf, m)`; the corelib still exposes the pull `Decoder`
+   (family 3) for streaming callers. **Dart** — a separate `_<Msg>Visitor` class
+   holds a reference to the object and a shared decode context;
+   `sofab.Decoder.decode(data, visitor)`. Because Dart's corelib delivers a native
+   array whole through a distinct `on*Array` callback (like Go, unlike the
+   flat-visitor family that streams array elements through the scalar callbacks),
+   an integer/fp array at a scalar id lands in a callback the id switch does not
+   handle and skips **structurally** — no `askip` guard (§7.3). And because the
+   Dart callbacks return `void`, the over-count/over-index/over-maxlen INVALID
+   verdicts ride a **sticky `_inv` flag** the generated `tryDecode` converts to a
+   terminal INVALID after the corelib returns (the Rust/Zig sticky-flag model);
+   the receiver-side `max_dyn_*` limits are enforced by the corelib itself via a
+   `DecoderLimits` (family "passed into the corelib decoder", §9.5).
 3. **Pull-parser** (Python; Go's corelib still exposes it for streaming). The
    generated `decode` loops `Decoder.Next()` → a field `{id, wire-type}`,
    switches on `id`, reads the typed value, and `Skip()`s unknowns; returns at
@@ -604,10 +616,11 @@ three-valued outcome — COMPLETE / INCOMPLETE / INVALID — and the generated
 one-shot decode must not hide it. For corelibs that surface INCOMPLETE as an
 error/exception (Go, Rust, C++, C, Python, TS) the fallible decode entry
 point (`try_decode`, Go's `(msg, error)`, thrown exceptions) already propagates
-all three. The **status-returning** corelibs (C#, Java, Zig) treat INCOMPLETE
+all three. The **status-returning** corelibs (C#, Java, Zig, Dart) treat INCOMPLETE
 as a non-error status (C#/Java: `DecodeStatus` from `Feed`/`status()`; Zig:
-`Status` from `feed(chunk)`) and leave the end-of-input verdict to the caller,
-so their backends must surface it explicitly:
+`Status` from `feed(chunk)`; Dart: `DecodeStatus` from `Decoder.decode`/`feed`)
+and leave the end-of-input verdict to the caller, so their backends must surface
+it explicitly:
 
 - C#/Java emit an additional status-surfacing entry point next to the
   back-compat best-effort `Decode`/`decode`: C# `static DecodeStatus
@@ -626,6 +639,16 @@ so their backends must surface it explicitly:
   is deliberately distinct from `error.InvalidMessage` so the §7 outcomes
   never collapse). The Zig conformance harness pins the same two vectors
   through the plain `decode` mode.
+- Dart, like Zig, has no back-compat surface, but its corelib is exception-free
+  for the decode path (it *returns* `DecodeStatus`), so the generated
+  `static DecodeStatus tryDecode(Uint8List data, T out)` returns the corelib's
+  terminal status directly — `invalid` when the sticky `_inv` flag (an
+  over-count/index/maxlen violation) is set, else the corelib's verdict. The
+  best-effort `static T decode(Uint8List)` discards it (the 90 % case). The
+  project harness exposes `tryDecode` as a `trydecode` mode pinning the same two
+  vectors; its `decode` mode sets a non-zero process exit on any non-`complete`
+  status (Dart ignores an `int` returned from `main`, so the harness calls
+  `exit()`).
 
 #### Decode verdict: over-count scalar arrays are INVALID (all families)
 
@@ -677,11 +700,12 @@ unguarded id-keyed grow materialised `id+1` elements and turned a ~9-byte messag
 into an arbitrarily large allocation (a heap-amplification DoS). Who enforces it
 splits exactly like the scalar case:
 
-- **Heap families reject** — the 9 heap backends (`go`, `rust` std, `cpp`
-  `corelib-cpp`, both Python, `java`, `typescript`, `csharp`, `zig`) emit a
+- **Heap families reject** — the 10 heap backends (`go`, `rust` std, `cpp`
+  `corelib-cpp`, both Python, `java`, `typescript`, `csharp`, `zig`, `dart`) emit a
   per-element `id >= N` guard using the same INVALID channel as the scalar
   over-count guard (`is.invalidate()` / sticky `inv` / `ErrInvalidMsg` /
-  thrown `SofabException`/`SofabError` / `SofaDecodeError`). A dynamic wrapper
+  thrown `SofabException`/`SofabError` / `SofaDecodeError` / Dart's sticky
+  `_inv`). A dynamic wrapper
   array (no `count`) has no `N` and keeps every delivered index — its length is
   *highest present id + 1* (§5.1).
 - **`no_std` Rust also rejects (string/blob)** — the generated `id >= N` guard is
@@ -730,10 +754,12 @@ exceeds `L` is malformed input and **MUST** be reported as `INVALID` on *every*
 target, **never silently truncated to `L`** — "two conformant implementations
 MUST agree on which messages are valid," regardless of allocation strategy.
 
-- **Heap families reject** — the 9 heap backends now emit a per-field guard at
+- **Heap families reject** — the 10 heap backends now emit a per-field guard at
   the length header (`wire byte length > L → INVALID`) for every bounded
   string/blob, scalar field *and* wrapper-array element, using the same INVALID
-  channel as the over-count/over-index guards. It is the **bounded-field twin**
+  channel as the over-count/over-index guards (Dart computes the exact UTF-8 byte
+  length of a materialized string with a `_u8len` helper, no re-transcode). It is
+  the **bounded-field twin**
   of the receiver-side `max_dyn_*` limit guards (§9.5): those reject an
   *unbounded* field's length as `LimitExceeded` (policy); this rejects a *bounded*
   field's length as `INVALID` (schema validity). A field is one or the other, so
@@ -842,7 +868,7 @@ that is a property of the corelib, not of the backend. Three models exist:
 
 | model | corelibs | who checks | §7.3 status |
 |---|---|---|---|
-| **corelib dispatches by type** — the corelib resolves wire type *and* fixlen subtype, then calls a distinctly-typed callback | go, rs, rs-no-std, cs, java, zig | nobody, *except* for an integer array at a scalar id: the five that stream array elements through the scalar callbacks need the generated `askip` guard (generator#183) | structural ✅ + `askip` ✅ |
+| **corelib dispatches by type** — the corelib resolves wire type *and* fixlen subtype, then calls a distinctly-typed callback | go, dart, rs, rs-no-std, cs, java, zig | nobody, *except* for an integer array at a scalar id: the five that stream array elements through the scalar callbacks need the generated `askip` guard (generator#183). `go` and `dart` are exempt even there — their corelibs deliver a native array *whole* through a distinct `on*Array` callback, so an array at a scalar id skips structurally too | structural ✅ (+ `askip` on rs/rs-no-std/cs/java/zig) |
 | **descriptor / object API** — the generator hands the schema to the corelib as a table | c (`c-cpp` object API) | corelib, against the descriptor (mask `0x3F` = wire type + subtype) | ✅ |
 | **generated code pulls by id** — the corelib delivers `(id, …)` and generated code chooses the reader | python, cpp, typescript, cpp-over-`c-cpp` | **generated code**, so the corelib must expose the delivered type at the decision point | ✅ all |
 
@@ -864,9 +890,11 @@ features. Both are now closed:
   `sofab::Wire`/`sofab::Fix` surface as `corelib-cpp` (corelib-c-cpp#104), so the
   generator emits one guard shape for both C++ corelibs. ✅
 
-All eleven target/corelib combinations now pass the four §7.3/§7.4 vectors (a
+All twelve target/corelib combinations now pass the four §7.3/§7.4 vectors (a
 `fixlen`-subtype mismatch and its control, plus the two §7.4-interaction cases
-below). The two combinations that previously failed — TypeScript on the subtype
+below) — `dart` joins the group that settles them structurally (its corelib
+dispatches by resolved type to distinct callbacks, including a distinct `on*Array`
+for native arrays, so no generated guard is needed; §9.3 family 2). The two combinations that previously failed — TypeScript on the subtype
 vector, and `cpp`/`c-cpp` on *any* contradictory wire type — are covered by the
 corelib accessors above and the generator guards keyed off them; the conformance
 harnesses assert all four on every target, no longer gated. The five backends
@@ -1051,9 +1079,9 @@ Enforcement by family: **generated visitor guards** (Rust std, Java, C#, Zig,
 pure C++ — the corelib callback exposes `count`/`total` pre-allocation; the
 corelibs contribute only the error category); **passed into the corelib
 decoder** (Go `sofab.WithMax*` options, Python `Decoder(max_*=...)` kwargs,
-TypeScript `Cursor(buf, DecodeLimits)` — the corelib allocates, so it
-enforces; the generated cap is raised to the largest schema bound of its kind
-because these apply globally per decode); pure C++ additionally derives a
+TypeScript `Cursor(buf, DecodeLimits)`, Dart `sofab.DecoderLimits` — the corelib
+allocates, so it enforces; the generated cap is raised to the largest schema bound
+of its kind because these apply globally per decode); pure C++ additionally derives a
 streaming reassembly cap (`sofab::Limits{max_buffered_field}` =
 max(string/blob caps, largest schema maxlen, largest schema count x 10)) for
 its `acc_` buffer. **Statically bounded profiles** (C, C++ `corelib: c-cpp`,
@@ -1078,6 +1106,7 @@ bounded and grow with delivered elements (the Java #96/#98 pattern).
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
 | **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `marshal`; zero-copy decode (strings/blobs borrow the input buffer, arrays from a caller allocator); fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
+| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `marshal`; `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); JSON harness carries u64 as a string. |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 
 **Common type mapping:** enum → smallest *signed* backing; bitfield → smallest

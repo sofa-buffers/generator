@@ -40,6 +40,9 @@
         "zig": {
           "$ref": "#/$defs/target_zig"
         },
+        "dart": {
+          "$ref": "#/$defs/target_dart"
+        },
         "docs": {
           "$ref": "#/$defs/target_docs"
         }
@@ -314,6 +317,24 @@
       }
     },
     "target_zig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "emit": {
+          "$ref": "#/$defs/emit"
+        },
+        "max_dyn_array_count": {
+          "$ref": "#/$defs/max_dyn_array_count"
+        },
+        "max_dyn_string_len": {
+          "$ref": "#/$defs/max_dyn_string_len"
+        },
+        "max_dyn_blob_len": {
+          "$ref": "#/$defs/max_dyn_blob_len"
+        }
+      }
+    },
+    "target_dart": {
       "type": "object",
       "additionalProperties": false,
       "properties": {

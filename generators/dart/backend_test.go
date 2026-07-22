@@ -1,0 +1,177 @@
+package dart
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/sofa-buffers/generator/internal/analysis"
+	"github.com/sofa-buffers/generator/internal/model"
+	"github.com/sofa-buffers/generator/internal/parser"
+)
+
+// genFor parses + analyzes a definition file, generates with cfg, and returns all
+// emitted files concatenated (path-delimited) for substring assertions.
+func genFor(t *testing.T, def string, cfg map[string]any) string {
+	t.Helper()
+	data, err := os.ReadFile(def)
+	if err != nil {
+		t.Fatalf("read %s: %v", def, err)
+	}
+	doc, err := parser.Parse(data, def)
+	if err != nil {
+		t.Fatalf("parse %s: %v", def, err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid %s: %v", def, errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatalf("model %s: %v", def, err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatalf("analyze %s: %v", def, err)
+	}
+	files, err := (&Backend{}).Generate(s, cfg)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var b strings.Builder
+	for _, f := range files {
+		b.WriteString("// === " + f.Path + " ===\n")
+		b.Write(f.Content)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+const exampleDef = "../../examples/messages/example.yaml"
+
+func TestModuleShape(t *testing.T) {
+	out := genFor(t, exampleDef, map[string]any{})
+	for _, want := range []string{
+		"import 'package:sofabuffers/sofabuffers.dart' as sofab;",
+		"class Myfirstmessage {",
+		"void marshal(sofab.Encoder e) {",
+		"Uint8List encode() => sofab.Encoder.encodeToBytes(marshal);",
+		"static sofab.DecodeStatus tryDecode(Uint8List data, Myfirstmessage out) {",
+		"static Myfirstmessage decode(Uint8List data) {",
+		"class _MyfirstmessageVisitor extends sofab.MessageVisitor {",
+		"static const int maxSize =",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated module missing %q", want)
+		}
+	}
+}
+
+func TestEnumBitfieldConstants(t *testing.T) {
+	out := genFor(t, exampleDef, map[string]any{})
+	// enum/bitfield lower to an abstract-final class of static const int values.
+	if !strings.Contains(out, "abstract final class MyfirstmessageSomeenum {") {
+		t.Error("enum not lowered to an abstract final class")
+	}
+	if !strings.Contains(out, "static const int ") {
+		t.Error("enum/bitfield constants not emitted as static const int")
+	}
+}
+
+func TestKeywordAndTypeNameMangling(t *testing.T) {
+	// A field named after a Dart keyword or core type is mangled with a trailing
+	// underscore; the JSON/wire name is unaffected (id-keyed).
+	out := genFor(t, "../../tests/matrix/corpus/defs/keywords.yaml", map[string]any{})
+	if !strings.Contains(out, "int_") {
+		t.Error("field named 'int' should mangle to int_ (would otherwise shadow the int type)")
+	}
+	if strings.Contains(out, " int int =") {
+		t.Error("a field named 'int' must not be emitted unmangled")
+	}
+}
+
+func TestU64DefaultLiteral(t *testing.T) {
+	// A u64 default of 2^64-1 must not be emitted as a decimal literal (Dart's int
+	// is signed 64-bit; the decimal form is a compile error). scalars.yaml has a
+	// u64max field defaulting to 18446744073709551615.
+	out := genFor(t, "../../tests/matrix/corpus/defs/scalars.yaml", map[string]any{})
+	if strings.Contains(out, "18446744073709551615") {
+		t.Error("u64 max default emitted as an out-of-range decimal literal")
+	}
+	if !strings.Contains(out, "= -1;") {
+		t.Error("u64 max default should be emitted as its signed bit pattern -1")
+	}
+}
+
+func TestSparseOmitGuards(t *testing.T) {
+	out := genFor(t, "../../tests/matrix/corpus/defs/scalars.yaml", map[string]any{})
+	// Every leaf write is guarded by a != default omit test (sparse canonical).
+	if !strings.Contains(out, "if (u8max != 255) { e.writeUnsigned(1, u8max); }") {
+		t.Error("scalar field not guarded by its != default omit test")
+	}
+}
+
+func TestProjectFiles(t *testing.T) {
+	out := genFor(t, exampleDef, map[string]any{"emit": "project"})
+	for _, want := range []string{
+		"// === pubspec.yaml ===",
+		"// === lib/message.dart ===",
+		"// === bin/harness.dart ===",
+		"path: ${SOFAB_DART_CORELIB}",
+		"void main(List<String> args) {",
+		"exit(1);", // decode-mode failure sets a non-zero process exit
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("project output missing %q", want)
+		}
+	}
+}
+
+func TestDecodeLimitsPlumbing(t *testing.T) {
+	// An unbounded string + a configured cap wires a DecoderLimits (no_maxlen.yaml
+	// has an unbounded string `s` and blob `b`).
+	out := genFor(t, "../../tests/matrix/corpus/defs/no_maxlen.yaml", map[string]any{"max_dyn_string_len": 8})
+	if !strings.Contains(out, "sofab.DecoderLimits(") {
+		t.Error("configured max_dyn_string_len should bake a DecoderLimits")
+	}
+	if !strings.Contains(out, ", limits: _limits)") {
+		t.Error("DecoderLimits should be passed to Decoder.decode")
+	}
+}
+
+func TestGeneratedIsASCII(t *testing.T) {
+	out := genFor(t, exampleDef, map[string]any{"emit": "project"})
+	for i := 0; i < len(out); i++ {
+		if out[i] >= 0x80 {
+			t.Fatalf("non-ASCII byte 0x%02x at offset %d", out[i], i)
+		}
+	}
+}
+
+// TestConformance runs the full generate -> dart build -> round-trip ->
+// shared-vector harness. Gated on SOFAB_DART_CORELIB (a corelib-dart checkout)
+// and the `dart` toolchain; skipped otherwise, so the hermetic core CI job stays
+// toolchain-free (the lang-dart job runs the harness directly).
+func TestConformance(t *testing.T) {
+	corelib := os.Getenv("SOFAB_DART_CORELIB")
+	if corelib == "" {
+		t.Skip("set SOFAB_DART_CORELIB to a corelib-dart checkout to run the Dart conformance harness")
+	}
+	if _, err := exec.LookPath("dart"); err != nil {
+		t.Skip("dart toolchain not on PATH")
+	}
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(root, "tests", "conformance", "dart", "run.sh"), corelib)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("conformance harness failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "PASS") {
+		t.Fatalf("conformance harness did not report PASS:\n%s", out)
+	}
+}

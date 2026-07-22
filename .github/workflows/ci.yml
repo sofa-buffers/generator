@@ -247,6 +247,30 @@ jobs:
           name: generated-zig
           path: generated
 
+  # Language milestone: Dart (corelib-dart). Installs the Dart SDK, generates a
+  # package, resolves + compiles the harness, round-trips JSON, and checks
+  # byte-exact output against the shared vectors. run.sh clones corelib-dart.
+  lang-dart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - name: Dart backend — generate, build, round-trip, conformance
+        run: ./tests/conformance/dart/run.sh
+      - name: Generate sources (artifact)
+        if: always()
+        run: ./tests/gen-artifacts.sh dart generated
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: generated-dart
+          path: generated
+
   # Docs target: non-code, so no toolchain, no conformance harness — nothing
   # executes. Renders the example + realworld + corpus definitions to the
   # self-contained HTML reference pages and attaches them as an artifact.
