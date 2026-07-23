@@ -163,9 +163,9 @@ exists partly to keep them visible.
   includes `<string>`/`<vector>`, which libstdc++ rejects under `-ffreestanding`
   ("This header is not available in freestanding mode"). So the `cpp-*` rows drop
   `-ffreestanding` (`cxx_flags` in `rows.json`) and are a **bloat tracker, not a
-  flash budget**. `docs/plans/cpp-embedded-footprint.md` is the plan to fix this
-  (`FixedString<N>`/`FixedBytes` from schema `maxlen`); when it lands, drop
-  `cxx_flags` and expect a step down. The `bss=180` on those rows is static RAM in a
+  flash budget**. Replacing the header's `<string>`/`<vector>` with
+  `FixedString<N>`/`FixedBytes` sized from schema `maxlen` would let `cxx_flags` be
+  dropped, with a step down expected. The `bss=180` on those rows is static RAM in a
   profile that advertises none.
 * **C++ is ARM-only.** Neither riscv64-unknown-elf nor avr ships a bare-metal C++
   standard library.
