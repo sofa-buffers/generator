@@ -81,6 +81,24 @@ run_variant() {
     (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/control.bin" >/dev/null) || { echo "FAIL: [$label] control (count == 4) must decode"; exit 1; }
     echo "==> [$label] over-count reject OK"
 
+    # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
+    # MESSAGE_SPEC S5.2). someuintarray declares count 4; a header announcing 6
+    # elements (> 4) followed by only 2 elements then EOF is BOTH schema-invalid and
+    # truncated. The over-count is decided at the count header (before the cut-off
+    # elements), so the message MUST report INVALID (InvalidMsg), not INCOMPLETE.
+    # Wire: 7b (id 15 unsigned-array) 06 (count 6) 01 02 (2 of 6 elements) <EOF>.
+    printf '\173\006\001\002' > "$WORK/overcount_trunc.bin"
+    echo "==> [$label] over-count + truncation must be INVALID, not INCOMPLETE (generator#216)"
+    ERR=$( (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overcount_trunc.bin" 2>&1 >/dev/null) || true )
+    echo "$ERR" | grep -q 'InvalidMsg' || { echo "FAIL: [$label] over-count(6>4)+truncated must be INVALID (InvalidMsg); got: $ERR"; exit 1; }
+    # Precision control: an IN-BOUND count (4 == bound) that is genuinely truncated
+    # (2 of 4 elements then EOF) is a clean truncation and MUST stay INCOMPLETE — the
+    # over-count guard must not turn every short array into INVALID.
+    printf '\173\004\001\002' > "$WORK/incount_trunc.bin"
+    ERR=$( (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/incount_trunc.bin" 2>&1 >/dev/null) || true )
+    echo "$ERR" | grep -q 'Incomplete' || { echo "FAIL: [$label] in-bound(4==4)+truncated must be INCOMPLETE; got: $ERR"; exit 1; }
+    echo "==> [$label] over-count/truncation ordering OK"
+
     # Over-index wrapper array (generator#142, #149): the sequence-form analogue of
     # the over-count scalar reject above. somestringarray (id 18) declares count: 5;
     # a well-formed string element at wire index 5 (>= N) is INVALID per MESSAGE_SPEC

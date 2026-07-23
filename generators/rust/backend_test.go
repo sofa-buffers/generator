@@ -647,15 +647,24 @@ messages:
 `
 	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
 		m := moduleFromYAML(t, src, cfg)
-		// Non-zero defaults reset to the element-default image on array_begin.
+		// Non-zero defaults reset to the element-default image on array_begin, now
+		// behind the over-count guard (generator#216): the count header is rejected
+		// as INVALID before the reset, so a truncated over-count array cannot mask
+		// the violation as INCOMPLETE (MESSAGE_SPEC S5.2).
 		for _, want := range []string{
-			"(_Loc::Root, 0) => self.m.defd = [0; 5],",
-			"(_Loc::Root, 3) => self.m.fdef = [0.0; 3],",
-			"(_Loc::Root, 4) => self.m.bdef = [false; 3],",
+			"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd = [0; 5]; },",
+			"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef = [0.0; 3]; },",
+			"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef = [false; 3]; },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing reset %q", cfg, want)
 			}
+		}
+		// The over-count reject is emitted at the count header for EVERY fixed-count
+		// array, including one with no reset (generator#216): nodef (count 3, no
+		// default) gets a bare guard arm and still no element assignment.
+		if !strings.Contains(m, "(_Loc::Root, 2) => { if count > 3 { self.inv = true; return; }") {
+			t.Errorf("message.rs (%v) missing over-count guard for nodef (id 2)", cfg)
 		}
 		// An all-zero or absent default already reads back as zero: no reset, so
 		// these schemas' generated code is unchanged.
