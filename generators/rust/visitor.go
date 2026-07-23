@@ -753,7 +753,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			case fkStruct:
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
-						if _, _, ok := g.fixedNativeArray(fld); ok {
+						if _, n, ok := g.fixedNativeArray(fld); ok {
+							// Over-count reject at the count header (generator#216 / F-0032):
+							// a wire element count above the schema `count` N is INVALID
+							// (MESSAGE_SPEC 3+7), and deciding it HERE — before the elements
+							// are read — makes INVALID dominate a truncated tail per §5.2. A
+							// check only at the element store (emitNativeArrayStore) never
+							// fires when truncation cuts the array short of N, so an
+							// over-count-AND-truncated array would misreport INCOMPLETE.
+							overcount := fmt.Sprintf("if count > %d { self.inv = true; return; } ", n)
 							// A fixed `[T; N]` is pre-allocated in the struct default, so
 							// the M wire elements store straight into it and no clear is
 							// needed to make room. But the encoder trims the trailing
@@ -764,9 +772,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 							// array_begin means the field is PRESENT on the wire, so this
 							// never disturbs the sparse-omission contract: an ABSENT field
 							// keeps its full schema default.
+							reset := ""
 							if zero, need := g.rustFixedArrayNeedsReset(fld); need {
-								f.line("            (_Loc::%s, %d) => %s.%s = %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), zero)
+								reset = fmt.Sprintf("%s.%s = %s;", fr.path, rustIdent(fld.Name), zero)
 							}
+							f.line("            (_Loc::%s, %d) => { %s%s },", fr.loc, fld.ID, overcount, reset)
 							continue
 						}
 						// Unbounded array under an active receiver cap (generator#102):

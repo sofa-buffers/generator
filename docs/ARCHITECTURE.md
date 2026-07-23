@@ -685,6 +685,20 @@ The infallible best-effort entry points kept for back-compat (Rust/C++
 `decode`) still discard the verdict; the fallible path is authoritative, and
 the conformance harnesses assert the reject through it (§12).
 
+**Ordering vs truncation (§5.2, generator#216 / F-0032).** A message that is
+*both* over-count *and* truncated must report **INVALID**, not INCOMPLETE —
+§5.2 makes INVALID "malformed regardless of what follows," so it dominates a
+truncated tail. This holds only when the over-count is decided at the **count
+header** (`count > N` at `array_begin`), before the cut-off elements: a guard
+that compares only after consuming the elements (or at the element store) never
+fires when truncation cuts the array short, so it misreports INCOMPLETE. The
+Rust backend now checks at the header (the `array_begin` `if count > N { inv }`
+arm) — the same "decide at the deciding word" rule as the over-`maxlen` guard
+(checked at the fixlen length word) and the try_decode ordering that reads the
+sticky `inv` flag before propagating `feed`'s `Incomplete`. The remaining
+"guard after the whole-array read" backends (Go, C++ `corelib-cpp`, TypeScript,
+Python, Zig, Dart) are tracked for the same move under generator#216.
+
 #### Decode verdict: over-index wrapper-array elements are INVALID (all targets)
 
 The **sequence-form analogue** of the over-count scalar rule (generator#142).
