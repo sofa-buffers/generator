@@ -175,13 +175,25 @@ func TestGoHeaderVisitorReject(t *testing.T) {
 	for _, want := range []string{
 		"func (m *M) ArrayBegin(id sofab.ID, count int) error {",
 		"func (m *M) FixlenHeader(id sofab.ID, subtype int, length int) error {",
-		"if count > 4 {",   // native u32 array (id 0) count bound
-		"if count > 3 {",   // fixlen fp32 array (id 1) count bound
-		"if length > 8 {",  // scalar string (id 2) maxlen
-		"if length > 16 {", // scalar blob (id 3) maxlen
+		"if count > 4 {", // native u32 array (id 0) count bound
+		"if count > 3 {", // fixlen fp32 array (id 1) count bound
+		// Each maxlen guard is gated on the DECLARED fixlen subtype (2 = string,
+		// 3 = blob): FixlenHeader fires for any subtype at a field id, and a
+		// contradicting one must be skipped, not measured against this field's
+		// bound (§7.3, generator#224).
+		"if subtype == 2 && length > 8 {",  // scalar string (id 2) maxlen
+		"if subtype == 3 && length > 16 {", // scalar blob (id 3) maxlen
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("m.go missing header-visitor guard %q:\n%s", want, msg)
+		}
+	}
+	// The bound must never be enforced on length alone — an un-gated compare is
+	// exactly the generator#224 defect (an fp64 landing on a `maxlen: 4` blob was
+	// rejected as INVALID instead of skipped).
+	for _, notWant := range []string{"if length > 8 {", "if length > 16 {"} {
+		if strings.Contains(msg, notWant) {
+			t.Errorf("m.go: maxlen header guard %q is not gated on the fixlen subtype (generator#224):\n%s", notWant, msg)
 		}
 	}
 	// The dynamic array (id 4) and unbounded string (id 5) declare no bound, so
@@ -200,6 +212,21 @@ func TestGoHeaderVisitorReject(t *testing.T) {
 	for _, notWant := range []string{"ArrayBegin(id sofab.ID", "FixlenHeader(id sofab.ID"} {
 		if strings.Contains(plain, notWant) {
 			t.Errorf("p.go: an unbounded-only type must not implement HeaderVisitor (%q):\n%s", notWant, plain)
+		}
+	}
+	// sofab.HeaderVisitor declares BOTH methods and the cursor reaches the hooks
+	// through one `v.(HeaderVisitor)` assertion, so a type carrying only ONE kind of
+	// bound must still implement both — emitting just the needed method leaves the
+	// assertion failing and silently disables the header rejects entirely.
+	for _, tc := range []struct{ name, src string }{
+		{"maxlen only", "version: 1\nmessages:\n  Q:\n    payload:\n      s: { id: 0, type: string, maxlen: 8 }\n"},
+		{"count only", "version: 1\nmessages:\n  Q:\n    payload:\n      a: { id: 0, type: array, items: { type: u32, count: 4 } }\n"},
+	} {
+		out := genGo(t, schemaFromYAMLString(t, tc.src), map[string]any{"package": "q"})["q.go"]
+		for _, want := range []string{"func (m *Q) ArrayBegin(id sofab.ID, count int) error {", "func (m *Q) FixlenHeader(id sofab.ID, subtype int, length int) error {"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("q.go (%s): a bounded type must implement the whole HeaderVisitor, missing %q:\n%s", tc.name, want, out)
+			}
 		}
 	}
 }

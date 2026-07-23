@@ -751,13 +751,13 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate.
 			str = append(str, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+acc+" = v"))
 			if fld.HasMaxlen {
-				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard(fld.Maxlen)))
+				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard(fixSubString, fld.Maxlen)))
 			}
 		case ir.KindBlob:
 			// v aliases the decode buffer (AcceptBytes) — copy what we keep.
 			blob = append(blob, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+acc+" = append([]byte(nil), v...)"))
 			if fld.HasMaxlen {
-				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard(fld.Maxlen)))
+				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard(fixSubBlob, fld.Maxlen)))
 			}
 		case ir.KindStruct, ir.KindUnion:
 			seq = append(seq, arm(fld.ID, fmt.Sprintf("return &%s, nil", acc)))
@@ -812,8 +812,17 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	// (generator#216). ArrayBegin/FixlenHeader fire at the header word, before the
 	// truncation check, so an over-count/over-maxlen field that is also truncated is
 	// INVALID, not INCOMPLETE (§5.2 anti-folding).
-	emitIDSwitch(f, recv, "ArrayBegin(id sofab.ID, count int) error", arrBegin)
-	emitIDSwitch(f, recv, "FixlenHeader(id sofab.ID, subtype int, length int) error", fixHdr)
+	//
+	// HeaderVisitor declares BOTH methods, and the cursor reaches the hooks through
+	// a single `v.(HeaderVisitor)` assertion — so emitting only the one kind a type
+	// happens to need leaves the assertion FAILING and silently disables the header
+	// rejects altogether. A type with any bound therefore gets both methods; the one
+	// with no arms is an empty switch (a no-op returning nil), which costs a call per
+	// bounded field and nothing on the bound-free max-speed path.
+	if len(arrBegin) > 0 || len(fixHdr) > 0 {
+		emitIDSwitchAlways(f, recv, "ArrayBegin(id sofab.ID, count int) error", arrBegin)
+		emitIDSwitchAlways(f, recv, "FixlenHeader(id sofab.ID, subtype int, length int) error", fixHdr)
+	}
 
 	if len(seq) > 0 {
 		f.line("%sBeginSequence(id sofab.ID) (sofab.Visitor, error) {", recv)
@@ -835,6 +844,13 @@ func emitIDSwitch(f *gofile, recv, sig string, arms []string) {
 	if len(arms) == 0 {
 		return
 	}
+	emitIDSwitchAlways(f, recv, sig, arms)
+}
+
+// emitIDSwitchAlways is emitIDSwitch without the skip-when-empty shortcut: the
+// method is emitted even with no arms. Used for the HeaderVisitor pair, where the
+// method set — not the arms — is what makes the interface assertion succeed.
+func emitIDSwitchAlways(f *gofile, recv, sig string, arms []string) {
 	f.line("%s%s {", recv, sig)
 	f.line("\tswitch id {")
 	for _, a := range arms {
@@ -932,12 +948,27 @@ func overcountHdrGuard(n int64) string {
 	return fmt.Sprintf("if count > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", n)
 }
 
+// The fixlen subtype tag carried in the low 3 bits of a fixlen word (MESSAGE_SPEC
+// §4.6). corelib-go keeps its own copies unexported, so the generated guard spells
+// the wire values out; they are fixed by the format and cannot drift.
+const (
+	fixSubString = 2
+	fixSubBlob   = 3
+)
+
 // maxlenHdrGuard is the FixlenHeader arm body rejecting a string/blob whose wire
 // byte length exceeds the schema maxlen as INVALID, at the length word
-// (generator#216). It bounds on length alone, keyed by field id — the subtype
-// param is unused because only bounded string/blob fields get an arm.
-func maxlenHdrGuard(n int64) string {
-	return fmt.Sprintf("if length > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", n)
+// (generator#216). The bound is enforced only when the wire `subtype` matches the
+// field's DECLARED one: FixlenHeader fires for ANY fixlen subtype at a field id
+// (the corelib resolves the subtype but cannot know the declared one — that is
+// schema knowledge only the generated code has), and a fixlen value whose subtype
+// contradicts the declaration must be SKIPPED, not measured against this field's
+// maxlen (MESSAGE_SPEC §7.3, generator#224). Without the gate an fp64 (8 bytes)
+// landing on a `blob` with `maxlen: 4` was rejected as INVALID instead of skipped.
+// The payload callbacks (String/Bytes) are already subtype-dispatched by the
+// corelib, so only this pre-dispatch hook needs the explicit check.
+func maxlenHdrGuard(sub int, n int64) string {
+	return fmt.Sprintf("if subtype == %d && length > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", sub, n)
 }
 
 // emaxOf maps a string/blob element maxlen bound to the collector's emax field:

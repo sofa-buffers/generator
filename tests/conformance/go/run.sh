@@ -188,6 +188,58 @@ OUT=$(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage
 echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
 echo "==> fixlen subtype skip OK"
 
+# Fixlen subtype mismatch AT A BOUNDED FIELD (generator#224, MESSAGE_SPEC S7.3):
+# FixlenHeader fires for ANY fixlen subtype at a field id, so a maxlen guard that
+# compares length alone measures a CONTRADICTING value against this field's bound
+# and rejects it, where S7.3 requires it be skipped. The guard must be gated on the
+# declared subtype. someblob (id 12) declares maxlen 16: a 17-byte STRING at that id
+# is a subtype mismatch (skip -> someblob keeps its "Hello" default), while a
+# 17-byte BLOB there is the genuine over-maxlen INVALID (asserted above).
+# Wire: 62 (id 12 fixlen) 8a 01 (fixlen word: len 17, subtype STRING) + 17 bytes.
+echo "==> over-bound fixlen at a MISMATCHED subtype must skip (S7.3, generator#224)"
+printf '\142\212\001aaaaaaaaaaaaaaaaa' > "$WORK/fixsub_bounded.bin"
+OUT=$(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/fixsub_bounded.bin") \
+    || { echo "FAIL: 17-byte string at a maxlen-16 BLOB id must skip, not be measured against maxlen"; exit 1; }
+echo "$OUT" | grep -q '"someblob":"SGVsbG8="' || { echo "FAIL: skipped fixlen field must keep its default; got: $OUT"; exit 1; }
+
+# The reported shape: a fixlen FP value whose fixed width exceeds a small maxlen.
+# Needs maxlen < 8, which the example has no field for, so use a dedicated schema.
+# It also pins the HeaderVisitor method set: sofab.HeaderVisitor declares BOTH
+# ArrayBegin and FixlenHeader and the cursor reaches them through ONE type
+# assertion, so this maxlen-only message (no counted array) must still implement
+# both -- emitting only FixlenHeader leaves the assertion failing and silently
+# disables every header reject, which the truncation controls below would miss.
+cat > "$WORK/fixsub.yaml" <<'YAML'
+version: 1
+messages:
+  probe: { payload: { s: { id: 2, type: string, maxlen: 32 }, b: { id: 3, type: blob, maxlen: 4 } } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/fixsub.yaml" --out "$WORK/fixsub" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/fixsub/go.mod"
+( cd "$WORK/fixsub" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build ./... )
+fixsub_decode() { (cd "$WORK/fixsub" && GOFLAGS=-mod=mod go run ./harness decode probe) }
+# fp64 1.5 (8 bytes > maxlen 4) at the blob id 3 -> subtype mismatch -> skip.
+# Wire: 1a (id 3 fixlen) 41 (len 8, subtype FP64) + 8 payload bytes.
+OUT=$(printf '\032\101\000\000\000\000\000\000\370\077' | fixsub_decode) \
+    || { echo "FAIL: fp64 at a maxlen-4 blob id must skip (generator#224)"; exit 1; }
+echo "$OUT" | grep -q '"b":null' || { echo "FAIL: skipped fp64 must leave b at its default; got: $OUT"; exit 1; }
+# fp32 1.5 (4 bytes, within the bound) at the same id: also a mismatch, also skipped.
+OUT=$(printf '\032\040\000\000\300\077' | fixsub_decode) \
+    || { echo "FAIL: fp32 at a maxlen-4 blob id must skip"; exit 1; }
+echo "$OUT" | grep -q '"b":null' || { echo "FAIL: skipped fp32 must leave b at its default; got: $OUT"; exit 1; }
+# Precision controls: the bound still bites on the MATCHING subtype, and still
+# dominates truncation (generator#216) -- the gate must not disarm either.
+printf '\032\043\001\002\003\004' | fixsub_decode >/dev/null \
+    || { echo "FAIL: 4-byte blob (== maxlen 4) must decode"; exit 1; }
+if printf '\032\053\001\002\003\004\005' | fixsub_decode >/dev/null 2>&1; then
+    echo "FAIL: 5-byte blob (> maxlen 4) must be INVALID"; exit 1
+fi
+ERR=$( (printf '\032\053\001' | fixsub_decode 2>&1 >/dev/null) || true )
+echo "$ERR" | grep -q 'invalid message' || { echo "FAIL: over-maxlen(5>4)+truncated must be INVALID; got: $ERR"; exit 1; }
+ERR=$( (printf '\032\043\001' | fixsub_decode 2>&1 >/dev/null) || true )
+echo "$ERR" | grep -q 'incomplete message' || { echo "FAIL: in-bound(4==4)+truncated must be INCOMPLETE; got: $ERR"; exit 1; }
+echo "==> bounded-field subtype gate OK"
+
 # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
 # skipped under S7.3 is not an occurrence for this clause: a correctly typed
 # earlier occurrence survives a mis-typed later one." somestringarray (id 18) is

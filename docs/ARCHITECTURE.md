@@ -713,13 +713,15 @@ Whether the fix is generator-only splits by the corelib's decode model:
   - **Go** — corelib `sofab.HeaderVisitor` (optional interface: `ArrayBegin(id,
     count)` at the count word, `FixlenHeader(id, subtype, length)` at the length
     word, both before the truncation check). The generator emits these methods on a
-    type only when a field declares a `count`/`maxlen` bound (`if count > N { return
-    sofab.ErrInvalidMsg }` / `if length > N …`), so a bound-free type does not
-    implement the interface and the max-speed decode path is unchanged.
+    type whenever a field declares a `count`/`maxlen` bound (`if count > N { return
+    sofab.ErrInvalidMsg }` / `if subtype == S && length > N …`), so a bound-free type
+    does not implement the interface and the max-speed decode path is unchanged.
+    Both methods are emitted together — the interface is all-or-nothing (see §7.3
+    below) — and the `maxlen` guard is gated on the declared fixlen subtype.
   - **Dart** — corelib `MessageVisitor.onArrayBegin(id, count)` /
     `onFixlenHeader(id, subtype, length)` overrides set the sticky `e.inv`, which
     `tryDecode` reads before returning the incomplete status. Emitted only for
-    bounded fields.
+    bounded fields, and subtype-gated as above.
   - **TypeScript** — the corelib readers take an optional `schemaCount` /
     `schemaMaxlen` (`readUnsignedArray(N)`, `readString(N)`, …) and throw
     `InvalidMsg` at the count/length word before the truncated-field `Incomplete`;
@@ -965,6 +967,52 @@ carrying the `askip` guard (`rust`, `rust`/`no_std`, `csharp`, `java`, `zig`)
 additionally assert the array-at-a-scalar-id pair — an unsigned array at a `u8`
 id and a signed array at an `i8` id, each with a correctly-typed control that
 pins the counter's self-termination.
+
+##### The §216 header hooks re-opened §7.3 for the "structural" backends
+
+"The corelib dispatches by type, so §7.3 is structural" holds for the *value*
+callbacks — it does **not** hold for the header hooks generator#216 added, because
+those fire **before** dispatch, at the count/length word, which is the whole point
+of them. A `maxlen` guard written there sees only `(id, subtype, length)`: the
+corelib has resolved the wire subtype but cannot know the **declared** one, which
+is schema knowledge only the generated code has. Comparing `length` alone
+therefore measures a *contradicting* fixlen value against the declared field's
+bound and rejects it, where §7.3 requires it be **skipped** (generator#224: an fp64
+— 8 bytes — landing on a `blob` with `maxlen: 4` came back `INVALID`, and the same
+un-gated shape rejects any string↔blob mismatch longer than the bound).
+
+The rule for any header-hook guard: **gate the bound on the declared subtype**
+(`subtype == string && length > N`), never on length alone. Applied to:
+
+- **dart** — `if (subtype == sofab.FixlenType.string && length > N) e.inv = true;`
+- **go** — `if subtype == 2 && length > N { return sofab.ErrInvalidMsg }`
+  (corelib-go keeps its fixlen-subtype constants unexported, so the generated
+  guard spells out the §4.6 wire values, which the format fixes).
+
+The array hooks (`onArrayBegin`/`ArrayBegin`) need no analogue: an array's wire
+type already selects the callback, and the fixlen-array subtype is checked by the
+element callbacks the corelib dispatches to.
+
+Two adjacent findings from the same audit:
+
+- **go, HeaderVisitor is all-or-nothing.** `sofab.HeaderVisitor` declares *both*
+  `ArrayBegin` and `FixlenHeader`, and the cursor reaches them through a single
+  `v.(HeaderVisitor)` assertion. Emitting only the method a message happens to
+  need left that assertion **failing**, silently disabling every header reject —
+  so a message with a `maxlen` but no counted array (or the reverse) still folded
+  over-bound+truncated to `INCOMPLETE`, the generator#216 defect it was supposed
+  to fix. A type with any bound now gets both methods; the one with no arms is an
+  empty switch. A bound-free type still implements neither, so the max-speed path
+  is unchanged.
+- **cpp (pure profile) has the same §7.3 hole, and it is not generator-fixable.**
+  `sofab::schema::FieldBound` carries `id` + `wire` + `bound` and no subtype, and
+  fp32/fp64/string/blob all share `Wire::Fixlen`, so the measure-phase check
+  (`fb->wire == Wire::Fixlen && len > fb->bound`) matches a contradicting subtype
+  and rejects it. Expressing the gate needs a `subtype` field on `FieldBound` in
+  corelib-cpp; tracked separately.
+- **typescript is clean by construction** — the generated `c.wire !== Fixlen ||
+  c.fixSub !== …` guard runs *before* `readString(N)`/`readBlob(N)`, so a
+  mismatched subtype is skipped and never reaches the bounded reader.
 
 #### Decode verdict: a repeated field id — scopes merge, wrappers replace (§7.4)
 
