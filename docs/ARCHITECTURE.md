@@ -1018,15 +1018,27 @@ only needs to mirror their *names* and gate on the schema's used features:
 
 - **corelib-rs-no-std** — Cargo features (`fixlen`, `array`, `sequence`, `fp64`,
   `value64`); see its [README](https://github.com/sofa-buffers/corelib-rs-no-std).
-  The generated crate sets `default-features = false` + exactly the features the
-  schema uses, emits only the `Visitor` callbacks those types need, and a
-  `require!` guard asserts the set.
+  The generated crate sets `default-features = false` + the **full** wire-type set
+  (not a schema-derived subset — see the §7.3 caveat below), emits the `Visitor`
+  callbacks those types need, and a `require!` guard asserts the set.
 - **corelib-c-cpp** — `SOFAB_DISABLE_*` macros (`FIXLEN`, `ARRAY`, `SEQUENCE`,
   `FP64`, `INT64`); see its [README](https://github.com/sofa-buffers/corelib-c-cpp).
   Generated C emits per-feature `#error` guards (only for features it uses); the
   C++ wrapper hard-requires FIXLEN+SEQUENCE and gates ARRAY/FP64/INT64.
 - **Value width** — disabling 64-bit integers narrows the value type to 32-bit;
   a schema with no `u64`/`i64` field then builds against the smaller corelib.
+
+> **§7.3 skip caveat (generator#215 / Crucible F-0027).** Point (a) — "gate on
+> the schema's used features" — holds only where a feature gates *field storage /
+> encode*. Where a corelib gates wire-type **parse/skip** behind the same switch
+> (as corelib-rs-no-std does), a **decoder** must provision the full wire-type set
+> regardless of the schema: §7.3 requires skipping any wire type an unknown id may
+> carry (array, fp64, 64-bit value), so a schema-derived subset yields a decoder
+> that *rejects* a well-formed skippable field instead of skipping it. The rust
+> backend therefore emits the full feature set for corelib-rs-no-std. The
+> footprint-preserving alternative is a corelib-side skip path that is
+> feature-independent (read-and-discard any wire construct even when its
+> decode-into-field arm is compiled out).
 
 ### 9.5 Decode resource bounds (receiver-side limits)
 

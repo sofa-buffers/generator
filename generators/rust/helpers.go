@@ -3,7 +3,6 @@ package rust
 import (
 	"encoding/base64"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -616,10 +615,11 @@ func bitfieldBacking(nt *ir.NamedType) string {
 	}
 }
 
-// hasCap reports whether the schema needs a given sofab feature, i.e. whether
-// the generated Cargo.toml turns it on for the no_std corelib. A feature that is
-// off is compiled out of that corelib entirely, so the generated code must not
-// reference the callbacks it gates.
+// hasCap reports whether a given sofab feature is provisioned in the generated
+// Cargo.toml for the no_std corelib. A feature that is off is compiled out of that
+// corelib entirely, so the generated code must not reference the callbacks it
+// gates. Since generator#215 the decoder provisions the full wire-type set, so
+// this is true for every wire type — kept so codegen stays tied to its feature.
 func (g *gen) hasCap(cap string) bool {
 	for _, c := range g.capabilities(g.schema) {
 		if c == cap {
@@ -629,79 +629,23 @@ func (g *gen) hasCap(cap string) bool {
 	return false
 }
 
-// capabilities returns the sofab features the schema needs, for require!() and
-// the generated Cargo.toml.
+// capabilities returns the sofab wire-type features the generated crate needs
+// from corelib-rs-no-std, for require!() and the generated Cargo.toml.
+//
+// A decoder needs the FULL wire-type set, not just the wire types the schema
+// declares: MESSAGE_SPEC §7.3 requires a field whose wire type doesn't match its
+// id's declared type to be skipped "exactly as an unknown id is skipped," and an
+// unknown id may carry any wire construct — an array, an fp64, a 64-bit value.
+// corelib-rs-no-std gates wire-type parse/skip (not just field storage) behind
+// these Cargo features, so a decoder built with only the schema's own wire types
+// cannot skip the rest — it rejects a well-formed skippable field with InvalidMsg
+// (generator#215 / Crucible F-0027). So provision every wire type here regardless
+// of the schema; value64 stays the value-width policy knob but is likewise needed
+// to skip a 64-bit value. (The footprint saving from dropping a wire type is not
+// available to a §7.3-conformant decoder; making the corelib's skip path itself
+// feature-independent is the alternative that would restore it.)
 func (g *gen) capabilities(s *ir.Schema) []string {
-	caps := map[string]bool{}
-	seen := map[string]bool{}
-	var walk func(fields []*ir.Field)
-	var walkArray func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem)
-	walk = func(fields []*ir.Field) {
-		for _, f := range fields {
-			switch f.Kind {
-			case ir.KindString, ir.KindBlob, ir.KindFP32:
-				caps["fixlen"] = true
-			case ir.KindFP64:
-				caps["fixlen"] = true
-				caps["fp64"] = true
-			case ir.KindU64, ir.KindI64:
-				caps["value64"] = true
-			case ir.KindStruct, ir.KindUnion:
-				caps["sequence"] = true
-				if !seen[f.Ref.Key] {
-					seen[f.Ref.Key] = true
-					walk(f.Ref.Target.Fields)
-				}
-			case ir.KindArray:
-				walkArray(f.Elem, f.ElemRef, f.ElemItems)
-			}
-		}
-	}
-	// walkArray adds the capabilities an array element needs. Numeric/enum/bool/
-	// bitfield elements use a native array; string/blob/struct/union/nested-array
-	// elements lower to a wrapper sequence.
-	walkArray = func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) {
-		switch elem {
-		case ir.KindString, ir.KindBlob:
-			caps["sequence"] = true
-			caps["fixlen"] = true
-		case ir.KindStruct, ir.KindUnion:
-			caps["sequence"] = true
-			if !seen[ref.Key] {
-				seen[ref.Key] = true
-				walk(ref.Target.Fields)
-			}
-		case ir.KindArray:
-			caps["sequence"] = true
-			walkArray(items.Elem, items.ElemRef, items.ElemItems)
-		case ir.KindFP64:
-			caps["array"] = true
-			caps["fixlen"] = true
-			caps["fp64"] = true
-		case ir.KindFP32:
-			caps["array"] = true
-			caps["fixlen"] = true
-		case ir.KindU64, ir.KindI64:
-			caps["array"] = true
-			caps["value64"] = true
-		case ir.KindBitfield:
-			caps["array"] = true
-			if bitfieldBacking(ref.Target) == "u64" {
-				caps["value64"] = true
-			}
-		default: // small numeric, enum, bool
-			caps["array"] = true
-		}
-	}
-	for _, m := range s.Messages {
-		walk(m.Fields)
-	}
-	out := make([]string, 0, len(caps))
-	for c := range caps {
-		out = append(out, c)
-	}
-	sort.Strings(out)
-	return out
+	return []string{"array", "fixlen", "fp64", "sequence", "value64"}
 }
 
 // ---- max-size cost model (PLAN §5.5) ----
