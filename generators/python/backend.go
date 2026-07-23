@@ -750,17 +750,24 @@ func capOf(hasCount bool, count int64) int64 {
 }
 
 func (g *gen) emitUnmarshalArray(f *pyfile, fld *ir.Field, acc string) {
-	g.unmarshalArray(f, "                ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax, 0)
 	// A wire element count above the schema `count` capacity is INVALID per
 	// MESSAGE_SPEC §3+§7 — reject the whole message, never keep-all
-	// (generator#100). Count-less (dynamic) arrays have no bound.
+	// (generator#100). Decide it at the count header: the wire element count is on
+	// the delivered Field (`fld.count`, read by d.next() before any element), so
+	// rejecting here — BEFORE read_*_array() would raise SofaIncompleteError on a
+	// truncated tail — makes INVALID dominate INCOMPLETE per §5.2 (generator#216 /
+	// F-0032). A check on len() after the read never fires when truncation cuts the
+	// array short of the announced count. Count-less (dynamic) arrays have no bound.
 	if fld.HasCount && isNativeArrayElem(fld.Elem) {
-		f.line("                if len(%s) > %d:", acc, fld.Count)
+		f.line("                if fld.count > %d:", fld.Count)
 		f.line(`                    raise SofaDecodeError("%s: array count above schema capacity %d")`, fld.Name, fld.Count)
-		// A `count: N` array is fixed-length: the wire may carry M <= N elements,
-		// and positions [M, N) are the element default. A growable container must
-		// materialize them so the decoded value has exactly N elements on every
-		// storage model (MESSAGE_SPEC §3).
+	}
+	g.unmarshalArray(f, "                ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax, 0)
+	// A `count: N` array is fixed-length: the wire may carry M <= N elements,
+	// and positions [M, N) are the element default. A growable container must
+	// materialize them so the decoded value has exactly N elements on every
+	// storage model (MESSAGE_SPEC §3).
+	if fld.HasCount && isNativeArrayElem(fld.Elem) {
 		f.line("                %s = _pad_to(%s, %d, %s)", acc, acc, fld.Count, pyElemZero(fld.Elem))
 	}
 }
