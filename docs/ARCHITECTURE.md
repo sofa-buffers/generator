@@ -700,8 +700,8 @@ sticky `inv` flag before propagating `feed`'s `Incomplete`.
 Whether the fix is generator-only splits by the corelib's decode model:
 - **Header-first corelibs** (Rust, Zig `arrayBegin(id, kind, count)`; Python
   `fld.count` on the delivered field) surface the count *before* the elements, so
-  the generator alone moves the guard to the header. **Done: Rust, Python**
-  (generator#216); Zig follows the same generator-only move.
+  the generator alone moves the guard to the header. **Done: Rust, Python, Zig**
+  (generator#216).
 - **Whole-unit / measure-then-deliver corelibs** (Go and Dart whole-slice
   callbacks; TypeScript's private count/length readers; C++ `corelib-cpp`, which
   *measures* a whole field for completeness before delivering it) surface the

@@ -338,9 +338,16 @@ messages:
 		"d: [5]u32 = .{ 1, 2, 3, 0, 0 },",
 		"f: [3]f32 = .{ 1.5, 0.0, 0.0 },",
 		"plain: [5]u32 = @splat(0),",
-		// A non-zero schema default is cleared to the element default first.
-		"1 => self.m.d = @splat(0),",
-		"4 => self.m.f = @splat(0.0),",
+		// A non-zero schema default is cleared to the element default first, now
+		// behind the over-count guard (generator#216): the count header is rejected
+		// as INVALID before the reset, so a truncated over-count array cannot mask
+		// the violation as INCOMPLETE (MESSAGE_SPEC S5.2).
+		"1 => { if (count > 5) { self.inv = true; return; } self.m.d = @splat(0); },",
+		"4 => { if (count > 3) { self.inv = true; return; } self.m.f = @splat(0.0); },",
+		// The over-count reject is emitted at the count header for EVERY fixed-count
+		// array, including ones with no reset (all-zero/absent default).
+		"2 => { if (count > 5) { self.inv = true; return; } },",
+		"3 => { if (count > 5) { self.inv = true; return; } },",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.zig missing %q", want)

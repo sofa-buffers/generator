@@ -79,6 +79,27 @@ fi
 "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+# Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
+# MESSAGE_SPEC S5.2). someuintarray count 4; a header of 6 (> 4) then only 2
+# elements + EOF is BOTH over-count and truncated. arrayBegin sets the sticky inv
+# at the count header (before the elements), and decode() reads inv before
+# .incomplete, so the outcome is InvalidMessage, not IncompleteMessage. Wire:
+# 7b (id 15 unsigned-array) 06 (count 6) 01 02 (2 of 6 elements) <EOF>.
+echo "==> over-count + truncation must be INVALID, not INCOMPLETE (generator#216)"
+printf '\173\006\001\002' > "$WORK/overcount_trunc.bin"
+if "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/overcount_trunc.bin" >/dev/null 2>"$WORK/oct.err"; then
+    echo "FAIL: over-count(6>4)+truncated must reject"; exit 1
+fi
+grep -q "InvalidMessage" "$WORK/oct.err" || { echo "FAIL: over-count(6>4)+truncated must be InvalidMessage; got:"; cat "$WORK/oct.err"; exit 1; }
+# Precision control: an in-bound count (4 == bound) that is genuinely truncated
+# (2 of 4 elements then EOF) is a clean truncation and MUST stay IncompleteMessage.
+printf '\173\004\001\002' > "$WORK/incount_trunc.bin"
+if "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/incount_trunc.bin" >/dev/null 2>"$WORK/ict.err"; then
+    echo "FAIL: in-bound(4==4)+truncated must reject"; exit 1
+fi
+grep -q "IncompleteMessage" "$WORK/ict.err" || { echo "FAIL: in-bound(4==4)+truncated must be IncompleteMessage; got:"; cat "$WORK/ict.err"; exit 1; }
+echo "==> over-count/truncation ordering OK"
+
 # Over-index wrapper array (generator#142): somestringarray declares count: 5
 # (id 18). A string element with a wire index >= 5 is INVALID for every target
 # (MESSAGE_SPEC S5.1/S7), never grown-into -- which also bounds an over-index
