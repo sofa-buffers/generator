@@ -712,6 +712,13 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	var uArr, sArr, f32Arr, f64Arr []string
 	// sequence descents (nested object + wrapper-sequence arrays)
 	var seq []string
+	// HeaderVisitor hooks: schema-bound rejects at the count/length word, BEFORE
+	// the truncation check, so INVALID dominates INCOMPLETE when the field is also
+	// truncated (generator#216 / F-0032, MESSAGE_SPEC §5.2). The whole-value guards
+	// below (len(v) > N in the *Array/String/Bytes arms) only fire once every
+	// element/byte has arrived, so a truncated over-count/over-maxlen field never
+	// reaches them — the header hook is what makes the over-bound win the tie.
+	var arrBegin, fixHdr []string
 
 	arm := func(id int64, body string) string { return fmt.Sprintf("case %d:\n%s", id, body) }
 	// maxlenGuard rejects a scalar string/blob whose wire byte length exceeds the
@@ -743,9 +750,15 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			// A wire byte length above the schema maxlen is malformed input
 			// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate.
 			str = append(str, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+acc+" = v"))
+			if fld.HasMaxlen {
+				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard(fld.Maxlen)))
+			}
 		case ir.KindBlob:
 			// v aliases the decode buffer (AcceptBytes) — copy what we keep.
 			blob = append(blob, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+acc+" = append([]byte(nil), v...)"))
+			if fld.HasMaxlen {
+				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard(fld.Maxlen)))
+			}
 		case ir.KindStruct, ir.KindUnion:
 			seq = append(seq, arm(fld.ID, fmt.Sprintf("return &%s, nil", acc)))
 		case ir.KindArray:
@@ -755,6 +768,12 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			guard := ""
 			if fld.HasCount {
 				guard = fmt.Sprintf("if len(v) > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", fld.Count)
+				// Native arrays (unsigned/signed/fp32/fp64) fire ArrayBegin at the
+				// count word; wrapper-sequence arrays descend via BeginSequence and
+				// have no header hook, so bound them at the collector's cap instead.
+				if isNativeArrayElem(fld.Elem) {
+					arrBegin = append(arrBegin, arm(fld.ID, overcountHdrGuard(fld.Count)))
+				}
 			}
 			// A `count: N` array is fixed-length: the wire may carry M <= N
 			// elements, and positions [M, N) are the element default. A growable
@@ -786,6 +805,15 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	emitIDSwitch(f, recv, "SignedArray(id sofab.ID, v []int64) error", sArr)
 	emitIDSwitch(f, recv, "Float32Array(id sofab.ID, v []float32) error", f32Arr)
 	emitIDSwitch(f, recv, "Float64Array(id sofab.ID, v []float64) error", f64Arr)
+
+	// Optional HeaderVisitor extension (corelib sofab.HeaderVisitor): emitted only
+	// when a field declares a count/maxlen bound, so a type without bounds does not
+	// implement the interface and the decoder's max-speed path is unchanged
+	// (generator#216). ArrayBegin/FixlenHeader fire at the header word, before the
+	// truncation check, so an over-count/over-maxlen field that is also truncated is
+	// INVALID, not INCOMPLETE (§5.2 anti-folding).
+	emitIDSwitch(f, recv, "ArrayBegin(id sofab.ID, count int) error", arrBegin)
+	emitIDSwitch(f, recv, "FixlenHeader(id sofab.ID, subtype int, length int) error", fixHdr)
 
 	if len(seq) > 0 {
 		f.line("%sBeginSequence(id sofab.ID) (sofab.Visitor, error) {", recv)
@@ -894,6 +922,22 @@ func capOf(hasCount bool, count int64) int64 {
 		return count
 	}
 	return -1
+}
+
+// overcountHdrGuard is the ArrayBegin arm body rejecting a native array whose
+// wire element count exceeds the schema count N as INVALID, at the count word
+// (generator#216). Reused for every native-array kind (unsigned/signed/fp32/fp64
+// arrays all fire ArrayBegin). gofmt fixes the indentation on emit.
+func overcountHdrGuard(n int64) string {
+	return fmt.Sprintf("if count > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", n)
+}
+
+// maxlenHdrGuard is the FixlenHeader arm body rejecting a string/blob whose wire
+// byte length exceeds the schema maxlen as INVALID, at the length word
+// (generator#216). It bounds on length alone, keyed by field id — the subtype
+// param is unused because only bounded string/blob fields get an arm.
+func maxlenHdrGuard(n int64) string {
+	return fmt.Sprintf("if length > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", n)
 }
 
 // emaxOf maps a string/blob element maxlen bound to the collector's emax field:
