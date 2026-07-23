@@ -154,6 +154,56 @@ func TestGoMaxlenReject(t *testing.T) {
 	}
 }
 
+// TestGoHeaderVisitorReject verifies the generator#216 / F-0032 fix: a schema
+// bound is rejected at the header word (sofab.HeaderVisitor) so INVALID dominates
+// a subsequent truncation (MESSAGE_SPEC §5.2). ArrayBegin rejects an over-count
+// native array at the count word, FixlenHeader an over-maxlen string/blob at the
+// length word — both BEFORE the corelib's truncation check, which the whole-value
+// len(v)>N guards run too late to beat. A type with no bound must implement
+// neither method, so the decoder's max-speed path (no type assertion hit) is kept.
+func TestGoHeaderVisitorReject(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      ua: { id: 0, type: array, items: { type: u32, count: 4 } }\n" +
+		"      fa: { id: 1, type: array, items: { type: fp32, count: 3 } }\n" +
+		"      s:  { id: 2, type: string, maxlen: 8 }\n" +
+		"      b:  { id: 3, type: blob,   maxlen: 16 }\n" +
+		"      da: { id: 4, type: array, items: { type: u32 } }\n" + // dynamic: no bound
+		"      us: { id: 5, type: string }\n" + // unbounded string: no bound
+		"      wa: { id: 6, type: array, items: { type: string, count: 5 } }\n" // wrapper array: no ArrayBegin arm
+	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
+	msg := files["m.go"]
+	for _, want := range []string{
+		"func (m *M) ArrayBegin(id sofab.ID, count int) error {",
+		"func (m *M) FixlenHeader(id sofab.ID, subtype int, length int) error {",
+		"if count > 4 {",   // native u32 array (id 0) count bound
+		"if count > 3 {",   // fixlen fp32 array (id 1) count bound
+		"if length > 8 {",  // scalar string (id 2) maxlen
+		"if length > 16 {", // scalar blob (id 3) maxlen
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("m.go missing header-visitor guard %q:\n%s", want, msg)
+		}
+	}
+	// The dynamic array (id 4) and unbounded string (id 5) declare no bound, so
+	// they contribute no ArrayBegin/FixlenHeader arm. The wrapper-sequence array
+	// (id 6) descends via BeginSequence and is bounded at the collector cap, not by
+	// ArrayBegin — so ArrayBegin holds exactly the two native arrays' arms.
+	if got := strings.Count(msg, "return sofab.ErrInvalidMsg"); got == 0 {
+		t.Errorf("m.go: expected header-visitor rejects, found none:\n%s", msg)
+	}
+	// A message with no bounded field must NOT implement HeaderVisitor at all,
+	// keeping the corelib's max-speed decode path (the once-per-scope type
+	// assertion stays a miss).
+	plain := genGo(t, schemaFromYAMLString(t,
+		"version: 1\nmessages:\n  P:\n    payload:\n      x: { id: 0, type: u32 }\n      da: { id: 1, type: array, items: { type: u32 } }\n"),
+		map[string]any{"package": "p"})["p.go"]
+	for _, notWant := range []string{"ArrayBegin(id sofab.ID", "FixlenHeader(id sofab.ID"} {
+		if strings.Contains(plain, notWant) {
+			t.Errorf("p.go: an unbounded-only type must not implement HeaderVisitor (%q):\n%s", notWant, plain)
+		}
+	}
+}
+
 func TestGoStructuralInvariants(t *testing.T) {
 	files := genGo(t, exampleSchema(t), map[string]any{"package": "messages"})
 	msg := files["myfirstmessage.go"]

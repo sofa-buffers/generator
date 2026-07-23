@@ -128,6 +128,37 @@ func TestProjectFiles(t *testing.T) {
 	}
 }
 
+// TestDartHeaderVisitorReject verifies the generator#216 / F-0032 fix: a schema
+// bound is rejected at the header word via the corelib-dart HeaderVisitor hooks
+// (onArrayBegin at the count word, onFixlenHeader at the length word), so a field
+// that is BOTH over-bound and truncated is INVALID, not INCOMPLETE (MESSAGE_SPEC
+// §5.2). The example's someuintarray (count 4), somestring (maxlen 50) and someblob
+// (maxlen 16) exercise both hooks; the sticky e.inv the guard sets is read by
+// tryDecode before the incomplete status, so the flag alone makes INVALID dominate.
+func TestDartHeaderVisitorReject(t *testing.T) {
+	out := genFor(t, exampleDef, map[string]any{})
+	for _, want := range []string{
+		"void onArrayBegin(int id, int count) {",
+		"void onFixlenHeader(int id, int subtype, int length) {",
+		"if (count > 4) e.inv = true;",   // someuintarray, count 4
+		"if (length > 50) e.inv = true;", // somestring, maxlen 50
+		"if (length > 16) e.inv = true;", // someblob, maxlen 16
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated module missing header-visitor guard %q", want)
+		}
+	}
+	// A message with no bounded field must NOT override the header hooks, keeping
+	// the corelib's max-speed decode path (no per-scope dispatch cost). scalars.yaml
+	// is all fixed-width scalars — no count, no maxlen.
+	plain := genFor(t, "../../tests/matrix/corpus/defs/scalars.yaml", map[string]any{})
+	for _, notWant := range []string{"void onArrayBegin(", "void onFixlenHeader("} {
+		if strings.Contains(plain, notWant) {
+			t.Errorf("a bound-free message must not override %q", notWant)
+		}
+	}
+}
+
 func TestDecodeLimitsPlumbing(t *testing.T) {
 	// An unbounded string + a configured cap wires a DecoderLimits (no_maxlen.yaml
 	// has an unbounded string `s` and blob `b`).

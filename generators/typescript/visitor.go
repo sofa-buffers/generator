@@ -99,8 +99,13 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// re-encoding via TextEncoder in the hot loop. An unbounded string keeps the
 		// bare read.
 		if x.HasMaxlen {
-			f.line("      case %d: { %sconst _s = c.readString(); if (_utf8Len(_s) > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: string byte length above schema maxlen %d\"); %s = _s; break; }",
-				x.ID, guard, x.Maxlen, x.Name, x.Maxlen, acc)
+			// The schema maxlen is passed to readString so an over-maxlen string is
+			// rejected as INVALID at the length word — before the payload take() can
+			// report it truncated — so INVALID dominates a subsequent truncation
+			// (generator#216 / F-0032, §5.2). The whole-string _utf8Len guard stays as
+			// defense; it runs too late to beat truncation on its own.
+			f.line("      case %d: { %sconst _s = c.readString(%d); if (_utf8Len(_s) > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: string byte length above schema maxlen %d\"); %s = _s; break; }",
+				x.ID, guard, x.Maxlen, x.Maxlen, x.Name, x.Maxlen, acc)
 		} else {
 			f.line("      case %d: %s%s = c.readString(); break;", x.ID, guard, acc)
 		}
@@ -109,8 +114,11 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// truncate (MESSAGE_SPEC §7.1). readBlob returns a Uint8Array view whose
 		// .length is the exact wire byte length. An unbounded blob keeps the bare read.
 		if x.HasMaxlen {
-			f.line("      case %d: { %sconst _b = c.readBlob(); if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: blob byte length above schema maxlen %d\"); %s = _b; break; }",
-				x.ID, guard, x.Maxlen, x.Name, x.Maxlen, acc)
+			// See the string case: the maxlen is passed to readBlob so an over-maxlen
+			// blob is INVALID at the length word, dominating a truncated payload
+			// (generator#216 / §5.2); the _b.length guard stays as defense.
+			f.line("      case %d: { %sconst _b = c.readBlob(%d); if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: blob byte length above schema maxlen %d\"); %s = _b; break; }",
+				x.ID, guard, x.Maxlen, x.Maxlen, x.Name, x.Maxlen, acc)
 		} else {
 			f.line("      case %d: %s%s = c.readBlob(); break;", x.ID, guard, acc)
 		}
@@ -133,10 +141,10 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			// exactly N elements (MESSAGE_SPEC §3).
 			if x.HasCount {
 				f.line("      case %d: { %sconst _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s = _padTo(_a, %d, %s); break; }",
-					x.ID, guard, g.nativeArrayRead(x.Elem, x.ElemRef), x.Count, x.Name, x.Count, acc, x.Count, g.elemZero(x))
+					x.ID, guard, g.nativeArrayRead(x.Elem, x.ElemRef, fmt.Sprintf("%d", x.Count)), x.Count, x.Name, x.Count, acc, x.Count, g.elemZero(x))
 				return
 			}
-			f.line("      case %d: %s%s = %s; break;", x.ID, guard, acc, g.nativeArrayRead(x.Elem, x.ElemRef))
+			f.line("      case %d: %s%s = %s; break;", x.ID, guard, acc, g.nativeArrayRead(x.Elem, x.ElemRef, ""))
 			return
 		}
 		// Composite array: a wrapper sequence whose elements arrive one per
@@ -284,30 +292,38 @@ func (g *gen) elemZero(x *ir.Field) string {
 // arrays have their own readers; bool arrays map to booleans and enum arrays cast
 // each element to the enum type — the two conversions the number-first readers do
 // not do inline (and that the reference decode patch's simpler schema never hit).
-func (g *gen) nativeArrayRead(elem ir.Kind, ref *ir.TypeRef) string {
+// The optional cnt is the schema `count`, passed straight into the corelib
+// reader (readUnsignedArray(schemaCount), …) so an over-count array is rejected
+// as INVALID at the count word — before the reader's own truncated-array
+// INCOMPLETE — making INVALID dominate a subsequent truncation (generator#216 /
+// F-0032, MESSAGE_SPEC §5.2 anti-folding). The whole-array `_a.length > N` guard
+// at the call site only fires once every element has arrived, so it cannot beat a
+// truncated over-count; the header argument is what does. cnt is "" for an
+// unbounded array (today's behavior, no bound).
+func (g *gen) nativeArrayRead(elem ir.Kind, ref *ir.TypeRef, cnt string) string {
 	switch elem {
 	case ir.KindU64:
 		if g.longArrays() {
-			return "c.readUnsignedArrayLong()"
+			return "c.readUnsignedArrayLong(" + cnt + ")"
 		}
-		return "c.readUnsignedArray() as bigint[]"
+		return "c.readUnsignedArray(" + cnt + ") as bigint[]"
 	case ir.KindI64:
 		if g.longArrays() {
-			return "c.readSignedArrayLong()"
+			return "c.readSignedArrayLong(" + cnt + ")"
 		}
-		return "c.readSignedArray() as bigint[]"
+		return "c.readSignedArray(" + cnt + ") as bigint[]"
 	case ir.KindI8, ir.KindI16, ir.KindI32:
-		return "c.readSignedArray() as number[]"
+		return "c.readSignedArray(" + cnt + ") as number[]"
 	case ir.KindFP32:
-		return "c.readFp32Array()"
+		return "c.readFp32Array(" + cnt + ")"
 	case ir.KindFP64:
-		return "c.readFp64Array()"
+		return "c.readFp64Array(" + cnt + ")"
 	case ir.KindBool:
-		return "(c.readUnsignedArray() as number[]).map((_e) => Boolean(_e))"
+		return "(c.readUnsignedArray(" + cnt + ") as number[]).map((_e) => Boolean(_e))"
 	case ir.KindEnum:
-		return "(c.readSignedArray() as number[]).map((_e) => _e as " + g.typeName(ref.Key) + ")"
+		return "(c.readSignedArray(" + cnt + ") as number[]).map((_e) => _e as " + g.typeName(ref.Key) + ")"
 	default: // u8/u16/u32, bitfield
-		return "c.readUnsignedArray() as number[]"
+		return "c.readUnsignedArray(" + cnt + ") as number[]"
 	}
 }
 
@@ -327,7 +343,11 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 		return g.typeName(ref.Key) + ".decodeFrom(c)"
 	case ir.KindArray:
 		if nativeArrayElem(items.Elem) {
-			return g.nativeArrayRead(items.Elem, items.ElemRef)
+			cnt := ""
+			if items.HasCount {
+				cnt = fmt.Sprintf("%d", items.Count)
+			}
+			return g.nativeArrayRead(items.Elem, items.ElemRef, cnt)
 		}
 		rowT := g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems)
 		return "((): " + rowT + "[] => { const _r: " + rowT + "[] = []; while (c.readHeader()) { " +

@@ -702,16 +702,39 @@ Whether the fix is generator-only splits by the corelib's decode model:
   `fld.count` on the delivered field) surface the count *before* the elements, so
   the generator alone moves the guard to the header. **Done: Rust, Python, Zig**
   (generator#216).
-- **Whole-unit / measure-then-deliver corelibs** (Go and Dart whole-slice
-  callbacks; TypeScript's private count/length readers; C++ `corelib-cpp`, which
-  *measures* a whole field for completeness before delivering it) surface the
-  truncation `Incomplete` *before* the generated guard ever runs, so the generator
-  cannot decide at the header. These need a small additive **corelib header hook**
-  (a count/length callback fired at the deciding word before the element/payload
-  read; for `corelib-cpp` a single measure-phase hook covers over-count,
-  over-`maxlen`, and over-index at once). Their try_decode ordering already lets a
-  sticky INVALID dominate, so only the header hook is missing. Tracked under
-  generator#216 for Go, TypeScript, Dart, and C++ `corelib-cpp`.
+- **Whole-unit / measure-then-deliver corelibs** surface the truncation
+  `Incomplete` *before* the generated whole-value guard ever runs, so the guard
+  alone cannot decide at the header. Each needed a small additive **corelib header
+  hook** — a count/length callback fired at the deciding word, before the
+  element/payload read — which the generator then implements/passes a bound into.
+  Their `try_decode`/`tryDecode` ordering already lets a sticky INVALID (or a
+  header-thrown INVALID) dominate the later `Incomplete`, so only the header wiring
+  was missing. **Done via that hook:**
+  - **Go** — corelib `sofab.HeaderVisitor` (optional interface: `ArrayBegin(id,
+    count)` at the count word, `FixlenHeader(id, subtype, length)` at the length
+    word, both before the truncation check). The generator emits these methods on a
+    type only when a field declares a `count`/`maxlen` bound (`if count > N { return
+    sofab.ErrInvalidMsg }` / `if length > N …`), so a bound-free type does not
+    implement the interface and the max-speed decode path is unchanged.
+  - **Dart** — corelib `MessageVisitor.onArrayBegin(id, count)` /
+    `onFixlenHeader(id, subtype, length)` overrides set the sticky `e.inv`, which
+    `tryDecode` reads before returning the incomplete status. Emitted only for
+    bounded fields.
+  - **TypeScript** — the corelib readers take an optional `schemaCount` /
+    `schemaMaxlen` (`readUnsignedArray(N)`, `readString(N)`, …) and throw
+    `InvalidMsg` at the count/length word before the truncated-field `Incomplete`;
+    the generator passes the schema bound in for every bounded native array and
+    scalar string/blob (precedence INVALID > LIMIT_EXCEEDED > INCOMPLETE). The
+    whole-value guards stay as defense. The generated harness gained a `status`
+    mode surfacing the `SofabError.code` so conformance can assert the
+    INVALID-vs-INCOMPLETE distinction a bare non-zero exit hides.
+- **Still open:** C++ `corelib-cpp`, which *measures* a whole field for
+  completeness before delivering it. The generator's over-count/over-`maxlen`
+  guards already sit at the deciding `deserialize` params, but the corelib must
+  dispatch the header callback (and, in the fixed profile, reject an over-index
+  `_MsgSeqFixed` element) *before* the truncation check; a single measure-phase
+  hook would cover over-count, over-`maxlen`, and over-index at once. Tracked under
+  generator#216.
 
 #### Decode verdict: over-index wrapper-array elements are INVALID (all targets)
 

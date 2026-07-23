@@ -149,6 +149,55 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 // maxlen is malformed and MUST be rejected as INVALID, never truncated
 // (MESSAGE_SPEC §7.1). Covers scalar fields and bounded wrapper-string elements;
 // an unbounded field keeps the bare read.
+// TestTSHeaderBoundReject verifies the generator#216 / F-0032 fix: the schema
+// count/maxlen is passed into the corelib reader (readUnsignedArray(N),
+// readString(N)…) so an over-bound field is rejected as INVALID at the header word
+// — before the reader's own truncated-field INCOMPLETE — making INVALID dominate a
+// subsequent truncation (MESSAGE_SPEC §5.2). A dynamic (count-less) array passes no
+// bound, preserving today's behavior. The `status` harness mode is emitted so the
+// INVALID-vs-INCOMPLETE distinction is assertable in conformance.
+func TestTSHeaderBoundReject(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      ua: { id: 0, type: array, items: { type: u32,  count: 4 } }\n" +
+		"      fa: { id: 1, type: array, items: { type: fp32, count: 3 } }\n" +
+		"      da: { id: 2, type: array, items: { type: u32 } }\n" // dynamic: no bound
+	files, err := (&Backend{}).Generate(schema(t, src), map[string]any{"emit": "project"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var mod, harness string
+	for _, f := range files {
+		switch f.Path {
+		case "message.ts":
+			mod = string(f.Content)
+		case "harness.ts":
+			harness = string(f.Content)
+		}
+	}
+	// Bounded native arrays pass their schema count into the reader (header reject);
+	// the dynamic array passes nothing (unbounded — no header arg).
+	for _, want := range []string{
+		"c.readUnsignedArray(4) as number[]", // ua, count 4 -> header reject
+		"c.readFp32Array(3)",                 // fa, count 3 -> header reject
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing header-bound reader call %q:\n%s", want, mod)
+		}
+	}
+	// The dynamic array must NOT gain a schema count (would wrongly reject a valid
+	// long array): its reader stays argument-free.
+	if !strings.Contains(mod, "o.da = c.readUnsignedArray() as number[]") {
+		t.Errorf("dynamic array must keep the unbounded reader call:\n%s", mod)
+	}
+	// The harness exposes a `status` mode surfacing the §7 outcome so INVALID vs
+	// INCOMPLETE is assertable (the bare decode mode only yields a non-zero exit).
+	for _, want := range []string{`mode === "status"`, `"INVALID\n"`, `"INCOMPLETE\n"`} {
+		if !strings.Contains(harness, want) {
+			t.Errorf("harness.ts missing status-mode surface %q:\n%s", want, harness)
+		}
+	}
+}
+
 func TestTSMaxlenReject(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s:  { id: 0, type: string, maxlen: 8 }\n" +
@@ -173,8 +222,8 @@ func TestTSMaxlenReject(t *testing.T) {
 	}
 	for _, want := range []string{
 		// (b) Scalar string + blob reject on an over-length byte check.
-		`case 0: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } const _s = c.readString(); if (_utf8Len(_s) > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); o.s = _s; break; }`,
-		`case 1: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Blob) { c.skip(c.wire); break; } const _b = c.readBlob(); if (_b.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8"); o.b = _b; break; }`,
+		`case 0: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } const _s = c.readString(8); if (_utf8Len(_s) > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); o.s = _s; break; }`,
+		`case 1: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Blob) { c.skip(c.wire); break; } const _b = c.readBlob(8); if (_b.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8"); o.b = _b; break; }`,
 		// (c) A bounded wrapper-string element rejects on its element maxlen.
 		`const _s = c.readString(); if (_utf8Len(_s) > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 5"); arr[_id] = _s;`,
 		// (e) The allocation-free byte-length helper is emitted once for the bounded
@@ -301,8 +350,8 @@ func TestTSInt64Long(t *testing.T) {
 		// Decode bypasses the setter (readers return canonical Long[]); a wire
 		// count above the schema capacity rejects as INVALID (generator#100), and a
 		// wire count below it refills the elided trailing default run (issue#136).
-		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.ZERO); break; }`,
-		`case 1: { if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } const _a = c.readSignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "is: array count above schema capacity 8"); o._is = _padTo(_a, 8, Long.ZERO); break; }`,
+		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(8); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.ZERO); break; }`,
+		`case 1: { if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } const _a = c.readSignedArrayLong(8); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "is: array count above schema capacity 8"); o._is = _padTo(_a, 8, Long.ZERO); break; }`,
 		// toJSON prints via Long.toString with the schema signedness.
 		`"us": this._us.map((_x0) => _x0.toString(false)),`,
 		`"is": this._is.map((_x0) => _x0.toString(true)),`,
@@ -329,7 +378,7 @@ func TestTSInt64Number(t *testing.T) {
 	for _, want := range []string{
 		// Arrays are Long-backed exactly as in long mode.
 		"os.writeUnsignedArrayLong(0, _trimTailLong(this._us));",
-		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.ZERO); break; }`,
+		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(8); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.ZERO); break; }`,
 		// Scalars are plain numbers: number default, !== 0 guard, Number() decode.
 		"u: number = 0;",
 		"i: number = -7;",
@@ -441,7 +490,7 @@ func TestTSFixedCountTrailingDefaultRun(t *testing.T) {
 		"os.writeSignedArray(8, _trimTail(this.fenum, 0 as EnumMode));",
 		"os.writeUnsignedArray(9, _trimTail(this.fbits, 0));",
 		// Decode: refill to exactly the schema count, after the over-count reject.
-		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray() as number[]; if (_a.length > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); o.fu32 = _padTo(_a, 5, 0); break; }`,
+		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray(5) as number[]; if (_a.length > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); o.fu32 = _padTo(_a, 5, 0); break; }`,
 		`o.ffp64 = _padTo(_a, 3, 0); break; }`,
 		`o.fbool = _padTo(_a, 4, false); break; }`,
 		`o.fenum = _padTo(_a, 2, 0 as EnumMode); break; }`,
@@ -655,7 +704,7 @@ func TestTSInt64Default(t *testing.T) {
 			// count: 8 -> the trailing default run is trimmed on encode and
 			// refilled on decode; the bigint element default is 0n (issue#136).
 			"os.writeUnsignedArray(0, _trimTail(this.us, 0n));",
-			`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray() as bigint[]; if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o.us = _padTo(_a, 8, 0n); break; }`,
+			`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray(8) as bigint[]; if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o.us = _padTo(_a, 8, 0n); break; }`,
 			"u: bigint = 0n;",
 		} {
 			if !strings.Contains(mod, want) {

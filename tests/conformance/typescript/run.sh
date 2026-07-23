@@ -76,6 +76,25 @@ fi
 (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+# Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
+# MESSAGE_SPEC S5.2). someuintarray declares count 4; a header announcing 6 elements
+# (> 4) followed by only 2 elements then EOF is BOTH schema-invalid and truncated.
+# The schema count is passed to readUnsignedArray, so the over-count is decided at
+# the count word (before the reader's own truncated-array INCOMPLETE) -- the message
+# MUST report INVALID. The `status` harness mode surfaces the SofabError.code so the
+# distinction (which a bare non-zero exit hides) is asserted directly.
+# Wire: 7b (id 15 unsigned-array) 06 (count 6) 01 02 (2 of 6 elements) <EOF>.
+echo "==> over-count + truncation must be INVALID, not INCOMPLETE (generator#216)"
+printf '\173\006\001\002' > "$WORK/overcount_trunc.bin"
+ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/overcount_trunc.bin" | head -n1 )
+[ "$ST" = "INVALID" ] || { echo "FAIL: over-count(6>4)+truncated -> $ST (want INVALID)"; exit 1; }
+# Precision control: an IN-BOUND count (4 == bound) genuinely truncated (2 of 4
+# then EOF) is a clean truncation and MUST stay INCOMPLETE.
+printf '\173\004\001\002' > "$WORK/incount_trunc.bin"
+ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/incount_trunc.bin" | head -n1 )
+[ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(4==4)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
+echo "==> over-count/truncation ordering OK"
+
 # Over-index wrapper array (generator#142): somestringarray declares count: 5
 # (id 18). A string element with a wire index >= 5 is INVALID for every target
 # (MESSAGE_SPEC S5.1/S7), never grown-into -- which also bounds an over-index
@@ -101,6 +120,23 @@ if (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/overmaxl
 fi
 (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
 echo "==> over-maxlen reject OK"
+
+# Over-maxlen AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
+# MESSAGE_SPEC S5.2), the string/blob analogue of the over-count ordering above.
+# someblob (id 12) declares maxlen 16; a length word of 17 (> 16) followed by only 1
+# payload byte then EOF is decided at the length word (readBlob's schemaMaxlen,
+# before the payload take), so it MUST be INVALID.
+# Wire: 62 (blob id 12) 8b 01 (fixlen word: len 17, blob subtype) 01 (1 of 17) <EOF>.
+echo "==> over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#216)"
+printf '\142\213\001\001' > "$WORK/overmaxlen_trunc.bin"
+ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/overmaxlen_trunc.bin" | head -n1 )
+[ "$ST" = "INVALID" ] || { echo "FAIL: over-maxlen(17>16)+truncated -> $ST (want INVALID)"; exit 1; }
+# Precision control: an IN-BOUND length (16 == maxlen) genuinely truncated (1 of 16
+# payload bytes then EOF) is a clean truncation and MUST stay INCOMPLETE.
+printf '\142\203\001\001' > "$WORK/inmaxlen_trunc.bin"
+ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/inmaxlen_trunc.bin" | head -n1 )
+[ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(16==16)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
+echo "==> over-maxlen/truncation ordering OK"
 
 # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose header
 # wire type is not the one its declared type maps to -- for fixlen, including the

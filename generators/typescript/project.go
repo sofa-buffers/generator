@@ -121,6 +121,22 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("  } else if (mode === \"decode\") {")
 	f.line("    const obj = cls.decode(new Uint8Array(input));")
 	f.line("    process.stdout.write(JSON.stringify(obj.toJSON()) + \"\\n\");")
+	f.line("  } else if (mode === \"status\") {")
+	// Surface the §7 decode outcome (COMPLETE / INVALID / INCOMPLETE / LIMIT_EXCEEDED)
+	// so a conformance harness can assert the INVALID-vs-INCOMPLETE distinction that
+	// a bare non-zero exit hides — e.g. a message that is BOTH over-bound and
+	// truncated must be INVALID, not INCOMPLETE (generator#216 / §5.2). The corelib
+	// throws a SofabError carrying a machine-readable .code.
+	f.line("    try {")
+	f.line("      cls.decode(new Uint8Array(input));")
+	f.line("      process.stdout.write(\"COMPLETE\\n\");")
+	f.line("    } catch (e) {")
+	f.line("      const code = (e as { code?: string })?.code;")
+	f.line("      if (code === \"INVALID_MSG\") process.stdout.write(\"INVALID\\n\");")
+	f.line("      else if (code === \"INCOMPLETE\") process.stdout.write(\"INCOMPLETE\\n\");")
+	f.line("      else if (code === \"LIMIT_EXCEEDED\") process.stdout.write(\"LIMIT_EXCEEDED\\n\");")
+	f.line("      else throw e;")
+	f.line("    }")
 	f.line("  } else { process.stderr.write(\"unknown mode\\n\"); return 2; }")
 	f.line("  return 0;")
 	f.line("}")
