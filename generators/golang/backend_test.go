@@ -175,9 +175,9 @@ func TestGoHeaderVisitorReject(t *testing.T) {
 	for _, want := range []string{
 		"func (m *M) ArrayBegin(id sofab.ID, count int) error {",
 		"func (m *M) FixlenHeader(id sofab.ID, subtype int, length int) error {",
-		"if count > 4 {",  // native u32 array (id 0) count bound
-		"if count > 3 {",  // fixlen fp32 array (id 1) count bound
-		"if length > 8 {", // scalar string (id 2) maxlen
+		"if count > 4 {",   // native u32 array (id 0) count bound
+		"if count > 3 {",   // fixlen fp32 array (id 1) count bound
+		"if length > 8 {",  // scalar string (id 2) maxlen
 		"if length > 16 {", // scalar blob (id 3) maxlen
 	} {
 		if !strings.Contains(msg, want) {
