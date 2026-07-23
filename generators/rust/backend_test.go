@@ -733,17 +733,30 @@ messages:
 		}
 	}
 
-	// no_std without the `array` Cargo feature: that corelib cannot decode an
-	// array wire type at all, so no element can reach a scalar callback and the
-	// guard (which would reference the feature-gated ArrayKind) must be absent.
+	// no_std, scalar-only schema: the decoder still needs the guard. §7.3 requires
+	// skipping an array wire type that arrives at any id (an unknown id may carry
+	// one), so the no_std decoder provisions the full wire-type set including
+	// `array` regardless of the schema (generator#215 / Crucible F-0027) — same as
+	// std. array_begin is emitted purely to arm the guard.
 	nostdScalar := moduleFromYAML(t, `
 version: 1
 messages:
   m: { payload: { u: { id: 0, type: u8 } } }
 `, map[string]any{"corelib": "rs-no-std"})
-	for _, bad := range []string{"askip", "ArrayKind", "array_begin"} {
-		if strings.Contains(nostdScalar, bad) {
-			t.Errorf("no_std scalar-only message.rs must not reference %q (the `array` feature is off):\n%s", bad, nostdScalar)
+	for _, want := range []string{
+		"fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {",
+		"self.askip = match kind {",
+	} {
+		if !strings.Contains(nostdScalar, want) {
+			t.Errorf("no_std scalar-only message.rs missing §7.3 array-skip guard %q (generator#215):\n%s", want, nostdScalar)
+		}
+	}
+	// ...and the require!() guard asserts the FULL wire-type set even though the
+	// schema declares no array/fp64/64-bit field: the decoder is provisioned to
+	// skip any of them (generator#215).
+	for _, cap := range []string{"array", "fixlen", "fp64", "sequence", "value64"} {
+		if !strings.Contains(nostdScalar, "require!") || !strings.Contains(nostdScalar, cap) {
+			t.Errorf("no_std scalar-only require!() must assert full wire-type set incl %q (generator#215):\n%s", cap, nostdScalar)
 		}
 	}
 }

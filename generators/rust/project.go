@@ -123,9 +123,13 @@ func (g *gen) cargoToml(s *ir.Schema) string {
 	// package "sofa-buffers-corelib" (importable as `sofab`).
 	dep := `sofab = { package = "sofa-buffers-corelib", path = "${SOFAB_RS_CORELIB}" }`
 	if !g.std() {
-		// corelib-rs-no-std: turn every feature off and re-enable exactly the wire
-		// types this schema uses, so the footprint matches the messages (the point
-		// of the no_std build). require!() in the module asserts the same set.
+		// corelib-rs-no-std gates every wire type behind a Cargo feature. Provision
+		// the full wire-type set (not just the wire types the schema declares): the
+		// generated decoder must be able to §7.3-skip any wire type an unknown id may
+		// carry — array, fp64, 64-bit value — and corelib-rs-no-std gates skip, not
+		// just field storage, behind these features, so a schema-derived subset would
+		// make the decoder reject a well-formed skippable field (generator#215 /
+		// Crucible F-0027). require!() in the module asserts the same set.
 		feats := ""
 		if caps := g.capabilities(s); len(caps) > 0 {
 			quoted := make([]string, len(caps))

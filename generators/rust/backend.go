@@ -5,10 +5,11 @@
 // self.m.<path> directly, which keeps the borrow checker happy.
 //
 // The `corelib` config key selects the Rust corelib: "rs-no-std" (default,
-// corelib-rs-no-std — #![no_std], heap-free, Cargo features to drop unused wire
-// types; the generated crate enables only the features the schema needs and a
-// require!() guard asserts them) or "rs" (corelib-rs — std, high-throughput,
-// every wire type always compiled in, so no features and no require! guard).
+// corelib-rs-no-std — #![no_std], heap-free, wire types behind Cargo features;
+// the generated decoder enables the full wire-type set so it can §7.3-skip any
+// wire type regardless of the schema (generator#215), with a require!() guard
+// asserting them) or "rs" (corelib-rs — std, high-throughput, every wire type
+// always compiled in, so no features and no require! guard).
 // Both expose the same sofab:: interface and produce identical wire bytes.
 package rust
 

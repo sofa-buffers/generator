@@ -55,13 +55,19 @@ bytes**; they differ in `std` usage and feature gating.
   `sofab = { package = "SofaBuffers", … }`.
 - **`rs-no-std`** — [`corelib-rs-no-std`]: `#![no_std]`, heap-free, tuned for
   small footprint. Wire types are gated behind Cargo features. The generated
-  `Cargo.toml` sets `default-features = false` and re-enables **only** the
-  features the schema actually uses (`fixlen`, `array`, `sequence`, `fp64`,
-  `value64`), so the binary carries no code for unused wire types; a
-  `sofab::require!(…)` guard in the generated module asserts the same set. The
-  generated decoder also overrides only the `Visitor` callbacks the schema needs,
-  so a varint-only schema pulls in none of the feature-gated wire types and a
-  schema with no `u64`/`i64` builds against the 32-bit value type.
+  `Cargo.toml` sets `default-features = false` and re-enables the **full**
+  wire-type set (`fixlen`, `array`, `sequence`, `fp64`, `value64`), and a
+  `sofab::require!(…)` guard in the generated module asserts the same set. The set
+  is **not** derived from the wire types the schema declares: `corelib-rs-no-std`
+  gates wire-type *parse/skip* (not just field storage) behind these features, and
+  MESSAGE_SPEC §7.3 requires a decoder to skip any wire type an unknown id may
+  carry — an array, an fp64, a 64-bit value — regardless of whether the schema
+  itself has such a field. A schema-derived subset would leave the decoder unable
+  to skip those, so it would **reject** a well-formed skippable field with
+  `InvalidMsg` (generator#215 / Crucible F-0027). The footprint saving from
+  dropping a wire type is therefore not available to a §7.3-conformant decoder;
+  making `corelib-rs-no-std`'s skip path itself feature-independent is the
+  alternative that would restore it.
 
 ```yaml
 targets:

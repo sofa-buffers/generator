@@ -322,10 +322,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	use := visitorUseOf(fs)
 
 	// §7.3 array-vs-scalar skip (generator#183). Emitting it needs an array_begin
-	// override, which the no_std profile can only have when the `array` Cargo
-	// feature is on — and when it is off that corelib cannot decode an array wire
-	// type at all, so no element can reach a scalar callback. corelib-rs (std)
-	// compiles every wire type in unconditionally, so it always needs the guard.
+	// override, which requires the `array` Cargo feature under no_std. The decoder
+	// now provisions the full wire-type set unconditionally (generator#215), so the
+	// feature is always on and hasCap("array") is always true — but keep the guard
+	// so the emit stays tied to the feature it depends on. corelib-rs (std) compiles
+	// every wire type in unconditionally, so it always needs the guard too.
 	arrSkip := !g.noStd || g.hasCap("array")
 	// array_begin is emitted for its own array-target work, and additionally
 	// whenever the §7.3 guard needs a place to arm itself.
