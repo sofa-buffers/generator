@@ -695,9 +695,23 @@ fires when truncation cuts the array short, so it misreports INCOMPLETE. The
 Rust backend now checks at the header (the `array_begin` `if count > N { inv }`
 arm) — the same "decide at the deciding word" rule as the over-`maxlen` guard
 (checked at the fixlen length word) and the try_decode ordering that reads the
-sticky `inv` flag before propagating `feed`'s `Incomplete`. The remaining
-"guard after the whole-array read" backends (Go, C++ `corelib-cpp`, TypeScript,
-Python, Zig, Dart) are tracked for the same move under generator#216.
+sticky `inv` flag before propagating `feed`'s `Incomplete`.
+
+Whether the fix is generator-only splits by the corelib's decode model:
+- **Header-first corelibs** (Rust, Zig `arrayBegin(id, kind, count)`; Python
+  `fld.count` on the delivered field) surface the count *before* the elements, so
+  the generator alone moves the guard to the header. **Done: Rust, Python**
+  (generator#216); Zig follows the same generator-only move.
+- **Whole-unit / measure-then-deliver corelibs** (Go and Dart whole-slice
+  callbacks; TypeScript's private count/length readers; C++ `corelib-cpp`, which
+  *measures* a whole field for completeness before delivering it) surface the
+  truncation `Incomplete` *before* the generated guard ever runs, so the generator
+  cannot decide at the header. These need a small additive **corelib header hook**
+  (a count/length callback fired at the deciding word before the element/payload
+  read; for `corelib-cpp` a single measure-phase hook covers over-count,
+  over-`maxlen`, and over-index at once). Their try_decode ordering already lets a
+  sticky INVALID dominate, so only the header hook is missing. Tracked under
+  generator#216 for Go, TypeScript, Dart, and C++ `corelib-cpp`.
 
 #### Decode verdict: over-index wrapper-array elements are INVALID (all targets)
 

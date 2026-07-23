@@ -70,7 +70,7 @@ func TestPythonStructural(t *testing.T) {
 		"class MyfirstmessageSomeenum(IntEnum):",
 		"def to_jsonable(self)",
 		"e.write_sequence_begin(",
-		"if len(self.someuintarray) > 4:", // over-count scalar array rejected (generator#100)
+		"if fld.count > 4:", // over-count scalar array rejected at the count header (generator#100/#216)
 		`raise SofaDecodeError("someuintarray: array count above schema capacity 4")`,
 	} {
 		if !strings.Contains(mod, want) {
@@ -325,8 +325,9 @@ messages:
 	if !strings.Contains(mod, "e.write_unsigned_array(6, self.dynU32)") {
 		t.Error("dynamic u32 array must encode untrimmed")
 	}
-	// The over-count guard must still reject M > N (generator#100).
-	if !strings.Contains(mod, "if len(self.fixedU32) > 5:") {
+	// The over-count guard must still reject a wire count > N, now decided at the
+	// count header (fld.count) so INVALID dominates a truncated tail (generator#216).
+	if !strings.Contains(mod, "if fld.count > 5:") {
 		t.Error("over-count SofaDecodeError guard regressed")
 	}
 }
