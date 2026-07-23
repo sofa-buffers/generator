@@ -404,6 +404,18 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 		f.line("            auto r = %s::try_decode(reinterpret_cast<const std::uint8_t *>(in.data()), in.size(), obj);", mt)
 		f.line("            if (!r.ok()) { std::cerr << \"decode error\\n\"; return 1; }")
 		f.line("            to_json(obj, std::cout); std::cout << \"\\n\";")
+		if !g.clib {
+			// Surface the §7 decode outcome so a conformance run can assert the
+			// INVALID-vs-INCOMPLETE distinction that a bare non-zero exit hides — e.g.
+			// a field that is both over-bound and truncated must be INVALID, not
+			// INCOMPLETE (generator#216 / §5.2). Pure corelib-cpp only: its Result
+			// carries the invalid()/incomplete()/limitExceeded() predicates (the c-cpp
+			// wrapper's Result does not, and has no measure phase to test anyway).
+			f.line("        } else if (mode == \"status\") {")
+			f.line("            %s obj;", mt)
+			f.line("            auto r = %s::try_decode(reinterpret_cast<const std::uint8_t *>(in.data()), in.size(), obj);", mt)
+			f.line("            std::cout << (r.invalid() ? \"INVALID\" : r.incomplete() ? \"INCOMPLETE\" : r.limitExceeded() ? \"LIMIT_EXCEEDED\" : \"COMPLETE\") << \"\\n\";")
+		}
 		f.line("        } else { std::cerr << \"unknown mode\\n\"; return 2; }")
 		f.line("    }")
 	}
