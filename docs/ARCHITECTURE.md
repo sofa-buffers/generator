@@ -1551,5 +1551,5 @@ to 1%.
 
 **Not measured / known gaps** (properties of the targets, not the harness): the C++
 `footprint` profile cannot build freestanding (the generated header pulls in
-`<string>`/`<vector>`, the gap `docs/plans/cpp-embedded-footprint.md` closes), and
-AVR cannot host any fp64 schema. Both are recorded in `tests/bench/README.md`.
+`<string>`/`<vector>`), and AVR cannot host any fp64 schema. Both are recorded in
+`tests/bench/README.md`.
