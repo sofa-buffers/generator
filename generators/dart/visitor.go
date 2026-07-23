@@ -21,6 +21,15 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	var uns, sig, f32, f64, str, blob []string
 	var uArr, sArr, f32Arr, f64Arr []string
 	var seq []string
+	// HeaderVisitor hooks (corelib-dart onArrayBegin/onFixlenHeader): schema-bound
+	// rejects at the count/length word, BEFORE the corelib's truncation check, so a
+	// field that is BOTH over-bound and truncated is INVALID, not INCOMPLETE
+	// (generator#216 / F-0032, MESSAGE_SPEC §5.2). The whole-value guards below
+	// (onUnsignedArray/onString len checks) fire only once every element/byte has
+	// arrived, so a truncated over-bound field never reaches them — the header hook
+	// is what makes the over-bound win the tie. tryDecode already reads the sticky
+	// e.inv before returning the incomplete status, so the flag alone suffices.
+	var arrBegin, fixHdr []string
 
 	arm := func(id int64, body string) string {
 		return fmt.Sprintf("      case %d:\n        %s\n        return;", id, body)
@@ -48,6 +57,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 				// A wire byte length above the schema maxlen is malformed input
 				// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate.
 				body = fmt.Sprintf("if (_u8len(value) > %d) { e.inv = true; return; }\n        %s", fld.Maxlen, body)
+				fixHdr = append(fixHdr, arm(fld.ID, fmt.Sprintf("if (length > %d) e.inv = true;", fld.Maxlen)))
 			}
 			str = append(str, arm(fld.ID, body))
 		case ir.KindBlob:
@@ -55,12 +65,13 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 			body := acc + " = Uint8List.fromList(value);"
 			if fld.HasMaxlen {
 				body = fmt.Sprintf("if (value.length > %d) { e.inv = true; return; }\n        %s", fld.Maxlen, body)
+				fixHdr = append(fixHdr, arm(fld.ID, fmt.Sprintf("if (length > %d) e.inv = true;", fld.Maxlen)))
 			}
 			blob = append(blob, arm(fld.ID, body))
 		case ir.KindStruct, ir.KindUnion:
 			seq = append(seq, seqArm(fld.ID, fmt.Sprintf("return %s(%s, e);", visitorName(g.typeName(fld.Ref.Key)), acc)))
 		case ir.KindArray:
-			g.emitArrayDecode(fld, acc, arm, seqArm, &uArr, &sArr, &f32Arr, &f64Arr, &seq)
+			g.emitArrayDecode(fld, acc, arm, seqArm, &uArr, &sArr, &f32Arr, &f64Arr, &seq, &arrBegin)
 		}
 	}
 
@@ -78,6 +89,11 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	emitSwitch(f, "void onSignedArray(int id, Int64List values)", sArr)
 	emitSwitch(f, "void onFp32Array(int id, Float32List values)", f32Arr)
 	emitSwitch(f, "void onFp64Array(int id, Float64List values)", f64Arr)
+	// Header hooks fire at the count/length word before the truncation check
+	// (generator#216). Emitted only when a field declares a bound, so a type with
+	// none does not override them and the corelib's max-speed path is unchanged.
+	emitSwitch(f, "void onArrayBegin(int id, int count)", arrBegin)
+	emitSwitch(f, "void onFixlenHeader(int id, int subtype, int length)", fixHdr)
 	// onSequenceStart is ALWAYS overridden: the base returns `this` (descend),
 	// which would misread an unknown nested sequence as this object's fields.
 	// Returning null skips any unhandled sequence (forward-compat + §7.3).
@@ -100,12 +116,18 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 // callback bucket. Native scalar arrays bind into the member (with an over-count
 // INVALID guard and a fixed-count pad); wrapper-sequence arrays clear their list
 // and descend into a collector.
-func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string) string, seqArm func(int64, string) string, uArr, sArr, f32Arr, f64Arr, seq *[]string) {
+func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string) string, seqArm func(int64, string) string, uArr, sArr, f32Arr, f64Arr, seq, arrBegin *[]string) {
 	guard := ""
 	if fld.HasCount {
 		// A wire element count above the schema `count` is INVALID (MESSAGE_SPEC
 		// §3+§7): reject, never clamp (generator#100).
 		guard = fmt.Sprintf("if (values.length > %d) { e.inv = true; return; }\n        ", fld.Count)
+		// Native arrays fire onArrayBegin at the count word; wrapper-sequence arrays
+		// descend via onSequenceStart (no header hook) and are bounded at the
+		// collector cap instead. So the header reject is only for the native kinds.
+		if nativeArrayElem(fld.Elem) {
+			*arrBegin = append(*arrBegin, arm(fld.ID, fmt.Sprintf("if (count > %d) e.inv = true;", fld.Count)))
+		}
 	}
 	pad := ""
 	if fld.HasCount {
