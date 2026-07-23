@@ -837,16 +837,26 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 		case fkStruct:
 			fa := frameArms{fr: fr}
 			for _, fld := range fr.fields {
-				if g.zigFixedArrayNeedsReset(fld) {
-					// A fixed [N]T whose declaration default is the schema
-					// default: clear it so the elements the encoder trimmed off
-					// the tail decode as the element default, not as that schema
-					// default (MESSAGE_SPEC S3 -- see zigFixedArrayNeedsReset).
-					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s.%s = @splat(%s),",
-						fld.ID, fr.path, zigIdent(fld.Name), zigElemZero(fld.Elem)))
-					// The reset reads only `id`: a fixed array's storage is the
-					// schema count, so the wire count is not consumed here.
-					idUsed = true
+				if _, n, ok := g.fixedNativeArray(fld); ok {
+					// Over-count reject at the count header (generator#216 / F-0032):
+					// a wire element count above the schema `count` N is INVALID
+					// (MESSAGE_SPEC 3+7), and setting the sticky `inv` HERE — before
+					// the elements are read — makes INVALID dominate a truncated tail
+					// (§5.2), since decode() reads `inv` before surfacing `.incomplete`.
+					// The store-side _putc bound only fires when the N+1th element
+					// actually arrives, which a truncated over-count array never reaches.
+					guard := fmt.Sprintf("if (count > %d) { self.inv = true; return; }", n)
+					// A fixed [N]T whose declaration default is the schema default also
+					// needs a reset here: clear it so the elements the encoder trimmed
+					// off the tail decode as the element default, not that schema default
+					// (MESSAGE_SPEC S3 -- see zigFixedArrayNeedsReset).
+					reset := ""
+					if g.zigFixedArrayNeedsReset(fld) {
+						reset = fmt.Sprintf(" %s.%s = @splat(%s);", fr.path, zigIdent(fld.Name), zigElemZero(fld.Elem))
+					}
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => { %s%s },", fld.ID, guard, reset))
+					// The guard reads the wire count; the switch reads id.
+					idUsed, countUsed = true, true
 					continue
 				}
 				if g.dynNativeArray(fld) {
