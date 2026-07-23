@@ -146,6 +146,33 @@ run_variant() {
         "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: [$label] control (16 == maxlen) must decode"; exit 1; }
         echo "==> [$label] over-maxlen reject OK"
 
+        # Schema-bound INVALID dominates truncation (generator#216 / F-0032,
+        # MESSAGE_SPEC S5.2). corelib-cpp measures a whole field for completeness
+        # before delivering it, so a field that is BOTH over-bound and truncated
+        # would misreport INCOMPLETE. The generated measure-phase schema
+        # (setSchema, corelib-cpp#50) rejects at the deciding word instead. The
+        # `status` harness mode surfaces the verdict the bare non-zero exit hides.
+        # Each over-bound+truncated input MUST be INVALID; each in-bound+truncated
+        # control MUST stay INCOMPLETE. Pure corelib-cpp only (no measure phase in
+        # the c-cpp wrapper).
+        echo "==> [$label] schema-bound + truncation ordering (generator#216)"
+        # over-count: someuintarray (id 15) count 4; 7b 06 (count 6>4) 01 02 <EOF>.
+        ST=$(printf '\173\006\001\002' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+        [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-count(6>4)+truncated -> $ST (want INVALID)"; exit 1; }
+        ST=$(printf '\173\004\001\002' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+        [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(4==4)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
+        # over-maxlen: someblob (id 12) maxlen 16; 62 8b 01 (len 17>16) 01 <EOF>.
+        ST=$(printf '\142\213\001\001' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+        [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-maxlen(17>16)+truncated -> $ST (want INVALID)"; exit 1; }
+        ST=$(printf '\142\203\001\001' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+        [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(16==16)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
+        # over-index: somestringarray (id 18) count 5; 96 01 (seq) 2a (elem index 5>=5) <EOF>.
+        ST=$(printf '\226\001\052' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+        [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-index(id5>=5)+truncated -> $ST (want INVALID)"; exit 1; }
+        ST=$(printf '\226\001\042' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+        [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(id4<5)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
+        echo "==> [$label] schema-bound/truncation ordering OK"
+
         # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose
         # header wire type is not the one its declared type maps to -- for fixlen,
         # including the subtype -- is SKIPPED, exactly like an unknown id. someu8

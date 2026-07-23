@@ -728,13 +728,25 @@ Whether the fix is generator-only splits by the corelib's decode model:
     whole-value guards stay as defense. The generated harness gained a `status`
     mode surfacing the `SofabError.code` so conformance can assert the
     INVALID-vs-INCOMPLETE distinction a bare non-zero exit hides.
-- **Still open:** C++ `corelib-cpp`, which *measures* a whole field for
-  completeness before delivering it. The generator's over-count/over-`maxlen`
-  guards already sit at the deciding `deserialize` params, but the corelib must
-  dispatch the header callback (and, in the fixed profile, reject an over-index
-  `_MsgSeqFixed` element) *before* the truncation check; a single measure-phase
-  hook would cover over-count, over-`maxlen`, and over-index at once. Tracked under
-  generator#216.
+  - **C++ `corelib-cpp`** — the pure profile *measures* a whole top-level field
+    for completeness (`measureField`) before delivering it to `deserialize` where
+    the `is.invalidate()` guards live, so those guards run too late once the field
+    is truncated. corelib-cpp#50 added a **measure-phase schema** (`sofab::schema`:
+    a static `SeqNode`/`FieldBound` tree consulted at the count varint / fixlen
+    length word / element header, before truncation is surfaced) installed with
+    `setSchema`. The generator emits that tree per message — one `FieldBound` per
+    over-`count` native array (matched by array wire type), over-`maxlen`
+    string/blob (`Fixlen`), and over-index wrapper array (`SequenceStart`,
+    `wrapperArray`), plus a `child` descriptor for each nested struct/union field —
+    and calls `in.setSchema(&…_schema)` in `decode`/`try_decode`. Emitted only when
+    a message carries a bound anywhere in its tree, so a bound-free message keeps
+    the corelib's schema-free (maxspeed) measure walk; element-level bounds inside a
+    wrapper array are not expressible (element ids are wire indices, not fixed field
+    ids), so a wrapper array carries only its over-index bound. Pure profile only:
+    the c-cpp wrapper is statically schema-bounded and has no measure phase. The
+    harness `status` mode surfaces the verdict, as for TypeScript.
+
+  With C++ landed, **generator#216 is closed for every backend.**
 
 #### Decode verdict: over-index wrapper-array elements are INVALID (all targets)
 

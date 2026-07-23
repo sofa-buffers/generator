@@ -193,6 +193,69 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 // elements) rejects an element id >= N as INVALID before growing the heap
 // container (issue #142 / MESSAGE_SPEC §5.1/§7). A dynamic wrapper array (no
 // count) keeps every delivered index, so its collector cap is -1.
+// TestCppMeasureSchema verifies the generator#216 / F-0032 fix: the pure-cpp
+// backend emits a measure-phase sofab::schema descriptor (corelib-cpp#50) and
+// installs it via setSchema, so an over-count / over-maxlen / over-index field
+// that is ALSO truncated is rejected as INVALID at its deciding word — before the
+// measure-then-deliver corelib surfaces the truncation INCOMPLETE (MESSAGE_SPEC
+// §5.2 anti-folding). Native arrays map to the array wire type, string/blob to
+// Fixlen, wrapper arrays to a wrapperArray SequenceStart (over-index), and a
+// nested struct field to a SequenceStart carrying its child descriptor.
+func TestCppMeasureSchema(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      ua: { id: 0, type: array, items: { type: u32,  count: 4 } }\n" +
+		"      fa: { id: 1, type: array, items: { type: fp32, count: 3 } }\n" +
+		"      s:  { id: 2, type: string, maxlen: 8 }\n" +
+		"      wa: { id: 3, type: array, items: { type: string, count: 5 } }\n" +
+		"      da: { id: 4, type: array, items: { type: u32 } }\n" + // dynamic native: no bound
+		"      ns: { id: 5, type: struct, fields: { inner: { id: 0, type: string, maxlen: 12 } } }\n"
+	h, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"static constexpr sofab::schema::FieldBound M_sbounds[] = {",
+		"static constexpr sofab::schema::SeqNode M_schema{M_sbounds,",
+		"{.id = 0, .wire = sofab::Wire::ArrayUnsigned, .bound = 4, .child = nullptr, .wrapperArray = false},",
+		"{.id = 1, .wire = sofab::Wire::ArrayFixlen, .bound = 3, .child = nullptr, .wrapperArray = false},",
+		"{.id = 2, .wire = sofab::Wire::Fixlen, .bound = 8, .child = nullptr, .wrapperArray = false},",
+		"{.id = 3, .wire = sofab::Wire::SequenceStart, .bound = 5, .child = nullptr, .wrapperArray = true},",
+		"{.id = 5, .wire = sofab::Wire::SequenceStart, .bound = 0, .child = &MNs_schema, .wrapperArray = false},",
+		"in.setSchema(&M_schema);", // installed in decode()/try_decode()
+		// the nested struct's own descriptor (its bounded inner string):
+		"{.id = 0, .wire = sofab::Wire::Fixlen, .bound = 12, .child = nullptr, .wrapperArray = false},",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.hpp missing measure-schema %q:\n%s", want, h)
+		}
+	}
+	// The dynamic native array (id 4) declares no count, so it carries no bound
+	// row — an unlisted id carries no bound.
+	if strings.Contains(h, ".id = 4,") {
+		t.Errorf("dynamic array (id 4) must not appear in the measure schema:\n%s", h)
+	}
+	// A bound-free message must not emit any descriptor or setSchema, keeping the
+	// corelib's schema-free max-speed measure walk.
+	plain, err := genHeader(t, "version: 1\nmessages:\n  P:\n    payload:\n      x: { id: 0, type: u32 }\n      da: { id: 1, type: array, items: { type: u32 } }\n", "p.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate plain: %v", err)
+	}
+	for _, notWant := range []string{"sofab::schema::", "setSchema"} {
+		if strings.Contains(plain, notWant) {
+			t.Errorf("a bound-free message must not emit %q:\n%s", notWant, plain)
+		}
+	}
+	// The c-cpp wrapper has no measure phase, so the descriptor is never emitted
+	// there (its own IStream is statically schema-bounded).
+	clib, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp", "allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("generate c-cpp: %v", err)
+	}
+	if strings.Contains(clib, "sofab::schema::") || strings.Contains(clib, "setSchema") {
+		t.Errorf("c-cpp profile must not emit a measure-phase schema:\n%s", clib)
+	}
+}
+
 func TestCppOverIndexWrapperArray(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" + // bounded string wrapper
