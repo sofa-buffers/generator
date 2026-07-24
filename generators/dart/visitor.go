@@ -57,7 +57,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 				// A wire byte length above the schema maxlen is malformed input
 				// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate.
 				body = fmt.Sprintf("if (_u8len(value) > %d) { e.inv = true; return; }\n        %s", fld.Maxlen, body)
-				fixHdr = append(fixHdr, arm(fld.ID, fmt.Sprintf("if (length > %d) e.inv = true;", fld.Maxlen)))
+				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard("string", fld.Maxlen)))
 			}
 			str = append(str, arm(fld.ID, body))
 		case ir.KindBlob:
@@ -65,7 +65,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 			body := acc + " = Uint8List.fromList(value);"
 			if fld.HasMaxlen {
 				body = fmt.Sprintf("if (value.length > %d) { e.inv = true; return; }\n        %s", fld.Maxlen, body)
-				fixHdr = append(fixHdr, arm(fld.ID, fmt.Sprintf("if (length > %d) e.inv = true;", fld.Maxlen)))
+				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard("blob", fld.Maxlen)))
 			}
 			blob = append(blob, arm(fld.ID, body))
 		case ir.KindStruct, ir.KindUnion:
@@ -110,6 +110,21 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	f.line("  }")
 	f.line("}")
 	f.blank()
+}
+
+// maxlenHdrGuard is the onFixlenHeader arm body rejecting a string/blob whose
+// wire byte length exceeds the schema maxlen as INVALID, at the length word
+// (generator#216). The bound is gated on the wire `subtype` matching the field's
+// declared one: onFixlenHeader fires for ANY fixlen subtype at a field id (the
+// corelib resolves the subtype but cannot know the DECLARED one — that is schema
+// knowledge only the generated code has), and a fixlen value whose subtype
+// contradicts the declaration must be SKIPPED, not measured against this field's
+// maxlen (MESSAGE_SPEC §7.3, generator#224). Without the gate an fp64 (8 bytes)
+// landing on a `blob` with `maxlen: 4` was rejected as INVALID instead of skipped.
+// The payload callbacks (onString/onBlob) are already subtype-dispatched by the
+// corelib, so only this pre-dispatch hook needs the explicit check.
+func maxlenHdrGuard(sub string, n int64) string {
+	return fmt.Sprintf("if (subtype == sofab.FixlenType.%s && length > %d) e.inv = true;", sub, n)
 }
 
 // emitArrayDecode appends the decode arm(s) for an array field to the right

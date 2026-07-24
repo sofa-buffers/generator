@@ -140,12 +140,26 @@ func TestDartHeaderVisitorReject(t *testing.T) {
 	for _, want := range []string{
 		"void onArrayBegin(int id, int count) {",
 		"void onFixlenHeader(int id, int subtype, int length) {",
-		"if (count > 4) e.inv = true;",   // someuintarray, count 4
-		"if (length > 50) e.inv = true;", // somestring, maxlen 50
-		"if (length > 16) e.inv = true;", // someblob, maxlen 16
+		"if (count > 4) e.inv = true;", // someuintarray, count 4
+		// Each maxlen guard is gated on the DECLARED fixlen subtype: onFixlenHeader
+		// fires for any subtype at a field id, and a contradicting one must be
+		// skipped, not measured against this field's bound (§7.3, generator#224).
+		"if (subtype == sofab.FixlenType.string && length > 50) e.inv = true;", // somestring
+		"if (subtype == sofab.FixlenType.blob && length > 16) e.inv = true;",   // someblob
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated module missing header-visitor guard %q", want)
+		}
+	}
+	// The bound must never be enforced on length alone — an un-gated compare is
+	// exactly the generator#224 defect (an fp64 landing on a `maxlen: 4` blob was
+	// rejected as INVALID instead of skipped).
+	for _, notWant := range []string{
+		"if (length > 50) e.inv = true;",
+		"if (length > 16) e.inv = true;",
+	} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("maxlen header guard %q is not gated on the fixlen subtype (generator#224)", notWant)
 		}
 	}
 	// A message with no bounded field must NOT override the header hooks, keeping

@@ -199,6 +199,53 @@ OUT=$("$H" decode myfirstmessage < "$WORK/fixsubtype_control.bin") \
 echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
 echo "==> fixlen subtype skip OK"
 
+# Fixlen subtype mismatch AT A BOUNDED FIELD (generator#224, MESSAGE_SPEC S7.3):
+# onFixlenHeader fires for ANY fixlen subtype at a field id, so a maxlen guard that
+# compares length alone measures a CONTRADICTING value against this field's bound
+# and rejects it, where S7.3 requires it be skipped. The guard must be gated on the
+# declared subtype. someblob (id 12) declares maxlen 16: a 17-byte STRING at that id
+# is a subtype mismatch (skip -> someblob keeps its "Hello" default), while a
+# 17-byte BLOB there is the genuine over-maxlen INVALID (asserted above).
+# Wire: 62 (id 12 fixlen) 8a 01 (fixlen word: len 17, subtype STRING) + 17 bytes.
+echo "==> over-bound fixlen at a MISMATCHED subtype must skip (S7.3, generator#224)"
+printf '\142\212\001aaaaaaaaaaaaaaaaa' > "$WORK/fixsub_bounded.bin"
+OUT=$("$H" decode myfirstmessage < "$WORK/fixsub_bounded.bin") \
+    || { echo "FAIL: 17-byte string at a maxlen-16 BLOB id must skip, not be measured against maxlen"; exit 1; }
+echo "$OUT" | grep -q '"someblob":\[72,101,108,108,111\]' \
+    || { echo "FAIL: skipped fixlen field must keep its default; got: $OUT"; exit 1; }
+
+# The reported shape: a fixlen FP value whose fixed width exceeds a small maxlen.
+# Needs maxlen < 8, which the example has no field for, so use a dedicated schema.
+cat > "$WORK/fixsub.yaml" <<'YAML'
+version: 1
+messages:
+  probe: { payload: { s: { id: 2, type: string, maxlen: 32 }, b: { id: 3, type: blob, maxlen: 4 } } }
+YAML
+build "$WORK/fixsub.yaml" "$WORK/fixsub"
+FH="$WORK/fixsub/harness"
+# fp64 1.5 (8 bytes > maxlen 4) at the blob id 3 -> subtype mismatch -> skip.
+# Wire: 1a (id 3 fixlen) 41 (len 8, subtype FP64) + 8 payload bytes.
+OUT=$(printf '\032\101\000\000\000\000\000\000\370\077' | "$FH" decode probe) \
+    || { echo "FAIL: fp64 at a maxlen-4 blob id must skip (generator#224)"; exit 1; }
+echo "$OUT" | grep -q '"b":\[\]' || { echo "FAIL: skipped fp64 must leave b at its default; got: $OUT"; exit 1; }
+# fp32 1.5 (4 bytes, within the bound) at the same id: also a mismatch, also skipped.
+OUT=$(printf '\032\040\000\000\300\077' | "$FH" decode probe) \
+    || { echo "FAIL: fp32 at a maxlen-4 blob id must skip"; exit 1; }
+echo "$OUT" | grep -q '"b":\[\]' || { echo "FAIL: skipped fp32 must leave b at its default; got: $OUT"; exit 1; }
+# Precision controls: the bound still bites on the MATCHING subtype, and still
+# dominates truncation (generator#216) -- the gate must not disarm either.
+"$FH" decode probe < /dev/null >/dev/null || { echo "FAIL: empty probe must decode"; exit 1; }
+printf '\032\043\001\002\003\004' | "$FH" decode probe >/dev/null \
+    || { echo "FAIL: 4-byte blob (== maxlen 4) must decode"; exit 1; }
+if printf '\032\053\001\002\003\004\005' | "$FH" decode probe >/dev/null 2>&1; then
+    echo "FAIL: 5-byte blob (> maxlen 4) must be INVALID"; exit 1
+fi
+ST=$(printf '\032\053\001' | "$FH" trydecode probe | head -n1)
+[ "$ST" = "INVALID" ] || { echo "FAIL: over-maxlen(5>4)+truncated -> $ST (want INVALID)"; exit 1; }
+ST=$(printf '\032\043\001' | "$FH" trydecode probe | head -n1)
+[ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(4==4)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
+echo "==> bounded-field subtype gate OK"
+
 # S7.3 x S7.4: a mis-typed later occurrence must not clear a valid earlier array/
 # struct. The clear lives inside onSequenceStart, which the corelib only calls for
 # an actual sequence header -- so a mis-typed (non-sequence) occurrence never clears.
