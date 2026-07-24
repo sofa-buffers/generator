@@ -112,6 +112,37 @@ func TestSparseOmitGuards(t *testing.T) {
 	}
 }
 
+// TestFp32SignalingNaNPreserved asserts the codegen shape that keeps an fp32
+// signaling/payload NaN bit-for-bit through decode -> re-encode (issue #226): a
+// Dart `double` quiets the NaN, so the generated code must route through
+// corelib-dart's raw-bits API (onFp32Bits / writeFp32Bits) for the scalar and a
+// bit-exact Float32List copy for the array. example.yaml has a scalar `somefp32`
+// (id 8) and a fixed-count fp32 array `somefloatarray` (id 17).
+func TestFp32SignalingNaNPreserved(t *testing.T) {
+	out := genFor(t, exampleDef, map[string]any{})
+	for _, want := range []string{
+		// Scalar: a private companion bits slot, captured in onFp32Bits and cleared
+		// in onFp32, and re-emitted via writeFp32Bits when the value is a NaN.
+		"int? _somefp32Fp32Bits;",
+		"void onFp32Bits(int id, int bits) {",
+		"o._somefp32Fp32Bits = bits;",
+		"o.somefp32 = _f32FromBits(bits);",
+		"o._somefp32Fp32Bits = null;",
+		"if (somefp32.isNaN && _somefp32Fp32Bits != null) { e.writeFp32Bits(8, _somefp32Fp32Bits!); }",
+		// Array: a bit-exact Float32List copy, never a widening List<double>.from.
+		"Float32List _f32copy(Float32List v, int n) {",
+		"o.somefloatarray = _f32copy(values, 3);",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("fp32 sNaN codegen missing %q", want)
+		}
+	}
+	// The widening path the bug rode on must be gone for fp32 arrays.
+	if strings.Contains(out, "somefloatarray = List<double>.from(values)") {
+		t.Error("fp32 array still decoded via List<double>.from (quiets a signaling NaN)")
+	}
+}
+
 func TestProjectFiles(t *testing.T) {
 	out := genFor(t, exampleDef, map[string]any{"emit": "project"})
 	for _, want := range []string{

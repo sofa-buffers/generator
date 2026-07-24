@@ -65,7 +65,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// a rejected (INVALID/INCOMPLETE/limitExceeded) decode from a clean one.
 	f.line("void main(List<String> args) {")
 	f.line("  if (args.isEmpty) {")
-	f.line("    stderr.writeln('usage: harness <encode|decode|trydecode|bench> [Message|workload]');")
+	f.line("    stderr.writeln('usage: harness <encode|decode|trydecode|recode|bench> [Message|workload]');")
 	f.line("    exit(2);")
 	f.line("  }")
 	f.line("  final mode = args[0];")
@@ -94,6 +94,16 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("        final st = %s.tryDecode(input, obj);", mt)
 		f.line("        stdout.writeln(st.name.toUpperCase());")
 		f.line("        stdout.writeln(jsonEncode(_toJson%s(obj)));", mt)
+		f.line("      } else if (mode == 'recode') {")
+		// Wire -> object -> wire, no JSON in the loop: the byte-exact re-encode path
+		// that must preserve an fp32 signaling NaN's raw bits (issue #226).
+		f.line("        final obj = %s();", mt)
+		f.line("        final st = %s.tryDecode(input, obj);", mt)
+		f.line("        if (st != sofab.DecodeStatus.complete) {")
+		f.line("          stderr.writeln('decode failed: ${st.name}');")
+		f.line("          exit(1);")
+		f.line("        }")
+		f.line("        stdout.add(obj.encode());")
 		f.line("      } else {")
 		f.line("        stderr.writeln('unknown mode');")
 		f.line("        exit(2);")

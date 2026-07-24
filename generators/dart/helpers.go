@@ -62,6 +62,12 @@ var dartKeywords = map[string]bool{
 	"Symbol": true, "Type": true, "Enum": true, "Record": true,
 }
 
+// fp32BitsField is the private companion `int?` holding the raw 32 wire bits of
+// an fp32 SCALAR field whose decoded value is a NaN, so a signaling/payload NaN
+// re-encodes bit-for-bit — a Dart `double` cannot carry an fp32 NaN payload
+// (MESSAGE_SPEC §4.6). null means "no captured bits; derive from the double".
+func fp32BitsField(name string) string { return "_" + dartIdent(name) + "Fp32Bits" }
+
 // dartIdent mangles a field name that is a Dart reserved word with a trailing
 // underscore. It also guards a leading digit / empty name defensively (the
 // schema identifier pattern already forbids those).

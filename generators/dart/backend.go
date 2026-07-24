@@ -226,6 +226,13 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 			f.line("  @Deprecated('retained for backward compatibility only')")
 		}
 		f.line("  %s %s%s;", g.dartType(fld), dartIdent(fld.Name), g.dartInit(fld))
+		if fld.Kind == ir.KindFP32 {
+			// Companion raw-bits slot: a Dart `double` cannot carry an fp32 NaN's
+			// payload/signaling bits (§4.6), so when decode delivers a NaN we keep the
+			// exact 32 wire bits here and re-emit them via writeFp32Bits. null == "no
+			// captured bits; derive the wire image from the double".
+			f.line("  int? %s;", fp32BitsField(fld.Name))
+		}
 	}
 	f.blank()
 
@@ -284,7 +291,14 @@ func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 	case ir.KindBool:
 		write = fmt.Sprintf("e.writeBool(%d, %s);", fld.ID, acc)
 	case ir.KindFP32:
-		write = fmt.Sprintf("e.writeFp32(%d, %s);", fld.ID, acc)
+		// A NaN with captured bits re-emits bit-for-bit (writeFp32Bits); any other
+		// value (incl. a user-set NaN with no captured bits) goes through writeFp32.
+		// `acc != default` still gates omission: a NaN never equals the default.
+		bits := fp32BitsField(fld.Name)
+		f.line("    if (%s != %s) {", acc, g.dartDefaultValue(fld))
+		f.line("      if (%s.isNaN && %s != null) { e.writeFp32Bits(%d, %s!); } else { e.writeFp32(%d, %s); }", acc, bits, fld.ID, bits, fld.ID, acc)
+		f.line("    }")
+		return
 	case ir.KindFP64:
 		write = fmt.Sprintf("e.writeFp64(%d, %s);", fld.ID, acc)
 	case ir.KindString:
