@@ -11,6 +11,11 @@ class _Dec {
   bool inv = false;
 }
 
+// Widen the 32 raw wire bits of an fp32 NaN to a display double for element
+// access; the exact bits are kept alongside for a bit-for-bit re-encode (MESSAGE_SPEC S4.6).
+double _f32FromBits(int bits) =>
+    (ByteData(4)..setUint32(0, bits, Endian.little)).getFloat32(0, Endian.little);
+
 class Scalars {
   int u8min = 0;
   int u8max = 255;
@@ -18,6 +23,7 @@ class Scalars {
   int i8min = -128;
   int i64min = 0x8000000000000000;
   double f32 = 3.14;
+  int? _f32Fp32Bits;
   double f64 = -2.5;
   bool flag = true;
 
@@ -27,7 +33,9 @@ class Scalars {
     if (u64max != -1) { e.writeUnsigned(2, u64max); }
     if (i8min != -128) { e.writeSigned(3, i8min); }
     if (i64min != 0x8000000000000000) { e.writeSigned(4, i64min); }
-    if (f32 != 3.14) { e.writeFp32(5, f32); }
+    if (f32 != 3.14) {
+      if (f32.isNaN && _f32Fp32Bits != null) { e.writeFp32Bits(5, _f32Fp32Bits!); } else { e.writeFp32(5, f32); }
+    }
     if (f64 != -2.5) { e.writeFp64(6, f64); }
     if (flag != true) { e.writeBool(7, flag); }
   }
@@ -95,6 +103,16 @@ class _ScalarsVisitor extends sofab.MessageVisitor {
     switch (id) {
       case 5:
         o.f32 = value;
+        o._f32Fp32Bits = null;
+        return;
+    }
+  }
+  @override
+  void onFp32Bits(int id, int bits) {
+    switch (id) {
+      case 5:
+        o._f32Fp32Bits = bits;
+        o.f32 = _f32FromBits(bits);
         return;
     }
   }

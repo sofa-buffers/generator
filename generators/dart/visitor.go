@@ -18,7 +18,7 @@ import (
 // an unarmed switch (no-op) and a sequence id returns null (skip), which is what
 // makes a contradictory wire type evaporate structurally (MESSAGE_SPEC §7.3).
 func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
-	var uns, sig, f32, f64, str, blob []string
+	var uns, sig, f32, f32bits, f64, str, blob []string
 	var uArr, sArr, f32Arr, f64Arr []string
 	var seq []string
 	// HeaderVisitor hooks (corelib-dart onArrayBegin/onFixlenHeader): schema-bound
@@ -48,7 +48,12 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 			sig = append(sig, arm(fld.ID, acc+" = value;"))
 		case ir.KindFP32:
-			f32 = append(f32, arm(fld.ID, acc+" = value;"))
+			// onFp32 fires for a non-NaN value: bind it and drop any bits a prior
+			// (re-opened, §7.4) NaN occurrence captured. onFp32Bits fires for a NaN:
+			// capture the exact wire bits and widen a display double for element access.
+			bitsAcc := "o." + fp32BitsField(fld.Name)
+			f32 = append(f32, arm(fld.ID, acc+" = value;\n        "+bitsAcc+" = null;"))
+			f32bits = append(f32bits, arm(fld.ID, bitsAcc+" = bits;\n        "+acc+" = _f32FromBits(bits);"))
 		case ir.KindFP64:
 			f64 = append(f64, arm(fld.ID, acc+" = value;"))
 		case ir.KindString:
@@ -82,6 +87,9 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	emitSwitch(f, "void onUnsigned(int id, int value)", uns)
 	emitSwitch(f, "void onSigned(int id, int value)", sig)
 	emitSwitch(f, "void onFp32(int id, double value)", f32)
+	// onFp32Bits is delivered (instead of onFp32) for an fp32 field whose payload
+	// is a NaN, carrying the raw 32 bits so a signaling/payload NaN survives §4.6.
+	emitSwitch(f, "void onFp32Bits(int id, int bits)", f32bits)
 	emitSwitch(f, "void onFp64(int id, double value)", f64)
 	emitSwitch(f, "void onString(int id, String value)", str)
 	emitSwitch(f, "void onBlob(int id, Uint8List value)", blob)
@@ -145,9 +153,10 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 		}
 	}
 	pad := ""
-	if fld.HasCount {
+	if fld.HasCount && fld.Elem != ir.KindFP32 {
 		// A `count: N` array is fixed-length: positions [M, N) are the element
-		// default. A growable list must materialize them (MESSAGE_SPEC S3).
+		// default. A growable list must materialize them (MESSAGE_SPEC S3). fp32 is
+		// exempt: _f32copy allocates exactly N and leaves the tail at the +0.0 default.
 		pad = fmt.Sprintf("\n        _padTo(%s, %d, %s);", acc, fld.Count, elemZero(fld.Elem))
 	}
 	switch {
@@ -158,7 +167,14 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 	case signedArrayElem(fld.Elem):
 		*sArr = append(*sArr, arm(fld.ID, guard+acc+" = List<int>.from(values);"+pad))
 	case fld.Elem == ir.KindFP32:
-		*f32Arr = append(*f32Arr, arm(fld.ID, guard+acc+" = List<double>.from(values);"+pad))
+		// Bit-exact copy into a fresh Float32List (length N for a fixed-count array,
+		// else the wire count): a per-element widen through a double would quiet a
+		// signaling/payload NaN (MESSAGE_SPEC S4.6). writeFp32Array re-emits a Float32List raw.
+		n := "values.length"
+		if fld.HasCount {
+			n = fmt.Sprintf("%d", fld.Count)
+		}
+		*f32Arr = append(*f32Arr, arm(fld.ID, fmt.Sprintf("%s%s = _f32copy(values, %s);", guard, acc, n)))
 	case fld.Elem == ir.KindFP64:
 		*f64Arr = append(*f64Arr, arm(fld.ID, guard+acc+" = List<double>.from(values);"+pad))
 	default: // wrapper-sequence array (string/blob/struct/union/nested)
@@ -238,6 +254,7 @@ type needs struct {
 	dec                             bool
 	bytesEq, listEq, u8len          bool
 	trimInt, trimF32, trimF64, pad  bool
+	f32copy, f32bits                bool
 	strSeq, blobSeq, objSeq         bool
 	intMat, dblMat, boolMat, seqSeq bool
 }
@@ -263,11 +280,18 @@ func (g *gen) computeNeeds(s *ir.Schema) needs {
 	if n.strSeq {
 		n.u8len = true
 	}
+	// _DblMat's onFp32Array branch calls _f32copy even for an fp64-only matrix (the
+	// call must resolve), so a native-array matrix always needs it emitted.
+	if n.dblMat {
+		n.f32copy = true
+	}
 	return n
 }
 
 func (g *gen) scanField(fld *ir.Field, n *needs) {
 	switch fld.Kind {
+	case ir.KindFP32:
+		n.f32bits = true
 	case ir.KindBlob:
 		if _, ok := g.blobDefaultLit(fld); ok {
 			n.bytesEq = true
@@ -281,14 +305,22 @@ func (g *gen) scanField(fld *ir.Field, n *needs) {
 			if _, ok := fld.Default.([]any); ok {
 				n.listEq = true
 			}
-			if fld.HasCount {
-				n.pad = true
-				switch fld.Elem {
-				case ir.KindFP32:
+			switch fld.Elem {
+			case ir.KindFP32:
+				// fp32 arrays bind through _f32copy (bit-exact), which also allocates
+				// the fixed-count length — so no _padTo.
+				n.f32copy = true
+				if fld.HasCount {
 					n.trimF32 = true
-				case ir.KindFP64:
+				}
+			case ir.KindFP64:
+				if fld.HasCount {
+					n.pad = true
 					n.trimF64 = true
-				default:
+				}
+			default:
+				if fld.HasCount {
+					n.pad = true
 					n.trimInt = true
 				}
 			}
@@ -424,6 +456,26 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		f.line("}")
 		f.blank()
 	}
+	if n.f32bits {
+		f.line("// Widen the 32 raw wire bits of an fp32 NaN to a display double for element")
+		f.line("// access; the exact bits are kept alongside for a bit-for-bit re-encode (MESSAGE_SPEC S4.6).")
+		f.line("double _f32FromBits(int bits) =>")
+		f.line("    (ByteData(4)..setUint32(0, bits, Endian.little)).getFloat32(0, Endian.little);")
+		f.blank()
+	}
+	if n.f32copy {
+		f.line("// Bit-exact fp32 array copy into a fresh Float32List of length [n] (>= the")
+		f.line("// source length; a fixed-count array passes its schema N, leaving the tail at")
+		f.line("// the +0.0 default). A raw byte copy preserves a signaling/payload NaN that a")
+		f.line("// per-element widen through a Dart double would quiet (MESSAGE_SPEC S4.6); writeFp32Array")
+		f.line("// re-emits a Float32List's bytes verbatim.")
+		f.line("Float32List _f32copy(Float32List v, int n) {")
+		f.line("  final out = Float32List(n < v.length ? v.length : n);")
+		f.line("  Uint8List.sublistView(out).setRange(0, v.length * 4, Uint8List.sublistView(v));")
+		f.line("  return out;")
+		f.line("}")
+		f.blank()
+	}
 	g.emitCollectors(f, n)
 }
 
@@ -507,14 +559,18 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("  final List<List<double>> out;")
 		f.line("  final bool f64;")
 		f.line("  final _Dec e;")
-		f.line("  void _row(int id, List<double> v) {")
+		f.line("  @override")
+		f.line("  void onFp32Array(int id, Float32List values) {")
+		f.line("    if (f64) return;")
 		f.line("    while (out.length <= id) { out.add(<double>[]); }")
-		f.line("    out[id] = List<double>.from(v);")
+		f.line("    out[id] = _f32copy(values, values.length); // bit-exact: keep an fp32 NaN's bits (MESSAGE_SPEC S4.6)")
 		f.line("  }")
 		f.line("  @override")
-		f.line("  void onFp32Array(int id, Float32List values) { if (!f64) _row(id, values); }")
-		f.line("  @override")
-		f.line("  void onFp64Array(int id, Float64List values) { if (f64) _row(id, values); }")
+		f.line("  void onFp64Array(int id, Float64List values) {")
+		f.line("    if (!f64) return;")
+		f.line("    while (out.length <= id) { out.add(<double>[]); }")
+		f.line("    out[id] = List<double>.from(values);")
+		f.line("  }")
 		f.line("}")
 		f.blank()
 	}

@@ -27,6 +27,7 @@ messages:
   vecu: { payload: { a: { id: 0, type: u64 } } }
   veci: { payload: { a: { id: 0, type: i64 } } }
   vecf32: { payload: { a: { id: 0, type: fp32 } } }
+  vecf32a: { payload: { a: { id: 0, type: array, items: { type: fp32, count: 3 } } } }
   vecf64: { payload: { a: { id: 0, type: fp64 } } }
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
@@ -289,6 +290,30 @@ echo "==> decode limits OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/dart/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/harness"
+
+# fp32 signaling-NaN bit-for-bit round-trip (issue #226): a Dart double quiets an
+# fp32 sNaN, so the generated code must route through corelib-dart's raw-bits API
+# (onFp32Bits / writeFp32Bits) and a bit-exact Float32List copy. `recode` is
+# wire -> object -> wire (no JSON), so an sNaN must survive decode+re-encode. Cover
+# a signaling (0x7F800001), a payload/quiet (0x7FC00001), and a negative NaN, both
+# as a scalar (vecf32, id 0) and as fp32 array elements (vecf32a, count 3).
+echo "==> fp32 signaling-NaN bit-exact round-trip (issue #226)"
+recode_exact() { # label message octal-wire
+    # shellcheck disable=SC2059  # $3 is a controlled octal escape sequence, not user data
+    printf "$3" > "$WORK/fp32in.bin"
+    "$WORK/conf/harness" recode "$2" < "$WORK/fp32in.bin" > "$WORK/fp32out.bin" \
+        || { echo "FAIL: $1 must decode"; exit 1; }
+    cmp -s "$WORK/fp32in.bin" "$WORK/fp32out.bin" \
+        || { echo "FAIL: $1 not bit-exact (an fp32 NaN was quieted)"; exit 1; }
+}
+# scalar: 02 (id0 fixlen) 20 (fp32 subtype) + 4 LE bytes
+recode_exact "scalar sNaN"    vecf32 '\002\040\001\000\200\177'
+recode_exact "scalar qNaN"    vecf32 '\002\040\001\000\300\177'
+recode_exact "scalar -NaN"    vecf32 '\002\040\001\000\300\377'
+# array: 05 (id0 arrayFixlen) 03 (count) 20 (fp32 subtype) + 3x4 LE bytes, all
+# non-zero so the canonical trailing-default trim keeps all three elements.
+recode_exact "array 3xNaN"    vecf32a '\005\003\040\001\000\200\177\001\000\300\177\001\000\300\377'
+echo "==> fp32 sNaN round-trip OK"
 
 echo "==> §7 decode status through the generated API"
 ST=$(printf '\200' | "$WORK/conf/harness" trydecode vecu | head -n1)   # lone 0x80: dangling varint

@@ -93,6 +93,32 @@ hex literal for `int64` min. On the wire this is identical to every other port.
 The `project` JSON harness carries u64 values as decimal **strings** for the same
 reason (`jsonDecode` reads a large number as a lossy `double`).
 
+### fp32 signaling NaN (issue #226)
+
+A Dart `double` is 64-bit, so widening an `fp32` value through it **quiets** a
+signaling NaN and drops a quiet NaN's payload bits (`0x7F800001` → `0x7FC00001`),
+violating the MESSAGE_SPEC §4.6 bit-for-bit float round-trip. `corelib-dart`
+delivers an fp32 **NaN** through the opt-in raw-bits callback `onFp32Bits(id,
+bits)` (not `onFp32`) and re-emits it with `Encoder.writeFp32Bits(id, bits)`, so
+the generated code uses that path:
+
+- **Scalar** — each `fp32` field gets a private companion `int? _<name>Fp32Bits`.
+  `onFp32Bits` captures the exact 32 wire bits there (and widens a display
+  `double` for element access); `onFp32` clears it (a later non-NaN occurrence,
+  §7.4, wins). `marshal` re-emits `writeFp32Bits` when the value is a NaN **and**
+  bits were captured, else `writeFp32` — the `!= default` omit test is unchanged
+  (a NaN never equals the default).
+- **Array** — elements bind through `_f32copy`, a **raw byte copy** into a fresh
+  `Float32List` (never `List<double>.from`, which widens each element). A
+  fixed-count array is allocated at its schema `N`, leaving the tail at the `+0.0`
+  default (so no separate `_padTo`); `writeFp32Array` re-emits a `Float32List`'s
+  bytes verbatim. Nested fp32 rows (`_DblMat`) copy the same way.
+
+The `recode` harness mode (wire → object → wire, no JSON) round-trips a signaling,
+a payload/quiet, and a negative NaN — scalar and array — byte-for-byte in
+`tests/conformance/dart/run.sh`. fp32 only: an fp64 NaN already survives a
+`double`. Verified cross-language by Crucible finding F-0031.
+
 ## Reserved-word and type-name field names
 
 A schema field whose name is a Dart reserved word (`class`, `for`, `return`, …)
