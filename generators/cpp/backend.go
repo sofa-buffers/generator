@@ -710,15 +710,10 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		}
 		if g.fixed && fld.HasMaxlen {
 			// FixedString: set_len fixes the logical length (and the trailing NUL);
-			// read binds data()/size() via the same read_string_noterm path.
-			if fld.HasMaxlen {
-				f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
-			}
+			// read binds data()/size() via the same read_string_noterm path. The
+			// capacity clamps, so this profile emits no maxlen reject (unchanged).
 			f.line("            %s.set_len(_size); if (_size) is.read(%s);", acc, acc)
 		} else if g.clib {
-			if fld.HasMaxlen {
-				f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
-			}
 			f.line("            %s.assign(_size, '\\0'); if (_size) is.read(%s);", acc, acc)
 		} else if fld.HasMaxlen {
 			// readString declares the fixlen SUBTYPE, so a contradicting one (a blob,
@@ -747,13 +742,10 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			// Pass the clamped size() (not the raw wire _size) so a _size wider
 			// than the inline capacity N cannot overflow the buffer — set_len
 			// already clamped len_ to min(_size, N), mirroring the FixedString
-			// path above. Feeding the unclamped _size overflows (issue #95).
-			f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
+			// path above. Feeding the unclamped _size overflows (issue #95). Like the
+			// FixedString path, the capacity clamps and no maxlen reject is emitted.
 			f.line("            %s.set_len(_size); is.read(%s.data(), %s.size());", acc, acc, acc)
 		} else if g.clib {
-			if fld.HasMaxlen {
-				f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
-			}
 			f.line("            %s.resize(_size); is.read(%s.data(), _size);", acc, acc)
 		} else if fld.HasMaxlen {
 			// readBlob declares Fix::Blob and reads straight into the byte container
