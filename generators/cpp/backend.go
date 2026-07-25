@@ -90,11 +90,13 @@ type gen struct {
 	// kind; the generated deserialize then guards those fields per-field
 	// (is.exceedLimit() -> Error::LimitExceeded) before any read. limBuffered
 	// additionally caps the corelib's streaming reassembly buffer
-	// (sofab::Limits{max_buffered_field}) — derived, not its own config key:
-	// max of the configured string/blob caps, raised to the schema's largest
-	// bounded string/blob maxlen and worst bounded array payload (count * 10,
-	// the widest varint element) so legitimate schema-bounded fields always
-	// still fit when fed in chunks.
+	// (sofab::Limits{max_buffered_field}) — derived, not its own config key: the
+	// largest BYTE span any single top-level field can legitimately reach, from
+	// the same worst-case cost walk that sizes _maxSize, with each configured
+	// max_dyn_* cap substituted for the missing schema bound (#228). A count is
+	// an element count, never a byte budget: the span of an array is its count
+	// times the worst-case element size, plus framing. 0 when the cap would be
+	// unsound (see resolveLimits).
 	limArr, limStr, limBlob          int64
 	limArrHas, limStrHas, limBlobHas bool
 	limBuffered                      int64
@@ -131,9 +133,43 @@ func (g *gen) resolveLimits(s *ir.Schema, cfg map[string]any) {
 	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
 		g.limBlob, g.limBlobHas = v, true
 	}
-	if g.limStrHas || g.limBlobHas {
-		g.limBuffered = max(g.limStr, g.limBlob, b.MaxStringLen, b.MaxBlobLen, b.MaxCount*10)
+	// The reassembly cap is the largest byte span a single top-level field can
+	// legitimately reach, so no message the per-field guards accept can trip it
+	// (#228). Derived from the same cost walk as _maxSize, with the configured
+	// caps standing in for the missing schema bounds. A field that is neither
+	// schema-bounded nor covered by a configured cap has no legitimate maximum,
+	// and the cap is one number for the whole stream — so rather than pick a
+	// value that would reject valid traffic, none is emitted and reassembly stays
+	// uncapped (as it is with no limits configured at all). Capping every dynamic
+	// field kind the schema uses is what buys the bound.
+	if g.anyLimit() {
+		if v, ok := g.maxFieldSpan(s); ok {
+			g.limBuffered = v
+		}
 	}
+}
+
+// maxFieldSpan returns the largest worst-case byte span of a single top-level
+// field across every message, with the configured max_dyn_* caps substituted for
+// missing schema bounds. ok is false when some field stays unbounded even with
+// the caps applied.
+func (g *gen) maxFieldSpan(s *ir.Schema) (int64, bool) {
+	caps := &costCaps{
+		arr: g.limArr, arrHas: g.limArrHas,
+		str: g.limStr, strHas: g.limStrHas,
+		blob: g.limBlob, blobHas: g.limBlobHas,
+	}
+	var worst int64
+	for _, m := range s.Messages {
+		for _, f := range m.Fields {
+			c, ok := g.fieldCost(f, map[string]bool{}, caps)
+			if !ok {
+				return 0, false
+			}
+			worst = max(worst, c)
+		}
+	}
+	return worst, worst > 0
 }
 
 type hfile struct{ b strings.Builder }

@@ -12,7 +12,22 @@ Options accepted under `targets.cpp`. For shared options (`emit`,
 | `allow_dynamic` | bool | `false` | `corelib: c-cpp` only. Keep a `std::vector`/`std::string` heap fallback for genuinely unbounded fields instead of failing generation. |
 | `namespace` | string | `message` | C++ namespace wrapping the generated types. Also settable in `generic`. |
 | `max_dyn_array_count` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only (`c-cpp` is statically schema-bounded). Emits a per-field `is.exceedLimit()` guard on unbounded count-prefixed arrays; `feed()`/`try_decode` then return `Error::LimitExceeded`. |
-| `max_dyn_string_len` / `max_dyn_blob_len` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only. Per-field `_size` guard on unbounded strings/blobs, plus a **derived** streaming reassembly cap passed as `sofab::Limits{max_buffered_field}` into the one-shot decode entry points — `max(string cap, blob cap, largest schema maxlen, largest schema count * 10)`, so legitimately schema-bounded fields always still fit when fed in chunks. |
+| `max_dyn_string_len` / `max_dyn_blob_len` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only. Per-field `_size` guard on unbounded strings/blobs. |
+
+Setting any of the three also derives a streaming reassembly cap, passed as
+`sofab::Limits{max_buffered_field}` into the one-shot decode entry points, that
+bounds how much the corelib buffers for a single incomplete field. It is a **byte**
+budget, so it is the largest byte *span* any one top-level field can legitimately
+reach — the same worst-case walk that sizes `_maxSize`, with each configured
+`max_dyn_*` cap standing in for the missing schema bound. An array charges its
+count times the worst-case element size plus framing; a count is never itself a
+byte budget (#228). No message the per-field guards accept can therefore trip the
+cap.
+
+A field that is neither schema-bounded nor covered by a configured cap has no
+legitimate maximum, and the cap is one number for the whole stream — so none is
+emitted and reassembly stays uncapped, exactly as with no limits configured. Cap
+every dynamic field kind your schema uses if you want the bound.
 
 ### `corelib`
 
