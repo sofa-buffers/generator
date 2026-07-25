@@ -366,6 +366,10 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// stay put and the vector is returned by move. Staging in an
 		// OStreamInline<_maxSize> first would put the worst case on the stack as
 		// well and then copy it across.
+		f.line("    /**")
+		f.line("     * @brief Encode this message into a new byte vector.")
+		f.line("     * @return The encoded bytes (empty if the message encodes to nothing).")
+		f.line("     */")
 		f.line("    std::vector<std::uint8_t> encode() const {")
 		f.line("        std::vector<std::uint8_t> out(_maxSize);")
 		f.line("        sofab::OStreamView os{out.data(), out.size()};")
@@ -376,6 +380,13 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// encodeTo(): the same, into storage the caller already has — no
 		// allocation at all. Returns 0 if the message does not fit in cap, in
 		// which case dst holds however much was written before that was found out.
+		f.line("    /**")
+		f.line("     * @brief Encode this message into caller-provided storage (no allocation).")
+		f.line("     * @param dst Destination buffer.")
+		f.line("     * @param cap Capacity of @p dst in bytes.")
+		f.line("     * @return Bytes written, or 0 if the message does not fit in @p cap —")
+		f.line("     *         in which case @p dst holds however much was written first.")
+		f.line("     */")
 		f.line("    std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {")
 		f.line("        sofab::OStreamView os{dst, cap};")
 		f.line("        serialize(os);")
@@ -385,6 +396,16 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// Infallible, best-effort decode: kept for back-compat. It discards feed's
 		// Result and always returns a value, so it can never reject malformed input
 		// — prefer try_decode when the accept/reject verdict matters.
+		f.line("    /**")
+		f.line("     * @brief Decode a message, best effort.")
+		f.line("     *")
+		f.line("     * Never reports failure: malformed input yields whatever was decoded")
+		f.line("     * before the error. Use @ref try_decode when the verdict matters.")
+		f.line("     *")
+		f.line("     * @param data Encoded bytes.")
+		f.line("     * @param len  Number of bytes at @p data.")
+		f.line("     * @return The decoded message.")
+		f.line("     */")
 		f.line("    static %s decode(const std::uint8_t *data, std::size_t len) {", name)
 		f.line("        sofab::IStreamObject<%s> in%s;", name, g.istreamLimits())
 		f.line("        in.feed(data, len);")
@@ -396,6 +417,13 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// infallible decode above drops it, so the public C++ API could otherwise
 		// never reject (generator#83). On success out holds the message; on error
 		// out is left unchanged and the returned Result carries the status.
+		f.line("    /**")
+		f.line("     * @brief Decode a message, reporting whether the input was acceptable.")
+		f.line("     * @param data Encoded bytes.")
+		f.line("     * @param len  Number of bytes at @p data.")
+		f.line("     * @param out  Receives the message on success; untouched otherwise.")
+		f.line("     * @return The decode result — check @c ok() before reading @p out.")
+		f.line("     */")
 		f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, %s &out) {", name)
 		f.line("        sofab::IStreamObject<%s> in%s;", name, g.istreamLimits())
 		f.line("        sofab::IStreamImpl::Result r = in.feed(data, len);")
@@ -407,6 +435,15 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 
 	// serialize: each write is a statement (Result is non-assignable, used only
 	// for chaining); return a no-op writeIf so the signature is satisfied.
+	f.line("    /**")
+	f.line("     * @brief Write this message's fields to an output stream.")
+	f.line("     *")
+	f.line("     * Called by @ref encode / @ref encodeTo, and directly when writing into a")
+	f.line("     * stream you own. Fields equal to their default are omitted.")
+	f.line("     *")
+	f.line("     * @param os Stream to write to.")
+	f.line("     * @return The result of the writes.")
+	f.line("     */")
 	f.line("    sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {")
 	for _, fld := range fields {
 		g.emitSerialize(f, fld)
@@ -457,6 +494,16 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 			break
 		}
 	}
+	f.line("    /**")
+	f.line("     * @brief Bind one decoded field to its member.")
+	f.line("     *")
+	f.line("     * Called once per field as the stream is fed. An id this message does")
+	f.line("     * not know, or one whose wire type contradicts the member's, binds")
+	f.line("     * nothing and is skipped.")
+	f.line("     *")
+	f.line("     * @param is Stream delivering the field.")
+	f.line("     * @param id Field identifier.")
+	f.line("     */")
 	f.line("    void deserialize(sofab::IStreamImpl &is, sofab::id id, %s, %s) noexcept override {", sizeParam, countParam)
 	f.line("        switch (id) {")
 	for _, fld := range fields {

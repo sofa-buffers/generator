@@ -17,11 +17,30 @@ namespace sofabuffers {
 struct ProbeInner : sofab::Message {
     std::int32_t x = 0;  ///< (unit: ms)
 
+    /**
+     * @brief Write this message's fields to an output stream.
+     *
+     * Called by @ref encode / @ref encodeTo, and directly when writing into a
+     * stream you own. Fields equal to their default are omitted.
+     *
+     * @param os Stream to write to.
+     * @return The result of the writes.
+     */
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
         if (x != 0) { (void)os.write(0, x); }
         return os.writeIf(0, false, false);
     }
 
+    /**
+     * @brief Bind one decoded field to its member.
+     *
+     * Called once per field as the stream is fed. An id this message does
+     * not know, or one whose wire type contradicts the member's, binds
+     * nothing and is skipped.
+     *
+     * @param is Stream delivering the field.
+     * @param id Field identifier.
+     */
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
         switch (id) {
         case 0:
@@ -49,6 +68,10 @@ struct Probe : sofab::Message {
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     Probe() = default;
 
+    /**
+     * @brief Encode this message into a new byte vector.
+     * @return The encoded bytes (empty if the message encodes to nothing).
+     */
     std::vector<std::uint8_t> encode() const {
         std::vector<std::uint8_t> out(_maxSize);
         sofab::OStreamView os{out.data(), out.size()};
@@ -56,18 +79,42 @@ struct Probe : sofab::Message {
         out.resize(os.bytesUsed());
         return out;
     }
+    /**
+     * @brief Encode this message into caller-provided storage (no allocation).
+     * @param dst Destination buffer.
+     * @param cap Capacity of @p dst in bytes.
+     * @return Bytes written, or 0 if the message does not fit in @p cap —
+     *         in which case @p dst holds however much was written first.
+     */
     std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {
         sofab::OStreamView os{dst, cap};
         serialize(os);
         if (!os.ok()) { return 0; }
         return os.bytesUsed();
     }
+    /**
+     * @brief Decode a message, best effort.
+     *
+     * Never reports failure: malformed input yields whatever was decoded
+     * before the error. Use @ref try_decode when the verdict matters.
+     *
+     * @param data Encoded bytes.
+     * @param len  Number of bytes at @p data.
+     * @return The decoded message.
+     */
     static Probe decode(const std::uint8_t *data, std::size_t len) {
         sofab::IStreamObject<Probe> in;
         in.feed(data, len);
         return *in;
     }
 
+    /**
+     * @brief Decode a message, reporting whether the input was acceptable.
+     * @param data Encoded bytes.
+     * @param len  Number of bytes at @p data.
+     * @param out  Receives the message on success; untouched otherwise.
+     * @return The decode result — check @c ok() before reading @p out.
+     */
     static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Probe &out) {
         sofab::IStreamObject<Probe> in;
         sofab::IStreamImpl::Result r = in.feed(data, len);
@@ -75,6 +122,15 @@ struct Probe : sofab::Message {
         return r;
     }
 
+    /**
+     * @brief Write this message's fields to an output stream.
+     *
+     * Called by @ref encode / @ref encodeTo, and directly when writing into a
+     * stream you own. Fields equal to their default are omitted.
+     *
+     * @param os Stream to write to.
+     * @return The result of the writes.
+     */
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
         if (count != 0) { (void)os.write(0, count); }
         if (delta != 0) { (void)os.write(1, delta); }
@@ -94,6 +150,16 @@ struct Probe : sofab::Message {
         return os.writeIf(0, false, false);
     }
 
+    /**
+     * @brief Bind one decoded field to its member.
+     *
+     * Called once per field as the stream is fed. An id this message does
+     * not know, or one whose wire type contradicts the member's, binds
+     * nothing and is skipped.
+     *
+     * @param is Stream delivering the field.
+     * @param id Field identifier.
+     */
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t _count) noexcept override {
         switch (id) {
         case 0:
