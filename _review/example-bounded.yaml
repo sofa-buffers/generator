@@ -3,18 +3,66 @@
 # The no-heap profile (corelib: c-cpp, allow_dynamic: false) has no fallback
 # storage, so it rejects an unbounded array or an unbounded string/blob at
 # generate time. Field `free` is therefore bounded here; everything else is
-# byte-for-byte the schema in example.yaml, so the two footprint outputs stay
-# directly comparable.
+# byte-for-byte the schema in example.yaml — including the metadata keys
+# (description / unit / decimals / deprecated / summary; see the header there)
+# — so the two footprint outputs stay directly comparable.
 version: 1
 messages:
   probe:
+    summary: >-
+      One field per decode shape that behaves differently under MESSAGE_SPEC
+      §7.3, carrying the full set of schema metadata.
     payload:
-      count:  { id: 0, type: u32 }                                        # unsigned scalar
-      delta:  { id: 1, type: i32 }                                        # signed scalar
-      ratio:  { id: 2, type: fp64 }                                       # fixlen, subtype fp64
-      name:   { id: 3, type: string, maxlen: 8 }                          # fixlen, subtype string + maxlen
-      data:   { id: 4, type: blob, maxlen: 8 }                            # fixlen, subtype blob + maxlen
-      fixed:  { id: 5, type: array, items: { type: u32, count: 3 } }      # native array + count
-      free:   { id: 6, type: array, items: { type: u32, count: 4 } }      # bounded (no-heap profile)
-      tags:   { id: 7, type: array, items: { type: string, count: 2, maxlen: 4 } }  # wrapper array
-      inner:  { id: 8, type: struct, fields: { x: { id: 0, type: i32 } } }          # nested sequence
+      count:                                        # unsigned scalar
+        id: 0
+        type: u32
+        description: Samples accumulated since the last report.
+        unit: samples
+      delta:                                        # signed scalar
+        id: 1
+        type: i32
+        description: Signed drift against the previous reading.
+        unit: ppm
+      ratio:                                        # fixlen, subtype fp64
+        id: 2
+        type: fp64
+        description: Share of delivered fields the reader accepted.
+        unit: "%"
+        decimals: 3
+      name:                                         # fixlen, subtype string + maxlen
+        id: 3
+        type: string
+        maxlen: 8
+        description: Short human-readable probe label.
+      data:                                         # fixlen, subtype blob + maxlen
+        id: 4
+        type: blob
+        maxlen: 8
+        description: Opaque vendor payload. Superseded by `tags`.
+        deprecated: true
+      fixed:                                        # native array + count
+        id: 5
+        type: array
+        items: { type: u32, count: 3 }
+        description: Calibration constants, in ascending channel order (counts).
+      free:                                         # bounded (no-heap profile)
+        id: 6
+        type: array
+        items: { type: u32, count: 4 }
+        description: Raw sample history, oldest first (counts).
+      tags:                                         # wrapper array
+        id: 7
+        type: array
+        items: { type: string, count: 2, maxlen: 4 }
+        description: Routing tags. Replaced by the header's route list.
+        deprecated: true
+      inner:                                        # nested sequence
+        id: 8
+        type: struct
+        description: Nested position record.
+        fields:
+          x:
+            id: 0
+            type: i32
+            description: Horizontal offset from the origin.
+            unit: mm

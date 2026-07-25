@@ -10,7 +10,14 @@ instead of the ~650 the repo's `examples/messages/example.yaml` produces.
 | path | config | §7.3 wire comparisons | lines |
 |---|---|---|---|
 | `generated/cpp/probe.hpp` | `targets.cpp: { namespace: sofabuffers }` | **0** | **118** (was 208) |
-| `generated/c-cpp/probe.hpp` | `+ corelib: c-cpp, allow_dynamic: true` | 17 | **137** (was 209) |
+| `generated/c-cpp-dynamic/probe.hpp` | `+ corelib: c-cpp, allow_dynamic: true` | 17 | **137** (was 209) |
+
+Both example schemas also carry the full set of field metadata (`description`,
+`unit`, `decimals`, `deprecated`, and the message `summary`) so the doc comments
+and deprecation attributes are reviewed too. That is additive and lands on both
+sides of the comparison equally — it adds 6 lines to each output (124 / 143) and
+leaves every `deserialize` arm byte-identical. The `lines` column above is the
+count without it, so the before/after delta stays comparable.
 
 The message header now contains the message and nothing else. Three things left
 it, in this order:

@@ -1,15 +1,79 @@
 # Minimal schema for reviewing the §7.3 seam: one field per decode shape that
 # behaves differently, and nothing else.
+#
+# Every field also carries the schema's metadata keys, so the generated doc
+# comments and deprecation attributes are part of the reviewed output:
+#
+#   description  any field       free text, emitted as the field's doc comment
+#   unit         numeric fields  appended to the doc comment as "(unit: x)"
+#   decimals     fp32/fp64 only  declared display precision — validated and
+#                                carried in the IR, but no backend emits it yet
+#   deprecated   any field       emits the target's deprecation attribute
+#   summary      the message     free text, emitted as the type's doc comment
+#
+# `default` is deliberately left out: it is a wire-visible knob (it drives the
+# !=default sparse-omission test on encode), not documentation, and setting it
+# would change the very encode path this review is about.
+#
+# Array *elements* carry no metadata at all — `items` accepts only type/count/
+# maxlen plus the nested type keys — so the metadata sits on the array field.
 version: 1
 messages:
   probe:
+    summary: >-
+      One field per decode shape that behaves differently under MESSAGE_SPEC
+      §7.3, carrying the full set of schema metadata.
     payload:
-      count:  { id: 0, type: u32 }                                        # unsigned scalar
-      delta:  { id: 1, type: i32 }                                        # signed scalar
-      ratio:  { id: 2, type: fp64 }                                       # fixlen, subtype fp64
-      name:   { id: 3, type: string, maxlen: 8 }                          # fixlen, subtype string + maxlen
-      data:   { id: 4, type: blob, maxlen: 8 }                            # fixlen, subtype blob + maxlen
-      fixed:  { id: 5, type: array, items: { type: u32, count: 3 } }      # native array + count
-      free:   { id: 6, type: array, items: { type: u32 } }                # native array, unbounded
-      tags:   { id: 7, type: array, items: { type: string, count: 2, maxlen: 4 } }  # wrapper array
-      inner:  { id: 8, type: struct, fields: { x: { id: 0, type: i32 } } }          # nested sequence
+      count:                                        # unsigned scalar
+        id: 0
+        type: u32
+        description: Samples accumulated since the last report.
+        unit: samples
+      delta:                                        # signed scalar
+        id: 1
+        type: i32
+        description: Signed drift against the previous reading.
+        unit: ppm
+      ratio:                                        # fixlen, subtype fp64
+        id: 2
+        type: fp64
+        description: Share of delivered fields the reader accepted.
+        unit: "%"
+        decimals: 3
+      name:                                         # fixlen, subtype string + maxlen
+        id: 3
+        type: string
+        maxlen: 8
+        description: Short human-readable probe label.
+      data:                                         # fixlen, subtype blob + maxlen
+        id: 4
+        type: blob
+        maxlen: 8
+        description: Opaque vendor payload. Superseded by `tags`.
+        deprecated: true
+      fixed:                                        # native array + count
+        id: 5
+        type: array
+        items: { type: u32, count: 3 }
+        description: Calibration constants, in ascending channel order (counts).
+      free:                                         # native array, unbounded
+        id: 6
+        type: array
+        items: { type: u32 }
+        description: Raw sample history, oldest first (counts).
+      tags:                                         # wrapper array
+        id: 7
+        type: array
+        items: { type: string, count: 2, maxlen: 4 }
+        description: Routing tags. Replaced by the header's route list.
+        deprecated: true
+      inner:                                        # nested sequence
+        id: 8
+        type: struct
+        description: Nested position record.
+        fields:
+          x:
+            id: 0
+            type: i32
+            description: Horizontal offset from the origin.
+            unit: mm

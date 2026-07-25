@@ -37,24 +37,25 @@
 # error "SofaBuffers: field ids in probe exceed the configured SOFAB_OBJECT_DESCR_PROFILE id width."
 #endif
 
+/*! One field per decode shape that behaves differently under MESSAGE_SPEC §7.3, carrying the full set of schema metadata. */
 typedef struct {
     char items[2][5];
 } sofabprobe_tags_elems_t;
 
 typedef struct {
-    int32_t x;
+    int32_t x;  /**< Horizontal offset from the origin. (unit: mm) */
 } sofabprobe_inner_t;
 
 typedef struct {
-    double ratio;
-    char name[9];
-    uint8_t data_len; uint8_t data[8];
-    uint32_t fixed[3];
-    uint32_t free[4];
-    sofabprobe_tags_elems_t tags;
-    sofabprobe_inner_t inner;
-    uint32_t count;
-    int32_t delta;
+    double ratio;  /**< Share of delivered fields the reader accepted. (unit: %) */
+    char name[9];  /**< Short human-readable probe label. */
+    uint8_t data_len; uint8_t data[8] __attribute__((deprecated));  /**< Opaque vendor payload. Superseded by `tags`. @deprecated */
+    uint32_t fixed[3];  /**< Calibration constants, in ascending channel order (counts). */
+    uint32_t free[4];  /**< Raw sample history, oldest first (counts). */
+    sofabprobe_tags_elems_t tags __attribute__((deprecated));  /**< Routing tags. Replaced by the header's route list. @deprecated */
+    sofabprobe_inner_t inner;  /**< Nested position record. */
+    uint32_t count;  /**< Samples accumulated since the last report. (unit: samples) */
+    int32_t delta;  /**< Signed drift against the previous reading. (unit: ppm) */
 } sofabprobe_t;
 
 /*! Worst-case serialized size of probe (every field present, all maxlen/count). */

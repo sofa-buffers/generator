@@ -15,7 +15,7 @@ static_assert(sofab::API_VERSION == 1,
 namespace sofabuffers {
 
 struct ProbeInner : sofab::OStreamMessage, sofab::IStreamMessage {
-    std::int32_t x = 0;
+    std::int32_t x = 0;  ///< Horizontal offset from the origin. (unit: mm)
 
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
         if (x != 0) { (void)os.write(0, x); }
@@ -33,17 +33,22 @@ struct ProbeInner : sofab::OStreamMessage, sofab::IStreamMessage {
     }
 };
 
+/** @brief One field per decode shape that behaves differently under MESSAGE_SPEC §7.3, carrying the full set of schema metadata. */
 struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
-    double ratio = 0.0;
-    sofab::FixedString<8> name = "";
-    sofab::FixedBytes<8> data = {};
-    std::array<std::uint32_t, 3> fixed = {};
-    std::array<std::uint32_t, 0> free = {};
-    sofab::InlineVector<sofab::FixedString<4>, 2> tags = {};
-    ProbeInner inner = {};
-    std::uint32_t count = 0;
-    std::int32_t delta = 0;
+    double ratio = 0.0;  ///< Share of delivered fields the reader accepted. (unit: %)
+    sofab::FixedString<8> name = "";  ///< Short human-readable probe label.
+    [[deprecated]] sofab::FixedBytes<8> data = {};  ///< Opaque vendor payload. Superseded by `tags`. @deprecated
+    std::array<std::uint32_t, 3> fixed = {};  ///< Calibration constants, in ascending channel order (counts).
+    std::array<std::uint32_t, 0> free = {};  ///< Raw sample history, oldest first (counts).
+    [[deprecated]] sofab::InlineVector<sofab::FixedString<4>, 2> tags = {};  ///< Routing tags. Replaced by the header's route list. @deprecated
+    ProbeInner inner = {};  ///< Nested position record.
+    std::uint32_t count = 0;  ///< Samples accumulated since the last report. (unit: samples)
+    std::int32_t delta = 0;  ///< Signed drift against the previous reading. (unit: ppm)
     static constexpr std::size_t _maxSize = 4096;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    Probe() = default;
 
     std::vector<std::uint8_t> encode() const {
         sofab::OStreamInline<_maxSize> os;
@@ -132,6 +137,7 @@ struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
         default: break;
         }
     }
+#pragma GCC diagnostic pop
 };
 
 } // namespace sofabuffers

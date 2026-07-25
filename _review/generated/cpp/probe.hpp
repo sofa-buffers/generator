@@ -15,7 +15,7 @@ static_assert(sofab::API_VERSION == 1,
 namespace sofabuffers {
 
 struct ProbeInner : sofab::Message {
-    std::int32_t x = 0;
+    std::int32_t x = 0;  ///< Horizontal offset from the origin. (unit: mm)
 
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
         if (x != 0) { (void)os.write(0, x); }
@@ -32,17 +32,22 @@ struct ProbeInner : sofab::Message {
     }
 };
 
+/** @brief One field per decode shape that behaves differently under MESSAGE_SPEC §7.3, carrying the full set of schema metadata. */
 struct Probe : sofab::Message {
-    double ratio = 0.0;
-    std::string name = "";
-    std::vector<std::uint8_t> data = {};
-    std::array<std::uint32_t, 3> fixed = {};
-    std::vector<std::uint32_t> free = {};
-    std::vector<std::string> tags = {};
-    ProbeInner inner = {};
-    std::uint32_t count = 0;
-    std::int32_t delta = 0;
+    double ratio = 0.0;  ///< Share of delivered fields the reader accepted. (unit: %)
+    std::string name = "";  ///< Short human-readable probe label.
+    [[deprecated]] std::vector<std::uint8_t> data = {};  ///< Opaque vendor payload. Superseded by `tags`. @deprecated
+    std::array<std::uint32_t, 3> fixed = {};  ///< Calibration constants, in ascending channel order (counts).
+    std::vector<std::uint32_t> free = {};  ///< Raw sample history, oldest first (counts).
+    [[deprecated]] std::vector<std::string> tags = {};  ///< Routing tags. Replaced by the header's route list. @deprecated
+    ProbeInner inner = {};  ///< Nested position record.
+    std::uint32_t count = 0;  ///< Samples accumulated since the last report. (unit: samples)
+    std::int32_t delta = 0;  ///< Signed drift against the previous reading. (unit: ppm)
     static constexpr std::size_t _maxSize = 4096;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    Probe() = default;
 
     std::vector<std::uint8_t> encode() const {
         sofab::OStreamInline<_maxSize> os;
@@ -113,6 +118,7 @@ struct Probe : sofab::Message {
         default: break;
         }
     }
+#pragma GCC diagnostic pop
 };
 
 } // namespace sofabuffers
