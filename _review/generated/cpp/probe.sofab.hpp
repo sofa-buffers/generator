@@ -3,9 +3,11 @@
 #include "sofab/sofab.hpp"
 
 // Field bounds consulted while a field is measured for completeness,
-// before its value is delivered. Installed by probe.hpp via setSchema().
+// before its value is delivered.
 
 namespace sofabuffers {
+
+struct Probe;
 
 static constexpr sofab::schema::FieldBound Probe_sbounds[] = {
     {.id = 3, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::String, .bound = 8, .child = nullptr, .wrapperArray = false},
@@ -16,3 +18,9 @@ static constexpr sofab::schema::FieldBound Probe_sbounds[] = {
 static constexpr sofab::schema::SeqNode Probe_schema{Probe_sbounds, 4};
 
 } // namespace sofabuffers
+
+// Bind each type to its descriptors: sofab::IStreamObject installs them,
+// so the message itself carries no decoder plumbing.
+template <> struct sofab::SchemaOf<sofabuffers::Probe> {
+    static constexpr const sofab::schema::SeqNode *node = &sofabuffers::Probe_schema;
+};

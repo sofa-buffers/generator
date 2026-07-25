@@ -245,8 +245,13 @@ func TestCppMeasureSchema(t *testing.T) {
 			t.Errorf("m.hpp missing measure-schema %q:\n%s", want, h)
 		}
 	}
-	if !strings.Contains(msg, "in.setSchema(&M_schema);") {
-		t.Errorf("decode()/try_decode() must install the descriptor:\n%s", msg)
+	// The message no longer installs anything: IStreamObject looks the descriptors
+	// up through sofab::SchemaOf, which the sibling specialises.
+	if strings.Contains(msg, "setSchema") {
+		t.Errorf("the message must not install its own schema:\n%s", msg)
+	}
+	if !strings.Contains(h, "template <> struct sofab::SchemaOf<message::M> {") {
+		t.Errorf("the sibling must bind the type to its descriptors:\n%s", h)
 	}
 	// A Fixlen bound must never be emitted without its subtype — an un-gated row
 	// is exactly the generator#229 defect (a contradicting fixlen value measured

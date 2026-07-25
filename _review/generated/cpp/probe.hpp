@@ -52,14 +52,12 @@ struct Probe : sofab::Message {
     }
     static Probe decode(const std::uint8_t *data, std::size_t len) {
         sofab::IStreamObject<Probe> in;
-        in.setSchema(&Probe_schema);
         in.feed(data, len);
         return *in;
     }
 
     static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Probe &out) {
         sofab::IStreamObject<Probe> in;
-        in.setSchema(&Probe_schema);
         sofab::IStreamImpl::Result r = in.feed(data, len);
         if (r.ok()) { out = *in; }
         return r;
