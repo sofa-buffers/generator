@@ -366,16 +366,16 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.line("        return std::vector<std::uint8_t>(os.data(), os.data() + os.bytesUsed());")
 		f.line("    }")
 		if g.fixed {
-			// Heap-free encode for the embedded profile: serialize into an inline
-			// buffer and copy into caller storage. Returns the byte count, or 0 if
-			// the output does not fit in cap (bytes are otherwise unchanged).
+			// Heap-free encode for the embedded profile: serialize straight into
+			// the caller's buffer — no staging copy, and no _maxSize-sized object
+			// on the stack, which for a large schema is the bigger of the two
+			// costs. Returns the byte count, or 0 if the output does not fit in
+			// cap; dst holds however much was written before that was discovered.
 			f.line("    std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {")
-			f.line("        sofab::OStreamInline<_maxSize> os;")
+			f.line("        sofab::OStreamView os{dst, cap};")
 			f.line("        serialize(os);")
-			f.line("        std::size_t n = os.bytesUsed();")
-			f.line("        if (n > cap) { return 0; }")
-			f.line("        for (std::size_t i = 0; i < n; ++i) { dst[i] = os.data()[i]; }")
-			f.line("        return n;")
+			f.line("        if (!os.ok()) { return 0; }")
+			f.line("        return os.bytesUsed();")
 			f.line("    }")
 		}
 		// Infallible, best-effort decode: kept for back-compat. It discards feed's

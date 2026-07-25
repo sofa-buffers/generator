@@ -1,20 +1,21 @@
 # The same schema as example.yaml, with a bound on every field.
 #
-# The no-heap profile (corelib: c-cpp, allow_dynamic: false) has no fallback
-# storage, so it rejects an unbounded array or an unbounded string/blob at
-# generate time. Field `free` is therefore bounded here; everything else is
-# byte-for-byte the schema in example.yaml, so the two footprint outputs stay
-# directly comparable.
+# The embedded profile (corelib: c-cpp) requires a maxlen on every string/blob
+# and a count on every array, in both storage modes — an unbounded field is a
+# generate-time error there. Field `free` is therefore bounded here; everything
+# else, metadata included, is the schema in example.yaml unchanged, so the two
+# footprint outputs stay directly comparable.
 version: 1
 messages:
   probe:
+    summary: One field per decode shape, for reviewing generated code.
     payload:
-      count:  { id: 0, type: u32 }                                        # unsigned scalar
-      delta:  { id: 1, type: i32 }                                        # signed scalar
-      ratio:  { id: 2, type: fp64 }                                       # fixlen, subtype fp64
-      name:   { id: 3, type: string, maxlen: 8 }                          # fixlen, subtype string + maxlen
-      data:   { id: 4, type: blob, maxlen: 8 }                            # fixlen, subtype blob + maxlen
+      count:  { id: 0, type: u32, description: "Samples taken since power-on." }              # unsigned scalar
+      delta:  { id: 1, type: i32, unit: mV, description: "Signed offset from the reference." } # signed scalar
+      ratio:  { id: 2, type: fp64, unit: "%", decimals: 3 }                # fixlen, subtype fp64
+      name:   { id: 3, type: string, maxlen: 8, description: "Human-readable device name." }  # fixlen, subtype string + maxlen
+      data:   { id: 4, type: blob, maxlen: 8, deprecated: true, description: "Raw payload, superseded by tags." }  # fixlen, subtype blob + maxlen
       fixed:  { id: 5, type: array, items: { type: u32, count: 3 } }      # native array + count
-      free:   { id: 6, type: array, items: { type: u32, count: 4 } }      # bounded (no-heap profile)
+      free:   { id: 6, type: array, items: { type: u32, count: 4 } }      # bounded (no unbounded field here)
       tags:   { id: 7, type: array, items: { type: string, count: 2, maxlen: 4 } }  # wrapper array
-      inner:  { id: 8, type: struct, fields: { x: { id: 0, type: i32 } } }          # nested sequence
+      inner:  { id: 8, type: struct, fields: { x: { id: 0, type: i32, unit: ms } } }  # nested sequence

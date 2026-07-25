@@ -37,24 +37,25 @@
 # error "SofaBuffers: field ids in probe exceed the configured SOFAB_OBJECT_DESCR_PROFILE id width."
 #endif
 
+/*! One field per decode shape, for reviewing generated code. */
 typedef struct {
     char items[2][5];
 } sofabprobe_tags_elems_t;
 
 typedef struct {
-    int32_t x;
+    int32_t x;  /**< (unit: ms) */
 } sofabprobe_inner_t;
 
 typedef struct {
-    double ratio;
-    char name[9];
-    uint8_t data_len; uint8_t data[8];
+    double ratio;  /**< (unit: %) */
+    char name[9];  /**< Human-readable device name. */
+    uint8_t data_len; uint8_t data[8] __attribute__((deprecated));  /**< Raw payload, superseded by tags. @deprecated */
     uint32_t fixed[3];
     uint32_t free[4];
     sofabprobe_tags_elems_t tags;
     sofabprobe_inner_t inner;
-    uint32_t count;
-    int32_t delta;
+    uint32_t count;  /**< Samples taken since power-on. */
+    int32_t delta;  /**< Signed offset from the reference. (unit: mV) */
 } sofabprobe_t;
 
 /*! Worst-case serialized size of probe (every field present, all maxlen/count). */

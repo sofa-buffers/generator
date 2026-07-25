@@ -15,7 +15,7 @@ static_assert(sofab::API_VERSION == 1,
 namespace sofabuffers {
 
 struct ProbeInner : sofab::Message {
-    std::int32_t x = 0;
+    std::int32_t x = 0;  ///< (unit: ms)
 
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
         if (x != 0) { (void)os.write(0, x); }
@@ -33,17 +33,22 @@ struct ProbeInner : sofab::Message {
     }
 };
 
+/** @brief One field per decode shape, for reviewing generated code. */
 struct Probe : sofab::Message {
-    double ratio = 0.0;
-    sofab::FixedString<8> name = "";
-    sofab::FixedBytes<8> data = {};
+    double ratio = 0.0;  ///< (unit: %)
+    sofab::FixedString<8> name = "";  ///< Human-readable device name.
+    [[deprecated]] sofab::FixedBytes<8> data = {};  ///< Raw payload, superseded by tags. @deprecated
     std::array<std::uint32_t, 3> fixed = {};
     std::array<std::uint32_t, 4> free = {};
     sofab::InlineVector<sofab::FixedString<4>, 2> tags = {};
     ProbeInner inner = {};
-    std::uint32_t count = 0;
-    std::int32_t delta = 0;
+    std::uint32_t count = 0;  ///< Samples taken since power-on.
+    std::int32_t delta = 0;  ///< Signed offset from the reference. (unit: mV)
     static constexpr std::size_t _maxSize = 154;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    Probe() = default;
 
     std::vector<std::uint8_t> encode() const {
         sofab::OStreamInline<_maxSize> os;
@@ -51,12 +56,10 @@ struct Probe : sofab::Message {
         return std::vector<std::uint8_t>(os.data(), os.data() + os.bytesUsed());
     }
     std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {
-        sofab::OStreamInline<_maxSize> os;
+        sofab::OStreamView os{dst, cap};
         serialize(os);
-        std::size_t n = os.bytesUsed();
-        if (n > cap) { return 0; }
-        for (std::size_t i = 0; i < n; ++i) { dst[i] = os.data()[i]; }
-        return n;
+        if (!os.ok()) { return 0; }
+        return os.bytesUsed();
     }
     static Probe decode(const std::uint8_t *data, std::size_t len) {
         sofab::IStreamObject<Probe> in;
@@ -132,6 +135,7 @@ struct Probe : sofab::Message {
         default: break;
         }
     }
+#pragma GCC diagnostic pop
 };
 
 } // namespace sofabuffers

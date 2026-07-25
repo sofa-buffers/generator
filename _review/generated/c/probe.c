@@ -20,6 +20,8 @@ static const sofab_object_descr_field_t _sofabfields_named_probe_inner[] = {
 };
 const sofab_object_descr_t _sofabdescr_named_probe_inner = SOFAB_OBJECT_DESCR(_sofabfields_named_probe_inner, 1, NULL, 0);
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 static const sofab_object_descr_field_t _sofabfields_message_probe[] = {
     SOFAB_OBJECT_FIELD(0, sofabprobe_t, count, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
     SOFAB_OBJECT_FIELD(1, sofabprobe_t, delta, SOFAB_OBJECT_FIELDTYPE_SIGNED),
@@ -36,6 +38,7 @@ static const sofab_object_descr_t *const _sofabnested_message_probe[] = {
     &_sofabdescr_named_probe_inner,
 };
 const sofab_object_descr_t _sofabdescr_message_probe = SOFAB_OBJECT_DESCR(_sofabfields_message_probe, 9, _sofabnested_message_probe, 2);
+#pragma GCC diagnostic pop
 
 void sofabprobe_init(sofabprobe_t *msg) {
     memset(msg, 0, sizeof(*msg));

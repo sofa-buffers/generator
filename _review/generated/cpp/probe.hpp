@@ -15,7 +15,7 @@ static_assert(sofab::API_VERSION == 1,
 namespace sofabuffers {
 
 struct ProbeInner : sofab::Message {
-    std::int32_t x = 0;
+    std::int32_t x = 0;  ///< (unit: ms)
 
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
         if (x != 0) { (void)os.write(0, x); }
@@ -32,17 +32,22 @@ struct ProbeInner : sofab::Message {
     }
 };
 
+/** @brief One field per decode shape, for reviewing generated code. */
 struct Probe : sofab::Message {
-    double ratio = 0.0;
-    std::string name = "";
-    std::vector<std::uint8_t> data = {};
+    double ratio = 0.0;  ///< (unit: %)
+    std::string name = "";  ///< Human-readable device name.
+    [[deprecated]] std::vector<std::uint8_t> data = {};  ///< Raw payload, superseded by tags. @deprecated
     std::array<std::uint32_t, 3> fixed = {};
     std::vector<std::uint32_t> free = {};
     std::vector<std::string> tags = {};
     ProbeInner inner = {};
-    std::uint32_t count = 0;
-    std::int32_t delta = 0;
+    std::uint32_t count = 0;  ///< Samples taken since power-on.
+    std::int32_t delta = 0;  ///< Signed offset from the reference. (unit: mV)
     static constexpr std::size_t _maxSize = 4096;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    Probe() = default;
 
     std::vector<std::uint8_t> encode() const {
         sofab::OStreamInline<_maxSize> os;
@@ -113,6 +118,7 @@ struct Probe : sofab::Message {
         default: break;
         }
     }
+#pragma GCC diagnostic pop
 };
 
 } // namespace sofabuffers

@@ -1,15 +1,19 @@
 # Minimal schema for reviewing the §7.3 seam: one field per decode shape that
-# behaves differently, and nothing else.
+# behaves differently, and nothing else — plus every metadata attribute schema v1
+# defines (`summary` on the message; `description`, `unit`, `decimals` and
+# `deprecated` on a field), so the review output also shows how each of those
+# reaches the generated code.
 version: 1
 messages:
   probe:
+    summary: One field per decode shape, for reviewing generated code.
     payload:
-      count:  { id: 0, type: u32 }                                        # unsigned scalar
-      delta:  { id: 1, type: i32 }                                        # signed scalar
-      ratio:  { id: 2, type: fp64 }                                       # fixlen, subtype fp64
-      name:   { id: 3, type: string, maxlen: 8 }                          # fixlen, subtype string + maxlen
-      data:   { id: 4, type: blob, maxlen: 8 }                            # fixlen, subtype blob + maxlen
+      count:  { id: 0, type: u32, description: "Samples taken since power-on." }              # unsigned scalar
+      delta:  { id: 1, type: i32, unit: mV, description: "Signed offset from the reference." } # signed scalar
+      ratio:  { id: 2, type: fp64, unit: "%", decimals: 3 }                # fixlen, subtype fp64
+      name:   { id: 3, type: string, maxlen: 8, description: "Human-readable device name." }  # fixlen, subtype string + maxlen
+      data:   { id: 4, type: blob, maxlen: 8, deprecated: true, description: "Raw payload, superseded by tags." }  # fixlen, subtype blob + maxlen
       fixed:  { id: 5, type: array, items: { type: u32, count: 3 } }      # native array + count
       free:   { id: 6, type: array, items: { type: u32 } }                # native array, unbounded
       tags:   { id: 7, type: array, items: { type: string, count: 2, maxlen: 4 } }  # wrapper array
-      inner:  { id: 8, type: struct, fields: { x: { id: 0, type: i32 } } }          # nested sequence
+      inner:  { id: 8, type: struct, fields: { x: { id: 0, type: i32, unit: ms } } }  # nested sequence
