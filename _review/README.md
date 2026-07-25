@@ -9,22 +9,18 @@ instead of the ~650 the repo's `examples/messages/example.yaml` produces.
 
 | path | config | §7.3 wire comparisons | lines |
 |---|---|---|---|
-| `generated/cpp/probe.hpp` | `targets.cpp: { namespace: sofabuffers }` | **0** | **121** (was 208) |
-| `generated/cpp/probe.sofab.hpp` | — | — | 18 |
+| `generated/cpp/probe.hpp` | `targets.cpp: { namespace: sofabuffers }` | **0** | **118** (was 208) |
 | `generated/c-cpp/probe.hpp` | `+ corelib: c-cpp, allow_dynamic: true` | 12 | 209 |
 
-The message header now contains the message and nothing else. Two things moved out
-of it:
+The message header now contains the message and nothing else. Three things left
+it, in this order:
 
-- the wrapper-sequence collectors and the encode trim, which are corelib
-  machinery — they live in `sofab::` (`StringSeq`, `BlobSeq`, `MessageSeq<T>`,
-  `trimTail`) and are referenced, not copied;
-- the measure-phase bound descriptors, into the sibling `probe.sofab.hpp`. They
-  are still required — the measure phase runs before any callback, so §5.2
-  ("INVALID dominates INCOMPLETE") has no other way to know a bound — but they
-  describe how the *corelib* checks the message, not the message itself. Removing
-  them for good needs header-first delivery; see
-  `docs/models/type-reconciliation.md` §11.
+- the §7.3 wire comparisons, into the corelib's typed reads;
+- the wrapper-sequence collectors and the encode trim, into `sofab::`
+  (`StringSeq`, `BlobSeq`, `MessageSeq<T>`, `trimTail`);
+- the measure-phase bound descriptors — **gone entirely**, not relocated. Header-
+  first delivery reaches every §5.2 verdict through the reads themselves, so
+  there is nothing left to deposit in advance.
 
 ## The point of the change, in one screenful
 

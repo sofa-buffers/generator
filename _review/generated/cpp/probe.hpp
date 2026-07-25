@@ -8,7 +8,6 @@
 #include <cstring>
 #include <cstddef>
 #include "sofab/sofab.hpp"
-#include "probe.sofab.hpp"
 
 static_assert(sofab::API_VERSION == 1,
     "SofaBuffers: generated against C++ API v1, but the linked corelib differs.");
@@ -94,10 +93,10 @@ struct Probe : sofab::Message {
             is.read(ratio);
             break;
         case 3:
-            if (is.readString(name) && _size > 8) { is.invalidate(); return; }
+            is.readString(name, 8);
             break;
         case 4:
-            if (is.readBlob(data) && _size > 8) { is.invalidate(); return; }
+            is.readBlob(data, 8);
             break;
         case 5:
             is.readArray(fixed, 3);
