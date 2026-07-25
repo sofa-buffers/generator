@@ -279,6 +279,11 @@ void MyMsg::deserialize(IStreamImpl& is, sofab::id id, size_t size, size_t count
 // generated static sofab::schema tree (installed by setSchema in decode/try_decode)
 // makes measureField reject count>4 at the count word, before truncation is seen.
 // feed() ordering then favors INVALID:  if (error_) return InvalidMessage;  (before Incomplete)
+//
+// A maxlen row names the declared fixlen SUBTYPE as well as the wire type —
+// {.wire = Wire::Fixlen, .subtype = Fix::Blob, .bound = 16, …} — because
+// fp32/fp64/string/blob share Wire::Fixlen and a contradicting subtype is skipped
+// (§7.3), so it must not be measured against this field's bound (generator#229).
 ```
 
 ---
