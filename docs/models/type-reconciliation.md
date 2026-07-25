@@ -1,6 +1,8 @@
 # Type reconciliation: moving §7.3 out of generated code
 
-> **Status: proposal.** Nothing here is implemented yet. Reader models are
+> **Status: proposal, partly built.** §13 steps 1–3 exist as draft PRs
+> (generator#237 + corelib-cpp#53) and are behaviour-neutral; §11 is the open
+> design question, with the numbers to decide it in §10. Reader models are
 > [`decode-reader-models.md`](decode-reader-models.md); the wire/corelib contract
 > is ARCHITECTURE §9, the §7.3 decode verdict is ARCHITECTURE §7.3.
 
@@ -30,7 +32,7 @@ subtype comparisons the *generator* emits:
 | zig | A1 | 16 | split |
 | java | A1 | 22 | split |
 | csharp | A1 | 16 | split |
-| **cpp** | D | **49** | generator |
+| **cpp** | D | **49** → **0** after §13 steps 1–3 | generator → corelib |
 | **cpp (`corelib: c-cpp`)** | E wrapper | **49** | generator |
 | **typescript** | B | **59** | generator |
 | **python** | A2 | **57** | generator |
@@ -365,7 +367,143 @@ limits, which report `LIMIT_EXCEEDED` rather than INVALID), and a tolerant defau
 
 ---
 
-## 10. What this resolves — and what it does not
+## 10. Measured: what the measure phase costs
+
+The cpp PoC (generator#237 + corelib-cpp#53) landed the seam and then folded the
+array reset behind it. Instructions per decode, `callgrind`, `-O2`, 5000
+iterations, measured against the shapes below:
+
+| step | Ir / decode | Δ |
+|---|---|---|
+| before the seam (guards in generated code) | 10 518 | — |
+| seam only | 10 640 | +1.16 % |
+| seam + `readArray`/`prepare` | 10 580 | **+0.59 %** |
+
+Moving the comparison did not make it cheaper — it made it *singular*. Folding
+the array reset halved the overhead by removing a double check (generated guard
+*and* corelib). Generated wire comparisons went 49 → 0, and the benchmark's
+`.text` fell **below** the pre-seam binary (62 722 → 62 306 B): the generated code
+shrank more than the corelib grew.
+
+### The descriptor is not just clutter — it is 10 % of decode
+
+Isolating the measure phase (a build that skips it entirely — valid only because
+the benchmark feeds one complete message per call, so it is an *upper bound* on
+what removing it could win) and the schema consultation inside it (a build whose
+`setSchema` is a no-op — not a conformant decoder, purely a cost probe):
+
+| message shape | current | no measure phase | measure share |
+|---|---|---|---|
+| **30 fields, 91 bytes** (`example.yaml`) | 10 580 | 7 404 | **3 176 → 30.0 %** |
+| 1 string, 4000 bytes | 5 824 | 5 683 | 141 → 2.4 % |
+
+For the field-dense shape, split further:
+
+| | Ir / decode | of total |
+|---|---|---|
+| measure phase, total | 3 176 | 30.0 % |
+| — of which the descriptor consultation | **1 078** | **10.2 %** |
+| — of which the bare completeness walk | 2 098 | 19.8 % |
+
+The spread is structural: the measure walk costs per **field**, not per byte — it
+skips a payload with `p += len`. Thirty small fields mean thirty header parses;
+one 4 KB string means one. SofaBuffers' target domain (telemetry, control
+messages) sits at the field-dense end, so 30 % is the number that matters.
+
+So the descriptor table is not only duplicated schema knowledge in the generated
+file — it is a tenth of the decode instructions.
+
+## 11. Header-first delivery: removing the descriptor entirely
+
+The descriptor exists for one reason: the measure phase must decide two things —
+*is the field complete?* (wire knowledge, the corelib has it) and *is it within
+the schema bound?* (schema knowledge, only generated code has it) — and it asks
+nobody. So the schema knowledge has to be deposited in advance.
+
+But **the typed read already carries all of it**. `readString(name, 8)` states the
+wire type, the fixlen subtype and the bound. The problem is not missing
+information, it is *ordering*: the call happens after the measure phase has
+already ruled the field complete or not. Move delivery from the end of the field
+to its **header**, and every column of the descriptor dissolves:
+
+| descriptor column | where it comes from instead |
+|---|---|
+| `id` | the callback fires for that id |
+| `wire` + `subtype` | *which* `read*` is called — `readString` means Fixlen+String |
+| `bound` | the argument — `readString(name, 8)` |
+| `child` | gone: delivery per level means the child type's own reads carry its bounds |
+| `wrapperArray` | gone: the collectors already check the element index themselves |
+
+§5.2 then holds structurally, with no rule written anywhere:
+
+```
+header read → callback → readString(name, 8)
+                          ├─ tag mismatch          → skip (§7.3)
+                          ├─ length > 8            → INVALID  ← decided before it is
+                          │                                     known whether the bytes arrived
+                          ├─ length ok, bytes there → assign
+                          └─ length ok, bytes short → INCOMPLETE, buffer, deliver again later
+```
+
+The one requirement is that a read be callable at the header and able to answer
+*"not enough bytes yet"*, so the decoder can buffer and re-deliver.
+
+### It holds for every wire kind
+
+| kind | known at the header | bound decidable? | length decidable? | retry idempotent? |
+|---|---|---|---|---|
+| Unsigned / Signed | id, wire | no bound exists | no (varint) | ✓ assignment follows a complete parse |
+| Fixlen (string, **blob**, fp32/64) | id, wire, subtype, **length** | ✓ `maxlen` | ✓ exactly | ✓ `assign` only when the payload is present |
+| ArrayUnsigned / ArraySigned | id, wire, **count** | ✓ `count` | **no** — elements are varints | ✓ `readArray` resets before filling |
+| ArrayFixlen (fp32/64) | id, wire, count, subtype, element size | ✓ `count` | ✓ exactly `n × esize` | ✓ as above |
+| SequenceStart (struct, union, wrapper array) | id, wire only | ✓ per element **index**, on arrival | **no** — only by scanning to SequenceEnd | ✓ `prepare()` clears, elements place by index |
+
+Completeness being undecidable at the header for varint arrays and sequences does
+not break the model: it is what the retry is for. A partial pass followed by a
+full one is idempotent because every destination is either reset wholesale
+(`readArray`, `prepare()`) or assigned by id. An `invalidate()` raised during a
+partial pass must **survive** the retry — which is also semantically right: an
+over-index element is INVALID whether or not the message was truncated.
+
+### Two consequences worth naming
+
+**#232 resolves itself.** For `ArrayFixlen` the element subtype is available at the
+header *if* the read fires after the element-size word rather than after the count
+word. The contradiction is then known before the count bound is applied, and
+today's inconsistency — skipped when in-count, INVALID when over-count —
+disappears without MESSAGE_SPEC having to rule on it. Varint arrays carry no
+subtype, so the question does not arise there.
+
+**Chunked input needs care.** The retry re-parses the field from its start and
+**re-runs generated code**, not just a scan. Today every `feed` also re-measures
+the buffered tail from `topPos_`, but callback-free. A 1000-element array fed byte
+by byte would repeat its element assignments 1000 times: O(n²) with a worse
+constant than today. The fix follows the measurements: **keep a measure phase only
+for the streaming path**. When the whole message arrives in one `feed` (`acc_`
+empty — what `try_decode` and every one-shot caller do), deliver header-first with
+no measure at all; when it arrives in chunks, buffer to field completeness first,
+then deliver.
+
+The descriptor disappears in **both** cases, because the bound decision lives in
+the read call, not in the measurement. What remains of the measure phase answers
+only *"are the bytes here?"* — pure wire knowledge, no schema.
+
+### Correction to §5 and to the reader-model reference
+
+An earlier justification for the measure phase — *"it is the price of zero-copy
+`std::string_view`"* — does not hold for **generated** code, which never asks for a
+view: members are `std::string` / `std::vector<uint8_t>`, so `read` copies
+(`value.assign(p_, fixLen_)`), exactly once for a one-shot feed and twice for a
+chunked one (buffer → `acc_` → member). `grep -c string_view` on generated output
+is 0. The zero-copy overload is a real corelib capability for hand-written
+callers; it is not what the generated path does, and it cannot be while the
+message type owns its storage. What the measure phase actually buys generated code
+is that the payload is contiguous and complete, so `assign` runs once instead of
+being assembled across chunks — convenience, not zero-copy.
+
+---
+
+## 12. What this resolves — and what it does not
 
 **Resolves**
 
@@ -380,30 +518,41 @@ limits, which report `LIMIT_EXCEEDED` rather than INVALID), and a tolerant defau
 **Does not resolve**
 
 - **#232** (a fixlen array whose element subtype contradicts is skipped when
-  in-count but INVALID when over-count). The count word precedes the element-size
-  word, so at the moment the bound is decided the subtype is still unknown. The
-  seam makes it *one* decision instead of five, but the ordering question is a
-  MESSAGE_SPEC question and stays open.
+  in-count but INVALID when over-count) — *not by the seam alone*. The count word
+  precedes the element-size word, so at the moment the bound is decided the subtype
+  is still unknown, and the seam only makes it one decision instead of five. §11's
+  header-first delivery **does** resolve it, by firing the read after the
+  element-size word; until then the MESSAGE_SPEC question stays open.
 - **Bounds** (`count` / `maxlen`). A separate axis, already reconciled family-wide
   by #216 / #222 / #223, and unaffected here.
 
 ---
 
-## 11. Sequencing
+## 13. Sequencing
 
-1. **cpp seam, behavior-neutral.** `read<T>()` checks the tag; the 49 generated
-   guards go. Conformance for both profiles must stay green unchanged, and
-   `tests/bench` shows what the comparison costs per read. No spec question is
-   touched.
-2. **Level 1 counter** in cpp, plus a §7.3 vector that asserts it.
-3. **c-cpp**: merge the two checks, `E_USAGE` → skip, counter. CHANGELOG + minor
+1. ~~**cpp seam, behavior-neutral.**~~ **Done** — generator#237 + corelib-cpp#53.
+   `read()` compares the tag; 49 generated guards → 15.
+2. ~~**Level 1 counter**~~ **Done** — on the stream and on `Result`, with the
+   counting scope pinned by test (unknown id 0, contradicting tag 1).
+3. ~~**`readArray` / `prepare`**~~ **Done** — the array reset folded behind the tag
+   match; 15 guards → 0, overhead +1.16 % → +0.59 %.
+4. **Header-first delivery in cpp (§11).** Removes the descriptor table *and* the
+   second pass. Measured upside: up to 30 % of decode instructions on a field-dense
+   message, 10 % of which is the table alone. Keep a measure phase for the chunked
+   path only. This step also resolves #232 for fixlen arrays.
+5. **c-cpp**: merge the two checks, `E_USAGE` → skip, counter. CHANGELOG + minor
    version.
-4. **go / dart** (`shouldRead` equivalent), then **ts / py**.
-5. **A1 (rust, zig, java, cs)** last — those need real corelib API changes in four
+6. **go / dart** (`shouldRead` equivalent), then **ts / py**.
+7. **A1 (rust, zig, java, cs)** last — those need real corelib API changes in four
    repos, and they are the ones that also retire `askip`.
-6. **Level 2 hook** wherever level 1 proves insufficient.
+8. **Level 2 hook** wherever level 1 proves insufficient.
 
-## 12. Open questions
+Steps 1–3 are behaviour-neutral and already verified against both C++ profiles.
+Step 4 is the first that changes the decoder's shape rather than where a
+comparison sits, so it wants its own measurement pass — the numbers in §10 are the
+baseline it has to beat.
+
+## 14. Open questions
 
 - Default report level per profile — level 1 for maxspeed, `0` or `1` for
   c / c-cpp / rs-no-std. To be **measured** with `tests/bench` (`.text` / `.bss`),
@@ -414,3 +563,11 @@ limits, which report `LIMIT_EXCEEDED` rather than INVALID), and a tolerant defau
   invariant applies.
 - Whether the type tag becomes a shared *named* concept in ARCHITECTURE §9 (the
   corelib API contract) or stays a per-corelib type with a documented rule.
+- Whether header-first delivery (§11) should also replace the measure phase in the
+  **chunked** path via resumable delivery (the corelib-c-cpp model: bind a
+  destination, fill it as bytes arrive) instead of buffering to completeness. That
+  removes the second pass everywhere, at the cost of a state machine per field.
+- Whether an opt-in **non-owning message profile** (`std::string_view` members) is
+  worth having, now that it is clear the generated path copies every
+  variable-length payload exactly once. That is an object-model question,
+  independent of the decoder shape.
