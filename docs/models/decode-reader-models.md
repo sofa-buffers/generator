@@ -341,6 +341,10 @@ void MyMsg::deserialize(IStreamImpl& is, sofab::id id, size_t size, size_t count
 | D measure-then-deliver | cpp | `deserialize` + zero-copy `read()` | measure-phase schema (`setSchema`) | ✅ |
 | E push into fixed buffer | c-cpp | header callback + `read_array(dst, cap)` | buffer capacity == bound | ✅ (reference) |
 
+> **See also:** [`type-reconciliation.md`](type-reconciliation.md) — a proposal to
+> move the §7.3 declared-type-vs-wire-type check out of generated code and into a
+> single seam per corelib, with a skip-reporting channel on top.
+
 **Takeaway.** The wire is uniform; the reader shape is intentionally not — it is
 each language's fastest idiom under its profile. A cross-cutting semantic like
 §5.2 must therefore be verified per model. The unifying *invariant* (not a single
