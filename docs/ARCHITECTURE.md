@@ -179,8 +179,10 @@ at the schema level, but the fixed-storage backends (C, the C++ `c-cpp`
 profile, `no_std` Rust) require every string/blob/array to be bounded so
 storage can be sized at compile time — an unbounded field there is a generation
 error (a `checkBounded` pass names the offending field before any code is
-emitted). The C++ `c-cpp` and `no_std` Rust profiles let `allow_dynamic` opt a
-field into a heap fallback (§9.3); the **C** target has no such escape — the C
+emitted). That holds in both C++ `c-cpp` storage modes: `allow_dynamic` chooses
+the container a *bounded* field lives in, never whether a bound is required
+(§9.3). The `no_std` Rust profile still uses `allow_dynamic` in its original
+sense — a heap fallback for unbounded fields; the **C** target has no such escape — the C
 object model has no dynamic containers — so for C every string/blob needs a
 `maxlen` and every array a `count`, unconditionally. Blob
 `default` base64 tolerates embedded whitespace; numeric value-range semantics
@@ -323,7 +325,8 @@ override.
 | `package` | go, java | Package name. |
 | `module_path`, `go_version` | go | `go.mod` fields. |
 | `symbol_prefix` | c | Prefix on generated C symbols. |
-| `allow_dynamic` | cpp (`c-cpp`), rust (`rs-no-std`) | Lets unbounded string/blob/array fields fall back to heap containers instead of failing generation (§9.3). |
+| `allow_dynamic` | cpp (`c-cpp`) | Stores bounded fields in `std::string`/`std::vector` instead of inline containers, for a target with a heap; bounds stay mandatory and become decode-path checks (§9.3). |
+| `allow_dynamic` | rust (`rs-no-std`) | Lets unbounded string/blob/array fields fall back to `alloc` containers instead of failing generation (§9.3). |
 | `format` | docs (`html`) | Documentation output format of the non-code `docs` target; `html` is currently the only one. |
 | `no_std` | rust | With `corelib: rs-no-std`, emit the `#![no_std]` crate profile (default `true`). |
 | `emit` | all | `sources` vs `project`. |
@@ -532,8 +535,12 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    fixed containers live in the corelib-c-cpp wrapper (`sofab.hpp`) — the generator
    references them rather than emitting them — and are filled via the same
    `read_*` paths as their dynamic counterparts; genuinely
-   unbounded fields (no `maxlen`/`count`) are rejected unless `allow_dynamic` opts
-   them into a `std::string`/`std::vector` fallback. **Rust `corelib: rs-no-std`
+   unbounded fields (no `maxlen`/`count`) are rejected outright — in both storage
+   modes, since one schema has to stay valid for every `c-cpp` target. What
+   `allow_dynamic` changes is where a *bounded* field lives: `std::string` /
+   `std::vector` sized to what the message carries, with the `maxlen`/`count`
+   enforced as an explicit reject instead of as the container's capacity. Encode
+   output is byte-identical between the two modes. **Rust `corelib: rs-no-std`
    (`no_std`, on by default) is the direct analog** (`docs/generator/rust.md`):
    bounded strings/blobs/sequence arrays lower to `heapless::String<N>` /
    `heapless::Vec<T,N>` (the `heapless` crate; the corelib stays storage-agnostic),
@@ -858,18 +865,27 @@ field's declared type. That reader assumes it is only invoked for its matching
 wire type, so the dispatch must check before reading. Who does the check differs
 by family (generator#174, Crucible F-0020):
 
-- **Python and C++ (`corelib-cpp`)** — the generated dispatch compares the
-  delivered header against the expected wire type **plus the fixlen subtype**
-  where the wire type alone is ambiguous (`fp32`/`fp64`/`string`/`blob` all share
-  `Fixlen`, and the fp arrays share `ArrayFixlen`), and skips on a mismatch.
-  Without the guard the failure mode is family-specific and *silent* in C++:
-  `read<T>` zig-zags on `T`'s signedness rather than the wire type, so a `Signed`
-  header on a `u8` field yielded the raw un-zig-zagged varint. Python instead
-  failed the *whole* decode, because corelib-py rightly raises `SofaStateError`
-  when a caller asks for a type the field does not carry — a caller error the
-  generated code should never provoke. The C++ guard needs the delivered field's
-  wire type, which `corelib-cpp` exposes as `IStreamImpl::wire()` /
-  `fixType()` (corelib-cpp#43).
+- **Python** — the generated dispatch compares the delivered header against the
+  expected wire type **plus the fixlen subtype** where the wire type alone is
+  ambiguous (`fp32`/`fp64`/`string`/`blob` all share `Fixlen`, and the fp arrays
+  share `ArrayFixlen`), and skips on a mismatch. Without it the *whole* decode
+  fails, because corelib-py rightly raises `SofaStateError` when a caller asks
+  for a type the field does not carry — a caller error the generated code should
+  never provoke.
+- **Both C++ paths** — the comparison lives in the **corelib**, inside the typed
+  read itself: `is.read(x)` knows both the tag it declares and the one that was
+  delivered, so a contradicting field is skipped there and the generated
+  `deserialize` carries no wire comparison at all. `corelib-cpp` decides inside
+  every read; the `c-cpp` wrapper's C decoder unbinds a contradicting read and
+  skips the field like an unknown id. Where an arm must touch its destination
+  *before* binding it — sizing a string or blob, resetting an array, emptying a
+  wrapper sequence — that preparation moved into the read too
+  (`readString`/`readBlob`/`readArray`/`readSequence`), because a check is only
+  a check if it precedes the side effect it protects. This is the "seam"
+  (`docs/models/type-reconciliation.md`); it replaced a generated guard per field
+  arm, whose earlier failure mode in C++ was *silent*: `read<T>` zig-zags on
+  `T`'s signedness rather than the wire type, so a `Signed` header on a `u8`
+  field yielded the raw un-zig-zagged varint.
 - **C** — the C object API is descriptor-driven, so the corelib makes the
   decision: `sofab_object_field_cb` compares the descriptor's expected wire opt
   against the delivered one and leaves `target_ptr` NULL on a mismatch, letting
@@ -936,7 +952,8 @@ that is a property of the corelib, not of the backend. Three models exist:
 |---|---|---|---|
 | **corelib dispatches by type** — the corelib resolves wire type *and* fixlen subtype, then calls a distinctly-typed callback | go, dart, rs, rs-no-std, cs, java, zig | nobody, *except* for an integer array at a scalar id: the five that stream array elements through the scalar callbacks need the generated `askip` guard (generator#183). `go` and `dart` are exempt even there — their corelibs deliver a native array *whole* through a distinct `on*Array` callback, so an array at a scalar id skips structurally too | structural ✅ (+ `askip` on rs/rs-no-std/cs/java/zig) |
 | **descriptor / object API** — the generator hands the schema to the corelib as a table | c (`c-cpp` object API) | corelib, against the descriptor (mask `0x3F` = wire type + subtype) | ✅ |
-| **generated code pulls by id** — the corelib delivers `(id, …)` and generated code chooses the reader | python, cpp, typescript, cpp-over-`c-cpp` | **generated code**, so the corelib must expose the delivered type at the decision point | ✅ all |
+| **generated code pulls by id** — the corelib delivers `(id, …)` and generated code chooses the reader | python, typescript | **generated code**, so the corelib must expose the delivered type at the decision point | ✅ all |
+| **corelib decides inside the typed read** (the seam) — generated code names the type it wants and the corelib compares before it acts | cpp, cpp-over-`c-cpp` | corelib, in `read`/`readString`/`readBlob`/`readArray`/`readSequence` | ✅ |
 
 Only the third model puts the burden on the generator, and it is the only one
 where a gap was possible — the corelib must surface enough type metadata for the
@@ -947,14 +964,18 @@ gaps that once existed here were shortfalls against that contract, not missing
 features. Both are now closed:
 
 - **python** — `Field.type` + `Field.subtype`. ✅
-- **cpp** (`corelib-cpp`) — `wire()` + `fixType()` (corelib-cpp#43). ✅
+- **cpp** (`corelib-cpp`) — was `wire()` + `fixType()` (corelib-cpp#43); the
+  decision has since moved inside the reads themselves, so generated code needs
+  neither. ✅
 - **typescript** — `Cursor.wire` plus **`Cursor.fixSub`**, the subtype companion
   recorded at `readHeader` via a non-consuming peek (corelib-ts#58). The guard
   emits `c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp64` for a
   fixlen field, and the same for the `ArrayFixlen` native fp arrays. ✅
-- **cpp over `c-cpp`** — `wire()` + `fixType()`, added with the same
-  `sofab::Wire`/`sofab::Fix` surface as `corelib-cpp` (corelib-c-cpp#104), so the
-  generator emits one guard shape for both C++ corelibs. ✅
+- **cpp over `c-cpp`** — likewise: `wire()` + `fixType()` were added with the
+  same `sofab::Wire`/`sofab::Fix` surface as `corelib-cpp` (corelib-c-cpp#104),
+  and are now used by the corelib's own reads rather than by generated guards.
+  The C decoder underneath skips a contradicting read instead of reporting a
+  usage error (corelib-c-cpp#111), which is what made that possible. ✅
 
 All twelve target/corelib combinations now pass the four §7.3/§7.4 vectors (a
 `fixlen`-subtype mismatch and its control, plus the two §7.4-interaction cases

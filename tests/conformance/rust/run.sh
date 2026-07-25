@@ -15,6 +15,9 @@
 # Requires: go, cargo, git, python3.
 set -eu
 
+# Corelib checkout + ref pinning (docs/CI.md).
+. "$(dirname "$0")/../lib/corelib.sh"
+
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 NOSTD="${1:-${SOFAB_RS_CORELIB:-}}"
 STD="${2:-${SOFAB_RS_STD_CORELIB:-}}"
@@ -22,11 +25,11 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 if [ -z "$NOSTD" ]; then
-    git clone --depth 1 https://github.com/sofa-buffers/corelib-rs-no-std.git "$WORK/nostd" >/dev/null 2>&1
+    clone_corelib corelib-rs-no-std "$WORK/nostd"
     NOSTD="$WORK/nostd"
 fi
 if [ -z "$STD" ]; then
-    git clone --depth 1 https://github.com/sofa-buffers/corelib-rs.git "$WORK/std" >/dev/null 2>&1
+    clone_corelib corelib-rs "$WORK/std"
     STD="$WORK/std"
 fi
 echo "==> corelib-rs-no-std: $NOSTD"

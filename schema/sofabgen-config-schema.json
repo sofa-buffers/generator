@@ -147,7 +147,7 @@
         "allow_dynamic": {
           "type": "boolean",
           "default": false,
-          "description": "corelib: c-cpp only. Keep a std::vector/std::string heap fallback for genuinely unbounded fields (string/blob without maxlen, array without count) instead of failing generation; bounded fields still use fixed-capacity inline storage."
+          "description": "corelib: c-cpp only. Store bounded fields in std::string/std::vector instead of fixed-capacity inline containers, for a target that has a heap and the C++ stdlib: a field then holds what a message actually carries rather than its declared worst case, and moves instead of copying. Bounds stay mandatory in both modes (an unbounded field is a generate-time error either way) and are enforced on the decode path, so the same schema and the same wire bytes serve both."
         },
         "max_dyn_array_count": {
           "$ref": "#/$defs/max_dyn_array_count"

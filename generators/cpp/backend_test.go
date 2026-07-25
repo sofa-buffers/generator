@@ -49,7 +49,7 @@ func TestCppStructural(t *testing.T) {
 	for _, want := range []string{
 		`#include "sofab/sofab.hpp"`,
 		"static_assert(sofab::API_VERSION == 1,",
-		"struct Myfirstmessage : sofab::OStreamMessage, sofab::IStreamMessage {",
+		"struct Myfirstmessage : sofab::Message {", // the pair, aliased in the corelib
 		"sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override",
 		"void deserialize(sofab::IStreamImpl &is, sofab::id id,",
 		"static constexpr std::size_t _maxSize =",
@@ -58,9 +58,9 @@ func TestCppStructural(t *testing.T) {
 		"static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Myfirstmessage &out)",
 		"enum class MyfirstmessageSomeenum : std::int8_t {", // smallest signed backing
 		"std::uint64_t someu64 = 18446744073709551615ULL;",
-		"is.read(",               // nested decode via is.read
-		"float somefp32 = 0.0f;", // valid float literal
-		"if (_count > 4) { is.invalidate(); return; }", // over-count scalar array rejected as INVALID (generator#100)
+		"is.read(",                        // nested decode via is.read
+		"float somefp32 = 0.0f;",          // valid float literal
+		"is.readArray(someuintarray, 4);", // the over-count reject (generator#100) rides into readArray
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q", want)
@@ -166,10 +166,10 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 		"std::vector<bool> bl = {};",                     // unbounded bool -> vector
 		"std::array<std::uint32_t, 4> fixed = {};",       // bounded native array unchanged
 		"std::vector<std::vector<std::uint32_t>> matrix", // matrix rows are dynamic vectors too
-		"arr.resize(_count); is.read(arr);",              // decode sizes the vector to the wire count
+		"is.readArray(arr);",                             // readArray sizes the vector to the wire count
 		"if (arr != std::vector<std::uint32_t>{}) {",     // whole-omit compares to an empty vector
 		"std::size_t _count) noexcept override",          // _count is named for the resize
-		"if constexpr (requires { row.resize(_count); }", // _MsgSeq sizes dynamic matrix rows
+		"sofab::MessageSeq<std::vector<std::uint32_t>>",  // matrix rows collected by the corelib helper
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap header missing %q:\n%s", want, h)
@@ -179,13 +179,13 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 	if strings.Contains(h, "std::array<std::uint32_t, 0>") {
 		t.Errorf("unbounded array must not lower to std::array<T, 0>:\n%s", h)
 	}
-	// enum vector: member is a vector of the scoped enum element type, and decode
-	// sizes it to _count before the value-narrowing read.
+	// enum vector: member is a vector of the scoped enum element type; readArray
+	// sizes the temp to the wire count and the member follows it.
 	if !strings.Contains(h, "std::vector<MEnElem> en = {};") {
 		t.Errorf("unbounded enum array should be a std::vector of the enum element:\n%s", h)
 	}
-	if !strings.Contains(h, "en.resize(_count);") {
-		t.Errorf("unbounded enum array decode should resize to _count:\n%s", h)
+	if !strings.Contains(h, "en.resize(_t0.size());") {
+		t.Errorf("unbounded enum array decode should follow the temp's size:\n%s", h)
 	}
 }
 
@@ -193,78 +193,9 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 // elements) rejects an element id >= N as INVALID before growing the heap
 // container (issue #142 / MESSAGE_SPEC §5.1/§7). A dynamic wrapper array (no
 // count) keeps every delivered index, so its collector cap is -1.
-// TestCppMeasureSchema verifies the generator#216 / F-0032 fix: the pure-cpp
-// backend emits a measure-phase sofab::schema descriptor (corelib-cpp#50) and
-// installs it via setSchema, so an over-count / over-maxlen / over-index field
-// that is ALSO truncated is rejected as INVALID at its deciding word — before the
-// measure-then-deliver corelib surfaces the truncation INCOMPLETE (MESSAGE_SPEC
-// §5.2 anti-folding). Native arrays map to the array wire type, string/blob to
-// Fixlen, wrapper arrays to a wrapperArray SequenceStart (over-index), and a
-// nested struct field to a SequenceStart carrying its child descriptor.
-func TestCppMeasureSchema(t *testing.T) {
-	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
-		"      ua: { id: 0, type: array, items: { type: u32,  count: 4 } }\n" +
-		"      fa: { id: 1, type: array, items: { type: fp32, count: 3 } }\n" +
-		"      s:  { id: 2, type: string, maxlen: 8 }\n" +
-		"      wa: { id: 3, type: array, items: { type: string, count: 5 } }\n" +
-		"      da: { id: 4, type: array, items: { type: u32 } }\n" + // dynamic native: no bound
-		"      ns: { id: 5, type: struct, fields: { inner: { id: 0, type: string, maxlen: 12 } } }\n" +
-		"      b:  { id: 6, type: blob, maxlen: 4 }\n"
-	h, err := genHeader(t, src, "m.hpp", map[string]any{})
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	for _, want := range []string{
-		"static constexpr sofab::schema::FieldBound M_sbounds[] = {",
-		"static constexpr sofab::schema::SeqNode M_schema{M_sbounds,",
-		"{.id = 0, .wire = sofab::Wire::ArrayUnsigned, .bound = 4, .child = nullptr, .wrapperArray = false},",
-		"{.id = 1, .wire = sofab::Wire::ArrayFixlen, .bound = 3, .child = nullptr, .wrapperArray = false},",
-		// Each maxlen row names the DECLARED fixlen subtype, so a contradicting one
-		// is skipped rather than measured against this field's bound (§7.3, #229).
-		"{.id = 2, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::String, .bound = 8, .child = nullptr, .wrapperArray = false},",
-		"{.id = 3, .wire = sofab::Wire::SequenceStart, .bound = 5, .child = nullptr, .wrapperArray = true},",
-		"{.id = 5, .wire = sofab::Wire::SequenceStart, .bound = 0, .child = &MNs_schema, .wrapperArray = false},",
-		"{.id = 6, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::Blob, .bound = 4, .child = nullptr, .wrapperArray = false},",
-		"in.setSchema(&M_schema);", // installed in decode()/try_decode()
-		// the nested struct's own descriptor (its bounded inner string):
-		"{.id = 0, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::String, .bound = 12, .child = nullptr, .wrapperArray = false},",
-	} {
-		if !strings.Contains(h, want) {
-			t.Errorf("m.hpp missing measure-schema %q:\n%s", want, h)
-		}
-	}
-	// A Fixlen bound must never be emitted without its subtype — an un-gated row
-	// is exactly the generator#229 defect (a contradicting fixlen value measured
-	// against a field's maxlen and rejected, where §7.3 requires it be skipped).
-	if strings.Contains(h, "sofab::Wire::Fixlen, .bound") {
-		t.Errorf("a maxlen row is not gated on the declared fixlen subtype (generator#229):\n%s", h)
-	}
-	// The dynamic native array (id 4) declares no count, so it carries no bound
-	// row — an unlisted id carries no bound.
-	if strings.Contains(h, ".id = 4,") {
-		t.Errorf("dynamic array (id 4) must not appear in the measure schema:\n%s", h)
-	}
-	// A bound-free message must not emit any descriptor or setSchema, keeping the
-	// corelib's schema-free max-speed measure walk.
-	plain, err := genHeader(t, "version: 1\nmessages:\n  P:\n    payload:\n      x: { id: 0, type: u32 }\n      da: { id: 1, type: array, items: { type: u32 } }\n", "p.hpp", map[string]any{})
-	if err != nil {
-		t.Fatalf("generate plain: %v", err)
-	}
-	for _, notWant := range []string{"sofab::schema::", "setSchema"} {
-		if strings.Contains(plain, notWant) {
-			t.Errorf("a bound-free message must not emit %q:\n%s", notWant, plain)
-		}
-	}
-	// The c-cpp wrapper has no measure phase, so the descriptor is never emitted
-	// there (its own IStream is statically schema-bounded).
-	clib, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp", "allow_dynamic": true})
-	if err != nil {
-		t.Fatalf("generate c-cpp: %v", err)
-	}
-	if strings.Contains(clib, "sofab::schema::") || strings.Contains(clib, "setSchema") {
-		t.Errorf("c-cpp profile must not emit a measure-phase schema:\n%s", clib)
-	}
-}
+// The measure-phase descriptors are gone: header-first delivery reaches every
+// §5.2 verdict through the reads themselves, so nothing is deposited in advance.
+// TestCppWireTypeGuard pins that no generated header mentions sofab::schema.
 
 func TestCppOverIndexWrapperArray(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
@@ -277,18 +208,25 @@ func TestCppOverIndexWrapperArray(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
+	// The bounds are handed to the corelib's collectors; the guards themselves live
+	// in corelib-cpp (sofab::StringSeq / BlobSeq / MessageSeq), not in generated
+	// code, so this asserts what the generator DECLARES rather than the check.
 	for _, want := range []string{
-		"{ _StrSeq _r0{bs, 4, 16}; is.read(_r0); }",  // bounded string -> cap 4, elem maxlen 16
-		"{ _BlobSeq _r0{bb, 3, 16}; is.read(_r0); }", // bounded blob -> cap 3, elem maxlen 16
-		"_r0.cap = 2;", // bounded struct -> _MsgSeq cap 2
-		"{ _StrSeq _r0{ds, -1, -1}; is.read(_r0); }", // dynamic string -> unbounded cap + maxlen
+		"{ sofab::StringSeq _r0{bs, 4, 16}; is.read(_r0); }", // bounded string -> cap 4, elem maxlen 16
+		"{ sofab::BlobSeq _r0{bb, 3, 16}; is.read(_r0); }",   // bounded blob -> cap 3, elem maxlen 16
+		"_r0.cap = 2;", // bounded struct -> MessageSeq cap 2
+		"{ sofab::StringSeq _r0{ds, -1, -1}; is.read(_r0); }", // dynamic string -> unbounded cap + maxlen
 		"_r0.cap = -1;", // dynamic struct -> unbounded
-		// the guards themselves, in the shared preludes:
-		"if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }",
-		"if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
 	} {
 		if !strings.Contains(h, want) {
-			t.Errorf("heap over-index guard missing %q:\n%s", want, h)
+			t.Errorf("heap over-index bound missing %q:\n%s", want, h)
+		}
+	}
+	// The collectors are corelib types now: a generated header must not define its
+	// own copies on the pure path.
+	for _, notWant := range []string{"struct _StrSeq", "struct _BlobSeq", "struct _MsgSeq"} {
+		if strings.Contains(h, notWant) {
+			t.Errorf("the pure path must use the corelib collector, not emit %q:\n%s", notWant, h)
 		}
 	}
 }
@@ -307,9 +245,14 @@ func TestCppMaxlenReject(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"if (_size > 8) { is.invalidate(); return; }",                                             // scalar string + blob both cap 8
-		"{ _StrSeq _r0{sa, 3, 5}; is.read(_r0); }",                                                // wrapper string: cap 3, elem maxlen 5
-		"if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }", // element guard
+		// The bound rides INTO the read. Header-first delivers a field before its
+		// payload is known to be present, so a bound checked after the read would
+		// fold an over-maxlen truncated field to INCOMPLETE (§5.2); inside the
+		// read it is applied after the tag and before the payload, which is the
+		// only order that satisfies both §7.3 and §5.2.
+		"is.readString(s, 8);",
+		"is.readBlob(b, 8);",
+		"{ sofab::StringSeq _r0{sa, 3, 5}; is.read(_r0); }", // wrapper string: cap 3, elem maxlen 5 handed to the corelib collector
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap maxlen guard missing %q:\n%s", want, h)
@@ -338,20 +281,20 @@ func TestCppFixedContainers(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"sofab::FixedBytes<16> bl = {};",                                                    // scalar blob -> fixed
-		"sofab::FixedString<8> s = \"\";",                                                   // bounded string -> FixedString
-		"std::array<std::uint32_t, 4> nums = {};",                                           // native array unchanged
-		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",                          // blob sequence -> inline
-		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",                         // string sequence -> inline
-		"sofab::InlineVector<MPtsElem",                                                      // struct sequence -> inline (prefix)
-		"if (bl != sofab::FixedBytes<16>{}) {",                                              // blob default-compare typed
-		"s.set_len(_size); if (_size) is.read(s);",                                          // FixedString decode
-		"bl.set_len(_size); is.read(bl.data(), bl.size());",                                 // FixedBytes decode: clamped size, not raw _size (issue #95)
-		"static _FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",                // blob-seq collector
-		"static _FixedStrSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>",               // string-seq collector
-		"static _MsgSeqFixed<sofab::InlineVector<",                                          // struct-seq collector
-		"if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }", // over-index element rejected INVALID (generator#149), no infinite loop (issue #126)
-		"std::size_t encodeTo(std::uint8_t *dst",                                            // heap-free encode
+		"sofab::FixedBytes<16> bl = {};",                                               // scalar blob -> fixed
+		"sofab::FixedString<8> s = \"\";",                                              // bounded string -> FixedString
+		"std::array<std::uint32_t, 4> nums = {};",                                      // native array unchanged
+		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",                     // blob sequence -> inline
+		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",                    // string sequence -> inline
+		"sofab::InlineVector<MPtsElem",                                                 // struct sequence -> inline (prefix)
+		"if (bl != sofab::FixedBytes<16>{}) {",                                         // blob default-compare typed
+		"is.readString(s, _size, 8);",                                                  // FixedString decode, bound carried into the corelib read
+		"is.readBlob(bl, _size, 16);",                                                  // FixedBytes decode, likewise (issue #95)
+		"static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",     // blob-seq collector
+		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
+		"static sofab::FixedMessageSeq<sofab::InlineVector<",                           // struct-seq collector
+		// over-index element rejected INVALID (generator#149), no infinite loop (issue #126)
+		"std::size_t encodeTo(std::uint8_t *dst", // heap-free encode
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("fixed header missing %q", want)
@@ -385,22 +328,37 @@ func TestCppFixedContainers(t *testing.T) {
 }
 
 // TestCppFixedUnbounded: an unbounded field (array without count) is a hard error
-// under the fixed profile, unless allow_dynamic keeps a std::vector fallback.
+// under the embedded profile in BOTH storage modes. allow_dynamic selects the
+// container a bounded field lives in; it never makes a bound optional, so one
+// schema stays valid for every c-cpp target.
 func TestCppFixedUnbounded(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      m: { id: 0, type: array, items: { type: struct, fields: { k: { id: 0, type: i32 } } } }\n"
-	if _, err := fixedHeader(t, src, "m.hpp", nil); err == nil {
-		t.Fatal("expected unbounded-field error under fixed profile")
-	} else if !strings.Contains(err.Error(), "has no count") {
-		t.Errorf("unexpected error: %v", err)
+	for _, dyn := range []bool{false, true} {
+		cfg := map[string]any{"allow_dynamic": dyn}
+		if _, err := fixedHeader(t, src, "m.hpp", cfg); err == nil {
+			t.Fatalf("allow_dynamic=%v: expected unbounded-field error", dyn)
+		} else if !strings.Contains(err.Error(), "has no count") {
+			t.Errorf("allow_dynamic=%v: unexpected error: %v", dyn, err)
+		}
 	}
-	// allow_dynamic keeps a std::vector fallback and generates cleanly.
-	h, err := fixedHeader(t, src, "m.hpp", map[string]any{"allow_dynamic": true})
+	// Bounded, it generates in both modes — inline by default, heap under
+	// allow_dynamic.
+	bounded := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      m: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: i32 } } } }\n"
+	h, err := fixedHeader(t, bounded, "m.hpp", nil)
 	if err != nil {
-		t.Fatalf("allow_dynamic should generate: %v", err)
+		t.Fatalf("bounded should generate: %v", err)
 	}
-	if !strings.Contains(h, "std::vector<MMElem") && !strings.Contains(h, "std::vector<") {
-		t.Error("allow_dynamic should keep a std::vector fallback for the unbounded field")
+	if !strings.Contains(h, "sofab::InlineVector<") {
+		t.Error("default storage should be inline")
+	}
+	h, err = fixedHeader(t, bounded, "m.hpp", map[string]any{"allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("bounded under allow_dynamic should generate: %v", err)
+	}
+	if !strings.Contains(h, "std::vector<") || strings.Contains(h, "sofab::InlineVector<") {
+		t.Error("allow_dynamic should put the bounded sequence in a std::vector")
 	}
 }
 
@@ -420,32 +378,72 @@ func TestCppFixedUnboundedNativeArray(t *testing.T) {
 	}
 }
 
-// TestCppFixedUnboundedString: a string without maxlen is now an unbounded field
-// (no more string exemption) — a hard error, unless allow_dynamic keeps a
-// std::string fallback. A bounded string still becomes FixedString even under
-// allow_dynamic.
+// TestCppFixedUnboundedString: a string without maxlen is an unbounded field (no
+// string exemption) and a hard error in both storage modes.
 func TestCppFixedUnboundedString(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s: { id: 0, type: string }\n"
-	if _, err := fixedHeader(t, src, "m.hpp", nil); err == nil {
-		t.Fatal("expected unbounded-string error under fixed profile")
-	} else if !strings.Contains(err.Error(), "has no maxlen") {
-		t.Errorf("unexpected error: %v", err)
+	for _, dyn := range []bool{false, true} {
+		cfg := map[string]any{"allow_dynamic": dyn}
+		if _, err := fixedHeader(t, src, "m.hpp", cfg); err == nil {
+			t.Fatalf("allow_dynamic=%v: expected unbounded-string error", dyn)
+		} else if !strings.Contains(err.Error(), "has no maxlen") {
+			t.Errorf("allow_dynamic=%v: unexpected error: %v", dyn, err)
+		}
 	}
-	// allow_dynamic keeps the unbounded string as std::string, but a bounded one
-	// still becomes FixedString.
-	src2 := "version: 1\nmessages:\n  M:\n    payload:\n" +
-		"      s: { id: 0, type: string }\n" +
-		"      t: { id: 1, type: string, maxlen: 12 }\n"
-	h, err := fixedHeader(t, src2, "m.hpp", map[string]any{"allow_dynamic": true})
+}
+
+// TestCppDynamicStorage: with every bound in place, allow_dynamic swaps the
+// storage and nothing else. The maxlen/count that were the inline container's
+// capacity become explicit rejects on the decode path, so the same schema keeps
+// the same wire contract on a target that has a heap.
+func TestCppDynamicStorage(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s: { id: 0, type: string, maxlen: 12 }\n" +
+		"      b: { id: 1, type: blob, maxlen: 8 }\n" +
+		"      a: { id: 2, type: array, items: { type: u32, count: 4 } }\n" +
+		"      t: { id: 3, type: array, items: { type: string, count: 2, maxlen: 5 } }\n"
+
+	fix, err := fixedHeader(t, src, "m.hpp", nil)
 	if err != nil {
-		t.Fatalf("allow_dynamic should generate: %v", err)
+		t.Fatalf("inline: %v", err)
 	}
-	if !strings.Contains(h, "std::string s = \"\";") {
-		t.Error("unbounded string under allow_dynamic should stay std::string")
+	for _, want := range []string{
+		"sofab::FixedString<12> s", "sofab::FixedBytes<8> b",
+		"std::array<std::uint32_t, 4> a", "sofab::InlineVector<sofab::FixedString<5>, 2> t",
+	} {
+		if !strings.Contains(fix, want) {
+			t.Errorf("inline storage: missing %q", want)
+		}
 	}
-	if !strings.Contains(h, "sofab::FixedString<12> t = \"\";") {
-		t.Error("bounded string should still be FixedString even under allow_dynamic")
+
+	dyn, err := fixedHeader(t, src, "m.hpp", map[string]any{"allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("dynamic: %v", err)
+	}
+	for _, want := range []string{
+		"std::string s", "std::vector<std::uint8_t> b",
+		"std::vector<std::uint32_t> a", "std::vector<std::string> t",
+	} {
+		if !strings.Contains(dyn, want) {
+			t.Errorf("dynamic storage: missing %q", want)
+		}
+	}
+	if strings.Contains(dyn, "sofab::Fixed") || strings.Contains(dyn, "sofab::InlineVector") {
+		t.Error("dynamic storage should use no inline container")
+	}
+	// Each bound survives as a check — it rides into the corelib read, which
+	// applies it after the §7.3 tag match and before it sizes the destination.
+	// The two storage modes emit the same calls; only the members differ.
+	for _, want := range []string{
+		"is.readString(s, _size, 12);",
+		"is.readBlob(b, _size, 8);",
+		"is.readArray(a, _count, 4);",
+		"_r0.cap = 2; _r0.elemMax = 5;",
+	} {
+		if !strings.Contains(dyn, want) {
+			t.Errorf("dynamic decode: missing bound check %q", want)
+		}
 	}
 }
 
@@ -575,7 +573,7 @@ messages:
 		// element count, never a byte budget.
 		"#define SOFAB_MAX_DYN_BUFFERED_FIELD 655364",
 		"if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }",
-		"if (_count > SOFAB_MAX_DYN_ARRAY_COUNT) { is.exceedLimit(); return; }",
+		"is.readArray(arr, -1, SOFAB_MAX_DYN_ARRAY_COUNT);", // the cap rides into readArray
 		"sofab::IStreamObject<Dyn> in{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}};",
 	} {
 		if !strings.Contains(h, want) {
@@ -736,20 +734,21 @@ func TestCppFixedCountTrimsTrailingDefaultRun(t *testing.T) {
 			if err != nil {
 				t.Fatalf("generate: %v", err)
 			}
-			for _, want := range []string{
-				// The helper is emitted for both corelibs, inside the shared prelude
-				// guard, and returns a non-owning span (heap-free).
-				"std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {",
-				// Bit-pattern compare, never ==: a trailing -0.0 (== 0.0) must survive.
-				"std::memcmp(&_a[_n - 1], &_z, sizeof(_T)) == 0",
+			// The trim helper lives in corelib-cpp on the pure path (sofab::trimTail)
+			// and is still emitted for the c-cpp wrapper, which links a different
+			// corelib. Both compare the element's BYTE IMAGE, never == -- a trailing
+			// -0.0 equals 0.0 but is not the default and must stay on the wire.
+			trim := "sofab::trimTail"
+			wants := []string{
 				// Numeric + float fields trim in place.
-				"(void)os.write(0, _trimTail(u32s));",
-				"(void)os.write(1, _trimTail(f32s));",
+				"(void)os.write(0, " + trim + "(u32s));",
+				"(void)os.write(1, " + trim + "(f32s));",
 				// Enum/bool value-convert through a native temp; the converted image is
 				// trimmed (enum default 0 -> backing 0, false -> 0).
-				"(void)os.write(2, _trimTail(_t0)); }",
-				"(void)os.write(3, _trimTail(_t0)); }",
-			} {
+				"(void)os.write(2, " + trim + "(_t0)); }",
+				"(void)os.write(3, " + trim + "(_t0)); }",
+			}
+			for _, want := range wants {
 				if !strings.Contains(h, want) {
 					t.Errorf("[%s] header missing %q:\n%s", corelib, want, h)
 				}
@@ -765,8 +764,15 @@ func TestCppFixedCountTrimsTrailingDefaultRun(t *testing.T) {
 			if !strings.Contains(h, "std::array<std::uint32_t, 5> u32s = {};") {
 				t.Errorf("[%s] fixed-count array must stay a zero-filled std::array:\n%s", corelib, h)
 			}
-			if !strings.Contains(h, "is.read(u32s);") {
-				t.Errorf("[%s] fixed-count decode must read the whole array:\n%s", corelib, h)
+			// Both corelibs read through readArray, which carries the bound and
+			// performs the reset behind the tag match; the c-cpp signature also
+			// takes the wire count, since it sizes a dynamic destination.
+			wantRead := "is.readArray(u32s, 5);"
+			if corelib == "c-cpp" {
+				wantRead = "is.readArray(u32s, _count, 5);"
+			}
+			if !strings.Contains(h, wantRead) {
+				t.Errorf("[%s] fixed-count decode must read the whole array (%s):\n%s", corelib, wantRead, h)
 			}
 		})
 	}
@@ -792,7 +798,7 @@ func TestCppDynamicArrayNotTrimmed(t *testing.T) {
 		"(void)os.write(1, dynf);",
 		"(void)os.write(2, _t0); }",
 		"(void)os.write(3, _t0); }",
-		"(void)os.write(4, _trimTail(fixed));", // the counted one still trims
+		"(void)os.write(4, sofab::trimTail(fixed));", // the counted one still trims
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q:\n%s", want, h)
@@ -833,15 +839,25 @@ func TestCppFixedCountResetsSchemaDefaultTail(t *testing.T) {
 			if !strings.Contains(h, "std::array<std::uint32_t, 5> c = {1, 2, 3};") {
 				t.Errorf("[%s] schema default must stay the member's declaration default:\n%s", corelib, h)
 			}
-			// A non-zero schema default resets on decode, after the over-count guard
-			// (a rejected message must not mutate the target) and before the read.
-			for _, want := range []string{"\n            c = {};", "\n            d = {};", "\n            e = {};"} {
-				if !strings.Contains(h, want) {
-					t.Errorf("[%s] missing fixed-array reset %q:\n%s", corelib, want, h)
+			// A non-zero schema default must be reset on decode so the elements the
+			// encoder trimmed off the tail come back as the ELEMENT default, not as
+			// that schema default (MESSAGE_SPEC S3). Both corelibs now do it inside
+			// readArray — behind the tag match and the bound, which is the order
+			// that makes a §7.3-skipped or rejected occurrence leave the target
+			// alone. Neither profile resets in the arm any more.
+			{
+				for _, bad := range []string{"\n            c = {};", "\n            d = {};", "\n            e = {};"} {
+					if strings.Contains(h, bad) {
+						t.Errorf("[%s] the arm must not reset %q — readArray does it behind the bound:\n%s", corelib, bad, h)
+					}
 				}
-			}
-			if !g_containsInOrder(h, "if (_count > 5) { is.invalidate(); return; }", "\n            c = {};", "is.read(c);") && corelib == "cpp" {
-				t.Errorf("[%s] reset must sit between the over-count guard and the read:\n%s", corelib, h)
+				wantRead := "is.readArray(c, 5);"
+				if corelib == "c-cpp" {
+					wantRead = "is.readArray(c, _count, 5);"
+				}
+				if !strings.Contains(h, wantRead) {
+					t.Errorf("[%s] the bound must ride into readArray (%s):\n%s", corelib, wantRead, h)
+				}
 			}
 			// A field with no schema default, or an all-zero one, already declares an
 			// all-zero array: no reset, generated code unchanged.
@@ -866,8 +882,8 @@ func TestCppDynamicArrayNoReset(t *testing.T) {
 	if strings.Contains(h, "\n            dyn = {};") {
 		t.Errorf("dynamic array must not emit a reset:\n%s", h)
 	}
-	if !strings.Contains(h, "dyn.resize(_count); is.read(dyn);") {
-		t.Errorf("dynamic array should resize to the wire count:\n%s", h)
+	if !strings.Contains(h, "is.readArray(dyn);") {
+		t.Errorf("dynamic array should read through readArray (which sizes it):\n%s", h)
 	}
 }
 
@@ -883,12 +899,18 @@ func g_containsInOrder(s string, needles ...string) bool {
 	return true
 }
 
-// TestCppWireTypeGuard pins the MESSAGE_SPEC §7.3 guard (generator#174): every
-// case arm compares the delivered field's wire type — plus the fixlen subtype
-// where the wire type alone is ambiguous — before calling read(), and returns
-// without reading on a mismatch so the driver skips the field. read<T>() does not
-// check this itself: for an integral T it zig-zags on T's signedness alone, so a
-// Signed header on a u8 field silently delivered the raw un-zig-zagged varint.
+// TestCppWireTypeGuard pins where the MESSAGE_SPEC §7.3 decision lives on the
+// pure-corelib-cpp path. It used to be a generated compare in every case arm
+// (generator#174); the corelib now makes it inside the typed read itself, which
+// compares the delivered field's whole wire tag against the one the read declares
+// and leaves a contradicting field unconsumed for the driver to skip (the seam,
+// docs/models/type-reconciliation.md).
+//
+// So a scalar, fixlen or struct/union arm carries NO guard, and the fixlen kinds
+// state their subtype by calling readString/readBlob rather than a bare read().
+// Array arms keep theirs: the arm resets its destination before the read, and that
+// reset must not run for a field §7.3 skips (§7.4 — a skipped occurrence is not an
+// occurrence).
 func TestCppWireTypeGuard(t *testing.T) {
 	h := headerFromYAML(t, `
 version: 1
@@ -908,25 +930,25 @@ messages:
       k: { id: 10, type: array, items: { type: fp64, count: 2 } }
       l: { id: 11, type: array, items: { type: string, count: 2, maxlen: 4 } }
 `, "m.hpp")
+	// Every kind states its expectation through the call it makes, and the corelib
+	// compares the tag: readString/readBlob name the fixlen subtype, readArray the
+	// array kind (and carries the bounds), read() the rest.
 	for _, want := range []string{
-		"if (is.wire() != sofab::Wire::Unsigned) break;",
-		"if (is.wire() != sofab::Wire::Signed) break;",
-		// fp32/fp64/string/blob share Wire::Fixlen, so the subtype decides.
-		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp32) break;",
-		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp64) break;",
-		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) break;",
-		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) break;",
-		// Nested messages and composite (wrapper) arrays open a sequence.
-		"if (is.wire() != sofab::Wire::SequenceStart) break;",
-		// Native scalar arrays carry the matching Array* wire type; the fp array
-		// shares Wire::ArrayFixlen, so it too needs the subtype.
-		"if (is.wire() != sofab::Wire::ArrayUnsigned) break;",
-		"if (is.wire() != sofab::Wire::ArraySigned) break;",
-		"if (is.wire() != sofab::Wire::ArrayFixlen || is.fixType() != sofab::Fix::Fp64) break;",
+		"is.readString(f, 8);",
+		"is.readBlob(g, 8);",
+		"is.readArray(i, 2);",
+		"is.readArray(j, 2);",
+		"is.readArray(k, 2);",
+		"is.read(h);", // nested struct
 	} {
 		if !strings.Contains(h, want) {
-			t.Errorf("m.hpp missing wire-type guard %q\n%s", want, h)
+			t.Errorf("m.hpp missing %q\n%s", want, h)
 		}
+	}
+	// NOTHING in a pure-corelib-cpp deserialize compares a wire type any more —
+	// that is the point of the seam. A single leftover comparison is a regression.
+	if strings.Contains(h, "is.wire() !=") || strings.Contains(h, "is.fixType() !=") {
+		t.Errorf("the pure-cpp deserialize must carry no wire comparison at all\n%s", h)
 	}
 }
 
@@ -948,12 +970,18 @@ messages:
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"if (is.wire() != sofab::Wire::Unsigned) break;",
-		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) break;",
-	} {
+	// No profile emits a wire comparison any more. The c-cpp wrapper was the last
+	// one to: its C decoder now unbinds a contradicting read and skips the field,
+	// and the arms that must touch their destination before binding it go through
+	// readString/readBlob/readArray/readSequence, which settle the tag first.
+	for _, bad := range []string{"is.wire()", "is.fixType()"} {
+		if strings.Contains(h, bad) {
+			t.Errorf("c-cpp deserialize must carry no %q comparison:\n%s", bad, h)
+		}
+	}
+	for _, want := range []string{"is.read(a);", "is.readString(b, _size, 8);"} {
 		if !strings.Contains(h, want) {
-			t.Errorf("c-cpp profile must emit the §7.3 guard %q\n%s", want, h)
+			t.Errorf("c-cpp profile must emit %q\n%s", want, h)
 		}
 	}
 }
@@ -976,23 +1004,23 @@ messages:
       msgs:   { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u8 } } } }
       native: { id: 3, type: array, items: { type: u32, count: 3 } }
 `, "m.hpp")
+	// The replace-whole reset moved out of the case arm entirely: it is prepare()
+	// on the corelib's collectors (sofab::StringSeq / BlobSeq / MessageSeq), which
+	// IStreamImpl::read calls once the SequenceStart tag matched — so it can no
+	// longer wipe a valid earlier occurrence on a §7.3-skipped one. The arms must
+	// therefore carry no clear at all, and must name the corelib collectors.
 	for _, want := range []string{
-		"strs.clear();",
-		"blobs.clear();",
-		"msgs.clear();",
+		"sofab::StringSeq _r0{strs,",
+		"sofab::BlobSeq _r0{blobs,",
+		"sofab::MessageSeq<",
 	} {
 		if !strings.Contains(h, want) {
-			t.Errorf("m.hpp missing wrapper-array clear %q\n%s", want, h)
+			t.Errorf("m.hpp missing corelib collector %q\n%s", want, h)
 		}
 	}
-	if strings.Contains(h, "native.clear();") {
-		t.Errorf("native scalar array must not be cleared (its read already replaces):\n%s", h)
-	}
-	// The clear must precede the collector read, not follow it. Anchor on the
-	// read call site (_StrSeq _r0{strs...), not the bare type name — the _StrSeq
-	// struct itself is defined in the prelude far above every case arm.
-	ci, ri := strings.Index(h, "strs.clear();"), strings.Index(h, "_StrSeq _r0{strs")
-	if ci < 0 || ri < 0 || ci > ri {
-		t.Errorf("strs.clear() must be emitted before the _StrSeq read (clear=%d read=%d)\n%s", ci, ri, h)
+	for _, notWant := range []string{"strs.clear();", "blobs.clear();", "msgs.clear();", "native.clear();"} {
+		if strings.Contains(h, notWant) {
+			t.Errorf("the arm must not clear %q — prepare() does it behind the tag match:\n%s", notWant, h)
+		}
 	}
 }

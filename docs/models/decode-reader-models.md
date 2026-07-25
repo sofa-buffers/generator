@@ -249,9 +249,17 @@ void onUnsignedArray(int id, Int64List values) {
 
 The maxspeed C++ engine: `feed()` first *measures* the whole top-level field for
 completeness, then delivers it via `deserialize`, where the generated code pulls
-values — including a **zero-copy `std::string_view` straight into the buffer**
-(the fastest option, but it requires the field be fully present and contiguous,
-which the measure pass guarantees). The measure walk would otherwise be
+values. The corelib **offers** a zero-copy `std::string_view` straight into the
+buffer, which requires the field be fully present and contiguous — the measure
+pass guarantees that. Note that **generated code does not use it**: message
+members are `std::string` / `std::vector<uint8_t>`, so `read` copies
+(`value.assign(p_, fixLen_)`) — once for a one-shot feed, twice for a chunked one
+(buffer → `acc_` → member). The zero-copy overload is there for hand-written
+callers; making it the generated path would mean a non-owning message type, which
+is an object-model decision rather than a decoder one. What the measure pass buys
+*generated* code is a contiguous, complete payload, so the copy happens in one
+`assign` rather than being assembled across chunks. The measure walk would
+otherwise be
 schema-blind — a truncated over-bound field would fail measurement (→ INCOMPLETE)
 before the `deserialize` guard runs — so the generator now emits a static
 `sofab::schema` bound tree and installs it with `setSchema`; the measure walk
@@ -338,8 +346,15 @@ void MyMsg::deserialize(IStreamImpl& is, sofab::id id, size_t size, size_t count
 | A2 pull `Field` | python | `next()→Field.count` + batched read | compare on `fld.count` | ✅ |
 | B pull cursor | ts | `readUnsignedArray(bound)` | bound arg on the reader (corelib-ts#69) | ✅ |
 | C whole-unit push | go, dart | `UnsignedArray(id, []T)` + `ArrayBegin` | header callback `ArrayBegin`/`onArrayBegin` | ✅ |
-| D measure-then-deliver | cpp | `deserialize` + zero-copy `read()` | measure-phase schema (`setSchema`) | ✅ |
+| D measure-then-deliver | cpp | `deserialize` + pull `read()` (zero-copy available, unused by codegen) | measure-phase schema (`setSchema`) | ✅ |
 | E push into fixed buffer | c-cpp | header callback + `read_array(dst, cap)` | buffer capacity == bound | ✅ (reference) |
+
+> **See also:** [`type-reconciliation.md`](type-reconciliation.md) — moving the
+> §7.3 declared-type-vs-wire-type check out of generated code into a single seam
+> per corelib, with a skip-reporting channel on top. Its §10/§11 measure Model D's
+> measure phase (30 % of decode instructions on a field-dense message, a third of
+> that the schema descriptor alone) and propose header-first delivery to remove
+> both the descriptor and the second pass.
 
 **Takeaway.** The wire is uniform; the reader shape is intentionally not — it is
 each language's fastest idiom under its profile. A cross-cutting semantic like

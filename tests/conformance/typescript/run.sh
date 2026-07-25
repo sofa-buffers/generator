@@ -6,6 +6,9 @@
 # Requires: go, node, npm, git.
 set -eu
 
+# Corelib checkout + ref pinning (docs/CI.md).
+. "$(dirname "$0")/../lib/corelib.sh"
+
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_TS_CORELIB:-}}"
 WORK=$(mktemp -d)
@@ -13,7 +16,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 if [ -z "$CORELIB" ]; then
     echo "==> cloning + building corelib-ts"
-    git clone --depth 1 https://github.com/sofa-buffers/corelib-ts.git "$WORK/corelib" >/dev/null 2>&1
+    clone_corelib corelib-ts "$WORK/corelib"
     ( cd "$WORK/corelib" && npm install >/dev/null 2>&1 && npm run build >/dev/null 2>&1 )
     CORELIB="$WORK/corelib"
 fi

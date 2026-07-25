@@ -94,18 +94,20 @@ func (g *gen) cppType(f *ir.Field) string {
 	case ir.KindString:
 		// Fixed profile: a bounded string becomes sofab::FixedString<N> (heap-free
 		// inline storage; the corelib-c-cpp wrapper fills it via the same
-		// read_string_noterm path as std::string). An unbounded string has no
-		// maxlen, so it stays std::string — allowed only under allow_dynamic, else
-		// checkBounded rejects it.
-		if g.fixed && f.HasMaxlen {
+		// read_string_noterm path as std::string). Under allow_dynamic the same
+		// bounded field lives in a std::string instead, sized to what the message
+		// carries; the maxlen then rides into the decode path as an explicit
+		// reject rather than as the container's capacity.
+		if g.fixed && !g.allowDynamic && f.HasMaxlen {
 			return fmt.Sprintf("sofab::FixedString<%d>", f.Maxlen)
 		}
 		return "std::string"
 	case ir.KindBlob:
 		// Fixed profile: a bounded blob becomes fixed-capacity inline storage
 		// (no heap). The read(void*,size_t) blob overload already takes a raw
-		// pointer, so decode needs no corelib change.
-		if g.fixed && f.HasMaxlen {
+		// pointer, so decode needs no corelib change. allow_dynamic puts the same
+		// bounded blob in a std::vector, as for strings above.
+		if g.fixed && !g.allowDynamic && f.HasMaxlen {
 			return fmt.Sprintf("sofab::FixedBytes<%d>", f.Maxlen)
 		}
 		return "std::vector<std::uint8_t>"
@@ -171,6 +173,24 @@ func cppFixSubtype(k ir.Kind) string {
 	return ""
 }
 
+// cppNeedsWireGuard reports whether a field still needs a generated §7.3 guard.
+//
+// It never does any more. The comparison belongs in the corelib, where a typed
+// read knows both the tag it declares and the one that was delivered, and both
+// C++ corelibs now make it there: corelib-cpp inside every typed read (the seam,
+// docs/models/type-reconciliation.md), and the corelib-c-cpp wrapper either in
+// the C decoder — which unbinds a contradicting read and skips the field like an
+// unknown id — or, where the arm has to touch its destination before binding it,
+// in readString/readBlob/readArray/readSequence, which check the tag before that
+// first side effect.
+//
+// Kept as a function rather than deleted so the reasoning above stays attached to
+// the decision, and so a future shape that genuinely needs a generated guard has
+// somewhere to say so.
+func cppNeedsWireGuard(_ *ir.Field, _ bool) bool {
+	return false
+}
+
 // cppWireGuard renders the §7.3 condition guarding one case arm: the wire type
 // the declared type maps to, plus the fixlen subtype where the wire type alone
 // is ambiguous (fp32/fp64/string/blob and the fp32/fp64 native arrays, which
@@ -204,8 +224,19 @@ func isNativeArrayElem(k ir.Kind) bool {
 // read/write (#112). A bounded native array (count present) stays a fixed
 // std::array; the fixed profile keeps std::array and rejects the count-less case
 // in checkBounded.
+// dynNativeArray reports whether a native scalar array is stored in a
+// std::vector rather than a std::array. Two independent reasons: the pure
+// corelib-cpp profile has no count (its arrays are genuinely unbounded), or the
+// c-cpp profile was asked for heap storage — where the count still exists and
+// becomes a decode-time bound rather than the container's capacity.
 func (g *gen) dynNativeArray(elem ir.Kind, count int64) bool {
-	return !g.fixed && isNativeArrayElem(elem) && count <= 0
+	if !isNativeArrayElem(elem) {
+		return false
+	}
+	if g.fixed {
+		return g.allowDynamic
+	}
+	return count <= 0
 }
 
 // cppArrayContainer is the C++ member type for an array with the given element.
@@ -225,7 +256,7 @@ func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 		}
 		return fmt.Sprintf("std::array<%s, %d>", et, count)
 	}
-	if g.fixed && count > 0 {
+	if g.fixed && !g.allowDynamic && count > 0 {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
 			if elemMaxHas {
@@ -244,12 +275,15 @@ func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64) string {
 	switch elem {
 	case ir.KindString:
-		if g.fixed && elemMaxHas {
+		// Same rule as a scalar string field: inline storage by default, a
+		// std::string under allow_dynamic, with the element maxlen still declared
+		// and still enforced — on the decode path rather than as a capacity.
+		if g.fixed && !g.allowDynamic && elemMaxHas {
 			return fmt.Sprintf("sofab::FixedString<%d>", elemMax)
 		}
 		return "std::string"
 	case ir.KindBlob:
-		if g.fixed && elemMaxHas {
+		if g.fixed && !g.allowDynamic && elemMaxHas {
 			return fmt.Sprintf("sofab::FixedBytes<%d>", elemMax)
 		}
 		return "std::vector<std::uint8_t>"
@@ -555,140 +589,6 @@ func byteList(b []byte) string {
 	return strings.Join(parts, ", ")
 }
 
-// cppMsgSeqPrelude is emitted for BOTH corelibs (the _StrSeq/_BlobSeq prelude is
-// pure-corelib-cpp only). _MsgSeq decodes a wrapper sequence of struct/union
-// elements, or of nested (native) arrays, into a std::vector: one element is
-// emplaced and read per child. is.read descends into a struct/union element's
-// own sub-sequence, or reads a nested array element, exactly as a scalar field
-// would. The target is held by pointer (not a bound reference) so the same
-// instance can be reused: the corelib-c-cpp decoder is deferred and dereferences
-// the visitor after deserialize returns, so on that path the visitor is given
-// static storage (a bound stack local would be a use-after-return). Unused
-// template, so it costs nothing when a message has no such array.
-//
-// The over-index reject (cap guard) differs by corelib: pure corelib-cpp calls
-// IStreamImpl::invalidate() (INVALID, #142); the c-cpp wrapper's IStreamImpl has
-// no such hook and only ever instantiates _MsgSeq for an allow_dynamic (dynamic,
-// cap == -1) field, so its guard is an inert drop that must still compile — the
-// call would be diagnosed eagerly (gcc -Wtemplate-body) even though never taken.
-func cppMsgSeqPreludeSrc(clib bool) string {
-	reject := "is.invalidate(); return;"
-	if clib {
-		reject = "return;"
-	}
-	return `template <typename T>
-struct _MsgSeq : sofab::IStreamMessage {
-    std::vector<T> *out = nullptr;
-    // Schema fixed-count bound N (-1 == dynamic/unbounded). An element id >= N is
-    // a schema-bound violation (MESSAGE_SPEC S5.1/S7: an index at or past the
-    // fixed count is INVALID, never grown-into) - reject before emplacing, which
-    // also bounds the allocation against an over-index heap-amplification DoS.
-    long cap = -1;
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t _count) noexcept override {
-        if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { ` + reject + ` }
-        T &row = out->emplace_back();
-        // A count-less native-array row (matrix with dynamic rows) is a std::vector
-        // that the corelib's span read fills only up to its current size, so size it
-        // to the row's wire count first. Struct/union rows are IStreamMessage
-        // (no resize) and fixed std::array rows have no resize(), so both skip this.
-        if constexpr (requires { row.resize(_count); } && !std::is_base_of_v<sofab::IStreamMessage, T>) {
-            row.resize(_count);
-        }
-        is.read(row);
-    }
-};`
-}
-
-// cppFixedPrelude is emitted only for the fixed-capacity (embedded) path
-// (corelib: c-cpp). The heap-free containers it decodes into —
-// sofab::FixedBytes<N> (a blob) and sofab::InlineVector<T,N> (a sequence) —
-// live in the corelib alongside sofab::FixedString<N>, so the generator only
-// references them; this prelude supplies the element collectors that bridge the
-// corelib's sequence-decode callbacks into that inline storage:
-//
-//   - _MsgSeqFixed / _FixedBlobSeq / _FixedStrSeq: per-element visitors that
-//     emplace into the next inline slot instead of push_back/emplace_back onto
-//     the heap. Inline storage never reallocates, so a bound-then-filled element
-//     (the deferred corelib-c-cpp decoder) is address-stable.
-const cppFixedPrelude = `template <typename Container>
-struct _MsgSeqFixed : sofab::IStreamMessage {
-    Container *out = nullptr;
-    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
-        is.read(out->emplace_back());
-    }
-};
-// _FixedBlobSeq / _FixedStrSeq place a blob / string element at its index id:
-// a default (empty) element is omitted on the wire, so the
-// inline vector is grown with empty-default slots up to id and the value is
-// stored at that index rather than appended in arrival order. Inline storage
-// never reallocates, so an earlier bound-then-filled element stays address-stable
-// while later slots grow.
-// An element index at or beyond the fixed capacity N is a schema-bound violation
-// (MESSAGE_SPEC S5.1/S7: an index at or past the fixed count is INVALID, never
-// grown-into) — reject it via is.invalidate() so feed()/try_decode report
-// Error::InvalidMessage, converging with the heap profile and no_std Rust
-// (generator#149 / F-0013 / S7.1: a declared bound binds every target). The
-// reject returns before the fill loop, so it also bounds an over-index
-// amplification: InlineVector::emplace_back() is a no-op once full (N never
-// grows), so an unbounded fill loop would otherwise spin forever on such an index
-// (issue #126). invalidate() is the callback→decoder abort channel the c-cpp
-// IStreamImpl gained in corelib-c-cpp#92.
-template <typename Container>
-struct _FixedBlobSeq : sofab::IStreamMessage {
-    Container *out = nullptr;
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        // S7.3 (issue #189): skip a wrapper element whose wire type/subtype is not a
-        // blob, like an unknown id -- return without read() and the driver skips it.
-        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) { return; }
-        if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }
-        while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
-        auto &b = (*out)[id];
-        b.set_len(_size);
-        if (_size) is.read(b.data(), b.size());
-    }
-};
-template <typename Container>
-struct _FixedStrSeq : sofab::IStreamMessage {
-    Container *out = nullptr;
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        // S7.3 (issue #189): skip a wrapper element whose wire type/subtype is not a
-        // string, like an unknown id -- return without read() and the driver skips it.
-        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) { return; }
-        if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }
-        while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
-        auto &s = (*out)[id];
-        s.set_len(_size);
-        if (_size) is.read(s);
-    }
-};`
-
-// cppTrimPrelude is emitted for BOTH corelibs. _trimTail returns a view of a's
-// leading elements [0, M'), where M' is one past the last element that differs
-// from the element default (0 / 0.0 / false for every native kind; M' == 0 when
-// every element is the default). A `count: N` array is FIXED-LENGTH, so its
-// canonical wire carries exactly those M' elements and the decoder rebuilds the
-// trailing default run from the schema count (MESSAGE_SPEC §3) — handing the
-// whole std::array to the corelib would emit that run instead.
-//
-// Elements compare by BIT PATTERN (memcmp against a value-initialized element),
-// never by ==: -0.0 == 0.0 is true in C++, but -0.0 is a distinct value that
-// must survive the round-trip rather than be silently trimmed to +0.0; a NaN
-// likewise never matches the default. Every element type reaching this helper is
-// an integer / float / enum backing type, none of which have padding bits, so a
-// byte compare is exactly a value-with-sign compare.
-//
-// Non-owning and non-allocating (the span borrows the caller's storage), so the
-// heap-free (corelib: c-cpp) profile uses the same helper. Unused template, so
-// it costs nothing when a message has no fixed-count native array.
-const cppTrimPrelude = `template <typename C>
-std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {
-    using _T = typename C::value_type;
-    const _T _z{};
-    std::size_t _n = _a.size();
-    while (_n > 0 && std::memcmp(&_a[_n - 1], &_z, sizeof(_T)) == 0) --_n;
-    return std::span<const _T>(_a.data(), _n);
-}`
-
 // _StrSeq / _BlobSeq collect the elements of a string / blob wrapper-sequence
 // array. Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
 // element is omitted on the wire, so each value is placed at its id and any gap
@@ -704,41 +604,6 @@ std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {
 // byte length exceeds it is INVALID (MESSAGE_SPEC S7.1), rejected before the
 // read, never truncated -- the wrapper-element analogue of the scalar maxlen
 // reject.
-const cppPrelude = `struct _StrSeq : sofab::IStreamMessage {
-    std::vector<std::string> &out;
-    long _cap;
-    long _emax;
-    explicit _StrSeq(std::vector<std::string> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        // MESSAGE_SPEC S5.1 makes every element a normal field, so S7.3 applies: an
-        // element whose wire type/subtype is not a string is skipped like an unknown
-        // id -- returning without read() makes the driver skip it -- checked before
-        // the over-index/maxlen guards so a mis-typed element is skipped, not
-        // rejected for its id (issue #189).
-        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) { return; }
-        if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
-        if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }
-        std::string _s; is.read(_s);
-        while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
-        out[id] = std::move(_s);
-    }
-};
-struct _BlobSeq : sofab::IStreamMessage {
-    std::vector<std::vector<std::uint8_t>> &out;
-    long _cap;
-    long _emax;
-    explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        // S7.3 (issue #189): skip a wrapper element whose wire type/subtype is not a
-        // blob, like an unknown id (see _StrSeq), before the over-index/maxlen guards.
-        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) { return; }
-        if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
-        if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }
-        std::string _s; is.read(_s);
-        while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
-        out[id].assign(_s.begin(), _s.end());
-    }
-};`
 
 // cppKeywords are C++ reserved words (superset of C). No identifier escape, so a
 // field with such a name is mangled (trailing underscore); JSON keys (emitted as
@@ -772,4 +637,23 @@ func cppIdent(name string) string {
 		return name + "_"
 	}
 	return name
+}
+
+// cppArrayBounds renders the trailing readArray() arguments carrying the two
+// receiver-side bounds: the schema `count` (INVALID when exceeded) and the
+// configured max_dyn_array_count policy cap (LimitExceeded). Both are omitted
+// when absent, so a plain bounded array reads `is.readArray(x, 4)` and an
+// unbounded one with no cap configured reads `is.readArray(x)`.
+func (g *gen) cppArrayBounds(count int64, hasCount bool) string {
+	schema := int64(-1)
+	if hasCount {
+		schema = count
+	}
+	if !hasCount && g.limArrHas {
+		return fmt.Sprintf(", -1, SOFAB_MAX_DYN_ARRAY_COUNT")
+	}
+	if schema < 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d", schema)
 }

@@ -25,3 +25,9 @@ __pycache__/
 # Core dumps (never commit crash snapshots)
 core
 core.*
+
+# Local review scratch: generated output kept for eyeballing, not part of the repo.
+_review/
+
+# Perf-experiment notes, owned by a separate workstream; never part of a PR.
+TODO_OPT.md
