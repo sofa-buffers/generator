@@ -307,7 +307,12 @@ func TestCppMaxlenReject(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"if (_size > 8) { is.invalidate(); return; }",                                             // scalar string + blob both cap 8
+		// The maxlen reject hangs off a SUCCESSFUL subtype-declaring read: a
+		// contradicting fixlen value is skipped by the corelib and must never be
+		// measured against this field's bound (generator#224/#229 on the deliver
+		// path). Checking _size before the read would resurrect exactly that.
+		"if (is.readString(s) && _size > 8) { is.invalidate(); return; }",
+		"if (is.readBlob(b) && _size > 8) { is.invalidate(); return; }",
 		"{ _StrSeq _r0{sa, 3, 5}; is.read(_r0); }",                                                // wrapper string: cap 3, elem maxlen 5
 		"if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }", // element guard
 	} {
@@ -883,12 +888,18 @@ func g_containsInOrder(s string, needles ...string) bool {
 	return true
 }
 
-// TestCppWireTypeGuard pins the MESSAGE_SPEC §7.3 guard (generator#174): every
-// case arm compares the delivered field's wire type — plus the fixlen subtype
-// where the wire type alone is ambiguous — before calling read(), and returns
-// without reading on a mismatch so the driver skips the field. read<T>() does not
-// check this itself: for an integral T it zig-zags on T's signedness alone, so a
-// Signed header on a u8 field silently delivered the raw un-zig-zagged varint.
+// TestCppWireTypeGuard pins where the MESSAGE_SPEC §7.3 decision lives on the
+// pure-corelib-cpp path. It used to be a generated compare in every case arm
+// (generator#174); the corelib now makes it inside the typed read itself, which
+// compares the delivered field's whole wire tag against the one the read declares
+// and leaves a contradicting field unconsumed for the driver to skip (the seam,
+// docs/models/type-reconciliation.md).
+//
+// So a scalar, fixlen or struct/union arm carries NO guard, and the fixlen kinds
+// state their subtype by calling readString/readBlob rather than a bare read().
+// Array arms keep theirs: the arm resets its destination before the read, and that
+// reset must not run for a field §7.3 skips (§7.4 — a skipped occurrence is not an
+// occurrence).
 func TestCppWireTypeGuard(t *testing.T) {
 	h := headerFromYAML(t, `
 version: 1
@@ -909,23 +920,35 @@ messages:
       l: { id: 11, type: array, items: { type: string, count: 2, maxlen: 4 } }
 `, "m.hpp")
 	for _, want := range []string{
+		// Array arms keep the guard — the reset below it must not run for a
+		// §7.3-skipped occurrence. The fp array shares Wire::ArrayFixlen, so it
+		// needs the subtype too.
+		"if (is.wire() != sofab::Wire::ArrayUnsigned) break;",
+		"if (is.wire() != sofab::Wire::ArraySigned) break;",
+		"if (is.wire() != sofab::Wire::ArrayFixlen || is.fixType() != sofab::Fix::Fp64) break;",
+		// Wrapper arrays open a sequence and clear before reading — guard kept.
+		"if (is.wire() != sofab::Wire::SequenceStart) break;",
+		// The fixlen kinds declare their subtype through the read they call, so a
+		// contradicting fp64/blob/string is skipped by the corelib.
+		"is.readString(f)",
+		"is.readBlob(g)",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.hpp missing %q\n%s", want, h)
+		}
+	}
+	// Scalars, fixlen values and struct/union fields must carry NO generated
+	// guard: that decision moved into the corelib's typed read.
+	for _, notWant := range []string{
 		"if (is.wire() != sofab::Wire::Unsigned) break;",
 		"if (is.wire() != sofab::Wire::Signed) break;",
-		// fp32/fp64/string/blob share Wire::Fixlen, so the subtype decides.
 		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp32) break;",
 		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp64) break;",
 		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) break;",
 		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) break;",
-		// Nested messages and composite (wrapper) arrays open a sequence.
-		"if (is.wire() != sofab::Wire::SequenceStart) break;",
-		// Native scalar arrays carry the matching Array* wire type; the fp array
-		// shares Wire::ArrayFixlen, so it too needs the subtype.
-		"if (is.wire() != sofab::Wire::ArrayUnsigned) break;",
-		"if (is.wire() != sofab::Wire::ArraySigned) break;",
-		"if (is.wire() != sofab::Wire::ArrayFixlen || is.fixType() != sofab::Fix::Fp64) break;",
 	} {
-		if !strings.Contains(h, want) {
-			t.Errorf("m.hpp missing wire-type guard %q\n%s", want, h)
+		if strings.Contains(h, notWant) {
+			t.Errorf("guard %q should have moved into the corelib read seam\n%s", notWant, h)
 		}
 	}
 }

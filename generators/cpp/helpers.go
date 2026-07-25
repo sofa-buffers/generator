@@ -171,6 +171,24 @@ func cppFixSubtype(k ir.Kind) string {
 	return ""
 }
 
+// cppNeedsWireGuard reports whether a field still needs a generated §7.3 guard.
+//
+// On the pure-corelib-cpp path the guard has moved into the corelib: every typed
+// read compares the delivered field's wire tag against the one the read declares
+// and leaves a contradicting field unconsumed, so the driver skips it (the "seam",
+// docs/models/type-reconciliation.md). A guard is still emitted for:
+//
+//   - the c-cpp wrapper, whose C layer reports a bound-type mismatch as a usage
+//     error rather than skipping — its own step in the sequencing;
+//   - array fields on either path, because the generated arm RESETS the
+//     destination (`arr = {}` / `.clear()`) BEFORE the read. A skip decided inside
+//     the read would come too late: the reset would already have wiped a valid
+//     earlier occurrence, breaking §7.4's rule that a §7.3-skipped occurrence is
+//     not an occurrence. Moving the reset behind the type decision is a follow-up.
+func cppNeedsWireGuard(fld *ir.Field, clib bool) bool {
+	return clib || fld.Kind == ir.KindArray
+}
+
 // cppWireGuard renders the §7.3 condition guarding one case arm: the wire type
 // the declared type maps to, plus the fixlen subtype where the wire type alone
 // is ambiguous (fp32/fp64/string/blob and the fp32/fp64 native arrays, which

@@ -482,18 +482,16 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	for _, fld := range fields {
 		f.line("        case %d:", fld.ID)
 		// Frame each field by its header wire type before reading (MESSAGE_SPEC
-		// §7.3). read<T>() documents the precondition that the requested type match
-		// the delivered field's wire type, and does not check it: for an integral T
-		// it pulls a varint and zig-zags on T's signedness alone, so a Signed header
-		// on a u8 field silently yields the raw un-zig-zagged value. Returning
-		// without calling read() makes the driver skip the field, exactly as for an
-		// unknown id. Both corelibs expose wire()/fixType() with the same
-		// sofab::Wire/sofab::Fix surface (corelib-cpp#43, corelib-c-cpp#104), so the
-		// guard is emitted for both. Emitting it here — above the array-wrapper
-		// clear() below — is also what makes §7.4's interaction rule hold on the
-		// c-cpp path: a mis-typed later occurrence skips before it can wipe a valid
-		// earlier array (an occurrence skipped under §7.3 is not an occurrence).
-		f.line("            if (%s) break;", cppWireGuard(fld))
+		// §7.3): a contradicting field is skipped, exactly like an unknown id.
+		//
+		// On the pure-corelib-cpp path the corelib now decides this inside the typed
+		// read itself (the seam, docs/models/type-reconciliation.md), so no guard is
+		// emitted for a scalar, fixlen or struct/union field. It is still emitted
+		// where the decision has to precede a side effect the arm performs — see
+		// cppNeedsWireGuard.
+		if cppNeedsWireGuard(fld, g.clib) {
+			f.line("            if (%s) break;", cppWireGuard(fld))
+		}
 		g.emitDeserialize(f, fld)
 		f.line("            break;")
 	}
@@ -710,20 +708,27 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		if !g.clib && !fld.HasMaxlen && g.limStrHas {
 			f.line("            if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }")
 		}
-		// Bounded string on the heap profile: a wire byte length above the schema
-		// maxlen is malformed input, INVALID for every target (MESSAGE_SPEC S7.1),
-		// rejected before the read and never truncated to the bound.
-		if !g.clib && fld.HasMaxlen {
-			f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
-		}
 		if g.fixed && fld.HasMaxlen {
 			// FixedString: set_len fixes the logical length (and the trailing NUL);
 			// read binds data()/size() via the same read_string_noterm path.
+			if fld.HasMaxlen {
+				f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
+			}
 			f.line("            %s.set_len(_size); if (_size) is.read(%s);", acc, acc)
 		} else if g.clib {
+			if fld.HasMaxlen {
+				f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
+			}
 			f.line("            %s.assign(_size, '\\0'); if (_size) is.read(%s);", acc, acc)
+		} else if fld.HasMaxlen {
+			// readString declares the fixlen SUBTYPE, so a contradicting one (a blob,
+			// an fp64) is skipped by the corelib and never measured against this
+			// field's maxlen — the maxlen reject (MESSAGE_SPEC S7.1: INVALID, never a
+			// truncating read) therefore hangs off a successful read. Checking _size
+			// first would resurrect generator#224/#229 on the deliver path.
+			f.line("            if (is.readString(%s) && _size > %d) { is.invalidate(); return; }", acc, fld.Maxlen)
 		} else {
-			f.line("            is.read(%s);", acc)
+			f.line("            is.readString(%s);", acc)
 		}
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindBool, ir.KindFP32, ir.KindFP64, ir.KindStruct, ir.KindUnion:
@@ -736,11 +741,6 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		if !g.clib && !fld.HasMaxlen && g.limBlobHas {
 			f.line("            if (_size > SOFAB_MAX_DYN_BLOB_LEN) { is.exceedLimit(); return; }")
 		}
-		// Bounded blob on the heap profile: same schema-maxlen reject as the string
-		// case above (MESSAGE_SPEC S7.1) -- INVALID, before the read, never clamped.
-		if !g.clib && fld.HasMaxlen {
-			f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
-		}
 		if g.fixed && fld.HasMaxlen {
 			// FixedBytes: bound the inline buffer's logical length, then bind the
 			// stable buffer via the wrapper's read(void*,size_t) blob overload.
@@ -748,11 +748,20 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			// than the inline capacity N cannot overflow the buffer — set_len
 			// already clamped len_ to min(_size, N), mirroring the FixedString
 			// path above. Feeding the unclamped _size overflows (issue #95).
+			f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
 			f.line("            %s.set_len(_size); is.read(%s.data(), %s.size());", acc, acc, acc)
 		} else if g.clib {
+			if fld.HasMaxlen {
+				f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
+			}
 			f.line("            %s.resize(_size); is.read(%s.data(), _size);", acc, acc)
+		} else if fld.HasMaxlen {
+			// readBlob declares Fix::Blob and reads straight into the byte container
+			// (no std::string round-trip); the maxlen reject hangs off the successful
+			// read for the same S7.3 reason as the string case above.
+			f.line("            if (is.readBlob(%s) && _size > %d) { is.invalidate(); return; }", acc, fld.Maxlen)
 		} else {
-			f.line("            { std::string _t; is.read(_t); %s.assign(_t.begin(), _t.end()); }", acc)
+			f.line("            is.readBlob(%s);", acc)
 		}
 	case ir.KindEnum:
 		// corelib-c-cpp's read binds a target by address and fills it after the
