@@ -155,31 +155,29 @@ sibling exceptions, so the header-time raise wins over a later truncation.
 ## Model B — pull cursor readers · `corelib-ts`
 
 A pull `Cursor`: the generated code loops on `readHeader()` and calls a value
-reader. Today the readers take no bound and the guard runs *after* the whole read,
-so a truncated over-count array throws INCOMPLETE first (generator#216 fix: pass
-the schema bound into the reader so it rejects at the count word — the reader is
-the natural seam, corelib-ts#69).
+reader. The readers now take the schema bound and reject at the deciding word (the
+reader is the natural seam), so a truncated over-bound field is INVALID before the
+truncation is seen — §5.2 ordering holds (generator#222, corelib-ts#69).
 
 **Corelib API (TypeScript):**
 ```ts
 class Cursor {
   readHeader(): { id: number; type: WireType } | null;
-  readUnsignedArray(/* proposed: bound?: number */): bigint[];
-  readString(/* proposed: bound?: number */): string;
+  readUnsignedArray(bound?: number): bigint[];  // rejects wire count > bound at the count word
+  readString(bound?: number): string;           // rejects wire length > bound at the length word
 }
 ```
 
-**Generated decode (TypeScript):**
+**Generated decode (TypeScript) — the schema bound is passed into the reader:**
 ```ts
 for (;;) {
   const h = c.readHeader();
   if (h === null || h.type === WireType.SequenceEnd) break;
   if (h.id === 15) {
-    // today: guard after the whole read (misorders vs truncation)
-    const a = c.readUnsignedArray();
-    if (a.length > 4) throw new SofabError(SofabError.InvalidMsg, "over-count");
-    this.arr = a;
-    // generator#216 target: c.readUnsignedArray(4) — reject at the count word.
+    // the count>4 reject fires inside readUnsignedArray, at the count word,
+    // before any element is consumed — so it wins over a later truncation.
+    const a = c.readUnsignedArray(4);
+    this.arr = _padTo(a, 4, 0n);
   } else c.skip();
 }
 ```
@@ -190,62 +188,59 @@ for (;;) {
 
 The corelib reads the *entire* array/string and delivers it whole via one
 callback — idiomatic under a GC (allocate once, hand over a slice/list; no stable
-pointer into a reused buffer). Truncation is detected *inside* the read, before
-the callback, so the bound guard misorders (generator#216 fix: a new header
-callback fired before the read — corelib-go#53, corelib-dart#18).
+pointer into a reused buffer). The whole-value read would surface a truncation
+before its bound guard, so a header callback now fires *before* the read: it
+carries the count/length word and rejects an over-bound field there, before the
+payload — §5.2 ordering holds (generator#222; corelib-go#53, corelib-dart#18/#19).
 
-**Corelib API (Go) — `Visitor` interface, whole slice:**
+**Corelib API (Go) — `Visitor` interface, whole slice + header callbacks:**
 ```go
 type Visitor interface {
     UnsignedArray(id ID, v []uint64) error
     String(id ID, s string) error
-    // proposed generator#216 seam:
-    // ArrayBegin(id ID, count int) error
+    ArrayBegin(id ID, count int) error                 // at the count word (§5.2 seam)
+    FixlenHeader(id ID, subtype int, length int) error // at the fixlen length word
 }
 ```
 
-**Generated decode (Go) — method on the generated visitor:**
+**Generated decode (Go) — the bound is a compare in the header callback:**
 ```go
+func (m *MyMsg) ArrayBegin(id sofab.ID, count int) error {
+    if id == 15 && count > 4 { return sofab.ErrInvalidMsg }   // at the header, before elements
+    return nil
+}
 func (m *MyMsg) UnsignedArray(id sofab.ID, v []uint64) error {
     switch id {
     case 15:
-        if len(v) > 4 {           // today: after the whole read
-            return sofab.ErrInvalidMsg
-        }
-        // ... store v ...
+        // reached only if ArrayBegin accepted the count; just store.
+        m.arr = padTo(v, 4, 0)
     }
     return nil
 }
-// generator#216 target:
-// func (m *MyMsg) ArrayBegin(id sofab.ID, count int) error {
-//     if id == 15 && count > 4 { return sofab.ErrInvalidMsg }   // at the header
-//     return nil
-// }
 ```
 
-**Corelib API (Dart) — `MessageVisitor`, whole value; `void` callbacks:**
+**Corelib API (Dart) — `MessageVisitor`, whole value + header callbacks; `void`:**
 ```dart
 abstract class MessageVisitor {
-  bool shouldRead(int id, WireType type);       // id+type only, no count/length
+  bool shouldRead(int id, WireType type);       // id+type only
   void onUnsignedArray(int id, Int64List values);
   void onString(int id, String value);
-  // proposed generator#216 seam: void onArrayBegin(int id, int count) {}
+  void onArrayBegin(int id, int count) {}                 // at the count word (§5.2 seam)
+  void onFixlenHeader(int id, int subtype, int length) {} // at the fixlen length word
 }
 ```
 
-**Generated decode (Dart) — override, set a sticky INVALID flag:**
+**Generated decode (Dart) — header callback sets the sticky INVALID flag:**
 ```dart
 @override
-void onUnsignedArray(int id, Int64List values) {
-  if (id == 15) {
-    if (values.length > 4) { inv = true; return; }   // today: after the whole read
-    arr = values;
-  }
+void onArrayBegin(int id, int count) {
+  if (id == 15 && count > 4) e.inv = true;   // at the header, before elements
 }
-// tryDecode already returns:  inv ? DecodeStatus.invalid : status;   (ordering OK)
-// generator#216 target: @override void onArrayBegin(int id, int count) {
-//   if (id == 15 && count > 4) inv = true;                          // at the header
-// }
+@override
+void onUnsignedArray(int id, Int64List values) {
+  if (id == 15) arr = List<int>.from(values);  // reached only if onArrayBegin accepted
+}
+// tryDecode returns:  e.inv ? DecodeStatus.invalid : status;   (INVALID dominates)
 ```
 
 ---
@@ -256,10 +251,12 @@ The maxspeed C++ engine: `feed()` first *measures* the whole top-level field for
 completeness, then delivers it via `deserialize`, where the generated code pulls
 values — including a **zero-copy `std::string_view` straight into the buffer**
 (the fastest option, but it requires the field be fully present and contiguous,
-which the measure pass guarantees). The measure walk is deliberately schema-blind,
-so a truncated over-bound field fails measurement (→ INCOMPLETE) before the
-`deserialize` guard runs. generator#216 fix: a schema-bound hook in the measure
-phase (corelib-cpp#49).
+which the measure pass guarantees). The measure walk would otherwise be
+schema-blind — a truncated over-bound field would fail measurement (→ INCOMPLETE)
+before the `deserialize` guard runs — so the generator now emits a static
+`sofab::schema` bound tree and installs it with `setSchema`; the measure walk
+consults it at the count/length word and rejects an over-bound field there, before
+the truncation is surfaced (generator#223, corelib-cpp#50).
 
 **Corelib API (C++):**
 ```cpp
@@ -272,14 +269,16 @@ virtual void deserialize(IStreamImpl& is, sofab::id id, size_t size, size_t coun
 void MyMsg::deserialize(IStreamImpl& is, sofab::id id, size_t size, size_t count) noexcept {
     switch (id) {
     case 15: {
-        if (count > 4) { is.invalidate(); return; }   // today: only reached if the field measured complete
+        if (count > 4) { is.invalidate(); return; }   // belt-and-suspenders on the delivered field
         // ... is.read(arr[i]) per element ...
         break;
     }
     }
 }
-// feed() ordering already favors INVALID:  if (error_) return InvalidMessage;  (before Incomplete)
-// generator#216 target: the count>4 check runs in the measure phase, before truncation.
+// The over-count reject that MATTERS runs earlier, in the measure phase: the
+// generated static sofab::schema tree (installed by setSchema in decode/try_decode)
+// makes measureField reject count>4 at the count word, before truncation is seen.
+// feed() ordering then favors INVALID:  if (error_) return InvalidMessage;  (before Incomplete)
 ```
 
 ---
@@ -332,14 +331,15 @@ void MyMsg::deserialize(IStreamImpl& is, sofab::id id, size_t size, size_t count
 |---|---|---|---|---|
 | A1 push streaming | rust, zig | `array_begin(count)` + element events | compare inside the header event | ✅ |
 | A2 pull `Field` | python | `next()→Field.count` + batched read | compare on `fld.count` | ✅ |
-| B pull cursor | ts | `readUnsignedArray()` no-arg | (proposed) bound arg on the reader | ⏳ #69 |
-| C whole-unit push | go, dart | `UnsignedArray(id, []T)` whole | (proposed) new header callback | ⏳ #53/#18 |
-| D measure-then-deliver | cpp | `deserialize` + zero-copy `read()` | (proposed) measure-phase schema hook | ⏳ #49 |
+| B pull cursor | ts | `readUnsignedArray(bound)` | bound arg on the reader (corelib-ts#69) | ✅ |
+| C whole-unit push | go, dart | `UnsignedArray(id, []T)` + `ArrayBegin` | header callback `ArrayBegin`/`onArrayBegin` | ✅ |
+| D measure-then-deliver | cpp | `deserialize` + zero-copy `read()` | measure-phase schema (`setSchema`) | ✅ |
 | E push into fixed buffer | c-cpp | header callback + `read_array(dst, cap)` | buffer capacity == bound | ✅ (reference) |
 
 **Takeaway.** The wire is uniform; the reader shape is intentionally not — it is
 each language's fastest idiom under its profile. A cross-cutting semantic like
 §5.2 must therefore be verified per model. The unifying *invariant* (not a single
 signature) is Model E's: **surface the count/length at the header and let the
-schema bound be checked there, before the payload** — which A1/A2 already satisfy
-and B/C/D are being brought to under generator#216.
+schema bound be checked there, before the payload** — which A1/A2/E always
+satisfied and B/C/D were brought to under generator#216 (generator#222 for
+ts/go/dart, generator#223 for cpp). All six models now hold §5.2.
