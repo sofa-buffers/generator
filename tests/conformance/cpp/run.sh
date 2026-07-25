@@ -173,6 +173,30 @@ run_variant() {
         [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(id4<5)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
         echo "==> [$label] schema-bound/truncation ordering OK"
 
+        # The measure-phase bound is gated on the DECLARED fixlen subtype
+        # (MESSAGE_SPEC S7.3, generator#229). fp32/fp64/string/blob all share the
+        # Fixlen wire type, so a schema row that matched the wire type alone
+        # measured a CONTRADICTING value against the field's maxlen and rejected
+        # it, where S7.3 requires it be skipped like an unknown id. someblob
+        # (id 12) declares blob, maxlen 16 and defaults to "Hello".
+        # Wire: 62 (id 12, fixlen) 8a 01 (fixlen word: len 17, STRING subtype 2)
+        #       + 17 bytes -> the STRING contradicts the declared blob, so the
+        # field is skipped whole and someblob keeps its default. Pre-fix this was
+        # INVALID (17 > 16 measured against the blob's maxlen).
+        echo "==> [$label] a contradicting fixlen subtype carries no bound (S7.3, generator#229)"
+        printf '\142\212\001\101\101\101\101\101\101\101\101\101\101\101\101\101\101\101\101\101' > "$WORK/subtypebound.bin"
+        OUT=$("$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/subtypebound.bin") \
+            || { echo "FAIL: [$label] an over-maxlen STRING at a blob id must skip, not reject"; exit 1; }
+        echo "$OUT" | grep -q '"someblob":\[72,101,108,108,111\]' || { echo "FAIL: [$label] skipped fixlen field must keep its default \"Hello\"; got: $OUT"; exit 1; }
+        # Control: the MATCHING subtype at the same length still hits the bound
+        # (62 8b 01 = len 17, BLOB subtype 3) -- covered as INVALID above -- and
+        # the S5.2 anti-folding order is unchanged for it. The truncated form of
+        # the skipped shape is INCOMPLETE, never INVALID: a skipped field is still
+        # measured for completeness.
+        ST=$(printf '\142\212\001\101' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+        [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] truncated contradicting subtype -> $ST (want INCOMPLETE)"; exit 1; }
+        echo "==> [$label] subtype-gated bound OK"
+
         # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose
         # header wire type is not the one its declared type maps to -- for fixlen,
         # including the subtype -- is SKIPPED, exactly like an unknown id. someu8
@@ -349,6 +373,47 @@ DEC=$("$WORK/lim102/harness/harness" decode dyn < "$WORK/in102.bin") || { echo "
 echo "$DEC" | grep -q '"a":\[1,2,3,4\]' || { echo "FAIL: [cpp] unbounded native array lost its elements (regression generator#112); got: $DEC"; exit 1; }
 "$WORK/nolim102/harness/harness" decode dyn < "$WORK/over102.bin" >/dev/null || { echo "FAIL: [cpp] without limits the same bytes must decode"; exit 1; }
 echo "==> [cpp] decode limits OK (over-cap rejected, in-cap preserves elements, unlimited accepted)"
+
+# generator#229 verbatim reproducer: a NESTED maxlen-4 blob (so the bound lives in
+# a child SeqNode, the descend-into-child measure path) carrying an fp64 value. The
+# subtype contradicts the declared blob, so S7.3 skips the field -- but the
+# measure-phase schema used to maxlen-check any Fixlen at the id and reject the
+# 8-byte payload as INVALID. Pure corelib-cpp only (no measure phase in c-cpp).
+echo "==> [cpp] nested maxlen-4 blob vs a contradicting fp64 (generator#229)"
+cat > "$WORK/probe229.yaml" <<'YAML'
+version: 1
+messages:
+  probe:
+    payload:
+      nested:
+        id: 10
+        type: struct
+        fields:
+          bytes_field: { id: 3, type: blob, maxlen: 4 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolimits.yaml" --lang cpp --in "$WORK/probe229.yaml" --out "$WORK/probe229" )
+make -C "$WORK/probe229" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+# 56 (seq start id 10) 1a (fixlen id 3) 41 (fixlen word: len 8, FP64 subtype 1)
+# + the 8 bytes of 1.5 + 07 (seq end).
+printf '\126\032\101\000\000\000\000\000\000\370\077\007' > "$WORK/f229_fp64.bin"
+DEC=$("$WORK/probe229/harness/harness" decode probe < "$WORK/f229_fp64.bin") \
+    || { echo "FAIL: [cpp] an fp64 at a maxlen-4 blob id must skip, not reject (generator#229)"; exit 1; }
+echo "$DEC" | grep -q '"bytes_field":\[\]' || { echo "FAIL: [cpp] the skipped fp64 must leave bytes_field at its default; got: $DEC"; exit 1; }
+# Control: the same 8-byte payload with the MATCHING blob subtype (43 = len 8,
+# BLOB subtype 3) is genuinely over maxlen 4 -> INVALID; the bound still bites.
+printf '\126\032\103\000\000\000\000\000\000\370\077\007' > "$WORK/f229_blob8.bin"
+ST=$("$WORK/probe229/harness/harness" status probe < "$WORK/f229_blob8.bin" | head -n1)
+[ "$ST" = "INVALID" ] || { echo "FAIL: [cpp] an 8-byte BLOB at maxlen 4 -> $ST (want INVALID)"; exit 1; }
+# Control: over-bound AND truncated with the matching subtype still resolves to
+# INVALID, i.e. the gate did not weaken the S5.2 anti-folding order.
+ST=$(printf '\126\032\103\000\000' | "$WORK/probe229/harness/harness" status probe | head -n1)
+[ "$ST" = "INVALID" ] || { echo "FAIL: [cpp] over-maxlen(8>4)+truncated -> $ST (want INVALID)"; exit 1; }
+# Control: an in-bound blob (23 = len 4, BLOB subtype 3) decodes to its bytes.
+printf '\126\032\043\001\002\003\004\007' > "$WORK/f229_blob4.bin"
+DEC=$("$WORK/probe229/harness/harness" decode probe < "$WORK/f229_blob4.bin") \
+    || { echo "FAIL: [cpp] an in-bound blob must decode"; exit 1; }
+echo "$DEC" | grep -q '"bytes_field":\[1,2,3,4\]' || { echo "FAIL: [cpp] in-bound blob lost its bytes; got: $DEC"; exit 1; }
+echo "==> [cpp] nested subtype-gated bound OK"
 
 # corelib-c-cpp feature-subset configs. The C++ wrapper (sofab/sofab.hpp) gates
 # its methods on ARRAY / FP64 / INT64 (SOFAB_CPP_HAVE_*), so generated C++ that

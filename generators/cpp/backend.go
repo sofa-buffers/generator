@@ -985,6 +985,7 @@ func unboundedErr(owner, path, missing string) error {
 type schemaBound struct {
 	id      int64
 	wire    string // sofab::Wire::… the bound is enforced on (exact-match only)
+	subtype string // sofab::Fix::… a Wire::Fixlen bound is additionally matched on; "" for every other wire type
 	bound   int64  // count N / maxlen L; 0 == unbounded (a descend-only nested field)
 	child   string // referenced child SeqNode name, "" == nullptr
 	wrapper bool   // element id IS its index -> enforce over-INDEX, not over-count
@@ -1011,23 +1012,38 @@ func arrayElemWire(elem ir.Kind) string {
 // are not expressible: element ids are wire indices, not fixed field ids, so a
 // wrapper array carries only its over-index bound with child == nullptr, matching
 // the corelib's find-by-id measure model.
+//
+// A maxlen row also carries the DECLARED fixlen subtype: string, blob, fp32 and
+// fp64 all share Wire::Fixlen, and a fixlen value whose subtype contradicts the
+// declaration is skipped like an unknown id (S7.3), so it must not be measured
+// against this field's maxlen (generator#229; the dart/go analogue is #224).
 func (g *gen) schemaBounds(fields []*ir.Field) []schemaBound {
 	var out []schemaBound
 	for _, fld := range fields {
 		switch {
 		case fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) && fld.HasCount:
-			out = append(out, schemaBound{fld.ID, arrayElemWire(fld.Elem), fld.Count, "", false})
+			out = append(out, schemaBound{fld.ID, arrayElemWire(fld.Elem), "", fld.Count, "", false})
 		case (fld.Kind == ir.KindString || fld.Kind == ir.KindBlob) && fld.HasMaxlen:
-			out = append(out, schemaBound{fld.ID, "sofab::Wire::Fixlen", fld.Maxlen, "", false})
+			out = append(out, schemaBound{fld.ID, "sofab::Wire::Fixlen", fixlenSubtype(fld.Kind), fld.Maxlen, "", false})
 		case fld.Kind == ir.KindArray && !isNativeArrayElem(fld.Elem) && fld.HasCount:
-			out = append(out, schemaBound{fld.ID, "sofab::Wire::SequenceStart", fld.Count, "", true})
+			out = append(out, schemaBound{fld.ID, "sofab::Wire::SequenceStart", "", fld.Count, "", true})
 		case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 			if g.typeHasSchema(g.schema.Named[fld.Ref.Key].Fields) {
-				out = append(out, schemaBound{fld.ID, "sofab::Wire::SequenceStart", 0, g.typeName(fld.Ref.Key) + "_schema", false})
+				out = append(out, schemaBound{fld.ID, "sofab::Wire::SequenceStart", "", 0, g.typeName(fld.Ref.Key) + "_schema", false})
 			}
 		}
 	}
 	return out
+}
+
+// fixlenSubtype maps a bounded fixlen field's declared kind to the sofab::Fix
+// subtype its wire values carry (MESSAGE_SPEC S4.6). Only string and blob can
+// declare a maxlen, so only those two ever reach a FieldBound row.
+func fixlenSubtype(k ir.Kind) string {
+	if k == ir.KindString {
+		return "sofab::Fix::String"
+	}
+	return "sofab::Fix::Blob"
 }
 
 // typeHasSchema reports whether a sequence level carries any enforceable bound.
@@ -1067,14 +1083,22 @@ func (g *gen) emitSchemaDescriptor(f *hfile, name string, fields []*ir.Field) {
 	f.line("// Measure-phase schema (generator#216): rejects an over-count / over-maxlen")
 	f.line("// / over-index field at its deciding word before truncation is surfaced, so")
 	f.line("// INVALID dominates INCOMPLETE (MESSAGE_SPEC S5.2). Installed by setSchema().")
+	f.line("// A maxlen row also names the declared fixlen subtype: a value whose subtype")
+	f.line("// contradicts it is skipped (S7.3) and carries no bound (generator#229).")
 	f.line("static constexpr sofab::schema::FieldBound %s_sbounds[] = {", name)
 	for _, b := range bounds {
 		child := "nullptr"
 		if b.child != "" {
 			child = "&" + b.child
 		}
-		f.line("    {.id = %d, .wire = %s, .bound = %d, .child = %s, .wrapperArray = %t},",
-			b.id, b.wire, b.bound, child, b.wrapper)
+		// .subtype is set only on a Wire::Fixlen row (the corelib reads it only
+		// there); every other row leaves it at the FieldBound default.
+		sub := ""
+		if b.subtype != "" {
+			sub = fmt.Sprintf(".subtype = %s, ", b.subtype)
+		}
+		f.line("    {.id = %d, .wire = %s, %s.bound = %d, .child = %s, .wrapperArray = %t},",
+			b.id, b.wire, sub, b.bound, child, b.wrapper)
 	}
 	f.line("};")
 	f.line("static constexpr sofab::schema::SeqNode %s_schema{%s_sbounds, %d};", name, name, len(bounds))

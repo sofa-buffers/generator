@@ -208,7 +208,8 @@ func TestCppMeasureSchema(t *testing.T) {
 		"      s:  { id: 2, type: string, maxlen: 8 }\n" +
 		"      wa: { id: 3, type: array, items: { type: string, count: 5 } }\n" +
 		"      da: { id: 4, type: array, items: { type: u32 } }\n" + // dynamic native: no bound
-		"      ns: { id: 5, type: struct, fields: { inner: { id: 0, type: string, maxlen: 12 } } }\n"
+		"      ns: { id: 5, type: struct, fields: { inner: { id: 0, type: string, maxlen: 12 } } }\n" +
+		"      b:  { id: 6, type: blob, maxlen: 4 }\n"
 	h, err := genHeader(t, src, "m.hpp", map[string]any{})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -218,16 +219,25 @@ func TestCppMeasureSchema(t *testing.T) {
 		"static constexpr sofab::schema::SeqNode M_schema{M_sbounds,",
 		"{.id = 0, .wire = sofab::Wire::ArrayUnsigned, .bound = 4, .child = nullptr, .wrapperArray = false},",
 		"{.id = 1, .wire = sofab::Wire::ArrayFixlen, .bound = 3, .child = nullptr, .wrapperArray = false},",
-		"{.id = 2, .wire = sofab::Wire::Fixlen, .bound = 8, .child = nullptr, .wrapperArray = false},",
+		// Each maxlen row names the DECLARED fixlen subtype, so a contradicting one
+		// is skipped rather than measured against this field's bound (§7.3, #229).
+		"{.id = 2, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::String, .bound = 8, .child = nullptr, .wrapperArray = false},",
 		"{.id = 3, .wire = sofab::Wire::SequenceStart, .bound = 5, .child = nullptr, .wrapperArray = true},",
 		"{.id = 5, .wire = sofab::Wire::SequenceStart, .bound = 0, .child = &MNs_schema, .wrapperArray = false},",
+		"{.id = 6, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::Blob, .bound = 4, .child = nullptr, .wrapperArray = false},",
 		"in.setSchema(&M_schema);", // installed in decode()/try_decode()
 		// the nested struct's own descriptor (its bounded inner string):
-		"{.id = 0, .wire = sofab::Wire::Fixlen, .bound = 12, .child = nullptr, .wrapperArray = false},",
+		"{.id = 0, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::String, .bound = 12, .child = nullptr, .wrapperArray = false},",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("m.hpp missing measure-schema %q:\n%s", want, h)
 		}
+	}
+	// A Fixlen bound must never be emitted without its subtype — an un-gated row
+	// is exactly the generator#229 defect (a contradicting fixlen value measured
+	// against a field's maxlen and rejected, where §7.3 requires it be skipped).
+	if strings.Contains(h, "sofab::Wire::Fixlen, .bound") {
+		t.Errorf("a maxlen row is not gated on the declared fixlen subtype (generator#229):\n%s", h)
 	}
 	// The dynamic native array (id 4) declares no count, so it carries no bound
 	// row — an unlisted id carries no bound.
