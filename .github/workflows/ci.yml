@@ -45,6 +45,7 @@ jobs:
           go-version: "1.26"
       - name: Toolchain
         run: gcc --version && make --version | head -1
+      - uses: ./.github/actions/corelib-refs
       - name: C backend — generate, build, round-trip, conformance
         run: ./tests/conformance/c/run.sh
       - name: Generate sources (artifact)
@@ -66,6 +67,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
+      - uses: ./.github/actions/corelib-refs
       - name: Go backend — generate, build, round-trip, conformance
         run: ./tests/conformance/go/run.sh
       - name: Generate sources (artifact)
@@ -89,6 +91,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
+      - uses: ./.github/actions/corelib-refs
       - name: Python backend — generate, syntax, round-trip, conformance
         run: ./tests/conformance/python/run.sh
       - name: Generate sources (artifact)
@@ -113,6 +116,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+      - uses: ./.github/actions/corelib-refs
       - name: TypeScript backend — build, typecheck, round-trip, conformance
         run: ./tests/conformance/typescript/run.sh
       - name: Generate sources (artifact)
@@ -138,6 +142,7 @@ jobs:
           go-version: "1.26"
       - name: Toolchain
         run: g++ --version | head -1
+      - uses: ./.github/actions/corelib-refs
       - name: C++ backend — generate, build, round-trip, conformance
         run: ./tests/conformance/cpp/run.sh
       - name: Generate sources (artifact)
@@ -162,6 +167,7 @@ jobs:
         with:
           go-version: "1.26"
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/corelib-refs
       - name: Rust backend — generate, build, round-trip, conformance
         run: ./tests/conformance/rust/run.sh
       - name: Generate sources (artifact)
@@ -186,6 +192,7 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "9.0.x"
+      - uses: ./.github/actions/corelib-refs
       - name: C# backend — generate, build, round-trip, conformance
         run: ./tests/conformance/csharp/run.sh
       - name: Generate sources (artifact)
@@ -211,6 +218,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - uses: ./.github/actions/corelib-refs
       - name: Java backend — generate, build, round-trip, conformance
         run: ./tests/conformance/java/run.sh
       - name: Generate sources (artifact)
@@ -236,6 +244,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - uses: ./.github/actions/corelib-refs
       - name: Zig backend — generate, build, round-trip, conformance
         run: ./tests/conformance/zig/run.sh
       - name: Generate sources (artifact)
@@ -260,6 +269,7 @@ jobs:
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
+      - uses: ./.github/actions/corelib-refs
       - name: Dart backend — generate, build, round-trip, conformance
         run: ./tests/conformance/dart/run.sh
       - name: Generate sources (artifact)

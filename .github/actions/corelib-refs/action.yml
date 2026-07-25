@@ -1,0 +1,24 @@
+name: Corelib refs
+description: >
+  Export the corelib branch pins from .github/corelib-refs into the job
+  environment, so a generator change can be tested against an unreleased
+  corelib before that corelib merges. See docs/CI.md.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        # Honoured on branches only. On main the corelibs always come from main,
+        # so a pin left behind by mistake cannot make main green against code
+        # that is not merged yet — it just sits there until someone deletes it.
+        if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          echo "on main — corelib pins ignored"
+          exit 0
+        fi
+        if [ ! -f .github/corelib-refs ]; then
+          echo "no .github/corelib-refs — every corelib comes from main"
+          exit 0
+        fi
+        echo "corelib pins in effect:"
+        grep -vE '^\s*(#|$)' .github/corelib-refs | tee -a "$GITHUB_ENV"

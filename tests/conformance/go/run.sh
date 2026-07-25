@@ -6,6 +6,9 @@
 # Requires: go, git.
 set -eu
 
+# Corelib checkout + ref pinning (docs/CI.md).
+. "$(dirname "$0")/../lib/corelib.sh"
+
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_GO_CORELIB:-}}"
 WORK=$(mktemp -d)
@@ -13,7 +16,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 if [ -z "$CORELIB" ]; then
     echo "==> cloning corelib-go"
-    git clone --depth 1 https://github.com/sofa-buffers/corelib-go.git "$WORK/corelib" >/dev/null 2>&1
+    clone_corelib corelib-go "$WORK/corelib"
     CORELIB="$WORK/corelib"
 fi
 echo "==> corelib-go: $CORELIB"

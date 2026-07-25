@@ -11,6 +11,9 @@
 # Requires: go, g++, gcc, make, python3, git.
 set -eu
 
+# Corelib checkout + ref pinning (docs/CI.md).
+. "$(dirname "$0")/../lib/corelib.sh"
+
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CPP="${1:-${SOFAB_CPP_DIR:-}}"
 CC="${2:-${SOFAB_C_DIR:-}}"
@@ -18,11 +21,11 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 if [ -z "$CPP" ]; then
-    git clone --depth 1 https://github.com/sofa-buffers/corelib-cpp.git "$WORK/cpp" >/dev/null 2>&1
+    clone_corelib corelib-cpp "$WORK/cpp"
     CPP="$WORK/cpp"
 fi
 if [ -z "$CC" ]; then
-    git clone --depth 1 https://github.com/sofa-buffers/corelib-c-cpp.git "$WORK/c" >/dev/null 2>&1
+    clone_corelib corelib-c-cpp "$WORK/c"
     CC="$WORK/c"
 fi
 echo "==> corelib-cpp: $CPP"

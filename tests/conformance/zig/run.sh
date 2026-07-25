@@ -8,13 +8,16 @@
 # Requires: go, zig (0.16+), git, python3.
 set -eu
 
+# Corelib checkout + ref pinning (docs/CI.md).
+. "$(dirname "$0")/../lib/corelib.sh"
+
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_ZIG_CORELIB:-}}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 if [ -z "$CORELIB" ]; then
-    git clone --depth 1 https://github.com/sofa-buffers/corelib-zig.git "$WORK/corelib" >/dev/null 2>&1
+    clone_corelib corelib-zig "$WORK/corelib"
     CORELIB="$WORK/corelib"
 fi
 # build.zig.zon path dependencies must be relative to the build root, so every

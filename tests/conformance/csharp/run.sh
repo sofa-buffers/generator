@@ -6,6 +6,9 @@
 # Requires: go, dotnet, git, python3.
 set -eu
 
+# Corelib checkout + ref pinning (docs/CI.md).
+. "$(dirname "$0")/../lib/corelib.sh"
+
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_CS_CORELIB:-}}"
 WORK=$(mktemp -d)
@@ -13,7 +16,7 @@ trap 'rm -rf "$WORK"' EXIT
 export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 
 if [ -z "$CORELIB" ]; then
-    git clone --depth 1 https://github.com/sofa-buffers/corelib-cs.git "$WORK/corelib" >/dev/null 2>&1
+    clone_corelib corelib-cs "$WORK/corelib"
     CORELIB="$WORK/corelib"
 fi
 export SOFAB_CS_CORELIB="$CORELIB"

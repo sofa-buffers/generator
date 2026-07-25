@@ -8,6 +8,9 @@
 # a temp dir. Requires: go, gcc, git.
 set -eu
 
+# Corelib checkout + ref pinning (docs/CI.md).
+. "$(dirname "$0")/../lib/corelib.sh"
+
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_C_CORELIB:-}}"
 WORK=$(mktemp -d)
@@ -15,7 +18,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 if [ -z "$CORELIB" ]; then
     echo "==> cloning corelib-c-cpp"
-    git clone --depth 1 https://github.com/sofa-buffers/corelib-c-cpp.git "$WORK/corelib" >/dev/null 2>&1
+    clone_corelib corelib-c-cpp "$WORK/corelib"
     CORELIB="$WORK/corelib"
 fi
 INC="$CORELIB/src/include"

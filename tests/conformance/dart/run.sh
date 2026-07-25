@@ -6,6 +6,9 @@
 # Requires: go, dart, git, python3.
 set -eu
 
+# Corelib checkout + ref pinning (docs/CI.md).
+. "$(dirname "$0")/../lib/corelib.sh"
+
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_DART_CORELIB:-}}"
 WORK=$(mktemp -d)
@@ -13,7 +16,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 if [ -z "$CORELIB" ]; then
     echo "==> cloning corelib-dart"
-    git clone --depth 1 https://github.com/sofa-buffers/corelib-dart.git "$WORK/corelib" >/dev/null 2>&1
+    clone_corelib corelib-dart "$WORK/corelib"
     CORELIB="$WORK/corelib"
 fi
 echo "==> corelib-dart: $CORELIB"
