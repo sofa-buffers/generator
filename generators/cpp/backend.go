@@ -212,26 +212,27 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.blank()
 	f.line("namespace %s {", g.ns)
 	f.blank()
-	// Guard the shared decode helpers so multiple generated headers (multi-message
-	// builds) can be included in one TU without redefining them.
-	// The _MsgSeq struct/union/nested-array sequence decoder is shared by both
-	// corelibs. The pure-corelib-cpp path additionally needs the _StrSeq/_BlobSeq
-	// string/blob sequence helpers; the corelib-c-cpp wrapper decodes those via
-	// native read() overloads instead.
-	f.line("#ifndef SOFABUFFERS_GEN_PRELUDE")
-	f.line("#define SOFABUFFERS_GEN_PRELUDE")
-	if !g.clib {
-		f.line("%s", cppPrelude)
+	// Decode helpers. On the pure-corelib-cpp path they live in the corelib
+	// (sofab::StringSeq / BlobSeq / MessageSeq / trimTail) and the generated code
+	// only references them — they are properties of the wire format, not of the
+	// user's message, so copying them into every header was duplication.
+	//
+	// The c-cpp profile still carries its own: its fixed-capacity collectors bind
+	// into sofab::InlineVector/FixedString storage through the wrapper's API, and
+	// its _MsgSeq differs (no invalidate() hook, no prepare()). Moving those is
+	// corelib-c-cpp's own step. The guard keeps multi-message builds including
+	// several generated headers in one TU from redefining them.
+	if g.clib {
+		f.line("#ifndef SOFABUFFERS_GEN_PRELUDE")
+		f.line("#define SOFABUFFERS_GEN_PRELUDE")
+		if g.fixed {
+			f.line("%s", cppFixedPrelude)
+		}
+		f.line("%s", cppMsgSeqPreludeSrc(g.clib))
+		f.line("%s", cppTrimPrelude)
+		f.line("#endif")
+		f.blank()
 	}
-	if g.fixed {
-		f.line("%s", cppFixedPrelude)
-	}
-	f.line("%s", cppMsgSeqPreludeSrc(g.clib))
-	// _trimTail (fixed-count encode trim, MESSAGE_SPEC §3) is corelib-agnostic:
-	// both wrappers take a std::span through the same templated OStream::write.
-	f.line("%s", cppTrimPrelude)
-	f.line("#endif")
-	f.blank()
 
 	// Receiver-side decode limits (generator#102), baked from the sofabgen config.
 	// Macros (not inline constexpr) so multiple generated headers agree in one TU;
@@ -616,7 +617,10 @@ func (g *gen) trimExpr(val string, trim bool) string {
 	if !trim {
 		return val
 	}
-	return fmt.Sprintf("_trimTail(%s)", val)
+	if g.clib {
+		return fmt.Sprintf("_trimTail(%s)", val)
+	}
+	return fmt.Sprintf("sofab::trimTail(%s)", val)
 }
 
 // serializeArray writes an array value as field idExpr, mirroring the Go/Python
@@ -887,7 +891,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
-			f.line("%s{ _StrSeq %s{%s, %d, %d}; is.read(%s); }", ind, rv, target, cap, elemMaxOr(elemMaxHas, elemMax), rv)
+			f.line("%s{ sofab::StringSeq %s{%s, %d, %d}; is.read(%s); }", ind, rv, target, cap, elemMaxOr(elemMaxHas, elemMax), rv)
 		}
 	case ir.KindBlob:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
@@ -899,7 +903,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
-			f.line("%s{ _BlobSeq %s{%s, %d, %d}; is.read(%s); }", ind, rv, target, cap, elemMaxOr(elemMaxHas, elemMax), rv)
+			f.line("%s{ sofab::BlobSeq %s{%s, %d, %d}; is.read(%s); }", ind, rv, target, cap, elemMaxOr(elemMaxHas, elemMax), rv)
 		}
 	case ir.KindStruct, ir.KindUnion:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
@@ -938,7 +942,7 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 		f.line("%s{ static _MsgSeq<%s> %s; %s.out = &%s;%s %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, reserve, rv, cap, rv)
 		return
 	}
-	f.line("%s{ _MsgSeq<%s> %s; %s.out = &%s; %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, rv, cap, rv)
+	f.line("%s{ sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, rv, cap, rv)
 }
 
 // checkBounded enforces the fixed-capacity (embedded) profile's unbounded-field

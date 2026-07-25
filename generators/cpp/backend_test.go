@@ -169,7 +169,7 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 		"is.readArray(arr);",                             // readArray sizes the vector to the wire count
 		"if (arr != std::vector<std::uint32_t>{}) {",     // whole-omit compares to an empty vector
 		"std::size_t _count) noexcept override",          // _count is named for the resize
-		"if constexpr (requires { row.resize(_count); }", // _MsgSeq sizes dynamic matrix rows
+		"sofab::MessageSeq<std::vector<std::uint32_t>>",  // matrix rows collected by the corelib helper
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap header missing %q:\n%s", want, h)
@@ -277,18 +277,25 @@ func TestCppOverIndexWrapperArray(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
+	// The bounds are handed to the corelib's collectors; the guards themselves live
+	// in corelib-cpp (sofab::StringSeq / BlobSeq / MessageSeq), not in generated
+	// code, so this asserts what the generator DECLARES rather than the check.
 	for _, want := range []string{
-		"{ _StrSeq _r0{bs, 4, 16}; is.read(_r0); }",  // bounded string -> cap 4, elem maxlen 16
-		"{ _BlobSeq _r0{bb, 3, 16}; is.read(_r0); }", // bounded blob -> cap 3, elem maxlen 16
-		"_r0.cap = 2;", // bounded struct -> _MsgSeq cap 2
-		"{ _StrSeq _r0{ds, -1, -1}; is.read(_r0); }", // dynamic string -> unbounded cap + maxlen
+		"{ sofab::StringSeq _r0{bs, 4, 16}; is.read(_r0); }", // bounded string -> cap 4, elem maxlen 16
+		"{ sofab::BlobSeq _r0{bb, 3, 16}; is.read(_r0); }",   // bounded blob -> cap 3, elem maxlen 16
+		"_r0.cap = 2;", // bounded struct -> MessageSeq cap 2
+		"{ sofab::StringSeq _r0{ds, -1, -1}; is.read(_r0); }", // dynamic string -> unbounded cap + maxlen
 		"_r0.cap = -1;", // dynamic struct -> unbounded
-		// the guards themselves, in the shared preludes:
-		"if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }",
-		"if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
 	} {
 		if !strings.Contains(h, want) {
-			t.Errorf("heap over-index guard missing %q:\n%s", want, h)
+			t.Errorf("heap over-index bound missing %q:\n%s", want, h)
+		}
+	}
+	// The collectors are corelib types now: a generated header must not define its
+	// own copies on the pure path.
+	for _, notWant := range []string{"struct _StrSeq", "struct _BlobSeq", "struct _MsgSeq"} {
+		if strings.Contains(h, notWant) {
+			t.Errorf("the pure path must use the corelib collector, not emit %q:\n%s", notWant, h)
 		}
 	}
 }
@@ -313,8 +320,7 @@ func TestCppMaxlenReject(t *testing.T) {
 		// path). Checking _size before the read would resurrect exactly that.
 		"if (is.readString(s) && _size > 8) { is.invalidate(); return; }",
 		"if (is.readBlob(b) && _size > 8) { is.invalidate(); return; }",
-		"{ _StrSeq _r0{sa, 3, 5}; is.read(_r0); }",                                                // wrapper string: cap 3, elem maxlen 5
-		"if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }", // element guard
+		"{ sofab::StringSeq _r0{sa, 3, 5}; is.read(_r0); }", // wrapper string: cap 3, elem maxlen 5 handed to the corelib collector
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap maxlen guard missing %q:\n%s", want, h)
@@ -741,20 +747,29 @@ func TestCppFixedCountTrimsTrailingDefaultRun(t *testing.T) {
 			if err != nil {
 				t.Fatalf("generate: %v", err)
 			}
-			for _, want := range []string{
-				// The helper is emitted for both corelibs, inside the shared prelude
-				// guard, and returns a non-owning span (heap-free).
-				"std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {",
-				// Bit-pattern compare, never ==: a trailing -0.0 (== 0.0) must survive.
-				"std::memcmp(&_a[_n - 1], &_z, sizeof(_T)) == 0",
+			// The trim helper lives in corelib-cpp on the pure path (sofab::trimTail)
+			// and is still emitted for the c-cpp wrapper, which links a different
+			// corelib. Both compare the element's BYTE IMAGE, never == -- a trailing
+			// -0.0 equals 0.0 but is not the default and must stay on the wire.
+			trim := "sofab::trimTail"
+			if corelib == "c-cpp" {
+				trim = "_trimTail"
+			}
+			wants := []string{
 				// Numeric + float fields trim in place.
-				"(void)os.write(0, _trimTail(u32s));",
-				"(void)os.write(1, _trimTail(f32s));",
+				"(void)os.write(0, " + trim + "(u32s));",
+				"(void)os.write(1, " + trim + "(f32s));",
 				// Enum/bool value-convert through a native temp; the converted image is
 				// trimmed (enum default 0 -> backing 0, false -> 0).
-				"(void)os.write(2, _trimTail(_t0)); }",
-				"(void)os.write(3, _trimTail(_t0)); }",
-			} {
+				"(void)os.write(2, " + trim + "(_t0)); }",
+				"(void)os.write(3, " + trim + "(_t0)); }",
+			}
+			if corelib == "c-cpp" {
+				wants = append(wants,
+					"std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {",
+					"std::memcmp(&_a[_n - 1], &_z, sizeof(_T)) == 0")
+			}
+			for _, want := range wants {
 				if !strings.Contains(h, want) {
 					t.Errorf("[%s] header missing %q:\n%s", corelib, want, h)
 				}
@@ -803,7 +818,7 @@ func TestCppDynamicArrayNotTrimmed(t *testing.T) {
 		"(void)os.write(1, dynf);",
 		"(void)os.write(2, _t0); }",
 		"(void)os.write(3, _t0); }",
-		"(void)os.write(4, _trimTail(fixed));", // the counted one still trims
+		"(void)os.write(4, sofab::trimTail(fixed));", // the counted one still trims
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q:\n%s", want, h)
@@ -1005,16 +1020,18 @@ messages:
       msgs:   { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u8 } } } }
       native: { id: 3, type: array, items: { type: u32, count: 3 } }
 `, "m.hpp")
-	// The replace-whole reset moved from the case arm into the collector's
-	// prepare(), which read() calls once the SequenceStart tag matched — so it can
-	// no longer wipe a valid earlier occurrence on a §7.3-skipped one. The arms
-	// must therefore carry no clear at all.
+	// The replace-whole reset moved out of the case arm entirely: it is prepare()
+	// on the corelib's collectors (sofab::StringSeq / BlobSeq / MessageSeq), which
+	// IStreamImpl::read calls once the SequenceStart tag matched — so it can no
+	// longer wipe a valid earlier occurrence on a §7.3-skipped one. The arms must
+	// therefore carry no clear at all, and must name the corelib collectors.
 	for _, want := range []string{
-		"void prepare() noexcept { out.clear(); }",           // _StrSeq / _BlobSeq
-		"void prepare() noexcept { if (out) out->clear(); }", // _MsgSeq
+		"sofab::StringSeq _r0{strs,",
+		"sofab::BlobSeq _r0{blobs,",
+		"sofab::MessageSeq<",
 	} {
 		if !strings.Contains(h, want) {
-			t.Errorf("m.hpp missing collector reset %q\n%s", want, h)
+			t.Errorf("m.hpp missing corelib collector %q\n%s", want, h)
 		}
 	}
 	for _, notWant := range []string{"strs.clear();", "blobs.clear();", "msgs.clear();", "native.clear();"} {

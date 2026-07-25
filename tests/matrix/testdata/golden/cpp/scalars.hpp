@@ -14,62 +14,6 @@ static_assert(sofab::API_VERSION == 1,
 
 namespace message {
 
-#ifndef SOFABUFFERS_GEN_PRELUDE
-#define SOFABUFFERS_GEN_PRELUDE
-struct _StrSeq : sofab::IStreamMessage {
-    std::vector<std::string> &out;
-    long _cap;
-    long _emax;
-    explicit _StrSeq(std::vector<std::string> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
-    void prepare() noexcept { out.clear(); }
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        std::string _s;
-        if (!is.readString(_s)) { return; }
-        if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
-        if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }
-        while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
-        out[id] = std::move(_s);
-    }
-};
-struct _BlobSeq : sofab::IStreamMessage {
-    std::vector<std::vector<std::uint8_t>> &out;
-    long _cap;
-    long _emax;
-    explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
-    void prepare() noexcept { out.clear(); }
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        std::vector<std::uint8_t> _b;
-        if (!is.readBlob(_b)) { return; }
-        if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
-        if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }
-        while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
-        out[id] = std::move(_b);
-    }
-};
-template <typename T>
-struct _MsgSeq : sofab::IStreamMessage {
-    std::vector<T> *out = nullptr;
-    void prepare() noexcept { if (out) out->clear(); }
-    long cap = -1;
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t _count) noexcept override {
-        if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }
-        T &row = out->emplace_back();
-        if constexpr (requires { row.resize(_count); } && !std::is_base_of_v<sofab::IStreamMessage, T>) {
-            row.resize(_count);
-        }
-        is.read(row);
-    }
-};
-template <typename C>
-std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {
-    using _T = typename C::value_type;
-    const _T _z{};
-    std::size_t _n = _a.size();
-    while (_n > 0 && std::memcmp(&_a[_n - 1], &_z, sizeof(_T)) == 0) --_n;
-    return std::span<const _T>(_a.data(), _n);
-}
-#endif
-
 struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {
     std::uint64_t u64max = 18446744073709551615ULL;
     std::int64_t i64min = -9223372036854775808LL;
