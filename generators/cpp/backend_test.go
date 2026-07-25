@@ -289,7 +289,7 @@ func TestCppFixedContainers(t *testing.T) {
 		"sofab::InlineVector<MPtsElem",                                                 // struct sequence -> inline (prefix)
 		"if (bl != sofab::FixedBytes<16>{}) {",                                         // blob default-compare typed
 		"is.readString(s, _size, 8);",                                                  // FixedString decode, bound carried into the corelib read
-		"is.readBlob(bl, _size, 16);",                                                 // FixedBytes decode, likewise (issue #95)
+		"is.readBlob(bl, _size, 16);",                                                  // FixedBytes decode, likewise (issue #95)
 		"static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",     // blob-seq collector
 		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
 		"static sofab::FixedMessageSeq<sofab::InlineVector<",                           // struct-seq collector
