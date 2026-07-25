@@ -1003,12 +1003,13 @@ rather than a per-backend gap. For a fixlen array the `count` word precedes the
 subtype is not yet known — dart/go's hooks are handed `(id, count)` and nothing
 else, and cpp's `measureField` would have to defer its `ArrayFixlen` count check
 past the element-size word to see it. So an fp64 array arriving at a declared
-`fp32[] count: N` with a count above `N` is reported INVALID by every backend,
-even though the *deliver* path would skip that field under §7.3
-(`is.fixType() != Fix::Fp32`). Deciding whether §5.2 should defer here (with the
-subtype unknown, more bytes genuinely could still make the field skippable) is a
-MESSAGE_SPEC question, not a codegen one; until it is settled the family stays
-uniform.
+`fp32[] count: N` is **skipped** when its count is within `N` (§7.3, measured
+identical on cpp and go) but reported **INVALID** when its count is above `N` —
+the over-count guard fires first, on a field §7.3 says is not that field's value
+at all. Deciding whether §5.2 should defer here (with the subtype unknown, more
+bytes genuinely could still make the field skippable) is a MESSAGE_SPEC question,
+not a codegen one; until it is settled the family stays uniform. Tracked with the
+measured vectors in **#232**.
 
 Three adjacent findings from the same audit:
 
