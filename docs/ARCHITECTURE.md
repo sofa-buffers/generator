@@ -1233,9 +1233,15 @@ decoder** (Go `sofab.WithMax*` options, Python `Decoder(max_*=...)` kwargs,
 TypeScript `Cursor(buf, DecodeLimits)`, Dart `sofab.DecoderLimits` — the corelib
 allocates, so it enforces; the generated cap is raised to the largest schema bound
 of its kind because these apply globally per decode); pure C++ additionally derives a
-streaming reassembly cap (`sofab::Limits{max_buffered_field}` =
-max(string/blob caps, largest schema maxlen, largest schema count x 10)) for
-its `acc_` buffer. **Statically bounded profiles** (C, C++ `corelib: c-cpp`,
+streaming reassembly cap (`sofab::Limits{max_buffered_field}`) for its `acc_`
+buffer — the largest **byte span** one top-level field can legitimately reach, from
+the same worst-case walk that sizes `_maxSize` with the configured caps standing in
+for the missing schema bounds, so no message the per-field guards accept can trip
+it. A count is an element count, never a byte budget: deriving the cap from counts
+rejected a valid at-cap array — and even a fully schema-bounded wrapper array —
+through `try_decode` where a bare `feed` accepted it (#228). A field left both
+unbounded and uncapped yields no cap at all rather than one that would reject valid
+traffic. **Statically bounded profiles** (C, C++ `corelib: c-cpp`,
 Rust `no_std`) are capacity-bound by construction — the keys are inert.
 
 Independent of the option (bugfix class), no generated decoder may allocate
