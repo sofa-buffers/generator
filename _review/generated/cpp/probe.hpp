@@ -83,7 +83,7 @@ struct Probe : sofab::Message {
      * @brief Encode this message into caller-provided storage (no allocation).
      * @param dst Destination buffer.
      * @param cap Capacity of @p dst in bytes.
-     * @return Bytes written, or 0 if the message does not fit in @p cap —
+     * @return Bytes written, or 0 if the message does not fit in @p cap;
      *         in which case @p dst holds however much was written first.
      */
     std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {
@@ -113,7 +113,7 @@ struct Probe : sofab::Message {
      * @param data Encoded bytes.
      * @param len  Number of bytes at @p data.
      * @param out  Receives the message on success; untouched otherwise.
-     * @return The decode result — check @c ok() before reading @p out.
+     * @return The decode result; check @c ok() before reading @p out.
      */
     static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Probe &out) {
         sofab::IStreamObject<Probe> in;
