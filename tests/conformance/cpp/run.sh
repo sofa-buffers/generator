@@ -374,6 +374,85 @@ echo "$DEC" | grep -q '"a":\[1,2,3,4\]' || { echo "FAIL: [cpp] unbounded native 
 "$WORK/nolim102/harness/harness" decode dyn < "$WORK/over102.bin" >/dev/null || { echo "FAIL: [cpp] without limits the same bytes must decode"; exit 1; }
 echo "==> [cpp] decode limits OK (over-cap rejected, in-cap preserves elements, unlimited accepted)"
 
+# The derived reassembly cap is a BYTE budget (generator#228). It used to be
+# derived from element COUNTS -- a different dimension -- so the corelib's
+# exceedsBuffer rejected messages the per-field guards accept, through the
+# generated try_decode, where a bare feed accepted them. Both shapes below are
+# valid input that MUST decode; the amplification control pins that the cap still
+# bites on input that is genuinely oversized.
+echo "==> [cpp] reassembly cap is a byte budget, not a count (generator#228)"
+cat > "$WORK/cfg-lim228.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 8 }
+targets: { cpp: { namespace: sofabuffers } }
+YAML
+cat > "$WORK/dyn228.yaml" <<'YAML'
+version: 1
+messages:
+  m: { payload: { a: { id: 0, type: array, items: { type: u32 } } } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim228.yaml" --lang cpp --in "$WORK/dyn228.yaml" --out "$WORK/lim228" )
+make -C "$WORK/lim228" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+# The issue's vector: an array of exactly 8 elements, at max_dyn_array_count 8.
+# 10 bytes on the wire -- above the count 8, which is why a count-derived cap
+# rejected it. 03 (id 0, unsigned array) 08 (count 8) + 8 one-byte elements.
+printf '\003\010\000\001\002\003\004\005\006\007' > "$WORK/atcap228.bin"
+ST=$("$WORK/lim228/harness/harness" status m < "$WORK/atcap228.bin" | head -n1)
+[ "$ST" = "COMPLETE" ] || { echo "FAIL: [cpp] an at-cap array (8 == max_dyn_array_count) -> $ST (want COMPLETE)"; exit 1; }
+DEC=$("$WORK/lim228/harness/harness" decode m < "$WORK/atcap228.bin") || { echo "FAIL: [cpp] at-cap array must decode"; exit 1; }
+echo "$DEC" | grep -q '"a":\[0,1,2,3,4,5,6,7\]' || { echo "FAIL: [cpp] at-cap array lost its elements; got: $DEC"; exit 1; }
+# Control: one element past the cap is still LimitExceeded (the count guard).
+printf '\003\011\000\001\002\003\004\005\006\007\010' > "$WORK/overcap228.bin"
+ST=$("$WORK/lim228/harness/harness" status m < "$WORK/overcap228.bin" | head -n1)
+[ "$ST" = "LIMIT_EXCEEDED" ] || { echo "FAIL: [cpp] over-cap array (9 > 8) -> $ST (want LIMIT_EXCEEDED)"; exit 1; }
+# The sharper shape: a FULLY schema-bounded wrapper array (5 string elements of
+# maxlen 16, 97 bytes on the wire) under a config that only caps the unbounded
+# string. Nothing here is dynamic, yet a count-derived cap (5 * 10 = 50) rejected
+# it -- the exact opposite of the "legitimately schema-bounded fields always still
+# fit" property the cap exists to preserve.
+cat > "$WORK/cfg-lim228b.yaml" <<'YAML'
+generic: { emit: project, max_dyn_string_len: 16 }
+targets: { cpp: { namespace: sofabuffers } }
+YAML
+cat > "$WORK/bnd228.yaml" <<'YAML'
+version: 1
+messages:
+  m:
+    payload:
+      sa: { id: 0, type: array, items: { type: string, count: 5, maxlen: 16 } }
+      s:  { id: 1, type: string }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim228b.yaml" --lang cpp --in "$WORK/bnd228.yaml" --out "$WORK/lim228b" )
+make -C "$WORK/lim228b" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+python3 -c "
+import sys
+def varint(x):
+    out = bytearray()
+    while True:
+        b = x & 0x7f; x >>= 7
+        out.append(b | 0x80 if x else b)
+        if not x: return bytes(out)
+out = bytearray([0x06])                                  # sequence start, id 0
+for i in range(5):                                       # element id IS its index
+    out += varint((i << 3) | 2) + varint((16 << 3) | 2) + b'A' * 16
+out += bytes([0x07])                                     # sequence end
+sys.stdout.buffer.write(bytes(out))" > "$WORK/bnd228.bin"
+ST=$("$WORK/lim228b/harness/harness" status m < "$WORK/bnd228.bin" | head -n1)
+[ "$ST" = "COMPLETE" ] || { echo "FAIL: [cpp] a fully schema-bounded string array -> $ST (want COMPLETE)"; exit 1; }
+# Amplification control: a fixlen field claiming far more than any legitimate
+# field span is still stopped at the length word, before the bytes are buffered.
+python3 -c "
+import sys
+def varint(x):
+    out = bytearray()
+    while True:
+        b = x & 0x7f; x >>= 7
+        out.append(b | 0x80 if x else b)
+        if not x: return bytes(out)
+sys.stdout.buffer.write(bytes([0x0a]) + varint((1000000 << 3) | 2) + b'A' * 4)" > "$WORK/amp228.bin"
+ST=$("$WORK/lim228b/harness/harness" status m < "$WORK/amp228.bin" | head -n1)
+[ "$ST" = "LIMIT_EXCEEDED" ] || { echo "FAIL: [cpp] a 1 MB fixlen claim -> $ST (want LIMIT_EXCEEDED)"; exit 1; }
+echo "==> [cpp] byte-dimensioned reassembly cap OK"
+
 # generator#229 verbatim reproducer: a NESTED maxlen-4 blob (so the bound lives in
 # a child SeqNode, the descend-into-child measure path) carrying an fp64 value. The
 # subtype contradicts the declared blob, so S7.3 skips the field -- but the

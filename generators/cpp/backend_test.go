@@ -568,8 +568,12 @@ messages:
 	for _, want := range []string{
 		"#define SOFAB_MAX_DYN_ARRAY_COUNT 65536",
 		"#define SOFAB_MAX_DYN_STRING_LEN 4096",
-		// derived cap: max(cfg string 4096, cfg blob unset, schema maxlen 8000, count*10 30)
-		"#define SOFAB_MAX_DYN_BUFFERED_FIELD 8000",
+		// Derived cap: the largest BYTE span one top-level field can legitimately
+		// reach (#228). Here that is arr — 65536 elements (the configured count
+		// cap) at up to 10 varint bytes each, plus header and count word — not the
+		// 8000-byte bs, and emphatically not the count 65536 itself: a count is an
+		// element count, never a byte budget.
+		"#define SOFAB_MAX_DYN_BUFFERED_FIELD 655364",
 		"if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }",
 		"if (_count > SOFAB_MAX_DYN_ARRAY_COUNT) { is.exceedLimit(); return; }",
 		"sofab::IStreamObject<Dyn> in{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}};",
@@ -594,6 +598,66 @@ messages:
 	}
 	if strings.Contains(plain, "SOFAB_MAX_DYN") || strings.Contains(plain, "exceedLimit") {
 		t.Error("unset limits must emit no limit plumbing")
+	}
+}
+
+// TestCppBufferedFieldCapIsBytes pins the dimension of the derived reassembly cap
+// (#228): SOFAB_MAX_DYN_BUFFERED_FIELD is a BYTE budget, so it must be derived
+// from the worst-case byte SPAN of a field, never from an element count. Deriving
+// it from counts made the corelib's exceedsBuffer reject messages the per-field
+// guards accept — a valid at-cap array, and even a fully schema-bounded wrapper
+// array — through try_decode, where a bare feed accepted them.
+func TestCppBufferedFieldCapIsBytes(t *testing.T) {
+	// A fully schema-bounded wrapper array: 5 string elements of maxlen 16 span 97
+	// bytes on the wire (1 + 5*(1 id + 2 length word + 16) + 1). The cap must
+	// cover it. Deriving from the count gave 50 (count 5 * 10) and rejected it.
+	bounded := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      sa: { id: 0, type: array, items: { type: string, count: 5, maxlen: 16 } }\n" +
+		"      s:  { id: 1, type: string }\n"
+	h, err := genHeader(t, bounded, "m.hpp", map[string]any{"max_dyn_string_len": 16})
+	if err != nil {
+		t.Fatalf("generate bounded: %v", err)
+	}
+	if !strings.Contains(h, "#define SOFAB_MAX_DYN_BUFFERED_FIELD 98") {
+		t.Errorf("the cap must cover a fully bounded wrapper array's 97-byte span:\n%s", h)
+	}
+
+	// A dynamic array capped at 8 elements: the cap must charge 8 * the widest
+	// varint element plus framing (82), not the count 8. This config sets only
+	// max_dyn_array_count, which previously derived no cap at all — so the array
+	// caps now buy reassembly protection they did not before.
+	dyn := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      a: { id: 0, type: array, items: { type: u32 } }\n"
+	h, err = genHeader(t, dyn, "m.hpp", map[string]any{"max_dyn_array_count": 8})
+	if err != nil {
+		t.Fatalf("generate dyn: %v", err)
+	}
+	for _, want := range []string{
+		"#define SOFAB_MAX_DYN_BUFFERED_FIELD 82",
+		"sofab::IStreamObject<M> in{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}};",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("dynamic-array cap missing %q:\n%s", want, h)
+		}
+	}
+
+	// A field kind left uncapped has no legitimate maximum, and the reassembly cap
+	// is one number for the whole stream — so none is emitted rather than one that
+	// would reject valid traffic. The per-field policy guard still stands.
+	mixed := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      s: { id: 0, type: string }\n" +
+		"      b: { id: 1, type: blob }\n" // unbounded AND uncapped
+	h, err = genHeader(t, mixed, "m.hpp", map[string]any{"max_dyn_string_len": 16})
+	if err != nil {
+		t.Fatalf("generate mixed: %v", err)
+	}
+	if !strings.Contains(h, "if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }") {
+		t.Errorf("the configured per-field string guard must still be emitted:\n%s", h)
+	}
+	for _, notWant := range []string{"SOFAB_MAX_DYN_BUFFERED_FIELD", "sofab::Limits{"} {
+		if strings.Contains(h, notWant) {
+			t.Errorf("an uncapped dynamic field must leave reassembly uncapped, got %q:\n%s", notWant, h)
+		}
 	}
 }
 
