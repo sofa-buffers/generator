@@ -738,8 +738,9 @@ Whether the fix is generator-only splits by the corelib's decode model:
     length word / element header, before truncation is surfaced) installed with
     `setSchema`. The generator emits that tree per message — one `FieldBound` per
     over-`count` native array (matched by array wire type), over-`maxlen`
-    string/blob (`Fixlen`), and over-index wrapper array (`SequenceStart`,
-    `wrapperArray`), plus a `child` descriptor for each nested struct/union field —
+    string/blob (`Fixlen` **plus the declared `subtype`**, see §7.3 below), and
+    over-index wrapper array (`SequenceStart`, `wrapperArray`), plus a `child`
+    descriptor for each nested struct/union field —
     and calls `in.setSchema(&…_schema)` in `decode`/`try_decode`. Emitted only when
     a message carries a bound anywhere in its tree, so a bound-free message keeps
     the corelib's schema-free (maxspeed) measure walk; element-level bounds inside a
@@ -988,12 +989,29 @@ The rule for any header-hook guard: **gate the bound on the declared subtype**
 - **go** — `if subtype == 2 && length > N { return sofab.ErrInvalidMsg }`
   (corelib-go keeps its fixlen-subtype constants unexported, so the generated
   guard spells out the §4.6 wire values, which the format fixes).
+- **cpp** — the descriptor row carries the subtype rather than the guard:
+  `{.wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::Blob, .bound = N, …}`,
+  and `measureField` matches it alongside the wire type (generator#229, below).
 
-The array hooks (`onArrayBegin`/`ArrayBegin`) need no analogue: an array's wire
-type already selects the callback, and the fixlen-array subtype is checked by the
-element callbacks the corelib dispatches to.
+The array hooks (`onArrayBegin`/`ArrayBegin`) get no analogue: an array's wire
+type already selects the callback, and the fixlen-array *element* subtype is
+checked by the element callbacks the corelib dispatches to.
 
-Two adjacent findings from the same audit:
+That last point is a **known, deliberate asymmetry**, uniform across the family
+rather than a per-backend gap. For a fixlen array the `count` word precedes the
+`fixlen_word` on the wire, so at the moment the count bound is decided the element
+subtype is not yet known — dart/go's hooks are handed `(id, count)` and nothing
+else, and cpp's `measureField` would have to defer its `ArrayFixlen` count check
+past the element-size word to see it. So an fp64 array arriving at a declared
+`fp32[] count: N` is **skipped** when its count is within `N` (§7.3, measured
+identical on cpp and go) but reported **INVALID** when its count is above `N` —
+the over-count guard fires first, on a field §7.3 says is not that field's value
+at all. Deciding whether §5.2 should defer here (with the subtype unknown, more
+bytes genuinely could still make the field skippable) is a MESSAGE_SPEC question,
+not a codegen one; until it is settled the family stays uniform. Tracked with the
+measured vectors in **#232**.
+
+Three adjacent findings from the same audit:
 
 - **go, HeaderVisitor is all-or-nothing.** `sofab.HeaderVisitor` declares *both*
   `ArrayBegin` and `FixlenHeader`, and the cursor reaches them through a single
@@ -1004,12 +1022,22 @@ Two adjacent findings from the same audit:
   to fix. A type with any bound now gets both methods; the one with no arms is an
   empty switch. A bound-free type still implements neither, so the max-speed path
   is unchanged.
-- **cpp (pure profile) has the same §7.3 hole, and it is not generator-fixable.**
-  `sofab::schema::FieldBound` carries `id` + `wire` + `bound` and no subtype, and
-  fp32/fp64/string/blob all share `Wire::Fixlen`, so the measure-phase check
-  (`fb->wire == Wire::Fixlen && len > fb->bound`) matches a contradicting subtype
-  and rejects it. Expressing the gate needs a `subtype` field on `FieldBound` in
-  corelib-cpp; tracked separately.
+- **cpp (pure profile) had the same §7.3 hole, in the measure-phase schema rather
+  than a header hook — fixed in generator#229 + corelib-cpp#51.** `FieldBound`
+  carried `id` + `wire` + `bound` and no subtype, and fp32/fp64/string/blob all
+  share `Wire::Fixlen`, so the measure check (`fb->wire == Wire::Fixlen && len >
+  fb->bound`) matched a *contradicting* subtype and rejected it — an fp64 landing
+  on a `maxlen: 4` blob came back `INVALID` where the deliver path (which does
+  gate on `is.fixType()`) and every other backend skip it. `FieldBound` gained a
+  `subtype` member that `measureField` matches alongside the wire type, and the
+  generator emits it on every `Wire::Fixlen` row. The member defaults to
+  `Fix::Fp32` — a subtype no *bounded* fixlen field can declare, since only
+  string/blob carry a `maxlen` — so an unset subtype disables that row's bound
+  instead of misapplying it, and the array/sequence rows that never read it are
+  unchanged. This is the whole §5.2-vs-§7.3 interaction: a skipped field carries
+  **no** bound, so it is measured for completeness only (a truncated skipped field
+  is `INCOMPLETE`, never `INVALID`), while a *matching* subtype keeps the full
+  anti-folding order.
 - **typescript is clean by construction** — the generated `c.wire !== Fixlen ||
   c.fixSub !== …` guard runs *before* `readString(N)`/`readBlob(N)`, so a
   mismatched subtype is skipped and never reaches the bounded reader.
