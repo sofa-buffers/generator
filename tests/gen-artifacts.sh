@@ -22,12 +22,16 @@ for d in "$ROOT"/tests/matrix/corpus/defs/*.yaml; do
 done
 
 # Alternate corelib to ALSO generate, for the languages that have two.
-# ALT_EXTRA carries any extra config the variant needs: both embedded profiles
-# (the corelib-c-cpp wrapper, and corelib-rs-no-std which now defaults to a
-# genuinely no_std/heap-free crate) use fixed-capacity containers and reject
-# unbounded fields, so allow_dynamic keeps a heap fallback for the intentionally
-# unbounded fields in the corpus (example.yaml's somemap, the no_maxlen def) —
-# same rationale as tests/conformance/{cpp,rust}/run.sh.
+# ALT_EXTRA carries any extra config the variant needs.
+#
+# For cpp the alternate is the embedded corelib-c-cpp profile, where every field
+# must be bounded whatever storage it uses — allow_dynamic selects std::string /
+# std::vector for those bounded fields, it does not make a bound optional. So the
+# deliberately-unbounded corpus inputs are handled the same way as for the C
+# target below: no_maxlen is skipped, example.yaml's `somemap` gets a capacity.
+# rust's rs-no-std still uses allow_dynamic in its original sense (a heap
+# fallback for unbounded fields), so it needs no such handling.
+# Same rationale as tests/conformance/{cpp,rust}/run.sh.
 ALT_CORELIB=""
 ALT_EXTRA=""
 case "$LANG_KEY" in
@@ -47,7 +51,7 @@ fi
 # input), and example.yaml's intentionally-dynamic `somemap` gets an explicit
 # capacity — same handling as tests/conformance/c/run.sh. `count` never reaches
 # the wire, so the generated wire bytes are unchanged.
-if [ "$LANG_KEY" = "c" ]; then
+if [ "$LANG_KEY" = "c" ] || [ "$ALT_CORELIB" = "c-cpp" ]; then
     C_EXAMPLE=$(mktemp)
     awk '
       /^      somemap:/ { inmap=1 }
@@ -69,7 +73,14 @@ for def in $DEFS; do
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang "$LANG_KEY" --in "$src" --out "$OUT/$name" )
     count=$((count + 1))
     if [ -n "$ALT_CORELIB" ]; then
-        ( cd "$ROOT" && go run ./cmd/sofabgen --config "$ALT_CFG" --lang "$LANG_KEY" --in "$def" --out "$OUT/$name-$ALT_CORELIB" )
+        alt_src="$def"
+        if [ "$ALT_CORELIB" = "c-cpp" ]; then
+            case "$name" in
+                no_maxlen) continue ;;
+                example)   alt_src="$C_EXAMPLE" ;;
+            esac
+        fi
+        ( cd "$ROOT" && go run ./cmd/sofabgen --config "$ALT_CFG" --lang "$LANG_KEY" --in "$alt_src" --out "$OUT/$name-$ALT_CORELIB" )
     fi
 done
 
