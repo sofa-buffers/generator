@@ -14,7 +14,7 @@ static_assert(sofab::API_VERSION == 1,
 
 namespace sofabuffers {
 
-struct ProbeInner : sofab::OStreamMessage, sofab::IStreamMessage {
+struct ProbeInner : sofab::Message {
     std::int32_t x = 0;
 
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
@@ -33,17 +33,17 @@ struct ProbeInner : sofab::OStreamMessage, sofab::IStreamMessage {
     }
 };
 
-struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
+struct Probe : sofab::Message {
     double ratio = 0.0;
-    sofab::FixedString<8> name = "";
-    sofab::FixedBytes<8> data = {};
-    std::array<std::uint32_t, 3> fixed = {};
-    std::array<std::uint32_t, 0> free = {};
-    sofab::InlineVector<sofab::FixedString<4>, 2> tags = {};
+    std::string name = "";
+    std::vector<std::uint8_t> data = {};
+    std::vector<std::uint32_t> fixed = {};
+    std::vector<std::uint32_t> free = {};
+    std::vector<std::string> tags = {};
     ProbeInner inner = {};
     std::uint32_t count = 0;
     std::int32_t delta = 0;
-    static constexpr std::size_t _maxSize = 4096;
+    static constexpr std::size_t _maxSize = 154;
 
     std::vector<std::uint8_t> encode() const {
         sofab::OStreamInline<_maxSize> os;
@@ -76,12 +76,12 @@ struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
         if (delta != 0) { (void)os.write(1, delta); }
         if (ratio != 0.0) { (void)os.write(2, ratio); }
         if (name != "") { (void)os.write(3, name); }
-        if (data != sofab::FixedBytes<8>{}) { (void)os.write(4, data.data(), static_cast<std::int32_t>(data.size())); }
-        if (fixed != std::array<std::uint32_t, 3>{}) {
+        if (data != std::vector<std::uint8_t>{}) { (void)os.write(4, data.data(), static_cast<std::int32_t>(data.size())); }
+        if (fixed != std::vector<std::uint32_t>{}) {
             (void)os.write(5, sofab::trimTail(fixed));
         }
-        if (free != std::array<std::uint32_t, 0>{}) {
-            (void)os.write(6, free);
+        if (free != std::vector<std::uint32_t>{}) {
+            (void)os.write(6, sofab::trimTail(free));
         }
         (void)os.sequenceBegin(7);
         { sofab::id _i0 = 0; for (const auto &_e0 : tags) { if (!_e0.empty()) { (void)os.write(_i0, _e0); } ++_i0; } }
@@ -90,7 +90,7 @@ struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
         return os.writeIf(0, false, false);
     }
 
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t _count) noexcept override {
         switch (id) {
         case 0:
             if (is.wire() != sofab::Wire::Unsigned) break;
@@ -106,24 +106,30 @@ struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
             break;
         case 3:
             if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) break;
-            name.set_len(_size); if (_size) is.read(name);
+            if (_size > 8) { is.invalidate(); return; }
+            name.assign(_size, '\0'); if (_size) is.read(name);
             break;
         case 4:
             if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) break;
-            data.set_len(_size); is.read(data.data(), data.size());
+            if (_size > 8) { is.invalidate(); return; }
+            data.resize(_size); is.read(data.data(), _size);
             break;
         case 5:
             if (is.wire() != sofab::Wire::ArrayUnsigned) break;
+            if (_count > 3) { is.invalidate(); return; }
+            fixed.resize(_count);
             is.read(fixed);
             break;
         case 6:
             if (is.wire() != sofab::Wire::ArrayUnsigned) break;
+            if (_count > 4) { is.invalidate(); return; }
+            free.resize(_count);
             is.read(free);
             break;
         case 7:
             if (is.wire() != sofab::Wire::SequenceStart) break;
             tags.clear();
-            { static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<4>, 2>> _r0; _r0.out = &tags; is.read(_r0); }
+            { static sofab::StringSeq _r0; _r0.out = &tags; _r0.cap = 2; _r0.elemMax = 4; is.read(_r0); }
             break;
         case 8:
             if (is.wire() != sofab::Wire::SequenceStart) break;

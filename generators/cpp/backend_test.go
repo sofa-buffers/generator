@@ -328,22 +328,37 @@ func TestCppFixedContainers(t *testing.T) {
 }
 
 // TestCppFixedUnbounded: an unbounded field (array without count) is a hard error
-// under the fixed profile, unless allow_dynamic keeps a std::vector fallback.
+// under the embedded profile in BOTH storage modes. allow_dynamic selects the
+// container a bounded field lives in; it never makes a bound optional, so one
+// schema stays valid for every c-cpp target.
 func TestCppFixedUnbounded(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      m: { id: 0, type: array, items: { type: struct, fields: { k: { id: 0, type: i32 } } } }\n"
-	if _, err := fixedHeader(t, src, "m.hpp", nil); err == nil {
-		t.Fatal("expected unbounded-field error under fixed profile")
-	} else if !strings.Contains(err.Error(), "has no count") {
-		t.Errorf("unexpected error: %v", err)
+	for _, dyn := range []bool{false, true} {
+		cfg := map[string]any{"allow_dynamic": dyn}
+		if _, err := fixedHeader(t, src, "m.hpp", cfg); err == nil {
+			t.Fatalf("allow_dynamic=%v: expected unbounded-field error", dyn)
+		} else if !strings.Contains(err.Error(), "has no count") {
+			t.Errorf("allow_dynamic=%v: unexpected error: %v", dyn, err)
+		}
 	}
-	// allow_dynamic keeps a std::vector fallback and generates cleanly.
-	h, err := fixedHeader(t, src, "m.hpp", map[string]any{"allow_dynamic": true})
+	// Bounded, it generates in both modes — inline by default, heap under
+	// allow_dynamic.
+	bounded := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      m: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: i32 } } } }\n"
+	h, err := fixedHeader(t, bounded, "m.hpp", nil)
 	if err != nil {
-		t.Fatalf("allow_dynamic should generate: %v", err)
+		t.Fatalf("bounded should generate: %v", err)
 	}
-	if !strings.Contains(h, "std::vector<MMElem") && !strings.Contains(h, "std::vector<") {
-		t.Error("allow_dynamic should keep a std::vector fallback for the unbounded field")
+	if !strings.Contains(h, "sofab::InlineVector<") {
+		t.Error("default storage should be inline")
+	}
+	h, err = fixedHeader(t, bounded, "m.hpp", map[string]any{"allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("bounded under allow_dynamic should generate: %v", err)
+	}
+	if !strings.Contains(h, "std::vector<") || strings.Contains(h, "sofab::InlineVector<") {
+		t.Error("allow_dynamic should put the bounded sequence in a std::vector")
 	}
 }
 
@@ -363,32 +378,70 @@ func TestCppFixedUnboundedNativeArray(t *testing.T) {
 	}
 }
 
-// TestCppFixedUnboundedString: a string without maxlen is now an unbounded field
-// (no more string exemption) — a hard error, unless allow_dynamic keeps a
-// std::string fallback. A bounded string still becomes FixedString even under
-// allow_dynamic.
+// TestCppFixedUnboundedString: a string without maxlen is an unbounded field (no
+// string exemption) and a hard error in both storage modes.
 func TestCppFixedUnboundedString(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s: { id: 0, type: string }\n"
-	if _, err := fixedHeader(t, src, "m.hpp", nil); err == nil {
-		t.Fatal("expected unbounded-string error under fixed profile")
-	} else if !strings.Contains(err.Error(), "has no maxlen") {
-		t.Errorf("unexpected error: %v", err)
+	for _, dyn := range []bool{false, true} {
+		cfg := map[string]any{"allow_dynamic": dyn}
+		if _, err := fixedHeader(t, src, "m.hpp", cfg); err == nil {
+			t.Fatalf("allow_dynamic=%v: expected unbounded-string error", dyn)
+		} else if !strings.Contains(err.Error(), "has no maxlen") {
+			t.Errorf("allow_dynamic=%v: unexpected error: %v", dyn, err)
+		}
 	}
-	// allow_dynamic keeps the unbounded string as std::string, but a bounded one
-	// still becomes FixedString.
-	src2 := "version: 1\nmessages:\n  M:\n    payload:\n" +
-		"      s: { id: 0, type: string }\n" +
-		"      t: { id: 1, type: string, maxlen: 12 }\n"
-	h, err := fixedHeader(t, src2, "m.hpp", map[string]any{"allow_dynamic": true})
+}
+
+// TestCppDynamicStorage: with every bound in place, allow_dynamic swaps the
+// storage and nothing else. The maxlen/count that were the inline container's
+// capacity become explicit rejects on the decode path, so the same schema keeps
+// the same wire contract on a target that has a heap.
+func TestCppDynamicStorage(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s: { id: 0, type: string, maxlen: 12 }\n" +
+		"      b: { id: 1, type: blob, maxlen: 8 }\n" +
+		"      a: { id: 2, type: array, items: { type: u32, count: 4 } }\n" +
+		"      t: { id: 3, type: array, items: { type: string, count: 2, maxlen: 5 } }\n"
+
+	fix, err := fixedHeader(t, src, "m.hpp", nil)
 	if err != nil {
-		t.Fatalf("allow_dynamic should generate: %v", err)
+		t.Fatalf("inline: %v", err)
 	}
-	if !strings.Contains(h, "std::string s = \"\";") {
-		t.Error("unbounded string under allow_dynamic should stay std::string")
+	for _, want := range []string{
+		"sofab::FixedString<12> s", "sofab::FixedBytes<8> b",
+		"std::array<std::uint32_t, 4> a", "sofab::InlineVector<sofab::FixedString<5>, 2> t",
+	} {
+		if !strings.Contains(fix, want) {
+			t.Errorf("inline storage: missing %q", want)
+		}
 	}
-	if !strings.Contains(h, "sofab::FixedString<12> t = \"\";") {
-		t.Error("bounded string should still be FixedString even under allow_dynamic")
+
+	dyn, err := fixedHeader(t, src, "m.hpp", map[string]any{"allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("dynamic: %v", err)
+	}
+	for _, want := range []string{
+		"std::string s", "std::vector<std::uint8_t> b",
+		"std::vector<std::uint32_t> a", "std::vector<std::string> t",
+	} {
+		if !strings.Contains(dyn, want) {
+			t.Errorf("dynamic storage: missing %q", want)
+		}
+	}
+	if strings.Contains(dyn, "sofab::Fixed") || strings.Contains(dyn, "sofab::InlineVector") {
+		t.Error("dynamic storage should use no inline container")
+	}
+	// Each bound survives as a check, since it is no longer a capacity.
+	for _, want := range []string{
+		"if (_size > 12) { is.invalidate(); return; }",
+		"if (_size > 8) { is.invalidate(); return; }",
+		"if (_count > 4) { is.invalidate(); return; }",
+		"_r0.cap = 2; _r0.elemMax = 5;",
+	} {
+		if !strings.Contains(dyn, want) {
+			t.Errorf("dynamic decode: missing bound check %q", want)
+		}
 	}
 }
 

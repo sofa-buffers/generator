@@ -23,17 +23,16 @@ gen cpp cpp example.yaml 'targets:
     namespace: sofabuffers
 '
 
-# footprint C++ (corelib-c-cpp), heap allowed: unbounded fields become
-# std::vector / std::string
-gen c-cpp-dynamic cpp example.yaml 'targets:
+# footprint C++ (corelib-c-cpp) with heap storage: the same bounded schema,
+# std::string / std::vector instead of inline containers
+gen c-cpp-dynamic cpp example-bounded.yaml 'targets:
   cpp:
     namespace: sofabuffers
     corelib: c-cpp
     allow_dynamic: true
 '
 
-# footprint C++ (corelib-c-cpp), no heap at all: every field is inline storage,
-# unbounded fields need a declared bound or are rejected at generate time
+# footprint C++ (corelib-c-cpp), default: every field inline, no allocation
 gen c-cpp-static cpp example-bounded.yaml 'targets:
   cpp:
     namespace: sofabuffers

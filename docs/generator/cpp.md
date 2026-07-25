@@ -9,7 +9,7 @@ Options accepted under `targets.cpp`. For shared options (`emit`,
 |--------|------|---------|--------|
 | `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
 | `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets. This also picks the container representation: `cpp` = dynamic (`std::vector`/`std::string`), `c-cpp` = fixed-capacity/heap-free (see below). |
-| `allow_dynamic` | bool | `false` | `corelib: c-cpp` only. Keep a `std::vector`/`std::string` heap fallback for genuinely unbounded fields instead of failing generation. |
+| `allow_dynamic` | bool | `false` | `corelib: c-cpp` only. Store bounded fields in `std::string`/`std::vector` instead of inline containers, for a target with a heap. Bounds stay mandatory either way. |
 | `namespace` | string | `message` | C++ namespace wrapping the generated types. Also settable in `generic`. |
 | `max_dyn_array_count` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only (`c-cpp` is statically schema-bounded). Emits a per-field `is.exceedLimit()` guard on unbounded count-prefixed arrays; `feed()`/`try_decode` then return `Error::LimitExceeded`. |
 | `max_dyn_string_len` / `max_dyn_blob_len` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only. Per-field `_size` guard on unbounded strings/blobs. |
@@ -124,20 +124,45 @@ non-allocating `encodeTo(dst, cap)` is also emitted alongside the convenience
 `encode()`.
 
 **Unbounded fields.** A string or blob without `maxlen`, or an array without
-`count`, cannot be sized, so on the `c-cpp` path such a field fails generation with
-an error naming the field and the missing attribute — unless `allow_dynamic: true`
-keeps a `std::string`/`std::vector` fallback for it (bounded fields still go
-fixed). This makes "no hidden allocation" the default guarantee: size your schema,
-or consciously opt a field into a heap fallback. The `count` requirement covers
-**every** array element kind, including a plain numeric array: a count-less native
-scalar array (e.g. `array` of `u32`) is rejected too, rather than silently
-lowering to a zero-length `std::array<T, 0>` (generator#104).
+`count`, cannot be sized, so on the `c-cpp` path such a field fails generation
+with an error naming the field and the missing attribute. That holds in **both**
+storage modes — `allow_dynamic` picks the container, never whether a bound is
+needed — so one schema stays valid for every `c-cpp` target. The `count`
+requirement covers **every** array element kind, including a plain numeric array:
+a count-less native scalar array (e.g. `array` of `u32`) is rejected too, rather
+than silently lowering to a zero-length `std::array<T, 0>` (generator#104). For
+genuinely unbounded fields, use `corelib: cpp`.
+
+**Storage mode (`allow_dynamic`).** With every field bounded, the switch chooses
+where those fields live:
+
+| schema | default (inline) | `allow_dynamic: true` |
+|---|---|---|
+| `string, maxlen 8` | `sofab::FixedString<8>` | `std::string` |
+| `blob, maxlen 8` | `sofab::FixedBytes<8>` | `std::vector<std::uint8_t>` |
+| `array u32, count 3` | `std::array<std::uint32_t, 3>` | `std::vector<std::uint32_t>` |
+| `array string, count 2, maxlen 4` | `sofab::InlineVector<sofab::FixedString<4>, 2>` | `std::vector<std::string>` |
+
+Inline is the default and the one that guarantees no allocation at all: the
+worst case is the object's size, known at compile time. Dynamic suits a target
+that has a heap and the C++ stdlib — a field then holds what the message
+actually carries rather than its declared worst case, and a message moves
+instead of copying, which matters once a bound is large enough that the inline
+object no longer fits comfortably on a stack.
+
+The bounds do not weaken. What was the inline container's capacity becomes an
+explicit check on the decode path (`_size > maxlen` / `_count > count` →
+`invalidate()`, and `cap`/`elemMax` on the sequence collectors), placed after the
+§7.3 wire-type guard and before the resize — so an over-long field is rejected as
+`INVALID` rather than allocating what the bound exists to prevent. Encode output
+and `_maxSize` are identical in both modes, so the two interoperate byte for
+byte.
 
 The `encode()` convenience method still returns a `std::vector<std::uint8_t>`
 (heap) for host-side use; embedded callers use the non-allocating
-`encodeTo(dst, cap)`. Because `encode()` and the `allow_dynamic` fallbacks may
-still use `std::string`/`std::vector`, the `<string>`/`<vector>` header includes
-are retained.
+`encodeTo(dst, cap)`. Because `encode()` — and, under `allow_dynamic`, the field
+storage itself — uses `std::string`/`std::vector`, the `<string>`/`<vector>`
+header includes are retained.
 
 Note: the `-Os -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti`
 compile flags and `-Wl,--gc-sections` link flag ship in the generated `c-cpp`
@@ -148,8 +173,8 @@ compile flags and `-Wl,--gc-sections` link flag ship in the generated `c-cpp`
 targets:
   cpp:
     namespace: myproj
-    corelib: c-cpp        # fixed-capacity, heap-free containers
-    allow_dynamic: true   # optional: keep std::vector/std::string for unbounded fields
+    corelib: c-cpp        # embedded profile; every field must be bounded
+    allow_dynamic: true   # optional: std::string/std::vector storage (needs a heap)
 ```
 
 ## Struct member order (widest-first)

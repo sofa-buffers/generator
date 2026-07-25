@@ -14,7 +14,7 @@ static_assert(sofab::API_VERSION == 1,
 
 namespace sofabuffers {
 
-struct ProbeInner : sofab::OStreamMessage, sofab::IStreamMessage {
+struct ProbeInner : sofab::Message {
     std::int32_t x = 0;
 
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
@@ -33,7 +33,7 @@ struct ProbeInner : sofab::OStreamMessage, sofab::IStreamMessage {
     }
 };
 
-struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
+struct Probe : sofab::Message {
     double ratio = 0.0;
     sofab::FixedString<8> name = "";
     sofab::FixedBytes<8> data = {};
