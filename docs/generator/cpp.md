@@ -14,7 +14,32 @@ Options accepted under `targets.cpp`. For shared options (`emit`,
 | `max_dyn_array_count` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only (`c-cpp` is statically schema-bounded). Emits a per-field `is.exceedLimit()` guard on unbounded count-prefixed arrays; `feed()`/`try_decode` then return `Error::LimitExceeded`. |
 | `max_dyn_string_len` / `max_dyn_blob_len` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only. Per-field `_size` guard on unbounded strings/blobs. |
 
-Setting any of the three also derives a streaming reassembly cap, passed as
+### What the two profile keys combine into
+
+`corelib` picks the runtime; `allow_dynamic` picks the storage inside the
+embedded profile. The three usable combinations:
+
+| `corelib` | `allow_dynamic` | Storage | Bounds | Heap |
+|---|---|---|---|---|
+| `cpp` (default) | *ignored* | `std::string` / `std::vector` | optional; `max_dyn_*` caps what the schema leaves open | yes |
+| `c-cpp` | `false` (default) | `FixedString<N>` / `FixedBytes<N>` / `std::array` / `InlineVector<T,N>` | **mandatory** | none on the message path |
+| `c-cpp` | `true` | `std::string` / `std::vector` | **mandatory** | yes |
+
+The two `c-cpp` rows accept exactly the same schemas and produce byte-identical
+encode output and the same `_maxSize`, so the switch is a per-device decision and
+never a schema change. What differs is where a field's bytes live, and therefore
+what a message costs to hold and to move.
+
+### `encode()` and `encodeTo()`
+
+Every message gets both. `encode()` returns a `std::vector<std::uint8_t>`: one
+allocation at `_maxSize`, serialized into directly, then shrunk to the bytes
+actually written — no staging buffer and no copy. `encodeTo(dst, cap)` writes
+into storage the caller already owns and allocates nothing at all; it returns the
+byte count, or `0` if the message does not fit in `cap`, in which case `dst`
+holds however much was written before that was discovered.
+
+Setting any of the three `max_dyn_*` keys also derives a streaming reassembly cap, passed as
 `sofab::Limits{max_buffered_field}` into the one-shot decode entry points, that
 bounds how much the corelib buffers for a single incomplete field. It is a **byte**
 budget, so it is the largest byte *span* any one top-level field can legitimately

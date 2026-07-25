@@ -15,7 +15,7 @@ import (
 //
 //	for l in c cpp go python typescript rust csharp java zig docs; do \
 //	  go run ./cmd/sofabgen --lang $l --in tests/matrix/corpus/defs/scalars.yaml \
-//	    --out tests/matrix/golden/$l; done
+//	    --out tests/matrix/testdata/golden/$l; done
 func TestGoldenOutput(t *testing.T) {
 	s, err := buildIR(t, "corpus/defs/scalars.yaml")
 	if err != nil {

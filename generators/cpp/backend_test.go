@@ -288,8 +288,8 @@ func TestCppFixedContainers(t *testing.T) {
 		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",                    // string sequence -> inline
 		"sofab::InlineVector<MPtsElem",                                                 // struct sequence -> inline (prefix)
 		"if (bl != sofab::FixedBytes<16>{}) {",                                         // blob default-compare typed
-		"s.set_len(_size); if (_size) is.read(s);",                                     // FixedString decode
-		"bl.set_len(_size); is.read(bl.data(), bl.size());",                            // FixedBytes decode: clamped size, not raw _size (issue #95)
+		"is.readString(s, _size, 8);",                                                  // FixedString decode, bound carried into the corelib read
+		"is.readBlob(bl, _size, 16);",                                                 // FixedBytes decode, likewise (issue #95)
 		"static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",     // blob-seq collector
 		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
 		"static sofab::FixedMessageSeq<sofab::InlineVector<",                           // struct-seq collector
@@ -432,11 +432,13 @@ func TestCppDynamicStorage(t *testing.T) {
 	if strings.Contains(dyn, "sofab::Fixed") || strings.Contains(dyn, "sofab::InlineVector") {
 		t.Error("dynamic storage should use no inline container")
 	}
-	// Each bound survives as a check, since it is no longer a capacity.
+	// Each bound survives as a check — it rides into the corelib read, which
+	// applies it after the §7.3 tag match and before it sizes the destination.
+	// The two storage modes emit the same calls; only the members differ.
 	for _, want := range []string{
-		"if (_size > 12) { is.invalidate(); return; }",
-		"if (_size > 8) { is.invalidate(); return; }",
-		"if (_count > 4) { is.invalidate(); return; }",
+		"is.readString(s, _size, 12);",
+		"is.readBlob(b, _size, 8);",
+		"is.readArray(a, _count, 4);",
 		"_r0.cap = 2; _r0.elemMax = 5;",
 	} {
 		if !strings.Contains(dyn, want) {
@@ -762,11 +764,12 @@ func TestCppFixedCountTrimsTrailingDefaultRun(t *testing.T) {
 			if !strings.Contains(h, "std::array<std::uint32_t, 5> u32s = {};") {
 				t.Errorf("[%s] fixed-count array must stay a zero-filled std::array:\n%s", corelib, h)
 			}
-			// Pure cpp reads through readArray (which carries the bound and the
-			// reset); the c-cpp wrapper still uses the plain span read.
+			// Both corelibs read through readArray, which carries the bound and
+			// performs the reset behind the tag match; the c-cpp signature also
+			// takes the wire count, since it sizes a dynamic destination.
 			wantRead := "is.readArray(u32s, 5);"
 			if corelib == "c-cpp" {
-				wantRead = "is.read(u32s);"
+				wantRead = "is.readArray(u32s, _count, 5);"
 			}
 			if !strings.Contains(h, wantRead) {
 				t.Errorf("[%s] fixed-count decode must read the whole array (%s):\n%s", corelib, wantRead, h)
@@ -838,24 +841,22 @@ func TestCppFixedCountResetsSchemaDefaultTail(t *testing.T) {
 			}
 			// A non-zero schema default must be reset on decode so the elements the
 			// encoder trimmed off the tail come back as the ELEMENT default, not as
-			// that schema default (MESSAGE_SPEC S3). On the pure path readArray does
-			// it — behind the tag match and the bound, which is the order that makes
-			// a §7.3-skipped or rejected occurrence leave the target alone. The c-cpp
-			// wrapper has no such call and still resets in the arm.
-			if corelib == "c-cpp" {
-				for _, want := range []string{"\n            c = {};", "\n            d = {};", "\n            e = {};"} {
-					if !strings.Contains(h, want) {
-						t.Errorf("[%s] missing fixed-array reset %q:\n%s", corelib, want, h)
-					}
-				}
-			} else {
+			// that schema default (MESSAGE_SPEC S3). Both corelibs now do it inside
+			// readArray — behind the tag match and the bound, which is the order
+			// that makes a §7.3-skipped or rejected occurrence leave the target
+			// alone. Neither profile resets in the arm any more.
+			{
 				for _, bad := range []string{"\n            c = {};", "\n            d = {};", "\n            e = {};"} {
 					if strings.Contains(h, bad) {
 						t.Errorf("[%s] the arm must not reset %q — readArray does it behind the bound:\n%s", corelib, bad, h)
 					}
 				}
-				if !strings.Contains(h, "is.readArray(c, 5);") {
-					t.Errorf("[%s] the bound must ride into readArray:\n%s", corelib, h)
+				wantRead := "is.readArray(c, 5);"
+				if corelib == "c-cpp" {
+					wantRead = "is.readArray(c, _count, 5);"
+				}
+				if !strings.Contains(h, wantRead) {
+					t.Errorf("[%s] the bound must ride into readArray (%s):\n%s", corelib, wantRead, h)
 				}
 			}
 			// A field with no schema default, or an all-zero one, already declares an
@@ -969,12 +970,18 @@ messages:
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"if (is.wire() != sofab::Wire::Unsigned) break;",
-		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) break;",
-	} {
+	// No profile emits a wire comparison any more. The c-cpp wrapper was the last
+	// one to: its C decoder now unbinds a contradicting read and skips the field,
+	// and the arms that must touch their destination before binding it go through
+	// readString/readBlob/readArray/readSequence, which settle the tag first.
+	for _, bad := range []string{"is.wire()", "is.fixType()"} {
+		if strings.Contains(h, bad) {
+			t.Errorf("c-cpp deserialize must carry no %q comparison:\n%s", bad, h)
+		}
+	}
+	for _, want := range []string{"is.read(a);", "is.readString(b, _size, 8);"} {
 		if !strings.Contains(h, want) {
-			t.Errorf("c-cpp profile must emit the §7.3 guard %q\n%s", want, h)
+			t.Errorf("c-cpp profile must emit %q\n%s", want, h)
 		}
 	}
 }

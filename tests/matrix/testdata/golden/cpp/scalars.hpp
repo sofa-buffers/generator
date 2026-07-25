@@ -26,9 +26,17 @@ struct Scalars : sofab::Message {
     static constexpr std::size_t _maxSize = 82;
 
     std::vector<std::uint8_t> encode() const {
-        sofab::OStreamInline<_maxSize> os;
+        std::vector<std::uint8_t> out(_maxSize);
+        sofab::OStreamView os{out.data(), out.size()};
         serialize(os);
-        return std::vector<std::uint8_t>(os.data(), os.data() + os.bytesUsed());
+        out.resize(os.bytesUsed());
+        return out;
+    }
+    std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {
+        sofab::OStreamView os{dst, cap};
+        serialize(os);
+        if (!os.ok()) { return 0; }
+        return os.bytesUsed();
     }
     static Scalars decode(const std::uint8_t *data, std::size_t len) {
         sofab::IStreamObject<Scalars> in;

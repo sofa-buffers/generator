@@ -175,20 +175,20 @@ func cppFixSubtype(k ir.Kind) string {
 
 // cppNeedsWireGuard reports whether a field still needs a generated §7.3 guard.
 //
-// On the pure-corelib-cpp path the guard has moved into the corelib: every typed
-// read compares the delivered field's wire tag against the one the read declares
-// and leaves a contradicting field unconsumed, so the driver skips it (the "seam",
-// docs/models/type-reconciliation.md). A guard is still emitted for:
+// It never does any more. The comparison belongs in the corelib, where a typed
+// read knows both the tag it declares and the one that was delivered, and both
+// C++ corelibs now make it there: corelib-cpp inside every typed read (the seam,
+// docs/models/type-reconciliation.md), and the corelib-c-cpp wrapper either in
+// the C decoder — which unbinds a contradicting read and skips the field like an
+// unknown id — or, where the arm has to touch its destination before binding it,
+// in readString/readBlob/readArray/readSequence, which check the tag before that
+// first side effect.
 //
-// the c-cpp wrapper, whose C layer reports a bound-type mismatch as a usage error
-// rather than skipping — its own step in the sequencing.
-//
-// Arrays were the last holdout on the pure path: their arm resets the destination
-// before reading, so the decision had to precede it. readArray()/prepare() now
-// fold the reset behind the tag match inside the corelib, so those guards are gone
-// too and the pure-cpp deserialize carries no wire comparison at all.
-func cppNeedsWireGuard(_ *ir.Field, clib bool) bool {
-	return clib
+// Kept as a function rather than deleted so the reasoning above stays attached to
+// the decision, and so a future shape that genuinely needs a generated guard has
+// somewhere to say so.
+func cppNeedsWireGuard(_ *ir.Field, _ bool) bool {
+	return false
 }
 
 // cppWireGuard renders the §7.3 condition guarding one case arm: the wire type

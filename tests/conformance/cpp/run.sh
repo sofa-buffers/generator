@@ -55,17 +55,32 @@ run_variant() {
     label=$1; corelib=$2; include=$3; shift 3
     echo "==> [$label] generating + building example project"
     if [ -n "$corelib" ]; then
-        # corelib-c-cpp defaults to the fixed-capacity (embedded) containers
-        # profile; allow_dynamic keeps a std::vector/std::string fallback for the
-        # intentionally-unbounded fields in example.yaml (somemap) and the
-        # no_maxlen corpus def, so the rich corpus still exercises both paths.
+        # corelib-c-cpp is the embedded profile: every string/blob needs a maxlen
+        # and every array a count, in BOTH storage modes. allow_dynamic selects
+        # std::string/std::vector storage for those bounded fields (a target with
+        # a heap), which is what this leg exercises — it does not make a bound
+        # optional, so the schemas below are bounded first (see EXAMPLE).
         printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: true } }\n' "$corelib" > "$WORK/cfg-$label.yaml"
         printf 'targets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: true } }\n' "$corelib" > "$WORK/cfg-corpus-$label.yaml"
     else
         printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-$label.yaml"
         printf 'targets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-corpus-$label.yaml"
     fi
-    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in examples/messages/example.yaml --out "$WORK/ex-$label" )
+    # example.yaml leaves `somemap` deliberately count-less to show the dynamic
+    # form. The embedded profile cannot size that, so this leg gives it a capacity
+    # — exactly what a schema author targeting an MCU does, and exactly what
+    # tests/conformance/c/run.sh already does for the C target. `count` never
+    # reaches the wire, so the round-trip and the shared vectors are unchanged.
+    EXAMPLE="$ROOT/examples/messages/example.yaml"
+    if [ -n "$corelib" ]; then
+        EXAMPLE="$WORK/example-$label.yaml"
+        awk '
+          /^      somemap:/ { inmap=1 }
+          inmap && /^          type: struct$/ { print; print "          count: 8"; inmap=0; next }
+          { print }
+        ' "$ROOT/examples/messages/example.yaml" > "$EXAMPLE"
+    fi
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$EXAMPLE" --out "$WORK/ex-$label" )
     make -C "$WORK/ex-$label" "$@" >/dev/null
 
     echo "==> [$label] JSON encode -> decode round-trip"
@@ -324,6 +339,11 @@ run_variant() {
 
     echo "==> [$label] corpus + realworld: every definition compiles"
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+        # no_maxlen.yaml exists to exercise genuinely unbounded string/blob fields.
+        # The embedded profile rejects those by design — in both storage modes —
+        # so it is not a definition this leg can compile, and skipping it is the
+        # honest outcome rather than a bound invented for the test.
+        case "$corelib:$(basename "$def")" in c-cpp:no_maxlen.yaml) continue ;; esac
         name=$(basename "$def" .yaml)
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp --in "$def" --out "$WORK/corpus-$label/$name" >/dev/null )
         for h in "$WORK"/corpus-"$label"/"$name"/*.hpp; do
@@ -521,7 +541,7 @@ subset_cpp() {  # label  expect(ok|fail)  "DISABLE flags"  "yaml"
 # Definitions that AVOID the disabled feature must still compile.
 subset_cpp noarray ok "-DSOFAB_DISABLE_ARRAY_SUPPORT" \
     'version: 1
-messages: { m: { payload: { a: {id: 0, type: i32}, s: {id: 1, type: string, maxlen: 16}, st: {id: 2, type: struct, fields: {x: {id: 0, type: i32}}}, sa: {id: 3, type: array, items: {type: string, count: 3}} } } }'
+messages: { m: { payload: { a: {id: 0, type: i32}, s: {id: 1, type: string, maxlen: 16}, st: {id: 2, type: struct, fields: {x: {id: 0, type: i32}}}, sa: {id: 3, type: array, items: {type: string, count: 3, maxlen: 16}} } } }'
 subset_cpp nofp64 ok "-DSOFAB_DISABLE_FP64_SUPPORT" \
     'version: 1
 messages: { m: { payload: { a: {id: 0, type: i32}, f: {id: 1, type: fp32}, s: {id: 2, type: string, maxlen: 16}, arr: {id: 3, type: array, items: {type: u8, count: 4}} } } }'
@@ -530,7 +550,7 @@ subset_cpp noint64 ok "-DSOFAB_DISABLE_INT64_SUPPORT" \
 messages: { m: { payload: { a: {id: 0, type: u32}, b: {id: 1, type: i32}, f: {id: 2, type: fp32}, s: {id: 3, type: string, maxlen: 16}, st: {id: 4, type: struct, fields: {x: {id: 0, type: i32}}} } } }'
 subset_cpp stripped ok "-DSOFAB_DISABLE_ARRAY_SUPPORT -DSOFAB_DISABLE_FP64_SUPPORT -DSOFAB_DISABLE_INT64_SUPPORT" \
     'version: 1
-messages: { m: { payload: { a: {id: 0, type: u8}, b: {id: 1, type: i16}, c: {id: 2, type: i32}, s: {id: 3, type: string, maxlen: 16}, bl: {id: 4, type: blob, maxlen: 8}, st: {id: 5, type: struct, fields: {x: {id: 0, type: i32}}}, sa: {id: 6, type: array, items: {type: string, count: 3}} } } }'
+messages: { m: { payload: { a: {id: 0, type: u8}, b: {id: 1, type: i16}, c: {id: 2, type: i32}, s: {id: 3, type: string, maxlen: 16}, bl: {id: 4, type: blob, maxlen: 8}, st: {id: 5, type: struct, fields: {x: {id: 0, type: i32}}}, sa: {id: 6, type: array, items: {type: string, count: 3, maxlen: 16}} } } }'
 # Definitions that USE the disabled feature must fail to compile.
 subset_cpp use_array fail "-DSOFAB_DISABLE_ARRAY_SUPPORT" \
     'version: 1

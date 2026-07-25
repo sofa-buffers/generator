@@ -360,24 +360,28 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 
 	// per-message encode()/decode() (members so multiple messages don't clash).
 	if isMessage {
+		// encode(): one allocation, no copy. The vector is created at the
+		// schema's worst case, serialized into directly, then shrunk to what was
+		// actually written — resize() downwards never reallocates, so the bytes
+		// stay put and the vector is returned by move. Staging in an
+		// OStreamInline<_maxSize> first would put the worst case on the stack as
+		// well and then copy it across.
 		f.line("    std::vector<std::uint8_t> encode() const {")
-		f.line("        sofab::OStreamInline<_maxSize> os;")
+		f.line("        std::vector<std::uint8_t> out(_maxSize);")
+		f.line("        sofab::OStreamView os{out.data(), out.size()};")
 		f.line("        serialize(os);")
-		f.line("        return std::vector<std::uint8_t>(os.data(), os.data() + os.bytesUsed());")
+		f.line("        out.resize(os.bytesUsed());")
+		f.line("        return out;")
 		f.line("    }")
-		if g.fixed {
-			// Heap-free encode for the embedded profile: serialize straight into
-			// the caller's buffer — no staging copy, and no _maxSize-sized object
-			// on the stack, which for a large schema is the bigger of the two
-			// costs. Returns the byte count, or 0 if the output does not fit in
-			// cap; dst holds however much was written before that was discovered.
-			f.line("    std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {")
-			f.line("        sofab::OStreamView os{dst, cap};")
-			f.line("        serialize(os);")
-			f.line("        if (!os.ok()) { return 0; }")
-			f.line("        return os.bytesUsed();")
-			f.line("    }")
-		}
+		// encodeTo(): the same, into storage the caller already has — no
+		// allocation at all. Returns 0 if the message does not fit in cap, in
+		// which case dst holds however much was written before that was found out.
+		f.line("    std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {")
+		f.line("        sofab::OStreamView os{dst, cap};")
+		f.line("        serialize(os);")
+		f.line("        if (!os.ok()) { return 0; }")
+		f.line("        return os.bytesUsed();")
+		f.line("    }")
 		// Infallible, best-effort decode: kept for back-compat. It discards feed's
 		// Result and always returns a value, so it can never reject malformed input
 		// — prefer try_decode when the accept/reject verdict matters.
@@ -443,11 +447,10 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 			continue
 		}
 		if g.clib {
-			if g.allowDynamic {
-				countParam = "std::size_t _count"
-				break
-			}
-			continue
+			// readArray takes the wire count in both storage modes: it bounds the
+			// count before a dynamic resize, and is what a fixed array is filled to.
+			countParam = "std::size_t _count"
+			break
 		}
 		if fld.HasCount || g.limArrHas || g.dynNativeArray(fld.Elem, fld.Count) {
 			countParam = "std::size_t _count"
@@ -685,19 +688,13 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		if !g.clib && !fld.HasMaxlen && g.limStrHas {
 			f.line("            if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }")
 		}
-		if g.fixed && !g.allowDynamic && fld.HasMaxlen {
-			// FixedString: set_len fixes the logical length (and the trailing NUL);
-			// read binds data()/size() via the same read_string_noterm path. The
-			// capacity clamps, so this profile emits no maxlen reject (unchanged).
-			f.line("            %s.set_len(_size); if (_size) is.read(%s);", acc, acc)
-		} else if g.fixed && fld.HasMaxlen {
-			// Dynamic storage: the maxlen is no longer the container's capacity, so
-			// it becomes an explicit reject — and it has to come BEFORE the resize,
-			// or a message could make the receiver allocate exactly what the bound
-			// exists to prevent. Emitted after the wire-type guard, so a field §7.3
-			// skips is never measured against this maxlen (generator#224/#229).
-			f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
-			f.line("            %s.assign(_size, '\\0'); if (_size) is.read(%s);", acc, acc)
+		if g.fixed {
+			// Both storage modes emit the same call: readString establishes the
+			// delivered type before it touches the destination (§7.3) and rejects
+			// past the maxlen before sizing it (§7.1) — so the arm is identical
+			// whether the destination is a FixedString or a std::string, and the
+			// bound is enforced the same way in both.
+			f.line("            is.readString(%s, _size, %d);", acc, maxlenOr(fld.HasMaxlen, fld.Maxlen))
 		} else if g.clib {
 			f.line("            %s.assign(_size, '\\0'); if (_size) is.read(%s);", acc, acc)
 		} else if fld.HasMaxlen {
@@ -721,20 +718,9 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		if !g.clib && !fld.HasMaxlen && g.limBlobHas {
 			f.line("            if (_size > SOFAB_MAX_DYN_BLOB_LEN) { is.exceedLimit(); return; }")
 		}
-		if g.fixed && !g.allowDynamic && fld.HasMaxlen {
-			// FixedBytes: bound the inline buffer's logical length, then bind the
-			// stable buffer via the wrapper's read(void*,size_t) blob overload.
-			// Pass the clamped size() (not the raw wire _size) so a _size wider
-			// than the inline capacity N cannot overflow the buffer — set_len
-			// already clamped len_ to min(_size, N), mirroring the FixedString
-			// path above. Feeding the unclamped _size overflows (issue #95). Like the
-			// FixedString path, the capacity clamps and no maxlen reject is emitted.
-			f.line("            %s.set_len(_size); is.read(%s.data(), %s.size());", acc, acc, acc)
-		} else if g.fixed && fld.HasMaxlen {
-			// Dynamic storage: reject against the maxlen before sizing, as for the
-			// string case above.
-			f.line("            if (_size > %d) { is.invalidate(); return; }", fld.Maxlen)
-			f.line("            %s.resize(_size); is.read(%s.data(), _size);", acc, acc)
+		if g.fixed {
+			// As for the string arm above.
+			f.line("            is.readBlob(%s, _size, %d);", acc, maxlenOr(fld.HasMaxlen, fld.Maxlen))
 		} else if g.clib {
 			f.line("            %s.resize(_size); is.read(%s.data(), _size);", acc, acc)
 		} else if fld.HasMaxlen {
@@ -782,9 +768,7 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// wrapper's deferred fill still lands on top. Assigning an empty braced
 		// initializer value-initializes in place: no allocation, so the heap-free
 		// profile uses the same reset.
-		if g.clib && g.cppFixedArrayNeedsReset(fld) {
-			f.line("            %s = {};", acc)
-		}
+
 		// A composite array's wrapper sequence IS the array's value (MESSAGE_SPEC
 		// §5), so a field id repeating within one scope REPLACES it whole — unlike a
 		// struct or union, whose re-opened scope continues (§7.4). The collectors
@@ -795,9 +779,7 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// On the pure path the collectors declare prepare(), which read() calls once
 		// the SequenceStart tag matched — so the replace-whole reset happens behind
 		// the §7.3 decision instead of in front of it.
-		if g.clib && !isNativeArrayElem(fld.Elem) {
-			f.line("            %s.clear();", acc)
-		}
+
 		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.ElemMaxHas, fld.ElemMax, 0)
 	}
 }
@@ -811,6 +793,13 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 // still-unfilled bound element.
 // elemMaxOr returns a string/blob wrapper element's schema maxlen bound (L) when
 // present, else -1 (no bound), for the _StrSeq/_BlobSeq collectors' _emax guard.
+func maxlenOr(has bool, m int64) int64 {
+	if has {
+		return m
+	}
+	return -1
+}
+
 func elemMaxOr(has bool, m int64) int64 {
 	if has {
 		return m
@@ -833,17 +822,12 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindFP32, ir.KindFP64, ir.KindBitfield:
-		if g.clib && g.allowDynamic && depth == 0 {
-			// Dynamic storage: the vector carries no capacity for the C runtime to
-			// reject against, so the schema count becomes an explicit check — before
-			// the resize, so an over-count message cannot make the receiver allocate
-			// what the bound exists to prevent. Sizing to the wire count (not to N)
-			// is the point of this mode: allocate what the message carries.
-			if hasCount {
-				f.line("%sif (_count > %d) { is.invalidate(); return; }", ind, count)
-			}
-			f.line("%s%s.resize(_count);", ind, target)
-			f.line("%sis.read(%s);", ind, target)
+		if g.clib && depth == 0 {
+			// readArray settles the tag before it prepares the destination, checks
+			// the wire count against the schema bound before any resize, and only
+			// then binds — so inline and dynamic storage emit the same call and the
+			// arm needs no guard and no reset of its own.
+			f.line("%sis.readArray(%s, _count, %d);", ind, target, cap)
 		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
@@ -884,12 +868,12 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			// Fixed string sequence: fill fixed inline FixedString slots by the
 			// element size via the scalar FixedString read, no heap. Static for the
 			// same deferred-decoder reason as the other fixed collectors.
-			f.line("%s{ static sofab::FixedStringSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, cont, rv, rv, target, rv)
+			f.line("%s{ static sofab::FixedStringSeq<%s> %s; is.readSequence(%s, %s); }", ind, cont, rv, rv, target)
 		} else if g.clib {
 			// Static for the same deferred-decoder reason as the fixed collectors:
 			// the C decoder dereferences it after this returns.
-			f.line("%s{ static sofab::StringSeq %s; %s.out = &%s; %s.cap = %d; %s.elemMax = %d; is.read(%s); }",
-				ind, rv, rv, target, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax), rv)
+			f.line("%s{ static sofab::StringSeq %s; %s.cap = %d; %s.elemMax = %d; is.readSequence(%s, %s); }",
+				ind, rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax), rv, target)
 		} else {
 			f.line("%s{ sofab::StringSeq %s{%s, %d, %d}; is.read(%s); }", ind, rv, target, cap, elemMaxOr(elemMaxHas, elemMax), rv)
 		}
@@ -899,10 +883,10 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			// Fixed blob sequence: fill fixed inline slots by the element size (the
 			// read(void*,size_t) blob overload), no heap. The collector is static
 			// because the corelib-c-cpp decoder dereferences it after this returns.
-			f.line("%s{ static sofab::FixedBlobSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, cont, rv, rv, target, rv)
+			f.line("%s{ static sofab::FixedBlobSeq<%s> %s; is.readSequence(%s, %s); }", ind, cont, rv, rv, target)
 		} else if g.clib {
-			f.line("%s{ static sofab::BlobSeq %s; %s.out = &%s; %s.cap = %d; %s.elemMax = %d; is.read(%s); }",
-				ind, rv, rv, target, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax), rv)
+			f.line("%s{ static sofab::BlobSeq %s; %s.cap = %d; %s.elemMax = %d; is.readSequence(%s, %s); }",
+				ind, rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax), rv, target)
 		} else {
 			f.line("%s{ sofab::BlobSeq %s{%s, %d, %d}; is.read(%s); }", ind, rv, target, cap, elemMaxOr(elemMaxHas, elemMax), rv)
 		}
@@ -929,7 +913,7 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 		// reason as the dynamic clib path. The InlineVector<_,N> capacity is the
 		// schema count, so _MsgSeqFixed's own >= capacity() guard rejects an
 		// over-index element — no separate cap needed here.
-		f.line("%s{ static sofab::FixedMessageSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, container, rv, rv, target, rv)
+		f.line("%s{ static sofab::FixedMessageSeq<%s> %s; is.readSequence(%s, %s); }", ind, container, rv, rv, target)
 		return
 	}
 	if g.clib {
@@ -937,10 +921,10 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 		if count > 0 {
 			reserve = fmt.Sprintf(" %s.reserve(%d);", target, count)
 		}
-		// The c-cpp wrapper's own istream rejects a count/capacity mismatch, so the
-		// heap fallback (allow_dynamic) is the only clib path reaching here; a fixed
-		// count still bounds the index via cap below.
-		f.line("%s{ static sofab::MessageSeq<%s> %s; %s.out = &%s;%s %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, reserve, rv, cap, rv)
+		// readSequence settles the SequenceStart tag before it empties the
+		// destination (§7.4 replaces rather than merges), so no guard is needed;
+		// cap bounds the element index (§5.1).
+		f.line("%s{ static sofab::MessageSeq<%s> %s; %s.cap = %d;%s is.readSequence(%s, %s); }", ind, elemType, rv, rv, cap, reserve, rv, target)
 		return
 	}
 	f.line("%s{ sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, rv, cap, rv)

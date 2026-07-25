@@ -25,7 +25,6 @@ struct ProbeInner : sofab::Message {
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
         switch (id) {
         case 0:
-            if (is.wire() != sofab::Wire::Signed) break;
             is.read(x);
             break;
         default: break;
@@ -51,9 +50,11 @@ struct Probe : sofab::Message {
     Probe() = default;
 
     std::vector<std::uint8_t> encode() const {
-        sofab::OStreamInline<_maxSize> os;
+        std::vector<std::uint8_t> out(_maxSize);
+        sofab::OStreamView os{out.data(), out.size()};
         serialize(os);
-        return std::vector<std::uint8_t>(os.data(), os.data() + os.bytesUsed());
+        out.resize(os.bytesUsed());
+        return out;
     }
     std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {
         sofab::OStreamView os{dst, cap};
@@ -96,46 +97,30 @@ struct Probe : sofab::Message {
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t _count) noexcept override {
         switch (id) {
         case 0:
-            if (is.wire() != sofab::Wire::Unsigned) break;
             is.read(count);
             break;
         case 1:
-            if (is.wire() != sofab::Wire::Signed) break;
             is.read(delta);
             break;
         case 2:
-            if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp64) break;
             is.read(ratio);
             break;
         case 3:
-            if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) break;
-            if (_size > 8) { is.invalidate(); return; }
-            name.assign(_size, '\0'); if (_size) is.read(name);
+            is.readString(name, _size, 8);
             break;
         case 4:
-            if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) break;
-            if (_size > 8) { is.invalidate(); return; }
-            data.resize(_size); is.read(data.data(), _size);
+            is.readBlob(data, _size, 8);
             break;
         case 5:
-            if (is.wire() != sofab::Wire::ArrayUnsigned) break;
-            if (_count > 3) { is.invalidate(); return; }
-            fixed.resize(_count);
-            is.read(fixed);
+            is.readArray(fixed, _count, 3);
             break;
         case 6:
-            if (is.wire() != sofab::Wire::ArrayUnsigned) break;
-            if (_count > 4) { is.invalidate(); return; }
-            free.resize(_count);
-            is.read(free);
+            is.readArray(free, _count, 4);
             break;
         case 7:
-            if (is.wire() != sofab::Wire::SequenceStart) break;
-            tags.clear();
-            { static sofab::StringSeq _r0; _r0.out = &tags; _r0.cap = 2; _r0.elemMax = 4; is.read(_r0); }
+            { static sofab::StringSeq _r0; _r0.cap = 2; _r0.elemMax = 4; is.readSequence(_r0, tags); }
             break;
         case 8:
-            if (is.wire() != sofab::Wire::SequenceStart) break;
             is.read(inner);
             break;
         default: break;
