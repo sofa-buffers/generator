@@ -21,17 +21,8 @@ struct _StrSeq : sofab::IStreamMessage {
     long _cap;
     long _emax;
     explicit _StrSeq(std::vector<std::string> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
-    // MESSAGE_SPEC S7.4: the wrapper sequence IS the array's value, so a repeated
-    // field id replaces it whole. read() calls this once the SequenceStart tag
-    // matched, so an occurrence skipped under S7.3 never reaches it and cannot
-    // wipe a valid earlier one.
     void prepare() noexcept { out.clear(); }
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        // S5.1 makes every element a normal field, so S7.3 applies: an element whose
-        // subtype is not a string is skipped like an unknown id. readString declares
-        // that subtype, so the corelib decides it and counts the skip; the
-        // over-index/maxlen rejects hang off a successful read so they are never
-        // applied to an element that is not this array's (issue #189).
         std::string _s;
         if (!is.readString(_s)) { return; }
         if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
@@ -45,10 +36,8 @@ struct _BlobSeq : sofab::IStreamMessage {
     long _cap;
     long _emax;
     explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
-    void prepare() noexcept { out.clear(); }   // S7.4 replace-whole; see _StrSeq
+    void prepare() noexcept { out.clear(); }
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        // S7.3 (issue #189): readBlob declares the subtype, so a mis-typed element is
-        // skipped by the corelib; it also reads straight into the byte container.
         std::vector<std::uint8_t> _b;
         if (!is.readBlob(_b)) { return; }
         if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
@@ -61,18 +50,10 @@ template <typename T>
 struct _MsgSeq : sofab::IStreamMessage {
     std::vector<T> *out = nullptr;
     void prepare() noexcept { if (out) out->clear(); }
-    // Schema fixed-count bound N (-1 == dynamic/unbounded). An element id >= N is
-    // a schema-bound violation (MESSAGE_SPEC S5.1/S7: an index at or past the
-    // fixed count is INVALID, never grown-into) - reject before emplacing, which
-    // also bounds the allocation against an over-index heap-amplification DoS.
     long cap = -1;
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t _count) noexcept override {
         if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }
         T &row = out->emplace_back();
-        // A count-less native-array row (matrix with dynamic rows) is a std::vector
-        // that the corelib's span read fills only up to its current size, so size it
-        // to the row's wire count first. Struct/union rows are IStreamMessage
-        // (no resize) and fixed std::array rows have no resize(), so both skip this.
         if constexpr (requires { row.resize(_count); } && !std::is_base_of_v<sofab::IStreamMessage, T>) {
             row.resize(_count);
         }

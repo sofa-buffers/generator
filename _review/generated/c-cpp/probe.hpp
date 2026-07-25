@@ -43,8 +43,6 @@ template <typename Container>
 struct _FixedBlobSeq : sofab::IStreamMessage {
     Container *out = nullptr;
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        // S7.3 (issue #189): skip a wrapper element whose wire type/subtype is not a
-        // blob, like an unknown id -- return without read() and the driver skips it.
         if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) { return; }
         if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }
         while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
@@ -57,8 +55,6 @@ template <typename Container>
 struct _FixedStrSeq : sofab::IStreamMessage {
     Container *out = nullptr;
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        // S7.3 (issue #189): skip a wrapper element whose wire type/subtype is not a
-        // string, like an unknown id -- return without read() and the driver skips it.
         if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) { return; }
         if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }
         while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
@@ -70,18 +66,10 @@ struct _FixedStrSeq : sofab::IStreamMessage {
 template <typename T>
 struct _MsgSeq : sofab::IStreamMessage {
     std::vector<T> *out = nullptr;
-    // Schema fixed-count bound N (-1 == dynamic/unbounded). An element id >= N is
-    // a schema-bound violation (MESSAGE_SPEC S5.1/S7: an index at or past the
-    // fixed count is INVALID, never grown-into) - reject before emplacing, which
-    // also bounds the allocation against an over-index heap-amplification DoS.
     long cap = -1;
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t _count) noexcept override {
         if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { return; }
         T &row = out->emplace_back();
-        // A count-less native-array row (matrix with dynamic rows) is a std::vector
-        // that the corelib's span read fills only up to its current size, so size it
-        // to the row's wire count first. Struct/union rows are IStreamMessage
-        // (no resize) and fixed std::array rows have no resize(), so both skip this.
         if constexpr (requires { row.resize(_count); } && !std::is_base_of_v<sofab::IStreamMessage, T>) {
             row.resize(_count);
         }

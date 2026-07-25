@@ -1117,11 +1117,6 @@ func (g *gen) computeSchemaNeeded(m *ir.Message) map[string]bool {
 // post-order emit ensures a child's descriptor precedes any parent that needs it.
 func (g *gen) emitSchemaDescriptor(f *hfile, name string, fields []*ir.Field) {
 	bounds := g.schemaBounds(fields)
-	f.line("// Measure-phase schema (generator#216): rejects an over-count / over-maxlen")
-	f.line("// / over-index field at its deciding word before truncation is surfaced, so")
-	f.line("// INVALID dominates INCOMPLETE (MESSAGE_SPEC S5.2). Installed by setSchema().")
-	f.line("// A maxlen row also names the declared fixlen subtype: a value whose subtype")
-	f.line("// contradicts it is skipped (S7.3) and carries no bound (generator#229).")
 	f.line("static constexpr sofab::schema::FieldBound %s_sbounds[] = {", name)
 	for _, b := range bounds {
 		child := "nullptr"
