@@ -31,18 +31,25 @@ of it:
 `generated/cpp/probe.hpp`, the message's own `deserialize`:
 
 ```cpp
-struct Probe : sofab::Message {                     // the OStream+IStream pair, aliased
-...
-case 0: is.read(count);                                                  break;  // u32
-case 1: is.read(delta);                                                  break;  // i32
-case 2: is.read(ratio);                                                  break;  // fp64
-case 3: if (is.readString(name) && _size > 8) { is.invalidate(); return; } break;
-case 4: if (is.readBlob(data)  && _size > 8) { is.invalidate(); return; } break;
-case 5: is.readArray(fixed, 3);                                          break;  // count: 3
-case 6: is.readArray(free);                                              break;  // unbounded
-case 7: { _StrSeq _r0{tags, 2, 4}; is.read(_r0); }                       break;  // wrapper array
-case 8: is.read(inner);                                                  break;  // nested struct
+struct Probe : sofab::Message {                          // the OStream+IStream pair, aliased
+    ...
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
+        switch (id) {
+        case 0: is.read(count);                                                    break;  // u32
+        case 1: is.read(delta);                                                    break;  // i32
+        case 2: is.read(ratio);                                                    break;  // fp64
+        case 3: if (is.readString(name) && _size > 8) { is.invalidate(); return; } break;
+        case 4: if (is.readBlob(data)  && _size > 8) { is.invalidate(); return; }  break;
+        case 5: is.readArray(fixed, 3);                                            break;  // count: 3
+        case 6: is.readArray(free);                                                break;  // unbounded
+        case 7: { sofab::StringSeq _r0{tags, 2, 4}; is.read(_r0); }                break;  // wrapper
+        case 8: is.read(inner);                                                    break;  // nested
+        default: break;
+        }
+    }
 ```
+
+(reflowed to one line per arm; the generated file puts the body on its own line)
 
 Every arm is *id → typed read*. The read states what the schema declares; the
 corelib compares the delivered field's tag against it and skips a contradicting
