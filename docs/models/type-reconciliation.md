@@ -163,6 +163,14 @@ The non-fixlen case needs no sentinel: the subtype half is simply unset.
 
 ## 5. The seam
 
+> **"Seam"** here means *the single point where the generated code's expectation
+> meets the corelib's knowledge of the wire, and where the match is decided*. The
+> term is borrowed from refactoring literature (Feathers: a place where behavior
+> can be changed without editing everywhere else); this document uses it in that
+> looser sense — the joint between the two halves, not a dependency-injection
+> point. Three things belong at it: the decision (does the type match?), the
+> behavior (skip rather than misread), and the report (§6).
+
 One primitive per corelib: *"is `(id, tag)` what you expect?"* — answered by the
 generated code (declaratively), applied by the corelib. Where each model stands:
 
