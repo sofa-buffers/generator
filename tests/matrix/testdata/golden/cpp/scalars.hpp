@@ -14,7 +14,7 @@ static_assert(sofab::API_VERSION == 1,
 
 namespace message {
 
-struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {
+struct Scalars : sofab::Message {
     std::uint64_t u64max = 18446744073709551615ULL;
     std::int64_t i64min = -9223372036854775808LL;
     double f64 = -2.5;

@@ -49,7 +49,7 @@ func TestCppStructural(t *testing.T) {
 	for _, want := range []string{
 		`#include "sofab/sofab.hpp"`,
 		"static_assert(sofab::API_VERSION == 1,",
-		"struct Myfirstmessage : sofab::OStreamMessage, sofab::IStreamMessage {",
+		"struct Myfirstmessage : sofab::Message {", // the pair, aliased in the corelib
 		"sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override",
 		"void deserialize(sofab::IStreamImpl &is, sofab::id id,",
 		"static constexpr std::size_t _maxSize =",
@@ -210,9 +210,21 @@ func TestCppMeasureSchema(t *testing.T) {
 		"      da: { id: 4, type: array, items: { type: u32 } }\n" + // dynamic native: no bound
 		"      ns: { id: 5, type: struct, fields: { inner: { id: 0, type: string, maxlen: 12 } } }\n" +
 		"      b:  { id: 6, type: blob, maxlen: 4 }\n"
-	h, err := genHeader(t, src, "m.hpp", map[string]any{})
+	// The descriptors are corelib machinery, so they are emitted into the sibling
+	// <msg>.sofab.hpp the message includes -- not into the message header.
+	h, err := genHeader(t, src, "m.sofab.hpp", map[string]any{})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
+	}
+	msg, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if strings.Contains(msg, "sofab::schema") {
+		t.Errorf("the message header must not carry the measure-phase descriptors:\n%s", msg)
+	}
+	if !strings.Contains(msg, `#include "m.sofab.hpp"`) {
+		t.Errorf("the message header must include its descriptor sibling:\n%s", msg)
 	}
 	for _, want := range []string{
 		"static constexpr sofab::schema::FieldBound M_sbounds[] = {",
@@ -225,13 +237,16 @@ func TestCppMeasureSchema(t *testing.T) {
 		"{.id = 3, .wire = sofab::Wire::SequenceStart, .bound = 5, .child = nullptr, .wrapperArray = true},",
 		"{.id = 5, .wire = sofab::Wire::SequenceStart, .bound = 0, .child = &MNs_schema, .wrapperArray = false},",
 		"{.id = 6, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::Blob, .bound = 4, .child = nullptr, .wrapperArray = false},",
-		"in.setSchema(&M_schema);", // installed in decode()/try_decode()
+
 		// the nested struct's own descriptor (its bounded inner string):
 		"{.id = 0, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::String, .bound = 12, .child = nullptr, .wrapperArray = false},",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("m.hpp missing measure-schema %q:\n%s", want, h)
 		}
+	}
+	if !strings.Contains(msg, "in.setSchema(&M_schema);") {
+		t.Errorf("decode()/try_decode() must install the descriptor:\n%s", msg)
 	}
 	// A Fixlen bound must never be emitted without its subtype — an un-gated row
 	// is exactly the generator#229 defect (a contradicting fixlen value measured

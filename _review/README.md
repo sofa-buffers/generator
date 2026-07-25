@@ -7,16 +7,32 @@ the build, nothing reads it, and it must be removed before this branch merges.
 that behaves differently, nothing else — so the generated header is ~200 lines
 instead of the ~650 the repo's `examples/messages/example.yaml` produces.
 
-| path | config | §7.3 wire comparisons in `deserialize` |
-|---|---|---|
-| `generated/cpp/` | `targets.cpp: { namespace: sofabuffers }` | **0** |
-| `generated/c-cpp/` | `+ corelib: c-cpp, allow_dynamic: true` | 12 (unchanged from `main`) |
+| path | config | §7.3 wire comparisons | lines |
+|---|---|---|---|
+| `generated/cpp/probe.hpp` | `targets.cpp: { namespace: sofabuffers }` | **0** | **121** (was 208) |
+| `generated/cpp/probe.sofab.hpp` | — | — | 18 |
+| `generated/c-cpp/probe.hpp` | `+ corelib: c-cpp, allow_dynamic: true` | 12 | 209 |
+
+The message header now contains the message and nothing else. Two things moved out
+of it:
+
+- the wrapper-sequence collectors and the encode trim, which are corelib
+  machinery — they live in `sofab::` (`StringSeq`, `BlobSeq`, `MessageSeq<T>`,
+  `trimTail`) and are referenced, not copied;
+- the measure-phase bound descriptors, into the sibling `probe.sofab.hpp`. They
+  are still required — the measure phase runs before any callback, so §5.2
+  ("INVALID dominates INCOMPLETE") has no other way to know a bound — but they
+  describe how the *corelib* checks the message, not the message itself. Removing
+  them for good needs header-first delivery; see
+  `docs/models/type-reconciliation.md` §11.
 
 ## The point of the change, in one screenful
 
 `generated/cpp/probe.hpp`, the message's own `deserialize`:
 
 ```cpp
+struct Probe : sofab::Message {                     // the OStream+IStream pair, aliased
+...
 case 0: is.read(count);                                                  break;  // u32
 case 1: is.read(delta);                                                  break;  // i32
 case 2: is.read(ratio);                                                  break;  // fp64
@@ -43,9 +59,9 @@ What each call carries:
   configured `max_dyn_array_count` (→ `LimitExceeded`) and the destination reset,
   applied in that order. The reset lands *behind* the tag match, so an occurrence
   skipped under §7.3 cannot wipe a valid earlier one (§7.4).
-- `read(collector)` / `read(struct)` — `SequenceStart`. Wrapper-array collectors
-  declare `prepare()`, which the corelib calls once the tag matched; that is where
-  the replace-whole `clear()` went.
+- `read(collector)` / `read(struct)` — `SequenceStart`. The collectors are corelib
+  types now (`sofab::StringSeq` and friends); their `prepare()` — which the corelib
+  calls once the tag matched — is where the replace-whole `clear()` went.
 
 ## For comparison
 

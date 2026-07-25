@@ -8,13 +8,14 @@
 #include <cstring>
 #include <cstddef>
 #include "sofab/sofab.hpp"
+#include "probe.sofab.hpp"
 
 static_assert(sofab::API_VERSION == 1,
     "SofaBuffers: generated against C++ API v1, but the linked corelib differs.");
 
 namespace sofabuffers {
 
-struct ProbeInner : sofab::OStreamMessage, sofab::IStreamMessage {
+struct ProbeInner : sofab::Message {
     std::int32_t x = 0;
 
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
@@ -32,15 +33,7 @@ struct ProbeInner : sofab::OStreamMessage, sofab::IStreamMessage {
     }
 };
 
-static constexpr sofab::schema::FieldBound Probe_sbounds[] = {
-    {.id = 3, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::String, .bound = 8, .child = nullptr, .wrapperArray = false},
-    {.id = 4, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::Blob, .bound = 8, .child = nullptr, .wrapperArray = false},
-    {.id = 5, .wire = sofab::Wire::ArrayUnsigned, .bound = 3, .child = nullptr, .wrapperArray = false},
-    {.id = 7, .wire = sofab::Wire::SequenceStart, .bound = 2, .child = nullptr, .wrapperArray = true},
-};
-static constexpr sofab::schema::SeqNode Probe_schema{Probe_sbounds, 4};
-
-struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
+struct Probe : sofab::Message {
     double ratio = 0.0;
     std::string name = "";
     std::vector<std::uint8_t> data = {};
