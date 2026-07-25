@@ -1,4 +1,0 @@
-# Corelib branches this branch is developed against (docs/CI.md).
-# Delete before merging: every entry pins a corelib to unmerged code.
-SOFAB_CORELIB_C_CPP_REF=feat/wrapper-sequence-collectors
-SOFAB_CORELIB_CPP_REF=chore/drop-dead-usage-error
