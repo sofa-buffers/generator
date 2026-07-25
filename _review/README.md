@@ -3,35 +3,53 @@
 Generated output committed **only so the diff is reviewable**. It is not part of
 the build, nothing reads it, and it must be removed before this branch merges.
 
-`examples/messages/example.yaml`, both C++ profiles:
+`example.yaml` here is a deliberately small schema — one field per decode shape
+that behaves differently, nothing else — so the generated header is ~200 lines
+instead of the ~650 the repo's `examples/messages/example.yaml` produces.
 
-| path | config | §7.3 guards in `deserialize` |
+| path | config | §7.3 wire comparisons in `deserialize` |
 |---|---|---|
-| `generated/cpp/` | `targets.cpp: { namespace: sofabuffers }` | **15** |
-| `generated/c-cpp/` | `+ corelib: c-cpp, allow_dynamic: true` | **49** (unchanged) |
+| `generated/cpp/` | `targets.cpp: { namespace: sofabuffers }` | **0** |
+| `generated/c-cpp/` | `+ corelib: c-cpp, allow_dynamic: true` | 12 (unchanged from `main`) |
 
-## What to look at
+## The point of the change, in one screenful
 
-- **`generated/cpp/myfirstmessage.hpp`** — the point of the change. Scalar,
-  fp32/fp64, string, blob and struct/union arms carry no wire-type comparison any
-  more; the corelib decides inside the typed read (corelib-cpp#53). Compare
-  `case 9`…`case 14` and `case 20`…`case 22` against the c-cpp file.
-- **`case 11` / `case 12`** — the fixlen kinds now name their subtype through the
-  call (`readString` / `readBlob`), and the `maxlen` reject hangs off a
-  *successful* read:
+`generated/cpp/probe.hpp`, the message's own `deserialize`:
 
-  ```cpp
-  if (is.readString(somestring) && _size > 50) { is.invalidate(); return; }
-  ```
+```cpp
+case 0: is.read(count);                                                  break;  // u32
+case 1: is.read(delta);                                                  break;  // i32
+case 2: is.read(ratio);                                                  break;  // fp64
+case 3: if (is.readString(name) && _size > 8) { is.invalidate(); return; } break;
+case 4: if (is.readBlob(data)  && _size > 8) { is.invalidate(); return; } break;
+case 5: is.readArray(fixed, 3);                                          break;  // count: 3
+case 6: is.readArray(free);                                              break;  // unbounded
+case 7: { _StrSeq _r0{tags, 2, 4}; is.read(_r0); }                       break;  // wrapper array
+case 8: is.read(inner);                                                  break;  // nested struct
+```
 
-  Checking `_size` first would measure a contradicting fixlen value against a
-  bound that does not apply to it — generator#224/#229 on the deliver path.
-- **`case 15`…`case 19`** — the arms that keep their guard. Each resets its
-  destination (`someuintarray = {}`, `somestringarray.clear()`) *before* reading,
-  and that reset must not run for a field §7.3 skips (§7.4: an occurrence skipped
-  under §7.3 is not an occurrence). Folding reset + bound + tag into one
-  `readArray(dst, bound)` call is the follow-up step; it also closes the
-  under-counting of array mismatches in `Result::skipped()`.
-- **`generated/c-cpp/myfirstmessage.hpp`** — should be byte-identical to what
-  `main` produces. Its corelib reports a bound-type mismatch as a *usage error*
-  rather than skipping, so it keeps every guard until its own step.
+Every arm is *id → typed read*. The read states what the schema declares; the
+corelib compares the delivered field's tag against it and skips a contradicting
+one (MESSAGE_SPEC §7.3). No wire type appears in generated code at all.
+
+What each call carries:
+
+- `readString` / `readBlob` — the fixlen **subtype**, which the wire type alone
+  cannot settle (`fp32`/`fp64`/`string`/`blob` all share `Wire::Fixlen`). The
+  `maxlen` reject hangs off a *successful* read, so a contradicting value is never
+  measured against a bound that does not apply to it (#224/#229 on the deliver
+  path).
+- `readArray(dst, count)` — the array kind, the schema `count` (→ `INVALID`), a
+  configured `max_dyn_array_count` (→ `LimitExceeded`) and the destination reset,
+  applied in that order. The reset lands *behind* the tag match, so an occurrence
+  skipped under §7.3 cannot wipe a valid earlier one (§7.4).
+- `read(collector)` / `read(struct)` — `SequenceStart`. Wrapper-array collectors
+  declare `prepare()`, which the corelib calls once the tag matched; that is where
+  the replace-whole `clear()` went.
+
+## For comparison
+
+`generated/c-cpp/probe.hpp` still carries all 12 comparisons and is byte-identical
+to what `main` produces — its C layer reports a bound-type mismatch as a *usage
+error* rather than skipping, so it keeps them until its own step in the sequencing
+(see `docs/models/type-reconciliation.md` §11).

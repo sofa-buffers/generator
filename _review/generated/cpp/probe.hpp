@@ -12,7 +12,7 @@
 static_assert(sofab::API_VERSION == 1,
     "SofaBuffers: generated against C++ API v1, but the linked corelib differs.");
 
-namespace message {
+namespace sofabuffers {
 
 #ifndef SOFABUFFERS_GEN_PRELUDE
 #define SOFABUFFERS_GEN_PRELUDE
@@ -89,76 +89,120 @@ std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {
 }
 #endif
 
-struct Scalars : sofab::OStreamMessage, sofab::IStreamMessage {
-    std::uint64_t u64max = 18446744073709551615ULL;
-    std::int64_t i64min = -9223372036854775808LL;
-    double f64 = -2.5;
-    float f32 = 3.14f;
-    std::uint8_t u8min = 0;
-    std::uint8_t u8max = 255;
-    std::int8_t i8min = -128;
-    bool flag = true;
-    static constexpr std::size_t _maxSize = 82;
-
-    std::vector<std::uint8_t> encode() const {
-        sofab::OStreamInline<_maxSize> os;
-        serialize(os);
-        return std::vector<std::uint8_t>(os.data(), os.data() + os.bytesUsed());
-    }
-    static Scalars decode(const std::uint8_t *data, std::size_t len) {
-        sofab::IStreamObject<Scalars> in;
-        in.feed(data, len);
-        return *in;
-    }
-
-    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Scalars &out) {
-        sofab::IStreamObject<Scalars> in;
-        sofab::IStreamImpl::Result r = in.feed(data, len);
-        if (r.ok()) { out = *in; }
-        return r;
-    }
+struct ProbeInner : sofab::OStreamMessage, sofab::IStreamMessage {
+    std::int32_t x = 0;
 
     sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
-        if (u8min != 0) { (void)os.write(0, u8min); }
-        if (u8max != 255) { (void)os.write(1, u8max); }
-        if (u64max != 18446744073709551615ULL) { (void)os.write(2, u64max); }
-        if (i8min != -128) { (void)os.write(3, i8min); }
-        if (i64min != -9223372036854775808LL) { (void)os.write(4, i64min); }
-        if (f32 != 3.14f) { (void)os.write(5, f32); }
-        if (f64 != -2.5) { (void)os.write(6, f64); }
-        if (flag != true) { (void)os.write(7, flag); }
+        if (x != 0) { (void)os.write(0, x); }
         return os.writeIf(0, false, false);
     }
 
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
         switch (id) {
         case 0:
-            is.read(u8min);
-            break;
-        case 1:
-            is.read(u8max);
-            break;
-        case 2:
-            is.read(u64max);
-            break;
-        case 3:
-            is.read(i8min);
-            break;
-        case 4:
-            is.read(i64min);
-            break;
-        case 5:
-            is.read(f32);
-            break;
-        case 6:
-            is.read(f64);
-            break;
-        case 7:
-            is.read(flag);
+            is.read(x);
             break;
         default: break;
         }
     }
 };
 
-} // namespace message
+// Measure-phase schema (generator#216): rejects an over-count / over-maxlen
+// / over-index field at its deciding word before truncation is surfaced, so
+// INVALID dominates INCOMPLETE (MESSAGE_SPEC S5.2). Installed by setSchema().
+// A maxlen row also names the declared fixlen subtype: a value whose subtype
+// contradicts it is skipped (S7.3) and carries no bound (generator#229).
+static constexpr sofab::schema::FieldBound Probe_sbounds[] = {
+    {.id = 3, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::String, .bound = 8, .child = nullptr, .wrapperArray = false},
+    {.id = 4, .wire = sofab::Wire::Fixlen, .subtype = sofab::Fix::Blob, .bound = 8, .child = nullptr, .wrapperArray = false},
+    {.id = 5, .wire = sofab::Wire::ArrayUnsigned, .bound = 3, .child = nullptr, .wrapperArray = false},
+    {.id = 7, .wire = sofab::Wire::SequenceStart, .bound = 2, .child = nullptr, .wrapperArray = true},
+};
+static constexpr sofab::schema::SeqNode Probe_schema{Probe_sbounds, 4};
+
+struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
+    double ratio = 0.0;
+    std::string name = "";
+    std::vector<std::uint8_t> data = {};
+    std::array<std::uint32_t, 3> fixed = {};
+    std::vector<std::uint32_t> free = {};
+    std::vector<std::string> tags = {};
+    ProbeInner inner = {};
+    std::uint32_t count = 0;
+    std::int32_t delta = 0;
+    static constexpr std::size_t _maxSize = 4096;
+
+    std::vector<std::uint8_t> encode() const {
+        sofab::OStreamInline<_maxSize> os;
+        serialize(os);
+        return std::vector<std::uint8_t>(os.data(), os.data() + os.bytesUsed());
+    }
+    static Probe decode(const std::uint8_t *data, std::size_t len) {
+        sofab::IStreamObject<Probe> in;
+        in.setSchema(&Probe_schema);
+        in.feed(data, len);
+        return *in;
+    }
+
+    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Probe &out) {
+        sofab::IStreamObject<Probe> in;
+        in.setSchema(&Probe_schema);
+        sofab::IStreamImpl::Result r = in.feed(data, len);
+        if (r.ok()) { out = *in; }
+        return r;
+    }
+
+    sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
+        if (count != 0) { (void)os.write(0, count); }
+        if (delta != 0) { (void)os.write(1, delta); }
+        if (ratio != 0.0) { (void)os.write(2, ratio); }
+        if (name != "") { (void)os.write(3, name); }
+        if (data != std::vector<std::uint8_t>{}) { (void)os.write(4, data.data(), static_cast<std::int32_t>(data.size())); }
+        if (fixed != std::array<std::uint32_t, 3>{}) {
+            (void)os.write(5, _trimTail(fixed));
+        }
+        if (free != std::vector<std::uint32_t>{}) {
+            (void)os.write(6, free);
+        }
+        (void)os.sequenceBegin(7);
+        { sofab::id _i0 = 0; for (const auto &_e0 : tags) { if (!_e0.empty()) { (void)os.write(_i0, _e0); } ++_i0; } }
+        (void)os.sequenceEnd();
+        (void)os.write(8, inner);
+        return os.writeIf(0, false, false);
+    }
+
+    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t _count) noexcept override {
+        switch (id) {
+        case 0:
+            is.read(count);
+            break;
+        case 1:
+            is.read(delta);
+            break;
+        case 2:
+            is.read(ratio);
+            break;
+        case 3:
+            if (is.readString(name) && _size > 8) { is.invalidate(); return; }
+            break;
+        case 4:
+            if (is.readBlob(data) && _size > 8) { is.invalidate(); return; }
+            break;
+        case 5:
+            is.readArray(fixed, 3);
+            break;
+        case 6:
+            is.readArray(free);
+            break;
+        case 7:
+            { _StrSeq _r0{tags, 2, 4}; is.read(_r0); }
+            break;
+        case 8:
+            is.read(inner);
+            break;
+        default: break;
+        }
+    }
+};
+
+} // namespace sofabuffers

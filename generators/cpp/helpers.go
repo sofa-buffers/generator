@@ -178,15 +178,15 @@ func cppFixSubtype(k ir.Kind) string {
 // and leaves a contradicting field unconsumed, so the driver skips it (the "seam",
 // docs/models/type-reconciliation.md). A guard is still emitted for:
 //
-//   - the c-cpp wrapper, whose C layer reports a bound-type mismatch as a usage
-//     error rather than skipping — its own step in the sequencing;
-//   - array fields on either path, because the generated arm RESETS the
-//     destination (`arr = {}` / `.clear()`) BEFORE the read. A skip decided inside
-//     the read would come too late: the reset would already have wiped a valid
-//     earlier occurrence, breaking §7.4's rule that a §7.3-skipped occurrence is
-//     not an occurrence. Moving the reset behind the type decision is a follow-up.
-func cppNeedsWireGuard(fld *ir.Field, clib bool) bool {
-	return clib || fld.Kind == ir.KindArray
+// the c-cpp wrapper, whose C layer reports a bound-type mismatch as a usage error
+// rather than skipping — its own step in the sequencing.
+//
+// Arrays were the last holdout on the pure path: their arm resets the destination
+// before reading, so the decision had to precede it. readArray()/prepare() now
+// fold the reset behind the tag match inside the corelib, so those guards are gone
+// too and the pure-cpp deserialize carries no wire comparison at all.
+func cppNeedsWireGuard(_ *ir.Field, clib bool) bool {
+	return clib
 }
 
 // cppWireGuard renders the §7.3 condition guarding one case arm: the wire type
@@ -591,12 +591,17 @@ func byteList(b []byte) string {
 // call would be diagnosed eagerly (gcc -Wtemplate-body) even though never taken.
 func cppMsgSeqPreludeSrc(clib bool) string {
 	reject := "is.invalidate(); return;"
+	// S7.4 replace-whole. On the pure path read() calls prepare() once the
+	// SequenceStart tag matched, so the reset sits behind the S7.3 decision; the
+	// c-cpp wrapper has no such hook and keeps clearing at the call site.
+	prepare := "\n    void prepare() noexcept { if (out) out->clear(); }"
 	if clib {
 		reject = "return;"
+		prepare = ""
 	}
 	return `template <typename T>
 struct _MsgSeq : sofab::IStreamMessage {
-    std::vector<T> *out = nullptr;
+    std::vector<T> *out = nullptr;` + prepare + `
     // Schema fixed-count bound N (-1 == dynamic/unbounded). An element id >= N is
     // a schema-bound violation (MESSAGE_SPEC S5.1/S7: an index at or past the
     // fixed count is INVALID, never grown-into) - reject before emplacing, which
@@ -727,16 +732,21 @@ const cppPrelude = `struct _StrSeq : sofab::IStreamMessage {
     long _cap;
     long _emax;
     explicit _StrSeq(std::vector<std::string> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
+    // MESSAGE_SPEC S7.4: the wrapper sequence IS the array's value, so a repeated
+    // field id replaces it whole. read() calls this once the SequenceStart tag
+    // matched, so an occurrence skipped under S7.3 never reaches it and cannot
+    // wipe a valid earlier one.
+    void prepare() noexcept { out.clear(); }
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        // MESSAGE_SPEC S5.1 makes every element a normal field, so S7.3 applies: an
-        // element whose wire type/subtype is not a string is skipped like an unknown
-        // id -- returning without read() makes the driver skip it -- checked before
-        // the over-index/maxlen guards so a mis-typed element is skipped, not
-        // rejected for its id (issue #189).
-        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) { return; }
+        // S5.1 makes every element a normal field, so S7.3 applies: an element whose
+        // subtype is not a string is skipped like an unknown id. readString declares
+        // that subtype, so the corelib decides it and counts the skip; the
+        // over-index/maxlen rejects hang off a successful read so they are never
+        // applied to an element that is not this array's (issue #189).
+        std::string _s;
+        if (!is.readString(_s)) { return; }
         if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
         if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }
-        std::string _s; is.read(_s);
         while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
         out[id] = std::move(_s);
     }
@@ -746,15 +756,16 @@ struct _BlobSeq : sofab::IStreamMessage {
     long _cap;
     long _emax;
     explicit _BlobSeq(std::vector<std::vector<std::uint8_t>> &o, long cap = -1, long emax = -1) : out(o), _cap(cap), _emax(emax) {}
+    void prepare() noexcept { out.clear(); }   // S7.4 replace-whole; see _StrSeq
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        // S7.3 (issue #189): skip a wrapper element whose wire type/subtype is not a
-        // blob, like an unknown id (see _StrSeq), before the over-index/maxlen guards.
-        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) { return; }
+        // S7.3 (issue #189): readBlob declares the subtype, so a mis-typed element is
+        // skipped by the corelib; it also reads straight into the byte container.
+        std::vector<std::uint8_t> _b;
+        if (!is.readBlob(_b)) { return; }
         if (_cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(_cap)) { is.invalidate(); return; }
         if (_emax >= 0 && _size > static_cast<std::size_t>(_emax)) { is.invalidate(); return; }
-        std::string _s; is.read(_s);
         while (out.size() <= static_cast<std::size_t>(id)) out.emplace_back();
-        out[id].assign(_s.begin(), _s.end());
+        out[id] = std::move(_b);
     }
 };`
 
@@ -790,4 +801,23 @@ func cppIdent(name string) string {
 		return name + "_"
 	}
 	return name
+}
+
+// cppArrayBounds renders the trailing readArray() arguments carrying the two
+// receiver-side bounds: the schema `count` (INVALID when exceeded) and the
+// configured max_dyn_array_count policy cap (LimitExceeded). Both are omitted
+// when absent, so a plain bounded array reads `is.readArray(x, 4)` and an
+// unbounded one with no cap configured reads `is.readArray(x)`.
+func (g *gen) cppArrayBounds(count int64, hasCount bool) string {
+	schema := int64(-1)
+	if hasCount {
+		schema = count
+	}
+	if !hasCount && g.limArrHas {
+		return fmt.Sprintf(", -1, SOFAB_MAX_DYN_ARRAY_COUNT")
+	}
+	if schema < 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d", schema)
 }

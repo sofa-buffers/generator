@@ -779,17 +779,11 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// Error::InvalidMessage instead of the corelib read clamping the excess
 		// (generator#100). The clib wrapper needs no guard: the C runtime
 		// rejects a count/capacity mismatch on its own (SOFAB_RET_E_INVALID_MSG).
-		if !g.clib && fld.HasCount && isNativeArrayElem(fld.Elem) {
-			f.line("            if (_count > %d) { is.invalidate(); return; }", fld.Count)
-		}
-		// Count-less (dynamic) native array under a configured receiver-side
-		// cap: reject the claimed count before any element is read — the
-		// count-prefixed wire types are the amplification vector (#102).
-		// Wrapper-sequence arrays carry no count header and grow only with
-		// delivered bytes, so they need no guard.
-		if !g.clib && !fld.HasCount && isNativeArrayElem(fld.Elem) && g.limArrHas {
-			f.line("            if (_count > SOFAB_MAX_DYN_ARRAY_COUNT) { is.exceedLimit(); return; }")
-		}
+		// On the pure path both the schema `count` and the configured policy cap
+		// ride into readArray(), which applies them AFTER the tag match — so
+		// neither can be measured against a field §7.3 skips (the deliver-path
+		// shape of generator#224/#229). The clib wrapper emitted neither: its C
+		// runtime rejects a count/capacity mismatch on its own.
 		// A fixed std::array<T,N> whose declaration default is a non-zero schema
 		// default: clear it so the elements the encoder trimmed off the tail decode
 		// as the ELEMENT default, not as that schema default (MESSAGE_SPEC §3 — see
@@ -798,7 +792,7 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// wrapper's deferred fill still lands on top. Assigning an empty braced
 		// initializer value-initializes in place: no allocation, so the heap-free
 		// profile uses the same reset.
-		if g.cppFixedArrayNeedsReset(fld) {
+		if g.clib && g.cppFixedArrayNeedsReset(fld) {
 			f.line("            %s = {};", acc)
 		}
 		// A composite array's wrapper sequence IS the array's value (MESSAGE_SPEC
@@ -808,7 +802,10 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// or emplace in arrival order and never reset the target, so without this
 		// clear a second opening merges into the first one's elements. Native scalar
 		// arrays already replace: they read the whole array in one call.
-		if !isNativeArrayElem(fld.Elem) {
+		// On the pure path the collectors declare prepare(), which read() calls once
+		// the SequenceStart tag matched — so the replace-whole reset happens behind
+		// the §7.3 decision instead of in front of it.
+		if g.clib && !isNativeArrayElem(fld.Elem) {
 			f.line("            %s.clear();", acc)
 		}
 		g.deserializeArray(f, "            ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.ElemMaxHas, fld.ElemMax, 0)
@@ -846,14 +843,14 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindFP32, ir.KindFP64, ir.KindBitfield:
-		if g.dynNativeArray(elem, count) {
-			// Count-less native array (heap): the corelib's span read fills at most
-			// target.size() elements, so size the vector to the wire count first,
-			// else it would decode empty (#112). The count-cap guard (#102), when
-			// configured, has already rejected an over-cap _count above.
-			f.line("%s%s.resize(_count); is.read(%s);", ind, target, target)
-		} else {
+		if g.clib {
 			f.line("%sis.read(%s);", ind, target)
+		} else {
+			// readArray carries the tag, the schema count, the configured policy cap
+			// and the reset — see IStreamImpl::readArray for the order they must run
+			// in. A count-less array sizes to the wire count inside it, so it can no
+			// longer decode empty (#112).
+			f.line("%sis.readArray(%s%s);", ind, target, g.cppArrayBounds(count, hasCount))
 		}
 	case ir.KindEnum:
 		bk := enumBacking(ref.Target)
@@ -861,21 +858,24 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		if g.clib {
 			f.line("%sis.read(reinterpret_cast<std::array<%s, %d> &>(%s));", ind, bk, count, target)
 		} else if g.dynNativeArray(elem, count) {
-			f.line("%s{ %s.resize(_count); std::vector<%s> %s(_count); is.read(%s); for (std::size_t %s = 0; %s < _count; ++%s) %s[%s] = static_cast<%s>(%s[%s]); }",
-				ind, target, bk, tv, tv, iv, iv, iv, target, iv, et, tv, iv)
+			// The temp carries the read (and with it the tag/bound/reset decision);
+			// the member is only resized and filled once that succeeded, so a
+			// §7.3-skipped occurrence leaves it untouched.
+			f.line("%s{ std::vector<%s> %s; if (is.readArray(%s%s)) { %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = static_cast<%s>(%s[%s]); } }",
+				ind, bk, tv, tv, g.cppArrayBounds(count, hasCount), target, tv, iv, iv, tv, iv, target, iv, et, tv, iv)
 		} else {
-			f.line("%s{ std::array<%s, %d> %s{}; is.read(%s); for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); }",
-				ind, bk, count, tv, tv, iv, iv, count, iv, target, iv, et, tv, iv)
+			f.line("%s{ std::array<%s, %d> %s{}; if (is.readArray(%s%s)) { for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); } }",
+				ind, bk, count, tv, tv, g.cppArrayBounds(count, hasCount), iv, iv, count, iv, target, iv, et, tv, iv)
 		}
 	case ir.KindBool:
 		if g.clib {
 			f.line("%sis.read(reinterpret_cast<std::array<std::uint8_t, %d> &>(%s));", ind, count, target)
 		} else if g.dynNativeArray(elem, count) {
-			f.line("%s{ %s.resize(_count); std::vector<std::uint8_t> %s(_count); is.read(%s); for (std::size_t %s = 0; %s < _count; ++%s) %s[%s] = %s[%s] != 0; }",
-				ind, target, tv, tv, iv, iv, iv, target, iv, tv, iv)
+			f.line("%s{ std::vector<std::uint8_t> %s; if (is.readArray(%s%s)) { %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = %s[%s] != 0; } }",
+				ind, tv, tv, g.cppArrayBounds(count, hasCount), target, tv, iv, iv, tv, iv, target, iv, tv, iv)
 		} else {
-			f.line("%s{ std::array<std::uint8_t, %d> %s{}; is.read(%s); for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] != 0; }",
-				ind, count, tv, tv, iv, iv, count, iv, target, iv, tv, iv)
+			f.line("%s{ std::array<std::uint8_t, %d> %s{}; if (is.readArray(%s%s)) { for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] != 0; } }",
+				ind, count, tv, tv, g.cppArrayBounds(count, hasCount), iv, iv, count, iv, target, iv, tv, iv)
 		}
 	case ir.KindString:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)

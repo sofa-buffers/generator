@@ -58,9 +58,9 @@ func TestCppStructural(t *testing.T) {
 		"static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Myfirstmessage &out)",
 		"enum class MyfirstmessageSomeenum : std::int8_t {", // smallest signed backing
 		"std::uint64_t someu64 = 18446744073709551615ULL;",
-		"is.read(",               // nested decode via is.read
-		"float somefp32 = 0.0f;", // valid float literal
-		"if (_count > 4) { is.invalidate(); return; }", // over-count scalar array rejected as INVALID (generator#100)
+		"is.read(",                        // nested decode via is.read
+		"float somefp32 = 0.0f;",          // valid float literal
+		"is.readArray(someuintarray, 4);", // the over-count reject (generator#100) rides into readArray
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q", want)
@@ -166,7 +166,7 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 		"std::vector<bool> bl = {};",                     // unbounded bool -> vector
 		"std::array<std::uint32_t, 4> fixed = {};",       // bounded native array unchanged
 		"std::vector<std::vector<std::uint32_t>> matrix", // matrix rows are dynamic vectors too
-		"arr.resize(_count); is.read(arr);",              // decode sizes the vector to the wire count
+		"is.readArray(arr);",                             // readArray sizes the vector to the wire count
 		"if (arr != std::vector<std::uint32_t>{}) {",     // whole-omit compares to an empty vector
 		"std::size_t _count) noexcept override",          // _count is named for the resize
 		"if constexpr (requires { row.resize(_count); }", // _MsgSeq sizes dynamic matrix rows
@@ -179,13 +179,13 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 	if strings.Contains(h, "std::array<std::uint32_t, 0>") {
 		t.Errorf("unbounded array must not lower to std::array<T, 0>:\n%s", h)
 	}
-	// enum vector: member is a vector of the scoped enum element type, and decode
-	// sizes it to _count before the value-narrowing read.
+	// enum vector: member is a vector of the scoped enum element type; readArray
+	// sizes the temp to the wire count and the member follows it.
 	if !strings.Contains(h, "std::vector<MEnElem> en = {};") {
 		t.Errorf("unbounded enum array should be a std::vector of the enum element:\n%s", h)
 	}
-	if !strings.Contains(h, "en.resize(_count);") {
-		t.Errorf("unbounded enum array decode should resize to _count:\n%s", h)
+	if !strings.Contains(h, "en.resize(_t0.size());") {
+		t.Errorf("unbounded enum array decode should follow the temp's size:\n%s", h)
 	}
 }
 
@@ -580,7 +580,7 @@ messages:
 		// element count, never a byte budget.
 		"#define SOFAB_MAX_DYN_BUFFERED_FIELD 655364",
 		"if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }",
-		"if (_count > SOFAB_MAX_DYN_ARRAY_COUNT) { is.exceedLimit(); return; }",
+		"is.readArray(arr, -1, SOFAB_MAX_DYN_ARRAY_COUNT);", // the cap rides into readArray
 		"sofab::IStreamObject<Dyn> in{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}};",
 	} {
 		if !strings.Contains(h, want) {
@@ -770,8 +770,14 @@ func TestCppFixedCountTrimsTrailingDefaultRun(t *testing.T) {
 			if !strings.Contains(h, "std::array<std::uint32_t, 5> u32s = {};") {
 				t.Errorf("[%s] fixed-count array must stay a zero-filled std::array:\n%s", corelib, h)
 			}
-			if !strings.Contains(h, "is.read(u32s);") {
-				t.Errorf("[%s] fixed-count decode must read the whole array:\n%s", corelib, h)
+			// Pure cpp reads through readArray (which carries the bound and the
+			// reset); the c-cpp wrapper still uses the plain span read.
+			wantRead := "is.readArray(u32s, 5);"
+			if corelib == "c-cpp" {
+				wantRead = "is.read(u32s);"
+			}
+			if !strings.Contains(h, wantRead) {
+				t.Errorf("[%s] fixed-count decode must read the whole array (%s):\n%s", corelib, wantRead, h)
 			}
 		})
 	}
@@ -838,15 +844,27 @@ func TestCppFixedCountResetsSchemaDefaultTail(t *testing.T) {
 			if !strings.Contains(h, "std::array<std::uint32_t, 5> c = {1, 2, 3};") {
 				t.Errorf("[%s] schema default must stay the member's declaration default:\n%s", corelib, h)
 			}
-			// A non-zero schema default resets on decode, after the over-count guard
-			// (a rejected message must not mutate the target) and before the read.
-			for _, want := range []string{"\n            c = {};", "\n            d = {};", "\n            e = {};"} {
-				if !strings.Contains(h, want) {
-					t.Errorf("[%s] missing fixed-array reset %q:\n%s", corelib, want, h)
+			// A non-zero schema default must be reset on decode so the elements the
+			// encoder trimmed off the tail come back as the ELEMENT default, not as
+			// that schema default (MESSAGE_SPEC S3). On the pure path readArray does
+			// it — behind the tag match and the bound, which is the order that makes
+			// a §7.3-skipped or rejected occurrence leave the target alone. The c-cpp
+			// wrapper has no such call and still resets in the arm.
+			if corelib == "c-cpp" {
+				for _, want := range []string{"\n            c = {};", "\n            d = {};", "\n            e = {};"} {
+					if !strings.Contains(h, want) {
+						t.Errorf("[%s] missing fixed-array reset %q:\n%s", corelib, want, h)
+					}
 				}
-			}
-			if !g_containsInOrder(h, "if (_count > 5) { is.invalidate(); return; }", "\n            c = {};", "is.read(c);") && corelib == "cpp" {
-				t.Errorf("[%s] reset must sit between the over-count guard and the read:\n%s", corelib, h)
+			} else {
+				for _, bad := range []string{"\n            c = {};", "\n            d = {};", "\n            e = {};"} {
+					if strings.Contains(h, bad) {
+						t.Errorf("[%s] the arm must not reset %q — readArray does it behind the bound:\n%s", corelib, bad, h)
+					}
+				}
+				if !strings.Contains(h, "is.readArray(c, 5);") {
+					t.Errorf("[%s] the bound must ride into readArray:\n%s", corelib, h)
+				}
 			}
 			// A field with no schema default, or an all-zero one, already declares an
 			// all-zero array: no reset, generated code unchanged.
@@ -871,8 +889,8 @@ func TestCppDynamicArrayNoReset(t *testing.T) {
 	if strings.Contains(h, "\n            dyn = {};") {
 		t.Errorf("dynamic array must not emit a reset:\n%s", h)
 	}
-	if !strings.Contains(h, "dyn.resize(_count); is.read(dyn);") {
-		t.Errorf("dynamic array should resize to the wire count:\n%s", h)
+	if !strings.Contains(h, "is.readArray(dyn);") {
+		t.Errorf("dynamic array should read through readArray (which sizes it):\n%s", h)
 	}
 }
 
@@ -919,37 +937,25 @@ messages:
       k: { id: 10, type: array, items: { type: fp64, count: 2 } }
       l: { id: 11, type: array, items: { type: string, count: 2, maxlen: 4 } }
 `, "m.hpp")
+	// Every kind states its expectation through the call it makes, and the corelib
+	// compares the tag: readString/readBlob name the fixlen subtype, readArray the
+	// array kind (and carries the bounds), read() the rest.
 	for _, want := range []string{
-		// Array arms keep the guard — the reset below it must not run for a
-		// §7.3-skipped occurrence. The fp array shares Wire::ArrayFixlen, so it
-		// needs the subtype too.
-		"if (is.wire() != sofab::Wire::ArrayUnsigned) break;",
-		"if (is.wire() != sofab::Wire::ArraySigned) break;",
-		"if (is.wire() != sofab::Wire::ArrayFixlen || is.fixType() != sofab::Fix::Fp64) break;",
-		// Wrapper arrays open a sequence and clear before reading — guard kept.
-		"if (is.wire() != sofab::Wire::SequenceStart) break;",
-		// The fixlen kinds declare their subtype through the read they call, so a
-		// contradicting fp64/blob/string is skipped by the corelib.
 		"is.readString(f)",
 		"is.readBlob(g)",
+		"is.readArray(i, 2);",
+		"is.readArray(j, 2);",
+		"is.readArray(k, 2);",
+		"is.read(h);", // nested struct
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("m.hpp missing %q\n%s", want, h)
 		}
 	}
-	// Scalars, fixlen values and struct/union fields must carry NO generated
-	// guard: that decision moved into the corelib's typed read.
-	for _, notWant := range []string{
-		"if (is.wire() != sofab::Wire::Unsigned) break;",
-		"if (is.wire() != sofab::Wire::Signed) break;",
-		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp32) break;",
-		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Fp64) break;",
-		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) break;",
-		"if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) break;",
-	} {
-		if strings.Contains(h, notWant) {
-			t.Errorf("guard %q should have moved into the corelib read seam\n%s", notWant, h)
-		}
+	// NOTHING in a pure-corelib-cpp deserialize compares a wire type any more —
+	// that is the point of the seam. A single leftover comparison is a regression.
+	if strings.Contains(h, "is.wire() !=") || strings.Contains(h, "is.fixType() !=") {
+		t.Errorf("the pure-cpp deserialize must carry no wire comparison at all\n%s", h)
 	}
 }
 
@@ -999,23 +1005,21 @@ messages:
       msgs:   { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u8 } } } }
       native: { id: 3, type: array, items: { type: u32, count: 3 } }
 `, "m.hpp")
+	// The replace-whole reset moved from the case arm into the collector's
+	// prepare(), which read() calls once the SequenceStart tag matched — so it can
+	// no longer wipe a valid earlier occurrence on a §7.3-skipped one. The arms
+	// must therefore carry no clear at all.
 	for _, want := range []string{
-		"strs.clear();",
-		"blobs.clear();",
-		"msgs.clear();",
+		"void prepare() noexcept { out.clear(); }",           // _StrSeq / _BlobSeq
+		"void prepare() noexcept { if (out) out->clear(); }", // _MsgSeq
 	} {
 		if !strings.Contains(h, want) {
-			t.Errorf("m.hpp missing wrapper-array clear %q\n%s", want, h)
+			t.Errorf("m.hpp missing collector reset %q\n%s", want, h)
 		}
 	}
-	if strings.Contains(h, "native.clear();") {
-		t.Errorf("native scalar array must not be cleared (its read already replaces):\n%s", h)
-	}
-	// The clear must precede the collector read, not follow it. Anchor on the
-	// read call site (_StrSeq _r0{strs...), not the bare type name — the _StrSeq
-	// struct itself is defined in the prelude far above every case arm.
-	ci, ri := strings.Index(h, "strs.clear();"), strings.Index(h, "_StrSeq _r0{strs")
-	if ci < 0 || ri < 0 || ci > ri {
-		t.Errorf("strs.clear() must be emitted before the _StrSeq read (clear=%d read=%d)\n%s", ci, ri, h)
+	for _, notWant := range []string{"strs.clear();", "blobs.clear();", "msgs.clear();", "native.clear();"} {
+		if strings.Contains(h, notWant) {
+			t.Errorf("the arm must not clear %q — prepare() does it behind the tag match:\n%s", notWant, h)
+		}
 	}
 }
