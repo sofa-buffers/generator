@@ -334,12 +334,13 @@ func TestCppMaxlenReject(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		// The maxlen reject hangs off a SUCCESSFUL subtype-declaring read: a
-		// contradicting fixlen value is skipped by the corelib and must never be
-		// measured against this field's bound (generator#224/#229 on the deliver
-		// path). Checking _size before the read would resurrect exactly that.
-		"if (is.readString(s) && _size > 8) { is.invalidate(); return; }",
-		"if (is.readBlob(b) && _size > 8) { is.invalidate(); return; }",
+		// The bound rides INTO the read. Header-first delivers a field before its
+		// payload is known to be present, so a bound checked after the read would
+		// fold an over-maxlen truncated field to INCOMPLETE (§5.2); inside the
+		// read it is applied after the tag and before the payload, which is the
+		// only order that satisfies both §7.3 and §5.2.
+		"is.readString(s, 8);",
+		"is.readBlob(b, 8);",
 		"{ sofab::StringSeq _r0{sa, 3, 5}; is.read(_r0); }", // wrapper string: cap 3, elem maxlen 5 handed to the corelib collector
 	} {
 		if !strings.Contains(h, want) {
@@ -976,8 +977,8 @@ messages:
 	// compares the tag: readString/readBlob name the fixlen subtype, readArray the
 	// array kind (and carries the bounds), read() the rest.
 	for _, want := range []string{
-		"is.readString(f)",
-		"is.readBlob(g)",
+		"is.readString(f, 8);",
+		"is.readBlob(g, 8);",
 		"is.readArray(i, 2);",
 		"is.readArray(j, 2);",
 		"is.readArray(k, 2);",
