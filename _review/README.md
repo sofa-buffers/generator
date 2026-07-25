@@ -10,7 +10,7 @@ instead of the ~650 the repo's `examples/messages/example.yaml` produces.
 | path | config | §7.3 wire comparisons | lines |
 |---|---|---|---|
 | `generated/cpp/probe.hpp` | `targets.cpp: { namespace: sofabuffers }` | **0** | **118** (was 208) |
-| `generated/c-cpp/probe.hpp` | `+ corelib: c-cpp, allow_dynamic: true` | 12 | 209 |
+| `generated/c-cpp/probe.hpp` | `+ corelib: c-cpp, allow_dynamic: true` | 17 | **137** (was 209) |
 
 The message header now contains the message and nothing else. Three things left
 it, in this order:
@@ -68,7 +68,9 @@ What each call carries:
 
 ## For comparison
 
-`generated/c-cpp/probe.hpp` still carries all 12 comparisons and is byte-identical
-to what `main` produces — its C layer reports a bound-type mismatch as a *usage
-error* rather than skipping, so it keeps them until its own step in the sequencing
-(see `docs/models/type-reconciliation.md` §11).
+`generated/c-cpp/probe.hpp` still carries its §7.3 comparisons: its C layer reports
+a bound-type mismatch as a *usage error* rather than skipping, so the guards stay
+until that changes — its own step. What it no longer carries is the prelude: the
+collectors moved into corelib-c-cpp as `sofab::FixedStringSeq` / `FixedBlobSeq` /
+`FixedMessageSeq` / `MessageSeq` / `trimTail`, named to match corelib-cpp so both
+C++ outputs read alike. 209 → 137 lines.

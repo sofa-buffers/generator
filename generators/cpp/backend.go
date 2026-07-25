@@ -201,27 +201,11 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.blank()
 	f.line("namespace %s {", g.ns)
 	f.blank()
-	// Decode helpers. On the pure-corelib-cpp path they live in the corelib
-	// (sofab::StringSeq / BlobSeq / MessageSeq / trimTail) and the generated code
-	// only references them — they are properties of the wire format, not of the
-	// user's message, so copying them into every header was duplication.
-	//
-	// The c-cpp profile still carries its own: its fixed-capacity collectors bind
-	// into sofab::InlineVector/FixedString storage through the wrapper's API, and
-	// its _MsgSeq differs (no invalidate() hook, no prepare()). Moving those is
-	// corelib-c-cpp's own step. The guard keeps multi-message builds including
-	// several generated headers in one TU from redefining them.
-	if g.clib {
-		f.line("#ifndef SOFABUFFERS_GEN_PRELUDE")
-		f.line("#define SOFABUFFERS_GEN_PRELUDE")
-		if g.fixed {
-			f.line("%s", cppFixedPrelude)
-		}
-		f.line("%s", cppMsgSeqPreludeSrc(g.clib))
-		f.line("%s", cppTrimPrelude)
-		f.line("#endif")
-		f.blank()
-	}
+	// Decode helpers live in the corelib on BOTH C++ paths -- sofab::StringSeq /
+	// BlobSeq / MessageSeq / trimTail in corelib-cpp, sofab::FixedStringSeq /
+	// FixedBlobSeq / FixedMessageSeq / trimTail in corelib-c-cpp. They describe
+	// how the wire format is collected, not anything about the user's message, so
+	// the generated header only references them.
 
 	// Receiver-side decode limits (generator#102), baked from the sofabgen config.
 	// Macros (not inline constexpr) so multiple generated headers agree in one TU;
@@ -601,9 +585,6 @@ func (g *gen) trimExpr(val string, trim bool) string {
 	if !trim {
 		return val
 	}
-	if g.clib {
-		return fmt.Sprintf("_trimTail(%s)", val)
-	}
 	return fmt.Sprintf("sofab::trimTail(%s)", val)
 }
 
@@ -871,7 +852,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			// Fixed string sequence: fill fixed inline FixedString slots by the
 			// element size via the scalar FixedString read, no heap. Static for the
 			// same deferred-decoder reason as the other fixed collectors.
-			f.line("%s{ static _FixedStrSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, cont, rv, rv, target, rv)
+			f.line("%s{ static sofab::FixedStringSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, cont, rv, rv, target, rv)
 		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
@@ -883,7 +864,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			// Fixed blob sequence: fill fixed inline slots by the element size (the
 			// read(void*,size_t) blob overload), no heap. The collector is static
 			// because the corelib-c-cpp decoder dereferences it after this returns.
-			f.line("%s{ static _FixedBlobSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, cont, rv, rv, target, rv)
+			f.line("%s{ static sofab::FixedBlobSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, cont, rv, rv, target, rv)
 		} else if g.clib {
 			f.line("%sis.read(%s);", ind, target)
 		} else {
@@ -912,7 +893,7 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 		// reason as the dynamic clib path. The InlineVector<_,N> capacity is the
 		// schema count, so _MsgSeqFixed's own >= capacity() guard rejects an
 		// over-index element — no separate cap needed here.
-		f.line("%s{ static _MsgSeqFixed<%s> %s; %s.out = &%s; is.read(%s); }", ind, container, rv, rv, target, rv)
+		f.line("%s{ static sofab::FixedMessageSeq<%s> %s; %s.out = &%s; is.read(%s); }", ind, container, rv, rv, target, rv)
 		return
 	}
 	if g.clib {
@@ -923,7 +904,7 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 		// The c-cpp wrapper's own istream rejects a count/capacity mismatch, so the
 		// heap fallback (allow_dynamic) is the only clib path reaching here; a fixed
 		// count still bounds the index via cap below.
-		f.line("%s{ static _MsgSeq<%s> %s; %s.out = &%s;%s %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, reserve, rv, cap, rv)
+		f.line("%s{ static sofab::MessageSeq<%s> %s; %s.out = &%s;%s %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, reserve, rv, cap, rv)
 		return
 	}
 	f.line("%s{ sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, rv, cap, rv)

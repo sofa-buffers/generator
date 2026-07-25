@@ -14,78 +14,6 @@ static_assert(sofab::API_VERSION == 1,
 
 namespace sofabuffers {
 
-#ifndef SOFABUFFERS_GEN_PRELUDE
-#define SOFABUFFERS_GEN_PRELUDE
-template <typename Container>
-struct _MsgSeqFixed : sofab::IStreamMessage {
-    Container *out = nullptr;
-    void deserialize(sofab::IStreamImpl &is, sofab::id, std::size_t, std::size_t) noexcept override {
-        is.read(out->emplace_back());
-    }
-};
-// _FixedBlobSeq / _FixedStrSeq place a blob / string element at its index id:
-// a default (empty) element is omitted on the wire, so the
-// inline vector is grown with empty-default slots up to id and the value is
-// stored at that index rather than appended in arrival order. Inline storage
-// never reallocates, so an earlier bound-then-filled element stays address-stable
-// while later slots grow.
-// An element index at or beyond the fixed capacity N is a schema-bound violation
-// (MESSAGE_SPEC S5.1/S7: an index at or past the fixed count is INVALID, never
-// grown-into) — reject it via is.invalidate() so feed()/try_decode report
-// Error::InvalidMessage, converging with the heap profile and no_std Rust
-// (generator#149 / F-0013 / S7.1: a declared bound binds every target). The
-// reject returns before the fill loop, so it also bounds an over-index
-// amplification: InlineVector::emplace_back() is a no-op once full (N never
-// grows), so an unbounded fill loop would otherwise spin forever on such an index
-// (issue #126). invalidate() is the callback→decoder abort channel the c-cpp
-// IStreamImpl gained in corelib-c-cpp#92.
-template <typename Container>
-struct _FixedBlobSeq : sofab::IStreamMessage {
-    Container *out = nullptr;
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::Blob) { return; }
-        if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }
-        while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
-        auto &b = (*out)[id];
-        b.set_len(_size);
-        if (_size) is.read(b.data(), b.size());
-    }
-};
-template <typename Container>
-struct _FixedStrSeq : sofab::IStreamMessage {
-    Container *out = nullptr;
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t _size, std::size_t) noexcept override {
-        if (is.wire() != sofab::Wire::Fixlen || is.fixType() != sofab::Fix::String) { return; }
-        if (static_cast<std::size_t>(id) >= out->capacity()) { is.invalidate(); return; }
-        while (out->size() <= static_cast<std::size_t>(id)) out->emplace_back();
-        auto &s = (*out)[id];
-        s.set_len(_size);
-        if (_size) is.read(s);
-    }
-};
-template <typename T>
-struct _MsgSeq : sofab::IStreamMessage {
-    std::vector<T> *out = nullptr;
-    long cap = -1;
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t _count) noexcept override {
-        if (cap >= 0 && static_cast<std::size_t>(id) >= static_cast<std::size_t>(cap)) { return; }
-        T &row = out->emplace_back();
-        if constexpr (requires { row.resize(_count); } && !std::is_base_of_v<sofab::IStreamMessage, T>) {
-            row.resize(_count);
-        }
-        is.read(row);
-    }
-};
-template <typename C>
-std::span<const typename C::value_type> _trimTail(const C &_a) noexcept {
-    using _T = typename C::value_type;
-    const _T _z{};
-    std::size_t _n = _a.size();
-    while (_n > 0 && std::memcmp(&_a[_n - 1], &_z, sizeof(_T)) == 0) --_n;
-    return std::span<const _T>(_a.data(), _n);
-}
-#endif
-
 struct ProbeInner : sofab::OStreamMessage, sofab::IStreamMessage {
     std::int32_t x = 0;
 
@@ -150,7 +78,7 @@ struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
         if (name != "") { (void)os.write(3, name); }
         if (data != sofab::FixedBytes<8>{}) { (void)os.write(4, data.data(), static_cast<std::int32_t>(data.size())); }
         if (fixed != std::array<std::uint32_t, 3>{}) {
-            (void)os.write(5, _trimTail(fixed));
+            (void)os.write(5, sofab::trimTail(fixed));
         }
         if (free != std::array<std::uint32_t, 0>{}) {
             (void)os.write(6, free);
@@ -195,7 +123,7 @@ struct Probe : sofab::OStreamMessage, sofab::IStreamMessage {
         case 7:
             if (is.wire() != sofab::Wire::SequenceStart) break;
             tags.clear();
-            { static _FixedStrSeq<sofab::InlineVector<sofab::FixedString<4>, 2>> _r0; _r0.out = &tags; is.read(_r0); }
+            { static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<4>, 2>> _r0; _r0.out = &tags; is.read(_r0); }
             break;
         case 8:
             if (is.wire() != sofab::Wire::SequenceStart) break;
