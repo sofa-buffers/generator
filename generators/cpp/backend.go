@@ -721,7 +721,7 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			// field's maxlen — the maxlen reject (MESSAGE_SPEC S7.1: INVALID, never a
 			// truncating read) therefore hangs off a successful read. Checking _size
 			// first would resurrect generator#224/#229 on the deliver path.
-			f.line("            if (is.readString(%s) && _size > %d) { is.invalidate(); return; }", acc, fld.Maxlen)
+			f.line("            is.readString(%s, %d);", acc, fld.Maxlen)
 		} else {
 			f.line("            is.readString(%s);", acc)
 		}
@@ -751,7 +751,7 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			// readBlob declares Fix::Blob and reads straight into the byte container
 			// (no std::string round-trip); the maxlen reject hangs off the successful
 			// read for the same S7.3 reason as the string case above.
-			f.line("            if (is.readBlob(%s) && _size > %d) { is.invalidate(); return; }", acc, fld.Maxlen)
+			f.line("            is.readBlob(%s, %d);", acc, fld.Maxlen)
 		} else {
 			f.line("            is.readBlob(%s);", acc)
 		}
