@@ -132,7 +132,7 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 		return g.rustIntDefault(f)
 	case ir.KindBlob:
 		// blob is a leaf: materialize its default so decode reconstructs it and
-		// marshal can compare against it (empty container when there is no default).
+		// serialize can compare against it (empty container when there is no default).
 		if raw, ok := g.blobBytes(f); ok {
 			return g.rustBlobNew(f.HasMaxlen, byteSliceLit(raw), true)
 		}

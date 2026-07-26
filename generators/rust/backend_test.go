@@ -75,7 +75,7 @@ func TestRustStructural(t *testing.T) {
 	for _, want := range []string{
 		"use sofab::{OStream, IStream, Visitor, Id, Unsigned, Signed};",
 		"pub struct Myfirstmessage {",
-		"pub fn marshal(&self, os: &mut OStream)",
+		"pub fn serialize<_F: sofab::Flush>(&self, os: &mut OStream<'_, _F>)",
 		"pub fn encode(&self) -> Vec<u8>",
 		"pub fn decode(data: &[u8]) -> Self",
 		"pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error>", // fallible entry point (generator#79)

@@ -1,5 +1,5 @@
 // Package rust is the Rust backend (PLAN §6.2, embedded/no_std-capable): structs
-// with marshal() over OStream and a flat-visitor decode. The corelib's Visitor
+// with serialize() over OStream and a flat-visitor decode. The corelib's Visitor
 // is flat (sequence_begin/end events, no child visitors), so decode is a
 // (location, id) state machine with a location stack — every assignment targets
 // self.m.<path> directly, which keeps the borrow checker happy.
@@ -381,7 +381,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	}
 	f.line("}")
 	f.blank()
-	// The generated Default, marshal, and decode read deprecated fields directly,
+	// The generated Default, serialize, and decode read deprecated fields directly,
 	// which would trip the deprecated lint; suppress it over the impl blocks that
 	// touch them so the generated crate stays warning-clean.
 	deprecated := fieldsHaveDeprecated(fields)
@@ -403,8 +403,8 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 		f.line("#[allow(deprecated)]")
 	}
 	f.line("impl %s {", name)
+	ms := g.messageSize(name, fields)
 	if isMessage {
-		ms := g.messageSize(name, fields)
 		if !ms.Bounded {
 			f.line("    /// Configured ceiling (max_message_size): an unbounded field means this")
 			f.line("    /// size is imposed, not derived from the schema.")
@@ -415,10 +415,13 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 			f.line("    pub const MAX_SIZE: usize = %d;", ms.Size)
 		}
 	}
-	// marshal
-	f.line("    pub fn marshal(&self, os: &mut OStream) {")
+	// serialize is generic over the stream's flush sink, so a caller can write
+	// into a buffer (NoFlush) or straight into a transport that drains the
+	// buffer as it fills -- the corelib supports both, and pinning the signature
+	// to NoFlush made the streaming half unreachable from generated code.
+	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut OStream<'_, _F>) {")
 	for _, fld := range fields {
-		g.emitMarshal(f, fld)
+		g.emitSerialize(f, fld)
 	}
 	f.line("    }")
 
@@ -429,16 +432,36 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 			f.line("    pub fn encode(&self) -> heapless::Vec<u8, %d> {", size)
 			f.line("        let mut buf: heapless::Vec<u8, %d> = heapless::Vec::new();", size)
 			f.line("        let _ = buf.resize_default(%d);", size)
-			f.line("        let used = { let mut os = OStream::new(&mut buf); self.marshal(&mut os); os.bytes_used() };")
+			f.line("        let used = { let mut os = OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };")
+			f.line("        buf.truncate(used);")
+			f.line("        buf")
+			f.line("    }")
+		} else if ms.Bounded {
+			// MAX_SIZE is derived from the schema, so one exactly-sized buffer
+			// always holds the message.
+			f.line("    pub fn encode(&self) -> Vec<u8> {")
+			f.line("        let mut buf = vec![0u8; Self::MAX_SIZE];")
+			f.line("        let used = { let mut os = OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };")
 			f.line("        buf.truncate(used);")
 			f.line("        buf")
 			f.line("    }")
 		} else {
+			// A field with no schema bound has no worst case, so MAX_SIZE here is
+			// the configured ceiling -- a policy number, not a size this message
+			// cannot exceed. Sizing the buffer from it would silently truncate a
+			// larger message (the writes report failure, and encode() has nowhere
+			// to report it to). This profile has a heap, so the buffer grows with
+			// the message instead and the ceiling never applies to a value the
+			// caller legitimately built.
 			f.line("    pub fn encode(&self) -> Vec<u8> {")
-			f.line("        let mut buf = vec![0u8; Self::MAX_SIZE];")
-			f.line("        let used = { let mut os = OStream::new(&mut buf); self.marshal(&mut os); os.bytes_used() };")
-			f.line("        buf.truncate(used);")
-			f.line("        buf")
+			f.line("        let mut out: Vec<u8> = Vec::new();")
+			f.line("        {")
+			f.line("            let mut scratch = [0u8; 512];")
+			f.line("            let mut os = OStream::with_flush(&mut scratch, 0, |_d: &[u8]| out.extend_from_slice(_d));")
+			f.line("            self.serialize(&mut os);")
+			f.line("            os.flush();")
+			f.line("        }")
+			f.line("        out")
 			f.line("    }")
 		}
 		f.line("    pub fn decode(data: &[u8]) -> Self {")
@@ -456,7 +479,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	}
 }
 
-func (g *gen) emitMarshal(f *rfile, fld *ir.Field) {
+func (g *gen) emitSerialize(f *rfile, fld *ir.Field) {
 	acc := "self." + rustIdent(fld.Name)
 	var write string
 	switch fld.Kind {
@@ -483,12 +506,12 @@ func (g *gen) emitMarshal(f *rfile, fld *ir.Field) {
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence is always framed; its child fields are omitted per-field by
-		// the nested marshal (MESSAGE_SPEC S2). An all-default nested object thus
+		// the nested serialize (MESSAGE_SPEC S2). An all-default nested object thus
 		// becomes an empty wrapper sequence, not a dropped field.
-		f.line("        let _ = os.write_sequence_begin(%d); %s.marshal(os); let _ = os.write_sequence_end();", fld.ID, acc)
+		f.line("        let _ = os.write_sequence_begin(%d); %s.serialize(os); let _ = os.write_sequence_end();", fld.ID, acc)
 		return
 	case ir.KindArray:
-		g.emitMarshalArray(f, fld, acc)
+		g.emitSerializeArray(f, fld, acc)
 		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
@@ -497,7 +520,7 @@ func (g *gen) emitMarshal(f *rfile, fld *ir.Field) {
 	f.line("        if %s { %s }", g.rustLeafNe(acc, fld), write)
 }
 
-func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
+func (g *gen) emitSerializeArray(f *rfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in Default), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence and is always framed (never whole-omitted).
@@ -517,11 +540,11 @@ func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("        if !%s.is_empty() {", acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.HasCount, 0)
+		g.serializeArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.HasCount, 0)
 		f.line("        }")
 		return
 	}
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.HasCount, 0)
+	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.HasCount, 0)
 }
 
 // trimExpr renders the `&[T]` argument for a native array write, applying the
@@ -546,7 +569,7 @@ func (g *gen) trimExpr(val string, elem ir.Kind, fixed bool) string {
 	}
 }
 
-// marshalArray writes the array val as field idExpr. Numeric/enum/bitfield
+// serializeArray writes the array val as field idExpr. Numeric/enum/bitfield
 // elements use the native array wire type (numeric/enum by signedness, bitfield
 // -> unsigned); boolean lowers to a 0/1 unsigned array; string/blob/struct/union/
 // array elements lower to a wrapper sequence whose child ids are the 0-based
@@ -557,7 +580,7 @@ func (g *gen) trimExpr(val string, elem ir.Kind, fixed bool) string {
 // from hasCount, which only selects the storage shape: a nested array-of-array
 // row is `count:`-shaped storage but is not a fixed-length field, so the
 // recursion passes fixed=false.
-func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, fixed bool, depth int) {
+func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, fixed bool, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	tv := fmt.Sprintf("_t%d", depth)
@@ -601,14 +624,14 @@ func (g *gen) marshalArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
-		f.line("%s    let _ = os.write_sequence_begin(%s as Id); %s.marshal(os); let _ = os.write_sequence_end();", ind, iv, ev)
+		f.line("%s    let _ = os.write_sequence_begin(%s as Id); %s.serialize(os); let _ = os.write_sequence_end();", ind, iv, ev)
 		f.line("%s}", ind)
 		f.line("%slet _ = os.write_sequence_end();", ind)
 	case ir.KindArray:
 		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
 		// A nested row is not a fixed-length *field*, so it keeps every element.
-		g.marshalArray(f, ind+"    ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, false, depth+1)
+		g.serializeArray(f, ind+"    ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, false, depth+1)
 		f.line("%s}", ind)
 		f.line("%slet _ = os.write_sequence_end();", ind)
 	}

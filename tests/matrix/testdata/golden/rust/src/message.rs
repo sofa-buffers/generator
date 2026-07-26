@@ -34,7 +34,7 @@ impl Default for Scalars {
 impl Scalars {
     /// Worst-case encoded size of this message, derived from the schema.
     pub const MAX_SIZE: usize = 49;
-    pub fn marshal(&self, os: &mut OStream) {
+    pub fn serialize<_F: sofab::Flush>(&self, os: &mut OStream<'_, _F>) {
         if self.u8min != 0 { let _ = os.write_unsigned(0, self.u8min as Unsigned); }
         if self.u8max != 255 { let _ = os.write_unsigned(1, self.u8max as Unsigned); }
         if self.u64max != 18446744073709551615 { let _ = os.write_unsigned(2, self.u64max as Unsigned); }
@@ -46,7 +46,7 @@ impl Scalars {
     }
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = vec![0u8; Self::MAX_SIZE];
-        let used = { let mut os = OStream::new(&mut buf); self.marshal(&mut os); os.bytes_used() };
+        let used = { let mut os = OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };
         buf.truncate(used);
         buf
     }
