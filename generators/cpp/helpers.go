@@ -335,7 +335,7 @@ func (g *gen) cppDefault(f *ir.Field) string {
 		return "0"
 	case ir.KindI64:
 		if f.Default != nil {
-			return scalarLit(f.Default) + "LL"
+			return cppI64Lit(f.Default)
 		}
 		return "0"
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32:
@@ -447,7 +447,7 @@ func (g *gen) cppArrayElemLit(elem ir.Kind, ref *ir.TypeRef, v any) string {
 	case ir.KindU64:
 		return scalarLit(v) + "ULL"
 	case ir.KindI64:
-		return scalarLit(v) + "LL"
+		return cppI64Lit(v)
 	case ir.KindFP32:
 		return floatLit(v) + "f"
 	case ir.KindFP64:
@@ -579,6 +579,22 @@ func asInt(v any) (int64, bool) {
 		return int64(x), true
 	}
 	return 0, false
+}
+
+// cppI64Lit renders an i64 default. INT64_MIN needs a form of its own: C++ has
+// no negative literals, so -9223372036854775808LL parses as the unary minus of
+// 9223372036854775808LL, and that magnitude does not fit a signed 64-bit type.
+// The compiler gives it an unsigned type and warns, which breaks any consumer
+// building generated headers with -Wall -Werror. Writing it as (min+1)-1 keeps
+// every intermediate value in range.
+func cppI64Lit(v any) string {
+	// The IR carries an i64 default as int64 or, when the schema wrote it as a
+	// string (which is how a value at the edge of the range is expressed safely
+	// in YAML/JSON), as that string. Both reach here.
+	if scalarLit(v) == "-9223372036854775808" {
+		return "(-9223372036854775807LL - 1)"
+	}
+	return scalarLit(v) + "LL"
 }
 
 func scalarLit(v any) string {

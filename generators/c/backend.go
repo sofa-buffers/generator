@@ -196,7 +196,7 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	}
 	h.blank()
 	// public API prototypes
-	g.emitProtos(h, m, msgType)
+	g.emitProtos(h, m, msgType, plans[msgKey])
 	h.blank()
 	h.line("#endif /* %s */", guardName)
 
@@ -560,7 +560,7 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 	c.blank()
 }
 
-func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string) {
+func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string, root *objectPlan) {
 	pfx := g.prefix + strings.ToLower(m.Name)
 	h.doc("Initialize a %s with its schema defaults (non-default fields zeroed).", m.Name)
 	h.line("void %s_init(%s *msg);", pfx, msgType)
@@ -568,11 +568,46 @@ func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string) {
 	h.line("sofab_ret_t %s_encode(const %s *msg, uint8_t *buf, size_t buflen, size_t *used);", pfx, msgType)
 	h.doc("Decode buf[len] into msg (call %s_init first to apply defaults). Returns sofab_ret_t.", pfx)
 	h.line("sofab_ret_t %s_decode(%s *msg, const uint8_t *buf, size_t len);", pfx, msgType)
+	h.blank()
+
+	// Streaming. The one-shot functions above own their stream for the length of
+	// one call, which forces the whole message through a single buffer in each
+	// direction. The corelib does not require that -- sofab_ostream_init takes a
+	// flush callback and sofab_istream_feed is incremental -- but neither was
+	// reachable, because the descriptor was defined in the .c without a
+	// declaration and the decoder state was a local. Both are exposed here.
+	h.doc("Object descriptor for %s, for use with the sofab_object_* API directly.", m.Name)
+	h.line("extern const sofab_object_descr_t %s;", root.descr)
+	h.blank()
+	h.doc("Encode msg into a stream the caller owns. With a flush callback on that\n" +
+		" *  stream the message may exceed its buffer: the buffer is drained as it\n" +
+		" *  fills, so what bounds memory is the buffer, not the message. The caller\n" +
+		" *  flushes the tail with sofab_ostream_flush().")
+	h.line("sofab_ret_t %s_encode_to(sofab_ostream_t *os, const %s *msg);", pfx, msgType)
+	h.blank()
+	h.doc("Incremental decoder: hold one and feed the message as bytes arrive,\n" +
+		" *  instead of buffering it whole first.\n" +
+		" *\n" +
+		" *  The wire format has no end marker at the top level -- a message ends\n" +
+		" *  where its bytes end -- so a feed cannot report that the MESSAGE is\n" +
+		" *  complete, only that the bytes handed in ended on a field boundary\n" +
+		" *  (SOFAB_RET_OK) or mid-field (SOFAB_RET_INCOMPLETE). Neither is a failure\n" +
+		" *  mid-stream; the caller's own framing decides when the input is over, and\n" +
+		" *  the last verdict says whether it ended half-read.")
+	h.line("typedef struct {")
+	h.line("    sofab_istream_t is;")
+	h.line("    sofab_object_decoder_t dec[%d];", g.maxDepth(m.Fields)+1)
+	h.line("} %s_decoder_t;", pfx)
+	h.blank()
+	h.doc("Bind a decoder to msg. Call %s_init on msg first to apply defaults.", pfx)
+	h.line("void %s_decoder_init(%s_decoder_t *d, %s *msg);", pfx, pfx, msgType)
+	h.blank()
+	h.doc("Feed the next chunk. See %s_decoder_t for what the return value means.", pfx)
+	h.line("sofab_ret_t %s_decoder_feed(%s_decoder_t *d, const void *buf, size_t len);", pfx, pfx)
 }
 
 func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPlan) {
 	pfx := g.prefix + strings.ToLower(m.Name)
-	depth := g.maxDepth(m.Fields) // decoder stack size
 
 	c.line("void %s_init(%s *msg) {", pfx, msgType)
 	// Zero first: sofab_object_init only writes descriptor fields, so a sized
@@ -596,15 +631,30 @@ func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPla
 	c.line("}")
 	c.blank()
 
+	c.line("sofab_ret_t %s_encode_to(sofab_ostream_t *os, const %s *msg) {", pfx, msgType)
+	c.line("    return sofab_object_encode(os, &%s, msg);", root.descr)
+	c.line("}")
+	c.blank()
+
+	c.line("void %s_decoder_init(%s_decoder_t *d, %s *msg) {", pfx, pfx, msgType)
+	c.line("    memset(d->dec, 0, sizeof(d->dec));")
+	c.line("    d->dec[0].info = &%s;", root.descr)
+	c.line("    d->dec[0].dst = (uint8_t *)msg;")
+	c.line("    d->dec[0].depth = (uint8_t)(sizeof(d->dec) / sizeof(d->dec[0]) - 1);")
+	c.line("    sofab_istream_init(&d->is, sofab_object_field_cb, (void *)&d->dec[0]);")
+	c.line("}")
+	c.blank()
+
+	c.line("sofab_ret_t %s_decoder_feed(%s_decoder_t *d, const void *buf, size_t len) {", pfx, pfx)
+	c.line("    return sofab_istream_feed(&d->is, buf, len);")
+	c.line("}")
+	c.blank()
+
+	// One-shot decode is the incremental one fed once, so the two cannot drift.
 	c.line("sofab_ret_t %s_decode(%s *msg, const uint8_t *buf, size_t len) {", pfx, msgType)
-	c.line("    sofab_istream_t ctx;")
-	c.line("    sofab_object_decoder_t dec[%d];", depth+1)
-	c.line("    memset(dec, 0, sizeof(dec));")
-	c.line("    dec[0].info = &%s;", root.descr)
-	c.line("    dec[0].dst = (uint8_t *)msg;")
-	c.line("    dec[0].depth = (uint8_t)(sizeof(dec) / sizeof(dec[0]) - 1);")
-	c.line("    sofab_istream_init(&ctx, sofab_object_field_cb, (void *)&dec[0]);")
-	c.line("    return sofab_istream_feed(&ctx, buf, len);")
+	c.line("    %s_decoder_t d;", pfx)
+	c.line("    %s_decoder_init(&d, msg);", pfx)
+	c.line("    return %s_decoder_feed(&d, buf, len);", pfx)
 	c.line("}")
 }
 

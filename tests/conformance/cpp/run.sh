@@ -48,21 +48,34 @@ YAML
 # fixed array, blob, string array, blob array, nested struct, union).
 IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"someu64":18446744073709551615,"somestringarray":["a","b","c","d","e"]}'
 
-# run_variant LABEL CORELIB INCLUDE MAKEVARS...
+# run_variant LABEL CORELIB DYNAMIC INCLUDE MAKEVARS...
 #   CORELIB  - "" for pure corelib-cpp, "c-cpp" for the corelib-c-cpp wrapper.
+#   DYNAMIC  - "true"/"false": the c-cpp storage mode. Both are real profiles and
+#              both need running. false is the DEFAULT one a schema author gets
+#              from a bare `corelib: c-cpp`, and it has storage types of its own
+#              (FixedString<N>, FixedBytes<N>, InlineVector<T,N>) with their own
+#              decode paths -- it was previously never built here at all.
 #   INCLUDE  - -I flag for the corpus syntax-only compile.
 #   MAKEVARS - vars passed to `make` for the generated project.
 run_variant() {
-    label=$1; corelib=$2; include=$3; shift 3
+    label=$1; corelib=$2; dynamic=$3; include=$4; shift 4
+    # corelib-cpp is header-only; the c-cpp wrapper needs the C sources linked.
+    STREAM_OBJS=""
+    if [ -n "$corelib" ]; then
+        for u in ostream istream object utf8; do
+            gcc -c -I"$CC/src/include" -o "$WORK/$u.o" "$CC/src/$u.c"
+        done
+        STREAM_OBJS="$WORK/ostream.o $WORK/istream.o $WORK/object.o $WORK/utf8.o"
+    fi
     echo "==> [$label] generating + building example project"
     if [ -n "$corelib" ]; then
         # corelib-c-cpp is the embedded profile: every string/blob needs a maxlen
         # and every array a count, in BOTH storage modes. allow_dynamic selects
         # std::string/std::vector storage for those bounded fields (a target with
-        # a heap), which is what this leg exercises — it does not make a bound
+        # a heap) instead of inline containers — it does not make a bound
         # optional, so the schemas below are bounded first (see EXAMPLE).
-        printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: true } }\n' "$corelib" > "$WORK/cfg-$label.yaml"
-        printf 'targets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: true } }\n' "$corelib" > "$WORK/cfg-corpus-$label.yaml"
+        printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: %s } }\n' "$corelib" "$dynamic" > "$WORK/cfg-$label.yaml"
+        printf 'targets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: %s } }\n' "$corelib" "$dynamic" > "$WORK/cfg-corpus-$label.yaml"
     else
         printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-$label.yaml"
         printf 'targets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-corpus-$label.yaml"
@@ -91,6 +104,16 @@ run_variant() {
         --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill-$label" )
     make -C "$WORK/fill-$label" "$@" >/dev/null
     check_maxsize_fill "$label" "$WORK/fill-$label/harness/harness" encode fill
+
+    # Streaming behaviour: both corelibs stream in both directions and always
+    # have, but nothing drove either -- the capability was demonstrable and
+    # unverified. Property: streaming is indistinguishable from the one-shot path.
+    echo "==> [$label] streaming: serialize through a sink, feed in chunks"
+    g++ -std=c++20 -Wall -Werror $include -I"$WORK/ex-$label" \
+        -DMSG_TYPE=sofabuffers::Myfirstmessage -include myfirstmessage.hpp \
+        -o "$WORK/stream-$label" "$ROOT/tests/conformance/cpp/streaming_check.cpp" \
+        $STREAM_OBJS
+    "$WORK/stream-$label"
 
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(printf '%s' "$IN" | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)
@@ -364,11 +387,12 @@ run_variant() {
 }
 
 # Pure C++20 corelib-cpp (default).
-run_variant cpp "" "-I$CPP/include" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC"
+run_variant cpp "" "" "-I$CPP/include" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC"
 
 # C++ wrapper over the C library, corelib-c-cpp (corelib: c-cpp). Only needs
 # SOFAB_C_DIR; the generated Makefile compiles + links its C sources.
-run_variant c-cpp "c-cpp" "-I$CC/src/include" SOFAB_C_DIR="$CC"
+run_variant c-cpp-dynamic "c-cpp" true "-I$CC/src/include" SOFAB_C_DIR="$CC"
+run_variant c-cpp-static  "c-cpp" false "-I$CC/src/include" SOFAB_C_DIR="$CC"
 
 # Receiver-side decode limits (generator#102), pure corelib-cpp only (the c-cpp
 # profile is statically schema-bounded). An unbounded array claiming more than

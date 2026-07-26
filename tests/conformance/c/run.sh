@@ -74,6 +74,14 @@ YAML
 make -C "$WORK/fillproj" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 check_maxsize_fill c "$WORK/fillproj/harness/harness" encode fill
 
+echo "==> streaming: encode through a sink, feed the decoder byte by byte"
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c \
+    --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/stream" )
+gcc -std=c99 -Wall -Wextra -Werror -I"$INC" -I"$WORK/stream" \
+    "$ROOT/tests/conformance/c/streaming_check.c" "$WORK"/stream/*.c \
+    "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/stream_check"
+"$WORK/stream_check"
+
 echo "==> verifying capability guards fire when a feature is stripped"
 if gcc -std=c99 -DSOFAB_DISABLE_SEQUENCE_SUPPORT -I"$INC" -I"$WORK/gen" \
         -c "$WORK"/gen/myfirstmessage.c -o /dev/null 2>/dev/null; then
