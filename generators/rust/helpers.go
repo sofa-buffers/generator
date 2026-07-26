@@ -393,42 +393,6 @@ func (g *gen) fixedNativeArray(f *ir.Field) (elem string, n int64, ok bool) {
 	return g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax), f.Count, true
 }
 
-// trimKinds reports which trailing-default-run trim helpers the schema needs
-// (MESSAGE_SPEC §3): the generic _trim_tail (integer/bool/enum/bitfield
-// elements, which lower to an int or to a 0/1 u8 image) and the bit-pattern
-// float variants. Only a top-level `count: N` native array field is trimmed, so
-// only those are scanned; every field of the crate appears exactly once here,
-// since module() emits one struct per named type plus one per message.
-func (g *gen) trimKinds(s *ir.Schema) (anyInt, anyF32, anyF64 bool) {
-	scan := func(fields []*ir.Field) {
-		for _, f := range fields {
-			// Whether the array is trimmed follows the schema `count`, not the
-			// storage: a bounded array is fixed-length on the wire whether it is
-			// held in a [T; N] or, under allow_dynamic, in a Vec<T>.
-			if f.Kind != ir.KindArray || !isNativeArrayElem(f.Elem) || !f.HasCount {
-				continue
-			}
-			switch f.Elem {
-			case ir.KindFP32:
-				anyF32 = true
-			case ir.KindFP64:
-				anyF64 = true
-			default:
-				anyInt = true
-			}
-		}
-	}
-	for _, key := range s.NamedOrder {
-		if nt := s.Named[key]; nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			scan(nt.Fields)
-		}
-	}
-	for _, m := range s.Messages {
-		scan(m.Fields)
-	}
-	return
-}
-
 // rustStr / rustBlob / rustSeq map a variable-length string, blob, or wrapper
 // sequence to its storage type per profile: std String/Vec (default), or under
 // no_std either fixed heapless storage sized from the schema (the default) or an

@@ -357,7 +357,7 @@ func (g *gen) nativeArrayTrimmedDefault(f *ir.Field) (string, bool) {
 			parts = append(parts, scalarLit(v))
 		}
 	}
-	// Drop the trailing element-default run (mirrors _trimTail on constants; a
+	// Drop the trailing element-default run (mirrors sofab.TrimTail on constants; a
 	// float -0.0 renders as "-0", so it is kept, matching the bit-pattern trim).
 	for len(parts) > 0 && isNativeElemDefaultLit(parts[len(parts)-1], f.Elem) {
 		parts = parts[:len(parts)-1]

@@ -329,11 +329,11 @@ func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 func TestJavaUtf8ValidatorRange(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n      s: { id: 0, type: string }\n"
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
-	if !strings.Contains(m, "if (_utf8ok(b, off, off + len))") {
-		t.Error("_utf8 must pass an exclusive end index (off + len) to _utf8ok")
+	if !strings.Contains(m, "if (Utf8.valid(b, off, off + len))") {
+		t.Error("_utf8 must pass an exclusive end index (off + len) to Utf8.valid")
 	}
-	if strings.Contains(m, "_utf8ok(b, off, len)") {
-		t.Error("_utf8ok called with a length where an exclusive end index is required")
+	if strings.Contains(m, "Utf8.valid(b, off, len)") {
+		t.Error("Utf8.valid called with a length where an exclusive end index is required")
 	}
 }
 

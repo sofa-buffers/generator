@@ -262,7 +262,6 @@ func TestGoStructuralInvariants(t *testing.T) {
 	prelude := files["sofab_visitor.go"]
 	for _, want := range []string{
 		"type _visitorBase struct{}",
-		"func _narrowU[T ~uint8 | ~uint16 | ~uint32 | ~uint64](v []uint64) []T",
 		"type _strSeq struct {",
 	} {
 		if !strings.Contains(prelude, want) {

@@ -578,32 +578,24 @@ messages:
 		}
 		for _, want := range []string{
 			// Fixed-count native arrays are trimmed, per element family.
-			"os.write_array_unsigned(0, _trim_tail(&self.fixedu[..], 0))",
-			"os.write_array_signed(1, _trim_tail(&self.fixedi[..], 0))",
-			"os.write_array_fp32(2, _trim_tail_f32(&self.fixedf32[..]))",
-			"os.write_array_fp64(3, _trim_tail_f64(&self.fixedf64[..]))",
+			"os.write_array_unsigned(0, sofab::trim_tail(&self.fixedu[..], 0))",
+			"os.write_array_signed(1, sofab::trim_tail(&self.fixedi[..], 0))",
+			"os.write_array_fp32(2, sofab::trim_tail_f32(&self.fixedf32[..]))",
+			"os.write_array_fp64(3, sofab::trim_tail_f64(&self.fixedf64[..]))",
 			// bool trims its 0/1 u8 image (false <-> 0).
-			"os.write_array_unsigned(4, _trim_tail(&_t0[..], 0))",
-			// Floats compare by bit pattern so a trailing -0.0 is not trimmed.
-			"while n > 0 && f32::to_bits(a[n - 1]) == 0 { n -= 1; }",
-			"while n > 0 && f64::to_bits(a[n - 1]) == 0 { n -= 1; }",
+			"os.write_array_unsigned(4, sofab::trim_tail(&_t0[..], 0))",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q", cfg, want)
 			}
 		}
-		// The helpers borrow rather than allocate and touch no std/alloc path, so
-		// the same text serves the #![no_std] crate.
-		for _, want := range []string{
-			"fn _trim_tail<T: PartialEq + Copy>(a: &[T], zero: T) -> &[T] {\n    let mut n = a.len();\n    while n > 0 && a[n - 1] == zero { n -= 1; }\n    &a[..n]\n}",
-			"fn _trim_tail_f32(a: &[f32]) -> &[f32] {",
-			"fn _trim_tail_f64(a: &[f64]) -> &[f64] {",
-		} {
-			if !strings.Contains(m, want) {
-				t.Errorf("message.rs (%v) missing helper %q", cfg, want)
-			}
+		// The helpers live in the corelib (corelib-rs / corelib-rs-no-std), not in
+		// a per-crate prelude: identical text served both profiles, which is what
+		// made them corelib material in the first place.
+		if strings.Contains(m, "fn _trim_tail") {
+			t.Errorf("message.rs (%v) must not carry a trim prelude; the corelib owns it", cfg)
 		}
-		for _, bad := range []string{"_trim_tail(&self.dynu", "_trim_tail_f32(&self.dynf32"} {
+		for _, bad := range []string{"trim_tail(&self.dynu", "trim_tail_f32(&self.dynf32"} {
 			if strings.Contains(m, bad) {
 				t.Errorf("message.rs (%v) must not contain %q", cfg, bad)
 			}
@@ -611,9 +603,9 @@ messages:
 	}
 }
 
-// The trim helpers are emitted only for the element families the schema uses,
-// and not at all for a schema with no fixed-count native array.
-func TestRustTrimHelpersGatedOnUse(t *testing.T) {
+// Only a fixed-count array is trimmed. A schema with no fixed-count native
+// array must not reach for the corelib trim at all.
+func TestRustTrimsOnlyFixedCountArrays(t *testing.T) {
 	const noFixed = `
 version: 1
 messages:
@@ -621,8 +613,8 @@ messages:
     payload:
       dynu: { id: 0, type: array, items: { type: u32 } }
 `
-	if m := moduleFromYAML(t, noFixed, map[string]any{}); strings.Contains(m, "_trim_tail") {
-		t.Error("no fixed-count array: trim helpers must not be emitted")
+	if m := moduleFromYAML(t, noFixed, map[string]any{}); strings.Contains(m, "trim_tail") {
+		t.Error("no fixed-count array: nothing to trim, so no trim call")
 	}
 	const onlyU = `
 version: 1
@@ -632,13 +624,8 @@ messages:
       fixedu: { id: 0, type: array, items: { type: u32, count: 4 } }
 `
 	m := moduleFromYAML(t, onlyU, map[string]any{})
-	if !strings.Contains(m, "fn _trim_tail<T: PartialEq + Copy>") {
-		t.Error("integer fixed-count array: _trim_tail must be emitted")
-	}
-	for _, bad := range []string{"fn _trim_tail_f32", "fn _trim_tail_f64"} {
-		if strings.Contains(m, bad) {
-			t.Errorf("no float fixed-count array: %q must not be emitted", bad)
-		}
+	if !strings.Contains(m, "sofab::trim_tail(&self.fixedu[..], 0)") {
+		t.Error("a fixed-count array must be trimmed via the corelib helper")
 	}
 }
 

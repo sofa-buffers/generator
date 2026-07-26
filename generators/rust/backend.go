@@ -235,8 +235,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.blank()
 	}
 
-	g.emitTrimHelpers(f, s)
-
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		switch nt.Category {
@@ -256,47 +254,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 		g.emitStruct(f, exported(m.Name), m.Fields, true, m.Summary)
 	}
 	return f.bytes()
-}
-
-// emitTrimHelpers emits the trailing-default-run trim helpers a fixed-count
-// native array needs on encode (MESSAGE_SPEC §3). They are `core`-only (slice
-// len/index plus f32/f64::to_bits) and allocate nothing — `&a[..n]` reborrows —
-// so the same code serves the std and the #![no_std] profile.
-func (g *gen) emitTrimHelpers(f *rfile, s *ir.Schema) {
-	anyInt, anyF32, anyF64 := g.trimKinds(s)
-	if !anyInt && !anyF32 && !anyF64 {
-		return
-	}
-	f.line("// _trim_tail / _trim_tail_f32 / _trim_tail_f64 return &a[..M'], where M' is one")
-	f.line("// past the last element that differs from the element default (0 when every")
-	f.line("// element is the default). A `count: N` array is fixed-length: its canonical wire")
-	f.line("// carries exactly those M' elements and the decoder rebuilds the trailing default")
-	f.line("// run from the schema count. A dynamic (count-less) array has")
-	f.line("// no N to refill from, so it is never trimmed. Floats compare by BIT PATTERN, not")
-	f.line("// by ==, so a trailing -0.0 (which == 0.0) survives the round-trip instead of")
-	f.line("// being silently trimmed to +0.0, and a NaN is never taken for the default.")
-	if anyInt {
-		f.line("fn _trim_tail<T: PartialEq + Copy>(a: &[T], zero: T) -> &[T] {")
-		f.line("    let mut n = a.len();")
-		f.line("    while n > 0 && a[n - 1] == zero { n -= 1; }")
-		f.line("    &a[..n]")
-		f.line("}")
-	}
-	if anyF32 {
-		f.line("fn _trim_tail_f32(a: &[f32]) -> &[f32] {")
-		f.line("    let mut n = a.len();")
-		f.line("    while n > 0 && f32::to_bits(a[n - 1]) == 0 { n -= 1; }")
-		f.line("    &a[..n]")
-		f.line("}")
-	}
-	if anyF64 {
-		f.line("fn _trim_tail_f64(a: &[f64]) -> &[f64] {")
-		f.line("    let mut n = a.len();")
-		f.line("    while n > 0 && f64::to_bits(a[n - 1]) == 0 { n -= 1; }")
-		f.line("    &a[..n]")
-		f.line("}")
-	}
-	f.blank()
 }
 
 func (g *gen) emitEnum(f *rfile, nt *ir.NamedType) {
@@ -579,13 +536,13 @@ func (g *gen) trimExpr(val string, elem ir.Kind, fixed bool) string {
 	}
 	switch elem {
 	case ir.KindFP32:
-		return fmt.Sprintf("_trim_tail_f32(&%s[..])", val)
+		return fmt.Sprintf("sofab::trim_tail_f32(&%s[..])", val)
 	case ir.KindFP64:
-		return fmt.Sprintf("_trim_tail_f64(&%s[..])", val)
+		return fmt.Sprintf("sofab::trim_tail_f64(&%s[..])", val)
 	default:
 		// Integer/enum/bitfield elements are ints (bool arrives here as its 0/1 u8
 		// image), so the unsuffixed 0 infers to the element type.
-		return fmt.Sprintf("_trim_tail(&%s[..], 0)", val)
+		return fmt.Sprintf("sofab::trim_tail(&%s[..], 0)", val)
 	}
 }
 

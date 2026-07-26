@@ -75,7 +75,7 @@ func TestZigStructural(t *testing.T) {
 		"somemap: []const MyfirstmessageSomemap",                                              // dynamic composite array -> slice
 		"if (!std.mem.eql(u32, self.someuintarray[0..], &.{ 0, 1, 1000, 4294967295 })) {",     // omit-guard vs default
 		"std.mem.sliceAsBytes",                                                                // bool array 0/1 lowering
-		"_putc(&self.m.someuintarray, &self.ai,",                                              // capacity-checked indexed store (generator#100)
+		"sofab.arrays.putChecked(&self.m.someuintarray, &self.ai,",                                              // capacity-checked indexed store (generator#100)
 		"if (v.inv) return error.InvalidMessage;",                                             // over-count array rejected as INVALID (generator#100)
 		"if (offset != 0) return;",                                                            // single-shot payload guard
 		"if (total > 50) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.somestring = chunk; } },", // bounded string: over-maxlen -> INVALID (§7.1); strict UTF-8 -> INVALID (issue #85); else zero-copy
@@ -166,10 +166,10 @@ messages:
 	m := string(files[0].Content)
 	for _, want := range []string{
 		// The count:N over-index guard (#142) wraps the maxlen:16 over-length
-		// element reject (MESSAGE_SPEC §7.1); both flag self.inv before _setElem grows.
-		`.root_bs => if (id >= 4) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { _setElem`, // string element: strict UTF-8 wraps the store
-		`.root_bb => if (id >= 3) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { _setElem`,                                                           // blob element: opaque, stored verbatim
-		`.root_bp => blk: { if (id >= 2) self.inv = true; break :blk if (_grow`,                                                                                               // bounded struct
+		// element reject (MESSAGE_SPEC §7.1); both flag self.inv before sofab.arrays.setElem grows.
+		`.root_bs => if (id >= 4) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem`, // string element: strict UTF-8 wraps the store
+		`.root_bb => if (id >= 3) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { sofab.arrays.setElem`,                                                           // blob element: opaque, stored verbatim
+		`.root_bp => blk: { if (id >= 2) self.inv = true; break :blk if (sofab.arrays.grow`,                                                                                               // bounded struct
 		`if (v.inv) return error.InvalidMessage;`, // surfaced as INVALID
 	} {
 		if !strings.Contains(m, want) {
@@ -178,7 +178,7 @@ messages:
 	}
 	// The dynamic string array keeps every index (no over-index guard); its store
 	// is still strict-UTF-8-wrapped (issue #85) since a string element is materialized.
-	if !strings.Contains(m, `.root_ds => if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { _setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk); },`) {
+	if !strings.Contains(m, `.root_ds => if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk); },`) {
 		t.Errorf("dynamic string array must not carry an over-index guard:\n%s", m)
 	}
 }
@@ -209,8 +209,8 @@ messages:
 		// Bounded scalar string and blob: reject over-maxlen before storing.
 		`0 => if (total > 8) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.bs = chunk; } },`, // string: strict UTF-8 wraps the store
 		`1 => if (total > 8) { self.inv = true; } else { self.m.bb = chunk; },`,                                                             // blob: opaque, verbatim
-		// Bounded wrapper string element: maxlen guard, then strict UTF-8, wrap the _setElem placement.
-		`if (total > 5) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { _setElem([]const u8, self.alloc, &(self.m.ws), id, "", chunk); } }`,
+		// Bounded wrapper string element: maxlen guard, then strict UTF-8, wrap the sofab.arrays.setElem placement.
+		`if (total > 5) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem([]const u8, self.alloc, &(self.m.ws), id, "", chunk); } }`,
 		// Surfaced as INVALID.
 		`if (v.inv) return error.InvalidMessage;`,
 	} {
@@ -256,18 +256,14 @@ messages:
 
 	// A fixed native array of every kind trims its trailing default run.
 	for _, want := range []string{
-		"try os.writeArrayUnsigned(1, _trimTail(self.fu[0..]));",
-		"try os.writeArraySigned(2, _trimTail(self.fi[0..]));",
-		"try os.writeArrayFp32(3, _trimTail(self.ff[0..]));",
-		"try os.writeArrayFp64(4, _trimTail(self.fd[0..]));",
+		"try os.writeArrayUnsigned(1, sofab.arrays.trimTail(self.fu[0..]));",
+		"try os.writeArraySigned(2, sofab.arrays.trimTail(self.fi[0..]));",
+		"try os.writeArrayFp32(3, sofab.arrays.trimTail(self.ff[0..]));",
+		"try os.writeArrayFp64(4, sofab.arrays.trimTail(self.fd[0..]));",
 		// bool lowers to its 0/1 byte image; trimming that image is equivalent.
-		"try os.writeArrayUnsigned(5, _trimTail(std.mem.sliceAsBytes(self.fb[0..])));",
-		"try os.writeArraySigned(6, _trimTail(self.fe[0..]));",
-		"try os.writeArrayUnsigned(7, _trimTail(self.fbf[0..]));",
-		// The helper compares the element BYTE IMAGE, never ==: a trailing -0.0
-		// (which == 0.0) must survive, and a NaN is never a default.
-		"fn _trimTail(a: anytype) []const std.meta.Elem(@TypeOf(a)) {",
-		"while (n > 0 and std.mem.allEqual(u8, std.mem.asBytes(&a[n - 1]), 0)) : (n -= 1) {}",
+		"try os.writeArrayUnsigned(5, sofab.arrays.trimTail(std.mem.sliceAsBytes(self.fb[0..])));",
+		"try os.writeArraySigned(6, sofab.arrays.trimTail(self.fe[0..]));",
+		"try os.writeArrayUnsigned(7, sofab.arrays.trimTail(self.fbf[0..]));",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.zig missing %q", want)
@@ -284,8 +280,8 @@ messages:
 		}
 	}
 	for _, notWant := range []string{
-		"_trimTail(self.dyn)",
-		"_trimTail(self.dynf)",
+		"sofab.arrays.trimTail(self.dyn)",
+		"sofab.arrays.trimTail(self.dynf)",
 	} {
 		if strings.Contains(m, notWant) {
 			t.Errorf("dynamic array must not be trimmed, found %q", notWant)
@@ -297,11 +293,11 @@ messages:
 	if !strings.Contains(m, "try os.writeArrayUnsigned(@intCast(_i0), _e0);") {
 		t.Error("nested array row must not be trimmed")
 	}
-	if strings.Contains(m, "_trimTail(_e0)") {
-		t.Error("nested array row must not be trimmed, found _trimTail(_e0)")
+	if strings.Contains(m, "sofab.arrays.trimTail(_e0)") {
+		t.Error("nested array row must not be trimmed, found sofab.arrays.trimTail(_e0)")
 	}
 	// A string-element array is a wrapper sequence: no native array to trim.
-	if strings.Contains(m, "_trimTail(self.strs") {
+	if strings.Contains(m, "sofab.arrays.trimTail(self.strs") {
 		t.Error("wrapper-sequence array must not be trimmed")
 	}
 }
@@ -417,11 +413,10 @@ messages:
 		"if (v.lim) return error.LimitExceeded;",
 		// The schema-bounded array keeps its generator#100 guard, now behind the
 		// generator#188 fill guard (a bare scalar at this array id is skipped).
-		"2 => { if (self.afill != 0) { self.afill -= 1; _putc(&self.m.barr, &self.ai, @truncate(value), &self.inv); } },",
-		// Hardened eager allocation: cap the untrusted wire count...
-		"const s = a.alloc(T, @min(n, 1024)) catch return &.{};",
-		// ...and grow as elements actually arrive, never past the announced count.
-		"const new = a.alloc(T, @min(@max(s.*.len * 2, i.* + 1), n)) catch return;",
+		"2 => { if (self.afill != 0) { self.afill -= 1; sofab.arrays.putChecked(&self.m.barr, &self.ai, @truncate(value), &self.inv); } },",
+		// Hardened eager allocation: the untrusted wire count is capped here, and
+		// sofab.arrays.putGrowing extends the slice as elements actually arrive.
+		"return sofab.arrays.allocN(T, a, @min(n, 1024));",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("limits message.zig missing %q", want)
