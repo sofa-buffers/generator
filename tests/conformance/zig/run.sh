@@ -10,6 +10,7 @@ set -eu
 
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_ZIG_CORELIB:-}}"
@@ -59,6 +60,12 @@ zig_build() {
 echo "==> generating + building example + conformance projects"
 zig_build "$ROOT/examples/messages/example.yaml" "$WORK/ex"
 zig_build "$WORK/conf.yaml" "$WORK/conf"
+
+# MAX_SIZE fill check (ARCHITECTURE §9.6): MAX_SIZE sizes the encode buffer, so a
+# fully filled message must fit it AND reach it exactly.
+echo "==> MAX_SIZE fill check"
+zig_build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
+check_maxsize_fill zig "$WORK/fill/zig-out/bin/harness" encode fill
 
 echo "==> JSON encode -> decode round-trip"
 IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someu64":18446744073709551615,"somestringarray":["a","b","c"]}'

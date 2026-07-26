@@ -30,7 +30,7 @@ func (*Backend) Lang() string { return "c" }
 // (build files + devcontainer wiring + encode/decode harness, §9.1), with the
 // message sources placed under generated/.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "message_"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg)}
+	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "message_"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), size: generator.NewSizePolicy(cfg)}
 	if err := checkBounded(s); err != nil {
 		return nil, err
 	}
@@ -61,7 +61,8 @@ type gen struct {
 	schema  *ir.Schema
 	prefix  string
 	banner  string
-	license string // SPDX id, "" to omit the header line
+	license string               // SPDX id, "" to omit the header line
+	size    generator.SizePolicy // max_message_size ceiling for unbounded messages
 }
 
 // objectPlan is the fully-resolved emission plan for one C object (the message,
@@ -176,12 +177,22 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	for _, k := range order {
 		g.emitStruct(h, plans[k])
 	}
-	// max serialized size
-	if size, bounded := g.maxSize(m.Fields); bounded {
+	// max serialized size (ir.MaxWireSize — one walk shared by every backend)
+	ms, err := g.size.Resolve(m.Name, m.Fields)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ms.Bounded {
 		h.line("/*! Worst-case serialized size of %s (every field present, all maxlen/count). */", m.Name)
-		h.line("#define %s %d", strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE"), size)
+		h.line("#define %s %d", strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE"), ms.Size)
 	} else {
-		h.line("/* %s is unbounded (a variable-length field has no maxlen): use streaming. */", m.Name)
+		// Unreachable for C today: the fixed-storage target already rejects an
+		// unbounded field before this point. Kept so the two constants stay
+		// distinguishable if that ever changes.
+		h.line("/*! Configured ceiling: %s has an unbounded field, so its size is imposed, not derived. */", m.Name)
+		h.line("#define %s %d", strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE_LIMIT"), ms.Size)
+		h.line("#define %s %s", strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE"),
+			strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE_LIMIT"))
 	}
 	h.blank()
 	// public API prototypes

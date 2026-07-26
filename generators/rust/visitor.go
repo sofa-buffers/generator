@@ -343,7 +343,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		if g.usesAlloc(g.schema) {
 			accType, accNew = "alloc::vec::Vec<u8>", "alloc::vec::Vec::new()"
 		} else {
-			sz, _ := g.maxSize(fields)
+			sz := g.messageSize(name, fields).Size
 			accType, accNew = fmt.Sprintf("heapless::Vec<u8, %d>", sz), "heapless::Vec::new()"
 		}
 	}

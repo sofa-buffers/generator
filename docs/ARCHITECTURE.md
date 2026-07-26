@@ -329,6 +329,7 @@ override.
 | `allow_dynamic` | rust (`rs-no-std`) | Stores bounded fields in `alloc::String`/`alloc::Vec` instead of heapless containers, for a target with an allocator; bounds stay mandatory and become decode-path checks (§9.3). |
 | `format` | docs (`html`) | Documentation output format of the non-code `docs` target; `html` is currently the only one. |
 | `no_std` | rust | With `corelib: rs-no-std`, emit the `#![no_std]` crate profile (default `true`). |
+| `max_message_size` | c, cpp, rust, java, csharp, zig, dart | Ceiling on a message's encoded size (default 4096). Fills in for a message the schema cannot bound (emitted as `MAX_SIZE_LIMIT`); when set explicitly it is also a budget a computed worst case may not exceed (§9.6). |
 | `emit` | all | `sources` vs `project`. |
 | `license` (generic) | all | SPDX header id; default **none** (§11). |
 | `tool_banner` (generic) | all | Tool name stamped in every generated file header (default `sofabgen`). |
@@ -1268,6 +1269,74 @@ Rust `no_std`) are capacity-bound by construction — the keys are inert.
 Independent of the option (bugfix class), no generated decoder may allocate
 eagerly from an untrusted wire count: C# and Zig count-less array arms reserve
 bounded and grow with delivered elements (the Java #96/#98 pattern).
+
+### 9.6 Worst-case message size (one walk, all backends)
+
+Most targets emit a `MAX_SIZE` constant and size their encode buffer from it.
+**That number is a property of the schema, not of the target.** The wire format
+is language-agnostic — the same definition encodes to the same bytes everywhere —
+so the walk that computes it lives **once**, in `internal/ir/wiresize.go`
+(`ir.MaxWireSize`), alongside `ir.Bounds`. A backend must not compute it itself.
+
+This is a correction, not a preference. Seven backends previously each carried
+their own copy and they disagreed with each other:
+
+| defect | scope | effect |
+|---|---|---|
+| every integer charged the full 64-bit varint width | 6 of 7 | a `u32` cost 10 bytes instead of 5 — 82 where the answer is 49 |
+| a surplus framing byte per wrapper array | 7 of 7 | the field header **is** the `sequence_begin`; only the terminator is extra |
+| the `fp32`/`fp64` array `fixlen_word` uncharged | C | 1 byte short per fixlen array |
+| an array without `count` charged **zero** payload | Rust | a schema-unbounded `Vec<u32>` reported as bounded, at 2 bytes |
+
+Only the last is unsafe, and only one backend had it — but no test could see any
+of them, because each backend was only ever compared against itself.
+
+**Every per-type maximum is exact; nothing is estimated.** `bool` 1, `u8`/`i8` 2,
+`u16`/`i16` 3, `u32`/`i32`/`enum` 5, `u64`/`i64`/`bitfield` 10 (signed kinds are
+ZigZag-mapped onto their unsigned peer's width, so they cost the same); `fp32`
+1+4, `fp64` 1+8; `string`/`blob` the fixlen word plus `maxlen`. Plus each field's
+`(id<<3)|wiretype` header, an array's element-count varint, a sequence's
+one-byte terminator, and one `fixlen_word` per `fp32`/`fp64` array.
+
+**Encode size and decode span are different questions.** A second entry point,
+`ir.MaxFieldDecodeSpan`, sizes a *reassembly window* and differs in two ways
+forced by what a decoder must tolerate:
+
+- it charges every varint its **widest** form (10 bytes) regardless of declared
+  type, because CORELIB_PLAN §4.1 obliges a decoder to accept a non-minimal
+  encoding — a conformant peer may legally pad a `u32` to ten bytes;
+- it substitutes the receiver-side `max_dyn_*` caps (§9.5) for missing schema
+  bounds, because those caps are exactly what this peer will accept.
+
+Those caps must **never** reach the encode walk: a limit on what I accept says
+nothing about what I may legitimately send, and sizing an encode buffer by it
+would refuse a message the schema permits.
+
+**When the schema cannot bound a message** — an array without `count`, a
+string/blob without `maxlen` — there is no worst case, and the walk says so
+rather than inventing one. The `max_message_size` config key then supplies a
+ceiling, and generated code names the distinction so a reader can see which kind
+of number they have:
+
+| case | emitted |
+|---|---|
+| schema-bounded | `MAX_SIZE = <computed>` |
+| schema-bounded, `max_message_size` set | `MAX_SIZE = <computed>`; generation **fails** if it exceeds the limit |
+| unbounded | `MAX_SIZE_LIMIT = <limit>`, `MAX_SIZE = MAX_SIZE_LIMIT` |
+| unbounded, statically-bounded target | rejected at generate time (C/`c-cpp`/`no_std` already reject unbounded fields) |
+
+The explicit-limit check is the more useful half: a message that cannot fit the
+target transport is caught while generating, not on the device. The default
+(4096) never triggers it — it only fills the unbounded case.
+
+**Verification.** `tests/matrix/maxsize_test.go` requires every target to emit
+the *same* number and to match `ir.MaxWireSize` — the guard none of the seven
+copies ever had. `tests/conformance/c/maxsize_fill.{yaml,c}` closes the loop
+against reality: a message with one field per wire shape, every bound exhausted
+and every varint at its widest, must encode to **exactly** `MAX_SIZE`. Too small
+means a legal message does not fit its own buffer; too large means every
+fixed-buffer target wastes that RAM silently. The wrapper-array surplus byte
+above was found by that check on its first run.
 
 ---
 

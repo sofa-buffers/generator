@@ -42,7 +42,7 @@ class Scalars {
 
   /// Worst-case serialized size (schema-bounded fields; a cap for
   /// unbounded ones).
-  static const int maxSize = 82;
+  static const int maxSize = 49;
   /// Serializes this message to a fresh byte buffer.
   Uint8List encode() => sofab.Encoder.encodeToBytes(marshal);
 

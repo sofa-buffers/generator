@@ -10,6 +10,7 @@ set -eu
 
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_C_CORELIB:-}}"
@@ -50,6 +51,28 @@ gcc -std=c99 -Wall -Wextra \
 
 echo "==> running round-trip"
 "$WORK/rt"
+
+echo "==> MAX_SIZE fill check: a fully filled message must encode to exactly MAX_SIZE"
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c \
+    --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill" )
+gcc -std=c99 -Wall -Wextra \
+    -I"$INC" -I"$WORK/fill" \
+    "$ROOT/tests/conformance/c/maxsize_fill.c" \
+    "$WORK"/fill/*.c \
+    "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" \
+    -o "$WORK/fill_check"
+"$WORK/fill_check"
+
+# The same check through the project harness, which is the form every other
+# target uses (tests/conformance/lib/maxsize_fill.sh).
+cat > "$WORK/fill-proj.yaml" <<YAML
+generic: { emit: project }
+targets: { c: { symbol_prefix: sofab_ } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/fill-proj.yaml" --lang c \
+    --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fillproj" )
+make -C "$WORK/fillproj" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+check_maxsize_fill c "$WORK/fillproj/harness/harness" encode fill
 
 echo "==> verifying capability guards fire when a feature is stripped"
 if gcc -std=c99 -DSOFAB_DISABLE_SEQUENCE_SUPPORT -I"$INC" -I"$WORK/gen" \

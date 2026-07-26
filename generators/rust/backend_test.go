@@ -90,13 +90,13 @@ func TestRustStructural(t *testing.T) {
 		"ArrayKind",                            // example has arrays -> array_begin imports it
 		"pub someu64: u64,",
 		"#[serde(default)]",
-		"pub someuintarray: Vec<u32>,",             // bounded native array -> the profile's dynamic container
-		"pub somefloatarray: Vec<f32>,",            // bounded fp array
-		"pub someboolarray: Vec<bool>,",            // bounded bool array
+		"pub someuintarray: Vec<u32>,",                 // bounded native array -> the profile's dynamic container
+		"pub somefloatarray: Vec<f32>,",                // bounded fp array
+		"pub someboolarray: Vec<bool>,",                // bounded bool array
 		"someuintarray: vec![0, 1, 1000, 4294967295],", // default is an N-element array literal
-		"someboolarray: vec![true, true, false, false, false, false, false, false],",  // default is exactly N                                   // short default tail-padded to N
-		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {",                                                      // omit-guard is a default compare
-		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear();", // bounds-checked store (generator#78); over-count rejects (generator#100)
+		"someboolarray: vec![true, true, false, false, false, false, false, false],", // default is exactly N                                   // short default tail-padded to N
+		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {",              // omit-guard is a default compare
+		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear();",    // bounds-checked store (generator#78); over-count rejects (generator#100)
 		"ai: usize", // fill index on the visitor
 		"if offset == 0 && chunk.len() >= total {", // string/blob single-shot fast path
 		"match core::str::from_utf8(&chunk[..total]) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }", // strict UTF-8: invalid -> INVALID (issue #85, subsumes #80)

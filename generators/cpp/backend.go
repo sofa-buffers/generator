@@ -42,7 +42,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	// std::string / std::vector, for a target that has a heap and would rather
 	// allocate what a message carries than its declared worst case.
 	fixed := clib
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: clib, fixed: fixed, allowDynamic: cfgBool(cfg, "allow_dynamic", false)}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: clib, fixed: fixed, allowDynamic: cfgBool(cfg, "allow_dynamic", false), size: generator.NewSizePolicy(cfg)}
 	if fixed {
 		if err := g.checkBounded(s); err != nil {
 			return nil, err
@@ -55,6 +55,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
+	}
+	if g.sizeErr != nil {
+		return nil, g.sizeErr
 	}
 	return files, nil
 }
@@ -99,6 +102,20 @@ type gen struct {
 	limArr, limStr, limBlob          int64
 	limArrHas, limStrHas, limBlobHas bool
 	limBuffered                      int64
+	// size is the max_message_size policy; sizeErr carries a violation out of
+	// the emit path, which has no error channel of its own.
+	size    generator.SizePolicy
+	sizeErr error
+}
+
+// messageSize resolves a message's worst-case encoded size via the shared walk,
+// deferring a max_message_size violation to Generate.
+func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize {
+	ms, err := g.size.Resolve(name, fields)
+	if err != nil && g.sizeErr == nil {
+		g.sizeErr = err
+	}
+	return ms
 }
 
 func (g *gen) anyLimit() bool { return g.limArrHas || g.limStrHas || g.limBlobHas }
@@ -146,29 +163,6 @@ func (g *gen) resolveLimits(s *ir.Schema, cfg map[string]any) {
 			g.limBuffered = v
 		}
 	}
-}
-
-// maxFieldSpan returns the largest worst-case byte span of a single top-level
-// field across every message, with the configured max_dyn_* caps substituted for
-// missing schema bounds. ok is false when some field stays unbounded even with
-// the caps applied.
-func (g *gen) maxFieldSpan(s *ir.Schema) (int64, bool) {
-	caps := &costCaps{
-		arr: g.limArr, arrHas: g.limArrHas,
-		str: g.limStr, strHas: g.limStrHas,
-		blob: g.limBlob, blobHas: g.limBlobHas,
-	}
-	var worst int64
-	for _, m := range s.Messages {
-		for _, f := range m.Fields {
-			c, ok := g.fieldCost(f, map[string]bool{}, caps)
-			if !ok {
-				return 0, false
-			}
-			worst = max(worst, c)
-		}
-	}
-	return worst, worst > 0
 }
 
 type hfile struct{ b strings.Builder }
@@ -339,8 +333,15 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		}
 	}
 	if isMessage {
-		size, _ := g.maxSize(fields)
-		f.line("    static constexpr std::size_t _maxSize = %d;", size)
+		ms := g.messageSize(name, fields)
+		if !ms.Bounded {
+			f.line("    /// Configured ceiling (max_message_size): an unbounded field means this")
+			f.line("    /// size is imposed, not derived from the schema.")
+			f.line("    static constexpr std::size_t _maxSizeLimit = %d;", ms.Size)
+			f.line("    static constexpr std::size_t _maxSize = _maxSizeLimit;")
+		} else {
+			f.line("    static constexpr std::size_t _maxSize = %d;", ms.Size)
+		}
 	}
 	f.blank()
 

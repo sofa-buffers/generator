@@ -21,10 +21,13 @@ type Backend struct{}
 func (*Backend) Lang() string { return "csharp" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(cfg)}
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(cfg), size: generator.NewSizePolicy(cfg)}
 	files := []generator.File{{Path: "Message.cs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
+	}
+	if g.sizeErr != nil {
+		return nil, g.sizeErr
 	}
 	return files, nil
 }
@@ -35,6 +38,22 @@ type gen struct {
 	banner  string
 	license string // SPDX id, "" to omit the header line
 	limits  limitSet
+	// size is the max_message_size policy; sizeErr carries a violation out of
+	// the emit path, which has no error channel of its own.
+	size    generator.SizePolicy
+	sizeErr error
+}
+
+// messageSize resolves a message's worst-case encoded size via the shared walk
+// (ir.MaxWireSize), falling back to the configured max_message_size ceiling when
+// a field is unbounded. The emit path has no error channel, so a violation of an
+// explicitly configured ceiling is recorded here and surfaced by Generate.
+func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize {
+	ms, err := g.size.Resolve(name, fields)
+	if err != nil && g.sizeErr == nil {
+		g.sizeErr = err
+	}
+	return ms
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102).
@@ -252,8 +271,15 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	f.line("    }")
 
 	if isMessage {
-		size, _ := g.maxSize(fields)
-		f.line("    public const int MaxSize = %d;", size)
+		ms := g.messageSize(name, fields)
+		if !ms.Bounded {
+			f.line("    // Configured ceiling (max_message_size): an unbounded field means this")
+			f.line("    // size is imposed, not derived from the schema.")
+			f.line("    public const int MaxSizeLimit = %d;", ms.Size)
+			f.line("    public const int MaxSize = MaxSizeLimit;")
+		} else {
+			f.line("    public const int MaxSize = %d;", ms.Size)
+		}
 		f.line("    // Per-thread scratch buffer: Encode() marshals into it and returns an")
 		f.line("    // exact-size copy, so the worst-case buffer is not re-allocated (and")
 		f.line("    // zeroed) on every call. Do not call Encode() reentrantly from a")

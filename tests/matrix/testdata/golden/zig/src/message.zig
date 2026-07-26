@@ -25,8 +25,8 @@ pub const Scalars = struct {
     f64: f64 = -2.5,
     flag: bool = true,
 
-    /// Upper bound on the encoded size of any value of this message.
-    pub const MAX_SIZE: usize = 82;
+    /// Worst-case encoded size of this message, derived from the schema.
+    pub const MAX_SIZE: usize = 49;
 
     /// Write this value's fields to `os` (sparse-canonical encoding).
     pub fn marshal(self: *const Scalars, os: *sofab.OStream) sofab.Error!void {

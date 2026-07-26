@@ -32,7 +32,8 @@ impl Default for Scalars {
 }
 
 impl Scalars {
-    pub const MAX_SIZE: usize = 82;
+    /// Worst-case encoded size of this message, derived from the schema.
+    pub const MAX_SIZE: usize = 49;
     pub fn marshal(&self, os: &mut OStream) {
         if self.u8min != 0 { let _ = os.write_unsigned(0, self.u8min as Unsigned); }
         if self.u8max != 255 { let _ = os.write_unsigned(1, self.u8max as Unsigned); }

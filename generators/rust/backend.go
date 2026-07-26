@@ -42,6 +42,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		corelib:      corelib,
 		noStd:        noStd,
 		allowDynamic: cfgBool(cfg, "allow_dynamic"),
+		size:         generator.NewSizePolicy(cfg),
 	}
 	// Receiver-side decode limits (generator#102) apply only to the std
 	// corelib-rs: corelib-rs-no-std has no Error::LimitExceeded, and its heapless
@@ -60,6 +61,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	files := []generator.File{{Path: "src/message.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
+	}
+	if g.sizeErr != nil {
+		return nil, g.sizeErr
 	}
 	return files, nil
 }
@@ -86,6 +90,22 @@ type gen struct {
 	// limits are the receiver-side decode limits (generator#102); resolved only
 	// for the std corelib-rs (empty — all inert — under corelib-rs-no-std).
 	limits limitSet
+	// size is the max_message_size policy; sizeErr carries a violation out of
+	// the emit path, which has no error channel of its own.
+	size    generator.SizePolicy
+	sizeErr error
+}
+
+// messageSize resolves a message's worst-case encoded size via the shared walk
+// (ir.MaxWireSize), falling back to the configured max_message_size ceiling when
+// a field is unbounded. The emit path has no error channel, so a violation of an
+// explicitly configured ceiling is recorded here and surfaced by Generate.
+func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize {
+	ms, err := g.size.Resolve(name, fields)
+	if err != nil && g.sizeErr == nil {
+		g.sizeErr = err
+	}
+	return ms
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102),
@@ -427,8 +447,16 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	}
 	f.line("impl %s {", name)
 	if isMessage {
-		size, _ := g.maxSize(fields)
-		f.line("    pub const MAX_SIZE: usize = %d;", size)
+		ms := g.messageSize(name, fields)
+		if !ms.Bounded {
+			f.line("    /// Configured ceiling (max_message_size): an unbounded field means this")
+			f.line("    /// size is imposed, not derived from the schema.")
+			f.line("    pub const MAX_SIZE_LIMIT: usize = %d;", ms.Size)
+			f.line("    pub const MAX_SIZE: usize = Self::MAX_SIZE_LIMIT;")
+		} else {
+			f.line("    /// Worst-case encoded size of this message, derived from the schema.")
+			f.line("    pub const MAX_SIZE: usize = %d;", ms.Size)
+		}
 	}
 	// marshal
 	f.line("    pub fn marshal(&self, os: &mut OStream) {")
@@ -440,7 +468,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	if isMessage {
 		if g.noStd {
 			// Heap-free encode into a fixed-capacity heapless::Vec sized by MAX_SIZE.
-			size, _ := g.maxSize(fields)
+			size := g.messageSize(name, fields).Size
 			f.line("    pub fn encode(&self) -> heapless::Vec<u8, %d> {", size)
 			f.line("        let mut buf: heapless::Vec<u8, %d> = heapless::Vec::new();", size)
 			f.line("        let _ = buf.resize_default(%d);", size)

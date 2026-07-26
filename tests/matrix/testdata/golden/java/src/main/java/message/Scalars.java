@@ -24,7 +24,7 @@ public class Scalars {
         if (this.f64 != -2.5) { os.writeFp64(6, this.f64); }
         if (this.flag != true) { os.writeBoolean(7, this.flag); }
     }
-    public static final int MAX_SIZE = 82;
+    public static final int MAX_SIZE = 49;
     // Per-thread scratch buffer: encode() marshals into it and returns an
     // exact-size copy, so the worst-case buffer is not re-allocated (and
     // zeroed) on every call. Do not call encode() reentrantly from a

@@ -23,7 +23,7 @@ struct Scalars : sofab::Message {
     std::uint8_t u8max = 255;
     std::int8_t i8min = -128;
     bool flag = true;
-    static constexpr std::size_t _maxSize = 82;
+    static constexpr std::size_t _maxSize = 49;
 
     /**
      * @brief Encode this message into a new byte vector.

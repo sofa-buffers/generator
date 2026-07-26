@@ -17,6 +17,7 @@ set -eu
 
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 NOSTD="${1:-${SOFAB_RS_CORELIB:-}}"
@@ -78,6 +79,13 @@ run_variant() {
     echo "==> [$label] generating + building example + conformance crates"
     rust_build "$EXAMPLE" "$WORK/ex-$label"
     rust_build "$WORK/conf.yaml" "$WORK/conf-$label"
+
+    # MAX_SIZE fill check (ARCHITECTURE §9.6): MAX_SIZE sizes the encode buffer
+    # (a heapless::Vec in the no_std profile), so a fully filled message must fit
+    # it AND reach it exactly.
+    echo "==> [$label] MAX_SIZE fill check"
+    rust_build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill-$label"
+    ( cd "$WORK/fill-$label" && check_maxsize_fill "$label" cargo run -q -- encode fill )
 
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(cd "$WORK/ex-$label" && printf '%s' "$IN" | cargo run -q -- encode myfirstmessage | cargo run -q -- decode myfirstmessage)
