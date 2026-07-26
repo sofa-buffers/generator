@@ -521,9 +521,14 @@ func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
 			// Fixed `[elem; N]` is never "empty"; omit when equal to its default
 			// (mirrors the C++ backend's `!= std::array{}`).
 			f.line("        if %s != %s {", acc, g.rustFieldDefault(fld))
-		} else if parts, ok := g.rustNativeArrayParts(fld); ok {
-			// Dynamic native array with a default: slice compare (std Vec / no_std alloc).
+		} else if parts, ok := g.rustNativeArrayPartsN(fld); ok {
+			// Native array with a default, held in a Vec: slice compare. The literal
+			// is the N-element default — the same one the field is constructed with —
+			// or a field sitting on its default would never compare equal and §2
+			// would never omit it.
 			f.line("        if &%s[..] != &[%s][..] {", acc, parts)
+		} else if fld.HasCount {
+			f.line("        if &%s[..] != &[%s; %d][..] {", acc, rustElemZeroLit(fld.Elem), fld.Count)
 		} else {
 			f.line("        if !%s.is_empty() {", acc)
 		}
