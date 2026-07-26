@@ -295,10 +295,10 @@ func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 		"        else if (kind == ArrayKind.FIXLEN) {\n            askip = count;\n            switch (cur) {",
 		"                case 4: askip = 0; afill = count; break;",
 		// Discarded at the top of every callback an array shares with a scalar.
-		"    public void unsigned(int id, long value) {\n        // S7.3 (generator#183",
-		"    public void signed(int id, long value) {\n        // S7.3 (generator#183",
-		"    public void fp32(int id, float value) {\n        // S7.3 (generator#183",
-		"    public void fp64(int id, double value) {\n        // S7.3 (generator#183",
+		"    public void unsigned(int id, long value) {\n        // Drop an element of an array",
+		"    public void signed(int id, long value) {\n        // Drop an element of an array",
+		"    public void fp32(int id, float value) {\n        // Drop an element of an array",
+		"    public void fp64(int id, double value) {\n        // Drop an element of an array",
 		"        if (askip > 0) { askip--; return; }",
 		// The mirror guard (generator#188) fronts every native-array fill arm.
 		"if (afill == 0) break; afill--; ",
@@ -329,11 +329,11 @@ func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 func TestJavaUtf8ValidatorRange(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n      s: { id: 0, type: string }\n"
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
-	if !strings.Contains(m, "if (_utf8ok(b, off, off + len))") {
-		t.Error("_utf8 must pass an exclusive end index (off + len) to _utf8ok")
+	if !strings.Contains(m, "if (Utf8.valid(b, off, off + len))") {
+		t.Error("_utf8 must pass an exclusive end index (off + len) to Utf8.valid")
 	}
-	if strings.Contains(m, "_utf8ok(b, off, len)") {
-		t.Error("_utf8ok called with a length where an exclusive end index is required")
+	if strings.Contains(m, "Utf8.valid(b, off, len)") {
+		t.Error("Utf8.valid called with a length where an exclusive end index is required")
 	}
 }
 

@@ -4,7 +4,6 @@ package message
 
 import (
 	"github.com/sofa-buffers/corelib-go"
-	"math"
 )
 
 // _visitorBase supplies no-op defaults for every sofab.Visitor method, so a
@@ -24,76 +23,16 @@ func (_visitorBase) Float64Array(sofab.ID, []float64) error        { return nil 
 func (_visitorBase) BeginSequence(sofab.ID) (sofab.Visitor, error) { return _visitorBase{}, nil }
 func (_visitorBase) EndSequence() error                            { return nil }
 
-// _narrowU / _narrowS copy a 64-bit-widened native array down to its declared
-// element width.
-func _narrowU[T ~uint8 | ~uint16 | ~uint32 | ~uint64](v []uint64) []T {
-	out := make([]T, len(v))
-	for i, x := range v {
-		out[i] = T(x)
-	}
-	return out
-}
-
-func _narrowS[T ~int8 | ~int16 | ~int32 | ~int64](v []int64) []T {
-	out := make([]T, len(v))
-	for i, x := range v {
-		out[i] = T(x)
-	}
-	return out
-}
-
-// _trimTail / _trimTailF32 / _trimTailF64 return a[:M'], where M' is one past the
-// last element that differs from the element default (0 if every element is the
-// default). A fixed-count array's canonical wire carries exactly those M'
-// elements; the decoder rebuilds the trailing default run from the schema count
-// (MESSAGE_SPEC S3). Elements compare by BIT PATTERN, not by ==, so a trailing
-// -0.0 (which == 0.0) survives the round-trip instead of being silently trimmed
-// to +0.0.
-func _trimTail[T comparable](a []T, zero T) []T {
-	n := len(a)
-	for n > 0 && a[n-1] == zero {
-		n--
-	}
-	return a[:n]
-}
-
-func _trimTailF32(a []float32) []float32 {
-	n := len(a)
-	for n > 0 && math.Float32bits(a[n-1]) == 0 {
-		n--
-	}
-	return a[:n]
-}
-
-func _trimTailF64(a []float64) []float64 {
-	n := len(a)
-	for n > 0 && math.Float64bits(a[n-1]) == 0 {
-		n--
-	}
-	return a[:n]
-}
-
-// _padTo grows a to exactly n elements with the element default. A fixed-count
-// array decodes to exactly its schema count regardless of the wire count, so a
-// growable container must materialize the trailing default run the encoder
-// elided (MESSAGE_SPEC S3).
-func _padTo[T any](a []T, n int, zero T) []T {
-	for len(a) < n {
-		a = append(a, zero)
-	}
-	return a
-}
-
 // _strSeq / _bytesSeq collect the elements of a string / blob array. Elements are
 // keyed by index id: a default (empty) element is omitted on the
 // wire, so we place each value at its id and fill any gap with the element default
 // ("" / nil). Blob copies (the corelib value aliases the decode buffer).
 // cap is the schema fixed-count bound N (-1 == dynamic/unbounded): an element id
-// >= N is a schema-bound violation (MESSAGE_SPEC S5.1/S7 - an index at or past
+// >= N is a schema-bound violation (an index at or past
 // the fixed count is INVALID, never grown-into), rejected before the slice grows,
 // which also bounds the id-keyed fill against an over-index amplification DoS.
 // emax is the schema element maxlen bound (-1 == unbounded): an element whose
-// wire byte length exceeds emax is malformed input (MESSAGE_SPEC S7.1),
+// wire byte length exceeds emax is malformed input,
 // rejected as INVALID before the slice grows - never silently truncated.
 type _strSeq struct {
 	_visitorBase
@@ -167,7 +106,7 @@ type _uMatSeq[T ~uint8 | ~uint16 | ~uint32 | ~uint64] struct {
 }
 
 func (s *_uMatSeq[T]) UnsignedArray(_ sofab.ID, v []uint64) error {
-	*s.out = append(*s.out, _narrowU[T](v))
+	*s.out = append(*s.out, sofab.NarrowUnsigned[T](v))
 	return nil
 }
 
@@ -177,7 +116,7 @@ type _sMatSeq[T ~int8 | ~int16 | ~int32 | ~int64] struct {
 }
 
 func (s *_sMatSeq[T]) SignedArray(_ sofab.ID, v []int64) error {
-	*s.out = append(*s.out, _narrowS[T](v))
+	*s.out = append(*s.out, sofab.NarrowSigned[T](v))
 	return nil
 }
 

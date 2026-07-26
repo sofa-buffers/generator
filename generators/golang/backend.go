@@ -111,14 +111,13 @@ func (g *gen) hasObject() bool {
 }
 
 // preludeFile is the once-per-package decode support: the no-op _visitorBase that
-// every generated object embeds, the integer-array narrowing helpers, and the
-// collector visitors that gather the elements of a wrapper-sequence array. These
-// are schema-independent, so the whole set is emitted unconditionally (unused
-// generic types/functions are legal Go) and shared by every message file.
+// every generated object embeds and the collector visitors that gather the
+// elements of a wrapper-sequence array. These are schema-independent, so the
+// whole set is emitted unconditionally (unused generic types/functions are legal
+// Go) and shared by every message file.
 func (g *gen) preludeFile() []byte {
 	f := newGoFile(g.pkg)
 	f.imp(corelibImport)
-	f.imp("math")
 	f.line(`// _visitorBase supplies no-op defaults for every sofab.Visitor method, so a
 // generated object overrides only the callbacks its fields actually use.
 type _visitorBase struct{}
@@ -136,76 +135,16 @@ func (_visitorBase) Float64Array(sofab.ID, []float64) error        { return nil 
 func (_visitorBase) BeginSequence(sofab.ID) (sofab.Visitor, error) { return _visitorBase{}, nil }
 func (_visitorBase) EndSequence() error                            { return nil }
 
-// _narrowU / _narrowS copy a 64-bit-widened native array down to its declared
-// element width.
-func _narrowU[T ~uint8 | ~uint16 | ~uint32 | ~uint64](v []uint64) []T {
-	out := make([]T, len(v))
-	for i, x := range v {
-		out[i] = T(x)
-	}
-	return out
-}
-
-func _narrowS[T ~int8 | ~int16 | ~int32 | ~int64](v []int64) []T {
-	out := make([]T, len(v))
-	for i, x := range v {
-		out[i] = T(x)
-	}
-	return out
-}
-
-// _trimTail / _trimTailF32 / _trimTailF64 return a[:M'], where M' is one past the
-// last element that differs from the element default (0 if every element is the
-// default). A fixed-count array's canonical wire carries exactly those M'
-// elements; the decoder rebuilds the trailing default run from the schema count
-// (MESSAGE_SPEC S3). Elements compare by BIT PATTERN, not by ==, so a trailing
-// -0.0 (which == 0.0) survives the round-trip instead of being silently trimmed
-// to +0.0.
-func _trimTail[T comparable](a []T, zero T) []T {
-	n := len(a)
-	for n > 0 && a[n-1] == zero {
-		n--
-	}
-	return a[:n]
-}
-
-func _trimTailF32(a []float32) []float32 {
-	n := len(a)
-	for n > 0 && math.Float32bits(a[n-1]) == 0 {
-		n--
-	}
-	return a[:n]
-}
-
-func _trimTailF64(a []float64) []float64 {
-	n := len(a)
-	for n > 0 && math.Float64bits(a[n-1]) == 0 {
-		n--
-	}
-	return a[:n]
-}
-
-// _padTo grows a to exactly n elements with the element default. A fixed-count
-// array decodes to exactly its schema count regardless of the wire count, so a
-// growable container must materialize the trailing default run the encoder
-// elided (MESSAGE_SPEC S3).
-func _padTo[T any](a []T, n int, zero T) []T {
-	for len(a) < n {
-		a = append(a, zero)
-	}
-	return a
-}
-
 // _strSeq / _bytesSeq collect the elements of a string / blob array. Elements are
 // keyed by index id: a default (empty) element is omitted on the
 // wire, so we place each value at its id and fill any gap with the element default
 // ("" / nil). Blob copies (the corelib value aliases the decode buffer).
 // cap is the schema fixed-count bound N (-1 == dynamic/unbounded): an element id
-// >= N is a schema-bound violation (MESSAGE_SPEC S5.1/S7 - an index at or past
+// >= N is a schema-bound violation (an index at or past
 // the fixed count is INVALID, never grown-into), rejected before the slice grows,
 // which also bounds the id-keyed fill against an over-index amplification DoS.
 // emax is the schema element maxlen bound (-1 == unbounded): an element whose
-// wire byte length exceeds emax is malformed input (MESSAGE_SPEC S7.1),
+// wire byte length exceeds emax is malformed input,
 // rejected as INVALID before the slice grows - never silently truncated.
 type _strSeq struct {
 	_visitorBase
@@ -279,7 +218,7 @@ type _uMatSeq[T ~uint8 | ~uint16 | ~uint32 | ~uint64] struct {
 }
 
 func (s *_uMatSeq[T]) UnsignedArray(_ sofab.ID, v []uint64) error {
-	*s.out = append(*s.out, _narrowU[T](v))
+	*s.out = append(*s.out, sofab.NarrowUnsigned[T](v))
 	return nil
 }
 
@@ -289,7 +228,7 @@ type _sMatSeq[T ~int8 | ~int16 | ~int32 | ~int64] struct {
 }
 
 func (s *_sMatSeq[T]) SignedArray(_ sofab.ID, v []int64) error {
-	*s.out = append(*s.out, _narrowS[T](v))
+	*s.out = append(*s.out, sofab.NarrowSigned[T](v))
 	return nil
 }
 
@@ -615,15 +554,15 @@ func (g *gen) trimExpr(val string, elem ir.Kind, ref *ir.TypeRef, fixed bool) st
 	}
 	switch elem {
 	case ir.KindFP32:
-		return fmt.Sprintf("_trimTailF32(%s)", val)
+		return fmt.Sprintf("sofab.TrimTailFloat32(%s)", val)
 	case ir.KindFP64:
-		return fmt.Sprintf("_trimTailF64(%s)", val)
+		return fmt.Sprintf("sofab.TrimTailFloat64(%s)", val)
 	case ir.KindBool:
-		return fmt.Sprintf("_trimTail(%s, false)", val)
+		return fmt.Sprintf("sofab.TrimTail(%s, false)", val)
 	case ir.KindEnum, ir.KindBitfield:
-		return fmt.Sprintf("_trimTail(%s, %s(0))", val, g.typeName(ref.Key))
+		return fmt.Sprintf("sofab.TrimTail(%s, %s(0))", val, g.typeName(ref.Key))
 	default:
-		return fmt.Sprintf("_trimTail(%s, 0)", val)
+		return fmt.Sprintf("sofab.TrimTail(%s, 0)", val)
 	}
 }
 
@@ -880,12 +819,12 @@ func (g *gen) padStmt(acc string, fld *ir.Field) string {
 	default:
 		zero = "0"
 	}
-	return fmt.Sprintf("\n\t\t%s = _padTo(%s, %d, %s)", acc, acc, fld.Count, zero)
+	return fmt.Sprintf("\n\t\t%s = sofab.PadTo(%s, %d, %s)", acc, acc, fld.Count, zero)
 }
 
 // narrowArrayStmt assigns a widened native array (v) into the field, narrowing to
 // the declared element width. 64-bit widths (and bitfield/enum at 64-bit) assign
-// the widened slice directly; narrower widths allocate via _narrowU/_narrowS.
+// the widened slice directly; narrower widths allocate via the corelib narrowers.
 func (g *gen) narrowArrayStmt(acc string, elem ir.Kind, ref *ir.TypeRef) string {
 	switch elem {
 	case ir.KindU64:
@@ -895,13 +834,13 @@ func (g *gen) narrowArrayStmt(acc string, elem ir.Kind, ref *ir.TypeRef) string 
 	case ir.KindBool:
 		return fmt.Sprintf("%s = make([]bool, len(v))\n\t\tfor _i, _x := range v {\n\t\t\t%s[_i] = _x != 0\n\t\t}", acc, acc)
 	case ir.KindBitfield:
-		return fmt.Sprintf("%s = _narrowU[%s](v)", acc, g.typeName(ref.Key))
+		return fmt.Sprintf("%s = sofab.NarrowUnsigned[%s](v)", acc, g.typeName(ref.Key))
 	case ir.KindEnum:
-		return fmt.Sprintf("%s = _narrowS[%s](v)", acc, g.typeName(ref.Key))
+		return fmt.Sprintf("%s = sofab.NarrowSigned[%s](v)", acc, g.typeName(ref.Key))
 	case ir.KindU8, ir.KindU16, ir.KindU32:
-		return fmt.Sprintf("%s = _narrowU[%s](v)", acc, goNumType(elem))
+		return fmt.Sprintf("%s = sofab.NarrowUnsigned[%s](v)", acc, goNumType(elem))
 	default: // i8/i16/i32
-		return fmt.Sprintf("%s = _narrowS[%s](v)", acc, goNumType(elem))
+		return fmt.Sprintf("%s = sofab.NarrowSigned[%s](v)", acc, goNumType(elem))
 	}
 }
 

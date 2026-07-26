@@ -45,6 +45,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
 		license: generator.LicenseID(cfg),
 		limits:  resolveLimits(s, cfg),
+		size:    generator.NewSizePolicy(cfg),
 	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	prefix := ""
@@ -55,6 +56,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if project {
 		files = append(files, g.projectFiles(s, cfg)...)
 	}
+	if g.sizeErr != nil {
+		return nil, g.sizeErr
+	}
 	return files, nil
 }
 
@@ -63,6 +67,22 @@ type gen struct {
 	banner  string
 	license string // SPDX id, "" to omit the header line
 	limits  limitSet
+	// size is the max_message_size policy; sizeErr carries a violation out of
+	// the emit path, which has no error channel of its own.
+	size    generator.SizePolicy
+	sizeErr error
+}
+
+// messageSize resolves a message's worst-case encoded size via the shared walk
+// (ir.MaxWireSize), falling back to the configured max_message_size ceiling when
+// a field is unbounded. The emit path has no error channel, so a violation of an
+// explicitly configured ceiling is recorded here and surfaced by Generate.
+func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize {
+	ms, err := g.size.Resolve(name, fields)
+	if err != nil && g.sizeErr == nil {
+		g.sizeErr = err
+	}
+	return ms
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102),
@@ -247,11 +267,19 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		f.blank()
 		f.line("  /// Worst-case serialized size (schema-bounded fields; a cap for")
 		f.line("  /// unbounded ones).")
-		f.line("  static const int maxSize = %d;", g.maxSize(fields))
+		ms := g.messageSize(name, fields)
+		if !ms.Bounded {
+			f.line("  // Configured ceiling (max_message_size): an unbounded field means this")
+			f.line("  // size is imposed, not derived from the schema.")
+			f.line("  static const int maxSizeLimit = %d;", ms.Size)
+			f.line("  static const int maxSize = maxSizeLimit;")
+		} else {
+			f.line("  static const int maxSize = %d;", ms.Size)
+		}
 		f.line("  /// Serializes this message to a fresh byte buffer.")
 		f.line("  Uint8List encode() => sofab.Encoder.encodeToBytes(marshal);")
 		f.blank()
-		f.line("  /// Status-surfacing one-shot decode (MESSAGE_SPEC S7): fills [out] and")
+		f.line("  /// Status-surfacing one-shot decode: fills [out] and")
 		f.line("  /// returns the terminal decode outcome. `invalid` covers both malformed")
 		f.line("  /// bytes and a schema-bound violation (over-count/over-index/over-maxlen);")
 		f.line("  /// `incomplete` means the bytes end inside a field or an open sequence.")

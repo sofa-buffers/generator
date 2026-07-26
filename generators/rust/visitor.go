@@ -237,7 +237,7 @@ func (g *gen) emitArraySkipGuard(f *rfile, arrSkip bool) {
 	if !arrSkip {
 		return
 	}
-	f.line("        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id")
+	f.line("        if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id")
 }
 
 // emitArraySkipArm arms the §7.3 discard counter in array_begin
@@ -343,7 +343,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		if g.usesAlloc(g.schema) {
 			accType, accNew = "alloc::vec::Vec<u8>", "alloc::vec::Vec::new()"
 		} else {
-			sz, _ := g.maxSize(fields)
+			sz := g.messageSize(name, fields).Size
 			accType, accNew = fmt.Sprintf("heapless::Vec<u8, %d>", sz), "heapless::Vec::new()"
 		}
 	}
@@ -495,7 +495,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// cannot tell them apart; array_begin arms this with the announced element
 	// count and the callbacks discard exactly that many.
 	if arrSkip {
-		f.line("    askip: usize, // elements left to discard from a S7.3-contradictory array")
+		f.line("    askip: usize, // elements left to discard from a wire-type-contradictory array")
 	}
 	// §7.3 mirror (generator#188): a bare scalar delivered at a native-array id
 	// would land in that array's fill arm as element 0. array_begin arms this with
@@ -647,7 +647,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		} else {
 			f.line("        // Single-shot: whole payload in one chunk -> build straight from the")
 			f.line("        // slice, skipping the `acc` accumulate + second copy.")
-			f.line("        // MESSAGE_SPEC 8 / CORELIB_PLAN 6.4: a string is UTF-8 and Rust's")
+			f.line("        // A string is UTF-8 and Rust's")
 			f.line("        // String is a Unicode type, so it is always strict. Invalid UTF-8 is")
 			f.line("        // the INVALID decode outcome (self.inv -> Error::InvalidMsg), never a")
 			f.line("        // lossy U+FFFD and never empty; the two Rust profiles agree (subsumes #80).")
@@ -753,7 +753,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			case fkStruct:
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
-						if _, n, ok := g.fixedNativeArray(fld); ok {
+						if fld.HasCount {
 							// Over-count reject at the count header (generator#216 / F-0032):
 							// a wire element count above the schema `count` N is INVALID
 							// (MESSAGE_SPEC 3+7), and deciding it HERE — before the elements
@@ -761,7 +761,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 							// check only at the element store (emitNativeArrayStore) never
 							// fires when truncation cuts the array short of N, so an
 							// over-count-AND-truncated array would misreport INCOMPLETE.
-							overcount := fmt.Sprintf("if count > %d { self.inv = true; return; } ", n)
+							overcount := fmt.Sprintf("if count > %d { self.inv = true; return; } ", fld.Count)
 							// A fixed `[T; N]` is pre-allocated in the struct default, so
 							// the M wire elements store straight into it and no clear is
 							// needed to make room. But the encoder trims the trailing
@@ -772,9 +772,24 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 							// array_begin means the field is PRESENT on the wire, so this
 							// never disturbs the sparse-omission contract: an ABSENT field
 							// keeps its full schema default.
+							// Under allow_dynamic the same bounded array lives in a Vec,
+							// which has no pre-allocated tail to wipe — it is cleared and
+							// the M wire elements are pushed. The bound above is what the
+							// [T; N] length used to provide, so it must be emitted for
+							// both storage modes; only what follows it differs.
 							reset := ""
-							if zero, need := g.rustFixedArrayNeedsReset(fld); need {
-								reset = fmt.Sprintf("%s.%s = %s;", fr.path, rustIdent(fld.Name), zero)
+							if _, _, fixed := g.fixedNativeArray(fld); fixed {
+								if zero, need := g.rustFixedArrayNeedsReset(fld); need {
+									reset = fmt.Sprintf("%s.%s = %s;", fr.path, rustIdent(fld.Name), zero)
+								}
+							} else {
+								// Size the Vec to N with element defaults, so the §3
+								// refill of the trimmed tail is the same act as for a
+								// [T; N]: the M wire elements overwrite [0, M) and
+								// [M, N) reads back as the element default.
+								reset = fmt.Sprintf("%s.%s.clear(); %s.%s.resize(%d, %s);",
+									fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name),
+									fld.Count, rustElemZeroLit(fld.Elem))
 							}
 							f.line("            (_Loc::%s, %d) => { %s%s },", fr.loc, fld.ID, overcount, reset)
 							continue
@@ -914,8 +929,14 @@ func (g *gen) emitMaxlenGuard(f *rfile, fs []frame, kind ir.Kind) {
 // message as malformed: a wire element count above the schema's `count` is
 // INVALID per MESSAGE_SPEC 3+7 and must reject, not clamp (generator#100).
 func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
-	if _, n, ok := g.fixedNativeArray(fld); ok {
-		f.line("            (_Loc::%s, %d) => { %sif self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } else { self.inv = true; } }", fr.loc, fld.ID, fillGuard, n, fr.path, rustIdent(fld.Name), rhs)
+	// A `count: N` array is fixed-length whatever holds it: MESSAGE_SPEC §3 has
+	// the encoder trim the trailing default run and the DECODER rebuild it from N,
+	// so the field must end up with N elements, not with the M the wire carried.
+	// The Vec is sized to N in array_begin, so both storage shapes take the same
+	// indexed store; only a count-less array pushes, because it has no N to
+	// rebuild from and every element it carries is significant.
+	if fld.HasCount && isNativeArrayElem(fld.Elem) {
+		f.line("            (_Loc::%s, %d) => { %sif self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } else { self.inv = true; } }", fr.loc, fld.ID, fillGuard, fld.Count, fr.path, rustIdent(fld.Name), rhs)
 		return
 	}
 	store := g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs)
@@ -985,11 +1006,18 @@ func (g *gen) pushStmt(target, val string) string {
 	return fmt.Sprintf("%s.push(%s);", target, val)
 }
 
+// innerNew is the empty row of a nested array, which must match the row type the
+// outer container holds: heapless under the default no_std storage, alloc when
+// allow_dynamic put the whole field on the allocator.
 func (g *gen) innerNew() string {
-	if g.noStd {
+	switch {
+	case g.noStd && g.allowDynamic:
+		return "alloc::vec::Vec::new()"
+	case g.noStd:
 		return "heapless::Vec::new()"
+	default:
+		return "Vec::new()"
 	}
-	return "Vec::new()"
 }
 
 // seqElemGrow emits the id-indexed growth prefix for a wrapper-sequence string/

@@ -3,16 +3,16 @@
 import 'dart:typed_data';
 import 'package:sofabuffers/sofabuffers.dart' as sofab;
 
-// A sticky INVALID flag shared across all visitors of one decode. corelib-dart
+// A sticky INVALID flag shared across all visitors of one decode. The corelib
 // visitor callbacks return void, so a schema-bound violation (over-count,
 // over-index, over-maxlen) sets this and the generated decode converts it to a
-// terminal INVALID after the corelib returns (the Rust/Zig sticky-flag model).
+// terminal INVALID after the corelib returns.
 class _Dec {
   bool inv = false;
 }
 
 // Widen the 32 raw wire bits of an fp32 NaN to a display double for element
-// access; the exact bits are kept alongside for a bit-for-bit re-encode (MESSAGE_SPEC S4.6).
+// access; the exact bits are kept alongside for a bit-for-bit re-encode.
 double _f32FromBits(int bits) =>
     (ByteData(4)..setUint32(0, bits, Endian.little)).getFloat32(0, Endian.little);
 
@@ -42,11 +42,11 @@ class Scalars {
 
   /// Worst-case serialized size (schema-bounded fields; a cap for
   /// unbounded ones).
-  static const int maxSize = 82;
+  static const int maxSize = 49;
   /// Serializes this message to a fresh byte buffer.
   Uint8List encode() => sofab.Encoder.encodeToBytes(marshal);
 
-  /// Status-surfacing one-shot decode (MESSAGE_SPEC S7): fills [out] and
+  /// Status-surfacing one-shot decode: fills [out] and
   /// returns the terminal decode outcome. `invalid` covers both malformed
   /// bytes and a schema-bound violation (over-count/over-index/over-maxlen);
   /// `incomplete` means the bytes end inside a field or an open sequence.

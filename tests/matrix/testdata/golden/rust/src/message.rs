@@ -32,7 +32,8 @@ impl Default for Scalars {
 }
 
 impl Scalars {
-    pub const MAX_SIZE: usize = 82;
+    /// Worst-case encoded size of this message, derived from the schema.
+    pub const MAX_SIZE: usize = 49;
     pub fn marshal(&self, os: &mut OStream) {
         if self.u8min != 0 { let _ = os.write_unsigned(0, self.u8min as Unsigned); }
         if self.u8max != 255 { let _ = os.write_unsigned(1, self.u8max as Unsigned); }
@@ -109,12 +110,12 @@ struct V<'a> {
     err: bool,
     inv: bool,
     ai: usize, // index into the fixed native array currently being filled
-    askip: usize, // elements left to discard from a S7.3-contradictory array
+    askip: usize, // elements left to discard from a wire-type-contradictory array
 }
 
 impl<'a> Visitor for V<'a> {
     fn unsigned(&mut self, id: Id, value: Unsigned) {
-        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id
+        if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id
         match (self.cur, id) {
             (_Loc::Root, 0) => self.m.u8min = value as u8,
             (_Loc::Root, 1) => self.m.u8max = value as u8,
@@ -124,7 +125,7 @@ impl<'a> Visitor for V<'a> {
         }
     }
     fn signed(&mut self, id: Id, value: Signed) {
-        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id
+        if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id
         match (self.cur, id) {
             (_Loc::Root, 3) => self.m.i8min = value as i8,
             (_Loc::Root, 4) => self.m.i64min = value as i64,
@@ -132,14 +133,14 @@ impl<'a> Visitor for V<'a> {
         }
     }
     fn fp32(&mut self, id: Id, value: f32) {
-        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id
+        if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id
         match (self.cur, id) {
             (_Loc::Root, 5) => self.m.f32 = value,
             _ => {}
         }
     }
     fn fp64(&mut self, id: Id, value: f64) {
-        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id
+        if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id
         match (self.cur, id) {
             (_Loc::Root, 6) => self.m.f64 = value,
             _ => {}

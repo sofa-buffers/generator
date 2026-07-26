@@ -13,6 +13,7 @@ set -eu
 
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CPP="${1:-${SOFAB_CPP_DIR:-}}"
@@ -82,6 +83,14 @@ run_variant() {
     fi
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$EXAMPLE" --out "$WORK/ex-$label" )
     make -C "$WORK/ex-$label" "$@" >/dev/null
+
+    # MAX_SIZE fill check (ARCHITECTURE §9.6): _maxSize sizes the encode buffer,
+    # so a fully filled message must fit it AND reach it exactly.
+    echo "==> [$label] MAX_SIZE fill check"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill-$label" )
+    make -C "$WORK/fill-$label" "$@" >/dev/null
+    check_maxsize_fill "$label" "$WORK/fill-$label/harness/harness" encode fill
 
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(printf '%s' "$IN" | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)

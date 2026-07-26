@@ -364,10 +364,10 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		return
 	}
 	if n.dec {
-		f.line("// A sticky INVALID flag shared across all visitors of one decode. corelib-dart")
+		f.line("// A sticky INVALID flag shared across all visitors of one decode. The corelib")
 		f.line("// visitor callbacks return void, so a schema-bound violation (over-count,")
 		f.line("// over-index, over-maxlen) sets this and the generated decode converts it to a")
-		f.line("// terminal INVALID after the corelib returns (the Rust/Zig sticky-flag model).")
+		f.line("// terminal INVALID after the corelib returns.")
 		f.line("class _Dec {")
 		f.line("  bool inv = false;")
 		f.line("}")
@@ -409,7 +409,7 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		f.blank()
 	}
 	if n.trimInt {
-		f.line("// Trailing-default-run trim for a fixed-count int array (MESSAGE_SPEC S3):")
+		f.line("// Trailing-default-run trim for a fixed-count int array:")
 		f.line("// drop the trailing run of element-default (0) values the canonical wire elides.")
 		f.line("List<int> _trimInt(List<int> a) {")
 		f.line("  var n = a.length;")
@@ -420,7 +420,7 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 	}
 	if n.trimF32 || n.trimF64 {
 		f.line("// Float trims compare by BIT PATTERN, so a trailing -0.0 (== 0.0) survives the")
-		f.line("// round-trip and a NaN is never mistaken for the default (MESSAGE_SPEC S3).")
+		f.line("// round-trip and a NaN is never mistaken for the default.")
 	}
 	if n.trimF32 {
 		f.line("List<double> _trimF32(List<double> a) {")
@@ -450,7 +450,7 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 	}
 	if n.pad {
 		f.line("// Grow [a] to exactly [n] elements with the element default [zero]: a decoded")
-		f.line("// fixed-count array has exactly its schema count elements (MESSAGE_SPEC S3).")
+		f.line("// fixed-count array has exactly its schema count elements.")
 		f.line("void _padTo<T>(List<T> a, int n, T zero) {")
 		f.line("  while (a.length < n) { a.add(zero); }")
 		f.line("}")
@@ -458,7 +458,7 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 	}
 	if n.f32bits {
 		f.line("// Widen the 32 raw wire bits of an fp32 NaN to a display double for element")
-		f.line("// access; the exact bits are kept alongside for a bit-for-bit re-encode (MESSAGE_SPEC S4.6).")
+		f.line("// access; the exact bits are kept alongside for a bit-for-bit re-encode.")
 		f.line("double _f32FromBits(int bits) =>")
 		f.line("    (ByteData(4)..setUint32(0, bits, Endian.little)).getFloat32(0, Endian.little);")
 		f.blank()
@@ -467,7 +467,7 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		f.line("// Bit-exact fp32 array copy into a fresh Float32List of length [n] (>= the")
 		f.line("// source length; a fixed-count array passes its schema N, leaving the tail at")
 		f.line("// the +0.0 default). A raw byte copy preserves a signaling/payload NaN that a")
-		f.line("// per-element widen through a Dart double would quiet (MESSAGE_SPEC S4.6); writeFp32Array")
+		f.line("// per-element widen through a Dart double would quiet; writeFp32Array")
 		f.line("// re-emits a Float32List's bytes verbatim.")
 		f.line("Float32List _f32copy(Float32List v, int n) {")
 		f.line("  final out = Float32List(n < v.length ? v.length : n);")
@@ -563,7 +563,7 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("  void onFp32Array(int id, Float32List values) {")
 		f.line("    if (f64) return;")
 		f.line("    while (out.length <= id) { out.add(<double>[]); }")
-		f.line("    out[id] = _f32copy(values, values.length); // bit-exact: keep an fp32 NaN's bits (MESSAGE_SPEC S4.6)")
+		f.line("    out[id] = _f32copy(values, values.length); // bit-exact: keep an fp32 NaN's bits")
 		f.line("  }")
 		f.line("  @override")
 		f.line("  void onFp64Array(int id, Float64List values) {")

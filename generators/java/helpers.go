@@ -444,120 +444,6 @@ func (g *gen) reachable(m *ir.Message) []string {
 	return order
 }
 
-// ---- max-size cost model ----
-
-func (g *gen) maxSize(fields []*ir.Field) (int64, bool) {
-	var total int64
-	seen := map[string]bool{}
-	for _, f := range fields {
-		c, ok := g.fieldCost(f, seen)
-		if !ok {
-			return 8192, true
-		}
-		total += c
-	}
-	if total < 64 {
-		total = 64
-	}
-	return total, true
-}
-
-func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
-	hdr := varintLen(uint64(f.ID)<<3 | 7)
-	switch f.Kind {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
-		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindBool, ir.KindEnum, ir.KindBitfield:
-		return hdr + 10, true
-	case ir.KindFP32:
-		return hdr + 1 + 4, true
-	case ir.KindFP64:
-		return hdr + 1 + 8, true
-	case ir.KindString, ir.KindBlob:
-		if !f.HasMaxlen {
-			return 0, false
-		}
-		return hdr + varintLen(uint64(f.Maxlen)<<3) + f.Maxlen, true
-	case ir.KindArray:
-		body, ok := g.arrayBodyCost(f.Count, f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax, seen)
-		if !ok {
-			return 0, false
-		}
-		return hdr + body, true
-	case ir.KindStruct, ir.KindUnion:
-		if seen[f.Ref.Key] {
-			return 0, false
-		}
-		seen[f.Ref.Key] = true
-		var inner int64
-		for _, c := range f.Ref.Target.Fields {
-			cc, ok := g.fieldCost(c, seen)
-			if !ok {
-				delete(seen, f.Ref.Key)
-				return 0, false
-			}
-			inner += cc
-		}
-		delete(seen, f.Ref.Key)
-		return hdr + inner + 1, true
-	}
-	return hdr, true
-}
-
-// arrayBodyCost is an upper bound (in bytes) for an array's on-wire payload,
-// excluding the outer field header. Native numeric/enum/boolean/bitfield elements
-// use the native array wire type; string/blob/struct/union/nested-array elements
-// lower to a wrapper sequence. A dynamic (count 0) array or an unbounded
-// string/blob element makes the size unbounded (ok=false).
-func (g *gen) arrayBodyCost(count int64, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, seen map[string]bool) (int64, bool) {
-	if count <= 0 {
-		return 0, false
-	}
-	idxHdr := varintLen(uint64(count)<<3 | 7) // generous per-element header
-	switch elem {
-	case ir.KindString, ir.KindBlob:
-		if !elemMaxHas {
-			return 0, false
-		}
-		per := idxHdr + varintLen(uint64(elemMax)<<3) + elemMax
-		return 1 + count*per + 1, true
-	case ir.KindStruct, ir.KindUnion:
-		if seen[ref.Key] {
-			return 0, false
-		}
-		seen[ref.Key] = true
-		var inner int64
-		for _, c := range ref.Target.Fields {
-			cc, ok := g.fieldCost(c, seen)
-			if !ok {
-				delete(seen, ref.Key)
-				return 0, false
-			}
-			inner += cc
-		}
-		delete(seen, ref.Key)
-		per := idxHdr + inner + 1
-		return 1 + count*per + 1, true
-	case ir.KindArray:
-		innerBody, ok := g.arrayBodyCost(items.Count, items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, seen)
-		if !ok {
-			return 0, false
-		}
-		per := idxHdr + innerBody
-		return 1 + count*per + 1, true
-	default: // numeric / enum / boolean / bitfield -> native array
-		return 1 + count*10, true
-	}
-}
-
-func varintLen(x uint64) int64 {
-	n := int64(1)
-	for x >= 0x80 {
-		x >>= 7
-		n++
-	}
-	return n
-}
-
 // sbufSupport is the shared array-conversion helper class.
 func (g *gen) sbufSupport() []byte {
 	spdx := ""
@@ -584,14 +470,14 @@ final class Sbuf {
     // fillFalse resets l to exactly n false elements. A fixed-count boolean
     // array decodes to exactly its schema count regardless of the wire count, so
     // the growable List materializes the trailing default run the encoder elided
-    // and the arriving elements overwrite [0, M) by index (MESSAGE_SPEC 3).
+    // and the arriving elements overwrite [0, M) by index.
     static void fillFalse(List<Boolean> l, int n) { l.clear(); for (int i = 0; i < n; i++) l.add(false); }
 
     // trimTail / trimTailF32 / trimTailF64 return a's first M' elements, where M'
     // is one past the last element that differs from the element default (0 when
     // every element is the default). A fixed-count array's canonical wire carries
     // exactly those M' elements; the decoder rebuilds the trailing default run
-    // from the schema count (MESSAGE_SPEC 3). Elements compare by BIT PATTERN,
+    // from the schema count. Elements compare by BIT PATTERN,
     // not by ==, so a trailing -0.0 (which == 0.0) and a NaN survive the
     // round-trip instead of being silently trimmed away.
     static long[] trimTail(long[] a) { int n = a.length; while (n > 0 && a[n - 1] == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }

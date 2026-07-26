@@ -42,6 +42,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		corelib:      corelib,
 		noStd:        noStd,
 		allowDynamic: cfgBool(cfg, "allow_dynamic"),
+		size:         generator.NewSizePolicy(cfg),
 	}
 	// Receiver-side decode limits (generator#102) apply only to the std
 	// corelib-rs: corelib-rs-no-std has no Error::LimitExceeded, and its heapless
@@ -60,6 +61,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	files := []generator.File{{Path: "src/message.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
+	}
+	if g.sizeErr != nil {
+		return nil, g.sizeErr
 	}
 	return files, nil
 }
@@ -86,6 +90,22 @@ type gen struct {
 	// limits are the receiver-side decode limits (generator#102); resolved only
 	// for the std corelib-rs (empty — all inert — under corelib-rs-no-std).
 	limits limitSet
+	// size is the max_message_size policy; sizeErr carries a violation out of
+	// the emit path, which has no error channel of its own.
+	size    generator.SizePolicy
+	sizeErr error
+}
+
+// messageSize resolves a message's worst-case encoded size via the shared walk
+// (ir.MaxWireSize), falling back to the configured max_message_size ceiling when
+// a field is unbounded. The emit path has no error channel, so a violation of an
+// explicitly configured ceiling is recorded here and surfaced by Generate.
+func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize {
+	ms, err := g.size.Resolve(name, fields)
+	if err != nil && g.sizeErr == nil {
+		g.sizeErr = err
+	}
+	return ms
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102),
@@ -126,8 +146,9 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 // std reports whether the std corelib-rs is selected (vs corelib-rs-no-std).
 func (g *gen) std() bool { return g.corelib != "rs-no-std" }
 
-// dynString / dynBlob / dynArray report whether a given unbounded field falls
-// back to an alloc heap container (allow_dynamic) rather than heapless storage.
+// usesAlloc reports whether the crate needs `extern crate alloc`: true when the
+// no_std profile was asked for alloc storage (allow_dynamic) and the schema has
+// any variable-length field to put there.
 func (g *gen) usesAlloc(s *ir.Schema) bool {
 	if !g.noStd || !g.allowDynamic {
 		return false
@@ -138,17 +159,11 @@ func (g *gen) usesAlloc(s *ir.Schema) bool {
 	walk = func(fields []*ir.Field) {
 		for _, f := range fields {
 			switch f.Kind {
-			case ir.KindString, ir.KindBlob:
-				if !f.HasMaxlen {
-					found = true
-				}
-			case ir.KindArray:
-				if !f.HasCount {
-					found = true
-				}
-				if (f.Elem == ir.KindString || f.Elem == ir.KindBlob) && !f.ElemMaxHas {
-					found = true
-				}
+			case ir.KindString, ir.KindBlob, ir.KindArray:
+				// Every variable-length field lives in an alloc container in this
+				// mode, bounded or not — the bound became a decode-path check
+				// rather than the container's capacity.
+				found = true
 			case ir.KindStruct, ir.KindUnion:
 				if !seen[f.Ref.Key] {
 					seen[f.Ref.Key] = true
@@ -220,8 +235,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.blank()
 	}
 
-	g.emitTrimHelpers(f, s)
-
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		switch nt.Category {
@@ -241,47 +254,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 		g.emitStruct(f, exported(m.Name), m.Fields, true, m.Summary)
 	}
 	return f.bytes()
-}
-
-// emitTrimHelpers emits the trailing-default-run trim helpers a fixed-count
-// native array needs on encode (MESSAGE_SPEC §3). They are `core`-only (slice
-// len/index plus f32/f64::to_bits) and allocate nothing — `&a[..n]` reborrows —
-// so the same code serves the std and the #![no_std] profile.
-func (g *gen) emitTrimHelpers(f *rfile, s *ir.Schema) {
-	anyInt, anyF32, anyF64 := g.trimKinds(s)
-	if !anyInt && !anyF32 && !anyF64 {
-		return
-	}
-	f.line("// _trim_tail / _trim_tail_f32 / _trim_tail_f64 return &a[..M'], where M' is one")
-	f.line("// past the last element that differs from the element default (0 when every")
-	f.line("// element is the default). A `count: N` array is fixed-length: its canonical wire")
-	f.line("// carries exactly those M' elements and the decoder rebuilds the trailing default")
-	f.line("// run from the schema count (MESSAGE_SPEC S3). A dynamic (count-less) array has")
-	f.line("// no N to refill from, so it is never trimmed. Floats compare by BIT PATTERN, not")
-	f.line("// by ==, so a trailing -0.0 (which == 0.0) survives the round-trip instead of")
-	f.line("// being silently trimmed to +0.0, and a NaN is never taken for the default.")
-	if anyInt {
-		f.line("fn _trim_tail<T: PartialEq + Copy>(a: &[T], zero: T) -> &[T] {")
-		f.line("    let mut n = a.len();")
-		f.line("    while n > 0 && a[n - 1] == zero { n -= 1; }")
-		f.line("    &a[..n]")
-		f.line("}")
-	}
-	if anyF32 {
-		f.line("fn _trim_tail_f32(a: &[f32]) -> &[f32] {")
-		f.line("    let mut n = a.len();")
-		f.line("    while n > 0 && f32::to_bits(a[n - 1]) == 0 { n -= 1; }")
-		f.line("    &a[..n]")
-		f.line("}")
-	}
-	if anyF64 {
-		f.line("fn _trim_tail_f64(a: &[f64]) -> &[f64] {")
-		f.line("    let mut n = a.len();")
-		f.line("    while n > 0 && f64::to_bits(a[n - 1]) == 0 { n -= 1; }")
-		f.line("    &a[..n]")
-		f.line("}")
-	}
-	f.blank()
 }
 
 func (g *gen) emitEnum(f *rfile, nt *ir.NamedType) {
@@ -432,8 +404,16 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	}
 	f.line("impl %s {", name)
 	if isMessage {
-		size, _ := g.maxSize(fields)
-		f.line("    pub const MAX_SIZE: usize = %d;", size)
+		ms := g.messageSize(name, fields)
+		if !ms.Bounded {
+			f.line("    /// Configured ceiling (max_message_size): an unbounded field means this")
+			f.line("    /// size is imposed, not derived from the schema.")
+			f.line("    pub const MAX_SIZE_LIMIT: usize = %d;", ms.Size)
+			f.line("    pub const MAX_SIZE: usize = Self::MAX_SIZE_LIMIT;")
+		} else {
+			f.line("    /// Worst-case encoded size of this message, derived from the schema.")
+			f.line("    pub const MAX_SIZE: usize = %d;", ms.Size)
+		}
 	}
 	// marshal
 	f.line("    pub fn marshal(&self, os: &mut OStream) {")
@@ -445,7 +425,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	if isMessage {
 		if g.noStd {
 			// Heap-free encode into a fixed-capacity heapless::Vec sized by MAX_SIZE.
-			size, _ := g.maxSize(fields)
+			size := g.messageSize(name, fields).Size
 			f.line("    pub fn encode(&self) -> heapless::Vec<u8, %d> {", size)
 			f.line("        let mut buf: heapless::Vec<u8, %d> = heapless::Vec::new();", size)
 			f.line("        let _ = buf.resize_default(%d);", size)
@@ -526,9 +506,14 @@ func (g *gen) emitMarshalArray(f *rfile, fld *ir.Field, acc string) {
 			// Fixed `[elem; N]` is never "empty"; omit when equal to its default
 			// (mirrors the C++ backend's `!= std::array{}`).
 			f.line("        if %s != %s {", acc, g.rustFieldDefault(fld))
-		} else if parts, ok := g.rustNativeArrayParts(fld); ok {
-			// Dynamic native array with a default: slice compare (std Vec / no_std alloc).
+		} else if parts, ok := g.rustNativeArrayPartsN(fld); ok {
+			// Native array with a default, held in a Vec: slice compare. The literal
+			// is the N-element default — the same one the field is constructed with —
+			// or a field sitting on its default would never compare equal and §2
+			// would never omit it.
 			f.line("        if &%s[..] != &[%s][..] {", acc, parts)
+		} else if fld.HasCount {
+			f.line("        if &%s[..] != &[%s; %d][..] {", acc, rustElemZeroLit(fld.Elem), fld.Count)
 		} else {
 			f.line("        if !%s.is_empty() {", acc)
 		}
@@ -551,13 +536,13 @@ func (g *gen) trimExpr(val string, elem ir.Kind, fixed bool) string {
 	}
 	switch elem {
 	case ir.KindFP32:
-		return fmt.Sprintf("_trim_tail_f32(&%s[..])", val)
+		return fmt.Sprintf("sofab::trim_tail_f32(&%s[..])", val)
 	case ir.KindFP64:
-		return fmt.Sprintf("_trim_tail_f64(&%s[..])", val)
+		return fmt.Sprintf("sofab::trim_tail_f64(&%s[..])", val)
 	default:
 		// Integer/enum/bitfield elements are ints (bool arrives here as its 0/1 u8
 		// image), so the unsuffixed 0 infers to the element type.
-		return fmt.Sprintf("_trim_tail(&%s[..], 0)", val)
+		return fmt.Sprintf("sofab::trim_tail(&%s[..], 0)", val)
 	}
 }
 

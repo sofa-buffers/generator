@@ -616,7 +616,11 @@ func TestCppBufferedFieldCapIsBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate bounded: %v", err)
 	}
-	if !strings.Contains(h, "#define SOFAB_MAX_DYN_BUFFERED_FIELD 98") {
+	// 97, not 98: the field's own header IS the sequence_begin, so a wrapper
+	// array costs `elements + terminator`, not `begin + elements + terminator`.
+	// The assertion previously pinned the surplus byte the per-backend cost
+	// models all carried; the comment above computed the right number all along.
+	if !strings.Contains(h, "#define SOFAB_MAX_DYN_BUFFERED_FIELD 97") {
 		t.Errorf("the cap must cover a fully bounded wrapper array's 97-byte span:\n%s", h)
 	}
 
@@ -1022,5 +1026,102 @@ messages:
 		if strings.Contains(h, notWant) {
 			t.Errorf("the arm must not clear %q — prepare() does it behind the tag match:\n%s", notWant, h)
 		}
+	}
+}
+
+// TestCppDynamicNativeArrayIsSizedToCount pins that a `count: N` array holds N
+// elements after construction in BOTH storage modes.
+//
+// std::array<T,N> gets that for free from aggregate initialization; std::vector
+// (the allow_dynamic storage) does not — `= {}` constructs it empty. A bounded
+// array that starts empty is not merely a different representation of the same
+// value: generated code indexes elements 0..N-1, so writes to every element are
+// silently discarded. Found by the MAX_SIZE fill check, which encoded 137 bytes
+// where the schema says 234 — exactly the four native arrays missing.
+func TestCppDynamicNativeArrayIsSizedToCount(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      zeros:   { id: 0, type: array, items: { type: u32, count: 4 } }\n" +
+		"      partial: { id: 1, type: array, items: { type: u32, count: 4 }, default: [10, 20] }\n" +
+		"      floats:  { id: 2, type: array, items: { type: fp32, count: 3 } }\n" +
+		"      flags:   { id: 3, type: array, items: { type: boolean, count: 2 } }\n"
+
+	dyn, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp", "allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("generate allow_dynamic: %v", err)
+	}
+	for _, want := range []string{
+		"std::vector<std::uint32_t> zeros = {0, 0, 0, 0};",
+		"std::vector<std::uint32_t> partial = {10, 20, 0, 0};",
+		"std::vector<float> floats = {0.0f, 0.0f, 0.0f};",
+		"std::vector<bool> flags = {false, false};",
+	} {
+		if !strings.Contains(dyn, want) {
+			t.Errorf("a bounded array in dynamic storage must construct with all %d elements, missing %q:\n%s",
+				4, want, dyn)
+		}
+	}
+
+	// The fixed profile keeps the idiomatic aggregate form — std::array fills the
+	// tail itself, so spelling out the zeros would be noise.
+	fixed, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp"})
+	if err != nil {
+		t.Fatalf("generate fixed: %v", err)
+	}
+	for _, want := range []string{
+		"std::array<std::uint32_t, 4> zeros = {};",
+		"std::array<std::uint32_t, 4> partial = {10, 20};",
+	} {
+		if !strings.Contains(fixed, want) {
+			t.Errorf("fixed storage should keep the aggregate form, missing %q:\n%s", want, fixed)
+		}
+	}
+}
+
+// TestCppDeprecatedSuppressionSpansTheClass: the deprecation-suppression pragma
+// must enclose the whole class definition, not just its member functions.
+//
+// A [[deprecated]] member is touched by the implicitly-defined special member
+// functions — destructor, copy/move constructor, assignment — and those
+// definitions are located AT THE CLASS. With the region starting after the
+// member declarations, a consumer that merely declared a message value got a
+// deprecation warning for a field it never named, pointing at a header line it
+// cannot edit. The attribute then fires for everyone instead of for the one
+// caller still using the field, which is the opposite of what marking it
+// deprecated is for.
+//
+// The attribute itself stays on the member: a consumer writing msg.oldField
+// must still be warned, at its own line.
+func TestCppDeprecatedSuppressionSpansTheClass(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      keep: { id: 0, type: u32 }\n" +
+		"      old:  { id: 1, type: u32, deprecated: true }\n"
+	h, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	push := strings.Index(h, "#pragma GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+	open := strings.Index(h, "struct M : sofab::Message {")
+	pop := strings.Index(h, "#pragma GCC diagnostic pop")
+	if push < 0 || open < 0 || pop < 0 {
+		t.Fatalf("expected a suppressed span around the class:\n%s", h)
+	}
+	if push > open {
+		t.Errorf("the suppression must start BEFORE the class, or the implicit "+
+			"destructor/copy members warn at every consumer:\n%s", h)
+	}
+	if pop < strings.LastIndex(h[:pop+1], "};") {
+		t.Errorf("the suppression must end after the class closes:\n%s", h)
+	}
+	// The attribute survives, so a consumer touching the field is still warned.
+	if !strings.Contains(h, "[[deprecated]] std::uint32_t old") {
+		t.Errorf("the member must keep its [[deprecated]] attribute:\n%s", h)
+	}
+	// A message with nothing deprecated emits no pragma at all.
+	plain, err := genHeader(t, "version: 1\nmessages:\n  m:\n    payload:\n      keep: { id: 0, type: u32 }\n", "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate plain: %v", err)
+	}
+	if strings.Contains(plain, "diagnostic") {
+		t.Errorf("no deprecated field: no pragma should be emitted:\n%s", plain)
 	}
 }

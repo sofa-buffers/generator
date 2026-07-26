@@ -488,7 +488,7 @@ function _padTo<T>(a: T[], n: number, zero: T): T[] {
 // string field decodes (blob maxlen checks read the wire Uint8Array .length).
 const utf8LenHelper = `// _utf8Len returns the UTF-8 byte length of s without allocating (mirrors what the
 // encode path already does). Used to bound a decoded string against its schema
-// maxlen on the hot decode path (issue #153).
+// maxlen on the hot decode path.
 function _utf8Len(s: string): number {
   let n = 0;
   for (let i = 0; i < s.length; i++) {

@@ -26,7 +26,7 @@ public sealed class Scalars {
         if (this.f64 != -2.5) { os.WriteFp64(6, this.f64); }
         if (this.flag != true) { os.WriteBoolean(7, this.flag); }
     }
-    public const int MaxSize = 82;
+    public const int MaxSize = 49;
     // Per-thread scratch buffer: Encode() marshals into it and returns an
     // exact-size copy, so the worst-case buffer is not re-allocated (and
     // zeroed) on every call. Do not call Encode() reentrantly from a

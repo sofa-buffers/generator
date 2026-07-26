@@ -25,8 +25,8 @@ pub const Scalars = struct {
     f64: f64 = -2.5,
     flag: bool = true,
 
-    /// Upper bound on the encoded size of any value of this message.
-    pub const MAX_SIZE: usize = 82;
+    /// Worst-case encoded size of this message, derived from the schema.
+    pub const MAX_SIZE: usize = 49;
 
     /// Write this value's fields to `os` (sparse-canonical encoding).
     pub fn marshal(self: *const Scalars, os: *sofab.OStream) sofab.Error!void {
@@ -79,7 +79,7 @@ const _dec_Scalars = struct {
     alloc: std.mem.Allocator,
     cur: _Loc = .root,
     inv: bool = false, // a scalar array over its schema count, or a wrapper element id >= count -> INVALID
-    askip: usize = 0, // elements left to discard from a S7.3-contradictory array
+    askip: usize = 0, // elements left to discard from a wire-type-contradictory array
 
     const _Loc = enum {
         root,
@@ -162,78 +162,7 @@ const _EncodeSink = struct {
     }
 };
 
-/// Store the next native-array element into a dynamic (count-less) slice,
-/// bounds-checked; the slice is pre-sized to the wire count, so the bound
-/// only guards a failed allocation (the data is then dropped).
-fn _put(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s))) void {
-    if (i.* >= s.len) return;
-    @constCast(&s[i.*]).* = v;
-    i.* += 1;
-}
-
-/// Store the next native-array element into a fixed [N]T destination. An
-/// element past the schema capacity N flags the message malformed: a wire
-/// count above the schema count is invalid and must be rejected, not
-/// clamped.
-fn _putc(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s)), inv: *bool) void {
-    if (i.* >= s.len) {
-        inv.* = true;
-        return;
-    }
-    @constCast(&s[i.*]).* = v;
-    i.* += 1;
-}
-
-/// Trim the trailing run of element-default elements off a fixed-count
-/// native array: returns a[0..M'], where M' is one past the last element
-/// that differs from the element default (0 when every element is the
-/// default). A `count: N` array is fixed-length, so the canonical wire
-/// carries only those M' elements and the decoder rebuilds the trailing
-/// default run from the schema count (MESSAGE_SPEC S3). A dynamic
-/// (count-less) array has no N to refill from and is never trimmed.
-///
-/// Elements compare by BIT PATTERN (the element's byte image), never by
-/// ==: a trailing -0.0 (which == 0.0) must survive the round-trip instead
-/// of being silently trimmed to +0.0, and a NaN is never a default. Every
-/// native element type (u8..u64, i8..i64, f32, f64, bool, and the enum/
-/// bitfield integer backings) is padding-free, so the byte image is exact.
-///
-/// `a` is a fixed field's `[0..]` (a *const [N]T) or its sliceAsBytes
-/// image, so the result is always a slice, never the pointer-to-array.
-fn _trimTail(a: anytype) []const std.meta.Elem(@TypeOf(a)) {
-    var n = a.len;
-    while (n > 0 and std.mem.allEqual(u8, std.mem.asBytes(&a[n - 1]), 0)) : (n -= 1) {}
-    return a[0..n];
-}
-
-/// Mutable pointer to the last element of a decode-allocated slice.
-fn _last(s: anytype) *std.meta.Elem(@TypeOf(s)) {
-    return @constCast(&s[s.len - 1]);
-}
-
-/// Grow a decode-owned slice to n elements, filling new slots with `fill`.
-/// Returns false when the allocation fails (the caller then drops the data).
-fn _grow(comptime T: type, a: std.mem.Allocator, s: *[]const T, n: usize, fill: T) bool {
-    if (s.*.len >= n) return true;
-    const new = a.alloc(T, n) catch return false;
-    @memcpy(new[0..s.*.len], s.*);
-    @memset(new[s.*.len..], fill);
-    s.* = new;
-    return true;
-}
-
-/// Allocate a zeroed native-array destination of exactly `n` elements (the
-/// wire count); on allocation failure the array decodes as empty.
+/// Native-array destination of exactly the announced wire count.
 fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {
-    const s = a.alloc(T, n) catch return &.{};
-    @memset(s, std.mem.zeroes(T));
-    return s;
-}
-
-/// Place a wrapper-array string/blob element at its wire id (= array index),
-/// growing the destination and filling id gaps left by omitted default
-/// elements.
-fn _setElem(comptime T: type, a: std.mem.Allocator, s: *[]const T, id: usize, fill: T, v: T) void {
-    if (!_grow(T, a, s, id + 1, fill)) return;
-    @constCast(&s.*[id]).* = v;
+    return sofab.arrays.allocN(T, a, n);
 }

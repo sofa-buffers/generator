@@ -10,7 +10,7 @@ documented once in the [generic config](README.md).
 |--------|------|---------|--------|
 | `corelib` | `rs` \| `rs-no-std` | `rs` | Which Rust corelib the generated crate targets (see below). |
 | `no_std` | bool | `true` when `corelib: rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate (see below). Set `false` to emit an ordinary `std` crate against the no-std corelib. Ignored for `corelib: rs`. |
-| `allow_dynamic` | bool | `false` | Under `no_std`, keep an `alloc` heap fallback for genuinely unbounded fields instead of failing generation. |
+| `allow_dynamic` | bool | `false` | `corelib: rs-no-std` only. Store bounded fields in `alloc::String`/`alloc::Vec` instead of heapless containers, for a target with an allocator. Bounds stay mandatory either way. |
 
 ### `max_dyn_*` — receiver-side decode limits
 
@@ -38,7 +38,7 @@ over-`maxlen` value is `InvalidMsg`, not a capacity error.
 **std profile only.** The limits apply to `corelib: rs` (std). Under
 `corelib: rs-no-std` the keys are inert: heapless storage is statically
 schema-bounded already (an unbounded field is either rejected at generation
-time or consciously opted into a heap fallback via `allow_dynamic`), and that
+time), and that
 corelib has no `Error::LimitExceeded`.
 
 ### `corelib`
@@ -105,16 +105,41 @@ crate with `cargo build --lib --no-default-features`.
 
 **Unbounded fields.** A string/blob without `maxlen`, or an array without
 `count`, cannot be sized, so on the `no_std` path such a field fails generation
-with an error naming the field — unless `allow_dynamic: true` keeps an
-`alloc::String`/`alloc::Vec` fallback for it (which pulls `extern crate alloc`;
-bounded fields still go `heapless`). This makes "no hidden allocation" the default
-guarantee: size your schema, or consciously opt a field into a heap fallback.
+with an error naming the field. That holds in **both** storage modes —
+`allow_dynamic` picks the container, never whether a bound is needed — so one
+schema stays valid for every `no_std` target. For genuinely unbounded fields, use
+`corelib: rs`.
+
+### Storage mode (`allow_dynamic`)
+
+With every field bounded, the switch chooses where those fields live:
+
+| schema | default (heapless) | `allow_dynamic: true` |
+|---|---|---|
+| `string, maxlen 8` | `heapless::String<8>` | `alloc::string::String` |
+| `blob, maxlen 8` | `heapless::Vec<u8, 8>` | `alloc::vec::Vec<u8>` |
+| `array u32, count 4` | `[u32; 4]` | `alloc::vec::Vec<u32>` |
+| `array string, count 2, maxlen 4` | `heapless::Vec<heapless::String<4>, 2>` | `alloc::vec::Vec<alloc::string::String>` |
+
+Heapless is the default and the one that guarantees no allocation at all: the
+worst case is the struct's size, known at compile time. The alloc mode suits a
+target that has an allocator — a field then holds what the message actually
+carries rather than its declared worst case, which matters once a bound is large
+enough that the inline struct no longer fits comfortably on a stack. It pulls
+`extern crate alloc`.
+
+The bounds do not weaken. What was the container's capacity becomes an explicit
+check on the decode path: a declared length above a `maxlen`, or a wire count
+above a `count`, sets the sticky `inv` flag and the decode reports
+`Error::InvalidMsg` — before any bytes accumulate, so an over-long field never
+allocates what the bound exists to prevent. Encode output is identical in both
+modes.
 
 ```yaml
 targets:
   rust:
     corelib: rs-no-std       # no_std is then on by default
-    allow_dynamic: true      # optional: alloc fallback for unbounded fields
+    allow_dynamic: true      # optional: alloc storage (needs an allocator)
 ```
 
 ## Struct field order

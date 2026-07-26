@@ -24,7 +24,7 @@ public class Scalars {
         if (this.f64 != -2.5) { os.writeFp64(6, this.f64); }
         if (this.flag != true) { os.writeBoolean(7, this.flag); }
     }
-    public static final int MAX_SIZE = 82;
+    public static final int MAX_SIZE = 49;
     // Per-thread scratch buffer: encode() marshals into it and returns an
     // exact-size copy, so the worst-case buffer is not re-allocated (and
     // zeroed) on every call. Do not call encode() reentrantly from a
@@ -64,7 +64,7 @@ class ScalarsVisitor implements Visitor {
     ScalarsVisitor(Scalars msg) { m = msg; }
 
     public void unsigned(int id, long value) {
-        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // Drop an element of an array whose id does
         // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
         switch (cur) {
@@ -77,7 +77,7 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void signed(int id, long value) {
-        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // Drop an element of an array whose id does
         // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
         switch (cur) {
@@ -88,7 +88,7 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void fp32(int id, float value) {
-        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // Drop an element of an array whose id does
         // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
         switch (cur) {
@@ -98,7 +98,7 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void fp64(int id, double value) {
-        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // Drop an element of an array whose id does
         // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
         switch (cur) {
@@ -107,25 +107,8 @@ class ScalarsVisitor implements Visitor {
         } break;
         }
     }
-    private static boolean _utf8ok(byte[] b, int i, int end) {
-        while (i < end) {
-            int c = b[i] & 0xff;
-            if (c < 0x80) { i++; continue; }
-            int n, lo, hi;
-            if (c < 0xC2) return false;
-            else if (c < 0xE0) { n = 1; lo = 0x80; hi = 0xBF; }
-            else if (c < 0xF0) { n = 2; lo = (c == 0xE0) ? 0xA0 : 0x80; hi = (c == 0xED) ? 0x9F : 0xBF; }
-            else if (c < 0xF5) { n = 3; lo = (c == 0xF0) ? 0x90 : 0x80; hi = (c == 0xF4) ? 0x8F : 0xBF; }
-            else return false;
-            if (i + n >= end) return false;
-            int cc = b[i + 1] & 0xff; if (cc < lo || cc > hi) return false;
-            for (int k = 2; k <= n; k++) { cc = b[i + k] & 0xff; if (cc < 0x80 || cc > 0xBF) return false; }
-            i += n + 1;
-        }
-        return true;
-    }
     private static String _utf8(byte[] b, int off, int len) {
-        if (_utf8ok(b, off, off + len)) return new String(b, off, len, java.nio.charset.StandardCharsets.UTF_8);
+        if (Utf8.valid(b, off, off + len)) return new String(b, off, len, java.nio.charset.StandardCharsets.UTF_8);
         throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "string: invalid UTF-8"));
     }
     public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
@@ -158,7 +141,7 @@ class ScalarsVisitor implements Visitor {
     }
     public void arrayBegin(int id, ArrayKind kind, int count) {
         ai = 0;
-        // MESSAGE_SPEC S7.3 (generator#183): an integer array delivered at an id
+        // An integer array delivered at an id
         // that does not declare one is a wire-type contradiction -- arm a discard
         // counter so unsigned()/signed() drop exactly `count` elements. Every id
         // that really declares an integer-element array disarms it below.

@@ -20,7 +20,7 @@ const (
 
 // frame is one sequence container reachable from a message. loc is the _Loc
 // variant; path is the Zig lvalue expression (e.g. "self.m.somestruct.deep" or
-// "_last(self.m.points).tags").
+// "sofab.arrays.last(self.m.points).tags").
 type frame struct {
 	loc      string
 	path     string
@@ -30,7 +30,7 @@ type frame struct {
 	elemKind ir.Kind     // fkSeqArr: string/blob element; fkNestedNative: inner native element kind
 	elemRef  *ir.TypeRef // fkNestedNative: enum/bitfield backing type
 	elemType string      // fkStructArr/fkArrArr/fkNestedNative: Zig type of one element (for _grow)
-	elemFill string      // fkStructArr/fkArrArr/fkNestedNative: fill literal for _grow
+	elemFill string      // fkStructArr/fkArrArr/fkNestedNative: fill literal for the grow helper
 
 	// Schema-unbounded element markers, for the receiver-side decode limits
 	// (generator#102): only unbounded fields are guarded.
@@ -102,7 +102,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 				loc: loc, path: path, kind: fkStructArr, elemLoc: el,
 				elemType: g.typeName(ref.Key), elemFill: ".{}", cap: cap,
 			})
-			walkFields(el, "_last("+path+")", ref.Target.Fields)
+			walkFields(el, "sofab.arrays.last("+path+")", ref.Target.Fields)
 		case ir.KindArray:
 			// The element is an inner array (items). A native inner array is
 			// handled by a single wrapper frame (arrayBegin appends a fresh
@@ -122,7 +122,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 					loc: loc, path: path, kind: fkArrArr, elemLoc: el,
 					elemType: "[]const " + inner, elemFill: "&.{}", cap: cap,
 				})
-				addArray(el, "_last("+path+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
+				addArray(el, "sofab.arrays.last("+path+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -139,7 +139,7 @@ type visitorUse struct {
 	// dynAlloc: the message decodes at least one slice-backed native array (a
 	// count-less direct field or a nested native element array), i.e. it
 	// allocates array storage from an untrusted wire count and needs the
-	// hardened _allocN/_put pair plus the announced-count register `an`.
+	// capped _allocN plus putGrowing, and the announced-count register `an`.
 	dynAlloc bool
 }
 
@@ -215,7 +215,7 @@ func (g *gen) dynNativeArray(f *ir.Field) bool {
 
 // dynAllocUse reports whether any message decodes a slice-backed native array
 // (a count-less direct field or a nested native element array) — i.e. whether
-// the hardened _allocN/_put pair is referenced (see emitSupport).
+// the capped _allocN is referenced (see emitSupport).
 func (g *gen) dynAllocUse(s *ir.Schema) bool {
 	for _, m := range s.Messages {
 		if visitorUseOf(g.frames(m)).dynAlloc {
@@ -261,17 +261,17 @@ func (g *gen) msgLimitGuards(fields []*ir.Field) bool {
 }
 
 // putCall renders the element store for a direct native array field: the
-// capacity-checked _putc for a fixed [N]T — an over-count element flags the
-// message INVALID per MESSAGE_SPEC 3+7 (generator#100) — or the growing _put
+// capacity-checked putChecked for a fixed [N]T -- an over-count element flags the
+// message INVALID -- or the growing putGrowing
 // for a dynamic (count-less) slice, which keeps every wire element up to the
 // announced count while never trusting that count for the eager allocation.
 func (g *gen) putCall(fr frame, fld *ir.Field, val string) string {
 	acc := fr.path + "." + zigIdent(fld.Name)
 	var inner string
 	if _, _, ok := g.fixedNativeArray(fld); ok {
-		inner = fmt.Sprintf("_putc(&%s, &self.ai, %s, &self.inv)", acc, val)
+		inner = fmt.Sprintf("sofab.arrays.putChecked(&%s, &self.ai, %s, &self.inv)", acc, val)
 	} else {
-		inner = fmt.Sprintf("_put(&%s, self.alloc, &self.ai, self.an, %s)", acc, val)
+		inner = fmt.Sprintf("sofab.arrays.putGrowing(&%s, self.alloc, &self.ai, self.an, %s)", acc, val)
 	}
 	// §7.3 fill guard (generator#188): only fill while arrayBegin has this array
 	// armed; a bare scalar at this id (afill == 0) falls through and is skipped.
@@ -327,7 +327,7 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	// discard exactly that many.
 	arrSkip := use.unsigned || use.signed || use.fp32 || use.fp64
 	if arrSkip {
-		f.line("    askip: usize = 0, // elements left to discard from a S7.3-contradictory array")
+		f.line("    askip: usize = 0, // elements left to discard from a wire-type-contradictory array")
 	}
 	// §7.3 mirror (generator#188): a bare scalar delivered at a native-array id
 	// would otherwise land in that array's fill arm as element 0. arrayBegin arms
@@ -437,7 +437,7 @@ func (g *gen) nestedNativeArm(fr frame, signed bool) string {
 	}
 	// §7.3 fill guard (generator#188), plus the empty-case guard: if the
 	// per-element allocation failed the outer slice may have no last element.
-	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; if (%s.len != 0) _put(_last(%s), self.alloc, &self.ai, self.an, %s); } }", fr.path, fr.path, cast)
+	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; if (%s.len != 0) sofab.arrays.putGrowing(sofab.arrays.last(%s), self.alloc, &self.ai, self.an, %s); } }", fr.path, fr.path, cast)
 }
 
 // emitArraySkipArm arms the §7.3 discard counter in arrayBegin (generator#183,
@@ -640,7 +640,7 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 	idUsed := false
 	for _, fr := range fs {
 		if fr.kind == fkNestedNative && fr.elemKind == kind {
-			body := fmt.Sprintf("if (%s.len != 0) _put(_last(%s), self.alloc, &self.ai, self.an, value)", fr.path, fr.path)
+			body := fmt.Sprintf("if (%s.len != 0) sofab.arrays.putGrowing(sofab.arrays.last(%s), self.alloc, &self.ai, self.an, value)", fr.path, fr.path)
 			all = append(all, frameArms{fr: fr, body: body})
 			continue
 		}
@@ -726,7 +726,7 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	}
 	for _, fr := range fs {
 		if fr.kind == fkSeqArr && fr.elemKind == kind {
-			set := fmt.Sprintf("_setElem([]const u8, self.alloc, &(%s), id, \"\", chunk)", fr.path)
+			set := fmt.Sprintf("sofab.arrays.setElem([]const u8, self.alloc, &(%s), id, \"\", chunk)", fr.path)
 			// stmt is the placement as a single statement (trailing ;), for use
 			// inside an { ... } block; body is the raw arm expression. For a string
 			// element the materialization is UTF-8-validated (mat); blob is verbatim.
@@ -818,7 +818,7 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 
 // emitArrayBegin emits the arrayBegin callback: reset the element fill index,
 // allocate a dynamic native array from the wire count (capped eagerly, grown
-// by _put as elements actually arrive), and append a fresh inner slice for a
+// as elements actually arrive), and append a fresh inner slice for a
 // nested native array element.
 //
 // With an active max_dyn_array_count (generator#102) every schema-unbounded
@@ -843,7 +843,7 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 					// (MESSAGE_SPEC 3+7), and setting the sticky `inv` HERE — before
 					// the elements are read — makes INVALID dominate a truncated tail
 					// (§5.2), since decode() reads `inv` before surfacing `.incomplete`.
-					// The store-side _putc bound only fires when the N+1th element
+					// The store-side putChecked bound only fires when the N+1th element
 					// actually arrives, which a truncated over-count array never reaches.
 					guard := fmt.Sprintf("if (count > %d) { self.inv = true; return; }", n)
 					// A fixed [N]T whose declaration default is the schema default also
@@ -879,7 +879,7 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 			}
 		case fkNestedNative:
 			inner := strings.TrimPrefix(fr.elemType, "[]const ")
-			body := fmt.Sprintf("if (_grow(%s, self.alloc, &(%s), %s.len + 1, &.{})) { _last(%s).* = _allocN(%s, self.alloc, count); }",
+			body := fmt.Sprintf("if (sofab.arrays.grow(%s, self.alloc, &(%s), %s.len + 1, &.{})) { sofab.arrays.last(%s).* = _allocN(%s, self.alloc, count); }",
 				fr.elemType, fr.path, fr.path, fr.path, inner)
 			if g.limits.arrayHas && fr.elemDynCount {
 				body = fmt.Sprintf("if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else %s", body)
@@ -973,7 +973,7 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 				all = append(all, fa)
 			}
 		case fkStructArr, fkArrArr:
-			grow := fmt.Sprintf("if (_grow(%s, self.alloc, &(%s), %s.len + 1, %s)) .%s else .dead",
+			grow := fmt.Sprintf("if (sofab.arrays.grow(%s, self.alloc, &(%s), %s.len + 1, %s)) .%s else .dead",
 				fr.elemType, fr.path, fr.path, fr.elemFill, fr.elemLoc)
 			body := grow
 			// Fixed-count wrapper array: a struct/union/nested-array element arrives

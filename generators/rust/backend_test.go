@@ -11,11 +11,26 @@ import (
 	"github.com/sofa-buffers/generator/internal/parser"
 )
 
-func exampleSchema(t *testing.T) *ir.Schema {
+func exampleSchema(t *testing.T) *ir.Schema { return exampleSchemaOpt(t, false) }
+
+// exampleSchemaBounded is the same example with a capacity on the deliberately
+// count-less `somemap`, which the no_std profile requires in both storage modes.
+// `count` never reaches the wire, so nothing about the encoding changes — the
+// same adjustment tests/conformance/c/run.sh makes for the C target.
+func exampleSchemaBounded(t *testing.T) *ir.Schema { return exampleSchemaOpt(t, true) }
+
+func exampleSchemaOpt(t *testing.T, bound bool) *ir.Schema {
 	t.Helper()
 	b, err := os.ReadFile("../../examples/messages/example.yaml")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if bound {
+		b = []byte(strings.Replace(string(b),
+			"      somemap:", "      somemap:\n        # bounded for the no_std profile (count never reaches the wire)", 1))
+		b = []byte(strings.Replace(string(b),
+			"            value:\n              id: 1\n              type: u32",
+			"            value:\n              id: 1\n              type: u32\n          count: 8", 1))
 	}
 	doc, err := parser.Parse(b, "example.yaml")
 	if err != nil {
@@ -38,6 +53,9 @@ func exampleSchema(t *testing.T) *ir.Schema {
 func exampleModule(t *testing.T, cfg map[string]any) string {
 	t.Helper()
 	s := exampleSchema(t)
+	if cfg["corelib"] == "rs-no-std" {
+		s = exampleSchemaBounded(t)
+	}
 	files, err := (&Backend{}).Generate(s, cfg)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -72,13 +90,13 @@ func TestRustStructural(t *testing.T) {
 		"ArrayKind",                            // example has arrays -> array_begin imports it
 		"pub someu64: u64,",
 		"#[serde(default)]",
-		"pub someuintarray: [u32; 4],",             // fixed native array (was Vec<u32>)
-		"pub somefloatarray: [f32; 3],",            // fixed fp array
-		"pub someboolarray: [bool; 8],",            // fixed bool array
-		"someuintarray: [0, 1, 1000, 4294967295],", // default is an N-element array literal
-		"someboolarray: [true, true, false, false, false, false, false, false],",                                   // short default tail-padded to N
-		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                                                      // omit-guard is a default compare
-		"if self.ai < 4 { self.m.someuintarray[self.ai] = value as u32; self.ai += 1; } else { self.inv = true; }", // bounds-checked store (generator#78); over-count rejects (generator#100)
+		"pub someuintarray: Vec<u32>,",                 // bounded native array -> the profile's dynamic container
+		"pub somefloatarray: Vec<f32>,",                // bounded fp array
+		"pub someboolarray: Vec<bool>,",                // bounded bool array
+		"someuintarray: vec![0, 1, 1000, 4294967295],", // default is an N-element array literal
+		"someboolarray: vec![true, true, false, false, false, false, false, false],", // default is exactly N                                   // short default tail-padded to N
+		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {",              // omit-guard is a default compare
+		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear();",    // bounds-checked store (generator#78); over-count rejects (generator#100)
 		"ai: usize", // fill index on the visitor
 		"if offset == 0 && chunk.len() >= total {", // string/blob single-shot fast path
 		"match core::str::from_utf8(&chunk[..total]) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }", // strict UTF-8: invalid -> INVALID (issue #85, subsumes #80)
@@ -91,12 +109,10 @@ func TestRustStructural(t *testing.T) {
 	// Lossy from_utf8_lossy (U+FFFD) is forbidden in every mode (MESSAGE_SPEC §8);
 	// strict from_utf8 -> INVALID makes std and no_std agree (issue #85, subsumes #80).
 	for _, notWant := range []string{
-		"pub someuintarray: Vec<u32>",
-		"someuintarray.push(",
 		"String::from_utf8_lossy",
 	} {
 		if strings.Contains(m, notWant) {
-			t.Errorf("message.rs (rs) should not contain %q (native fixed array must not be Vec/push)", notWant)
+			t.Errorf("message.rs (rs) should not contain %q ", notWant)
 		}
 	}
 	if strings.Contains(m, "require!") {
@@ -104,8 +120,9 @@ func TestRustStructural(t *testing.T) {
 	}
 
 	// corelib-rs-no-std: require! guard asserting the example's capabilities.
-	// allow_dynamic keeps a heap fallback for the example's unbounded `somemap`.
-	n := exampleModule(t, map[string]any{"corelib": "rs-no-std", "allow_dynamic": true})
+	// Default storage is heapless; the example is taken bounded, since this
+	// profile requires a bound whatever storage it uses.
+	n := exampleModule(t, map[string]any{"corelib": "rs-no-std"})
 	if !strings.Contains(n, "sofab::require!(") {
 		t.Error("rs-no-std must emit a require! capability guard")
 	}
@@ -122,7 +139,7 @@ func TestRustStructural(t *testing.T) {
 		"pub somestring: heapless::String<50>,",                                                             // bounded string -> heapless
 		"pub someblob: heapless::Vec<u8, 16>,",                                                              // bounded blob -> heapless
 		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",                                      // string array -> inline
-		"pub somemap: alloc::vec::Vec<",                                                                     // unbounded -> alloc fallback
+		"pub somemap: heapless::Vec<",                                                                       // bounded -> heapless (default no_std storage)
 		"pub fn encode(&self) -> heapless::Vec<u8,",                                                         // heap-free encode
 		"stack: heapless::Vec<_Loc,",                                                                        // bounded decode stack
 		"if self.somestring.as_str() != \"\" {",                                                             // string omit via as_str
@@ -262,13 +279,25 @@ messages:
 		}
 	}
 
-	// corelib-rs-no-std: the keys are inert (statically bounded storage, no
-	// Error::LimitExceeded in that corelib) — no constants, no guards.
+	// corelib-rs-no-std: the keys are inert there (every field is schema-bounded,
+	// and that corelib has no Error::LimitExceeded) — no constants, no guards.
+	// The schema is the bounded one, since no_std requires a bound in both storage
+	// modes; the caps being inert is exactly what makes that consistent.
 	noStdCfg := map[string]any{"corelib": "rs-no-std", "allow_dynamic": true}
 	for k, v := range limitsCfg {
 		noStdCfg[k] = v
 	}
-	n := gen(noStdCfg)
+	boundedSrc := `version: 1
+messages:
+  dyn:
+    payload:
+      s:    { id: 0, type: string, maxlen: 16 }
+      arr:  { id: 1, type: array, items: { type: u64, count: 4 } }
+      barr: { id: 2, type: array, items: { type: i32, count: 3 } }
+      b:    { id: 3, type: blob, maxlen: 8 }
+      sa:   { id: 4, type: array, items: { type: string, count: 4, maxlen: 16 } }
+`
+	n := moduleFromYAML(t, boundedSrc, noStdCfg)
 	for _, notWant := range []string{"MAX_DYN_", "LimitExceeded"} {
 		if strings.Contains(n, notWant) {
 			t.Errorf("rs-no-std must ignore max_dyn_* keys, found %q", notWant)
@@ -442,7 +471,11 @@ messages:
 	}
 	// no_std profile: a string/blob element rejects an over-index id ahead of the
 	// heapless capacity drop, converging with std (issue #149 / F-0013).
-	mn := moduleFromYAML(t, src, map[string]any{"corelib": "rs-no-std", "allow_dynamic": true})
+	// no_std requires a bound on every array in both storage modes, so its leg
+	// drops the deliberately count-less `ds` — a dynamic array is a std-profile
+	// shape by construction, and the guard under test here is the bounded one.
+	srcNoStd := strings.Replace(src, "      ds: { id: 3, type: array, items: { type: string } }\n", "", 1)
+	mn := moduleFromYAML(t, srcNoStd, map[string]any{"corelib": "rs-no-std", "allow_dynamic": true})
 	for _, want := range []string{
 		"if id as usize >= 4 { self.inv = true; return; } while self.m.bs.len()", // bounded string
 		"if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len()", // bounded blob
@@ -473,11 +506,18 @@ messages:
       sa: { id: 2, type: array, items: { type: string, count: 3, maxlen: 5 } }
       ds: { id: 3, type: string }
 `
+	// no_std requires a maxlen on every string in both storage modes, so its leg
+	// drops the deliberately unbounded `ds`; the bounded rejects are the point.
+	srcNoStd := strings.Replace(src, "      ds: { id: 3, type: string }\n", "", 1)
 	for _, cfg := range []map[string]any{
-		{}, // std
-		{"corelib": "rs-no-std", "no_std": true, "allow_dynamic": true}, // no_std must also reject as INVALID
+		{},                                       // std
+		{"corelib": "rs-no-std", "no_std": true}, // no_std must also reject as INVALID
 	} {
-		m := moduleFromYAML(t, src, cfg)
+		in := src
+		if cfg["corelib"] == "rs-no-std" {
+			in = srcNoStd
+		}
+		m := moduleFromYAML(t, in, cfg)
 		for _, want := range []string{
 			"(_Loc::Root, 0) => if total > 8 { self.inv = true; return; },",    // scalar string
 			"(_Loc::Root, 1) => if total > 8 { self.inv = true; return; },",    // scalar blob
@@ -508,43 +548,54 @@ messages:
       dynu:    { id: 5, type: array, items: { type: u32 } }
       dynf32:  { id: 6, type: array, items: { type: fp32 } }
 `
+	// The count-less arrays belong to the std profile only: no_std requires a bound
+	// on every array in both storage modes, so its legs take the same schema minus
+	// those two fields. What they demonstrate — a dynamic array is never trimmed,
+	// having no N to refill from — is a std-profile property by construction.
+	srcBounded := strings.Replace(src, "      dynu:    { id: 5, type: array, items: { type: u32 } }\n", "", 1)
+	srcBounded = strings.Replace(srcBounded, "      dynf32:  { id: 6, type: array, items: { type: fp32 } }\n", "", 1)
+
 	for _, cfg := range []map[string]any{
 		{}, // std corelib-rs
-		{"corelib": "rs-no-std", "allow_dynamic": true}, // #![no_std] + heapless
+		{"corelib": "rs-no-std", "allow_dynamic": true}, // #![no_std], alloc storage
 		{"corelib": "rs-no-std", "no_std": false},       // no-std corelib, std crate
 	} {
-		m := moduleFromYAML(t, src, cfg)
+		in := src
+		if cfg["corelib"] == "rs-no-std" && cfg["no_std"] != false {
+			in = srcBounded
+		}
+		m := moduleFromYAML(t, in, cfg)
+		if in == src {
+			for _, want := range []string{
+				// Dynamic arrays keep every element.
+				"os.write_array_unsigned(5, &self.dynu)",
+				"os.write_array_fp32(6, &self.dynf32)",
+			} {
+				if !strings.Contains(m, want) {
+					t.Errorf("message.rs (%v) missing %q", cfg, want)
+				}
+			}
+		}
 		for _, want := range []string{
 			// Fixed-count native arrays are trimmed, per element family.
-			"os.write_array_unsigned(0, _trim_tail(&self.fixedu[..], 0))",
-			"os.write_array_signed(1, _trim_tail(&self.fixedi[..], 0))",
-			"os.write_array_fp32(2, _trim_tail_f32(&self.fixedf32[..]))",
-			"os.write_array_fp64(3, _trim_tail_f64(&self.fixedf64[..]))",
+			"os.write_array_unsigned(0, sofab::trim_tail(&self.fixedu[..], 0))",
+			"os.write_array_signed(1, sofab::trim_tail(&self.fixedi[..], 0))",
+			"os.write_array_fp32(2, sofab::trim_tail_f32(&self.fixedf32[..]))",
+			"os.write_array_fp64(3, sofab::trim_tail_f64(&self.fixedf64[..]))",
 			// bool trims its 0/1 u8 image (false <-> 0).
-			"os.write_array_unsigned(4, _trim_tail(&_t0[..], 0))",
-			// Dynamic arrays keep every element.
-			"os.write_array_unsigned(5, &self.dynu)",
-			"os.write_array_fp32(6, &self.dynf32)",
-			// Floats compare by bit pattern so a trailing -0.0 is not trimmed.
-			"while n > 0 && f32::to_bits(a[n - 1]) == 0 { n -= 1; }",
-			"while n > 0 && f64::to_bits(a[n - 1]) == 0 { n -= 1; }",
+			"os.write_array_unsigned(4, sofab::trim_tail(&_t0[..], 0))",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q", cfg, want)
 			}
 		}
-		// The helpers borrow rather than allocate and touch no std/alloc path, so
-		// the same text serves the #![no_std] crate.
-		for _, want := range []string{
-			"fn _trim_tail<T: PartialEq + Copy>(a: &[T], zero: T) -> &[T] {\n    let mut n = a.len();\n    while n > 0 && a[n - 1] == zero { n -= 1; }\n    &a[..n]\n}",
-			"fn _trim_tail_f32(a: &[f32]) -> &[f32] {",
-			"fn _trim_tail_f64(a: &[f64]) -> &[f64] {",
-		} {
-			if !strings.Contains(m, want) {
-				t.Errorf("message.rs (%v) missing helper %q", cfg, want)
-			}
+		// The helpers live in the corelib (corelib-rs / corelib-rs-no-std), not in
+		// a per-crate prelude: identical text served both profiles, which is what
+		// made them corelib material in the first place.
+		if strings.Contains(m, "fn _trim_tail") {
+			t.Errorf("message.rs (%v) must not carry a trim prelude; the corelib owns it", cfg)
 		}
-		for _, bad := range []string{"_trim_tail(&self.dynu", "_trim_tail_f32(&self.dynf32"} {
+		for _, bad := range []string{"trim_tail(&self.dynu", "trim_tail_f32(&self.dynf32"} {
 			if strings.Contains(m, bad) {
 				t.Errorf("message.rs (%v) must not contain %q", cfg, bad)
 			}
@@ -552,9 +603,9 @@ messages:
 	}
 }
 
-// The trim helpers are emitted only for the element families the schema uses,
-// and not at all for a schema with no fixed-count native array.
-func TestRustTrimHelpersGatedOnUse(t *testing.T) {
+// Only a fixed-count array is trimmed. A schema with no fixed-count native
+// array must not reach for the corelib trim at all.
+func TestRustTrimsOnlyFixedCountArrays(t *testing.T) {
 	const noFixed = `
 version: 1
 messages:
@@ -562,8 +613,8 @@ messages:
     payload:
       dynu: { id: 0, type: array, items: { type: u32 } }
 `
-	if m := moduleFromYAML(t, noFixed, map[string]any{}); strings.Contains(m, "_trim_tail") {
-		t.Error("no fixed-count array: trim helpers must not be emitted")
+	if m := moduleFromYAML(t, noFixed, map[string]any{}); strings.Contains(m, "trim_tail") {
+		t.Error("no fixed-count array: nothing to trim, so no trim call")
 	}
 	const onlyU = `
 version: 1
@@ -573,13 +624,8 @@ messages:
       fixedu: { id: 0, type: array, items: { type: u32, count: 4 } }
 `
 	m := moduleFromYAML(t, onlyU, map[string]any{})
-	if !strings.Contains(m, "fn _trim_tail<T: PartialEq + Copy>") {
-		t.Error("integer fixed-count array: _trim_tail must be emitted")
-	}
-	for _, bad := range []string{"fn _trim_tail_f32", "fn _trim_tail_f64"} {
-		if strings.Contains(m, bad) {
-			t.Errorf("no float fixed-count array: %q must not be emitted", bad)
-		}
+	if !strings.Contains(m, "sofab::trim_tail(&self.fixedu[..], 0)") {
+		t.Error("a fixed-count array must be trimmed via the corelib helper")
 	}
 }
 
@@ -617,10 +663,10 @@ messages:
 `
 	m := moduleFromYAML(t, src, map[string]any{})
 	for _, want := range []string{
-		"short: [1, 2, 0, 0, 0],",
-		"none: [0; 3],",
-		"fullf: [1.5, 0.0],",
-		"boolp: [true, false, false],",
+		"short: vec![1, 2, 0, 0, 0],",
+		"none: vec![0; 3],",
+		"fullf: vec![1.5, 0.0],",
+		"boolp: vec![true, false, false],",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs missing %q", want)
@@ -651,11 +697,21 @@ messages:
 		// behind the over-count guard (generator#216): the count header is rejected
 		// as INVALID before the reset, so a truncated over-count array cannot mask
 		// the violation as INCOMPLETE (MESSAGE_SPEC S5.2).
-		for _, want := range []string{
-			"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd = [0; 5]; },",
-			"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef = [0.0; 3]; },",
-			"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef = [false; 3]; },",
-		} {
+		// What follows the guard depends on the storage: an inline [T; N] is wiped
+		// to the element-default image, a Vec is cleared and refilled by push.
+		resets := []string{
+			"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear(); self.m.defd.resize(5, 0); },",
+			"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear(); self.m.fdef.resize(3, 0.0); },",
+			"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef.clear(); self.m.bdef.resize(3, false); },",
+		}
+		if cfg["corelib"] == "rs-no-std" {
+			resets = []string{
+				"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd = [0; 5]; },",
+				"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef = [0.0; 3]; },",
+				"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef = [false; 3]; },",
+			}
+		}
+		for _, want := range resets {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing reset %q", cfg, want)
 			}

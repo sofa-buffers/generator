@@ -310,7 +310,7 @@ func (g *gen) emitMaxlenGuard(f *jfile, fs []frame, kind ir.Kind, noun string) {
 // counter self-terminates on `count`, so no array-end callback is needed, and it
 // lives in the visitor, so it survives a feed chunk boundary.
 func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
-	f.line("        // MESSAGE_SPEC S7.3 (generator#183): an integer array delivered at an id")
+	f.line("        // An integer array delivered at an id")
 	f.line("        // that does not declare one is a wire-type contradiction -- arm a discard")
 	f.line("        // counter so unsigned()/signed() drop exactly `count` elements. Every id")
 	f.line("        // that really declares an integer-element array disarms it below.")
@@ -381,7 +381,7 @@ func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 // routed by id. Emitted for those four callbacks — the ones an array shares with
 // a lone scalar; string()/blob() are unaffected.
 func (g *gen) emitArraySkipGuard(f *jfile) {
-	f.line("        // S7.3 (generator#183/#193): drop an element of an array whose id does")
+	f.line("        // Drop an element of an array whose id does")
 	f.line("        // not declare one -- armed by arrayBegin, self-terminating on count.")
 	f.line("        if (askip > 0) { askip--; return; }")
 }
@@ -512,29 +512,11 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	// hand them to the JVM-intrinsic `new String(b, off, len, UTF_8)` (vectorized,
 	// and with valid input it never substitutes). This mirrors protobuf-java's
 	// hand-rolled Utf8 validator + intrinsic decode and measured ~43 % faster on
-	// the arena strings, at zero per-string allocation. _utf8ok accepts exactly
-	// well-formed UTF-8 (RFC 3629): it rejects continuation-as-lead, overlong 2/3/4
-	// -byte forms, UTF-16 surrogates (ED A0..BF), code points > U+10FFFF (F4 90..
-	// / F5..FF) and truncated sequences — the same set the fatal decoder rejects.
-	f.line("    private static boolean _utf8ok(byte[] b, int i, int end) {")
-	f.line("        while (i < end) {")
-	f.line("            int c = b[i] & 0xff;")
-	f.line("            if (c < 0x80) { i++; continue; }")
-	f.line("            int n, lo, hi;")
-	f.line("            if (c < 0xC2) return false;")
-	f.line("            else if (c < 0xE0) { n = 1; lo = 0x80; hi = 0xBF; }")
-	f.line("            else if (c < 0xF0) { n = 2; lo = (c == 0xE0) ? 0xA0 : 0x80; hi = (c == 0xED) ? 0x9F : 0xBF; }")
-	f.line("            else if (c < 0xF5) { n = 3; lo = (c == 0xF0) ? 0x90 : 0x80; hi = (c == 0xF4) ? 0x8F : 0xBF; }")
-	f.line("            else return false;")
-	f.line("            if (i + n >= end) return false;")
-	f.line("            int cc = b[i + 1] & 0xff; if (cc < lo || cc > hi) return false;")
-	f.line("            for (int k = 2; k <= n; k++) { cc = b[i + k] & 0xff; if (cc < 0x80 || cc > 0xBF) return false; }")
-	f.line("            i += n + 1;")
-	f.line("        }")
-	f.line("        return true;")
-	f.line("    }")
+	// the arena strings, at zero per-string allocation. The scan itself is
+	// sofab.Utf8.valid, which accepts exactly well-formed UTF-8 (RFC 3629) — the
+	// same set the fatal decoder rejects.
 	f.line("    private static String _utf8(byte[] b, int off, int len) {")
-	f.line("        if (_utf8ok(b, off, off + len)) return new String(b, off, len, java.nio.charset.StandardCharsets.UTF_8);")
+	f.line("        if (Utf8.valid(b, off, off + len)) return new String(b, off, len, java.nio.charset.StandardCharsets.UTF_8);")
 	f.line("        throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"string: invalid UTF-8\"));")
 	f.line("    }")
 

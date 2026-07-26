@@ -17,6 +17,7 @@ set -eu
 
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 NOSTD="${1:-${SOFAB_RS_CORELIB:-}}"
@@ -60,9 +61,31 @@ run_variant() {
         ( cd "$2" && cargo build -q )
     }
 
+    # example.yaml leaves `somemap` deliberately count-less to show the dynamic
+    # form. The no_std profile requires a bound in both storage modes, so this leg
+    # gives it a capacity — the same thing tests/conformance/{c,cpp}/run.sh do.
+    # `count` never reaches the wire, so the round-trip and the shared vectors are
+    # unchanged.
+    EXAMPLE="$ROOT/examples/messages/example.yaml"
+    if [ "$label" = "no-std" ]; then
+        EXAMPLE="$WORK/example-no-std.yaml"
+        awk '
+          /^      somemap:/ { inmap=1 }
+          inmap && /^          type: struct$/ { print; print "          count: 8"; inmap=0; next }
+          { print }
+        ' "$ROOT/examples/messages/example.yaml" > "$EXAMPLE"
+    fi
+
     echo "==> [$label] generating + building example + conformance crates"
-    rust_build "$ROOT/examples/messages/example.yaml" "$WORK/ex-$label"
+    rust_build "$EXAMPLE" "$WORK/ex-$label"
     rust_build "$WORK/conf.yaml" "$WORK/conf-$label"
+
+    # MAX_SIZE fill check (ARCHITECTURE §9.6): MAX_SIZE sizes the encode buffer
+    # (a heapless::Vec in the no_std profile), so a fully filled message must fit
+    # it AND reach it exactly.
+    echo "==> [$label] MAX_SIZE fill check"
+    rust_build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill-$label"
+    ( cd "$WORK/fill-$label" && check_maxsize_fill "$label" cargo run -q -- encode fill )
 
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(cd "$WORK/ex-$label" && printf '%s' "$IN" | cargo run -q -- encode myfirstmessage | cargo run -q -- decode myfirstmessage)
@@ -293,6 +316,11 @@ run_variant() {
 
     echo "==> [$label] corpus + realworld: every definition builds"
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+        # no_maxlen.yaml exists to exercise genuinely unbounded string/blob fields.
+        # The no_std profile rejects those by design — in both storage modes — so
+        # it is not a definition this leg can compile, and skipping it is the
+        # honest outcome rather than a bound invented for the test.
+        case "$label:$(basename "$def")" in no-std:no_maxlen.yaml) continue ;; esac
         name=$(basename "$def" .yaml)
         rust_build "$def" "$WORK/corpus-$label/$name"
     done
@@ -327,11 +355,12 @@ sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/nolim/Cargo.toml"
 (cd "$WORK/nolim" && cargo run -q -- decode dyn < "$WORK/lim-over.bin" >/dev/null) || { echo "FAIL: no-limits project must decode oversized input"; exit 1; }
 echo "==> [rs] decode limits OK"
 
-# corelib-rs-no-std is now the genuinely #![no_std], heap-free profile (heapless
-# fixed-capacity fields). The rich example.yaml has an unbounded field (somemap),
-# so it needs allow_dynamic: true to keep an alloc fallback for that one field —
-# the Rust analog of the c-cpp allow_dynamic variant. The corpus spans the
-# feature-subset matrix under the same config.
+# corelib-rs-no-std is the genuinely #![no_std] profile. Every field is
+# schema-bounded there whatever storage it uses, and allow_dynamic selects that
+# storage: alloc::String/alloc::Vec instead of heapless containers, for a target
+# that has an allocator. This leg exercises the alloc mode; the heapless default
+# is proven below. The corpus spans the feature-subset matrix under the same
+# config.
 run_variant no-std "corelib: rs-no-std, allow_dynamic: true" "$NOSTD"
 
 # The point of the no_std profile is a crate that builds as #![no_std] and
@@ -341,7 +370,7 @@ run_variant no-std "corelib: rs-no-std, allow_dynamic: true" "$NOSTD"
 # mirroring the c-cpp bounded-vs-allow_dynamic split.
 echo "==> no_std lib builds heap-free (--lib --no-default-features), allow_dynamic on AND off"
 
-# (a) allow_dynamic: true — example.yaml keeps an alloc fallback for somemap, so
+# (a) allow_dynamic: true — every variable-length field is an alloc container, so
 # the crate pulls `extern crate alloc` yet still compiles as #![no_std] on a lib.
 grep -q 'extern crate alloc' "$WORK/ex-no-std/src/lib.rs" || { echo "FAIL: allow_dynamic crate should pull extern crate alloc"; exit 1; }
 ( cd "$WORK/ex-no-std" && cargo build -q --lib --no-default-features )
@@ -357,12 +386,17 @@ sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/strict/Cargo.toml"
 ( cd "$WORK/strict" && cargo build -q --lib --no-default-features )
 echo "==> [allow_dynamic=false] strict no_std lib (pure heapless, no alloc) builds"
 
-# an unbounded field without allow_dynamic is rejected, not silently heaped.
+# An unbounded field is rejected under no_std in BOTH storage modes: allow_dynamic
+# chooses the container, never whether a bound is needed, so one schema stays
+# valid for every no_std target.
 printf 'version: 1\nmessages:\n  m: { payload: { s: { id: 0, type: string } } }\n' > "$WORK/unbounded.yaml"
-if ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-strict.yaml" --lang rust --in "$WORK/unbounded.yaml" --out "$WORK/unbounded" 2>/dev/null ); then
-    echo "FAIL: unbounded field under no_std without allow_dynamic should error"; exit 1
-fi
-echo "==> [allow_dynamic=false] unbounded field is correctly rejected"
+printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std, allow_dynamic: true } }\n' > "$WORK/cfg-dyn.yaml"
+for c in cfg-strict cfg-dyn; do
+    if ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/$c.yaml" --lang rust --in "$WORK/unbounded.yaml" --out "$WORK/unbounded-$c" 2>/dev/null ); then
+        echo "FAIL: unbounded field under no_std ($c) should error"; exit 1
+    fi
+done
+echo "==> unbounded field is rejected in both storage modes"
 
 echo "==> no-std feature-subset smoke: a varint-only schema builds with no features"
 printf 'version: 1\nmessages:\n  tiny: { payload: { a: { id: 0, type: i32 }, b: { id: 1, type: u16 }, c: { id: 2, type: boolean } } }\n' > "$WORK/tiny.yaml"

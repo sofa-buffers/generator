@@ -44,10 +44,15 @@ func cfgLimit(cfg map[string]any, key string) (int64, bool) {
 }
 
 // checkBounded enforces the no_std profile's sizing policy (the Rust analog of the
-// C++ c-cpp checkBounded): every field that lowers to fixed heapless storage must
-// be sized by the schema. A string/blob needs a maxlen; an array needs a count
-// (and a string/blob element needs its own maxlen). An unbounded such field is a
-// hard error unless allow_dynamic keeps an alloc heap fallback for it.
+// C++ c-cpp checkBounded): every field must be sized by the schema. A string/blob
+// needs a maxlen; an array needs a count (and a string/blob element needs its own
+// maxlen). An unbounded such field is a hard error.
+//
+// The bound is mandatory in BOTH storage modes: allow_dynamic chooses the
+// container a *bounded* field lives in, never whether a bound is needed. That is
+// what keeps one schema valid for every no_std target — same maxlen/count, same
+// wire bytes, only the storage differs — so the switch can be flipped per device
+// without touching the schema.
 func (g *gen) checkBounded(s *ir.Schema) error {
 	seen := map[string]bool{}
 	var walk func(owner string, fields []*ir.Field) error
@@ -68,26 +73,17 @@ func (g *gen) checkBounded(s *ir.Schema) error {
 }
 
 func (g *gen) checkField(owner string, f *ir.Field, seen map[string]bool, walk func(string, []*ir.Field) error) error {
-	if g.allowDynamic {
-		// A heap fallback is allowed, so nothing is rejected; still recurse into
-		// nested types to size their fixed fields.
-		if (f.Kind == ir.KindStruct || f.Kind == ir.KindUnion) && !seen[f.Ref.Key] {
-			seen[f.Ref.Key] = true
-			return walk(f.Ref.Key, f.Ref.Target.Fields)
-		}
-		return nil
-	}
 	switch f.Kind {
 	case ir.KindString, ir.KindBlob:
 		if !f.HasMaxlen {
-			return fmt.Errorf("no_std: field %q of %q is an unbounded %s (no maxlen); add a maxlen or set allow_dynamic: true", f.Name, owner, kindName(f.Kind))
+			return fmt.Errorf("no_std: field %q of %q is an unbounded %s (no maxlen); add a maxlen. The bound is required in both storage modes - allow_dynamic chooses the container, not whether a bound is needed (use corelib: rs for genuinely unbounded fields)", f.Name, owner, kindName(f.Kind))
 		}
 	case ir.KindArray:
 		if !f.HasCount {
-			return fmt.Errorf("no_std: array field %q of %q has no count; add a count or set allow_dynamic: true", f.Name, owner)
+			return fmt.Errorf("no_std: array field %q of %q has no count; add a count. The bound is required in both storage modes (use corelib: rs for genuinely unbounded fields)", f.Name, owner)
 		}
 		if (f.Elem == ir.KindString || f.Elem == ir.KindBlob) && !f.ElemMaxHas {
-			return fmt.Errorf("no_std: %s-array field %q of %q has no element maxlen; add items.maxlen or set allow_dynamic: true", kindName(f.Elem), f.Name, owner)
+			return fmt.Errorf("no_std: %s-array field %q of %q has no element maxlen; add items.maxlen. The bound is required in both storage modes (use corelib: rs for genuinely unbounded fields)", kindName(f.Elem), f.Name, owner)
 		}
 	case ir.KindStruct, ir.KindUnion:
 		if !seen[f.Ref.Key] {
@@ -150,7 +146,18 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 			return g.rustFixedArrayDefault(f, elem, n)
 		}
 		if isNativeArrayElem(f.Elem) {
-			if parts, ok := g.rustNativeArrayParts(f); ok {
+			// No declared default: a `count: N` array still defaults to N element
+			// defaults, exactly as [T; N] did and as C/C++ aggregate init gives.
+			// `vec!` is a std macro, so the no_std profile builds the same value
+			// from an array literal instead -- a #![no_std] crate has alloc, not
+			// the prelude macro.
+			if f.Default == nil && f.HasCount {
+				if g.noStd {
+					return fmt.Sprintf("[%s; %d].to_vec()", rustElemZeroLit(f.Elem), f.Count)
+				}
+				return fmt.Sprintf("vec![%s; %d]", rustElemZeroLit(f.Elem), f.Count)
+			}
+			if parts, ok := g.rustNativeArrayPartsN(f); ok {
 				if g.noStd {
 					// dynamic (count-less) native array under allow_dynamic -> alloc Vec.
 					return "[" + parts + "].to_vec()"
@@ -167,6 +174,33 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 // rustNativeArrayParts renders a native scalar array's schema default element
 // list (comma-joined, no brackets); ("", false) when there is no default.
 // Element literals are unconstrained and infer to the field's element type.
+// rustNativeArrayPartsN is rustNativeArrayParts, tail-padded to the schema
+// `count` when there is one. A `count: N` array's default is exactly N elements
+// — the declared values, then the element default — in every target: C and C++
+// get that from aggregate initialization, which zero-fills what a braced
+// initializer leaves out. A Vec has no such rule, so the padding is explicit
+// here; otherwise an omitted field would reconstruct with fewer elements than
+// the same schema yields elsewhere.
+func (g *gen) rustNativeArrayPartsN(f *ir.Field) (string, bool) {
+	parts, ok := g.rustNativeArrayParts(f)
+	if !ok || !f.HasCount {
+		return parts, ok
+	}
+	have := int64(0)
+	if parts != "" {
+		have = int64(len(strings.Split(parts, ", ")))
+	}
+	zero := rustElemZeroLit(f.Elem)
+	for ; have < f.Count; have++ {
+		if parts == "" {
+			parts = zero
+		} else {
+			parts += ", " + zero
+		}
+	}
+	return parts, true
+}
+
 func (g *gen) rustNativeArrayParts(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
 	if !ok {
@@ -213,7 +247,7 @@ func byteSliceLit(raw []byte) string {
 // a bounded string is a heapless::String<N> filled by push_str (heap-free); an
 // unbounded one falls back to alloc::String.
 func (g *gen) rustStrNew(hasMax bool, lit string, hasLit bool) string {
-	if hasMax {
+	if hasMax && !(g.noStd && g.allowDynamic) {
 		if hasLit {
 			return fmt.Sprintf("{ let mut _s = heapless::String::new(); let _ = _s.push_str(%q); _s }", lit)
 		}
@@ -235,7 +269,7 @@ func (g *gen) rustBlobNew(hasMax bool, sliceLit string, hasLit bool) string {
 		}
 		return "Vec::new()"
 	}
-	if hasMax {
+	if hasMax && !g.allowDynamic {
 		if hasLit {
 			return fmt.Sprintf("{ let mut _v = heapless::Vec::new(); let _ = _v.extend_from_slice(&%s); _v }", sliceLit)
 		}
@@ -253,6 +287,8 @@ func (g *gen) rustSeqNew(hasCount bool) string {
 	switch {
 	case !g.noStd:
 		return "Vec::new()"
+	case g.allowDynamic:
+		return "alloc::vec::Vec::new()"
 	case hasCount:
 		return "heapless::Vec::new()"
 	default:
@@ -341,49 +377,44 @@ func (g *gen) fixedNativeArray(f *ir.Field) (elem string, n int64, ok bool) {
 	if f.Kind != ir.KindArray || !isNativeArrayElem(f.Elem) || !f.HasCount {
 		return "", 0, false
 	}
+	// Under allow_dynamic a native array is a Vec like every other container; the
+	// schema count stays mandatory and becomes a decode-path check instead of the
+	// array's length.
+	// Inline fixed-size storage belongs to exactly one profile: no_std without
+	// allow_dynamic, the one with no allocator to reach for. Everywhere else a
+	// bounded array goes in that profile's dynamic container, like a bounded
+	// string or blob: all three are variable-length up to their declared maximum
+	// (§3 trims an array's trailing default run), so the maximum is a bound, not a
+	// storage decision.
+	//
+	// This gives up the [T; N] the std profile used to emit, measured as a
+	// maxspeed win in cd8e9eb. Two things outweighed it: within one struct a
+	// `count: N` array was inline while a count-less one was a Vec, so declaring a
+	// bound silently changed the storage; and `len()` then meant "the schema
+	// count" on one field and "what the message carried" on the next. The
+	// allocation is worth revisiting once the storage model is settled.
+	if !g.noStd || g.allowDynamic {
+		return "", 0, false
+	}
 	return g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax), f.Count, true
 }
 
-// trimKinds reports which trailing-default-run trim helpers the schema needs
-// (MESSAGE_SPEC §3): the generic _trim_tail (integer/bool/enum/bitfield
-// elements, which lower to an int or to a 0/1 u8 image) and the bit-pattern
-// float variants. Only a top-level `count: N` native array field is trimmed, so
-// only those are scanned; every field of the crate appears exactly once here,
-// since module() emits one struct per named type plus one per message.
-func (g *gen) trimKinds(s *ir.Schema) (anyInt, anyF32, anyF64 bool) {
-	scan := func(fields []*ir.Field) {
-		for _, f := range fields {
-			if _, _, ok := g.fixedNativeArray(f); !ok {
-				continue
-			}
-			switch f.Elem {
-			case ir.KindFP32:
-				anyF32 = true
-			case ir.KindFP64:
-				anyF64 = true
-			default:
-				anyInt = true
-			}
-		}
-	}
-	for _, key := range s.NamedOrder {
-		if nt := s.Named[key]; nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			scan(nt.Fields)
-		}
-	}
-	for _, m := range s.Messages {
-		scan(m.Fields)
-	}
-	return
-}
-
 // rustStr / rustBlob / rustSeq map a variable-length string, blob, or wrapper
-// sequence to its storage type per profile: std String/Vec (default), fixed
-// heapless::String<N>/Vec<T,N> sized from the schema (no_std), or an alloc heap
-// fallback when the field is unbounded and allow_dynamic is set.
+// sequence to its storage type per profile: std String/Vec (default), or under
+// no_std either fixed heapless storage sized from the schema (the default) or an
+// alloc container holding what the message actually carries (allow_dynamic).
+//
+// Both no_std modes take the same schema — checkBounded requires the bound
+// either way — so hasMax/hasCount are always true there. What changes is where
+// the bytes live, and therefore what a message costs to hold and to move: with a
+// large declared bound the inline object is the worst case whether the message
+// uses it or not.
 func (g *gen) rustStr(hasMax bool, max int64) string {
 	switch {
-	case !g.noStd:
+	case !g.noStd, g.allowDynamic:
+		if g.noStd {
+			return "alloc::string::String"
+		}
 		return "String"
 	case hasMax:
 		return fmt.Sprintf("heapless::String<%d>", max)
@@ -394,7 +425,10 @@ func (g *gen) rustStr(hasMax bool, max int64) string {
 
 func (g *gen) rustBlob(hasMax bool, max int64) string {
 	switch {
-	case !g.noStd:
+	case !g.noStd, g.allowDynamic:
+		if g.noStd {
+			return "alloc::vec::Vec<u8>"
+		}
 		return "Vec<u8>"
 	case hasMax:
 		return fmt.Sprintf("heapless::Vec<u8, %d>", max)
@@ -405,7 +439,10 @@ func (g *gen) rustBlob(hasMax bool, max int64) string {
 
 func (g *gen) rustSeq(elem string, hasCount bool, count int64) string {
 	switch {
-	case !g.noStd:
+	case !g.noStd, g.allowDynamic:
+		if g.noStd {
+			return "alloc::vec::Vec<" + elem + ">"
+		}
 		return "Vec<" + elem + ">"
 	case hasCount:
 		return fmt.Sprintf("heapless::Vec<%s, %d>", elem, count)
@@ -646,115 +683,6 @@ func (g *gen) hasCap(cap string) bool {
 // feature-independent is the alternative that would restore it.)
 func (g *gen) capabilities(s *ir.Schema) []string {
 	return []string{"array", "fixlen", "fp64", "sequence", "value64"}
-}
-
-// ---- max-size cost model (PLAN §5.5) ----
-
-func (g *gen) maxSize(fields []*ir.Field) (int64, bool) {
-	var total int64
-	seen := map[string]bool{}
-	for _, f := range fields {
-		c, ok := g.fieldCost(f, seen)
-		if !ok {
-			return 8192, true
-		}
-		total += c
-	}
-	if total < 64 {
-		total = 64
-	}
-	return total, true
-}
-
-func (g *gen) fieldCost(f *ir.Field, seen map[string]bool) (int64, bool) {
-	hdr := varintLen(uint64(f.ID)<<3 | 7)
-	switch f.Kind {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
-		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindBool, ir.KindEnum, ir.KindBitfield:
-		return hdr + 10, true
-	case ir.KindFP32:
-		return hdr + 1 + 4, true
-	case ir.KindFP64:
-		return hdr + 1 + 8, true
-	case ir.KindString, ir.KindBlob:
-		if !f.HasMaxlen {
-			return 0, false
-		}
-		return hdr + varintLen(uint64(f.Maxlen)<<3) + f.Maxlen, true
-	case ir.KindArray:
-		return g.arrayCost(hdr, f.Elem, f.ElemRef, f.ElemItems, f.Count, f.ElemMaxHas, f.ElemMax, seen)
-	case ir.KindStruct, ir.KindUnion:
-		if seen[f.Ref.Key] {
-			return 0, false
-		}
-		seen[f.Ref.Key] = true
-		var inner int64
-		for _, c := range f.Ref.Target.Fields {
-			cc, ok := g.fieldCost(c, seen)
-			if !ok {
-				delete(seen, f.Ref.Key)
-				return 0, false
-			}
-			inner += cc
-		}
-		delete(seen, f.Ref.Key)
-		return hdr + inner + 1, true
-	}
-	return hdr, true
-}
-
-// arrayCost bounds the encoded size of an array field body (hdr is the field
-// header). Native (numeric/enum/bool/bitfield) elements use a native array;
-// string/blob/struct/union/nested-array elements lower to a wrapper sequence. A
-// dynamic (count == 0) wrapper-sequence array is unbounded, so it forces the
-// default cap.
-func (g *gen) arrayCost(hdr int64, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64, seen map[string]bool) (int64, bool) {
-	ihdr := varintLen(uint64(count)<<3 | 7) // per-element wrapper/child header estimate
-	switch elem {
-	case ir.KindString, ir.KindBlob:
-		if !elemMaxHas || count == 0 {
-			return 0, false
-		}
-		per := ihdr + varintLen(uint64(elemMax)<<3) + elemMax
-		return hdr + 1 + count*per + 1, true
-	case ir.KindStruct, ir.KindUnion:
-		if count == 0 || seen[ref.Key] {
-			return 0, false
-		}
-		seen[ref.Key] = true
-		var inner int64
-		for _, c := range ref.Target.Fields {
-			cc, ok := g.fieldCost(c, seen)
-			if !ok {
-				delete(seen, ref.Key)
-				return 0, false
-			}
-			inner += cc
-		}
-		delete(seen, ref.Key)
-		per := ihdr + inner + 1 // element sequence header + body + sequence end
-		return hdr + 1 + count*per + 1, true
-	case ir.KindArray:
-		if count == 0 {
-			return 0, false
-		}
-		cc, ok := g.arrayCost(ihdr, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax, seen)
-		if !ok {
-			return 0, false
-		}
-		return hdr + 1 + count*cc + 1, true
-	default: // numeric / enum / bool / bitfield -> native array
-		return hdr + varintLen(uint64(count)) + count*10, true
-	}
-}
-
-func varintLen(x uint64) int64 {
-	n := int64(1)
-	for x >= 0x80 {
-		x >>= 7
-		n++
-	}
-	return n
 }
 
 var _ = fmt.Sprintf

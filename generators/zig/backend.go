@@ -35,10 +35,14 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
 		license: generator.LicenseID(cfg),
 		limits:  resolveLimits(s, cfg),
+		size:    generator.NewSizePolicy(cfg),
 	}
 	files := []generator.File{{Path: "src/message.zig", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s)...)
+	}
+	if g.sizeErr != nil {
+		return nil, g.sizeErr
 	}
 	return files, nil
 }
@@ -48,6 +52,22 @@ type gen struct {
 	banner  string
 	license string // SPDX id, "" to omit the header line
 	limits  limitSet
+	// size is the max_message_size policy; sizeErr carries a violation out of
+	// the emit path, which has no error channel of its own.
+	size    generator.SizePolicy
+	sizeErr error
+}
+
+// messageSize resolves a message's worst-case encoded size via the shared walk
+// (ir.MaxWireSize), falling back to the configured max_message_size ceiling when
+// a field is unbounded. The emit path has no error channel, so a violation of an
+// explicitly configured ceiling is recorded here and surfaced by Generate.
+func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize {
+	ms, err := g.size.Resolve(name, fields)
+	if err != nil && g.sizeErr == nil {
+		g.sizeErr = err
+	}
+	return ms
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102),
@@ -238,9 +258,16 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 	}
 	f.blank()
 	if isMessage {
-		size, _ := g.maxSize(fields)
-		f.line("    /// Upper bound on the encoded size of any value of this message.")
-		f.line("    pub const MAX_SIZE: usize = %d;", size)
+		ms := g.messageSize(name, fields)
+		if !ms.Bounded {
+			f.line("    /// Configured ceiling (max_message_size): an unbounded field means this")
+			f.line("    /// size is imposed, not derived from the schema.")
+			f.line("    pub const MAX_SIZE_LIMIT: usize = %d;", ms.Size)
+			f.line("    pub const MAX_SIZE: usize = MAX_SIZE_LIMIT;")
+		} else {
+			f.line("    /// Worst-case encoded size of this message, derived from the schema.")
+			f.line("    pub const MAX_SIZE: usize = %d;", ms.Size)
+		}
 		f.blank()
 	}
 
@@ -375,7 +402,7 @@ func trimExpr(val string, fixed bool) string {
 	if !fixed {
 		return val
 	}
-	return fmt.Sprintf("_trimTail(%s)", val)
+	return fmt.Sprintf("sofab.arrays.trimTail(%s)", val)
 }
 
 // marshalArray writes the array val (a slice-like expression) as field idExpr.
@@ -448,12 +475,10 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 // declarations lazily, so helpers a given schema never references cost
 // nothing.
 //
-// dynAlloc selects the _put/_allocN pair: when any message decodes a
-// slice-backed native array, the hardened grow-on-demand versions are emitted
-// (the wire count is untrusted, so the eager allocation is capped and grown as
-// elements actually arrive — generator#102); otherwise the pair is unreferenced
-// and keeps its historical exact-count text, so schemas without such arrays
-// stay byte-identical.
+// dynAlloc selects the initial-allocation strategy for a slice-backed native
+// array. The wire count is untrusted, so when any message decodes one the eager
+// allocation is capped here and grown as elements actually arrive
+// (sofab.arrays.putGrowing); otherwise the exact count is allocated up front.
 func (g *gen) emitSupport(f *zfile, dynAlloc bool) {
 	f.line("// --- shared encode/decode support -------------------------------------------")
 	f.blank()
@@ -470,112 +495,21 @@ func (g *gen) emitSupport(f *zfile, dynAlloc bool) {
 	f.line("        };")
 	f.line("    }")
 	f.line("};")
-	f.blank()
 	if dynAlloc {
-		f.line("/// Store the next native-array element into a dynamic slice, growing the")
-		f.line("/// capped initial allocation (see _allocN) geometrically as the elements")
-		f.line("/// actually arrive -- never past the announced wire count n. An element the")
-		f.line("/// grow cannot hold (allocation failure) is dropped.")
-		f.line("fn _put(s: anytype, a: std.mem.Allocator, i: *usize, n: usize, v: std.meta.Elem(@TypeOf(s.*))) void {")
-		f.line("    if (i.* >= n) return;")
-		f.line("    if (i.* >= s.*.len) {")
-		f.line("        const T = std.meta.Elem(@TypeOf(s.*));")
-		f.line("        const new = a.alloc(T, @min(@max(s.*.len * 2, i.* + 1), n)) catch return;")
-		f.line("        @memcpy(new[0..s.*.len], s.*);")
-		f.line("        @memset(new[s.*.len..], std.mem.zeroes(T));")
-		f.line("        s.* = new;")
-		f.line("    }")
-		f.line("    @constCast(&s.*[i.*]).* = v;")
-		f.line("    i.* += 1;")
+		f.blank()
+		f.line("/// Initial storage for a native array announcing n wire elements. The count")
+		f.line("/// is untrusted until the elements actually arrive, so the eager allocation")
+		f.line("/// is capped here and sofab.arrays.putGrowing extends it on demand -- a")
+		f.line("/// lying count cannot force a huge allocation. On allocation failure the")
+		f.line("/// array decodes as empty.")
+		f.line("fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {")
+		f.line("    return sofab.arrays.allocN(T, a, @min(n, 1024));")
 		f.line("}")
 	} else {
-		f.line("/// Store the next native-array element into a dynamic (count-less) slice,")
-		f.line("/// bounds-checked; the slice is pre-sized to the wire count, so the bound")
-		f.line("/// only guards a failed allocation (the data is then dropped).")
-		f.line("fn _put(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s))) void {")
-		f.line("    if (i.* >= s.len) return;")
-		f.line("    @constCast(&s[i.*]).* = v;")
-		f.line("    i.* += 1;")
+		f.blank()
+		f.line("/// Native-array destination of exactly the announced wire count.")
+		f.line("fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {")
+		f.line("    return sofab.arrays.allocN(T, a, n);")
 		f.line("}")
 	}
-	f.blank()
-	f.line("/// Store the next native-array element into a fixed [N]T destination. An")
-	f.line("/// element past the schema capacity N flags the message malformed: a wire")
-	f.line("/// count above the schema count is invalid and must be rejected, not")
-	f.line("/// clamped.")
-	f.line("fn _putc(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s)), inv: *bool) void {")
-	f.line("    if (i.* >= s.len) {")
-	f.line("        inv.* = true;")
-	f.line("        return;")
-	f.line("    }")
-	f.line("    @constCast(&s[i.*]).* = v;")
-	f.line("    i.* += 1;")
-	f.line("}")
-	f.blank()
-	f.line("/// Trim the trailing run of element-default elements off a fixed-count")
-	f.line("/// native array: returns a[0..M'], where M' is one past the last element")
-	f.line("/// that differs from the element default (0 when every element is the")
-	f.line("/// default). A `count: N` array is fixed-length, so the canonical wire")
-	f.line("/// carries only those M' elements and the decoder rebuilds the trailing")
-	f.line("/// default run from the schema count (MESSAGE_SPEC S3). A dynamic")
-	f.line("/// (count-less) array has no N to refill from and is never trimmed.")
-	f.line("///")
-	f.line("/// Elements compare by BIT PATTERN (the element's byte image), never by")
-	f.line("/// ==: a trailing -0.0 (which == 0.0) must survive the round-trip instead")
-	f.line("/// of being silently trimmed to +0.0, and a NaN is never a default. Every")
-	f.line("/// native element type (u8..u64, i8..i64, f32, f64, bool, and the enum/")
-	f.line("/// bitfield integer backings) is padding-free, so the byte image is exact.")
-	f.line("///")
-	f.line("/// `a` is a fixed field's `[0..]` (a *const [N]T) or its sliceAsBytes")
-	f.line("/// image, so the result is always a slice, never the pointer-to-array.")
-	f.line("fn _trimTail(a: anytype) []const std.meta.Elem(@TypeOf(a)) {")
-	f.line("    var n = a.len;")
-	f.line("    while (n > 0 and std.mem.allEqual(u8, std.mem.asBytes(&a[n - 1]), 0)) : (n -= 1) {}")
-	f.line("    return a[0..n];")
-	f.line("}")
-	f.blank()
-	f.line("/// Mutable pointer to the last element of a decode-allocated slice.")
-	f.line("fn _last(s: anytype) *std.meta.Elem(@TypeOf(s)) {")
-	f.line("    return @constCast(&s[s.len - 1]);")
-	f.line("}")
-	f.blank()
-	f.line("/// Grow a decode-owned slice to n elements, filling new slots with `fill`.")
-	f.line("/// Returns false when the allocation fails (the caller then drops the data).")
-	f.line("fn _grow(comptime T: type, a: std.mem.Allocator, s: *[]const T, n: usize, fill: T) bool {")
-	f.line("    if (s.*.len >= n) return true;")
-	f.line("    const new = a.alloc(T, n) catch return false;")
-	f.line("    @memcpy(new[0..s.*.len], s.*);")
-	f.line("    @memset(new[s.*.len..], fill);")
-	f.line("    s.* = new;")
-	f.line("    return true;")
-	f.line("}")
-	f.blank()
-	if dynAlloc {
-		f.line("/// Allocate the initial storage for a native array announcing n wire")
-		f.line("/// elements. The count is untrusted until the elements actually arrive, so")
-		f.line("/// the eager allocation is capped and _put grows it on demand (a lying")
-		f.line("/// count cannot force a huge allocation); on allocation failure the array")
-		f.line("/// decodes as empty.")
-		f.line("fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {")
-		f.line("    const s = a.alloc(T, @min(n, 1024)) catch return &.{};")
-		f.line("    @memset(s, std.mem.zeroes(T));")
-		f.line("    return s;")
-		f.line("}")
-	} else {
-		f.line("/// Allocate a zeroed native-array destination of exactly `n` elements (the")
-		f.line("/// wire count); on allocation failure the array decodes as empty.")
-		f.line("fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {")
-		f.line("    const s = a.alloc(T, n) catch return &.{};")
-		f.line("    @memset(s, std.mem.zeroes(T));")
-		f.line("    return s;")
-		f.line("}")
-	}
-	f.blank()
-	f.line("/// Place a wrapper-array string/blob element at its wire id (= array index),")
-	f.line("/// growing the destination and filling id gaps left by omitted default")
-	f.line("/// elements.")
-	f.line("fn _setElem(comptime T: type, a: std.mem.Allocator, s: *[]const T, id: usize, fill: T, v: T) void {")
-	f.line("    if (!_grow(T, a, s, id + 1, fill)) return;")
-	f.line("    @constCast(&s.*[id]).* = v;")
-	f.line("}")
 }

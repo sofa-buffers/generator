@@ -398,17 +398,45 @@ func (g *gen) cppDefault(f *ir.Field) string {
 }
 
 // cppNativeArrayBraces renders a native scalar array's schema default as a braced
-// initializer ({v0, v1, ...}); "{}" (zero-filled) when there is no default.
+// initializer ({v0, v1, ...}).
+//
+// A `count: N` array holds exactly N elements (MESSAGE_SPEC §3, ARCHITECTURE
+// §11) — in every storage mode. `std::array<T,N>` gets that from aggregate
+// initialization: `{}` zero-fills the whole array and `{10, 20}` zero-fills the
+// tail. `std::vector<T>` (the allow_dynamic storage) has no such rule — `{}`
+// constructs it EMPTY — so there the initializer is written out to all N
+// elements. Without it a bounded array starts at size 0 and generated code that
+// indexes elements 0..N-1 writes into nothing.
 func (g *gen) cppNativeArrayBraces(f *ir.Field) string {
-	vals, ok := f.Default.([]any)
-	if !ok {
-		return "{}"
+	vals, _ := f.Default.([]any)
+	parts := g.cppArrayElemLits(f, vals)
+	if f.HasCount && g.dynNativeArray(f.Elem, f.Count) {
+		zero := g.cppArrayElemLit(f.Elem, f.ElemRef, elemZeroValue(f.Elem))
+		for int64(len(parts)) < f.Count {
+			parts = append(parts, zero)
+		}
 	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+func (g *gen) cppArrayElemLits(f *ir.Field, vals []any) []string {
 	parts := make([]string, len(vals))
 	for i, v := range vals {
 		parts[i] = g.cppArrayElemLit(f.Elem, f.ElemRef, v)
 	}
-	return "{" + strings.Join(parts, ", ") + "}"
+	return parts
+}
+
+// elemZeroValue is the IR-typed zero an unset array element takes.
+func elemZeroValue(elem ir.Kind) any {
+	switch elem {
+	case ir.KindBool:
+		return false
+	case ir.KindFP32, ir.KindFP64:
+		return float64(0)
+	default:
+		return int64(0)
+	}
 }
 
 // cppArrayElemLit renders one native-array element default as a C++ literal typed

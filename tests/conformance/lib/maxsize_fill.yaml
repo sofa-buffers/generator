@@ -1,0 +1,42 @@
+# One field per wire shape, every one bounded, for the MAX_SIZE fill check
+# (tests/conformance/c/maxsize_fill.c).
+#
+# The point of this schema is coverage of the cost walk in internal/ir/wiresize.go,
+# not realism: it carries a scalar of every varint width, both float widths, a
+# string and a blob, a native integer array, both fixlen array kinds (which carry
+# a per-array fixlen word), both wrapper-array kinds (string and blob elements,
+# which lower to a sequence), and a nested struct. Filling every one of them to
+# its declared bound must produce exactly MAX_SIZE bytes.
+#
+# No field declares a `default`: a field equal to its default is omitted from the
+# wire (MESSAGE_SPEC §2), which would make a "full" message shorter than its
+# worst case and hide a wrong bound.
+version: 1
+messages:
+  fill:
+    summary: Every wire shape, bounded, for the worst-case size check.
+    payload:
+      f_bool:   { id: 0,  type: boolean }
+      f_u8:     { id: 1,  type: u8 }
+      f_u16:    { id: 2,  type: u16 }
+      f_u32:    { id: 3,  type: u32 }
+      f_u64:    { id: 4,  type: u64 }
+      f_i32:    { id: 5,  type: i32 }
+      f_i64:    { id: 6,  type: i64 }
+      f_fp32:   { id: 7,  type: fp32 }
+      f_fp64:   { id: 8,  type: fp64 }
+      f_str:    { id: 9,  type: string, maxlen: 9 }
+      f_blob:   { id: 10, type: blob,   maxlen: 7 }
+      f_arr_u32:  { id: 11, type: array, items: { type: u32, count: 5 } }
+      f_arr_u64:  { id: 12, type: array, items: { type: u64, count: 3 } }
+      f_arr_fp32: { id: 13, type: array, items: { type: fp32, count: 4 } }
+      f_arr_fp64: { id: 14, type: array, items: { type: fp64, count: 2 } }
+      f_arr_str:  { id: 15, type: array, items: { type: string, count: 3, maxlen: 6 } }
+      f_arr_blob: { id: 16, type: array, items: { type: blob,   count: 2, maxlen: 5 } }
+      # A two-byte field header: (17<<3)|7 = 143 no longer fits in one varint byte.
+      f_nested:
+        id: 17
+        type: struct
+        fields:
+          n_i32: { id: 0, type: i32 }
+          n_str: { id: 1, type: string, maxlen: 4 }

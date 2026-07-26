@@ -29,14 +29,14 @@ done
 # std::vector for those bounded fields, it does not make a bound optional. So the
 # deliberately-unbounded corpus inputs are handled the same way as for the C
 # target below: no_maxlen is skipped, example.yaml's `somemap` gets a capacity.
-# rust's rs-no-std still uses allow_dynamic in its original sense (a heap
-# fallback for unbounded fields), so it needs no such handling.
+# rust's rs-no-std follows the same rule since generator#241, so it gets the same
+# handling.
 # Same rationale as tests/conformance/{cpp,rust}/run.sh.
 ALT_CORELIB=""
 ALT_EXTRA=""
 case "$LANG_KEY" in
     cpp)  ALT_CORELIB="c-cpp"; ALT_EXTRA=", allow_dynamic: true" ;;
-    rust) ALT_CORELIB="rs-no-std"; ALT_EXTRA=", allow_dynamic: true" ;;
+    rust) ALT_CORELIB="rs-no-std"; ALT_EXTRA=", allow_dynamic: true" ;;   # storage mode; bounds mandatory either way
 esac
 ALT_CFG=""
 C_EXAMPLE=""
@@ -51,7 +51,7 @@ fi
 # input), and example.yaml's intentionally-dynamic `somemap` gets an explicit
 # capacity — same handling as tests/conformance/c/run.sh. `count` never reaches
 # the wire, so the generated wire bytes are unchanged.
-if [ "$LANG_KEY" = "c" ] || [ "$ALT_CORELIB" = "c-cpp" ]; then
+if [ "$LANG_KEY" = "c" ] || [ "$ALT_CORELIB" = "c-cpp" ] || [ "$ALT_CORELIB" = "rs-no-std" ]; then
     C_EXAMPLE=$(mktemp)
     awk '
       /^      somemap:/ { inmap=1 }
@@ -74,7 +74,7 @@ for def in $DEFS; do
     count=$((count + 1))
     if [ -n "$ALT_CORELIB" ]; then
         alt_src="$def"
-        if [ "$ALT_CORELIB" = "c-cpp" ]; then
+        if [ "$ALT_CORELIB" = "c-cpp" ] || [ "$ALT_CORELIB" = "rs-no-std" ]; then
             case "$name" in
                 no_maxlen) continue ;;
                 example)   alt_src="$C_EXAMPLE" ;;
