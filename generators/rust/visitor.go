@@ -237,7 +237,7 @@ func (g *gen) emitArraySkipGuard(f *rfile, arrSkip bool) {
 	if !arrSkip {
 		return
 	}
-	f.line("        if self.askip > 0 { self.askip -= 1; return; } // S7.3 array at a scalar id")
+	f.line("        if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id")
 }
 
 // emitArraySkipArm arms the §7.3 discard counter in array_begin
@@ -495,7 +495,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// cannot tell them apart; array_begin arms this with the announced element
 	// count and the callbacks discard exactly that many.
 	if arrSkip {
-		f.line("    askip: usize, // elements left to discard from a S7.3-contradictory array")
+		f.line("    askip: usize, // elements left to discard from a wire-type-contradictory array")
 	}
 	// §7.3 mirror (generator#188): a bare scalar delivered at a native-array id
 	// would land in that array's fill arm as element 0. array_begin arms this with
@@ -647,7 +647,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		} else {
 			f.line("        // Single-shot: whole payload in one chunk -> build straight from the")
 			f.line("        // slice, skipping the `acc` accumulate + second copy.")
-			f.line("        // MESSAGE_SPEC 8 / CORELIB_PLAN 6.4: a string is UTF-8 and Rust's")
+			f.line("        // A string is UTF-8 and Rust's")
 			f.line("        // String is a Unicode type, so it is always strict. Invalid UTF-8 is")
 			f.line("        // the INVALID decode outcome (self.inv -> Error::InvalidMsg), never a")
 			f.line("        // lossy U+FFFD and never empty; the two Rust profiles agree (subsumes #80).")

@@ -271,7 +271,7 @@ func (g *gen) emitTrimHelpers(f *rfile, s *ir.Schema) {
 	f.line("// past the last element that differs from the element default (0 when every")
 	f.line("// element is the default). A `count: N` array is fixed-length: its canonical wire")
 	f.line("// carries exactly those M' elements and the decoder rebuilds the trailing default")
-	f.line("// run from the schema count (MESSAGE_SPEC S3). A dynamic (count-less) array has")
+	f.line("// run from the schema count. A dynamic (count-less) array has")
 	f.line("// no N to refill from, so it is never trimmed. Floats compare by BIT PATTERN, not")
 	f.line("// by ==, so a trailing -0.0 (which == 0.0) survives the round-trip instead of")
 	f.line("// being silently trimmed to +0.0, and a NaN is never taken for the default.")

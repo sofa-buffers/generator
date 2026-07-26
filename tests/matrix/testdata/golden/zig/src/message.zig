@@ -79,7 +79,7 @@ const _dec_Scalars = struct {
     alloc: std.mem.Allocator,
     cur: _Loc = .root,
     inv: bool = false, // a scalar array over its schema count, or a wrapper element id >= count -> INVALID
-    askip: usize = 0, // elements left to discard from a S7.3-contradictory array
+    askip: usize = 0, // elements left to discard from a wire-type-contradictory array
 
     const _Loc = enum {
         root,
@@ -189,7 +189,7 @@ fn _putc(s: anytype, i: *usize, v: std.meta.Elem(@TypeOf(s)), inv: *bool) void {
 /// that differs from the element default (0 when every element is the
 /// default). A `count: N` array is fixed-length, so the canonical wire
 /// carries only those M' elements and the decoder rebuilds the trailing
-/// default run from the schema count (MESSAGE_SPEC S3). A dynamic
+/// default run from the schema count. A dynamic
 /// (count-less) array has no N to refill from and is never trimmed.
 ///
 /// Elements compare by BIT PATTERN (the element's byte image), never by

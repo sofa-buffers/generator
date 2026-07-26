@@ -45,8 +45,8 @@ func _narrowS[T ~int8 | ~int16 | ~int32 | ~int64](v []int64) []T {
 // _trimTail / _trimTailF32 / _trimTailF64 return a[:M'], where M' is one past the
 // last element that differs from the element default (0 if every element is the
 // default). A fixed-count array's canonical wire carries exactly those M'
-// elements; the decoder rebuilds the trailing default run from the schema count
-// (MESSAGE_SPEC S3). Elements compare by BIT PATTERN, not by ==, so a trailing
+// elements; the decoder rebuilds the trailing default run from the schema
+// count. Elements compare by BIT PATTERN, not by ==, so a trailing
 // -0.0 (which == 0.0) survives the round-trip instead of being silently trimmed
 // to +0.0.
 func _trimTail[T comparable](a []T, zero T) []T {
@@ -76,7 +76,7 @@ func _trimTailF64(a []float64) []float64 {
 // _padTo grows a to exactly n elements with the element default. A fixed-count
 // array decodes to exactly its schema count regardless of the wire count, so a
 // growable container must materialize the trailing default run the encoder
-// elided (MESSAGE_SPEC S3).
+// elided.
 func _padTo[T any](a []T, n int, zero T) []T {
 	for len(a) < n {
 		a = append(a, zero)
@@ -89,11 +89,11 @@ func _padTo[T any](a []T, n int, zero T) []T {
 // wire, so we place each value at its id and fill any gap with the element default
 // ("" / nil). Blob copies (the corelib value aliases the decode buffer).
 // cap is the schema fixed-count bound N (-1 == dynamic/unbounded): an element id
-// >= N is a schema-bound violation (MESSAGE_SPEC S5.1/S7 - an index at or past
+// >= N is a schema-bound violation (an index at or past
 // the fixed count is INVALID, never grown-into), rejected before the slice grows,
 // which also bounds the id-keyed fill against an over-index amplification DoS.
 // emax is the schema element maxlen bound (-1 == unbounded): an element whose
-// wire byte length exceeds emax is malformed input (MESSAGE_SPEC S7.1),
+// wire byte length exceeds emax is malformed input,
 // rejected as INVALID before the slice grows - never silently truncated.
 type _strSeq struct {
 	_visitorBase

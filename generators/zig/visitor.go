@@ -327,7 +327,7 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	// discard exactly that many.
 	arrSkip := use.unsigned || use.signed || use.fp32 || use.fp64
 	if arrSkip {
-		f.line("    askip: usize = 0, // elements left to discard from a S7.3-contradictory array")
+		f.line("    askip: usize = 0, // elements left to discard from a wire-type-contradictory array")
 	}
 	// §7.3 mirror (generator#188): a bare scalar delivered at a native-array id
 	// would otherwise land in that array's fill arm as element 0. arrayBegin arms

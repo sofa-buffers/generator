@@ -310,7 +310,7 @@ func (g *gen) emitMaxlenGuard(f *jfile, fs []frame, kind ir.Kind, noun string) {
 // counter self-terminates on `count`, so no array-end callback is needed, and it
 // lives in the visitor, so it survives a feed chunk boundary.
 func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
-	f.line("        // MESSAGE_SPEC S7.3 (generator#183): an integer array delivered at an id")
+	f.line("        // An integer array delivered at an id")
 	f.line("        // that does not declare one is a wire-type contradiction -- arm a discard")
 	f.line("        // counter so unsigned()/signed() drop exactly `count` elements. Every id")
 	f.line("        // that really declares an integer-element array disarms it below.")
@@ -381,7 +381,7 @@ func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 // routed by id. Emitted for those four callbacks — the ones an array shares with
 // a lone scalar; string()/blob() are unaffected.
 func (g *gen) emitArraySkipGuard(f *jfile) {
-	f.line("        // S7.3 (generator#183/#193): drop an element of an array whose id does")
+	f.line("        // Drop an element of an array whose id does")
 	f.line("        // not declare one -- armed by arrayBegin, self-terminating on count.")
 	f.line("        if (askip > 0) { askip--; return; }")
 }

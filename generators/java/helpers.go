@@ -470,14 +470,14 @@ final class Sbuf {
     // fillFalse resets l to exactly n false elements. A fixed-count boolean
     // array decodes to exactly its schema count regardless of the wire count, so
     // the growable List materializes the trailing default run the encoder elided
-    // and the arriving elements overwrite [0, M) by index (MESSAGE_SPEC 3).
+    // and the arriving elements overwrite [0, M) by index.
     static void fillFalse(List<Boolean> l, int n) { l.clear(); for (int i = 0; i < n; i++) l.add(false); }
 
     // trimTail / trimTailF32 / trimTailF64 return a's first M' elements, where M'
     // is one past the last element that differs from the element default (0 when
     // every element is the default). A fixed-count array's canonical wire carries
     // exactly those M' elements; the decoder rebuilds the trailing default run
-    // from the schema count (MESSAGE_SPEC 3). Elements compare by BIT PATTERN,
+    // from the schema count. Elements compare by BIT PATTERN,
     // not by ==, so a trailing -0.0 (which == 0.0) and a NaN survive the
     // round-trip instead of being silently trimmed away.
     static long[] trimTail(long[] a) { int n = a.length; while (n > 0 && a[n - 1] == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }

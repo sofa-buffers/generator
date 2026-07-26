@@ -279,7 +279,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		f.line("  /// Serializes this message to a fresh byte buffer.")
 		f.line("  Uint8List encode() => sofab.Encoder.encodeToBytes(marshal);")
 		f.blank()
-		f.line("  /// Status-surfacing one-shot decode (MESSAGE_SPEC S7): fills [out] and")
+		f.line("  /// Status-surfacing one-shot decode: fills [out] and")
 		f.line("  /// returns the terminal decode outcome. `invalid` covers both malformed")
 		f.line("  /// bytes and a schema-bound violation (over-count/over-index/over-maxlen);")
 		f.line("  /// `incomplete` means the bytes end inside a field or an open sequence.")

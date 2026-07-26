@@ -295,10 +295,10 @@ func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 		"        else if (kind == ArrayKind.FIXLEN) {\n            askip = count;\n            switch (cur) {",
 		"                case 4: askip = 0; afill = count; break;",
 		// Discarded at the top of every callback an array shares with a scalar.
-		"    public void unsigned(int id, long value) {\n        // S7.3 (generator#183",
-		"    public void signed(int id, long value) {\n        // S7.3 (generator#183",
-		"    public void fp32(int id, float value) {\n        // S7.3 (generator#183",
-		"    public void fp64(int id, double value) {\n        // S7.3 (generator#183",
+		"    public void unsigned(int id, long value) {\n        // Drop an element of an array",
+		"    public void signed(int id, long value) {\n        // Drop an element of an array",
+		"    public void fp32(int id, float value) {\n        // Drop an element of an array",
+		"    public void fp64(int id, double value) {\n        // Drop an element of an array",
 		"        if (askip > 0) { askip--; return; }",
 		// The mirror guard (generator#188) fronts every native-array fill arm.
 		"if (afill == 0) break; afill--; ",

@@ -64,7 +64,7 @@ class ScalarsVisitor implements Visitor {
     ScalarsVisitor(Scalars msg) { m = msg; }
 
     public void unsigned(int id, long value) {
-        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // Drop an element of an array whose id does
         // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
         switch (cur) {
@@ -77,7 +77,7 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void signed(int id, long value) {
-        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // Drop an element of an array whose id does
         // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
         switch (cur) {
@@ -88,7 +88,7 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void fp32(int id, float value) {
-        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // Drop an element of an array whose id does
         // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
         switch (cur) {
@@ -98,7 +98,7 @@ class ScalarsVisitor implements Visitor {
         }
     }
     public void fp64(int id, double value) {
-        // S7.3 (generator#183/#193): drop an element of an array whose id does
+        // Drop an element of an array whose id does
         // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
         switch (cur) {
@@ -158,7 +158,7 @@ class ScalarsVisitor implements Visitor {
     }
     public void arrayBegin(int id, ArrayKind kind, int count) {
         ai = 0;
-        // MESSAGE_SPEC S7.3 (generator#183): an integer array delivered at an id
+        // An integer array delivered at an id
         // that does not declare one is a wire-type contradiction -- arm a discard
         // counter so unsigned()/signed() drop exactly `count` elements. Every id
         // that really declares an integer-element array disarms it below.

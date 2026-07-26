@@ -172,7 +172,7 @@ func (g *gen) emitFixedHelpers(f *cfile, s *ir.Schema) {
 	f.line("// Trailing-default-run trim for fixed-count (`count: N`) native arrays:")
 	f.line("// the canonical wire carries only elements [0, M'), where M' is one past")
 	f.line("// the last non-default element; the decoder rebuilds [M', N) from the")
-	f.line("// schema count (MESSAGE_SPEC S3). Dynamic (count-less) arrays never trim.")
+	f.line("// schema count. Dynamic (count-less) arrays never trim.")
 	f.line("internal static class SofabFixedArray {")
 	if genT {
 		// Integer/enum/bitfield/boolean elements reach here as their integer wire

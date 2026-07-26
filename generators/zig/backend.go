@@ -544,7 +544,7 @@ func (g *gen) emitSupport(f *zfile, dynAlloc bool) {
 	f.line("/// that differs from the element default (0 when every element is the")
 	f.line("/// default). A `count: N` array is fixed-length, so the canonical wire")
 	f.line("/// carries only those M' elements and the decoder rebuilds the trailing")
-	f.line("/// default run from the schema count (MESSAGE_SPEC S3). A dynamic")
+	f.line("/// default run from the schema count. A dynamic")
 	f.line("/// (count-less) array has no N to refill from and is never trimmed.")
 	f.line("///")
 	f.line("/// Elements compare by BIT PATTERN (the element's byte image), never by")
