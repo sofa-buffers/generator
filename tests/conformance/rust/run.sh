@@ -411,6 +411,35 @@ echo "==> [allow_dynamic=false] strict no_std lib (pure heapless, no alloc) buil
 # has its own `acc` -- the buffer that reassembles a string/blob split across
 # feed chunks is a fixed-capacity heapless::Vec here, a distinct path from the
 # alloc leg's growable Vec. Drive it.
+# A declared feature combination that is never built breaks silently. `serde`
+# without `std` is exactly that: a bare-metal consumer that wants the derives but
+# no std. It is offered, so it has to compile.
+echo "==> no_std + serde without std compiles"
+( cd "$WORK/strict" && cargo build -q --lib --no-default-features --features serde )
+
+# The generated crate emits sofab::require!(...) to fail the build when the
+# corelib was compiled without a wire feature the schema needs. A guard that
+# never fires in a test is a guard nobody has verified -- so strip one and
+# require the build to fail. `sequence` is the right lever: nothing implies it,
+# whereas removing `fixlen` proves nothing because `fp64 = ["fixlen"]` pulls it
+# straight back in (which is how this check was wrong on its first attempt).
+echo "==> the capability guard fires when a corelib feature is stripped"
+cp "$WORK/strict/Cargo.toml" "$WORK/strict/Cargo.toml.bak"
+sed -i 's/, "sequence"//' "$WORK/strict/Cargo.toml"
+if ( cd "$WORK/strict" && cargo build -q --lib --no-default-features 2>"$WORK/guard.err" ); then
+    echo "FAIL: building without the corelib's \`sequence\` feature must not succeed"
+    mv "$WORK/strict/Cargo.toml.bak" "$WORK/strict/Cargo.toml"
+    exit 1
+fi
+grep -q 'requires the `sequence` feature' "$WORK/guard.err" || {
+    echo "FAIL: build failed, but not with the require!() capability message:"
+    head -20 "$WORK/guard.err"
+    mv "$WORK/strict/Cargo.toml.bak" "$WORK/strict/Cargo.toml"
+    exit 1
+}
+mv "$WORK/strict/Cargo.toml.bak" "$WORK/strict/Cargo.toml"
+echo "==> guard fired as expected"
+
 echo "==> [allow_dynamic=false] strict no_std: streaming behaviour"
 cp "$ROOT/tests/conformance/rust/streaming_check_nostd.rs" "$WORK/strict/src/main.rs"
 ( cd "$WORK/strict" && cargo run -q --features std )
