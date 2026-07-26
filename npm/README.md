@@ -1,4 +1,15 @@
-# @sofa-buffers/generator
+<p align="center"><img src="https://raw.githubusercontent.com/sofa-buffers/generator/main/assets/sofabuffers_logo.png" alt="SofaBuffers" height="140"></p>
+
+# SofaBuffers
+
+<b>Structured Objects For Anyone</b><br>
+<i>... so optimized, feels amazing.</i>
+
+[Would you like to know more?](https://github.com/sofa-buffers)
+
+---
+
+## SofaBuffers Code Generator — `@sofa-buffers/generator`
 
 **`sofabgen`** — the SofaBuffers code generator. It compiles a message
 definition (YAML/JSON) into typed encode/decode wrappers for your target

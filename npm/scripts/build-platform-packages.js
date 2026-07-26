@@ -140,7 +140,18 @@ function platformPackageJson(t) {
 // this points readers at the main package they should actually install.
 function platformReadme(t) {
   const name = `@sofa-buffers/generator-${t.platform}-${t.arch}`;
-  return `# ${name}
+  return `<p align="center"><img src="https://raw.githubusercontent.com/sofa-buffers/generator/main/assets/sofabuffers_logo.png" alt="SofaBuffers" height="140"></p>
+
+# SofaBuffers
+
+<b>Structured Objects For Anyone</b><br>
+<i>... so optimized, feels amazing.</i>
+
+[Would you like to know more?](https://github.com/sofa-buffers)
+
+---
+
+## ${name}
 
 Prebuilt \`sofabgen\` binary for **${t.platform}/${t.arch}** — a platform-specific
 optional dependency of
