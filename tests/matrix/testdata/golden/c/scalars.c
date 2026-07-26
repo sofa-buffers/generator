@@ -44,13 +44,24 @@ sofab_ret_t message_scalars_encode(const message_Scalars_t *msg, uint8_t *buf, s
     return ret;
 }
 
+sofab_ret_t message_scalars_encode_to(sofab_ostream_t *os, const message_Scalars_t *msg) {
+    return sofab_object_encode(os, &_message_descr_message_Scalars, msg);
+}
+
+void message_scalars_decoder_init(message_scalars_decoder_t *d, message_Scalars_t *msg) {
+    memset(d->dec, 0, sizeof(d->dec));
+    d->dec[0].info = &_message_descr_message_Scalars;
+    d->dec[0].dst = (uint8_t *)msg;
+    d->dec[0].depth = (uint8_t)(sizeof(d->dec) / sizeof(d->dec[0]) - 1);
+    sofab_istream_init(&d->is, sofab_object_field_cb, (void *)&d->dec[0]);
+}
+
+sofab_ret_t message_scalars_decoder_feed(message_scalars_decoder_t *d, const void *buf, size_t len) {
+    return sofab_istream_feed(&d->is, buf, len);
+}
+
 sofab_ret_t message_scalars_decode(message_Scalars_t *msg, const uint8_t *buf, size_t len) {
-    sofab_istream_t ctx;
-    sofab_object_decoder_t dec[1];
-    memset(dec, 0, sizeof(dec));
-    dec[0].info = &_message_descr_message_Scalars;
-    dec[0].dst = (uint8_t *)msg;
-    dec[0].depth = (uint8_t)(sizeof(dec) / sizeof(dec[0]) - 1);
-    sofab_istream_init(&ctx, sofab_object_field_cb, (void *)&dec[0]);
-    return sofab_istream_feed(&ctx, buf, len);
+    message_scalars_decoder_t d;
+    message_scalars_decoder_init(&d, msg);
+    return message_scalars_decoder_feed(&d, buf, len);
 }

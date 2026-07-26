@@ -67,14 +67,14 @@ run_variant() {
     # `count` never reaches the wire, so the round-trip and the shared vectors are
     # unchanged.
     EXAMPLE="$ROOT/examples/messages/example.yaml"
-    if [ "$label" = "no-std-dynamic" ]; then
-        EXAMPLE="$WORK/example-no-std-dynamic.yaml"
+    case "$label" in no-std-*)
+        EXAMPLE="$WORK/example-$label.yaml"
         awk '
           /^      somemap:/ { inmap=1 }
           inmap && /^          type: struct$/ { print; print "          count: 8"; inmap=0; next }
           { print }
-        ' "$ROOT/examples/messages/example.yaml" > "$EXAMPLE"
-    fi
+        ' "$ROOT/examples/messages/example.yaml" > "$EXAMPLE" ;;
+    esac
 
     echo "==> [$label] generating + building example + conformance crates"
     rust_build "$EXAMPLE" "$WORK/ex-$label"
@@ -90,22 +90,25 @@ run_variant() {
     # Streaming behaviour (PR #242): the generator tests only assert that the
     # streaming API appears in the output. This runs it, and pins the property
     # that matters -- streaming must be indistinguishable from the one-shot path.
+    # The shared check assigns String/Vec directly, which heapless cannot take —
+    # the static leg is driven by streaming_check_nostd.rs further down instead.
+    if [ "$label" != "no-std-static" ]; then
     echo "==> [$label] streaming: serialize through a sink, feed the decoder in chunks"
     rm -rf "$WORK/stream-$label"
     rust_build "$EXAMPLE" "$WORK/stream-$label"
-    if [ "$label" = "no-std-dynamic" ]; then
-        printf 'use sofabuffers_generated::*;\n' > "$WORK/stream-$label/src/main.rs"
-    else
-        printf 'mod message;\nuse message::*;\n' > "$WORK/stream-$label/src/main.rs"
-    fi
+    case "$label" in
+        no-std-*) printf 'use sofabuffers_generated::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
+        *)        printf 'mod message;\nuse message::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
+    esac
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/streaming_check.rs" \
         >> "$WORK/stream-$label/src/main.rs"
-    if [ "$label" = "no-std-dynamic" ]; then
+    case "$label" in
         # The lib is #![no_std] without this; the binary above needs it linked
         # for println!/Vec in the check itself.
-        ( cd "$WORK/stream-$label" && cargo run -q --features std )
-    else
-        ( cd "$WORK/stream-$label" && cargo run -q )
+        no-std-*) ( cd "$WORK/stream-$label" && cargo run -q --features std ) ;;
+        *)        ( cd "$WORK/stream-$label" && cargo run -q ) ;;
+    esac
+
     fi
 
     echo "==> [$label] JSON encode -> decode round-trip"
@@ -341,7 +344,7 @@ run_variant() {
         # The no_std profile rejects those by design — in both storage modes — so
         # it is not a definition this leg can compile, and skipping it is the
         # honest outcome rather than a bound invented for the test.
-        case "$label:$(basename "$def")" in no-std-dynamic:no_maxlen.yaml) continue ;; esac
+        case "$label:$(basename "$def")" in no-std-*:no_maxlen.yaml) continue ;; esac
         name=$(basename "$def" .yaml)
         rust_build "$def" "$WORK/corpus-$label/$name"
     done
@@ -383,6 +386,10 @@ echo "==> [rs] decode limits OK"
 # is proven below. The corpus spans the feature-subset matrix under the same
 # config.
 run_variant no-std-dynamic "corelib: rs-no-std, allow_dynamic: true" "$NOSTD"
+
+# The pure heapless profile through the same matrix. It is the DEFAULT for
+# corelib: rs-no-std, and until now only its builds were checked.
+run_variant no-std-static "corelib: rs-no-std" "$NOSTD"
 
 # The point of the no_std profile is a crate that builds as #![no_std] and
 # heap-free. A bin cannot be no_std on a hosted target, so prove it on the lib

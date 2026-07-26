@@ -16,7 +16,7 @@ namespace message {
 
 struct Scalars : sofab::Message {
     std::uint64_t u64max = 18446744073709551615ULL;
-    std::int64_t i64min = -9223372036854775808LL;
+    std::int64_t i64min = (-9223372036854775807LL - 1);
     double f64 = -2.5;
     float f32 = 3.14f;
     std::uint8_t u8min = 0;
@@ -93,7 +93,7 @@ struct Scalars : sofab::Message {
         if (u8max != 255) { (void)os.write(1, u8max); }
         if (u64max != 18446744073709551615ULL) { (void)os.write(2, u64max); }
         if (i8min != -128) { (void)os.write(3, i8min); }
-        if (i64min != -9223372036854775808LL) { (void)os.write(4, i64min); }
+        if (i64min != (-9223372036854775807LL - 1)) { (void)os.write(4, i64min); }
         if (f32 != 3.14f) { (void)os.write(5, f32); }
         if (f64 != -2.5) { (void)os.write(6, f64); }
         if (flag != true) { (void)os.write(7, flag); }

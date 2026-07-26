@@ -55,4 +55,37 @@ sofab_ret_t message_scalars_encode(const message_Scalars_t *msg, uint8_t *buf, s
 /*! Decode buf[len] into msg (call message_scalars_init first to apply defaults). Returns sofab_ret_t. */
 sofab_ret_t message_scalars_decode(message_Scalars_t *msg, const uint8_t *buf, size_t len);
 
+/*! Object descriptor for Scalars, for use with the sofab_object_* API directly. */
+extern const sofab_object_descr_t _message_descr_message_Scalars;
+
+/*!
+ * Encode msg into a stream the caller owns. With a flush callback on that
+ *  *  stream the message may exceed its buffer: the buffer is drained as it
+ *  *  fills, so what bounds memory is the buffer, not the message. The caller
+ *  *  flushes the tail with sofab_ostream_flush().
+ */
+sofab_ret_t message_scalars_encode_to(sofab_ostream_t *os, const message_Scalars_t *msg);
+
+/*!
+ * Incremental decoder: hold one and feed the message as bytes arrive,
+ *  *  instead of buffering it whole first.
+ *  *
+ *  *  The wire format has no end marker at the top level -- a message ends
+ *  *  where its bytes end -- so a feed cannot report that the MESSAGE is
+ *  *  complete, only that the bytes handed in ended on a field boundary
+ *  *  (SOFAB_RET_OK) or mid-field (SOFAB_RET_INCOMPLETE). Neither is a failure
+ *  *  mid-stream; the caller's own framing decides when the input is over, and
+ *  *  the last verdict says whether it ended half-read.
+ */
+typedef struct {
+    sofab_istream_t is;
+    sofab_object_decoder_t dec[1];
+} message_scalars_decoder_t;
+
+/*! Bind a decoder to msg. Call message_scalars_init on msg first to apply defaults. */
+void message_scalars_decoder_init(message_scalars_decoder_t *d, message_Scalars_t *msg);
+
+/*! Feed the next chunk. See message_scalars_decoder_t for what the return value means. */
+sofab_ret_t message_scalars_decoder_feed(message_scalars_decoder_t *d, const void *buf, size_t len);
+
 #endif /* MESSAGE_SCALARS_H */
