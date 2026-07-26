@@ -1076,3 +1076,52 @@ func TestCppDynamicNativeArrayIsSizedToCount(t *testing.T) {
 		}
 	}
 }
+
+// TestCppDeprecatedSuppressionSpansTheClass: the deprecation-suppression pragma
+// must enclose the whole class definition, not just its member functions.
+//
+// A [[deprecated]] member is touched by the implicitly-defined special member
+// functions — destructor, copy/move constructor, assignment — and those
+// definitions are located AT THE CLASS. With the region starting after the
+// member declarations, a consumer that merely declared a message value got a
+// deprecation warning for a field it never named, pointing at a header line it
+// cannot edit. The attribute then fires for everyone instead of for the one
+// caller still using the field, which is the opposite of what marking it
+// deprecated is for.
+//
+// The attribute itself stays on the member: a consumer writing msg.oldField
+// must still be warned, at its own line.
+func TestCppDeprecatedSuppressionSpansTheClass(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      keep: { id: 0, type: u32 }\n" +
+		"      old:  { id: 1, type: u32, deprecated: true }\n"
+	h, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	push := strings.Index(h, "#pragma GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+	open := strings.Index(h, "struct M : sofab::Message {")
+	pop := strings.Index(h, "#pragma GCC diagnostic pop")
+	if push < 0 || open < 0 || pop < 0 {
+		t.Fatalf("expected a suppressed span around the class:\n%s", h)
+	}
+	if push > open {
+		t.Errorf("the suppression must start BEFORE the class, or the implicit "+
+			"destructor/copy members warn at every consumer:\n%s", h)
+	}
+	if pop < strings.LastIndex(h[:pop+1], "};") {
+		t.Errorf("the suppression must end after the class closes:\n%s", h)
+	}
+	// The attribute survives, so a consumer touching the field is still warned.
+	if !strings.Contains(h, "[[deprecated]] std::uint32_t old") {
+		t.Errorf("the member must keep its [[deprecated]] attribute:\n%s", h)
+	}
+	// A message with nothing deprecated emits no pragma at all.
+	plain, err := genHeader(t, "version: 1\nmessages:\n  m:\n    payload:\n      keep: { id: 0, type: u32 }\n", "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate plain: %v", err)
+	}
+	if strings.Contains(plain, "diagnostic") {
+		t.Errorf("no deprecated field: no pragma should be emitted:\n%s", plain)
+	}
+}

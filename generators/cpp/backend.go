@@ -305,18 +305,39 @@ func flagDoc(fl *ir.BitfieldFlag) string {
 
 func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isMessage bool) {
 	emitStructDoc(f, summary)
+
+	// A [[deprecated]] member is touched by the implicitly-defined special member
+	// functions — destructor, copy/move constructor, assignment — as well as by
+	// the generated serialize/deserialize. Those implicit definitions are located
+	// AT THE CLASS, so a consumer that merely declares a message value gets a
+	// deprecation warning for a field it never named, from a header line it
+	// cannot edit. That devalues the attribute: it fires for everyone instead of
+	// for the one caller still using the field.
+	//
+	// So the suppression spans the whole class definition. The attribute stays on
+	// the member, so `msg.oldField` in a consumer's code still warns — at the
+	// consumer's own line, which is the point of marking it deprecated.
+	hasDeprecated := false
+	for _, fld := range fields {
+		if fld.Deprecated {
+			hasDeprecated = true
+			break
+		}
+	}
+	if hasDeprecated {
+		f.line("#pragma GCC diagnostic push")
+		f.line("#pragma GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+	}
 	// sofab::Message is exactly the OStreamMessage + IStreamMessage pair (an empty
 	// intermediate base, same layout). Both corelibs define it, so both profiles
 	// use it.
 	f.line("struct %s : sofab::Message {", name)
 	// Declare members widest-first to minimise padding; encode/decode below stay
 	// in schema/id order, so the wire bytes are unchanged.
-	hasDeprecated := false
 	for _, fld := range ir.SortedForLayout(fields) {
 		attr := ""
 		if fld.Deprecated {
 			attr = "[[deprecated]] "
-			hasDeprecated = true
 		}
 		doc := fieldDoc(fld)
 		if fld.Deprecated {
@@ -345,16 +366,10 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	}
 	f.blank()
 
-	// The generated member functions below legitimately touch every field,
-	// including any marked [[deprecated]]; suppress the deprecation warning so the
-	// generated code stays warning-clean (gcc and clang both honour this pragma).
-	// The implicitly-defined default constructor also touches the deprecated
-	// member (via its default member initializer) and would warn at every
-	// construction site — including inside the corelib templates, out of reach of
-	// this region — so it is explicitly defaulted here, inside the suppressed span.
+	// The default constructor is defaulted explicitly so its definition is located
+	// inside this class — an implicit one first instantiated inside a corelib
+	// template would be diagnosed there, out of reach of any pragma here.
 	if hasDeprecated {
-		f.line("#pragma GCC diagnostic push")
-		f.line("#pragma GCC diagnostic ignored \"-Wdeprecated-declarations\"")
 		f.line("    %s() = default;", name)
 		f.blank()
 	}
@@ -526,10 +541,10 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.line("        default: break;")
 	f.line("        }")
 	f.line("    }")
+	f.line("};")
 	if hasDeprecated {
 		f.line("#pragma GCC diagnostic pop")
 	}
-	f.line("};")
 	f.blank()
 }
 
