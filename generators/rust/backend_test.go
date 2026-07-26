@@ -713,9 +713,9 @@ messages:
 		// What follows the guard depends on the storage: an inline [T; N] is wiped
 		// to the element-default image, a Vec is cleared and refilled by push.
 		resets := []string{
-			"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear(); },",
-			"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear(); },",
-			"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef.clear(); },",
+			"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear(); self.m.defd.resize(5, 0); },",
+			"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear(); self.m.fdef.resize(3, 0.0); },",
+			"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef.clear(); self.m.bdef.resize(3, false); },",
 		}
 		if cfg["corelib"] == "rs-no-std" {
 			resets = []string{

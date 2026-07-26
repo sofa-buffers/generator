@@ -783,7 +783,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 									reset = fmt.Sprintf("%s.%s = %s;", fr.path, rustIdent(fld.Name), zero)
 								}
 							} else {
-								reset = fmt.Sprintf("%s.%s.clear();", fr.path, rustIdent(fld.Name))
+								// Size the Vec to N with element defaults, so the §3
+								// refill of the trimmed tail is the same act as for a
+								// [T; N]: the M wire elements overwrite [0, M) and
+								// [M, N) reads back as the element default.
+								reset = fmt.Sprintf("%s.%s.clear(); %s.%s.resize(%d, %s);",
+									fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name),
+									fld.Count, rustElemZeroLit(fld.Elem))
 							}
 							f.line("            (_Loc::%s, %d) => { %s%s },", fr.loc, fld.ID, overcount, reset)
 							continue
@@ -923,8 +929,14 @@ func (g *gen) emitMaxlenGuard(f *rfile, fs []frame, kind ir.Kind) {
 // message as malformed: a wire element count above the schema's `count` is
 // INVALID per MESSAGE_SPEC 3+7 and must reject, not clamp (generator#100).
 func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
-	if _, n, ok := g.fixedNativeArray(fld); ok {
-		f.line("            (_Loc::%s, %d) => { %sif self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } else { self.inv = true; } }", fr.loc, fld.ID, fillGuard, n, fr.path, rustIdent(fld.Name), rhs)
+	// A `count: N` array is fixed-length whatever holds it: MESSAGE_SPEC §3 has
+	// the encoder trim the trailing default run and the DECODER rebuild it from N,
+	// so the field must end up with N elements, not with the M the wire carried.
+	// The Vec is sized to N in array_begin, so both storage shapes take the same
+	// indexed store; only a count-less array pushes, because it has no N to
+	// rebuild from and every element it carries is significant.
+	if fld.HasCount && isNativeArrayElem(fld.Elem) {
+		f.line("            (_Loc::%s, %d) => { %sif self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } else { self.inv = true; } }", fr.loc, fld.ID, fillGuard, fld.Count, fr.path, rustIdent(fld.Name), rhs)
 		return
 	}
 	store := g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs)
