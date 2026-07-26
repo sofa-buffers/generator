@@ -618,10 +618,13 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 		f.line("        if (%s != %s%s) { (void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size())); }", acc, g.cppType(fld), g.cppDefault(fld), fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
-		// A sequence is ALWAYS framed; its child fields are omitted per-field by the
-		// nested serialize. An all-default nested object thus encodes to an empty
-		// wrapper sequence, not a dropped field.
-		f.line("        (void)os.write(%d, %s);", fld.ID, acc)
+		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
+		// exception, so writeLazy() opens the frame lazily -- the corelib writes the
+		// header only once a child field appears. The nested serialize omits each
+		// child that equals its default, so "no child was written" IS "the object
+		// equals its declared default", per field and recursively. An all-default
+		// nested object is dropped, not emitted as an empty wrapper.
+		f.line("        (void)os.writeLazy(%d, %s);", fld.ID, acc)
 		return
 	case ir.KindArray:
 		g.emitSerializeArray(f, fld, acc)
@@ -645,6 +648,13 @@ func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
 		f.line("        }")
 		return
 	}
+	// The field-level wrapper frame is dropped when no element is written, and
+	// absence then reconstructs the field's default. That is correct because a
+	// wrapper array's declared `default` is not materialized today, so absent and
+	// explicitly-empty denote the same value. If that gap is ever closed, this call
+	// needs a guard -- `if (value != default) { ... sequenceEndKeep(); }` -- so that
+	// a value differing from a non-empty default still reaches the wire as the empty
+	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
 	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 0)
 }
 
@@ -675,6 +685,17 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	tv := fmt.Sprintf("_t%d", depth)
+	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether a
+	// contentless one survives. A wrapper array is a sequence-typed FIELD, so at
+	// depth 0 it closes with the dropping end -- an all-default array is omitted and
+	// absence reconstructs it. A nested row (depth > 0) is an array ELEMENT, and
+	// element presence is what carries a dynamic array's length (S5.1), so it closes
+	// with the keeping end. A struct/union element goes through os.write(id, elem),
+	// which is the corelib's element form and keeps its frame already.
+	seqEnd := "sequenceEnd"
+	if depth > 0 {
+		seqEnd = "sequenceEndKeep"
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
@@ -708,32 +729,32 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		// A blob element is a leaf: omit it when it equals the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2). The
 		// index still advances on an omitted element so surviving ids stay aligned.
-		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
+		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { if (!%s.empty()) { (void)os.write(%s, %s.data(), static_cast<std::int32_t>(%s.size())); } ++%s; } }", ind, iv, ev, val, ev, iv, ev, ev, iv)
-		f.line("%s(void)os.sequenceEnd();", ind)
+		f.line("%s(void)os.%s();", ind, seqEnd)
 	case ir.KindString:
 		// A string element is a leaf: omit it when it equals the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2). The
 		// index still advances on an omitted element so surviving ids stay aligned.
-		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
+		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { if (!%s.empty()) { (void)os.write(%s, %s); } ++%s; } }", ind, iv, ev, val, ev, iv, ev, iv)
-		f.line("%s(void)os.sequenceEnd();", ind)
+		f.line("%s(void)os.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
 		// A struct/union element is itself a sequence: ALWAYS framed, never omitted
 		// (MESSAGE_SPEC S2). os.write(index, element) writes
 		// sequenceBegin(index)/serialize/sequenceEnd.
-		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
+		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { (void)os.write(%s++, %s); } }", ind, iv, ev, val, iv, ev)
-		f.line("%s(void)os.sequenceEnd();", ind)
+		f.line("%s(void)os.%s();", ind, seqEnd)
 	case ir.KindArray:
-		f.line("%s(void)os.sequenceBegin(%s);", ind, idExpr)
+		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) {", ind, iv, ev, val)
 		// A nested row is a wrapper-sequence element, not a `count: N` field: the
 		// trailing-default-run rule is scoped to fields (MESSAGE_SPEC §3), so rows
 		// are never trimmed.
 		g.serializeArray(f, ind+"    ", fmt.Sprintf("%s++", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, false, depth+1)
 		f.line("%s} }", ind)
-		f.line("%s(void)os.sequenceEnd();", ind)
+		f.line("%s(void)os.%s();", ind, seqEnd)
 	}
 }
 

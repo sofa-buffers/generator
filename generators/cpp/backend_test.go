@@ -505,7 +505,9 @@ func TestCppContainersByCorelib(t *testing.T) {
 // TestCppSparse: the C++ serialize is always sparse-canonical (MESSAGE_SPEC S2),
 // with no config toggle. A scalar/string/blob leaf is written under an
 // "if (v != default)" guard; a native scalar array (leaf) is whole-omitted vs a
-// materialized default; a struct/union and a composite array stay ALWAYS framed.
+// materialized default; a struct/union field and a composite-array field are
+// framed LAZILY, so an all-default one is omitted rather than emitted as an empty
+// wrapper -- the corelib decides that from "was any child written".
 func TestCppSparse(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      a: { id: 0, type: u32, default: 7 }\n" +
@@ -521,19 +523,20 @@ func TestCppSparse(t *testing.T) {
 		"if (bl != std::vector<std::uint8_t>{}) {",            // blob guard
 		"std::array<std::int32_t, 3> nums = {1, 2, 3};",       // native array default materialized
 		"if (nums != std::array<std::int32_t, 3>{1, 2, 3}) {", // native array whole-omit
-		"(void)os.write(5, st);",                              // struct ALWAYS framed (no guard)
+		"(void)os.writeLazy(5, st);",                          // struct framed lazily (no guard)
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q", want)
 		}
 	}
-	// A composite array is always framed: emitted via sequenceBegin, never guarded
-	// by an "if (strs != ...)" whole-omission.
+	// A composite array carries no whole-omission guard in generated code: the
+	// wrapper frame is opened lazily and the corelib drops it when no element was
+	// written (S2). Its field declares no default, so the lazy form is correct.
 	if strings.Contains(h, "if (strs !=") {
-		t.Error("composite array must be always framed (no whole-omission guard)")
+		t.Error("composite array must not carry a whole-omission guard")
 	}
-	if !strings.Contains(h, "(void)os.sequenceBegin(4);") {
-		t.Error("composite array must be framed via sequenceBegin")
+	if !strings.Contains(h, "(void)os.sequenceBeginLazy(4);") {
+		t.Error("composite array field must be framed via sequenceBeginLazy")
 	}
 }
 

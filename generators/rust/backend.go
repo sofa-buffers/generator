@@ -510,10 +510,13 @@ func (g *gen) emitSerialize(f *rfile, fld *ir.Field) {
 		}
 		return
 	case ir.KindStruct, ir.KindUnion:
-		// A sequence is always framed; its child fields are omitted per-field by
-		// the nested serialize (MESSAGE_SPEC S2). An all-default nested object thus
-		// becomes an empty wrapper sequence, not a dropped field.
-		f.line("        let _ = os.write_sequence_begin(%d); %s.serialize(os); let _ = os.write_sequence_end();", fld.ID, acc)
+		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
+		// exception, so the frame is opened LAZILY -- the corelib writes the header
+		// only once a child field appears. The nested serialize omits each child
+		// that equals its default, so "no child was written" IS "the object equals
+		// its declared default", evaluated per field and recursively. An all-default
+		// nested object is therefore dropped, not emitted as an empty wrapper.
+		f.line("        let _ = os.write_sequence_begin_lazy(%d); %s.serialize(os); let _ = os.write_sequence_end();", fld.ID, acc)
 		return
 	case ir.KindArray:
 		g.emitSerializeArray(f, fld, acc)
@@ -549,6 +552,14 @@ func (g *gen) emitSerializeArray(f *rfile, fld *ir.Field, acc string) {
 		f.line("        }")
 		return
 	}
+	// The field-level wrapper frame is dropped when no element is written, and
+	// absence then reconstructs the field's default. That is correct because a
+	// wrapper array's declared `default` is not materialized today (the generated
+	// Default is the empty collection), so absent and explicitly-empty denote the
+	// same value. If that gap is ever closed, this call needs a guard --
+	// `if value != default { ... write_sequence_end_keep() }` -- so that a value
+	// differing from a non-empty default still reaches the wire as the empty
+	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
 	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.HasCount, 0)
 }
 
@@ -589,6 +600,16 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	tv := fmt.Sprintf("_t%d", depth)
+	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether a
+	// contentless one survives. A wrapper array is a sequence-typed FIELD, so at
+	// depth 0 it closes with the dropping end -- an all-default array is omitted and
+	// absence reconstructs it. A nested row (depth > 0) is an array ELEMENT, and
+	// element presence is what carries a dynamic array's length (S5.1), so it closes
+	// with the keeping end.
+	seqEnd := "write_sequence_end"
+	if depth > 0 {
+		seqEnd = "write_sequence_end_keep"
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		// bitfield backing is an unsigned int (UnsignedElem), so it writes directly.
@@ -617,27 +638,29 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
-		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
+		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() { let _ = os.write_str(%s as Id, %s); } }", ind, iv, ev, val, ev, iv, ev)
-		f.line("%slet _ = os.write_sequence_end();", ind)
+		f.line("%slet _ = os.%s();", ind, seqEnd)
 	case ir.KindBlob:
 		// A blob element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
-		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
+		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() { let _ = os.write_blob(%s as Id, %s); } }", ind, iv, ev, val, ev, iv, ev)
-		f.line("%slet _ = os.write_sequence_end();", ind)
+		f.line("%slet _ = os.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
+		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
-		f.line("%s    let _ = os.write_sequence_begin(%s as Id); %s.serialize(os); let _ = os.write_sequence_end();", ind, iv, ev)
+		// An ELEMENT is framed unconditionally: dropping an all-default one would
+		// leave an id gap and change the decoded length, not just the bytes (S5.1).
+		f.line("%s    let _ = os.write_sequence_begin_lazy(%s as Id); %s.serialize(os); let _ = os.write_sequence_end_keep();", ind, iv, ev)
 		f.line("%s}", ind)
-		f.line("%slet _ = os.write_sequence_end();", ind)
+		f.line("%slet _ = os.%s();", ind, seqEnd)
 	case ir.KindArray:
-		f.line("%slet _ = os.write_sequence_begin(%s);", ind, idExpr)
+		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
 		// A nested row is not a fixed-length *field*, so it keeps every element.
 		g.serializeArray(f, ind+"    ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, false, depth+1)
 		f.line("%s}", ind)
-		f.line("%slet _ = os.write_sequence_end();", ind)
+		f.line("%slet _ = os.%s();", ind, seqEnd)
 	}
 }

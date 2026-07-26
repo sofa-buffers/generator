@@ -371,6 +371,15 @@ a reimplementation should emit code that honors all of them:
   touch the wire format from generated code (§1 firm boundary).
 - **Emit fields in ascending id order** — deterministic output, and lets the
   decoder (and where applicable the encoder) dispatch optimally.
+- **Use the closed public name set** (CORELIB_PLAN §6.1.1) — a generated type lands
+  in the *user's* namespace, so the entry points are fixed and only the casing
+  adapts: `encode()` / `decode(bytes)` / `try_decode(bytes)` for the one-shot
+  convenience, `serialize(ostream)` / `deserialize(istream, …)` for the streaming
+  pair the corelib drives, `decoder()` for the streaming reader. No second spelling
+  for either — no `serialize_to`, `to_bytes`, `from_bytes`, `decode_from`,
+  `decode_into`, `marshal`/`unmarshal`. **Not yet uniform:** the backends predate
+  this rule (TypeScript still emits `decodeFrom`/`decodeInto`; several ports lack
+  `try_decode`), so aligning them is an open, breaking API pass.
 - **Decode by `switch` on field id**, not an if-chain — compilers build a jump
   table; unknown ids fall through to the corelib's skip path, giving
   forward/backward compatibility for free.
@@ -495,8 +504,15 @@ corelib; canonical set):
 `write_unsigned(id, v)` · `write_signed(id, v)` · `write_boolean(id, v)` ·
 `write_fp32(id, v)` · `write_fp64(id, v)` · `write_string(id, s)` ·
 `write_blob(id, ptr, len)` · `write_array_unsigned/signed(id, elems)` ·
-`write_array_fp32/fp64(id, elems)` · `write_sequence_begin(id)` ·
-`write_sequence_end()`.
+`write_array_fp32/fp64(id, elems)` · `write_sequence_begin_lazy(id)` ·
+`write_sequence_end()` · `write_sequence_end_keep()`.
+
+**Sequence framing is lazy** (CORELIB_PLAN §6): `begin_lazy` holds the header back
+until a field write proves the sequence non-default, `end` drops a frame that never
+got content, `end_keep` forces it out for an array **element**. See *Lazy sequence
+framing* in §11 for which closer goes where and why. The **C** backend does not use
+this path at all — its descriptor decides omission per field before opening, so it
+keeps the eager `sofab_ostream_write_sequence_begin`/`_end` pair.
 
 Integers are written at their **natural width** (the varint output is
 value-based, so the bytes are identical to a widened write; this lets
@@ -1454,16 +1470,20 @@ metadata above. The `docs` target renders the same metadata as HTML page content
 - **Sparse-canonical encoding** — encoding is **always** sparse (no config
   toggle, MESSAGE_SPEC §2): a field equal to its effective default (schema
   `default:`, else type-zero) is skipped on encode and reconstructed on decode.
-  The `!= default` test is applied **per field, except a `sequence`** (a
-  `struct`/`union`, and the wrapper form of composite/dynamic-element arrays):
-  a sequence is always framed, so an all-default nested object becomes an *empty
-  wrapper sequence*, not a dropped field. **Within a wrapper array the same rule
+  The `!= default` test is applied **per field, and a `sequence`-typed field is
+  no exception** (a `struct`/`union`, and the wrapper form of
+  composite/dynamic-element arrays): an all-default sequence field is **omitted**,
+  not emitted as an empty wrapper — see *Lazy sequence framing* below for how the
+  backends express that in one forward pass. **Within a wrapper array the same rule
   reaches the elements** (id = index, MESSAGE_SPEC §2): a `string`/`blob`
   **element** is a leaf, so it is **omitted when it equals its element default
   (empty)** — leaving an id gap the decoder fills from the default, so trailing
   default elements collapse (`["a",""]` encodes as `["a"]`, `["",""]` as the
   empty wrapper). A `struct`/`union`/nested-array element is itself a sequence and
-  stays framed. (The compact native scalar arrays are exempt — they carry no
+  **stays framed even when all-default** — element presence is what carries a
+  dynamic array's length (*highest present id + 1*, MESSAGE_SPEC §5.1), so dropping
+  one would change the decoded length, not merely the bytes. (The compact native
+  scalar arrays are exempt — they carry no
   per-element header, so their elements are always serialized in full.) The
   corelibs are dumb codecs, so the
   rule lives in the **generated code**: every imperative backend emits per-field
@@ -1483,6 +1503,32 @@ metadata above. The `docs` target renders the same metadata as HTML page content
   `used_len == 0`) rather than compared against the image — so a non-empty blob
   default is materialised on decode but transmitted, not omitted, at its default
   value (issue #128; `docs/generator/c.md`).
+- **Lazy sequence framing** — the §2 rule above asks whether a sequence is emitted
+  from *what its children turn out to be*, while its header must precede them. The
+  backends never buffer a sub-message to find out; the corelib holds the header
+  back instead (CORELIB_PLAN §6, "Sequence framing"):
+  `begin_lazy(id)` pushes the id onto a pending run, the **first field write**
+  emits the whole run (outermost header first), `end()` **drops** a frame that got
+  no content, and `end_keep()` forces it out. Held-back ids are encoder state, not
+  buffer content, so a flush cannot split a run and the bytes stay independent of
+  the output-buffer size — the chunked-encode guarantee is untouched.
+  The closer is chosen **statically**, from the position in the schema:
+  | position | closer |
+  |---|---|
+  | `struct`/`union` field, array field (the wrapper) | `end` |
+  | wrapper-array **element** (`struct`/`union`/nested row) | `end_keep` |
+  The two failure directions are asymmetric, which makes `end_keep` the safe
+  default: the wrong `end_keep` costs one non-canonical empty frame a decoder
+  normalizes away, the wrong `end` silently changes an array's length. In C++ the
+  distinction rides on the corelib's two message writes — `write(id, msg)` is the
+  element form (keeps the frame), `writeLazy(id, msg)` the field form.
+  **C is the exception**: its message layer is the `object.h` descriptor, which
+  tests each field against its default *before* opening anything, so it keeps the
+  plain eager `sequence_begin`/`sequence_end` pair and needs no hold-back at all.
+  The guard that decides this in `sofab_object_encode` discriminates on the
+  **role** (`info->fixed_seq` — a wrapper holder's "fields" are element slots),
+  not on the field type: dropping the type check alone would elide interior array
+  elements and break §5.1.
 - **Widest-first member layout** — value-type backends declare struct members by
   alignment widest-first (8→4→2→1, stable within a width; composite/heap = 8) to
   cut native padding, via the shared `AlignRank`/`SortedForLayout`. Applied to C,
