@@ -1,17 +1,15 @@
 # TypeScript target — `targets.typescript`
 
-Options accepted under `targets.typescript`. For shared options (`emit`,
-`tool_banner`, `license`, …) see the [generic config](README.md).
+Target-specific options, accepted under `targets.typescript`. Everything set
+in the
+`generic:` section — `emit`, `license`, the `max_dyn_*` decode limits, … — is
+documented once in the [generic config](README.md).
 
 ## Options
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
 | `int64` | `bigint` \| `long` \| `number` | `bigint` | Representation of 64-bit integer fields in the generated TS API (see below). All modes are wire-identical. |
-| `max_dyn_array_count` | integer | unset (unlimited) | Receiver-side decode limit (generator#102): maximum element count accepted for an **unbounded** array (one without a schema `count`). See below. |
-| `max_dyn_string_len` | integer | unset (unlimited) | Receiver-side decode limit: maximum byte length accepted for an **unbounded** string (one without a schema `maxlen`). See below. |
-| `max_dyn_blob_len` | integer | unset (unlimited) | Receiver-side decode limit: maximum byte length accepted for an **unbounded** blob (one without a schema `maxlen`). See below. |
 
 ### `max_dyn_*` — receiver-side decode limits
 

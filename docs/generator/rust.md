@@ -1,19 +1,16 @@
 # Rust target — `targets.rust`
 
-Options accepted under `targets.rust`. For shared options (`emit`,
-`tool_banner`, `license`, …) see the [generic config](README.md).
+Target-specific options, accepted under `targets.rust`. Everything set in the
+`generic:` section — `emit`, `license`, the `max_dyn_*` decode limits, … — is
+documented once in the [generic config](README.md).
 
 ## Options
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
 | `corelib` | `rs` \| `rs-no-std` | `rs` | Which Rust corelib the generated crate targets (see below). |
 | `no_std` | bool | `true` when `corelib: rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate (see below). Set `false` to emit an ordinary `std` crate against the no-std corelib. Ignored for `corelib: rs`. |
 | `allow_dynamic` | bool | `false` | Under `no_std`, keep an `alloc` heap fallback for genuinely unbounded fields instead of failing generation. |
-| `max_dyn_array_count` | int | unset = unlimited | Receiver-side decode limit (generator#102): max element count accepted for an **unbounded** array (no schema `count`). `corelib: rs` only (see below). |
-| `max_dyn_string_len` | int | unset = unlimited | Receiver-side decode limit: max byte length accepted for an **unbounded** string (no schema `maxlen`). `corelib: rs` only. |
-| `max_dyn_blob_len` | int | unset = unlimited | Receiver-side decode limit: max byte length accepted for an **unbounded** blob (no schema `maxlen`). `corelib: rs` only. |
 
 ### `max_dyn_*` — receiver-side decode limits
 
