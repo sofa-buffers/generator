@@ -146,7 +146,12 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 			return g.rustFixedArrayDefault(f, elem, n)
 		}
 		if isNativeArrayElem(f.Elem) {
-			if parts, ok := g.rustNativeArrayParts(f); ok {
+			// No declared default: a `count: N` array still defaults to N element
+			// defaults, exactly as [T; N] did and as C/C++ aggregate init gives.
+			if f.Default == nil && f.HasCount {
+				return fmt.Sprintf("vec![%s; %d]", rustElemZeroLit(f.Elem), f.Count)
+			}
+			if parts, ok := g.rustNativeArrayPartsN(f); ok {
 				if g.noStd {
 					// dynamic (count-less) native array under allow_dynamic -> alloc Vec.
 					return "[" + parts + "].to_vec()"
@@ -163,6 +168,33 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 // rustNativeArrayParts renders a native scalar array's schema default element
 // list (comma-joined, no brackets); ("", false) when there is no default.
 // Element literals are unconstrained and infer to the field's element type.
+// rustNativeArrayPartsN is rustNativeArrayParts, tail-padded to the schema
+// `count` when there is one. A `count: N` array's default is exactly N elements
+// — the declared values, then the element default — in every target: C and C++
+// get that from aggregate initialization, which zero-fills what a braced
+// initializer leaves out. A Vec has no such rule, so the padding is explicit
+// here; otherwise an omitted field would reconstruct with fewer elements than
+// the same schema yields elsewhere.
+func (g *gen) rustNativeArrayPartsN(f *ir.Field) (string, bool) {
+	parts, ok := g.rustNativeArrayParts(f)
+	if !ok || !f.HasCount {
+		return parts, ok
+	}
+	have := int64(0)
+	if parts != "" {
+		have = int64(len(strings.Split(parts, ", ")))
+	}
+	zero := rustElemZeroLit(f.Elem)
+	for ; have < f.Count; have++ {
+		if parts == "" {
+			parts = zero
+		} else {
+			parts += ", " + zero
+		}
+	}
+	return parts, true
+}
+
 func (g *gen) rustNativeArrayParts(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
 	if !ok {
@@ -342,7 +374,20 @@ func (g *gen) fixedNativeArray(f *ir.Field) (elem string, n int64, ok bool) {
 	// Under allow_dynamic a native array is a Vec like every other container; the
 	// schema count stays mandatory and becomes a decode-path check instead of the
 	// array's length.
-	if g.noStd && g.allowDynamic {
+	// Inline fixed-size storage belongs to exactly one profile: no_std without
+	// allow_dynamic, the one with no allocator to reach for. Everywhere else a
+	// bounded array goes in that profile's dynamic container, like a bounded
+	// string or blob: all three are variable-length up to their declared maximum
+	// (§3 trims an array's trailing default run), so the maximum is a bound, not a
+	// storage decision.
+	//
+	// This gives up the [T; N] the std profile used to emit, measured as a
+	// maxspeed win in cd8e9eb. Two things outweighed it: within one struct a
+	// `count: N` array was inline while a count-less one was a Vec, so declaring a
+	// bound silently changed the storage; and `len()` then meant "the schema
+	// count" on one field and "what the message carried" on the next. The
+	// allocation is worth revisiting once the storage model is settled.
+	if !g.noStd || g.allowDynamic {
 		return "", 0, false
 	}
 	return g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax), f.Count, true

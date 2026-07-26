@@ -90,13 +90,13 @@ func TestRustStructural(t *testing.T) {
 		"ArrayKind",                            // example has arrays -> array_begin imports it
 		"pub someu64: u64,",
 		"#[serde(default)]",
-		"pub someuintarray: [u32; 4],",             // fixed native array (was Vec<u32>)
-		"pub somefloatarray: [f32; 3],",            // fixed fp array
-		"pub someboolarray: [bool; 8],",            // fixed bool array
-		"someuintarray: [0, 1, 1000, 4294967295],", // default is an N-element array literal
-		"someboolarray: [true, true, false, false, false, false, false, false],",                                   // short default tail-padded to N
-		"if self.someuintarray != [0, 1, 1000, 4294967295] {",                                                      // omit-guard is a default compare
-		"if self.ai < 4 { self.m.someuintarray[self.ai] = value as u32; self.ai += 1; } else { self.inv = true; }", // bounds-checked store (generator#78); over-count rejects (generator#100)
+		"pub someuintarray: Vec<u32>,",             // bounded native array -> the profile's dynamic container
+		"pub somefloatarray: Vec<f32>,",            // bounded fp array
+		"pub someboolarray: Vec<bool>,",            // bounded bool array
+		"someuintarray: vec![0, 1, 1000, 4294967295],", // default is an N-element array literal
+		"someboolarray: vec![true, true, false, false, false, false, false, false],",  // default is exactly N                                   // short default tail-padded to N
+		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {",                                                      // omit-guard is a default compare
+		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear();", // bounds-checked store (generator#78); over-count rejects (generator#100)
 		"ai: usize", // fill index on the visitor
 		"if offset == 0 && chunk.len() >= total {", // string/blob single-shot fast path
 		"match core::str::from_utf8(&chunk[..total]) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }", // strict UTF-8: invalid -> INVALID (issue #85, subsumes #80)
@@ -109,12 +109,10 @@ func TestRustStructural(t *testing.T) {
 	// Lossy from_utf8_lossy (U+FFFD) is forbidden in every mode (MESSAGE_SPEC §8);
 	// strict from_utf8 -> INVALID makes std and no_std agree (issue #85, subsumes #80).
 	for _, notWant := range []string{
-		"pub someuintarray: Vec<u32>",
-		"someuintarray.push(",
 		"String::from_utf8_lossy",
 	} {
 		if strings.Contains(m, notWant) {
-			t.Errorf("message.rs (rs) should not contain %q (native fixed array must not be Vec/push)", notWant)
+			t.Errorf("message.rs (rs) should not contain %q ", notWant)
 		}
 	}
 	if strings.Contains(m, "require!") {
@@ -678,10 +676,10 @@ messages:
 `
 	m := moduleFromYAML(t, src, map[string]any{})
 	for _, want := range []string{
-		"short: [1, 2, 0, 0, 0],",
-		"none: [0; 3],",
-		"fullf: [1.5, 0.0],",
-		"boolp: [true, false, false],",
+		"short: vec![1, 2, 0, 0, 0],",
+		"none: vec![0; 3],",
+		"fullf: vec![1.5, 0.0],",
+		"boolp: vec![true, false, false],",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs missing %q", want)
@@ -712,11 +710,21 @@ messages:
 		// behind the over-count guard (generator#216): the count header is rejected
 		// as INVALID before the reset, so a truncated over-count array cannot mask
 		// the violation as INCOMPLETE (MESSAGE_SPEC S5.2).
-		for _, want := range []string{
-			"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd = [0; 5]; },",
-			"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef = [0.0; 3]; },",
-			"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef = [false; 3]; },",
-		} {
+		// What follows the guard depends on the storage: an inline [T; N] is wiped
+		// to the element-default image, a Vec is cleared and refilled by push.
+		resets := []string{
+			"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear(); },",
+			"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear(); },",
+			"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef.clear(); },",
+		}
+		if cfg["corelib"] == "rs-no-std" {
+			resets = []string{
+				"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd = [0; 5]; },",
+				"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef = [0.0; 3]; },",
+				"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef = [false; 3]; },",
+			}
+		}
+		for _, want := range resets {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing reset %q", cfg, want)
 			}
