@@ -67,8 +67,8 @@ run_variant() {
     # `count` never reaches the wire, so the round-trip and the shared vectors are
     # unchanged.
     EXAMPLE="$ROOT/examples/messages/example.yaml"
-    if [ "$label" = "no-std" ]; then
-        EXAMPLE="$WORK/example-no-std.yaml"
+    if [ "$label" = "no-std-dynamic" ]; then
+        EXAMPLE="$WORK/example-no-std-dynamic.yaml"
         awk '
           /^      somemap:/ { inmap=1 }
           inmap && /^          type: struct$/ { print; print "          count: 8"; inmap=0; next }
@@ -93,14 +93,14 @@ run_variant() {
     echo "==> [$label] streaming: serialize through a sink, feed the decoder in chunks"
     rm -rf "$WORK/stream-$label"
     rust_build "$EXAMPLE" "$WORK/stream-$label"
-    if [ "$label" = "no-std" ]; then
+    if [ "$label" = "no-std-dynamic" ]; then
         printf 'use sofabuffers_generated::*;\n' > "$WORK/stream-$label/src/main.rs"
     else
         printf 'mod message;\nuse message::*;\n' > "$WORK/stream-$label/src/main.rs"
     fi
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/streaming_check.rs" \
         >> "$WORK/stream-$label/src/main.rs"
-    if [ "$label" = "no-std" ]; then
+    if [ "$label" = "no-std-dynamic" ]; then
         # The lib is #![no_std] without this; the binary above needs it linked
         # for println!/Vec in the check itself.
         ( cd "$WORK/stream-$label" && cargo run -q --features std )
@@ -341,7 +341,7 @@ run_variant() {
         # The no_std profile rejects those by design — in both storage modes — so
         # it is not a definition this leg can compile, and skipping it is the
         # honest outcome rather than a bound invented for the test.
-        case "$label:$(basename "$def")" in no-std:no_maxlen.yaml) continue ;; esac
+        case "$label:$(basename "$def")" in no-std-dynamic:no_maxlen.yaml) continue ;; esac
         name=$(basename "$def" .yaml)
         rust_build "$def" "$WORK/corpus-$label/$name"
     done
@@ -382,7 +382,7 @@ echo "==> [rs] decode limits OK"
 # that has an allocator. This leg exercises the alloc mode; the heapless default
 # is proven below. The corpus spans the feature-subset matrix under the same
 # config.
-run_variant no-std "corelib: rs-no-std, allow_dynamic: true" "$NOSTD"
+run_variant no-std-dynamic "corelib: rs-no-std, allow_dynamic: true" "$NOSTD"
 
 # The point of the no_std profile is a crate that builds as #![no_std] and
 # heap-free. A bin cannot be no_std on a hosted target, so prove it on the lib
@@ -393,21 +393,23 @@ echo "==> no_std lib builds heap-free (--lib --no-default-features), allow_dynam
 
 # (a) allow_dynamic: true — every variable-length field is an alloc container, so
 # the crate pulls `extern crate alloc` yet still compiles as #![no_std] on a lib.
-grep -q 'extern crate alloc' "$WORK/ex-no-std/src/lib.rs" || { echo "FAIL: allow_dynamic crate should pull extern crate alloc"; exit 1; }
-( cd "$WORK/ex-no-std" && cargo build -q --lib --no-default-features )
-echo "==> [allow_dynamic=true] no_std lib (heapless + alloc fallback) builds"
+# Deliberately inspects the crate run_variant built for the dynamic leg -- the
+# assertion is about THAT leg's output, so borrowing it is the point here.
+grep -q 'extern crate alloc' "$WORK/ex-no-std-dynamic/src/lib.rs" || { echo "FAIL: allow_dynamic crate should pull extern crate alloc"; exit 1; }
+( cd "$WORK/ex-no-std-dynamic" && cargo build -q --lib --no-default-features )
+echo "==> [no-std-dynamic] lib builds (alloc fallback)"
 
 # (b) allow_dynamic: false (default) — a fully bounded schema must lower to pure
 # heapless with NO allocator at all (no `extern crate alloc`), and an unbounded
 # field must instead be a hard generation error.
-printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }\n' > "$WORK/cfg-strict.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-strict.yaml" --lang rust --in "$WORK/conf.yaml" --out "$WORK/strict" )
-if grep -q 'extern crate alloc' "$WORK/strict/src/lib.rs"; then echo "FAIL: strict (bounded, no allow_dynamic) crate must not pull alloc"; exit 1; fi
-sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/strict/Cargo.toml"
-( cd "$WORK/strict" && cargo build -q --lib --no-default-features )
-echo "==> [allow_dynamic=false] strict no_std lib (pure heapless, no alloc) builds"
+printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }\n' > "$WORK/cfg-no-std-static.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-no-std-static.yaml" --lang rust --in "$WORK/conf.yaml" --out "$WORK/no-std-static" )
+if grep -q 'extern crate alloc' "$WORK/no-std-static/src/lib.rs"; then echo "FAIL: no-std-static crate must not pull alloc"; exit 1; fi
+sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/no-std-static/Cargo.toml"
+( cd "$WORK/no-std-static" && cargo build -q --lib --no-default-features )
+echo "==> [no-std-static] lib builds (pure heapless, no alloc)"
 
-# Building the strict crate is not the same as running it. The heapless profile
+# Building the no-std-static crate is not the same as running it. The heapless profile
 # has its own `acc` -- the buffer that reassembles a string/blob split across
 # feed chunks is a fixed-capacity heapless::Vec here, a distinct path from the
 # alloc leg's growable Vec. Drive it.
@@ -415,7 +417,7 @@ echo "==> [allow_dynamic=false] strict no_std lib (pure heapless, no alloc) buil
 # without `std` is exactly that: a bare-metal consumer that wants the derives but
 # no std. It is offered, so it has to compile.
 echo "==> no_std + serde without std compiles"
-( cd "$WORK/strict" && cargo build -q --lib --no-default-features --features serde )
+( cd "$WORK/no-std-static" && cargo build -q --lib --no-default-features --features serde )
 
 # The generated crate emits sofab::require!(...) to fail the build when the
 # corelib was compiled without a wire feature the schema needs. A guard that
@@ -424,41 +426,50 @@ echo "==> no_std + serde without std compiles"
 # whereas removing `fixlen` proves nothing because `fp64 = ["fixlen"]` pulls it
 # straight back in (which is how this check was wrong on its first attempt).
 echo "==> the capability guard fires when a corelib feature is stripped"
-cp "$WORK/strict/Cargo.toml" "$WORK/strict/Cargo.toml.bak"
-sed -i 's/, "sequence"//' "$WORK/strict/Cargo.toml"
-if ( cd "$WORK/strict" && cargo build -q --lib --no-default-features 2>"$WORK/guard.err" ); then
+cp "$WORK/no-std-static/Cargo.toml" "$WORK/no-std-static/Cargo.toml.bak"
+sed -i 's/, "sequence"//' "$WORK/no-std-static/Cargo.toml"
+if ( cd "$WORK/no-std-static" && cargo build -q --lib --no-default-features 2>"$WORK/guard.err" ); then
     echo "FAIL: building without the corelib's \`sequence\` feature must not succeed"
-    mv "$WORK/strict/Cargo.toml.bak" "$WORK/strict/Cargo.toml"
+    mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"
     exit 1
 fi
 grep -q 'requires the `sequence` feature' "$WORK/guard.err" || {
     echo "FAIL: build failed, but not with the require!() capability message:"
     head -20 "$WORK/guard.err"
-    mv "$WORK/strict/Cargo.toml.bak" "$WORK/strict/Cargo.toml"
+    mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"
     exit 1
 }
-mv "$WORK/strict/Cargo.toml.bak" "$WORK/strict/Cargo.toml"
+mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"
 echo "==> guard fired as expected"
 
-echo "==> [allow_dynamic=false] strict no_std: streaming behaviour"
-cp "$ROOT/tests/conformance/rust/streaming_check_nostd.rs" "$WORK/strict/src/main.rs"
-( cd "$WORK/strict" && cargo run -q --features std )
+echo "==> [no-std-static] streaming behaviour"
+cp "$ROOT/tests/conformance/rust/streaming_check_nostd.rs" "$WORK/no-std-static/src/main.rs"
+( cd "$WORK/no-std-static" && cargo run -q --features std )
 
 # An unbounded field is rejected under no_std in BOTH storage modes: allow_dynamic
 # chooses the container, never whether a bound is needed, so one schema stays
 # valid for every no_std target.
 printf 'version: 1\nmessages:\n  m: { payload: { s: { id: 0, type: string } } }\n' > "$WORK/unbounded.yaml"
-printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std, allow_dynamic: true } }\n' > "$WORK/cfg-dyn.yaml"
-for c in cfg-strict cfg-dyn; do
+# Own configs, under names no other step writes. run_variant creates
+# cfg-<label>.yaml as a side effect of building its leg; reusing one of those
+# here would make this step depend on which legs ran, and in what order.
+printf 'targets: { rust: { corelib: rs-no-std } }\n' > "$WORK/reject-static.yaml"
+printf 'targets: { rust: { corelib: rs-no-std, allow_dynamic: true } }\n' > "$WORK/reject-dynamic.yaml"
+for c in reject-static reject-dynamic; do
     if ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/$c.yaml" --lang rust --in "$WORK/unbounded.yaml" --out "$WORK/unbounded-$c" 2>/dev/null ); then
         echo "FAIL: unbounded field under no_std ($c) should error"; exit 1
     fi
 done
 echo "==> unbounded field is rejected in both storage modes"
 
+# The point of this one is the SMALLEST build the generator can produce, so it
+# uses the static profile: no allocator, and a varint-only schema needs none of
+# the corelib's wire features. It previously borrowed the dynamic leg's config,
+# which pulls alloc in -- the opposite of what a minimal-footprint check wants.
 echo "==> no-std feature-subset smoke: a varint-only schema builds with no features"
 printf 'version: 1\nmessages:\n  tiny: { payload: { a: { id: 0, type: i32 }, b: { id: 1, type: u16 }, c: { id: 2, type: boolean } } }\n' > "$WORK/tiny.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-no-std.yaml" --lang rust --in "$WORK/tiny.yaml" --out "$WORK/tiny" )
+printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }\n' > "$WORK/cfg-tiny.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-tiny.yaml" --lang rust --in "$WORK/tiny.yaml" --out "$WORK/tiny" )
 grep -q 'default-features = false' "$WORK/tiny/Cargo.toml" || { echo "FAIL: varint-only schema should need no sofab features"; exit 1; }
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/tiny/Cargo.toml"
 ( cd "$WORK/tiny" && cargo build -q )
