@@ -1,13 +1,13 @@
 # C target — `targets.c`
 
-Options accepted under `targets.c`. For shared options (`emit`, `namespace`,
-`tool_banner`, `license`, …) see the [generic config](README.md).
+Target-specific options, accepted under `targets.c`. Everything set in the
+`generic:` section — `emit`, `license`, the `max_dyn_*` decode limits, … — is
+documented once in the [generic config](README.md).
 
 ## Options
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
 | `symbol_prefix` | string | `message_` | Prefix applied to every generated C symbol — struct typedefs (`<prefix>Name_t`), descriptor tables, and the encode/decode/init functions. Use it to avoid name collisions when linking generated code from several schemas into one binary. |
 
 ```yaml
@@ -16,23 +16,13 @@ targets:
     symbol_prefix: myproj_   # -> myproj_Point_t, myproj_point_encode(), ...
 ```
 
-That is the whole per-target surface. The C target has no storage or bounds
+That is the whole per-target surface — the generic `namespace` is ignored here,
+since C has no namespaces; `symbol_prefix` is its counterpart. The C target has no storage or bounds
 option, because it has no choice to offer: the C object model has no dynamic
 containers, so every field is schema-sized and every bound is mandatory (next
 section). The C++ target's `corelib` / `allow_dynamic` pair has no counterpart
 here — for a heap-capable target, generate C++ against the same corelib
 (`targets.cpp` with `corelib: c-cpp`, see [cpp.md](cpp.md)).
-
-### What the shared options do here
-
-| Option | Effect on the C output |
-|--------|------------------------|
-| `emit: sources` | `<message>.h` + `<message>.c` per message, nothing else — drop them into an existing build. |
-| `emit: project` | The sources plus a `Makefile` and a JSON round-trip harness that compiles and links `corelib-c-cpp`'s C files; this is what the conformance runner builds. |
-| `license` | SPDX identifier stamped into every generated file header. |
-| `tool_banner` | Tool name in that same header. |
-| `namespace` | **Ignored.** C has no namespaces; use `symbol_prefix`. |
-| `max_dyn_array_count`, `max_dyn_string_len`, `max_dyn_blob_len` | **Ignored.** These cap what a schema leaves unbounded, and this target has no unbounded fields to cap — the bound is already mandatory, and enforced by the corelib. |
 
 ### Behaviour the corelib decides, not the generator
 

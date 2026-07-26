@@ -1,17 +1,16 @@
 # Go target — `targets.go`
 
-Options accepted under `targets.go`. For shared options (`emit`,
-`tool_banner`, `license`, …) see the [generic config](README.md).
+Target-specific options, accepted under `targets.go`. Everything set in the
+`generic:` section — `emit`, `license`, the `max_dyn_*` decode limits, … — is
+documented once in the [generic config](README.md).
 
 ## Options
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
 | `package` | string | `message` | The `package <name>` clause of the generated `.go` files. |
 | `module_path` | string | `example.com/generated` | The module path written to the generated `go.mod` (project mode). |
 | `go_version` | string | `1.21` | The `go <version>` directive written to the generated `go.mod` (project mode). |
-| `max_dyn_array_count` / `max_dyn_string_len` / `max_dyn_blob_len` | integer | unset = unlimited | See [generic config](README.md). Baked as `MaxDyn*` package constants and passed into every `Decode<Msg>` via `sofab.WithMaxArrayCount/WithMaxStringLen/WithMaxBlobLen`; a violation returns `sofab.ErrLimitExceeded`. The corelib enforces these globally per decode, so each cap is raised to the largest schema bound of its kind — schema-bounded fields stay governed by their own bound. A key whose kind has no unbounded field emits nothing. |
 
 ```yaml
 targets:
@@ -20,6 +19,19 @@ targets:
     module_path: github.com/me/myproj
     go_version: "1.22"
 ```
+
+## Receiver-side decode limits
+
+The `max_dyn_*` caps are [generic options](README.md); what is specific to this
+target is how they land in the generated code — as `MaxDyn*` package constants,
+passed into every `Decode<Msg>` via `sofab.WithMaxArrayCount`,
+`WithMaxStringLen` and `WithMaxBlobLen`. A violation returns
+`sofab.ErrLimitExceeded`.
+
+The corelib enforces them globally per decode rather than per field, so each cap
+is raised to the largest schema bound of its kind — schema-bounded fields stay
+governed by their own bound. A key whose kind has no unbounded field emits
+nothing.
 
 ## Struct field order (widest-first)
 

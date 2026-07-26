@@ -1,18 +1,16 @@
 # C++ target — `targets.cpp`
 
-Options accepted under `targets.cpp`. For shared options (`emit`,
-`tool_banner`, `license`, …) see the [generic config](README.md).
+Target-specific options, accepted under `targets.cpp`. Everything set in the
+`generic:` section — `emit`, `license`, the `max_dyn_*` decode limits, … — is
+documented once in the [generic config](README.md).
 
 ## Options
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
 | `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets. This also picks the container representation: `cpp` = dynamic (`std::vector`/`std::string`), `c-cpp` = fixed-capacity/heap-free (see below). |
 | `allow_dynamic` | bool | `false` | `corelib: c-cpp` only. Store bounded fields in `std::string`/`std::vector` instead of inline containers, for a target with a heap. Bounds stay mandatory either way. |
 | `namespace` | string | `message` | C++ namespace wrapping the generated types. Also settable in `generic`. |
-| `max_dyn_array_count` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only (`c-cpp` is statically schema-bounded). Emits a per-field `is.exceedLimit()` guard on unbounded count-prefixed arrays; `feed()`/`try_decode` then return `Error::LimitExceeded`. |
-| `max_dyn_string_len` / `max_dyn_blob_len` | integer | unset = unlimited | See [generic config](README.md). `corelib: cpp` only. Per-field `_size` guard on unbounded strings/blobs. |
 
 ### What the two profile keys combine into
 

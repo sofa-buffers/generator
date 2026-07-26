@@ -1,16 +1,13 @@
 # Zig target — `targets.zig`
 
-Options accepted under `targets.zig`. For shared options (`emit`,
-`tool_banner`, `license`, …) see the [generic config](README.md).
+Target-specific options, accepted under `targets.zig`. Everything set in the
+`generic:` section — `emit`, `license`, the `max_dyn_*` decode limits, … — is
+documented once in the [generic config](README.md).
 
 ## Options
 
-| Option | Type | Default | Effect |
-|--------|------|---------|--------|
-| `emit` | `sources` \| `project` | `sources` | See [generic config](README.md); per-target override. |
-| `max_dyn_array_count` | integer | unset = unlimited | Receiver-side decode limit (generator#102): caps the wire element count of arrays the schema left unbounded (no `count`). Baked as a private `max_dyn_array_count` constant and checked per-field at the array's count header, before its storage is allocated; exceeding it fails `decode()` with `error.LimitExceeded` (never a clamp). Emitted as configured — fields with a schema `count` keep only their own generator#100 guard. |
-| `max_dyn_string_len` | integer | unset = unlimited | Same, for strings without a schema `maxlen`: the header-announced length is checked before the zero-copy borrow is taken (a policy cap, not just an allocation guard). |
-| `max_dyn_blob_len` | integer | unset = unlimited | Same, for blobs without a schema `maxlen`. |
+The Zig target takes no options of its own — everything is set in the
+[generic config](README.md).
 
 The Zig target has a single corelib — [`corelib-zig`], the **max-speed** port
 of the family (allocation-free streaming encoder, zero-copy contiguous
@@ -24,6 +21,13 @@ Set the corelib path in the generated `build.zig.zon` (the
 dependencies must be **relative to the project root**. Build with
 `zig build --release=fast` (Zig 0.16+) — the corelib is tuned for
 ReleaseFast and the generated `build.zig` prefers it under `--release`.
+
+## Receiver-side decode limits
+
+The `max_dyn_*` caps are [generic options](README.md); what is specific to this
+target is how they land in the generated code — as comptime constants checked at
+the length/count header, before the payload is buffered. A violation returns
+`error.LimitExceeded`.
 
 ## Generated shape
 
