@@ -407,6 +407,14 @@ sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/strict/Cargo.toml"
 ( cd "$WORK/strict" && cargo build -q --lib --no-default-features )
 echo "==> [allow_dynamic=false] strict no_std lib (pure heapless, no alloc) builds"
 
+# Building the strict crate is not the same as running it. The heapless profile
+# has its own `acc` -- the buffer that reassembles a string/blob split across
+# feed chunks is a fixed-capacity heapless::Vec here, a distinct path from the
+# alloc leg's growable Vec. Drive it.
+echo "==> [allow_dynamic=false] strict no_std: streaming behaviour"
+cp "$ROOT/tests/conformance/rust/streaming_check_nostd.rs" "$WORK/strict/src/main.rs"
+( cd "$WORK/strict" && cargo run -q --features std )
+
 # An unbounded field is rejected under no_std in BOTH storage modes: allow_dynamic
 # chooses the container, never whether a bound is needed, so one schema stays
 # valid for every no_std target.

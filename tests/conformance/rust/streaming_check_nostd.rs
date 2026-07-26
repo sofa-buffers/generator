@@ -1,0 +1,103 @@
+// Streaming check for the PURE heapless no_std profile (allow_dynamic: false).
+//
+// The main streaming_check.rs runs against the alloc leg. This one exists
+// because the heapless profile has a different `acc` — the buffer that
+// reassembles a string/blob payload split across feed chunks is a
+// `heapless::Vec` with fixed capacity here, not a growable `Vec`. That is a
+// distinct code path with a distinct failure mode (a push past capacity sets the
+// sticky `err` flag instead of allocating), and compiling it is not the same as
+// running it.
+//
+// The property is the same one the alloc leg asserts: streaming must be
+// indistinguishable from the one-shot path.
+
+use sofabuffers_generated::*;
+
+fn main() {
+    // A string long enough that it cannot land inside a single chunk at any of
+    // the sizes below — the whole point is to make `acc` carry a partial payload
+    // from one feed to the next, repeatedly.
+    let text: heapless::String<4096> = core::iter::repeat('x')
+        .take(600)
+        .collect::<std::string::String>()
+        .as_str()
+        .try_into()
+        .expect("fits the schema maxlen");
+
+    let mut m = Vecs::default();
+    m.a = text;
+
+    let one_shot = m.encode();
+    let expect = Vecs::try_decode(&one_shot).expect("one-shot decode failed");
+
+    // 1. streaming encode is byte-identical, through a buffer far smaller than
+    //    the payload.
+    let mut streamed: std::vec::Vec<u8> = std::vec::Vec::new();
+    {
+        let mut scratch = [0u8; 7];
+        let mut os = sofab::OStream::with_flush(&mut scratch, 0, |d: &[u8]| {
+            streamed.extend_from_slice(d)
+        });
+        m.serialize(&mut os);
+        os.flush();
+    }
+    assert_eq!(
+        &one_shot[..],
+        &streamed[..],
+        "heapless: streaming encode differs from encode()"
+    );
+
+    // 2. chunked decode is value-identical. At size 1 the 600-byte payload is
+    //    delivered in 600 separate feeds, so `acc` has to hold and extend a
+    //    partial string across every one of them.
+    for size in [1usize, 2, 3, 5, 16, 64, 4096] {
+        let mut dec = Vecs::decoder();
+        for chunk in one_shot.chunks(size) {
+            match dec.feed(chunk) {
+                Ok(()) | Err(sofab::Error::Incomplete) => continue,
+                Err(e) => panic!("heapless chunk size {size}: feed failed: {e:?}"),
+            }
+        }
+        let got = dec.finish().expect("heapless finish failed");
+        assert!(
+            got == expect,
+            "heapless chunk size {size}: decoded value differs from the one-shot decode"
+        );
+        assert_eq!(got.a.len(), 600, "heapless chunk size {size}: payload length");
+    }
+
+    // 3. a wrapper array of heapless strings: element boundaries and payload
+    //    boundaries both fall inside chunks.
+    let mut arr = Vecsa::default();
+    for i in 0..8u32 {
+        let s: heapless::String<16> = std::format!("element-{i:03}")
+            .as_str()
+            .try_into()
+            .expect("fits the element maxlen");
+        arr.a.push(s).expect("fits the schema count");
+    }
+    let wire = arr.encode();
+    let want = Vecsa::try_decode(&wire).expect("one-shot decode failed");
+
+    for size in [1usize, 3, 7, 16] {
+        let mut dec = Vecsa::decoder();
+        for chunk in wire.chunks(size) {
+            match dec.feed(chunk) {
+                Ok(()) | Err(sofab::Error::Incomplete) => continue,
+                Err(e) => panic!("heapless array chunk size {size}: feed failed: {e:?}"),
+            }
+        }
+        let got = dec.finish().expect("heapless array finish failed");
+        assert!(
+            got == want,
+            "heapless array chunk size {size}: decoded value differs from the one-shot decode"
+        );
+        assert_eq!(got.a.len(), 8, "heapless array chunk size {size}: element count");
+    }
+
+    println!(
+        "streaming (pure heapless): {}-byte payload byte-identical through a 7-byte buffer; \
+value-identical at 7 chunk sizes; 8-element wrapper array at 4 chunk sizes",
+        one_shot.len()
+    );
+}
