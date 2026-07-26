@@ -753,7 +753,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			case fkStruct:
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
-						if _, n, ok := g.fixedNativeArray(fld); ok {
+						if fld.HasCount {
 							// Over-count reject at the count header (generator#216 / F-0032):
 							// a wire element count above the schema `count` N is INVALID
 							// (MESSAGE_SPEC 3+7), and deciding it HERE — before the elements
@@ -761,7 +761,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 							// check only at the element store (emitNativeArrayStore) never
 							// fires when truncation cuts the array short of N, so an
 							// over-count-AND-truncated array would misreport INCOMPLETE.
-							overcount := fmt.Sprintf("if count > %d { self.inv = true; return; } ", n)
+							overcount := fmt.Sprintf("if count > %d { self.inv = true; return; } ", fld.Count)
 							// A fixed `[T; N]` is pre-allocated in the struct default, so
 							// the M wire elements store straight into it and no clear is
 							// needed to make room. But the encoder trims the trailing
@@ -772,9 +772,18 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 							// array_begin means the field is PRESENT on the wire, so this
 							// never disturbs the sparse-omission contract: an ABSENT field
 							// keeps its full schema default.
+							// Under allow_dynamic the same bounded array lives in a Vec,
+							// which has no pre-allocated tail to wipe — it is cleared and
+							// the M wire elements are pushed. The bound above is what the
+							// [T; N] length used to provide, so it must be emitted for
+							// both storage modes; only what follows it differs.
 							reset := ""
-							if zero, need := g.rustFixedArrayNeedsReset(fld); need {
-								reset = fmt.Sprintf("%s.%s = %s;", fr.path, rustIdent(fld.Name), zero)
+							if _, _, fixed := g.fixedNativeArray(fld); fixed {
+								if zero, need := g.rustFixedArrayNeedsReset(fld); need {
+									reset = fmt.Sprintf("%s.%s = %s;", fr.path, rustIdent(fld.Name), zero)
+								}
+							} else {
+								reset = fmt.Sprintf("%s.%s.clear();", fr.path, rustIdent(fld.Name))
 							}
 							f.line("            (_Loc::%s, %d) => { %s%s },", fr.loc, fld.ID, overcount, reset)
 							continue
@@ -985,11 +994,18 @@ func (g *gen) pushStmt(target, val string) string {
 	return fmt.Sprintf("%s.push(%s);", target, val)
 }
 
+// innerNew is the empty row of a nested array, which must match the row type the
+// outer container holds: heapless under the default no_std storage, alloc when
+// allow_dynamic put the whole field on the allocator.
 func (g *gen) innerNew() string {
-	if g.noStd {
+	switch {
+	case g.noStd && g.allowDynamic:
+		return "alloc::vec::Vec::new()"
+	case g.noStd:
 		return "heapless::Vec::new()"
+	default:
+		return "Vec::new()"
 	}
-	return "Vec::new()"
 }
 
 // seqElemGrow emits the id-indexed growth prefix for a wrapper-sequence string/

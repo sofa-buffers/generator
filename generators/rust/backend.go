@@ -126,8 +126,9 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 // std reports whether the std corelib-rs is selected (vs corelib-rs-no-std).
 func (g *gen) std() bool { return g.corelib != "rs-no-std" }
 
-// dynString / dynBlob / dynArray report whether a given unbounded field falls
-// back to an alloc heap container (allow_dynamic) rather than heapless storage.
+// usesAlloc reports whether the crate needs `extern crate alloc`: true when the
+// no_std profile was asked for alloc storage (allow_dynamic) and the schema has
+// any variable-length field to put there.
 func (g *gen) usesAlloc(s *ir.Schema) bool {
 	if !g.noStd || !g.allowDynamic {
 		return false
@@ -138,17 +139,11 @@ func (g *gen) usesAlloc(s *ir.Schema) bool {
 	walk = func(fields []*ir.Field) {
 		for _, f := range fields {
 			switch f.Kind {
-			case ir.KindString, ir.KindBlob:
-				if !f.HasMaxlen {
-					found = true
-				}
-			case ir.KindArray:
-				if !f.HasCount {
-					found = true
-				}
-				if (f.Elem == ir.KindString || f.Elem == ir.KindBlob) && !f.ElemMaxHas {
-					found = true
-				}
+			case ir.KindString, ir.KindBlob, ir.KindArray:
+				// Every variable-length field lives in an alloc container in this
+				// mode, bounded or not — the bound became a decode-path check
+				// rather than the container's capacity.
+				found = true
 			case ir.KindStruct, ir.KindUnion:
 				if !seen[f.Ref.Key] {
 					seen[f.Ref.Key] = true
