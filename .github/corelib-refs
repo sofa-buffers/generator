@@ -1,0 +1,10 @@
+# Corelib branches this branch is developed against (docs/CI.md).
+# Delete before merging: every entry pins a corelib to unmerged code.
+#
+# MESSAGE_SPEC §2 sequence omission — the pair is:
+#   sofa-buffers/documentation#29 (spec)
+#   corelib-c-cpp#114, corelib-cpp#57, corelib-rs#38, corelib-rs-no-std#58
+SOFAB_CORELIB_C_CPP_REF=poc/omit-all-default-sequences
+SOFAB_CORELIB_CPP_REF=poc/omit-all-default-sequences
+SOFAB_CORELIB_RS_REF=poc/omit-all-default-sequences
+SOFAB_CORELIB_RS_NO_STD_REF=poc/omit-all-default-sequences
