@@ -141,7 +141,7 @@ func TestRustStructural(t *testing.T) {
 		"pub somestring: heapless::String<50>,",                                                             // bounded string -> heapless
 		"pub someblob: heapless::Vec<u8, 16>,",                                                              // bounded blob -> heapless
 		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",                                      // string array -> inline
-		"pub somemap: heapless::Vec<",                                                                     // bounded -> heapless (default no_std storage)
+		"pub somemap: heapless::Vec<",                                                                       // bounded -> heapless (default no_std storage)
 		"pub fn encode(&self) -> heapless::Vec<u8,",                                                         // heap-free encode
 		"stack: heapless::Vec<_Loc,",                                                                        // bounded decode stack
 		"if self.somestring.as_str() != \"\" {",                                                             // string omit via as_str
@@ -512,7 +512,7 @@ messages:
 	// drops the deliberately unbounded `ds`; the bounded rejects are the point.
 	srcNoStd := strings.Replace(src, "      ds: { id: 3, type: string }\n", "", 1)
 	for _, cfg := range []map[string]any{
-		{}, // std
+		{},                                       // std
 		{"corelib": "rs-no-std", "no_std": true}, // no_std must also reject as INVALID
 	} {
 		in := src
