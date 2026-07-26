@@ -87,6 +87,27 @@ run_variant() {
     rust_build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill-$label"
     ( cd "$WORK/fill-$label" && check_maxsize_fill "$label" cargo run -q -- encode fill )
 
+    # Streaming behaviour (PR #242): the generator tests only assert that the
+    # streaming API appears in the output. This runs it, and pins the property
+    # that matters -- streaming must be indistinguishable from the one-shot path.
+    echo "==> [$label] streaming: serialize through a sink, feed the decoder in chunks"
+    rm -rf "$WORK/stream-$label"
+    rust_build "$EXAMPLE" "$WORK/stream-$label"
+    if [ "$label" = "no-std" ]; then
+        printf 'use sofabuffers_generated::*;\n' > "$WORK/stream-$label/src/main.rs"
+    else
+        printf 'mod message;\nuse message::*;\n' > "$WORK/stream-$label/src/main.rs"
+    fi
+    sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/streaming_check.rs" \
+        >> "$WORK/stream-$label/src/main.rs"
+    if [ "$label" = "no-std" ]; then
+        # The lib is #![no_std] without this; the binary above needs it linked
+        # for println!/Vec in the check itself.
+        ( cd "$WORK/stream-$label" && cargo run -q --features std )
+    else
+        ( cd "$WORK/stream-$label" && cargo run -q )
+    fi
+
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(cd "$WORK/ex-$label" && printf '%s' "$IN" | cargo run -q -- encode myfirstmessage | cargo run -q -- decode myfirstmessage)
     echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: [$label] u64 round-trip"; exit 1; }

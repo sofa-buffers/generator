@@ -857,7 +857,11 @@ messages:
 			"pub fn decoder() -> MDecoder {",
 			"pub struct Decoder {",
 			"pub fn feed(&mut self, chunk: &[u8]) -> Result<(), sofab::Error> {",
-			"pub fn finish(self) -> Result<M, sofab::Error> {",
+			"pub fn finish(mut self) -> Result<M, sofab::Error> {",
+			// finish must probe end-of-input, or a stream cut mid-field would be
+			// handed back as a half-filled value instead of rejected. The corelib
+			// exposes no finalize(); an empty chunk is the documented probe.
+			"self.feed(&[])?;",
 			// The state the visitor needs across chunks lives in the decoder, not
 			// in a borrow: a self-referential struct would need unsafe.
 			"let mut v = V { m: &mut self.m,",
