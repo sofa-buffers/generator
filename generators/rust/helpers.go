@@ -148,7 +148,13 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 		if isNativeArrayElem(f.Elem) {
 			// No declared default: a `count: N` array still defaults to N element
 			// defaults, exactly as [T; N] did and as C/C++ aggregate init gives.
+			// `vec!` is a std macro, so the no_std profile builds the same value
+			// from an array literal instead -- a #![no_std] crate has alloc, not
+			// the prelude macro.
 			if f.Default == nil && f.HasCount {
+				if g.noStd {
+					return fmt.Sprintf("[%s; %d].to_vec()", rustElemZeroLit(f.Elem), f.Count)
+				}
 				return fmt.Sprintf("vec![%s; %d]", rustElemZeroLit(f.Elem), f.Count)
 			}
 			if parts, ok := g.rustNativeArrayPartsN(f); ok {

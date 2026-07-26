@@ -75,7 +75,7 @@ func TestZigStructural(t *testing.T) {
 		"somemap: []const MyfirstmessageSomemap",                                              // dynamic composite array -> slice
 		"if (!std.mem.eql(u32, self.someuintarray[0..], &.{ 0, 1, 1000, 4294967295 })) {",     // omit-guard vs default
 		"std.mem.sliceAsBytes",                                                                // bool array 0/1 lowering
-		"sofab.arrays.putChecked(&self.m.someuintarray, &self.ai,",                                              // capacity-checked indexed store (generator#100)
+		"sofab.arrays.putChecked(&self.m.someuintarray, &self.ai,",                            // capacity-checked indexed store (generator#100)
 		"if (v.inv) return error.InvalidMessage;",                                             // over-count array rejected as INVALID (generator#100)
 		"if (offset != 0) return;",                                                            // single-shot payload guard
 		"if (total > 50) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.somestring = chunk; } },", // bounded string: over-maxlen -> INVALID (§7.1); strict UTF-8 -> INVALID (issue #85); else zero-copy
