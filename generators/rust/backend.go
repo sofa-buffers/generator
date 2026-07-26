@@ -470,6 +470,11 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 		f.line("    pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error> {")
 		f.line("        %s_dec::try_decode(data)", strings.ToLower(name))
 		f.line("    }")
+		f.line("    /// An incremental decoder for this message: hold it and feed chunks as")
+		f.line("    /// they arrive, instead of buffering the whole message first.")
+		f.line("    pub fn decoder() -> %sDecoder {", name)
+		f.line("        %sDecoder::new()", name)
+		f.line("    }")
 	}
 	f.line("}")
 	f.blank()

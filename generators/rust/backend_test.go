@@ -825,3 +825,51 @@ messages:
 		}
 	}
 }
+
+// TestRustIncrementalDecoder pins the public incremental decoder: the corelib's
+// IStream is incremental by design, but decode/try_decode own it for the length
+// of one call, so without this type the caller must hold the whole message as a
+// single contiguous slice — at a transport that means buffering it entirely
+// before decoding, which is what streaming exists to avoid.
+//
+// The decoder owns the message and the visitor's persistent state as plain
+// fields, and V borrows them for the duration of one feed, so the type is not
+// self-referential and needs no unsafe.
+func TestRustIncrementalDecoder(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+      s: { id: 1, type: string, maxlen: 16 }
+      arr: { id: 2, type: array, items: { type: u32, count: 4 } }
+`
+	for _, cfg := range []map[string]any{
+		{},                      // no_std, heapless
+		{"allow_dynamic": true}, // no_std, alloc
+		{"corelib": "rs"},       // std
+	} {
+		m := moduleFromYAML(t, src, cfg)
+		for _, want := range []string{
+			// Re-exported under the message's own name; the decoder module stays private.
+			"pub use m_dec::Decoder as MDecoder;",
+			"pub fn decoder() -> MDecoder {",
+			"pub struct Decoder {",
+			"pub fn feed(&mut self, chunk: &[u8]) -> Result<(), sofab::Error> {",
+			"pub fn finish(self) -> Result<M, sofab::Error> {",
+			// The state the visitor needs across chunks lives in the decoder, not
+			// in a borrow: a self-referential struct would need unsafe.
+			"let mut v = V { m: &mut self.m,",
+			"let r = self.is.feed(chunk, &mut v);",
+			"let V {",
+			// INVALID dominates a truncated tail, so it is checked before feed's
+			// own Incomplete verdict is returned.
+			"if self.inv { return Err(sofab::Error::InvalidMsg); }",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing %q", cfg, want)
+			}
+		}
+	}
+}

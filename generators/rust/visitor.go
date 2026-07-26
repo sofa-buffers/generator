@@ -350,6 +350,10 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 
 	// Wrap the decoder in a private module so _Loc / V don't clash across
 	// messages in a multi-message crate.
+	// The decoder module stays private -- _Loc and V are implementation detail --
+	// but the incremental Decoder is part of the public API, so it is re-exported
+	// under the message's own name.
+	f.line("pub use %s_dec::Decoder as %sDecoder;", strings.ToLower(name), name)
 	f.line("mod %s_dec {", strings.ToLower(name))
 	f.line("    use super::*;")
 	// ArrayKind is gated behind the no-std `array` feature; import it only when an
@@ -445,6 +449,88 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("        // report it rather than return a silently-truncated value.")
 	f.line("        if overflow { return Err(sofab::Error::BufferFull); }")
 	f.line("        Ok(m)")
+	f.line("    }")
+	f.blank()
+
+	// --- incremental decoder -------------------------------------------------
+	//
+	// decode/try_decode above own the IStream and the visitor for the length of
+	// one call, so the caller must have the whole message as one contiguous
+	// slice. The corelib does not require that -- IStream::feed is incremental
+	// and reports Incomplete so it can be called again -- but the generated API
+	// gave no way to hold the parse state across calls. At a transport that
+	// means buffering the entire message before decoding it, which is what
+	// streaming exists to avoid, and on a constrained target it means RAM for
+	// the whole message.
+	//
+	// The decoder owns the message and the visitor's persistent state as plain
+	// fields; V borrows them for the duration of one feed and is destructured
+	// afterwards, so nothing here is self-referential.
+	stateFields := g.visitorState(stackCap, needAcc, accType, accNew, arrSkip, use.scalarArray)
+	f.line("    /// Incremental decoder: hold one and feed the message as bytes arrive.")
+	f.line("    ///")
+	f.line("    /// `feed` returns `Err(Error::Incomplete)` while the message is still")
+	f.line("    /// short -- that is the signal to supply the next chunk, not a failure.")
+	f.line("    /// Any other error is terminal and the decoder must be discarded.")
+	f.line("    pub struct Decoder {")
+	f.line("        m: %s,", name)
+	f.line("        is: IStream,")
+	for _, sf := range stateFields {
+		f.line("        %s: %s,", sf.name, sf.typ)
+	}
+	f.line("    }")
+	f.blank()
+	f.line("    impl Decoder {")
+	f.line("        pub fn new() -> Self {")
+	inits := make([]string, 0, len(stateFields))
+	for _, sf := range stateFields {
+		inits = append(inits, fmt.Sprintf("%s: %s", sf.name, sf.init))
+	}
+	f.line("            Self { m: %s::default(), is: IStream::new(), %s }", name, strings.Join(inits, ", "))
+	f.line("        }")
+	f.blank()
+	f.line("        /// Feed the next chunk. `Ok(())` once the message is complete at a")
+	f.line("        /// field boundary; `Err(Incomplete)` means feed more.")
+	f.line("        pub fn feed(&mut self, chunk: &[u8]) -> Result<(), sofab::Error> {")
+	f.line("            let fed = {")
+	takes := make([]string, 0, len(stateFields))
+	names := make([]string, 0, len(stateFields))
+	for _, sf := range stateFields {
+		names = append(names, sf.name)
+		if sf.copy {
+			takes = append(takes, fmt.Sprintf("%s: self.%s", sf.name, sf.name))
+		} else {
+			takes = append(takes, fmt.Sprintf("%s: core::mem::take(&mut self.%s)", sf.name, sf.name))
+		}
+	}
+	f.line("                let mut v = V { m: &mut self.m, %s };", strings.Join(takes, ", "))
+	f.line("                let r = self.is.feed(chunk, &mut v);")
+	f.line("                // `..` covers `m`, ending its borrow before the write-back.")
+	f.line("                let V { %s, .. } = v;", strings.Join(names, ", "))
+	for _, sf := range stateFields {
+		f.line("                self.%s = %s;", sf.name, sf.name)
+	}
+	f.line("                r")
+	f.line("            };")
+	f.line("            // INVALID dominates a truncated tail (S5.2), so it is reported")
+	f.line("            // ahead of feed's own Incomplete verdict.")
+	f.line("            if self.inv { return Err(sofab::Error::InvalidMsg); }")
+	f.line("            fed")
+	f.line("        }")
+	f.blank()
+	f.line("        /// Take the decoded message, applying the same checks as try_decode.")
+	f.line("        pub fn finish(self) -> Result<%s, sofab::Error> {", name)
+	f.line("            if self.inv { return Err(sofab::Error::InvalidMsg); }")
+	if g.limits.any() {
+		f.line("            if self.lim { return Err(sofab::Error::LimitExceeded); }")
+	}
+	f.line("            if self.err { return Err(sofab::Error::BufferFull); }")
+	f.line("            Ok(self.m)")
+	f.line("        }")
+	f.line("    }")
+	f.blank()
+	f.line("    impl Default for Decoder {")
+	f.line("        fn default() -> Self { Self::new() }")
 	f.line("    }")
 	f.blank()
 
@@ -1043,3 +1129,48 @@ func isSignedElem(k ir.Kind) bool {
 
 var _ = strings.TrimSpace
 var _ = fmt.Sprintf
+
+// vField is one field of the visitor's state that must survive between feed
+// calls. `copy` marks a Copy type, which the decoder can read straight out of
+// itself; the rest are moved out with core::mem::take.
+type vField struct {
+	name string
+	typ  string
+	init string
+	copy bool
+}
+
+// visitorState lists the visitor's persistent fields — everything in V except
+// the `&mut message` borrow. It is the single description used for the V
+// construction inside decode/try_decode and for the incremental Decoder, so the
+// two cannot drift apart.
+func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, arrSkip, scalarArray bool) []vField {
+	var out []vField
+	if g.noStd {
+		out = append(out,
+			vField{"stack", fmt.Sprintf("heapless::Vec<_Loc, %d>", stackCap), "heapless::Vec::new()", false},
+			vField{"cur", "_Loc", "_Loc::Root", true})
+		if needAcc {
+			out = append(out, vField{"acc", accType, accNew, false})
+		}
+	} else {
+		out = append(out,
+			vField{"stack", "Vec<_Loc>", "Vec::new()", false},
+			vField{"cur", "_Loc", "_Loc::Root", true},
+			vField{"acc", "Vec<u8>", "Vec::new()", false})
+	}
+	out = append(out,
+		vField{"err", "bool", "false", true},
+		vField{"inv", "bool", "false", true})
+	if g.limits.any() {
+		out = append(out, vField{"lim", "bool", "false", true})
+	}
+	out = append(out, vField{"ai", "usize", "0", true})
+	if arrSkip {
+		out = append(out, vField{"askip", "usize", "0", true})
+	}
+	if scalarArray {
+		out = append(out, vField{"afill", "usize", "0", true})
+	}
+	return out
+}

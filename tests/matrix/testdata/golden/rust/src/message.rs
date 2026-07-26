@@ -56,8 +56,14 @@ impl Scalars {
     pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error> {
         scalars_dec::try_decode(data)
     }
+    /// An incremental decoder for this message: hold it and feed chunks as
+    /// they arrive, instead of buffering the whole message first.
+    pub fn decoder() -> ScalarsDecoder {
+        ScalarsDecoder::new()
+    }
 }
 
+pub use scalars_dec::Decoder as ScalarsDecoder;
 mod scalars_dec {
     use super::*;
     use sofab::{IStream, Visitor, Id, Unsigned, Signed, ArrayKind};
@@ -95,6 +101,63 @@ mod scalars_dec {
         // report it rather than return a silently-truncated value.
         if overflow { return Err(sofab::Error::BufferFull); }
         Ok(m)
+    }
+
+    /// Incremental decoder: hold one and feed the message as bytes arrive.
+    ///
+    /// `feed` returns `Err(Error::Incomplete)` while the message is still
+    /// short -- that is the signal to supply the next chunk, not a failure.
+    /// Any other error is terminal and the decoder must be discarded.
+    pub struct Decoder {
+        m: Scalars,
+        is: IStream,
+        stack: Vec<_Loc>,
+        cur: _Loc,
+        acc: Vec<u8>,
+        err: bool,
+        inv: bool,
+        ai: usize,
+        askip: usize,
+    }
+
+    impl Decoder {
+        pub fn new() -> Self {
+            Self { m: Scalars::default(), is: IStream::new(), stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0, askip: 0 }
+        }
+
+        /// Feed the next chunk. `Ok(())` once the message is complete at a
+        /// field boundary; `Err(Incomplete)` means feed more.
+        pub fn feed(&mut self, chunk: &[u8]) -> Result<(), sofab::Error> {
+            let fed = {
+                let mut v = V { m: &mut self.m, stack: core::mem::take(&mut self.stack), cur: self.cur, acc: core::mem::take(&mut self.acc), err: self.err, inv: self.inv, ai: self.ai, askip: self.askip };
+                let r = self.is.feed(chunk, &mut v);
+                // `..` covers `m`, ending its borrow before the write-back.
+                let V { stack, cur, acc, err, inv, ai, askip, .. } = v;
+                self.stack = stack;
+                self.cur = cur;
+                self.acc = acc;
+                self.err = err;
+                self.inv = inv;
+                self.ai = ai;
+                self.askip = askip;
+                r
+            };
+            // INVALID dominates a truncated tail (S5.2), so it is reported
+            // ahead of feed's own Incomplete verdict.
+            if self.inv { return Err(sofab::Error::InvalidMsg); }
+            fed
+        }
+
+        /// Take the decoded message, applying the same checks as try_decode.
+        pub fn finish(self) -> Result<Scalars, sofab::Error> {
+            if self.inv { return Err(sofab::Error::InvalidMsg); }
+            if self.err { return Err(sofab::Error::BufferFull); }
+            Ok(self.m)
+        }
+    }
+
+    impl Default for Decoder {
+        fn default() -> Self { Self::new() }
     }
 
 #[derive(Clone, Copy, PartialEq)]
