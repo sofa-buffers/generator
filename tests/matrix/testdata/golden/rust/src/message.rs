@@ -34,7 +34,7 @@ impl Default for Scalars {
 impl Scalars {
     /// Worst-case encoded size of this message, derived from the schema.
     pub const MAX_SIZE: usize = 49;
-    pub fn marshal(&self, os: &mut OStream) {
+    pub fn serialize<_F: sofab::Flush>(&self, os: &mut OStream<'_, _F>) {
         if self.u8min != 0 { let _ = os.write_unsigned(0, self.u8min as Unsigned); }
         if self.u8max != 255 { let _ = os.write_unsigned(1, self.u8max as Unsigned); }
         if self.u64max != 18446744073709551615 { let _ = os.write_unsigned(2, self.u64max as Unsigned); }
@@ -46,7 +46,7 @@ impl Scalars {
     }
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = vec![0u8; Self::MAX_SIZE];
-        let used = { let mut os = OStream::new(&mut buf); self.marshal(&mut os); os.bytes_used() };
+        let used = { let mut os = OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };
         buf.truncate(used);
         buf
     }
@@ -56,8 +56,14 @@ impl Scalars {
     pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error> {
         scalars_dec::try_decode(data)
     }
+    /// An incremental decoder for this message: hold it and feed chunks as
+    /// they arrive, instead of buffering the whole message first.
+    pub fn decoder() -> ScalarsDecoder {
+        ScalarsDecoder::new()
+    }
 }
 
+pub use scalars_dec::Decoder as ScalarsDecoder;
 mod scalars_dec {
     use super::*;
     use sofab::{IStream, Visitor, Id, Unsigned, Signed, ArrayKind};
@@ -95,6 +101,78 @@ mod scalars_dec {
         // report it rather than return a silently-truncated value.
         if overflow { return Err(sofab::Error::BufferFull); }
         Ok(m)
+    }
+
+    /// Incremental decoder: hold one and feed the message as bytes arrive.
+    ///
+    /// The wire format has no end marker at the top level -- a message ends
+    /// where its bytes end -- so `feed` cannot tell you the message is
+    /// complete, and does not try to. Its verdict is about the bytes handed
+    /// in: `Ok(())` means they ended on a clean field boundary (the message
+    /// COULD end here), `Err(Incomplete)` means they ended mid-field. Neither
+    /// is a failure mid-stream. The caller's own framing -- a length prefix, a
+    /// datagram boundary, a closed socket -- decides when to stop; `finish`
+    /// then gives the verdict for the message as a whole.
+    ///
+    /// Any error other than `Incomplete` is terminal: discard the decoder.
+    pub struct Decoder {
+        m: Scalars,
+        is: IStream,
+        stack: Vec<_Loc>,
+        cur: _Loc,
+        acc: Vec<u8>,
+        err: bool,
+        inv: bool,
+        ai: usize,
+        askip: usize,
+    }
+
+    impl Decoder {
+        pub fn new() -> Self {
+            Self { m: Scalars::default(), is: IStream::new(), stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0, askip: 0 }
+        }
+
+        /// Feed the next chunk. `Ok(())` if it ended on a field boundary,
+        /// `Err(Incomplete)` if it ended mid-field -- see the type docs: neither
+        /// answers whether the MESSAGE is done, only whether these bytes were.
+        pub fn feed(&mut self, chunk: &[u8]) -> Result<(), sofab::Error> {
+            let fed = {
+                let mut v = V { m: &mut self.m, stack: core::mem::take(&mut self.stack), cur: self.cur, acc: core::mem::take(&mut self.acc), err: self.err, inv: self.inv, ai: self.ai, askip: self.askip };
+                let r = self.is.feed(chunk, &mut v);
+                // `..` covers `m`, ending its borrow before the write-back.
+                let V { stack, cur, acc, err, inv, ai, askip, .. } = v;
+                self.stack = stack;
+                self.cur = cur;
+                self.acc = acc;
+                self.err = err;
+                self.inv = inv;
+                self.ai = ai;
+                self.askip = askip;
+                r
+            };
+            // INVALID dominates a truncated tail (S5.2), so it is reported
+            // ahead of feed's own Incomplete verdict.
+            if self.inv { return Err(sofab::Error::InvalidMsg); }
+            fed
+        }
+
+        /// Take the decoded message once the caller's framing says the input
+        /// is over. Applies the same checks as try_decode, including that the
+        /// stream actually ended at a clean boundary -- a truncated message
+        /// must be rejected, not returned half-filled.
+        pub fn finish(mut self) -> Result<Scalars, sofab::Error> {
+            if self.inv { return Err(sofab::Error::InvalidMsg); }
+            // An empty chunk probes end-of-input without supplying any: Ok only
+            // when nothing is half-read. This is what makes a truncated stream
+            // an error here rather than a silently partial value.
+            self.feed(&[])?;
+            if self.err { return Err(sofab::Error::BufferFull); }
+            Ok(self.m)
+        }
+    }
+
+    impl Default for Decoder {
+        fn default() -> Self { Self::new() }
     }
 
 #[derive(Clone, Copy, PartialEq)]
