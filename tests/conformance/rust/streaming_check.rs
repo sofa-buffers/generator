@@ -23,12 +23,86 @@
 
 //SOFAB_IMPORT
 
+#[allow(deprecated)]
 fn main() {
+    // Every field SHAPE has to be present, not just a few scalars. Chunked
+    // feeding exercises decoder state that a scalar-only message never reaches:
+    //
+    //   acc          reassembles a string/blob payload split across feeds — its
+    //                only reason to exist, and untouched unless a string or blob
+    //                actually carries bytes
+    //   stack/cur    the location stack, pushed and popped around nested
+    //                sequences; a chunk boundary can fall between the push and
+    //                the pop
+    //   ai/afill     native-array fill progress, which must survive a boundary
+    //                falling between two elements
+    //
+    // The strings and blobs below are deliberately long: at every chunk size
+    // tested they are guaranteed to straddle a boundary rather than land inside
+    // one chunk by luck.
     let mut m = Myfirstmessage::default();
+
+    // scalars, each at a width that makes its varint as wide as it gets
+    m.someu8 = u8::MAX;
+    m.someu16 = u16::MAX;
+    m.someu32 = u32::MAX;
+    m.someu64 = u64::MAX - 1; // the schema default IS u64::MAX, so shift off it
     m.somei8 = -5;
-    m.somebool = true;
-    m.someu64 = u64::MAX; // widest varint
+    m.somei16 = i16::MIN;
+    m.somei32 = i32::MIN;
+    m.somei64 = i64::MIN;
     m.somefp32 = 2.5;
+    m.somefp64 = -1.0e300;
+    m.somebool = !m.somebool;
+    m.someenum = 33;
+    m.somebitfield = 2;
+
+    // long payloads: these are what acc exists for
+    // At their schema maxlen (50 and 16) -- the longest the format permits here,
+    // and long enough to straddle a boundary at every chunk size below 50.
+    // Exceeding the bound is not a bigger test, it is a different one: §7.1 makes
+    // an over-maxlen payload INVALID, so the decode would be rejected outright.
+    m.somestring = "0123456789-0123456789-0123456789-0123456789-01234".into();
+    debug_assert!(m.somestring.len() <= 50);
+    m.someblob = (0u8..16).collect();
+
+    // native arrays: assign in place, the schema count fixes the length
+    for (i, v) in m.someuintarray.iter_mut().enumerate() {
+        *v = (i as u32 + 1) * 100_000;
+    }
+    for (i, v) in m.someintarray.iter_mut().enumerate() {
+        *v = -((i as i32 + 1) * 100_000);
+    }
+    for (i, v) in m.somefloatarray.iter_mut().enumerate() {
+        *v = i as f32 + 0.5;
+    }
+    for (i, v) in m.someenumarray.iter_mut().enumerate() {
+        *v = (i % 2) as i8;
+    }
+    for v in m.someboolarray.iter_mut() {
+        *v = true;
+    }
+    for (i, v) in m.somebitfieldarray.iter_mut().enumerate() {
+        *v = (i as u8) | 1;
+    }
+
+    // wrapper-sequence arrays: their elements are child fields keyed by index, so
+    // a boundary can fall between two elements or inside one element's payload.
+    for i in 0..5 {
+        m.somestringarray.push(format!("elem-{i:08}")); // 13 <= maxlen 16
+    }
+    for i in 0..3u8 {
+        m.someblobarray.push(vec![i; 8]); // 8 == maxlen 8
+    }
+    for i in 0..4u32 {
+        m.somematrix.push(vec![i * 11, i * 22, i * 33]);
+    }
+
+    // nested sequence: a chunk boundary can fall between its begin and end
+    m.somestruct.nestedint = 7;
+    m.somestruct.nestedstring = "nested-string-straddles".into();
+    m.somestruct.nestedstruct.deepint = -99;
+    m.someunion.option1 = 4242;
 
     // ---- 1. streaming encode is byte-identical -------------------------
 
