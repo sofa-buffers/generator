@@ -157,6 +157,38 @@ func (g *gen) typeName(key string) string {
 	return b.String()
 }
 
+// fixedSeqArray reports whether a field is a `count: N` WRAPPER array — one whose
+// elements lower to sequence frames (string/blob/struct/union/nested array)
+// rather than to a native array wire type. It is the set of fields whose N
+// element defaults have to be materialized by hand: the native fixed-count
+// arrays get theirs from a padded default literal (javaPrimArrayLiteral /
+// javaNativeArrayLiteral), which a wrapper array has no equivalent of.
+func fixedSeqArray(f *ir.Field) bool {
+	return f.Kind == ir.KindArray && f.HasCount && seqArrayElem(f.Elem)
+}
+
+// javaSeqDefName is the private static filler that adds a fixed-count wrapper
+// array's N default elements to a List and returns it, shared by the field
+// initializer and reset().
+func javaSeqDefName(fld *ir.Field) string { return "_seqdef_" + fld.Name }
+
+// javaSeqElemDefault renders one default element of a wrapper array: the empty
+// string / empty blob / default-constructed struct or union / empty inner row.
+// It is exactly what the decode-side collectors gap-fill an id hole with, so the
+// materialized value and the refilled value cannot drift apart.
+func (g *gen) javaSeqElemDefault(f *ir.Field) string {
+	switch f.Elem {
+	case ir.KindBlob:
+		return "new byte[0]"
+	case ir.KindStruct, ir.KindUnion:
+		return "new " + g.typeName(f.ElemRef.Key) + "()"
+	case ir.KindArray:
+		return "new ArrayList<>()"
+	default: // string
+		return `""`
+	}
+}
+
 // primitiveArrayElem reports whether an array element lowers to a Java primitive
 // array (`long[]`/`float[]`/`double[]`) instead of a boxed `List<...>`: integers,
 // enum and bitfield (all long-backed, delivered via signed/unsigned) and fp. It
@@ -305,6 +337,13 @@ func (g *gen) javaInit(f *ir.Field) string {
 			if lit, ok := g.javaNativeArrayLiteral(f); ok {
 				return " = new ArrayList<>(" + lit + ")"
 			}
+		}
+		// A `count: N` wrapper array is fixed-length, so its value is N element
+		// defaults at construction, exactly like the native fixed-count arrays above
+		// (§5.1). Only a count-less (dynamic) one starts empty: it has no N, and its
+		// decoded length is highest-present-id + 1.
+		if fixedSeqArray(f) {
+			return fmt.Sprintf(" = %s(new ArrayList<>(%d))", javaSeqDefName(f), f.Count)
 		}
 		return " = new ArrayList<>()"
 	case ir.KindString:

@@ -213,6 +213,34 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 			f.line("    private static final %s %s = %s;", g.javaType(fld), javaArrDefName(fld), def)
 		}
 	}
+	// A `count: N` array's value is N elements long whether or not the field ever
+	// reaches the wire (MESSAGE_SPEC §5.1: the length "is N for every target").
+	// A NATIVE fixed-count array has always been materialized at construction --
+	// `new long[3]` / `new ArrayList<>(List.of(false, false))` above -- but a
+	// WRAPPER one (string/blob/struct/union/nested elements) was left as the empty
+	// List, which made the two kinds disagree about the same schema and made the
+	// field disagree with itself: an ABSENT count:3 string array decoded at length
+	// 0 while one element on the wire, or an explicitly-empty wrapper, decoded at
+	// 3 (sequenceEnd can only refill a sequence that was actually opened).
+	//
+	// The N default elements cannot be a shared static the way the native
+	// omit-compare defaults above can: the List is the mutable field value, and a
+	// struct/union element must be a distinct instance per array slot. A filler
+	// factory keeps both the field initializer and reset() to one call and stays
+	// compact for a large N.
+	//
+	// Elements are the element default, exactly what the collectors gap-fill with:
+	// a declared per-element default is not materialized anywhere today.
+	for _, fld := range fields {
+		if !fixedSeqArray(fld) {
+			continue
+		}
+		t := g.javaType(fld)
+		f.line("    private static %s %s(%s l) {", t, javaSeqDefName(fld), t)
+		f.line("        for (int i = 0; i < %d; i++) l.add(%s);", fld.Count, g.javaSeqElemDefault(fld))
+		f.line("        return l;")
+		f.line("    }")
+	}
 	f.blank()
 
 	// marshal
@@ -420,13 +448,20 @@ func (g *gen) emitResetField(f *jfile, fld *ir.Field) {
 			return
 		}
 		// List-backed: the boolean array (which may carry a materialized default) and
-		// every wrapper sequence (whose declared default is not materialized, so the
-		// empty list IS its default — same rule the dropping closer relies on).
+		// every wrapper sequence (whose declared per-element default is not
+		// materialized, so the element defaults ARE its default — the same rule the
+		// dropping closer relies on).
 		f.line("        %s = Sbuf.resetList(%s);", acc, acc)
 		if nativeArrayElem(fld.Elem) {
 			if _, ok := g.javaNativeArrayLiteral(fld); ok {
 				f.line("        %s.addAll(%s);", acc, javaArrDefName(fld))
 			}
+		}
+		// reset() re-arms a destination the caller supplies, so it has to land on the
+		// same value `new <Msg>()` does: a fixed-count wrapper array is N element
+		// defaults, not the empty list (§5.1).
+		if fixedSeqArray(fld) {
+			f.line("        %s(%s);", javaSeqDefName(fld), acc)
 		}
 	default:
 		// Scalar/string/blob leaf: assign the same literal the field initializer uses.

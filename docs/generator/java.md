@@ -105,9 +105,10 @@ state different truth tables. It exists because a wrapper-array **element** has 
 be judged *before* its frame is opened, which the implicit "no child was written"
 test cannot answer in time.
 
-A wrapper array's declared `default` is not materialized by this backend (the
-field initializer is the empty collection), so absent and explicitly-empty denote
-the same value and the plain dropping close is correct. If that gap is ever closed,
+A wrapper array's declared `default` is not materialized by this backend (its
+initial value is `N` *element* defaults for a `count: N` array, the empty
+collection for a dynamic one), so absent and explicitly-empty denote the same
+value and the plain dropping close is correct. If that gap is ever closed,
 the wrapper needs an `if (value != default) { … os.writeSequenceEndKeep(); }` guard
 so a value differing from a non-empty default still reaches the wire as the empty
 wrapper — the only encoding of "explicitly empty" (§2, §3).
@@ -147,6 +148,21 @@ Two invariants hold this together:
   are `List`-backed and did not. Without it the trailing elision would not
   *re-shape* the array, it would **shorten** it on every round trip.
 
+`sequenceEnd` can only refill a sequence that was actually **opened**, so it
+covers only half the rule. An **absent** field fires no callback at all, and §2
+makes absence the encoding of an all-default array — the common case. The other
+half is therefore materialization at construction: a `count: N` wrapper array's
+field initializer is `N` element defaults (`""`, `new byte[0]`, `new <Elem>()`,
+an empty inner row), emitted by a per-field `_seqdef_<name>` filler that both the
+initializer and `reset()` call. The native fixed-count arrays beside it have
+always been materialized this way, from their padded default literal; without the
+same treatment the same schema disagreed with itself — an absent `count: 3`
+string array decoded at length 0 while one element on the wire, or an explicitly
+empty wrapper, decoded at 3. A **dynamic** array has no `N` and still starts
+empty. Materializing the elements does not put the field on the wire: `marshal`
+narrows to `M == 0` and the lazily-opened wrapper is dropped, so an untouched
+message still encodes to zero bytes.
+
 The narrowing expression is generated once (`elemTrimExpr`) and used by both the
 marshal loop and `isDefault`. If the predicate narrowed a field the writer did not
 (or the reverse), the result would be a field omitted though it is on the wire, or
@@ -178,7 +194,7 @@ is the entire point of accepting a destination:
 | Field | Reset |
 |-------|-------|
 | scalar / `String` / `blob` | assigned the same literal the field initializer uses |
-| `List`-backed array (wrapper, `boolean`) | `Sbuf.resetList` — `clear()`, keeping the backing capacity; a `boolean` array's materialized default is then `addAll`ed back |
+| `List`-backed array (wrapper, `boolean`) | `Sbuf.resetList` — `clear()`, keeping the backing capacity; a `boolean` array's materialized default is then `addAll`ed back, and a `count: N` wrapper array is refilled to its `N` element defaults by `_seqdef_<name>` so `reset()` lands on the value `new <Msg>()` has |
 | primitive array with a default (always so for `count: N`) | `System.arraycopy` from the shared `_arrdef_*` static when the length already matches; `clone()` only otherwise |
 | dynamic primitive array | the shared zero-length `Sbuf.EMPTY_*` constant |
 | `struct` / `union` | `reset()` recursively, never a new object |

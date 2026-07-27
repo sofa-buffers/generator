@@ -780,3 +780,68 @@ func TestJavaWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
 		t.Errorf("a dynamic array has no N and must never be default-filled:\n%s", got)
 	}
 }
+
+// TestJavaFixedCountWrapperArrayMaterialized: MESSAGE_SPEC §5.1 makes a
+// `count: N` array's value N elements long whether or not the field ever reaches
+// the wire -- the length "is N for every target". The NATIVE fixed-count arrays
+// have always been materialized at construction from their padded default
+// literal (`new long[3]`, `new ArrayList<>(List.of(false, false))`); the WRAPPER
+// ones were left as the empty List, so the same schema disagreed with itself:
+//
+//	absent field             -> length 0     (wrong)
+//	one element on the wire  -> length N     (right, sequenceEnd refills)
+//	explicitly-empty wrapper -> length N     (right)
+//
+// sequenceEnd can only refill a sequence that was actually OPENED, so the absent
+// case has to be covered where the native arrays already cover it: at
+// construction, and in the reset() that re-arms a caller-supplied destination.
+// A DYNAMIC (count-less) array has no N -- its length is highest-present-id + 1
+// -- and must stay empty.
+func TestJavaFixedCountWrapperArrayMaterialized(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      nums:  { id: 1, type: array, items: { type: u32, count: 3 } }
+      blobs: { id: 2, type: array, items: { type: blob, count: 2, maxlen: 4 } }
+      objs:  { id: 3, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }
+      dyn:   { id: 4, type: array, items: { type: string, maxlen: 8 } }
+`
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+	for _, want := range []string{
+		// Construction: the wrapper arrays are materialized right where the native
+		// one next to them is.
+		"public List<String> strs = _seqdef_strs(new ArrayList<>(3));",
+		"public long[] nums = new long[3];",
+		"public List<byte[]> blobs = _seqdef_blobs(new ArrayList<>(2));",
+		"public List<MObjsElem> objs = _seqdef_objs(new ArrayList<>(2));",
+		// The filler adds N ELEMENT defaults -- the same values the collectors
+		// gap-fill an id hole with.
+		"        for (int i = 0; i < 3; i++) l.add(\"\");",
+		"        for (int i = 0; i < 2; i++) l.add(new byte[0]);",
+		"        for (int i = 0; i < 2; i++) l.add(new MObjsElem());",
+		// reset() re-arms to the same value, in place.
+		"        this.strs = Sbuf.resetList(this.strs);\n        _seqdef_strs(this.strs);",
+		"        this.objs = Sbuf.resetList(this.objs);\n        _seqdef_objs(this.objs);",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing %q:\n%s", want, m)
+		}
+	}
+	// A dynamic wrapper array has no N: it starts empty and reset() leaves it empty.
+	if !strings.Contains(m, "public List<String> dyn = new ArrayList<>();") {
+		t.Errorf("a count-less wrapper array must start empty:\n%s", m)
+	}
+	if strings.Contains(m, "_seqdef_dyn") {
+		t.Errorf("a count-less wrapper array must never be default-filled:\n%s", m)
+	}
+	// Materializing the elements must not make the field encode: an all-default
+	// wrapper array is still dropped whole (§2), which is what keeps the empty
+	// message empty.
+	if !strings.Contains(m, "if (!Sbuf.trimTailStrings(this.strs).isEmpty()) return false;") ||
+		strings.Contains(m, "if (this.strs != null && !this.strs.isEmpty())") {
+		t.Errorf("a materialized wrapper array must not gain a whole-omission guard:\n%s", m)
+	}
+}
