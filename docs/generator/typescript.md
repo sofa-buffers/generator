@@ -91,7 +91,7 @@ in the generated code:
 | Position | Closer | Effect |
 |---|---|---|
 | `struct`/`union` **field** | `os.writeSequenceEnd()` | an all-default nested object is **omitted**, not framed empty |
-| wrapper-array **field** | `os.writeSequenceEnd()` | an empty array is omitted; absence reconstructs the (empty) default |
+| wrapper-array **field** | `os.writeSequenceEnd()` | an array narrowing to nothing is omitted; absence reconstructs the field's construction default (empty when dynamic, `N` element defaults when `count: N` — see below) |
 | wrapper-array **element** (`struct`/`union`, nested row) | `os.writeSequenceEndKeep()` | the frame always survives — element presence is what carries the array's length (*highest present id + 1*) |
 
 This is MESSAGE_SPEC §2 / CORELIB_PLAN §6. The visible consequence: a message
@@ -150,6 +150,29 @@ of `_padTo` on native arrays: without it the trailing elision would not re-shape
 the bytes, it would **shorten** the decoded array on every round trip. The
 generator#142 over-index guard still rejects an element id `≥ N`, which also
 bounds the gap-fill.
+
+That close-of-scope fill can only fill a sequence that was actually **opened**, so
+it is only half the rule. A `count: N` array's value is `N` elements long whether
+or not the field ever reaches the wire (§5.1: the length "is `N` for every
+target"), so the field is also **materialized to `N` element defaults at
+construction** — in `tsDefault`, the same place `nativeArrayDefault` has always
+materialized a native `count: N` array:
+
+```ts
+strs: string[] = ["", "", ""];                                  // count: 3, string
+blobs: Uint8Array[] = [new Uint8Array(), new Uint8Array()];     // count: 2, blob
+objs: VecObjsElem[] = [new VecObjsElem(), new VecObjsElem()];   // count: 2, struct
+nums: number[] = [0, 0, 0];                                     // count: 3, u32 (unchanged)
+dyn: string[] = [];                                             // dynamic: stays empty
+```
+
+Without it the two array kinds disagreed about the same schema, and the wrapper
+field disagreed with *itself*: absent → length 0, one element on the wire → `N`,
+explicitly-empty wrapper → `N`. Elements are the element default (the value the
+close-of-scope fill and the placement gap-fill use), each composite slot its own
+instance so a write into slot *i* cannot surface in slot *j*. Nothing about the
+bytes changes: the trims narrow those `N` defaults away, so `marshal` writes no
+child and `isDefault()` stays true — a fresh message still encodes to zero bytes.
 
 ## Benchmark row
 

@@ -480,6 +480,33 @@ func (g *gen) tsDefault(f *ir.Field) string {
 			if lit, ok := g.nativeArrayDefault(f); ok {
 				return lit
 			}
+			return "[]"
+		}
+		// A count:N array's value is N elements long whether or not the field ever
+		// reaches the wire (MESSAGE_SPEC §5.1: the length "is N for every target").
+		// A native one has always been materialized here through nativeArrayDefault
+		// above; a WRAPPER one was not, which left the two kinds disagreeing about
+		// the same schema -- a count:3 u32 array constructing at length 3 next to a
+		// count:3 string array constructing empty. It also made the field's own two
+		// absent forms disagree: an omitted field stayed empty while an
+		// explicitly-empty wrapper refilled to N via seqFillTo, which can only fill a
+		// sequence that was actually opened.
+		//
+		// Elements are the element default, the very value seqFillTo and the
+		// placement gap-fill grow the array with; a declared per-element default is
+		// not materialized anywhere today. Each composite slot is its own instance
+		// (elemDefaultNew), so a later write into slot i cannot show up in slot j, and
+		// the initializer runs per construction, so instances never share an array.
+		// The N defaults do not reach the wire: elemTrimExpr narrows the trailing
+		// default run away, so marshal writes no child and isDefault stays true.
+		//
+		// A dynamic (count-less) wrapper array has no N and stays empty.
+		if f.HasCount {
+			parts := make([]string, f.Count)
+			for i := range parts {
+				parts[i] = g.elemDefaultNew(f.Elem, f.ElemRef)
+			}
+			return "[" + strings.Join(parts, ", ") + "]"
 		}
 		return "[]"
 	}

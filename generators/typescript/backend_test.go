@@ -397,8 +397,10 @@ func TestTSInt64Long(t *testing.T) {
 		"private _us: Long[] = [Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO];",
 		"get us(): Long[] { return this._us; }",
 		"set us(vals: readonly (Long | bigint | number)[]) { this._us = vals.map(Long.fromValue); }",
-		// Nested array: Long[][] with a per-row setter conversion.
-		"private _rows: Long[][] = [];",
+		// Nested array: Long[][] with a per-row setter conversion. It is `count: 2`,
+		// so it is materialized to two rows — the row default is the empty array,
+		// the very value the outer sequence's N-fill grows it with.
+		"private _rows: Long[][] = [[], []];",
 		"set rows(vals: readonly (readonly (Long | bigint | number)[])[]) { this._rows = vals.map((_v0) => _v0.map(Long.fromValue)); }",
 		// Marshal reads the backing field; 64-bit arrays use the Long writers.
 		// These are `count: N` fields, so the trailing default run is trimmed
@@ -620,6 +622,7 @@ messages:
       fe:    { id: 7, type: array, items: { type: enum, count: 2, enum: { $ref: "#/$defs/enum/Mode" } } }
       fu64:  { id: 8, type: array, items: { type: u64, count: 3 }, default: [1] }
       strs:  { id: 9, type: array, items: { type: string, count: 2, maxlen: 8 } }
+      dstrs: { id: 10, type: array, items: { type: string, maxlen: 8 } }
 `
 
 // TestTSFixedCountDefaultLength: a `count: N` array is FIXED-LENGTH, so its
@@ -645,6 +648,12 @@ func TestTSFixedCountDefaultLength(t *testing.T) {
 		// an all-default fixed array is omitted whole (no bytes at all).
 		"if (!arrEq(this.none, [0, 0, 0, 0, 0])) {",
 		"if (!arrEq(this.short, [1, 2, 0, 0, 0])) {",
+		// A count:N WRAPPER array is fixed-length for exactly the same reason, so it
+		// is materialized to N element defaults alongside the native ones. This line
+		// used to read `strs: string[] = [];`, which pinned the pre-fill behaviour:
+		// the field then constructed empty but decoded at N as soon as one element
+		// was on the wire.
+		`strs: string[] = ["", ""];`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-default message.ts missing %q", want)
@@ -654,8 +663,8 @@ func TestTSFixedCountDefaultLength(t *testing.T) {
 		// Dynamic arrays are NOT fixed-length: no synthesized default, no padding.
 		"dyn: number[] = [0",
 		"dynd: number[] = [1, 2, 0",
-		// A string-element array is a wrapper sequence: still starts empty.
-		"strs: string[] = [\"\"",
+		// ...and that holds for a wrapper element kind too.
+		`dstrs: string[] = [""`,
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("fixed-default message.ts should not emit %q", gone)
@@ -664,7 +673,7 @@ func TestTSFixedCountDefaultLength(t *testing.T) {
 	for _, want := range []string{
 		"dyn: number[] = [];",      // no default, dynamic -> empty
 		"dynd: number[] = [1, 2];", // dynamic default kept verbatim (not padded)
-		"strs: string[] = [];",
+		"dstrs: string[] = [];",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-default message.ts missing unchanged dynamic form %q", want)
@@ -1015,6 +1024,73 @@ messages:
 	// the gap-fill above.
 	if !strings.Contains(mod, `if (c.id >= 4) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 4");`) {
 		t.Errorf("the over-index guard must survive:\n%s", mod)
+	}
+}
+
+// A count:N array's value is N elements long whether or not the field ever
+// reaches the wire (MESSAGE_SPEC §5.1: the length "is N for every target"). The
+// seqFillTo refill above can only fill a sequence that was actually OPENED, so
+// with the field materialized empty the same schema decoded three different
+// lengths:
+//
+//	absent field            -> 0   (wrong)
+//	one element on the wire  -> N   (right)
+//	explicitly-empty wrapper -> N   (right)
+//
+// A native count:N array never had that split — nativeArrayDefault has always
+// materialized it. This pins the wrapper kinds getting the same treatment, in the
+// same place, and the three things that must NOT change with it: a dynamic
+// wrapper array stays empty, each composite slot is its own instance, and the N
+// defaults never reach the wire (the trims narrow them away, so marshal writes no
+// child and isDefault stays true).
+//
+// Verified against a real build (corelib-ts): fresh / empty input / one string
+// element / explicit empty wrapper all decode `strs` at length 3, matching the
+// count:3 u32 array beside it, and the fresh message still encodes to zero bytes.
+func TestTSFixedCountWrapperArrayMaterializedToN(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      strs:   { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      nums:   { id: 1, type: array, items: { type: u32, count: 3 } }
+      blobs:  { id: 2, type: array, items: { type: blob, count: 2, maxlen: 4 } }
+      objs:   { id: 3, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }
+      dstrs:  { id: 4, type: array, items: { type: string, maxlen: 8 } }
+      dobjs:  { id: 5, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+`, map[string]any{})
+
+	for _, want := range []string{
+		// The wrapper kinds now materialize to N, exactly like the native one below
+		// them. Element defaults are the values seqFillTo grows the array with.
+		`strs: string[] = ["", "", ""];`,
+		"blobs: Uint8Array[] = [new Uint8Array(), new Uint8Array()];",
+		"objs: VecObjsElem[] = [new VecObjsElem(), new VecObjsElem()];",
+		// The native count:N array is unchanged — it is the behaviour being matched.
+		"nums: number[] = [0, 0, 0];",
+		// A dynamic wrapper array has no N and must stay empty: its length is
+		// highest-present-id + 1, so pre-filling would invent elements.
+		"dstrs: string[] = [];",
+		"dobjs: VecDobjsElem[] = [];",
+		// The N defaults are trimmed away before framing, so an untouched message
+		// still encodes to nothing (MESSAGE_SPEC §2) and isDefault agrees.
+		"if (!(_trimStrs(this.strs).length === 0)) return false;",
+		"if (!(_trimObjs(this.objs).length === 0)) return false;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
+	}
+	// Each composite slot must be a FRESH instance: `[x, x]` from one shared value
+	// would let a decode into slot 0 show up in slot 1.
+	if strings.Contains(mod, "objs: VecObjsElem[] = new Array") || strings.Contains(mod, ".fill(new VecObjsElem())") {
+		t.Errorf("composite slots must not share one instance:\n%s", mod)
+	}
+	// The decode-side refill is what the construction default now agrees with; it
+	// must survive, since a partially-transmitted array still arrives short.
+	if !strings.Contains(mod, `while (arr.length < 3) arr.push("");`) {
+		t.Errorf("the sequence-close N-fill must survive:\n%s", mod)
 	}
 }
 
