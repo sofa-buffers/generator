@@ -1,0 +1,46 @@
+# Nested WRAPPER rows: array<array<string|blob|struct>> at depth 2 and 3.
+#
+# This shape had no coverage anywhere in the repo, which is why generator#250
+# (the cpp backend emitting a corelib adapter that cannot read a wrapper row,
+# failing a static_assert on both C++ legs) went unnoticed until it was written
+# down. Native nested rows (array<array<u32>>) already routed correctly and are
+# kept alongside as the control: if a backend breaks both, the defect is in the
+# row dispatch; if it breaks only the wrapper rows, it is the adapter choice.
+#
+# Single-field wrapper arrays (array<string>, array<struct>, …) live in
+# arrays.yaml and seq_elements.yaml.
+version: 1
+$defs:
+  struct:
+    Point:
+      x: { id: 0, type: i32 }
+      y: { id: 1, type: i32 }
+messages:
+  NestedRows:
+    payload:
+      # depth 2, wrapper elements — the three shapes that did not compile
+      strrows:
+        id: 0
+        type: array
+        items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } }
+      blobrows:
+        id: 1
+        type: array
+        items: { type: array, count: 2, items: { type: blob, count: 2, maxlen: 4 } }
+      structrows:
+        id: 2
+        type: array
+        items: { type: array, count: 2, items: { type: struct, count: 2, fields: { $ref: '#/$defs/struct/Point' } } }
+      # depth 3: a row of rows of strings
+      strcube:
+        id: 3
+        type: array
+        items:
+          type: array
+          count: 2
+          items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } }
+      # native rows: the control that already worked
+      numrows: { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+      fprows:  { id: 5, type: array, items: { type: array, count: 2, items: { type: fp32, count: 2 } } }
+      # dynamic outer, wrapper inner: no count to fill to at the outer level
+      dynstrrows: { id: 6, type: array, items: { type: array, items: { type: string, maxlen: 8 } } }
