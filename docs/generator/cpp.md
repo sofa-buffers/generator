@@ -210,6 +210,25 @@ order only** — encode iterates the schema/field-id order, so the wire bytes ar
 byte-identical to every other target. Initialize members by name (designated
 initializers or assignment), not with positional aggregate initialization.
 
+## Known limitation: nested wrapper rows
+
+A nested **wrapper** row — `array<array<string>>`, `array<array<blob>>`, or
+`array<array<struct>>` — does not compile today (generator#250). Both legs are
+affected: `corelib-cpp` (maxspeed) and `corelib: c-cpp` (footprint). The generated decode emits
+`sofab::MessageSeq<std::vector<std::string>>`, whose `deserialize` hands the raw
+row to `IStream::read()`, and corelib-cpp has no overload for a vector of
+strings/blobs/messages; the header fails the "Unsupported span element type"
+`static_assert`.
+
+Unaffected: native nested rows (`array<array<u32>>`, `array<array<fp32>>`) and
+first-level wrapper elements (`array<string>`, `array<blob>`), which route
+through `StringSeq`/`BlobSeq` and compile normally.
+
+The fix is a generated row collector that wraps each row in the corelib's
+existing `StringSeq`/`BlobSeq` instead of the generic `MessageSeq`. Until then
+the shape is kept out of `tests/matrix/corpus/defs/` (which is generated for
+every backend) and lives in `tests/conformance/lib/nested_wrapper_rows.yaml`.
+
 ## Benchmark row
 
 Row `cpp-cpp` (corelib `cpp`) and `cpp-c-cpp` (corelib `c-cpp`) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with

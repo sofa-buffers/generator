@@ -247,13 +247,49 @@ func schemaHasCountedFloatArray(s *ir.Schema) bool {
 // all. fp32/fp64/string/blob and their native arrays all share one wire type
 // (FIXLEN / ARRAY_FIXLEN), so only the subtype separates them; every other kind
 // is settled by the wire type alone and needs no import.
+//
+// The guard exists at two levels and BOTH must be counted (issue #246): the
+// field-level pyWireGuard, and pyElemWireGuard on every wrapper-sequence ELEMENT
+// at every nesting depth. Looking only at the field and one level of native
+// element missed `array<string>`, `array<blob>` and every nested row, emitting a
+// module that names FixlenSubtype without importing it — a NameError at decode.
 func schemaHasFixlenField(s *ir.Schema) bool {
 	return schemaHasField(s, func(fld *ir.Field) bool {
 		if pyFixlenSubtype(fld.Kind) != "" {
 			return true
 		}
-		return fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) && pyFixlenSubtype(fld.Elem) != ""
+		if fld.Kind != ir.KindArray {
+			return false
+		}
+		// Field level: a native fp32/fp64 array is ARRAY_FIXLEN-framed.
+		if isNativeArrayElem(fld.Elem) && pyFixlenSubtype(fld.Elem) != "" {
+			return true
+		}
+		return elemGuardHasFixlen(fld.Elem, fld.ElemItems)
 	})
+}
+
+// elemGuardHasFixlen reports whether the per-element §7.3 guards emitted for an
+// array with element (elem, items) name a fixlen subtype at any depth. It mirrors
+// unmarshalArray's own recursion exactly, so the import stays in lockstep with
+// the emitted code: a native element reads in one call and emits no element
+// guard, while every other element kind runs pyElemWireGuard in the wrapper loop.
+func elemGuardHasFixlen(elem ir.Kind, items *ir.ArrayElem) bool {
+	if isNativeArrayElem(elem) {
+		return false // native array read — no per-element guard at this level
+	}
+	// Wrapper-sequence loop: pyElemWireGuard runs on every element header.
+	if pyFixlenSubtype(elem) != "" {
+		return true // string/blob element -> FixlenSubtype.STRING/.BLOB
+	}
+	if elem == ir.KindArray && items != nil {
+		// A nested native fp32/fp64 row is ARRAY_FIXLEN-framed, like a field.
+		if isNativeArrayElem(items.Elem) && pyFixlenSubtype(items.Elem) != "" {
+			return true
+		}
+		return elemGuardHasFixlen(items.Elem, items.ElemItems)
+	}
+	return false // struct/union element: settled by SEQUENCE_START alone
 }
 
 // pyFixlenSubtype returns the FixlenSubtype member a fixlen kind must carry, or

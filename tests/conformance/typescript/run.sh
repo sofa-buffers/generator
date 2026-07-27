@@ -30,6 +30,7 @@ messages:
   vecu: { payload: { a: { id: 0, type: u64 } } }
   veci: { payload: { a: { id: 0, type: i64 } } }
   vecf32: { payload: { a: { id: 0, type: fp32 } } }
+  vecf32a: { payload: { a: { id: 0, type: array, items: { type: fp32, count: 3 } } } }
   vecf64: { payload: { a: { id: 0, type: fp64 } } }
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
@@ -319,6 +320,38 @@ DEC_B=$( cd "$WORK/i64-long"   && npx tsx harness.ts decode m64 < "$WORK/i64_ful
 [ "$DEC_A" = "$DEC_B" ] || { echo "FAIL: int64: long decode drift"; exit 1; }
 echo "==> int64 modes OK (bigint == long == number on the wire)"
 
+# fp32 signaling-NaN bit-for-bit round-trip (issue #235): a JS number is a double,
+# and widening an fp32 sNaN into one quiets it (0x7F800001 -> 0x7FC00001), so the
+# generated code must route through corelib-ts's raw channel (readFp32Raw /
+# readFp32ArrayRaw on decode, writeFixlen / writeFp32ArrayRaw on re-encode —
+# corelib-ts#66/#72). `recode` is wire -> object -> wire with no JSON in between,
+# so an sNaN must survive decode+re-encode. This is the ts analogue of the dart
+# block in tests/conformance/dart/run.sh (generator#226) and uses the same vectors:
+# a signaling (0x7F800001), a payload/quiet (0x7FC00001) and a negative NaN, as a
+# scalar (vecf32, id 0) and as fp32 array elements (vecf32a, count 3).
+echo "==> fp32 signaling-NaN bit-exact round-trip (issue #235)"
+recode_exact() { # label message octal-wire
+    # shellcheck disable=SC2059  # $3 is a controlled octal escape sequence, not user data
+    printf "$3" > "$WORK/fp32in.bin"
+    ( cd "$WORK/conf" && npx tsx harness.ts recode "$2" ) < "$WORK/fp32in.bin" > "$WORK/fp32out.bin" \
+        || { echo "FAIL: $1 must decode"; exit 1; }
+    cmp -s "$WORK/fp32in.bin" "$WORK/fp32out.bin" \
+        || { echo "FAIL: $1 not bit-exact (an fp32 NaN was quieted)"; exit 1; }
+}
+# scalar: 02 (id0 fixlen) 20 (fp32 subtype) + 4 LE bytes
+recode_exact "scalar sNaN"    vecf32 '\002\040\001\000\200\177'
+recode_exact "scalar qNaN"    vecf32 '\002\040\001\000\300\177'
+recode_exact "scalar -NaN"    vecf32 '\002\040\001\000\300\377'
+# A finite value must still take the plain number path unchanged (2.5).
+recode_exact "scalar finite"  vecf32 '\002\040\000\000\040\100'
+# array: 05 (id0 arrayFixlen) 03 (count) 20 (fp32 subtype) + 3x4 LE bytes, all
+# non-zero so the canonical trailing-default trim keeps all three elements.
+recode_exact "array 3xNaN"    vecf32a '\005\003\040\001\000\200\177\001\000\300\177\001\000\300\377'
+# A shorter wire run refills to count 3 on decode and re-trims on encode: the
+# retained raw payload must not resurrect the elided trailing defaults.
+recode_exact "array 1xsNaN"   vecf32a '\005\001\040\001\000\200\177'
+echo "==> fp32 sNaN round-trip OK"
+
 echo "==> corpus + realworld: every definition typechecks"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
@@ -327,5 +360,36 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     ( cd "$WORK/corpus/$name" && npx tsc --noEmit )
 done
 echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+
+# Wrapper-array elements and nested rows, DECODED (issue #246).
+#
+# The loop above typechecks, which on this backend does catch a missing import —
+# but only because tsc happens to run. It cannot catch a guard that is present
+# and wrong, and a JS consumer that skips typechecking gets a ReferenceError at
+# decode instead. So round-trip the nested-array corpus definition with every
+# field non-empty: each field is a shape the import gate has to see through, and
+# the wire bytes must match Python's byte for byte (same definition, same input).
+echo "==> nested wrapper arrays: populated JSON -> wire -> JSON round-trip (#246)"
+# Compare the whole object, not one field: a gate that misses exactly one shape
+# would otherwise slip through on a spot check.
+roundtrip_exact() { # label  dir  message  json
+    _out=$( cd "$2" && printf '%s' "$4" | npx tsx harness.ts encode "$3" | npx tsx harness.ts decode "$3" ) \
+        || { echo "FAIL: $1 round-trip did not complete"; exit 1; }
+    _want=$(printf '%s' "$4" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify(JSON.parse(s))))')
+    [ "$_out" = "$_want" ] \
+        || { echo "FAIL: $1 round-trip differs"; echo " in: $_want"; echo "out: $_out"; exit 1; }
+}
+[ -d "$WORK/corpus/nested_arrays" ] || { echo "FAIL: nested_arrays corpus def missing"; exit 1; }
+roundtrip_exact corpus "$WORK/corpus/nested_arrays" NestedArrays \
+    '{"tags":["alpha","beta","gamma"],"chunks":[[1,2],[255]],"f32rows":[[1.5,2.5,3.5],[-0.5]],"f64rows":[[1.25,2.5],[3.75]],"introws":[[1,2,3,4],[5,6]],"tail":4242}'
+# The nested string/blob rows live outside corpus/defs (see that file's header:
+# the C++ backend cannot compile the shape yet), so generate that definition here.
+gen "$ROOT/tests/conformance/lib/nested_wrapper_rows.yaml" "$WORK/wrappedrows"
+ln -s "$WORK/ex/node_modules" "$WORK/wrappedrows/node_modules"
+( cd "$WORK/wrappedrows" && npx tsc --noEmit ) \
+    || { echo "FAIL: nested wrapper rows do not typecheck"; exit 1; }
+roundtrip_exact wrapper "$WORK/wrappedrows" WrapperRows \
+    '{"strrows":[["a","bb"],["ccc"]],"blobrows":[[[1]],[[2,3],[4]]],"deeprows":[[["x","y"],["z"]],[["w"]]],"tags":["alpha","beta"],"introws":[[1,2,3,4],[5,6]],"tail":4242}'
+echo "==> nested wrapper-array round-trip OK"
 
 echo "PASS"

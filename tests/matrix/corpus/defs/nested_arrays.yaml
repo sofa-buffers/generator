@@ -1,0 +1,36 @@
+# Wrapper-array elements and nested rows.
+#
+# The rest of the corpus only ever nests a NATIVE row (`arrays.yaml` is flat;
+# example.yaml's `somematrix` is a u32 matrix), so no definition exercised a
+# wrapper element below the first level until this one. That hole is what let
+# issue #246 through: the python/typescript import gates walked a field plus one
+# level of native element, missed every shape below, and emitted a module naming
+# FixlenSubtype without importing it — a NameError/ReferenceError at decode.
+#
+# Every array and string/blob carries a bound, so this is a valid input for the
+# fixed-storage targets too (the C backend rejects an unbounded field).
+#
+# NOTE — nested WRAPPER rows (`array<array<string|blob|struct>>`) are deliberately
+# NOT here (issue #250). The C++ backend emits non-compiling code for that shape
+# — it hands a raw std::vector row to sofab::MessageSeq, whose is.read() has no
+# overload for it — so putting it in the all-backend corpus would break lang-cpp
+# on a defect unrelated to #246. It lives in tests/conformance/lib/nested_wrapper_rows.yaml,
+# exercised end to end by the python and typescript jobs, until that is fixed.
+version: 1
+messages:
+  NestedArrays:
+    payload:
+      # Wrapper element at the first level: string/blob elements are FIXLEN-framed,
+      # so their per-element §7.3 guard names a fixlen subtype even though the
+      # FIELD is a plain sequence. This is the shape #246 was reported against.
+      tags:    { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      chunks:  { id: 1, type: array, items: { type: blob, count: 2, maxlen: 4 } }
+      # A nested NATIVE fp32/fp64 row is ARRAY_FIXLEN-framed, so the row header
+      # carries the subtype the enclosing wrapper loop must check — the gate has
+      # to descend one level to see it.
+      f32rows: { id: 2, type: array, items: { type: array, count: 2, items: { type: fp32, count: 3 } } }
+      f64rows: { id: 3, type: array, items: { type: array, count: 2, items: { type: fp64, count: 2 } } }
+      # Control: an integer matrix settles on wire type alone and must NOT pull a
+      # fixlen subtype in — the negative half of the same gate.
+      introws: { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 4 } } }
+      tail:    { id: 5, type: u32 }

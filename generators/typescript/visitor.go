@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -88,7 +89,15 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	case ir.KindEnum:
 		f.line("      case %d: %s%s = Number(c.readSigned()) as %s; break;", x.ID, guard, acc, g.typeName(x.Ref.Key))
 	case ir.KindFP32:
-		f.line("      case %d: %s%s = c.readFp32(); break;", x.ID, guard, acc)
+		// Read the raw 4 wire bytes, not a number: readFp32() widens through a JS
+		// double, which QUIETS a signaling NaN (0x7F800001 -> 0x7FC00001) and makes a
+		// bit-exact re-encode impossible (MESSAGE_SPEC §4.6, issue #235). The number
+		// is still what the field exposes; the bytes ride along only when the value
+		// is a NaN, which is the sole case a double cannot represent faithfully.
+		// readFp32Raw's view aliases the cursor's buffer, so retaining it requires a
+		// copy — slice(), not subarray().
+		f.line("      case %d: { %sconst _r = c.readFp32Raw(); %s = _fp32FromRaw(_r); %s = Number.isNaN(%s) ? _r.slice() : null; break; }",
+			x.ID, guard, acc, "o."+fp32RawField(x.Name), acc)
 	case ir.KindFP64:
 		f.line("      case %d: %s%s = c.readFp64(); break;", x.ID, guard, acc)
 	case ir.KindString:
@@ -131,6 +140,37 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// decodeFrom(c)'s fresh object instead would discard the earlier opening.
 		f.line("      case %d: %s%s.decodeInto(c, %s); break;", x.ID, guard, g.typeName(x.Ref.Key), acc)
 	case ir.KindArray:
+		if fp32Array(x) {
+			// Same reasoning as the fp32 scalar: readFp32Array widens each element
+			// through a double and quiets a signaling NaN, so read the whole raw
+			// payload and retain it when any element decoded to NaN (issue #235 /
+			// §4.6). The over-count reject and the fixed-count refill are unchanged —
+			// they work off the widened values exactly as before. The retained copy is
+			// the wire payload as received; re-encode emits it only while it still
+			// describes the current values (see marshalArray).
+			cnt := ""
+			if x.HasCount {
+				cnt = fmt.Sprintf("%d", x.Count)
+			}
+			raw := "o." + fp32RawField(x.Name)
+			f.line("      case %d: {", x.ID)
+			f.line("        %s", strings.TrimSuffix(guard, " "))
+			f.line("        const _rp = c.readFp32ArrayRaw(%s);", cnt)
+			f.line("        const _a = _fp32ArrayFromRaw(_rp);")
+			if x.HasCount {
+				f.line("        if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, %q);", x.Count,
+					fmt.Sprintf("%s: array count above schema capacity %d", x.Name, x.Count))
+			}
+			f.line("        %s = _a.some(Number.isNaN) ? _rp.slice() : null;", raw)
+			if x.HasCount {
+				f.line("        %s = _padTo(_a, %d, %s);", acc, x.Count, g.elemZero(x))
+			} else {
+				f.line("        %s = _a;", acc)
+			}
+			f.line("        break;")
+			f.line("      }")
+			return
+		}
 		if nativeArrayElem(x.Elem) {
 			// A wire element count above the schema `count` capacity is INVALID
 			// per MESSAGE_SPEC §3+§7 — reject the whole message, never keep-all
@@ -349,8 +389,15 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 			}
 			return g.nativeArrayRead(items.Elem, items.ElemRef, cnt)
 		}
+		// tsArrayType already returns the ARRAY type for an element kind
+		// (tsArrayType(string) == "string[]"), and the IIFE builds exactly ONE row —
+		// so rowT is the row's own type. Appending a further "[]" over-dimensioned
+		// the row by one (`string[][]` for an `array<array<string>>` row) and made
+		// the generated module fail tsc on every nested wrapper row; the shape had
+		// no coverage anywhere until tests/conformance/lib/nested_wrapper_rows.yaml,
+		// so nothing caught it.
 		rowT := g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems)
-		return "((): " + rowT + "[] => { const _r: " + rowT + "[] = []; while (c.readHeader()) { " +
+		return "((): " + rowT + " => { const _r: " + rowT + " = []; while (c.readHeader()) { " +
 			g.seqCollectBody("_r", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax) + " } return _r; })()"
 	}
 	return "undefined as never"
@@ -499,6 +546,53 @@ function _utf8Len(s: string): number {
     else n += 3;
   }
   return n;
+}`
+
+// fp32RawHelper is the bit-preserving fp32 channel (issue #235 / MESSAGE_SPEC
+// §4.6). A JS `number` is a 64-bit double, and widening an fp32 SIGNALING NaN
+// into one quiets it (0x7F800001 -> 0x7FC00001), so a field that stores only the
+// number can never re-emit the value it decoded. corelib-ts exposes the raw
+// channel (Cursor.readFp32Raw / readFp32ArrayRaw, OStream.writeFixlen /
+// writeFp32ArrayRaw — corelib-ts#66/#72); these helpers are what the generated
+// code needs on top of it. Emitted only for a schema with an fp32 field.
+const fp32RawHelper = `// _fp32FromRaw widens the 4 raw wire bytes of an fp32 to the number the field
+// stores. Widening quiets a signaling NaN, which is exactly why the bytes are
+// retained beside the value: the number is what you read, the bytes are what is
+// re-encoded, so a signaling NaN survives a decode/encode round-trip bit-exact.
+const _fp32View = new DataView(new ArrayBuffer(4));
+function _fp32FromRaw(b: Uint8Array, off = 0): number {
+  _fp32View.setUint8(0, b[off]!);
+  _fp32View.setUint8(1, b[off + 1]!);
+  _fp32View.setUint8(2, b[off + 2]!);
+  _fp32View.setUint8(3, b[off + 3]!);
+  return _fp32View.getFloat32(0, true);
+}`
+
+// fp32ArrRawHelper carries the array flavour: the payload-to-values widen plus
+// the staleness check the re-encode path needs. Emitted only when the schema has
+// a native fp32 array.
+const fp32ArrRawHelper = `// _fp32ArrayFromRaw widens a raw fp32 array payload (4 bytes per element) to the
+// number[] the field stores.
+function _fp32ArrayFromRaw(b: Uint8Array): number[] {
+  const out: number[] = new Array(b.length >> 2);
+  for (let i = 0; i < out.length; i++) out[i] = _fp32FromRaw(b, i * 4);
+  return out;
+}
+
+// _fp32RawMatches reports whether a retained raw payload still describes vals.
+// Decode retains the bytes only when an element decoded to NaN, but the field
+// stays publicly assignable, so re-encode must not emit stale bytes for a value
+// somebody replaced. Object.is keeps -0 distinct from +0 (the trailing-default
+// trim depends on that); a NaN matches a NaN, since two fp32 NaN payloads are
+// indistinguishable once widened to a double.
+function _fp32RawMatches(vals: readonly number[], raw: Uint8Array): boolean {
+  if (vals.length * 4 !== raw.length) return false;
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i]!;
+    const r = _fp32FromRaw(raw, i * 4);
+    if (Number.isNaN(v) ? !Number.isNaN(r) : !Object.is(v, r)) return false;
+  }
+  return true;
 }`
 
 // longArrEqHelper is the Long[] flavour of arrEq: Long elements are object

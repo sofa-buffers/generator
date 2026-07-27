@@ -155,6 +155,24 @@ type helperUse struct {
 	strMaxlen   bool // bounded string (scalar or wrapper element) -> emit the allocation-free _utf8Len helper for its decode-side maxlen check (blobs measure .length directly)
 	trimTail    bool // fixed-count non-Long native array -> encode-side trailing-default-run trim
 	trimTailLng bool // fixed-count Long-backed native array -> Long flavour of the trim
+	fp32Raw     bool // any fp32 field (scalar or array) -> bit-preserving raw channel (issue #235 / §4.6)
+	fp32ArrRaw  bool // native fp32 array -> the array flavour of that channel
+}
+
+// fp32RawField is the private companion holding the raw wire bytes of an fp32
+// field whose decoded value is (or contains) a NaN, so a signaling/payload NaN
+// re-encodes bit-for-bit — a JS number cannot carry an fp32 NaN payload
+// (MESSAGE_SPEC §4.6, issue #235). null means "no retained bytes; derive the
+// wire image from the value", which is the normal case. Mirrors the dart
+// backend's _<name>Fp32Bits companion (generator#226).
+func fp32RawField(name string) string { return "_" + name + "Fp32Raw" }
+
+// fp32Scalar / fp32Array classify the two field shapes that need that companion.
+// Scope is fp32 only: an fp64 sNaN already round-trips, because a JS number IS a
+// double and nothing is widened.
+func fp32Scalar(f *ir.Field) bool { return f.Kind == ir.KindFP32 }
+func fp32Array(f *ir.Field) bool {
+	return f.Kind == ir.KindArray && f.Elem == ir.KindFP32
 }
 
 // arrayOverIndexed reports whether an array field (recursively through nested
@@ -229,6 +247,14 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 			}
 			if fld.Kind == ir.KindArray && arrayHasBoundedString(fld.Elem, fld.ElemItems, fld.ElemMaxHas) {
 				use.strMaxlen = true
+			}
+			// An fp32 field decodes through the raw channel so a signaling NaN
+			// survives decode -> re-encode (issue #235 / MESSAGE_SPEC §4.6).
+			if fp32Scalar(fld) || fp32Array(fld) {
+				use.fp32Raw = true
+			}
+			if fp32Array(fld) {
+				use.fp32ArrRaw = true
 			}
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				if fld.HasCount {
@@ -677,4 +703,13 @@ func (g *gen) tsArrayFromJSON(src string, elem ir.Kind, ref *ir.TypeRef, items *
 	default:
 		return fmt.Sprintf("%s as number[]", src)
 	}
+}
+
+// fp32RawSlot names a field's retained fp32 wire-payload companion, or "" for a
+// field that has none (issue #235).
+func fp32RawSlot(f *ir.Field) string {
+	if fp32Scalar(f) || fp32Array(f) {
+		return "this." + fp32RawField(f.Name)
+	}
+	return ""
 }

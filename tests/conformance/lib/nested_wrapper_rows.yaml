@@ -1,0 +1,34 @@
+# Nested WRAPPER rows — a string/blob element below the first level.
+#
+# Companion to tests/matrix/corpus/defs/nested_arrays.yaml, kept OUT of
+# corpus/defs/ because that directory is generated for every backend and the C++
+# backend cannot compile this shape today: a nested wrapper row is emitted as
+# sofab::MessageSeq<std::vector<std::string>>, and corelib-cpp's IStream::read()
+# has no overload for a raw std::vector of strings/blobs/messages — it fails the
+# "Unsupported span element type" static_assert. That is a pre-existing C++ gap,
+# tracked as issue #250 and independent of issue #246; this file is referenced
+# explicitly by the python and typescript conformance runners so those two jobs
+# cover the shape end to end without holding lang-cpp hostage to it. Move it into corpus/defs/ once the C++
+# backend grows a row collector for wrapper rows.
+#
+# Why the shape matters (#246): the §7.3 guard that names FixlenSubtype sits on
+# the wrapper ELEMENT, not the field, so for `array<array<string>>` it lives one
+# level below the field and for the depth-3 row two levels below. An import gate
+# that stops at the field emits a module referencing a symbol it never imported —
+# valid syntax, a clean import, and a NameError/ReferenceError the moment a real
+# element arrives on the wire.
+version: 1
+messages:
+  WrapperRows:
+    payload:
+      # Depth 2: string and blob rows.
+      strrows:  { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }
+      blobrows: { id: 1, type: array, items: { type: array, count: 2, items: { type: blob, count: 2, maxlen: 4 } } }
+      # Depth 3, so the gate's walk has to recurse rather than special-case one
+      # level.
+      deeprows: { id: 2, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 8 } } } }
+      # A first-level wrapper element and an integer matrix alongside, so one
+      # decode covers both the positive and the negative half of the gate.
+      tags:     { id: 3, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      introws:  { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 4 } } }
+      tail:     { id: 5, type: u32 }

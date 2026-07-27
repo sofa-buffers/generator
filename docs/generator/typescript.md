@@ -80,6 +80,40 @@ Measured on the full-scale arena message (best-of-3, corelib-ts #19/#20):
 | `long` | 38.0 | 0.95 | 47.3 | 1.17 |
 | `number` | 40.2 | 1.04 | 50.8 | 1.18 |
 
+## fp32 and the signaling NaN
+
+A JS `number` is a 64-bit double, and widening an fp32 **signaling** NaN into one
+quiets it (`0x7F800001` becomes `0x7FC00001`). MESSAGE_SPEC §4.6 requires a
+bit-for-bit float round-trip with no normalization, so a generated field that only
+ever held the number could not satisfy it (generator#235).
+
+Every `fp32` field — scalar and array alike — therefore decodes through
+corelib-ts's **raw channel** (`Cursor.readFp32Raw` / `readFp32ArrayRaw`,
+corelib-ts#66/#72) and carries a private companion slot beside the public value:
+
+```ts
+export class M {
+  f32: number = 0;
+  private _f32Fp32Raw: Uint8Array | null = null;   // retained only for a NaN
+}
+```
+
+The public API is unchanged — `f32` is still a `number`, and JSON is unaffected.
+The bytes are retained **only when the decoded value is a NaN**, the sole case a
+double cannot represent faithfully; re-encode emits them verbatim
+(`OStream.writeFixlen` with subtype fp32, or `writeFp32ArrayRaw` for an array)
+and otherwise takes the plain `writeFp32`/`writeFp32Array` path. Assigning to the
+field is safe: the scalar path re-checks `Number.isNaN`, and the array path
+re-checks the retained payload against the current values before using it, so a
+value somebody replaced is never re-emitted from stale bytes.
+
+Scope is **fp32 only**. An fp64 sNaN already round-trips, because a JS `number`
+*is* a double and nothing is widened. Nested array-of-array rows keep the value
+path — they are wrapper-sequence elements with no companion slot of their own.
+
+This mirrors the Dart backend, which has the same constraint for the same reason
+(a Dart `double` is 64-bit; generator#226).
+
 ## Benchmark row
 
 Row `ts-bigint` and `ts-long` (one per `int64` mode) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with

@@ -9,7 +9,16 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   without `maxlen`), every array kind (numeric, array-of-string, array-of-blob),
   enums (shorthand + object form, negative values), bitfields (pos 0 and 63),
   nested structs, unions with `default_id`, large/non-contiguous field ids,
-  metadata (`deprecated`/`unit`/`description`), and `$ref` reuse.
+  metadata (`deprecated`/`unit`/`description`), `$ref` reuse, and wrapper-array
+  elements with nested rows (`nested_arrays.yaml`).
+
+  Nested **wrapper** rows (`array<array<string|blob|struct>>`) are deliberately
+  **not** here: the C++ backend cannot compile that shape yet (generator#250; see
+  `docs/ARCHITECTURE.md` §11, "On-demand imports and helpers"), and every def in
+  this directory is generated for every backend. They live in
+  `tests/conformance/lib/nested_wrapper_rows.yaml`, referenced explicitly by the
+  python and typescript conformance runners, and move here once C++ supports
+  them.
 - **`invalid/`** — definitions that **must be rejected** by the hard gate
   (duplicate ids, out-of-range defaults, enum/union default mismatch, bitfield
   pos collision, blob/string default over `maxlen`, oversize/negative u64,

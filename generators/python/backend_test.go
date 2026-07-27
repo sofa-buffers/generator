@@ -145,8 +145,14 @@ messages:
 	// The over-index guard raises SofaDecodeError, so the on-demand import MUST be
 	// emitted even when the schema has no scalar over-count array (the #100 case) —
 	// a wrapper-only schema like this one. Missing it is a NameError at decode time.
-	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType") {
-		t.Error("message.py must import SofaDecodeError for the over-index guard (else NameError at decode)")
+	//
+	// Asserted as a WHOLE line (issue #246): this used to be a prefix Contains, which
+	// still matched once FixlenSubtype was appended, so it could not tell a correct
+	// import list from one missing a name the module goes on to reference. The string
+	// elements here are FIXLEN-framed, so their §7.3 element guard names
+	// FixlenSubtype and the import must carry it.
+	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType, FixlenSubtype\n") {
+		t.Errorf("message.py import line must carry SofaDecodeError (over-index guard) and FixlenSubtype (string-element §7.3 guard); got:\n%s", importLine(mod))
 	}
 	for _, want := range []string{
 		`if _ef0.id >= 4:`,
@@ -651,5 +657,82 @@ messages:
 	}
 	if !strings.Contains(mod, "from sofab import Encoder, Decoder, WireType") {
 		t.Errorf("message.py missing plain import line:\n%s", mod)
+	}
+}
+
+// importLine returns the generated module's `from sofab import ...` line, for
+// test failure messages that show what was emitted rather than the whole module.
+func importLine(mod string) string {
+	for _, ln := range strings.Split(mod, "\n") {
+		if strings.HasPrefix(ln, "from sofab import ") {
+			return ln
+		}
+	}
+	return "(no sofab import line)"
+}
+
+// TestPythonFixlenImportSeesWrapperElements: the FixlenSubtype import gate must
+// see WRAPPER-ARRAY ELEMENTS and NESTED ROWS, not just a field plus one level of
+// native element (issue #246).
+//
+// fp32/fp64/string/blob share one wire type with their neighbours, so only the
+// fixlen subtype separates them and the §7.3 guard has to compare it. That guard
+// is emitted at two levels: on the field (pyWireGuard) and on every wrapper
+// element at every depth (pyElemWireGuard). The gate used to walk only the first,
+// so a schema whose ONLY fixlen use sits in a wrapper element emitted a module
+// that named FixlenSubtype without importing it — valid syntax, `import message`
+// succeeds, and decode dies with NameError the moment an element arrives.
+//
+// Each positive case below is a shape that produced exactly that.
+func TestPythonFixlenImportSeesWrapperElements(t *testing.T) {
+	const head = "version: 1\nmessages:\n  M:\n    payload:\n      a: "
+	for _, tc := range []struct {
+		name  string
+		field string
+		want  bool
+	}{
+		// Wrapper elements one level down: FIXLEN-framed, so the ELEMENT guard
+		// names FixlenSubtype.STRING/.BLOB even though the field is a sequence.
+		{"array of string", `{ id: 0, type: array, items: { type: string } }`, true},
+		{"array of blob", `{ id: 0, type: array, items: { type: blob } }`, true},
+		// Nested rows: the naming guard is one level below the field.
+		{"nested string row", `{ id: 0, type: array, items: { type: array, items: { type: string } } }`, true},
+		{"nested blob row", `{ id: 0, type: array, items: { type: array, items: { type: blob } } }`, true},
+		// A nested NATIVE fp32/fp64 row is ARRAY_FIXLEN-framed: the row header
+		// carries the subtype the enclosing wrapper loop checks.
+		{"nested fp32 row", `{ id: 0, type: array, items: { type: array, items: { type: fp32 } } }`, true},
+		{"nested fp64 row", `{ id: 0, type: array, items: { type: array, items: { type: fp64 } } }`, true},
+		// Depth 3 — the walk recurses rather than special-casing one level.
+		{"depth-3 string row", `{ id: 0, type: array, items: { type: array, items: { type: array, items: { type: string } } } }`, true},
+		{"depth-3 fp32 row", `{ id: 0, type: array, items: { type: array, items: { type: array, items: { type: fp32 } } } }`, true},
+		// Already covered before #246: the field-level guard.
+		{"scalar fp32", `{ id: 0, type: fp32 }`, true},
+		{"native fp64 array", `{ id: 0, type: array, items: { type: fp64, count: 2 } }`, true},
+		// Negatives: the wire type alone settles these, so the import must stay
+		// OUT — an over-eager gate would leave an unused import behind.
+		{"array of struct", `{ id: 0, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }`, false},
+		{"nested u32 row", `{ id: 0, type: array, items: { type: array, items: { type: u32 } } }`, false},
+		{"nested u64 row", `{ id: 0, type: array, items: { type: array, items: { type: u64 } } }`, false},
+		{"depth-3 i32 row", `{ id: 0, type: array, items: { type: array, items: { type: array, items: { type: i32 } } } }`, false},
+		{"plain u32", `{ id: 0, type: u32 }`, false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			mod := string(genPy(t, schema(t, head+tc.field+"\n"), map[string]any{})["message.py"])
+			imported := strings.Contains(importLine(mod), "FixlenSubtype")
+			// The invariant, stated once: the module must never NAME a symbol its
+			// import list leaves out. Checking `used` rather than hardcoding the
+			// expectation keeps the test honest if the emitter changes shape.
+			used := strings.Contains(mod, "FixlenSubtype.")
+			if used && !imported {
+				t.Errorf("module references FixlenSubtype but does not import it (NameError at decode)\n%s", importLine(mod))
+			}
+			if imported != tc.want {
+				t.Errorf("FixlenSubtype imported = %v, want %v\n%s", imported, tc.want, importLine(mod))
+			}
+			if tc.want && !used {
+				t.Errorf("expected the module to reference FixlenSubtype; import would be unused\n%s", importLine(mod))
+			}
+		})
 	}
 }

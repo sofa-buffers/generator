@@ -243,4 +243,36 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
 done
 echo "==> corpus imports ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
 
+# Wrapper-array elements and nested rows, DECODED (issue #246).
+#
+# The loop above only imports. Importing runs module-level code, so it catches a
+# missing import that the module body names -- but a symbol named inside
+# _unmarshal is not resolved until that line executes, and the guard that names
+# FixlenSubtype only runs once a wrapper ELEMENT actually arrives on the wire.
+# That is precisely how #246 stayed invisible: message.py imported cleanly for
+# years while decode would have died with NameError on the first element.
+#
+# So round-trip the nested-array corpus definition with every field non-empty.
+# Each field is a shape the import gate has to see through; a gate that misses
+# any of them fails here with NameError rather than passing quietly.
+echo "==> nested wrapper arrays: populated JSON -> wire -> JSON round-trip (#246)"
+# Compare the whole object, not one field: a gate that misses exactly one shape
+# would otherwise slip through on a spot check.
+roundtrip_exact() { # label  def  message  json
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python \
+        --in "$2" --out "$WORK/nested-$1" >/dev/null )
+    _out=$(cd "$WORK/nested-$1" && printf '%s' "$4" | python3 harness.py encode "$3" | python3 harness.py decode "$3") \
+        || { echo "FAIL: $1 round-trip did not complete"; exit 1; }
+    _want=$(printf '%s' "$4" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)))')
+    [ "$_out" = "$_want" ] \
+        || { echo "FAIL: $1 round-trip differs"; echo " in: $_want"; echo "out: $_out"; exit 1; }
+}
+roundtrip_exact corpus tests/matrix/corpus/defs/nested_arrays.yaml NestedArrays \
+    '{"tags":["alpha","beta","gamma"],"chunks":[[1,2],[255]],"f32rows":[[1.5,2.5,3.5],[-0.5]],"f64rows":[[1.25,2.5],[3.75]],"introws":[[1,2,3,4],[5,6]],"tail":4242}'
+# The nested string/blob rows live outside corpus/defs (see that file's header:
+# the C++ backend cannot compile the shape yet), so name the definition directly.
+roundtrip_exact wrapper tests/conformance/lib/nested_wrapper_rows.yaml WrapperRows \
+    '{"strrows":[["a","bb"],["ccc"]],"blobrows":[[[1]],[[2,3],[4]]],"deeprows":[[["x","y"],["z"]],[["w"]]],"tags":["alpha","beta"],"introws":[[1,2,3,4],[5,6]],"tail":4242}'
+echo "==> nested wrapper-array round-trip OK"
+
 echo "PASS"

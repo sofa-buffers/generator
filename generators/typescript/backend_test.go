@@ -88,7 +88,10 @@ func TestTSWireTypeGuard(t *testing.T) {
 		// fp32/fp64/string/blob share WireType.Fixlen, so the guard also checks the
 		// fixlen subtype (corelib-ts#58); the fp arrays share ArrayFixlen likewise.
 		"case 2: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } o.c = c.readString(); break;",
-		"case 3: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp32) { c.skip(c.wire); break; } o.d = c.readFp32(); break;",
+		// fp32 keeps the same guard, then reads the RAW bytes rather than a number:
+		// widening an fp32 signaling NaN through a JS double quiets it (issue #235 /
+		// §4.6), so the value and the wire bytes are decoded side by side.
+		"case 3: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp32) { c.skip(c.wire); break; } const _r = c.readFp32Raw(); o.d = _fp32FromRaw(_r); o._dFp32Raw = Number.isNaN(o.d) ? _r.slice() : null; break; }",
 		"case 4: if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; } ME.decodeInto(c, o.e); break;", // nested message, decoded into the existing member (§7.4)
 		"case 5: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.f = c.readUnsignedArray() as number[]; break;",
 		"case 6: if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } o.g = c.readSignedArray() as number[]; break;",
@@ -178,7 +181,7 @@ func TestTSHeaderBoundReject(t *testing.T) {
 	// the dynamic array passes nothing (unbounded — no header arg).
 	for _, want := range []string{
 		"c.readUnsignedArray(4) as number[]", // ua, count 4 -> header reject
-		"c.readFp32Array(3)",                 // fa, count 3 -> header reject
+		"c.readFp32ArrayRaw(3)",              // fa, count 3 -> header reject (raw channel, issue #235)
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing header-bound reader call %q:\n%s", want, mod)
@@ -484,7 +487,11 @@ func TestTSFixedCountTrailingDefaultRun(t *testing.T) {
 		// Encode: fixed-count native arrays trim, one form per element kind.
 		"os.writeUnsignedArray(0, _trimTail(this.fu32, 0));",
 		"os.writeSignedArray(2, _trimTail(this.fi16, 0));",
-		"os.writeFp32Array(3, _trimTail(this.ffp32, 0));",
+		// fp32 still trims, but through the raw-channel branch: the trimmed values go
+		// to a local first, so the retained wire payload can be re-emitted verbatim
+		// when it still describes them (issue #235 / bit-exact signaling NaN).
+		"const _f32t = _trimTail(this.ffp32, 0);",
+		"os.writeFp32Array(3, _f32t);",
 		"os.writeFp64Array(4, _trimTail(this.ffp64, 0));",
 		"os.writeUnsignedArray(6, _trimTail(this.fbool.map((_e0) => (_e0 ? 1 : 0)), 0));",
 		"os.writeSignedArray(8, _trimTail(this.fenum, 0 as EnumMode));",
@@ -758,5 +765,212 @@ messages:
 	// A wrapper-array ELEMENT is genuinely new per index, so it keeps decodeFrom.
 	if !strings.Contains(mod, "MEElem.decodeFrom(c)") {
 		t.Errorf("array elements must still use decodeFrom (fresh per index):\n%s", mod)
+	}
+}
+
+// tsImportLine returns the generated module's corelib import line, for failure
+// messages that show what was emitted rather than the whole module.
+func tsImportLine(mod string) string {
+	for _, ln := range strings.Split(mod, "\n") {
+		if strings.HasPrefix(ln, "import {") {
+			return ln
+		}
+	}
+	return "(no corelib import line)"
+}
+
+// TestTSFixlenImportSeesWrapperElements: the FixlenSubtype import gate must see
+// WRAPPER-ARRAY ELEMENTS and NESTED ROWS, not just a field plus one level of
+// native element (issue #246) — the TS half of the same gap as the Python test.
+//
+// The §7.3 guard is emitted on the field (tsWireGuardCond) AND on every wrapper
+// element at every depth (tsElemWireGuardCond). Walking only the first meant a
+// schema whose only fixlen use sits in a wrapper element emitted a module naming
+// FixlenSubtype without importing it: tsc fails, and a JS consumer that skips
+// typechecking gets a ReferenceError at decode.
+func TestTSFixlenImportSeesWrapperElements(t *testing.T) {
+	const head = "version: 1\nmessages:\n  M:\n    payload:\n      a: "
+	for _, tc := range []struct {
+		name  string
+		field string
+		want  bool
+	}{
+		{"array of string", `{ id: 0, type: array, items: { type: string } }`, true},
+		{"array of blob", `{ id: 0, type: array, items: { type: blob } }`, true},
+		{"nested string row", `{ id: 0, type: array, items: { type: array, items: { type: string } } }`, true},
+		{"nested blob row", `{ id: 0, type: array, items: { type: array, items: { type: blob } } }`, true},
+		{"nested fp32 row", `{ id: 0, type: array, items: { type: array, items: { type: fp32 } } }`, true},
+		{"nested fp64 row", `{ id: 0, type: array, items: { type: array, items: { type: fp64 } } }`, true},
+		{"depth-3 string row", `{ id: 0, type: array, items: { type: array, items: { type: array, items: { type: string } } } }`, true},
+		{"depth-3 fp32 row", `{ id: 0, type: array, items: { type: array, items: { type: array, items: { type: fp32 } } } }`, true},
+		{"scalar fp32", `{ id: 0, type: fp32 }`, true},
+		{"native fp64 array", `{ id: 0, type: array, items: { type: fp64, count: 2 } }`, true},
+		// Negatives: settled by the wire type alone, so the import stays out.
+		{"array of struct", `{ id: 0, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }`, false},
+		{"nested u32 row", `{ id: 0, type: array, items: { type: array, items: { type: u32 } } }`, false},
+		{"nested u64 row", `{ id: 0, type: array, items: { type: array, items: { type: u64 } } }`, false},
+		{"depth-3 i32 row", `{ id: 0, type: array, items: { type: array, items: { type: array, items: { type: i32 } } } }`, false},
+		{"plain u32", `{ id: 0, type: u32 }`, false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			mod := genTSWith(t, head+tc.field+"\n", map[string]any{})
+			imported := strings.Contains(tsImportLine(mod), "FixlenSubtype")
+			used := strings.Contains(mod, "FixlenSubtype.")
+			if used && !imported {
+				t.Errorf("module references FixlenSubtype but does not import it (tsc error / ReferenceError at decode)\n%s", tsImportLine(mod))
+			}
+			if imported != tc.want {
+				t.Errorf("FixlenSubtype imported = %v, want %v\n%s", imported, tc.want, tsImportLine(mod))
+			}
+			if tc.want && !used {
+				t.Errorf("expected the module to reference FixlenSubtype; import would be unused\n%s", tsImportLine(mod))
+			}
+		})
+	}
+}
+
+// TestTSNestedWrapperRowType: the IIFE that decodes ONE nested wrapper row must
+// be typed as that row, not as an array of rows. tsArrayType already returns an
+// array type (tsArrayType(string) == "string[]"), so the old `rowT + "[]"` was
+// one dimension too many and every `array<array<string|blob|struct>>` schema
+// failed tsc. Found by generating tests/matrix/corpus/defs/nested_arrays.yaml,
+// the first definition to carry the shape (issue #246).
+func TestTSNestedWrapperRowType(t *testing.T) {
+	const head = "version: 1\nmessages:\n  M:\n    payload:\n      a: "
+	for _, tc := range []struct {
+		name  string
+		field string
+		want  string
+	}{
+		{"nested string row", `{ id: 0, type: array, items: { type: array, items: { type: string } } }`, "((): string[] =>"},
+		{"nested blob row", `{ id: 0, type: array, items: { type: array, items: { type: blob } } }`, "((): Uint8Array[] =>"},
+		{"depth-3 string row", `{ id: 0, type: array, items: { type: array, items: { type: array, items: { type: string } } } }`, "((): string[][] =>"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			mod := genTSWith(t, head+tc.field+"\n", map[string]any{})
+			if !strings.Contains(mod, tc.want) {
+				t.Errorf("nested row IIFE must be typed %q\n%s", tc.want, mod)
+			}
+			// The paired local declaration must carry the same type.
+			decl := strings.Replace(tc.want, "((): ", "const _r: ", 1)
+			decl = strings.TrimSuffix(decl, " =>") + " = []"
+			if !strings.Contains(mod, decl) {
+				t.Errorf("nested row accumulator must be declared %q\n%s", decl, mod)
+			}
+		})
+	}
+}
+
+// TestTSFp32RawChannel: an fp32 field must decode and re-encode through
+// corelib-ts's BIT-PRESERVING raw channel, not through a JS number (issue #235 /
+// MESSAGE_SPEC §4.6).
+//
+// A JS number is a 64-bit double, and widening an fp32 SIGNALING NaN into one
+// quiets it (0x7F800001 -> 0x7FC00001), so a field that only ever holds the
+// number cannot re-emit what it decoded. corelib-ts exposes the raw channel
+// (corelib-ts#66/#72); this asserts the generated code actually consumes it, for
+// the scalar AND for fp32 array elements. Mirrors the dart backend (#226).
+func TestTSFp32RawChannel(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      s:  { id: 0, type: fp32 }
+      fa: { id: 1, type: array, items: { type: fp32, count: 3 } }
+      fd: { id: 2, type: array, items: { type: fp32 } }
+      d:  { id: 3, type: fp64 }
+      da: { id: 4, type: array, items: { type: fp64, count: 2 } }
+`
+	mod := genTSWith(t, src, map[string]any{})
+	for _, want := range []string{
+		// Companion raw-bytes slots, one per fp32 field.
+		"private _sFp32Raw: Uint8Array | null = null;",
+		"private _faFp32Raw: Uint8Array | null = null;",
+		"private _fdFp32Raw: Uint8Array | null = null;",
+		// Scalar: raw read, retained only for a NaN, and re-emitted verbatim.
+		"const _r = c.readFp32Raw();",
+		"o._sFp32Raw = Number.isNaN(o.s) ? _r.slice() : null;",
+		"os.writeFixlen(0, this._sFp32Raw, FixlenSubtype.Fp32);",
+		// Array: raw payload read, retained when any element is NaN.
+		"const _rp = c.readFp32ArrayRaw(3);",
+		"const _rp = c.readFp32ArrayRaw();",
+		"_a.some(Number.isNaN) ? _rp.slice() : null;",
+		"os.writeFp32ArrayRaw(1, this._faFp32Raw);",
+		// The retained payload is only used while it still describes the values.
+		"_fp32RawMatches(_f32t, this._faFp32Raw)",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing fp32 raw-channel emit %q", want)
+		}
+	}
+	// The quieting readers must be gone from the fp32 paths entirely.
+	for _, bad := range []string{
+		"c.readFp32();",
+		"c.readFp32Array(",
+	} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("message.ts still uses the value-widening fp32 reader %q (quiets a signaling NaN)", bad)
+		}
+	}
+	// The over-count reject and the fixed-count refill must survive the rewrite.
+	for _, want := range []string{
+		`if (_a.length > 3) throw new SofabError(SofabErrorCode.InvalidMsg, "fa: array count above schema capacity 3");`,
+		"o.fa = _padTo(_a, 3, 0);",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts lost an array guard across the raw-channel rewrite: %q", want)
+		}
+	}
+	// fp64 is out of scope: a JS number IS a double, so nothing is widened and an
+	// fp64 sNaN already round-trips. It must keep the plain readers and gain no
+	// companion slot.
+	for _, want := range []string{"c.readFp64();", "c.readFp64Array(2)", "os.writeFp64(3, this.d);"} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("fp64 must keep the plain value path: missing %q", want)
+		}
+	}
+	if strings.Contains(mod, "Fp64Raw") {
+		t.Error("fp64 must not gain a raw-bytes companion (issue #235 is fp32-only)")
+	}
+}
+
+// TestTSFp32RawHelpersOnDemand: the raw-channel helpers are emitted only for the
+// schemas that reference them — a module with no fp32 field must not carry them.
+func TestTSFp32RawHelpersOnDemand(t *testing.T) {
+	const head = "version: 1\nmessages:\n  M:\n    payload:\n      a: "
+	for _, tc := range []struct {
+		name             string
+		field            string
+		scalarHelperWant bool
+		arrHelperWant    bool
+	}{
+		{"fp32 scalar", `{ id: 0, type: fp32 }`, true, false},
+		{"fp32 array", `{ id: 0, type: array, items: { type: fp32, count: 2 } }`, true, true},
+		{"fp64 scalar", `{ id: 0, type: fp64 }`, false, false},
+		{"fp64 array", `{ id: 0, type: array, items: { type: fp64, count: 2 } }`, false, false},
+		{"u32 scalar", `{ id: 0, type: u32 }`, false, false},
+		// A nested fp32 row has no companion slot of its own, so it keeps the value
+		// path and needs neither helper.
+		{"nested fp32 row", `{ id: 0, type: array, items: { type: array, items: { type: fp32 } } }`, false, false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			mod := genTSWith(t, head+tc.field+"\n", map[string]any{})
+			if got := strings.Contains(mod, "function _fp32FromRaw("); got != tc.scalarHelperWant {
+				t.Errorf("_fp32FromRaw emitted = %v, want %v", got, tc.scalarHelperWant)
+			}
+			if got := strings.Contains(mod, "function _fp32RawMatches("); got != tc.arrHelperWant {
+				t.Errorf("_fp32RawMatches emitted = %v, want %v", got, tc.arrHelperWant)
+			}
+			// Never name a helper the module does not define.
+			for _, h := range []string{"_fp32FromRaw", "_fp32ArrayFromRaw", "_fp32RawMatches"} {
+				if strings.Contains(mod, h+"(") && !strings.Contains(mod, "function "+h+"(") {
+					t.Errorf("module calls %s but never defines it", h)
+				}
+			}
+		})
 	}
 }

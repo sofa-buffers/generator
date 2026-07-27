@@ -181,6 +181,14 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("%s", utf8LenHelper)
 		f.blank()
 	}
+	if use.fp32Raw {
+		f.line("%s", fp32RawHelper)
+		f.blank()
+	}
+	if use.fp32ArrRaw {
+		f.line("%s", fp32ArrRawHelper)
+		f.blank()
+	}
 
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
@@ -225,13 +233,27 @@ func decodesAnyField(s *ir.Schema) bool {
 // FixlenSubtype — a fixlen scalar (fp32/fp64/string/blob) or a native fp32/fp64
 // array, the only kinds the wire type alone does not settle. Mirrors the
 // per-field decision in tsWireGuardCond so the import matches the emitted code.
+//
+// The guard exists at two levels and BOTH must be counted (issue #246): the
+// field-level tsWireGuardCond, and tsElemWireGuardCond on every wrapper-sequence
+// ELEMENT at every nesting depth. Looking only at the field and one level of
+// native element missed `array<string>`, `array<blob>` and every nested row,
+// emitting a module that names FixlenSubtype without importing it — a
+// ReferenceError at decode, and a tsc failure on the way there.
 func schemaHasFixlenGuard(s *ir.Schema) bool {
 	has := func(fields []*ir.Field) bool {
 		for _, x := range fields {
 			if tsFixSub(x.Kind) != "" {
 				return true
 			}
-			if x.Kind == ir.KindArray && nativeArrayElem(x.Elem) && tsFixSub(x.Elem) != "" {
+			if x.Kind != ir.KindArray {
+				continue
+			}
+			// Field level: a native fp32/fp64 array is ArrayFixlen-framed.
+			if nativeArrayElem(x.Elem) && tsFixSub(x.Elem) != "" {
+				return true
+			}
+			if elemGuardHasFixlen(x.Elem, x.ElemItems) {
 				return true
 			}
 		}
@@ -249,6 +271,30 @@ func schemaHasFixlenGuard(s *ir.Schema) bool {
 		}
 	}
 	return false
+}
+
+// elemGuardHasFixlen reports whether the per-element §7.3 guards emitted for an
+// array with element (elem, items) name a fixlen subtype at any depth. It mirrors
+// seqCollectBody/elemDecode's own recursion exactly, so the import stays in
+// lockstep with the emitted code: a native element reads in one call and emits no
+// element guard, while every other element kind runs tsElemWireGuardCond in the
+// wrapper loop.
+func elemGuardHasFixlen(elem ir.Kind, items *ir.ArrayElem) bool {
+	if nativeArrayElem(elem) {
+		return false // native array read — no per-element guard at this level
+	}
+	// Wrapper-sequence loop: tsElemWireGuardCond runs on every element header.
+	if tsFixSub(elem) != "" {
+		return true // string/blob element -> FixlenSubtype.String/.Blob
+	}
+	if elem == ir.KindArray && items != nil {
+		// A nested native fp32/fp64 row is ArrayFixlen-framed, like a field.
+		if nativeArrayElem(items.Elem) && tsFixSub(items.Elem) != "" {
+			return true
+		}
+		return elemGuardHasFixlen(items.Elem, items.ElemItems)
+	}
+	return false // struct/union element: settled by SequenceStart alone
 }
 
 func (g *gen) emitEnum(f *tsfile, nt *ir.NamedType) {
@@ -281,6 +327,13 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 		}
 		f.emitDoc("  ", fieldDoc(fld))
 		f.line("  %s: %s = %s;", fld.Name, g.tsType(fld), g.tsDefault(fld))
+		if fp32Scalar(fld) || fp32Array(fld) {
+			// Companion raw-bytes slot: a JS number cannot carry an fp32 NaN's
+			// payload/signaling bits (§4.6), so when decode delivers a NaN we keep the
+			// exact wire bytes here and re-emit them verbatim. null == "no retained
+			// bytes; derive the wire image from the value" (issue #235).
+			f.line("  private %s: Uint8Array | null = null;", fp32RawField(fld.Name))
+		}
 	}
 	f.blank()
 
@@ -346,7 +399,13 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 	case ir.KindBool:
 		write = fmt.Sprintf("os.writeBoolean(%d, %s);", fld.ID, acc)
 	case ir.KindFP32:
-		write = fmt.Sprintf("os.writeFp32(%d, %s);", fld.ID, acc)
+		// A NaN with retained bytes re-emits bit-for-bit (writeFixlen, subtype fp32);
+		// any other value takes the plain number path. Mirrors the dart backend's
+		// `isNaN && bits != null` guard (generator#226) — the retained bytes describe
+		// a NaN, so a value that is no longer NaN must not use them (issue #235).
+		raw := "this." + fp32RawField(fld.Name)
+		write = fmt.Sprintf("if (Number.isNaN(%s) && %s !== null) { os.writeFixlen(%d, %s, FixlenSubtype.Fp32); } else { os.writeFp32(%d, %s); }",
+			acc, raw, fld.ID, raw, fld.ID, acc)
 	case ir.KindFP64:
 		write = fmt.Sprintf("os.writeFp64(%d, %s);", fld.ID, acc)
 	case ir.KindString:
@@ -399,11 +458,11 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("    if (%s.length !== 0) {", acc)
 		}
-		g.marshalArray(f, "      ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
+		g.marshalArray(f, "      ", fmt.Sprintf("%d", fld.ID), acc, fp32RawSlot(fld), fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
 		f.line("    }")
 		return
 	}
-	g.marshalArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
+	g.marshalArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fp32RawSlot(fld), fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
 }
 
 // trimExpr wraps a native array expression in the trailing-default-run trim a
@@ -435,7 +494,10 @@ func (g *gen) trimExpr(val string, elem ir.Kind, ref *ir.TypeRef, fixed bool) st
 // whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
 // arrays. `fixed` marks a declared `count: N` field, whose trailing default run
 // is trimmed off the wire (MESSAGE_SPEC §3).
-func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
+// rawSlot names the field's retained fp32 wire-payload companion (issue #235),
+// or "" when there is none — a non-fp32 array, or a nested row, which has no
+// companion slot of its own.
+func (g *gen) marshalArray(f *tsfile, ind, idExpr, val, rawSlot string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
 	ev := fmt.Sprintf("_e%d", depth)
 	iv := fmt.Sprintf("_i%d", depth)
 	switch elem {
@@ -465,6 +527,19 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindBitfield:
 		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindFP32:
+		// Bit-exact re-encode (issue #235 / §4.6): when decode retained the wire
+		// payload (some element was NaN) and it still describes the current values,
+		// emit those bytes verbatim rather than re-quantizing each number — which
+		// would quiet a signaling NaN. Only a top-level fp32 FIELD has a companion
+		// slot; a nested row (depth > 0) has nowhere to retain bytes, so it keeps
+		// the value path.
+		if depth == 0 && rawSlot != "" {
+			trimmed := g.trimExpr(val, elem, ref, fixed)
+			f.line("%sconst _f32t = %s;", ind, trimmed)
+			f.line("%sif (%s !== null && _fp32RawMatches(_f32t, %s)) { os.writeFp32ArrayRaw(%s, %s); } else { os.writeFp32Array(%s, _f32t); }",
+				ind, rawSlot, rawSlot, idExpr, rawSlot, idExpr)
+			return
+		}
 		f.line("%sos.writeFp32Array(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindFP64:
 		f.line("%sos.writeFp64Array(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
@@ -505,7 +580,7 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 		// A nested row is a wrapper-sequence element, not a `count: N` field: the
 		// trailing-default-run rule is scoped to fields (MESSAGE_SPEC §3), so rows
 		// are never trimmed.
-		g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
+		g.marshalArray(f, ind+"  ", iv, ev, "", items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
 		f.line("%s});", ind)
 		f.line("%sos.writeSequenceEnd();", ind)
 	}

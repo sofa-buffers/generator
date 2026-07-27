@@ -1348,8 +1348,8 @@ above was found by that check on its first run.
 | **C++** | `corelib-cpp` (default) / `corelib-c-cpp` (`corelib: c-cpp`) | child-visitor / flat-visitor wrapper | header-only `OStreamMessage`+`IStreamMessage`; `c-cpp` decode pre-sizes varlen fields + links the C sources. |
 | **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. |
 | **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; `Decode` via zero-copy `sofab.AcceptBytes`; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
-| **Python** | `corelib-py` | pull-parser | dataclasses + `_marshal`/`_unmarshal`. |
-| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`. |
+| **Python** | `corelib-py` | pull-parser | dataclasses + `_marshal`/`_unmarshal`; the module's `from sofab import ...` list and its private helpers are emitted **on demand**, gated by a schema walk (see §11, "On-demand imports and helpers"). |
+| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`; a JS `number` is a 64-bit double, so an fp32 NaN routes through the corelib raw channel (`readFp32Raw`/`readFp32ArrayRaw` on decode, `writeFixlen`/`writeFp32ArrayRaw` on re-encode) with a companion `Uint8Array | null` slot retained only when a NaN was decoded, preserving a signaling NaN bit-for-bit (§4.6, #235) — the same shape as the Dart row. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
 | **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `marshal`; zero-copy decode (strings/blobs borrow the input buffer, arrays from a caller allocator); fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
@@ -1380,6 +1380,59 @@ metadata above. The `docs` target renders the same metadata as HTML page content
 ---
 
 ## 11. Cross-cutting design decisions
+
+- **On-demand imports and helpers: the gate must mirror the emitter, at every
+  depth** (generator#246). The Python and TypeScript backends emit their import
+  list and module-private helpers *conditionally*, so a schema that never uses a
+  feature keeps an unused symbol out of the generated module. Each condition is a
+  schema walk, and every such walk is a **duplicate of the emitter's own
+  recursion** — which makes it a standing correctness hazard rather than a
+  cosmetic one: a gate that under-approximates emits a module that **names a
+  symbol it never imported**. That is not a compile-time nuisance in Python; it
+  is a `NameError` raised from inside `_unmarshal`, so `import message` succeeds
+  and only a real decode of the affected shape fails.
+
+  The rule for any such gate: **walk what the emitter walks.** A guard exists at
+  two levels — on the field, and on every wrapper-sequence *element* at every
+  nesting depth (§9.1) — so a gate that inspects a field plus one level of
+  *native* element misses `array<string>`, `array<blob>`, and every nested row.
+  That is exactly how #246 shipped: `FixlenSubtype` (the fp32/fp64/string/blob
+  subtype comparison that §7.3 needs, because those four share one wire type)
+  went unimported for any schema whose only fixlen use sat in a wrapper element.
+
+  Two structural conclusions, both acted on:
+  - Prefer a gate that **reuses the emitter's recursion shape** literally, and
+    say so in its doc comment, so the two drift together or not at all. The four
+    Python gates that were already correct (`schemaHasCountedWrapperArray`,
+    `schemaHasMaxlenStringBlob`, and the two counted-native-array gates) are
+    exactly the ones written that way.
+  - A gate is only as good as the corpus. There was **no definition anywhere**
+    with a wrapper element below the first level, so nothing could have caught
+    this. `tests/matrix/corpus/defs/nested_arrays.yaml` now carries the shapes
+    every backend supports (first-level string/blob elements, nested fp32/fp64
+    rows, an integer-matrix control), and
+    `tests/conformance/lib/nested_wrapper_rows.yaml` carries the nested
+    string/blob rows at depth 2 and 3. Both are **decoded populated** by the
+    python and typescript jobs rather than merely imported or typechecked — an
+    import-only check passes straight through this whole class of bug.
+
+  Adding that coverage immediately surfaced two further defects in the same
+  never-exercised shape, which is the point:
+  - **TypeScript nested-row type** — `elemDecode` typed the row IIFE as
+    `tsArrayType(...) + "[]"`, but `tsArrayType` already returns an array type,
+    so every `array<array<string|blob>>` schema was over-dimensioned by one and
+    failed `tsc` outright. Fixed alongside #246.
+  - **C++ nested wrapper rows (open, generator#250)** — a nested wrapper row is emitted as
+    `sofab::MessageSeq<std::vector<std::string>>`, whose `deserialize` hands the
+    raw row to `IStream::read()`; corelib-cpp has no overload for a vector of
+    strings/blobs/messages, so the generated header fails the "Unsupported span
+    element type" `static_assert`. `array<array<string>>`,
+    `array<array<blob>>` and `array<array<struct>>` therefore do not compile on
+    the C++ target. Native nested rows (`array<array<u32>>`) and first-level
+    wrapper elements are unaffected. The fix is a generated row collector that
+    wraps each row in the corelib's existing `StringSeq`/`BlobSeq` rather than
+    routing it through the generic `MessageSeq`; until then the shape is kept
+    out of `corpus/defs/` so the all-backend loop stays green.
 
 - **Fixed-count arrays: the trailing-default-run rule** (MESSAGE_SPEC §3,
   adopted in documentation#18; generator#136 / Crucible F-0010). A field
