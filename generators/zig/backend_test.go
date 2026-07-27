@@ -178,7 +178,7 @@ messages:
 		// element reject (MESSAGE_SPEC §7.1); both flag self.inv before sofab.arrays.setElem grows.
 		`.root_bs => if (id >= 4) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem`, // string element: strict UTF-8 wraps the store
 		`.root_bb => if (id >= 3) { self.inv = true; } else { if (total > 16) { self.inv = true; } else { sofab.arrays.setElem`,                                                           // blob element: opaque, stored verbatim
-		`.root_bp => blk: { if (id >= 2) self.inv = true; break :blk if (sofab.arrays.grow`,                                                                                               // bounded struct
+		".root_bp => blk: {\n                if (id >= 2) { self.inv = true; break :blk .dead; }\n",                                                                                       // bounded struct: rejected BEFORE the gap-fill grows
 		`if (v.inv) return error.InvalidMessage;`, // surfaced as INVALID
 	} {
 		if !strings.Contains(m, want) {
@@ -709,8 +709,9 @@ messages:
 	for _, want := range []string{
 		// FIELD wrappers, one per array field: closed with the dropping end, so an
 		// empty array is omitted and absence reconstructs it.
-		"try os.writeSequenceBeginLazy(1);\n        for (self.s, 0..) |_e0, _i0| {\n            if (_e0.len != 0) try os.writeString(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
-		"try os.writeSequenceBeginLazy(2);\n        for (self.b, 0..) |_e0, _i0| {\n            if (_e0.len != 0) try os.writeBlob(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
+		// (the element loop runs over the narrowed run -- see elemTrimExpr)
+		"try os.writeSequenceBeginLazy(1);\n        for (_trimSlices(u8, self.s), 0..) |_e0, _i0| {\n            if (_e0.len != 0) try os.writeString(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
+		"try os.writeSequenceBeginLazy(2);\n        for (_trimSlices(u8, self.b), 0..) |_e0, _i0| {\n            if (_e0.len != 0) try os.writeBlob(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
 		// A struct ELEMENT keeps its frame even with every child at its default.
 		"            try os.writeSequenceBeginLazy(@intCast(_i0));\n            try _e0.marshal(os);\n            try os.writeSequenceEndKeep();\n        }\n        try os.writeSequenceEnd();",
 		// A nested array row is an ELEMENT too: its own frame is kept, while the
@@ -752,5 +753,110 @@ messages:
 	}
 	if strings.Contains(sm, "writeSequenceEndKeep") {
 		t.Error("a struct FIELD must not keep an all-default frame")
+	}
+}
+
+// A count:N wrapper array's canonical wire stops at M -- one past its last
+// non-default element (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements")
+// -- and M == 0 leaves the whole wrapper omitted (§2). generator#248: the
+// element loop used to run to the slice length, framing every trailing
+// all-default element, so a decoder that accepted the non-canonical form
+// re-encoded it unchanged instead of normalising. A DYNAMIC array has no N to
+// refill from, so its trailing default element is significant and stays framed.
+func TestZigFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	// The fixed array narrows to M before framing anything...
+	if !strings.Contains(m, "for (_trimObjs(VecFixedElem, self.fixed), 0..) |*_e0, _i0| {") {
+		t.Errorf("count:N struct array must loop to M, not to the slice length:\n%s", m)
+	}
+	// ...while the dynamic one keeps every element, trailing defaults included.
+	if !strings.Contains(m, "for (self.dynamic, 0..) |*_e0, _i0| {") {
+		t.Errorf("dynamic struct array must not be narrowed:\n%s", m)
+	}
+	// An interior all-default element is still framed: only the TRAILING run goes.
+	if !strings.Contains(m, "            try os.writeSequenceBeginLazy(@intCast(_i0));\n            try _e0.marshal(os);\n            try os.writeSequenceEndKeep();\n") {
+		t.Errorf("interior elements must keep the framing closer:\n%s", m)
+	}
+
+	// isDefault is the exact negation of what marshal writes, so it must narrow a
+	// field exactly when the marshal loop does -- disagreeing would either omit a
+	// field that is on the wire or keep one that is not.
+	if !strings.Contains(m, "if (_trimObjs(VecFixedElem, self.fixed).len != 0) return false;") {
+		t.Errorf("isDefault must narrow the fixed array like marshal does:\n%s", m)
+	}
+	if !strings.Contains(m, "if (self.dynamic.len != 0) return false;") {
+		t.Errorf("isDefault must NOT narrow the dynamic array:\n%s", m)
+	}
+	if !strings.Contains(m, "if (_trimSlices(u8, self.fstrs).len != 0) return false;") {
+		t.Errorf("isDefault for a string wrapper array must test the narrowed run:\n%s", m)
+	}
+	// The element predicate itself: the explicit form of the "no child was
+	// written" test the lazy framing only encodes implicitly for a FIELD.
+	if !strings.Contains(m, "pub fn isDefault(self: *const VecFixedElem) bool {\n        if (self.k != 0) return false;\n        return true;\n    }") {
+		t.Errorf("every struct type must carry the all-default predicate:\n%s", m)
+	}
+}
+
+// generator#247: a wrapper array's element id IS the array index (§5.1), so an
+// element is PLACED at dest[id] after gap-filling -- never appended. Appending
+// shortened the array by the size of any interior id gap and decoded a REOPENED
+// id as a second element instead of merging into the first (§7.4). The leaf
+// string/blob path next to it (sofab.arrays.setElem) always got this right.
+//
+// The N-fill when the sequence scope closes is what makes the §3/§5.1 trailing
+// elision lossless: without it, re-encoding a decoded fixed array shortens it on
+// every round trip.
+func TestZigWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      objs: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } } }
+      dyn:  { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	for _, want := range []string{
+		// placement, not append -- and the gap-fill that precedes it
+		"                if (!sofab.arrays.grow(VecObjsElem, self.alloc, &(self.m.objs), @as(usize, id) + 1, .{})) break :blk .dead;\n                self.ei_root_objs = id;\n                break :blk .root_objs_e;",
+		// the child stores address that element, never the last appended one
+		"0 => _at(self.m.objs, self.ei_root_objs).k = @truncate(value),",
+		// the cap bound still rejects an out-of-range element id, which also
+		// bounds the gap-fill above
+		"                if (id >= 4) { self.inv = true; break :blk .dead; }",
+		// N-fill when the sequence scope closes
+		"            .root_objs => _ = sofab.arrays.grow(VecObjsElem, self.alloc, &(self.m.objs), 4, .{}),",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing %q:\n%s", want, m)
+		}
+	}
+	// The defect this replaced: appending ignored the id entirely.
+	if strings.Contains(m, "self.m.objs.len + 1") || strings.Contains(m, "sofab.arrays.last(self.m.objs)") {
+		t.Errorf("a wrapper element must not be appended id-blind:\n%s", m)
+	}
+	// A dynamic array has no N to refill from: its length is highest-present-id
+	// + 1, so it is never filled.
+	if strings.Contains(m, "&(self.m.dyn), 4") || strings.Contains(m, ".root_dyn => _ = sofab.arrays.grow") {
+		t.Errorf("a dynamic wrapper array must never be default-filled:\n%s", m)
 	}
 }

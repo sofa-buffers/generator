@@ -40,6 +40,22 @@ pub const Scalars = struct {
         if (self.flag != true) try os.writeBoolean(7, self.flag);
     }
 
+    /// True when every field equals its declared default, compared per field
+    /// and recursively -- i.e. when marshal would write no child at all
+    /// (S2). A `count: N` array of this type trims its trailing
+    /// run of default elements with it (S3/S5.1).
+    pub fn isDefault(self: *const Scalars) bool {
+        if (self.u8min != 0) return false;
+        if (self.u8max != 255) return false;
+        if (self.u64max != 18446744073709551615) return false;
+        if (self.i8min != -128) return false;
+        if (self.i64min != -9223372036854775808) return false;
+        if (self.f32 != 3.14) return false;
+        if (self.f64 != -2.5) return false;
+        if (self.flag != true) return false;
+        return true;
+    }
+
     /// Encode into a fresh buffer allocated from `alloc`.
     pub fn encode(self: *const Scalars, alloc: std.mem.Allocator) (sofab.Error || std.mem.Allocator.Error)![]u8 {
         var sink: _EncodeSink = .{ .alloc = alloc };
@@ -161,6 +177,44 @@ const _EncodeSink = struct {
         };
     }
 };
+
+/// Mutable pointer to element `i` of a decode-allocated wrapper array.
+///
+/// The element id IS the array index (S5.1), so sequenceBegin
+/// grows the destination to id + 1 -- default-filling the gaps left by omitted
+/// elements -- records the id, and every child store then lands HERE, at that
+/// index. Appending instead would shorten the array by the size of any interior
+/// id gap, and would decode a REOPENED element id as a second element instead of
+/// merging into the first (S7.4). It is the object-element twin of what
+/// sofab.arrays.setElem does for a string/blob element.
+fn _at(s: anytype, i: usize) *std.meta.Elem(@TypeOf(s)) {
+    return @constCast(&s[i]);
+}
+
+/// Narrow a `count: N` wrapper array of struct/union elements to M -- one past
+/// the last element differing from the element default -- which is what its
+/// canonical wire carries (S3/S5.1, "even for sequence-form
+/// elements"). Only the TRAILING run is dropped: an interior all-default element
+/// keeps its frame, because element presence is what carries the array's length.
+/// M == 0 writes no child at all, so the lazily-opened wrapper is dropped by
+/// writeSequenceEnd and the whole field is omitted (S2). A dynamic (count-less)
+/// array has no N to refill from and is never narrowed.
+fn _trimObjs(comptime T: type, a: []const T) []const T {
+    var m = a.len;
+    while (m > 0 and a[m - 1].isDefault()) : (m -= 1) {}
+    return a[0..m];
+}
+
+/// _trimObjs for the slice-shaped element kinds -- string, blob and nested rows
+/// -- whose element default is the empty slice. A string/blob element is a leaf
+/// the writer already omits individually, so narrowing its trailing run does not
+/// change the bytes: it exists so the all-default predicate is computed from the
+/// very expression the writer loops over, and cannot drift away from it.
+fn _trimSlices(comptime T: type, a: []const []const T) []const []const T {
+    var m = a.len;
+    while (m > 0 and a[m - 1].len == 0) : (m -= 1) {}
+    return a[0..m];
+}
 
 /// Native-array destination of exactly the announced wire count.
 fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {

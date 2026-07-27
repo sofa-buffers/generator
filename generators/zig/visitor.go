@@ -32,6 +32,13 @@ type frame struct {
 	elemType string      // fkStructArr/fkArrArr/fkNestedNative: Zig type of one element (for _grow)
 	elemFill string      // fkStructArr/fkArrArr/fkNestedNative: fill literal for the grow helper
 
+	// idx is the decoder register holding the element index this frame is
+	// currently decoding into (fkStructArr/fkArrArr). The element id IS the array
+	// index (MESSAGE_SPEC §5.1), so sequenceBegin places at that index and the
+	// child stores address it through _at(path, self.<idx>) — never through the
+	// last appended element.
+	idx string
+
 	// Schema-unbounded element markers, for the receiver-side decode limits
 	// (generator#102): only unbounded fields are guarded.
 	elemDynLen   bool // fkSeqArr: element string/blob has no schema maxlen
@@ -98,11 +105,12 @@ func (g *gen) frames(m *ir.Message) []frame {
 			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDynLen: !elemMaxHas, cap: cap, emax: boundOf(elemMaxHas, elemMax)})
 		case ir.KindStruct, ir.KindUnion:
 			el := loc + "_e"
+			idx := "ei_" + loc
 			out = append(out, frame{
-				loc: loc, path: path, kind: fkStructArr, elemLoc: el,
+				loc: loc, path: path, kind: fkStructArr, elemLoc: el, idx: idx,
 				elemType: g.typeName(ref.Key), elemFill: ".{}", cap: cap,
 			})
-			walkFields(el, "sofab.arrays.last("+path+")", ref.Target.Fields)
+			walkFields(el, "_at("+path+", self."+idx+")", ref.Target.Fields)
 		case ir.KindArray:
 			// The element is an inner array (items). A native inner array is
 			// handled by a single wrapper frame (arrayBegin appends a fresh
@@ -118,11 +126,12 @@ func (g *gen) frames(m *ir.Message) []frame {
 				})
 			} else {
 				el := loc + "_e"
+				idx := "ei_" + loc
 				out = append(out, frame{
-					loc: loc, path: path, kind: fkArrArr, elemLoc: el,
+					loc: loc, path: path, kind: fkArrArr, elemLoc: el, idx: idx,
 					elemType: "[]const " + inner, elemFill: "&.{}", cap: cap,
 				})
-				addArray(el, "sofab.arrays.last("+path+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
+				addArray(el, "_at("+path+", self."+idx+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -336,6 +345,16 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	// skipped like an unknown id.
 	if use.scalarArray {
 		f.line("    afill: usize = 0, // elements still expected by an armed native-array fill (S7.3)")
+	}
+	// One element-index register per struct/nested-array wrapper frame: the
+	// element id IS the array index (MESSAGE_SPEC §5.1), so sequenceBegin records
+	// the id it placed at and the child stores address that element through
+	// _at(path, self.<idx>). Nesting needs no stack — a frame's register is only
+	// read while that frame's element scope is open.
+	for _, fr := range fs {
+		if fr.idx != "" {
+			f.line("    %s: usize = 0, // index of the element %s is decoding into (S5.1)", fr.idx, fr.loc)
+		}
 	}
 	f.blank()
 	f.line("    const _Loc = enum {")
@@ -943,6 +962,57 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 	f.line("    }")
 }
 
+// fillTo renders the default-fill of a wrapper array back out to its schema
+// count N, or "" for a dynamic (count-less) array, which has no N to refill from
+// and whose length is highest-present-id + 1.
+//
+// MESSAGE_SPEC §5.1: a `count: N` array's length "is N for every target -- a
+// growable-list target MUST default-fill to N exactly like a pre-sized one". The
+// generated arrays are decode-allocated slices, so the fill is what makes the
+// encoder's §3/§5.1 trailing elision LOSSLESS: without it, re-encoding a decoded
+// array would not re-normalise it, it would SHORTEN it on every round trip.
+// Native arrays already had this (a fixed field is a [N]T from the start).
+func (g *gen) fillTo(fr frame) string {
+	if fr.cap < 0 {
+		return ""
+	}
+	elemType, fill := fr.elemType, fr.elemFill
+	if fr.kind == fkSeqArr { // string/blob elements: a borrowed byte slice
+		elemType, fill = "[]const u8", `""`
+	}
+	return fmt.Sprintf("_ = sofab.arrays.grow(%s, self.alloc, &(%s), %d, %s)", elemType, fr.path, fr.cap, fill)
+}
+
+// emitFillToN emits the sequenceEnd default-fill (see fillTo). The scope closing
+// here is the wrapper array's own frame — self.cur still names it — so the fill
+// runs exactly once, when the array's elements are complete.
+func (g *gen) emitFillToN(f *zfile, fs []frame) {
+	var arms []string
+	for _, fr := range fs {
+		switch fr.kind {
+		case fkSeqArr, fkStructArr, fkArrArr, fkNestedNative:
+			if s := g.fillTo(fr); s != "" {
+				arms = append(arms, fmt.Sprintf("            .%s => %s,", fr.loc, s))
+			}
+		}
+	}
+	if len(arms) == 0 {
+		return
+	}
+	f.line("        // S5.1: a `count: N` array decodes to N elements -- \"a")
+	f.line("        // growable-list target MUST default-fill to N exactly like a pre-sized")
+	f.line("        // one\". This scope IS the array's wrapper, so the fill also restores the")
+	f.line("        // trailing default run the encoder elided under S3/S5.1; without it that")
+	f.line("        // elision would SHORTEN the array on every round trip instead of")
+	f.line("        // normalising it.")
+	f.line("        switch (self.cur) {")
+	for _, a := range arms {
+		f.line("%s", a)
+	}
+	f.line("            else => {},")
+	f.line("        }")
+}
+
 // emitSequence emits sequenceBegin/sequenceEnd: push the current location and
 // descend. Wrapper-array fields reset their slice on entry (an explicit empty
 // wrapper must override a non-empty value); struct/nested-array element frames
@@ -973,19 +1043,29 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 				all = append(all, fa)
 			}
 		case fkStructArr, fkArrArr:
-			grow := fmt.Sprintf("if (sofab.arrays.grow(%s, self.alloc, &(%s), %s.len + 1, %s)) .%s else .dead",
-				fr.elemType, fr.path, fr.path, fr.elemFill, fr.elemLoc)
-			body := grow
-			// Fixed-count wrapper array: a struct/union/nested-array element arrives
-			// in dense arrival order, so id == the appended index; an id >= N marks
-			// the decode INVALID (MESSAGE_SPEC §5.1/§7 — issue #142). The element is
-			// still appended (bounded by the real wire elements, no amplification) so
-			// the descended element location stays valid.
+			// The element id IS the array index (MESSAGE_SPEC §5.1), exactly as for
+			// the string/blob leaf elements sofab.arrays.setElem places: grow to
+			// id + 1 — default-filling the gaps left by omitted elements — record
+			// the index, and descend INTO that element. Appending would shorten the
+			// array by the size of any interior id gap and would decode a REOPENED
+			// id as a second element instead of merging into the first (§7.4), which
+			// placement gives for free. A failed allocation drops the subtree.
+			idUsed = true
+			var b strings.Builder
+			b.WriteString("blk: {\n")
+			// Fixed-count wrapper array: an element id >= N is a schema-bound
+			// violation, rejected as INVALID (MESSAGE_SPEC §5.1/§7 — issue #142)
+			// before the destination grows, which also bounds the gap-fill against
+			// an over-index heap amplification.
 			if fr.cap >= 0 {
-				idUsed = true
-				body = fmt.Sprintf("blk: { if (id >= %d) self.inv = true; break :blk %s; }", fr.cap, grow)
+				fmt.Fprintf(&b, "                if (id >= %d) { self.inv = true; break :blk .dead; }\n", fr.cap)
 			}
-			all = append(all, frameArms{fr: fr, body: body})
+			fmt.Fprintf(&b, "                if (!sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, %s)) break :blk .dead;\n",
+				fr.elemType, fr.path, fr.elemFill)
+			fmt.Fprintf(&b, "                self.%s = id;\n", fr.idx)
+			fmt.Fprintf(&b, "                break :blk .%s;\n", fr.elemLoc)
+			b.WriteString("            }")
+			all = append(all, frameArms{fr: fr, body: b.String()})
 		}
 	}
 	idParam := "_"
@@ -1016,6 +1096,7 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	f.line("    }")
 	f.blank()
 	f.line("    pub fn sequenceEnd(self: *_dec_%s) void {", name)
+	g.emitFillToN(f, fs)
 	f.line("        if (self.sp > 0) {")
 	f.line("            self.sp -= 1;")
 	f.line("            self.cur = self.stack[self.sp];")

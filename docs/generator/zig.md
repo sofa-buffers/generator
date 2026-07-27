@@ -68,11 +68,31 @@ Per message:
   | wrapper-array field (the array itself) | `writeSequenceEnd` — an empty array is omitted; absence reconstructs it |
   | wrapper-array **element** (struct/union element, nested array row) | `writeSequenceEndKeep` — the frame stays |
 
-  An element keeps its frame because element presence is what carries a
-  dynamic array's length (*highest present id + 1*, MESSAGE_SPEC §5.1):
-  dropping an all-default element would change the decoded **length**, not
-  merely the bytes. Consequently an all-default message now encodes to zero
-  bytes. A wrapper array's declared `default` is not materialized in the
+  An **interior** element keeps its frame because element presence is what
+  carries a dynamic array's length (*highest present id + 1*, MESSAGE_SPEC
+  §5.1): dropping an all-default element would change the decoded **length**,
+  not merely the bytes. Consequently an all-default message now encodes to zero
+  bytes.
+
+  The **trailing** run is different. A `count: N` wrapper array is
+  fixed-length, so its canonical wire stops at `M` — one past its last element
+  differing from the element default — "even for sequence-form elements"
+  (MESSAGE_SPEC §3/§5.1, generator#248). The element loop therefore runs over
+  `_trimObjs(T, …)` / `_trimSlices(T, …)`, not over the whole slice, and `M == 0`
+  writes no child at all, so the lazily-opened wrapper is dropped and the field
+  is omitted (§2). A **dynamic** (count-less) array has no `N` to refill from, so
+  a trailing default element is significant there and is never narrowed away.
+
+  Every generated `struct`/`union` carries `pub fn isDefault()` for this: it is
+  the explicit form of the "no child was written" test the lazy framing already
+  encodes implicitly for a *field*, needed because an *element* must be judged
+  **before** the loop opens. Its per-field terms are generated from the very
+  expressions `marshal` writes each field under, so the predicate and the writer
+  cannot drift apart — a predicate that narrowed a field the writer does not
+  (or the reverse) would omit a field that is on the wire, or keep one that is
+  not.
+
+  A wrapper array's declared `default` is not materialized in the
   generated field initializer today (it is the empty collection), so absent
   and explicitly-empty denote the same value and the plain dropping closer is
   correct; closing that gap would require an
@@ -103,6 +123,27 @@ Rust backend, monomorphized by the corelib's comptime duck typing (no
 vtable). Element stores are bounds-checked explicitly — ReleaseFast compiles
 without implicit bounds checks, so hostile counts/ids degrade to dropped
 elements, never out-of-bounds writes.
+
+### Wrapper-array elements are placed by id, and filled back out to N
+
+A wrapper array's element **id IS the array index** (MESSAGE_SPEC §5.1). Every
+element kind honours that, not just the `string`/`blob` leaves that go through
+`sofab.arrays.setElem`: for a `struct`/`union` (and a nested-array row)
+`sequenceBegin` grows the destination to `id + 1` — default-filling the id gaps
+an omitted element leaves — records the index in a per-frame `ei_*` register,
+and descends into `_at(path, ei)`. Appending instead (generator#247) shortened
+the array by the size of any interior id gap, and decoded a **reopened** element
+id as a second element rather than merging into the first; placement gives the
+§7.4 struct-merge for free. The `count: N` over-index reject still runs first,
+which also bounds the gap-fill.
+
+When the array's sequence scope closes, a `count: N` array is default-filled
+back out to `N`: §5.1 says the length "is N for every target — a growable-list
+target MUST default-fill to N exactly like a pre-sized one". This is what makes
+the encoder's trailing-run elision above **lossless**: without it, re-encoding a
+decoded fixed array would not re-normalise it, it would shorten it on every
+round trip. A dynamic array is never filled — its length is *highest present id
++ 1*.
 
 ## Unbounded fields
 

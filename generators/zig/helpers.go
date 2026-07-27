@@ -57,6 +57,7 @@ var zigKeywords = map[string]bool{
 // JSON name (emitted from the schema name) are unaffected.
 var zigDeclClash = map[string]bool{
 	"marshal": true, "encode": true, "decode": true, "MAX_SIZE": true,
+	"isDefault": true,
 }
 
 // zigIdent renders a schema field name as a Zig identifier: @"name" for a
