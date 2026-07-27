@@ -120,6 +120,37 @@ element-chain walk lives in `fieldHasFixlenGuard` (visitor.go); the maxlen /
 over-index gates already descend the same way (`arrayHasBoundedStrBlob`,
 `arrayOverIndexed`).
 
+## Wrapper arrays: `M` on encode, `N` on decode
+
+A `count: N` wrapper array's canonical wire stops at **`M`** — one past its last
+element that differs from the element default — "even for sequence-form elements"
+(MESSAGE_SPEC §3/§5.1). `marshal` therefore narrows the container *before* the
+element loop, through one of `_trimStrs` / `_trimBlobs` / `_trimObjs` /
+`_trimRows`; only the **trailing** run goes, an interior all-default element keeps
+its frame (element presence is what carries the length). `M === 0` writes no child
+at all, so the lazily-opened wrapper is dropped by `writeSequenceEnd()` and the
+whole field is omitted (§2). A **dynamic** (count-less) array has no `N` to refill
+from, so its trailing default element is significant and is never narrowed.
+
+Every generated class carries `isDefault(): boolean` for this: the explicit form
+of the "no child was written" test the lazy framing already encodes implicitly for
+a *field*, needed here because an *element* must be judged before the loop opens.
+It is generated as the exact negation of `marshal`'s per-field write guards, and
+reads the **same** narrowed expression the element loop walks — a predicate that
+narrowed a field the writer did not (or the reverse) would either omit a field
+that is on the wire or keep one that is not (generator#248).
+
+The decode counterpart, and what makes the elision lossless: a wrapper element is
+**placed at `arr[id]`** after gap-filling with default elements — never appended,
+because the element id *is* the array index (§5.1). A reopened element id then
+merges into the element already there (§7.4, `T.decodeInto(c, arr[_id]!)`) instead
+of appending a second one (generator#247). When the sequence scope closes, a
+`count: N` array is default-filled back out to `N`, the wrapper-array counterpart
+of `_padTo` on native arrays: without it the trailing elision would not re-shape
+the bytes, it would **shorten** the decoded array on every round trip. The
+generator#142 over-index guard still rejects an element id `≥ N`, which also
+bounds the gap-fill.
+
 ## Benchmark row
 
 Row `ts-bigint` and `ts-long` (one per `int64` mode) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with

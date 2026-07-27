@@ -153,6 +153,9 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		f.line("        if (%s) { c.skip(c.wire); break; }", g.tsWireGuardCond(x))
 		f.line("        const arr: %s = [];", g.tsType(x))
 		f.line("        while (c.readHeader()) { %s }", g.seqCollectBody("arr", x.Elem, x.ElemRef, x.ElemItems, capOf(x.HasCount, x.Count), x.ElemMaxHas, x.ElemMax))
+		if fill := g.seqFillTo("arr", x.Elem, x.ElemRef, capOf(x.HasCount, x.Count)); fill != "" {
+			f.line("        %s", fill)
+		}
 		f.line("        %s = arr;", acc)
 		f.line("        break;")
 		f.line("      }")
@@ -374,8 +377,12 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 			return g.nativeArrayRead(items.Elem, items.ElemRef, cnt)
 		}
 		rowT := g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems)
+		fill := g.seqFillTo("_r", items.Elem, items.ElemRef, capOf(items.HasCount, items.Count))
+		if fill != "" {
+			fill += " "
+		}
 		return "((): " + rowT + "[] => { const _r: " + rowT + "[] = []; while (c.readHeader()) { " +
-			g.seqCollectBody("_r", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax) + " } return _r; })()"
+			g.seqCollectBody("_r", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax) + " } " + fill + "return _r; })()"
 	}
 	return "undefined as never"
 }
@@ -387,6 +394,42 @@ func capOf(hasCount bool, count int64) int64 {
 		return count
 	}
 	return -1
+}
+
+// seqFillTo renders the statement that default-fills a decoded wrapper array out
+// to the schema count N once its sequence scope has closed — "" for a dynamic
+// (count-less) array, whose length is highest-present-id + 1 and which therefore
+// must not be filled.
+//
+// MESSAGE_SPEC §5.1: for a fixed-count array the length "is N for every target —
+// a growable-list target MUST default-fill to N exactly like a pre-sized one".
+// The pull decoder's `while (c.readHeader())` loop ends exactly where a
+// visitor-driven backend gets its EndSequence callback, so the fill goes right
+// after it. This is also what makes the encoder's §3/§5.1 trailing elision
+// lossless: without it that elision would not merely re-shape the bytes, it would
+// SHORTEN the decoded array on every round trip. Native arrays have had the same
+// refill all along, via _padTo.
+func (g *gen) seqFillTo(arr string, elem ir.Kind, ref *ir.TypeRef, cap int64) string {
+	if cap < 0 {
+		return ""
+	}
+	return fmt.Sprintf("while (%s.length < %d) %s.push(%s);", arr, cap, arr, g.elemDefaultNew(elem, ref))
+}
+
+// elemDefaultNew renders a FRESH wrapper-array element default, the value
+// seqFillTo (and the placement gap-fill) grows the array with. Every composite
+// element is mutable, so each slot gets its own instance — sharing one would let a
+// later decode into slot i show up in slot j.
+func (g *gen) elemDefaultNew(elem ir.Kind, ref *ir.TypeRef) string {
+	switch elem {
+	case ir.KindString:
+		return `""`
+	case ir.KindBlob:
+		return "new Uint8Array()"
+	case ir.KindStruct, ir.KindUnion:
+		return "new " + g.typeName(ref.Key) + "()"
+	}
+	return "[]" // a nested row: the empty array is the row default
 }
 
 // seqCollectBody returns the body of a `while (c.readHeader()) { ... }` loop that
@@ -432,6 +475,18 @@ func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *i
 				arr + "[_id] = _b;"
 		}
 		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); " + arr + "[_id] = c.readBlob();"
+	case ir.KindStruct, ir.KindUnion:
+		// The element id IS the array index (§5.1), exactly as for the string/blob
+		// leaf paths above, so the element is PLACED at arr[id] after gap-filling
+		// with default elements — never appended. Appending would shorten the array
+		// by the size of any interior id gap, and would decode a REOPENED element id
+		// as a second element instead of merging into the first (§7.4) — which
+		// placement gives for free, because decodeInto continues the element an
+		// earlier opening already populated. The over-index guard above rejects an
+		// element id >= N, which also bounds the gap-fill.
+		t := g.typeName(ref.Key)
+		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new " + t + "()); " +
+			t + ".decodeInto(c, " + arr + "[_id]!);"
 	default:
 		return guard + arr + ".push(" + g.elemDecode(elem, ref, items) + ");"
 	}
@@ -501,6 +556,53 @@ const padToHelper = `// _padTo grows a to exactly n elements with the element de
 function _padTo<T>(a: T[], n: number, zero: T): T[] {
   while (a.length < n) a.push(zero);
   return a;
+}`
+
+// trimObjsHelper is the encode-side narrowing of a `count: N` wrapper array of
+// struct/union elements to M — one past its last non-default element — which is
+// what its canonical wire carries (MESSAGE_SPEC §3/§5.1, "even for sequence-form
+// elements"). Only the TRAILING run is dropped: an interior all-default element
+// stays framed, because element presence is what carries the array's length.
+// M === 0 writes no child at all, so the lazily-opened wrapper is dropped by
+// writeSequenceEnd and the whole field is omitted (§2). A dynamic (count-less)
+// array has no N to refill from and is never narrowed.
+const trimObjsHelper = `// _trimObjs returns a's leading run up to and including the last element that is
+// not the element default, i.e. it drops the trailing all-default run. Used only
+// for ` + "`count: N`" + ` wrapper arrays, whose declared count lets the decoder rebuild
+// the dropped run; an empty result leaves the wrapper itself omitted.
+function _trimObjs<T extends { isDefault(): boolean }>(a: readonly T[]): readonly T[] {
+  let m = a.length;
+  while (m > 0 && a[m - 1]!.isDefault()) m--;
+  return m === a.length ? a : a.slice(0, m);
+}`
+
+// trimStrsHelper / trimBlobsHelper / trimRowsHelper are _trimObjs for the other
+// wrapper-element kinds. A string/blob element is a leaf the writer already omits
+// individually when it equals the element default, so trimming the trailing run
+// does not change the bytes — they exist so the all-default predicate is computed
+// from the very same expression the writer loops over, and cannot drift away
+// from it.
+const trimStrsHelper = `// _trimStrs is _trimObjs for a string wrapper array: the element default is "".
+function _trimStrs(a: readonly string[]): readonly string[] {
+  let m = a.length;
+  while (m > 0 && a[m - 1] === "") m--;
+  return m === a.length ? a : a.slice(0, m);
+}`
+
+const trimBlobsHelper = `// _trimBlobs is _trimObjs for a blob wrapper array: the element default is empty.
+function _trimBlobs(a: readonly Uint8Array[]): readonly Uint8Array[] {
+  let m = a.length;
+  while (m > 0 && a[m - 1]!.length === 0) m--;
+  return m === a.length ? a : a.slice(0, m);
+}`
+
+const trimRowsHelper = `// _trimRows is _trimObjs for a nested-array wrapper array: a row equals the row
+// default when it is empty. Only the OUTER array's trailing run of empty rows is
+// dropped; a row's own content is never narrowed (the rule is scoped to fields).
+function _trimRows<T extends { length: number }>(a: readonly T[]): readonly T[] {
+  let m = a.length;
+  while (m > 0 && a[m - 1]!.length === 0) m--;
+  return m === a.length ? a : a.slice(0, m);
 }`
 
 // utf8LenHelper counts a string's UTF-8 byte length without allocating — no

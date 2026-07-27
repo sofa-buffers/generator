@@ -129,7 +129,9 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 	for _, want := range []string{
 		`if (c.id >= 4) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 4"); const _id = c.id; while (arr.length <= _id) arr.push("");`,
 		`if (c.id >= 3) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 3"); const _id = c.id; while (arr.length <= _id) arr.push(new Uint8Array());`,
-		`if (c.id >= 2) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 2"); arr.push(MBpElem.decodeFrom(c));`,
+		// The struct-element path now places by id like the leaf paths above; the
+		// guard runs first and so also bounds the gap-fill (generator#247).
+		`if (c.id >= 2) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 2"); const _id = c.id; while (arr.length <= _id) arr.push(new MBpElem()); MBpElem.decodeInto(c, arr[_id]!);`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing over-index guard %q", want)
@@ -270,8 +272,8 @@ func TestTSStructural(t *testing.T) {
 		// A wrapper-array FIELD is a sequence too: lazy + dropping end at depth 0,
 		// while each ELEMENT keeps its frame (element presence carries the array's
 		// length, §5.1).
-		"    os.writeSequenceBeginLazy(23);\n    this.somestructarray.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
-		"    os.writeSequenceBeginLazy(25);\n    this.someunionarray.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(23);\n    _trimObjs(this.somestructarray).forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(25);\n    _trimObjs(this.someunionarray).forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
 		// A leaf string/blob wrapper array is a FIELD as well.
 		"    os.writeSequenceBeginLazy(18);\n",
 		"    os.writeSequenceBeginLazy(19);\n",
@@ -296,7 +298,7 @@ func TestTSStructural(t *testing.T) {
 	}
 	// Fast-encode marshal tidy-up: a leaf string list uses an indexed for (no
 	// per-encode closure) rather than .forEach.
-	if !strings.Contains(mod, "for (let _i0 = 0; _i0 < this.somestringarray.length; _i0++) {") {
+	if !strings.Contains(mod, "for (let _i0 = 0, _a0 = _trimStrs(this.somestringarray); _i0 < _a0.length; _i0++) {") {
 		t.Error("message.ts missing indexed-for string-list marshal (fast-encode)")
 	}
 }
@@ -324,12 +326,12 @@ func TestTSLazySequenceFraming(t *testing.T) {
 	// composite/nested-array wrappers — all closed with the dropping end.
 	for _, want := range []string{
 		"    os.writeSequenceBeginLazy(0);\n    this.s.marshal(os);\n    os.writeSequenceEnd();\n",
-		"    os.writeSequenceBeginLazy(2);\n    for (let _i0 = 0; _i0 < this.strs.length; _i0++) {",
-		"    os.writeSequenceBeginLazy(4);\n    for (let _i0 = 0; _i0 < this.blobs.length; _i0++) {",
+		"    os.writeSequenceBeginLazy(2);\n    for (let _i0 = 0, _a0 = _trimStrs(this.strs); _i0 < _a0.length; _i0++) {",
+		"    os.writeSequenceBeginLazy(4);\n    for (let _i0 = 0, _a0 = _trimBlobs(this.blobs); _i0 < _a0.length; _i0++) {",
 		"    os.writeSequenceBeginLazy(1);\n    this.ss.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
 		// The nested row is an ELEMENT of `rows`, so its own wrapper keeps its
 		// frame; the outer `rows` wrapper is a FIELD and may vanish.
-		"    os.writeSequenceBeginLazy(3);\n    this.rows.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      for (let _i1 = 0; _i1 < _e0.length; _i1++) {\n        if (_e0[_i1]! !== \"\") {\n          os.writeString(_i1, _e0[_i1]!);\n        }\n      }\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(3);\n    this.rows.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      for (let _i1 = 0, _a1 = _trimStrs(_e0); _i1 < _a1.length; _i1++) {\n        if (_a1[_i1]! !== \"\") {\n          os.writeString(_i1, _a1[_i1]!);\n        }\n      }\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing lazy-framing shape %q\n%s", want, mod)
@@ -886,8 +888,171 @@ messages:
 			t.Errorf("message.ts must not replace a nested member (%q):\n%s", bad, mod)
 		}
 	}
-	// A wrapper-array ELEMENT is genuinely new per index, so it keeps decodeFrom.
-	if !strings.Contains(mod, "MEElem.decodeFrom(c)") {
-		t.Errorf("array elements must still use decodeFrom (fresh per index):\n%s", mod)
+	// A wrapper-array ELEMENT is not new per arrival either: the element id IS the
+	// array index (§5.1), so a REOPENED element id re-opens that element's scope and
+	// must merge into it exactly like a re-opened field (§7.4, generator#247). It
+	// therefore decodes INTO the element placed at that index, never into a fresh
+	// object that would be appended alongside.
+	if !strings.Contains(mod, "MEElem.decodeInto(c, arr[_id]!);") {
+		t.Errorf("array elements must decode INTO the element at their id:\n%s", mod)
+	}
+	if strings.Contains(mod, "arr.push(MEElem.decodeFrom(c))") {
+		t.Errorf("array elements must not be appended id-blind:\n%s", mod)
+	}
+}
+
+// A count:N wrapper array's canonical wire stops at M — one past its last
+// non-default element (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements")
+// — and M === 0 leaves the whole wrapper omitted (§2). generator#248: the element
+// loop used to run to .length, framing every trailing all-default element, so a
+// decoder that accepted the non-canonical form re-encoded it unchanged instead of
+// normalising. A DYNAMIC array has no N to refill from, so its trailing default
+// element is significant and must still be framed.
+func TestTSFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      fblobs:  { id: 3, type: array, items: { type: blob, count: 2, maxlen: 4 } }
+`, map[string]any{})
+
+	// The fixed array narrows to M before framing anything...
+	if !strings.Contains(mod, "_trimObjs(this.fixed).forEach((_e0, _i0) => {") {
+		t.Errorf("count:N struct array must loop to M, not to .length:\n%s", mod)
+	}
+	// ...while the dynamic one keeps every element, trailing defaults included.
+	if !strings.Contains(mod, "this.dynamic.forEach((_e0, _i0) => {") {
+		t.Errorf("dynamic struct array must not be narrowed:\n%s", mod)
+	}
+	// An interior all-default element is still framed: only the TRAILING run goes.
+	if !strings.Contains(mod, "      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      os.writeSequenceEndKeep();\n") {
+		t.Errorf("interior elements must keep the framing closer:\n%s", mod)
+	}
+	// The trim helpers are emitted only for the element kinds actually present.
+	for _, want := range []string{
+		"function _trimObjs<T extends { isDefault(): boolean }>(a: readonly T[]): readonly T[] {",
+		"function _trimStrs(a: readonly string[]): readonly string[] {",
+		"function _trimBlobs(a: readonly Uint8Array[]): readonly Uint8Array[] {",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing trim helper %q:\n%s", want, mod)
+		}
+	}
+	if strings.Contains(mod, "function _trimRows") {
+		t.Errorf("_trimRows must not be emitted for a schema with no nested rows:\n%s", mod)
+	}
+
+	// isDefault is the exact negation of what marshal writes, so it must narrow a
+	// field exactly when the marshal loop does — disagreeing would either omit a
+	// field that is on the wire or keep one that is not.
+	for _, want := range []string{
+		"if (!(_trimObjs(this.fixed).length === 0)) return false;",
+		"if (!(this.dynamic.length === 0)) return false;",
+		"if (!(_trimStrs(this.fstrs).length === 0)) return false;",
+		"if (!(_trimBlobs(this.fblobs).length === 0)) return false;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("isDefault must mirror the marshal loop, missing %q:\n%s", want, mod)
+		}
+	}
+	// The leaf loops walk the very same narrowed run the predicate measures.
+	if !strings.Contains(mod, "for (let _i0 = 0, _a0 = _trimStrs(this.fstrs); _i0 < _a0.length; _i0++) {") {
+		t.Errorf("string wrapper loop must bind the trimmed run once:\n%s", mod)
+	}
+	if !strings.Contains(mod, "for (let _i0 = 0, _a0 = _trimBlobs(this.fblobs); _i0 < _a0.length; _i0++) {") {
+		t.Errorf("blob wrapper loop must bind the trimmed run once:\n%s", mod)
+	}
+}
+
+// generator#247: a wrapper array's element id IS the array index (§5.1), so an
+// element is PLACED at arr[id] after gap-filling — never appended. Appending
+// shortened the array by the size of any interior id gap and decoded a REOPENED
+// id as a second element instead of merging into the first (§7.4). The leaf
+// string/blob paths next to it always got this right.
+//
+// The N-fill when the sequence scope closes is what makes the §3/§5.1 trailing
+// elision lossless: without it, re-encoding a decoded fixed array shortens it on
+// every round trip.
+func TestTSWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      objs: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } } }
+      dyn:  { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      strs: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`, map[string]any{})
+
+	for _, want := range []string{
+		// placement, not append — and the gap-fill that precedes it
+		"const _id = c.id; while (arr.length <= _id) arr.push(new VecObjsElem()); VecObjsElem.decodeInto(c, arr[_id]!);",
+		// N-fill when the sequence scope closes, per element kind
+		"while (arr.length < 4) arr.push(new VecObjsElem());",
+		"while (arr.length < 3) arr.push(\"\");",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
+	}
+	// The defect this replaced: appending ignored the id entirely.
+	if strings.Contains(mod, "arr.push(VecObjsElem.decodeFrom(c))") {
+		t.Errorf("struct elements must not be appended id-blind:\n%s", mod)
+	}
+	// A dynamic array (no schema count) has no N to refill from: its length is
+	// highest-present-id + 1, so it is placed by id but never filled.
+	if !strings.Contains(mod, "const _id = c.id; while (arr.length <= _id) arr.push(new VecDynElem()); VecDynElem.decodeInto(c, arr[_id]!);") {
+		t.Errorf("dynamic struct elements must still be placed by id:\n%s", mod)
+	}
+	if strings.Contains(mod, "arr.push(new VecDynElem());\n") {
+		t.Errorf("a dynamic array must not be filled to any N:\n%s", mod)
+	}
+	// The cap bound still rejects an out-of-range element id, which also bounds
+	// the gap-fill above.
+	if !strings.Contains(mod, `if (c.id >= 4) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 4");`) {
+		t.Errorf("the over-index guard must survive:\n%s", mod)
+	}
+}
+
+// isDefault must be emitted for every generated class and must be the exact
+// negation of marshal's per-field write guards (MESSAGE_SPEC §2) — including a
+// nested object, which is default iff ITS marshal writes no child.
+func TestTSIsDefaultMirrorsMarshalGuards(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  m:
+    payload:
+      n:    { id: 0, type: u8, default: 7 }
+      s:    { id: 1, type: string, default: "hi" }
+      b:    { id: 2, type: blob, maxlen: 4 }
+      sub:  { id: 3, type: struct, fields: { x: { id: 0, type: i32 } } }
+      nat:  { id: 4, type: array, items: { type: i32, count: 3 }, default: [1, 2, 3] }
+      dynn: { id: 5, type: array, items: { type: u8 } }
+`, map[string]any{})
+	for _, want := range []string{
+		"if (!(this.n === 7)) return false;",
+		`if (!(this.s === "hi")) return false;`,
+		"if (!(this.b.length === 0)) return false;",
+		"if (!(this.sub.isDefault())) return false;",
+		"if (!(arrEq(this.nat, [1, 2, 3]))) return false;",
+		"if (!(this.dynn.length === 0)) return false;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("isDefault missing %q:\n%s", want, mod)
+		}
+	}
+	// Every class carries the predicate, nested types included.
+	if strings.Count(mod, "isDefault(): boolean {") != 2 {
+		t.Errorf("every generated class must carry isDefault:\n%s", mod)
+	}
+	// A field-less class is trivially default.
+	empty := genTSWith(t, "version: 1\nmessages:\n  e:\n    payload: {}\n", map[string]any{})
+	if !strings.Contains(empty, "isDefault(): boolean {\n    return true;\n  }") {
+		t.Errorf("a field-less class must be trivially default:\n%s", empty)
 	}
 }

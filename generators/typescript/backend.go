@@ -177,6 +177,22 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("%s", padToHelper)
 		f.blank()
 	}
+	if use.trimStrs {
+		f.line("%s", trimStrsHelper)
+		f.blank()
+	}
+	if use.trimBlobs {
+		f.line("%s", trimBlobsHelper)
+		f.blank()
+	}
+	if use.trimObjs {
+		f.line("%s", trimObjsHelper)
+		f.blank()
+	}
+	if use.trimRows {
+		f.line("%s", trimRowsHelper)
+		f.blank()
+	}
 	if use.strMaxlen {
 		f.line("%s", utf8LenHelper)
 		f.blank()
@@ -292,6 +308,9 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 	f.line("  }")
 	f.blank()
 
+	// all-default predicate (the explicit form of marshal's lazy framing)
+	g.emitIsDefault(f, fields)
+
 	// JSON
 	g.emitJSON(f, name, fields)
 
@@ -333,6 +352,74 @@ func (g *gen) longConvert(val string, elem ir.Kind, items *ir.ArrayElem, depth i
 		return fmt.Sprintf("%s.map((%s) => %s)", val, v, g.longConvert(v, items.Elem, items.ElemItems, depth+1))
 	}
 	return val + ".map(Long.fromValue)"
+}
+
+// emitIsDefault emits the object's all-default predicate. It is the exact
+// negation of what marshal writes: the object equals its declared default iff
+// marshal would emit no child at all, evaluated per field and recursively
+// (MESSAGE_SPEC §2). Every generated class carries it so that a `count: N`
+// wrapper array can find M — one past its last non-default element — BEFORE
+// opening the element loop (§3/§5.1), which the lazy framing's implicit "no child
+// was written" test cannot answer in time (it only reports after the fact, per
+// FIELD). Keep this in lockstep with emitMarshal: a predicate that disagrees with
+// the writer either omits a field that is on the wire or keeps one that is not.
+func (g *gen) emitIsDefault(f *tsfile, fields []*ir.Field) {
+	f.line("  // True iff marshal would write no child at all, i.e. this object equals its")
+	f.line("  // declared default -- compared per field and recursively, never as a byte image.")
+	f.line("  // Used to find where a fixed-count wrapper array's trailing default run starts.")
+	f.line("  isDefault(): boolean {")
+	for _, fld := range fields {
+		f.line("    if (!(%s)) return false;", g.fieldIsDefaultExpr(fld))
+	}
+	f.line("    return true;")
+	f.line("  }")
+	f.blank()
+}
+
+// fieldIsDefaultExpr is the boolean expression "this field equals its default",
+// i.e. the negation of emitMarshal's write guard for the same field.
+func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
+	acc := g.storage("this", fld)
+	switch fld.Kind {
+	case ir.KindBlob:
+		if blobHasNonEmptyDefault(fld) {
+			return fmt.Sprintf("arrEq(%s, %s)", acc, g.tsDefault(fld))
+		}
+		return fmt.Sprintf("%s.length === 0", acc)
+	case ir.KindStruct, ir.KindUnion:
+		// Lazily framed: the frame survives iff the nested marshal wrote a child,
+		// which is exactly "the nested object is not default".
+		return fmt.Sprintf("%s.isDefault()", acc)
+	case ir.KindArray:
+		return g.arrayIsDefaultExpr(fld, acc)
+	}
+	return fmt.Sprintf("%s === %s", acc, g.tsDefault(fld))
+}
+
+// arrayIsDefaultExpr mirrors emitMarshalArray: a native array compares against
+// its materialized default exactly as the writer's guard does, a wrapper array is
+// default iff it would write no child — every element equal to the element
+// default, judged on the very same narrowed run the marshal loop walks.
+func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
+	if nativeArrayElem(fld.Elem) {
+		if def, ok := g.nativeArrayDefault(fld); ok {
+			eq := "arrEq"
+			if g.longBacked(fld) {
+				eq = "longArrEq"
+			}
+			return fmt.Sprintf("%s(%s, %s)", eq, acc, def)
+		}
+		return fmt.Sprintf("%s.length === 0", acc)
+	}
+	// Wrapper array: no child is written iff every element is the element default.
+	// A struct/union or nested-row element is framed unconditionally, so "no child"
+	// is the emptiness of the narrowed run; for string/blob leaves the writer omits
+	// a default element individually, so it is the emptiness of the trimmed run.
+	// fld.HasCount must be threaded through unchanged: narrowing here but not in the
+	// marshal loop (or the reverse) is exactly the drift this shared helper exists to
+	// prevent — it would call a dynamic [{}] "default" while the writer still frames
+	// its one empty element, omitting a field that is on the wire.
+	return fmt.Sprintf("%s.length === 0", g.elemTrimExpr(acc, fld.Elem, fld.HasCount))
 }
 
 func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
@@ -442,6 +529,39 @@ func (g *gen) trimExpr(val string, elem ir.Kind, ref *ir.TypeRef, fixed bool) st
 	}
 }
 
+// elemTrimExpr narrows a wrapper array to the M its canonical wire carries: one
+// past the last element differing from the element default (MESSAGE_SPEC §3/§5.1,
+// which says "even for sequence-form elements"). Only a declared `count: N` array
+// is fixed-length and may be narrowed — a dynamic array has no N to refill from,
+// so a trailing default ELEMENT is significant and stays framed. Interior
+// all-default elements are never dropped by this: element presence carries the
+// length, so only the trailing run goes. Both the marshal loop and isDefault run
+// off this one expression, so the writer and the predicate cannot disagree.
+//
+// A string/blob element is a leaf the writer already omits individually when it
+// equals the element default, so trimming its trailing run does not change the
+// bytes — the trim exists so the all-default predicate is computed from the very
+// same expression the writer loops over, and cannot drift away from it.
+func (g *gen) elemTrimExpr(val string, elem ir.Kind, fixed bool) string {
+	switch elem {
+	case ir.KindString:
+		return fmt.Sprintf("_trimStrs(%s)", val)
+	case ir.KindBlob:
+		return fmt.Sprintf("_trimBlobs(%s)", val)
+	case ir.KindStruct, ir.KindUnion:
+		if !fixed {
+			return val
+		}
+		return fmt.Sprintf("_trimObjs(%s)", val)
+	case ir.KindArray:
+		if !fixed {
+			return val
+		}
+		return fmt.Sprintf("_trimRows(%s)", val)
+	}
+	return val
+}
+
 // marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
 // bitfield elements use the native array wire type (enum->signed, bool/bitfield->
 // unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
@@ -451,6 +571,7 @@ func (g *gen) trimExpr(val string, elem ir.Kind, ref *ir.TypeRef, fixed bool) st
 func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
 	ev := fmt.Sprintf("_e%d", depth)
 	iv := fmt.Sprintf("_i%d", depth)
+	av := fmt.Sprintf("_a%d", depth)
 	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether a
 	// contentless one survives, and it is picked statically from the position in the
 	// schema, never from the value. A wrapper array is a sequence-typed FIELD, so at
@@ -496,11 +617,13 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 		// Leaf sequence: an indexed for (not .forEach) avoids a per-marshal closure
 		// allocation and inlines the monomorphic write body. A string element is a
 		// leaf keyed by index id: omit it when equal to the element default (empty),
-		// leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		// leaving an id gap the decoder restores (MESSAGE_SPEC S2). The narrowed run
+		// is bound ONCE in the loop init (scoped to the for statement, so sibling
+		// array fields cannot collide) and is what both the writer and isDefault see.
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (let %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
-		f.line("%s  if (%s[%s]! !== \"\") {", ind, val, iv)
-		f.line("%s    os.writeString(%s, %s[%s]!);", ind, iv, val, iv)
+		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, g.elemTrimExpr(val, elem, fixed), iv, av, iv)
+		f.line("%s  if (%s[%s]! !== \"\") {", ind, av, iv)
+		f.line("%s    os.writeString(%s, %s[%s]!);", ind, iv, av, iv)
 		f.line("%s  }", ind)
 		f.line("%s}", ind)
 		f.line("%sos.%s();", ind, seqEnd)
@@ -509,17 +632,20 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 		// element default (empty), leaving an id gap the decoder restores
 		// (MESSAGE_SPEC S2).
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (let %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
-		f.line("%s  if (%s[%s]!.length !== 0) {", ind, val, iv)
-		f.line("%s    os.writeBlob(%s, %s[%s]!);", ind, iv, val, iv)
+		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, g.elemTrimExpr(val, elem, fixed), iv, av, iv)
+		f.line("%s  if (%s[%s]!.length !== 0) {", ind, av, iv)
+		f.line("%s    os.writeBlob(%s, %s[%s]!);", ind, iv, av, iv)
 		f.line("%s  }", ind)
 		f.line("%s}", ind)
 		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s%s.forEach((%s, %s) => {", ind, val, ev, iv)
-		// An ELEMENT is framed unconditionally: dropping an all-default one would
-		// leave an id gap and change the decoded length, not just the bytes (S5.1).
+		f.line("%s%s.forEach((%s, %s) => {", ind, g.elemTrimExpr(val, elem, fixed), ev, iv)
+		// An INTERIOR element is framed unconditionally: dropping it would leave an id
+		// gap and change the decoded length, not just the bytes (S5.1). The TRAILING
+		// all-default run is already gone — the loop runs to M, not to length
+		// (S3/S5.1) — and M === 0 writes no child at all, so the lazily-opened wrapper
+		// is dropped and the whole field is omitted (S2).
 		f.line("%s  os.writeSequenceBeginLazy(%s);", ind, iv)
 		f.line("%s  %s.marshal(os);", ind, ev)
 		f.line("%s  os.writeSequenceEndKeep();", ind)
@@ -527,12 +653,13 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindArray:
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s%s.forEach((%s, %s) => {", ind, val, ev, iv)
-		// A nested row is a wrapper-sequence element, not a `count: N` field: the
-		// trailing-default-run rule is scoped to fields (MESSAGE_SPEC §3), so rows
-		// are never trimmed. Its own frame is kept (depth + 1 > 0 selects
-		// writeSequenceEndKeep) because element presence carries the outer array's
-		// length (MESSAGE_SPEC §5.1).
+		f.line("%s%s.forEach((%s, %s) => {", ind, g.elemTrimExpr(val, elem, fixed), ev, iv)
+		// A nested row's own CONTENT is never narrowed: the trailing-default-run rule
+		// is scoped to fields (MESSAGE_SPEC §3), so the recursion passes fixed=false.
+		// The row's frame is kept (depth + 1 > 0 selects writeSequenceEndKeep) because
+		// element presence carries the outer array's length (MESSAGE_SPEC §5.1); the
+		// outer array's own trailing run of EMPTY rows is what elemTrimExpr dropped
+		// above, and only for a declared `count: N` field.
 		g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
 		f.line("%s});", ind)
 		f.line("%sos.%s();", ind, seqEnd)

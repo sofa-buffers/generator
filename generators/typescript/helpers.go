@@ -155,6 +155,36 @@ type helperUse struct {
 	strMaxlen   bool // bounded string (scalar or wrapper element) -> emit the allocation-free _utf8Len helper for its decode-side maxlen check (blobs measure .length directly)
 	trimTail    bool // fixed-count non-Long native array -> encode-side trailing-default-run trim
 	trimTailLng bool // fixed-count Long-backed native array -> Long flavour of the trim
+	trimStrs    bool // string wrapper array -> encode-side trailing-default-run trim (generator#248)
+	trimBlobs   bool // blob wrapper array -> ditto
+	trimObjs    bool // fixed-count struct/union wrapper array -> ditto
+	trimRows    bool // fixed-count nested-array wrapper array -> ditto
+}
+
+// scanArrayTrims records which wrapper-array trim helpers a composite array field
+// references (generator#248). It mirrors elemTrimExpr exactly, including the walk
+// into nested rows: a row is an array ELEMENT, not a `count: N` field, so the
+// trailing-default-run rule does not apply one level down and `fixed` is false
+// there (MESSAGE_SPEC §3). Emitting a helper the code never calls (or, worse, not
+// emitting one it does) is the same drift the shared expression exists to prevent.
+func scanArrayTrims(use *helperUse, elem ir.Kind, items *ir.ArrayElem, fixed bool) {
+	switch elem {
+	case ir.KindString:
+		use.trimStrs = true
+	case ir.KindBlob:
+		use.trimBlobs = true
+	case ir.KindStruct, ir.KindUnion:
+		if fixed {
+			use.trimObjs = true
+		}
+	case ir.KindArray:
+		if fixed {
+			use.trimRows = true
+		}
+		if items != nil {
+			scanArrayTrims(use, items.Elem, items.ElemItems, false)
+		}
+	}
 }
 
 // arrayOverIndexed reports whether an array field (recursively through nested
@@ -229,6 +259,11 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 			}
 			if fld.Kind == ir.KindArray && arrayHasBoundedString(fld.Elem, fld.ElemItems, fld.ElemMaxHas) {
 				use.strMaxlen = true
+			}
+			// A composite (wrapper-sequence) array narrows to M before its element
+			// loop, and its isDefault predicate reads the very same narrowed run.
+			if fld.Kind == ir.KindArray && !nativeArrayElem(fld.Elem) {
+				scanArrayTrims(&use, fld.Elem, fld.ElemItems, fld.HasCount)
 			}
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				if fld.HasCount {
