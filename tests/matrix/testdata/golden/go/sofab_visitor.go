@@ -55,6 +55,8 @@ func (s *_strSeq) String(id sofab.ID, v string) error {
 	return nil
 }
 
+func (s *_strSeq) EndSequence() error { return _fillTo(s.out, s.cap, "") }
+
 type _bytesSeq struct {
 	_visitorBase
 	out  *[][]byte
@@ -76,10 +78,34 @@ func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
 	return nil
 }
 
+func (s *_bytesSeq) EndSequence() error { return _fillTo(s.out, s.cap, nil) }
+
+// _fillTo default-fills a decoded wrapper array out to the schema count N
+// (S5.1: for a fixed-count array the length "is N for every target
+// -- a growable-list target MUST default-fill to N exactly like a pre-sized
+// one"). It runs when the sequence scope closes, so it also restores the
+// TRAILING run the encoder elided under S3/S5.1: without it that elision would
+// not merely re-shape the bytes, it would SHORTEN the decoded array on every
+// round trip. cap < 0 marks a dynamic array, whose length is highest-present-id
+// + 1 and which therefore must not be filled.
+func _fillTo[T any](out *[]T, cap int, zero T) error {
+	if cap < 0 {
+		return nil
+	}
+	for len(*out) < cap {
+		*out = append(*out, zero)
+	}
+	return nil
+}
+
 // _objSeq collects the elements of a struct/union array: each element is a nested
-// sequence decoded into a freshly appended T (PT is *T and a Visitor). Elements
-// arrive in ascending index order with no gaps, so appending tracks the index;
-// an element id >= cap (schema count N) is still rejected as INVALID (S5.1/S7).
+// sequence decoded into the element the child id names (PT is *T and a Visitor).
+// The element id IS the array index (S5.1), exactly as for the _strSeq/_bytesSeq
+// leaf paths above, so the element is PLACED at out[id] after gap-filling with
+// default elements -- never appended. Appending would shorten the array by the
+// size of any interior id gap and would decode a REOPENED id as a second element
+// instead of merging into the first (S7.4). An element id >= cap (schema count N)
+// is rejected as INVALID (S5.1/S7), which also bounds the gap-fill.
 type _objSeq[T any, PT interface {
 	*T
 	sofab.Visitor
@@ -94,8 +120,71 @@ func (s *_objSeq[T, PT]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
 		return nil, sofab.ErrInvalidMsg
 	}
 	var zero T
-	*s.out = append(*s.out, zero)
-	return PT(&(*s.out)[len(*s.out)-1]), nil
+	for len(*s.out) <= int(id) {
+		*s.out = append(*s.out, zero)
+	}
+	return PT(&(*s.out)[id]), nil
+}
+
+func (s *_objSeq[T, PT]) EndSequence() error {
+	var zero T
+	return _fillTo(s.out, s.cap, zero)
+}
+
+// _isDefaulter is implemented by every generated struct/union type: isDefault
+// reports whether the object equals its declared default, compared per child
+// field and recursively (S2) -- never as a byte image. It is the
+// same predicate the lazy framing already encodes implicitly for a sequence
+// FIELD ("no child was written"), made explicit because an array ELEMENT needs
+// it BEFORE the element loop runs.
+type _isDefaulter interface{ isDefault() bool }
+
+// _trimObjs narrows a count:N wrapper array to M -- one past the last element
+// differing from the element default -- which is what its canonical wire carries
+// (S3/S5.1, "even for sequence-form elements"). Only the TRAILING
+// run is dropped: an interior all-default element stays framed, because element
+// presence is what carries the array's length. M == 0 writes no child at all, so
+// the lazily-opened wrapper is dropped by WriteSequenceEnd and the whole field is
+// omitted (S2). A dynamic (count-less) array has no N to refill from and is never
+// narrowed.
+func _trimObjs[T any, PT interface {
+	*T
+	_isDefaulter
+}](a []T) []T {
+	m := len(a)
+	for m > 0 && PT(&a[m-1]).isDefault() {
+		m--
+	}
+	return a[:m]
+}
+
+// _trimStrs / _trimBlobs / _trimRows are _trimObjs for the other element kinds.
+// A string/blob element is a leaf the writer already omits individually when it
+// equals the element default, so trimming the trailing run does not change the
+// bytes -- it exists so the all-default predicate is computed from the very same
+// expression the writer loops over, and cannot drift away from it.
+func _trimStrs(a []string) []string {
+	m := len(a)
+	for m > 0 && a[m-1] == "" {
+		m--
+	}
+	return a[:m]
+}
+
+func _trimBlobs(a [][]byte) [][]byte {
+	m := len(a)
+	for m > 0 && len(a[m-1]) == 0 {
+		m--
+	}
+	return a[:m]
+}
+
+func _trimRows[T any](a [][]T) [][]T {
+	m := len(a)
+	for m > 0 && len(a[m-1]) == 0 {
+		m--
+	}
+	return a[:m]
 }
 
 // _uMatSeq / _sMatSeq / _f32MatSeq / _f64MatSeq / _boolMatSeq collect the rows of

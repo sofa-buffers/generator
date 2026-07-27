@@ -520,3 +520,96 @@ messages:
 		t.Error("unset limits must emit no limit plumbing")
 	}
 }
+
+// A count:N wrapper array's canonical wire stops at M -- one past its last
+// non-default element (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements")
+// -- and M == 0 leaves the whole wrapper omitted (§2). generator#248: the
+// element loop used to run to len(), framing every trailing all-default element,
+// so a decoder that accepted the non-canonical form re-encoded it unchanged
+// instead of normalising. A DYNAMIC array has no N to refill from, so its
+// trailing default element is significant and must still be framed.
+func TestGoFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`)
+	got := genGo(t, s, map[string]any{"package": "messages"})["vec.go"]
+
+	// The fixed array narrows to M before framing anything...
+	if !strings.Contains(got, "for _i0, _e0 := range _trimObjs[VecFixedElem, *VecFixedElem](m.Fixed) {") {
+		t.Errorf("count:N struct array must loop to M, not len:\n%s", got)
+	}
+	// ...while the dynamic one keeps every element, trailing defaults included.
+	if !strings.Contains(got, "for _i0, _e0 := range m.Dynamic {") {
+		t.Errorf("dynamic struct array must not be narrowed:\n%s", got)
+	}
+	// An interior all-default element is still framed: only the TRAILING run goes.
+	if !strings.Contains(got, "\t\te.WriteSequenceBeginLazy(sofab.ID(_i0))\n\t\t_e0.marshal(e)\n\t\te.WriteSequenceEndKeep()\n") {
+		t.Errorf("interior elements must keep the framing closer:\n%s", got)
+	}
+
+	// isDefault is the exact negation of what marshal writes, so it must narrow a
+	// field exactly when the marshal loop does -- disagreeing would either omit a
+	// field that is on the wire or keep one that is not.
+	if !strings.Contains(got, "len(_trimObjs[VecFixedElem, *VecFixedElem](m.Fixed)) == 0") {
+		t.Errorf("isDefault must narrow the fixed array like marshal does:\n%s", got)
+	}
+	if !strings.Contains(got, "len(m.Dynamic) == 0") {
+		t.Errorf("isDefault must NOT narrow the dynamic array:\n%s", got)
+	}
+	if !strings.Contains(got, "len(_trimStrs(m.Fstrs)) == 0") {
+		t.Errorf("isDefault for a string wrapper array must test the trimmed run:\n%s", got)
+	}
+}
+
+// generator#247: a wrapper array's element id IS the array index (§5.1), so an
+// element is PLACED at dest[id] after gap-filling -- never appended. Appending
+// shortened the array by the size of any interior id gap and decoded a REOPENED
+// id as a second element instead of merging into the first (§7.4). The leaf
+// _strSeq/_bytesSeq paths next to it always got this right.
+//
+// The N-fill on EndSequence is what makes the §3/§5.1 trailing elision lossless:
+// without it, re-encoding a decoded fixed array shortens it on every round trip.
+func TestGoWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      objs: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } } }
+`)
+	files := genGo(t, s, map[string]any{"package": "messages"})
+	prelude := files["sofab_visitor.go"]
+
+	for _, want := range []string{
+		// placement, not append -- and the gap-fill that precedes it
+		"\tfor len(*s.out) <= int(id) {\n\t\t*s.out = append(*s.out, zero)\n\t}\n\treturn PT(&(*s.out)[id]), nil",
+		// N-fill when the sequence scope closes
+		"func (s *_objSeq[T, PT]) EndSequence() error {",
+		"func (s *_strSeq) EndSequence() error { return _fillTo(s.out, s.cap, \"\") }",
+		"func (s *_bytesSeq) EndSequence() error { return _fillTo(s.out, s.cap, nil) }",
+		// a dynamic array (cap < 0) is never filled: its length is highest-id + 1
+		"\tif cap < 0 {\n\t\treturn nil\n\t}",
+	} {
+		if !strings.Contains(prelude, want) {
+			t.Errorf("sofab_visitor.go missing %q:\n%s", want, prelude)
+		}
+	}
+	// The defect this replaced: appending ignored the id entirely.
+	if strings.Contains(prelude, "*s.out = append(*s.out, zero)\n\treturn PT(&(*s.out)[len(*s.out)-1]), nil") {
+		t.Errorf("_objSeq must not append id-blind:\n%s", prelude)
+	}
+	// The cap bound still rejects an out-of-range element id, which also bounds
+	// the gap-fill above.
+	if !strings.Contains(prelude, "if s.cap >= 0 && int(id) >= s.cap {") {
+		t.Errorf("_objSeq must keep the over-index guard:\n%s", prelude)
+	}
+	if !strings.Contains(files["vec.go"], "cap: 4") {
+		t.Errorf("vec.go must pass the schema count as the collector cap:\n%s", files["vec.go"])
+	}
+}
