@@ -24,6 +24,18 @@ public class Scalars {
         if (this.f64 != -2.5) { os.writeFp64(6, this.f64); }
         if (this.flag != true) { os.writeBoolean(7, this.flag); }
     }
+    /** True when every field still equals its declared default, compared per field and recursively -- i.e. marshal would write nothing at all. */
+    boolean isDefault() {
+        if (this.u8min != 0L) return false;
+        if (this.u8max != 255L) return false;
+        if (this.u64max != Long.parseUnsignedLong("18446744073709551615")) return false;
+        if (this.i8min != -128L) return false;
+        if (this.i64min != -9223372036854775808L) return false;
+        if (this.f32 != 3.14f) return false;
+        if (this.f64 != -2.5) return false;
+        if (this.flag != true) return false;
+        return true;
+    }
     /** Restores every field to its declared default, in place; call before reusing an instance as a decode destination. */
     public void reset() {
         this.u8min = 0L;

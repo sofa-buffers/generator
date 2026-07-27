@@ -92,7 +92,13 @@ func (g *gen) frames(m *ir.Message) []frame {
 		case ir.KindStruct, ir.KindUnion:
 			elemLoc := loc + "_e"
 			out = append(out, frame{kind: fkSeqObj, loc: loc, listExpr: listExpr, childLoc: elemLoc, elemType: g.typeName(ref.Key), cap: cap})
-			walk(elemLoc, get, ref.Target.Fields)
+			// The element id IS the array index (MESSAGE_SPEC §5.1), so the element
+			// a child field writes into is the one sequenceBegin PLACED at that
+			// index -- NOT the last one appended. Java's flat visitor has no
+			// per-element child visitor to carry the position (a nested-visitor
+			// backend just returns a pointer to dest[id]), so the index is parked in
+			// a visitor field and the child accessor path reads it back.
+			walk(elemLoc, listExpr+".get("+elemIdxVar(loc)+")", ref.Target.Fields)
 		case ir.KindArray:
 			if nativeArrayElem(items.Elem) {
 				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerRef: items.ElemRef, innerHasCount: items.HasCount})
@@ -108,6 +114,69 @@ func (g *gen) frames(m *ir.Message) []frame {
 		out[i].idx = i
 	}
 	return out
+}
+
+// emitSequenceEnd writes sequenceEnd(): default-fill the wrapper array whose
+// scope is closing out to the schema count N, then pop the location stack.
+//
+// MESSAGE_SPEC §5.1 makes a `count: N` array's length N "for every target -- a
+// growable-list target MUST default-fill to N exactly like a pre-sized one".
+// Native arrays already got this (arrayBegin materializes them at exactly N);
+// wrapper arrays, which are List-backed and grown by arriving elements, did not.
+//
+// It is also the prerequisite for the §3/§5.1 trailing-run elision on the encode
+// side: without the refill that elision would not RE-SHAPE the array, it would
+// SHORTEN it on every round trip. `cur` still names the scope being closed at this
+// point, so the arm is selected before the pop. A DYNAMIC array (cap < 0) has no N
+// to refill from -- its length is highest-present-id + 1 -- and is never filled.
+func (g *gen) emitSequenceEnd(f *jfile, fs []frame) {
+	var arms []string
+	for _, fr := range fs {
+		if fr.cap < 0 {
+			continue
+		}
+		switch fr.kind {
+		case fkSeqLeaf:
+			zero := `""`
+			if fr.elemKind == ir.KindBlob {
+				zero = "new byte[0]"
+			}
+			arms = append(arms, fmt.Sprintf("        case %d: while (%s.size() < %d) %s.add(%s); break;", fr.idx, fr.listExpr, fr.cap, fr.listExpr, zero))
+		case fkSeqObj:
+			arms = append(arms, fmt.Sprintf("        case %d: while (%s.size() < %d) %s.add(new %s()); break;", fr.idx, fr.listExpr, fr.cap, fr.listExpr, fr.elemType))
+		}
+	}
+	if len(arms) == 0 {
+		f.line("    public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
+		return
+	}
+	f.line("    public void sequenceEnd() {")
+	f.line("        // Refill the closing wrapper array to its schema count (S5.1).")
+	f.line("        switch (cur) {")
+	for _, a := range arms {
+		f.line("%s", a)
+	}
+	f.line("        }")
+	f.line("        cur = sp > 0 ? stk[--sp] : 0;")
+	f.line("    }")
+}
+
+// elemIdxVar is the visitor field holding the array index of the struct/union
+// wrapper-array element currently being decoded at loc. See the fkSeqObj walk
+// above for why the flat visitor needs it. Non-identifier characters in loc are
+// folded to '_' so the name is always a legal Java identifier.
+func elemIdxVar(loc string) string {
+	var b strings.Builder
+	b.WriteString("_ex_")
+	for _, r := range loc {
+		switch {
+		case r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 // overIndexGuard returns the reject clause for a fixed-count wrapper array: an
@@ -422,6 +491,13 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	}
 	f.line("    private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)")
 	f.line("    private int sp = 0;")
+	// One per struct/union wrapper array: the index sequenceBegin placed the
+	// element at, which its child field accessors read back (MESSAGE_SPEC §5.1).
+	for _, fr := range fs {
+		if fr.kind == fkSeqObj {
+			f.line("    private int %s = 0;  // index of the element being decoded in %s (S5.1: the element id IS the index)", elemIdxVar(fr.loc), fr.loc)
+		}
+	}
 	f.line("    private java.io.ByteArrayOutputStream acc; // lazy: only split string/blob payloads need it")
 	if limArr || limStr || limBlob {
 		// Emitted only for the limits that are configured AND have at least one
@@ -684,7 +760,17 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		switch fr.kind {
 		case fkSeqObj:
-			f.line("        case %d: %s%s.add(new %s()); cur = %d; break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.elemType, locIndex(fs, fr.childLoc))
+			// MESSAGE_SPEC §5.1: the element id IS the array index, exactly as on the
+			// string/blob leaf-element paths above, so the element is PLACED at
+			// list.get(id) after gap-filling with default elements -- never appended.
+			// Appending shortened the array by the size of any interior id gap and
+			// decoded a REOPENED id as a second element instead of merging into the
+			// first (§7.4 struct-merge, which placement gives for free: the existing
+			// element is reused and the reopened frame's fields land on top of it).
+			// The over-index guard still rejects id >= N, which also bounds the
+			// gap-fill.
+			f.line("        case %d: %swhile (%s.size() <= id) %s.add(new %s()); %s = id; cur = %d; break;",
+				fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.elemType, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkSeqMat:
 			f.line("        case %d: %s%s.add(new ArrayList<>()); cur = %d; break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, locIndex(fs, fr.childLoc))
 		case fkNormal:
@@ -704,7 +790,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	}
 	f.line("        }")
 	f.line("    }")
-	f.line("    public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
+	g.emitSequenceEnd(f, fs)
 	// Lazy-growth helper(s): enlarge the backing array to hold index `i`, doubling
 	// but never exceeding `cap` (the declared element count) so a valid array ends
 	// exactly right-sized. Growth tracks elements actually delivered, so an

@@ -94,8 +94,16 @@ value:
 | wrapper-array element (`struct`/`union`) | `os.writeSequenceEndKeep()` | presence carries the array length |
 | nested array row | `os.writeSequenceEndKeep()` | a row is an element |
 
-Consequence: an all-default message encodes to **zero bytes**, and an array of
-all-default struct elements still round-trips at its original length.
+Consequence: an all-default message encodes to **zero bytes**. An *interior*
+all-default struct element still round-trips, because its keeping closer holds
+the id gap open; the **trailing** run does not — see the next section.
+
+The predicate behind the lazy framing is also emitted explicitly, as a
+package-private `isDefault()` on every generated `struct`/`union` class. Each of
+its arms is literally the corresponding `marshal` write guard, so the two cannot
+state different truth tables. It exists because a wrapper-array **element** has to
+be judged *before* its frame is opened, which the implicit "no child was written"
+test cannot answer in time.
 
 A wrapper array's declared `default` is not materialized by this backend (the
 field initializer is the empty collection), so absent and explicitly-empty denote
@@ -103,6 +111,46 @@ the same value and the plain dropping close is correct. If that gap is ever clos
 the wrapper needs an `if (value != default) { … os.writeSequenceEndKeep(); }` guard
 so a value differing from a non-empty default still reaches the wire as the empty
 wrapper — the only encoding of "explicitly empty" (§2, §3).
+
+## §3/§5.1: wrapper arrays — element ids are indexes, and the tail is elided
+
+A wrapper array's element id **is** the array index (§5.1). Decode therefore
+gap-fills with default elements up to the id and decodes **into** `list.get(id)`;
+it never appends. Appending shortened the array by any interior id gap and decoded
+a *re-opened* element id as a second element instead of merging into the first
+(the §7.4 struct-merge, which placement gives for free). The leaf `string`/`blob`
+element paths always did this; the `struct`/`union` path now agrees with them.
+
+Java's `Visitor` is **flat** — there is no per-element child visitor to carry the
+position the way a nested-visitor backend returns a pointer to `dest[id]` — so
+`sequenceBegin` parks the index in a per-array `_ex_<loc>` field, and the element's
+child-field accessors resolve through `list.get(_ex_<loc>)`. The existing
+over-index guard (element id `≥ N` is `INVALID`) still applies, and now also bounds
+the gap-fill.
+
+Encode is the mirror. A `count: N` wrapper array's canonical wire stops at **M**,
+one past its last non-default element — explicitly *"even for sequence-form
+elements"* (§3/§5.1) — so `marshal` narrows the container to M **before** the
+element loop, via the `Sbuf.trimTail*` helpers (a `subList` view, so no
+allocation). Only the trailing run goes; interior all-default elements keep their
+frame. `M == 0` writes no child at all, so the lazily-opened wrapper is dropped by
+the field-level closer and the field is omitted entirely (§2).
+
+Two invariants hold this together:
+
+- **A dynamic (count-less) array is never narrowed.** It has no `N` to refill
+  from, so a trailing default element is significant and keeps its frame.
+- **Decode default-fills a `count: N` wrapper array back out to `N`** when the
+  sequence scope closes (`sequenceEnd`). §5.1 makes the length `N` "for every
+  target — a growable-list target MUST default-fill to `N` exactly like a
+  pre-sized one". Native arrays already got this from `arrayBegin`; wrapper arrays
+  are `List`-backed and did not. Without it the trailing elision would not
+  *re-shape* the array, it would **shorten** it on every round trip.
+
+The narrowing expression is generated once (`elemTrimExpr`) and used by both the
+marshal loop and `isDefault`. If the predicate narrowed a field the writer did not
+(or the reverse), the result would be a field omitted though it is on the wire, or
+kept though it is not.
 
 ## `reset()` — the decode side of §2
 

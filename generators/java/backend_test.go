@@ -139,7 +139,9 @@ func TestJavaOverIndexWrapperArray(t *testing.T) {
 	for _, want := range []string{
 		`if (id >= 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_bs element: array index above schema capacity 4")); while (m.bs.size() <= id)`,
 		`if (id >= 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_bb element: array index above schema capacity 3")); while (m.bb.size() <= id)`,
-		`if (id >= 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_bp element: array index above schema capacity 2")); m.bp.add(new`,
+		// The struct-element arm gap-fills and PLACES by id (generator#247), so the
+		// guard is now followed by the same grow-to-id loop the leaf arms use.
+		`if (id >= 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_bp element: array index above schema capacity 2")); while (m.bp.size() <= id) m.bp.add(new`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing over-index guard %q", want)
@@ -660,5 +662,121 @@ func TestJavaSbufResetList(t *testing.T) {
 		map[string]any{})["src/main/java/message/Sbuf.java"])
 	if !strings.Contains(s, "static <T> List<T> resetList(List<T> l) { if (l == null) return new java.util.ArrayList<>(); l.clear(); return l; }") {
 		t.Error("Sbuf.java missing the in-place resetList helper")
+	}
+}
+
+// wrapperArraySrc is the schema both wrapper-array regression tests below run
+// against: a count:N struct array, a count-less one of the same element shape as
+// the control, and a count:N string array for the leaf-element path.
+const wrapperArraySrc = `
+version: 1
+messages:
+  Vec:
+    payload:
+      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`
+
+// A count:N wrapper array's canonical wire stops at M -- one past its last
+// non-default element (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements")
+// -- and M == 0 leaves the whole wrapper omitted (§2). generator#248: the element
+// loop used to run to size(), framing every trailing all-default element, so a
+// decoder that accepted the non-canonical form re-encoded it unchanged instead of
+// normalising. A DYNAMIC array has no N to refill from, so its trailing default
+// element is significant and must still be framed.
+func TestJavaFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+	files := genJavaFromYAML(t, wrapperArraySrc, map[string]any{})
+	got := files["src/main/java/message/Vec.java"]
+
+	// The fixed array narrows to M before framing anything...
+	if !strings.Contains(got, "List<VecFixedElem> _t0 = Sbuf.trimTailObjs(this.fixed, VecFixedElem::isDefault);") ||
+		!strings.Contains(got, "for (int _i0 = 0; _i0 < _t0.size(); _i0++) { os.writeSequenceBeginLazy(_i0);") {
+		t.Errorf("count:N struct array must loop to M, not size():\n%s", got)
+	}
+	// ...while the dynamic one keeps every element, trailing defaults included.
+	if !strings.Contains(got, "for (int _i0 = 0; _i0 < this.dynamic.size(); _i0++) { os.writeSequenceBeginLazy(_i0);") {
+		t.Errorf("dynamic struct array must not be narrowed:\n%s", got)
+	}
+	// An interior all-default element is still framed: only the TRAILING run goes.
+	if !strings.Contains(got, ".marshal(os); os.writeSequenceEndKeep(); }") {
+		t.Errorf("interior elements must keep the framing closer:\n%s", got)
+	}
+	// The leaf string array shares the mechanism.
+	if !strings.Contains(got, "List<String> _t1 = Sbuf.trimTailStrings(this.fstrs);") {
+		t.Errorf("count:N string array must loop over the trimmed run:\n%s", got)
+	}
+
+	// isDefault is the exact mirror of what marshal writes, so it must narrow a
+	// field exactly when the marshal loop does -- disagreeing would either omit a
+	// field that is on the wire or keep one that is not.
+	if !strings.Contains(got, "if (!Sbuf.trimTailObjs(this.fixed, VecFixedElem::isDefault).isEmpty()) return false;") {
+		t.Errorf("isDefault must narrow the fixed array like marshal does:\n%s", got)
+	}
+	if !strings.Contains(got, "if (!this.dynamic.isEmpty()) return false;") {
+		t.Errorf("isDefault must NOT narrow the dynamic array:\n%s", got)
+	}
+	if !strings.Contains(got, "if (!Sbuf.trimTailStrings(this.fstrs).isEmpty()) return false;") {
+		t.Errorf("isDefault for a string wrapper array must test the trimmed run:\n%s", got)
+	}
+
+	// The narrowing helpers themselves, and the fact that they return a VIEW.
+	sbuf := files["src/main/java/message/Sbuf.java"]
+	for _, want := range []string{
+		"static <T> List<T> trimTailObjs(List<T> a, java.util.function.Predicate<? super T> isDefault) {",
+		"static List<String> trimTailStrings(List<String> a) {",
+		"return n == a.size() ? a : a.subList(0, n);",
+	} {
+		if !strings.Contains(sbuf, want) {
+			t.Errorf("Sbuf.java missing %q:\n%s", want, sbuf)
+		}
+	}
+}
+
+// generator#247: a wrapper array's element id IS the array index (§5.1), so an
+// element is PLACED at dest[id] after gap-filling -- never appended. Appending
+// shortened the array by the size of any interior id gap and decoded a REOPENED
+// id as a second element instead of merging into the first (§7.4). The leaf
+// string/blob element paths next to it always got this right.
+//
+// The N-fill on sequenceEnd is what makes the §3/§5.1 trailing elision lossless:
+// without it, re-encoding a decoded fixed array shortens it on every round trip.
+func TestJavaWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+	got := genJavaFromYAML(t, wrapperArraySrc, map[string]any{})["src/main/java/message/Vec.java"]
+
+	for _, want := range []string{
+		// placement, not append -- and the gap-fill that precedes it
+		"while (m.fixed.size() <= id) m.fixed.add(new VecFixedElem()); _ex_Root_fixed = id;",
+		// a child field of the element resolves through the PLACED index, not
+		// through the last-appended element
+		"case 0: m.fixed.get(_ex_Root_fixed).k = value; break;",
+		// N-fill when the sequence scope closes
+		"case 1: while (m.fixed.size() < 5) m.fixed.add(new VecFixedElem()); break;",
+		"case 5: while (m.fstrs.size() < 3) m.fstrs.add(\"\"); break;",
+		// the over-index guard still bounds both the placement and the gap-fill
+		`if (id >= 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_fixed element: array index above schema capacity 5"));`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Vec.java missing %q:\n%s", want, got)
+		}
+	}
+
+	// The defect this replaced: appending ignored the id entirely.
+	if strings.Contains(got, "m.fixed.add(new VecFixedElem()); cur =") {
+		t.Errorf("struct-array elements must not be appended id-blind:\n%s", got)
+	}
+	if strings.Contains(got, "m.fixed.get(m.fixed.size()-1)") {
+		t.Errorf("element child fields must not resolve through the last-appended element:\n%s", got)
+	}
+	// A DYNAMIC array is placed by id too, but its length is highest-id + 1, so it
+	// is never filled to any N.
+	if !strings.Contains(got, "while (m.dynamic.size() <= id) m.dynamic.add(new VecDynamicElem()); _ex_Root_dynamic = id;") {
+		t.Errorf("dynamic struct array must also place by id:\n%s", got)
+	}
+	// A fill arm ends right after the add (`... .add(new X()); break;`), where the
+	// placement arm above continues into `_ex_... = id; cur = ...`. Neither the
+	// dynamic struct array nor any other count-less wrapper may get one.
+	if strings.Contains(got, "m.dynamic.add(new VecDynamicElem()); break;") {
+		t.Errorf("a dynamic array has no N and must never be default-filled:\n%s", got)
 	}
 }

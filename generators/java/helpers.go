@@ -490,6 +490,51 @@ final class Sbuf {
     static long[] trimTail(long[] a) { int n = a.length; while (n > 0 && a[n - 1] == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
     static float[] trimTailF32(float[] a) { int n = a.length; while (n > 0 && Float.floatToRawIntBits(a[n - 1]) == 0) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
     static double[] trimTailF64(double[] a) { int n = a.length; while (n > 0 && Double.doubleToRawLongBits(a[n - 1]) == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
+
+    // trimTailStrings / trimTailBlobs / trimTailObjs / trimTailRows narrow a
+    // WRAPPER array to M -- one past the last element differing from the element
+    // default -- which is what its canonical wire carries, sequence-form elements
+    // included. Only the TRAILING run is dropped: an interior all-default element
+    // keeps its frame, because element presence is what carries the array's
+    // length. M == 0 leaves no child written at all, so the lazily-opened wrapper
+    // is dropped by the field-level writeSequenceEnd and the whole field is
+    // omitted. The result is a subList VIEW, so narrowing allocates nothing and
+    // the marshal loop keeps indexing by the element's original index (only the
+    // tail is cut).
+    //
+    // A string/blob element is a leaf the writer already omits individually when
+    // it equals the element default, so trimming their trailing run does not move
+    // a single byte -- those two exist so that the all-default predicate is
+    // computed from the very same expression the writer loops over and cannot
+    // drift away from it.
+    static List<String> trimTailStrings(List<String> a) {
+        if (a == null) return java.util.Collections.emptyList();
+        int n = a.size();
+        while (n > 0 && (a.get(n - 1) == null || a.get(n - 1).isEmpty())) n--;
+        return n == a.size() ? a : a.subList(0, n);
+    }
+    static List<byte[]> trimTailBlobs(List<byte[]> a) {
+        if (a == null) return java.util.Collections.emptyList();
+        int n = a.size();
+        while (n > 0 && (a.get(n - 1) == null || a.get(n - 1).length == 0)) n--;
+        return n == a.size() ? a : a.subList(0, n);
+    }
+    // isDefault is the element type's own all-default predicate, passed as a
+    // non-capturing method reference (X::isDefault), so the JVM caches one
+    // instance and the narrowing costs no allocation. A null element is the
+    // element default -- marshal encodes it as a fresh all-default object.
+    static <T> List<T> trimTailObjs(List<T> a, java.util.function.Predicate<? super T> isDefault) {
+        if (a == null) return java.util.Collections.emptyList();
+        int n = a.size();
+        while (n > 0 && (a.get(n - 1) == null || isDefault.test(a.get(n - 1)))) n--;
+        return n == a.size() ? a : a.subList(0, n);
+    }
+    static <T extends java.util.Collection<?>> List<T> trimTailRows(List<T> a) {
+        if (a == null) return java.util.Collections.emptyList();
+        int n = a.size();
+        while (n > 0 && (a.get(n - 1) == null || a.get(n - 1).isEmpty())) n--;
+        return n == a.size() ? a : a.subList(0, n);
+    }
 }
 `, g.banner, spdx, g.pkg))
 }
