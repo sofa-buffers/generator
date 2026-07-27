@@ -140,9 +140,10 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 	case ir.KindArray:
 		// A native scalar array is a leaf: materialize its schema default so an
 		// omitted default array reconstructs correctly. A fixed-count native array
-		// is a stack `[elem; N]`; a dynamic one stays a heap Vec. Composite arrays
-		// are wrapper sequences whose declared default is not materialized, so they stay
-		// an empty container -- which is what makes their dropping closer correct (§2).
+		// is a stack `[elem; N]`; a dynamic one stays a heap Vec. A wrapper array's
+		// declared `default:` is still not materialized -- only its LENGTH is (see
+		// rustSeqFilled), so an all-default one is still the empty-run value whose
+		// dropping closer §2 needs.
 		if elem, n, ok := g.fixedNativeArray(f); ok {
 			return g.rustFixedArrayDefault(f, elem, n)
 		}
@@ -165,6 +166,18 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 				}
 				return "vec![" + parts + "]"
 			}
+		}
+		// A `count: N` wrapper array's value is N elements long whether or not the
+		// field ever reaches the wire (S5.1: the length "is N for every target").
+		// The native arrays above have always been materialized here; the wrapper
+		// ones were not, which left the two kinds disagreeing about the same schema
+		// -- a count:3 u32 array reading back at length 3 next to a count:3 string
+		// array at length 0 -- and left the field disagreeing with itself: the
+		// sequence_end refill (elemFill) can only fill a sequence that was actually
+		// OPENED, so an explicitly-empty wrapper decoded at N while an omitted field
+		// stayed empty.
+		if fill := g.rustSeqFilled(f); fill != "" {
+			return fill
 		}
 		return g.rustSeqNew(f.HasCount)
 	default: // struct/union: all children default, so Default::default() is right
@@ -295,6 +308,37 @@ func (g *gen) rustSeqNew(hasCount bool) string {
 	default:
 		return "alloc::vec::Vec::new()"
 	}
+}
+
+// rustSeqFilled is the Default for a `count: N` WRAPPER array: the container of
+// rustSeqNew, filled with N element defaults. "" when the field is not one, i.e.
+// when the container must stay empty.
+//
+// The set of fields filled here is exactly the set elemFill refills at
+// sequence_end -- string/blob (fkSeqArr) and struct/union (fkStructArr)
+// elements. Nested-array ROWS are deliberately excluded from BOTH: a row's
+// writer emits its array header unconditionally (serializeArray's KindArray
+// arm), so materialized rows would reach the wire instead of being narrowed
+// away, and the array would grow on every round trip. Construction and refill
+// have to agree about that, or the field is inconsistent the other way round.
+//
+// Elements are the type's default (empty string/blob, all-default struct or
+// union), matching elemFill's `Default::default()`; a declared per-element
+// default is not materialized anywhere today. That keeps the filled value
+// byte-neutral: a default leaf element is omitted individually and the trailing
+// all-default run is narrowed off by elemTrimExpr, so an untouched `count: N`
+// wrapper array still writes no child and is still dropped by its closer (§2).
+//
+// One loop shape serves both profiles: under no_std the container is a
+// heapless::Vec whose capacity IS N, so the pushes cannot fail, but the loop
+// stops when the length stops growing anyway -- the same guard elemFill uses, so
+// a fixed-capacity container can never spin here.
+func (g *gen) rustSeqFilled(f *ir.Field) string {
+	if !f.HasCount || !isWrapperElem(f.Elem) || f.Elem == ir.KindArray {
+		return ""
+	}
+	return fmt.Sprintf("{ let mut _v = %s; while _v.len() < %d { let _n = _v.len(); let _ = _v.push(Default::default()); if _v.len() == _n { break; } } _v }",
+		g.rustSeqNew(true), f.Count)
 }
 
 // rustLeafCmp compares a scalar/string leaf field against its default with the

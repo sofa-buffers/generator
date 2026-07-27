@@ -1,6 +1,7 @@
 package rust
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -674,6 +675,77 @@ messages:
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs missing %q", want)
 		}
+	}
+}
+
+// A `count: N` WRAPPER array's value is N elements long whether or not the field
+// ever reaches the wire (MESSAGE_SPEC S5.1: the length "is N for every target"),
+// so Default materializes N element defaults exactly like the native array next
+// to it. Without this the field disagreed with itself -- the sequence_end refill
+// only fires on a sequence that was actually opened, so an absent count:3 string
+// array decoded at length 0 while one carrying a single element decoded at 3.
+//
+// The filled set is exactly the set sequence_end refills: a DYNAMIC array has no
+// N and stays empty, and nested-array ROWS are excluded from both (their writer
+// emits every row unconditionally, so materialized rows would reach the wire).
+func TestRustFixedCountWrapperArrayMaterializesN(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  struct:
+    Kv:
+      k: { id: 0, type: u32 }
+messages:
+  m:
+    payload:
+      strs:    { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      blobs:   { id: 1, type: array, items: { type: blob, count: 2, maxlen: 4 } }
+      structs: { id: 2, type: array, items: { type: struct, count: 2, fields: { $ref: '#/$defs/struct/Kv' } } }
+      rows:    { id: 3, type: array, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } }
+      nums:    { id: 4, type: array, items: { type: u32, count: 3 } }
+`
+	// heapless::Vec is capacity-bounded, not pre-sized: its Default is length 0,
+	// so the static no_std profile needs the same fill as the std one.
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]any
+		ctor string
+	}{
+		{"std", map[string]any{}, "Vec::new()"},
+		{"no-std-static", map[string]any{"corelib": "rs-no-std"}, "heapless::Vec::new()"},
+		{"no-std-dynamic", map[string]any{"corelib": "rs-no-std", "allow_dynamic": true}, "alloc::vec::Vec::new()"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := moduleFromYAML(t, src, tc.cfg)
+			fill := func(field string, n int) string {
+				return fmt.Sprintf("%s: { let mut _v = %s; while _v.len() < %d {", field, tc.ctor, n)
+			}
+			for _, want := range []string{fill("strs", 3), fill("blobs", 2), fill("structs", 2)} {
+				if !strings.Contains(m, want) {
+					t.Errorf("message.rs missing %q:\n%s", want, m)
+				}
+			}
+			// A nested-array row container is never filled.
+			if want := fmt.Sprintf("rows: %s,", tc.ctor); !strings.Contains(m, want) {
+				t.Errorf("nested rows must stay empty, missing %q", want)
+			}
+		})
+	}
+}
+
+// The count-less half of the same rule: a DYNAMIC wrapper array has no N to
+// materialize and must stay empty (std profile only -- no_std requires a bound).
+func TestRustDynamicWrapperArrayStaysEmpty(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      dyns: { id: 0, type: array, items: { type: string, maxlen: 8 } }
+`
+	m := moduleFromYAML(t, src, map[string]any{})
+	if !strings.Contains(m, "dyns: Vec::new(),") {
+		t.Errorf("a dynamic wrapper array must default to the empty container:\n%s", m)
 	}
 }
 

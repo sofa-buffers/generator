@@ -181,6 +181,25 @@ This is visible in the decoded value (a `count: 5` string array carrying three
 elements reads back as five, the last two empty). A **dynamic** (count-less)
 array is never filled: its length is highest-present-id + 1.
 
+The fill at `sequence_end` is only half of it: it can fill a sequence that was
+actually **opened**, and an omitted field opens nothing. So `Default` for the
+same field **materializes the N elements too**, exactly like the native
+`count: N` array next to it (`vec![0; 3]`, `[0; 3]`). Without that the field
+disagreed with itself — absent decoded at 0, one element on the wire at N,
+explicitly-empty at N — and disagreed with the native array beside it under the
+same schema. Both profiles need it: `heapless::Vec<T, N>` is capacity-bounded,
+not pre-sized, so its `Default` is length 0 as much as `Vec`'s is.
+
+This costs no bytes. The declared `default:` of a wrapper array is still not
+materialized — only the length is — so the value is N *element* defaults, which
+the trailing-run narrowing below removes again: an untouched `count: N` wrapper
+array still writes no child and is still dropped by its closer (§2).
+
+Practical consequence for hand-written code: a `count: N` wrapper array is
+assigned **in place** (`for (i, v) in m.strs.iter_mut().enumerate()`), like every
+other fixed-count array. Pushing onto it appends past N, and the resulting wire
+is rejected as over-count.
+
 **The trailing run.** Encode narrows a `count: N` wrapper array to `M` — one
 past its last element differing from the element default — before the element
 loop, because that is what its canonical wire carries (§3/§5.1, "even for
@@ -199,7 +218,9 @@ not — or the reverse — would omit a field that is on the wire, or keep one t
 is not. `is_default()` and the `_trim_seq` helper are emitted only for the
 schemas that use them, so a footprint build carries neither.
 
-**Nested-array rows are excluded** from the narrowing and the fill. A row's
+**Nested-array rows are excluded** from the narrowing, the fill, and the
+`Default` materialization — the three have to agree, or the field is inconsistent
+the other way round. A row's
 writer emits an array header unconditionally, so a row is never "not written" the
 way a default string element or an all-default struct element is: dropping a
 trailing empty row would remove a child that *is* on the wire, and there is no
