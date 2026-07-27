@@ -111,10 +111,13 @@ messages:
 		"        e.write_sequence_begin_lazy(0)\n        self.st._marshal(e)\n        e.write_sequence_end()\n",
 		"        e.write_sequence_begin_lazy(1)\n        self.un._marshal(e)\n        e.write_sequence_end()\n",
 		// string/blob wrapper FIELD: the leaf elements are omitted when default,
-		// and the wrapper itself closes with the dropping end at field level.
-		"        e.write_sequence_begin_lazy(2)\n        for _i0, _e0 in enumerate(self.strs):\n" +
+		// and the wrapper itself closes with the dropping end at field level. The
+		// run is narrowed to M first — a no-op on the BYTES for a leaf element the
+		// writer already omits individually, but it keeps the loop and the
+		// _is_default predicate running off one expression (generator#248).
+		"        e.write_sequence_begin_lazy(2)\n        for _i0, _e0 in enumerate(_trim_empty(self.strs)):\n" +
 			"            if _e0 != \"\":\n                e.write_string(_i0, _e0)\n        e.write_sequence_end()\n",
-		"        e.write_sequence_begin_lazy(3)\n        for _i0, _e0 in enumerate(self.blobs):\n" +
+		"        e.write_sequence_begin_lazy(3)\n        for _i0, _e0 in enumerate(_trim_empty(self.blobs)):\n" +
 			"            if len(_e0) != 0:\n                e.write_bytes(_i0, bytes(_e0))\n        e.write_sequence_end()\n",
 		// struct ELEMENT inside a wrapper array: keeping close; the wrapper FIELD
 		// around it still closes with the dropping end.
@@ -805,4 +808,141 @@ func importLine(t *testing.T, mod string) string {
 	}
 	t.Fatalf("no corelib import line in:\n%s", mod)
 	return ""
+}
+
+// A count:N wrapper array's canonical wire stops at M -- one past its last
+// non-default element (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements")
+// -- and M == 0 leaves the whole wrapper omitted (§2). generator#248: the
+// element loop used to run over the whole container, framing every trailing
+// all-default element, so a decoder that accepted the non-canonical form
+// re-encoded it unchanged instead of normalising. A DYNAMIC array has no N to
+// refill from, so its trailing default element is significant and must still be
+// framed.
+func TestPythonFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  vec:
+    payload:
+      fixed:
+        id: 0
+        type: array
+        items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } }
+      dynamic:
+        id: 1
+        type: array
+        items: { type: struct, fields: { k: { id: 0, type: u32 } } }
+      fstrs: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+
+	for _, want := range []string{
+		"def _trim_objs(a: list) -> list:",
+		"    while n > 0 and a[n - 1]._is_default():",
+		// The fixed array narrows to M before framing anything...
+		"for _i0, _e0 in enumerate(_trim_objs(self.fixed)):",
+		// ...while the dynamic one keeps every element, trailing defaults included.
+		"for _i0, _e0 in enumerate(self.dynamic):",
+		// An interior all-default element is still framed: only the TRAILING run
+		// goes, and M == 0 writes no child so the lazy wrapper is dropped (§2).
+		"            e.write_sequence_begin_lazy(_i0)\n            _e0._marshal(e)\n            e.write_sequence_end_keep()\n",
+		// _is_default is the exact negation of what _marshal writes, so it must
+		// narrow a field exactly when the marshal loop does -- disagreeing would
+		// either omit a field that is on the wire or keep one that is not.
+		"if not (len(_trim_objs(self.fixed)) == 0):",
+		"if not (len(self.dynamic) == 0):",
+		"if not (len(_trim_empty(self.fstrs)) == 0):",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q:\n%s", want, mod)
+		}
+	}
+	// The defect this replaced: the loop ran over the whole container.
+	if strings.Contains(mod, "for _i0, _e0 in enumerate(self.fixed):") {
+		t.Errorf("count:N struct array must loop to M, not over the whole list:\n%s", mod)
+	}
+	if strings.Contains(mod, "if not (len(_trim_objs(self.dynamic)) == 0):") {
+		t.Errorf("_is_default must NOT narrow the dynamic array:\n%s", mod)
+	}
+}
+
+// generator#247: a wrapper array's element id IS the array index (§5.1), so an
+// element is PLACED at target[id] after gap-filling -- never appended. Appending
+// shortened the array by the size of any interior id gap and decoded a REOPENED
+// id as a second element instead of merging into the first (§7.4). The leaf
+// string/blob element paths next to it always got this right.
+//
+// The N-fill when the sequence scope closes is what makes the §3/§5.1 trailing
+// elision lossless: without it, re-encoding a decoded fixed array shortens it on
+// every round trip.
+func TestPythonWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  vec:
+    payload:
+      objs:
+        id: 0
+        type: array
+        items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } }
+      strs: { id: 1, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      dyn:
+        id: 2
+        type: array
+        items: { type: struct, fields: { k: { id: 0, type: u32 } } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+
+	for _, want := range []string{
+		// placement, not append -- and the gap-fill that precedes it
+		"                    while len(self.objs) <= _ef0.id:\n" +
+			"                        self.objs.append(VecObjsElem())\n" +
+			"                    self.objs[_ef0.id]._unmarshal(d)\n",
+		// N-fill when the sequence scope closes, for every fixed wrapper kind
+		"                while len(self.objs) < 4:\n                    self.objs.append(VecObjsElem())\n",
+		"                while len(self.strs) < 3:\n                    self.strs.append(\"\")\n",
+		// the over-index guard still bounds both the decode and the gap-fill
+		"if _ef0.id >= 4:",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q:\n%s", want, mod)
+		}
+	}
+	// The defect this replaced: decode built a fresh element and appended it,
+	// consulting the id only for the capacity check.
+	if strings.Contains(mod, "self.objs.append(_e0)") {
+		t.Errorf("struct elements must not be appended id-blind:\n%s", mod)
+	}
+	// A dynamic (count-less) array has no N to refill from: it is placed by id
+	// like every wrapper array, but never filled.
+	if !strings.Contains(mod, "while len(self.dyn) <= _ef0.id:") {
+		t.Errorf("dynamic struct array must still place by element id:\n%s", mod)
+	}
+	if strings.Contains(mod, "while len(self.dyn) < ") {
+		t.Errorf("dynamic array must not be default-filled:\n%s", mod)
+	}
+}
+
+// TestPythonNoWrapperTrimHelpersWhenUnused keeps the helper emission honest:
+// _trim_empty / _trim_objs are referenced only by a wrapper (sequence-form)
+// array, so a schema without one must not carry them. A dynamic struct array
+// references neither — it is never narrowed.
+func TestPythonNoWrapperTrimHelpersWhenUnused(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  T:
+    payload:
+      dynU32: { id: 0, type: array, items: { type: u32 } }
+      dynObjs:
+        id: 1
+        type: array
+        items: { type: struct, fields: { k: { id: 0, type: u32 } } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, bad := range []string{"_trim_empty", "_trim_objs"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("message.py must not contain %q when no array references it:\n%s", bad, mod)
+		}
+	}
 }
