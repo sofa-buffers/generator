@@ -231,6 +231,9 @@ func (g *gen) dartInit(f *ir.Field) string {
 		if lit, ok := g.dartArrayLiteral(f); ok {
 			return " = " + lit
 		}
+		if lit, ok := g.dartWrapperFillLit(f); ok {
+			return " = " + lit
+		}
 		return " = <" + g.dartArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">[]"
 	case ir.KindString:
 		if s, ok := f.Default.(string); ok {
@@ -308,6 +311,48 @@ func (g *gen) dartArrayLiteral(f *ir.Field) (string, bool) {
 	}
 	parts = g.tailPadLiteral(f, parts)
 	return fmt.Sprintf("<%s>[%s]", et, strings.Join(parts, ", ")), true
+}
+
+// dartWrapperFillLit renders a fixed-count WRAPPER array's materialized value:
+// exactly `count` element defaults, as a growable Dart list literal.
+// ("", false) for a native-element array — dartArrayLiteral owns those — and for
+// a count-less one, whose length is whatever the wire gave it.
+//
+// A `count: N` array's value is N elements long whether or not the field ever
+// reaches the wire (MESSAGE_SPEC S5.1: the length "is N for every target"). The
+// native kinds have always been materialized here through their padded default
+// literal, wrapper ones were not, which left the two disagreeing about the same
+// schema — a count:3 u32 array at length 3 next to a count:3 string array at
+// length 0. It also made the field's own absent forms disagree: an omitted
+// field stayed empty while an explicitly-empty wrapper refilled to N in the
+// collector's onSequenceEnd, which can only fill a sequence that was opened.
+func (g *gen) dartWrapperFillLit(f *ir.Field) (string, bool) {
+	if nativeArrayElem(f.Elem) || !f.HasCount {
+		return "", false
+	}
+	et := g.dartArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
+	parts := make([]string, f.Count)
+	for i := range parts {
+		parts[i] = g.wrapperElemZero(f.Elem, f.ElemRef, f.ElemItems)
+	}
+	return fmt.Sprintf("<%s>[%s]", et, strings.Join(parts, ", ")), true
+}
+
+// wrapperElemZero is one wrapper-sequence element's default, matching element
+// for element the gap-fill the collectors perform (visitor.go, fillToCap): the
+// empty string/blob, a default-constructed object, an empty inner list. A
+// declared per-element default is not materialized anywhere today.
+func (g *gen) wrapperElemZero(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	switch elem {
+	case ir.KindBlob:
+		return "Uint8List(0)"
+	case ir.KindStruct, ir.KindUnion:
+		return g.typeName(ref.Key) + "()"
+	case ir.KindArray:
+		return "<" + g.dartArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">[]"
+	default: // string
+		return "''"
+	}
 }
 
 // tailPadLiteral extends a `count: N` array's schema default to exactly N

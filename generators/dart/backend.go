@@ -378,12 +378,21 @@ func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
 			return
 		}
 		// A `const` default literal is canonicalized once by the Dart compiler, so
-		// refilling allocates nothing. A wrapper-sequence array has no materialized
-		// default (see marshal), so it resets to empty.
+		// refilling allocates nothing.
 		if lit, ok := g.dartArrayLiteral(fld); ok {
 			f.line("    %s..clear()..addAll(const %s);", acc, lit)
 			return
 		}
+		// A `count: N` wrapper array is N elements long even when the field never
+		// reaches the wire (S5.1), so reset restores the same N element defaults the
+		// field initializer materializes -- otherwise tryDecode's reused destination
+		// and decode's fresh one would disagree about an absent field. Not `const`:
+		// a struct/union element must be a FRESH instance per reset, never shared.
+		if lit, ok := g.dartWrapperFillLit(fld); ok {
+			f.line("    %s..clear()..addAll(%s);", acc, lit)
+			return
+		}
+		// A count-less wrapper array has no N to refill from: it resets to empty.
 		f.line("    %s.clear();", acc)
 	case ir.KindFP32:
 		// Drop any captured NaN wire bits with the value they belonged to (§4.6).

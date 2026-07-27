@@ -170,10 +170,13 @@ func TestResetRestoresDefaults(t *testing.T) {
 		// an all-default struct in the next message is omitted entirely.
 		"    somestruct.reset();",
 		"    someunion.reset();",
-		// Wrapper-sequence arrays (string/blob/struct/union/nested) clear.
-		"    somestringarray.clear();",
-		"    somestructarray.clear();",
-		"    somematrix.clear();",
+		// Wrapper-sequence arrays (string/blob/struct/union/nested) clear -- and,
+		// since all three of these declare `count: N`, refill to N element defaults:
+		// a count:N array is N long whether or not the field reaches the wire
+		// (S5.1), exactly like the native count:N arrays below.
+		"    somestringarray..clear()..addAll(<String>['', '', '', '', '']);",
+		"    somestructarray..clear()..addAll(<MyfirstmessageSomestructarrayElem>[MyfirstmessageSomestructarrayElem(), MyfirstmessageSomestructarrayElem(), MyfirstmessageSomestructarrayElem()]);",
+		"    somematrix..clear()..addAll(<List<int>>[<int>[], <int>[]]);",
 		// A native array with a materialized default is cleared and refilled from a
 		// const literal: no reallocation of the list, none of the default either.
 		"    someuintarray..clear()..addAll(const <int>[0, 1, 1000, 4294967295]);",
@@ -212,7 +215,10 @@ func TestResetIsInPlaceForReuse(t *testing.T) {
 	body := out[strings.Index(out, "  void reset() {"):]
 	body = body[:strings.Index(body, "\n  }")]
 	for _, want := range []string{
-		"    names.clear();",
+		// `names` is count:2, so it is refilled to its 2 element defaults, not left
+		// empty -- in place, like the native count:3 `nums` beside it. `dyn` is
+		// count-less: no N to refill from, so it stays at the bare clear.
+		"    names..clear()..addAll(<String>['', '']);",
 		"    nums..clear()..addAll(const <int>[1, 2, 3]);",
 		"    dyn.clear();",
 	} {
@@ -517,5 +523,58 @@ func TestDartDynamicWrapperArrayIsNeitherTrimmedNorFilled(t *testing.T) {
 	// cap -1 short-circuits the fill at runtime; the guard must be present.
 	if !strings.Contains(out, "    if (cap < 0) return;") {
 		t.Errorf("the N-fill must short-circuit for a dynamic array:\n%s", out)
+	}
+}
+
+// A `count: N` array's value is N elements long whether or not the field ever
+// reaches the wire (S5.1: the length "is N for every target"). The native kinds
+// have always been materialized at construction from their padded default
+// literal; a WRAPPER array was not, so the two disagreed about the same schema
+// -- a count:3 u32 array at length 3 next to a count:3 string array at length 0
+// -- and the wrapper field disagreed with ITSELF: the collector's onSequenceEnd
+// fill can only fill a sequence that was actually opened, so an absent field
+// stayed empty while an explicitly-empty wrapper came back at N.
+//
+// Both the field initializer and reset() must materialize N element defaults,
+// or decode()'s fresh destination and tryDecode()'s reused one would disagree.
+func TestDartFixedWrapperArrayIsMaterializedToN(t *testing.T) {
+	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }\n" +
+		"      nums:  { id: 1, type: array, items: { type: u32, count: 3 } }\n" +
+		"      blobs: { id: 2, type: array, items: { type: blob, count: 2, maxlen: 8 } }\n" +
+		"      objs:  { id: 3, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }\n" +
+		"      dyn:   { id: 4, type: array, items: { type: string, maxlen: 8 } }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+
+	for _, want := range []string{
+		// The wrapper initializer sits right beside the native one it must match.
+		"  List<String> strs = <String>['', '', ''];",
+		"  List<int> nums = <int>[0, 0, 0];",
+		"  List<Uint8List> blobs = <Uint8List>[Uint8List(0), Uint8List(0)];",
+		"  List<VecObjsElem> objs = <VecObjsElem>[VecObjsElem(), VecObjsElem()];",
+		// reset() restores the same N, in place -- and NOT `const` for a struct
+		// element, which must be a fresh instance per reset.
+		"    strs..clear()..addAll(<String>['', '', '']);",
+		"    blobs..clear()..addAll(<Uint8List>[Uint8List(0), Uint8List(0)]);",
+		"    objs..clear()..addAll(<VecObjsElem>[VecObjsElem(), VecObjsElem()]);",
+		// A count-less wrapper array has no N: it starts and resets empty.
+		"  List<String> dyn = <String>[];",
+		"    dyn.clear();",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated Dart missing %q:\n%s", want, out)
+		}
+	}
+	// The defect: a fixed-count wrapper array left at the count-less empty literal.
+	if strings.Contains(out, "  List<String> strs = <String>[];") {
+		t.Errorf("count:3 string array must not be materialized empty:\n%s", out)
+	}
+	if strings.Contains(out, "    strs.clear();") {
+		t.Errorf("count:3 string array must not reset to empty:\n%s", out)
+	}
+	// Materializing N defaults must not put the field on the wire: an all-default
+	// wrapper is still omitted whole (S2), which is what the M-trim buys.
+	if !strings.Contains(out, "if (!(_trimLen(strs, (x) => x.isEmpty) == 0)) return false;") {
+		t.Errorf("an all-default count:N wrapper array must still read as default:\n%s", out)
 	}
 }

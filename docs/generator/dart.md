@@ -50,6 +50,18 @@ enum values (which a plain Dart `enum` cannot express) and 64-bit bitfields work
 | string / blob / struct / union / nested array | `List<String>` / `List<Uint8List>` / `List<T>` / `List<List<…>>` |
 | struct / union | the generated class type |
 
+A **`count: N` array is materialized to N elements by its initializer**, native
+and wrapper alike: `List<int> nums = <int>[0, 0, 0]` next to
+`List<String> strs = <String>['', '', '']`, and likewise `Uint8List(0)` /
+`T()` / `<E>[]` elements for a blob, struct/union and nested-row array. Its
+value is N elements long whether or not the field ever reaches the wire (§5.1:
+the length "is N for every target"), so an *absent* `count: 3` string array must
+read back at length 3 exactly like the `count: 3` u32 array beside it — the
+`onSequenceEnd` fill described under [Decode model](#decode-model) cannot cover
+that case, because it can only fill a sequence that was actually opened.
+`reset()` restores the same N. A **count-less** array has no N to materialize
+and starts (and resets) empty.
+
 Per message:
 
 - `void marshal(sofab.Encoder e)` — sparse-canonical field writes into any
@@ -117,8 +129,9 @@ The elision is only lossless because decode default-fills the array back out to
 `N` — see [Decode model](#decode-model).
 
 The array wrapper may use the dropping closer because a wrapper array's declared
-`default` is not materialized by this backend (the generated field starts as the
-empty collection), so *absent* and *explicitly empty* denote the same value. If
+`default` is not materialized by this backend (the generated field starts either
+empty or, for `count: N`, at N *element* defaults — never at the declared array
+default), so *absent* and *explicitly empty* denote the same value. If
 that gap is ever closed, the wrapper needs an `if (value != default) { …;
 e.endSequenceKeep(); }` guard so an explicitly-empty value differing from a
 non-empty default still reaches the wire as the empty wrapper (§2, §3).
@@ -157,7 +170,12 @@ callback. Two consequences the generated code relies on:
   positions `[M, N)` when the wrapper scope closes. This is the prerequisite for
   the encode-side trailing elision above: without it the trim would not
   *normalise* the array, it would **shorten** it on every round trip. A
-  count-less array (`cap < 0`) is left at its wire length.
+  count-less array (`cap < 0`) is left at its wire length. `onSequenceEnd` only
+  runs for a wrapper the wire actually opened, so it is only half the rule: an
+  **omitted** field never reaches a collector at all, and gets its N from the
+  field initializer / `reset()` instead (see [Generated
+  shape](#generated-shape)). Between them, absent, partially-transmitted and
+  explicitly-empty all land at N.
 
 - **INVALID verdicts ride a sticky flag.** The corelib's visitor callbacks return
   `void`, so a generated visitor cannot fail the decode mid-stream. The over-count
@@ -187,8 +205,11 @@ reason), and for recycling an instance between encodes.
 
 It restores each field in place, so a reused instance keeps its backing storage:
 a nested `struct`/`union` member is `reset()` recursively rather than
-reconstructed, and a list is `clear()`ed (and refilled from a `const` default
-literal, which the compiler canonicalizes — the refill allocates nothing). Two
+reconstructed, and a list is `clear()`ed (and, when it has a materialized value,
+refilled from a literal). A native array's literal is `const`, which the compiler
+canonicalizes — that refill allocates nothing; a `count: N` **wrapper** array's
+is deliberately *not*, since a struct/union element has to be a fresh instance
+per reset rather than one shared across every reset of every message. Two
 kinds are assigned instead, because Dart has no in-place form for them: a `blob`
 (`Uint8List` is fixed-length) and an **fp32 array**, whose member holds the
 fixed-length `Float32List` that decode installs to keep a signaling NaN's bits
