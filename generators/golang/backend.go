@@ -1225,10 +1225,23 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 
 func (g *gen) emitDefaults(f *gofile, fields []*ir.Field) {
 	for _, fld := range fields {
-		lit, ok := g.defaultLiteral(fld)
-		if !ok {
+		if lit, ok := g.defaultLiteral(fld); ok {
+			f.line("\tm.%s = %s", goFieldName(fld.Name), lit)
 			continue
 		}
-		f.line("\tm.%s = %s", goFieldName(fld.Name), lit)
+		// A count:N array's value is N elements long whether or not the field ever
+		// reaches the wire (S5.1: the length "is N for every target"). A native one
+		// has always been materialized here through its padded default literal
+		// above; a WRAPPER one was not, which left the two kinds disagreeing about
+		// the same schema -- a count:3 u32 array decoding at length 3 next to a
+		// count:3 string array decoding at length 1. It also made the field's own
+		// two absent forms disagree: an omitted field stayed empty while an
+		// explicitly-empty wrapper refilled to N on EndSequence.
+		//
+		// Elements are the zero value, matching the gap-fill in the collectors: a
+		// declared per-element default is not materialized anywhere today.
+		if fld.Kind == ir.KindArray && fld.HasCount && !isNativeArrayElem(fld.Elem) {
+			f.line("\tm.%s = make(%s, %d)", goFieldName(fld.Name), g.goType(fld), fld.Count)
+		}
 	}
 }

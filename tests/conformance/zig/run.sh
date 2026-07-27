@@ -73,7 +73,11 @@ OUT=$(printf '%s' "$IN" | "$WORK/ex/zig-out/bin/harness" encode myfirstmessage |
 echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "$OUT" | grep -q '"someblob":\[10,20,30\]' || { echo "FAIL: blob round-trip"; exit 1; }
-echo "$OUT" | grep -q '"somestringarray":\["a","b","c"\]' || { echo "FAIL: string array round-trip"; exit 1; }
+# somestringarray declares count: 5, and a fixed-count array's decoded length is
+# N for every target (MESSAGE_SPEC S5.1) -- the decoder refills the trailing run
+# the encoder elides, so three input strings come back as five. Asserting the
+# three-element form here pinned the pre-refill behaviour, not the rule.
+echo "$OUT" | grep -q '"somestringarray":\["a","b","c","",""\]' || { echo "FAIL: string array round-trip (want the count:5 refill)"; exit 1; }
 echo "$OUT" | grep -q '"somefp32":2.5' || { echo "FAIL: fp32 round-trip"; exit 1; }
 echo "==> round-trip OK"
 

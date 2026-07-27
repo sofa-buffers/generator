@@ -242,18 +242,26 @@ func TestEmptyArrayFieldWireIsOmitted(t *testing.T) {
 	if one == "" {
 		t.Error("a populated array must be on the wire, got empty payload")
 	}
-	// Round-trips: the omitted field decodes to a zero-length array (Go renders it
-	// as null), the populated one to length 1.
-	if n := arrLen(t, bin, "vec", empty); n != 0 {
-		t.Errorf("empty array must decode to length 0, got %d", n)
-	}
-	if n := arrLen(t, bin, "vec", one); n != 1 {
-		t.Errorf("one-element array must decode to length 1, got %d", n)
-	}
-	// The pre-uniform encoding (an explicit empty wrapper, 06 07) stays readable
-	// and denotes the very same value -- a decoder normalizes it away.
-	if n := arrLen(t, bin, "vec", "0607"); n != 0 {
-		t.Errorf("a legacy empty wrapper must still decode to length 0, got %d", n)
+	// Round-trip LENGTH is not what distinguishes these encodings: this array
+	// declares count: 3, and a fixed-count array's length is N for every target
+	// (S5.1) -- the decoder refills the elided trailing run rather than reporting
+	// a short array. So all three forms below decode at length 3, exactly like the
+	// count: 3 NATIVE array that has always been materialized to N. Asserting 1
+	// and 0 here pinned the disagreement between the two array kinds, not a rule.
+	// What the omission buys is bytes, which the encHex assertions above pin.
+	for _, tc := range []struct {
+		what string
+		hex  string
+	}{
+		{"the omitted field", empty},
+		{"a one-element wire", one},
+		// The pre-uniform encoding (an explicit empty wrapper, 06 07) stays
+		// readable and denotes the very same value -- a decoder normalizes it away.
+		{"a legacy empty wrapper", "0607"},
+	} {
+		if n := arrLen(t, bin, "vec", tc.hex); n != 3 {
+			t.Errorf("%s must decode to the schema count 3, got %d", tc.what, n)
+		}
 	}
 }
 

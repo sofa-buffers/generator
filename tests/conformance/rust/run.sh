@@ -344,7 +344,12 @@ run_variant() {
         # The no_std profile rejects those by design — in both storage modes — so
         # it is not a definition this leg can compile, and skipping it is the
         # honest outcome rather than a bound invented for the test.
-        case "$label:$(basename "$def")" in no-std-*:no_maxlen.yaml) continue ;; esac
+        # seq_elements_dyn.yaml is the same category: count-less wrapper arrays,
+        # which the no_std profile rejects for the same reason. Its bounded
+        # counterparts (seq_elements, nested_rows) do compile here.
+        case "$label:$(basename "$def")" in
+        no-std-*:no_maxlen.yaml | no-std-*:seq_elements_dyn.yaml) continue ;;
+        esac
         name=$(basename "$def" .yaml)
         rust_build "$def" "$WORK/corpus-$label/$name"
     done

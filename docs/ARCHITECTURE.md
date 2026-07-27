@@ -389,6 +389,15 @@ a reimplementation should emit code that honors all of them:
 - **No reflection / no runtime schema** — all dispatch is concrete generated
   code. (The sole exception is C, which *deliberately* uses a static descriptor
   table for footprint.)
+- **Generated support code is allowed where the *schema* is what decides.** The
+  firm boundary is about the wire format, not about who owns every line: a
+  backend may emit small schema-driven helpers (Go's collector prelude
+  `sofab_visitor.go`, C++'s macro-guarded `namespace sofabgen` block, the
+  per-language element-trim and refill helpers of §11) when the rule they
+  implement depends on a schema `count` the corelib cannot see (CORELIB_PLAN §7).
+  Such a helper still only *calls* the corelib's typed API — it never touches
+  bytes. Emit it once per package/translation unit and guard it against
+  double-inclusion; do not grow it into a second runtime.
 - **Pick the narrowest correct type** — map each integer to its exact width;
   enum → smallest *signed* backing, bitfield → smallest *unsigned* backing; avoid
   widening on the hot path (§11 natural-width writes).
@@ -1529,6 +1538,35 @@ metadata above. The `docs` target renders the same metadata as HTML page content
   **role** (`info->fixed_seq` — a wrapper holder's "fields" are element slots),
   not on the field type: dropping the type check alone would elide interior array
   elements and break §5.1.
+- **Wrapper-array elements: placement, refill, trailing trim** — inside a wrapper
+  sequence the child id **is** the array index (MESSAGE_SPEC §5.1), which makes
+  three rules generator-side business, because only the generator knows the
+  schema `count` (CORELIB_PLAN §7):
+  | rule | encode | decode |
+  |---|---|---|
+  | **placement** | element written at its index | element decoded **into** `dest[id]` after gap-filling with element defaults — never appended |
+  | **refill** | — | a `count: N` array is default-filled back out to `N` once the sequence scope closes |
+  | **trailing trim** | the loop runs to `M` = one past the last non-default element; `M == 0` writes no child, so the lazy wrapper is dropped and the field is omitted (§2) | — |
+  Placement is what gives §7.4 struct-merge on a **reopened** element id for free:
+  the second frame decodes into the element the first one produced. Appending
+  instead shortens the array by the size of any interior id gap *and* turns a
+  reopened id into a second element (generator#247). The over-index reject
+  (element id ≥ N is `INVALID`) also bounds the gap-fill.
+  The refill is not cosmetic — it is what makes the trim **lossless**. Without it
+  the trailing elision would not re-shape the bytes, it would shorten the decoded
+  array on every round trip; native arrays always had it, wrapper arrays did not
+  (generator#248). A **dynamic** array has no `N` to refill from, so it is never
+  narrowed and never filled: there a trailing default element is significant, and
+  its length stays *highest present id + 1*.
+  The trim needs an explicit all-default predicate (`isDefault` and friends),
+  because the lazy framing's implicit "no child was written" test answers too
+  late — an element must be judged **before** its frame opens. Each backend
+  generates the writer loop and that predicate from **one** expression: a
+  predicate that narrows a field the writer does not (or the reverse) either omits
+  a field that is on the wire or keeps one that is not.
+  **C** is again the exception: `sofab_object_encode` routes both the §2 field
+  omission and the §5.1 trailing elision through its recursive `_field_is_default`,
+  so the C backend needed no change and serves as the cross-backend control.
 - **Widest-first member layout** — value-type backends declare struct members by
   alignment widest-first (8→4→2→1, stable within a width; composite/heap = 8) to
   cut native padding, via the shared `AlignRank`/`SortedForLayout`. Applied to C,

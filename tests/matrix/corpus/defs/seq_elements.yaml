@@ -3,11 +3,13 @@
 #
 # Every field here is a wrapper array — one whose elements lower to sequence
 # frames rather than to a native array wire type — because that is the position
-# where the element id doubles as the array index. The fixed/dynamic pairs exist
-# so a backend cannot satisfy one rule by breaking the other: a `count: N` array
-# elides its trailing default run and default-fills back to N on decode, while a
-# count-less array must keep every element, its trailing defaults included.
+# where the element id doubles as the array index.
 #
+# Every array here is bounded, so the fixed-storage targets (c, and cpp with
+# corelib: c-cpp) generate it too: this is the fixed-count half of the rule --
+# elide the trailing default run on encode, default-fill back to N on decode.
+# The count-less half, which must do neither, needs unbounded arrays and so lives
+# in seq_elements_dyn.yaml alongside the other deliberately-unbounded schema.
 # Nested rows (`array<array<…>>`) live in nested_rows.yaml.
 version: 1
 $defs:
@@ -23,11 +25,6 @@ messages:
         id: 0
         type: array
         items: { type: struct, count: 5, fields: { $ref: '#/$defs/struct/Kv' } }
-      # same elements, no count: never narrowed, never filled
-      dyn_structs:
-        id: 1
-        type: array
-        items: { type: struct, fields: { $ref: '#/$defs/struct/Kv' } }
       # union elements carry default_id, so "all-default" is not "all-zero"
       fixed_unions:
         id: 2
@@ -41,7 +38,6 @@ messages:
             text:  { id: 1, type: string, maxlen: 8 }
       # leaf elements: a default element leaves an id GAP rather than a frame
       fixed_strs:  { id: 3, type: array, items: { type: string, count: 4, maxlen: 8 } }
-      dyn_strs:    { id: 4, type: array, items: { type: string, maxlen: 8 } }
       fixed_blobs: { id: 5, type: array, items: { type: blob, count: 2, maxlen: 4 } }
       # a scalar after the arrays, so a decoder that mis-tracks an element frame
       # corrupts a field it can be caught on

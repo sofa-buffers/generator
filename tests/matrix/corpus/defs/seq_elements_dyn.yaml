@@ -1,0 +1,25 @@
+# The count-less half of the wrapper-element rules, split out of
+# seq_elements.yaml because a dynamic array cannot be expressed on the
+# fixed-storage targets (c, and cpp with corelib: c-cpp), which require a bound
+# on every array and string -- the C conformance harness skips this file for the
+# same reason it skips no_maxlen.yaml.
+#
+# A dynamic array has no N to refill from, so the two rules the fixed half tests
+# must NOT fire here: its trailing default element is significant and stays on
+# the wire, and its decoded length is highest-present-id + 1, never padded.
+#
+# Nested rows are nested_rows.yaml's job, dynamic ones included -- keeping them
+# out of here keeps this file to one variable (the missing count).
+version: 1
+$defs:
+  struct:
+    Kv:
+      k: { id: 0, type: u32 }
+      v: { id: 1, type: string, maxlen: 16 }
+messages:
+  SeqElementsDyn:
+    payload:
+      dyn_structs: { id: 0, type: array, items: { type: struct, fields: { $ref: '#/$defs/struct/Kv' } } }
+      dyn_strs:    { id: 1, type: array, items: { type: string, maxlen: 8 } }
+      dyn_blobs:   { id: 2, type: array, items: { type: blob, maxlen: 4 } }
+      tail:        { id: 4, type: u32, default: 9 }
