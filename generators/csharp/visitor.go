@@ -93,7 +93,11 @@ func (g *gen) frames(m *ir.Message) []frame {
 		case ir.KindStruct, ir.KindUnion:
 			fr.childLoc = loc + "_e"
 			out = append(out, fr)
-			walkObj(fr.childLoc, lastElem(list), ref.Target.Fields)
+			// The element id IS the array index (MESSAGE_SPEC §5.1), so the element
+			// scope decodes into the element that id names — never into "the one just
+			// appended" (generator#247). SequenceBegin records the id in this scope's
+			// own index variable, which the whole child sub-tree's paths hang off.
+			walkObj(fr.childLoc, elemAt(list, loc), ref.Target.Fields)
 		case ir.KindArray:
 			if seqArrayElem(items.Elem) {
 				fr.childLoc = loc + "_e"
@@ -364,6 +368,15 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	for i, fr := range fs {
 		f.line("    private const int %s = %d;", fr.loc, i)
 	}
+	// One element-index latch per struct/union array scope (generator#247): the
+	// element id IS the array index (MESSAGE_SPEC §5.1), and the element's fields
+	// arrive after SequenceBegin has descended, so the id is held here for the
+	// child scope's paths to address.
+	for _, fr := range fs {
+		if fr.isArr && (fr.elem == ir.KindStruct || fr.elem == ir.KindUnion) {
+			f.line("    private int %s = 0;   // element index this array scope decodes into", ixVar(fr.loc))
+		}
+	}
 	if limArr || limStr || limBlob {
 		// Receiver-side decode limits (generator#102): configured caps on the
 		// fields the schema leaves unbounded (array without count, string/blob
@@ -621,7 +634,15 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		if fr.isArr {
 			switch {
 			case fr.elem == ir.KindStruct || fr.elem == ir.KindUnion:
-				f.line("            case (%s, _): %s%s.Add(new %s()); cur = %s; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, g.typeName(fr.ref.Key), fr.childLoc)
+				// The element id IS the array index (MESSAGE_SPEC §5.1), exactly as for
+				// the String/Blob element arms above: gap-fill with default elements up
+				// to id, then decode INTO element id -- never append (generator#247).
+				// Appending shortened the array by the size of any interior id gap and
+				// decoded a REOPENED id as a second element instead of merging into the
+				// first (§7.4 -- placement gives that merge for free). The over-index
+				// guard rejects id >= N first, which also bounds the gap-fill.
+				f.line("            case (%s, _): %swhile (%s.Count <= id) %s.Add(new %s()); %s = id; cur = %s; break;",
+					fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, g.typeName(fr.ref.Key), ixVar(fr.loc), fr.childLoc)
 			case fr.elem == ir.KindArray && seqArrayElem(fr.items.Elem):
 				f.line("            case (%s, _): %s%s.Add(new List<%s>()); cur = %s; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, g.csArrayElemType(fr.items.Elem, fr.items.ElemRef, fr.items.ElemItems), fr.childLoc)
 			}
@@ -638,7 +659,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	}
 	f.line("        }")
 	f.line("    }")
-	f.line("    public void SequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
+	g.emitSequenceEnd(f, fs)
 	if dynPrim {
 		// Lazy-growth helper: enlarge the backing array to hold index `i`,
 		// doubling but never past `cap` (the wire count), so growth tracks
@@ -657,6 +678,55 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	}
 	f.line("}")
 	f.blank()
+}
+
+// emitSequenceEnd emits the scope pop, preceded by the fixed-count wrapper array
+// default-fill. MESSAGE_SPEC §5.1: a `count: N` array's length "is N for every
+// target -- a growable-list target MUST default-fill to N exactly like a pre-sized
+// one". `cur` still names the scope being closed here, so a wrapper array is
+// filled the moment its own wrapper sequence ends -- which is also what makes the
+// §3/§5.1 trailing elision on the encode side LOSSLESS: without it, re-encoding a
+// decoded fixed array would not normalise the array, it would SHORTEN it on every
+// round trip. A dynamic array (cap < 0) has no N to refill from and is never
+// filled: its length is highest-present-id + 1.
+func (g *gen) emitSequenceEnd(f *cfile, fs []frame) {
+	var arms []string
+	for _, fr := range fs {
+		if !fr.isArr || fr.cap < 0 {
+			continue
+		}
+		var zero string
+		switch fr.elem {
+		case ir.KindString:
+			zero = `""`
+		case ir.KindBlob:
+			zero = "Array.Empty<byte>()"
+		case ir.KindStruct, ir.KindUnion:
+			zero = fmt.Sprintf("new %s()", g.typeName(fr.ref.Key))
+		case ir.KindArray:
+			zero = fmt.Sprintf("new List<%s>()", g.csArrayElemType(fr.items.Elem, fr.items.ElemRef, fr.items.ElemItems))
+		default:
+			continue
+		}
+		arms = append(arms, fmt.Sprintf("            case %s: while (%s.Count < %d) %s.Add(%s); break;",
+			fr.loc, fr.path, fr.cap, fr.path, zero))
+	}
+	if len(arms) == 0 {
+		f.line("    public void SequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
+		return
+	}
+	f.line("    public void SequenceEnd() {")
+	f.line("        // A `count: N` array is N elements long however it is stored, so")
+	f.line("        // refill the trailing default run the encoder left off the wire.")
+	f.line("        // Without this the elision would not normalise the array, it would")
+	f.line("        // shorten it on every round trip. Count-less arrays are not filled.")
+	f.line("        switch (cur) {")
+	for _, a := range arms {
+		f.line("%s", a)
+	}
+	f.line("        }")
+	f.line("        cur = sp > 0 ? stk[--sp] : 0;")
+	f.line("    }")
 }
 
 func (g *gen) emitFloatVisit(f *cfile, fs []frame, kind ir.Kind, cb, ctype string) {

@@ -60,3 +60,47 @@ announced count (no array-end callback needed), survives a chunk boundary (the
 counter lives in the visitor), leaves legitimate arrays untouched, and still
 decodes a real scalar arriving at that id after the array. The fp arrays are never
 armed — their elements go to the float callbacks and cannot reach a scalar arm.
+
+## Wrapper arrays: placement, N-fill and the trailing run (issues #247, #248)
+
+A wrapper array's element id **is** the array index (MESSAGE_SPEC §5.1), and a
+`count: N` array's canonical wire stops at `M`, one past its last non-default
+element — "even for sequence-form elements" (§3/§5.1). Three pieces implement that
+here, and they only work together.
+
+**Placement (decode).** The flat visitor descends into an element scope on
+`SequenceBegin(id)`. The element's own fields arrive *after* that descent, so the
+id is latched in a per-scope field, `_ix<Scope>`, and the whole child sub-tree
+addresses `list[_ix<Scope>]`. The list is gap-filled with default elements up to
+`id` first. Appending instead — "the element just added" — shortened the array by
+any interior id gap and decoded a **reopened** id as a second element rather than
+merging into the first (§7.4, which placement gives for free). Each array scope is
+a distinct static location and the scope tree is acyclic, so one latch per scope is
+enough. The `#142` over-index guard still rejects `id >= N` first, which also
+bounds the gap-fill.
+
+**N-fill (decode).** `SequenceEnd` runs while `cur` still names the scope being
+closed, so it default-fills that array back out to `N` — §5.1 requires the length
+to be `N` "for every target", and a growable `List<T>` must fill exactly like
+pre-sized storage. This is the prerequisite for the trim below: without it the
+elision would not *normalise* a decoded array, it would **shorten** it on every
+round trip. A count-less array has no `N` and is never filled (its length is
+highest-present-id + 1).
+
+**Trim (encode).** The element loop runs to `M`, not to `Count`. Interior
+all-default elements keep their frame (`WriteSequenceEndKeep`) — element presence
+is what carries the length — and `M == 0` writes no child at all, so the lazily
+opened wrapper is dropped and the field is omitted (§2). `M` comes from
+`elemTrimExpr`: a static `TrimTail` on the element class (backed by the generated
+`IsDefault()`, emitted only for types actually used as a `count: N` element), or
+`SofabFixedArray.TrimStrs/TrimBlobs/TrimRows` for the other element kinds. A
+**dynamic** array is never narrowed — with no `N` to refill from, a trailing
+default element is significant.
+
+`IsDefault()` — every class carries it — is the exact negation of what `Marshal`
+writes, evaluated per field and recursively: the explicit form of the "no child was
+written" test the lazy framing already performs for a *field*, needed because an
+*element* must be judged **before** the loop opens. It and the marshal loop are
+generated from the one `elemTrimExpr`, so the writer and the predicate cannot
+drift: a predicate that narrowed a field the writer does not would omit a field
+that is on the wire.

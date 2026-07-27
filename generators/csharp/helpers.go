@@ -603,3 +603,16 @@ func (g *gen) arrayElemAddRHS(elem ir.Kind, ref *ir.TypeRef, v string) string {
 func lastElem(list string) string {
 	return list + "[" + list + ".Count - 1]"
 }
+
+// ixVar names the visitor field holding the element index an array scope is
+// currently decoding into. A wrapper element's id IS its array index
+// (MESSAGE_SPEC §5.1 — generator#247), so the element scope must address
+// `list[id]`, not "the last element"; the id is latched here by SequenceBegin
+// because the element's own callbacks arrive later, under the child scope. Each
+// array scope has its own variable (scopes are a static, acyclic tree, so no
+// scope is ever re-entered while active) and a nested scope's path composes off
+// its parent's, exactly as the append-based accessor did.
+func ixVar(loc string) string { return "_ix" + loc }
+
+// elemAt is the accessor for the element an array scope is decoding into.
+func elemAt(list, loc string) string { return list + "[" + ixVar(loc) + "]" }

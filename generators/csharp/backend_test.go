@@ -426,6 +426,37 @@ messages:
 	}
 }
 
+// TestCsSeqTrimHelpersFollowNestedElements: the wrapper-array narrowings are
+// emitted for the element kinds actually reached, at any nesting depth. A string
+// array reachable only as the INNER row of an array-of-array still calls
+// TrimStrs (marshalArray recurses into rows), so gating on top-level fields alone
+// would emit a call to a helper that does not exist.
+func TestCsSeqTrimHelpersFollowNestedElements(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      grid:
+        id: 0
+        type: array
+        items:
+          type: array
+          items: { type: string, maxlen: 8 }
+`
+	m := buildModule(t, []byte(src), "grid.yaml", map[string]any{})
+	if !strings.Contains(m, "internal static int TrimStrs(List<string> a) {") {
+		t.Errorf("a nested string row must still get its narrowing helper:\n%s", m)
+	}
+	if !strings.Contains(m, "SofabFixedArray.TrimStrs(this.grid[_i0])") {
+		t.Errorf("the inner row must narrow through the helper:\n%s", m)
+	}
+	// `grid` is dynamic, so no row narrowing is reachable and TrimRows stays out.
+	if strings.Contains(m, "TrimRows") {
+		t.Errorf("a dynamic array-of-array must not emit the row narrowing:\n%s", m)
+	}
+}
+
 // TestCsFixedCountDefaultIsNElements covers the second F-0010 route (#136): the
 // OMISSION path. A `count: N` native array is fixed-length, so its value is
 // ALWAYS exactly N elements — with no schema default that is N element
@@ -560,8 +591,10 @@ messages:
 		// FIELD: the wrapper of an array-of-array (depth 0) ...
 		"os.WriteSequenceBeginLazy(3);",
 		// ... whose rows are ELEMENTS: an all-default row keeps its frame (§5.1).
-		"for (int _i0 = 0; _i0 < this.grid.Count; _i0++) {\n            os.WriteSequenceBeginLazy(_i0);\n" +
-			"            for (int _i1 = 0; _i1 < this.grid[_i0].Count; _i1++) { if ((this.grid[_i0][_i1] ?? \"\") != \"\") os.WriteString(_i1, this.grid[_i0][_i1] ?? \"\"); }\n" +
+		// `grid` is DYNAMIC, so its row loop runs to Count: with no schema N to
+		// refill from, a trailing all-default row is significant (generator#248).
+		"for (int _i0 = 0, _n0 = this.grid.Count; _i0 < _n0; _i0++) {\n            os.WriteSequenceBeginLazy(_i0);\n" +
+			"            for (int _i1 = 0, _n1 = SofabFixedArray.TrimStrs(this.grid[_i0]); _i1 < _n1; _i1++) { if ((this.grid[_i0][_i1] ?? \"\") != \"\") os.WriteString(_i1, this.grid[_i0][_i1] ?? \"\"); }\n" +
 			"            os.WriteSequenceEndKeep();\n        }\n        os.WriteSequenceEnd();",
 	} {
 		if !strings.Contains(m, want) {
@@ -579,5 +612,110 @@ messages:
 	}
 	if got := strings.Count(m, "os.WriteSequenceEnd();"); got != 4 {
 		t.Errorf("WriteSequenceEnd count = %d, want 4 (struct field + 3 array wrappers)", got)
+	}
+}
+
+// trimSchema is a message with one `count: N` struct array, one DYNAMIC struct
+// array and one `count: N` string array — the three shapes generator#247/#248
+// separate.
+const trimSchema = `
+version: 1
+messages:
+  vec:
+    payload:
+      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`
+
+// A count:N wrapper array's canonical wire stops at M — one past its last
+// non-default element (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements")
+// — and M == 0 leaves the whole wrapper omitted (§2). generator#248: the element
+// loop used to run to Count, framing every trailing all-default element, so a
+// decoder that accepted the non-canonical form re-encoded it unchanged instead of
+// normalising. A DYNAMIC array has no N to refill from, so its trailing default
+// element is significant and must still be framed.
+func TestCsFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+	m := buildModule(t, []byte(trimSchema), "m.yaml", map[string]any{})
+
+	// The fixed array narrows to M before framing anything...
+	if !strings.Contains(m, "for (int _i0 = 0, _n0 = VecFixedElem.TrimTail(this.@fixed); _i0 < _n0; _i0++) {") {
+		t.Errorf("count:N struct array must loop to M, not Count:\n%s", m)
+	}
+	// ...while the dynamic one keeps every element, trailing defaults included.
+	if !strings.Contains(m, "for (int _i0 = 0, _n0 = this.dynamic.Count; _i0 < _n0; _i0++) {") {
+		t.Errorf("dynamic struct array must not be narrowed:\n%s", m)
+	}
+	// An interior all-default element is still framed: only the TRAILING run goes.
+	if !strings.Contains(m, "os.WriteSequenceBeginLazy(_i0); (this.@fixed[_i0] ?? new VecFixedElem()).Marshal(os); os.WriteSequenceEndKeep();") {
+		t.Errorf("interior elements must keep the framing closer:\n%s", m)
+	}
+	// The predicate M is found with: the element's own all-default test.
+	if !strings.Contains(m, "    internal static int TrimTail(List<VecFixedElem> a) {\n"+
+		"        int n = a.Count;\n"+
+		"        while (n > 0 && (a[n - 1] == null || a[n - 1].IsDefault())) n--;\n"+
+		"        return n;\n    }") {
+		t.Errorf("the element class must carry the narrowing helper:\n%s", m)
+	}
+
+	// IsDefault is the exact negation of what Marshal writes, so it must narrow a
+	// field exactly when the marshal loop does — disagreeing would either omit a
+	// field that is on the wire or keep one that is not.
+	if !strings.Contains(m, "if (!(VecFixedElem.TrimTail(this.@fixed) == 0)) return false;") {
+		t.Errorf("IsDefault must narrow the fixed array like Marshal does:\n%s", m)
+	}
+	if !strings.Contains(m, "if (!(this.dynamic.Count == 0)) return false;") {
+		t.Errorf("IsDefault must NOT narrow the dynamic array:\n%s", m)
+	}
+	if !strings.Contains(m, "if (!(SofabFixedArray.TrimStrs(this.fstrs) == 0)) return false;") {
+		t.Errorf("IsDefault for a string wrapper array must test the trimmed run:\n%s", m)
+	}
+	// A type only used as a DYNAMIC array's element never needs the helper.
+	if strings.Contains(m, "TrimTail(List<VecDynamicElem> a)") {
+		t.Errorf("a dynamic array's element type must not get a narrowing helper:\n%s", m)
+	}
+}
+
+// generator#247: a wrapper array's element id IS the array index (§5.1), so an
+// element is PLACED at dest[id] after gap-filling — never appended. Appending
+// shortened the array by the size of any interior id gap and decoded a REOPENED
+// id as a second element instead of merging into the first (§7.4). The leaf
+// string/blob element arms next to it always got this right.
+//
+// The N-fill when the sequence scope closes is what makes the §3/§5.1 trailing
+// elision lossless: without it, re-encoding a decoded fixed array shortens it on
+// every round trip.
+func TestCsWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+	m := buildModule(t, []byte(trimSchema), "m.yaml", map[string]any{})
+
+	for _, want := range []string{
+		// placement, not append — the gap-fill, the id latch, then the descent
+		"case (Root_fixed, _): if (id >= 5) throw new SofabException(SofabError.InvalidMessage, " +
+			"\"Root_fixed element: array index above schema capacity 5\"); " +
+			"while (m.@fixed.Count <= id) m.@fixed.Add(new VecFixedElem()); _ixRoot_fixed = id; cur = Root_fixed_e; break;",
+		// the element scope decodes into the element the id named, not the last one
+		"case (Root_fixed_e, 0): m.@fixed[_ixRoot_fixed].k = (uint)value; break;",
+		// N-fill when the sequence scope closes, per element kind
+		"case Root_fixed: while (m.@fixed.Count < 5) m.@fixed.Add(new VecFixedElem()); break;",
+		"case Root_fstrs: while (m.fstrs.Count < 3) m.fstrs.Add(\"\"); break;",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q:\n%s", want, m)
+		}
+	}
+	// The defect this replaced: appending ignored the id entirely.
+	if strings.Contains(m, "m.@fixed.Add(new VecFixedElem()); cur = Root_fixed_e;") {
+		t.Errorf("a struct element must not be appended id-blind:\n%s", m)
+	}
+	if strings.Contains(m, "m.@fixed[m.@fixed.Count - 1]") {
+		t.Errorf("the element scope must address the id, not the last element:\n%s", m)
+	}
+	// A DYNAMIC array is gap-filled like any other (its length is highest id + 1)
+	// but never filled out to an N it does not have.
+	if !strings.Contains(m, "while (m.dynamic.Count <= id) m.dynamic.Add(new VecDynamicElem()); _ixRoot_dynamic = id;") {
+		t.Errorf("a dynamic array's elements must still be placed by id:\n%s", m)
+	}
+	if strings.Contains(m, "case Root_dynamic:") {
+		t.Errorf("a dynamic array must not be default-filled at SequenceEnd:\n%s", m)
 	}
 }
