@@ -100,6 +100,26 @@ all-default object costs nothing instead of a two-byte empty frame. Decoding is
 unchanged — a decoder still accepts the empty frame and treats it as the omitted
 field.
 
+## On-demand corelib imports
+
+The generated `message.ts` imports from `@sofa-buffers/corelib` only the names its
+own body can name — `WireType`, `FixlenSubtype`, `Long`, `SofabError`/
+`SofabErrorCode` are each gated on the schema (`schemaHasFixlenGuard`,
+`scanHelpers` in `helpers.go`), so no module carries an unused import. Every gate
+is a *mirror of an emitter* and has to stay in lockstep with **where** that
+emitter fires.
+
+The trap this walked into once (generator#246): the §7.3 wire guard is emitted at
+**two** levels — `tsWireGuardCond` for the field and `tsElemWireGuardCond` for
+every wrapper-sequence **element** down the array element chain. A gate that
+inspects field kinds plus one level of *native* array element misses
+`array<string>`, `array<blob>` and nested rows such as `array<array<fp32>>`,
+which name `FixlenSubtype` from an element guard while no field is fixlen; the
+emitted module then throws `ReferenceError` in `decodeInto` and fails `tsc`. The
+element-chain walk lives in `fieldHasFixlenGuard` (visitor.go); the maxlen /
+over-index gates already descend the same way (`arrayHasBoundedStrBlob`,
+`arrayOverIndexed`).
+
 ## Benchmark row
 
 Row `ts-bigint` and `ts-long` (one per `int64` mode) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with

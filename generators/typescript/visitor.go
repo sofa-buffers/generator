@@ -220,6 +220,30 @@ func tsFixSub(k ir.Kind) string {
 	return ""
 }
 
+// fieldHasFixlenGuard reports whether any guard emitted for x — tsWireGuardCond
+// on the field itself, plus one tsElemWireGuardCond per level of the array
+// element chain — names a FixlenSubtype member. A fixlen kind anywhere in that
+// chain does it: as a native array element the containing array's guard carries
+// the subtype (WireType.ArrayFixlen is ambiguous), and as a wrapper element the
+// element's own guard does (WireType.Fixlen is). A struct/union element carries
+// no subtype; its own fields are scanned separately through the named types.
+func fieldHasFixlenGuard(x *ir.Field) bool {
+	if tsFixSub(x.Kind) != "" {
+		return true
+	}
+	if x.Kind != ir.KindArray {
+		return false
+	}
+	for elem, items := x.Elem, x.ElemItems; ; elem, items = items.Elem, items.ElemItems {
+		if tsFixSub(elem) != "" {
+			return true
+		}
+		if elem != ir.KindArray || items == nil {
+			return false
+		}
+	}
+}
+
 // tsWireGuardCond renders the §7.3 condition a field header must satisfy before
 // its schema-typed reader may run: the wire type the declared type maps to, plus
 // the fixlen subtype where the wire type alone is ambiguous. c.fixSub is the

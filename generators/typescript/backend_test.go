@@ -688,6 +688,74 @@ func TestTSFixedCountDefaultLong(t *testing.T) {
 
 // TestTSNoFixedCountNoHelpers: a schema without any fixed-count native array
 // must not carry the trim/pad helpers (they would be dead code).
+// TestTSFixlenSubtypeImportMatchesUse is the durable form of generator#246:
+// rather than pinning one import line per shape, it asserts the INVARIANT the
+// gate exists for — the module imports FixlenSubtype exactly when its body
+// references it. schemaHasFixlenGuard used to inspect field kinds plus one level
+// of NATIVE array element only, so a schema whose sole fixlen use is a wrapper
+// ELEMENT guard (array<string>, or a nested array<array<fp32>> row) emitted a
+// module naming a symbol it never imported: ReferenceError at decode, and tsc
+// fails on it.
+func TestTSFixlenSubtypeImportMatchesUse(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool // FixlenSubtype expected in the import line
+		src  string
+	}{
+		{"wrapper string array", true, `
+      tags: { id: 0, type: array, items: { type: string } }
+      n:    { id: 1, type: u32 }`},
+		{"wrapper blob array", true, `
+      parts: { id: 0, type: array, items: { type: blob } }
+      n:     { id: 1, type: u32 }`},
+		{"nested string rows", true, `
+      rows: { id: 0, type: array, items: { type: array, items: { type: string } } }
+      n:    { id: 1, type: u32 }`},
+		{"nested fp32 rows", true, `
+      grid: { id: 0, type: array, items: { type: array, items: { type: fp32 } } }
+      n:    { id: 1, type: u32 }`},
+		{"doubly nested blob rows", true, `
+      cube: { id: 0, type: array, items: { type: array, items: { type: array, items: { type: blob } } } }
+      n:    { id: 1, type: u32 }`},
+		// Reached through a struct element: guarded inside that struct's own class,
+		// which the named-type walk already covers.
+		{"string inside a struct element", true, `
+      items: { id: 0, type: array, items: { type: struct, fields: { s: { id: 0, type: string } } } }
+      n:     { id: 1, type: u32 }`},
+		// Negatives — the import must stay out, else every module carries a dead name.
+		{"native integer array", false, `
+      a: { id: 0, type: array, items: { type: u32 } }
+      n: { id: 1, type: u32 }`},
+		{"nested integer rows", false, `
+      m: { id: 0, type: array, items: { type: array, items: { type: i32 } } }
+      n: { id: 1, type: u32 }`},
+		{"struct elements without fixlen", false, `
+      items: { id: 0, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }
+      n:     { id: 1, type: u32 }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mod := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:"+tc.src+"\n", map[string]any{})
+			imp, body, ok := strings.Cut(mod, "\n")
+			for ok && !strings.HasPrefix(imp, "import {") {
+				imp, body, ok = strings.Cut(body, "\n")
+			}
+			if !ok {
+				t.Fatalf("no corelib import line in:\n%s", mod)
+			}
+			imported := strings.Contains(imp, "FixlenSubtype")
+			used := strings.Contains(body, "FixlenSubtype")
+			if used != tc.want {
+				t.Fatalf("expected the emitted guards to reference FixlenSubtype=%v; module:\n%s", tc.want, mod)
+			}
+			if imported != used {
+				t.Errorf("import/use mismatch: imported=%v used=%v (imported without use = dead name; used without import = ReferenceError + tsc failure)\n%s",
+					imported, used, mod)
+			}
+		})
+	}
+}
+
 func TestTSNoFixedCountNoHelpers(t *testing.T) {
 	const src = `
 version: 1

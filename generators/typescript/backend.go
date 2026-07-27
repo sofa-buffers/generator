@@ -221,17 +221,17 @@ func decodesAnyField(s *ir.Schema) bool {
 	return false
 }
 
-// schemaHasFixlenGuard reports whether any decoded field's §7.3 guard references
+// schemaHasFixlenGuard reports whether any §7.3 guard the module emits references
 // FixlenSubtype — a fixlen scalar (fp32/fp64/string/blob) or a native fp32/fp64
-// array, the only kinds the wire type alone does not settle. Mirrors the
-// per-field decision in tsWireGuardCond so the import matches the emitted code.
+// array, the only kinds the wire type alone does not settle. Mirrors the decision
+// in tsWireGuardCond AND in tsElemWireGuardCond so the import matches the emitted
+// code: guards exist at two levels, and the element-level one was missing
+// (generator#246) — an `array<string>` or an `array<array<fp32>>` names
+// FixlenSubtype from a wrapper ELEMENT guard while no *field* is fixlen.
 func schemaHasFixlenGuard(s *ir.Schema) bool {
 	has := func(fields []*ir.Field) bool {
 		for _, x := range fields {
-			if tsFixSub(x.Kind) != "" {
-				return true
-			}
-			if x.Kind == ir.KindArray && nativeArrayElem(x.Elem) && tsFixSub(x.Elem) != "" {
+			if fieldHasFixlenGuard(x) {
 				return true
 			}
 		}

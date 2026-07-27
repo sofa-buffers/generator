@@ -242,18 +242,43 @@ func schemaHasCountedFloatArray(s *ir.Schema) bool {
 	})
 }
 
-// schemaHasFixlenField reports whether any field's §7.3 guard needs to compare a
-// fixlen subtype — i.e. whether the generated module references FixlenSubtype at
-// all. fp32/fp64/string/blob and their native arrays all share one wire type
-// (FIXLEN / ARRAY_FIXLEN), so only the subtype separates them; every other kind
-// is settled by the wire type alone and needs no import.
+// schemaHasFixlenField reports whether any §7.3 guard the module emits needs to
+// compare a fixlen subtype — i.e. whether the generated module references
+// FixlenSubtype at all. fp32/fp64/string/blob and their native arrays all share
+// one wire type (FIXLEN / ARRAY_FIXLEN), so only the subtype separates them;
+// every other kind is settled by the wire type alone and needs no import.
+//
+// Guards are emitted at TWO levels and both must be counted (generator#246): the
+// field-level pyWireGuard, and pyElemWireGuard for every wrapper-sequence
+// ELEMENT down the array element chain — so an `array<string>` (element guard
+// names FixlenSubtype.STRING) or an `array<array<fp32>>` (the nested row's guard
+// names FixlenSubtype.FP32) needs the import even though no *field* is fixlen.
 func schemaHasFixlenField(s *ir.Schema) bool {
-	return schemaHasField(s, func(fld *ir.Field) bool {
-		if pyFixlenSubtype(fld.Kind) != "" {
+	return schemaHasField(s, fieldHasFixlenGuard)
+}
+
+// fieldHasFixlenGuard reports whether any guard emitted for fld — pyWireGuard on
+// the field itself, plus one pyElemWireGuard per level of the array element chain
+// — names a FixlenSubtype member. A fixlen kind anywhere in that chain does it:
+// as a native array element the containing array's guard carries the subtype
+// (ARRAY_FIXLEN is ambiguous), and as a wrapper element the element's own guard
+// does (FIXLEN is). A struct/union element carries no subtype; its own fields are
+// reached separately through the named types (schemaHasField).
+func fieldHasFixlenGuard(fld *ir.Field) bool {
+	if pyFixlenSubtype(fld.Kind) != "" {
+		return true
+	}
+	if fld.Kind != ir.KindArray {
+		return false
+	}
+	for elem, items := fld.Elem, fld.ElemItems; ; elem, items = items.Elem, items.ElemItems {
+		if pyFixlenSubtype(elem) != "" {
 			return true
 		}
-		return fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) && pyFixlenSubtype(fld.Elem) != ""
-	})
+		if elem != ir.KindArray || items == nil {
+			return false
+		}
+	}
 }
 
 // pyFixlenSubtype returns the FixlenSubtype member a fixlen kind must carry, or

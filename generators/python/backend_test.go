@@ -212,8 +212,11 @@ messages:
 	// The over-index guard raises SofaDecodeError, so the on-demand import MUST be
 	// emitted even when the schema has no scalar over-count array (the #100 case) —
 	// a wrapper-only schema like this one. Missing it is a NameError at decode time.
-	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType") {
-		t.Error("message.py must import SofaDecodeError for the over-index guard (else NameError at decode)")
+	// FixlenSubtype rides along: the string/blob ELEMENT guards name it even though
+	// no *field* here is fixlen (generator#246), so the full line is asserted — a
+	// prefix match would pass either way and let the missing name through.
+	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType, FixlenSubtype\n") {
+		t.Errorf("message.py needs SofaDecodeError (over-index guard) AND FixlenSubtype (element guard) imported, else NameError at decode:\n%s", mod)
 	}
 	for _, want := range []string{
 		`if _ef0.id >= 4:`,
@@ -255,8 +258,11 @@ messages:
 	// (a) The maxlen guard raises SofaDecodeError, so the on-demand import MUST be
 	// present even though this schema has no counted native/wrapper array — the
 	// import bug this test guards against.
-	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType") {
-		t.Error("message.py must import SofaDecodeError for the maxlen guard (else NameError at decode)")
+	// Asserted as the FULL line (FixlenSubtype included — this schema has string
+	// and blob fields, and a string wrapper element): a prefix match cannot tell a
+	// complete import line from a truncated one (generator#246).
+	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType, FixlenSubtype\n") {
+		t.Errorf("message.py must import SofaDecodeError for the maxlen guard (else NameError at decode):\n%s", mod)
 	}
 
 	for _, want := range []string{
@@ -719,4 +725,84 @@ messages:
 	if !strings.Contains(mod, "from sofab import Encoder, Decoder, WireType") {
 		t.Errorf("message.py missing plain import line:\n%s", mod)
 	}
+}
+
+// TestPythonFixlenSubtypeImportMatchesUse is the durable form of generator#246:
+// instead of pinning one import line per shape, it asserts the INVARIANT the gate
+// exists for — the module imports FixlenSubtype exactly when its body references
+// it. The old gate looked only at field kinds plus one level of NATIVE array
+// element, so every wrapper-array element that names a subtype (an array<string>
+// element guard, or a nested array<array<fp32>> row) generated a module using a
+// name it never imported: NameError at decode time, from decode of any field —
+// the module imports fine, so no test that merely compiles it can catch this.
+func TestPythonFixlenSubtypeImportMatchesUse(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool // FixlenSubtype expected in the import line
+		src  string
+	}{
+		// The issue's reproduction: the ONLY fixlen use is a wrapper string
+		// ELEMENT. Pre-fix this imported nothing and died in _unmarshal.
+		{"wrapper string array", true, `
+      tags: { id: 0, type: array, items: { type: string } }
+      n:    { id: 1, type: u32 }`},
+		{"wrapper blob array", true, `
+      parts: { id: 0, type: array, items: { type: blob } }
+      n:     { id: 1, type: u32 }`},
+		// Nested rows: the guard sits one (or two) levels below the field.
+		{"nested string rows", true, `
+      rows: { id: 0, type: array, items: { type: array, items: { type: string } } }
+      n:    { id: 1, type: u32 }`},
+		{"nested fp32 rows", true, `
+      grid: { id: 0, type: array, items: { type: array, items: { type: fp32 } } }
+      n:    { id: 1, type: u32 }`},
+		{"doubly nested blob rows", true, `
+      cube: { id: 0, type: array, items: { type: array, items: { type: array, items: { type: blob } } } }
+      n:    { id: 1, type: u32 }`},
+		// A string reached through a STRUCT element is guarded inside the struct's
+		// own class, which schemaHasField already walks via the named types.
+		{"string inside a struct element", true, `
+      items: { id: 0, type: array, items: { type: struct, fields: { s: { id: 0, type: string } } } }
+      n:     { id: 1, type: u32 }`},
+		// Negatives — the import must stay out, or every module carries an unused
+		// name (the reason the gate exists at all).
+		{"native integer array", false, `
+      a: { id: 0, type: array, items: { type: u32 } }
+      n: { id: 1, type: u32 }`},
+		{"nested integer rows", false, `
+      m: { id: 0, type: array, items: { type: array, items: { type: i32 } } }
+      n: { id: 1, type: u32 }`},
+		{"struct elements without fixlen", false, `
+      items: { id: 0, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }
+      n:     { id: 1, type: u32 }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mod := string(genPy(t, schema(t, "version: 1\nmessages:\n  M:\n    payload:"+tc.src+"\n"), map[string]any{})["message.py"])
+			imp := importLine(t, mod)
+			imported := strings.Contains(imp, "FixlenSubtype")
+			// The body is what settles it: a reference outside the import line is a
+			// NameError unless the name was imported.
+			used := strings.Contains(mod[strings.Index(mod, imp)+len(imp):], "FixlenSubtype")
+			if used != tc.want {
+				t.Fatalf("expected the emitted guards to reference FixlenSubtype=%v; module:\n%s", tc.want, mod)
+			}
+			if imported != used {
+				t.Errorf("import/use mismatch: imported=%v used=%v (imported without use = dead name; used without import = NameError at decode)\n%s",
+					imported, used, mod)
+			}
+		})
+	}
+}
+
+// importLine returns the module's single `from sofab import ...` line.
+func importLine(t *testing.T, mod string) string {
+	t.Helper()
+	for _, ln := range strings.Split(mod, "\n") {
+		if strings.HasPrefix(ln, "from sofab import ") {
+			return ln
+		}
+	}
+	t.Fatalf("no corelib import line in:\n%s", mod)
+	return ""
 }
