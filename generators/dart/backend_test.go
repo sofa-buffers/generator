@@ -147,6 +147,84 @@ func TestLazySequenceFraming(t *testing.T) {
 	}
 }
 
+// TestResetRestoresDefaults: MESSAGE_SPEC S2 omits a sequence-typed field equal to
+// its default, so an absent field fires NO decode callback and the S7.4
+// sequence-start clear cannot run for it. Decoding into a REUSED destination
+// therefore has to start from the defaults, which is what the generated reset()
+// gives tryDecode. Every field kind must be covered, in place where it can be.
+func TestResetRestoresDefaults(t *testing.T) {
+	out := genFor(t, exampleDef, map[string]any{})
+	for _, want := range []string{
+		"  void reset() {",
+		// tryDecode resets the caller's destination; decode's fresh instance does not
+		// pay for it twice.
+		"    out.reset();\n    return _decodeInto(data, out);",
+		"    final m = Myfirstmessage();\n    _decodeInto(data, m);",
+		// Scalars/strings/blobs are values: assignment is the reset.
+		"    someu8 = 7;",
+		"    somestring = '';",
+		"    someblob = Uint8List.fromList(<int>[72, 101, 108, 108, 111]);",
+		// fp32 drops the captured NaN wire bits with the value (S4.6).
+		"    somefp32 = 0.0;\n    _somefp32Fp32Bits = null;",
+		// A nested struct/union is reset in place, recursively -- the nested case:
+		// an all-default struct in the next message is omitted entirely.
+		"    somestruct.reset();",
+		"    someunion.reset();",
+		// Wrapper-sequence arrays (string/blob/struct/union/nested) clear.
+		"    somestringarray.clear();",
+		"    somestructarray.clear();",
+		"    somematrix.clear();",
+		// A native array with a materialized default is cleared and refilled from a
+		// const literal: no reallocation of the list, none of the default either.
+		"    someuintarray..clear()..addAll(const <int>[0, 1, 1000, 4294967295]);",
+		"    someenumarray..clear()..addAll(const <int>[2, 1, 0, 0]);",
+		// fp32 arrays are the one exception: decode installs a fixed-length
+		// Float32List (bit-exact NaN copy), which cannot be cleared.
+		"    somefloatarray = <double>[0.0, -1.5, 3.25];",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("reset() missing %q", want)
+		}
+	}
+	// Every generated object class carries one, message and named type alike.
+	if got, want := strings.Count(out, "  void reset() {"), strings.Count(out, "  void marshal(sofab.Encoder e) {"); got != want {
+		t.Errorf("reset() on %d classes, marshal on %d: every object class needs both", got, want)
+	}
+	// The S7.4 replace-on-reopen clear stays where it was.
+	if !strings.Contains(out, "        o.somestringarray = <String>[];") {
+		t.Error("the S7.4 sequence-start clear must remain in the visitor")
+	}
+}
+
+// TestResetIsInPlaceForReuse: reset must not hand the field a fresh container, or
+// the reuse entry point reallocates everything it was meant to recycle. A blob and
+// an fp32 array are the documented exceptions (both fixed-length in Dart).
+func TestResetIsInPlaceForReuse(t *testing.T) {
+	def := filepath.Join(t.TempDir(), "reuse.yaml")
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      names: { id: 0, type: array, items: { type: string, count: 2, maxlen: 4 } }\n" +
+		"      nums: { id: 1, type: array, items: { type: u32, count: 3 }, default: [1, 2, 3] }\n" +
+		"      dyn: { id: 2, type: array, items: { type: i16 } }\n"
+	if err := os.WriteFile(def, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := genFor(t, def, map[string]any{})
+	body := out[strings.Index(out, "  void reset() {"):]
+	body = body[:strings.Index(body, "\n  }")]
+	for _, want := range []string{
+		"    names.clear();",
+		"    nums..clear()..addAll(const <int>[1, 2, 3]);",
+		"    dyn.clear();",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("reset() body missing %q; got:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "names = <") || strings.Contains(body, "nums = <") || strings.Contains(body, "dyn = <") {
+		t.Errorf("reset() reallocated a list instead of clearing it:\n%s", body)
+	}
+}
+
 // TestNestedRowKeepsItsFrame: a nested array row is an ELEMENT (depth > 0), so its
 // wrapper closes with endSequenceKeep even though the identically-shaped field-level
 // wrapper (depth 0) closes with the dropping endSequence.

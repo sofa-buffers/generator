@@ -592,3 +592,73 @@ messages:
 		t.Error("M.java: a wrapper array must not carry a whole-omission guard")
 	}
 }
+
+// TestJavaResetForReuse: MESSAGE_SPEC §2 made ABSENCE the encoding of an
+// all-default field, and an absent field fires no callback — so a destination
+// supplied by the caller must be re-armed before the feed, not from
+// sequenceBegin/arrayBegin. Every class gets a public reset() that restores its
+// declared defaults IN PLACE, and tryDecode calls it first. Without this a reused
+// destination keeps the previous decode's array elements: data that is not in the
+// message.
+func TestJavaResetForReuse(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      lead: { id: 0, type: u32, default: 3 }
+      name: { id: 1, type: string, maxlen: 8, default: "dflt" }
+      strs: { id: 2, type: array, items: { type: string, maxlen: 8 } }
+      dyn:  { id: 3, type: array, items: { type: u32 } }
+      fixd: { id: 4, type: array, items: { type: u32, count: 3 }, default: [7, 8, 9] }
+      bools: { id: 5, type: array, items: { type: boolean, count: 2 }, default: [true, false] }
+      st:   { id: 6, type: struct, fields: { inner: { id: 0, type: array, items: { type: string, maxlen: 8 } } } }
+`
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+	for _, want := range []string{
+		// Public, so a caller driving the Visitor by hand can re-arm too.
+		"    public void reset() {",
+		// Scalars and strings go back to the declared default.
+		"        this.lead = 3L;",
+		`        this.name = "dflt";`,
+		// Containers are emptied in place — the point of taking a destination.
+		"        this.strs = Sbuf.resetList(this.strs);",
+		"        this.dyn = Sbuf.EMPTY_LONGS;",
+		// A fixed-count array is refilled from the shared default without allocating.
+		"        if (this.fixd != null && this.fixd.length == _arrdef_fixd.length) System.arraycopy(_arrdef_fixd, 0, this.fixd, 0, _arrdef_fixd.length);",
+		"        else this.fixd = _arrdef_fixd.clone();",
+		"        this.bools = Sbuf.resetList(this.bools);\n        this.bools.addAll(_arrdef_bools);",
+		// A nested object recurses instead of being re-allocated.
+		"        if (this.st == null) this.st = new MSt(); else this.st.reset();",
+		"        this.inner = Sbuf.resetList(this.inner);",
+		// The reuse entry point re-arms before feeding.
+		"    public static DecodeStatus tryDecode(byte[] data, M out) throws SofabException {\n        out.reset();",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing %q", want)
+		}
+	}
+	// Every emitted class (M plus its one struct) carries a reset().
+	if got := strings.Count(m, "public void reset() {"); got != 2 {
+		t.Errorf("expected one reset() per class (2), got %d", got)
+	}
+	// decode(byte[]) builds a fresh instance, so it must not pay for a reset.
+	if strings.Contains(m, "M m = new M();\n        m.reset();") {
+		t.Error("decode(byte[]) constructs a fresh instance and must not call reset()")
+	}
+	// §7.4 is unchanged: a re-opened wrapper still replaces the array whole.
+	if !strings.Contains(m, "case 2: m.strs.clear(); cur = 1; break;") {
+		t.Error("M.java: the §7.4 sequence-start clear must stay")
+	}
+}
+
+// TestJavaSbufResetList pins the in-place list reset the generated reset() leans
+// on: clearing keeps the backing capacity, so re-arming a reused destination
+// allocates nothing.
+func TestJavaSbufResetList(t *testing.T) {
+	s := string(genJavaFromYAML(t, "version: 1\nmessages:\n  M:\n    payload:\n      a: { id: 0, type: u32 }\n",
+		map[string]any{})["src/main/java/message/Sbuf.java"])
+	if !strings.Contains(s, "static <T> List<T> resetList(List<T> l) { if (l == null) return new java.util.ArrayList<>(); l.clear(); return l; }") {
+		t.Error("Sbuf.java missing the in-place resetList helper")
+	}
+}

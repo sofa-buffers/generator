@@ -263,6 +263,9 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 	}
 	f.line("  }")
 
+	f.blank()
+	g.emitReset(f, fields)
+
 	if isMessage {
 		f.blank()
 		f.line("  /// Worst-case serialized size (schema-bounded fields; a cap for")
@@ -283,7 +286,20 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		f.line("  /// returns the terminal decode outcome. `invalid` covers both malformed")
 		f.line("  /// bytes and a schema-bound violation (over-count/over-index/over-maxlen);")
 		f.line("  /// `incomplete` means the bytes end inside a field or an open sequence.")
+		f.line("  ///")
+		f.line("  /// [out] is REUSABLE: it is [reset] to the declared defaults first. That")
+		f.line("  /// reset is what makes a reused destination correct: a field equal to its")
+		f.line("  /// default is not written to the wire at all, nested objects and arrays")
+		f.line("  /// included, so nothing in the bytes can clear a value left over from an")
+		f.line("  /// earlier decode.")
 		f.line("  static sofab.DecodeStatus tryDecode(Uint8List data, %s out) {", name)
+		f.line("    out.reset();")
+		f.line("    return _decodeInto(data, out);")
+		f.line("  }")
+		f.blank()
+		f.line("  /// Decodes into a destination the caller guarantees is already at its")
+		f.line("  /// defaults, so [decode]'s fresh instance skips the redundant reset.")
+		f.line("  static sofab.DecodeStatus _decodeInto(Uint8List data, %s out) {", name)
 		f.line("    final e = _Dec();")
 		f.line("    final st = sofab.Decoder.decode(data, %s(out, e)%s);", visitorName(name), g.limitsArg())
 		f.line("    return e.inv ? sofab.DecodeStatus.invalid : st;")
@@ -294,7 +310,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		f.line("  /// when a truncated or malformed message must be distinguished.")
 		f.line("  static %s decode(Uint8List data) {", name)
 		f.line("    final m = %s();", name)
-		f.line("    tryDecode(data, m);")
+		f.line("    _decodeInto(data, m);")
 		f.line("    return m;")
 		f.line("  }")
 	}
@@ -305,6 +321,77 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 }
 
 func visitorName(typeName string) string { return "_" + typeName + "Visitor" }
+
+// ---- reset ----------------------------------------------------------------
+
+// emitReset emits `reset()`, putting every field back to its declared default.
+//
+// MESSAGE_SPEC §2 omits a field whose value equals its default, and since the
+// sequence carve-out is gone that now includes a struct/union member and a
+// wrapper-array field. An omitted field fires NO decode callback, so the
+// §7.4 "a later occurrence replaces the array whole" clear in onSequenceStart
+// cannot run for it — decoding into a REUSED destination would keep the previous
+// decode's elements. Clearing up front is the only place absence is still
+// observable, so tryDecode calls this before handing the object to the corelib.
+// (The §7.4 sequence-start clear stays exactly as it was: a re-opened wrapper
+// must still replace, not append.)
+//
+// It works IN PLACE — a list is cleared and refilled rather than reallocated, so
+// a reused destination keeps its backing storage, which is the point of the
+// reuse entry point. Public: a caller driving the visitor itself needs the same
+// ability (corelib-cpp exposes `IStreamImpl::reset()` for exactly this).
+func (g *gen) emitReset(f *dfile, fields []*ir.Field) {
+	f.line("  /// Restores every field to its declared default, in place.")
+	f.line("  ///")
+	f.line("  /// A field is only written during decode when the wire carries it, and a")
+	f.line("  /// field equal to its default is not on the wire at all, so a destination")
+	f.line("  /// must start from the defaults for an absent field to read back as its")
+	f.line("  /// default. [tryDecode] does that for you; call this directly when driving")
+	f.line("  /// the decode visitor yourself, or to recycle an instance.")
+	f.line("  ///")
+	f.line("  /// Lists are cleared and refilled rather than replaced, so a reused")
+	f.line("  /// instance keeps its backing storage. (A list member assigned a")
+	f.line("  /// fixed-length list by the caller is the one exception -- see the fp32")
+	f.line("  /// array note in the generator docs.)")
+	f.line("  void reset() {")
+	for _, fld := range fields {
+		g.emitResetField(f, fld)
+	}
+	f.line("  }")
+}
+
+func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
+	acc := dartIdent(fld.Name)
+	switch fld.Kind {
+	case ir.KindStruct, ir.KindUnion:
+		// The member object survives; its own reset clears it recursively.
+		f.line("    %s.reset();", acc)
+	case ir.KindArray:
+		if fld.Elem == ir.KindFP32 {
+			// An fp32 array member holds a Float32List after decode (_f32copy, which
+			// keeps a signaling NaN's raw bits). That is FIXED-LENGTH, so clear() would
+			// throw — this one kind is reassigned instead of cleared.
+			f.line("    %s = %s;", acc, g.dartDefaultValue(fld))
+			return
+		}
+		// A `const` default literal is canonicalized once by the Dart compiler, so
+		// refilling allocates nothing. A wrapper-sequence array has no materialized
+		// default (see marshal), so it resets to empty.
+		if lit, ok := g.dartArrayLiteral(fld); ok {
+			f.line("    %s..clear()..addAll(const %s);", acc, lit)
+			return
+		}
+		f.line("    %s.clear();", acc)
+	case ir.KindFP32:
+		// Drop any captured NaN wire bits with the value they belonged to (§4.6).
+		f.line("    %s = %s;", acc, g.dartDefaultValue(fld))
+		f.line("    %s = null;", fp32BitsField(fld.Name))
+	default:
+		// Scalars, strings and blobs are values: assignment IS the in-place reset
+		// (a Uint8List is fixed-length and cannot be cleared).
+		f.line("    %s = %s;", acc, g.dartDefaultValue(fld))
+	}
+}
 
 // ---- marshal --------------------------------------------------------------
 

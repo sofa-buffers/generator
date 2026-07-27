@@ -217,6 +217,8 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 	}
 	f.line("    }")
 
+	g.emitReset(f, fields)
+
 	if isMessage {
 		ms := g.messageSize(name, fields)
 		if !ms.Bounded {
@@ -258,7 +260,12 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		// sequence. Malformed input throws SofabException (INVALID) from feed;
 		// the caller owns end-of-input and decides whether a trailing
 		// INCOMPLETE is a truncation error.
+		// `out` is caller-supplied and may carry a previous decode. Absence is the
+		// encoding of an all-default field (MESSAGE_SPEC §2), and an absent field
+		// fires no callback at all, so the destination is re-armed HERE — the last
+		// point at which absence is still observable.
 		f.line("    public static DecodeStatus tryDecode(byte[] data, %s out) throws SofabException {", name)
+		f.line("        out.reset();")
 		f.line("        IStream is = new IStream();")
 		f.line("        is.feed(data, new %sVisitor(out));", name)
 		f.line("        return is.status();")
@@ -269,6 +276,82 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 
 	if isMessage {
 		g.emitVisitor(f, name, fields)
+	}
+}
+
+// emitReset writes `reset()`: every field back to its declared default, in place.
+//
+// It exists because MESSAGE_SPEC §2 made ABSENCE the encoding of an all-default
+// sequence. The visitor's §7.4 clear (a wrapper array is replaced whole by a later
+// occurrence) hangs off sequenceBegin/arrayBegin — a callback an omitted field
+// never fires. Decoding into a REUSED destination therefore left the previous
+// decode's elements standing, so the decoded array held data that was not in the
+// message. Absence is only observable before the feed starts, so the reset has to
+// happen there: tryDecode(data, out) calls out.reset() first, and the §7.4 clear
+// stays exactly as it is for the re-opened-wrapper case it actually covers.
+//
+// "In place" is the point of a reuse API: a List is cleared (keeping its capacity)
+// and a nested object is reset recursively rather than re-allocated, and a
+// primitive array is refilled from the shared default when its length already
+// matches. It is public so a caller who drives the Visitor directly — feeding
+// chunks itself, with no tryDecode to hook — can re-arm a destination the same way
+// (corelib-cpp exposes IStreamImpl::reset() for the same reason).
+func (g *gen) emitReset(f *jfile, fields []*ir.Field) {
+	f.line("    /** Restores every field to its declared default, in place; call before reusing an instance as a decode destination. */")
+	f.line("    public void reset() {")
+	for _, fld := range fields {
+		g.emitResetField(f, fld)
+	}
+	f.line("    }")
+}
+
+func (g *gen) emitResetField(f *jfile, fld *ir.Field) {
+	acc := "this." + javaIdent(fld.Name)
+	switch fld.Kind {
+	case ir.KindStruct, ir.KindUnion:
+		// Recurse rather than re-allocate; a null field is materialized once.
+		f.line("        if (%s == null) %s = new %s(); else %s.reset();", acc, acc, g.typeName(fld.Ref.Key), acc)
+	case ir.KindArray:
+		if primitiveArrayElem(fld.Elem) {
+			// A materialized default (always the case for `count: N`) is copied back
+			// over the existing storage when the length already matches — a fixed
+			// array's length never changes, so the reuse path allocates nothing. A
+			// dynamic array with no default is the shared zero-length constant, which
+			// is exactly its field initializer.
+			if _, ok := g.javaPrimArrayLiteral(fld); ok {
+				d := javaArrDefName(fld)
+				f.line("        if (%s != null && %s.length == %s.length) System.arraycopy(%s, 0, %s, 0, %s.length);", acc, acc, d, d, acc, d)
+				f.line("        else %s = %s.clone();", acc, d)
+				return
+			}
+			f.line("        %s = %s;", acc, emptyPrimConst(fld.Elem))
+			return
+		}
+		// List-backed: the boolean array (which may carry a materialized default) and
+		// every wrapper sequence (whose declared default is not materialized, so the
+		// empty list IS its default — same rule the dropping closer relies on).
+		f.line("        %s = Sbuf.resetList(%s);", acc, acc)
+		if nativeArrayElem(fld.Elem) {
+			if _, ok := g.javaNativeArrayLiteral(fld); ok {
+				f.line("        %s.addAll(%s);", acc, javaArrDefName(fld))
+			}
+		}
+	default:
+		// Scalar/string/blob leaf: assign the same literal the field initializer uses.
+		f.line("        %s = %s;", acc, g.javaDefaultValue(fld))
+	}
+}
+
+// emptyPrimConst is the shared zero-length primitive-array constant backing a
+// dynamic (count-less, default-less) array field — the same value javaInit gives it.
+func emptyPrimConst(elem ir.Kind) string {
+	switch primArrayBase(elem) {
+	case "float":
+		return "Sbuf.EMPTY_FLOATS"
+	case "double":
+		return "Sbuf.EMPTY_DOUBLES"
+	default:
+		return "Sbuf.EMPTY_LONGS"
 	}
 }
 

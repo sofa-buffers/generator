@@ -129,6 +129,17 @@ func (g *gen) istreamLimits() string {
 	return "{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}}"
 }
 
+// istreamInlineLimits is the same cap as a trailing constructor argument, for
+// IStreamInline — whose first parameter is the field callback. Empty in the
+// fixed profile: its containers are statically bounded, so no cap is derived and
+// the corelib-c-cpp IStreamInline takes the callback alone.
+func (g *gen) istreamInlineLimits() string {
+	if g.limBuffered <= 0 {
+		return ""
+	}
+	return ", sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}"
+}
+
 // resolveLimits fills the gen's limit fields from the max_dyn_* config keys and
 // the schema's bounds (see the gen field comment).
 func (g *gen) resolveLimits(s *ir.Schema, cfg map[string]any) {
@@ -303,6 +314,74 @@ func flagDoc(fl *ir.BitfieldFlag) string {
 	return note
 }
 
+// emitReset writes reset(): every field back to its declared default, in place.
+//
+// MESSAGE_SPEC §2 omits a field whose value equals its default — a sequence-typed
+// one included — so an absent field delivers no deserialize() callback at all and
+// leaves whatever the previous message put in that member. Decoding into a REUSED
+// destination therefore has to clear it where absence is still observable: at the
+// start of the decode. It cannot be done from the callback side — the §7.4
+// "a later occurrence replaces the array whole" clear lives in the wrapper
+// collectors (StringSeq/BlobSeq/MessageSeq::prepare) and hangs off the
+// SequenceStart tag, which an omitted field never sends. That clear stays exactly
+// as it is; this is the other half.
+//
+// Each member is assigned its DECLARATION default, which is by construction the
+// value an absent field decodes to, so the two cannot drift apart.
+//
+// In place on purpose: std::string/std::vector assignment reuses the buffer the
+// destination already holds (and the fixed profile's FixedString/FixedBytes/
+// InlineVector have no buffer to hand back at all), whereas `out = P{}` would
+// return every allocation only to take it again on the next message — which is
+// the whole point of a reuse API. Struct and union members recurse into their own
+// reset() rather than being assigned a fresh temporary, for the same reason.
+//
+// Public because a caller driving the visitor itself (sofab::IStreamInline, or a
+// bare sofab::IStreamImpl) owns its destinations and needs the same call between
+// messages; corelib-cpp exposes the decoder-state half as IStreamImpl::reset().
+func (g *gen) emitReset(f *hfile, fields []*ir.Field, isMessage bool) {
+	f.line("    /**")
+	f.line("     * @brief Put every field back to its declared default, in place.")
+	f.line("     *")
+	f.line("     * A field whose value equals its default is absent from the encoded")
+	f.line("     * bytes, so nothing runs for it on decode and a destination decoded into")
+	f.line("     * twice keeps the earlier message's value - the elements of an array")
+	f.line("     * field included, since an array is only cleared when its sequence is")
+	f.line("     * actually present. The clear therefore has to happen before the bytes")
+	f.line("     * are fed, not from a callback an absent field never fires.")
+	f.line("     *")
+	// The reference only resolves on a type that HAS a try_decode, and only says
+	// something true on the profile whose try_decode decodes into the caller's
+	// destination; the fixed profile's stages in a fresh instance instead.
+	if isMessage && !g.clib {
+		f.line("     * @ref try_decode calls this for you. Drive a stream yourself (e.g.")
+		f.line("     * @c sofab::IStreamInline) and it is yours to call between messages,")
+		f.line("     * alongside the stream's own reset for the decoder state.")
+	} else {
+		f.line("     * Drive a stream yourself (e.g. @c sofab::IStreamInline) and this is")
+		f.line("     * yours to call between messages, alongside the stream's own reset for")
+		f.line("     * the decoder state.")
+	}
+	f.line("     *")
+	f.line("     * Containers are cleared, not reallocated: the capacity a reused")
+	f.line("     * destination has already paid for is kept.")
+	f.line("     */")
+	f.line("    void reset() noexcept {")
+	for _, fld := range fields {
+		acc := cppIdent(fld.Name)
+		switch fld.Kind {
+		case ir.KindStruct, ir.KindUnion:
+			// Recurse: the nested default is that type's own declaration state, and
+			// reaching it in place keeps the nested containers' capacity too.
+			f.line("        %s.reset();", acc)
+		default:
+			f.line("        %s = %s;", acc, g.cppDefault(fld))
+		}
+	}
+	f.line("    }")
+	f.blank()
+}
+
 func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isMessage bool) {
 	emitStructDoc(f, summary)
 
@@ -374,6 +453,8 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.blank()
 	}
 
+	g.emitReset(f, fields, isMessage)
+
 	// per-message encode()/decode() (members so multiple messages don't clash).
 	if isMessage {
 		// encode(): one allocation, no copy. The vector is created at the
@@ -431,21 +512,79 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// Fallible decode: surfaces the corelib's accept/reject decision. feed()
 		// detects malformed input and returns Error::InvalidMessage, but the
 		// infallible decode above drops it, so the public C++ API could otherwise
-		// never reject (generator#83). On success out holds the message; on error
-		// out is left unchanged and the returned Result carries the status.
+		// never reject (generator#83).
+		//
+		// Two shapes, because the destination means something different in each
+		// profile — and MESSAGE_SPEC §2 is what makes the difference matter. An
+		// all-default field is now absent from the bytes, so a destination that is
+		// DECODED INTO keeps the previous message's value for every field these
+		// bytes do not carry, a wrapper array included (its collector clears on the
+		// sequence header, which an absent field never sends). Only the start of the
+		// decode can clear that, which is what reset() is for.
+		//
+		//   heap profile (corelib-cpp): `out` IS the destination. An IStreamInline
+		//   binds this message's deserialize, so nothing is staged in a second
+		//   instance and copied across — which is the point of passing a destination
+		//   in (the bench decode row and the JSON harness both feed one in a loop),
+		//   and why the reset has to be here. The stream reaches the callback through
+		//   a pointer filled in right after construction: IStreamInline takes its
+		//   callback by value, so the lambda cannot capture the object it is being
+		//   handed to.
+		//
+		//   fixed profile (corelib-c-cpp): decode into a freshly constructed
+		//   IStreamObject and copy the result over `out`. That is a memcpy of inline
+		//   storage — no allocation to hand back, nothing to reuse — and it cannot go
+		//   stale, because the destination it decodes into starts at the declared
+		//   defaults every time. It stays this way for footprint: this profile's
+		//   IStreamObject dispatches through a C-ABI function pointer, whereas
+		//   IStreamInline holds a std::function, so routing the decode through a
+		//   callback here would put that machinery in .text on the targets that have
+		//   the least of it. reset() is emitted all the same, for a caller driving
+		//   the stream itself.
 		f.line("    /**")
-		f.line("     * @brief Decode a message, reporting whether the input was acceptable.")
-		f.line("     * @param data Encoded bytes.")
-		f.line("     * @param len  Number of bytes at @p data.")
-		f.line("     * @param out  Receives the message on success; untouched otherwise.")
-		f.line("     * @return The decode result; check @c ok() before reading @p out.")
-		f.line("     */")
-		f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, %s &out) {", name)
-		f.line("        sofab::IStreamObject<%s> in%s;", name, g.istreamLimits())
-		f.line("        sofab::IStreamImpl::Result r = in.feed(data, len);")
-		f.line("        if (r.ok()) { out = *in; }")
-		f.line("        return r;")
-		f.line("    }")
+		if g.clib {
+			f.line("     * @brief Decode a message, reporting whether the input was acceptable.")
+			f.line("     *")
+			f.line("     * Decodes into a fresh instance and copies it over @p out on success,")
+			f.line("     * so @p out never carries anything over from an earlier message. To")
+			f.line("     * decode into a destination directly, drive the stream yourself and")
+			f.line("     * call @ref reset on it between messages.")
+			f.line("     *")
+			f.line("     * @param data Encoded bytes.")
+			f.line("     * @param len  Number of bytes at @p data.")
+			f.line("     * @param out  Receives the message on success; untouched otherwise.")
+			f.line("     * @return The decode result; check @c ok() before reading @p out.")
+			f.line("     */")
+			f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, %s &out) {", name)
+			f.line("        sofab::IStreamObject<%s> in%s;", name, g.istreamLimits())
+			f.line("        sofab::IStreamImpl::Result r = in.feed(data, len);")
+			f.line("        if (r.ok()) { out = *in; }")
+			f.line("        return r;")
+			f.line("    }")
+		} else {
+			f.line("     * @brief Decode a message into @p out, reporting whether the input was")
+			f.line("     *        acceptable.")
+			f.line("     *")
+			f.line("     * @p out is put back to its declared defaults first (@ref reset) and")
+			f.line("     * then decoded into directly, so it may be reused across messages")
+			f.line("     * without carrying anything over and without giving its buffers back.")
+			f.line("     *")
+			f.line("     * @param data Encoded bytes.")
+			f.line("     * @param len  Number of bytes at @p data.")
+			f.line("     * @param out  Receives the message; on a rejected input it holds the")
+			f.line("     *             fields decoded before the error, never an older message's.")
+			f.line("     * @return The decode result; check @c ok() before reading @p out.")
+			f.line("     */")
+			f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, %s &out) {", name)
+			f.line("        out.reset();")
+			f.line("        sofab::IStreamInline *_isp = nullptr;")
+			f.line("        sofab::IStreamInline _is{[&out, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {")
+			f.line("            out.deserialize(*_isp, _id, _size, _count);")
+			f.line("        }%s};", g.istreamInlineLimits())
+			f.line("        _isp = &_is;")
+			f.line("        return _is.feed(data, len);")
+			f.line("    }")
+		}
 		f.blank()
 	}
 

@@ -474,6 +474,12 @@ final class Sbuf {
     // and the arriving elements overwrite [0, M) by index.
     static void fillFalse(List<Boolean> l, int n) { l.clear(); for (int i = 0; i < n; i++) l.add(false); }
 
+    // resetList empties a list IN PLACE, keeping its capacity, and materializes one
+    // only when the field is null. The generated reset() uses it so re-arming a
+    // reused decode destination costs no allocation -- which is the whole point of
+    // taking a destination from the caller.
+    static <T> List<T> resetList(List<T> l) { if (l == null) return new java.util.ArrayList<>(); l.clear(); return l; }
+
     // trimTail / trimTailF32 / trimTailF64 return a's first M' elements, where M'
     // is one past the last element that differs from the element default (0 when
     // every element is the default). A fixed-count array's canonical wire carries

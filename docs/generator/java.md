@@ -103,3 +103,44 @@ the same value and the plain dropping close is correct. If that gap is ever clos
 the wrapper needs an `if (value != default) { … os.writeSequenceEndKeep(); }` guard
 so a value differing from a non-empty default still reaches the wire as the empty
 wrapper — the only encoding of "explicitly empty" (§2, §3).
+
+## `reset()` — the decode side of §2
+
+`tryDecode(byte[] data, M out)` takes its destination from the caller, and callers
+reuse it. Once §2 made **absence** the encoding of an all-default field, an
+omitted field stopped firing any callback at all — so the visitor's clears, which
+hang off `sequenceBegin`/`arrayBegin`, no longer run for it. A reused destination
+then kept the *previous* decode's elements: the decoded array held data that was
+not in the message.
+
+Absence is only observable before the feed starts, so that is where the
+destination is re-armed. Every generated class carries
+
+```java
+/** Restores every field to its declared default, in place; … */
+public void reset()
+```
+
+and `tryDecode` calls `out.reset()` as its first statement. `decode(byte[])`
+constructs a fresh instance and does not pay for it.
+
+`reset()` restores the declared defaults **in place**, because not re-allocating
+is the entire point of accepting a destination:
+
+| Field | Reset |
+|-------|-------|
+| scalar / `String` / `blob` | assigned the same literal the field initializer uses |
+| `List`-backed array (wrapper, `boolean`) | `Sbuf.resetList` — `clear()`, keeping the backing capacity; a `boolean` array's materialized default is then `addAll`ed back |
+| primitive array with a default (always so for `count: N`) | `System.arraycopy` from the shared `_arrdef_*` static when the length already matches; `clone()` only otherwise |
+| dynamic primitive array | the shared zero-length `Sbuf.EMPTY_*` constant |
+| `struct` / `union` | `reset()` recursively, never a new object |
+
+It is **public** for the same reason corelib-cpp exposes `IStreamImpl::reset()`:
+a caller who drives the `Visitor` directly — feeding chunks itself, with no
+`tryDecode` to hook — needs the same ability to re-arm a destination between
+messages.
+
+The §7.4 clear in the visitor is unchanged and still required: it covers a
+*re-opened* wrapper within one message, which must replace the array whole.
+`reset()` covers the field that never appears at all. The two are different
+events and both are needed.

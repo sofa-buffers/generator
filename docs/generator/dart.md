@@ -33,7 +33,8 @@ corelib's `LimitExceeded` outcome.
 One `class <Message>` per object, each field initialized to its schema default
 (Dart requires non-nullable fields be initialized) — a fresh object already
 carries every default, which is what makes sparse-canonical decode
-(MESSAGE_SPEC S2) a no-op for omitted fields. Enums and bitfields lower to an
+(MESSAGE_SPEC S2) a no-op for omitted fields (a *reused* object gets there via
+`reset()`, below). Enums and bitfields lower to an
 `abstract final class` namespace of `static const int` values
 (`Someenum.RED`, `Somebitfield.FLAGA`) over the raw wire integer, so negative
 enum values (which a plain Dart `enum` cannot express) and 64-bit bitfields work.
@@ -61,6 +62,8 @@ Per message:
   end inside a field or an open sequence.
 - `static <Message> decode(Uint8List data)` — the best-effort convenience (the
   90 % case): returns the message decoded so far, discarding the status.
+- `void reset()` — every field back to its declared default, **in place**. See
+  [Reusing a destination](#reusing-a-destination); `tryDecode` calls it for you.
 
 ### Encode model — lazy sequence framing (MESSAGE_SPEC §2)
 
@@ -108,7 +111,10 @@ callback. Two consequences the generated code relies on:
   scalar callbacks). A re-opened `struct`/`union` scope descends into the
   **existing** member (merge); an array wrapper clears its list inside
   `onSequenceStart` (replace) — and because that clear lives in the sequence-only
-  callback, a mis-typed later occurrence can never wipe a valid earlier value.
+  callback, a mis-typed later occurrence can never wipe a valid earlier value. It
+  is also why it cannot serve a *reused* destination, whose stale value must be
+  cleared before the decode starts (see [Reusing a
+  destination](#reusing-a-destination)).
 
 - **INVALID verdicts ride a sticky flag.** The corelib's visitor callbacks return
   `void`, so a generated visitor cannot fail the decode mid-stream. The over-count
@@ -117,6 +123,39 @@ callback. Two consequences the generated code relies on:
   terminal `DecodeStatus.invalid` after the corelib returns — the Rust/Zig
   "generated guard, sticky flag" model. The receiver-side `max_dyn_*` limits are
   enforced by the corelib itself (a `DecoderLimits`), the Go/Python/TS family.
+
+### Reusing a destination
+
+`tryDecode(data, out)` lets the caller supply the destination, so the same object
+can absorb a stream of messages without reallocating. That entry point starts
+with **`out.reset()`**, and it has to: since MESSAGE_SPEC §2 dropped the sequence
+carve-out, a `struct`/`union` member or an array field equal to its default is
+**not on the wire at all**, so it fires no callback. The §7.4 "a later occurrence
+replaces the array whole" clear in `onSequenceStart` therefore cannot run for it,
+and a reused `out` would keep the *previous* message's elements — the decoded
+array would hold data that is not in the message. The start of the decode is the
+only place absence is still observable, so that is where the clear belongs. The
+§7.4 sequence-start clear stays exactly as it was: a re-opened wrapper must still
+replace, not append.
+
+`reset()` is **public** for the caller who drives the visitor directly rather
+than through `tryDecode` (corelib-cpp exposes `IStreamImpl::reset()` for the same
+reason), and for recycling an instance between encodes.
+
+It restores each field in place, so a reused instance keeps its backing storage:
+a nested `struct`/`union` member is `reset()` recursively rather than
+reconstructed, and a list is `clear()`ed (and refilled from a `const` default
+literal, which the compiler canonicalizes — the refill allocates nothing). Two
+kinds are assigned instead, because Dart has no in-place form for them: a `blob`
+(`Uint8List` is fixed-length) and an **fp32 array**, whose member holds the
+fixed-length `Float32List` that decode installs to keep a signaling NaN's bits
+(see below) and on which `clear()` would throw. For the same reason `reset()`
+expects the *growable* lists the initializers and the decode path produce; a
+caller who assigns a fixed-length list to a list member owns that choice.
+
+`decode(data)` builds a fresh instance, which already carries every default, so
+it skips the redundant reset (both routes share a private `_decodeInto`) — the
+`bench` decode row is unchanged by this.
 
 ### 64-bit integers
 

@@ -37,6 +37,57 @@ into storage the caller already owns and allocates nothing at all; it returns th
 byte count, or `0` if the message does not fit in `cap`, in which case `dst`
 holds however much was written before that was discovered.
 
+### `reset()` and decoding a second message
+
+Every generated message and nested type also gets a public `void reset() noexcept`
+that puts each field back to its **declared default, in place** — containers are
+cleared rather than reallocated, so a destination reused across messages keeps the
+capacity it has already paid for, and a struct or union member recurses into its
+own `reset()` instead of being assigned a fresh temporary.
+
+It exists because a field whose value equals its default is **absent** from the
+encoded bytes (MESSAGE_SPEC §2), a sequence-typed one included. An absent field
+delivers no `deserialize()` callback, so nothing on the callback side can clear a
+destination that is decoded into twice: the "a later occurrence replaces the array
+whole" clear inside `sofab::StringSeq` / `BlobSeq` / `MessageSeq` hangs off the
+sequence header, which an omitted field never sends. Clearing has to happen where
+absence is still observable — at the start of the decode.
+
+So: **drive a stream yourself and `reset()` is yours to call** between messages,
+alongside the corelib's own `IStreamImpl::reset()` for the decoder state (the two
+halves: the destination is yours, the decoder state is the stream's).
+
+```cpp
+sofab::IStreamObject<Telemetry> in;
+in.feed(first.data(), first.size());
+in.reset();                       // decoder state AND the message it owns
+in.feed(second.data(), second.size());
+
+Telemetry dst;                    // a destination you own
+sofab::IStreamInline *sp = nullptr;
+sofab::IStreamInline s{[&](sofab::id id, std::size_t sz, std::size_t ct) {
+    dst.deserialize(*sp, id, sz, ct);
+}};
+sp = &s;
+s.feed(first.data(), first.size());
+s.reset(); dst.reset();           // both halves, or the first message survives
+s.feed(second.data(), second.size());
+```
+
+`try_decode` handles this for you, differently per profile:
+
+| profile | shape | `out` on a rejected input |
+|---|---|---|
+| `corelib: cpp` | `out.reset()`, then an `IStreamInline` decodes into `out` directly — no second instance, no copy, no buffer handed back | the fields decoded before the error |
+| `corelib: c-cpp` | decodes into a fresh `IStreamObject` and copies the result over `out` | untouched |
+
+The fixed profile keeps the copy on purpose. Its containers are inline, so there
+is no allocation to hand back and nothing to reuse, and the instance it decodes
+into starts at the declared defaults every time — while its `IStreamObject`
+dispatches through a C-ABI function pointer where `IStreamInline` holds a
+`std::function`. Routing the decode through a callback there would put that
+machinery in `.text` on the targets that have the least of it.
+
 Setting any of the three `max_dyn_*` keys also derives a streaming reassembly cap, passed as
 `sofab::Limits{max_buffered_field}` into the one-shot decode entry points, that
 bounds how much the corelib buffers for a single incomplete field. It is a **byte**
