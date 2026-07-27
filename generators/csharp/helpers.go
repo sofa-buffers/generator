@@ -237,7 +237,8 @@ func (g *gen) csInit(f *ir.Field) string {
 	case ir.KindArray:
 		// A NATIVE scalar array is a leaf field: materialize its default so an
 		// omitted default array reconstructs correctly and marshal can compare
-		// against it. Composite arrays are wrapper sequences (always framed).
+		// against it. A composite array is a wrapper sequence whose declared default
+		// is not materialized, which is what makes its dropping closer correct (§2).
 		if primArrayElem(f.Elem) {
 			if lit, ok := g.csPrimArrayLiteral(f); ok {
 				return " = " + lit

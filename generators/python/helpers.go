@@ -152,7 +152,8 @@ func (g *gen) pyDefault(f *ir.Field) string {
 		// would be an empty list on this growable backend while the fixed-storage
 		// camp yields N zeros — the same MESSAGE_SPEC §3 divergence as the trailing
 		// default run, reached through the omission path. Composite arrays are
-		// wrapper sequences (always framed) and start empty.
+		// wrapper sequences whose declared default is not materialized, so they start
+		// empty -- which is what makes their dropping closer correct (§2).
 		if lit, ok := g.pyNativeArrayDefault(f); ok {
 			return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
 		}
@@ -163,8 +164,9 @@ func (g *gen) pyDefault(f *ir.Field) string {
 
 // isNativeArrayElem reports whether an array element uses a native scalar array
 // wire type (vs. a wrapper sequence). Native arrays are a leaf field (omitted as
-// a whole when equal to their default); composite/dynamic-element arrays are
-// always framed.
+// a whole when equal to their default); a composite/dynamic-element array is a
+// wrapper sequence, opened lazily and closed with the dropping end at field level
+// (MESSAGE_SPEC §2).
 func isNativeArrayElem(elem ir.Kind) bool {
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,

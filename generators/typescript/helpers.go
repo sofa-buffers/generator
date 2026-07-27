@@ -436,7 +436,8 @@ func (g *gen) tsDefault(f *ir.Field) string {
 		// A native scalar array is a leaf field: materialize its schema default so
 		// an omitted (default-valued) array reconstructs correctly on decode and so
 		// marshal can compare against it. Composite arrays are wrapper sequences
-		// (always framed) and start empty.
+		// whose declared default is not materialized, so it starts empty -- which is
+		// what makes its dropping closer correct (§2).
 		// A `count: N` native array is fixed-length even with no schema default:
 		// its value is N element defaults, so nativeArrayDefault materializes
 		// them (MESSAGE_SPEC §3).

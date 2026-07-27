@@ -62,6 +62,37 @@ Per message:
 - `static <Message> decode(Uint8List data)` — the best-effort convenience (the
   90 % case): returns the message decoded so far, discarding the status.
 
+### Encode model — lazy sequence framing (MESSAGE_SPEC §2)
+
+The `≠ default` omit test is per field and a **sequence-typed field is no
+exception**, so `marshal` never opens a frame eagerly: every sequence is opened
+with `Encoder.beginSequenceLazy(id)`, which holds the header back until a child
+field is actually written. Because the nested `marshal` already omits each child
+equal to its default, "no child was written" *is* "the value equals its declared
+default", evaluated per field and recursively — no buffering and no runtime
+whole-object compare.
+
+The **closer** is what decides whether a contentless frame survives, and the
+backend picks it statically from the position in the schema, never from the value:
+
+| position | closer emitted |
+|---|---|
+| `struct` / `union` field | `e.endSequence()` — frame dropped when empty |
+| array field (the wrapper) | `e.endSequence()` — frame dropped when empty |
+| wrapper-array **element** (`struct`/`union`/nested row) | `e.endSequenceKeep()` — frame always emitted |
+
+An element keeps its frame because element presence is what carries a dynamic
+array's length (*highest present id + 1*, §5.1): dropping an all-default element
+would change the decoded **length**, not merely the bytes. Consequence: an
+all-default message encodes to **zero bytes**.
+
+The array wrapper may use the dropping closer because a wrapper array's declared
+`default` is not materialized by this backend (the generated field starts as the
+empty collection), so *absent* and *explicitly empty* denote the same value. If
+that gap is ever closed, the wrapper needs an `if (value != default) { …;
+e.endSequenceKeep(); }` guard so an explicitly-empty value differing from a
+non-empty default still reaches the wire as the empty wrapper (§2, §3).
+
 ### Decode model
 
 `corelib-dart` exposes the **push child-visitor** decode (like Go): a

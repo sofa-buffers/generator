@@ -1,10 +1,17 @@
 # Corelib branches this branch is developed against (docs/CI.md).
 # Delete before merging: every entry pins a corelib to unmerged code.
 #
-# MESSAGE_SPEC §2 sequence omission — the pair is:
-#   sofa-buffers/documentation#29 (spec)
-#   corelib-c-cpp#114, corelib-cpp#57, corelib-rs#38, corelib-rs-no-std#58
+# MESSAGE_SPEC §2 sequence omission — the spec is sofa-buffers/documentation#29
+# and every corelib carries the same branch name. The eager sequence-begin is gone
+# from all eleven, so a lang-* job that clones main cannot compile generated code.
 SOFAB_CORELIB_C_CPP_REF=poc/omit-all-default-sequences
 SOFAB_CORELIB_CPP_REF=poc/omit-all-default-sequences
 SOFAB_CORELIB_RS_REF=poc/omit-all-default-sequences
 SOFAB_CORELIB_RS_NO_STD_REF=poc/omit-all-default-sequences
+SOFAB_CORELIB_GO_REF=poc/omit-all-default-sequences
+SOFAB_CORELIB_JAVA_REF=poc/omit-all-default-sequences
+SOFAB_CORELIB_CS_REF=poc/omit-all-default-sequences
+SOFAB_CORELIB_PY_REF=poc/omit-all-default-sequences
+SOFAB_CORELIB_TS_REF=poc/omit-all-default-sequences
+SOFAB_CORELIB_ZIG_REF=poc/omit-all-default-sequences
+SOFAB_CORELIB_DART_REF=poc/omit-all-default-sequences

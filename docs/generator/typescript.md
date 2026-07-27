@@ -80,6 +80,26 @@ Measured on the full-scale arena message (best-of-3, corelib-ts #19/#20):
 | `long` | 38.0 | 0.95 | 47.3 | 1.17 |
 | `number` | 40.2 | 1.04 | 50.8 | 1.18 |
 
+## Encode: sequence framing
+
+`marshal(os)` opens **every** nested sequence with the corelib's
+`os.writeSequenceBeginLazy(id)`, which holds the header back until a child field
+is actually written. Which closer follows is decided at generation time from the
+position in the schema — never from the value, so there is no runtime predicate
+in the generated code:
+
+| Position | Closer | Effect |
+|---|---|---|
+| `struct`/`union` **field** | `os.writeSequenceEnd()` | an all-default nested object is **omitted**, not framed empty |
+| wrapper-array **field** | `os.writeSequenceEnd()` | an empty array is omitted; absence reconstructs the (empty) default |
+| wrapper-array **element** (`struct`/`union`, nested row) | `os.writeSequenceEndKeep()` | the frame always survives — element presence is what carries the array's length (*highest present id + 1*) |
+
+This is MESSAGE_SPEC §2 / CORELIB_PLAN §6. The visible consequence: a message
+whose every field equals its default now encodes to **zero bytes**, and a nested
+all-default object costs nothing instead of a two-byte empty frame. Decoding is
+unchanged — a decoder still accepts the empty frame and treats it as the omitted
+field.
+
 ## Benchmark row
 
 Row `ts-bigint` and `ts-long` (one per `int64` mode) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with

@@ -389,10 +389,14 @@ func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
 		f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s ?? Array.Empty<byte>(), %s)) { os.WriteBlob(%d, %s ?? Array.Empty<byte>()); }", acc, g.csDefaultValue(fld), fld.ID, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
-		// A sequence is always framed; its child fields are omitted per-field by
-		// the nested Marshal (MESSAGE_SPEC S2). An all-default nested object thus
-		// becomes an empty wrapper sequence, not a dropped field.
-		f.line("        os.WriteSequenceBegin(%d); (%s ?? new %s()).Marshal(os); os.WriteSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key))
+		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
+		// FIELD is no exception, so the frame is opened LAZILY -- the corelib holds
+		// the header back until a child field appears. The nested Marshal omits every
+		// child that equals its default, so "no child was written" IS "the object
+		// equals its declared default", evaluated per field and recursively. The
+		// dropping closer therefore makes an all-default nested object vanish instead
+		// of reaching the wire as an empty wrapper frame.
+		f.line("        os.WriteSequenceBeginLazy(%d); (%s ?? new %s()).Marshal(os); os.WriteSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key))
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
@@ -410,8 +414,9 @@ func arrDefName(fld *ir.Field) string { return "_arrdef_" + fld.Name }
 // csArrayCompareDefault is the literal a native array field's value is compared
 // against for whole-field omission, and ("", false) when the field has no
 // materialized default (a dynamic array with no schema default, or a
-// wrapper-sequence array, which is never whole-omitted). It is exactly the
-// field initializer, so an untouched field always compares equal and is omitted.
+// wrapper-sequence array, whose whole-field omission is the corelib's lazy frame
+// rather than a compare here). It is exactly the field initializer, so an
+// untouched field always compares equal and is omitted.
 func (g *gen) csArrayCompareDefault(fld *ir.Field) (string, bool) {
 	if fld.Kind != ir.KindArray {
 		return "", false
@@ -425,7 +430,8 @@ func (g *gen) csArrayCompareDefault(fld *ir.Field) (string, bool) {
 func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in the field initializer), else when empty. A composite/
-	// dynamic-element array is a wrapper sequence and is always framed.
+	// dynamic-element array is a wrapper sequence, opened lazily and closed by the
+	// dropping end, so it disappears when no element reaches the wire.
 	if primArrayElem(fld.Elem) {
 		// Primitive array (T[]): written straight to the OStream overload with
 		// no List.ToArray temporary.
@@ -448,6 +454,14 @@ func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
 		f.line("        }")
 		return
 	}
+	// The field-level wrapper frame is dropped when no element is written, and
+	// absence then reconstructs the field's default. That is correct because a
+	// wrapper array's declared `default` is not materialized today (the generated
+	// field initializer is the empty collection), so absent and explicitly-empty
+	// denote the same value. If that gap is ever closed, this call needs a guard --
+	// `if (value != default) { ... WriteSequenceEndKeep(); }` -- so that a value
+	// differing from a non-empty default still reaches the wire as the empty
+	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
 	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, fld.HasCount)
 }
 
@@ -487,6 +501,17 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 	if isPrim {
 		arr = val
 	}
+	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether a
+	// contentless one survives, and it is chosen statically from the position in the
+	// schema. A wrapper array at depth 0 is a sequence-typed FIELD, so it closes with
+	// the dropping end -- an all-default array is omitted and absence reconstructs
+	// it. A nested row (depth > 0) is an array ELEMENT, and element presence is what
+	// carries a dynamic array's length (S5.1), so it closes with the keeping end:
+	// dropping it would change the decoded length, not merely the bytes.
+	seqEnd := "WriteSequenceEnd"
+	if depth > 0 {
+		seqEnd = "WriteSequenceEndKeep"
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
 		f.line("%sos.WriteArrayUnsigned(%s, %s);", ind, idExpr, trimExpr(arr, elem, fixed))
@@ -513,26 +538,28 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
-		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
+		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) { if ((%s[%s] ?? \"\") != \"\") os.WriteString(%s, %s[%s] ?? \"\"); }", ind, iv, iv, val, iv, val, iv, iv, val, iv)
-		f.line("%sos.WriteSequenceEnd();", ind)
+		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindBlob:
 		// A blob element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
-		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
+		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) { if ((%s[%s] ?? Array.Empty<byte>()).Length != 0) os.WriteBlob(%s, %s[%s] ?? Array.Empty<byte>()); }", ind, iv, iv, val, iv, val, iv, iv, val, iv)
-		f.line("%sos.WriteSequenceEnd();", ind)
+		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
+		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) {", ind, iv, iv, val, iv)
-		f.line("%s    os.WriteSequenceBegin(%s); (%s[%s] ?? new %s()).Marshal(os); os.WriteSequenceEnd();", ind, iv, val, iv, g.typeName(ref.Key))
+		// An ELEMENT is framed unconditionally: dropping an all-default one would
+		// leave an id gap and change the decoded length, not just the bytes (S5.1).
+		f.line("%s    os.WriteSequenceBeginLazy(%s); (%s[%s] ?? new %s()).Marshal(os); os.WriteSequenceEndKeep();", ind, iv, val, iv, g.typeName(ref.Key))
 		f.line("%s}", ind)
-		f.line("%sos.WriteSequenceEnd();", ind)
+		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindArray:
-		f.line("%sos.WriteSequenceBegin(%s);", ind, idExpr)
+		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.Count; %s++) {", ind, iv, iv, val, iv)
 		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false, false)
 		f.line("%s}", ind)
-		f.line("%sos.WriteSequenceEnd();", ind)
+		f.line("%sos.%s();", ind, seqEnd)
 	}
 }

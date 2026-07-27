@@ -340,9 +340,14 @@ func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 		}
 		return
 	case ir.KindStruct, ir.KindUnion:
-		// A sequence is always framed; its children are omitted per-field by the
-		// nested marshal (MESSAGE_SPEC S2).
-		f.line("    e.beginSequence(%d); %s.marshal(e); e.endSequence();", fld.ID, acc)
+		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
+		// exception, so the frame is opened LAZILY -- the corelib holds the header
+		// back until a child field appears. The nested marshal omits each child that
+		// equals its default, so "no child was written" IS "the object equals its
+		// declared default", evaluated per field and recursively. endSequence then
+		// drops the frame, so an all-default nested object is omitted rather than
+		// emitted as an empty wrapper.
+		f.line("    e.beginSequenceLazy(%d); %s.marshal(e); e.endSequence();", fld.ID, acc)
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
@@ -366,7 +371,8 @@ func (g *gen) blobDefaultLit(f *ir.Field) (string, bool) {
 func (g *gen) emitMarshalArray(f *dfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit when equal to its (trimmed)
 	// default, else when empty. A composite/dynamic-element array is a wrapper
-	// sequence and is always framed.
+	// sequence: opened lazily and closed with the dropping end at field level, so an
+	// all-default one is omitted (MESSAGE_SPEC §2).
 	if nativeArrayElem(fld.Elem) {
 		val := acc
 		if fld.Elem == ir.KindBool {
@@ -388,7 +394,15 @@ func (g *gen) emitMarshalArray(f *dfile, fld *ir.Field, acc string) {
 		}
 		return
 	}
-	// Wrapper sequence (string/blob/struct/union/nested array).
+	// Wrapper sequence (string/blob/struct/union/nested array). The field-level
+	// wrapper frame is dropped when no element is written, and absence then
+	// reconstructs the field's default. That is correct because a wrapper array's
+	// declared `default` is not materialized today (the generated field starts as
+	// the empty collection), so absent and explicitly-empty denote the same value.
+	// If that gap is ever closed, this call needs a guard --
+	// `if (value != default) { ...; e.endSequenceKeep(); }` -- so that a value
+	// differing from a non-empty default still reaches the wire as the empty
+	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
 	g.marshalWrapperArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
 }
 
@@ -519,25 +533,39 @@ func (g *gen) isElemZero(elem ir.Kind, v any) bool {
 // omitted when equal to the element default (empty).
 func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
+	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether a
+	// contentless one survives, and it is chosen statically from the position in the
+	// schema, never from the value. A wrapper array is a sequence-typed FIELD, so at
+	// depth 0 it closes with the dropping endSequence -- an all-default array is
+	// omitted and absence reconstructs it. A nested row (depth > 0) is an array
+	// ELEMENT, and element presence is what carries a dynamic array's length (S5.1),
+	// so it closes with endSequenceKeep: dropping an all-default row would change the
+	// decoded length, not merely the bytes.
+	seqEnd := "endSequence"
+	if depth > 0 {
+		seqEnd = "endSequenceKeep"
+	}
 	switch elem {
 	case ir.KindString:
-		f.line("%se.beginSequence(%s);", ind, idExpr)
+		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
 		f.line("%sfor (var %s = 0; %s < %s.length; %s++) { if (%s[%s].isNotEmpty) e.writeString(%s, %s[%s]); }", ind, iv, iv, val, iv, val, iv, iv, val, iv)
-		f.line("%se.endSequence();", ind)
+		f.line("%se.%s();", ind, seqEnd)
 	case ir.KindBlob:
-		f.line("%se.beginSequence(%s);", ind, idExpr)
+		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
 		f.line("%sfor (var %s = 0; %s < %s.length; %s++) { if (%s[%s].isNotEmpty) e.writeBlob(%s, %s[%s]); }", ind, iv, iv, val, iv, val, iv, iv, val, iv)
-		f.line("%se.endSequence();", ind)
+		f.line("%se.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("%se.beginSequence(%s);", ind, idExpr)
+		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
 		f.line("%sfor (var %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
-		f.line("%s  e.beginSequence(%s); %s[%s].marshal(e); e.endSequence();", ind, iv, val, iv)
+		// An ELEMENT is framed unconditionally: dropping an all-default one would
+		// leave an id gap and change the decoded length, not just the bytes (S5.1).
+		f.line("%s  e.beginSequenceLazy(%s); %s[%s].marshal(e); e.endSequenceKeep();", ind, iv, val, iv)
 		f.line("%s}", ind)
-		f.line("%se.endSequence();", ind)
+		f.line("%se.%s();", ind, seqEnd)
 	case ir.KindArray:
 		// A nested row is a wrapper-sequence element, not a `count: N` field, so it
 		// is never trimmed (MESSAGE_SPEC S3).
-		f.line("%se.beginSequence(%s);", ind, idExpr)
+		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
 		f.line("%sfor (var %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
 		if nativeArrayElem(items.Elem) {
 			row := fmt.Sprintf("%s[%s]", val, iv)
@@ -549,7 +577,7 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 			g.marshalWrapperArray(f, ind+"  ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1)
 		}
 		f.line("%s}", ind)
-		f.line("%se.endSequence();", ind)
+		f.line("%se.%s();", ind, seqEnd)
 	}
 }
 

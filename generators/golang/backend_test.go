@@ -243,7 +243,8 @@ func TestGoStructuralInvariants(t *testing.T) {
 		"func NewMyfirstmessage() *Myfirstmessage",
 		"func DecodeMyfirstmessage(",
 		"sofab.AcceptBytes(data, m)", // zero-copy cursor decode
-		"e.WriteSequenceBegin(",      // nested struct/union framing (marshal unchanged)
+		"e.WriteSequenceBeginLazy(",  // nested struct/union framing (MESSAGE_SPEC S2)
+		"e.WriteSequenceEndKeep()",   // ... and an array ELEMENT keeps its frame
 		"`json:\"somei8\"`",          // canonical json tags
 	} {
 		if !strings.Contains(msg, want) {
@@ -258,6 +259,11 @@ func TestGoStructuralInvariants(t *testing.T) {
 			t.Errorf("myfirstmessage.go should no longer contain %q (pull-parser replaced by visitor)", notWant)
 		}
 	}
+	// Every sequence is opened lazily: the eager begin no longer exists in the
+	// corelib, and emitting it would not even compile (MESSAGE_SPEC S2).
+	if strings.Contains(strings.ReplaceAll(msg, "e.WriteSequenceBeginLazy(", ""), "e.WriteSequenceBegin(") {
+		t.Errorf("myfirstmessage.go must open every sequence with WriteSequenceBeginLazy:\n%s", msg)
+	}
 	// The decode prelude (embedded no-op base + collectors) is emitted once.
 	prelude := files["sofab_visitor.go"]
 	for _, want := range []string{
@@ -271,6 +277,50 @@ func TestGoStructuralInvariants(t *testing.T) {
 	types := files["types.go"]
 	if !strings.Contains(types, "type MyfirstmessageSomeenum int8") {
 		t.Errorf("enum backing type missing/incorrect:\n%s", firstLines(types, 12))
+	}
+}
+
+// MESSAGE_SPEC §2: every sequence opens with the lazy begin, and the CLOSER is
+// chosen statically from the position in the schema. A sequence-typed FIELD (a
+// struct/union field, an array wrapper) closes with the dropping WriteSequenceEnd
+// so an all-default one is omitted; a wrapper-array ELEMENT (a struct element, a
+// nested row) closes with WriteSequenceEndKeep, because element presence carries
+// the array's length (§5.1) and dropping one would change the decoded value.
+func TestGoSequenceCloserIsPositional(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      nested: { id: 0, type: struct, fields: { x: { id: 0, type: i32 } } }
+      strs:   { id: 1, type: array, items: { type: string } }
+      structs: { id: 2, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }
+      rows:   { id: 3, type: array, items: { type: array, items: { type: string } } }
+`)
+	got := genGo(t, s, map[string]any{"package": "messages"})["vec.go"]
+	for _, want := range []string{
+		// struct FIELD: lazy begin, dropping end
+		"\te.WriteSequenceBeginLazy(0)\n\tm.Nested.marshal(e)\n\te.WriteSequenceEnd()\n",
+		// string-array wrapper FIELD (id 1): dropping end
+		"\te.WriteSequenceBeginLazy(1)\n",
+		// struct-array wrapper FIELD (id 2) holding ELEMENT frames that are kept
+		"\te.WriteSequenceBeginLazy(2)\n\tfor _i0, _e0 := range m.Structs {\n\t\te.WriteSequenceBeginLazy(sofab.ID(_i0))\n\t\t_e0.marshal(e)\n\t\te.WriteSequenceEndKeep()\n\t}\n\te.WriteSequenceEnd()\n",
+		// nested array: the outer wrapper is a FIELD (end), each row an ELEMENT (end_keep)
+		"\te.WriteSequenceBeginLazy(3)\n\tfor _i0, _e0 := range m.Rows {\n\t\te.WriteSequenceBeginLazy(sofab.ID(_i0))\n",
+		"\t\te.WriteSequenceEndKeep()\n\t}\n\te.WriteSequenceEnd()\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("vec.go missing %q:\n%s", want, got)
+		}
+	}
+	// The string-array FIELD must close with the dropping end, never the keeping
+	// one -- getting this backwards costs two bytes per all-default array field.
+	if !strings.Contains(got, "\t\te.WriteString(sofab.ID(_i0), _e0)\n\t\t}\n\t}\n\te.WriteSequenceEnd()\n") {
+		t.Errorf("string-array wrapper FIELD must close with WriteSequenceEnd:\n%s", got)
+	}
+	// The eager begin no longer exists in corelib-go; emitting it would not compile.
+	if strings.Contains(strings.ReplaceAll(got, "WriteSequenceBeginLazy(", ""), "WriteSequenceBegin(") {
+		t.Errorf("no sequence may use the eager begin:\n%s", got)
 	}
 }
 

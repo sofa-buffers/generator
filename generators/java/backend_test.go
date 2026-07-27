@@ -529,3 +529,66 @@ messages:
 		t.Error("M.java: dynamic array must keep its length!=0 omission guard")
 	}
 }
+
+// TestJavaLazySequenceFraming: MESSAGE_SPEC §2 omits a sequence-typed FIELD whose
+// value equals its declared default instead of framing it empty, while a
+// wrapper-array ELEMENT keeps its frame — element presence is what carries a
+// dynamic array's length (§5.1). Every sequence is therefore opened with the
+// corelib's hold-back begin (writeSequenceBeginLazy); the CLOSER is what encodes
+// the distinction and is chosen statically from the position in the schema:
+// writeSequenceEnd (drops a contentless frame) for a struct/union field and for a
+// wrapper-array field, writeSequenceEndKeep (forces it out) for an element and for
+// a nested array row.
+func TestJavaLazySequenceFraming(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      st:   { id: 0, type: struct, fields: { x: { id: 0, type: i32 } } }
+      strs: { id: 1, type: array, items: { type: string, maxlen: 8 } }
+      blbs: { id: 2, type: array, items: { type: blob, maxlen: 8 } }
+      objs: { id: 3, type: array, items: { type: struct, fields: { y: { id: 0, type: i32 } } } }
+      mat:  { id: 4, type: array, items: { type: array, items: { type: string, maxlen: 8 } } }
+`
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+
+	for _, want := range []string{
+		// A struct FIELD: opened lazily, closed with the dropping end, so an
+		// all-default nested object vanishes instead of becoming an empty wrapper.
+		"os.writeSequenceBeginLazy(0); (this.st == null ? new MSt() : this.st).marshal(os); os.writeSequenceEnd();",
+		// A wrapper-array FIELD (string/blob elements): same -- depth 0 drops.
+		"os.writeSequenceBeginLazy(1);",
+		"os.writeSequenceBeginLazy(2);",
+		// A struct ELEMENT keeps its frame: its id counts toward the array length.
+		"os.writeSequenceBeginLazy(3);",
+		"os.writeSequenceBeginLazy(_i0); (this.objs.get(_i0) == null ? new MObjsElem() : this.objs.get(_i0)).marshal(os); os.writeSequenceEndKeep();",
+		// A nested array ROW is an element too: the inner row keeps, the outer
+		// wrapper field drops.
+		"os.writeSequenceBeginLazy(4);",
+		"            os.writeSequenceEndKeep();",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing %q", want)
+		}
+	}
+
+	// The eager begin is gone from the corelib; emitting it would not compile.
+	if strings.Contains(m, "os.writeSequenceBegin(") {
+		t.Error("M.java: every sequence must be opened with writeSequenceBeginLazy")
+	}
+	// Two keeping closes (the objs struct element, the mat row) and five dropping
+	// ones (st, strs, blbs, the objs wrapper, the mat wrapper) -- one per
+	// sequence-typed FIELD.
+	if got := strings.Count(m, "writeSequenceEndKeep()"); got != 2 {
+		t.Errorf("expected 2 keeping closes (struct element + nested row), got %d", got)
+	}
+	if got := strings.Count(m, "os.writeSequenceEnd();"); got != 5 {
+		t.Errorf("expected 5 dropping closes (one per sequence-typed field), got %d", got)
+	}
+	// A wrapper array carries no whole-omission guard in generated code: the frame
+	// is opened lazily and the corelib drops it when no element was written.
+	if strings.Contains(m, "if (this.strs !=") || strings.Contains(m, "if (this.objs !=") {
+		t.Error("M.java: a wrapper array must not carry a whole-omission guard")
+	}
+}

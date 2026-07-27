@@ -299,10 +299,14 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 		f.line("        if (!Arrays.equals(%s, %s)) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, g.javaDefaultValue(fld), fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
-		// A sequence is always framed; its child fields are omitted per-field by
-		// the nested marshal (MESSAGE_SPEC S2). An all-default nested object thus
-		// becomes an empty wrapper sequence, not a dropped field.
-		f.line("        os.writeSequenceBegin(%d); (%s == null ? new %s() : %s).marshal(os); os.writeSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key), acc)
+		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
+		// field is no exception, so the frame is opened LAZILY -- the corelib holds
+		// the header back until a child field actually appears. The nested marshal
+		// omits every child that equals its default, so "no child was written" IS
+		// "the object equals its declared default", evaluated per field and
+		// recursively, with no byte image ever compared. An all-default nested
+		// object is therefore dropped, not emitted as an empty wrapper.
+		f.line("        os.writeSequenceBeginLazy(%d); (%s == null ? new %s() : %s).marshal(os); os.writeSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key), acc)
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
@@ -317,7 +321,8 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized at construction), else when empty. A composite/dynamic-element
-	// array is a wrapper sequence and is always framed (never whole-omitted).
+	// array is a wrapper sequence: opened lazily, closed with the dropping end at
+	// field level, so an all-default one is omitted (MESSAGE_SPEC §2).
 	if primitiveArrayElem(fld.Elem) {
 		// Primitive array (long[]/float[]/double[]): omit when equal to its default
 		// (Arrays.equals), else when empty; write straight to the OStream primitive
@@ -341,6 +346,14 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 		f.line("        }")
 		return
 	}
+	// The field-level wrapper frame is dropped when no element is written, and
+	// absence then reconstructs the field's default. That is correct because a
+	// wrapper array's declared `default` is not materialized today (the generated
+	// field initializer is the empty collection), so absent and explicitly-empty
+	// denote the same value. If that gap is ever closed, this call needs a guard --
+	// `if (value != default) { ... os.writeSequenceEndKeep(); }` -- so that a value
+	// differing from a non-empty default still reaches the wire as the empty
+	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
 	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, fld.HasCount)
 }
 
@@ -408,6 +421,18 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 	if prim {
 		longs, floats, doubles = val, val, val
 	}
+	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether a
+	// contentless one survives, and it is picked here statically from the position
+	// in the schema, never from the value. A wrapper array at depth 0 is a
+	// sequence-typed FIELD, so it closes with the dropping end -- an all-default
+	// array is omitted and absence reconstructs it. A nested row (depth > 0) is an
+	// array ELEMENT, and element presence is what carries a dynamic array's length
+	// (S5.1), so it closes with the keeping end: dropping an all-default row would
+	// change the decoded length, not merely the bytes.
+	seqEnd := "writeSequenceEnd"
+	if depth > 0 {
+		seqEnd = "writeSequenceEndKeep"
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, trimExpr(longs, elem, fixed))
@@ -424,25 +449,29 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// A string element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		ev := fmt.Sprintf("_e%d", depth)
-		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { String %s = %s.get(%s); if (%s != null && !%s.isEmpty()) os.writeString(%s, %s); }", ind, iv, iv, val, iv, ev, val, iv, ev, ev, iv, ev)
-		f.line("%sos.writeSequenceEnd();", ind)
+		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindBlob:
 		// A blob element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		ev := fmt.Sprintf("_e%d", depth)
-		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s != null && %s.length != 0) os.writeBlob(%s, %s); }", ind, iv, iv, val, iv, ev, val, iv, ev, ev, iv, ev)
-		f.line("%sos.writeSequenceEnd();", ind)
+		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { os.writeSequenceBegin(%s); (%s.get(%s) == null ? new %s() : %s.get(%s)).marshal(os); os.writeSequenceEnd(); }", ind, iv, iv, val, iv, iv, val, iv, g.typeName(ref.Key), val, iv)
-		f.line("%sos.writeSequenceEnd();", ind)
+		// The per-element frame closes with the KEEPING end: a struct/union element
+		// is present even when all-default, and its id counts toward the array's
+		// length (highest present id + 1, MESSAGE_SPEC S5.1). Dropping it would
+		// leave an id gap and shorten the decoded array.
+		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { os.writeSequenceBeginLazy(%s); (%s.get(%s) == null ? new %s() : %s.get(%s)).marshal(os); os.writeSequenceEndKeep(); }", ind, iv, iv, val, iv, iv, val, iv, g.typeName(ref.Key), val, iv)
+		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindArray:
-		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) {", ind, iv, iv, val, iv)
 		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s.get(%s)", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false, false)
 		f.line("%s}", ind)
-		f.line("%sos.writeSequenceEnd();", ind)
+		f.line("%sos.%s();", ind, seqEnd)
 	}
 }

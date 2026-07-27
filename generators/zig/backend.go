@@ -272,7 +272,8 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 	}
 
 	// marshal: sparse-canonical (MESSAGE_SPEC S2) -- a leaf equal to its
-	// default is omitted; a sequence is always framed.
+	// default is omitted; a sequence is opened lazily and, at field level, closed
+	// with the dropping end (MESSAGE_SPEC §2).
 	f.line("    /// Write this value's fields to `os` (sparse-canonical encoding).")
 	f.line("    pub fn marshal(self: *const %s, os: *sofab.OStream) sofab.Error!void {", name)
 	needsSelf := len(fields) > 0
@@ -346,10 +347,14 @@ func (g *gen) emitMarshal(f *zfile, fld *ir.Field) {
 	case ir.KindBlob:
 		write = fmt.Sprintf("try os.writeBlob(%d, %s);", fld.ID, acc)
 	case ir.KindStruct, ir.KindUnion:
-		// A sequence is always framed; its child fields are omitted per-field
-		// by the nested marshal (MESSAGE_SPEC S2). An all-default nested object
-		// thus becomes an empty wrapper sequence, not a dropped field.
-		f.line("        try os.writeSequenceBegin(%d);", fld.ID)
+		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
+		// FIELD is no exception, so the frame is opened LAZILY -- the corelib
+		// holds the header back until a child field actually appears. The nested
+		// marshal omits every child that equals its default, so "no child was
+		// written" IS "the object equals its declared default", evaluated per
+		// field and recursively. writeSequenceEnd therefore drops an all-default
+		// nested object entirely instead of emitting an empty wrapper.
+		f.line("        try os.writeSequenceBeginLazy(%d);", fld.ID)
 		f.line("        try %s.marshal(os);", acc)
 		f.line("        try os.writeSequenceEnd();")
 		return
@@ -366,7 +371,8 @@ func (g *gen) emitMarshal(f *zfile, fld *ir.Field) {
 func (g *gen) emitMarshalArray(f *zfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in the field initializer), else when empty. A composite/
-	// dynamic-element array is a wrapper sequence and is always framed.
+	// dynamic-element array is a wrapper sequence, opened lazily: writing no
+	// element drops the frame, so an empty array is omitted (MESSAGE_SPEC S2).
 	if isNativeArrayElem(fld.Elem) {
 		elem := g.zigArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems)
 		val := acc
@@ -389,6 +395,14 @@ func (g *gen) emitMarshalArray(f *zfile, fld *ir.Field, acc string) {
 		f.line("        }")
 		return
 	}
+	// The field-level wrapper frame is dropped when no element is written, and
+	// absence then reconstructs the field's default. That is correct because a
+	// wrapper array's declared `default` is not materialized today (the generated
+	// field initializer is the empty collection), so absent and explicitly-empty
+	// denote the same value. If that gap is ever closed, this call needs a guard
+	// -- `if (value != default) { ... writeSequenceEndKeep(); }` -- so that a
+	// value differing from a non-empty default still reaches the wire as the
+	// empty wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
 	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, false, 0)
 }
 
@@ -417,6 +431,18 @@ func trimExpr(val string, fixed bool) string {
 func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
+	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether
+	// a contentless one survives, and it is a static property of the position in
+	// the schema, never of the value. A wrapper array is a sequence-typed FIELD, so
+	// at depth 0 it closes with the dropping writeSequenceEnd -- an empty array is
+	// omitted and absence reconstructs it. A nested row (depth > 0) is an array
+	// ELEMENT, and element presence is what carries a dynamic array's length
+	// (S5.1), so it closes with writeSequenceEndKeep: dropping an all-default row
+	// would change the decoded length, not merely the bytes.
+	seqEnd := "writeSequenceEnd"
+	if depth > 0 {
+		seqEnd = "writeSequenceEndKeep"
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		// bitfield backing is an unsigned int, so it writes directly.
@@ -438,27 +464,29 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element
 		// default (empty), leaving an id gap the decoder restores.
-		f.line("%stry os.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%stry os.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, 0..) |%s, %s| {", ind, val, ev, iv)
 		f.line("%s    if (%s.len != 0) try os.writeString(@intCast(%s), %s);", ind, ev, iv, ev)
 		f.line("%s}", ind)
-		f.line("%stry os.writeSequenceEnd();", ind)
+		f.line("%stry os.%s();", ind, seqEnd)
 	case ir.KindBlob:
-		f.line("%stry os.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%stry os.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, 0..) |%s, %s| {", ind, val, ev, iv)
 		f.line("%s    if (%s.len != 0) try os.writeBlob(@intCast(%s), %s);", ind, ev, iv, ev)
 		f.line("%s}", ind)
-		f.line("%stry os.writeSequenceEnd();", ind)
+		f.line("%stry os.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("%stry os.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%stry os.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, 0..) |*%s, %s| {", ind, val, ev, iv)
-		f.line("%s    try os.writeSequenceBegin(@intCast(%s));", ind, iv)
+		// An ELEMENT is framed unconditionally: dropping an all-default one would
+		// leave an id gap and change the decoded length, not just the bytes (S5.1).
+		f.line("%s    try os.writeSequenceBeginLazy(@intCast(%s));", ind, iv)
 		f.line("%s    try %s.marshal(os);", ind, ev)
-		f.line("%s    try os.writeSequenceEnd();", ind)
+		f.line("%s    try os.writeSequenceEndKeep();", ind)
 		f.line("%s}", ind)
-		f.line("%stry os.writeSequenceEnd();", ind)
+		f.line("%stry os.%s();", ind, seqEnd)
 	case ir.KindArray:
-		f.line("%stry os.writeSequenceBegin(%s);", ind, idExpr)
+		f.line("%stry os.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, 0..) |%s, %s| {", ind, val, ev, iv)
 		// A nested row is a wrapper-sequence element, not a `count: N` field:
 		// the trailing-default-run rule is scoped to fields (MESSAGE_SPEC S3),
@@ -466,7 +494,7 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// only a direct field lowers to a fixed [N]T.)
 		g.marshalArray(f, ind+"    ", fmt.Sprintf("@intCast(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
 		f.line("%s}", ind)
-		f.line("%stry os.writeSequenceEnd();", ind)
+		f.line("%stry os.%s();", ind, seqEnd)
 	}
 }
 

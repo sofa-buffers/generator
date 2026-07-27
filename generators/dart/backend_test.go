@@ -112,6 +112,64 @@ func TestSparseOmitGuards(t *testing.T) {
 	}
 }
 
+// TestLazySequenceFraming locks MESSAGE_SPEC S2 framing: every sequence is opened
+// with beginSequenceLazy, and the CLOSER is picked statically from the position in
+// the schema. A struct/union FIELD and an array wrapper FIELD close with the
+// dropping endSequence, so an all-default one is omitted instead of emitted as an
+// empty frame; a wrapper-array ELEMENT closes with endSequenceKeep, because element
+// presence is what carries a dynamic array's length (S5.1). example.yaml has a
+// struct field (id 20), a union field (id 21), a struct-array (id 23) and a
+// union-array (id 25).
+func TestLazySequenceFraming(t *testing.T) {
+	out := genFor(t, exampleDef, map[string]any{})
+	for _, want := range []string{
+		// FIELD: struct / union, opened lazily, dropped when no child was written.
+		"e.beginSequenceLazy(20); somestruct.marshal(e); e.endSequence();",
+		"e.beginSequenceLazy(21); someunion.marshal(e); e.endSequence();",
+		// FIELD: the struct-array wrapper (id 23) -- also the dropping closer.
+		"e.beginSequenceLazy(23);",
+		// ELEMENT: a struct/union element keeps its frame even when all-default.
+		"e.beginSequenceLazy(_i0); somestructarray[_i0].marshal(e); e.endSequenceKeep();",
+		"e.beginSequenceLazy(_i0); someunionarray[_i0].marshal(e); e.endSequenceKeep();",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("sequence framing missing %q", want)
+		}
+	}
+	// The eager open is gone from corelib-dart, so emitting it would not compile.
+	if strings.Contains(out, "e.beginSequence(") {
+		t.Error("eager e.beginSequence( emitted; every sequence must open with beginSequenceLazy")
+	}
+	// The wrapper FIELD must close with the dropping end. Count both closers: the
+	// keeping one appears exactly once per sequence-form element loop body.
+	if got, want := strings.Count(out, "e.endSequenceKeep();"), strings.Count(out, ".marshal(e); e.endSequenceKeep();"); got != want {
+		t.Errorf("endSequenceKeep used outside an array element body: %d keeping closers, %d element bodies", got, want)
+	}
+}
+
+// TestNestedRowKeepsItsFrame: a nested array row is an ELEMENT (depth > 0), so its
+// wrapper closes with endSequenceKeep even though the identically-shaped field-level
+// wrapper (depth 0) closes with the dropping endSequence.
+func TestNestedRowKeepsItsFrame(t *testing.T) {
+	def := filepath.Join(t.TempDir(), "matrix.yaml")
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      rows: { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } }\n"
+	if err := os.WriteFile(def, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := genFor(t, def, map[string]any{})
+	if !strings.Contains(out, "e.beginSequenceLazy(0);") {
+		t.Error("array FIELD wrapper not opened lazily")
+	}
+	// depth 0 (the field) drops, depth 1 (the row element) keeps.
+	if !strings.Contains(out, "e.endSequenceKeep();") {
+		t.Error("nested row (an array ELEMENT) must close with endSequenceKeep")
+	}
+	if strings.Count(out, "e.endSequence();") != 1 {
+		t.Errorf("expected exactly one dropping closer (the field wrapper), got %d", strings.Count(out, "e.endSequence();"))
+	}
+}
+
 // TestFp32SignalingNaNPreserved asserts the codegen shape that keeps an fp32
 // signaling/payload NaN bit-for-bit through decode -> re-encode (issue #226): a
 // Dart `double` quiets the NaN, so the generated code must route through

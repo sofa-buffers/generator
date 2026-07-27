@@ -19,7 +19,8 @@ import (
 //   - "the encoder emits a field iff its value != its default"
 //   - enum/boolean/bitfield arrays reuse the signed/unsigned array wire types
 //   - struct/union/nested arrays lower to wrapper sequences
-//   - "empty != absent": an explicit [] overrides a non-empty default.
+//   - a sequence-typed FIELD whose value is all-default is omitted, while an
+//     all-default array ELEMENT keeps its frame (MESSAGE_SPEC S2).
 
 func requireGoCorelib(t *testing.T) string {
 	t.Helper()
@@ -219,13 +220,15 @@ func TestNestedArrayWireRoundTrip(t *testing.T) {
 	}
 }
 
-// TestEmptyArrayIsEmptySequence pins the spec rule that "an empty wrapper (a
-// sequence with no children) is the explicit empty array": an explicit [] of a
-// sequence-typed element (string) is written as a real, non-empty wire object (an
-// empty wrapper sequence) -- shorter than a populated one and NOT dropped -- and
-// round-trips as an empty array. (A string array lowers to a sequence; an empty
-// numeric array has no legal native encoding, so string is the right probe.)
-func TestEmptyArrayWireIsEmptySequence(t *testing.T) {
+// TestEmptyArrayFieldWireIsOmitted pins the MESSAGE_SPEC §2 rule for an array
+// FIELD: the wrapper sequence is opened lazily and dropped when no element is
+// written, so an empty (all-element-default) array is OMITTED rather than framed
+// as an empty wrapper. That is the canonical encoding precisely because the
+// field's declared default is the empty collection, so absence reconstructs the
+// same value -- the array still round-trips as length 0. (A string array lowers
+// to a sequence; an empty numeric array has no legal native encoding, so string
+// is the right probe.)
+func TestEmptyArrayFieldWireIsOmitted(t *testing.T) {
 	corelib := requireGoCorelib(t)
 	def := "version: 1\nmessages:\n  vec:\n    payload:\n" +
 		"      arr: {id: 0, type: array, items: {type: string, count: 3, maxlen: 8}}\n"
@@ -233,27 +236,60 @@ func TestEmptyArrayWireIsEmptySequence(t *testing.T) {
 
 	empty := encHex(t, bin, "vec", `{"arr":[]}`)
 	one := encHex(t, bin, "vec", `{"arr":["x"]}`)
-	if empty == "" {
-		t.Error("an explicit empty array must be written as an empty wrapper sequence, got empty payload")
+	if empty != "" {
+		t.Errorf("an all-default array field must be omitted, got %s", empty)
 	}
-	if len(empty) >= len(one) {
-		t.Errorf("an empty array must be shorter on the wire than a populated one: empty=%s one=%s", empty, one)
+	if one == "" {
+		t.Error("a populated array must be on the wire, got empty payload")
 	}
-	// Round-trips: empty decodes to a zero-length array (Go renders it as null),
-	// the populated one to length 1.
+	// Round-trips: the omitted field decodes to a zero-length array (Go renders it
+	// as null), the populated one to length 1.
 	if n := arrLen(t, bin, "vec", empty); n != 0 {
 		t.Errorf("empty array must decode to length 0, got %d", n)
 	}
 	if n := arrLen(t, bin, "vec", one); n != 1 {
 		t.Errorf("one-element array must decode to length 1, got %d", n)
 	}
+	// The pre-uniform encoding (an explicit empty wrapper, 06 07) stays readable
+	// and denotes the very same value -- a decoder normalizes it away.
+	if n := arrLen(t, bin, "vec", "0607"); n != 0 {
+		t.Errorf("a legacy empty wrapper must still decode to length 0, got %d", n)
+	}
+}
+
+// TestWireAllDefaultStructElementsKeepFrames is the other half of MESSAGE_SPEC §2:
+// the field-level omission must NOT reach array ELEMENTS. Element presence is
+// what carries a dynamic array's length (highest present id + 1, §5.1), so two
+// all-default struct elements must still reach the wire as begin+end frames and
+// decode back at length 2 -- dropping them would change the VALUE, not just the
+// bytes. This is what the keeping closer (WriteSequenceEndKeep) buys.
+func TestWireAllDefaultStructElementsKeepFrames(t *testing.T) {
+	corelib := requireGoCorelib(t)
+	def := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      arr: {id: 0, type: array, items: {type: struct, fields: {x: {id: 0, type: i32}, y: {id: 1, type: i32}}}}\n"
+	bin := buildGoHarnessCfg(t, corelib, def, nil)
+
+	// Wrapper seq_begin id 0 (06), element frames 06 07 (id 0) and 0e 07 (id 1) --
+	// each begin+end with no child -- then the wrapper's end 07.
+	allDefault := `{"arr":[{"x":0,"y":0},{"x":0,"y":0}]}`
+	if got, want := encHex(t, bin, "vec", allDefault), "0606070e0707"; got != want {
+		t.Errorf("all-default struct elements must keep their frames: got %s, want %s", got, want)
+	}
+	if n := arrLen(t, bin, "vec", encHex(t, bin, "vec", allDefault)); n != 2 {
+		t.Errorf("two all-default struct elements must decode at length 2, got %d", n)
+	}
+	// The wrapper itself is still a FIELD: with no element at all it is omitted.
+	if got := encHex(t, bin, "vec", `{"arr":[]}`); got != "" {
+		t.Errorf("an empty struct array field must be omitted, got %s", got)
+	}
 }
 
 // TestWrapperArrayStringElementSparse pins MESSAGE_SPEC §2 element-level omission:
 // inside a wrapper-sequence array a string element equal to its element default
 // (empty) is dropped, leaving an id gap the decoder restores; trailing default
-// elements collapse. The hex here is the cross-language canonical form (verified
-// byte-identical against C, C++, Rust, Python, TypeScript, Java, C#).
+// elements collapse, and an array whose elements all collapse leaves the wrapper
+// FIELD contentless, which §2 omits. The hex here is the cross-language canonical
+// form (verified byte-identical against C, C++, Rust, Python, TypeScript, Java, C#).
 func TestWrapperArrayStringElementSparse(t *testing.T) {
 	corelib := requireGoCorelib(t)
 	def := "version: 1\nmessages:\n  vec:\n    payload:\n" +
@@ -267,8 +303,9 @@ func TestWrapperArrayStringElementSparse(t *testing.T) {
 		{`{"arr":["a","","c"]}`, "06020a61120a6307", `{"arr":["a","","c"]}`},
 		// trailing default collapses: only str(0)="a" survives
 		{`{"arr":["a",""]}`, "06020a6107", `{"arr":["a"]}`},
-		// all-default array is an empty wrapper sequence (decodes to nil slice)
-		{`{"arr":["",""]}`, "0607", `{"arr":null}`},
+		// every element dropped leaves the wrapper contentless, and a wrapper is a
+		// FIELD: it is omitted entirely (MESSAGE_SPEC S2), decoding to a nil slice
+		{`{"arr":["",""]}`, "", `{"arr":null}`},
 		// leading gap kept (str(1)="x"), trailing default collapses
 		{`{"arr":["","x",""]}`, "060a0a7807", `{"arr":["","x"]}`},
 	}

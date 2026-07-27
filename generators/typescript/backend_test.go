@@ -263,7 +263,18 @@ func TestTSStructural(t *testing.T) {
 		"MyfirstmessageSomestruct.decodeInto(c, o.somestruct); break;",
 		`while (c.readHeader()) { if ((c.wire as WireType) !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); continue; } if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); const _s = c.readString(); if (_utf8Len(_s) > 16) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 16"); arr[_id] = _s; }`, // wrapper-element §7.3 wire guard (#189) + id-aware string-list, over-index + over-maxlen rejected (S2/S5.1/S7/S7.1, #142)
 		"o.someu64 = c.readUnsigned() as bigint; break;", // u64 -> bigint, number-first
-		"os.writeSequenceBegin(",                         // nested framing (marshal unchanged)
+		// MESSAGE_SPEC §2: a struct/union FIELD opens lazily and closes with the
+		// dropping end, so an all-default nested object is omitted, not framed empty.
+		"    os.writeSequenceBeginLazy(20);\n    this.somestruct.marshal(os);\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(21);\n    this.someunion.marshal(os);\n    os.writeSequenceEnd();\n",
+		// A wrapper-array FIELD is a sequence too: lazy + dropping end at depth 0,
+		// while each ELEMENT keeps its frame (element presence carries the array's
+		// length, §5.1).
+		"    os.writeSequenceBeginLazy(23);\n    this.somestructarray.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(25);\n    this.someunionarray.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
+		// A leaf string/blob wrapper array is a FIELD as well.
+		"    os.writeSequenceBeginLazy(18);\n",
+		"    os.writeSequenceBeginLazy(19);\n",
 		"export enum MyfirstmessageSomeenum {",
 	} {
 		if !strings.Contains(mod, want) {
@@ -275,6 +286,9 @@ func TestTSStructural(t *testing.T) {
 	for _, gone := range []string{
 		"_visitor()", "ChunkAcc", "type Visitor", "sequenceBegin(",
 		"stringListVisitor", "unsigned(id: number, value: bigint)",
+		// The eager begin no longer exists in corelib-ts: every sequence is opened
+		// with writeSequenceBeginLazy (MESSAGE_SPEC §2).
+		"os.writeSequenceBegin(",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("message.ts should no longer emit %q (push/visitor decode removed)", gone)
@@ -284,6 +298,55 @@ func TestTSStructural(t *testing.T) {
 	// per-encode closure) rather than .forEach.
 	if !strings.Contains(mod, "for (let _i0 = 0; _i0 < this.somestringarray.length; _i0++) {") {
 		t.Error("message.ts missing indexed-for string-list marshal (fast-encode)")
+	}
+}
+
+// TestTSLazySequenceFraming pins the MESSAGE_SPEC §2 closer table. Every sequence
+// opens with writeSequenceBeginLazy; the CLOSER is chosen statically from the
+// position in the schema, never from the value:
+//
+//	struct/union FIELD        -> writeSequenceEnd()      may vanish when all-default
+//	array FIELD (the wrapper)  -> writeSequenceEnd()      may vanish when all-default
+//	wrapper-array ELEMENT      -> writeSequenceEndKeep()  presence carries the length
+//
+// example.yaml has no array of composite rows, so the depth > 0 nested-row case
+// (an ELEMENT that is itself a wrapper sequence) is only covered here.
+func TestTSLazySequenceFraming(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s:    { id: 0, type: struct, fields: { x: { id: 0, type: i32 } } }\n" +
+		"      ss:   { id: 1, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }\n" +
+		"      strs: { id: 2, type: array, items: { type: string } }\n" +
+		"      rows: { id: 3, type: array, items: { type: array, items: { type: string } } }\n" +
+		"      blobs: { id: 4, type: array, items: { type: blob } }\n"
+	mod := genTSWith(t, src, map[string]any{})
+
+	// FIELDs: struct field, leaf-string wrapper array, blob wrapper array, and the
+	// composite/nested-array wrappers — all closed with the dropping end.
+	for _, want := range []string{
+		"    os.writeSequenceBeginLazy(0);\n    this.s.marshal(os);\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(2);\n    for (let _i0 = 0; _i0 < this.strs.length; _i0++) {",
+		"    os.writeSequenceBeginLazy(4);\n    for (let _i0 = 0; _i0 < this.blobs.length; _i0++) {",
+		"    os.writeSequenceBeginLazy(1);\n    this.ss.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
+		// The nested row is an ELEMENT of `rows`, so its own wrapper keeps its
+		// frame; the outer `rows` wrapper is a FIELD and may vanish.
+		"    os.writeSequenceBeginLazy(3);\n    this.rows.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      for (let _i1 = 0; _i1 < _e0.length; _i1++) {\n        if (_e0[_i1]! !== \"\") {\n          os.writeString(_i1, _e0[_i1]!);\n        }\n      }\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing lazy-framing shape %q\n%s", want, mod)
+		}
+	}
+	// The eager begin is gone from corelib-ts entirely: emitting it would not
+	// compile.
+	if strings.Contains(mod, "os.writeSequenceBegin(") {
+		t.Error("message.ts must not emit the removed eager os.writeSequenceBegin()")
+	}
+	// Exactly one keeping close per ELEMENT site (two struct/row element frames,
+	// one per array), and no keeping close on any FIELD wrapper.
+	if got, want := strings.Count(mod, "os.writeSequenceEndKeep();"), 2; got != want {
+		t.Errorf("writeSequenceEndKeep() count = %d, want %d (one per wrapper-array element site)", got, want)
+	}
+	if got, want := strings.Count(mod, "os.writeSequenceBeginLazy("), 7; got != want {
+		t.Errorf("writeSequenceBeginLazy() count = %d, want %d (5 fields + 2 element frames)", got, want)
 	}
 }
 

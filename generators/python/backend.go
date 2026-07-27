@@ -591,10 +591,13 @@ func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 		f.line("            e.write_bytes(%d, bytes(%s))", fld.ID, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
-		// A sequence is always framed; its child fields are omitted per-field by
-		// the nested marshal (MESSAGE_SPEC S2). An all-default nested object thus
-		// becomes an empty wrapper sequence, not a dropped field.
-		f.line("        e.write_sequence_begin(%d)", fld.ID)
+		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
+		// exception, so the frame is opened LAZILY -- the corelib holds the header
+		// back until a child field appears. The nested marshal omits each child that
+		// equals its default, so "no child was written" IS "the object equals its
+		// declared default", evaluated per field and recursively. An all-default
+		// nested object is therefore dropped, not emitted as an empty wrapper.
+		f.line("        e.write_sequence_begin_lazy(%d)", fld.ID)
 		f.line("        %s._marshal(e)", acc)
 		f.line("        e.write_sequence_end()")
 		return
@@ -612,7 +615,8 @@ func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in the dataclass), else when empty. A composite/dynamic-element
-	// array is a wrapper sequence and is always framed (never whole-omitted).
+	// array is a wrapper sequence, opened lazily and closed by the dropping end
+	// (see marshalArray) -- an empty one vanishes instead of being framed empty.
 	if isNativeArrayElem(fld.Elem) {
 		if lit, ok := g.pyNativeArrayDefault(fld); ok {
 			f.line("        if %s != %s:", acc, lit)
@@ -622,6 +626,15 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
 		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
 		return
 	}
+	// The field-level wrapper frame is dropped when no element is written, and
+	// absence then reconstructs the field's default. That is correct because a
+	// wrapper array's declared `default` is not materialized today (the dataclass
+	// default is the empty list -- pyNativeArrayDefault reports no literal for a
+	// composite array), so absent and explicitly-empty denote the same value. If
+	// that gap is ever closed, this call needs a guard --
+	// `if value != default: ... e.write_sequence_end_keep()` -- so that a value
+	// differing from a non-empty default still reaches the wire as the empty
+	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
 	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
 }
 
@@ -651,6 +664,17 @@ func trimExpr(val string, elem ir.Kind, fixed bool) string {
 func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
+	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether a
+	// contentless one survives, and it is picked statically from the position in the
+	// schema, never from the value. A wrapper array at depth 0 is a sequence-typed
+	// FIELD, so it closes with the dropping end -- an all-default (here: empty) array
+	// is omitted and absence reconstructs it. A nested row (depth > 0) is an array
+	// ELEMENT, and element presence is what carries a dynamic array's length (S5.1),
+	// so it closes with the keeping end.
+	seqEnd := "write_sequence_end"
+	if depth > 0 {
+		seqEnd = "write_sequence_end_keep"
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
 		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, trimExpr(val, elem, fixed))
@@ -670,34 +694,37 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
-		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
+		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
 		f.line(`%s    if %s != "":`, ind, ev)
 		f.line("%s        e.write_string(%s, %s)", ind, iv, ev)
-		f.line("%se.write_sequence_end()", ind)
+		f.line("%se.%s()", ind, seqEnd)
 	case ir.KindBlob:
 		// A blob element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
-		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
+		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
 		f.line("%s    if len(%s) != 0:", ind, ev)
 		f.line("%s        e.write_bytes(%s, bytes(%s))", ind, iv, ev)
-		f.line("%se.write_sequence_end()", ind)
+		f.line("%se.%s()", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
+		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
-		f.line("%s    e.write_sequence_begin(%s)", ind, iv)
+		// An ELEMENT is framed unconditionally: dropping an all-default one would
+		// leave an id gap and change the decoded length, not just the bytes (S5.1).
+		f.line("%s    e.write_sequence_begin_lazy(%s)", ind, iv)
 		f.line("%s    %s._marshal(e)", ind, ev)
-		f.line("%s    e.write_sequence_end()", ind)
-		f.line("%se.write_sequence_end()", ind)
+		f.line("%s    e.write_sequence_end_keep()", ind)
+		f.line("%se.%s()", ind, seqEnd)
 	case ir.KindArray:
-		f.line("%se.write_sequence_begin(%s)", ind, idExpr)
+		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
 		// A nested array-of-array row is an ir.ArrayElem, not a field: the
 		// fixed-length rule is scoped to top-level array FIELDS, so a row never
-		// trims (MESSAGE_SPEC §3).
+		// trims (MESSAGE_SPEC §3). The row itself is an ELEMENT, so the recursion
+		// (depth+1) closes it with the keeping end.
 		g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
-		f.line("%se.write_sequence_end()", ind)
+		f.line("%se.%s()", ind, seqEnd)
 	}
 }
 

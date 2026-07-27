@@ -69,13 +69,80 @@ func TestPythonStructural(t *testing.T) {
 		"def _unmarshal(self, d: Decoder)",
 		"class MyfirstmessageSomeenum(IntEnum):",
 		"def to_jsonable(self)",
-		"e.write_sequence_begin(",
+		"e.write_sequence_begin_lazy(", // every sequence opens lazily (MESSAGE_SPEC S2)
 		"if fld.count > 4:", // over-count scalar array rejected at the count header (generator#100/#216)
 		`raise SofaDecodeError("someuintarray: array count above schema capacity 4")`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q", want)
 		}
+	}
+}
+
+// TestPythonLazySequenceFraming: MESSAGE_SPEC §2 omits a sequence-typed FIELD
+// whose value equals its declared default instead of framing it empty, so every
+// sequence opens with write_sequence_begin_lazy and the CLOSER — chosen
+// statically from the position in the schema, never from the value — decides
+// whether a contentless one survives:
+//
+//	struct/union FIELD          -> write_sequence_end       (may vanish)
+//	array wrapper FIELD         -> write_sequence_end       (may vanish)
+//	wrapper-array ELEMENT       -> write_sequence_end_keep  (always framed)
+//
+// An ELEMENT must keep its frame because element presence is what carries a
+// dynamic array's length (§5.1): dropping an all-default element would change the
+// decoded LENGTH, not merely the bytes.
+func TestPythonLazySequenceFraming(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      st:    { id: 0, type: struct, fields: { x: { id: 0, type: i32 } } }
+      un:    { id: 1, type: union, oneof: { a: { id: 0, type: i32 } } }
+      strs:  { id: 2, type: array, items: { type: string } }
+      blobs: { id: 3, type: array, items: { type: blob } }
+      objs:  { id: 4, type: array, items: { type: struct, fields: { y: { id: 0, type: i32 } } } }
+      deep:  { id: 5, type: array, items: { type: array, items: { type: struct, fields: { z: { id: 0, type: i32 } } } } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		// struct FIELD and union FIELD: lazy open, dropping close.
+		"        e.write_sequence_begin_lazy(0)\n        self.st._marshal(e)\n        e.write_sequence_end()\n",
+		"        e.write_sequence_begin_lazy(1)\n        self.un._marshal(e)\n        e.write_sequence_end()\n",
+		// string/blob wrapper FIELD: the leaf elements are omitted when default,
+		// and the wrapper itself closes with the dropping end at field level.
+		"        e.write_sequence_begin_lazy(2)\n        for _i0, _e0 in enumerate(self.strs):\n" +
+			"            if _e0 != \"\":\n                e.write_string(_i0, _e0)\n        e.write_sequence_end()\n",
+		"        e.write_sequence_begin_lazy(3)\n        for _i0, _e0 in enumerate(self.blobs):\n" +
+			"            if len(_e0) != 0:\n                e.write_bytes(_i0, bytes(_e0))\n        e.write_sequence_end()\n",
+		// struct ELEMENT inside a wrapper array: keeping close; the wrapper FIELD
+		// around it still closes with the dropping end.
+		"        e.write_sequence_begin_lazy(4)\n        for _i0, _e0 in enumerate(self.objs):\n" +
+			"            e.write_sequence_begin_lazy(_i0)\n            _e0._marshal(e)\n" +
+			"            e.write_sequence_end_keep()\n        e.write_sequence_end()\n",
+		// array-of-array: the nested ROW is an ELEMENT (keeping close), as is each
+		// struct element inside it; only the depth-0 wrapper may vanish.
+		"        e.write_sequence_begin_lazy(5)\n        for _i0, _e0 in enumerate(self.deep):\n" +
+			"            e.write_sequence_begin_lazy(_i0)\n            for _i1, _e1 in enumerate(_e0):\n" +
+			"                e.write_sequence_begin_lazy(_i1)\n                _e1._marshal(e)\n" +
+			"                e.write_sequence_end_keep()\n            e.write_sequence_end_keep()\n" +
+			"        e.write_sequence_end()\n",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing lazy framing:\n%s\ngot:\n%s", want, mod)
+		}
+	}
+	// The eager begin is gone from corelib-py: emitting it would be an
+	// AttributeError at encode time, not a size regression.
+	if strings.Contains(mod, "e.write_sequence_begin(") {
+		t.Error("generated code must not call the removed eager write_sequence_begin")
+	}
+	// Exactly three ELEMENT frames in this schema (objs element, deep row, deep
+	// element) — a keeping close anywhere else would pin a wrapper FIELD that §2
+	// says must be droppable.
+	if n := strings.Count(mod, "e.write_sequence_end_keep()"); n != 3 {
+		t.Errorf("expected 3 write_sequence_end_keep() calls (array ELEMENTS only), got %d", n)
 	}
 }
 

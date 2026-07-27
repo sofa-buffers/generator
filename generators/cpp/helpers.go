@@ -387,7 +387,8 @@ func (g *gen) cppDefault(f *ir.Field) string {
 		// A native scalar array is a leaf: materialize its schema default at
 		// construction (zero-filled when none) so an omitted default array
 		// reconstructs correctly and serialize can compare against it. A
-		// composite/dynamic-element array is a wrapper sequence (always framed) and
+		// composite/dynamic-element array is a wrapper sequence whose declared default
+		// is not materialized (§2) and
 		// is left empty.
 		if isNativeArrayElem(f.Elem) {
 			return g.cppNativeArrayBraces(f)

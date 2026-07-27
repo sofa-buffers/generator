@@ -489,8 +489,8 @@ messages:
 		"public uint[] dyn = new uint[",
 		"_arrdef_dyn ",
 		"public uint[] dynd = new uint[]{1, 2, 0",
-		// A wrapper-sequence array is always framed: never whole-omitted, so it
-		// gets no compare default.
+		// A wrapper-sequence array carries no compare default: its whole-field
+		// omission is the corelib's lazy frame (MESSAGE_SPEC §2), not a compare here.
 		"_arrdef_strs",
 	} {
 		if strings.Contains(m, bad) {
@@ -507,5 +507,77 @@ messages:
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing untouched dynamic form %q", want)
 		}
+	}
+}
+
+// TestCsSequenceFramingClosers covers MESSAGE_SPEC §2 (documentation#29): every
+// sequence is opened with the lazy begin, and the CLOSER — chosen statically from
+// the position in the schema, never from the value — decides whether a contentless
+// one survives. A sequence-typed FIELD (struct/union field, or the wrapper of a
+// composite array) closes with the dropping `WriteSequenceEnd`, so an all-default
+// nested object vanishes instead of costing an empty frame. A wrapper-array ELEMENT
+// (a struct/union element, or a nested row of an array-of-array) closes with
+// `WriteSequenceEndKeep`, because element presence is what carries a dynamic
+// array's length (§5.1) — dropping one would change the decoded length, not just
+// the bytes.
+func TestCsSequenceFramingClosers(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      nested:
+        id: 0
+        type: struct
+        fields:
+          a: { id: 0, type: u32 }
+      structs:
+        id: 1
+        type: array
+        items:
+          type: struct
+          fields:
+            b: { id: 0, type: u32 }
+      names: { id: 2, type: array, items: { type: string, maxlen: 8 } }
+      grid:
+        id: 3
+        type: array
+        items:
+          type: array
+          items: { type: string, maxlen: 8 }
+`
+	m := buildModule(t, []byte(src), "m.yaml", map[string]any{})
+	for _, want := range []string{
+		// FIELD: a struct field may vanish whole when every child is at its default.
+		"os.WriteSequenceBeginLazy(0); (this.nested ?? new MNested()).Marshal(os); os.WriteSequenceEnd();",
+		// FIELD: the wrapper of a struct-element array (depth 0).
+		"os.WriteSequenceBeginLazy(1);",
+		// ELEMENT: the per-element struct frame is unconditional.
+		"os.WriteSequenceBeginLazy(_i0); (this.structs[_i0] ?? new MStructsElem()).Marshal(os); os.WriteSequenceEndKeep();",
+		// FIELD: the wrapper of a string array (depth 0) — leaf elements are omitted
+		// individually, and an all-default array drops the wrapper too.
+		"os.WriteSequenceBeginLazy(2);",
+		// FIELD: the wrapper of an array-of-array (depth 0) ...
+		"os.WriteSequenceBeginLazy(3);",
+		// ... whose rows are ELEMENTS: an all-default row keeps its frame (§5.1).
+		"for (int _i0 = 0; _i0 < this.grid.Count; _i0++) {\n            os.WriteSequenceBeginLazy(_i0);\n" +
+			"            for (int _i1 = 0; _i1 < this.grid[_i0].Count; _i1++) { if ((this.grid[_i0][_i1] ?? \"\") != \"\") os.WriteString(_i1, this.grid[_i0][_i1] ?? \"\"); }\n" +
+			"            os.WriteSequenceEndKeep();\n        }\n        os.WriteSequenceEnd();",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q", want)
+		}
+	}
+	// The eager begin is gone from the corelib; emitting it would not compile.
+	if strings.Contains(m, "WriteSequenceBegin(") {
+		t.Error("eager WriteSequenceBegin must not be emitted; the corelib only has WriteSequenceBeginLazy")
+	}
+	// Exactly one keeping closer per ELEMENT site (struct element, nested row) and
+	// one dropping closer per FIELD site (4 wrappers + the struct field).
+	if got := strings.Count(m, "os.WriteSequenceEndKeep();"); got != 2 {
+		t.Errorf("WriteSequenceEndKeep count = %d, want 2 (struct element + nested row)", got)
+	}
+	if got := strings.Count(m, "os.WriteSequenceEnd();"); got != 4 {
+		t.Errorf("WriteSequenceEnd count = %d, want 4 (struct field + 3 array wrappers)", got)
 	}
 }

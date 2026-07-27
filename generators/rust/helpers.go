@@ -141,7 +141,8 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 		// A native scalar array is a leaf: materialize its schema default so an
 		// omitted default array reconstructs correctly. A fixed-count native array
 		// is a stack `[elem; N]`; a dynamic one stays a heap Vec. Composite arrays
-		// are wrapper sequences (always framed) and stay an empty container.
+		// are wrapper sequences whose declared default is not materialized, so they stay
+		// an empty container -- which is what makes their dropping closer correct (§2).
 		if elem, n, ok := g.fixedNativeArray(f); ok {
 			return g.rustFixedArrayDefault(f, elem, n)
 		}

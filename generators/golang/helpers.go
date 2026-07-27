@@ -269,8 +269,8 @@ func (g *gen) defaultLiteral(f *ir.Field) (string, bool) {
 	case ir.KindArray:
 		// A NATIVE scalar array is a leaf field: materialize its default so an
 		// omitted default array reconstructs correctly, and so marshal can compare
-		// against it. Composite arrays are wrapper sequences (always framed) and
-		// are left zero.
+		// against it. A composite array is a wrapper sequence whose declared default
+		// is not materialized, which is what makes its dropping closer correct (§2).
 		if isNativeArrayElem(f.Elem) {
 			return g.nativeArrayLiteral(f)
 		}
@@ -295,8 +295,9 @@ func (g *gen) bitfieldDefault(f *ir.Field) (string, bool) {
 
 // isNativeArrayElem reports whether an array element uses a native scalar array
 // wire type (vs. a wrapper sequence). Native arrays are a leaf field (omitted as
-// a whole when equal to their default); composite/dynamic-element arrays are
-// always framed.
+// a whole when equal to their default); a composite/dynamic-element array is
+// a wrapper sequence, opened lazily and closed with the dropping end at field
+// level (MESSAGE_SPEC §2).
 func isNativeArrayElem(elem ir.Kind) bool {
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,

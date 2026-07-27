@@ -70,3 +70,36 @@ announced count (no array-end callback needed), survives a chunk boundary (the
 counter lives in the visitor), leaves legitimate arrays untouched, and still
 decodes a real scalar arriving at that id after the array. The fp arrays are never
 armed — their elements go to the float callbacks and cannot reach a scalar arm.
+
+## §2: sequence framing — which closer `marshal` emits
+
+MESSAGE_SPEC **§2** omits a sequence-typed **field** whose value equals its
+declared default instead of framing it empty, while a wrapper-array **element**
+keeps its frame: element presence is what carries a dynamic array's length
+(*highest present id + 1*, §5.1), so dropping an all-default element would change
+the decoded length, not merely the bytes.
+
+The generated `marshal` opens **every** sequence with `os.writeSequenceBeginLazy(id)`,
+which holds the header back until a child field is actually written. Since the
+per-field sparse rule already omits every child equal to its default, "not one
+child was written" *is* "the object equals its declared default", evaluated per
+field and recursively — no byte image is ever compared. What differs is the
+**closer**, chosen statically from the position in the schema, never from the
+value:
+
+| Emission site | Closer | Why |
+|---------------|--------|-----|
+| `struct` / `union` field | `os.writeSequenceEnd()` | absence reconstructs the same value |
+| array field (the wrapper) | `os.writeSequenceEnd()` | its default is the empty collection |
+| wrapper-array element (`struct`/`union`) | `os.writeSequenceEndKeep()` | presence carries the array length |
+| nested array row | `os.writeSequenceEndKeep()` | a row is an element |
+
+Consequence: an all-default message encodes to **zero bytes**, and an array of
+all-default struct elements still round-trips at its original length.
+
+A wrapper array's declared `default` is not materialized by this backend (the
+field initializer is the empty collection), so absent and explicitly-empty denote
+the same value and the plain dropping close is correct. If that gap is ever closed,
+the wrapper needs an `if (value != default) { … os.writeSequenceEndKeep(); }` guard
+so a value differing from a non-empty default still reaches the wire as the empty
+wrapper — the only encoding of "explicitly empty" (§2, §3).

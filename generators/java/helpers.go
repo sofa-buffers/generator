@@ -286,7 +286,8 @@ func (g *gen) javaInit(f *ir.Field) string {
 	case ir.KindArray:
 		// A native scalar array is a leaf field: materialize its schema default so
 		// an omitted default array reconstructs correctly and marshal can compare
-		// against it. Composite arrays are wrapper sequences (always framed).
+		// against it. A composite array is a wrapper sequence whose declared default
+		// is not materialized, which is what makes its dropping closer correct (§2).
 		if primitiveArrayElem(f.Elem) {
 			if lit, ok := g.javaPrimArrayLiteral(f); ok {
 				return " = " + lit

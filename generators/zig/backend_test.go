@@ -85,10 +85,19 @@ func TestZigStructural(t *testing.T) {
 			t.Errorf("message.zig missing %q", want)
 		}
 	}
-	// Sequences are always framed (never omit-guarded); the struct field write
-	// must be unconditional.
-	if !strings.Contains(m, "try os.writeSequenceBegin(20);") {
-		t.Error("nested struct must be framed unconditionally")
+	// A sequence-typed field is opened LAZILY and closed with the dropping end
+	// (MESSAGE_SPEC S2): the write stays unconditional -- there is no generated
+	// omit-guard -- but the corelib drops the frame when the nested marshal wrote
+	// no child, i.e. when the object equals its declared default.
+	if !strings.Contains(m, "try os.writeSequenceBeginLazy(20);") {
+		t.Error("nested struct field must be opened with writeSequenceBeginLazy")
+	}
+	if !strings.Contains(m, "try os.writeSequenceBeginLazy(20);\n        try self.somestruct.marshal(os);\n        try os.writeSequenceEnd();") {
+		t.Error("nested struct field must close with the dropping writeSequenceEnd")
+	}
+	// The eager begin is gone from the corelib; no call site may still use it.
+	if strings.Contains(m, "os.writeSequenceBegin(") {
+		t.Error("eager writeSequenceBegin must not be emitted any more")
 	}
 	// No heap containers in the message type: storage is fixed arrays + slices.
 	for _, notWant := range []string{
@@ -650,5 +659,98 @@ messages:
 	scalarOnly := string(scf[0].Content)
 	if !strings.Contains(scalarOnly, "pub fn arrayBegin(self: *_dec_M, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {") {
 		t.Errorf("scalar-only message.zig must emit arrayBegin with an unused id:\n%s", scalarOnly)
+	}
+}
+
+// TestZigLazySequenceFraming: MESSAGE_SPEC §2 omits a sequence-typed FIELD whose
+// value equals its declared default, while a wrapper-array ELEMENT keeps its
+// frame even when all-default (element presence carries a dynamic array's
+// length — §5.1). Both rest on corelib-zig's hold-back framing: every sequence
+// opens with writeSequenceBeginLazy and the CLOSER, chosen statically from the
+// position in the schema, decides whether a contentless one survives —
+// writeSequenceEnd drops it, writeSequenceEndKeep forces it onto the wire.
+//
+// The classification under test:
+//
+//	struct/union FIELD                       -> writeSequenceEnd
+//	wrapper array FIELD (depth 0)            -> writeSequenceEnd
+//	wrapper-array ELEMENT (struct/union)     -> writeSequenceEndKeep
+//	wrapper-array ELEMENT (nested array row) -> writeSequenceEndKeep
+//
+// Getting a FIELD wrong costs two bytes; getting an ELEMENT wrong changes the
+// decoded array LENGTH, so the element frames are the load-bearing assertions.
+func TestZigLazySequenceFraming(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      s:    { id: 1, type: array, items: { type: string } }
+      b:    { id: 2, type: array, items: { type: blob } }
+      st:   { id: 3, type: array, items: { type: struct, fields: { a: { id: 0, type: u8 } } } }
+      nest: { id: 4, type: array, items: { type: array, items: { type: string } } }
+      nst:  { id: 5, type: array, items: { type: array, items: { type: struct, fields: { a: { id: 0, type: u8 } } } } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	// Every sequence opens lazily: the eager begin no longer exists in the corelib.
+	if strings.Contains(m, "os.writeSequenceBegin(") {
+		t.Error("eager writeSequenceBegin must not be emitted any more")
+	}
+	// 5 field wrappers + 4 element frames (st, nest row, nst row, nst struct).
+	if n := strings.Count(m, "os.writeSequenceBeginLazy("); n != 9 {
+		t.Errorf("want 9 lazy sequence opens, got %d:\n%s", n, m)
+	}
+
+	for _, want := range []string{
+		// FIELD wrappers, one per array field: closed with the dropping end, so an
+		// empty array is omitted and absence reconstructs it.
+		"try os.writeSequenceBeginLazy(1);\n        for (self.s, 0..) |_e0, _i0| {\n            if (_e0.len != 0) try os.writeString(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
+		"try os.writeSequenceBeginLazy(2);\n        for (self.b, 0..) |_e0, _i0| {\n            if (_e0.len != 0) try os.writeBlob(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
+		// A struct ELEMENT keeps its frame even with every child at its default.
+		"            try os.writeSequenceBeginLazy(@intCast(_i0));\n            try _e0.marshal(os);\n            try os.writeSequenceEndKeep();\n        }\n        try os.writeSequenceEnd();",
+		// A nested array row is an ELEMENT too: its own frame is kept, while the
+		// field wrapper around the rows still closes with the dropping end.
+		"try os.writeSequenceBeginLazy(4);\n        for (self.nest, 0..) |_e0, _i0| {\n            try os.writeSequenceBeginLazy(@intCast(_i0));",
+		"                if (_e1.len != 0) try os.writeString(@intCast(_i1), _e1);\n            }\n            try os.writeSequenceEndKeep();\n        }\n        try os.writeSequenceEnd();",
+		// Array of arrays of structs: row frame AND per-struct element frame kept.
+		"                try os.writeSequenceBeginLazy(@intCast(_i1));\n                try _e1.marshal(os);\n                try os.writeSequenceEndKeep();\n            }\n            try os.writeSequenceEndKeep();\n        }\n        try os.writeSequenceEnd();",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing lazy-framing shape %q:\n%s", want, m)
+		}
+	}
+
+	// One keeping closer per wrapper-array ELEMENT site, one dropping closer per
+	// array FIELD wrapper. ("...EndKeep();" is not a substring of "...End();".)
+	if n := strings.Count(m, "os.writeSequenceEndKeep();"); n != 4 {
+		t.Errorf("want 4 keeping closers (one per wrapper-array element site), got %d", n)
+	}
+	if n := strings.Count(m, "os.writeSequenceEnd();"); n != 5 {
+		t.Errorf("want 5 dropping closers (one per array FIELD wrapper), got %d", n)
+	}
+
+	// A struct/union FIELD is a sequence too: lazily opened, dropping closer.
+	sf := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      inner: { id: 1, type: struct, fields: { a: { id: 0, type: u8 } } }
+`)
+	sff, err := (&Backend{}).Generate(sf, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	sm := string(sff[0].Content)
+	if !strings.Contains(sm, "try os.writeSequenceBeginLazy(1);\n        try self.inner.marshal(os);\n        try os.writeSequenceEnd();") {
+		t.Errorf("a struct FIELD must be opened lazily and closed with the dropping end:\n%s", sm)
+	}
+	if strings.Contains(sm, "writeSequenceEndKeep") {
+		t.Error("a struct FIELD must not keep an all-default frame")
 	}
 }

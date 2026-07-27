@@ -53,6 +53,31 @@ Per message:
 - `marshal(self, os: *sofab.OStream) sofab.Error!void` — sparse-canonical
   field writes into any caller-configured `OStream` (fixed buffer, or a flush
   sink for streaming).
+
+  Sequences are opened with the corelib's **`writeSequenceBeginLazy(id)`**,
+  which holds the header back until a child field actually appears — so the
+  `≠ default` test of MESSAGE_SPEC §2 applies to a sequence-typed field for
+  free, with no whole-object comparison and no buffering: "the nested
+  `marshal` wrote no child" *is* "the value equals its declared default".
+  Which **closer** follows is decided at generation time from the position in
+  the schema, never from the value:
+
+  | position | closer |
+  |---|---|
+  | `struct` / `union` field | `writeSequenceEnd` — an all-default nested object is **omitted** |
+  | wrapper-array field (the array itself) | `writeSequenceEnd` — an empty array is omitted; absence reconstructs it |
+  | wrapper-array **element** (struct/union element, nested array row) | `writeSequenceEndKeep` — the frame stays |
+
+  An element keeps its frame because element presence is what carries a
+  dynamic array's length (*highest present id + 1*, MESSAGE_SPEC §5.1):
+  dropping an all-default element would change the decoded **length**, not
+  merely the bytes. Consequently an all-default message now encodes to zero
+  bytes. A wrapper array's declared `default` is not materialized in the
+  generated field initializer today (it is the empty collection), so absent
+  and explicitly-empty denote the same value and the plain dropping closer is
+  correct; closing that gap would require an
+  `if (value != default) { …; writeSequenceEndKeep(); }` guard on the field
+  wrapper.
 - `encode(self, alloc) ![]u8` — convenience wrapper: streams through a stack
   scratch buffer into an allocated byte slice via the corelib flush sink.
 - `decode(alloc, data) DecodeError!Message` — one-shot decode on the

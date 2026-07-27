@@ -531,7 +531,8 @@ func (g *gen) emitSerialize(f *rfile, fld *ir.Field) {
 func (g *gen) emitSerializeArray(f *rfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in Default), else when empty. A composite/dynamic-element
-	// array is a wrapper sequence and is always framed (never whole-omitted).
+	// array is a wrapper sequence: opened lazily, closed with the dropping end at
+	// field level, so an all-default one is omitted (MESSAGE_SPEC §2).
 	if isNativeArrayElem(fld.Elem) {
 		if _, _, ok := g.fixedNativeArray(fld); ok {
 			// Fixed `[elem; N]` is never "empty"; omit when equal to its default
