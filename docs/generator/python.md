@@ -17,6 +17,37 @@ target is how they land in the generated code — as `MAX_DYN_ARRAY_COUNT`,
 corelib as `Decoder(max_array_count=…, max_string_len=…, max_blob_len=…)`. A
 violation raises `SofaLimitError` before anything is allocated.
 
+## Fixed-count arrays are materialized at construction
+
+Python's containers are growable, so a `count: N` array's length is a property of
+the *value*, not of the storage — nothing makes it N on its own. MESSAGE_SPEC
+§5.1 says that length "is N for every target", regardless of whether the field
+ever reaches the wire, so both array shapes are materialized in the dataclass
+field default (`pyDefault` in `helpers.go`):
+
+| field | dataclass default |
+| --- | --- |
+| `count: 3` native (`u32`) | `field(default_factory=lambda: [0, 0, 0])` |
+| `count: 3` wrapper (`string`) | `field(default_factory=lambda: ["" for _ in range(3)])` |
+| `count: 2` wrapper (`struct`) | `field(default_factory=lambda: [Elem() for _ in range(2)])` |
+| count-less (either kind) | `field(default_factory=list)` |
+
+A wrapper array needs this *in addition to* the refill `unmarshalArray` emits at
+`SEQUENCE_END`, because that refill can only run once the sequence scope has been
+opened. Without the construction default an **absent** field decoded at length 0
+while the same field carrying one element, or an explicitly-empty wrapper,
+decoded at N — and the `count: N` native array next to it decoded at N in all
+three. A dynamic array has no N and must stay empty; so must a nested-array row,
+whose element has no default on the decode side either (`pyWrapperElemZero`
+declines it), since materializing only one of the two ends would reintroduce that
+same split.
+
+The element expression is a **comprehension, not a repeated literal** — a shared
+mutable element would alias every slot of a struct/union array, and every
+instance, onto one object. Materializing costs nothing on the wire: the marshal
+gate for a wrapper array narrows it to M (one past the last non-default element)
+first, so a fresh object still writes no child and the field stays omitted (§2).
+
 ## On-demand corelib imports
 
 The generated `message.py` imports from `sofab` only the names its own body can

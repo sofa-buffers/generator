@@ -451,10 +451,14 @@ messages:
 		"if self.noDflt != [0, 0, 0, 0, 0]:",
 		"if self.shortDflt != [1, 2, 0, 0, 0]:",
 		"if self.fixedBool != [False, False, False, False]:",
-		// dynamic + wrapper-sequence arrays keep starting empty
+		// DYNAMIC arrays -- native or wrapper -- have no N and keep starting empty
 		"dynU32: list[int] = field(default_factory=list)",
 		"dynStrs: list[str] = field(default_factory=list)",
-		"fixedStrs: list[str] = field(default_factory=list)",
+		// ...but a count:N WRAPPER array is fixed-length just like the native one
+		// above, so it is materialized to N element defaults too (S5.1). This line
+		// used to read `field(default_factory=list)`, which pinned the pre-refill
+		// behaviour rather than a rule -- see TestPythonFixedCountWrapperArrayIsN.
+		`fixedStrs: list[str] = field(default_factory=lambda: ["" for _ in range(3)])`,
 		"if len(self.dynU32) != 0:",
 	} {
 		if !strings.Contains(mod, want) {
@@ -920,6 +924,139 @@ messages:
 	}
 	if strings.Contains(mod, "while len(self.dyn) < ") {
 		t.Errorf("dynamic array must not be default-filled:\n%s", mod)
+	}
+}
+
+// TestPythonFixedCountWrapperArrayIsN: a `count: N` array's value is N elements
+// long whether or not the field ever reaches the wire (MESSAGE_SPEC §5.1 -- the
+// length "is N for every target"). The decode-side refill can only run once the
+// sequence scope has actually been opened, so materializing a fixed-count
+// WRAPPER array at construction is what makes the three absent-ish forms agree:
+//
+//	absent field            -> N   (construction default; nothing overwrites it)
+//	one element on the wire -> N   (gap-fill + refill at SEQUENCE_END)
+//	explicitly-empty wrapper-> N   (refill at SEQUENCE_END)
+//
+// Before this, the first row decoded at 0 while the other two decoded at N, and
+// the count:3 NATIVE array sitting next to it decoded at 3 in all three -- the
+// same field disagreeing with itself and with its neighbour.
+//
+// A DYNAMIC (count-less) wrapper array has no N to size from and stays empty.
+func TestPythonFixedCountWrapperArrayIsN(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  probe:
+    payload:
+      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      nums:  { id: 1, type: array, items: { type: u32, count: 3 } }
+      blobs: { id: 2, type: array, items: { type: blob, count: 2, maxlen: 4 } }
+      pts:
+        id: 3
+        type: array
+        items: { type: struct, count: 2, fields: { x: { id: 0, type: i32, default: -1 } } }
+      dyn:   { id: 4, type: array, items: { type: string, maxlen: 8 } }
+      rows:
+        id: 5
+        type: array
+        items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		// The wrapper array is materialized in the SAME place the native one is,
+		// with the element default the decode-side gap-fill already writes. A
+		// comprehension, not a repeated literal: a shared mutable element would
+		// alias every slot (and every instance) onto one object.
+		`strs: list[str] = field(default_factory=lambda: ["" for _ in range(3)])`,
+		`blobs: list[bytes] = field(default_factory=lambda: [b"" for _ in range(2)])`,
+		`pts: list[ProbePtsElem] = field(default_factory=lambda: [ProbePtsElem() for _ in range(2)])`,
+		// the native neighbour, unchanged -- this is the behaviour being matched
+		"nums: list[int] = field(default_factory=lambda: [0, 0, 0])",
+		// a count-less wrapper array has no N and stays empty
+		"dyn: list[str] = field(default_factory=list)",
+		// A nested-array ROW has no element default on the decode side either
+		// (pyWrapperElemZero declines it, so unmarshalArray emits no refill);
+		// materializing it here alone would reintroduce the very split above.
+		"rows: list[list[str]] = field(default_factory=list)",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q:\n%s", want, mod)
+		}
+	}
+	// The pre-fix rendering, in either spelling.
+	for _, bad := range []string{
+		"strs: list[str] = field(default_factory=list)",
+		"blobs: list[bytes] = field(default_factory=list)",
+	} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("count:N wrapper array must not start empty (%q):\n%s", bad, mod)
+		}
+	}
+	// The S2 omission must survive materialization: the marshal gate for a wrapper
+	// array narrows to M (one past the last non-default element), so a fresh
+	// all-default object still writes no child and the field stays off the wire.
+	for _, want := range []string{
+		"if not (len(_trim_empty(self.strs)) == 0):",
+		"if not (len(_trim_objs(self.pts)) == 0):",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q:\n%s", want, mod)
+		}
+	}
+
+	// Execute the table. Gated on a corelib-py checkout, like TestPythonConformance.
+	corelib := os.Getenv("SOFAB_PY_CORELIB")
+	if corelib == "" {
+		t.Skip("set SOFAB_PY_CORELIB to a corelib-py checkout to execute the decode table")
+	}
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not found")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "message.py"), []byte(mod), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Wire vectors, all for `strs` (id 0, a wrapper sequence):
+	//   absent            -- no bytes at all
+	//   one element       -- 06 (seq begin id 0) 02 0a 61 (string elem id 0 = "a") 07
+	//   explicitly empty  -- 06 07
+	const driver = `
+import sys
+from message import Probe
+cases = {
+    "absent":   b"",
+    "one":      bytes([0x06, 0x02, 0x0A, 0x61, 0x07]),
+    "empty":    bytes([0x06, 0x07]),
+}
+bad = []
+for name, wire in cases.items():
+    m = Probe.decode(wire)
+    if len(m.strs) != 3 or len(m.nums) != 3 or len(m.blobs) != 2 or len(m.pts) != 2:
+        bad.append("%s: strs=%r nums=%r blobs=%r pts=%r" % (name, m.strs, m.nums, m.blobs, m.pts))
+    if m.dyn != [] or m.rows != []:
+        bad.append("%s: dynamic array grew: dyn=%r rows=%r" % (name, m.dyn, m.rows))
+fresh = Probe()
+if len(fresh.strs) != 3 or len(fresh.pts) != 2 or fresh.pts[0].x != -1:
+    bad.append("fresh: strs=%r pts=%r" % (fresh.strs, fresh.pts))
+# elements must be distinct objects, within an instance and across instances
+fresh.pts[0].x = 7
+if fresh.pts[1].x != -1 or Probe().pts[0].x != -1:
+    bad.append("aliased struct elements: %r" % (fresh.pts,))
+# an all-default fixed array is still omitted whole (S2)
+if Probe().encode() != b"":
+    bad.append("fresh object must encode to nothing, got %r" % (Probe().encode(),))
+# the single element still lands at its index, with the rest defaulted
+one = Probe.decode(cases["one"])
+if one.strs != ["a", "", ""]:
+    bad.append("placement: %r" % (one.strs,))
+if bad:
+    sys.exit("\n".join(bad))
+`
+	cmd := exec.Command(py, "-c", driver)
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(corelib, "src")+string(os.PathListSeparator)+dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fixed-count wrapper array did not decode at N:\n%s", out)
 	}
 }
 

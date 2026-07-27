@@ -151,12 +151,23 @@ func (g *gen) pyDefault(f *ir.Field) string {
 		// Without this a fresh (or all-default, hence omitted-on-the-wire) array
 		// would be an empty list on this growable backend while the fixed-storage
 		// camp yields N zeros — the same MESSAGE_SPEC §3 divergence as the trailing
-		// default run, reached through the omission path. Composite arrays are
-		// wrapper sequences whose declared default is not materialized, so they start
-		// empty -- which is what makes their dropping closer correct (§2).
+		// default run, reached through the omission path.
 		if lit, ok := g.pyNativeArrayDefault(f); ok {
 			return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
 		}
+		// A `count: N` WRAPPER array is fixed-length for exactly the same reason:
+		// S5.1 says its length "is N for every target", regardless of whether the
+		// field ever reaches the wire. The decode-side refill can only run when the
+		// sequence scope was actually opened, so without materializing here the
+		// field disagreed with itself -- absent decoded at length 0 while a single
+		// element on the wire, or an explicitly-empty wrapper, decoded at N -- and
+		// disagreed with the count:N native array sitting next to it, which has
+		// always been materialized from the padded literal above.
+		if lit, ok := g.pyWrapperArrayDefault(f); ok {
+			return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
+		}
+		// Dynamic (count-less) arrays have no N and start empty, which is what makes
+		// dropping their closer correct (§2).
 		return "field(default_factory=list)"
 	}
 	return "None"
@@ -188,6 +199,33 @@ func (g *gen) pyNativeArrayDefault(f *ir.Field) (string, bool) {
 		return "", false
 	}
 	return g.pyNativeArrayLiteral(f)
+}
+
+// pyWrapperArrayDefault renders a `count: N` WRAPPER array's materialized
+// default -- N element defaults -- as a Python list expression; ("", false) for
+// a dynamic array (no N to size from) or a native one (pyNativeArrayDefault owns
+// those). A wrapper array's own declared `default` is still not materialized;
+// the elements are the ELEMENT default, which is exactly what the decode-side
+// gap-fill and refill in unmarshalArray already write, so all three of absent,
+// partially transmitted and explicitly empty land on the same N-element value.
+//
+// A comprehension, not a repeated literal: the element expression must be
+// evaluated afresh per position or every slot of a struct/union array would
+// alias one shared instance. Rendered inside the caller's default_factory
+// lambda, so a referenced class need not be defined yet.
+//
+// A nested-array row is deliberately excluded (pyWrapperElemZero has no default
+// for it, and the decode path does not refill one either): materializing it here
+// alone would create the very absent-vs-on-the-wire split this fix removes.
+func (g *gen) pyWrapperArrayDefault(f *ir.Field) (string, bool) {
+	if isNativeArrayElem(f.Elem) || !f.HasCount {
+		return "", false
+	}
+	zero, ok := g.pyWrapperElemZero(f.Elem, f.ElemRef)
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("[%s for _ in range(%d)]", zero, f.Count), true
 }
 
 // pyNativeArrayLiteral renders a native scalar array's default as a Python list

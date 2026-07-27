@@ -793,9 +793,10 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
 	// absence then reconstructs the field's default. That is correct because a
-	// wrapper array's declared `default` is not materialized today (the dataclass
-	// default is the empty list -- pyNativeArrayDefault reports no literal for a
-	// composite array), so absent and explicitly-empty denote the same value. If
+	// wrapper array's declared `default` is not materialized today -- the dataclass
+	// default is the empty list, or for a `count: N` array N ELEMENT defaults, which
+	// this writer trims away to nothing all the same -- so absent and
+	// explicitly-empty denote the same value. If
 	// that gap is ever closed, this call needs a guard --
 	// `if value != default: ... e.write_sequence_end_keep()` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
