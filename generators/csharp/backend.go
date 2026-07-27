@@ -222,6 +222,21 @@ func trimElemTypes(s *ir.Schema) map[string]bool {
 	return out
 }
 
+// hasFixedSeqField reports whether the schema has a `count: N` WRAPPER array
+// field, i.e. whether any field initializer needs SofabFixedArray.Filled to
+// materialize the array to N element defaults at construction.
+func hasFixedSeqField(s *ir.Schema) bool {
+	found := false
+	eachFieldList(s, func(fields []*ir.Field) {
+		for _, fld := range fields {
+			if fld.Kind == ir.KindArray && fld.HasCount && seqArrayElem(fld.Elem) {
+				found = true
+			}
+		}
+	})
+	return found
+}
+
 // emitFixedHelpers emits the trailing-default-run trim helpers a fixed-count
 // (`count: N`) native array's canonical encoding needs (MESSAGE_SPEC §3): the
 // wire carries only elements [0, M'), where M' is one past the last element that
@@ -233,7 +248,8 @@ func trimElemTypes(s *ir.Schema) map[string]bool {
 func (g *gen) emitFixedHelpers(f *cfile, s *ir.Schema) {
 	genT, f32, f64 := fixedTrimKinds(s)
 	str, blob, rows := seqTrimKinds(s)
-	if !genT && !f32 && !f64 && !str && !blob && !rows {
+	fill := hasFixedSeqField(s)
+	if !genT && !f32 && !f64 && !str && !blob && !rows && !fill {
 		return
 	}
 	f.line("// Trailing-default-run trim for fixed-count (`count: N`) arrays, native and")
@@ -305,6 +321,18 @@ func (g *gen) emitFixedHelpers(f *cfile, s *ir.Schema) {
 		f.line("        int n = a.Count;")
 		f.line("        while (n > 0 && (a[n - 1] == null || a[n - 1].Count == 0)) n--;")
 		f.line("        return n;")
+		f.line("    }")
+	}
+	if fill {
+		// Construction-time materialization for a `count: N` WRAPPER array — the
+		// counterpart of the zero-filled `new T[N]` a fixed-count NATIVE array gets
+		// in its own initializer. `mk` is called per element rather than one value
+		// being repeated: a struct/union or nested-row element is mutable, so N
+		// copies of one reference would alias.
+		f.line("    internal static List<T> Filled<T>(int n, Func<T> mk) {")
+		f.line("        var l = new List<T>(n);")
+		f.line("        for (int i = 0; i < n; i++) l.Add(mk());")
+		f.line("        return l;")
 		f.line("    }")
 	}
 	f.line("}")

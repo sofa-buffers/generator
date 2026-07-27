@@ -486,6 +486,7 @@ messages:
       enums: { id: 8, type: array, items: { type: enum, count: 3, enum: { $ref: "#/$defs/enum/Color" } }, default: [2] }
       perms: { id: 9, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Perm" } } }
       strs:  { id: 10, type: array, items: { type: string, count: 2, maxlen: 8 } }
+      dstrs: { id: 11, type: array, items: { type: string, maxlen: 8 } }
 `
 	m := buildModule(t, []byte(src), "fixeddef.yaml", map[string]any{})
 
@@ -531,7 +532,13 @@ messages:
 	for _, want := range []string{
 		"public uint[] dyn = Array.Empty<uint>();",
 		"public uint[] dynd = new uint[]{1, 2};",
-		"public List<string> strs = new();",
+		// Only a DYNAMIC wrapper array starts empty. `strs` is `count: 2` and so is
+		// two elements long from construction like every other fixed-count array
+		// here — see TestCsFixedWrapperArrayMaterialized. It carries no _arrdef_
+		// compare default either way (asserted above): the whole-field omission of a
+		// wrapper array is the corelib's lazy frame, not a compare.
+		"public List<string> dstrs = new();",
+		`public List<string> strs = SofabFixedArray.Filled<string>(2, () => "");`,
 		// A dynamic array with no default keeps the allocation-free emptiness test.
 		"if (this.dyn != null && this.dyn.Length != 0) {",
 	} {
@@ -717,5 +724,68 @@ func TestCsWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
 	}
 	if strings.Contains(m, "case Root_dynamic:") {
 		t.Errorf("a dynamic array must not be default-filled at SequenceEnd:\n%s", m)
+	}
+}
+
+// TestCsFixedWrapperArrayMaterialized: a `count: N` WRAPPER array is N elements
+// long from construction, exactly like the `count: N` NATIVE array beside it
+// (MESSAGE_SPEC §5.1 — the length "is N for every target"). Before this, only the
+// native field was materialized in its initializer and the wrapper field started
+// as an empty List, so one field answered its own length three different ways:
+// absent -> 0, one element on the wire -> N, explicitly-empty wrapper -> N. The
+// last two come from the SequenceEnd refill, which can only fill a sequence that
+// was actually opened. A DYNAMIC (count-less) wrapper array has no N and stays
+// empty.
+func TestCsFixedWrapperArrayMaterialized(t *testing.T) {
+	src := []byte("version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }\n" +
+		"      nums:  { id: 1, type: array, items: { type: u32, count: 3 } }\n" +
+		"      blobs: { id: 2, type: array, items: { type: blob, count: 2, maxlen: 8 } }\n" +
+		"      structs: { id: 3, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n" +
+		"      rows:  { id: 4, type: array, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 8 } } }\n" +
+		"      dyns:  { id: 5, type: array, items: { type: string, maxlen: 8 } }\n" +
+		"      bools: { id: 6, type: array, items: { type: boolean, count: 2 } }\n")
+	m := buildModule(t, src, "in.yaml", map[string]any{"namespace": "S"})
+	for _, want := range []string{
+		// The fill helper: one mk() call per element, never one shared reference
+		// repeated — a struct/union or nested-row element is mutable and would alias.
+		"    internal static List<T> Filled<T>(int n, Func<T> mk) {\n" +
+			"        var l = new List<T>(n);\n" +
+			"        for (int i = 0; i < n; i++) l.Add(mk());\n" +
+			"        return l;\n" +
+			"    }",
+		// Every fixed-count wrapper field is materialized to N element defaults,
+		// per element kind — the same value SequenceEnd's gap-fill appends.
+		`public List<string> strs = SofabFixedArray.Filled<string>(3, () => "");`,
+		`public List<byte[]> blobs = SofabFixedArray.Filled<byte[]>(2, () => Array.Empty<byte>());`,
+		`public List<MStructsElem> structs = SofabFixedArray.Filled<MStructsElem>(2, () => new MStructsElem());`,
+		`public List<List<string>> rows = SofabFixedArray.Filled<List<string>>(2, () => new List<string>());`,
+		// The native fields beside them are materialized as they always were.
+		`public uint[] nums = new uint[3];`,
+		`public List<bool> bools = new List<bool>(new bool[2]);`,
+		// A dynamic wrapper array has no N and starts empty.
+		`public List<string> dyns = new();`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q:\n%s", want, m)
+		}
+	}
+	// The defect: a fixed-count wrapper array left at the empty collection, so an
+	// absent field decoded shorter than the same field with one element on it.
+	if strings.Contains(m, "public List<string> strs = new();") {
+		t.Errorf("a count: N wrapper array must not start empty:\n%s", m)
+	}
+	if strings.Contains(m, "public List<byte[]> blobs = new();") {
+		t.Errorf("a count: N blob array must not start empty:\n%s", m)
+	}
+	// The construction-time fill and the decode-side gap-fill agree element for
+	// element; both read csSeqElemDefault.
+	if !strings.Contains(m, `case Root_strs: while (m.strs.Count < 3) m.strs.Add(""); break;`) {
+		t.Errorf("the SequenceEnd refill must stay in place:\n%s", m)
+	}
+	// Whole-field omission is unaffected: N element defaults still narrow to M == 0,
+	// so the field is still absent from the wire (MESSAGE_SPEC §2).
+	if !strings.Contains(m, "if (!(SofabFixedArray.TrimStrs(this.strs) == 0)) return false;") {
+		t.Errorf("an all-default fixed wrapper array must still be omitted:\n%s", m)
 	}
 }

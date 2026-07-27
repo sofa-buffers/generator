@@ -203,6 +203,26 @@ func (g *gen) csArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem
 	}
 }
 
+// csSeqElemDefault renders the element default of a WRAPPER (sequence) array:
+// the value both the construction-time fill of a `count: N` field and the
+// SequenceEnd gap-fill put in a position no wire element reached. ("", false)
+// for a native element, which is not a wrapper. One expression serves both
+// sides so a fresh array and a decoded one cannot disagree about what "the
+// element default" is.
+func (g *gen) csSeqElemDefault(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) (string, bool) {
+	switch elem {
+	case ir.KindString:
+		return `""`, true
+	case ir.KindBlob:
+		return "Array.Empty<byte>()", true
+	case ir.KindStruct, ir.KindUnion:
+		return fmt.Sprintf("new %s()", g.typeName(ref.Key)), true
+	case ir.KindArray:
+		return fmt.Sprintf("new List<%s>()", g.csArrayElemType(items.Elem, items.ElemRef, items.ElemItems)), true
+	}
+	return "", false
+}
+
 func numCsType(k ir.Kind) string {
 	switch k {
 	case ir.KindU8:
@@ -247,6 +267,20 @@ func (g *gen) csInit(f *ir.Field) string {
 		}
 		if lit, ok := g.csNativeArrayLiteral(f); ok {
 			return " = " + lit
+		}
+		// A `count: N` WRAPPER array is N elements long from construction, exactly
+		// like the native one above (MESSAGE_SPEC §5.1: the length "is N for every
+		// target — a growable-list target MUST default-fill to N"). Without this the
+		// field disagreed with itself: an absent field stayed empty at length 0 while
+		// one element on the wire — or an explicitly-empty wrapper — came back at N,
+		// because the SequenceEnd refill can only fill a sequence that was actually
+		// opened. Elements are the element default, the very value that gap-fill
+		// appends. A DYNAMIC (count-less) wrapper array has no N and stays empty.
+		if f.HasCount {
+			if zero, ok := g.csSeqElemDefault(f.Elem, f.ElemRef, f.ElemItems); ok {
+				return fmt.Sprintf(" = SofabFixedArray.Filled<%s>(%d, () => %s)",
+					g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems), f.Count, zero)
+			}
 		}
 		return " = new()"
 	case ir.KindString:

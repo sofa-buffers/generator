@@ -65,8 +65,22 @@ armed — their elements go to the float callbacks and cannot reach a scalar arm
 
 A wrapper array's element id **is** the array index (MESSAGE_SPEC §5.1), and a
 `count: N` array's canonical wire stops at `M`, one past its last non-default
-element — "even for sequence-form elements" (§3/§5.1). Three pieces implement that
+element — "even for sequence-form elements" (§3/§5.1). Four pieces implement that
 here, and they only work together.
+
+**Construction.** A `count: N` wrapper field's initializer is
+`SofabFixedArray.Filled<T>(N, () => <element default>)` — `N` element defaults
+before any wire byte is seen, exactly as the `count: N` native field beside it is
+materialized from `new T[N]` (or its tail-padded literal). Without it the field
+disagreed with **itself**: an absent field decoded at length 0 while the same
+field with one element on the wire — or with an explicitly-empty wrapper — came
+back at `N`, because the N-fill below can only fill a sequence that was actually
+opened. `mk()` is called per element rather than one value being repeated: a
+struct/union or nested-row element is mutable, so `N` copies of one reference
+would alias. A **dynamic** wrapper array has no `N` and starts empty. The element
+default is `csSeqElemDefault`, the one expression the decode-side gap-fill also
+reads, so a fresh array and a decoded one cannot disagree about what it is.
+Whole-field omission is unaffected: `N` element defaults still narrow to `M == 0`.
 
 **Placement (decode).** The flat visitor descends into an element scope on
 `SequenceBegin(id)`. The element's own fields arrive *after* that descent, so the

@@ -695,17 +695,8 @@ func (g *gen) emitSequenceEnd(f *cfile, fs []frame) {
 		if !fr.isArr || fr.cap < 0 {
 			continue
 		}
-		var zero string
-		switch fr.elem {
-		case ir.KindString:
-			zero = `""`
-		case ir.KindBlob:
-			zero = "Array.Empty<byte>()"
-		case ir.KindStruct, ir.KindUnion:
-			zero = fmt.Sprintf("new %s()", g.typeName(fr.ref.Key))
-		case ir.KindArray:
-			zero = fmt.Sprintf("new List<%s>()", g.csArrayElemType(fr.items.Elem, fr.items.ElemRef, fr.items.ElemItems))
-		default:
+		zero, ok := g.csSeqElemDefault(fr.elem, fr.ref, fr.items)
+		if !ok {
 			continue
 		}
 		arms = append(arms, fmt.Sprintf("            case %s: while (%s.Count < %d) %s.Add(%s); break;",
