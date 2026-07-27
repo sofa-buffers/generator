@@ -89,6 +89,33 @@ array's length (*highest present id + 1*, §5.1): dropping an all-default elemen
 would change the decoded **length**, not merely the bytes. Consequence: an
 all-default message encodes to **zero bytes**.
 
+#### Where the element loop stops (§3/§5.1)
+
+"Frame always emitted" is scoped to the elements the loop reaches, and a
+`count: N` array's element loop stops at **M** — one past its last element that
+differs from the element default — because that is what its canonical wire
+carries, *"even for sequence-form elements"*. So:
+
+- an **interior** all-default element still gets its empty frame (element
+  presence carries the length);
+- the **trailing** run of all-default elements is elided;
+- `M == 0` writes no child at all, so the lazily-opened wrapper is dropped by
+  `endSequence` and the whole field is omitted (§2);
+- a **count-less** array is never narrowed: it has no `N` to refill from, so a
+  trailing default element is significant and keeps its frame.
+
+M comes from the generated `_trimLen(list, isDefault)` helper, and the
+all-default predicate it takes is the generated `bool get _isDefault` every class
+carries — the explicit form of the "no child was written" test the lazy framing
+already encodes implicitly for a *field*, needed here because an *element* must
+be judged **before** the loop opens. The marshal loop and `_isDefault` are
+generated from the **same** expression, so the writer and the predicate cannot
+drift apart: a predicate that narrowed a field the writer does not (or the
+reverse) would omit a field that is on the wire, or keep one that is not.
+
+The elision is only lossless because decode default-fills the array back out to
+`N` — see [Decode model](#decode-model).
+
 The array wrapper may use the dropping closer because a wrapper array's declared
 `default` is not materialized by this backend (the generated field starts as the
 empty collection), so *absent* and *explicitly empty* denote the same value. If
@@ -115,6 +142,22 @@ callback. Two consequences the generated code relies on:
   is also why it cannot serve a *reused* destination, whose stale value must be
   cleared before the decode starts (see [Reusing a
   destination](#reusing-a-destination)).
+
+- **A wrapper element's id IS its array index (§5.1).** The `_ObjSeq` /
+  `_StrSeq` / `_BlobSeq` collectors gap-fill with default elements up to the
+  child id and then decode **into** `out[id]` — never append. Appending would
+  shorten the array by the size of any interior id gap, and would decode a
+  *re-opened* element id as a second element instead of merging into the first
+  (§7.4, which placement gives for free). The over-index guard (`id >= cap` is
+  INVALID) also bounds the gap-fill.
+
+- **A `count: N` wrapper array is default-filled back out to N.** Its length "is
+  N for every target — a growable-list target MUST default-fill to N exactly like
+  a pre-sized one" (§5.1), so each collector overrides `onSequenceEnd` to restore
+  positions `[M, N)` when the wrapper scope closes. This is the prerequisite for
+  the encode-side trailing elision above: without it the trim would not
+  *normalise* the array, it would **shorten** it on every round trip. A
+  count-less array (`cap < 0`) is left at its wire length.
 
 - **INVALID verdicts ride a sticky flag.** The corelib's visitor callbacks return
   `void`, so a generated visitor cannot fail the decode mid-stream. The over-count

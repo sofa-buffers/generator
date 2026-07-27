@@ -64,6 +64,22 @@ class Scalars {
     flag = true;
   }
 
+  /// Whether every field equals its declared default, compared per field and
+  /// recursively -- i.e. whether [marshal] would write no child at all. A
+  /// `count: N` array of sequence-form elements uses this to find how many of
+  /// its elements the canonical encoding carries.
+  bool get _isDefault {
+    if (!(u8min == 0)) return false;
+    if (!(u8max == 255)) return false;
+    if (!(u64max == -1)) return false;
+    if (!(i8min == -128)) return false;
+    if (!(i64min == 0x8000000000000000)) return false;
+    if (!(f32 == 3.14)) return false;
+    if (!(f64 == -2.5)) return false;
+    if (!(flag == true)) return false;
+    return true;
+  }
+
   /// Worst-case serialized size (schema-bounded fields; a cap for
   /// unbounded ones).
   static const int maxSize = 49;

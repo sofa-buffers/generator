@@ -254,6 +254,7 @@ type needs struct {
 	dec                             bool
 	bytesEq, listEq, u8len          bool
 	trimInt, trimF32, trimF64, pad  bool
+	trimLen                         bool
 	f32copy, f32bits                bool
 	strSeq, blobSeq, objSeq         bool
 	intMat, dblMat, boolMat, seqSeq bool
@@ -325,6 +326,11 @@ func (g *gen) scanField(fld *ir.Field, n *needs) {
 				}
 			}
 			return
+		}
+		// A `count: N` wrapper array narrows to M before its element loop, and
+		// _isDefault tests the same expression (MESSAGE_SPEC §3/§5.1).
+		if fld.HasCount {
+			n.trimLen = true
 		}
 		g.scanArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, n)
 	}
@@ -448,6 +454,20 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		f.line("}")
 		f.blank()
 	}
+	if n.trimLen {
+		f.line("// How many elements of a `count: N` array of sequence-form elements the")
+		f.line("// canonical encoding carries: one past the last element that differs from the")
+		f.line("// element default. Only the TRAILING run of default elements is elided -- an")
+		f.line("// INTERIOR one keeps its frame, because element presence is what carries the")
+		f.line("// array's length. Zero means no element is written at all, so the lazily-opened")
+		f.line("// wrapper is dropped and the field is omitted entirely.")
+		f.line("int _trimLen<T>(List<T> a, bool Function(T) isDef) {")
+		f.line("  var n = a.length;")
+		f.line("  while (n > 0 && isDef(a[n - 1])) { n--; }")
+		f.line("  return n;")
+		f.line("}")
+		f.blank()
+	}
 	if n.pad {
 		f.line("// Grow [a] to exactly [n] elements with the element default [zero]: a decoded")
 		f.line("// fixed-count array has exactly its schema count elements.")
@@ -484,7 +504,27 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 // for a dynamic array) rejects an over-index element as INVALID before the list
 // grows (MESSAGE_SPEC §5.1/§7 — also bounding an over-index amplification DoS),
 // and emax (element maxlen, or -1) rejects an over-length string/blob element.
+//
+// When the wrapper's scope closes, a fixed-count collector default-fills its
+// list out to N (see fillToCap): §5.1 says a fixed-count array's length "is N
+// for every target — a growable-list target MUST default-fill to N exactly like
+// a pre-sized one". That is also what makes the §3/§5.1 trailing-run elision on
+// the encode side LOSSLESS: without it, re-encoding a decoded fixed array would
+// not merely re-shape the bytes, it would SHORTEN the array on every round trip.
 func (g *gen) emitCollectors(f *dfile, n needs) {
+	// fillToCap emits the onSequenceEnd override that restores positions [M, N).
+	// cap < 0 marks a dynamic array, whose length is highest-present-id + 1 and
+	// which therefore must not be filled.
+	fillToCap := func(zero string) {
+		f.line("  /// Restores the trailing default elements a `count: N` array's encoding")
+		f.line("  /// elides, so a decoded fixed-count array always has exactly N elements.")
+		f.line("  /// A count-less array (cap < 0) keeps whatever length the wire gave it.")
+		f.line("  @override")
+		f.line("  void onSequenceEnd() {")
+		f.line("    if (cap < 0) return;")
+		f.line("    while (out.length < cap) { out.add(%s); }", zero)
+		f.line("  }")
+	}
 	if n.strSeq {
 		f.line("class _StrSeq extends sofab.MessageVisitor {")
 		f.line("  _StrSeq(this.out, this.cap, this.emax, this.e);")
@@ -499,6 +539,7 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("    while (out.length <= id) { out.add(''); }")
 		f.line("    out[id] = value;")
 		f.line("  }")
+		fillToCap("''")
 		f.line("}")
 		f.blank()
 	}
@@ -516,10 +557,16 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("    while (out.length <= id) { out.add(Uint8List(0)); }")
 		f.line("    out[id] = Uint8List.fromList(value);")
 		f.line("  }")
+		fillToCap("Uint8List(0)")
 		f.line("}")
 		f.blank()
 	}
 	if n.objSeq {
+		// The element id IS the array index (§5.1), so an element is PLACED at
+		// out[id] after gap-filling with default elements -- never appended.
+		// Appending would shorten the array by the size of any interior id gap and
+		// would decode a REOPENED id as a second element instead of merging into the
+		// first (§7.4, which placement gives for free).
 		f.line("class _ObjSeq<T> extends sofab.MessageVisitor {")
 		f.line("  _ObjSeq(this.out, this.cap, this.e, this.make, this.vis);")
 		f.line("  final List<T> out;")
@@ -533,6 +580,7 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("    while (out.length <= id) { out.add(make()); }")
 		f.line("    return vis(out[id]);")
 		f.line("  }")
+		fillToCap("make()")
 		f.line("}")
 		f.blank()
 	}

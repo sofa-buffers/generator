@@ -387,3 +387,135 @@ func TestConformance(t *testing.T) {
 		t.Fatalf("conformance harness did not report PASS:\n%s", out)
 	}
 }
+
+// writeDef writes a schema source to a temp file and returns its path.
+func writeDef(t *testing.T, src string) string {
+	t.Helper()
+	def := filepath.Join(t.TempDir(), "def.yaml")
+	if err := os.WriteFile(def, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return def
+}
+
+const trimDef = "version: 1\nmessages:\n  vec:\n    payload:\n" +
+	"      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }\n" +
+	"      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }\n" +
+	"      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }\n"
+
+// A count:N wrapper array's canonical wire stops at M -- one past its last
+// non-default element (MESSAGE_SPEC S3/S5.1, "even for sequence-form elements")
+// -- and M == 0 leaves the whole wrapper omitted (S2). generator#248: the
+// element loop used to run to length, framing every trailing all-default
+// element, so a decoder that accepted the non-canonical form re-encoded it
+// unchanged instead of normalising. A DYNAMIC array has no N to refill from, so
+// its trailing default element is significant and must still be framed.
+func TestDartFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+	out := genFor(t, writeDef(t, trimDef), map[string]any{})
+
+	// The fixed array narrows to M before framing anything...
+	if !strings.Contains(out, "for (var _i0 = 0, _n0 = _trimLen(fixed, (x) => x._isDefault); _i0 < _n0; _i0++) {") {
+		t.Errorf("count:N struct array must loop to M, not length:\n%s", out)
+	}
+	// ...while the dynamic one keeps every element, trailing defaults included.
+	if !strings.Contains(out, "for (var _i0 = 0, _n0 = dynamic_.length; _i0 < _n0; _i0++) {") {
+		t.Errorf("dynamic struct array must not be narrowed:\n%s", out)
+	}
+	// An interior all-default element is still framed: only the TRAILING run goes.
+	if !strings.Contains(out, "e.beginSequenceLazy(_i0); fixed[_i0].marshal(e); e.endSequenceKeep();") {
+		t.Errorf("interior elements must keep the framing closer:\n%s", out)
+	}
+
+	// _isDefault is the exact negation of what marshal writes, so it must narrow a
+	// field exactly when the marshal loop does -- disagreeing would either omit a
+	// field that is on the wire or keep one that is not.
+	if !strings.Contains(out, "if (!(_trimLen(fixed, (x) => x._isDefault) == 0)) return false;") {
+		t.Errorf("_isDefault must narrow the fixed array like marshal does:\n%s", out)
+	}
+	if !strings.Contains(out, "if (!(dynamic_.length == 0)) return false;") {
+		t.Errorf("_isDefault must NOT narrow the dynamic array:\n%s", out)
+	}
+	if !strings.Contains(out, "if (!(_trimLen(fstrs, (x) => x.isEmpty) == 0)) return false;") {
+		t.Errorf("_isDefault for a string wrapper array must test the trimmed run:\n%s", out)
+	}
+	// The all-default predicate itself: emitted for every class, per field and
+	// recursively, so an ELEMENT can be judged before the element loop opens.
+	if !strings.Contains(out, "bool get _isDefault {") {
+		t.Errorf("every generated class must carry the all-default predicate:\n%s", out)
+	}
+	if !strings.Contains(out, "int _trimLen<T>(List<T> a, bool Function(T) isDef) {") {
+		t.Errorf("the M helper must be emitted:\n%s", out)
+	}
+}
+
+// generator#247 (already correct in Dart -- pinned as a regression): a wrapper
+// array's element id IS the array index (S5.1), so an element is PLACED at
+// out[id] after gap-filling -- never appended. Appending would shorten the array
+// by the size of any interior id gap and would decode a REOPENED id as a second
+// element instead of merging into the first (S7.4).
+//
+// The N-fill on onSequenceEnd is what makes the S3/S5.1 trailing elision
+// lossless: without it, re-encoding a decoded fixed array shortens it on every
+// round trip. That is the prerequisite generator#248 could not land without.
+func TestDartWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+	out := genFor(t, writeDef(t, trimDef), map[string]any{})
+
+	for _, want := range []string{
+		// placement, not append -- and the gap-fill that precedes it
+		"    while (out.length <= id) { out.add(make()); }\n    return vis(out[id]);",
+		// N-fill when the sequence scope closes, for every wrapper collector
+		"  void onSequenceEnd() {\n    if (cap < 0) return;\n    while (out.length < cap) { out.add(make()); }\n  }",
+		"  void onSequenceEnd() {\n    if (cap < 0) return;\n    while (out.length < cap) { out.add(''); }\n  }",
+		// the over-index guard still bounds both the placement and the gap-fill
+		"    if (cap >= 0 && id >= cap) { e.inv = true; return null; }",
+		// the schema count reaches the collector as its cap; the dynamic one is -1
+		"_ObjSeq<VecFixedElem>(o.fixed, 5, e,",
+		"_ObjSeq<VecDynamicElem>(o.dynamic_, -1, e,",
+		"_StrSeq(o.fstrs, 3, 8, e)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated Dart missing %q:\n%s", want, out)
+		}
+	}
+	// The defect the placement replaced: appending ignores the id entirely.
+	if strings.Contains(out, "out.add(make());\n    return vis(out[out.length - 1]);") {
+		t.Errorf("_ObjSeq must not append id-blind:\n%s", out)
+	}
+}
+
+// A blob wrapper array gets the same N-fill, and an emax-bounded element keeps
+// its guard: the fill must not disturb the over-index / over-maxlen rejects.
+func TestDartBlobWrapperArrayFillsToN(t *testing.T) {
+	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      blobs: { id: 0, type: array, items: { type: blob, count: 4, maxlen: 8 } }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+	for _, want := range []string{
+		"  void onSequenceEnd() {\n    if (cap < 0) return;\n    while (out.length < cap) { out.add(Uint8List(0)); }\n  }",
+		"    if (emax >= 0 && value.length > emax) { e.inv = true; return; }",
+		"_BlobSeq(o.blobs, 4, 8, e)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("blob wrapper array missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A DYNAMIC wrapper array must be left alone end to end: no trim on the marshal
+// side (a trailing default element is significant when there is no N to refill
+// from) and no fill on the decode side (its length is highest-present-id + 1).
+func TestDartDynamicWrapperArrayIsNeitherTrimmedNorFilled(t *testing.T) {
+	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      strs: { id: 0, type: array, items: { type: string, maxlen: 8 } }\n" +
+		"      objs: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+	if strings.Contains(out, "_trimLen(") {
+		t.Errorf("a schema with no count:N wrapper array must not emit the M helper:\n%s", out)
+	}
+	if !strings.Contains(out, "_StrSeq(o.strs, -1, 8, e)") || !strings.Contains(out, "_ObjSeq<VecObjsElem>(o.objs, -1, e,") {
+		t.Errorf("dynamic wrapper arrays must pass cap -1:\n%s", out)
+	}
+	// cap -1 short-circuits the fill at runtime; the guard must be present.
+	if !strings.Contains(out, "    if (cap < 0) return;") {
+		t.Errorf("the N-fill must short-circuit for a dynamic array:\n%s", out)
+	}
+}
