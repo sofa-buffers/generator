@@ -297,20 +297,29 @@ func (g *gen) rustSeqNew(hasCount bool) string {
 	}
 }
 
-// rustLeafNe is the boolean omit-guard `<lhs> != <default>` for a scalar/string
-// leaf field. A string compares against its &str default (as_str() under no_std,
-// where the field is a heapless/alloc string); other scalars against their
-// materialized default value.
-func (g *gen) rustLeafNe(acc string, f *ir.Field) string {
+// rustLeafCmp compares a scalar/string leaf field against its default with the
+// given operator. A string compares against its &str default (as_str() under
+// no_std, where the field is a heapless/alloc string); other scalars against
+// their materialized default value.
+//
+// One builder serves both the `!=` omit-guard emitSerialize writes and the `==`
+// arm of is_default, so the write decision and the all-default predicate read the
+// same operands — including for a NaN default, where both sides agree the field
+// is never equal to it.
+func (g *gen) rustLeafCmp(acc string, f *ir.Field, op string) string {
 	if f.Kind == ir.KindString {
 		lit, _ := f.Default.(string)
 		if g.noStd {
-			return fmt.Sprintf("%s.as_str() != %q", acc, lit)
+			return fmt.Sprintf("%s.as_str() %s %q", acc, op, lit)
 		}
-		return fmt.Sprintf("%s != %q", acc, lit)
+		return fmt.Sprintf("%s %s %q", acc, op, lit)
 	}
-	return fmt.Sprintf("%s != %s", acc, g.rustFieldDefault(f))
+	return fmt.Sprintf("%s %s %s", acc, op, g.rustFieldDefault(f))
 }
+
+// rustLeafNe is the boolean omit-guard `<lhs> != <default>` for a scalar/string
+// leaf field (MESSAGE_SPEC §2).
+func (g *gen) rustLeafNe(acc string, f *ir.Field) string { return g.rustLeafCmp(acc, f, "!=") }
 
 func (g *gen) rustIntDefault(f *ir.Field) string {
 	if f.Kind == ir.KindBitfield {

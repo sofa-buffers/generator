@@ -58,6 +58,11 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 			return nil, err
 		}
 	}
+	// Which types need the all-default predicate a `count: N` wrapper array uses to
+	// find M, and whether the module needs the narrowing helper at all
+	// (generator#248). Resolved before emit so both the writer and the predicate
+	// read the same answer.
+	g.scanTrim(s)
 	files := []generator.File{{Path: "src/message.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -94,6 +99,80 @@ type gen struct {
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
 	sizeErr error
+	// trimSeq marks that the schema has at least one `count: N` wrapper array, the
+	// only construct that needs the _trim_seq narrowing helper (generator#248).
+	trimSeq bool
+	// isDefault is the set of generated type names (by rendered Rust name) that
+	// must carry is_default(): the element type of a `count: N` struct/union array
+	// and, transitively, every struct/union it holds as a field. Nothing else pays
+	// for the predicate — it would be dead weight in a footprint build.
+	isDefault map[string]bool
+}
+
+// scanTrim resolves trimSeq and isDefault for the whole schema. It walks exactly
+// the shapes emitSerializeArray narrows, so a type gets the predicate iff some
+// writer loop asks for it.
+func (g *gen) scanTrim(s *ir.Schema) {
+	g.isDefault = map[string]bool{}
+	seen := map[string]bool{}
+	var scan func(fields []*ir.Field)
+	var scanElem func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem)
+	scan = func(fields []*ir.Field) {
+		for _, fld := range fields {
+			switch {
+			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
+				if !seen[fld.Ref.Key] {
+					seen[fld.Ref.Key] = true
+					scan(fld.Ref.Target.Fields)
+				}
+			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
+				// Only a declared `count: N` array is narrowed; a dynamic one keeps
+				// every element, so it needs no predicate.
+				if fld.HasCount && (fld.Elem == ir.KindString || fld.Elem == ir.KindBlob) {
+					g.trimSeq = true
+				}
+				if fld.HasCount && (fld.Elem == ir.KindStruct || fld.Elem == ir.KindUnion) {
+					g.trimSeq = true
+					g.markIsDefault(fld.ElemRef.Key, fld.ElemRef.Target.Fields)
+				}
+				scanElem(fld.Elem, fld.ElemRef, fld.ElemItems)
+			}
+		}
+	}
+	scanElem = func(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) {
+		switch elem {
+		case ir.KindStruct, ir.KindUnion:
+			if !seen[ref.Key] {
+				seen[ref.Key] = true
+				scan(ref.Target.Fields)
+			}
+		case ir.KindArray:
+			scanElem(items.Elem, items.ElemRef, items.ElemItems)
+		}
+	}
+	for _, m := range s.Messages {
+		scan(m.Fields)
+	}
+}
+
+// markIsDefault records that a type needs is_default(), and recurses into the
+// struct/union fields the predicate itself calls it on.
+func (g *gen) markIsDefault(key string, fields []*ir.Field) {
+	name := g.typeName(key)
+	if g.isDefault[name] {
+		return
+	}
+	g.isDefault[name] = true
+	for _, fld := range fields {
+		switch {
+		case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
+			g.markIsDefault(fld.Ref.Key, fld.Ref.Target.Fields)
+		case fld.Kind == ir.KindArray && fld.HasCount &&
+			(fld.Elem == ir.KindStruct || fld.Elem == ir.KindUnion):
+			// The field's own narrowing predicate calls the element's is_default.
+			g.markIsDefault(fld.ElemRef.Key, fld.ElemRef.Target.Fields)
+		}
+	}
 }
 
 // messageSize resolves a message's worst-case encoded size via the shared walk
@@ -232,6 +311,27 @@ func (g *gen) module(s *ir.Schema) []byte {
 		if g.limits.blobHas {
 			f.line("const MAX_DYN_BLOB_LEN: usize = %d;", g.limits.blobLen)
 		}
+		f.blank()
+	}
+
+	// The trailing-default-run narrowing a `count: N` wrapper array's canonical
+	// wire needs (generator#248), emitted only when the schema actually has one so
+	// every other schema's output — and the footprint profile's `.text` — is
+	// unchanged.
+	if g.trimSeq {
+		f.line("// _trim_seq narrows a `count: N` wrapper array to M -- one past its last")
+		f.line("// element differing from the element default -- which is what its canonical")
+		f.line("// wire carries (S3/S5.1, \"even for sequence-form elements\").")
+		f.line("// Only the TRAILING run is dropped: an interior all-default element keeps its")
+		f.line("// frame, because element presence is what carries the array's length. M == 0")
+		f.line("// leaves the lazily-opened wrapper contentless, so its dropping closer omits")
+		f.line("// the whole field (S2). A dynamic (count-less) array has no N to refill from")
+		f.line("// and is never narrowed -- there a trailing default element is significant.")
+		f.line("fn _trim_seq<T>(v: &[T], is_default: impl Fn(&T) -> bool) -> &[T] {")
+		f.line("    let mut _m = v.len();")
+		f.line("    while _m > 0 && is_default(&v[_m - 1]) { _m -= 1; }")
+		f.line("    &v[.._m]")
+		f.line("}")
 		f.blank()
 	}
 
@@ -424,6 +524,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 		g.emitSerialize(f, fld)
 	}
 	f.line("    }")
+	g.emitIsDefault(f, name, fields)
 
 	if isMessage {
 		if g.noStd {
@@ -484,6 +585,70 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	}
 }
 
+// emitIsDefault emits the object's all-default predicate, for the types
+// scanTrim marked. It is the exact negation of what serialize writes: the object
+// is default iff serialize would emit no child at all, evaluated per field and
+// recursively (MESSAGE_SPEC S2). It exists because a `count: N` wrapper array has
+// to find M -- one past its last non-default element -- BEFORE it opens the
+// element loop (S3/S5.1), and the lazy framing's implicit "no child was written"
+// test cannot answer that in time.
+//
+// Every arm is the negation of the very expression emitSerialize uses for the
+// same field (rustLeafCmp / nativeArrayCmp / elemTrimExpr), so the
+// writer and the predicate cannot drift: one that narrowed a field the writer
+// does not would omit a field that is on the wire, and the reverse would keep one
+// that is not.
+func (g *gen) emitIsDefault(f *rfile, name string, fields []*ir.Field) {
+	if !g.isDefault[name] {
+		return
+	}
+	f.line("    /// True when every field equals its declared default, i.e. when")
+	f.line("    /// serialize would write no child at all (S2). Used to find")
+	f.line("    /// the M a `count: N` wrapper array's canonical wire stops at (S3/S5.1).")
+	f.line("    fn is_default(&self) -> bool {")
+	for _, fld := range fields {
+		f.line("        if !(%s) { return false; }", g.fieldIsDefaultExpr(fld))
+	}
+	f.line("        true")
+	f.line("    }")
+}
+
+// fieldIsDefaultExpr is the boolean "this field equals its default", i.e. the
+// negation of emitSerialize's write guard for the same field, built from the
+// same operand builders so the two cannot drift.
+func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
+	acc := "self." + rustIdent(fld.Name)
+	switch fld.Kind {
+	case ir.KindBlob:
+		if raw, ok := g.blobBytes(fld); ok {
+			return fmt.Sprintf("&%s[..] == &%s[..]", acc, byteSliceLit(raw))
+		}
+		return fmt.Sprintf("%s.is_empty()", acc)
+	case ir.KindStruct, ir.KindUnion:
+		// Lazily framed: the frame survives iff the nested serialize wrote a child,
+		// which is exactly "the nested object is not default".
+		return fmt.Sprintf("%s.is_default()", acc)
+	case ir.KindArray:
+		return g.arrayIsDefaultExpr(fld, acc)
+	}
+	return g.rustLeafCmp(acc, fld, "==")
+}
+
+// arrayIsDefaultExpr mirrors emitSerializeArray: a native array compares against
+// its default through the same expression the write guard uses; a wrapper array
+// is default iff it would write no child -- i.e. iff its narrowed run is empty.
+//
+// fld.HasCount must be threaded into elemTrimExpr unchanged: narrowing here but
+// not in the serialize loop (or the reverse) is exactly the drift the shared
+// helper exists to prevent -- it would call a dynamic [{}] "default" while the
+// writer still frames its one empty element.
+func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
+	if isNativeArrayElem(fld.Elem) {
+		return g.nativeArrayCmp(fld, acc, false)
+	}
+	return fmt.Sprintf("%s.is_empty()", g.elemTrimExpr(acc, fld.Elem, fld.HasCount))
+}
+
 func (g *gen) emitSerialize(f *rfile, fld *ir.Field) {
 	acc := "self." + rustIdent(fld.Name)
 	var write string
@@ -534,21 +699,7 @@ func (g *gen) emitSerializeArray(f *rfile, fld *ir.Field, acc string) {
 	// array is a wrapper sequence: opened lazily, closed with the dropping end at
 	// field level, so an all-default one is omitted (MESSAGE_SPEC §2).
 	if isNativeArrayElem(fld.Elem) {
-		if _, _, ok := g.fixedNativeArray(fld); ok {
-			// Fixed `[elem; N]` is never "empty"; omit when equal to its default
-			// (mirrors the C++ backend's `!= std::array{}`).
-			f.line("        if %s != %s {", acc, g.rustFieldDefault(fld))
-		} else if parts, ok := g.rustNativeArrayPartsN(fld); ok {
-			// Native array with a default, held in a Vec: slice compare. The literal
-			// is the N-element default — the same one the field is constructed with —
-			// or a field sitting on its default would never compare equal and §2
-			// would never omit it.
-			f.line("        if &%s[..] != &[%s][..] {", acc, parts)
-		} else if fld.HasCount {
-			f.line("        if &%s[..] != &[%s; %d][..] {", acc, rustElemZeroLit(fld.Elem), fld.Count)
-		} else {
-			f.line("        if !%s.is_empty() {", acc)
-		}
+		f.line("        if %s {", g.nativeArrayCmp(fld, acc, true))
 		g.serializeArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.HasCount, 0)
 		f.line("        }")
 		return
@@ -562,6 +713,61 @@ func (g *gen) emitSerializeArray(f *rfile, fld *ir.Field, acc string) {
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
 	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.HasCount, 0)
+}
+
+// nativeArrayCmp is the `!= default` write guard for a native scalar array field
+// (MESSAGE_SPEC §2), or its exact negation when ne is false. One builder serves
+// both emitSerializeArray and is_default; four inline branches in two places
+// would let the write decision and the all-default predicate drift, and a field
+// sitting on its default would then be written or dropped inconsistently.
+func (g *gen) nativeArrayCmp(fld *ir.Field, acc string, ne bool) string {
+	op, empty := "==", "%s.is_empty()"
+	if ne {
+		op, empty = "!=", "!%s.is_empty()"
+	}
+	if _, _, ok := g.fixedNativeArray(fld); ok {
+		// Fixed `[elem; N]` is never "empty"; omit when equal to its default
+		// (mirrors the C++ backend's `!= std::array{}`).
+		return fmt.Sprintf("%s %s %s", acc, op, g.rustFieldDefault(fld))
+	}
+	if parts, ok := g.rustNativeArrayPartsN(fld); ok {
+		// Native array with a default, held in a Vec: slice compare. The literal is
+		// the N-element default — the same one the field is constructed with — or a
+		// field sitting on its default would never compare equal and §2 would never
+		// omit it.
+		return fmt.Sprintf("&%s[..] %s &[%s][..]", acc, op, parts)
+	}
+	if fld.HasCount {
+		return fmt.Sprintf("&%s[..] %s &[%s; %d][..]", acc, op, rustElemZeroLit(fld.Elem), fld.Count)
+	}
+	return fmt.Sprintf(empty, acc)
+}
+
+// elemTrimExpr narrows a wrapper array to the M its canonical wire carries: one
+// past the last element differing from the element default (MESSAGE_SPEC §3/§5.1,
+// which says "even for sequence-form elements"). Only a declared `count: N` array
+// is fixed-length and may be narrowed -- a dynamic array has no N to refill from,
+// so a trailing default ELEMENT is significant and stays framed. Interior
+// all-default elements are never dropped by this: element presence carries the
+// length, so only the trailing run goes. Both the serialize loop and is_default
+// run off this one expression, so the writer and the predicate cannot disagree.
+//
+// A string/blob element is a leaf the writer already omits individually when it
+// equals the element default, so narrowing that run does not change the bytes --
+// it exists so the predicate is computed from the very expression the writer
+// loops over. Nested-array ROWS are deliberately not narrowed here; see the
+// KindArray arm of serializeArray.
+func (g *gen) elemTrimExpr(val string, elem ir.Kind, fixed bool) string {
+	if !fixed {
+		return val
+	}
+	switch elem {
+	case ir.KindString, ir.KindBlob:
+		return fmt.Sprintf("_trim_seq(&%s, |_x| _x.is_empty())", val)
+	case ir.KindStruct, ir.KindUnion:
+		return fmt.Sprintf("_trim_seq(&%s, |_x| _x.is_default())", val)
+	}
+	return val
 }
 
 // trimExpr renders the `&[T]` argument for a native array write, applying the
@@ -640,24 +846,34 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 		// A string element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() { let _ = os.write_str(%s as Id, %s); } }", ind, iv, ev, val, ev, iv, ev)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() { let _ = os.write_str(%s as Id, %s); } }", ind, iv, ev, g.elemTrimExpr(val, elem, fixed), ev, iv, ev)
 		f.line("%slet _ = os.%s();", ind, seqEnd)
 	case ir.KindBlob:
 		// A blob element is a leaf: omit it when equal to the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() { let _ = os.write_blob(%s as Id, %s); } }", ind, iv, ev, val, ev, iv, ev)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() { let _ = os.write_blob(%s as Id, %s); } }", ind, iv, ev, g.elemTrimExpr(val, elem, fixed), ev, iv, ev)
 		f.line("%slet _ = os.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
-		// An ELEMENT is framed unconditionally: dropping an all-default one would
-		// leave an id gap and change the decoded length, not just the bytes (S5.1).
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, g.elemTrimExpr(val, elem, fixed))
+		// An INTERIOR element is framed unconditionally: dropping it would leave an
+		// id gap and change the decoded length, not just the bytes (S5.1). The
+		// TRAILING all-default run is already gone -- the loop runs to M, not to
+		// len (S3/S5.1) -- and M == 0 writes no child at all, so the lazily-opened
+		// wrapper is dropped and the field is omitted (S2).
 		f.line("%s    let _ = os.write_sequence_begin_lazy(%s as Id); %s.serialize(os); let _ = os.write_sequence_end_keep();", ind, iv, ev)
 		f.line("%s}", ind)
 		f.line("%slet _ = os.%s();", ind, seqEnd)
 	case ir.KindArray:
 		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
+		// Nested-array ROWS are not narrowed (elemTrimExpr is deliberately not
+		// applied here). A row's writer emits an array header unconditionally, so a
+		// row is never "not written" the way a default string element or an
+		// all-default struct element is; dropping a trailing empty row would remove
+		// a child that IS on the wire, and decode has no row refill to put it back,
+		// so the outer array would shorten on every round trip. See docs/generator/
+		// rust.md.
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
 		// A nested row is not a fixed-length *field*, so it keeps every element.
 		g.serializeArray(f, ind+"    ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, false, depth+1)

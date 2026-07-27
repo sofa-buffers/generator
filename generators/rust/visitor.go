@@ -38,6 +38,15 @@ type frame struct {
 	// also bounds an over-index heap-amplification fill. Set on the array frames
 	// (fkSeqArr / fkStructArr / fkArrArr).
 	cap int64
+	// ixVar is the visitor-state field holding the CURRENT element index of a
+	// fkStructArr frame (generator#247). The element id IS the array index (§5.1),
+	// and the flat visitor has no child-visitor object to hold that index for it,
+	// so the descended element location addresses its object as
+	// `<path>[self.<ixVar>]`. One field per frame rather than a shared stack: a
+	// location can only be active once at a time, so its index needs no depth
+	// arithmetic. It is part of the persistent visitor state because an element can
+	// straddle a chunk boundary in the incremental decoder.
+	ixVar string
 	// emax is the fkSeqArr string/blob element's schema maxlen L (-1 == no bound):
 	// an element whose wire byte length exceeds L is INVALID (MESSAGE_SPEC §7.1),
 	// rejected before the read, never truncated.
@@ -78,17 +87,52 @@ func overIndexGuard(cap int64) string {
 	return fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", cap)
 }
 
-// overIndexMark is the sequence_begin variant of overIndexGuard for struct/union
-// and nested-array wrapper elements: those append in arrival order (dense, no
-// id-keyed growth, so no amplification), so the fresh element is still pushed —
-// keeping the descended element location's last_mut() valid — but an id >= N
-// marks the decode INVALID (§5.1/§7). std profile only; on no_std the heapless
-// Vec<_, N> is capacity-bounded and drops the element (issue #126).
+// overIndexMark is the sequence_begin variant of overIndexGuard for nested-array
+// wrapper elements: those append in arrival order (dense, no id-keyed growth, so
+// no amplification), so the fresh row is still pushed — keeping the descended
+// element location's last_mut() valid — but an id >= N marks the decode INVALID
+// (§5.1/§7). std profile only; on no_std the heapless Vec<_, N> is
+// capacity-bounded and drops the element (issue #126).
 func (g *gen) overIndexMark(cap int64) string {
 	if g.noStd || cap < 0 {
 		return ""
 	}
 	return fmt.Sprintf("if id as usize >= %d { self.inv = true; } ", cap)
+}
+
+// elemFill default-fills a decoded wrapper array out to the schema count N when
+// its sequence scope closes (MESSAGE_SPEC §5.1: the length "is N for every target
+// -- a growable-list target MUST default-fill to N exactly like a pre-sized
+// one"). It is also what makes the §3/§5.1 trailing elision LOSSLESS: without it
+// the encoder's narrowing would not re-shape the bytes, it would SHORTEN the
+// array on every round trip. Empty for a dynamic array (cap == -1), whose length
+// is highest-present-id + 1 and which must therefore never be filled.
+//
+// The filled tail is byte-neutral on re-encode: a default string/blob element is
+// omitted individually and a trailing all-default struct element is narrowed away
+// again, so the wire is unchanged and only the decoded VALUE gains the length
+// §5.1 requires. Under no_std push can fail (fixed capacity), so the loop stops
+// when the length stops growing rather than spinning.
+func (g *gen) elemFill(path string, cap int64) string {
+	if cap < 0 {
+		return ""
+	}
+	if g.noStd {
+		return fmt.Sprintf("while %s.len() < %d { let _n = %s.len(); let _ = %s.push(Default::default()); if %s.len() == _n { break; } }", path, cap, path, path, path)
+	}
+	return fmt.Sprintf("while %s.len() < %d { %s.push(Default::default()); }", path, cap, path)
+}
+
+// ixVarsOf lists the element-index state slots the message's frames need
+// (frame.ixVar), in the order frames() handed them out.
+func ixVarsOf(fs []frame) []string {
+	var out []string
+	for _, fr := range fs {
+		if fr.ixVar != "" {
+			out = append(out, fr.ixVar)
+		}
+	}
+	return out
 }
 
 // isWrapperElem reports whether an array element lowers to a wrapper sequence
@@ -117,6 +161,7 @@ func isNativeArrayElem(k ir.Kind) bool {
 // frames walks a message and returns every sequence container, root first.
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
+	nix := 0 // running number of element-index slots handed out (see frame.ixVar)
 	var walkFields func(loc, path string, fields []*ir.Field)
 	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64)
 
@@ -143,8 +188,15 @@ func (g *gen) frames(m *ir.Message) []frame {
 			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDyn: !elemMaxHas, cap: cap, emax: boundOf(elemMaxHas, elemMax)})
 		case ir.KindStruct, ir.KindUnion:
 			el := loc + "_e"
-			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el, cap: cap})
-			walkFields(el, path+".last_mut().unwrap()", ref.Target.Fields)
+			// The element id IS the array index (§5.1), so the element location
+			// addresses out[id] through the frame's index slot -- it is NOT the last
+			// element pushed. Appending would shorten the array by the size of any
+			// interior id gap, and would decode a REOPENED id as a second element
+			// instead of merging into the first (§7.4). generator#247.
+			ix := fmt.Sprintf("_ix%d", nix)
+			nix++
+			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el, cap: cap, ixVar: ix})
+			walkFields(el, fmt.Sprintf("%s[self.%s]", path, ix), ref.Target.Fields)
 		case ir.KindArray:
 			// The element is an inner array (items). A native inner array is handled
 			// by a single wrapper frame (array_begin pushes a new inner Vec, elements
@@ -383,6 +435,12 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.scalarArray {
 		askipInit += ", afill: 0"
 	}
+	// Element-index slots (generator#247); the field order in a struct literal is
+	// free, so they simply follow the rest of the state.
+	ixVars := ixVarsOf(fs)
+	for _, ix := range ixVars {
+		askipInit += ", " + ix + ": 0"
+	}
 	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false,%s ai: 0%s };", limInit, askipInit)
 	if g.noStd {
 		if needAcc {
@@ -466,7 +524,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// The decoder owns the message and the visitor's persistent state as plain
 	// fields; V borrows them for the duration of one feed and is destructured
 	// afterwards, so nothing here is self-referential.
-	stateFields := g.visitorState(stackCap, needAcc, accType, accNew, arrSkip, use.scalarArray)
+	stateFields := g.visitorState(stackCap, needAcc, accType, accNew, arrSkip, use.scalarArray, ixVars)
 	f.line("    /// Incremental decoder: hold one and feed the message as bytes arrive.")
 	f.line("    ///")
 	f.line("    /// The wire format has no end marker at the top level -- a message ends")
@@ -604,6 +662,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// while it is positive, so an unarmed bare scalar (afill == 0) is skipped.
 	if use.scalarArray {
 		f.line("    afill: usize, // elements still expected by an armed native-array fill (S7.3)")
+	}
+	// The array index of the element each struct/union wrapper array is currently
+	// decoding (generator#247): the element id IS that index (S5.1), and a flat
+	// visitor has no child-visitor object to carry it, so the element location
+	// addresses its object through this slot instead of the last one pushed.
+	for _, ix := range ixVars {
+		f.line("    %s: usize, // current element index of a struct/union wrapper array", ix)
 	}
 	f.line("}")
 	f.blank()
@@ -937,7 +1002,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 					}
 				}
 			case fkStructArr:
-				f.line("            (_Loc::%s, _) => { %s %s_Loc::%s },", fr.loc, g.pushStmt(fr.path, "Default::default()"), g.overIndexMark(fr.cap), fr.elemLoc)
+				// generator#247: the element id IS the array index (§5.1), so the
+				// element is PLACED at out[id] after gap-filling with default
+				// elements -- exactly like the leaf string/blob path above -- and
+				// never appended. The over-index reject runs FIRST, so it bounds the
+				// gap-fill (and, on no_std, keeps the index inside the heapless
+				// capacity); returning early leaves cur on the array frame, which the
+				// element's own sequence_end pops back off the already-pushed stack.
+				f.line("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
+					fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
 			case fkArrArr:
 				f.line("            (_Loc::%s, _) => { %s %s_Loc::%s },", fr.loc, g.pushStmt(fr.path, g.innerNew()), g.overIndexMark(fr.cap), fr.elemLoc)
 			}
@@ -946,6 +1019,30 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		f.line("        };")
 		f.line("    }")
 		f.line("    fn sequence_end(&mut self) {")
+		// The scope that closes here is self.cur, so a `count: N` wrapper array is
+		// default-filled back out to N before the pop (§5.1) -- the prerequisite the
+		// encoder's trailing-run narrowing (generator#248) needs to stay lossless.
+		// Nested-array rows are excluded: their writer emits every row
+		// unconditionally, so filling would add rows that then reach the wire.
+		var fills []string
+		for _, fr := range fs {
+			if fr.kind != fkSeqArr && fr.kind != fkStructArr {
+				continue
+			}
+			if fill := g.elemFill(fr.path, fr.cap); fill != "" {
+				fills = append(fills, fmt.Sprintf("            _Loc::%s => { %s }", fr.loc, fill))
+			}
+		}
+		if len(fills) > 0 {
+			f.line("        // A `count: N` wrapper array's decoded length is N (S5.1): fill the")
+			f.line("        // elements the canonical wire elided back in as element defaults.")
+			f.line("        match self.cur {")
+			for _, a := range fills {
+				f.line("%s", a)
+			}
+			f.line("            _ => {}")
+			f.line("        }")
+		}
 		f.line("        self.cur = self.stack.pop().unwrap_or(_Loc::Root);")
 		f.line("    }")
 	}
@@ -1159,7 +1256,7 @@ type vField struct {
 // the `&mut message` borrow. It is the single description used for the V
 // construction inside decode/try_decode and for the incremental Decoder, so the
 // two cannot drift apart.
-func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, arrSkip, scalarArray bool) []vField {
+func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, arrSkip, scalarArray bool, ixVars []string) []vField {
 	var out []vField
 	if g.noStd {
 		out = append(out,
@@ -1186,6 +1283,12 @@ func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, a
 	}
 	if scalarArray {
 		out = append(out, vField{"afill", "usize", "0", true})
+	}
+	// One index slot per struct/union wrapper-array frame: the array index of the
+	// element currently being decoded (generator#247). It must survive between feed
+	// calls, since an element can straddle a chunk boundary.
+	for _, ix := range ixVars {
+		out = append(out, vField{ix, "usize", "0", true})
 	}
 	return out
 }

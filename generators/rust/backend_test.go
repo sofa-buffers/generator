@@ -438,8 +438,10 @@ func moduleFromYAML(t *testing.T, src string, cfg map[string]any) string {
 // string/blob element now rejects the same way — the guard fires ahead of the
 // heapless capacity drop, so the verdict matches std instead of silently dropping
 // (issue #149 / F-0013 / MESSAGE_SPEC §7.1). A dynamic array still keeps every
-// index, and a struct-element over-index remains a separate axis (still dropped
-// on no_std, tracked apart from F-0013).
+// index. Since generator#247 a STRUCT element rejects through the same clause on
+// both profiles: it is placed at out[id], so the reject has to run before the
+// gap-fill — which converges the last over-index axis and, on no_std, keeps the
+// index inside the heapless capacity instead of dropping the element silently.
 func TestRustOverIndexWrapperArray(t *testing.T) {
 	const src = `
 version: 1
@@ -454,9 +456,9 @@ messages:
 	// std profile: rejects.
 	m := moduleFromYAML(t, src, map[string]any{})
 	for _, want := range []string{
-		"if id as usize >= 4 { self.inv = true; return; } while self.m.bs.len()",       // bounded string
-		"if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len()",       // bounded blob
-		"self.m.bp.push(Default::default()); if id as usize >= 2 { self.inv = true; }", // bounded struct
+		"if id as usize >= 4 { self.inv = true; return; } while self.m.bs.len()", // bounded string
+		"if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len()", // bounded blob
+		"if id as usize >= 2 { self.inv = true; return; } while self.m.bp.len()", // bounded struct
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("std message.rs missing over-index guard %q", want)
@@ -479,6 +481,7 @@ messages:
 	for _, want := range []string{
 		"if id as usize >= 4 { self.inv = true; return; } while self.m.bs.len()", // bounded string
 		"if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len()", // bounded blob
+		"if id as usize >= 2 { self.inv = true; return; } while self.m.bp.len()", // bounded struct (generator#247)
 	} {
 		if !strings.Contains(mn, want) {
 			t.Errorf("no_std message.rs missing over-index guard %q:\n%s", want, mn)
@@ -875,5 +878,150 @@ messages:
 				t.Errorf("message.rs (%v) missing %q", cfg, want)
 			}
 		}
+	}
+}
+
+// A count:N wrapper array's canonical wire stops at M -- one past its last
+// non-default element (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements")
+// -- and M == 0 leaves the whole wrapper omitted (§2). generator#248: the element
+// loop used to run to len(), framing every trailing all-default element, so a
+// decoder that accepted the non-canonical form re-encoded it unchanged instead of
+// normalising. A DYNAMIC array has no N to refill from, so its trailing default
+// element is significant and must still be framed.
+func TestRustFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+	src := `
+version: 1
+messages:
+  vec:
+    payload:
+      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`
+	// std only: the no_std profile rejects the deliberately count-less `dynamic`.
+	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
+
+	// The fixed array narrows to M before framing anything...
+	if !strings.Contains(got, "for (_i0, _e0) in _trim_seq(&self.fixed, |_x| _x.is_default()).iter().enumerate() {") {
+		t.Errorf("count:N struct array must loop to M, not len:\n%s", got)
+	}
+	// ...while the dynamic one keeps every element, trailing defaults included.
+	if !strings.Contains(got, "for (_i0, _e0) in self.dynamic.iter().enumerate() {") {
+		t.Errorf("dynamic struct array must not be narrowed:\n%s", got)
+	}
+	// An interior all-default element is still framed: only the TRAILING run goes,
+	// and M == 0 leaves the wrapper contentless for the DROPPING closer to omit.
+	if !strings.Contains(got, "for (_i0, _e0) in _trim_seq(&self.fixed, |_x| _x.is_default()).iter().enumerate() {\n            let _ = os.write_sequence_begin_lazy(_i0 as Id); _e0.serialize(os); let _ = os.write_sequence_end_keep();\n        }\n        let _ = os.write_sequence_end();") {
+		t.Errorf("interior framing + dropping field closer expected:\n%s", got)
+	}
+	// The element predicate is generated from the writer's own guard, negated.
+	if !strings.Contains(got, "fn is_default(&self) -> bool {\n        if !(self.k == 0) { return false; }\n        true\n    }") {
+		t.Errorf("the element type must carry the writer's negated guard:\n%s", got)
+	}
+	// A string element is a leaf the writer already omits individually, so
+	// narrowing it changes no bytes -- but it must run off the SAME expression, or
+	// the predicate and the writer could drift.
+	if !strings.Contains(got, "_trim_seq(&self.fstrs, |_x| _x.is_empty())") {
+		t.Errorf("count:N string array must be narrowed through the shared helper:\n%s", got)
+	}
+}
+
+// The narrowing helper and the is_default predicate are emitted only for schemas
+// that need them: a footprint build must not carry a predicate no writer calls.
+func TestRustTrimHelperIsGatedOnUse(t *testing.T) {
+	noArrays := moduleFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+      s: { id: 1, type: struct, fields: { k: { id: 0, type: u32 } } }
+`, map[string]any{"corelib": "rs"})
+	if strings.Contains(noArrays, "_trim_seq") || strings.Contains(noArrays, "fn is_default") {
+		t.Errorf("a schema with no count:N wrapper array must carry neither:\n%s", noArrays)
+	}
+	// A DYNAMIC wrapper array is never narrowed, so it needs neither.
+	dyn := moduleFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      d: { id: 0, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+`, map[string]any{"corelib": "rs"})
+	if strings.Contains(dyn, "_trim_seq") || strings.Contains(dyn, "fn is_default") {
+		t.Errorf("a dynamic wrapper array must not be narrowed:\n%s", dyn)
+	}
+}
+
+// generator#247: a wrapper array's element id IS the array index (§5.1), so an
+// element is PLACED at dest[id] after gap-filling -- never appended. Appending
+// shortened the array by the size of any interior id gap and decoded a REOPENED
+// id as a second element instead of merging into the first (§7.4). The leaf
+// string/blob path next to it always got this right.
+//
+// The N-fill when the sequence scope closes is what makes the §3/§5.1 trailing
+// elision lossless: without it, re-encoding a decoded fixed array shortens it on
+// every round trip.
+func TestRustWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+	src := `
+version: 1
+messages:
+  vec:
+    payload:
+      objs: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } } }
+      strs: { id: 1, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`
+	for _, cfg := range []map[string]any{
+		{"corelib": "rs"}, // std
+		{},                // no_std, heapless
+		{"corelib": "rs-no-std", "allow_dynamic": true}, // no_std, alloc
+	} {
+		got := moduleFromYAML(t, src, cfg)
+		// Placement, not append: gap-fill to id, then descend into out[id]. The
+		// over-index reject runs first, so it bounds the fill.
+		if !strings.Contains(got, "(_Loc::Root_objs, _) => { if id as usize >= 4 { self.inv = true; return; } while self.m.objs.len() <= id as usize {") {
+			t.Errorf("(%v) struct element must gap-fill under the over-index guard:\n%s", cfg, got)
+		}
+		if !strings.Contains(got, "self._ix0 = id as usize; _Loc::Root_objs_e },") {
+			t.Errorf("(%v) struct element must record the element id as its index:\n%s", cfg, got)
+		}
+		// Every read of the element addresses out[id], not the last element pushed.
+		if !strings.Contains(got, "self.m.objs[self._ix0].k") {
+			t.Errorf("(%v) element fields must be addressed by index:\n%s", cfg, got)
+		}
+		// The defect this replaced: append + last_mut() ignored the id entirely.
+		if strings.Contains(got, "self.m.objs.last_mut().unwrap()") {
+			t.Errorf("(%v) struct elements must not be appended id-blind:\n%s", cfg, got)
+		}
+		// The index survives between feed calls -- an element can straddle a chunk.
+		if !strings.Contains(got, "_ix0: usize,") || !strings.Contains(got, "self._ix0 = _ix0;") {
+			t.Errorf("(%v) the element index must be part of the persistent state:\n%s", cfg, got)
+		}
+		// N-fill when the sequence scope closes, for BOTH element kinds.
+		if !strings.Contains(got, "_Loc::Root_objs => { while self.m.objs.len() < 4 {") {
+			t.Errorf("(%v) a count:N struct array must be filled to N on sequence_end:\n%s", cfg, got)
+		}
+		if !strings.Contains(got, "_Loc::Root_strs => { while self.m.strs.len() < 3 {") {
+			t.Errorf("(%v) a count:N string array must be filled to N on sequence_end:\n%s", cfg, got)
+		}
+	}
+}
+
+// A dynamic (count-less) wrapper array has no N to refill from: its length is
+// highest-present-id + 1, so it must never be default-filled.
+func TestRustDynamicWrapperArrayIsNeverFilled(t *testing.T) {
+	got := moduleFromYAML(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      objs: { id: 0, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+`, map[string]any{"corelib": "rs"})
+	if strings.Contains(got, "_Loc::Root_objs => { while self.m.objs.len() <") {
+		t.Errorf("a dynamic wrapper array must not be filled:\n%s", got)
+	}
+	// It still places by id -- #247 is independent of the count.
+	if !strings.Contains(got, "self._ix0 = id as usize; _Loc::Root_objs_e },") {
+		t.Errorf("a dynamic wrapper array must still place elements by id:\n%s", got)
 	}
 }
