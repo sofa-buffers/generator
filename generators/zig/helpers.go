@@ -292,8 +292,10 @@ func (g *gen) zigFieldDefault(f *ir.Field) string {
 		// A native scalar array is a leaf: materialize its schema default so an
 		// omitted default array reconstructs correctly. A fixed-count native
 		// array is a stack [N]T; a dynamic one stays a slice. Composite arrays
-		// are wrapper sequences whose declared default is not materialized, so they stay
-		// an empty slice -- which is what makes their dropping closer correct (§2).
+		// are wrapper sequences whose declared default is not materialized, so a
+		// DYNAMIC one stays an empty slice -- which is what makes their dropping
+		// closer correct (§2). A fixed-count one is materialized to N ELEMENT
+		// defaults (see zigFixedWrapperDefault).
 		if elem, n, ok := g.fixedNativeArray(f); ok {
 			return g.zigFixedArrayDefault(f, elem, n)
 		}
@@ -301,6 +303,10 @@ func (g *gen) zigFieldDefault(f *ir.Field) string {
 			if parts, ok := g.zigNativeArrayParts(f); ok {
 				return "&.{ " + parts + " }"
 			}
+			return "&.{}"
+		}
+		if lit, ok := g.zigFixedWrapperDefault(f); ok {
+			return lit
 		}
 		return "&.{}"
 	default: // struct/union: all children default, so .{} is right
@@ -392,6 +398,58 @@ func (g *gen) zigFixedArrayDefault(f *ir.Field, elem string, n int64) string {
 		return ".{ " + strings.Join(parts, ", ") + " }"
 	}
 	return fmt.Sprintf("@splat(%s)", zero)
+}
+
+// zigFixedWrapperDefault renders the initializer of a `count: N` WRAPPER array
+// (string/blob/struct/union/nested-row elements): the N element defaults, as
+// `&([_][]const u8{""} ** 3)`. ("", false) for a dynamic (count-less) one, which
+// has no N and stays `&.{}`.
+//
+// A count:N array's value is N elements long whether or not the field ever
+// reaches the wire (MESSAGE_SPEC S5.1: the length "is N for every target"). The
+// native twin is materialized by its own type -- `nums: [3]u32 = @splat(0)` --
+// so the two kinds must agree here, at construction, or the same schema decodes
+// at length 3 for `nums` and 0 for `strs`. The decode-side fill (fillTo) cannot
+// close that gap alone: it hangs off sequenceEnd, so it only fires for a
+// sequence that was actually OPENED, which left the field's own absent forms
+// disagreeing -- omitted stayed empty while an explicitly-empty wrapper refilled
+// to N.
+//
+// Elements are the ELEMENT default (zero value / empty slice / all-default
+// object), matching the gap-fill the collectors already perform (frame.elemFill);
+// a declared per-element default is not materialized anywhere today.
+//
+// This literal is comptime-const, hence read-only, and it MUST stay untouched by
+// decode. It is: every write path into a wrapper array sits behind
+// sequenceBegin, which resets the field to `&.{}` first (see emitSequence), so
+// the const is only ever replaced, never written through.
+//
+// The `**` repetition keeps the emitted source O(1) in N -- the slice analogue
+// of the `@splat` a fixed NATIVE array gets -- so a large `count` costs a
+// comptime array, not N lines of generated code. It restates the element type,
+// which cannot drift: zigType builds the field's own `[]const T` from the same
+// zigArrayElem call.
+func (g *gen) zigFixedWrapperDefault(f *ir.Field) (string, bool) {
+	if !f.HasCount || f.Count <= 0 {
+		return "", false
+	}
+	elem := g.zigArrayElem(f.Elem, f.ElemRef, f.ElemItems)
+	return fmt.Sprintf("&([_]%s{%s} ** %d)", elem, zigWrapperElemZero(f.Elem), f.Count), true
+}
+
+// zigWrapperElemZero is one wrapper-array element's default literal: a borrowed
+// byte slice for string/blob, the all-default object for struct/union, the empty
+// slice for a nested row. It mirrors frame.elemFill, the value the decode-side
+// gap-fill writes into an id the wire omitted.
+func zigWrapperElemZero(elem ir.Kind) string {
+	switch elem {
+	case ir.KindStruct, ir.KindUnion:
+		return ".{}"
+	case ir.KindArray:
+		return "&.{}"
+	default: // string/blob: []const u8
+		return `""`
+	}
 }
 
 func (g *gen) zigIntDefault(f *ir.Field) string {

@@ -860,3 +860,74 @@ messages:
 		t.Errorf("a dynamic wrapper array must never be default-filled:\n%s", m)
 	}
 }
+
+// A `count: N` array's value is N elements long whether or not the field ever
+// reaches the wire (MESSAGE_SPEC §5.1: the length "is N for every target"). The
+// native twin is materialized by its own type -- `nums: [3]u32 = @splat(0)` --
+// so a fixed-count WRAPPER array must be materialized to N element defaults in
+// the very same place, the field declaration.
+//
+// Without it the field is self-inconsistent, because the decode-side fill hangs
+// off sequenceEnd and so only fires for a sequence that was actually OPENED: an
+// absent field decoded at length 0 while one element on the wire, or an
+// explicitly-empty wrapper, decoded at N.
+//
+// A DYNAMIC (count-less) wrapper array has no N and must stay empty.
+func TestZigFixedWrapperArrayIsMaterializedToN(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      blobs: { id: 1, type: array, items: { type: blob, count: 2, maxlen: 4 } }
+      objs:  { id: 2, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }
+      rows:  { id: 3, type: array, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } }
+      nums:  { id: 4, type: array, items: { type: u32, count: 3 } }
+      dstrs: { id: 5, type: array, items: { type: string, maxlen: 8 } }
+      dobjs: { id: 6, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	for _, want := range []string{
+		// The element default is the one the collectors gap-fill with: an empty
+		// borrowed slice, the all-default object, the empty row. `**` keeps the
+		// emitted source O(1) in N, like the native array's @splat.
+		`    strs: []const []const u8 = &([_][]const u8{""} ** 3),`,
+		`    blobs: []const []const u8 = &([_][]const u8{""} ** 2),`,
+		"    objs: []const VecObjsElem = &([_]VecObjsElem{.{}} ** 2),",
+		"    rows: []const []const []const u8 = &([_][]const []const u8{&.{}} ** 2),",
+		// the native twin, unchanged -- this is the shape the wrapper now matches
+		"    nums: [3]u32 = @splat(0),",
+		// A dynamic wrapper array has no N: it stays the empty collection.
+		"    dstrs: []const []const u8 = &.{},",
+		"    dobjs: []const VecDobjsElem = &.{},",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing %q:\n%s", want, m)
+		}
+	}
+
+	// The materialized literal is comptime-const, hence read-only. Decode may
+	// only ever REPLACE it, which is what sequenceBegin's reset guarantees --
+	// every write path into a wrapper array sits behind it.
+	for _, want := range []string{
+		"0 => blk: { self.m.strs = &.{}; break :blk .root_strs; },",
+		"2 => blk: { self.m.objs = &.{}; break :blk .root_objs; },",
+		"3 => blk: { self.m.rows = &.{}; break :blk .root_rows; },",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing the sequenceBegin reset %q:\n%s", want, m)
+		}
+	}
+
+	// Encoding is untouched: an all-default fixed array still narrows to M = 0,
+	// so its lazily-opened wrapper is dropped and the field stays off the wire.
+	if !strings.Contains(m, "if (_trimSlices(u8, self.strs).len != 0) return false;") {
+		t.Errorf("the materialized default must still test as default:\n%s", m)
+	}
+}

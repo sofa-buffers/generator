@@ -45,7 +45,7 @@ integer, shared with the Rust backend's rules so all ports agree.
 | string / blob | `[]const u8` |
 | native numeric/enum/bool/bitfield array (`count N`) | `[N]T` (stack, allocation-free) |
 | native array without `count` | `[]const T` |
-| string/blob/struct/union/nested array | `[]const T` |
+| string/blob/struct/union/nested array | `[]const T` (with `count: N`, materialized to N element defaults) |
 | struct / union | the generated struct type |
 
 Per message:
@@ -144,6 +144,34 @@ the encoder's trailing-run elision above **lossless**: without it, re-encoding a
 decoded fixed array would not re-normalise it, it would shorten it on every
 round trip. A dynamic array is never filled — its length is *highest present id
 + 1*.
+
+That fill hangs off `sequenceEnd`, so it can only reach a sequence that was
+actually **opened** — which is why the `count: N` length also has to be
+established at **construction**. A fixed-count *native* array always had it: its
+storage IS a `[N]T`, materialized by the field declaration
+(`nums: [3]u32 = @splat(0)`). A fixed-count *wrapper* array is a slice, so its
+declaration materializes the same length explicitly, as N element defaults:
+
+```zig
+strs: []const []const u8 = &([_][]const u8{""} ** 3),   // count: 3, string elements
+objs: []const VecObjsElem = &([_]VecObjsElem{.{}} ** 2), // count: 2, struct elements
+dyn:  []const []const u8 = &.{},                         // count-less: no N, stays empty
+```
+
+The elements are the ELEMENT default — the same value the gap-fill above writes
+into an id the wire omitted; a declared per-element `default` is not
+materialized anywhere today. The `**` repetition is the slice analogue of the
+native array's `@splat`: the emitted source stays O(1) in `N`. Without this the
+field disagreed with itself and with the native array beside it: absent decoded
+at length 0 while one element on the wire, or an explicitly-empty wrapper,
+decoded at N.
+
+The literal is comptime-const, hence read-only, and decode never writes through
+it: every store into a wrapper array sits behind `sequenceBegin`, which resets
+the field to `&.{}` first (an explicit empty wrapper must override a non-empty
+value), so the const is only ever replaced. Encoding is unaffected — an
+all-default fixed array still narrows to `M = 0`, so its lazily-opened wrapper is
+dropped and the field stays off the wire (§2).
 
 ## Unbounded fields
 

@@ -467,9 +467,11 @@ func (g *gen) emitMarshalArray(f *zfile, fld *ir.Field, acc string) {
 	//
 	// The field-level wrapper frame is dropped when no element is written, and
 	// absence then reconstructs the field's default. That is correct because a
-	// wrapper array's declared `default` is not materialized today (the generated
-	// field initializer is the empty collection), so absent and explicitly-empty
-	// denote the same value. If that gap is ever closed, this call needs a guard
+	// wrapper array's declared `default` is not materialized today: the generated
+	// field initializer is the empty collection for a dynamic array and the N
+	// ELEMENT defaults for a `count: N` one (which sequenceEnd's fill-to-N
+	// reproduces), so absent and explicitly-empty denote the same value either
+	// way. If that gap is ever closed, this call needs a guard
 	// -- `if (value != default) { ... writeSequenceEndKeep(); }` -- so that a
 	// value differing from a non-empty default still reaches the wire as the
 	// empty wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
