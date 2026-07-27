@@ -285,8 +285,8 @@ func TestCppFixedContainers(t *testing.T) {
 		"sofab::FixedBytes<16> bl = {};",                                               // scalar blob -> fixed
 		"sofab::FixedString<8> s = \"\";",                                              // bounded string -> FixedString
 		"std::array<std::uint32_t, 4> nums = {};",                                      // native array unchanged
-		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",                     // blob sequence -> inline
-		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",                    // string sequence -> inline
+		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {{}, {}, {}};",           // blob sequence -> inline, at its count
+		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {{}, {}, {}, {}, {}};",  // string sequence -> inline, at its count
 		"sofab::InlineVector<MPtsElem",                                                 // struct sequence -> inline (prefix)
 		"if (bl != sofab::FixedBytes<16>{}) {",                                         // blob default-compare typed
 		"is.readString(s, _size, 8);",                                                  // FixedString decode, bound carried into the corelib read
@@ -1166,9 +1166,11 @@ func TestCppResetPutsEveryFieldBackInPlace(t *testing.T) {
 	for _, want := range []string{
 		"    void reset() noexcept {",
 		// Every member goes back to the value its DECLARATION carries, so the
-		// reset and the wire-absent value cannot drift apart.
-		"        items = {};",
-		"        names = {};",
+		// reset and the wire-absent value cannot drift apart -- a `count: N`
+		// wrapper array included, which is N elements long at rest just like the
+		// native array below it.
+		"        items = {{}, {}, {}, {}};",
+		"        names = {{}, {}, {}, {}};",
 		"        nums = {7, 8, 9};",
 		"        tag = 3;",
 		// A struct member recurses instead of being assigned a fresh temporary:
@@ -1260,7 +1262,7 @@ func TestCppFixedProfileKeepsItsDecodeShape(t *testing.T) {
 	}
 	for _, want := range []string{
 		"    void reset() noexcept {",
-		"        names = {};",
+		"        names = {{}, {}, {}, {}};",
 		"        tag = 3;",
 		"        sofab::IStreamObject<M> in;",
 		"        if (r.ok()) { out = *in; }",
@@ -1558,5 +1560,97 @@ func TestCppMistypedWrapperElementLeavesNoPhantom(t *testing.T) {
 				t.Errorf("[%s] the gate must be scoped to sequence-shaped elements:\n%s", corelib, h)
 			}
 		})
+	}
+}
+
+// TestCppFixedCountWrapperArrayIsMaterializedToN pins the length a `count: N`
+// wrapper array has at rest.
+//
+// MESSAGE_SPEC §5.1 makes that length N "for every target", and it is not a wire
+// property: it holds whether or not the field ever reaches the wire. The native
+// `count: N` array next to it has always had it — its member declaration carries
+// the padded default literal — but the wrapper one was constructed empty, so one
+// schema had two different answers to the same question:
+//
+//	absent field             -> length 0   (wrong)
+//	one element on the wire   -> length N  (sofabgen::fillTo, after the sequence)
+//	explicitly-empty wrapper  -> length N  (same)
+//
+// The refill can only run once the sequence is actually opened, so closing the
+// gap has to happen at construction. All three storage kinds are checked: the
+// heap profile's std::vector, the c-cpp allow_dynamic std::vector, and the c-cpp
+// inline sofab::InlineVector — whose LOGICAL length starts at 0 even though its
+// inline buffer already has N slots, so it needs the same treatment.
+//
+// A DYNAMIC (count-less) array has no N and must stay empty; the §2 omission of
+// an all-default array is unaffected, since the encoder measures elements
+// (trimEmpty), not the container's size.
+func TestCppFixedCountWrapperArrayIsMaterializedToN(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }\n" +
+		"      blobs: { id: 1, type: array, items: { type: blob, count: 2, maxlen: 4 } }\n" +
+		"      pts:   { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n" +
+		"      nums:  { id: 3, type: array, items: { type: u32, count: 3 } }\n"
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]any
+		want []string
+	}{
+		{"heap", map[string]any{}, []string{
+			"std::vector<std::string> strs = {{}, {}, {}};",
+			"std::vector<std::vector<std::uint8_t>> blobs = {{}, {}};",
+			"std::array<std::uint32_t, 3> nums = {};",
+		}},
+		{"c-cpp-inline", map[string]any{"corelib": "c-cpp"}, []string{
+			"sofab::InlineVector<sofab::FixedString<8>, 3> strs = {{}, {}, {}};",
+			"sofab::InlineVector<sofab::FixedBytes<4>, 2> blobs = {{}, {}};",
+			"std::array<std::uint32_t, 3> nums = {};",
+		}},
+		// allow_dynamic puts the native array in a std::vector too — and that one
+		// has always been written out to all N elements, which is precisely the
+		// precedent the wrapper arrays above now follow.
+		{"c-cpp-dynamic", map[string]any{"corelib": "c-cpp", "allow_dynamic": true}, []string{
+			"std::vector<std::string> strs = {{}, {}, {}};",
+			"std::vector<std::vector<std::uint8_t>> blobs = {{}, {}};",
+			"std::vector<std::uint32_t> nums = {0, 0, 0};",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := genHeader(t, src, "m.hpp", tc.cfg)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			// A struct element's member type is a generated row name, so only its
+			// initializer is pinned; reset() must agree with the declaration.
+			want := append(tc.want, " pts = {{}, {}};", "        strs = {{}, {}, {}};")
+			for _, w := range want {
+				if !strings.Contains(h, w) {
+					t.Errorf("[%s] missing %q:\n%s", tc.name, w, h)
+				}
+			}
+			// The construction default is what an ABSENT field reconstructs to, so
+			// an empty container here IS the length-0 answer.
+			for _, bad := range []string{"strs = {};", "blobs = {};", "pts = {};"} {
+				if strings.Contains(h, bad) {
+					t.Errorf("[%s] a count:N wrapper array must not be constructed empty, found %q:\n%s", tc.name, bad, h)
+				}
+			}
+			// §2 is untouched: an all-default array is still omitted whole, because
+			// the encoder measures ELEMENTS rather than the container's size.
+			if !strings.Contains(h, "if (!(sofabgen::trimEmpty(strs) == 0)) { return false; }") {
+				t.Errorf("[%s] the omission predicate must still count elements:\n%s", tc.name, h)
+			}
+		})
+	}
+
+	// A count-less array has no N to materialize and stays empty. Only the heap
+	// profile accepts one — the c-cpp profile requires every array to be sized.
+	dyn, err := genHeader(t, "version: 1\nmessages:\n  m:\n    payload:\n"+
+		"      strs: { id: 0, type: array, items: { type: string } }\n", "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate dynamic: %v", err)
+	}
+	if !strings.Contains(dyn, "std::vector<std::string> strs = {};") {
+		t.Errorf("a count-less wrapper array has no N and must stay empty:\n%s", dyn)
 	}
 }

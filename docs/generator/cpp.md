@@ -328,6 +328,19 @@ pre-sized one". It is gated on the field actually having been a sequence, so a
 §7.3 skip never materialises N elements out of nothing. A count-less array has no
 N to pad to and is left at highest-present-id + 1.
 
+The refill only reaches a sequence that was *opened*, so the same length is also
+given at **construction**: a `count: N` wrapper array's member declaration (and
+`reset()`) carries N value-initialised elements — `strs = {{}, {}, {}}` — exactly
+as the native `count: N` array beside it has always carried its padded default
+literal. Without it the field disagreed with itself: absent → length 0, one
+element on the wire → N, explicitly-empty wrapper → N. All three storage kinds
+need it, `sofab::InlineVector<T, N>` included: its inline buffer has N slots but
+its *logical* length starts at 0, and the braced form is the only way to set it
+(the container has no `resize()`). A count-less array has no N and stays empty.
+This costs no bytes — §2 omission measures **elements** (`sofabgen::trimEmpty` /
+`trimObjs`), not the container's size, so an all-default array is still dropped
+whole and an all-default message still encodes to zero bytes.
+
 **3. The encoder stops at M.** A `count: N` array's canonical wire carries only
 `[0, M)`, M being one past the last element differing from the element default —
 "even for sequence-form elements" (§3/§5.1). Interior all-default elements keep

@@ -386,12 +386,29 @@ func (g *gen) cppDefault(f *ir.Field) string {
 	case ir.KindArray:
 		// A native scalar array is a leaf: materialize its schema default at
 		// construction (zero-filled when none) so an omitted default array
-		// reconstructs correctly and serialize can compare against it. A
-		// composite/dynamic-element array is a wrapper sequence whose declared default
-		// is not materialized (§2) and
-		// is left empty.
+		// reconstructs correctly and serialize can compare against it.
 		if isNativeArrayElem(f.Elem) {
 			return g.cppNativeArrayBraces(f)
+		}
+		// A composite-element array is a wrapper sequence. Its declared default is
+		// still not materialized (§2), but its LENGTH is not a wire property: a
+		// `count: N` array holds N elements whether or not the field ever reaches
+		// the wire (MESSAGE_SPEC §5.1 — "N for every target"). The native array
+		// next to it has always been materialized here; the wrapper one was not,
+		// so the two disagreed about the same schema, and the field disagreed with
+		// itself: an omitted field stayed empty while both an explicitly-empty
+		// wrapper and a partially-transmitted one refilled to N through
+		// sofabgen::fillTo, which only runs once the sequence is actually opened.
+		//
+		// Elements are value-initialized (`{}`), matching that fill's
+		// emplace_back() and the collectors' gap-fill: a declared per-element
+		// default is not materialized anywhere today. The braced form is what both
+		// storage kinds accept — std::vector takes the initializer_list, and
+		// sofab::InlineVector<T,N> routes it through its assign(), which is the
+		// only way to give that container a logical length (it has no resize()).
+		// A dynamic (count-less) array has no N and stays empty.
+		if f.HasCount && f.Count > 0 {
+			return cppWrapperArrayBraces(f.Count)
 		}
 		return "{}"
 	}
@@ -416,6 +433,17 @@ func (g *gen) cppNativeArrayBraces(f *ir.Field) string {
 		for int64(len(parts)) < f.Count {
 			parts = append(parts, zero)
 		}
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// cppWrapperArrayBraces renders a `count: N` wrapper array's construction value:
+// N value-initialized elements ({{}, {}, ...}). See cppDefault for why the
+// length, unlike the element values, is materialized.
+func cppWrapperArrayBraces(n int64) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = "{}"
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
