@@ -70,7 +70,7 @@ func TestPythonStructural(t *testing.T) {
 		"class MyfirstmessageSomeenum(IntEnum):",
 		"def to_jsonable(self)",
 		"e.write_sequence_begin_lazy(", // every sequence opens lazily (MESSAGE_SPEC S2)
-		"if fld.count > 4:", // over-count scalar array rejected at the count header (generator#100/#216)
+		"if fld.count > 4:",            // over-count scalar array rejected at the count header (generator#100/#216)
 		`raise SofaDecodeError("someuintarray: array count above schema capacity 4")`,
 	} {
 		if !strings.Contains(mod, want) {
