@@ -203,18 +203,24 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.line("#include <span>")
 	f.line("#include <cstring>")
 	f.line("#include <cstddef>")
+	if g.needsSeqHelpers(m) {
+		// <type_traits> backs the sofabgen:: wrapper-sequence helpers below.
+		f.line("#include <type_traits>")
+	}
 	f.line("#include %q", "sofab/sofab.hpp")
 	f.blank()
 	f.line("static_assert(sofab::API_VERSION == 1,")
 	f.line("    \"SofaBuffers: generated against C++ API v1, but the linked corelib differs.\");")
 	f.blank()
+	// Scalar-array and leaf helpers live in the corelib on BOTH C++ paths --
+	// sofab::StringSeq / BlobSeq / trimTail in corelib-cpp, sofab::FixedStringSeq /
+	// FixedBlobSeq / trimTail in corelib-c-cpp. The WRAPPER-ARRAY element helpers
+	// do not: the schema `count` N is what decides placement, refill and the
+	// trailing-run trim, and N is known here (CORELIB_PLAN §7 split), so they are
+	// generated.
+	g.emitSeqHelpers(f, m)
 	f.line("namespace %s {", g.ns)
 	f.blank()
-	// Decode helpers live in the corelib on BOTH C++ paths -- sofab::StringSeq /
-	// BlobSeq / MessageSeq / trimTail in corelib-cpp, sofab::FixedStringSeq /
-	// FixedBlobSeq / FixedMessageSeq / trimTail in corelib-c-cpp. They describe
-	// how the wire format is collected, not anything about the user's message, so
-	// the generated header only references them.
 
 	// Receiver-side decode limits (generator#102), baked from the sofabgen config.
 	// Macros (not inline constexpr) so multiple generated headers agree in one TU;
@@ -262,6 +268,162 @@ func (g *gen) header(m *ir.Message) []byte {
 	g.emitStruct(f, exported(m.Name), m.Summary, m.Fields, true)
 	f.line("} // namespace %s", g.ns)
 	return f.bytes()
+}
+
+// needsSeqHelpers reports whether this header contains a wrapper array -- a
+// string/blob/struct/union/nested-array array, which lowers to a sequence whose
+// child ids are the element indexes. Only such a header needs the sofabgen::
+// helper block; a schema of scalars and native arrays never names it.
+func (g *gen) needsSeqHelpers(m *ir.Message) bool {
+	has := func(fields []*ir.Field) bool {
+		for _, fld := range fields {
+			if fld.Kind == ir.KindArray && !isNativeArrayElem(fld.Elem) {
+				return true
+			}
+		}
+		return false
+	}
+	if has(m.Fields) {
+		return true
+	}
+	for _, key := range g.reachable(m) {
+		nt := g.schema.Named[key]
+		if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && has(nt.Fields) {
+			return true
+		}
+	}
+	return false
+}
+
+// emitSeqHelpers writes the wrapper-array element helpers shared by every
+// generated header: the element collector, the fixed-count refill, and the two
+// trailing-run trims the encoder narrows with.
+//
+// They are generated rather than taken from the corelib because each of them is
+// decided by the schema `count` N, which only the generator knows
+// (CORELIB_PLAN §7): the corelib collectors bound the element index but have no
+// N to refill to, and the corelib-c-cpp ones append in arrival order because the
+// C wrapper never learns the index means anything.
+//
+// The block is emitted at global scope in its own `sofabgen` namespace and is
+// macro-guarded, since several generated headers -- possibly with different
+// `namespace` settings -- can be included into one translation unit.
+func (g *gen) emitSeqHelpers(f *hfile, m *ir.Message) {
+	if !g.needsSeqHelpers(m) {
+		return
+	}
+	f.line("#ifndef SOFABGEN_WRAPPER_SEQ_HELPERS")
+	f.line("#define SOFABGEN_WRAPPER_SEQ_HELPERS")
+	f.line("/// Wrapper-array element helpers shared by every sofabgen-generated header.")
+	f.line("namespace sofabgen {")
+	f.blank()
+	f.line("/**")
+	f.line(" * @brief Collects an array of strings, blobs, structs, unions or rows, placing")
+	f.line(" *        each element at the index its own id names.")
+	f.line(" *")
+	f.line(" * Such an array travels as a sequence whose child id IS the element's index, so")
+	f.line(" * an element is stored at `dest[id]` -- never appended. The ids may have gaps:")
+	f.line(" * an element equal to the element default is left off the wire, and the gap it")
+	f.line(" * leaves is filled with that default. Appending instead would shorten the array")
+	f.line(" * by the size of every gap, and would turn a repeated element id into a second")
+	f.line(" * element instead of continuing the first one.")
+	f.line(" *")
+	f.line(" * An index at or past the schema `count` is rejected as a malformed message,")
+	f.line(" * before the container grows -- which also bounds the fill above, since a")
+	f.line(" * fixed-capacity container cannot grow past its capacity to reach the index.")
+	f.line(" *")
+	f.line(" * @tparam Container Destination container; its `value_type` is the element type.")
+	f.line(" */")
+	f.line("template <typename Container>")
+	f.line("struct WrapperSeq : sofab::IStreamMessage {")
+	f.line("    using Elem = typename Container::value_type;")
+	f.line("    Container *out = nullptr;  ///< Destination, bound by the generated read.")
+	f.line("    long cap = -1;             ///< Schema `count`, or -1 when the array has none.")
+	f.blank()
+	f.line("    /**")
+	f.line("     * @brief Empty the destination before collecting into it.")
+	f.line("     *")
+	f.line("     * The sequence IS the array's value, so a field id occurring twice replaces")
+	f.line("     * the array rather than extending it. This runs only once the field is known")
+	f.line("     * to be a sequence, so an occurrence skipped for a contradicting wire type")
+	f.line("     * cannot wipe a valid earlier one.")
+	f.line("     */")
+	f.line("    void prepare() noexcept { if (out != nullptr) { out->clear(); } }")
+	f.blank()
+	f.line("    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t count) noexcept override {")
+	f.line("        /* The two corelibs put the wire tag enum in different scopes; decltype")
+	f.line("         * names neither. */")
+	f.line("        using Tag = decltype(is.wire());")
+	f.line("        if constexpr (std::is_base_of_v<sofab::IStreamMessage, Elem>) {")
+	f.line("            /* An element whose wire type contradicts the declared one is skipped")
+	f.line("             * exactly like an unknown id -- which means it must leave the")
+	f.line("             * container untouched, so the decision comes before the fill below. */")
+	f.line("            if (is.wire() != Tag::SequenceStart) { return; }")
+	f.line("        }")
+	f.line("        if (cap >= 0 && static_cast<long>(id) >= cap) { is.invalidate(); return; }")
+	f.line("        while (out->size() <= static_cast<std::size_t>(id)) { (void)out->emplace_back(); }")
+	f.line("        Elem &row = (*out)[static_cast<std::size_t>(id)];")
+	f.line("        /* A row that is itself a count-less array is filled only up to its")
+	f.line("         * current size, so size it to the row's element count first. Struct,")
+	f.line("         * union and fixed-length rows have no resize(). */")
+	f.line("        if constexpr (requires { row.resize(count); } && !std::is_base_of_v<sofab::IStreamMessage, Elem>) {")
+	f.line("            row.resize(count);")
+	f.line("        }")
+	f.line("        is.read(row);")
+	f.line("    }")
+	f.line("};")
+	f.blank()
+	f.line("/**")
+	f.line(" * @brief Pad a decoded array back out to the schema `count`.")
+	f.line(" *")
+	f.line(" * An array declared with a `count` always has exactly that many elements, so a")
+	f.line(" * growable container is padded with default elements to match. That is also")
+	f.line(" * what makes the encoder's dropping of the trailing default run lossless:")
+	f.line(" * without the padding, a decode/encode cycle would shorten the array every")
+	f.line(" * time. An array without a `count` has no length to pad to and is left alone --")
+	f.line(" * its length is one past the highest element index present.")
+	f.line(" */")
+	f.line("template <typename Container>")
+	f.line("void fillTo(Container &out, std::size_t n) noexcept {")
+	f.line("    for (std::size_t i = out.size(); i < n; ++i) { (void)out.emplace_back(); }")
+	f.line("}")
+	f.blank()
+	f.line("/**")
+	f.line(" * @brief How many elements of a struct/union array reach the wire: one past the")
+	f.line(" *        last element that differs from the element default.")
+	f.line(" *")
+	f.line(" * An array declared with a `count` stops there, since the decoder pads the rest")
+	f.line(" * back with defaults. Only the TRAILING run is dropped -- an interior")
+	f.line(" * all-default element is still written, because it is the presence of the")
+	f.line(" * elements that carries the ones after it to their indexes. A result of 0")
+	f.line(" * writes nothing at all, which leaves the whole array field off the wire.")
+	f.line(" */")
+	f.line("template <typename Container>")
+	f.line("std::size_t trimObjs(const Container &a) noexcept {")
+	f.line("    std::size_t m = a.size();")
+	f.line("    while (m > 0 && a[m - 1]._isDefault()) { --m; }")
+	f.line("    return m;")
+	f.line("}")
+	f.blank()
+	f.line("/**")
+	f.line(" * @brief trimObjs for the element kinds whose default is emptiness: strings,")
+	f.line(" *        blobs and array rows.")
+	f.line(" *")
+	f.line(" * Such an element is a leaf the writer already leaves out one by one when it is")
+	f.line(" * empty, so narrowing the trailing run does not change the bytes. It exists so")
+	f.line(" * that the \"is this whole field still at its default?\" test is computed from")
+	f.line(" * the very same expression the writer loops over, and cannot drift from it.")
+	f.line(" */")
+	f.line("template <typename Container>")
+	f.line("std::size_t trimEmpty(const Container &a) noexcept {")
+	f.line("    std::size_t m = a.size();")
+	f.line("    while (m > 0 && a[m - 1].size() == 0) { --m; }")
+	f.line("    return m;")
+	f.line("}")
+	f.blank()
+	f.line("} // namespace sofabgen")
+	f.line("#endif // SOFABGEN_WRAPPER_SEQ_HELPERS")
+	f.blank()
 }
 
 func (g *gen) emitEnum(f *hfile, nt *ir.NamedType) {
@@ -588,6 +750,8 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.blank()
 	}
 
+	g.emitIsDefault(f, fields)
+
 	// serialize: each write is a statement (Result is non-assignable, used only
 	// for chaining); return a no-op writeIf so the signature is satisfied.
 	f.line("    /**")
@@ -729,6 +893,94 @@ func fieldDoc(fld *ir.Field) string {
 	}
 }
 
+// emitIsDefault writes the object's all-default predicate. It is the exact
+// negation of what serialize writes: the object is default iff serialize would
+// emit no child at all, evaluated per field and recursively (MESSAGE_SPEC §2).
+//
+// Every generated struct/union/message carries it so that a `count: N` wrapper
+// array can find M -- one past its last non-default element -- BEFORE opening
+// the element loop (§3/§5.1). The lazy framing already answers "was any child
+// written?" for a FIELD, but only after the fact; an ELEMENT has to be judged
+// first, which is why the test is made explicit here.
+//
+// Keep this in lockstep with emitSerialize: a predicate that disagrees with the
+// writer either drops a non-default element or keeps a default one.
+func (g *gen) emitIsDefault(f *hfile, fields []*ir.Field) {
+	f.line("    /**")
+	f.line("     * @brief True when every field still holds its declared default.")
+	f.line("     *")
+	f.line("     * The exact negation of @ref serialize: an object is default when")
+	f.line("     * serialize would write nothing at all for it, tested per field and")
+	f.line("     * recursively. Used to find the last non-default element of an array")
+	f.line("     * declared with a `count`, whose encoding stops one past it.")
+	f.line("     */")
+	f.line("    bool _isDefault() const noexcept {")
+	for _, fld := range fields {
+		f.line("        if (!(%s)) { return false; }", g.fieldIsDefaultExpr(fld))
+	}
+	f.line("        return true;")
+	f.line("    }")
+	f.blank()
+}
+
+// fieldIsDefaultExpr is the boolean expression "this field equals its default",
+// i.e. the negation of emitSerialize's write guard for the same field.
+func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
+	acc := cppIdent(fld.Name)
+	switch fld.Kind {
+	case ir.KindBlob:
+		return fmt.Sprintf("%s == %s%s", acc, g.cppType(fld), g.cppDefault(fld))
+	case ir.KindStruct, ir.KindUnion:
+		// Lazily framed: the frame survives iff the nested serialize wrote a
+		// child, which is exactly "the nested object is not default".
+		return fmt.Sprintf("%s._isDefault()", acc)
+	case ir.KindArray:
+		if isNativeArrayElem(fld.Elem) {
+			// The same expression emitSerializeArray guards the whole field with.
+			def := g.cppArrayContainer(fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax) + g.cppDefault(fld)
+			return fmt.Sprintf("%s == %s", acc, def)
+		}
+		// Wrapper array: no child is written iff M == 0. fld.HasCount must be
+		// threaded through unchanged -- narrowing here but not in the serialize
+		// loop (or the reverse) is exactly the drift this shared expression
+		// exists to prevent: it would call a dynamic [{}] "default" while the
+		// writer still frames its one empty element, omitting a field that is on
+		// the wire.
+		return fmt.Sprintf("%s == 0", g.elemCountExpr(acc, fld.Elem, fld.HasCount))
+	}
+	return fmt.Sprintf("%s == %s", acc, g.cppDefault(fld))
+}
+
+// elemCountExpr renders M for a wrapper array: the number of elements its
+// canonical wire carries, one past the last element differing from the element
+// default (MESSAGE_SPEC §3/§5.1, which says "even for sequence-form elements").
+//
+// Only a declared `count: N` array is fixed-length and may be narrowed -- a
+// dynamic array has no N to refill from at decode, so a trailing default ELEMENT
+// is significant and stays framed. Interior all-default elements are never
+// dropped by this: element presence carries the length, so only the trailing run
+// goes.
+//
+// Both the serialize loop and _isDefault run off this one expression, so the
+// writer and the predicate cannot disagree about which elements exist.
+func (g *gen) elemCountExpr(val string, elem ir.Kind, fixed bool) string {
+	switch elem {
+	case ir.KindString, ir.KindBlob:
+		return fmt.Sprintf("sofabgen::trimEmpty(%s)", val)
+	case ir.KindStruct, ir.KindUnion:
+		if !fixed {
+			return fmt.Sprintf("%s.size()", val)
+		}
+		return fmt.Sprintf("sofabgen::trimObjs(%s)", val)
+	case ir.KindArray:
+		if !fixed {
+			return fmt.Sprintf("%s.size()", val)
+		}
+		return fmt.Sprintf("sofabgen::trimEmpty(%s)", val)
+	}
+	return fmt.Sprintf("%s.size()", val)
+}
+
 func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 	acc := cppIdent(fld.Name)
 	var write string
@@ -824,6 +1076,7 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	tv := fmt.Sprintf("_t%d", depth)
+	nv := fmt.Sprintf("_n%d", depth)
 	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether a
 	// contentless one survives. A wrapper array is a sequence-typed FIELD, so at
 	// depth 0 it closes with the dropping end -- an all-default array is omitted and
@@ -869,29 +1122,40 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2). The
 		// index still advances on an omitted element so surviving ids stay aligned.
 		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { if (!%s.empty()) { (void)os.write(%s, %s.data(), static_cast<std::int32_t>(%s.size())); } ++%s; } }", ind, iv, ev, val, ev, iv, ev, ev, iv)
+		f.line("%s{ const std::size_t %s = %s; for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty()) { (void)os.write(static_cast<sofab::id>(%s), %s.data(), static_cast<std::int32_t>(%s.size())); } } }",
+			ind, nv, g.elemCountExpr(val, elem, trim), iv, iv, nv, iv, ev, val, iv, ev, iv, ev, ev)
 		f.line("%s(void)os.%s();", ind, seqEnd)
 	case ir.KindString:
 		// A string element is a leaf: omit it when it equals the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2). The
 		// index still advances on an omitted element so surviving ids stay aligned.
 		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { if (!%s.empty()) { (void)os.write(%s, %s); } ++%s; } }", ind, iv, ev, val, ev, iv, ev, iv)
+		f.line("%s{ const std::size_t %s = %s; for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty()) { (void)os.write(static_cast<sofab::id>(%s), %s); } } }",
+			ind, nv, g.elemCountExpr(val, elem, trim), iv, iv, nv, iv, ev, val, iv, ev, iv, ev)
 		f.line("%s(void)os.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
-		// A struct/union element is itself a sequence: ALWAYS framed, never omitted
-		// (MESSAGE_SPEC S2). os.write(index, element) writes
-		// sequenceBegin(index)/serialize/sequenceEnd.
+		// An INTERIOR struct/union element is itself a sequence and is ALWAYS
+		// framed, never omitted (MESSAGE_SPEC S2): dropping it would leave an id
+		// gap and change the decoded length, not just the bytes (S5.1).
+		// os.write(index, element) writes sequenceBegin/serialize/sequenceEnd.
+		//
+		// The TRAILING all-default run is already gone -- the loop runs to M, not
+		// to size() (S3/S5.1, "even for sequence-form elements") -- and M == 0
+		// writes no child at all, so the lazily-opened wrapper is dropped by the
+		// closer below and the whole field is omitted (S2).
 		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) { (void)os.write(%s++, %s); } }", ind, iv, ev, val, iv, ev)
+		f.line("%s{ const std::size_t %s = %s; for (std::size_t %s = 0; %s < %s; ++%s) { (void)os.write(static_cast<sofab::id>(%s), %s[%s]); } }",
+			ind, nv, g.elemCountExpr(val, elem, trim), iv, iv, nv, iv, iv, val, iv)
 		f.line("%s(void)os.%s();", ind, seqEnd)
 	case ir.KindArray:
 		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ sofab::id %s = 0; for (const auto &%s : %s) {", ind, iv, ev, val)
+		f.line("%s{ const std::size_t %s = %s; for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s];",
+			ind, nv, g.elemCountExpr(val, elem, trim), iv, iv, nv, iv, ev, val, iv)
 		// A nested row is a wrapper-sequence element, not a `count: N` field: the
-		// trailing-default-run rule is scoped to fields (MESSAGE_SPEC §3), so rows
-		// are never trimmed.
-		g.serializeArray(f, ind+"    ", fmt.Sprintf("%s++", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, false, depth+1)
+		// trailing-default-run rule is scoped to fields (MESSAGE_SPEC §3), so the
+		// row's OWN elements are never trimmed -- only this array's trailing run
+		// of empty rows is, and only when the array itself declares a count.
+		g.serializeArray(f, ind+"    ", fmt.Sprintf("static_cast<sofab::id>(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, false, depth+1)
 		f.line("%s} }", ind)
 		f.line("%s(void)os.%s();", ind, seqEnd)
 	}
@@ -1087,18 +1351,24 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		}
 	case ir.KindString:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
+		// The leaf collectors stay in the corelib: they already PLACE each element
+		// at its element id (MESSAGE_SPEC §5.1), which is the half of generator#247
+		// the object path was missing. Only the §5.1 refill to N is added here,
+		// where the schema count is known.
 		if strings.HasPrefix(cont, "sofab::InlineVector") {
 			// Fixed string sequence: fill fixed inline FixedString slots by the
 			// element size via the scalar FixedString read, no heap. Static for the
 			// same deferred-decoder reason as the other fixed collectors.
-			f.line("%s{ static sofab::FixedStringSeq<%s> %s; is.readSequence(%s, %s); }", ind, cont, rv, rv, target)
+			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::FixedStringSeq<%s> %s;", cont, rv),
+				fmt.Sprintf("is.readSequence(%s, %s)", rv, target), target, cap, rv)
 		} else if g.clib {
 			// Static for the same deferred-decoder reason as the fixed collectors:
 			// the C decoder dereferences it after this returns.
-			f.line("%s{ static sofab::StringSeq %s; %s.cap = %d; %s.elemMax = %d; is.readSequence(%s, %s); }",
-				ind, rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax), rv, target)
+			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::StringSeq %s; %s.cap = %d; %s.elemMax = %d;", rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax)),
+				fmt.Sprintf("is.readSequence(%s, %s)", rv, target), target, cap, rv)
 		} else {
-			f.line("%s{ sofab::StringSeq %s{%s, %d, %d}; is.read(%s); }", ind, rv, target, cap, elemMaxOr(elemMaxHas, elemMax), rv)
+			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::StringSeq %s{%s, %d, %d};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax)),
+				fmt.Sprintf("is.read(%s)", rv), target, cap, rv)
 		}
 	case ir.KindBlob:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
@@ -1106,12 +1376,14 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			// Fixed blob sequence: fill fixed inline slots by the element size (the
 			// read(void*,size_t) blob overload), no heap. The collector is static
 			// because the corelib-c-cpp decoder dereferences it after this returns.
-			f.line("%s{ static sofab::FixedBlobSeq<%s> %s; is.readSequence(%s, %s); }", ind, cont, rv, rv, target)
+			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::FixedBlobSeq<%s> %s;", cont, rv),
+				fmt.Sprintf("is.readSequence(%s, %s)", rv, target), target, cap, rv)
 		} else if g.clib {
-			f.line("%s{ static sofab::BlobSeq %s; %s.cap = %d; %s.elemMax = %d; is.readSequence(%s, %s); }",
-				ind, rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax), rv, target)
+			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::BlobSeq %s; %s.cap = %d; %s.elemMax = %d;", rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax)),
+				fmt.Sprintf("is.readSequence(%s, %s)", rv, target), target, cap, rv)
 		} else {
-			f.line("%s{ sofab::BlobSeq %s{%s, %d, %d}; is.read(%s); }", ind, rv, target, cap, elemMaxOr(elemMaxHas, elemMax), rv)
+			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::BlobSeq %s{%s, %d, %d};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax)),
+				fmt.Sprintf("is.read(%s)", rv), target, cap, rv)
 		}
 	case ir.KindStruct, ir.KindUnion:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
@@ -1208,34 +1480,73 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 	f.line("%s}", ind)
 }
 
-// deserializeSeqInto reads a wrapper sequence of elemType into target via the
-// _MsgSeq visitor. corelib-cpp decodes synchronously, so a plain stack-local
-// visitor is fine. The corelib-c-cpp wrapper is a deferred decoder that uses the
-// visitor after this call returns, so its visitor gets static storage; a fixed
-// count also reserves the target up front so an emplace never reallocates a
-// still-bound element (a dynamic sequence cannot be pre-sized this way).
+// deserializeSeqInto reads a wrapper sequence of struct/union elements or
+// nested-array rows into target through sofabgen::WrapperSeq, which places each
+// element at its element id (MESSAGE_SPEC §5.1) instead of appending it, and
+// refills the array to the schema count N once the sequence is settled.
+//
+// The collector is generated rather than taken from the corelib because N is
+// what decides both (CORELIB_PLAN §7): corelib-cpp's MessageSeq places but has
+// no N to refill to, and corelib-c-cpp's Fixed/MessageSeq append in arrival
+// order because the C wrapper never learns that the element id means anything.
+//
+// corelib-cpp decodes synchronously, so a plain stack-local collector is fine
+// and read() reports whether the SequenceStart tag matched. The corelib-c-cpp
+// wrapper is a DEFERRED decoder that uses the collector after this call returns,
+// so its collector gets static storage, the wrapper's own presence is decided
+// from the field tag before readSequence, and a fixed count reserves the target
+// up front so a later placement never reallocates a still-bound element.
 func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, cap int64, rv, container string) {
-	if strings.HasPrefix(container, "sofab::InlineVector") {
-		// Fixed inline sequence: the visitor emplaces into the next inline slot
-		// (address-stable, no reserve/reallocation). Static for the same deferred
-		// reason as the dynamic clib path. The InlineVector<_,N> capacity is the
-		// schema count, so _MsgSeqFixed's own >= capacity() guard rejects an
-		// over-index element — no separate cap needed here.
-		f.line("%s{ static sofab::FixedMessageSeq<%s> %s; is.readSequence(%s, %s); }", ind, container, rv, rv, target)
-		return
-	}
+	seq := fmt.Sprintf("sofabgen::WrapperSeq<%s>", container)
 	if g.clib {
 		reserve := ""
-		if count > 0 {
+		if count > 0 && !strings.HasPrefix(container, "sofab::InlineVector") {
+			// A dynamic destination must not reallocate while an element the
+			// deferred decoder still has to fill is bound into it.
 			reserve = fmt.Sprintf(" %s.reserve(%d);", target, count)
 		}
-		// readSequence settles the SequenceStart tag before it empties the
-		// destination (§7.4 replaces rather than merges), so no guard is needed;
-		// cap bounds the element index (§5.1).
-		f.line("%s{ static sofab::MessageSeq<%s> %s; %s.cap = %d;%s is.readSequence(%s, %s); }", ind, elemType, rv, rv, cap, reserve, rv, target)
+		g.emitSeqRead(f, ind, fmt.Sprintf("static %s %s; %s.cap = %d;%s", seq, rv, rv, cap, reserve),
+			fmt.Sprintf("is.readSequence(%s, %s)", rv, target), target, cap, rv)
 		return
 	}
-	f.line("%s{ sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d; is.read(%s); }", ind, elemType, rv, rv, target, rv, cap, rv)
+	g.emitSeqRead(f, ind, fmt.Sprintf("%s %s; %s.out = &%s; %s.cap = %d;", seq, rv, rv, target, rv, cap),
+		fmt.Sprintf("is.read(%s)", rv), target, cap, rv)
+}
+
+// emitSeqRead writes one wrapper-array read: the collector declaration, the read
+// itself, and — for a declared `count: N` array — the refill of the destination
+// back out to N.
+//
+// MESSAGE_SPEC §5.1 makes the refill mandatory ("N for every target -- a
+// growable-list target MUST default-fill to N exactly like a pre-sized one"),
+// and it is also what makes the encoder's trailing-default-run elision (§3/§5.1)
+// lossless: without it, re-encoding a decoded fixed array would SHORTEN it on
+// every round trip instead of normalising it. A dynamic (count-less) array has
+// no N to refill from and is never filled.
+//
+// The refill must be gated on the field actually having been a sequence: a §7.3
+// skip is not an occurrence, and filling after one would materialise N elements
+// out of a field that was never delivered. corelib-cpp's read() reports that
+// directly (it also reports false for a sequence cut short, which is re-delivered
+// whole once its bytes arrive). The corelib-c-cpp readSequence() returns nothing,
+// so the same decision is taken from the field tag before the call — and there
+// filling first is safe as well as necessary, because that decoder delivers the
+// elements only after this returns, into slots that then already exist.
+func (g *gen) emitSeqRead(f *hfile, ind, decl, readCall, target string, cap int64, rv string) {
+	if cap < 0 {
+		f.line("%s{ %s %s; }", ind, decl, readCall)
+		return
+	}
+	fill := fmt.Sprintf("sofabgen::fillTo(%s, %d);", target, cap)
+	if g.clib {
+		pv := strings.Replace(rv, "_r", "_p", 1)
+		// The wire tag enum is sofab::Wire in one corelib and sofab::detail::Wire
+		// in the other; decltype names neither.
+		f.line("%s{ %s const bool %s = is.wire() == decltype(is.wire())::SequenceStart; %s; if (%s) { %s } }",
+			ind, decl, pv, readCall, pv, fill)
+		return
+	}
+	f.line("%s{ %s if (%s) { %s } }", ind, decl, readCall, fill)
 }
 
 // checkBounded enforces the fixed-capacity (embedded) profile's unbounded-field

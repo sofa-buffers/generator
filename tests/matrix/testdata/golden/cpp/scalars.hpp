@@ -118,6 +118,26 @@ struct Scalars : sofab::Message {
     }
 
     /**
+     * @brief True when every field still holds its declared default.
+     *
+     * The exact negation of @ref serialize: an object is default when
+     * serialize would write nothing at all for it, tested per field and
+     * recursively. Used to find the last non-default element of an array
+     * declared with a `count`, whose encoding stops one past it.
+     */
+    bool _isDefault() const noexcept {
+        if (!(u8min == 0)) { return false; }
+        if (!(u8max == 255)) { return false; }
+        if (!(u64max == 18446744073709551615ULL)) { return false; }
+        if (!(i8min == -128)) { return false; }
+        if (!(i64min == (-9223372036854775807LL - 1))) { return false; }
+        if (!(f32 == 3.14f)) { return false; }
+        if (!(f64 == -2.5)) { return false; }
+        if (!(flag == true)) { return false; }
+        return true;
+    }
+
+    /**
      * @brief Write this message's fields to an output stream.
      *
      * Called by @ref encode / @ref encodeTo, and directly when writing into a

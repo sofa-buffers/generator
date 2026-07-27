@@ -162,14 +162,14 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"std::vector<std::uint32_t> arr = {};",           // unbounded native -> vector (was std::array<T,0>)
-		"std::vector<bool> bl = {};",                     // unbounded bool -> vector
-		"std::array<std::uint32_t, 4> fixed = {};",       // bounded native array unchanged
-		"std::vector<std::vector<std::uint32_t>> matrix", // matrix rows are dynamic vectors too
-		"is.readArray(arr);",                             // readArray sizes the vector to the wire count
-		"if (arr != std::vector<std::uint32_t>{}) {",     // whole-omit compares to an empty vector
-		"std::size_t _count) noexcept override",          // _count is named for the resize
-		"sofab::MessageSeq<std::vector<std::uint32_t>>",  // matrix rows collected by the corelib helper
+		"std::vector<std::uint32_t> arr = {};",                          // unbounded native -> vector (was std::array<T,0>)
+		"std::vector<bool> bl = {};",                                    // unbounded bool -> vector
+		"std::array<std::uint32_t, 4> fixed = {};",                      // bounded native array unchanged
+		"std::vector<std::vector<std::uint32_t>> matrix",                // matrix rows are dynamic vectors too
+		"is.readArray(arr);",                                            // readArray sizes the vector to the wire count
+		"if (arr != std::vector<std::uint32_t>{}) {",                    // whole-omit compares to an empty vector
+		"std::size_t _count) noexcept override",                         // _count is named for the resize
+		"sofabgen::WrapperSeq<std::vector<std::vector<std::uint32_t>>>", // matrix rows collected by the generated placer
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap header missing %q:\n%s", want, h)
@@ -208,22 +208,23 @@ func TestCppOverIndexWrapperArray(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	// The bounds are handed to the corelib's collectors; the guards themselves live
-	// in corelib-cpp (sofab::StringSeq / BlobSeq / MessageSeq), not in generated
-	// code, so this asserts what the generator DECLARES rather than the check.
+	// The string/blob bounds are handed to the corelib's collectors, whose guards
+	// live in corelib-cpp (sofab::StringSeq / BlobSeq); the object path collects
+	// through the generated placer, which carries the same bound as `cap`. Either
+	// way this asserts what the generator DECLARES rather than the check itself.
 	for _, want := range []string{
-		"{ sofab::StringSeq _r0{bs, 4, 16}; is.read(_r0); }", // bounded string -> cap 4, elem maxlen 16
-		"{ sofab::BlobSeq _r0{bb, 3, 16}; is.read(_r0); }",   // bounded blob -> cap 3, elem maxlen 16
-		"_r0.cap = 2;", // bounded struct -> MessageSeq cap 2
-		"{ sofab::StringSeq _r0{ds, -1, -1}; is.read(_r0); }", // dynamic string -> unbounded cap + maxlen
+		"{ sofab::StringSeq _r0{bs, 4, 16}; if (is.read(_r0)) { sofabgen::fillTo(bs, 4); } }", // bounded string -> cap 4, elem maxlen 16
+		"{ sofab::BlobSeq _r0{bb, 3, 16}; if (is.read(_r0)) { sofabgen::fillTo(bb, 3); } }",   // bounded blob -> cap 3, elem maxlen 16
+		"_r0.cap = 2;", // bounded struct -> placer cap 2
+		"{ sofab::StringSeq _r0{ds, -1, -1}; is.read(_r0); }", // dynamic string -> unbounded cap + maxlen, and never refilled
 		"_r0.cap = -1;", // dynamic struct -> unbounded
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap over-index bound missing %q:\n%s", want, h)
 		}
 	}
-	// The collectors are corelib types now: a generated header must not define its
-	// own copies on the pure path.
+	// The leaf collectors are corelib types: a generated header must not define
+	// its own copies of those on the pure path.
 	for _, notWant := range []string{"struct _StrSeq", "struct _BlobSeq", "struct _MsgSeq"} {
 		if strings.Contains(h, notWant) {
 			t.Errorf("the pure path must use the corelib collector, not emit %q:\n%s", notWant, h)
@@ -252,7 +253,7 @@ func TestCppMaxlenReject(t *testing.T) {
 		// only order that satisfies both §7.3 and §5.2.
 		"is.readString(s, 8);",
 		"is.readBlob(b, 8);",
-		"{ sofab::StringSeq _r0{sa, 3, 5}; is.read(_r0); }", // wrapper string: cap 3, elem maxlen 5 handed to the corelib collector
+		"{ sofab::StringSeq _r0{sa, 3, 5}; if (is.read(_r0)) { sofabgen::fillTo(sa, 3); } }", // wrapper string: cap 3, elem maxlen 5 handed to the corelib collector
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap maxlen guard missing %q:\n%s", want, h)
@@ -292,7 +293,7 @@ func TestCppFixedContainers(t *testing.T) {
 		"is.readBlob(bl, _size, 16);",                                                  // FixedBytes decode, likewise (issue #95)
 		"static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",     // blob-seq collector
 		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
-		"static sofab::FixedMessageSeq<sofab::InlineVector<",                           // struct-seq collector
+		"static sofabgen::WrapperSeq<sofab::InlineVector<",                             // struct-seq collector (places by element index)
 		// over-index element rejected INVALID (generator#149), no infinite loop (issue #126)
 		"std::size_t encodeTo(std::uint8_t *dst", // heap-free encode
 	} {
@@ -760,9 +761,12 @@ func TestCppFixedCountTrimsTrailingDefaultRun(t *testing.T) {
 					t.Errorf("[%s] header missing %q:\n%s", corelib, want, h)
 				}
 			}
-			// A nested matrix row is a wrapper-sequence element, not a `count: N`
-			// field: the rule is scoped to fields, so rows are never trimmed.
-			if !strings.Contains(h, "(void)os.write(_i0++, _e0);") {
+			// A nested matrix ROW is a wrapper-sequence element, not a `count: N`
+			// field: the rule is scoped to fields, so a row's OWN elements are
+			// never trimmed. The array OF rows still is, since it declares a count
+			// of its own -- an all-zero fixed row is not "empty", so trimEmpty
+			// leaves it in place, exactly as the Go reference does.
+			if !strings.Contains(h, "(void)os.write(static_cast<sofab::id>(_i0), _e0);") {
 				t.Errorf("[%s] nested array row must not be trimmed:\n%s", corelib, h)
 			}
 			// Decode is unchanged: the fixed std::array already materializes N
@@ -954,7 +958,16 @@ messages:
 	}
 	// NOTHING in a pure-corelib-cpp deserialize compares a wire type any more —
 	// that is the point of the seam. A single leftover comparison is a regression.
-	if strings.Contains(h, "is.wire() !=") || strings.Contains(h, "is.fixType() !=") {
+	//
+	// Scoped to the message types: the shared wrapper-array collector emitted
+	// ahead of the namespace does compare one, because an ELEMENT skipped for a
+	// contradicting wire type must leave the container untouched and only the
+	// collector can see that (there is no typed read to fold the decision into).
+	body := h
+	if i := strings.Index(body, "#endif // SOFABGEN_WRAPPER_SEQ_HELPERS"); i >= 0 {
+		body = body[i:]
+	}
+	if strings.Contains(body, "is.wire() !=") || strings.Contains(body, "is.fixType() !=") {
 		t.Errorf("the pure-cpp deserialize must carry no wire comparison at all\n%s", h)
 	}
 }
@@ -1012,14 +1025,15 @@ messages:
       native: { id: 3, type: array, items: { type: u32, count: 3 } }
 `, "m.hpp")
 	// The replace-whole reset moved out of the case arm entirely: it is prepare()
-	// on the corelib's collectors (sofab::StringSeq / BlobSeq / MessageSeq), which
+	// on the collectors (corelib sofab::StringSeq / BlobSeq for the leaves, the
+	// generated sofabgen::WrapperSeq for the object path), which
 	// IStreamImpl::read calls once the SequenceStart tag matched — so it can no
 	// longer wipe a valid earlier occurrence on a §7.3-skipped one. The arms must
-	// therefore carry no clear at all, and must name the corelib collectors.
+	// therefore carry no clear at all, and must name a collector.
 	for _, want := range []string{
 		"sofab::StringSeq _r0{strs,",
 		"sofab::BlobSeq _r0{blobs,",
-		"sofab::MessageSeq<",
+		"sofabgen::WrapperSeq<",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("m.hpp missing corelib collector %q\n%s", want, h)
@@ -1197,7 +1211,7 @@ func TestCppResetPutsEveryFieldBackInPlace(t *testing.T) {
 	}
 	// The sequence-start clear is untouched: a re-opened wrapper still replaces
 	// the array whole rather than merging into the earlier occurrence.
-	if !strings.Contains(h, "sofab::MessageSeq<MItemsElem> _r0; _r0.out = &items;") {
+	if !strings.Contains(h, "sofabgen::WrapperSeq<std::vector<MItemsElem>> _r0; _r0.out = &items;") {
 		t.Errorf("the wrapper collector (and its replace-whole clear) must be unchanged:\n%s", h)
 	}
 }
@@ -1293,21 +1307,22 @@ func TestCppNestedWrapperRowsHeap(t *testing.T) {
 		"struct _S0 : sofab::IStreamMessage {",
 		"std::vector<std::vector<std::string>> *out = nullptr;",
 		"long cap = 2;",
-		"{ sofab::StringSeq _r1{_e0, 3, 8}; is.read(_r1); }",
+		"{ sofab::StringSeq _r1{_e0, 3, 8}; if (is.read(_r1)) { sofabgen::fillTo(_e0, 3); } }",
 		"_S0 _r0; _r0.out = &strrows; is.read(_r0);",
 		// blob rows
-		"{ sofab::BlobSeq _r1{_e0, 3, 8}; is.read(_r1); }",
+		"{ sofab::BlobSeq _r1{_e0, 3, 8}; if (is.read(_r1)) { sofabgen::fillTo(_e0, 3); } }",
 		// struct rows: MessageSeq over the ELEMENT type, not the row container
-		"{ sofab::MessageSeq<MStructrowsElemElem> _r1; _r1.out = &_e0; _r1.cap = 3; is.read(_r1); }",
+		"{ sofabgen::WrapperSeq<std::vector<MStructrowsElemElem>> _r1; _r1.out = &_e0; _r1.cap = 3; if (is.read(_r1)) { sofabgen::fillTo(_e0, 3); } }",
 		// depth 3: the row collector nests, one level further
 		"struct _S1 : sofab::IStreamMessage {",
-		"{ sofab::StringSeq _r2{_e1, 3, 8}; is.read(_r2); }",
+		"{ sofab::StringSeq _r2{_e1, 3, 8}; if (is.read(_r2)) { sofabgen::fillTo(_e1, 3); } }",
 		// §5.1 placement + over-index reject, §7.4 replace-whole
 		"if (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
 		"while (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();",
 		"void prepare() noexcept { if (out) out->clear(); }",
 		// native rows keep the corelib collector
-		"sofab::MessageSeq<std::array<std::uint32_t, 3>> _r0; _r0.out = &urows;",
+		"sofabgen::WrapperSeq<std::vector<std::array<std::uint32_t, 3>>> _r0; _r0.out = &urows;",
+		"sofabgen::fillTo(urows, 2);",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("nested wrapper rows missing %q:\n%s", want, h)
@@ -1342,14 +1357,16 @@ func TestCppNestedWrapperRowsFixed(t *testing.T) {
 		"struct _S0 : sofab::IStreamMessage {",
 		"sofab::InlineVector<sofab::InlineVector<sofab::FixedString<8>, 3>, 2> *out = nullptr;",
 		"if (static_cast<std::size_t>(_id) >= out->capacity()) { is.invalidate(); return; }",
-		"{ static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r1; is.readSequence(_r1, _e0); }",
+		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r1;",
+		"is.readSequence(_r1, _e0); if (_p1) { sofabgen::fillTo(_e0, 3); }",
 		"static _S0 _r0; is.readSequence(_r0, strrows);",
-		"{ static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>> _r1; is.readSequence(_r1, _e0); }",
-		"{ static sofab::FixedMessageSeq<sofab::InlineVector<MStructrowsElemElem, 3>> _r1; is.readSequence(_r1, _e0); }",
+		"static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>> _r1;",
+		"static sofabgen::WrapperSeq<sofab::InlineVector<MStructrowsElemElem, 3>> _r1; _r1.cap = 3;",
 		"struct _S1 : sofab::IStreamMessage {",
-		"{ static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r2; is.readSequence(_r2, _e1); }",
+		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r2;",
+		"is.readSequence(_r2, _e1); if (_p2) { sofabgen::fillTo(_e1, 3); }",
 		// native rows keep the corelib collector
-		"static sofab::FixedMessageSeq<sofab::InlineVector<std::array<std::uint32_t, 3>, 2>> _r0; is.readSequence(_r0, urows);",
+		"static sofabgen::WrapperSeq<sofab::InlineVector<std::array<std::uint32_t, 3>, 2>> _r0; _r0.cap = 2;",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("fixed nested wrapper rows missing %q:\n%s", want, h)
@@ -1376,10 +1393,170 @@ func TestCppNestedWrapperRowsFixed(t *testing.T) {
 		"if (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
 		"strrows.reserve(2);",
 		"static _S0 _r0; is.readSequence(_r0, strrows);",
-		"{ static sofab::StringSeq _r1; _r1.cap = 3; _r1.elemMax = 8; is.readSequence(_r1, _e0); }",
+		"static sofab::StringSeq _r1; _r1.cap = 3; _r1.elemMax = 8;",
 	} {
 		if !strings.Contains(d, want) {
 			t.Errorf("c-cpp allow_dynamic nested wrapper rows missing %q:\n%s", want, d)
 		}
+	}
+}
+
+// wrapperSeqSrc: a `count: N` struct array next to a dynamic one and a
+// `count: N` string array, so one header shows every narrowing decision.
+const wrapperSeqSrc = "version: 1\nmessages:\n  vec:\n    payload:\n" +
+	"      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }\n" +
+	"      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }\n" +
+	"      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }\n"
+
+// TestCppWrapperElementsArePlacedByIDAndFilledToN: a wrapper array's element id
+// IS the array index (MESSAGE_SPEC §5.1), so an element is PLACED at dest[id]
+// after gap-filling -- never appended. Appending shortened the array by the size
+// of any interior id gap and decoded a REOPENED id as a second element instead
+// of merging into the first (§7.4). The leaf string/blob collectors in both
+// corelibs always got this right; corelib-c-cpp's Fixed/MessageSeq did not, so
+// the object path now collects through a generated placer on BOTH profiles
+// (generator#247).
+//
+// The refill to N on top is what makes the §3/§5.1 trailing elision lossless:
+// without it, re-encoding a decoded fixed array shortens it on every round trip.
+func TestCppWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+	for _, corelib := range []string{"cpp", "c-cpp"} {
+		t.Run(corelib, func(t *testing.T) {
+			cfg := map[string]any{}
+			src := wrapperSeqSrc
+			if corelib == "c-cpp" {
+				cfg["corelib"] = "c-cpp"
+				cfg["allow_dynamic"] = true
+				// The embedded profile requires a count on every array.
+				src = strings.Replace(src, "items: { type: struct, fields:", "items: { type: struct, count: 2, fields:", 1)
+			}
+			h, err := genHeader(t, src, "vec.hpp", cfg)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			for _, want := range []string{
+				// placement, not append -- and the gap-fill that precedes it
+				"while (out->size() <= static_cast<std::size_t>(id)) { (void)out->emplace_back(); }",
+				"Elem &row = (*out)[static_cast<std::size_t>(id)];",
+				// the over-index reject, which also bounds the gap-fill
+				"if (cap >= 0 && static_cast<long>(id) >= cap) { is.invalidate(); return; }",
+				// the refill, and the schema count that feeds it
+				"void fillTo(Container &out, std::size_t n) noexcept {",
+				"sofabgen::fillTo(fixed, 5)",
+				"sofabgen::fillTo(fstrs, 3)",
+				"_r0.cap = 5;",
+			} {
+				if !strings.Contains(h, want) {
+					t.Errorf("[%s] vec.hpp missing %q:\n%s", corelib, want, h)
+				}
+			}
+			// The corelib collectors that append id-blind must be gone from the
+			// object path on both profiles -- that is the defect being replaced.
+			for _, notWant := range []string{"sofab::FixedMessageSeq<", "sofab::MessageSeq<"} {
+				if strings.Contains(h, notWant) {
+					t.Errorf("[%s] the appending collector %q must not be used any more:\n%s", corelib, notWant, h)
+				}
+			}
+		})
+	}
+	// A dynamic array has no N to refill from: its length is highest-present-id
+	// + 1, so filling it would invent elements the wire never carried.
+	h, err := genHeader(t, wrapperSeqSrc, "vec.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if !strings.Contains(h, "_r0.cap = -1; is.read(_r0); }") {
+		t.Errorf("a dynamic wrapper array must be read without a refill:\n%s", h)
+	}
+	if strings.Contains(h, "sofabgen::fillTo(dynamic") {
+		t.Errorf("a dynamic wrapper array must never be refilled:\n%s", h)
+	}
+}
+
+// TestCppFixedWrapperArrayTrimsTrailingDefaultRun: a `count: N` wrapper array's
+// canonical wire stops at M -- one past its last non-default element
+// (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements") -- and M == 0 leaves
+// the whole wrapper omitted (§2). generator#248: the element loop used to run to
+// the container's size, framing every trailing all-default element, so a decoder
+// that accepted the non-canonical form re-encoded it unchanged instead of
+// normalising. A DYNAMIC array has no N to refill from, so its trailing default
+// element is significant and must still be framed.
+func TestCppFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+	h, err := genHeader(t, wrapperSeqSrc, "vec.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	// The fixed array narrows to M before framing anything...
+	if !strings.Contains(h, "const std::size_t _n0 = sofabgen::trimObjs(fixed); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { (void)os.write(static_cast<sofab::id>(_i0), fixed[_i0]); }") {
+		t.Errorf("count:N struct array must loop to M, not to size():\n%s", h)
+	}
+	// ...while the dynamic one keeps every element, trailing defaults included.
+	if !strings.Contains(h, "const std::size_t _n0 = dynamic.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { (void)os.write(static_cast<sofab::id>(_i0), dynamic[_i0]); }") {
+		t.Errorf("dynamic struct array must not be narrowed:\n%s", h)
+	}
+	// An INTERIOR all-default element is still framed: the write keeps its own
+	// frame, and the field's lazy closer is what drops an M == 0 wrapper.
+	if !strings.Contains(h, "(void)os.sequenceBeginLazy(0);") || !strings.Contains(h, "(void)os.sequenceEnd();") {
+		t.Errorf("the wrapper must stay lazily opened and dropped by its closer:\n%s", h)
+	}
+	// _isDefault is the exact negation of what serialize writes, so it must
+	// narrow a field exactly when the serialize loop does -- disagreeing would
+	// either omit a field that is on the wire or keep one that is not.
+	for _, want := range []string{
+		"if (!(sofabgen::trimObjs(fixed) == 0)) { return false; }",
+		"if (!(dynamic.size() == 0)) { return false; }",
+		"if (!(sofabgen::trimEmpty(fstrs) == 0)) { return false; }",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("_isDefault must be computed from the same expression as serialize, missing %q:\n%s", want, h)
+		}
+	}
+	// The trim itself: one past the last element that is not the element default.
+	if !strings.Contains(h, "while (m > 0 && a[m - 1]._isDefault()) { --m; }") {
+		t.Errorf("trimObjs must stop one past the last non-default element:\n%s", h)
+	}
+}
+
+// TestCppMistypedWrapperElementLeavesNoPhantom: a child inside a wrapper array
+// whose wire type contradicts the declared element is skipped exactly like an
+// unknown id (MESSAGE_SPEC §7.3) -- and a skip must leave the container
+// byte-for-byte as it was. Both C++ profiles used to grow the container first
+// and only then discover the mismatch, leaving a phantom default-initialised
+// element behind (generator#249).
+//
+// The assertion is on ORDER: the wire-type decision has to precede every
+// mutation, which is the only shape that cannot leave the phantom.
+func TestCppMistypedWrapperElementLeavesNoPhantom(t *testing.T) {
+	for _, corelib := range []string{"cpp", "c-cpp"} {
+		t.Run(corelib, func(t *testing.T) {
+			cfg := map[string]any{}
+			src := wrapperSeqSrc
+			if corelib == "c-cpp" {
+				cfg["corelib"] = "c-cpp"
+				cfg["allow_dynamic"] = true
+				src = strings.Replace(src, "items: { type: struct, fields:", "items: { type: struct, count: 2, fields:", 1)
+			}
+			h, err := genHeader(t, src, "vec.hpp", cfg)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			gate := "if (is.wire() != Tag::SequenceStart) { return; }"
+			grow := "while (out->size() <= static_cast<std::size_t>(id)) { (void)out->emplace_back(); }"
+			gi, wi := strings.Index(h, gate), strings.Index(h, grow)
+			if gi < 0 {
+				t.Fatalf("[%s] the element wire-type gate is missing:\n%s", corelib, h)
+			}
+			if wi < 0 {
+				t.Fatalf("[%s] the placement fill is missing:\n%s", corelib, h)
+			}
+			if gi > wi {
+				t.Errorf("[%s] the wire-type gate must precede any container growth, or a skipped child leaves a phantom element:\n%s", corelib, h)
+			}
+			// The gate is only for element kinds read as their own sequence; a
+			// nested-array row is not one, hence the compile-time guard.
+			if !strings.Contains(h, "if constexpr (std::is_base_of_v<sofab::IStreamMessage, Elem>) {") {
+				t.Errorf("[%s] the gate must be scoped to sequence-shaped elements:\n%s", corelib, h)
+			}
+		})
 	}
 }

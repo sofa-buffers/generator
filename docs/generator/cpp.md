@@ -49,8 +49,8 @@ It exists because a field whose value equals its default is **absent** from the
 encoded bytes (MESSAGE_SPEC §2), a sequence-typed one included. An absent field
 delivers no `deserialize()` callback, so nothing on the callback side can clear a
 destination that is decoded into twice: the "a later occurrence replaces the array
-whole" clear inside `sofab::StringSeq` / `BlobSeq` / `MessageSeq` hangs off the
-sequence header, which an omitted field never sends. Clearing has to happen where
+whole" clear inside `sofab::StringSeq` / `BlobSeq` / `sofabgen::WrapperSeq` hangs
+off the sequence header, which an omitted field never sends. Clearing has to happen where
 absence is still observable — at the start of the decode.
 
 So: **drive a stream yourself and `reset()` is yours to call** between messages,
@@ -164,7 +164,10 @@ All three fixed-capacity containers — `sofab::FixedString<N>`,
 `sofab::FixedBytes<N>` and `sofab::InlineVector<T,N>` — live in the corelib-c-cpp
 wrapper (`sofab.hpp`) as a single source of truth; the generator only references
 them (nothing container-shaped is emitted into the generated headers, so a fix to
-a container is a corelib change, not a codegen change).
+a container is a corelib change, not a codegen change — the one generated block,
+`namespace sofabgen`, holds the wrapper-array element helpers described
+[below](#wrapper-arrays-element-placement-refill-trailing-run-trim), which are
+decided by the schema `count` and so cannot live in a corelib).
 
 `sofab::FixedString<N>` is a heap-free, `std::string`-friendly fixed-capacity
 string (implicit construct/assign from `std::string`/`std::string_view`/`const
@@ -183,14 +186,15 @@ where a field really *is* fixed-length (the native numeric arrays), the generato
 does use plain `std::array<T,N>`. `InlineVector`'s inline storage also never
 reallocates, so a bound-then-filled element is address-stable — strictly safer
 under the corelib-c-cpp deferred decoder than a `std::vector` + `reserve()`.
-The generated per-element collectors (`_FixedStrSeq` / `_FixedBlobSeq`) place a
-string/blob element at its wire index `id` by growing the `InlineVector` up to
-that slot; because `emplace_back()` is a no-op once the vector is full, an
-untrusted element index `id >= N` is **dropped** (the fill loop is guarded by the
-container capacity) rather than spun on forever — the corelib skips the element's
-payload since the callback binds no destination, mirroring the native-array
-over-capacity drop (MESSAGE_SPEC §5.1). Without the guard a 4-byte message could
-hang the decoder (issue #126, DoS).
+The per-element collectors (`sofab::FixedStringSeq` / `FixedBlobSeq` for the
+leaves, `sofabgen::WrapperSeq` for structs, unions and rows) place an element at
+its wire index `id` by growing the `InlineVector` up to that slot; because
+`emplace_back()` is a no-op once the vector is full, an untrusted element index
+`id >= N` is **dropped** (the fill loop is guarded by the container capacity, and
+`WrapperSeq` rejects the index outright before the loop) rather than spun on
+forever — the corelib skips the element's payload since the callback binds no
+destination, mirroring the native-array over-capacity drop (MESSAGE_SPEC §5.1).
+Without the guard a 4-byte message could hang the decoder (issue #126, DoS).
 Because they are non-aggregates with `initializer_list` constructors, a brace-init
 like `msg.field = {"a", "b"}` sets the logical length correctly rather than
 silently leaving it at zero (which would drop the field from the wire). A
@@ -290,6 +294,70 @@ as for every other.
 > element kinds are value-converted through a native-typed temporary rather than
 > read in place, which the row path does not do yet. First-level `array<enum>` /
 > `array<boolean>` are unaffected.
+
+## Wrapper arrays: element placement, refill, trailing-run trim
+
+An array of strings, blobs, structs, unions or rows travels as a **sequence whose
+child id is the element's index** (MESSAGE_SPEC §5.1). Three rules govern that
+shape, and all three are decided by the schema `count` — which only the generator
+knows (CORELIB_PLAN §7), so they live in generated code rather than in either
+corelib.
+
+The generated header carries a small `namespace sofabgen` block for them, emitted
+once per header behind `#ifndef SOFABGEN_WRAPPER_SEQ_HELPERS` at global scope, so
+several generated headers — even with different `namespace` settings — can be
+included into one translation unit. It is the only thing the generator emits
+outside its configured namespace, and it holds no state: a collector
+(`WrapperSeq`), the refill (`fillTo`) and the two trims (`trimObjs`,
+`trimEmpty`).
+
+**1. An element is placed at its id, never appended.** `sofabgen::WrapperSeq`
+gap-fills the destination with default elements up to `id` and then decodes into
+`dest[id]`. Appending would shorten the array by the size of every interior id
+gap, and would decode a **reopened** element id as a second element instead of
+continuing the first (§7.4 struct-merge, which placement gives for free). An
+element id at or past `count` is rejected as `INVALID` **before** the fill, which
+also bounds it (generator#247). The leaf collectors stay in the corelib —
+`sofab::StringSeq`/`BlobSeq` and `FixedStringSeq`/`FixedBlobSeq` always placed;
+this is the object path agreeing with them.
+
+**2. A `count: N` array decodes back out to N.** `sofabgen::fillTo` pads the
+destination once the sequence is settled, because §5.1 makes the length N *for
+every target* — "a growable-list target MUST default-fill to N exactly like a
+pre-sized one". It is gated on the field actually having been a sequence, so a
+§7.3 skip never materialises N elements out of nothing. A count-less array has no
+N to pad to and is left at highest-present-id + 1.
+
+**3. The encoder stops at M.** A `count: N` array's canonical wire carries only
+`[0, M)`, M being one past the last element differing from the element default —
+"even for sequence-form elements" (§3/§5.1). Interior all-default elements keep
+their frame (element presence is what carries the length); only the trailing run
+goes. `M == 0` writes no child at all, so the lazily-opened wrapper is dropped by
+its closer and the whole field is omitted (§2). A dynamic array is never narrowed
+— it has no N to refill from, so a trailing default element is significant
+(generator#248).
+
+Rule 3 is only lossless *because* of rule 2: without the refill, the elision
+would shorten the array on every decode/encode cycle instead of normalising it.
+
+Every generated struct, union and message therefore also carries
+`bool _isDefault() const noexcept` — the explicit form of the "was any child
+written?" test the lazy framing already answers implicitly for a *field*, needed
+here because an *element* must be judged before the loop opens. The serialize
+loop and `_isDefault` are generated from **one** expression per field, so the
+writer and the predicate cannot drift: a predicate that narrowed a field the
+writer does not (or the reverse) would either omit a field that is on the wire or
+keep one that is not.
+
+Two consequences worth knowing:
+
+- A mistyped child inside a wrapper array is skipped with **no container
+  mutation** — the wire-type decision precedes the gap-fill, so it cannot leave a
+  phantom default element behind (generator#249).
+- An array of **fixed-length rows** (`array` of `array u32, count 3`) trims a
+  trailing run of *empty* rows only. A fixed row is never empty (its size is its
+  count), so such an array is not narrowed — the same behaviour as the other
+  targets.
 
 ## Struct member order (widest-first)
 
