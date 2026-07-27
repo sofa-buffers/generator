@@ -1117,10 +1117,95 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
 		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, cap, rv, cont)
 	case ir.KindArray:
-		inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
-		g.deserializeSeqInto(f, ind, target, inner, count, cap, rv, cont)
+		// A row of native scalars IS readable by the corelib: MessageSeq/
+		// FixedMessageSeq places the row and hands it to is.read(), whose span
+		// overload fills a contiguous container of trivially-copyable elements.
+		// A row whose elements are strings, blobs, structs/unions or arrays is
+		// itself a wrapper SEQUENCE, which is not a span of scalars and not an
+		// IStreamMessage either -- handing it to is.read() is the static_assert
+		// "Unsupported span element type" (generator#250). Such a row needs its
+		// own collector, one level down.
+		if isNativeArrayElem(items.Elem) {
+			inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
+			g.deserializeSeqInto(f, ind, target, inner, count, cap, rv, cont)
+			return
+		}
+		g.deserializeRowSeq(f, ind, target, items, count, cap, rv, cont, depth)
 	}
+}
+
+// deserializeRowSeq reads an array of wrapper ROWS -- array<array<string>>,
+// array<array<blob>>, array<array<struct|union>> and deeper -- into target.
+//
+// The corelib's MessageSeq/FixedMessageSeq is the collector for a sequence whose
+// ELEMENTS the stream can read on its own: a struct/union element (an
+// IStreamMessage) or a native-scalar row (a span of trivially-copyable values).
+// A row that is itself a wrapper sequence is neither, so it needs a collector of
+// its own, and the corelib cannot ship one: what a row costs to read is the
+// schema's business (element bounds, element type), not the wire format's.
+//
+// So the row collector is generated, right where it is used, and the row read it
+// wraps is the SAME array emission one level down -- which is what makes this
+// recursive rather than three special cases: depth 3 wraps a depth-2 collector,
+// and a struct/blob/string row lands on the corelib collector the first-level
+// path already uses (sofab::StringSeq/BlobSeq/MessageSeq, or their Fixed*
+// counterparts on the c-cpp leg).
+//
+// The collector carries the same two spec rules as the corelib ones:
+//   - §5.1 an element id IS its index, so a row is PLACED at that index (gaps are
+//     legal and stay at the element default), and an id at or past the schema
+//     `count` is INVALID -- the fixed profile reads that bound off the inline
+//     container's capacity, which also stops an over-index emplace_back that
+//     InlineVector would otherwise no-op forever on (#126).
+//   - §7.4 a repeated field id replaces the array whole, via prepare() on the
+//     pure path (read() calls it once the SequenceStart tag matched, so a §7.3
+//     skip cannot wipe an earlier value) and via readSequence() on the c-cpp leg,
+//     which clears the destination itself.
+//
+// Storage follows deserializeSeqInto: the c-cpp decoder is deferred and uses the
+// collector after this call returns, so it gets static storage (one instance per
+// nesting level is enough -- rows are decoded one at a time, in stream order),
+// and a heap row vector is reserved up front so placing a later row never moves
+// a still-bound earlier one.
+func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayElem, count, cap int64, rv, container string, depth int) {
+	sv := fmt.Sprintf("_S%d", depth)
+	ev := fmt.Sprintf("_e%d", depth)
+	inlineRows := strings.HasPrefix(container, "sofab::InlineVector")
+	in2 := ind + "    "
+	in3 := in2 + "    "
+	in4 := in3 + "    "
+	f.line("%s{", ind)
+	f.line("%sstruct %s : sofab::IStreamMessage {", in2, sv)
+	f.line("%s%s *out = nullptr;", in3, container)
+	if !inlineRows {
+		f.line("%slong cap = %d;", in3, cap)
+	}
+	if !g.clib {
+		// Declaring prepare() is how a collector asks read() for the §7.4
+		// replace-whole reset; readSequence() on the c-cpp leg clears for us.
+		f.line("%svoid prepare() noexcept { if (out) out->clear(); }", in3)
+	}
+	f.line("%svoid deserialize(sofab::IStreamImpl &is, sofab::id _id, std::size_t, std::size_t) noexcept override {", in3)
+	if inlineRows {
+		f.line("%sif (static_cast<std::size_t>(_id) >= out->capacity()) { is.invalidate(); return; }", in4)
+	} else {
+		f.line("%sif (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }", in4)
+	}
+	f.line("%swhile (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();", in4)
+	f.line("%sauto &%s = (*out)[_id];", in4, ev)
+	g.deserializeArray(f, in4, ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, items.ElemMaxHas, items.ElemMax, depth+1)
+	f.line("%s}", in3)
+	f.line("%s};", in2)
+	if g.clib {
+		if count > 0 && !inlineRows {
+			f.line("%s%s.reserve(%d);", in2, target, count)
+		}
+		f.line("%sstatic %s %s; is.readSequence(%s, %s);", in2, sv, rv, rv, target)
+	} else {
+		f.line("%s%s %s; %s.out = &%s; is.read(%s);", in2, sv, rv, rv, target, rv)
+	}
+	f.line("%s}", ind)
 }
 
 // deserializeSeqInto reads a wrapper sequence of elemType into target via the

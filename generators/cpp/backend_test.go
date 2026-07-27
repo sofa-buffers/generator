@@ -1262,3 +1262,124 @@ func TestCppFixedProfileKeepsItsDecodeShape(t *testing.T) {
 		t.Errorf("the fixed profile must not route try_decode through a std::function:\n%s", h)
 	}
 }
+
+// nestedWrapperRowsSrc is the shape of generator#250: a nested array whose ROW
+// is itself a wrapper sequence (string / blob / struct elements), at depth 2 and
+// depth 3, alongside a native-row control that must keep its existing lowering.
+const nestedWrapperRowsSrc = "version: 1\nmessages:\n  M:\n    payload:\n" +
+	"      strrows:    { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }\n" +
+	"      blobrows:   { id: 1, type: array, items: { type: array, count: 2, items: { type: blob,   count: 3, maxlen: 8 } } }\n" +
+	"      structrows: { id: 2, type: array, items: { type: array, count: 2, items: { type: struct, count: 3, fields: { a: { id: 0, type: u32 } } } } }\n" +
+	"      deep:       { id: 3, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } } }\n" +
+	"      urows:      { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }\n"
+
+// TestCppNestedWrapperRowsHeap: a row of strings/blobs/structs is a wrapper
+// SEQUENCE — neither a span of scalars nor an IStreamMessage — so handing the
+// ROW CONTAINER to sofab::MessageSeq<T> makes its is.read(row) fail the
+// corelib's "Unsupported span element type in IStream::read()" static_assert and
+// the whole header stops compiling (generator#250). Such a row gets a generated
+// collector that places the row at its element id and reads it with the SAME
+// emission the first level uses (StringSeq / BlobSeq / MessageSeq over the
+// ELEMENT type). A row of native scalars is unaffected: the corelib collector
+// reads it directly.
+func TestCppNestedWrapperRowsHeap(t *testing.T) {
+	h, err := genHeader(t, nestedWrapperRowsSrc, "m.hpp", map[string]any{"namespace": "sofabuffers"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		// string rows: outer collector with the schema count as its cap, inner read
+		// through the corelib's string collector over the ROW.
+		"struct _S0 : sofab::IStreamMessage {",
+		"std::vector<std::vector<std::string>> *out = nullptr;",
+		"long cap = 2;",
+		"{ sofab::StringSeq _r1{_e0, 3, 8}; is.read(_r1); }",
+		"_S0 _r0; _r0.out = &strrows; is.read(_r0);",
+		// blob rows
+		"{ sofab::BlobSeq _r1{_e0, 3, 8}; is.read(_r1); }",
+		// struct rows: MessageSeq over the ELEMENT type, not the row container
+		"{ sofab::MessageSeq<MStructrowsElemElem> _r1; _r1.out = &_e0; _r1.cap = 3; is.read(_r1); }",
+		// depth 3: the row collector nests, one level further
+		"struct _S1 : sofab::IStreamMessage {",
+		"{ sofab::StringSeq _r2{_e1, 3, 8}; is.read(_r2); }",
+		// §5.1 placement + over-index reject, §7.4 replace-whole
+		"if (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
+		"while (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();",
+		"void prepare() noexcept { if (out) out->clear(); }",
+		// native rows keep the corelib collector
+		"sofab::MessageSeq<std::array<std::uint32_t, 3>> _r0; _r0.out = &urows;",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("nested wrapper rows missing %q:\n%s", want, h)
+		}
+	}
+	// The bug itself: a row CONTAINER handed to MessageSeq<T> is the
+	// non-compiling adapter. None of these may appear.
+	for _, notWant := range []string{
+		"sofab::MessageSeq<std::vector<std::string>>",
+		"sofab::MessageSeq<std::vector<std::vector<std::uint8_t>>>",
+		"sofab::MessageSeq<std::vector<MStructrowsElemElem>>",
+		"sofab::MessageSeq<std::vector<std::vector<std::string>>>",
+	} {
+		if strings.Contains(h, notWant) {
+			t.Errorf("wrapper row must not be read as %q (static_assert in IStream::read):\n%s", notWant, h)
+		}
+	}
+}
+
+// TestCppNestedWrapperRowsFixed: the same shape on the footprint leg
+// (corelib: c-cpp). The collector is static — the C decoder dereferences it
+// after the callback returns — reads through readSequence (which clears the
+// destination for §7.4), and takes its §5.1 over-index bound from the inline
+// container's capacity, which also stops InlineVector's saturating
+// emplace_back() from spinning on an over-index id (issue #126).
+func TestCppNestedWrapperRowsFixed(t *testing.T) {
+	h, err := fixedHeader(t, nestedWrapperRowsSrc, "m.hpp", nil)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"struct _S0 : sofab::IStreamMessage {",
+		"sofab::InlineVector<sofab::InlineVector<sofab::FixedString<8>, 3>, 2> *out = nullptr;",
+		"if (static_cast<std::size_t>(_id) >= out->capacity()) { is.invalidate(); return; }",
+		"{ static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r1; is.readSequence(_r1, _e0); }",
+		"static _S0 _r0; is.readSequence(_r0, strrows);",
+		"{ static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>> _r1; is.readSequence(_r1, _e0); }",
+		"{ static sofab::FixedMessageSeq<sofab::InlineVector<MStructrowsElemElem, 3>> _r1; is.readSequence(_r1, _e0); }",
+		"struct _S1 : sofab::IStreamMessage {",
+		"{ static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r2; is.readSequence(_r2, _e1); }",
+		// native rows keep the corelib collector
+		"static sofab::FixedMessageSeq<sofab::InlineVector<std::array<std::uint32_t, 3>, 2>> _r0; is.readSequence(_r0, urows);",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("fixed nested wrapper rows missing %q:\n%s", want, h)
+		}
+	}
+	for _, notWant := range []string{
+		"sofab::FixedMessageSeq<sofab::InlineVector<sofab::InlineVector<sofab::FixedString<8>, 3>, 2>>",
+		"sofab::FixedMessageSeq<sofab::InlineVector<sofab::InlineVector<sofab::FixedBytes<8>, 3>, 2>>",
+		"sofab::FixedMessageSeq<sofab::InlineVector<sofab::InlineVector<MStructrowsElemElem, 3>, 2>>",
+	} {
+		if strings.Contains(h, notWant) {
+			t.Errorf("wrapper row must not be read as %q (static_assert in IStream::read):\n%s", notWant, h)
+		}
+	}
+	// The heap storage mode of the same leg: the bound is no longer a container
+	// capacity, so it rides in as `cap`, and the row vector is reserved so
+	// placing a later row never moves a still-bound earlier one.
+	d, err := fixedHeader(t, nestedWrapperRowsSrc, "m.hpp", map[string]any{"allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("generate dynamic: %v", err)
+	}
+	for _, want := range []string{
+		"long cap = 2;",
+		"if (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
+		"strrows.reserve(2);",
+		"static _S0 _r0; is.readSequence(_r0, strrows);",
+		"{ static sofab::StringSeq _r1; _r1.cap = 3; _r1.elemMax = 8; is.readSequence(_r1, _e0); }",
+	} {
+		if !strings.Contains(d, want) {
+			t.Errorf("c-cpp allow_dynamic nested wrapper rows missing %q:\n%s", want, d)
+		}
+	}
+}

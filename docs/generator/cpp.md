@@ -251,6 +251,46 @@ targets:
     allow_dynamic: true   # optional: std::string/std::vector storage (needs a heap)
 ```
 
+## Nested arrays (arrays of arrays)
+
+An array of arrays lowers to a wrapper sequence whose elements are the **rows**
+(MESSAGE_SPEC §5.1: an element id IS its index). How a row is read depends on
+what the row holds, and there are exactly two cases:
+
+- **A row of native scalars** (`array<array<u32>>`, `array<array<fp32>>`) is a
+  span of trivially-copyable values, so the corelib's own collector reads it:
+  `sofab::MessageSeq<std::array<T,N>>` / `sofab::FixedMessageSeq<...>` places the
+  row and hands it to `is.read(row)`.
+- **A row of strings, blobs, structs/unions or further arrays** is itself a
+  wrapper *sequence*. It is neither a span of scalars nor an `IStreamMessage`, so
+  `is.read(row)` has nothing to do with it — handing the row container to
+  `MessageSeq<T>` fails the corelib's `static_assert("Unsupported span element
+  type in IStream::read()")` and the header does not compile (generator#250).
+  These rows get a small **generated row collector** instead: it places the row
+  at its element id and then reads the row with exactly the emission the first
+  level uses — `sofab::StringSeq` / `BlobSeq` / `MessageSeq<Element>` on the
+  `cpp` leg, `sofab::FixedStringSeq` / `FixedBlobSeq` / `FixedMessageSeq` on the
+  `c-cpp` leg.
+
+The collector is generated rather than shipped by the corelib because what a row
+costs to read is the *schema's* business (its element bounds and element type),
+not the wire format's — the corelib still owns every byte that is actually read.
+It is emitted as a local struct at the point of use, and it nests: depth 3
+(`array<array<array<string>>>`) wraps the depth-2 collector, so there are no
+per-shape special cases. The two spec rules it carries are the same ones the
+corelib collectors carry: §5.1 placement plus the over-index reject at the schema
+`count` (the fixed profile reads that bound off the `InlineVector` capacity,
+which also stops a saturating `emplace_back()` from spinning — issue #126), and
+§7.4 replace-whole (`prepare()` on the `cpp` leg, `readSequence()`'s own clear on
+the `c-cpp` leg). Both legs produce byte-identical wire output for these shapes,
+as for every other.
+
+> **Gap.** A nested row of `enum` or `boolean` elements
+> (`array<array<enum>>`, `array<array<boolean>>`) still does not compile: those
+> element kinds are value-converted through a native-typed temporary rather than
+> read in place, which the row path does not do yet. First-level `array<enum>` /
+> `array<boolean>` are unaffected.
+
 ## Struct member order (widest-first)
 
 The members of a generated message struct are declared **widest-first**
