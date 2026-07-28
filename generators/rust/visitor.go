@@ -51,6 +51,13 @@ type frame struct {
 	// an element whose wire byte length exceeds L is INVALID (MESSAGE_SPEC §7.1),
 	// rejected before the read, never truncated.
 	emax int64
+	// ecap is the fkNestedNative ROW's own schema count M (-1 == dynamic/no
+	// count) — the bound on the elements INSIDE one row, as distinct from cap,
+	// which bounds the rows. A row whose wire element count exceeds M is INVALID
+	// (MESSAGE_SPEC §3+§7), rejected at the count header exactly like a top-level
+	// native array (generator#216 / F-0032), which is what keeps the row's fill
+	// inside its declared capacity on both profiles.
+	ecap int64
 }
 
 // capOf maps a schema fixed-count bound to a frame's cap: N when the array
@@ -85,6 +92,43 @@ func overIndexGuard(cap int64) string {
 		return ""
 	}
 	return fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", cap)
+}
+
+// rowReject builds one reject clause for a NATIVE ROW frame (fkNestedNative) in
+// array_begin: it sets the sticky verdict flag, DISARMS the fill counter and
+// returns before the row is opened or grown.
+//
+// The disarm is what makes the clause a reject. array_begin arms afill with the
+// announced element count BEFORE this arm runs (emitArrayFillArm), and the row's
+// elements arrive afterwards through the plain unsigned()/signed()/fp callbacks,
+// which store while afill > 0 into whatever row the index slot still names. A
+// clause that only returned would therefore reject the header and then let the
+// very elements it rejected stream into the previously opened row, unbounded —
+// the fill the reject exists to stop. Zeroing afill routes them into the
+// fillGuard's `afill == 0` skip instead, so they are discarded like a bare
+// scalar at an array id.
+func rowReject(cond, flag string) string {
+	return fmt.Sprintf("if %s { self.%s = true; self.afill = 0; return; } ", cond, flag)
+}
+
+// rowGuards returns the reject clauses that front a native row's array_begin arm,
+// in the order §5.2 needs them decided: the ROW id against the outer array's
+// count (cap), then the row's own element count against the row's count (ecap) —
+// or, for a row the schema leaves unbounded, against the receiver's configured
+// array limit. Both bounds are decided at the header, before the row is opened
+// or filled, so INVALID dominates a truncated tail (generator#216).
+func (g *gen) rowGuards(fr frame) string {
+	var out string
+	if fr.cap >= 0 {
+		out += rowReject(fmt.Sprintf("id as usize >= %d", fr.cap), "inv")
+	}
+	switch {
+	case fr.ecap >= 0:
+		out += rowReject(fmt.Sprintf("count > %d", fr.ecap), "inv")
+	case g.limits.arrayHas:
+		out += rowReject("count > MAX_DYN_ARRAY_COUNT", "lim")
+	}
+	return out
 }
 
 // ixVarsOf lists the element-index state slots the message's frames need
@@ -173,7 +217,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			ix := fmt.Sprintf("_ix%d", nix)
 			nix++
 			if isNativeArrayElem(items.Elem) {
-				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef, elemDyn: !items.HasCount, cap: cap, ixVar: ix})
+				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef, elemDyn: !items.HasCount, cap: cap, ixVar: ix, ecap: boundOf(items.HasCount, items.Count)})
 			} else {
 				el := loc + "_e"
 				out = append(out, frame{loc: loc, path: path, kind: fkArrArr, elemLoc: el, cap: cap, ixVar: ix})
@@ -918,12 +962,16 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				// down by one. The over-index reject runs first, so it also bounds the
 				// gap-fill against an amplification DoS -- a bound this collector did
 				// not have before.
-				lim := ""
-				if g.limits.arrayHas && fr.elemDyn {
-					lim = "if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } "
-				}
-				f.line("            (_Loc::%s, _) => { %s%s%s self.%s = id as usize; },",
-					fr.loc, lim, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar)
+				//
+				// Both of the row's schema bounds are decided here, at the header
+				// (rowGuards): the ROW id against the outer `count`, and the row's own
+				// element count against the INNER `count`. The inner bound is the twin
+				// of the top-level over-count reject above -- without it a `count: M`
+				// row is not a bound at all on decode, and a row grows to whatever
+				// element count the wire announces (std) or silently drops the excess
+				// past its heapless capacity (no_std), instead of INVALID per §3+§7.
+				f.line("            (_Loc::%s, _) => { %s%s self.%s = id as usize; },",
+					fr.loc, g.rowGuards(fr), g.seqElemGrow(fr.path), fr.ixVar)
 			}
 		}
 		f.line("            _ => {}")

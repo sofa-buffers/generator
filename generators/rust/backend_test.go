@@ -244,7 +244,7 @@ messages:
 		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
-		"(_Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
+		"(_Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
 		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
@@ -789,6 +789,52 @@ messages:
 	}
 }
 
+// A NESTED ROW's own `count` must bound its elements, exactly like the
+// top-level over-count reject above (generator#216 / F-0032).
+//
+// The defect this pins: array_begin's row arm checked only the ROW id against the
+// OUTER count and then opened the row, so the row's inner `count: M` was not a
+// decode bound at all. On corelib-rs a `count: 3` row filled to whatever element
+// count the header announced (measured: 200_000 elements from a 583 KB message,
+// accepted); on rs-no-std the elements past the heapless capacity were dropped
+// and the message was ALSO accepted -- the two profiles disagreeing on the same
+// bytes, which §7.1 convergence (issue #149 / F-0013) forbids. Both must be
+// INVALID, decided at the count header so it dominates a truncated tail (§5.2).
+//
+// The reject must also DISARM the fill: array_begin arms afill with the announced
+// count before the arm runs, so a reject that only returned left the rejected
+// row's elements streaming into whatever row the index slot still named (measured:
+// an over-index row's 64 elements grew the legal row 0 from 3 to 67).
+func TestRustNestedRowInnerCountBoundsItsElements(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      mat:  { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+      fmat: { id: 1, type: array, items: { type: array, count: 2, items: { type: fp32, count: 4 } } }
+`
+	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
+		m := moduleFromYAML(t, src, cfg)
+		for _, want := range []string{
+			// row id vs the OUTER count, then element count vs the INNER count,
+			// both before the row is opened or grown, both disarming the fill.
+			"(_Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {",
+			"(_Loc::Root_fmat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 4 { self.inv = true; self.afill = 0; return; } while self.m.fmat.len() <= id as usize {",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
+			}
+		}
+		// The reject is at the header, not at the element store: the store stays a
+		// plain guarded push (a per-element bound would let a truncated over-count
+		// row report INCOMPLETE instead of INVALID).
+		if !strings.Contains(m, "if let Some(_r) = self.m.mat.get_mut(self._ix0) {") {
+			t.Errorf("message.rs (%v) row store must stay unconditional:\n%s", cfg, m)
+		}
+	}
+}
+
 // TestRustArrayAtScalarIdSkips: an ARRAY header delivered to a SCALAR-declared
 // field id is a wire-type contradiction and must be skipped like an unknown id
 // (MESSAGE_SPEC §7.3, issues #183 for integers and #193 for fp). corelib-rs
@@ -1037,7 +1083,7 @@ messages:
 		}
 		// Matrix rows: array_begin opens the row the id names, and elements push into
 		// THAT row rather than into the last one appended.
-		if !strings.Contains(got, "(_Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; return; } while self.m.mat.len() <= id as usize {") ||
+		if !strings.Contains(got, "(_Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {") ||
 			!strings.Contains(got, "self._ix1 = id as usize; },") {
 			t.Errorf("(%v) a matrix row must be opened at out[id], bounded by the outer count:\n%s", cfg, got)
 		}

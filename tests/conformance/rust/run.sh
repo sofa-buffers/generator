@@ -168,6 +168,38 @@ run_variant() {
     (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null) || { echo "FAIL: [$label] control (index 4 < 5) must decode"; exit 1; }
     echo "==> [$label] over-index reject OK"
 
+    # A NESTED ROW carries BOTH bounds, and array_begin decides both.
+    # somematrix (id 24) is `array of array of u32` with an OUTER count of 2 and an
+    # INNER count of 4. The row id is bounded by the outer count (the wrapper case
+    # above, one level down); the row's own ELEMENT COUNT is bounded by the inner
+    # count, exactly like the top-level over-count reject at the start of this
+    # function. Checking only the id left the inner `count: 4` as no decode bound at
+    # all: corelib-rs filled the row to whatever count the wire announced, and the
+    # no_std profile silently dropped the elements past its heapless capacity and
+    # accepted the message anyway -- the cross-profile divergence S7.1 forbids.
+    # Wire: c6 01 (sequence_begin id 24) 03 (row id 0, unsigned-array) <count>
+    # <elements> 07 (sequence_end).
+    echo "==> [$label] over-count nested row must reject (MESSAGE_SPEC S3+S7)"
+    printf '\306\001\003\005\001\002\003\004\005\007' > "$WORK/rowovercount.bin"
+    printf '\306\001\003\004\001\002\003\004\007' > "$WORK/rowovercount_control.bin"
+    if (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/rowovercount.bin" >/dev/null 2>&1); then
+        echo "FAIL: [$label] over-count matrix row (5 > inner count 4) must be INVALID"; exit 1
+    fi
+    (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/rowovercount_control.bin" >/dev/null) || { echo "FAIL: [$label] control (row of 4 == inner count) must decode"; exit 1; }
+    # Row id >= the OUTER count is the other half of the same arm.
+    printf '\306\001\023\001\001\007' > "$WORK/rowoverindex.bin"
+    printf '\306\001\013\001\001\007' > "$WORK/rowoverindex_control.bin"
+    if (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/rowoverindex.bin" >/dev/null 2>&1); then
+        echo "FAIL: [$label] over-index matrix row (id 2 >= outer count 2) must be INVALID"; exit 1
+    fi
+    (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/rowoverindex_control.bin" >/dev/null) || { echo "FAIL: [$label] control (row id 1 < 2) must decode"; exit 1; }
+    # Decided at the COUNT HEADER, so INVALID dominates a truncated tail (S5.2):
+    # a row announcing 6 elements (> 4) with only 2 present then EOF is INVALID.
+    printf '\306\001\003\006\001\002' > "$WORK/rowovercount_trunc.bin"
+    ERR=$( (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/rowovercount_trunc.bin" 2>&1 >/dev/null) || true )
+    echo "$ERR" | grep -q 'InvalidMsg' || { echo "FAIL: [$label] over-count(6>4)+truncated row must be INVALID (InvalidMsg); got: $ERR"; exit 1; }
+    echo "==> [$label] nested-row bounds OK"
+
     # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
     # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
     # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;

@@ -214,6 +214,27 @@ reachable now, and an appending collector would have shifted every later row dow
 by one. Placing by id also gave those two collectors the over-index bound they
 previously lacked.
 
+**A native row carries two bounds, and `array_begin` decides both.** A matrix row
+is opened by `array_begin`, which sees the row id *and* the row's announced
+element count, so both of the schema's bounds are checked there, before the row is
+opened or grown: the **row id** against the OUTER `count` (over-index →
+`InvalidMsg`) and the row's **element count** against the row's own INNER `count`
+(over-count → `InvalidMsg`, the twin of the top-level reject in `generator#216`).
+Deciding the element count at the header rather than at the store is what makes
+`INVALID` dominate a truncated tail (§5.2). Checking only the id was the earlier
+hole: the inner `count: M` was then not a decode bound at all — on `corelib-rs` a
+row filled to whatever count the wire announced, and on `no_std` the elements past
+the `heapless::Vec` capacity were silently dropped and the message *still*
+accepted, the cross-profile divergence §7.1 forbids.
+
+Both rejects also **disarm the fill** (`self.afill = 0`). `array_begin` arms
+`afill` with the announced element count before the reject arm runs, and a row's
+elements arrive afterwards through the ordinary `unsigned`/`signed`/`fp`
+callbacks, which store into whatever row the index slot still names. A reject that
+only returned would therefore let the elements it just rejected stream into the
+previously opened row, unbounded; zeroing `afill` routes them into the
+`afill == 0` skip instead, so they are discarded like a bare scalar at an array id.
+
 **One sparse rule, positional in the value.** An element before the last one that
 equals its element default is **omitted**, leaving an id gap that decode restores
 from that same default:
