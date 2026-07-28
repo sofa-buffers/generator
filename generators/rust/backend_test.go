@@ -1097,3 +1097,44 @@ messages:
 		t.Errorf("a dynamic wrapper array must still place elements by id:\n%s", got)
 	}
 }
+
+// The last element of a DYNAMIC wrapper array is always written, whatever its
+// value (MESSAGE_SPEC §2). Such an array recovers its length as highest-present-
+// id + 1 (§5.1), so the element at the highest index is the only one whose
+// PRESENCE carries the length: dropping a trailing default leaf encoded ["a", ""]
+// exactly like ["a"] and decoded one element short. Sequence-form elements never
+// had the problem -- they are framed unconditionally -- so this holds both
+// element kinds to one standard. A fixed-count array is exempt: its length is N
+// whatever the wire carries, so it still elides the whole trailing run.
+func TestRustDynamicArrayAlwaysWritesLastElement(t *testing.T) {
+	// std only: the no_std profile rejects a count-less array outright (in both
+	// storage modes, allow_dynamic included), so a dynamic wrapper array can only
+	// exist here and the change is a no-op for the footprint profile.
+	got := moduleFromYAML(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
+      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`, map[string]any{"corelib": "rs"})
+
+	for _, want := range []string{
+		// dynamic: the last index escapes the omit test
+		"for (_i0, _e0) in self.dynstr.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dynstr.len() { let _ = os.write_str(_i0 as Id, _e0); } }",
+		"for (_i0, _e0) in self.dynblob.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dynblob.len() { let _ = os.write_blob(_i0 as Id, _e0); } }",
+		// fixed: no guard -- the trailing run still collapses, the decoder refills to N
+		"for (_i0, _e0) in _trim_seq(&self.fixedstr, |_x| _x.is_empty()).iter().enumerate() { if !_e0.is_empty() { let _ = os.write_str(_i0 as Id, _e0); } }",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.rs missing %q:\n%s", want, got)
+		}
+	}
+	// The all-default predicate has to follow the writer: a dynamic [""] now puts
+	// an element on the wire, so the field is NOT default and must not be trimmed
+	// here -- elemTrimExpr's !fixed early return is what keeps the two in step.
+	if strings.Contains(got, "_trim_seq(&self.dynstr") || strings.Contains(got, "_trim_seq(&self.dynblob") {
+		t.Errorf("a dynamic string/blob array must not be narrowed:\n%s", got)
+	}
+}

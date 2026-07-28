@@ -218,6 +218,28 @@ not — or the reverse — would omit a field that is on the wire, or keep one t
 is not. `is_default()` and the `_trim_seq` helper are emitted only for the
 schemas that use them, so a footprint build carries neither.
 
+**The last element of a dynamic array is always present** (§2, tightened by
+documentation#29). A dynamic array recovers its length as highest-present-id + 1
+(§5.1), so the element at the highest index is the only one whose *presence*
+carries the length. A `string`/`blob` element is otherwise a leaf the writer
+omits whenever it equals the element default — which dropped that one element
+too, so `["a", ""]` encoded exactly like `["a"]` and decoded one element short,
+and `["", ""]` encoded to nothing at all. The omit test therefore carries a
+`|| _i0 + 1 == <arr>.len()` disjunct (`lastElemGuard`), and `["", ""]` goes on
+the wire as its final element **alone, at id 1**. Interior gaps are untouched:
+`["", "b"]` still elides index 0. `struct`/`union`/row elements never needed the
+guard — they are framed unconditionally — so this holds both element kinds to one
+standard.
+
+A `count: N` array is exempt and gets no guard: its length is `N` whatever the
+wire carries, which is why it elides the entire trailing default run instead.
+That is the same `HasCount` flag `elemTrimExpr` gates its narrowing on, and
+deliberately so — narrowing a dynamic `[""]` in the predicate while the writer
+frames its one element is exactly the drift the shared expression exists to
+prevent. Under `corelib: rs-no-std` this is all inert: that profile rejects a
+count-less array outright (in both storage modes, `allow_dynamic` included), so a
+dynamic wrapper array can only exist on the std profile.
+
 **Nested-array rows are excluded** from the narrowing, the fill, and the
 `Default` materialization — the three have to agree, or the field is inconsistent
 the other way round. A row's
