@@ -1545,7 +1545,7 @@ metadata above. The `docs` target renders the same metadata as HTML page content
   | rule | encode | decode |
   |---|---|---|
   | **placement** | element written at its index | element decoded **into** `dest[id]` after gap-filling with element defaults — never appended |
-  | **refill** | — | a `count: N` array is default-filled back out to `N` once the sequence scope closes |
+  | **refill** | — | a `count: N` array is default-filled back out to `N` once the sequence scope closes, *and* materialized to `N` at construction |
   | **trailing trim** | the loop runs to `M` = one past the last non-default element; `M == 0` writes no child, so the lazy wrapper is dropped and the field is omitted (§2) | — |
   Placement is what gives §7.4 struct-merge on a **reopened** element id for free:
   the second frame decodes into the element the first one produced. Appending
@@ -1555,9 +1555,18 @@ metadata above. The `docs` target renders the same metadata as HTML page content
   The refill is not cosmetic — it is what makes the trim **lossless**. Without it
   the trailing elision would not re-shape the bytes, it would shorten the decoded
   array on every round trip; native arrays always had it, wrapper arrays did not
-  (generator#248). A **dynamic** array has no `N` to refill from, so it is never
-  narrowed and never filled: there a trailing default element is significant, and
-  its length stays *highest present id + 1*.
+  (generator#248). It has to happen in **both** places: the refill on sequence
+  close only fires for a field that was actually on the wire, so a wrapper array
+  is also materialized to `N` at construction, exactly where a native fixed-count
+  array always was. Filling in only one of the two leaves the field disagreeing
+  with itself — absent decoding at length 0 while a single transmitted element
+  decodes at `N`. A **dynamic** array has no `N` to refill from, so it is never
+  narrowed, never filled and never materialized: there a trailing default element
+  is significant, and its length stays *highest present id + 1*.
+  Materialization does not change any bytes: the trim narrows the `N` default
+  elements straight back off, so an untouched message still encodes to nothing.
+  It does change hand-written *construction* — a `count: N` wrapper array is
+  assigned in place, not `push`ed onto, or the value runs past `N`.
   The trim needs an explicit all-default predicate (`isDefault` and friends),
   because the lazy framing's implicit "no child was written" test answers too
   late — an element must be judged **before** its frame opens. Each backend

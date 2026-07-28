@@ -88,11 +88,14 @@ fn main() {
 
     // wrapper-sequence arrays: their elements are child fields keyed by index, so
     // a boundary can fall between two elements or inside one element's payload.
-    for i in 0..5 {
-        m.somestringarray.push(format!("elem-{i:08}")); // 13 <= maxlen 16
+    // A `count: N` wrapper array is materialized to N elements by Default, exactly
+    // like the native arrays above, so it is assigned in place too: pushing would
+    // append past N and the wire would be rejected as over-count.
+    for (i, v) in m.somestringarray.iter_mut().enumerate() {
+        *v = format!("elem-{i:08}"); // 13 <= maxlen 16
     }
-    for i in 0..3u8 {
-        m.someblobarray.push(vec![i; 8]); // 8 == maxlen 8
+    for (i, v) in m.someblobarray.iter_mut().enumerate() {
+        *v = vec![i as u8; 8]; // 8 == maxlen 8
     }
     for i in 0..4u32 {
         m.somematrix.push(vec![i * 11, i * 22, i * 33]);

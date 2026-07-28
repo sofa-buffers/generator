@@ -68,13 +68,15 @@ fn main() {
 
     // 3. a wrapper array of heapless strings: element boundaries and payload
     //    boundaries both fall inside chunks.
+    // `a` is `count: 8`, so its Default is already 8 elements long (S5.1) — the
+    // elements are assigned in place; a push would run past the heapless capacity.
     let mut arr = Vecsa::default();
-    for i in 0..8u32 {
-        let s: heapless::String<16> = std::format!("element-{i:03}")
+    assert_eq!(arr.a.len(), 8, "a count: 8 wrapper array defaults to 8 elements");
+    for (i, v) in arr.a.iter_mut().enumerate() {
+        *v = std::format!("element-{i:03}")
             .as_str()
             .try_into()
             .expect("fits the element maxlen");
-        arr.a.push(s).expect("fits the schema count");
     }
     let wire = arr.encode();
     let want = Vecsa::try_decode(&wire).expect("one-shot decode failed");
