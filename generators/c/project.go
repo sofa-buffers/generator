@@ -204,21 +204,57 @@ func (g *gen) fieldToJSON(h *cfile, f *ir.Field) {
 	}
 }
 
+// arrRef locates one array value in the generated C storage: `store` is the
+// member the elements live in (the array itself for a compact array, the holder
+// object for a wrapper array) and `length` is the C expression for how many
+// elements it currently holds — the companion length member, or the literal
+// capacity for the two un-sized holder forms (see holderSized). `lenType` is
+// that member's C type, empty when there is none to write back.
+type arrRef struct{ store, length, lenType string }
+
+// arrayRef resolves the storage of an array VALUE reached through acc, given its
+// element spec. The value is either a compact array (acc is the array, acc_len
+// its length) or a wrapper holder (acc is the holder, acc.len its element count).
+func (g *gen) arrayRef(spec arraySpec, acc string) arrRef {
+	if !isHolderElem(spec.elem) {
+		return arrRef{store: acc, length: acc + "_len", lenType: lenC(g.cAlignArray(spec))}
+	}
+	if holderSized(spec) {
+		return arrRef{store: acc, length: acc + ".len", lenType: lenC(g.cAlignArray(spec))}
+	}
+	return arrRef{store: acc, length: fmt.Sprintf("%d", spec.count)}
+}
+
+// arrayRefSlot resolves an INNER array value held in a holder slot. A nested
+// compact row is a { len; vals[]; } slot, so its two parts sit inside the slot
+// rather than beside it; a nested holder is the slot itself.
+func (g *gen) arrayRefSlot(spec arraySpec, slot string) arrRef {
+	if !isHolderElem(spec.elem) {
+		return arrRef{store: slot + ".vals", length: slot + ".len", lenType: lenC(g.cAlignArray(spec))}
+	}
+	return g.arrayRef(spec, slot)
+}
+
 func (g *gen) arrayToJSON(h *cfile, f *ir.Field, acc string) {
-	g.arrayValueToJSON(h, specOfField(f), acc, "    ", 0)
+	spec := specOfField(f)
+	g.arrayValueToJSON(h, spec, g.arrayRef(spec, acc), "    ", 0)
 }
 
 // arrayValueToJSON emits the JSON for one array value. Native numeric/enum/
-// boolean/bitfield elements are read from acc[_iN]; string/blob/struct/union and
-// nested-array elements live in the holder's acc.items[_iN] slot. Recurses for
-// nested arrays, depth-suffixing the loop variable.
-func (g *gen) arrayValueToJSON(h *cfile, spec arraySpec, acc, ind string, depth int) {
+// boolean/bitfield elements are read from ref.store[_iN]; string/blob/struct/union
+// and nested-array elements live in the holder's ref.store.items[_iN] slot.
+// Recurses for nested arrays, depth-suffixing the loop variable.
+//
+// The loop runs to the array's LENGTH, not its capacity (MESSAGE_SPEC §3/§5.1):
+// `count` bounds the storage and never appears in a value, so a decode that
+// received three of a possible five must render three.
+func (g *gen) arrayValueToJSON(h *cfile, spec arraySpec, ref arrRef, ind string, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	h.line(`%sfputc('[', out);`, ind)
-	h.line("%sfor (int %s = 0; %s < %d; %s++) {", ind, iv, iv, spec.count, iv)
+	h.line("%sfor (int %s = 0; %s < (int)(%s); %s++) {", ind, iv, iv, ref.length, iv)
 	h.line(`%s    if (%s) fputc(',', out);`, ind, iv)
-	elem := fmt.Sprintf("%s[%s]", acc, iv)       // native element access
-	slot := fmt.Sprintf("%s.items[%s]", acc, iv) // holder element access
+	elem := fmt.Sprintf("%s[%s]", ref.store, iv)       // native element access
+	slot := fmt.Sprintf("%s.items[%s]", ref.store, iv) // holder element access
 	switch spec.elem {
 	case ir.KindFP32, ir.KindFP64:
 		h.line(`%s    fprintf(out, "%%.17g", (double)%s);`, ind, elem)
@@ -235,7 +271,8 @@ func (g *gen) arrayValueToJSON(h *cfile, spec arraySpec, acc, ind string, depth 
 	case ir.KindStruct, ir.KindUnion:
 		h.line(`%s    %s_to_json(&%s, out);`, ind, g.jsonFn(spec.ref.Key), slot)
 	case ir.KindArray:
-		g.arrayValueToJSON(h, specOfItems(spec.items), slot, ind+"    ", depth+1)
+		inner := specOfItems(spec.items)
+		g.arrayValueToJSON(h, inner, g.arrayRefSlot(inner, slot), ind+"    ", depth+1)
 	default: // unsigned numeric, bitfield
 		h.line(`%s    fprintf(out, "%%llu", (unsigned long long)%s);`, ind, elem)
 	}
@@ -291,19 +328,29 @@ func (g *gen) fieldFromJSON(h *cfile, f *ir.Field) {
 }
 
 func (g *gen) arrayFromJSON(h *cfile, f *ir.Field, acc string) {
-	g.arrayValueFromJSON(h, specOfField(f), acc, "c", "        ", 0)
+	spec := specOfField(f)
+	g.arrayValueFromJSON(h, spec, g.arrayRef(spec, acc), "c", "        ", 0)
 }
 
 // arrayValueFromJSON parses one array value from the JSON node jnode. Mirrors
-// arrayValueToJSON: native elements land in acc[_iN], holder elements in
-// acc.items[_iN]. Recurses for nested arrays.
-func (g *gen) arrayValueFromJSON(h *cfile, spec arraySpec, acc, jnode, ind string, depth int) {
+// arrayValueToJSON: native elements land in ref.store[_iN], holder elements in
+// ref.store.items[_iN]. Recurses for nested arrays.
+//
+// The parsed element count is written back to the array's length member, bounded
+// by the capacity: that length is the value (§3/§5.1), so a three-element JSON
+// array in a `count: 5` field must encode as three elements, not five.
+func (g *gen) arrayValueFromJSON(h *cfile, spec arraySpec, ref arrRef, jnode, ind string, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
-	h.line("%sfor (size_t %s = 0; %s < sofab_json_array_size(%s) && %s < %d; %s++) {", ind, iv, iv, jnode, iv, spec.count, iv)
+	nv := fmt.Sprintf("_n%d", depth)
+	h.line("%s{ size_t %s = sofab_json_array_size(%s); if (%s > %d) %s = %d;", ind, nv, jnode, nv, spec.count, nv, spec.count)
+	if ref.lenType != "" {
+		h.line("%s%s = (%s)%s;", ind, ref.length, ref.lenType, nv)
+	}
+	h.line("%sfor (size_t %s = 0; %s < %s; %s++) {", ind, iv, iv, nv, iv)
 	h.line("%s    const sofab_json_t *%s = sofab_json_array_at(%s, %s);", ind, ev, jnode, iv)
-	elem := fmt.Sprintf("%s[%s]", acc, iv)
-	slot := fmt.Sprintf("%s.items[%s]", acc, iv)
+	elem := fmt.Sprintf("%s[%s]", ref.store, iv)
+	slot := fmt.Sprintf("%s.items[%s]", ref.store, iv)
 	switch spec.elem {
 	case ir.KindFP32:
 		h.line("%s    %s = (float)sofab_json_double(%s);", ind, elem, ev)
@@ -322,11 +369,12 @@ func (g *gen) arrayValueFromJSON(h *cfile, spec arraySpec, acc, jnode, ind strin
 	case ir.KindStruct, ir.KindUnion:
 		h.line("%s    %s_from_json(%s, &%s);", ind, g.jsonFn(spec.ref.Key), ev, slot)
 	case ir.KindArray:
-		g.arrayValueFromJSON(h, specOfItems(spec.items), slot, ev, ind+"    ", depth+1)
+		inner := specOfItems(spec.items)
+		g.arrayValueFromJSON(h, inner, g.arrayRefSlot(inner, slot), ev, ind+"    ", depth+1)
 	default: // unsigned numeric, bitfield
 		h.line("%s    %s = (%s)sofab_json_u64(%s);", ind, elem, g.arrayElemCType(spec.elem, spec.ref), ev)
 	}
-	h.line("%s}", ind)
+	h.line("%s} }", ind)
 }
 
 // emitBench emits the Callgrind workload entry points (tests/bench, ARCHITECTURE

@@ -384,9 +384,9 @@ messages:
 `)
 	c := files["m.c"]
 	for _, want := range []string{
-		"_sa_elems = SOFAB_OBJECT_DESCR_SEQ(", // string holder
-		"_ba_elems = SOFAB_OBJECT_DESCR_SEQ(", // blob holder
-		"_pa_elems = SOFAB_OBJECT_DESCR_SEQ(", // struct holder
+		"_sa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // string holder (carries its element count)
+		"_ba_elems = SOFAB_OBJECT_DESCR_SEQ(",       // blob holder (un-sized: the slot's own length is in the way)
+		"_pa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // struct holder
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c holder descriptor not marked fixed-seq: missing %q:\n%s", want, c)
@@ -478,6 +478,242 @@ messages:
 	if strings.Contains(files["m.h"], "__attribute__((deprecated))") {
 		t.Errorf("no deprecated field, but m.h emitted a deprecated attribute:\n%s", files["m.h"])
 	}
+}
+
+// TestCompactArraySized: MESSAGE_SPEC §3 makes `count: N` the array's CAPACITY
+// and the wire count M its LENGTH — no element is elided, and no decoder refills
+// [M, N). The C backend writes no encode logic of its own; it hands object.c a
+// descriptor, and a plain SOFAB_OBJECT_FIELD_ARRAY derives the count structurally
+// from sizeof(field)/sizeof(field[0]) — the capacity, and nothing else. So every
+// compact array must lower to SOFAB_OBJECT_FIELD_ARRAY_SIZED with a companion
+// length member holding 0..N, declared immediately before the buffer.
+func TestCompactArraySized(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      u8s:  { id: 0, type: array, items: { type: u8,   count: 4 } }
+      u32s: { id: 1, type: array, items: { type: u32,  count: 4 } }
+      f64s: { id: 2, type: array, items: { type: fp64, count: 3 } }
+      wide: { id: 3, type: array, items: { type: u16,  count: 400 } }
+`)
+	h, c := files["m.h"], files["m.c"]
+	// The length must be at least as wide as one element: it sits immediately
+	// before the buffer, and the corelib reads it at <offset − width>, so a
+	// narrower one would be padded away (and fail SOFAB_OBJECT_ASSERT_LEN_ADJACENT).
+	for _, want := range []string{
+		"uint8_t u8s_len; uint8_t u8s[4];",       // byte elements: capacity fits a byte
+		"uint32_t u32s_len; uint32_t u32s[4];",   // 4-byte elements force a 4-byte length
+		"uint64_t f64s_len; double f64s[3];",     // 8-byte elements force an 8-byte length
+		"uint16_t wide_len; uint16_t wide[400];", // capacity 400 needs 2 bytes anyway
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.h missing %q:\n%s", want, h)
+		}
+	}
+	for _, want := range []string{
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(0, message_m_t, u8s, u8s_len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(2, message_m_t, f64s, f64s_len, SOFAB_OBJECT_FIELDTYPE_ARRAY_FP64),",
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c missing %q:\n%s", want, c)
+		}
+	}
+	// The capacity-only descriptor can express only the length N, so it must be gone.
+	if strings.Contains(c, "SOFAB_OBJECT_FIELD_ARRAY(") {
+		t.Errorf("m.c still emits a capacity-only SOFAB_OBJECT_FIELD_ARRAY (§3):\n%s", c)
+	}
+	// An 8-byte length is read through the corelib's _load_uint, whose 8-byte case
+	// SOFAB_DISABLE_INT64_SUPPORT compiles out — so such a schema must guard it.
+	if !strings.Contains(h, "#if defined(SOFAB_DISABLE_INT64_SUPPORT)") {
+		t.Errorf("m.h: an 8-byte array length needs the INT64 capability guard:\n%s", h)
+	}
+}
+
+// TestWrapperHolderSized: MESSAGE_SPEC §5.1 gives a wrapper array the length
+// *highest present id + 1*, i.e. any of 0..N, with `count` bounding it only. A C
+// holder materializes all N slots, so without a length member it can express
+// nothing but 0 (every slot default — the enclosing object omits the field) and
+// N. The holder therefore leads with an element-count member and is emitted as
+// SOFAB_OBJECT_DESCR_SEQ_SIZED.
+func TestWrapperHolderSized(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      sa: { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      pa: { id: 1, type: array, items: { type: struct, count: 3, fields: { x: { id: 0, type: i32 } } } }
+      wa: { id: 2, type: array, items: { type: struct, count: 3, fields: { x: { id: 0, type: u64 } } } }
+      na: { id: 3, type: array, items: { type: array,  count: 2, items: { type: string, count: 2, maxlen: 4 } } }
+`)
+	h, c := files["m.h"], files["m.c"]
+	for _, want := range []string{
+		"uint8_t len; char items[3][9];",                    // string slots are byte-aligned: any width works
+		"uint32_t len; message_m_pa_elem_t items[3];",       // i32 element struct -> 4-byte alignment
+		"uint64_t len; message_m_wa_elem_t items[3];",       // u64 element struct -> 8-byte alignment
+		"uint8_t len; message_m_na_elems_inner_t items[2];", // holder of holders: inner leads with a uint8_t
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.h missing %q:\n%s", want, h)
+		}
+	}
+	for _, want := range []string{
+		"_sa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(_message_fields_message_m_sa_elems, 3, NULL, 0, message_m_sa_elems_t, items[0], len);",
+		"_pa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"_wa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"_na_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"_na_elems_inner = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c missing %q:\n%s", want, c)
+		}
+	}
+	// No holder here may keep the length-less form: each would then be stuck at
+	// the two lengths 0 and N.
+	if strings.Contains(c, "_elems = SOFAB_OBJECT_DESCR_SEQ(") {
+		t.Errorf("m.c left a wrapper holder without its element count (§5.1):\n%s", c)
+	}
+}
+
+// TestSizedElementHolderStaysUnsized: the two element kinds whose slot is itself
+// length-carrying — a blob element and a native inner-array row (issues #128/#130)
+// — put their own used-length in the one byte the holder's element count would
+// have to occupy (the descriptor reads it at <first slot offset − width>). Those
+// holders stay un-sized, and each row/element keeps its OWN sized descriptor: a
+// row's wire count is its length too (§3).
+func TestSizedElementHolderStaysUnsized(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      ba:   { id: 0, type: array, items: { type: blob,  count: 3, maxlen: 4 } }
+      rows: { id: 1, type: array, items: { type: array, count: 2, items: { type: u16, count: 3 } } }
+`)
+	h, c := files["m.h"], files["m.c"]
+	if !strings.Contains(h, "struct { uint16_t len; uint16_t vals[3]; } items[2];") {
+		t.Errorf("m.h: a native inner-array row must be a sized { len; vals[]; } slot:\n%s", h)
+	}
+	for _, want := range []string{
+		"_ba_elems = SOFAB_OBJECT_DESCR_SEQ(",
+		"_rows_elems = SOFAB_OBJECT_DESCR_SEQ(",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(0, message_m_rows_elems_t, items[0].vals, items[0].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(1, message_m_rows_elems_t, items[1].vals, items[1].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c missing %q:\n%s", want, c)
+		}
+	}
+	if strings.Contains(c, "SOFAB_OBJECT_DESCR_SEQ_SIZED(") {
+		t.Errorf("m.c: a holder whose slots carry their own length has no room for an element count:\n%s", c)
+	}
+}
+
+// TestArrayDefaultKeepsItsLength: a declared `default` shorter than `count` is an
+// array of ITS OWN length — §3 dropped the padding to N that the fixed-length
+// reading implied. The length lives in the companion member, and sofab_object_init
+// seeds that from the default image (at offset − width), so the image must carry
+// it. An all-ZERO declared default still has a length: [0,0,0] is the three-element
+// array of zeros, not the empty array, so the length entry is emitted even when the
+// value image is elided as all-zero storage.
+func TestArrayDefaultKeepsItsLength(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      few: { id: 0, type: array, items: { type: u32, count: 5 }, default: [1, 2, 3] }
+      zeros: { id: 1, type: array, items: { type: u32, count: 5 }, default: [0, 0, 0] }
+      none:  { id: 2, type: array, items: { type: u32, count: 5 } }
+`)
+	c := files["m.c"]
+	for _, want := range []string{
+		".few_len = 3,",
+		".few = { 1, 2, 3 },",
+		".zeros_len = 3,", // the length is the value even when every element is zero
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c missing %q:\n%s", want, c)
+		}
+	}
+	// No declared default -> the empty array -> length 0, which the memset already
+	// leaves; nothing may be written into the image for it.
+	if strings.Contains(c, ".none_len") || strings.Contains(c, ".none =") {
+		t.Errorf("m.c invented a default for an array that declares none:\n%s", c)
+	}
+	// The superseded reading padded the declared default out to the capacity.
+	if strings.Contains(c, ".few = { 1, 2, 3, 0, 0 }") {
+		t.Errorf("m.c padded a short declared default out to count (§2/§3/§6):\n%s", c)
+	}
+}
+
+// TestHarnessRendersArrayLength: the project harness is what the conformance
+// round-trips run through, so it has to speak the same language as the wire — a
+// JSON array is read into the length member and rendered from it, never from the
+// capacity. Rendering `count` elements would print a decoded 2-of-5 array as five.
+func TestHarnessRendersArrayLength(t *testing.T) {
+	files := genCProject(t, `
+version: 1
+messages:
+  m:
+    payload:
+      a:  { id: 0, type: array, items: { type: u32, count: 5 } }
+      sa: { id: 1, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      ba: { id: 2, type: array, items: { type: blob, count: 3, maxlen: 4 } }
+`)
+	hs := files["harness/main.c"]
+	for _, want := range []string{
+		"_i0 < (int)(o->a_len)",  // compact array renders its length
+		"_i0 < (int)(o->sa.len)", // sized holder renders its element count
+		"o->a_len = (uint32_t)_n0;",
+		"o->sa.len = (uint8_t)_n0;",
+	} {
+		if !strings.Contains(hs, want) {
+			t.Errorf("harness/main.c missing %q:\n%s", want, hs)
+		}
+	}
+	// The blob holder has no element count, so it (and only it) renders its capacity.
+	if !strings.Contains(hs, "_i0 < (int)(3)") {
+		t.Errorf("harness/main.c: an un-sized holder renders its capacity:\n%s", hs)
+	}
+	// Nothing may still loop to a compact array's capacity.
+	if strings.Contains(hs, "_i0 < (int)(5)") {
+		t.Errorf("harness/main.c still renders a compact array to its capacity:\n%s", hs)
+	}
+}
+
+// genCProject generates with emit:project so the harness sources are included.
+func genCProject(t *testing.T, src string) map[string]string {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "test.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := doc.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("schema must validate: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(s, map[string]any{"emit": "project"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	out := map[string]string{}
+	for _, f := range files {
+		out[f.Path] = string(f.Content)
+	}
+	return out
 }
 
 func keys(m map[string]string) []string {

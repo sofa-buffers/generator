@@ -47,6 +47,9 @@ int main(void)
     memcpy(m.f_str, "123456789", 9);
     m.f_blob_len = 7;
     memset(m.f_blob, 0xAB, 7);
+    /* The wire carries an array's length, so set it (MESSAGE_SPEC §3/§5.1). */
+    m.f_arr_u32_len = 5;
+    m.f_arr_str.len = 3;
     for (int i = 0; i < 5; i++) { m.f_arr_u32[i] = UINT32_MAX; }
     for (int i = 0; i < 3; i++) { memcpy(m.f_arr_str.items[i], "abcdef", 6); }
     m.f_nested.n_i32 = INT32_MIN;

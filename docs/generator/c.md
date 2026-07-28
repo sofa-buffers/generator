@@ -53,56 +53,113 @@ Unlike the C++ `c-cpp` and Rust `no_std` fixed-capacity profiles there is **no
 `allow_dynamic` escape** for C: a schema with a genuinely dynamic collection (a
 `count`-less map, say) is a heap-target schema, and must be given explicit
 capacities before it can be generated for C. `count` itself never goes on the
-wire — but it is **not** encoding-neutral: it makes the array fixed-length `N`,
-which changes what the canonical wire carries (see below).
+wire, and it is encoding-neutral: it is a **capacity**, so it bounds the storage
+and rejects an over-long message, but it never adds an element to a value (see
+below).
 
-## Fixed-count arrays: the S3 rule lives in the corelib, not in generated code
+## `count` is a capacity: every array carries a length
 
-MESSAGE_SPEC §3 makes `count: N` a **fixed-length** array of exactly `N`
-elements: the canonical encoding **elides the trailing default run**, and a
-decoder refills `[M, N)` from the **element** default (ARCHITECTURE §11,
-*fixed-count arrays*). `[7,8,9]` in a `count: 5` u32 field encodes as
-`23 03 07 08 09`, not `23 05 07 08 09 00 00`.
+MESSAGE_SPEC §3/§5.1 make `count: N` the array's **capacity**, never its length.
+The wire count `M` **is** a compact array's length; a wrapper array's length is
+*highest present id + 1*; and nothing that carries the length may be elided —
+`[1,2,3,0,0]` and `[1,2,3]` are different values, so no trailing-default run is
+trimmed and no decoder fills `[M, N)`. Inside an array the *interior* is sparse
+(an element equal to its element default is skipped, leaf and sequence form
+alike, leaving an id gap) and the **last** element is always written — as its
+value, or as an empty frame.
 
-C is the one target where **neither half is emitted by the generator**. Every
-other backend writes its own array call and hands the corelib a trimmed
-slice/span; C emits only a struct plus a static descriptor table, and
-`SOFAB_OBJECT_FIELD_ARRAY` derives the element count *structurally* —
+C is the one target where **none of that is emitted by the generator**. Every
+other backend writes its own array call; C emits only a struct plus a static
+descriptor table, and `object.c` (corelib-c-cpp 0.8.x, commits `45a857d` +
+`55d5161`) implements the whole rule from the descriptor. What the generator owes
+it is the one thing a descriptor cannot infer — **the length** — because
+`SOFAB_OBJECT_FIELD_ARRAY` / `SOFAB_OBJECT_DESCR_SEQ` derive the element count
+*structurally* from `sizeof(field)/sizeof(field[0])` and from `field_count`,
+i.e. from the capacity and nothing else. A capacity-only object can hold no array
+shorter than `N`, and a decode of `M < N` re-encodes as `N`.
+
+So every array form is emitted in its **length-carrying** variant: a companion
+member declared immediately before the storage, whose width the descriptor
+records.
+
+**Compact (numeric/enum/boolean/bitfield) arrays** — `SOFAB_OBJECT_FIELD_ARRAY_SIZED`:
 
 ```c
-#define SOFAB_OBJECT_FIELD_ARRAY(id, obj, field, type) \
-    { id, offsetof(obj, field), sizeof(((obj *)0)->field), 0, type, \
-      (sizeof(((obj *)0)->field[0]) & 0xF) }
+typedef struct { …; uint32_t <name>_len; uint32_t <name>[N]; …; } message_M_t;
+…
+SOFAB_OBJECT_FIELD_ARRAY_SIZED(id, message_M_t, <name>, <name>_len,
+                               SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED)
 ```
 
-— so `object.c` sees `field->size / field->element_size == N` and there is no
-used-length slot, and no generated statement, to trim through. The rule is
-therefore implemented **in `corelib-c-cpp`** (generator#136 / Crucible F-0010,
-fixed by corelib-c-cpp#87):
+Encode writes exactly `<name>_len` elements — trailing element defaults included;
+decode stores the received `M` back into it. `M > N` stays `SOFAB_RET_E_INVALID_MSG`.
 
-- **encode** — `object.c` trims the trailing all-zero element run before calling
-  the array writer. It lives on the C-only descriptor path and **not** in the
-  `sofab_ostream_write_array_of_*` writers, which the C++ wrapper calls directly
-  with dynamic `std::vector`s that have no `N` to refill from and so must keep
-  their trailing defaults.
-- **decode** — `_bind_array_count` (`istream.c`) accepts `M <= N`, rejects
-  `M > N` with `SOFAB_RET_E_INVALID_MSG`, and clears `[M, N)` to the element
-  default. The clear matters because `<prefix>_init` seeds the destination from
-  the **schema** default image, which describes the whole field only when the
-  field is *absent*; without it a `count: 5, default: [1,2,3]` field would decode
-  `23 02 01 02` as `[1,2,3,0,0]` instead of `[1,2,0,0,0]`.
+**Wrapper-array holders** (`string`/`struct`/`union` elements, and an array of
+arrays whose inner element is itself a wrapper) — `SOFAB_OBJECT_DESCR_SEQ_SIZED`:
 
-**Minimum corelib.** Generated C is only canonical against a `corelib-c-cpp` that
-carries corelib-c-cpp#87. Against an older one the generated sources still
-compile and interoperate — a decoder must accept a non-canonical encoding that
-carries trailing default elements (§3) — but C's own output keeps the trailing
-run, and a short wire count leaks the schema default.
+```c
+typedef struct { uint8_t len; char items[N][maxlen + 1]; } message_M_sa_elems_t;
+…
+SOFAB_OBJECT_DESCR_SEQ_SIZED(fields, N, NULL, 0, message_M_sa_elems_t, items[0], len)
+```
 
-**Consequence for `corelib: c-cpp`.** The C++ wrapper shares `istream.c`, so that
-profile now gets the `[M, N)` clear from the corelib *as well as* from the
-`array_begin` reset the generator emits. The generated reset is kept regardless:
-it is what makes the pure `corelib: cpp` (heap) profile correct, since that is a
-different library without this fix, and it costs nothing where it is redundant.
+`len` holds `0..N`; encode walks the slots `[0, len)` and always writes the one
+at `len - 1`; decode stores *highest present id + 1* back into it, so a received
+`["a"]` re-encodes as one element instead of growing back to `N`. `len == 0` is
+the empty array, which the enclosing object's ≠-default test omits whole (the
+canonical encoding, §2).
+
+### How the length's width is chosen
+
+The descriptor stores only the length's **width** and reads it at
+*storage offset − width*, so the two members have to be **adjacent** — and unlike
+a sized blob's byte buffer (alignment 1, which abuts any width) an element slot
+can be aligned strictly enough to pad a narrower length away from it:
+`{ uint8_t len; uint32_t v[4]; }` puts `v` at offset 4, three bytes past the
+length. The generator therefore picks
+
+> width = max(narrowest width holding `0..count`, the element's alignment)
+
+— `uint8_t` for byte-wide elements and for a `string` holder (`char[]`, alignment
+1), `uint32_t` for a `u32`/`fp32` array or a struct holder whose element's widest
+member is 4 bytes, `uint64_t` for `u64`/`fp64`/8-byte-aligned struct elements.
+Both inputs are powers of two ≤ 8, so the wider one is too, and the storage that
+follows is automatically aligned. corelib-c-cpp asserts the adjacency at compile
+time anyway (`SOFAB_OBJECT_ASSERT_LEN_ADJACENT`, a negative array bound), so a
+mistake here is a build error rather than a silent misread.
+
+An 8-byte length is read through the corelib's `_load_uint`, whose 8-byte case
+`SOFAB_DISABLE_INT64_SUPPORT` compiles out — so a schema that forces one also
+emits the `SOFAB_DISABLE_INT64_SUPPORT` capability guard, even when no field is a
+64-bit integer.
+
+### Two holders that cannot carry a length
+
+A `blob` array element and a native inner-array **row** are themselves
+length-carrying (issues #128/#130): each keeps its own used-length in the byte
+immediately before its buffer — which is the one address the holder's element
+count would have to occupy. Those two holders therefore stay
+`SOFAB_OBJECT_DESCR_SEQ` (un-sized): their value occupies every slot, the last
+index is `count - 1`, and the lengths `1 … N-1` are not expressible. Both round
+trip exactly (an interior default element is omitted and reconstructed in place,
+an all-default holder is omitted whole as the empty array); what is lost is only
+the ability to *say* "two of a possible three" for those two element kinds. Each
+row/element keeps its own `SOFAB_OBJECT_FIELD_ARRAY_SIZED` /
+`SOFAB_OBJECT_FIELD_BLOB_SIZED`, so an inner array's own length is exact.
+
+### Declared array defaults are not padded
+
+A `default` shorter than `count` is an array of **its own** length: `count: 5,
+default: [1,2,3]` is the three-element `[1,2,3]`, not `[1,2,3,0,0]`. The length is
+part of the default image (`.<name>_len = 3` beside `.<name> = { 1, 2, 3 }`), which
+`sofab_object_init` seeds from — and it is emitted even when every declared element
+is zero, because `[0,0,0]` is the length-3 array of zeros and not the empty array.
+
+**Minimum corelib.** `SOFAB_OBJECT_FIELD_ARRAY_SIZED` and
+`SOFAB_OBJECT_DESCR_SEQ_SIZED` arrived in corelib-c-cpp 0.8.x; generated C does
+not compile against an older one. This is the flag day of the `count`-is-a-capacity
+change — the earlier trim-on-encode / fill-on-decode pair (Crucible F-0010,
+sofabgen 0.17.2) is gone from both sides.
 
 ## Struct member order (widest-first)
 
