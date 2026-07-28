@@ -322,19 +322,27 @@ echo "==> int64 modes OK (bigint == long == number on the wire)"
 echo "==> corpus + realworld: every definition typechecks"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
-    # KNOWN GAP, tracked separately: the TypeScript backend emits code that does
-    # not typecheck for a nested WRAPPER row (array<array<string|blob>>) — it
-    # hands the row container to the leaf collector, so a string[][] reaches a
-    # string[] parameter. This is the exact analogue of the C++ defect fixed in
-    # generator#250, it reproduces identically on a pristine tree predating the
-    # corpus definition, and it is out of scope for the change that added the
-    # definition. Skipping keeps this leg honest instead of green by omission;
-    # every other corpus definition, seq_elements included, still typechecks.
-    [ "$name" = "nested_rows" ] && continue
+    # nested_rows.yaml (array<array<string|blob|struct>>, and the same one level
+    # deeper) was skipped here while the backend handed the row CONTAINER to the
+    # leaf collector, so a string[][] reached a string[] parameter. That is fixed
+    # (the row collector is typed with the ROW's type), so the definition is back
+    # in the loop and this leg is green without omissions.
     gen "$def" "$WORK/corpus/$name"
     ln -s "$WORK/ex/node_modules" "$WORK/corpus/$name/node_modules"
     ( cd "$WORK/corpus/$name" && npx tsc --noEmit )
 done
 echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+
+# Nested WRAPPER rows round-trip, not only typecheck. Typechecking alone would
+# accept a collector that compiles but drops rows, so the shape that used to fail
+# tsc is exercised end to end: a string row, a blob row, a struct row and a
+# depth-3 row of rows, each carrying an INTERIOR element equal to the element
+# default ("" / empty blob / zero-valued Point) that §2 omits on the wire and the
+# id-keyed placement has to restore.
+echo "==> nested wrapper rows round-trip"
+NR='{"strrows":[["a","bb","ccc"],["","","zz"]],"blobrows":[[[1,2],[3]],[[],[9,9,9,9]]],"structrows":[[{"x":1,"y":2},{"x":0,"y":0}],[{"x":-7,"y":8},{"x":3,"y":4}]],"strcube":[[["p","q"],["","r"]],[["s",""],["t","u"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[0,3.25]]}'
+NROUT=$(cd "$WORK/corpus/nested_rows" && printf '%s' "$NR" | npx tsx harness.ts encode NestedRows | npx tsx harness.ts decode NestedRows)
+[ "$NROUT" = "$NR" ] || { echo "FAIL: nested wrapper row round-trip drift"; echo "  in : $NR"; echo "  out: $NROUT"; exit 1; }
+echo "==> nested wrapper rows OK"
 
 echo "PASS"

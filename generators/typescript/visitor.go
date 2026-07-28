@@ -354,8 +354,17 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 			}
 			return g.nativeArrayRead(items.Elem, items.ElemRef, cnt)
 		}
+		// tsArrayType already answers with the CONTAINER type for the level it is
+		// handed: given the row's element kind (plus the row's own ElemItems for a
+		// deeper row) it returns exactly the row's type — string[] for a row of
+		// strings, string[][] for a row of rows of strings. Appending another "[]"
+		// declared the collector with the container type of the level ABOVE while
+		// its body collected the row's LEAF elements, so a string[][] accumulator
+		// was pushed "" and assigned a string: TS2345/TS2322 on every
+		// array<array<string|blob|struct>> and one level deeper (generator#250's
+		// TypeScript analogue). The row collector's type must be the row's.
 		rowT := g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems)
-		return "((): " + rowT + "[] => { const _r: " + rowT + "[] = []; while (c.readHeader()) { " +
+		return "((): " + rowT + " => { const _r: " + rowT + " = []; while (c.readHeader()) { " +
 			g.seqCollectBody("_r", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax) + " } return _r; })()"
 	}
 	return "undefined as never"

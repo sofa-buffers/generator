@@ -1044,11 +1044,9 @@ messages:
 		// unreachable while every row was written, and an interior gap makes it
 		// reachable, shifting every later row down one index.
 		"const _id = c.id; while (arr.length <= _id) arr.push([]); arr[_id] = c.readUnsignedArray(3) as number[];",
-		// ...including a wrapper row, whose own collector runs inside the placement.
-		// (The row's element TYPE is off by one level here — the known nested-wrapper-
-		// row gap this change neither fixes nor widens; what is asserted is the
-		// placement.)
-		"const _id = c.id; while (arr.length <= _id) arr.push([]); arr[_id] = ((): string[][] =>",
+		// ...including a wrapper row, whose own collector — typed with the ROW's type,
+		// see TestTSNestedWrapperRowCollectorTypes — runs inside the placement.
+		"const _id = c.id; while (arr.length <= _id) arr.push([]); arr[_id] = ((): string[] =>",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q:\n%s", want, mod)
@@ -1058,7 +1056,7 @@ messages:
 	for _, bad := range []string{
 		"arr.push(VecObjsElem.decodeFrom(c))",
 		"arr.push(c.readUnsignedArray(3) as number[])",
-		"arr.push(((): string[][] =>",
+		"arr.push(((): string[] =>",
 	} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("elements must not be appended id-blind (%q):\n%s", bad, mod)
@@ -1232,5 +1230,106 @@ messages:
 		if strings.Contains(mod, gone) {
 			t.Errorf("no string/blob array may be trimmed, counted or not (%q):\n%s", gone, mod)
 		}
+	}
+}
+
+// TestTSNestedWrapperRowCollectorTypes: a nested array whose ROW is itself a
+// wrapper sequence — array<array<string>>, array<array<blob>>,
+// array<array<struct>> and the same one level deeper — must declare its inline
+// row collector with the ROW's type, not the container type of the level above.
+//
+// tsArrayType already answers with the container type for the level it is handed,
+// so appending another "[]" in elemDecode declared `const _r: string[][]` for a
+// row that the very next statements fill with LEAF strings (`_r.push("")`,
+// `_r[_id] = c.readString()`). The emitted module then failed tsc with TS2345
+// "Argument of type 'string' is not assignable to parameter of type 'string[]'"
+// plus TS2322 follow-ons on the same line — the TypeScript analogue of the C++
+// defect fixed as generator#250. Native rows (array<array<u32>>) never went
+// through this path and are kept here as the control.
+func TestTSNestedWrapperRowCollectorTypes(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+$defs:
+  struct:
+    Point:
+      x: { id: 0, type: i32 }
+      y: { id: 1, type: i32 }
+messages:
+  NestedRows:
+    payload:
+      strrows:    { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }
+      blobrows:   { id: 1, type: array, items: { type: array, count: 2, items: { type: blob, count: 2, maxlen: 4 } } }
+      structrows: { id: 2, type: array, items: { type: array, count: 2, items: { type: struct, count: 2, fields: { $ref: '#/$defs/struct/Point' } } } }
+      strcube:    { id: 3, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } } }
+      numrows:    { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+`, map[string]any{})
+
+	// The row collector is declared with the row's own type: one "[]" less than the
+	// member it is placed into. Depth 3 wraps the depth-2 collector, so the outer
+	// row is string[][] and the inner one string[].
+	for _, tc := range []struct{ member, row string }{
+		{"string[][]", "string[]"},
+		{"Uint8Array[][]", "Uint8Array[]"},
+		{"StructPoint[][]", "StructPoint[]"},
+		{"string[][][]", "string[][]"},
+	} {
+		if !strings.Contains(mod, "const arr: "+tc.member+" = [];") {
+			t.Fatalf("expected a member declared %q:\n%s", tc.member, mod)
+		}
+		want := "arr[_id] = ((): " + tc.row + " => { const _r: " + tc.row + " = [];"
+		if !strings.Contains(mod, want) {
+			// The pristine emission put tc.member here instead: the collector carried
+			// the container type of the level above while its body collected that
+			// container's leaf elements.
+			t.Errorf("row collector for %s must be typed %s, missing %q:\n%s", tc.member, tc.row, want, mod)
+		}
+	}
+
+	// Structural invariant, independent of the shapes above: in every emitted row
+	// collector `((): T => { const _r: T = []; … _r.push(D)`, the gap-fill default D
+	// must be the default of T's ELEMENT type. A collector typed one level too high
+	// gets exactly that wrong, whatever the shape.
+	elemDefault := map[string]string{"string": `""`, "Uint8Array": "new Uint8Array()"}
+	collectors := 0
+	for rest := mod; ; {
+		i := strings.Index(rest, "((): ")
+		if i < 0 {
+			break
+		}
+		rest = rest[i+len("((): "):]
+		j := strings.Index(rest, " => { const _r: ")
+		if j < 0 {
+			continue
+		}
+		collectors++
+		rowT := rest[:j]
+		if !strings.HasSuffix(rowT, "[]") {
+			t.Errorf("row collector type %q is not an array type:\n%s", rowT, mod)
+			continue
+		}
+		elem := strings.TrimSuffix(rowT, "[]")
+		want, ok := elemDefault[elem]
+		if !ok {
+			if strings.HasSuffix(elem, "[]") {
+				want = "[]" // a deeper row: the empty row is the element default
+			} else {
+				want = "new " + elem + "()" // struct/union element
+			}
+		}
+		body := rest[j:]
+		if e := strings.Index(body, "; })()"); e >= 0 {
+			body = body[:e]
+		}
+		if !strings.Contains(body, "_r.push("+want+")") {
+			t.Errorf("collector typed %s must gap-fill with the %s default %s:\n%s", rowT, elem, want, body)
+		}
+	}
+	if collectors != 5 { // 3 depth-2 rows + the depth-3 row and its inner row
+		t.Errorf("expected 5 row collectors, found %d:\n%s", collectors, mod)
+	}
+
+	// Control: a row of native scalars still reads in one corelib call, untouched.
+	if !strings.Contains(mod, "arr[_id] = c.readUnsignedArray(3) as number[];") {
+		t.Errorf("a native row must still read in one call:\n%s", mod)
 	}
 }

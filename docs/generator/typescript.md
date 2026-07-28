@@ -221,6 +221,20 @@ down by one index. Rows are placed at `arr[_id]`, gap-filled with the empty row,
 bounded by the outer array's `count` — which is also what closes the over-index
 hole that arm had.
 
+A row whose elements are themselves a wrapper sequence — `array<array<string>>`,
+`array<array<blob>>`, `array<array<struct|union>>`, and the same one level
+deeper — is read by an inline IIFE collector emitted at the point of use, and
+that collector is **typed with the row's own type**. `tsArrayType` already answers
+with the container type for the level it is handed, so appending another `[]`
+declared `const _r: string[][]` for a row that the next statements fill with leaf
+strings; the emitted module failed `tsc` with TS2345 *"Argument of type 'string'
+is not assignable to parameter of type 'string[]'"* and TS2322 follow-ons on the
+same line. The recursion is what keeps this to one rule rather than three special
+cases: depth 3 wraps the depth-2 collector, so a string row lands on the string
+arm and a blob row on the blob arm. A **native** row (`array<array<u32>>`) never
+goes through a collector at all — it reads in one corelib call
+(`c.readUnsignedArray(N)`) — and is the control that told the two apart.
+
 Nothing is filled in afterwards. The `M` elements that arrived **are** the value,
 so a decoded array's length is the wire's, `count: N` or not, and a `count: N`
 field constructs **empty**:
