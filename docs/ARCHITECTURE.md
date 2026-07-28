@@ -1044,19 +1044,89 @@ The array hooks (`onArrayBegin`/`ArrayBegin`) get no analogue: an array's wire
 type already selects the callback, and the fixlen-array *element* subtype is
 checked by the element callbacks the corelib dispatches to.
 
-That last point is a **known, deliberate asymmetry**, uniform across the family
-rather than a per-backend gap. For a fixlen array the `count` word precedes the
-`fixlen_word` on the wire, so at the moment the count bound is decided the element
-subtype is not yet known — dart/go's hooks are handed `(id, count)` and nothing
-else, and cpp's `measureField` would have to defer its `ArrayFixlen` count check
-past the element-size word to see it. So an fp64 array arriving at a declared
-`fp32[] count: N` is **skipped** when its count is within `N` (§7.3, measured
-identical on cpp and go) but reported **INVALID** when its count is above `N` —
-the over-count guard fires first, on a field §7.3 says is not that field's value
-at all. Deciding whether §5.2 should defer here (with the subtype unknown, more
-bytes genuinely could still make the field skippable) is a MESSAGE_SPEC question,
-not a codegen one; until it is settled the family stays uniform. Tracked with the
-measured vectors in **#232**.
+That last point used to be recorded here as a *deliberate, family-uniform*
+asymmetry. It is neither any more: the spec has settled the ordering, and the
+family has split on it. Both halves are stated below, because the resolution is
+**not** a generator change.
+
+##### The rule: a fixlen array's element subtype is decided before its schema `count`
+
+The `count` word precedes the `fixlen_word` on the wire, so at the moment the
+count bound would be decided the element subtype is not yet known. MESSAGE_SPEC
+**§7.3** ("Against a schema bound, this clause wins") and CORELIB_PLAN **§4.8**
+(documentation `e678884`) now fix the decode order normatively:
+
+1. read `element_count`, enforcing only the **format** ceiling `ARRAY_MAX`, and
+   allocate nothing on the strength of it;
+2. read the `fixlen_word` → subtype + per-element length;
+3. a subtype that **contradicts** the declared element type ⇒ **skip** the field
+   (§7.3), leaving the declared field at its default. The schema `count`
+   **MUST NOT** be applied — it was never this array's count;
+4. only a *matching* subtype gets the schema `count` bound applied (§7.1):
+   over-count ⇒ `INVALID`.
+
+The order costs nothing: the payload length is `element_count × element_length`,
+so a decoder has already read both words before it can skip the field at all.
+Two consequences are intended — a message ending **between** the two words is
+`INCOMPLETE` (not `INVALID`) even when the count already exceeds the schema
+`count`, and the format ceiling still fires on the count word whatever the
+subtype turns out to be.
+
+##### Measured against that rule (generator#232)
+
+`fa: { id: 1, type: array, items: { type: fp32, count: 3 } }`, header `0d`,
+fixlen word `20` = fp32/4 B, `41` = fp64/8 B. Measured on generator `main`
+(`0c424ac`) against the corelibs at `v0.9.0`:
+
+| wire | means | required | c, cpp ×3, python, typescript | go, rust ×3, zig, dart, java, csharp |
+|---|---|---|---|---|
+| `0d 03 41` +24 B | fp64, in-count | `COMPLETE`, default kept | ✅ | ✅ (java/csharp keep a zero-*filled* array, see below) |
+| `0d 05 41` +40 B | fp64, over-count | `COMPLETE`, default kept | ✅ | ❌ `INVALID` |
+| `0d 05 20` +20 B | fp32, over-count | `INVALID` | ✅ | ✅ |
+| `0d 05` | over-count, ends between the words | `INCOMPLETE` | ✅ | ❌ `INVALID` on go, rust-no-std ×2, dart, java, csharp (rust-std, zig ✅) |
+| `0d 05 20` +8 B | fp32, over-count, payload short | `INVALID` (§5.2) | ✅ | ✅ |
+| `0d 05 41` (no payload) | fp64, over-count, payload short | `INCOMPLETE` | ✅ | ❌ `INVALID` |
+
+##### Why this is blocked on the corelibs, not on codegen
+
+The four conformant targets are conformant because **their corelib hands the
+generated code the element subtype at the header**: the C runtime is descriptor
+driven, cpp's `FieldBound` carries a `subtype`, python's pull parser exposes
+`fld.subtype` next to `fld.count`, and the TypeScript cursor exposes `c.fixSub`.
+The generated guard is then simply subtype-first.
+
+The seven that miss it cannot express the rule at all:
+
+| corelib | array header hook | fires | subtype visible |
+|---|---|---|---|
+| `corelib-go` | `ArrayBegin(id, count)` | after the count word | no |
+| `corelib-java` | `arrayBegin(id, ArrayKind, count)` | after the count word | no (`ArrayKind.FIXLEN` only) |
+| `corelib-cs` | `ArrayBegin(id, ArrayKind, count)` | after the count word | no |
+| `corelib-dart` | `onArrayBegin(id, count)` | after the count word | no |
+| `corelib-rs-no-std` | `array_begin(id, ArrayKind, count)` | after the count word | no |
+| `corelib-rs` | `array_begin(id, ArrayKind, count)` | **after the fixlen word** | no |
+| `corelib-zig` | `arrayBegin(id, ArrayKind, count)` | **after the fixlen word** | no |
+
+So the fix is a corelib API change in seven repos — widen the array header hook
+to carry the fixlen element subtype, and (for the first five rows) move it past
+the `fixlen_word` — after which the generator emits the same subtype-first guard
+it already emits for a *scalar* bounded fixlen field (generator#229 above).
+
+The generator cannot approximate it. Dropping the header guard, or latching the
+over-count and converting it on the first matching element, gets rows 2 and 4
+right but turns row 3 (`0d 05 20` with no payload at all: subtype known and
+matching, count over bound, then EOF) from the required `INVALID` into
+`INCOMPLETE` — trading one interop split for another, and losing the §5.2
+anti-folding that generator#216 installed. Go is worse still: it delivers fixlen
+arrays whole (`Float32Array(id, []float32)`), so an element latch never fires on
+a truncated array and row 5 regresses too.
+
+Adjacent, and also waiting on the same hook: java and csharp allocate the
+destination from the wire count in `arrayBegin` (`m.fa = new float[min(count,
+ARRAY_INIT_CAP)]`), so an fp64 array skipped at a declared `fp32[]` leaves the
+field holding `[0, 0, 0]` instead of its declared default — §7.3 requires a
+skipped field to leave the destination untouched. Tracked with the measured
+vectors in **#232**.
 
 Three adjacent findings from the same audit:
 
