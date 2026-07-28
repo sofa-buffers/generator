@@ -217,44 +217,41 @@ func isNativeArrayElem(k ir.Kind) bool {
 	return false
 }
 
-// dynNativeArray reports whether a native-element array lowers to a growable
-// std::vector rather than a fixed std::array: the heap (corelib: cpp) profile
-// with no schema count. Such an array carries no compile-time capacity, so it
-// must be sized to the wire element count before the corelib's span-based
-// read/write (#112). A bounded native array (count present) stays a fixed
-// std::array; the fixed profile keeps std::array and rejects the count-less case
-// in checkBounded.
-// dynNativeArray reports whether a native scalar array is stored in a
-// std::vector rather than a std::array. Two independent reasons: the pure
-// corelib-cpp profile has no count (its arrays are genuinely unbounded), or the
-// c-cpp profile was asked for heap storage — where the count still exists and
-// becomes a decode-time bound rather than the container's capacity.
-func (g *gen) dynNativeArray(elem ir.Kind, count int64) bool {
+// dynNativeArray reports whether a native scalar array is stored in a growable
+// std::vector rather than the corelib's heap-free sofab::InlineVector<T, N>.
+//
+// Since `count: N` became a CAPACITY and the wire count became the array's
+// LENGTH (MESSAGE_SPEC §3, documentation#29), EVERY native array has to carry a
+// logical length of its own: without one it cannot hold a value shorter than N,
+// so [1, 2] on a `count: 4` field would encode as four elements on one profile
+// and two on another — the same schema, two different wire images. So the only
+// question left is WHERE the elements live, which is the heap-free decision and
+// nothing else: inline storage on `c-cpp` without allow_dynamic, the heap
+// everywhere else. std::array<T, N> is not an answer to either question and is
+// no longer used for an array member.
+func (g *gen) dynNativeArray(elem ir.Kind) bool {
 	if !isNativeArrayElem(elem) {
 		return false
 	}
-	if g.fixed {
-		return g.allowDynamic
-	}
-	return count <= 0
+	return !(g.fixed && !g.allowDynamic)
 }
 
 // cppArrayContainer is the C++ member type for an array with the given element.
-// A bounded native element is a fixed std::array<T, count>; a count-less native
-// element on the heap profile is a growable std::vector<T> (NOT std::array<T, 0>,
-// which cannot hold any element — #112). For composite/dynamic elements the
-// default profile uses std::vector<T>; the fixed profile lowers a bounded array
-// (count present, and for blobs the element maxlen present) to an
-// InlineVector<T, count> — fixed inline storage with a separate logical length,
-// no heap. A string/blob element additionally needs its element maxlen to be
-// sized; without it the array stays std::vector.
+// Every array member is length-carrying: a growable std::vector<T>, or — on the
+// heap-free c-cpp storage mode, for a bounded array — the corelib's
+// InlineVector<T, count>, which is inline storage plus a separate logical
+// length. That is uniform across element kinds now: a native scalar array is
+// sized exactly like a wrapper array, because `count` is a capacity for both and
+// the wire count is the length for both (MESSAGE_SPEC §3). A string/blob element
+// additionally needs its element maxlen to be sized inline; without it the array
+// stays std::vector.
 func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64) string {
 	et := g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax)
 	if isNativeArrayElem(elem) {
-		if g.dynNativeArray(elem, count) {
+		if g.dynNativeArray(elem) {
 			return "std::vector<" + et + ">"
 		}
-		return fmt.Sprintf("std::array<%s, %d>", et, count)
+		return fmt.Sprintf("sofab::InlineVector<%s, %d>", et, count)
 	}
 	if g.fixed && !g.allowDynamic && count > 0 {
 		switch elem {
@@ -430,13 +427,13 @@ func (g *gen) cppDefault(f *ir.Field) string {
 // value it is compared against, which is what keeps a shorter array distinct from
 // the padded one.
 //
-// The storage still has the last word on what "length" means here. A
-// std::vector<T> (the count-less heap array, and the allow_dynamic storage for a
-// bounded one) takes the initializer verbatim and carries the length itself. A
-// std::array<T,N> has no logical length: aggregate initialization zero-fills
-// whatever the initializer leaves out, so its value is always N elements and a
-// short default names the same value as the tail-padded one. See
-// docs/generator/cpp.md.
+// The storage no longer has a say in it: both containers a native array can land
+// in — std::vector<T> and sofab::InlineVector<T, N> — take the initializer
+// verbatim and carry the resulting length themselves, so a default shorter than
+// N stays shorter than N on every profile. That is what the container change
+// bought: previously a std::array<T,N> zero-filled whatever the initializer left
+// out, and the same schema then had two different construction values (and two
+// different wire images). See docs/generator/cpp.md.
 func (g *gen) cppNativeArrayBraces(f *ir.Field) string {
 	vals, _ := f.Default.([]any)
 	return "{" + strings.Join(g.cppArrayElemLits(f, vals), ", ") + "}"

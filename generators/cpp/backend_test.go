@@ -164,7 +164,7 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 	for _, want := range []string{
 		"std::vector<std::uint32_t> arr = {};",                          // unbounded native -> vector (was std::array<T,0>)
 		"std::vector<bool> bl = {};",                                    // unbounded bool -> vector
-		"std::array<std::uint32_t, 4> fixed = {};",                      // bounded native array unchanged
+		"std::vector<std::uint32_t> fixed = {};",                        // a bounded native array is length-carrying too
 		"std::vector<std::vector<std::uint32_t>> matrix",                // matrix rows are dynamic vectors too
 		"is.readArray(arr);",                                            // readArray sizes the vector to the wire count
 		"if (arr != std::vector<std::uint32_t>{}) {",                    // whole-omit compares to an empty vector
@@ -284,7 +284,7 @@ func TestCppFixedContainers(t *testing.T) {
 	for _, want := range []string{
 		"sofab::FixedBytes<16> bl = {};",                                               // scalar blob -> fixed
 		"sofab::FixedString<8> s = \"\";",                                              // bounded string -> FixedString
-		"std::array<std::uint32_t, 4> nums = {};",                                      // native array unchanged
+		"sofab::InlineVector<std::uint32_t, 4> nums = {};",                             // native array is inline + length-carrying
 		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",                     // blob sequence -> inline, EMPTY (count is a capacity)
 		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",                    // string sequence -> inline, EMPTY (count is a capacity)
 		"sofab::InlineVector<MPtsElem",                                                 // struct sequence -> inline (prefix)
@@ -411,7 +411,7 @@ func TestCppDynamicStorage(t *testing.T) {
 	}
 	for _, want := range []string{
 		"sofab::FixedString<12> s", "sofab::FixedBytes<8> b",
-		"std::array<std::uint32_t, 4> a", "sofab::InlineVector<sofab::FixedString<5>, 2> t",
+		"sofab::InlineVector<std::uint32_t, 4> a", "sofab::InlineVector<sofab::FixedString<5>, 2> t",
 	} {
 		if !strings.Contains(fix, want) {
 			t.Errorf("inline storage: missing %q", want)
@@ -519,12 +519,12 @@ func TestCppSparse(t *testing.T) {
 		"      st: { id: 5, type: struct, fields: { x: { id: 0, type: i32 } } }\n"
 	h := headerFromYAML(t, src, "m.hpp")
 	for _, want := range []string{
-		"if (a != 7) { (void)os.write(0, a); }",               // scalar guard
-		`if (s != "") {`,                                      // string guard (empty default)
-		"if (bl != std::vector<std::uint8_t>{}) {",            // blob guard
-		"std::array<std::int32_t, 3> nums = {1, 2, 3};",       // native array default materialized
-		"if (nums != std::array<std::int32_t, 3>{1, 2, 3}) {", // native array whole-omit
-		"(void)os.writeLazy(5, st);",                          // struct framed lazily (no guard)
+		"if (a != 7) { (void)os.write(0, a); }",             // scalar guard
+		`if (s != "") {`,                                    // string guard (empty default)
+		"if (bl != std::vector<std::uint8_t>{}) {",          // blob guard
+		"std::vector<std::int32_t> nums = {1, 2, 3};",       // native array default materialized
+		"if (nums != std::vector<std::int32_t>{1, 2, 3}) {", // native array whole-omit
+		"(void)os.writeLazy(5, st);",                        // struct framed lazily (no guard)
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q", want)
@@ -773,17 +773,25 @@ func TestCppNativeArrayWritesEveryElement(t *testing.T) {
 			// rule: an interior row equal to the element default is not written and
 			// leaves an id gap; the last row always is. The row has no frame of its
 			// own (it is one count-prefixed value), so the rule lands on the write.
-			if !strings.Contains(h, "if (_e0 != std::array<std::uint32_t, 3>{} || _i0 + 1 == _n0) {") {
+			rowType := "std::vector<std::uint32_t>"
+			if corelib == "c-cpp" {
+				rowType = "sofab::InlineVector<std::uint32_t, 3>"
+			}
+			if !strings.Contains(h, "if (_e0 != "+rowType+"{} || _i0 + 1 == _n0) {") {
 				t.Errorf("[%s] a matrix row must be omitted in the interior when default:\n%s", corelib, h)
 			}
 			if !strings.Contains(h, "(void)os.write(static_cast<sofab::id>(_i0), _e0);") {
 				t.Errorf("[%s] a matrix row must still be written whole:\n%s", corelib, h)
 			}
-			// The member type is unchanged: a fixed std::array<T,N> has no logical
-			// length, so its value is always N elements, zero-filled by the in-class
-			// initializer.
-			if !strings.Contains(h, "std::array<std::uint32_t, 5> u32s = {};") {
-				t.Errorf("[%s] fixed-count array must stay a zero-filled std::array:\n%s", corelib, h)
+			// The member carries a LENGTH: a `count: 5` array with no default is
+			// EMPTY, not five zeros, so the profiles cannot disagree about what
+			// [1, 2] means on this field.
+			wantMember := "std::vector<std::uint32_t> u32s = {};"
+			if corelib == "c-cpp" {
+				wantMember = "sofab::InlineVector<std::uint32_t, 5> u32s = {};"
+			}
+			if !strings.Contains(h, wantMember) {
+				t.Errorf("[%s] a count:N array must be length-carrying (%s):\n%s", corelib, wantMember, h)
 			}
 			// Both corelibs read through readArray, which carries the bound and
 			// performs the reset behind the tag match; the c-cpp signature also
@@ -858,7 +866,11 @@ func TestCppFixedCountResetsSchemaDefaultTail(t *testing.T) {
 			}
 			// The member still declares the schema default: an ABSENT field must
 			// reconstruct to it (sparse-omission contract, MESSAGE_SPEC S2).
-			if !strings.Contains(h, "std::array<std::uint32_t, 5> c = {1, 2, 3};") {
+			wantC := "std::vector<std::uint32_t> c = {1, 2, 3};"
+			if corelib == "c-cpp" {
+				wantC = "sofab::InlineVector<std::uint32_t, 5> c = {1, 2, 3};"
+			}
+			if !strings.Contains(h, wantC) {
 				t.Errorf("[%s] schema default must stay the member's declaration default:\n%s", corelib, h)
 			}
 			// A non-zero schema default must be reset on decode so the elements the
@@ -1105,26 +1117,35 @@ func TestCppNativeArrayIsNotPaddedToCount(t *testing.T) {
 		t.Errorf("a growable native array must be sized from the JSON input:\n%s", dynJSON)
 	}
 
-	// The fixed profile keeps the idiomatic aggregate form -- std::array fills the
-	// tail itself, so spelling out the zeros would be noise.
+	// The heap-free storage mode expresses the SAME values, in sofab::InlineVector
+	// -- inline slots plus a logical length. That is the whole point: without a
+	// length it could only ever hold N elements, so [10, 20] on a count: 4 field
+	// would be a different value (and a different wire image) here than under
+	// allow_dynamic, for one and the same schema.
 	fixed, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp"})
 	if err != nil {
 		t.Fatalf("generate fixed: %v", err)
 	}
 	for _, want := range []string{
-		"std::array<std::uint32_t, 4> zeros = {};",
-		"std::array<std::uint32_t, 4> partial = {10, 20};",
+		"sofab::InlineVector<std::uint32_t, 4> zeros = {};",
+		"sofab::InlineVector<std::uint32_t, 4> partial = {10, 20};",
 	} {
 		if !strings.Contains(fixed, want) {
-			t.Errorf("fixed storage should keep the aggregate form, missing %q:\n%s", want, fixed)
+			t.Errorf("heap-free storage must carry a length, missing %q:\n%s", want, fixed)
 		}
 	}
+	if strings.Contains(fixed, "std::array<std::uint32_t, 4>") {
+		t.Errorf("no native array member may be a bare std::array any more:\n%s", fixed)
+	}
+	// The JSON path sizes BOTH containers now: InlineVector has a resize() too
+	// (corelib-c-cpp), so neither leg index-assigns into a container that is the
+	// wrong length.
 	fixedJSON, err := genHeader(t, src, "harness/json.hpp", map[string]any{"corelib": "c-cpp", "emit": "project"})
 	if err != nil {
 		t.Fatalf("generate fixed project: %v", err)
 	}
-	if strings.Contains(fixedJSON, "o.zeros.resize(") {
-		t.Errorf("a fixed std::array has no resize(); the JSON path must index-assign:\n%s", fixedJSON)
+	if !strings.Contains(fixedJSON, "o.zeros.resize(sofab_json_array_size(c));") {
+		t.Errorf("an inline native array must be sized from the JSON input too:\n%s", fixedJSON)
 	}
 }
 
@@ -1357,7 +1378,7 @@ func TestCppNestedWrapperRowsHeap(t *testing.T) {
 		"while (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();",
 		"void prepare() noexcept { if (out) out->clear(); }",
 		// native rows keep the corelib collector
-		"sofabgen::WrapperSeq<std::vector<std::array<std::uint32_t, 3>>> _r0; _r0.out = &urows;",
+		"sofabgen::WrapperSeq<std::vector<std::vector<std::uint32_t>>> _r0; _r0.out = &urows;",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("nested wrapper rows missing %q:\n%s", want, h)
@@ -1401,7 +1422,7 @@ func TestCppNestedWrapperRowsFixed(t *testing.T) {
 		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r2;",
 		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r2; is.readSequence(_r2, _e1); }",
 		// native rows keep the corelib collector
-		"static sofabgen::WrapperSeq<sofab::InlineVector<std::array<std::uint32_t, 3>, 2>> _r0; _r0.cap = 2;",
+		"static sofabgen::WrapperSeq<sofab::InlineVector<sofab::InlineVector<std::uint32_t, 3>, 2>> _r0; _r0.cap = 2;",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("fixed nested wrapper rows missing %q:\n%s", want, h)
@@ -1636,12 +1657,12 @@ func TestCppCountIsACapacityNotALength(t *testing.T) {
 		{"heap", map[string]any{}, []string{
 			"std::vector<std::string> strs = {};",
 			"std::vector<std::vector<std::uint8_t>> blobs = {};",
-			"std::array<std::uint32_t, 3> nums = {};",
+			"std::vector<std::uint32_t> nums = {};",
 		}},
 		{"c-cpp-inline", map[string]any{"corelib": "c-cpp"}, []string{
 			"sofab::InlineVector<sofab::FixedString<8>, 3> strs = {};",
 			"sofab::InlineVector<sofab::FixedBytes<4>, 2> blobs = {};",
-			"std::array<std::uint32_t, 3> nums = {};",
+			"sofab::InlineVector<std::uint32_t, 3> nums = {};",
 		}},
 		{"c-cpp-dynamic", map[string]any{"corelib": "c-cpp", "allow_dynamic": true}, []string{
 			"std::vector<std::string> strs = {};",
@@ -1827,10 +1848,119 @@ func TestCppClibEnumBoolArrayNeverCastsTheContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate cpp: %v", err)
 	}
-	if !strings.Contains(pure, "std::array<bool, 4> flags") {
+	if !strings.Contains(pure, "std::vector<bool> flags") {
 		t.Errorf("the corelib-cpp leg keeps bool elements:\n%s", pure)
 	}
 	if strings.Contains(pure, "sofabgen::RawArray") {
 		t.Errorf("the corelib-cpp leg needs no element view:\n%s", pure)
+	}
+}
+
+// TestCppNativeCountArrayCarriesALength pins the container decision for a
+// `count: N` array of NATIVE scalars across all three profiles.
+//
+// Since `count` became a CAPACITY and the wire count became the array's LENGTH
+// (MESSAGE_SPEC §3, documentation#29), an array member that cannot be shorter
+// than N cannot represent what the wire can say. std::array<T, N> is exactly
+// such a member, and it was what two of the three profiles used -- so the same
+// schema had two wire images and, worse, two DECODE results: `7b 02 01 02`
+// (wire count 2) came back as [1, 2] on one leg and [1, 2, 0, 0] on the other.
+// That is the byte-identity promise in docs/generator/cpp.md and in
+// checkBounded -- "the storage switch never changes the wire" -- broken.
+//
+// So every native array member is length-carrying now: std::vector<T> on the
+// heap profiles, sofab::InlineVector<T, N> (inline slots + len_) on the
+// heap-free c-cpp storage mode. std::array is gone from array members entirely.
+func TestCppNativeCountArrayCarriesALength(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      nums: { id: 0, type: array, items: { type: u32, count: 4 } }\n" +
+		"      part: { id: 1, type: array, items: { type: i32, count: 4 }, default: [10, 20] }\n" +
+		"      rows: { id: 2, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }\n"
+
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]any
+		want []string
+	}{
+		{
+			// maxspeed: the decision that changed here. A bounded native array was
+			// std::array<T, N> on this profile too.
+			name: "cpp-maxspeed",
+			cfg:  map[string]any{},
+			want: []string{
+				"std::vector<std::uint32_t> nums = {};",
+				"std::vector<std::int32_t> part = {10, 20};",
+				"std::vector<std::vector<std::uint32_t>> rows = {};",
+				"is.readArray(nums, 4);",
+			},
+		},
+		{
+			// heap-free: inline storage, but with a logical length.
+			name: "c-cpp-inline",
+			cfg:  map[string]any{"corelib": "c-cpp"},
+			want: []string{
+				"sofab::InlineVector<std::uint32_t, 4> nums = {};",
+				"sofab::InlineVector<std::int32_t, 4> part = {10, 20};",
+				"sofab::InlineVector<sofab::InlineVector<std::uint32_t, 3>, 2> rows = {};",
+				"is.readArray(nums, _count, 4);",
+			},
+		},
+		{
+			// unchanged by this commit -- pinned so the three legs cannot drift.
+			name: "c-cpp-dynamic",
+			cfg:  map[string]any{"corelib": "c-cpp", "allow_dynamic": true},
+			want: []string{
+				"std::vector<std::uint32_t> nums = {};",
+				"std::vector<std::int32_t> part = {10, 20};",
+				"std::vector<std::vector<std::uint32_t>> rows = {};",
+				"is.readArray(nums, _count, 4);",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := genHeader(t, src, "m.hpp", tc.cfg)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(h, want) {
+					t.Errorf("missing %q:\n%s", want, h)
+				}
+			}
+			// The whole point: no array member is a fixed-extent container any more.
+			// A std::array<T,N> member is precisely the thing that cannot express a
+			// value shorter than N.
+			if strings.Contains(h, "std::array<std::uint32_t, 4>") ||
+				strings.Contains(h, "std::array<std::int32_t, 4>") ||
+				strings.Contains(h, "std::array<std::uint32_t, 3>") {
+				t.Errorf("a count:N native array must not be a fixed-extent std::array:\n%s", h)
+			}
+			// A declared default shorter than N stays shorter than N -- on every
+			// profile. Under std::array the initializer was zero-filled out to N, so
+			// [10, 20] and [10, 20, 0, 0] named the same construction value.
+			if strings.Contains(h, "part = {10, 20, 0, 0}") {
+				t.Errorf("a short default must not be padded to the count:\n%s", h)
+			}
+		})
+	}
+
+	// The encode temp an enum array converts through must not touch a heap on the
+	// heap-free profile, and must be the VALUE's length -- never the schema count,
+	// which would put N elements on the wire for a shorter value.
+	enumSrc := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      cols: { id: 0, type: array, items: { type: enum, count: 3, enum: { A: 0, B: 1 } } }\n"
+	fixedEnum, err := genHeader(t, enumSrc, "m.hpp", map[string]any{"corelib": "c-cpp"})
+	if err != nil {
+		t.Fatalf("generate enum fixed: %v", err)
+	}
+	if !strings.Contains(fixedEnum, "{ sofab::InlineVector<std::int8_t, 3> _t0; _t0.resize(cols.size());") {
+		t.Errorf("the heap-free enum encode temp must be inline and value-length:\n%s", fixedEnum)
+	}
+	heapEnum, err := genHeader(t, enumSrc, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate enum heap: %v", err)
+	}
+	if !strings.Contains(heapEnum, "{ std::vector<std::int8_t> _t0; _t0.resize(cols.size());") {
+		t.Errorf("the heap enum encode temp must be value-length:\n%s", heapEnum)
 	}
 }

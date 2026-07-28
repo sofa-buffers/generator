@@ -863,7 +863,7 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 			countParam = "std::size_t _count"
 			break
 		}
-		if fld.HasCount || g.limArrHas || g.dynNativeArray(fld.Elem, fld.Count) {
+		if fld.HasCount || g.limArrHas || g.dynNativeArray(fld.Elem) {
 			countParam = "std::size_t _count"
 			break
 		}
@@ -1155,18 +1155,14 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		ir.KindFP32, ir.KindFP64, ir.KindBitfield:
 		f.line("%s(void)os.write(%s, %s);", ind, idExpr, val)
 	case ir.KindEnum:
-		bk := enumBacking(ref.Target)
-		if g.dynNativeArray(elem, count) {
-			// Count-less enum array (heap): the temp is sized to the value's length,
-			// not a compile-time count.
-			f.line("%s{ std::vector<%s> %s(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
-				ind, bk, tv, val, iv, iv, val, iv, tv, iv, bk, val, iv, idExpr, tv)
-		} else {
-			// The enum values are converted through a native-typed temporary before
-			// the write; the temp is the whole container, element for element.
-			f.line("%s{ std::array<%s, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
-				ind, bk, count, tv, iv, iv, count, iv, tv, iv, bk, val, iv, idExpr, tv)
-		}
+		// The enum values are converted through a native-typed temporary before the
+		// write, element for element. The temp is the value's LENGTH long, never
+		// the schema `count`: `count` is a capacity and the wire count is the
+		// length (§3), so padding the temp out to N would put N elements on the
+		// wire for a shorter value. The temp takes the member's own container form,
+		// so the heap-free profile stays heap-free here too.
+		f.line("%s{ %s %s; %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
+			ind, g.nativeTemp(enumBacking(ref.Target), count), tv, tv, val, iv, iv, val, iv, tv, iv, enumBacking(ref.Target), val, iv, idExpr, tv)
 	case ir.KindBool:
 		if g.clib {
 			// On the c-cpp leg the element already IS the wire's std::uint8_t (see
@@ -1174,12 +1170,9 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 			// directly, exactly like a numeric array. The bytes are the same ones
 			// the bool->0/1 temporary produced.
 			f.line("%s(void)os.write(%s, %s);", ind, idExpr, val)
-		} else if g.dynNativeArray(elem, count) {
+		} else {
 			f.line("%s{ std::vector<std::uint8_t> %s(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
 				ind, tv, val, iv, iv, val, iv, tv, iv, val, iv, idExpr, tv)
-		} else {
-			f.line("%s{ std::array<std::uint8_t, %d> %s{}; for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
-				ind, count, tv, iv, iv, count, iv, tv, iv, val, iv, idExpr, tv)
 		}
 	case ir.KindBlob:
 		// A blob element is a leaf: in the array's INTERIOR it is omitted when it
@@ -1371,6 +1364,18 @@ func elemMaxOr(has bool, m int64) int64 {
 	return -1
 }
 
+// nativeTemp is the container an enum array's encode temporary takes: the same
+// form the member itself takes, so a heap-free profile converts without touching
+// a heap. Both forms carry their own length, which is what the temp needs — the
+// wire count IS the length (MESSAGE_SPEC §3), so the temp must be the value's
+// length and not the schema `count`.
+func (g *gen) nativeTemp(elemType string, count int64) string {
+	if g.fixed && !g.allowDynamic {
+		return fmt.Sprintf("sofab::InlineVector<%s, %d>", elemType, count)
+	}
+	return "std::vector<" + elemType + ">"
+}
+
 // nativeArrayRead emits the read for an array whose MEMBER element type is
 // already the wire element type -- every numeric/bitfield array, and a boolean
 // array on the c-cpp leg, where the element is std::uint8_t. No conversion, no
@@ -1429,15 +1434,15 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			// order and the bytes land in the member's own storage.
 			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; is.readArray(%s, _count, %d); }",
 				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, tv, cap)
-		} else if g.dynNativeArray(elem, count) {
-			// The temp carries the read (and with it the tag/bound/reset decision);
-			// the member is only resized and filled once that succeeded, so a
-			// §7.3-skipped occurrence leaves it untouched.
+		} else {
+			// corelib-cpp decodes synchronously, so the temp is safe here: it carries
+			// the read (and with it the tag/bound/reset decision) and the member is
+			// only resized and filled once that succeeded, so a §7.3-skipped
+			// occurrence leaves it untouched. The member is sized to the TEMP's
+			// length, which is the wire count -- the array's length (§3) -- and never
+			// to the schema `count`.
 			f.line("%s{ std::vector<%s> %s; if (is.readArray(%s%s)) { %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = static_cast<%s>(%s[%s]); } }",
 				ind, bk, tv, tv, g.cppArrayBounds(count, hasCount), target, tv, iv, iv, tv, iv, target, iv, et, tv, iv)
-		} else {
-			f.line("%s{ std::array<%s, %d> %s{}; if (is.readArray(%s%s)) { for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = static_cast<%s>(%s[%s]); } }",
-				ind, bk, count, tv, tv, g.cppArrayBounds(count, hasCount), iv, iv, count, iv, target, iv, et, tv, iv)
 		}
 	case ir.KindBool:
 		if g.clib {
@@ -1447,12 +1452,9 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			// reinterpret_cast of the container, which is what corrupted a
 			// std::vector<bool>'s control words under allow_dynamic.
 			g.nativeArrayRead(f, ind, target, count, hasCount, cap, depth)
-		} else if g.dynNativeArray(elem, count) {
+		} else {
 			f.line("%s{ std::vector<std::uint8_t> %s; if (is.readArray(%s%s)) { %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = %s[%s] != 0; } }",
 				ind, tv, tv, g.cppArrayBounds(count, hasCount), target, tv, iv, iv, tv, iv, target, iv, tv, iv)
-		} else {
-			f.line("%s{ std::array<std::uint8_t, %d> %s{}; if (is.readArray(%s%s)) { for (std::size_t %s = 0; %s < %d; ++%s) %s[%s] = %s[%s] != 0; } }",
-				ind, count, tv, tv, g.cppArrayBounds(count, hasCount), iv, iv, count, iv, target, iv, tv, iv)
 		}
 	case ir.KindString:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)

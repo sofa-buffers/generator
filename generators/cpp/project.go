@@ -312,22 +312,20 @@ func (g *gen) emitFromJSONArray(f *hfile, fld *ir.Field, acc string) {
 // container by index; string/blob/struct/union/nested-array elements append to
 // a std::vector or sofab::InlineVector.
 //
-// A growable native container is SIZED to the JSON array first. Its length is
-// the array's length (MESSAGE_SPEC §3 — the declared `count` is a capacity that
-// never adds an element), so it is only ever as long as the input, and without
-// the resize a fresh empty container would swallow every element: the
-// index-assign below is bounded by the container's current size. A fixed
-// std::array<T,N> is already N long and has no shorter value, so it keeps the
-// pure index-assign and a shorter input leaves the element default in the tail.
+// A native container is SIZED to the JSON array first — every one of them now,
+// std::vector and sofab::InlineVector alike, because both carry a logical
+// length. Its length is the array's length (MESSAGE_SPEC §3 — the declared
+// `count` is a capacity that never adds an element), so it is only ever as long
+// as the input, and without the resize a fresh empty container would swallow
+// every element: the index-assign below is bounded by the container's current
+// size.
 func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	vv := fmt.Sprintf("_v%d", depth)
 	inner := ind + "    "
 	if isNativeArrayElem(elem) {
-		if g.dynNativeArray(elem, count) {
-			f.line("%s%s.resize(sofab_json_array_size(%s));", ind, target, node)
-		}
+		f.line("%s%s.resize(sofab_json_array_size(%s));", ind, target, node)
 		f.line("%sfor (size_t %s = 0; %s < sofab_json_array_size(%s); %s++) {", ind, iv, iv, node, iv)
 		f.line("%sconst sofab_json_t *%s = sofab_json_array_at(%s, %s);", inner, ev, node, iv)
 		switch elem {

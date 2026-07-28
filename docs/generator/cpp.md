@@ -20,7 +20,7 @@ embedded profile. The three usable combinations:
 | `corelib` | `allow_dynamic` | Storage | Bounds | Heap |
 |---|---|---|---|---|
 | `cpp` (default) | *ignored* | `std::string` / `std::vector` | optional; `max_dyn_*` caps what the schema leaves open | yes |
-| `c-cpp` | `false` (default) | `FixedString<N>` / `FixedBytes<N>` / `std::array` / `InlineVector<T,N>` | **mandatory** | none on the message path |
+| `c-cpp` | `false` (default) | `FixedString<N>` / `FixedBytes<N>` / `InlineVector<T,N>` | **mandatory** | none on the message path |
 | `c-cpp` | `true` | `std::string` / `std::vector` | **mandatory** | yes |
 
 The two `c-cpp` rows accept exactly the same schemas and produce the same
@@ -28,15 +28,17 @@ The two `c-cpp` rows accept exactly the same schemas and produce the same
 What differs is where a field's bytes live, and therefore what a message costs to
 hold and to move.
 
-Encode output is byte-identical too, with **one exception**: a `count: N` array
-of native scalars whose value is *shorter than N*. `allow_dynamic: false` stores
-it in `std::array<T, N>`, which has no logical length, so its value is always N
-elements; `allow_dynamic: true` stores it in `std::vector<T>`, which carries the
-length and can hold fewer. `count` is a capacity and the wire count is the length
-(MESSAGE_SPEC §3), so the two legs then write different lengths — `[1, 2]` on a
-`count: 4` field is 4 elements inline and 2 on the heap. Every other field kind,
-including every wrapper array (`InlineVector<T, N>` carries its own length), is
-unaffected. See *`count` is a capacity* below.
+Encode output is byte-identical too, and so is what a decode reconstructs — for
+every field kind, with no exception. That holds because **every array member
+carries a logical length**, whichever container it lands in: `std::vector<T>` on
+the heap profiles, `sofab::InlineVector<T, N>` (inline slots plus a `len_`) on
+the heap-free one. Since `count` is a capacity and the wire count is the array's
+length (MESSAGE_SPEC §3), a member that could not be shorter than N could not
+express what the wire can say: `[1, 2]` on a `count: 4` field would be four
+elements in one storage mode and two in the other, and the wire `7b 02 01 02`
+would come back as `[1, 2]` on one leg and `[1, 2, 0, 0]` on the other. A
+`std::array<T, N>` was exactly such a member, and it is no longer used for one.
+See *`count` is a capacity* below.
 
 ### `encode()` and `encodeTo()`
 
@@ -145,8 +147,10 @@ container: a string with no `maxlen` → `std::string`, a blob with no `maxlen` 
 `std::vector<std::uint8_t>`, and an array with no `count` → `std::vector<T>` —
 including a **native scalar array** (e.g. an `array` of `u32` with no count is
 `std::vector<std::uint32_t>`, not `std::array<T, 0>`). A **bounded** native array
-(count present) stays a fixed `std::array<T, N>`. Decode sizes a dynamic native
-vector to the wire element count before filling it, and the
+(count present) is a `std::vector<T>` too: `count` is a capacity, so the member
+still has to hold anything from 0 to N elements, and only a length-carrying
+container can. Decode sizes a native vector to the wire element count before
+filling it, and the
 [`max_dyn_array_count`](#options) cap (when set) rejects an over-cap count as
 `Error::LimitExceeded` before any allocation.
 
@@ -171,7 +175,7 @@ What `c-cpp` produces vs `cpp` (all sized from the schema's `maxlen`/`count`):
 | string array (`count N`, elem `maxlen M`) | `std::vector<std::string>` | `sofab::InlineVector<sofab::FixedString<M>, N>` |
 | blob array (`count N`, elem `maxlen M`) | `std::vector<std::vector<std::uint8_t>>` | `sofab::InlineVector<sofab::FixedBytes<M>, N>` |
 | struct / union / matrix array (`count N`) | `std::vector<T>` | `sofab::InlineVector<T, N>` |
-| native numeric/enum/bool/bitfield array | `std::array<T, N>` | `std::array<T, N>` (already fixed) |
+| native numeric/enum/bool/bitfield array (`count N`) | `std::vector<T>` | `sofab::InlineVector<T, N>` |
 
 A **boolean** array's element type differs between the two corelibs:
 `bool` on `corelib: cpp`, **`std::uint8_t`** on `corelib: c-cpp` (in both storage
@@ -216,10 +220,15 @@ array shorter than its `count`. `std::array<T,N>` is always exactly length `N`, 
 it cannot represent "3 of a possible 5"; `std::vector` would represent it but
 reintroduces the heap this profile exists to avoid. So a purpose-built inline
 container (inline `std::array` storage + a separate `len_`) is the only fit —
-which is exactly what makes every **wrapper** array express the 0..N that §5.1
-asks of it. The native scalar arrays still use plain `std::array<T,N>` and
-therefore still cannot: that is the one remaining gap, spelled out under
-[`count` is a capacity](#count-is-a-capacity). `InlineVector`'s inline storage also never
+which is what makes every array express the 0..N that §3 and §5.1 ask of it.
+That now includes the **native scalar** arrays, which used to be the one
+exception: they were plain `std::array<T,N>` and so had no length, which is the
+gap [`count` is a capacity](#count-is-a-capacity) used to record and no longer
+does. `InlineVector` gained a `resize()` for it (corelib-c-cpp), which is what
+lets `IStreamImpl::readArray` keep ownership of the tag / bound / reset / bind
+order for inline storage too — without it, readArray took its fixed-extent
+branch, set the logical length to 0 and dropped the array silently.
+`InlineVector`'s inline storage also never
 reallocates, so a bound-then-filled element is address-stable — strictly safer
 under the corelib-c-cpp deferred decoder than a `std::vector` + `reserve()`.
 The per-element collectors (`sofab::FixedStringSeq` / `FixedBlobSeq` for the
@@ -254,7 +263,7 @@ where those fields live:
 |---|---|---|
 | `string, maxlen 8` | `sofab::FixedString<8>` | `std::string` |
 | `blob, maxlen 8` | `sofab::FixedBytes<8>` | `std::vector<std::uint8_t>` |
-| `array u32, count 3` | `std::array<std::uint32_t, 3>` | `std::vector<std::uint32_t>` |
+| `array u32, count 3` | `sofab::InlineVector<std::uint32_t, 3>` | `std::vector<std::uint32_t>` |
 | `array string, count 2, maxlen 4` | `sofab::InlineVector<sofab::FixedString<4>, 2>` | `std::vector<std::string>` |
 
 Inline is the default and the one that guarantees no allocation at all: the
@@ -269,9 +278,9 @@ explicit check on the decode path (`_size > maxlen` / `_count > count` →
 `invalidate()`, and `cap`/`elemMax` on the sequence collectors), placed after the
 §7.3 wire-type guard and before the resize — so an over-long field is rejected as
 `INVALID` rather than allocating what the bound exists to prevent. `_maxSize` is
-identical in both modes, and so is encode output for every value both can hold —
-the exception being a `count: N` **native scalar** array shorter than N, which
-`std::array<T, N>` cannot represent and `std::vector<T>` can; see
+identical in both modes, and so is encode output — for every value, with no
+exception: both containers a bounded field can land in carry a logical length, so
+there is no value one mode can hold and the other cannot. See
 [`count` is a capacity](#count-is-a-capacity).
 
 The `encode()` convenience method still returns a `std::vector<std::uint8_t>`
@@ -355,25 +364,43 @@ What follows from that, in C++:
 - A field is omitted only when it **equals its default** — for an array with no
   declared default, only when it is empty.
 
-### The one place C++ storage still disagrees: `std::array<T, N>`
+### Every profile agrees, because every array member has a length
 
-A `count: N` array of **native scalars** is stored in `std::array<T, N>` on the
-default `cpp` profile and on `c-cpp` with `allow_dynamic: false`. That container
-has no logical length: its value is N elements and a shorter one is not
-representable. Concretely, for a `count: 4` `u32` array:
+A `count: N` array of **native scalars** used to be stored in `std::array<T, N>`
+on the default `cpp` profile and on `c-cpp` with `allow_dynamic: false`. That
+container has no logical length — its value is always N elements — so those two
+profiles could not express a shorter array at all, and the *same schema* then had
+two different wire images and two different decode results. That broke the
+byte-identity promise this document makes at the top and the one `checkBounded`
+enforces ("the storage switch never changes the wire").
 
-| value | `std::array<T,4>` (cpp, c-cpp inline) | `std::vector<T>` (c-cpp allow_dynamic, and every count-less array) |
+Every array member is length-carrying now, so for a `count: 4` `u32` array all
+three profiles agree, in both directions:
+
+| value | wire (all three profiles) | decodes back to |
 |---|---|---|
-| `[1, 2, 0, 0]` | 4 elements on the wire | 4 elements on the wire |
-| `[1, 2]` | **not representable** — it is `[1, 2, 0, 0]`, 4 on the wire | 2 elements on the wire |
-| `[0, 0, 0, 0]` | equals the member's default → field omitted, absence reconstructs `[0,0,0,0]` | 4 elements on the wire (distinct from the empty array) |
-| `[]` | **not representable** | field omitted |
+| `[1, 2, 0, 0]` | `7b 04 01 02 00 00` | `[1, 2, 0, 0]` |
+| `[1, 2]` | `7b 02 01 02` | `[1, 2]` |
+| `[]` | `7b 00` | `[]` |
+| equal to the declared default | field omitted | the declared default |
 
-A received `M < N` is not lost on decode — the corelib's `readArray`
-value-initializes the destination and then fills the M that arrived, so `[M, N)`
-holds the element default — but it is not *remembered* either: re-encoding writes
-N. Where that matters, use `allow_dynamic: true`, or leave the array count-less
-on the `cpp` profile. Wrapper arrays have no such restriction on any profile.
+What makes it true: `std::vector<T>` on `corelib: cpp` and on `c-cpp` with
+`allow_dynamic: true`; `sofab::InlineVector<T, N>` on `c-cpp` with
+`allow_dynamic: false` — inline slots plus a `len_`, so the heap-free profile
+stays heap-free while still expressing 0..N. `InlineVector` needed one addition
+for this, a `resize()`, so that `IStreamImpl::readArray` recognises it as a
+*resizable* destination and sizes it to the wire count; before that it fell to
+readArray's fixed-extent branch, which set the length to 0 and dropped the array.
+
+**Cost.** On the `maxspeed` profile this replaces an inline `std::array` member
+with a heap `std::vector`, and that is not free: on the
+`examples/messages/realworld/vehicle_telemetry.yaml` bench row (`cpp-cpp`) it is
+**+5.5% encode and +21.7% decode** Ir/op. It is paid because there is no
+alternative that keeps the wire honest: `sofab::InlineVector` lives in
+corelib-c-cpp only, corelib-cpp ships no length-carrying inline container, and
+generated headers deliberately define no containers of their own. The heap-free
+row (`cpp-c-cpp`) is unaffected on encode (-0.02%) and +1.1% on decode, for
++3.2%/+4.4% `.text`.
 
 ## Wrapper arrays: element placement and the sparse element rule
 
@@ -432,9 +459,9 @@ Two consequences worth knowing:
 - A mistyped child inside a wrapper array is skipped with **no container
   mutation** — the wire-type decision precedes the gap-fill, so it cannot leave a
   phantom default element behind (generator#249).
-- An array of **fixed-length rows** (`array` of `array u32, count 3`) applies
-  rule 2 to the row's own default value, which for a `std::array<T,N>` row is the
-  N element defaults rather than emptiness — an all-zero interior row is omitted,
+- An array of **rows** (`array` of `array u32, count 3`) applies rule 2 to the
+  row's own default value, which — now that a row carries a length like any other
+  array — is the EMPTY row: an empty interior row is omitted and leaves an id gap,
   and the last row is always written.
 
 ## Struct member order (widest-first)
