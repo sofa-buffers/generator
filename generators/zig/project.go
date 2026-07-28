@@ -294,7 +294,9 @@ func (g *gen) emitJSON(f *zfile, name string, fields []*ir.Field) {
 		acc := "o." + zigIdent(fld.Name)
 		if fld.Kind == ir.KindArray {
 			ed := arrayElemOf(fld)
-			g.emitToJSONValue(f, "    ", acc, ir.ArrayElem{Elem: ir.KindArray, ElemItems: &ed}, 0)
+			// A count:N native array's value is its first `.len` elements, not the
+			// whole inline capacity (MESSAGE_SPEC §3).
+			g.emitToJSONValue(f, "    ", g.arrayValExpr(fld, acc), ir.ArrayElem{Elem: ir.KindArray, ElemItems: &ed}, 0)
 		} else {
 			g.emitToJSONValue(f, "    ", acc, fieldElem(fld), 0)
 		}
@@ -394,10 +396,11 @@ func (g *gen) emitFromJSONField(f *zfile, fld *ir.Field) {
 		f.line("    if (%s) |x| switch (x) {", get)
 		f.line("        .array => |a0| {")
 		if _, n, ok := g.fixedNativeArray(fld); ok {
-			f.line("            for (a0.items, 0..) |it0, k0| {")
-			f.line("                if (k0 >= %d) break;", n)
-			f.line("                %s[k0] = %s;", acc, g.fromJSONElemExpr(arrayElemOf(fld), 0))
-			f.line("            }")
+			// The JSON array's length IS the value's length; `count: N` only bounds
+			// it (MESSAGE_SPEC §3), so the spare capacity past it stays out.
+			f.line("            const n0 = @min(a0.items.len, %d);", n)
+			f.line("            for (a0.items[0..n0], 0..) |it0, k0| %s.items[k0] = %s;", acc, g.fromJSONElemExpr(arrayElemOf(fld), 0))
+			f.line("            %s.len = n0;", acc)
 		} else {
 			elemType := g.harnessElemType(arrayElemOf(fld))
 			f.line("            const s0 = alloc.alloc(%s, a0.items.len) catch @panic(\"oom\");", elemType)
@@ -429,14 +432,14 @@ func (g *gen) harnessElemType(e ir.ArrayElem) string {
 
 // fieldsUseAlloc reports whether fromJson for these fields references its
 // allocator: blobs and struct/union loads always do, arrays do unless they
-// lower to a fixed [N]T destination.
+// lower to inline FixedArray storage.
 func fieldsUseAlloc(fields []*ir.Field) bool {
 	for _, f := range fields {
 		switch f.Kind {
 		case ir.KindBlob, ir.KindStruct, ir.KindUnion:
 			return true
 		case ir.KindArray:
-			// Fixed native arrays fill in place; anything else allocates.
+			// count:N native arrays fill their inline storage; anything else allocates.
 			if !(isNativeArrayElem(f.Elem) && f.HasCount) {
 				return true
 			}

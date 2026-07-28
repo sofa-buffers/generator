@@ -41,9 +41,7 @@ pub const Scalars = struct {
     }
 
     /// True when every field equals its declared default, compared per field
-    /// and recursively -- i.e. when marshal would write no child at all
-    /// (S2). A `count: N` array of this type trims its trailing
-    /// run of default elements with it (S3/S5.1).
+    /// and recursively -- i.e. when marshal would write no child at all (S2).
     pub fn isDefault(self: *const Scalars) bool {
         if (self.u8min != 0) return false;
         if (self.u8max != 255) return false;
@@ -187,33 +185,56 @@ const _EncodeSink = struct {
 /// id gap, and would decode a REOPENED element id as a second element instead of
 /// merging into the first (S7.4). It is the object-element twin of what
 /// sofab.arrays.setElem does for a string/blob element.
+///
+/// Gaps are ordinary here: an interior element equal to the element default is
+/// omitted by a conformant encoder (S2), and only the LAST element is guaranteed
+/// present -- which is what makes the decoded length, highest present id + 1,
+/// exact.
 fn _at(s: anytype, i: usize) *std.meta.Elem(@TypeOf(s)) {
     return @constCast(&s[i]);
 }
 
-/// Narrow a `count: N` wrapper array of struct/union elements to M -- one past
-/// the last element differing from the element default -- which is what its
-/// canonical wire carries (S3/S5.1, "even for sequence-form
-/// elements"). Only the TRAILING run is dropped: an interior all-default element
-/// keeps its frame, because element presence is what carries the array's length.
-/// M == 0 writes no child at all, so the lazily-opened wrapper is dropped by
-/// writeSequenceEnd and the whole field is omitted (S2). A dynamic (count-less)
-/// array has no N to refill from and is never narrowed.
-fn _trimObjs(comptime T: type, a: []const T) []const T {
-    var m = a.len;
-    while (m > 0 and a[m - 1].isDefault()) : (m -= 1) {}
-    return a[0..m];
-}
+/// Storage for a `count: N` native array: N elements of inline capacity plus
+/// the length.
+///
+/// `count` is a CAPACITY, never a length (S3): the field carries
+/// 0..N elements and the wire count M IS the length, so a bare `[N]T` -- which
+/// can only ever BE N long -- cannot represent the value. This can, without
+/// giving up the inline storage that keeps a bounded array allocation-free on
+/// both encode and decode.
+///
+/// The value is `items[0..len]`; `items[len..]` is spare capacity and never
+/// reaches the wire. `.{}` is the EMPTY array -- which is what a fresh count:N
+/// array is: N is a bound, not a content.
+pub fn FixedArray(comptime T: type, comptime N: usize) type {
+    return struct {
+        const Self = @This();
 
-/// _trimObjs for the slice-shaped element kinds -- string, blob and nested rows
-/// -- whose element default is the empty slice. A string/blob element is a leaf
-/// the writer already omits individually, so narrowing its trailing run does not
-/// change the bytes: it exists so the all-default predicate is computed from the
-/// very expression the writer loops over, and cannot drift away from it.
-fn _trimSlices(comptime T: type, a: []const []const T) []const []const T {
-    var m = a.len;
-    while (m > 0 and a[m - 1].len == 0) : (m -= 1) {}
-    return a[0..m];
+        /// The schema `count`: the most elements this field may carry.
+        pub const capacity: usize = N;
+
+        items: [N]T = std.mem.zeroes([N]T),
+        len: usize = 0,
+
+        /// The array's value: exactly the elements the wire carries.
+        pub fn slice(self: *const Self) []const T {
+            return self.items[0..self.len];
+        }
+
+        /// Replace the value with `vals`, truncated to the capacity N.
+        pub fn set(self: *Self, vals: []const T) void {
+            const n = @min(vals.len, N);
+            @memcpy(self.items[0..n], vals[0..n]);
+            self.len = n;
+        }
+
+        /// A value holding `vals` (truncated to N) -- the literal form.
+        pub fn init(vals: []const T) Self {
+            var s: Self = .{};
+            s.set(vals);
+            return s;
+        }
+    };
 }
 
 /// Native-array destination of exactly the announced wire count.

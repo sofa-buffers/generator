@@ -43,10 +43,31 @@ integer, shared with the Rust backend's rules so all ports agree.
 | numeric / bool / fp | `u8`…`u64`, `i8`…`i64`, `bool`, `f32`, `f64` |
 | enum / bitfield | narrowest backing integer (`i8`/`i16`/`i32`, `u8`…`u64`) |
 | string / blob | `[]const u8` |
-| native numeric/enum/bool/bitfield array (`count N`) | `[N]T` (stack, allocation-free) |
+| native numeric/enum/bool/bitfield array (`count N`) | `FixedArray(T, N)` — `[N]T` inline capacity **plus** `len` (stack, allocation-free) |
 | native array without `count` | `[]const T` |
-| string/blob/struct/union/nested array | `[]const T` (with `count: N`, materialized to N element defaults) |
+| string/blob/struct/union/nested array | `[]const T` (a `count: N` bounds it; it is not materialized) |
 | struct / union | the generated struct type |
+
+### `count: N` is a capacity, so the storage carries a length
+
+`count: N` is a **capacity**, never a length (MESSAGE_SPEC §3): a field holds
+0..N elements and the wire count `M` **is** the length. A bare `[N]T` can only
+ever *be* `N` long, so it cannot represent that value — this backend's count:N
+native arrays are therefore `FixedArray(T, N)`, a small generated type holding
+`items: [N]T` plus `len: usize`:
+
+```zig
+nums: FixedArray(u32, 3) = .{},                                   // no default: the EMPTY array
+seed: FixedArray(u32, 5) = .{ .items = .{ 1, 2, 3, 0, 0 }, .len = 3 }, // default: [1, 2, 3] — 3 long, not 5
+```
+
+The value is `items[0..len]` (`.slice()`); `items[len..]` is spare capacity that
+never reaches the wire. `.init(&.{ 1, 2 })` / `.set(&.{ 1, 2 })` build one. This
+keeps a bounded array **allocation-free on both encode and decode**, which is the
+point of `count` on this max-speed target — turning it into a heap slice would
+make a bounded schema allocate. A declared `default` stands exactly as written
+and is never padded out to `N`, so a fresh count:N array is the *empty* array
+(it used to be `N` element defaults).
 
 Per message:
 
@@ -59,55 +80,50 @@ Per message:
   `≠ default` test of MESSAGE_SPEC §2 applies to a sequence-typed field for
   free, with no whole-object comparison and no buffering: "the nested
   `marshal` wrote no child" *is* "the value equals its declared default".
-  Which **closer** follows is decided at generation time from the position in
-  the schema, never from the value:
+  Which **closer** follows is decided per position — statically for a *field*,
+  and from the index in the **value** for an *element*:
 
   | position | closer |
   |---|---|
   | `struct` / `union` field | `writeSequenceEnd` — an all-default nested object is **omitted** |
   | wrapper-array field (the array itself) | `writeSequenceEnd` — an empty array is omitted; absence reconstructs it |
-  | wrapper-array **element** (struct/union element, nested array row) | `writeSequenceEndKeep` — the frame stays |
+  | wrapper-array **element**, last index | `writeSequenceEndKeep` — the empty frame stays |
+  | wrapper-array **element**, interior | `writeSequenceEnd` — the frame drops, leaving an id **gap** |
 
-  An **interior** element keeps its frame because element presence is what
-  carries a dynamic array's length (*highest present id + 1*, MESSAGE_SPEC
-  §5.1): dropping an all-default element would change the decoded **length**,
-  not merely the bytes. Consequently an all-default message now encodes to zero
+  That element split is the whole of the rule. An array carries no length field:
+  its decoded length is *highest present id + 1* (MESSAGE_SPEC §5.1), so the
+  element at the highest index is the only one whose **presence** carries the
+  length, and nothing that carries the length may be elided. Everything before it
+  may be: an interior element equal to the element default is indistinguishable
+  from an absent one, because the decoder restores an absent id from that same
+  default. So: **interior sparse, last always written** — as its value for a
+  leaf, as an empty frame for a sequence element. Sequence-form elements used to
+  have a carve-out (framed unconditionally); they no longer do, and one rule now
+  covers both element kinds. Consequently an all-default message encodes to zero
   bytes.
 
-  The **trailing** run is different. A `count: N` wrapper array is
-  fixed-length, so its canonical wire stops at `M` — one past its last element
-  differing from the element default — "even for sequence-form elements"
-  (MESSAGE_SPEC §3/§5.1, generator#248). The element loop therefore runs over
-  `_trimObjs(T, …)` / `_trimSlices(T, …)`, not over the whole slice, and `M == 0`
-  writes no child at all, so the lazily-opened wrapper is dropped and the field
-  is omitted (§2). A **dynamic** (count-less) array has no `N` to refill from, so
-  a trailing default element is significant there and is never narrowed away.
+  A declared `count: N` changes none of it. `N` is a capacity, not a length
+  (§3), so it can never restore an elided tail: **no trailing run is elided**, of
+  either element kind, with or without a count. `["a", ""]` stays distinct from
+  `["a"]`, `["", ""]` is written as its final element alone at id 1, and
+  `["", "x", ""]` elides element 0 into a gap while keeping element 2. The
+  compact form follows the same principle from the other side: the wire count IS
+  the length, so `[1, 2, 0, 0]` keeps its trailing zeros and stays distinct from
+  `[1, 2]`.
 
-  That significance also binds the **leaf** side. A `string`/`blob` element is
-  not framed — it is omitted individually whenever it equals the element default
-  (empty), leaving an id gap the decoder restores. At the **last** index of a
-  *dynamic* array that omission is lossy: the array recovers its length as
-  *highest present id + 1*, so the final element is the only one whose
-  **presence** carries the length. The generated omit test therefore gains an
-  `or _iN == <slice>.len - 1` disjunct there (MESSAGE_SPEC §2, "the last element
-  of a dynamic array is always present"): `["a", ""]` used to encode exactly like
-  `["a"]` and decode one element short, and `["", ""]` encoded to nothing at all.
-  Now `["", ""]` is written as its final element **alone**, at id 1 — interior
-  gaps are untouched, so `["", "b"]` still elides element 0. A `count: N` array
-  gets no such guard: its length is `N` whatever the wire carries, which is why
-  it elides the whole trailing run instead. For the same reason `elemTrimExpr`
-  narrows a `string`/`blob` run only when the array is fixed — narrowing a
-  dynamic one would make `isDefault` call `[""]` "default" and omit a field the
-  marshal loop writes.
+  A **native** nested row (an array-of-native-array element) has no frame of its
+  own, so the rule lands on the write itself: an interior empty row is not
+  written at all, and the last row always is (as a count-0 array if that is what
+  it is).
 
-  Every generated `struct`/`union` carries `pub fn isDefault()` for this: it is
-  the explicit form of the "no child was written" test the lazy framing already
-  encodes implicitly for a *field*, needed because an *element* must be judged
-  **before** the loop opens. Its per-field terms are generated from the very
-  expressions `marshal` writes each field under, so the predicate and the writer
-  cannot drift apart — a predicate that narrowed a field the writer does not
-  (or the reverse) would omit a field that is on the wire, or keep one that is
-  not.
+  Every generated `struct`/`union` carries `pub fn isDefault()`: the explicit
+  form of the "no child was written" test the lazy framing encodes implicitly for
+  a *field*. Its per-field terms are generated from the very expressions
+  `marshal` writes each field under, so the predicate and the writer cannot drift
+  apart — one that disagreed would omit a field that is on the wire, or keep one
+  that is not. An array field's own omit test is now simply emptiness: the writer
+  emits a child for every element it holds, so "no child is written" is exactly
+  "the array is empty".
 
   A wrapper array's declared `default` is not materialized in the
   generated field initializer today (it is the empty collection), so absent
@@ -141,62 +157,52 @@ vtable). Element stores are bounds-checked explicitly — ReleaseFast compiles
 without implicit bounds checks, so hostile counts/ids degrade to dropped
 elements, never out-of-bounds writes.
 
-### Wrapper-array elements are placed by id, and filled back out to N
+### Array elements are placed by id, and nothing is filled in
 
 A wrapper array's element **id IS the array index** (MESSAGE_SPEC §5.1). Every
 element kind honours that, not just the `string`/`blob` leaves that go through
-`sofab.arrays.setElem`: for a `struct`/`union` (and a nested-array row)
-`sequenceBegin` grows the destination to `id + 1` — default-filling the id gaps
-an omitted element leaves — records the index in a per-frame `ei_*` register,
-and descends into `_at(path, ei)`. Appending instead (generator#247) shortened
-the array by the size of any interior id gap, and decoded a **reopened** element
-id as a second element rather than merging into the first; placement gives the
-§7.4 struct-merge for free. The `count: N` over-index reject still runs first,
-which also bounds the gap-fill.
+`sofab.arrays.setElem`:
 
-When the array's sequence scope closes, a `count: N` array is default-filled
-back out to `N`: §5.1 says the length "is N for every target — a growable-list
-target MUST default-fill to N exactly like a pre-sized one". This is what makes
-the encoder's trailing-run elision above **lossless**: without it, re-encoding a
-decoded fixed array would not re-normalise it, it would shorten it on every
-round trip. A dynamic array is never filled — its length is *highest present id
-+ 1*.
+- `struct`/`union` elements and wrapper nested rows: `sequenceBegin` grows the
+  destination to `id + 1` — default-filling the id gaps an omitted element
+  leaves — records the index in a per-frame `ei_*` register, and descends into
+  `_at(path, ei)`. Appending instead (generator#247) shortened the array by the
+  size of any interior id gap and decoded a **reopened** element id as a second
+  element rather than merging into the first; placement gives the §7.4
+  struct-merge for free.
+- **native rows** (an array whose elements are native arrays): `arrayBegin`
+  used to *append* a row per header, ignoring the element id. That was
+  unreachable while every row was framed; the §2 interior-sparse rule makes an
+  omitted empty row reachable, and an appending collector then shifts every
+  later row down by one. Rows are now placed at `_at(path, id)` too, with the
+  same `ei_*` register carrying the index into the element stores.
 
-That fill hangs off `sequenceEnd`, so it can only reach a sequence that was
-actually **opened** — which is why the `count: N` length also has to be
-established at **construction**. A fixed-count *native* array always had it: its
-storage IS a `[N]T`, materialized by the field declaration
-(`nums: [3]u32 = @splat(0)`). A fixed-count *wrapper* array is a slice, so its
-declaration materializes the same length explicitly, as N element defaults:
+The `count: N` over-index reject runs first in every case (an id `≥ N` is
+INVALID, §5.1/§7), which also bounds the id-keyed gap-fill against an over-index
+amplification.
 
-```zig
-strs: []const []const u8 = &([_][]const u8{""} ** 3),   // count: 3, string elements
-objs: []const VecObjsElem = &([_]VecObjsElem{.{}} ** 2), // count: 2, struct elements
-dyn:  []const []const u8 = &.{},                         // count-less: no N, stays empty
-```
+**Nothing is filled in on the way out.** The wire count `M` IS a compact array's
+length and the highest present element id IS a wrapper array's last index
+(§3/§5.1), so what arrived is the whole value: no `sequenceEnd` refill to `N`,
+no `[M, N)` tail on a native array, and no `count: N` array materialized to `N`
+element defaults at construction — a fresh one is empty, wrapper and native
+alike. A count:N native array's `len` is reset at its array header (an
+explicitly empty array decodes to the *empty* array) and advanced by the element
+stores; the reset is gated on the announced wire **kind**, so a header
+contradicting the declared element type is skipped like an unknown id and leaves
+a correctly typed earlier occurrence intact (§7.3/§7.4).
 
-The elements are the ELEMENT default — the same value the gap-fill above writes
-into an id the wire omitted; a declared per-element `default` is not
-materialized anywhere today. The `**` repetition is the slice analogue of the
-native array's `@splat`: the emitted source stays O(1) in `N`. Without this the
-field disagreed with itself and with the native array beside it: absent decoded
-at length 0 while one element on the wire, or an explicitly-empty wrapper,
-decoded at N.
-
-The literal is comptime-const, hence read-only, and decode never writes through
-it: every store into a wrapper array sits behind `sequenceBegin`, which resets
-the field to `&.{}` first (an explicit empty wrapper must override a non-empty
-value), so the const is only ever replaced. Encoding is unaffected — an
-all-default fixed array still narrows to `M = 0`, so its lazily-opened wrapper is
-dropped and the field stays off the wire (§2).
+`sequenceBegin` still resets a wrapper array field to `&.{}` before its elements
+land: an array wrapper IS the array's value, so a later occurrence replaces it
+whole rather than merging by index (§7.4).
 
 ## Unbounded fields
 
 There is no `no_std`-style sizing gate: `corelib-zig` is the family's
 max-speed port, and the generated code takes an allocator on the decode
 path, so a string/blob without `maxlen` or an array without `count` is fine —
-bounded native arrays still lower to fixed `[N]T` stack storage and skip the
-allocator entirely.
+bounded native arrays still lower to inline `FixedArray(T, N)` stack storage and
+skip the allocator entirely.
 
 Two receiver-side protections cover those unbounded fields on decode:
 

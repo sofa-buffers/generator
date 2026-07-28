@@ -42,6 +42,16 @@ def main() -> int:
         arr = string_array_values(v["fields"])
         if arr is not None:
             msg, payload = "vecsa", json.dumps({"a": arr})
+        elif len(v["fields"]) == 1 and v["fields"][0].get("op") == "array":
+            # Native (compact) array vectors, against the count:8 u32 harness
+            # message: `count` is a capacity, so the wire count IS the length and
+            # the whole value reaches the wire, trailing default run included
+            # (MESSAGE_SPEC S3). Only u32 is mapped — one message per element type
+            # would add nothing this does not already pin.
+            f = v["fields"][0]
+            if f.get("element_type") != "u32" or f["id"] != 0 or len(f["values"]) > 8:
+                continue
+            msg, payload = "vecua", json.dumps({"a": f["values"]})
         elif len(v["fields"]) == 1:
             f = v["fields"][0]
             msg = OP_TO_MSG.get(f["op"])

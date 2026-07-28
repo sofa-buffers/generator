@@ -14,13 +14,13 @@ const (
 	fkStruct       frameKind = iota // root / struct / union / struct-array element: named fields
 	fkSeqArr                        // array of string/blob: elements placed in string()/blob()
 	fkStructArr                     // array of struct/union: per-element sequence grows and descends
-	fkNestedNative                  // array of native array: arrayBegin appends an inner slice
+	fkNestedNative                  // array of native array: arrayBegin places an inner slice at the row's id
 	fkArrArr                        // array of (string/blob/struct/nested) array: per-element sequence descends
 )
 
 // frame is one sequence container reachable from a message. loc is the _Loc
 // variant; path is the Zig lvalue expression (e.g. "self.m.somestruct.deep" or
-// "sofab.arrays.last(self.m.points).tags").
+// "_at(self.m.points, self.ei_root_points).tags").
 type frame struct {
 	loc      string
 	path     string
@@ -33,10 +33,10 @@ type frame struct {
 	elemFill string      // fkStructArr/fkArrArr/fkNestedNative: fill literal for the grow helper
 
 	// idx is the decoder register holding the element index this frame is
-	// currently decoding into (fkStructArr/fkArrArr). The element id IS the array
-	// index (MESSAGE_SPEC §5.1), so sequenceBegin places at that index and the
-	// child stores address it through _at(path, self.<idx>) — never through the
-	// last appended element.
+	// currently decoding into (fkStructArr/fkArrArr/fkNestedNative). The element
+	// id IS the array index (MESSAGE_SPEC §5.1), so sequenceBegin (arrayBegin for
+	// a native row) places at that index and the child stores address it through
+	// _at(path, self.<idx>) — never through the last appended element.
 	idx string
 
 	// Schema-unbounded element markers, for the receiver-side decode limits
@@ -44,11 +44,13 @@ type frame struct {
 	elemDynLen   bool // fkSeqArr: element string/blob has no schema maxlen
 	elemDynCount bool // fkNestedNative: inner native array has no schema count
 
-	// cap is the wrapper array's schema fixed-count bound N (-1 == dynamic/no
-	// count): an element id >= N is a schema-bound violation (MESSAGE_SPEC
-	// §5.1/§7), rejected as INVALID (self.inv) before the slice grows — which also
-	// bounds an over-index heap-amplification fill. Set on fkSeqArr / fkStructArr /
-	// fkArrArr.
+	// cap is the wrapper array's schema count bound N (-1 == no count). N is a
+	// CAPACITY, not a length: it never reaches the wire and never adds elements the
+	// wire did not carry. All it does here is bound the array — an element id >= N
+	// is a schema-bound violation (MESSAGE_SPEC §5.1/§7), rejected as INVALID
+	// (self.inv) before the slice grows, which also bounds an over-index
+	// heap-amplification fill. Set on fkSeqArr / fkStructArr / fkArrArr /
+	// fkNestedNative.
 	cap int64
 
 	// emax is the fkSeqArr string/blob element's schema maxlen L (-1 == no bound):
@@ -58,8 +60,9 @@ type frame struct {
 	emax int64
 }
 
-// capOf maps a schema fixed-count bound to a frame's cap: N when the array
-// declares a count, -1 (dynamic/unbounded) otherwise.
+// capOf maps a schema count bound to a frame's cap: N when the array declares a
+// count, -1 (unbounded) otherwise. N is a CAPACITY: a frame uses it only to
+// reject an out-of-range element id, never to size the result.
 func capOf(hasCount bool, count int64) int64 {
 	if hasCount {
 		return count
@@ -98,7 +101,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 	// addArray builds the frame(s) for a wrapper-sequence array whose slice is
 	// at (loc, path) and whose element is (elem, ref, items); elemMaxHas is the
 	// element's schema maxlen presence (string/blob elements only); cap is the
-	// array's schema fixed-count bound (-1 == dynamic).
+	// array's schema count bound (-1 == no count).
 	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64) {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
@@ -113,13 +116,13 @@ func (g *gen) frames(m *ir.Message) []frame {
 			walkFields(el, "_at("+path+", self."+idx+")", ref.Target.Fields)
 		case ir.KindArray:
 			// The element is an inner array (items). A native inner array is
-			// handled by a single wrapper frame (arrayBegin appends a fresh
-			// inner slice, elements land in the last one); a wrapper inner
-			// array descends recursively with its own inner count bound.
+			// handled by a single wrapper frame (arrayBegin places a fresh inner
+			// slice at the row's element id, elements land in that one); a
+			// wrapper inner array descends recursively with its own count bound.
 			inner := g.zigArrayElem(items.Elem, items.ElemRef, items.ElemItems)
 			if isNativeArrayElem(items.Elem) {
 				out = append(out, frame{
-					loc: loc, path: path, kind: fkNestedNative,
+					loc: loc, path: path, kind: fkNestedNative, idx: "ei_" + loc,
 					elemKind: items.Elem, elemRef: items.ElemRef,
 					elemType: "[]const " + inner, elemFill: "&.{}",
 					elemDynCount: !items.HasCount, cap: cap,
@@ -270,15 +273,20 @@ func (g *gen) msgLimitGuards(fields []*ir.Field) bool {
 }
 
 // putCall renders the element store for a direct native array field: the
-// capacity-checked putChecked for a fixed [N]T -- an over-count element flags the
-// message INVALID -- or the growing putGrowing
+// capacity-checked putChecked into a count:N field's inline items -- an element
+// past the capacity flags the message INVALID -- or the growing putGrowing
 // for a dynamic (count-less) slice, which keeps every wire element up to the
 // announced count while never trusting that count for the eager allocation.
+//
+// The count:N store also advances the field's `len`. The wire count M IS the
+// array's length (MESSAGE_SPEC §3), so the length follows the elements that
+// actually arrive; `count` bounds them but adds none, and nothing is filled in
+// at [M, N).
 func (g *gen) putCall(fr frame, fld *ir.Field, val string) string {
 	acc := fr.path + "." + zigIdent(fld.Name)
 	var inner string
 	if _, _, ok := g.fixedNativeArray(fld); ok {
-		inner = fmt.Sprintf("sofab.arrays.putChecked(&%s, &self.ai, %s, &self.inv)", acc, val)
+		inner = fmt.Sprintf("sofab.arrays.putChecked(&%s.items, &self.ai, %s, &self.inv); %s.len = self.ai", acc, val, acc)
 	} else {
 		inner = fmt.Sprintf("sofab.arrays.putGrowing(&%s, self.alloc, &self.ai, self.an, %s)", acc, val)
 	}
@@ -454,9 +462,10 @@ func (g *gen) nestedNativeArm(fr frame, signed bool) string {
 			return ""
 		}
 	}
-	// §7.3 fill guard (generator#188), plus the empty-case guard: if the
-	// per-element allocation failed the outer slice may have no last element.
-	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; if (%s.len != 0) sofab.arrays.putGrowing(sofab.arrays.last(%s), self.alloc, &self.ai, self.an, %s); } }", fr.path, fr.path, cast)
+	// §7.3 fill guard (generator#188), plus the placement guard: the row lives at
+	// the index arrayBegin recorded, not at the end of the outer slice, and that
+	// index is only addressable if the row's allocation succeeded.
+	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; if (self.%s < %s.len) sofab.arrays.putGrowing(_at(%s, self.%s), self.alloc, &self.ai, self.an, %s); } }", fr.idx, fr.path, fr.path, fr.idx, cast)
 }
 
 // emitArraySkipArm arms the §7.3 discard counter in arrayBegin (generator#183,
@@ -659,7 +668,7 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 	idUsed := false
 	for _, fr := range fs {
 		if fr.kind == fkNestedNative && fr.elemKind == kind {
-			body := fmt.Sprintf("if (%s.len != 0) sofab.arrays.putGrowing(sofab.arrays.last(%s), self.alloc, &self.ai, self.an, value)", fr.path, fr.path)
+			body := fmt.Sprintf("if (self.%s < %s.len) sofab.arrays.putGrowing(_at(%s, self.%s), self.alloc, &self.ai, self.an, value)", fr.idx, fr.path, fr.path, fr.idx)
 			all = append(all, frameArms{fr: fr, body: body})
 			continue
 		}
@@ -865,15 +874,20 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 					// The store-side putChecked bound only fires when the N+1th element
 					// actually arrives, which a truncated over-count array never reaches.
 					guard := fmt.Sprintf("if (count > %d) { self.inv = true; return; }", n)
-					// A fixed [N]T whose declaration default is the schema default also
-					// needs a reset here: clear it so the elements the encoder trimmed
-					// off the tail decode as the element default, not that schema default
-					// (MESSAGE_SPEC S3 -- see zigFixedArrayNeedsReset).
-					reset := ""
-					if g.zigFixedArrayNeedsReset(fld) {
-						reset = fmt.Sprintf(" %s.%s = @splat(%s);", fr.path, zigIdent(fld.Name), zigElemZero(fld.Elem))
-					}
-					fa.arms = append(fa.arms, fmt.Sprintf("%d => { %s%s },", fld.ID, guard, reset))
+					// Then the length is reset: the wire count M IS the array's length
+					// (§3), so the value is exactly what this array header delivers --
+					// an explicitly empty one (count 0) decodes to the EMPTY array, not
+					// to the previous value and not to N element defaults. The stores
+					// advance `len` from here (see putCall); the spare capacity past it
+					// is not part of the value, so it needs no clearing.
+					//
+					// Gated on the announced wire KIND, so a header whose kind
+					// contradicts the declared element type is skipped like an unknown
+					// id and a correctly typed earlier occurrence survives it (§7.3,
+					// §7.4) -- this arm must not clear an array it will not refill.
+					arm := fmt.Sprintf("if (kind == .%s) { %s %s.%s.len = 0; }",
+						wireArrayKind(fld.Elem), guard, fr.path, zigIdent(fld.Name))
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, arm))
 					// The guard reads the wire count; the switch reads id.
 					idUsed, countUsed = true, true
 					continue
@@ -897,13 +911,23 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 				all = append(all, fa)
 			}
 		case fkNestedNative:
+			// A row's element id IS its index in the outer array (MESSAGE_SPEC
+			// §5.1), so the row is PLACED at that index — never appended. Appending
+			// was unreachable while every row was framed; the §2 interior-sparse
+			// rule makes an omitted all-default row reachable, and an appending
+			// collector then shifts every later row down by one. The outer array's
+			// `count` bounds the id (an id >= N is INVALID, §5.1/§7), which also
+			// bounds the id-keyed gap-fill against an over-index amplification.
 			inner := strings.TrimPrefix(fr.elemType, "[]const ")
-			body := fmt.Sprintf("if (sofab.arrays.grow(%s, self.alloc, &(%s), %s.len + 1, &.{})) { sofab.arrays.last(%s).* = _allocN(%s, self.alloc, count); }",
-				fr.elemType, fr.path, fr.path, fr.path, inner)
+			body := fmt.Sprintf("{ self.%s = id; if (sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, &.{})) { _at(%s, id).* = _allocN(%s, self.alloc, count); } }",
+				fr.idx, fr.elemType, fr.path, fr.path, inner)
+			if fr.cap >= 0 {
+				body = fmt.Sprintf("if (id >= %d) { self.inv = true; } else %s", fr.cap, body)
+			}
 			if g.limits.arrayHas && fr.elemDynCount {
 				body = fmt.Sprintf("if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else %s", body)
 			}
-			countUsed = true
+			idUsed, countUsed = true, true
 			all = append(all, frameArms{fr: fr, body: body})
 		}
 	}
@@ -962,61 +986,24 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 	f.line("    }")
 }
 
-// fillTo renders the default-fill of a wrapper array back out to its schema
-// count N, or "" for a dynamic (count-less) array, which has no N to refill from
-// and whose length is highest-present-id + 1.
-//
-// MESSAGE_SPEC §5.1: a `count: N` array's length "is N for every target -- a
-// growable-list target MUST default-fill to N exactly like a pre-sized one". The
-// generated arrays are decode-allocated slices, so the fill is what makes the
-// encoder's §3/§5.1 trailing elision LOSSLESS: without it, re-encoding a decoded
-// array would not re-normalise it, it would SHORTEN it on every round trip.
-// Native arrays already had this (a fixed field is a [N]T from the start).
-func (g *gen) fillTo(fr frame) string {
-	if fr.cap < 0 {
-		return ""
+// wireArrayKind is the corelib ArrayKind a native array element type is
+// delivered under: integers (and bool, enum, bitfield) as .unsigned / .signed by
+// signedness of the backing type, fp as .fixlen.
+func wireArrayKind(elem ir.Kind) string {
+	switch {
+	case elem == ir.KindFP32 || elem == ir.KindFP64:
+		return "fixlen"
+	case isSignedElem(elem) || elem == ir.KindEnum:
+		return "signed"
+	default: // unsigned numeric, bool, bitfield
+		return "unsigned"
 	}
-	elemType, fill := fr.elemType, fr.elemFill
-	if fr.kind == fkSeqArr { // string/blob elements: a borrowed byte slice
-		elemType, fill = "[]const u8", `""`
-	}
-	return fmt.Sprintf("_ = sofab.arrays.grow(%s, self.alloc, &(%s), %d, %s)", elemType, fr.path, fr.cap, fill)
-}
-
-// emitFillToN emits the sequenceEnd default-fill (see fillTo). The scope closing
-// here is the wrapper array's own frame — self.cur still names it — so the fill
-// runs exactly once, when the array's elements are complete.
-func (g *gen) emitFillToN(f *zfile, fs []frame) {
-	var arms []string
-	for _, fr := range fs {
-		switch fr.kind {
-		case fkSeqArr, fkStructArr, fkArrArr, fkNestedNative:
-			if s := g.fillTo(fr); s != "" {
-				arms = append(arms, fmt.Sprintf("            .%s => %s,", fr.loc, s))
-			}
-		}
-	}
-	if len(arms) == 0 {
-		return
-	}
-	f.line("        // S5.1: a `count: N` array decodes to N elements -- \"a")
-	f.line("        // growable-list target MUST default-fill to N exactly like a pre-sized")
-	f.line("        // one\". This scope IS the array's wrapper, so the fill also restores the")
-	f.line("        // trailing default run the encoder elided under S3/S5.1; without it that")
-	f.line("        // elision would SHORTEN the array on every round trip instead of")
-	f.line("        // normalising it.")
-	f.line("        switch (self.cur) {")
-	for _, a := range arms {
-		f.line("%s", a)
-	}
-	f.line("            else => {},")
-	f.line("        }")
 }
 
 // emitSequence emits sequenceBegin/sequenceEnd: push the current location and
 // descend. Wrapper-array fields reset their slice on entry (an explicit empty
 // wrapper must override a non-empty value); struct/nested-array element frames
-// grow their slice by one default element and descend into it.
+// grow their slice to id + 1 and descend into the element that id names.
 func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	type frameArms struct {
 		fr   frame
@@ -1096,7 +1083,11 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	f.line("    }")
 	f.blank()
 	f.line("    pub fn sequenceEnd(self: *_dec_%s) void {", name)
-	g.emitFillToN(f, fs)
+	// Nothing to fill in on the way out: the wire count M IS a compact array's
+	// length and the highest present element id IS a wrapper array's last index
+	// (MESSAGE_SPEC §3/§5.1), so what arrived is the whole value. A declared
+	// `count: N` is a capacity — it bounds the elements (see the id guards in
+	// sequenceBegin) and never adds any.
 	f.line("        if (self.sp > 0) {")
 	f.line("            self.sp -= 1;")
 	f.line("            self.cur = self.stack[self.sp];")
