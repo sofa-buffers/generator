@@ -35,10 +35,12 @@ type frame struct {
 	// schema bounds, for the receiver-side decode limits (generator#102):
 	elemMaxHas    bool // fkSeqLeaf: the string/blob element declares a maxlen
 	innerHasCount bool // fkNativeMat: the inner array declares a count
-	// cap is the wrapper array's schema fixed-count bound N (-1 == dynamic/no
-	// count): a wrapper element id >= N is a schema-bound violation (MESSAGE_SPEC
-	// §5.1/§7 — issue #142), rejected as INVALID before the List grows, which also
-	// bounds an over-index heap-amplification fill. Set on fkSeqLeaf/fkSeqObj/fkSeqMat.
+	// cap is the wrapper array's schema count bound N (-1 == no count). N is a
+	// CAPACITY, not a length (MESSAGE_SPEC §3): it never reaches the wire and never
+	// adds elements the wire did not carry. All it does here is bound the array --
+	// an element id >= N is a schema-bound violation (§5.1/§7 — issue #142),
+	// rejected as INVALID before the List grows, which also bounds the id-keyed gap
+	// fill against an over-index heap-amplification DoS. Set on every array frame.
 	cap int64
 	// emax is the fkSeqLeaf string/blob element's schema maxlen L (-1 == no
 	// bound): an element whose wire byte length exceeds L is malformed input,
@@ -82,10 +84,11 @@ func (g *gen) frames(m *ir.Message) []frame {
 	}
 	// addArray registers the frame(s) entered inside the wrapper sequence of a
 	// sequence-typed array (string/blob/struct/union/nested). listExpr is the List
-	// accessor the frame collects into; `get` reaches the just-added last element;
-	// cap is the array's schema fixed-count bound (-1 == dynamic).
+	// accessor the frame collects into; `row` reaches the element the current
+	// element id names (never the last-appended one -- see the placement notes on
+	// sequenceBegin/arrayBegin); cap is the array's schema count bound (-1 == none).
 	addArray = func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax, cap int64) {
-		get := listExpr + ".get(" + listExpr + ".size()-1)"
+		row := listExpr + ".get(" + elemIdxVar(loc) + ")"
 		switch elem {
 		case ir.KindString, ir.KindBlob:
 			out = append(out, frame{kind: fkSeqLeaf, loc: loc, listExpr: listExpr, elemKind: elem, elemMaxHas: elemMaxHas, cap: cap, emax: boundOf(elemMaxHas, elemMax)})
@@ -100,12 +103,18 @@ func (g *gen) frames(m *ir.Message) []frame {
 			// a visitor field and the child accessor path reads it back.
 			walk(elemLoc, listExpr+".get("+elemIdxVar(loc)+")", ref.Target.Fields)
 		case ir.KindArray:
+			// A row of a matrix / an array-of-wrapper-arrays is placed at the index
+			// its element id names, exactly like every other element kind, so the
+			// row accessor reads that index back out of a visitor field rather than
+			// reaching for the last-appended row. Appending would shift every later
+			// row down by one across an interior id gap -- which an omitted
+			// all-default row now makes reachable (§2).
 			if nativeArrayElem(items.Elem) {
-				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerRef: items.ElemRef, innerHasCount: items.HasCount})
+				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerRef: items.ElemRef, innerHasCount: items.HasCount, cap: cap})
 			} else {
 				innerLoc := loc + "_e"
 				out = append(out, frame{kind: fkSeqMat, loc: loc, listExpr: listExpr, childLoc: innerLoc, cap: cap})
-				addArray(innerLoc, get, items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
+				addArray(innerLoc, row, items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -116,54 +125,23 @@ func (g *gen) frames(m *ir.Message) []frame {
 	return out
 }
 
-// emitSequenceEnd writes sequenceEnd(): default-fill the wrapper array whose
-// scope is closing out to the schema count N, then pop the location stack.
+// emitSequenceEnd writes sequenceEnd(): pop the location stack, and nothing else.
 //
-// MESSAGE_SPEC §5.1 makes a `count: N` array's length N "for every target -- a
-// growable-list target MUST default-fill to N exactly like a pre-sized one".
-// Native arrays already got this (arrayBegin materializes them at exactly N);
-// wrapper arrays, which are List-backed and grown by arriving elements, did not.
-//
-// It is also the prerequisite for the §3/§5.1 trailing-run elision on the encode
-// side: without the refill that elision would not RE-SHAPE the array, it would
-// SHORTEN it on every round trip. `cur` still names the scope being closed at this
-// point, so the arm is selected before the pop. A DYNAMIC array (cap < 0) has no N
-// to refill from -- its length is highest-present-id + 1 -- and is never filled.
-func (g *gen) emitSequenceEnd(f *jfile, fs []frame) {
-	var arms []string
-	for _, fr := range fs {
-		if fr.cap < 0 {
-			continue
-		}
-		switch fr.kind {
-		case fkSeqLeaf:
-			zero := `""`
-			if fr.elemKind == ir.KindBlob {
-				zero = "new byte[0]"
-			}
-			arms = append(arms, fmt.Sprintf("        case %d: while (%s.size() < %d) %s.add(%s); break;", fr.idx, fr.listExpr, fr.cap, fr.listExpr, zero))
-		case fkSeqObj:
-			arms = append(arms, fmt.Sprintf("        case %d: while (%s.size() < %d) %s.add(new %s()); break;", fr.idx, fr.listExpr, fr.cap, fr.listExpr, fr.elemType))
-		}
-	}
-	if len(arms) == 0 {
-		f.line("    public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
-		return
-	}
-	f.line("    public void sequenceEnd() {")
-	f.line("        // Refill the closing wrapper array to its schema count (S5.1).")
-	f.line("        switch (cur) {")
-	for _, a := range arms {
-		f.line("%s", a)
-	}
-	f.line("        }")
-	f.line("        cur = sp > 0 ? stk[--sp] : 0;")
-	f.line("    }")
+// A wrapper array's decoded length is *highest present id + 1* (MESSAGE_SPEC
+// §5.1) -- the elements that arrived are the whole value. A declared `count: N` is
+// a CAPACITY (§3): it bounds the element ids (see overIndexGuard) but never adds
+// elements the wire did not carry, so there is nothing to fill in when the scope
+// closes.
+func (g *gen) emitSequenceEnd(f *jfile) {
+	f.line("    public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
 }
 
-// elemIdxVar is the visitor field holding the array index of the struct/union
-// wrapper-array element currently being decoded at loc. See the fkSeqObj walk
-// above for why the flat visitor needs it. Non-identifier characters in loc are
+// elemIdxVar is the visitor field holding the array index of the wrapper-array
+// element currently being decoded at loc -- the struct/union element of a
+// fkSeqObj, or the row of a fkSeqMat / fkNativeMat. Java's flat visitor has no
+// per-element child visitor to carry the position (a nested-visitor backend just
+// returns a pointer to dest[id]), so the index is parked in a visitor field and
+// the child accessor path reads it back. Non-identifier characters in loc are
 // folded to '_' so the name is always a legal Java identifier.
 func elemIdxVar(loc string) string {
 	var b strings.Builder
@@ -491,10 +469,12 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	}
 	f.line("    private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)")
 	f.line("    private int sp = 0;")
-	// One per struct/union wrapper array: the index sequenceBegin placed the
-	// element at, which its child field accessors read back (MESSAGE_SPEC §5.1).
+	// One per wrapper array whose elements have inner state: the index
+	// sequenceBegin/arrayBegin placed the element at, which its child field or row
+	// accessors read back (MESSAGE_SPEC §5.1).
 	for _, fr := range fs {
-		if fr.kind == fkSeqObj {
+		switch fr.kind {
+		case fkSeqObj, fkSeqMat, fkNativeMat:
 			f.line("    private int %s = 0;  // index of the element being decoded in %s (S5.1: the element id IS the index)", elemIdxVar(fr.loc), fr.loc)
 		}
 	}
@@ -535,12 +515,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			case isUnsignedElem(fld.Elem) || fld.Elem == ir.KindBitfield:
 				return "index", true // primitive long[] fill
 			case fld.Elem == ir.KindBool:
-				// A boolean array stays a List<Boolean>. A fixed-count one is
-				// pre-filled to N `false` at arrayBegin, so its M wire elements
-				// overwrite [0, M) by index instead of appending (MESSAGE_SPEC §3).
-				if fld.HasCount {
-					return "setBool", true
-				}
+				// A boolean array stays a List<Boolean>, cleared at arrayBegin and
+				// grown by the M elements the wire carries -- M IS the length, with
+				// or without a declared count (MESSAGE_SPEC §3).
 				return "addBool", true
 			}
 		}
@@ -681,8 +658,8 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 
 	// arrayBegin: a primitive array reserves a small backing store (capped, NOT
 	// `new T[count]` — count is untrusted, see #96) and is grown/filled by index
-	// (ai reset below); a boolean array clears its List; native-matrix rows append
-	// a new inner list.
+	// (ai reset below); a boolean array clears its List; a native-matrix row is
+	// placed at the index its element id names.
 	f.line("    public void arrayBegin(int id, ArrayKind kind, int count) {")
 	f.line("        ai = 0;")
 	if hasPrim {
@@ -699,7 +676,12 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			if limArr && !fr.innerHasCount {
 				guard = limitThrowGuard("count > MAX_DYN_ARRAY_COUNT", locName(fr.loc), "array count above configured limit", g.limits.arrayCount) + " "
 			}
-			f.line("        case %d: %s%s.add(new ArrayList<>()); break;", fr.idx, guard, fr.listExpr)
+			// The row's element id IS its index in the outer array (§5.1), so it is
+			// PLACED there after gap-filling with empty rows -- never appended.
+			// Appending ignored the id, which an interior gap (an omitted all-default
+			// row, §2) turns into a one-off shift of every later row. The outer
+			// array's count bounds the id, which also bounds the gap fill.
+			f.line("        case %d: %s%sSbuf.placeRow(%s, id); %s = id; break;", fr.idx, guard, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc))
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -721,28 +703,17 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			} else if limArr {
 				guard = limitThrowGuard("count > MAX_DYN_ARRAY_COUNT", fld.Name, "array count above configured limit", g.limits.arrayCount) + " "
 			}
-			// A `count: N` array is FIXED-LENGTH: the wire may carry M <= N
-			// elements and positions [M, N) are the element default, so the
-			// container is materialized at exactly N up front and the elided
-			// trailing default run needs no separate fill pass — Java
-			// zero-initializes a primitive array, and the boolean List is
-			// pre-filled with `false` (MESSAGE_SPEC §3). N comes from the schema,
-			// not the wire, so this eager sizing is not the untrusted-count
-			// allocation of #96; the guard above already rejects count > N. Only a
-			// count-less (dynamic) array keeps the lazily grown reservation.
+			// The wire count M IS the array's length (MESSAGE_SPEC §3): the M
+			// elements that arrived are the whole value, so the container is grown
+			// as they come and ends exactly M long. A declared `count: N` is a
+			// CAPACITY and bounds M (the guard above); it never adds elements, so
+			// there is nothing to materialize at [M, N) and a count:N array is
+			// filled exactly like a count-less one.
 			target := fr.path + "." + javaIdent(fld.Name)
 			if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) {
-				if fld.HasCount {
-					arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sacap = %d; %s = new %s[%d]", guard, fld.Count, target, primArrayBase(fld.Elem), fld.Count)))
-				} else {
-					arms = append(arms, jcase(fld.ID, guard+target+" = new "+primArrayBase(fld.Elem)+"[Math.min(count, ARRAY_INIT_CAP)]"))
-				}
+				arms = append(arms, jcase(fld.ID, guard+target+" = new "+primArrayBase(fld.Elem)+"[Math.min(count, ARRAY_INIT_CAP)]"))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) { // boolean List
-				if fld.HasCount {
-					arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sSbuf.fillFalse(%s, %d)", guard, target, fld.Count)))
-				} else {
-					arms = append(arms, jcase(fld.ID, guard+target+".clear()"))
-				}
+				arms = append(arms, jcase(fld.ID, guard+target+".clear()"))
 			}
 		}
 		if len(arms) > 0 {
@@ -772,7 +743,13 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			f.line("        case %d: %swhile (%s.size() <= id) %s.add(new %s()); %s = id; cur = %d; break;",
 				fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.elemType, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkSeqMat:
-			f.line("        case %d: %s%s.add(new ArrayList<>()); cur = %d; break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, locIndex(fs, fr.childLoc))
+			// A row of an array-of-wrapper-arrays is placed at the index its element
+			// id names, for the same reason as the struct element above and the
+			// native-matrix row in arrayBegin: appending ignored the id, and an
+			// interior gap (an omitted all-default row, §2) then shifts every later
+			// row down by one. An array wrapper IS the array's value, so a REOPENED
+			// row id replaces the row rather than merging into it (§7.4).
+			f.line("        case %d: %sSbuf.placeRow(%s, id); %s = id; cur = %d; break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkNormal:
 			var arms []string
 			for _, fld := range fr.fields {
@@ -790,7 +767,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	}
 	f.line("        }")
 	f.line("    }")
-	g.emitSequenceEnd(f, fs)
+	g.emitSequenceEnd(f)
 	// Lazy-growth helper(s): enlarge the backing array to hold index `i`, doubling
 	// but never exceeding `cap` (the declared element count) so a valid array ends
 	// exactly right-sized. Growth tracks elements actually delivered, so an
@@ -846,7 +823,10 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 	for _, fr := range fs {
 		if fr.kind == fkNativeMat {
 			if nativeElemCb(fr.innerElem) == cb {
-				row := fr.listExpr + ".get(" + fr.listExpr + ".size()-1)"
+				// The row arrayBegin PLACED at the element id, not the last-appended
+				// one: an interior id gap must leave an empty row, not shift the
+				// values into the wrong row.
+				row := fr.listExpr + ".get(" + elemIdxVar(fr.loc) + ")"
 				// Gated like the fkNormal fills (generator#188): a matrix inner row
 				// is armed by its own arrayBegin; a bare scalar in the matrix scope
 				// (afill == 0) is skipped.
@@ -875,13 +855,9 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 				stmt = fillGuard + target + ".add(value)"
 			case "addBool":
 				stmt = fillGuard + target + ".add(value != 0)"
-			case "setBool":
-				// Fixed-count: the List is already sized to the schema count.
-				stmt = fillGuard + target + ".set(ai++, value != 0)"
 			case "index":
-				// Grow the backing array on demand (never trust the wire count).
-				// A fixed-count array is already sized to the schema count, so
-				// ensureCap is a no-op there and the zero tail survives.
+				// Grow the backing array on demand (never trust the wire count), up
+				// to the announced count, so a valid array ends exactly M long.
 				stmt = fillGuard + target + " = ensureCap(" + target + ", ai, acap); " + target + "[ai++] = value"
 			default:
 				stmt = target + " " + act

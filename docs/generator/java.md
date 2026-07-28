@@ -27,6 +27,40 @@ targets:
     package: com.myproj.messages
 ```
 
+## Arrays — `count` is a capacity
+
+An array field maps to a `long[]`/`float[]`/`double[]` (numeric, enum, bitfield,
+fp) or to a `List<...>` (boolean, and every wrapper-sequence element kind), and
+the array's length is the length of that container. A schema `count: N` is a
+**capacity**, not a length: it never reaches the wire, it bounds the array (an
+element count or element id past `N` fails the decode as `INVALID_MSG`), and it
+lets fixed-storage targets pre-size — but it never adds elements.
+
+What you can observe from Java:
+
+- `new <Msg>()` leaves a `count: N` array **empty** unless the schema declares a
+  `default`, and a declared default shorter than `N` is materialized exactly as
+  written (never tail-padded to `N`). `reset()` re-arms to the same value.
+- Encode writes **every** element the container holds. `new long[]{1, 2, 0, 0}`
+  and `new long[]{1, 2}` are different values with different bytes.
+- Decode yields exactly the elements the wire carried: `length` / `size()` after a
+  round trip equals what went in, for the compact scalar form and the wrapper form
+  alike. `sequenceEnd()` fills nothing back in.
+- A field is omitted only when it **equals its default** — for an array with no
+  declared default, only when it is empty. An all-zero `new long[]{0, 0, 0, 0}` is
+  a four-element value and stays on the wire.
+
+Inside a wrapper-sequence array (string/blob/struct/union/nested-array elements)
+the **interior is sparse**: an element equal to the element default is dropped and
+leaves an id gap, which decode restores from that same default. The **last**
+element is always written — as its value, or as an empty frame for a
+struct/union/nested element — because its presence is what carries the length. So
+`List.of("a", "")`, `List.of("a")` and an empty list are three distinct values that
+encode and decode distinctly.
+
+Because an interior gap is now ordinary, every element kind is **placed at its
+element id** on decode, matrix rows included (`Sbuf.placeRow`), never appended.
+
 ## Receiver-side decode limits
 
 The `max_dyn_*` caps are [generic options](README.md); what is specific to this

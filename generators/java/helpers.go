@@ -72,43 +72,20 @@ func (g *gen) javaDefaultValue(f *ir.Field) string {
 // It is used both to materialize the field default and, in marshal, as the RHS to
 // compare against for whole-array omission.
 //
-// A `count: N` array is fixed-length, so its value is ALWAYS exactly N elements:
-// a short schema default leaves the trailing ones at the element default, and no
-// schema default at all still means N element defaults. Both are tail-padded to N
-// here. Without this a fresh (or all-default, hence omitted-on-the-wire) array
-// would materialize shorter than N on this growable backend while the
-// fixed-storage camp yields N zeros — the same MESSAGE_SPEC §3 divergence as the
-// trailing default run, reached through the omission path (F-0010).
+// A declared `count: N` takes no part in it. `count` is a CAPACITY, never a
+// length (MESSAGE_SPEC §3): it never reaches the wire, so a default shorter than
+// N stands exactly as written rather than being tail-padded to N, and a count:N
+// array with no declared default is simply the EMPTY array.
 func (g *gen) javaNativeArrayLiteral(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
-	if !ok && (f.Default != nil || !f.HasCount) {
-		return "", false // dynamic and/or non-array default: no literal
+	if !ok {
+		return "", false // no (or non-array) default: no literal
 	}
 	parts := make([]string, len(vals))
 	for i, v := range vals {
 		parts[i] = g.javaArrayElemLit(f.Elem, v)
 	}
-	if f.HasCount {
-		for int64(len(parts)) < f.Count {
-			parts = append(parts, g.javaArrayZeroLit(f.Elem))
-		}
-	}
 	return "List.of(" + strings.Join(parts, ", ") + ")", true
-}
-
-// javaArrayZeroLit is the element default (zero for every native kind) as a boxed
-// Java literal, used to tail-pad a fixed-count array's default out to N.
-func (g *gen) javaArrayZeroLit(elem ir.Kind) string {
-	switch elem {
-	case ir.KindBool:
-		return "false"
-	case ir.KindFP32:
-		return "0.0f"
-	case ir.KindFP64:
-		return "0.0"
-	default: // integers, enum, bitfield -> Long
-		return "0L"
-	}
 }
 
 // javaArrayElemLit renders one native array element default as a boxed Java
@@ -157,38 +134,6 @@ func (g *gen) typeName(key string) string {
 	return b.String()
 }
 
-// fixedSeqArray reports whether a field is a `count: N` WRAPPER array — one whose
-// elements lower to sequence frames (string/blob/struct/union/nested array)
-// rather than to a native array wire type. It is the set of fields whose N
-// element defaults have to be materialized by hand: the native fixed-count
-// arrays get theirs from a padded default literal (javaPrimArrayLiteral /
-// javaNativeArrayLiteral), which a wrapper array has no equivalent of.
-func fixedSeqArray(f *ir.Field) bool {
-	return f.Kind == ir.KindArray && f.HasCount && seqArrayElem(f.Elem)
-}
-
-// javaSeqDefName is the private static filler that adds a fixed-count wrapper
-// array's N default elements to a List and returns it, shared by the field
-// initializer and reset().
-func javaSeqDefName(fld *ir.Field) string { return "_seqdef_" + fld.Name }
-
-// javaSeqElemDefault renders one default element of a wrapper array: the empty
-// string / empty blob / default-constructed struct or union / empty inner row.
-// It is exactly what the decode-side collectors gap-fill an id hole with, so the
-// materialized value and the refilled value cannot drift apart.
-func (g *gen) javaSeqElemDefault(f *ir.Field) string {
-	switch f.Elem {
-	case ir.KindBlob:
-		return "new byte[0]"
-	case ir.KindStruct, ir.KindUnion:
-		return "new " + g.typeName(f.ElemRef.Key) + "()"
-	case ir.KindArray:
-		return "new ArrayList<>()"
-	default: // string
-		return `""`
-	}
-}
-
 // primitiveArrayElem reports whether an array element lowers to a Java primitive
 // array (`long[]`/`float[]`/`double[]`) instead of a boxed `List<...>`: integers,
 // enum and bitfield (all long-backed, delivered via signed/unsigned) and fp. It
@@ -220,42 +165,24 @@ func primArrayBase(k ir.Kind) string {
 }
 
 // javaPrimArrayLiteral renders a primitive array field's schema default as a
-// `new long[]{...}` / `new float[]{...}` / `new double[]{...}` literal of exactly
-// `count` elements — the schema values tail-padded with the element zero (a fixed
-// array always has `count` elements, so a short default must be zero-filled to
-// match C++/Rust). ("", false) when there is no default.
+// `new long[]{...}` / `new float[]{...}` / `new double[]{...}` literal, exactly
+// as the schema wrote it. ("", false) when there is no default.
 //
-// A `count: N` array with NO schema default is still fixed-length: its value is N
-// element defaults, rendered as the compact zero-filled `new long[N]` rather than
-// an N-element literal. Without this a fresh (or all-default, hence
-// omitted-on-the-wire) array would materialize empty on this growable backend
-// while the fixed-storage camp yields N zeros — the same MESSAGE_SPEC §3
-// divergence as the trailing default run, reached through the omission path
-// (F-0010). A dynamic (count-less) array has no N and keeps the shared
-// zero-length default.
+// A declared `count: N` contributes nothing: `count` is a CAPACITY, not a length
+// (MESSAGE_SPEC §3), so a short default is NOT tail-padded to N and a count:N
+// array with no default has no literal at all — its value is the empty array,
+// which is also what an absent field decodes back to. Padding here would make an
+// all-zero N-element array compare equal to "no value" and vanish from the wire,
+// where §3 says [1,2,3,0,0] and [1,2,3] are different values.
 func (g *gen) javaPrimArrayLiteral(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
 	if !ok {
-		if f.Default != nil || !f.HasCount {
-			return "", false
-		}
-		return fmt.Sprintf("new %s[%d]", primArrayBase(f.Elem), f.Count), true
+		return "", false
 	}
 	base := primArrayBase(f.Elem)
-	zero := "0"
-	if base == "float" {
-		zero = "0.0f"
-	} else if base == "double" {
-		zero = "0.0"
-	}
 	parts := make([]string, 0, len(vals))
 	for _, v := range vals {
 		parts = append(parts, g.javaArrayElemLit(f.Elem, v))
-	}
-	if f.HasCount {
-		for int64(len(parts)) < f.Count {
-			parts = append(parts, zero)
-		}
 	}
 	return fmt.Sprintf("new %s[]{%s}", base, strings.Join(parts, ", ")), true
 }
@@ -338,13 +265,9 @@ func (g *gen) javaInit(f *ir.Field) string {
 				return " = new ArrayList<>(" + lit + ")"
 			}
 		}
-		// A `count: N` wrapper array is fixed-length, so its value is N element
-		// defaults at construction, exactly like the native fixed-count arrays above
-		// (§5.1). Only a count-less (dynamic) one starts empty: it has no N, and its
-		// decoded length is highest-present-id + 1.
-		if fixedSeqArray(f) {
-			return fmt.Sprintf(" = %s(new ArrayList<>(%d))", javaSeqDefName(f), f.Count)
-		}
+		// A wrapper array starts EMPTY, with or without a declared `count: N`:
+		// `count` is a capacity, not a length (MESSAGE_SPEC §3), so a fresh count:N
+		// array holds no elements and an absent field decodes back to none.
 		return " = new ArrayList<>()"
 	case ir.KindString:
 		if s, ok := f.Default.(string); ok {
@@ -507,11 +430,20 @@ final class Sbuf {
     static float[] toFloatArray(List<Float> l) { float[] a = new float[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
     static double[] toDoubleArray(List<Double> l) { double[] a = new double[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
 
-    // fillFalse resets l to exactly n false elements. A fixed-count boolean
-    // array decodes to exactly its schema count regardless of the wire count, so
-    // the growable List materializes the trailing default run the encoder elided
-    // and the arriving elements overwrite [0, M) by index.
-    static void fillFalse(List<Boolean> l, int n) { l.clear(); for (int i = 0; i < n; i++) l.add(false); }
+    // placeRow stores a FRESH empty row of a matrix (an array whose elements are
+    // themselves arrays) at the index its element id names, growing the outer list
+    // with empty rows so an id GAP decodes as an empty row instead of shifting
+    // every later row down by one. Gaps are ordinary: an interior row equal to the
+    // element default (the empty row) is omitted by a conformant encoder (S2), and
+    // only the LAST row is guaranteed present -- which is what makes the decoded
+    // length, highest present id + 1, exact. The row is replaced rather than merged
+    // into, because an array wrapper IS the array's value (S7.4). The caller's
+    // over-index guard bounds the id against the outer array's schema capacity
+    // before this grows anything.
+    static <T> void placeRow(List<List<T>> l, int id) {
+        while (l.size() <= id) l.add(new java.util.ArrayList<>());
+        l.set(id, new java.util.ArrayList<>());
+    }
 
     // resetList empties a list IN PLACE, keeping its capacity, and materializes one
     // only when the field is null. The generated reset() uses it so re-arming a
@@ -519,65 +451,14 @@ final class Sbuf {
     // taking a destination from the caller.
     static <T> List<T> resetList(List<T> l) { if (l == null) return new java.util.ArrayList<>(); l.clear(); return l; }
 
-    // trimTail / trimTailF32 / trimTailF64 return a's first M' elements, where M'
-    // is one past the last element that differs from the element default (0 when
-    // every element is the default). A fixed-count array's canonical wire carries
-    // exactly those M' elements; the decoder rebuilds the trailing default run
-    // from the schema count. Elements compare by BIT PATTERN,
-    // not by ==, so a trailing -0.0 (which == 0.0) and a NaN survive the
-    // round-trip instead of being silently trimmed away.
-    static long[] trimTail(long[] a) { int n = a.length; while (n > 0 && a[n - 1] == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
-    static float[] trimTailF32(float[] a) { int n = a.length; while (n > 0 && Float.floatToRawIntBits(a[n - 1]) == 0) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
-    static double[] trimTailF64(double[] a) { int n = a.length; while (n > 0 && Double.doubleToRawLongBits(a[n - 1]) == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
-
-    // trimTailStrings / trimTailBlobs / trimTailObjs / trimTailRows narrow a
-    // WRAPPER array to M -- one past the last element differing from the element
-    // default -- which is what its canonical wire carries, sequence-form elements
-    // included. Only the TRAILING run is dropped: an interior all-default element
-    // keeps its frame, because element presence is what carries the array's
-    // length. M == 0 leaves no child written at all, so the lazily-opened wrapper
-    // is dropped by the field-level writeSequenceEnd and the whole field is
-    // omitted. The result is a subList VIEW, so narrowing allocates nothing and
-    // the marshal loop keeps indexing by the element's original index (only the
-    // tail is cut).
-    //
-    // A string/blob element is a leaf the writer already omits individually when
-    // it equals the element default, so trimming their trailing run does not move
-    // a single byte -- those two exist so that the all-default predicate is
-    // computed from the very same expression the writer loops over and cannot
-    // drift away from it. They are reached only for a count:N array: a DYNAMIC
-    // array's last element is always written (S2), so narrowing it here would make
-    // the predicate omit a field the writer puts on the wire. orEmpty is the
-    // dynamic counterpart -- identity, minus the null the trims used to absorb.
+    // orEmpty is the null-absorbing identity the marshal loop and the all-default
+    // predicate both run a WRAPPER array through. No narrowing happens here and
+    // none may: the wire count IS a compact array's length and the highest wrapper
+    // id IS its last index (S3/S5.1), so dropping a trailing default element would
+    // not re-shape the bytes, it would SHORTEN the value. What the interior may
+    // drop -- a leaf equal to the element default, an all-default sequence element
+    // -- is decided per element inside the loop, never here.
     static <T> List<T> orEmpty(List<T> a) { return a == null ? java.util.Collections.emptyList() : a; }
-    static List<String> trimTailStrings(List<String> a) {
-        if (a == null) return java.util.Collections.emptyList();
-        int n = a.size();
-        while (n > 0 && (a.get(n - 1) == null || a.get(n - 1).isEmpty())) n--;
-        return n == a.size() ? a : a.subList(0, n);
-    }
-    static List<byte[]> trimTailBlobs(List<byte[]> a) {
-        if (a == null) return java.util.Collections.emptyList();
-        int n = a.size();
-        while (n > 0 && (a.get(n - 1) == null || a.get(n - 1).length == 0)) n--;
-        return n == a.size() ? a : a.subList(0, n);
-    }
-    // isDefault is the element type's own all-default predicate, passed as a
-    // non-capturing method reference (X::isDefault), so the JVM caches one
-    // instance and the narrowing costs no allocation. A null element is the
-    // element default -- marshal encodes it as a fresh all-default object.
-    static <T> List<T> trimTailObjs(List<T> a, java.util.function.Predicate<? super T> isDefault) {
-        if (a == null) return java.util.Collections.emptyList();
-        int n = a.size();
-        while (n > 0 && (a.get(n - 1) == null || isDefault.test(a.get(n - 1)))) n--;
-        return n == a.size() ? a : a.subList(0, n);
-    }
-    static <T extends java.util.Collection<?>> List<T> trimTailRows(List<T> a) {
-        if (a == null) return java.util.Collections.emptyList();
-        int n = a.size();
-        while (n > 0 && (a.get(n - 1) == null || a.get(n - 1).isEmpty())) n--;
-        return n == a.size() ? a : a.subList(0, n);
-    }
 }
 `, g.banner, spdx, g.pkg))
 }

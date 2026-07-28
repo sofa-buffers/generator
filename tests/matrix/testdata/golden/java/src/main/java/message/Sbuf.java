@@ -15,11 +15,20 @@ final class Sbuf {
     static float[] toFloatArray(List<Float> l) { float[] a = new float[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
     static double[] toDoubleArray(List<Double> l) { double[] a = new double[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
 
-    // fillFalse resets l to exactly n false elements. A fixed-count boolean
-    // array decodes to exactly its schema count regardless of the wire count, so
-    // the growable List materializes the trailing default run the encoder elided
-    // and the arriving elements overwrite [0, M) by index.
-    static void fillFalse(List<Boolean> l, int n) { l.clear(); for (int i = 0; i < n; i++) l.add(false); }
+    // placeRow stores a FRESH empty row of a matrix (an array whose elements are
+    // themselves arrays) at the index its element id names, growing the outer list
+    // with empty rows so an id GAP decodes as an empty row instead of shifting
+    // every later row down by one. Gaps are ordinary: an interior row equal to the
+    // element default (the empty row) is omitted by a conformant encoder (S2), and
+    // only the LAST row is guaranteed present -- which is what makes the decoded
+    // length, highest present id + 1, exact. The row is replaced rather than merged
+    // into, because an array wrapper IS the array's value (S7.4). The caller's
+    // over-index guard bounds the id against the outer array's schema capacity
+    // before this grows anything.
+    static <T> void placeRow(List<List<T>> l, int id) {
+        while (l.size() <= id) l.add(new java.util.ArrayList<>());
+        l.set(id, new java.util.ArrayList<>());
+    }
 
     // resetList empties a list IN PLACE, keeping its capacity, and materializes one
     // only when the field is null. The generated reset() uses it so re-arming a
@@ -27,63 +36,12 @@ final class Sbuf {
     // taking a destination from the caller.
     static <T> List<T> resetList(List<T> l) { if (l == null) return new java.util.ArrayList<>(); l.clear(); return l; }
 
-    // trimTail / trimTailF32 / trimTailF64 return a's first M' elements, where M'
-    // is one past the last element that differs from the element default (0 when
-    // every element is the default). A fixed-count array's canonical wire carries
-    // exactly those M' elements; the decoder rebuilds the trailing default run
-    // from the schema count. Elements compare by BIT PATTERN,
-    // not by ==, so a trailing -0.0 (which == 0.0) and a NaN survive the
-    // round-trip instead of being silently trimmed away.
-    static long[] trimTail(long[] a) { int n = a.length; while (n > 0 && a[n - 1] == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
-    static float[] trimTailF32(float[] a) { int n = a.length; while (n > 0 && Float.floatToRawIntBits(a[n - 1]) == 0) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
-    static double[] trimTailF64(double[] a) { int n = a.length; while (n > 0 && Double.doubleToRawLongBits(a[n - 1]) == 0L) n--; return n == a.length ? a : java.util.Arrays.copyOf(a, n); }
-
-    // trimTailStrings / trimTailBlobs / trimTailObjs / trimTailRows narrow a
-    // WRAPPER array to M -- one past the last element differing from the element
-    // default -- which is what its canonical wire carries, sequence-form elements
-    // included. Only the TRAILING run is dropped: an interior all-default element
-    // keeps its frame, because element presence is what carries the array's
-    // length. M == 0 leaves no child written at all, so the lazily-opened wrapper
-    // is dropped by the field-level writeSequenceEnd and the whole field is
-    // omitted. The result is a subList VIEW, so narrowing allocates nothing and
-    // the marshal loop keeps indexing by the element's original index (only the
-    // tail is cut).
-    //
-    // A string/blob element is a leaf the writer already omits individually when
-    // it equals the element default, so trimming their trailing run does not move
-    // a single byte -- those two exist so that the all-default predicate is
-    // computed from the very same expression the writer loops over and cannot
-    // drift away from it. They are reached only for a count:N array: a DYNAMIC
-    // array's last element is always written (S2), so narrowing it here would make
-    // the predicate omit a field the writer puts on the wire. orEmpty is the
-    // dynamic counterpart -- identity, minus the null the trims used to absorb.
+    // orEmpty is the null-absorbing identity the marshal loop and the all-default
+    // predicate both run a WRAPPER array through. No narrowing happens here and
+    // none may: the wire count IS a compact array's length and the highest wrapper
+    // id IS its last index (S3/S5.1), so dropping a trailing default element would
+    // not re-shape the bytes, it would SHORTEN the value. What the interior may
+    // drop -- a leaf equal to the element default, an all-default sequence element
+    // -- is decided per element inside the loop, never here.
     static <T> List<T> orEmpty(List<T> a) { return a == null ? java.util.Collections.emptyList() : a; }
-    static List<String> trimTailStrings(List<String> a) {
-        if (a == null) return java.util.Collections.emptyList();
-        int n = a.size();
-        while (n > 0 && (a.get(n - 1) == null || a.get(n - 1).isEmpty())) n--;
-        return n == a.size() ? a : a.subList(0, n);
-    }
-    static List<byte[]> trimTailBlobs(List<byte[]> a) {
-        if (a == null) return java.util.Collections.emptyList();
-        int n = a.size();
-        while (n > 0 && (a.get(n - 1) == null || a.get(n - 1).length == 0)) n--;
-        return n == a.size() ? a : a.subList(0, n);
-    }
-    // isDefault is the element type's own all-default predicate, passed as a
-    // non-capturing method reference (X::isDefault), so the JVM caches one
-    // instance and the narrowing costs no allocation. A null element is the
-    // element default -- marshal encodes it as a fresh all-default object.
-    static <T> List<T> trimTailObjs(List<T> a, java.util.function.Predicate<? super T> isDefault) {
-        if (a == null) return java.util.Collections.emptyList();
-        int n = a.size();
-        while (n > 0 && (a.get(n - 1) == null || isDefault.test(a.get(n - 1)))) n--;
-        return n == a.size() ? a : a.subList(0, n);
-    }
-    static <T extends java.util.Collection<?>> List<T> trimTailRows(List<T> a) {
-        if (a == null) return java.util.Collections.emptyList();
-        int n = a.size();
-        while (n > 0 && (a.get(n - 1) == null || a.get(n - 1).isEmpty())) n--;
-        return n == a.size() ? a : a.subList(0, n);
-    }
 }

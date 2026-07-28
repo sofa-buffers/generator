@@ -60,12 +60,12 @@ func TestJavaStructural(t *testing.T) {
 		"class MyfirstmessageSomestructNestedstruct {",                                                // nested types in file
 		"public long[] someuintarray = new long[]{0L, 1L, 1000L, 4294967295L};",                       // primitive array (was List<Long>)
 		"public float[] somefloatarray = new float[]{0.0f, -1.5f, 3.25f};",                            // primitive fp array
-		"public long[] someenumarray = new long[]{2L, 1L, 0L, 0};",                                    // short default tail-padded to count
-		"os.writeArrayUnsigned(15, Sbuf.trimTail(this.someuintarray));",                               // direct write, no Sbuf box; count: 4 -> trailing default run elided (#136)
+		"public long[] someenumarray = new long[]{2L, 1L, 0L};",                                       // declared default, NOT padded to count (count is a capacity)
+		"os.writeArrayUnsigned(15, this.someuintarray);",                                              // direct write, no Sbuf box, no trim: the wire count IS the length
 		"private static final long[] _arrdef_someuintarray = new long[]{0L, 1L, 1000L, 4294967295L};", // omit-default hoisted to a static (#146)
 		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",                  // guard reads the static -- no per-encode new long[] (#146)
 		"m.someuintarray = ensureCap(m.someuintarray, ai, acap); m.someuintarray[ai++] = value;",      // grow-on-demand indexed decode (#96)
-		"case 15: if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"someuintarray: array count above schema capacity 4\")); acap = 4; m.someuintarray = new long[4]; break;", // over-count rejected (#100); fixed count -> materialize exactly N, zero tail (#136)
+		"case 15: if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"someuintarray: array count above schema capacity 4\")); m.someuintarray = new long[Math.min(count, ARRAY_INIT_CAP)]; break;", // over-count rejected (#100); the M that arrived is the whole value
 		"private static long[] ensureCap(long[] a, int i, int cap) {",   // lazy-growth helper
 		"private static float[] ensureCap(float[] a, int i, int cap) {", // fp32 overload
 		"if (offset == 0 && chunkLength >= total) {",                    // string/blob single-shot
@@ -213,7 +213,7 @@ messages:
 		// Unbounded array: count checked against the cap before the (lazy) reservation.
 		`case 1: if (count > MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "arr: array count above configured limit 4")); m.arr = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
 		// Bounded array: only the generator#100 schema guard, never the cap.
-		`case 2: if (count > 6) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "barr: array count above schema capacity 6")); acap = 6; m.barr = new long[6]; break;`,
+		`case 2: if (count > 6) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "barr: array count above schema capacity 6")); m.barr = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
 		// Unbounded string: total checked at the top of string(), before accumulation.
 		"if (total > MAX_DYN_STRING_LEN) {",
 		`case 0: throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "s: string length above configured limit 4096"));`,
@@ -339,7 +339,13 @@ func TestJavaUtf8ValidatorRange(t *testing.T) {
 	}
 }
 
-func TestJavaFixedCountTrailingDefaultRun(t *testing.T) {
+// documentation#29: `count: N` is a CAPACITY, never a length. The wire count M IS
+// a compact array's length, so nothing that carries it may be elided -- the
+// trim-on-encode / fill-on-decode pair this backend shipped for a `count: N`
+// native array was correct only under the superseded fixed-length reading and is
+// gone. [1,2,0,0] and [1,2] are different values with different bytes, and a
+// count:N array decodes to exactly the M elements that arrived.
+func TestJavaCountIsCapacityNativeArrays(t *testing.T) {
 	const src = `
 version: 1
 $defs:
@@ -365,26 +371,26 @@ messages:
       ds:   { id: 10, type: array, items: { type: string } }
       mat:  { id: 11, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
 `
-	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
-	sbuf := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/Sbuf.java"]
+	files := genJavaFromYAML(t, src, map[string]any{})
+	m := files["src/main/java/message/M.java"]
+	sbuf := files["src/main/java/message/Sbuf.java"]
 
 	for _, want := range []string{
-		// --- encode: a fixed-count native array trims its trailing default run.
-		"os.writeArrayUnsigned(0, Sbuf.trimTail(this.fu));",
-		"os.writeArraySigned(1, Sbuf.trimTail(this.fi));",
-		"os.writeArrayFp32(2, Sbuf.trimTailF32(this.ff32));", // bit-pattern compare: -0.0 must NOT trim
-		"os.writeArrayFp64(3, Sbuf.trimTailF64(this.ff64));", // bit-pattern compare: -0.0 must NOT trim
-		"os.writeArrayUnsigned(4, Sbuf.trimTail(Sbuf.boolToLongArray(this.fb)));",
-		"os.writeArraySigned(5, Sbuf.trimTail(this.fe));",    // enum -> signed
-		"os.writeArrayUnsigned(6, Sbuf.trimTail(this.fbf));", // bitfield -> unsigned
-
-		// --- decode: materialize exactly N, defaults at [M, N).
-		"acap = 5; m.fu = new long[5]",
-		"acap = 5; m.ff32 = new float[5]",
-		"acap = 5; m.ff64 = new double[5]",
-		"Sbuf.fillFalse(m.fb, 5)",
-		"m.fb.set(ai++, value != 0);",
-
+		// --- encode: every element the value holds is written, count or no count.
+		"os.writeArrayUnsigned(0, this.fu);",
+		"os.writeArraySigned(1, this.fi);",
+		"os.writeArrayFp32(2, this.ff32);",
+		"os.writeArrayFp64(3, this.ff64);",
+		"os.writeArrayUnsigned(4, Sbuf.boolToLongArray(this.fb));",
+		"os.writeArraySigned(5, this.fe);",    // enum -> signed
+		"os.writeArrayUnsigned(6, this.fbf);", // bitfield -> unsigned
+		// --- decode: a count:N array is filled exactly like a count-less one, from
+		// the M elements that arrived; the schema count only bounds M.
+		"m.fu = new long[Math.min(count, ARRAY_INIT_CAP)]",
+		"m.ff32 = new float[Math.min(count, ARRAY_INIT_CAP)]",
+		"m.ff64 = new double[Math.min(count, ARRAY_INIT_CAP)]",
+		"m.fb.clear()",
+		"m.fb.add(value != 0);",
 		// --- the over-count guard (#100) still rejects M > N.
 		`if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "fu: array count above schema capacity 5"));`,
 	} {
@@ -394,21 +400,18 @@ messages:
 	}
 
 	for _, unwanted := range []string{
-		// --- encode: a DYNAMIC array is never trimmed (trailing default is significant).
-		"Sbuf.trimTail(this.du)",
-		"Sbuf.trimTailF32(this.df32)",
-		"Sbuf.trimTail(Sbuf.boolToLongArray(this.db))",
-		// --- decode: a dynamic array keeps the lazy reservation and .add/.clear.
-		"acap = 5; m.du =",
-		"Sbuf.fillFalse(m.db",
-		"m.db.set(ai++",
+		// The whole trim-on-encode / fill-on-decode pair is gone.
+		"Sbuf.trimTail", "Sbuf.fillFalse", "Sbuf.padTo",
+		"acap = 5;", // no materialization at the schema count
+		"m.fu = new long[5]", "m.ff32 = new float[5]", "m.ff64 = new double[5]",
+		"m.fb.set(ai++", // a boolean array is grown, never overwritten by index
 	} {
 		if strings.Contains(m, unwanted) {
-			t.Errorf("M.java must not contain %q (dynamic arrays are unchanged)", unwanted)
+			t.Errorf("M.java must not contain %q (count is a capacity, not a length)", unwanted)
 		}
 	}
 
-	// Dynamic arrays keep their original emission verbatim.
+	// Dynamic arrays were already right and must be untouched.
 	for _, want := range []string{
 		"os.writeArrayUnsigned(7, this.du);",
 		"os.writeArrayFp32(8, this.df32);",
@@ -421,33 +424,27 @@ messages:
 		}
 	}
 
-	// A nested array-of-array row is NOT a top-level fixed field: rows stay
-	// untrimmed even though both the outer and inner carry a `count`.
-	if strings.Contains(m, "Sbuf.trimTail(Sbuf.toLongArray(") {
-		t.Error("nested array rows must not be trimmed")
+	// A native ROW of a matrix carries no frame of its own, so the §2 element rule
+	// lands on the write: an interior row equal to the element default (the empty
+	// row) is not written at all, and the last row always is.
+	if !strings.Contains(m, "if (!_e0.isEmpty() || _i0 == _t1.size() - 1) {") {
+		t.Errorf("a native matrix row must take the interior/last write guard:\n%s", m)
 	}
 
-	// The trim helpers compare by BIT PATTERN, never by == (-0.0 == 0.0 in Java).
-	for _, want := range []string{
-		"Float.floatToRawIntBits(a[n - 1]) == 0",
-		"Double.doubleToRawLongBits(a[n - 1]) == 0L",
-		"static void fillFalse(List<Boolean> l, int n)",
-	} {
-		if !strings.Contains(sbuf, want) {
-			t.Errorf("Sbuf.java missing %q", want)
+	// The generated support class ships neither trim nor fill any more.
+	for _, gone := range []string{"trimTail", "fillFalse", "padTo"} {
+		if strings.Contains(sbuf, gone) {
+			t.Errorf("Sbuf.java must not still ship %q", gone)
 		}
 	}
 }
 
-// A `count: N` array is fixed-length, so its VALUE is always exactly N elements —
-// including before anything touches the wire (MESSAGE_SPEC §3, finding F-0010).
-// With no schema default that is N element defaults; with a short schema default
-// the unlisted trailing elements are the element default. An all-default array is
-// omitted entirely by the sparse rule, so it never reaches arrayBegin on decode:
-// without an N-element constructor default it would decode back as length 0 here
-// while the fixed-storage backends yield N zeros. Dynamic arrays have no N and
-// keep the shared zero-length default.
-func TestJavaFixedCountDefaultShape(t *testing.T) {
+// A `count: N` array's VALUE is bounded by N, never sized to it (MESSAGE_SPEC §3,
+// documentation#29): a fresh count:N array is EMPTY, a declared default shorter
+// than N stands exactly as written, and an all-zero N-element value is a length-N
+// array that differs from the empty one and stays on the wire. Padding either side
+// to N is what used to make [0,0,0,0] indistinguishable from "no value".
+func TestJavaCountIsCapacityDefaultShape(t *testing.T) {
 	const src = `
 version: 1
 $defs:
@@ -460,87 +457,85 @@ $defs:
 messages:
   m:
     payload:
-      # count: N, NO schema default -> N element defaults.
+      # count: N, NO schema default -> the EMPTY array.
       fu:   { id: 0, type: array, items: { type: u32, count: 5 } }
       ff32: { id: 1, type: array, items: { type: fp32, count: 4 } }
       ff64: { id: 2, type: array, items: { type: fp64, count: 2 } }
       fb:   { id: 3, type: array, items: { type: boolean, count: 3 } }
       fe:   { id: 4, type: array, items: { type: enum, count: 3, enum: { $ref: "#/$defs/enum/Color" } } }
       fbf:  { id: 5, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Flags" } } }
-      # count: N with a SHORT schema default -> tail-padded to N.
+      # count: N with a SHORT schema default -> exactly as written, not padded.
       pu:   { id: 6, type: array, items: { type: u32, count: 4 }, default: [1, 2] }
       pb:   { id: 7, type: array, items: { type: boolean, count: 4 }, default: [true, true] }
       pf32: { id: 8, type: array, items: { type: fp32, count: 3 }, default: [1.5] }
+      # wrapper elements: a count:N one starts empty just like a count-less one.
+      fstr: { id: 9, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      fobj: { id: 10, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }
       # dynamic -> unchanged, shared zero-length default.
-      du:   { id: 9, type: array, items: { type: u32 } }
-      df32: { id: 10, type: array, items: { type: fp32 } }
-      db:   { id: 11, type: array, items: { type: boolean } }
+      du:   { id: 11, type: array, items: { type: u32 } }
+      df32: { id: 12, type: array, items: { type: fp32 } }
+      db:   { id: 13, type: array, items: { type: boolean } }
 `
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
 
 	for _, want := range []string{
-		// --- fixed, no schema default: exactly N element defaults.
-		"public long[] fu = new long[5];",
-		"public float[] ff32 = new float[4];",
-		"public double[] ff64 = new double[2];",
-		"public List<Boolean> fb = new ArrayList<>(List.of(false, false, false));",
-		"public long[] fe = new long[3];",  // enum -> long[]
-		"public long[] fbf = new long[2];", // bitfield -> long[]
-
-		// --- fixed, short schema default: tail-padded to N.
-		"public long[] pu = new long[]{1L, 2L, 0, 0};",
-		"public List<Boolean> pb = new ArrayList<>(List.of(true, true, false, false));",
-		"public float[] pf32 = new float[]{1.5f, 0.0f, 0.0f};",
-
-		// --- dynamic: shared zero-length default, unchanged.
+		// --- count:N, no schema default: the empty array, exactly like a dynamic one.
+		"public long[] fu = Sbuf.EMPTY_LONGS;",
+		"public float[] ff32 = Sbuf.EMPTY_FLOATS;",
+		"public double[] ff64 = Sbuf.EMPTY_DOUBLES;",
+		"public List<Boolean> fb = new ArrayList<>();",
+		"public long[] fe = Sbuf.EMPTY_LONGS;",  // enum -> long[]
+		"public long[] fbf = Sbuf.EMPTY_LONGS;", // bitfield -> long[]
+		// --- count:N with a short schema default: as written, no tail padding.
+		"public long[] pu = new long[]{1L, 2L};",
+		"public List<Boolean> pb = new ArrayList<>(List.of(true, true));",
+		"public float[] pf32 = new float[]{1.5f};",
+		// --- count:N wrapper arrays start empty too.
+		"public List<String> fstr = new ArrayList<>();",
+		"public List<MFobjElem> fobj = new ArrayList<>();",
+		// --- dynamic: unchanged.
 		"public long[] du = Sbuf.EMPTY_LONGS;",
-		"public float[] df32 = Sbuf.EMPTY_FLOATS;",
 		"public List<Boolean> db = new ArrayList<>();",
-
-		// --- the synthesized default doubles as the whole-field omission guard, so
-		// an all-default fixed array is omitted entirely (encodes to no bytes). The
-		// default is hoisted to a static (#146) so the guard allocates nothing.
-		"private static final long[] _arrdef_fu = new long[5];",
-		"if (!java.util.Arrays.equals(this.fu, _arrdef_fu)) {",
-		"private static final List<Boolean> _arrdef_fb = List.of(false, false, false);",
-		"if (!_arrdef_fb.equals(this.fb)) {",
+		// --- with no declared default the omit guard is plain emptiness, so an
+		// all-zero N-element value is NOT default and stays on the wire.
+		"if (this.fu != null && this.fu.length != 0) {",
+		"if (this.fb != null && !this.fb.isEmpty()) {",
+		// --- a declared default is still hoisted to a static and compared whole (#146).
+		"private static final long[] _arrdef_pu = new long[]{1L, 2L};",
+		"if (!java.util.Arrays.equals(this.pu, _arrdef_pu)) {",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing %q", want)
 		}
 	}
 
-	// A dynamic array must never gain a synthesized N-element default nor an
-	// Arrays.equals omission guard (it has no N to refill from).
+	// No array of any shape may be padded out to its schema count.
 	for _, unwanted := range []string{
-		"public long[] du = new long[",
-		"public List<Boolean> db = new ArrayList<>(List.of(",
-		"java.util.Arrays.equals(this.du",
-		// #146: the omit guard must not allocate a throwaway array per encode --
-		// no `new T[...]` literal inside an Arrays.equals / List.of compare.
-		"Arrays.equals(this.fu, new long[",
-		"List.of(false, false, false).equals(this.fb)",
+		"public long[] fu = new long[5]",
+		"public long[] pu = new long[]{1L, 2L, 0, 0}",
+		"public float[] pf32 = new float[]{1.5f, 0.0f, 0.0f}",
+		"List.of(true, true, false, false)",
+		"List.of(false, false, false)",
+		"_seqdef_", // the count:N wrapper-array filler is gone entirely
 	} {
 		if strings.Contains(m, unwanted) {
-			t.Errorf("M.java must not contain %q (dynamic arrays keep the empty default)", unwanted)
+			t.Errorf("M.java must not contain %q (count is a capacity, not a length)", unwanted)
 		}
-	}
-
-	// Dynamic arrays keep the plain emptiness guard.
-	if !strings.Contains(m, "if (this.du != null && this.du.length != 0) {") {
-		t.Error("M.java: dynamic array must keep its length!=0 omission guard")
 	}
 }
 
 // TestJavaLazySequenceFraming: MESSAGE_SPEC §2 omits a sequence-typed FIELD whose
-// value equals its declared default instead of framing it empty, while a
-// wrapper-array ELEMENT keeps its frame — element presence is what carries a
-// dynamic array's length (§5.1). Every sequence is therefore opened with the
-// corelib's hold-back begin (writeSequenceBeginLazy); the CLOSER is what encodes
-// the distinction and is chosen statically from the position in the schema:
-// writeSequenceEnd (drops a contentless frame) for a struct/union field and for a
-// wrapper-array field, writeSequenceEndKeep (forces it out) for an element and for
-// a nested array row.
+// value equals its declared default instead of framing it empty. Every sequence is
+// therefore opened with the corelib's hold-back begin (writeSequenceBeginLazy) and
+// the CLOSER is what encodes the distinction — writeSequenceEnd drops a
+// contentless frame, writeSequenceEndKeep forces it out.
+//
+// documentation#29 made that choice POSITIONAL for a sequence-form array ELEMENT,
+// read off the value at run time rather than off the schema: the dropping closer
+// in the array's interior, where an all-default element vanishes into an id gap
+// like any other default value, and the keeping one at the LAST index, whose
+// presence is what carries the array's length (§5.1). A sequence-typed FIELD still
+// always drops.
 func TestJavaLazySequenceFraming(t *testing.T) {
 	const src = `
 version: 1
@@ -562,13 +557,12 @@ messages:
 		// A wrapper-array FIELD (string/blob elements): same -- depth 0 drops.
 		"os.writeSequenceBeginLazy(1);",
 		"os.writeSequenceBeginLazy(2);",
-		// A struct ELEMENT keeps its frame: its id counts toward the array length.
+		// A struct ELEMENT chooses its closer from its position in the VALUE.
 		"os.writeSequenceBeginLazy(3);",
-		"os.writeSequenceBeginLazy(_i0); (this.objs.get(_i0) == null ? new MObjsElem() : this.objs.get(_i0)).marshal(os); os.writeSequenceEndKeep();",
-		// A nested array ROW is an element too: the inner row keeps, the outer
-		// wrapper field drops.
+		"os.writeSequenceBeginLazy(_i0); (_t2.get(_i0) == null ? new MObjsElem() : _t2.get(_i0)).marshal(os); if (_i0 == _t2.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
+		// A nested wrapper ROW is an element too, and takes the same choice.
 		"os.writeSequenceBeginLazy(4);",
-		"            os.writeSequenceEndKeep();",
+		"            if (_i0 == _t3.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing %q", want)
@@ -579,14 +573,21 @@ messages:
 	if strings.Contains(m, "os.writeSequenceBegin(") {
 		t.Error("M.java: every sequence must be opened with writeSequenceBeginLazy")
 	}
-	// Two keeping closes (the objs struct element, the mat row) and five dropping
-	// ones (st, strs, blbs, the objs wrapper, the mat wrapper) -- one per
-	// sequence-typed FIELD.
+	// Two element positions (the objs struct element, the mat row), each a
+	// keep/drop pair; five sequence-typed FIELDS, each an unconditional drop.
 	if got := strings.Count(m, "writeSequenceEndKeep()"); got != 2 {
 		t.Errorf("expected 2 keeping closes (struct element + nested row), got %d", got)
 	}
-	if got := strings.Count(m, "os.writeSequenceEnd();"); got != 5 {
-		t.Errorf("expected 5 dropping closes (one per sequence-typed field), got %d", got)
+	if got := strings.Count(m, "else os.writeSequenceEnd();"); got != 2 {
+		t.Errorf("expected 2 positional closers (struct element + nested row), got %d", got)
+	}
+	if got := strings.Count(m, "os.writeSequenceEnd();"); got != 7 {
+		t.Errorf("expected 7 dropping closes (5 fields + 2 element interiors), got %d", got)
+	}
+	// An element is NEVER framed unconditionally any more: an all-default one in
+	// the interior must vanish into an id gap (§2).
+	if strings.Contains(m, ".marshal(os); os.writeSequenceEndKeep();") {
+		t.Error("M.java: a sequence-form element must not take the keeping closer unconditionally")
 	}
 	// A wrapper array carries no whole-omission guard in generated code: the frame
 	// is opened lazily and the corelib drops it when no element was written.
@@ -665,9 +666,10 @@ func TestJavaSbufResetList(t *testing.T) {
 	}
 }
 
-// wrapperArraySrc is the schema both wrapper-array regression tests below run
-// against: a count:N struct array, a count-less one of the same element shape as
-// the control, and a count:N string array for the leaf-element path.
+// wrapperArraySrc is the schema the wrapper-array regression tests below run
+// against: a count:N struct array next to a count-less one of the same element
+// shape, count:N and count-less leaf arrays, and both matrix flavours (native
+// rows and wrapper rows).
 const wrapperArraySrc = `
 version: 1
 messages:
@@ -676,85 +678,102 @@ messages:
       fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
       dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
       fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      dstrs:   { id: 3, type: array, items: { type: string, maxlen: 8 } }
+      dblbs:   { id: 4, type: array, items: { type: blob, maxlen: 8 } }
+      mat:     { id: 5, type: array, items: { type: array, count: 4, items: { type: u32, count: 3 } } }
+      smat:    { id: 6, type: array, items: { type: array, count: 4, items: { type: string, maxlen: 8 } } }
 `
 
-// A count:N wrapper array's canonical wire stops at M -- one past its last
-// non-default element (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements")
-// -- and M == 0 leaves the whole wrapper omitted (§2). generator#248: the element
-// loop used to run to size(), framing every trailing all-default element, so a
-// decoder that accepted the non-canonical form re-encoded it unchanged instead of
-// normalising. A DYNAMIC array has no N to refill from, so its trailing default
-// element is significant and must still be framed.
-func TestJavaFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+// documentation#29 leaves ONE sparse rule for both element kinds, the same with
+// or without a declared count: an element BEFORE the last one that equals its
+// element default is omitted and leaves an id GAP, while the LAST element is
+// always written -- as its value for a leaf, as an empty frame for a
+// struct/union/nested-array element. Nothing is narrowed over the whole array any
+// more: the wire count IS a compact array's length and the highest wrapper id IS
+// its last index, so a trailing-run elision would SHORTEN the value, not re-shape
+// it.
+func TestJavaWrapperArrayInteriorSparseLastAlwaysWritten(t *testing.T) {
 	files := genJavaFromYAML(t, wrapperArraySrc, map[string]any{})
 	got := files["src/main/java/message/Vec.java"]
 
-	// The fixed array narrows to M before framing anything...
-	if !strings.Contains(got, "List<VecFixedElem> _t0 = Sbuf.trimTailObjs(this.fixed, VecFixedElem::isDefault);") ||
-		!strings.Contains(got, "for (int _i0 = 0; _i0 < _t0.size(); _i0++) { os.writeSequenceBeginLazy(_i0);") {
-		t.Errorf("count:N struct array must loop to M, not size():\n%s", got)
-	}
-	// ...while the dynamic one keeps every element, trailing defaults included.
-	if !strings.Contains(got, "for (int _i0 = 0; _i0 < this.dynamic.size(); _i0++) { os.writeSequenceBeginLazy(_i0);") {
-		t.Errorf("dynamic struct array must not be narrowed:\n%s", got)
-	}
-	// An interior all-default element is still framed: only the TRAILING run goes.
-	if !strings.Contains(got, ".marshal(os); os.writeSequenceEndKeep(); }") {
-		t.Errorf("interior elements must keep the framing closer:\n%s", got)
-	}
-	// The leaf string array shares the mechanism.
-	if !strings.Contains(got, "List<String> _t1 = Sbuf.trimTailStrings(this.fstrs);") {
-		t.Errorf("count:N string array must loop over the trimmed run:\n%s", got)
-	}
-
-	// isDefault is the exact mirror of what marshal writes, so it must narrow a
-	// field exactly when the marshal loop does -- disagreeing would either omit a
-	// field that is on the wire or keep one that is not.
-	if !strings.Contains(got, "if (!Sbuf.trimTailObjs(this.fixed, VecFixedElem::isDefault).isEmpty()) return false;") {
-		t.Errorf("isDefault must narrow the fixed array like marshal does:\n%s", got)
-	}
-	if !strings.Contains(got, "if (!this.dynamic.isEmpty()) return false;") {
-		t.Errorf("isDefault must NOT narrow the dynamic array:\n%s", got)
-	}
-	if !strings.Contains(got, "if (!Sbuf.trimTailStrings(this.fstrs).isEmpty()) return false;") {
-		t.Errorf("isDefault for a string wrapper array must test the trimmed run:\n%s", got)
-	}
-
-	// The narrowing helpers themselves, and the fact that they return a VIEW.
-	sbuf := files["src/main/java/message/Sbuf.java"]
 	for _, want := range []string{
-		"static <T> List<T> trimTailObjs(List<T> a, java.util.function.Predicate<? super T> isDefault) {",
-		"static List<String> trimTailStrings(List<String> a) {",
-		"return n == a.size() ? a : a.subList(0, n);",
+		// The loop runs over the value as written -- only a null is absorbed --
+		// with or without a count.
+		"List<VecFixedElem> _t0 = Sbuf.orEmpty(this.fixed);",
+		"List<VecDynamicElem> _t1 = Sbuf.orEmpty(this.dynamic);",
+		"List<String> _t2 = Sbuf.orEmpty(this.fstrs);",
+		"for (int _i0 = 0; _i0 < _t0.size(); _i0++) { os.writeSequenceBeginLazy(_i0);",
+		// A sequence-form element takes the POSITIONAL closer: dropping in the
+		// interior (where an all-default element becomes an id gap), keeping at the
+		// last index. Identical for the count:N and the count-less array.
+		"(_t0.get(_i0) == null ? new VecFixedElem() : _t0.get(_i0)).marshal(os); if (_i0 == _t0.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
+		"(_t1.get(_i0) == null ? new VecDynamicElem() : _t1.get(_i0)).marshal(os); if (_i0 == _t1.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
+		// A leaf element: the same rule, unconditional now rather than count-gated.
+		`String _e0 = _t2.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t2.size() - 1) os.writeString(_i0, _e0);`,
+		`String _e0 = _t3.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t3.size() - 1) os.writeString(_i0, _e0);`,
+		`byte[] _e0 = _t4.get(_i0); if (_e0 == null) _e0 = Sbuf.EMPTY_BYTES; if (_e0.length != 0 || _i0 == _t4.size() - 1) os.writeBlob(_i0, _e0);`,
+		// A NATIVE row has no frame of its own, so the rule lands on the write.
+		"if (!_e0.isEmpty() || _i0 == _t5.size() - 1) {",
+		"os.writeArrayUnsigned(_i0, Sbuf.toLongArray(_e0));",
+		// A WRAPPER row has one, so it takes the closer -- like the struct element.
+		"if (_i0 == _t6.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
 	} {
-		if !strings.Contains(sbuf, want) {
-			t.Errorf("Sbuf.java missing %q:\n%s", want, sbuf)
+		if !strings.Contains(got, want) {
+			t.Errorf("Vec.java missing %q:\n%s", want, got)
+		}
+	}
+
+	// isDefault is the exact mirror of what marshal writes: the writer emits a
+	// child for every element it holds (the last one whatever its value), so "no
+	// child is written" is exactly "the array is empty" -- for every element kind
+	// and whether or not a count is declared.
+	for _, want := range []string{
+		"if (!Sbuf.orEmpty(this.fixed).isEmpty()) return false;",
+		"if (!Sbuf.orEmpty(this.dynamic).isEmpty()) return false;",
+		"if (!Sbuf.orEmpty(this.fstrs).isEmpty()) return false;",
+		"if (!Sbuf.orEmpty(this.mat).isEmpty()) return false;",
+		"if (!Sbuf.orEmpty(this.smat).isEmpty()) return false;",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("isDefault must mirror the marshal loop, missing %q:\n%s", want, got)
+		}
+	}
+
+	// The superseded narrowing is gone from the generated code and from Sbuf.
+	for _, gone := range []string{"trimTailObjs", "trimTailStrings", "trimTailBlobs", "trimTailRows"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("Vec.java must not still narrow with %q:\n%s", gone, got)
+		}
+		if strings.Contains(files["src/main/java/message/Sbuf.java"], gone) {
+			t.Errorf("Sbuf.java must not still ship %q", gone)
 		}
 	}
 }
 
 // generator#247: a wrapper array's element id IS the array index (§5.1), so an
-// element is PLACED at dest[id] after gap-filling -- never appended. Appending
-// shortened the array by the size of any interior id gap and decoded a REOPENED
-// id as a second element instead of merging into the first (§7.4). The leaf
-// string/blob element paths next to it always got this right.
+// element is PLACED at dest[id] after gap-filling -- never appended. Interior
+// sparsity (documentation#29) is what makes an interior gap reachable at all, so
+// this now matters for every element kind, matrix rows included.
 //
-// The N-fill on sequenceEnd is what makes the §3/§5.1 trailing elision lossless:
-// without it, re-encoding a decoded fixed array shortens it on every round trip.
-func TestJavaWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+// The other half: `count: N` is a CAPACITY, so it bounds the element id and
+// nothing more -- sequenceEnd fills NOTHING back in, because the elements that
+// arrived are the whole value.
+func TestJavaWrapperElementsArePlacedByID(t *testing.T) {
 	got := genJavaFromYAML(t, wrapperArraySrc, map[string]any{})["src/main/java/message/Vec.java"]
 
 	for _, want := range []string{
 		// placement, not append -- and the gap-fill that precedes it
 		"while (m.fixed.size() <= id) m.fixed.add(new VecFixedElem()); _ex_Root_fixed = id;",
-		// a child field of the element resolves through the PLACED index, not
-		// through the last-appended element
+		"while (m.dynamic.size() <= id) m.dynamic.add(new VecDynamicElem()); _ex_Root_dynamic = id;",
+		// a child field of the element resolves through the PLACED index
 		"case 0: m.fixed.get(_ex_Root_fixed).k = value; break;",
-		// N-fill when the sequence scope closes
-		"case 1: while (m.fixed.size() < 5) m.fixed.add(new VecFixedElem()); break;",
-		"case 5: while (m.fstrs.size() < 3) m.fstrs.add(\"\"); break;",
-		// the over-index guard still bounds both the placement and the gap-fill
+		// leaf elements were always placed by id
+		"while (m.fstrs.size() <= id) m.fstrs.add(\"\"); m.fstrs.set(id, _s); break;",
+		"while (m.dblbs.size() <= id) m.dblbs.add(new byte[0]); m.dblbs.set(id, _b); break;",
+		// the over-index guard bounds both the placement and the gap-fill
 		`if (id >= 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_fixed element: array index above schema capacity 5"));`,
+		// sequenceEnd is a bare pop: a capacity adds no elements.
+		"public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Vec.java missing %q:\n%s", want, got)
@@ -765,39 +784,75 @@ func TestJavaWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
 	if strings.Contains(got, "m.fixed.add(new VecFixedElem()); cur =") {
 		t.Errorf("struct-array elements must not be appended id-blind:\n%s", got)
 	}
-	if strings.Contains(got, "m.fixed.get(m.fixed.size()-1)") {
-		t.Errorf("element child fields must not resolve through the last-appended element:\n%s", got)
-	}
-	// A DYNAMIC array is placed by id too, but its length is highest-id + 1, so it
-	// is never filled to any N.
-	if !strings.Contains(got, "while (m.dynamic.size() <= id) m.dynamic.add(new VecDynamicElem()); _ex_Root_dynamic = id;") {
-		t.Errorf("dynamic struct array must also place by id:\n%s", got)
-	}
-	// A fill arm ends right after the add (`... .add(new X()); break;`), where the
-	// placement arm above continues into `_ex_... = id; cur = ...`. Neither the
-	// dynamic struct array nor any other count-less wrapper may get one.
-	if strings.Contains(got, "m.dynamic.add(new VecDynamicElem()); break;") {
-		t.Errorf("a dynamic array has no N and must never be default-filled:\n%s", got)
+	// No wrapper array may be refilled to a schema count on sequenceEnd any more.
+	for _, gone := range []string{
+		"while (m.fixed.size() < 5)",
+		"while (m.fstrs.size() < 3)",
+		"Refill the closing wrapper array",
+	} {
+		if strings.Contains(got, gone) {
+			t.Errorf("a capacity must never add elements, found %q:\n%s", gone, got)
+		}
 	}
 }
 
-// TestJavaFixedCountWrapperArrayMaterialized: MESSAGE_SPEC §5.1 makes a
-// `count: N` array's value N elements long whether or not the field ever reaches
-// the wire -- the length "is N for every target". The NATIVE fixed-count arrays
-// have always been materialized at construction from their padded default
-// literal (`new long[3]`, `new ArrayList<>(List.of(false, false))`); the WRAPPER
-// ones were left as the empty List, so the same schema disagreed with itself:
-//
-//	absent field             -> length 0     (wrong)
-//	one element on the wire  -> length N     (right, sequenceEnd refills)
-//	explicitly-empty wrapper -> length N     (right)
-//
-// sequenceEnd can only refill a sequence that was actually OPENED, so the absent
-// case has to be covered where the native arrays already cover it: at
-// construction, and in the reset() that re-arms a caller-supplied destination.
-// A DYNAMIC (count-less) array has no N -- its length is highest-present-id + 1
-// -- and must stay empty.
-func TestJavaFixedCountWrapperArrayMaterialized(t *testing.T) {
+// The row collectors of a matrix (native inner rows) and of an array-of-wrapper-
+// arrays used to APPEND, ignoring the row's element id. That was unreachable while
+// every row was written; interior sparsity (documentation#29) makes an interior
+// gap ordinary, and an appending collector then shifts every later row down by
+// one. Rows are placed at out[id] like every other element kind, bounded by the
+// outer array's count -- which also closes the over-index hole those collectors
+// had.
+func TestJavaMatrixRowsArePlacedByID(t *testing.T) {
+	got := genJavaFromYAML(t, wrapperArraySrc, map[string]any{})["src/main/java/message/Vec.java"]
+
+	for _, want := range []string{
+		// native rows: placed in arrayBegin, bounded by the OUTER array's count
+		`case 8: if (id >= 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_mat element: array index above schema capacity 4")); Sbuf.placeRow(m.mat, id); _ex_Root_mat = id; break;`,
+		// and the elements land in the row that id named
+		"m.mat.get(_ex_Root_mat).add(value); break;",
+		// wrapper rows: placed in sequenceBegin, same shape
+		`case 9: if (id >= 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_smat element: array index above schema capacity 4")); Sbuf.placeRow(m.smat, id); _ex_Root_smat = id; cur = 10; break;`,
+		"while (m.smat.get(_ex_Root_smat).size() <= id) m.smat.get(_ex_Root_smat).add(\"\");",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Vec.java missing %q:\n%s", want, got)
+		}
+	}
+
+	// The defect: an id-blind append, and a row accessor reaching for the last
+	// appended row instead of the one the id named.
+	for _, gone := range []string{
+		"m.mat.add(new ArrayList<>())",
+		"m.smat.add(new ArrayList<>())",
+		"m.mat.get(m.mat.size()-1)",
+		"m.smat.get(m.smat.size()-1)",
+	} {
+		if strings.Contains(got, gone) {
+			t.Errorf("matrix rows must not be collected id-blind, found %q:\n%s", gone, got)
+		}
+	}
+
+	// The helper itself: grow with empty rows, then REPLACE at the id (an array
+	// wrapper is the array's value, §7.4).
+	sbuf := genJavaFromYAML(t, wrapperArraySrc, map[string]any{})["src/main/java/message/Sbuf.java"]
+	for _, want := range []string{
+		"static <T> void placeRow(List<List<T>> l, int id) {",
+		"while (l.size() <= id) l.add(new java.util.ArrayList<>());",
+		"l.set(id, new java.util.ArrayList<>());",
+	} {
+		if !strings.Contains(sbuf, want) {
+			t.Errorf("Sbuf.java missing %q:\n%s", want, sbuf)
+		}
+	}
+}
+
+// A `count: N` wrapper array is NOT materialized to N elements anywhere:
+// `count` is a capacity, so a fresh one is empty, reset() leaves it empty, and an
+// absent field decodes back to empty -- which is exactly what a count-less one
+// does. The filler factory that used to add N element defaults is gone with the
+// fill-to-N it existed to match.
+func TestJavaCountNWrapperArrayNotMaterialized(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -811,92 +866,24 @@ messages:
 `
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
 	for _, want := range []string{
-		// Construction: the wrapper arrays are materialized right where the native
-		// one next to them is.
-		"public List<String> strs = _seqdef_strs(new ArrayList<>(3));",
-		"public long[] nums = new long[3];",
-		"public List<byte[]> blobs = _seqdef_blobs(new ArrayList<>(2));",
-		"public List<MObjsElem> objs = _seqdef_objs(new ArrayList<>(2));",
-		// The filler adds N ELEMENT defaults -- the same values the collectors
-		// gap-fill an id hole with.
-		"        for (int i = 0; i < 3; i++) l.add(\"\");",
-		"        for (int i = 0; i < 2; i++) l.add(new byte[0]);",
-		"        for (int i = 0; i < 2; i++) l.add(new MObjsElem());",
-		// reset() re-arms to the same value, in place.
-		"        this.strs = Sbuf.resetList(this.strs);\n        _seqdef_strs(this.strs);",
-		"        this.objs = Sbuf.resetList(this.objs);\n        _seqdef_objs(this.objs);",
+		// Construction: empty, exactly like the count-less array next to them.
+		"public List<String> strs = new ArrayList<>();",
+		"public long[] nums = Sbuf.EMPTY_LONGS;",
+		"public List<byte[]> blobs = new ArrayList<>();",
+		"public List<MObjsElem> objs = new ArrayList<>();",
+		"public List<String> dyn = new ArrayList<>();",
+		// reset() re-arms to the same value, in place, and adds nothing.
+		"        this.strs = Sbuf.resetList(this.strs);\n        this.nums = Sbuf.EMPTY_LONGS;",
+		"        this.objs = Sbuf.resetList(this.objs);\n        this.dyn = Sbuf.resetList(this.dyn);",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing %q:\n%s", want, m)
 		}
 	}
-	// A dynamic wrapper array has no N: it starts empty and reset() leaves it empty.
-	if !strings.Contains(m, "public List<String> dyn = new ArrayList<>();") {
-		t.Errorf("a count-less wrapper array must start empty:\n%s", m)
-	}
-	if strings.Contains(m, "_seqdef_dyn") {
-		t.Errorf("a count-less wrapper array must never be default-filled:\n%s", m)
-	}
-	// Materializing the elements must not make the field encode: an all-default
-	// wrapper array is still dropped whole (§2), which is what keeps the empty
-	// message empty.
-	if !strings.Contains(m, "if (!Sbuf.trimTailStrings(this.strs).isEmpty()) return false;") ||
-		strings.Contains(m, "if (this.strs != null && !this.strs.isEmpty())") {
-		t.Errorf("a materialized wrapper array must not gain a whole-omission guard:\n%s", m)
-	}
-}
-
-// The last element of a DYNAMIC wrapper array is always written, whatever its
-// value (MESSAGE_SPEC §2, tightened by documentation#29). Such an array recovers
-// its length as highest-present-id + 1 (§5.1), so the element at the highest
-// index is the only one whose PRESENCE carries the length: dropping a trailing
-// default leaf encoded ["a", ""] exactly like ["a"] and decoded one element
-// short, and ["", ""] encoded to nothing and decoded as []. Sequence-form
-// elements never had the problem -- they are framed unconditionally by the
-// keeping closer -- so this holds both element kinds to one standard. A count:N
-// array is exempt: its length is N whatever the wire carries, so it still elides
-// the whole trailing run.
-func TestJavaDynamicArrayAlwaysWritesLastElement(t *testing.T) {
-	got := genJavaFromYAML(t, `
-version: 1
-messages:
-  Vec:
-    payload:
-      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
-      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
-      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
-`, map[string]any{})["src/main/java/message/Vec.java"]
-
-	for _, want := range []string{
-		// Dynamic: the last index escapes the omit test. A null element is the
-		// element default, so it is normalized before the guard can write it.
-		`List<String> _t0 = Sbuf.orEmpty(this.dynstr);`,
-		`String _e0 = _t0.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t0.size() - 1) os.writeString(_i0, _e0);`,
-		`List<byte[]> _t1 = Sbuf.orEmpty(this.dynblob);`,
-		`byte[] _e0 = _t1.get(_i0); if (_e0 == null) _e0 = Sbuf.EMPTY_BYTES; if (_e0.length != 0 || _i0 == _t1.size() - 1) os.writeBlob(_i0, _e0);`,
-		// Fixed: no guard -- the trailing run still collapses and the decoder
-		// refills to N.
-		`List<String> _t2 = Sbuf.trimTailStrings(this.fixedstr);`,
-		`String _e0 = _t2.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty()) os.writeString(_i0, _e0);`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("Vec.java missing %q:\n%s", want, got)
+	// The N-element filler and every trace of it are gone.
+	for _, gone := range []string{"_seqdef_", "for (int i = 0; i < 3; i++) l.add", "new ArrayList<>(3)"} {
+		if strings.Contains(m, gone) {
+			t.Errorf("a count:N wrapper array must not be materialized, found %q:\n%s", gone, m)
 		}
-	}
-	// The all-default predicate has to follow the writer: a dynamic [""] now puts
-	// an element on the wire, so the field is NOT default and must not be omitted.
-	// Trimming it here would drop a field the marshal loop writes.
-	for _, want := range []string{
-		"if (!Sbuf.orEmpty(this.dynstr).isEmpty()) return false;",
-		"if (!Sbuf.orEmpty(this.dynblob).isEmpty()) return false;",
-		// The fixed one keeps its trim on both sides.
-		"if (!Sbuf.trimTailStrings(this.fixedstr).isEmpty()) return false;",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("isDefault must mirror the marshal loop, missing %q:\n%s", want, got)
-		}
-	}
-	if strings.Contains(got, "trimTailStrings(this.dynstr)") || strings.Contains(got, "trimTailBlobs(this.dynblob)") {
-		t.Errorf("a dynamic leaf array must never be trimmed:\n%s", got)
 	}
 }
