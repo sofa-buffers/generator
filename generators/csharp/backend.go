@@ -177,10 +177,16 @@ func eachFieldList(s *ir.Schema, fn func([]*ir.Field)) {
 func seqTrimKinds(s *ir.Schema) (str, blob, rows bool) {
 	// mark walks one element position. `fixed` is the `count: N` of the enclosing
 	// FIELD and so is true at most at the top level: a nested row is an element,
-	// never a field, so it is never narrowed AS a row (its own leaf elements still
-	// are — marshalArray recurses into them at any depth).
+	// never a field, so it is never narrowed AS a row, nor are its leaf elements
+	// — only a `count: N` field's leaves are (see elemTrimExpr).
 	var mark func(elem ir.Kind, items *ir.ArrayElem, fixed bool)
 	mark = func(elem ir.Kind, items *ir.ArrayElem, fixed bool) {
+		if !fixed {
+			// A DYNAMIC array is never narrowed: its last element is always written,
+			// whatever its value (MESSAGE_SPEC §2), so there is no trailing run to
+			// find and elemTrimExpr emits no call. Its nested rows are dynamic too.
+			return
+		}
 		switch elem {
 		case ir.KindString:
 			str = true
@@ -706,11 +712,22 @@ func trimExpr(val string, elem ir.Kind, fixed bool) string {
 // never dropped by this: element presence carries the length, so only the trailing
 // run goes. Both the marshal loop and IsDefault run off this one expression, so
 // the writer and the predicate cannot disagree.
+//
+// The leaf (string/blob) narrowing is fixed-only for exactly that reason: a
+// dynamic array now puts its last element on the wire whatever its value (see
+// lastElemGuard), so a dynamic [""] is NOT default and must not be trimmed here
+// — the predicate would otherwise omit a field the marshal loop writes.
 func (g *gen) elemTrimExpr(val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool) string {
 	switch elem {
 	case ir.KindString:
+		if !fixed {
+			return val + ".Count"
+		}
 		return fmt.Sprintf("SofabFixedArray.TrimStrs(%s)", val)
 	case ir.KindBlob:
+		if !fixed {
+			return val + ".Count"
+		}
 		return fmt.Sprintf("SofabFixedArray.TrimBlobs(%s)", val)
 	case ir.KindStruct, ir.KindUnion:
 		if !fixed {
@@ -724,6 +741,26 @@ func (g *gen) elemTrimExpr(val string, elem ir.Kind, ref *ir.TypeRef, items *ir.
 		return fmt.Sprintf("SofabFixedArray.TrimRows(%s)", val)
 	}
 	return val + ".Count"
+}
+
+// lastElemGuard is the "|| this is the last element" disjunct that keeps a
+// DYNAMIC wrapper array's final element on the wire whatever its value
+// (MESSAGE_SPEC §2, "the last element of a dynamic array is always present").
+// Such an array recovers its length as highest-present-id + 1 (§5.1), so the
+// element at the highest index is the only one whose PRESENCE carries the
+// length: dropping it would encode ["a", ""] exactly like ["a"] and decode one
+// element short. Sequence-form elements never needed this — they are framed
+// unconditionally — so this closes the gap on the leaf side and holds both
+// element kinds to one standard. A fixed-count array needs none of it: its
+// length is N whatever the wire carries, which is why it elides the entire
+// trailing default run instead (§3/§5.1), so the guard is omitted there and the
+// trailing run collapses as before. `nv` is the loop bound, which for a dynamic
+// array is the list's Count (elemTrimExpr does not narrow it).
+func lastElemGuard(iv, nv string, fixed bool) string {
+	if fixed {
+		return ""
+	}
+	return fmt.Sprintf(" || %s == %s - 1", iv, nv)
 }
 
 // marshalArray writes the list `val` as field `idExpr`. Numeric/enum/boolean/
@@ -785,15 +822,19 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 		f.line("%sos.WriteArrayUnsigned(%s, %s);", ind, idExpr, trimExpr(conv, ir.KindU8, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2) --
+		// except at the one position whose presence carries the length, see
+		// lastElemGuard.
 		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s%s { if ((%s[%s] ?? \"\") != \"\") os.WriteString(%s, %s[%s] ?? \"\"); }", ind, loop(g.elemTrimExpr(val, elem, ref, items, fixed)), val, iv, iv, val, iv)
+		f.line("%s%s { if ((%s[%s] ?? \"\") != \"\"%s) os.WriteString(%s, %s[%s] ?? \"\"); }", ind, loop(g.elemTrimExpr(val, elem, ref, items, fixed)), val, iv, lastElemGuard(iv, nv, fixed), iv, val, iv)
 		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindBlob:
 		// A blob element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2) --
+		// except at the one position whose presence carries the length, see
+		// lastElemGuard.
 		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s%s { if ((%s[%s] ?? Array.Empty<byte>()).Length != 0) os.WriteBlob(%s, %s[%s] ?? Array.Empty<byte>()); }", ind, loop(g.elemTrimExpr(val, elem, ref, items, fixed)), val, iv, iv, val, iv)
+		f.line("%s%s { if ((%s[%s] ?? Array.Empty<byte>()).Length != 0%s) os.WriteBlob(%s, %s[%s] ?? Array.Empty<byte>()); }", ind, loop(g.elemTrimExpr(val, elem, ref, items, fixed)), val, iv, lastElemGuard(iv, nv, fixed), iv, val, iv)
 		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)

@@ -426,12 +426,13 @@ messages:
 	}
 }
 
-// TestCsSeqTrimHelpersFollowNestedElements: the wrapper-array narrowings are
-// emitted for the element kinds actually reached, at any nesting depth. A string
-// array reachable only as the INNER row of an array-of-array still calls
-// TrimStrs (marshalArray recurses into rows), so gating on top-level fields alone
-// would emit a call to a helper that does not exist.
-func TestCsSeqTrimHelpersFollowNestedElements(t *testing.T) {
+// TestCsSeqTrimHelpersAreFixedOnly: the wrapper-array narrowings are emitted for
+// exactly the element kinds that can still be narrowed, i.e. those of a `count: N`
+// FIELD. An inner row of an array-of-array is an ELEMENT, never a field, so it is
+// dynamic — its last element is always written (MESSAGE_SPEC §2) and there is no
+// trailing run to find. Emitting the helper anyway would leave a call site behind
+// that drops that element, and the helper itself dead.
+func TestCsSeqTrimHelpersAreFixedOnly(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -445,15 +446,28 @@ messages:
           items: { type: string, maxlen: 8 }
 `
 	m := buildModule(t, []byte(src), "grid.yaml", map[string]any{})
-	if !strings.Contains(m, "internal static int TrimStrs(List<string> a) {") {
-		t.Errorf("a nested string row must still get its narrowing helper:\n%s", m)
+	if strings.Contains(m, "TrimStrs") {
+		t.Errorf("a dynamic inner string row must not be narrowed:\n%s", m)
 	}
-	if !strings.Contains(m, "SofabFixedArray.TrimStrs(this.grid[_i0])") {
-		t.Errorf("the inner row must narrow through the helper:\n%s", m)
+	if !strings.Contains(m, "for (int _i1 = 0, _n1 = this.grid[_i0].Count;") {
+		t.Errorf("the inner row must loop to Count:\n%s", m)
 	}
 	// `grid` is dynamic, so no row narrowing is reachable and TrimRows stays out.
 	if strings.Contains(m, "TrimRows") {
 		t.Errorf("a dynamic array-of-array must not emit the row narrowing:\n%s", m)
+	}
+	// A `count: N` string FIELD still narrows, and still gets its helper.
+	const fixedSrc = `
+version: 1
+messages:
+  m: { payload: { fstrs: { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } } } }
+`
+	fm := buildModule(t, []byte(fixedSrc), "fstrs.yaml", map[string]any{})
+	if !strings.Contains(fm, "internal static int TrimStrs(List<string> a) {") {
+		t.Errorf("a count:N string array must still get its narrowing helper:\n%s", fm)
+	}
+	if !strings.Contains(fm, "SofabFixedArray.TrimStrs(this.fstrs)") {
+		t.Errorf("a count:N string array must narrow through the helper:\n%s", fm)
 	}
 }
 
@@ -592,8 +606,9 @@ messages:
 		"os.WriteSequenceBeginLazy(1);",
 		// ELEMENT: the per-element struct frame is unconditional.
 		"os.WriteSequenceBeginLazy(_i0); (this.structs[_i0] ?? new MStructsElem()).Marshal(os); os.WriteSequenceEndKeep();",
-		// FIELD: the wrapper of a string array (depth 0) — leaf elements are omitted
-		// individually, and an all-default array drops the wrapper too.
+		// FIELD: the wrapper of a string array (depth 0) — interior leaf elements are
+		// omitted individually, and an EMPTY array drops the wrapper too (the last
+		// element is always written, so a non-empty one never vanishes, §2).
 		"os.WriteSequenceBeginLazy(2);",
 		// FIELD: the wrapper of an array-of-array (depth 0) ...
 		"os.WriteSequenceBeginLazy(3);",
@@ -601,7 +616,7 @@ messages:
 		// `grid` is DYNAMIC, so its row loop runs to Count: with no schema N to
 		// refill from, a trailing all-default row is significant (generator#248).
 		"for (int _i0 = 0, _n0 = this.grid.Count; _i0 < _n0; _i0++) {\n            os.WriteSequenceBeginLazy(_i0);\n" +
-			"            for (int _i1 = 0, _n1 = SofabFixedArray.TrimStrs(this.grid[_i0]); _i1 < _n1; _i1++) { if ((this.grid[_i0][_i1] ?? \"\") != \"\") os.WriteString(_i1, this.grid[_i0][_i1] ?? \"\"); }\n" +
+			"            for (int _i1 = 0, _n1 = this.grid[_i0].Count; _i1 < _n1; _i1++) { if ((this.grid[_i0][_i1] ?? \"\") != \"\" || _i1 == _n1 - 1) os.WriteString(_i1, this.grid[_i0][_i1] ?? \"\"); }\n" +
 			"            os.WriteSequenceEndKeep();\n        }\n        os.WriteSequenceEnd();",
 	} {
 		if !strings.Contains(m, want) {
@@ -787,5 +802,54 @@ func TestCsFixedWrapperArrayMaterialized(t *testing.T) {
 	// so the field is still absent from the wire (MESSAGE_SPEC §2).
 	if !strings.Contains(m, "if (!(SofabFixedArray.TrimStrs(this.strs) == 0)) return false;") {
 		t.Errorf("an all-default fixed wrapper array must still be omitted:\n%s", m)
+	}
+}
+
+// The last element of a DYNAMIC wrapper array is always written, whatever its
+// value (MESSAGE_SPEC §2). Such an array recovers its length as highest-present-
+// id + 1 (§5.1), so the element at the highest index is the only one whose
+// PRESENCE carries the length: dropping a trailing default leaf encoded ["a", ""]
+// exactly like ["a"] and decoded one element short. Sequence-form elements never
+// had the problem -- they are framed unconditionally -- so this holds both
+// element kinds to one standard. A fixed-count array is exempt: its length is N
+// whatever the wire carries, so it still elides the whole trailing run.
+func TestCsDynamicArrayAlwaysWritesLastElement(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  vec:
+    payload:
+      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
+      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`
+	m := buildModule(t, []byte(src), "vec.yaml", map[string]any{})
+
+	for _, want := range []string{
+		// dynamic: the loop runs to Count and the last index escapes the omit test
+		`for (int _i0 = 0, _n0 = this.dynstr.Count; _i0 < _n0; _i0++) { if ((this.dynstr[_i0] ?? "") != "" || _i0 == _n0 - 1) os.WriteString(_i0, this.dynstr[_i0] ?? ""); }`,
+		`for (int _i0 = 0, _n0 = this.dynblob.Count; _i0 < _n0; _i0++) { if ((this.dynblob[_i0] ?? Array.Empty<byte>()).Length != 0 || _i0 == _n0 - 1) os.WriteBlob(_i0, this.dynblob[_i0] ?? Array.Empty<byte>()); }`,
+		// fixed: no guard -- the trailing run still collapses, the decoder refills to N
+		`for (int _i0 = 0, _n0 = SofabFixedArray.TrimStrs(this.fixedstr); _i0 < _n0; _i0++) { if ((this.fixedstr[_i0] ?? "") != "") os.WriteString(_i0, this.fixedstr[_i0] ?? ""); }`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q:\n%s", want, m)
+		}
+	}
+	// IsDefault has to follow the writer: a dynamic [""] now puts an element on the
+	// wire, so the field is NOT default and must not be omitted. Trimming it here
+	// would drop a field that the marshal loop writes.
+	if !strings.Contains(m, "if (!(this.dynstr.Count == 0)) return false;") {
+		t.Errorf("IsDefault must not trim a dynamic string array:\n%s", m)
+	}
+	if !strings.Contains(m, "if (!(this.dynblob.Count == 0)) return false;") {
+		t.Errorf("IsDefault must not trim a dynamic blob array:\n%s", m)
+	}
+	if strings.Contains(m, "TrimStrs(this.dynstr)") || strings.Contains(m, "TrimBlobs(this.dynblob)") {
+		t.Errorf("a dynamic leaf array must not be trimmed:\n%s", m)
+	}
+	// The fixed one keeps its trim on both sides.
+	if !strings.Contains(m, "if (!(SofabFixedArray.TrimStrs(this.fixedstr) == 0)) return false;") {
+		t.Errorf("a count:N string array must still be trimmed:\n%s", m)
 	}
 }

@@ -109,7 +109,22 @@ opened wrapper is dropped and the field is omitted (§2). `M` comes from
 `IsDefault()`, emitted only for types actually used as a `count: N` element), or
 `SofabFixedArray.TrimStrs/TrimBlobs/TrimRows` for the other element kinds. A
 **dynamic** array is never narrowed — with no `N` to refill from, a trailing
-default element is significant.
+default element is significant — so every one of those narrowings is emitted only
+for a `count: N` **field**, and a nested row (always an element, never a field)
+loops to `Count`.
+
+**The last element of a dynamic array is always present** (§2, tightened by
+documentation#29). A count-less array recovers its length as highest-present-id
++ 1 (§5.1), so the element at the highest index is the only one whose *presence*
+carries the length. A leaf `string`/`blob` element is otherwise omitted when it
+equals the element default, which made `["a", ""]` encode exactly like `["a"]`
+and decode one element short, and `["", ""]` encode to nothing at all. The omit
+test therefore carries a `|| _i0 == _n0 - 1` disjunct (`lastElemGuard`) whenever
+the array is dynamic: `["", ""]` is written as its final element alone, at id 1
+(`06 0a 02 07`), while an interior gap is still elided (`["", "b"]` →
+`06 0a 0a 62 07`). Struct/union/row elements never needed it — they are framed
+unconditionally. A `count: N` array keeps no guard: its length is `N` whatever
+the wire carries, which is why it elides the whole trailing run instead.
 
 `IsDefault()` — every class carries it — is the exact negation of what `Marshal`
 writes, evaluated per field and recursively: the explicit form of the "no child was
