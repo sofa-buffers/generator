@@ -23,10 +23,20 @@ embedded profile. The three usable combinations:
 | `c-cpp` | `false` (default) | `FixedString<N>` / `FixedBytes<N>` / `std::array` / `InlineVector<T,N>` | **mandatory** | none on the message path |
 | `c-cpp` | `true` | `std::string` / `std::vector` | **mandatory** | yes |
 
-The two `c-cpp` rows accept exactly the same schemas and produce byte-identical
-encode output and the same `_maxSize`, so the switch is a per-device decision and
-never a schema change. What differs is where a field's bytes live, and therefore
-what a message costs to hold and to move.
+The two `c-cpp` rows accept exactly the same schemas and produce the same
+`_maxSize`, so the switch is a per-device decision and never a schema change.
+What differs is where a field's bytes live, and therefore what a message costs to
+hold and to move.
+
+Encode output is byte-identical too, with **one exception**: a `count: N` array
+of native scalars whose value is *shorter than N*. `allow_dynamic: false` stores
+it in `std::array<T, N>`, which has no logical length, so its value is always N
+elements; `allow_dynamic: true` stores it in `std::vector<T>`, which carries the
+length and can hold fewer. `count` is a capacity and the wire count is the length
+(MESSAGE_SPEC §3), so the two legs then write different lengths — `[1, 2]` on a
+`count: 4` field is 4 elements inline and 2 on the heap. Every other field kind,
+including every wrapper array (`InlineVector<T, N>` carries its own length), is
+unaffected. See *`count` is a capacity* below.
 
 ### `encode()` and `encodeTo()`
 
@@ -146,8 +156,11 @@ vector to the wire element count before filling it, and the
 heap-free containers — there is no separate knob. This removes hidden dynamic
 allocation from the generated message code. If a target has the resources for a
 heap, use `corelib: cpp` (which uses `std::vector`/`std::string`). Wire output is
-identical either way — this is purely an in-memory representation change, so the
-shared conformance vectors and every sha256 stay the same.
+identical either way for every value both representations can hold — this is an
+in-memory representation change, so the shared conformance vectors and every
+sha256 stay the same. The one value that only one of them can hold is a
+`count: N` array of native scalars shorter than N; see
+[`count` is a capacity](#count-is-a-capacity).
 
 What `c-cpp` produces vs `cpp` (all sized from the schema's `maxlen`/`count`):
 
@@ -165,9 +178,9 @@ All three fixed-capacity containers — `sofab::FixedString<N>`,
 wrapper (`sofab.hpp`) as a single source of truth; the generator only references
 them (nothing container-shaped is emitted into the generated headers, so a fix to
 a container is a corelib change, not a codegen change — the one generated block,
-`namespace sofabgen`, holds the wrapper-array element helpers described
-[below](#wrapper-arrays-element-placement-refill-trailing-run-trim), which are
-decided by the schema `count` and so cannot live in a corelib).
+`namespace sofabgen`, holds the wrapper-array element collector described
+[below](#wrapper-arrays-element-placement-and-the-sparse-element-rule), which is
+bounded by the schema `count` and so cannot live in a corelib).
 
 `sofab::FixedString<N>` is a heap-free, `std::string`-friendly fixed-capacity
 string (implicit construct/assign from `std::string`/`std::string_view`/`const
@@ -181,9 +194,11 @@ length distinct from the capacity `N`** — a blob shorter than its `maxlen`, an
 array shorter than its `count`. `std::array<T,N>` is always exactly length `N`, so
 it cannot represent "3 of a possible 5"; `std::vector` would represent it but
 reintroduces the heap this profile exists to avoid. So a purpose-built inline
-container (inline `std::array` storage + a separate `len_`) is the only fit — and
-where a field really *is* fixed-length (the native numeric arrays), the generator
-does use plain `std::array<T,N>`. `InlineVector`'s inline storage also never
+container (inline `std::array` storage + a separate `len_`) is the only fit —
+which is exactly what makes every **wrapper** array express the 0..N that §5.1
+asks of it. The native scalar arrays still use plain `std::array<T,N>` and
+therefore still cannot: that is the one remaining gap, spelled out under
+[`count` is a capacity](#count-is-a-capacity). `InlineVector`'s inline storage also never
 reallocates, so a bound-then-filled element is address-stable — strictly safer
 under the corelib-c-cpp deferred decoder than a `std::vector` + `reserve()`.
 The per-element collectors (`sofab::FixedStringSeq` / `FixedBlobSeq` for the
@@ -232,9 +247,11 @@ The bounds do not weaken. What was the inline container's capacity becomes an
 explicit check on the decode path (`_size > maxlen` / `_count > count` →
 `invalidate()`, and `cap`/`elemMax` on the sequence collectors), placed after the
 §7.3 wire-type guard and before the resize — so an over-long field is rejected as
-`INVALID` rather than allocating what the bound exists to prevent. Encode output
-and `_maxSize` are identical in both modes, so the two interoperate byte for
-byte.
+`INVALID` rather than allocating what the bound exists to prevent. `_maxSize` is
+identical in both modes, and so is encode output for every value both can hold —
+the exception being a `count: N` **native scalar** array shorter than N, which
+`std::array<T, N>` cannot represent and `std::vector<T>` can; see
+[`count` is a capacity](#count-is-a-capacity).
 
 The `encode()` convenience method still returns a `std::vector<std::uint8_t>`
 (heap) for host-side use; embedded callers use the non-allocating
@@ -262,9 +279,8 @@ An array of arrays lowers to a wrapper sequence whose elements are the **rows**
 what the row holds, and there are exactly two cases:
 
 - **A row of native scalars** (`array<array<u32>>`, `array<array<fp32>>`) is a
-  span of trivially-copyable values, so the corelib's own collector reads it:
-  `sofab::MessageSeq<std::array<T,N>>` / `sofab::FixedMessageSeq<...>` places the
-  row and hands it to `is.read(row)`.
+  span of trivially-copyable values, so `sofabgen::WrapperSeq` places the row at
+  its element id and hands it to `is.read(row)`.
 - **A row of strings, blobs, structs/unions or further arrays** is itself a
   wrapper *sequence*. It is neither a span of scalars nor an `IStreamMessage`, so
   `is.read(row)` has nothing to do with it — handing the row container to
@@ -272,9 +288,9 @@ what the row holds, and there are exactly two cases:
   type in IStream::read()")` and the header does not compile (generator#250).
   These rows get a small **generated row collector** instead: it places the row
   at its element id and then reads the row with exactly the emission the first
-  level uses — `sofab::StringSeq` / `BlobSeq` / `MessageSeq<Element>` on the
-  `cpp` leg, `sofab::FixedStringSeq` / `FixedBlobSeq` / `FixedMessageSeq` on the
-  `c-cpp` leg.
+  level uses — `sofab::StringSeq` / `BlobSeq` / `sofabgen::WrapperSeq` on the
+  `cpp` leg, `sofab::FixedStringSeq` / `FixedBlobSeq` / `sofabgen::WrapperSeq` on
+  the `c-cpp` leg.
 
 The collector is generated rather than shipped by the corelib because what a row
 costs to read is the *schema's* business (its element bounds and element type),
@@ -295,107 +311,110 @@ as for every other.
 > read in place, which the row path does not do yet. First-level `array<enum>` /
 > `array<boolean>` are unaffected.
 
-## Wrapper arrays: element placement, refill, trailing-run trim
+## `count` is a capacity
+
+A schema `count: N` is a **capacity**, never a length (MESSAGE_SPEC §3). It never
+reaches the wire, it bounds the array — an element count or an element id past
+`N` fails the decode as `INVALID` — and it lets the embedded profile pre-size
+its storage. It never adds an element.
+
+What follows from that, in C++:
+
+- A fresh `count: N` **wrapper** array (string/blob/struct/union/row elements) is
+  **empty**, in all three storage kinds — `std::vector`, and
+  `sofab::InlineVector<T, N>`, whose N inline slots are a capacity and whose
+  *logical* length starts at 0. A declared `default` shorter than `N` is
+  materialized exactly as written and never tail-padded.
+- Encode writes **every** element the container holds. `{1, 2, 0, 0}` and
+  `{1, 2}` are different values with different bytes; there is no
+  trailing-default-run elision on either element kind any more.
+- Decode yields exactly the elements the wire carried. Nothing is filled in past
+  the highest element the wire named, so `size()` after a round trip equals
+  `size()` before it.
+- A field is omitted only when it **equals its default** — for an array with no
+  declared default, only when it is empty.
+
+### The one place C++ storage still disagrees: `std::array<T, N>`
+
+A `count: N` array of **native scalars** is stored in `std::array<T, N>` on the
+default `cpp` profile and on `c-cpp` with `allow_dynamic: false`. That container
+has no logical length: its value is N elements and a shorter one is not
+representable. Concretely, for a `count: 4` `u32` array:
+
+| value | `std::array<T,4>` (cpp, c-cpp inline) | `std::vector<T>` (c-cpp allow_dynamic, and every count-less array) |
+|---|---|---|
+| `[1, 2, 0, 0]` | 4 elements on the wire | 4 elements on the wire |
+| `[1, 2]` | **not representable** — it is `[1, 2, 0, 0]`, 4 on the wire | 2 elements on the wire |
+| `[0, 0, 0, 0]` | equals the member's default → field omitted, absence reconstructs `[0,0,0,0]` | 4 elements on the wire (distinct from the empty array) |
+| `[]` | **not representable** | field omitted |
+
+A received `M < N` is not lost on decode — the corelib's `readArray`
+value-initializes the destination and then fills the M that arrived, so `[M, N)`
+holds the element default — but it is not *remembered* either: re-encoding writes
+N. Where that matters, use `allow_dynamic: true`, or leave the array count-less
+on the `cpp` profile. Wrapper arrays have no such restriction on any profile.
+
+## Wrapper arrays: element placement and the sparse element rule
 
 An array of strings, blobs, structs, unions or rows travels as a **sequence whose
-child id is the element's index** (MESSAGE_SPEC §5.1). Four rules govern that
-shape, and all four are decided by the schema `count` — which only the generator
-knows (CORELIB_PLAN §7), so they live in generated code rather than in either
-corelib.
+child id is the element's index** (MESSAGE_SPEC §5.1), and its decoded length is
+*highest present id + 1*.
 
-The generated header carries a small `namespace sofabgen` block for them, emitted
-once per header behind `#ifndef SOFABGEN_WRAPPER_SEQ_HELPERS` at global scope, so
-several generated headers — even with different `namespace` settings — can be
-included into one translation unit. It is the only thing the generator emits
-outside its configured namespace, and it holds no state: a collector
-(`WrapperSeq`), the refill (`fillTo`) and the two trims (`trimObjs`,
-`trimEmpty`).
+The generated header carries a small `namespace sofabgen` block for the element
+collector, emitted once per header behind `#ifndef SOFABGEN_WRAPPER_SEQ_HELPERS`
+at global scope, so several generated headers — even with different `namespace`
+settings — can be included into one translation unit. It is the only thing the
+generator emits outside its configured namespace, and it holds no state.
 
 **1. An element is placed at its id, never appended.** `sofabgen::WrapperSeq`
 gap-fills the destination with default elements up to `id` and then decodes into
 `dest[id]`. Appending would shorten the array by the size of every interior id
-gap, and would decode a **reopened** element id as a second element instead of
-continuing the first (§7.4 struct-merge, which placement gives for free). An
-element id at or past `count` is rejected as `INVALID` **before** the fill, which
-also bounds it (generator#247). The leaf collectors stay in the corelib —
+gap — and rule 2 makes such gaps ordinary input — and would decode a **reopened**
+element id as a second element instead of continuing the first (§7.4
+struct-merge, which placement gives for free). An element id at or past `count`
+is rejected as `INVALID` **before** the fill, which also bounds it
+(generator#247). The leaf collectors stay in the corelib —
 `sofab::StringSeq`/`BlobSeq` and `FixedStringSeq`/`FixedBlobSeq` always placed;
-this is the object path agreeing with them.
+this is the object path agreeing with them. The corelib collectors that append
+id-blind (`MessageSeq` / `FixedMessageSeq`) are not used by generated code.
 
-**2. A `count: N` array decodes back out to N.** `sofabgen::fillTo` pads the
-destination once the sequence is settled, because §5.1 makes the length N *for
-every target* — "a growable-list target MUST default-fill to N exactly like a
-pre-sized one". It is gated on the field actually having been a sequence, so a
-§7.3 skip never materialises N elements out of nothing. A count-less array has no
-N to pad to and is left at highest-present-id + 1.
+**2. The interior is sparse; the last element is always written.** One rule, both
+element kinds, decided from the position in the **value** at run time:
 
-The refill only reaches a sequence that was *opened*, so the same length is also
-given at **construction**: a `count: N` wrapper array's member declaration (and
-`reset()`) carries N value-initialised elements — `strs = {{}, {}, {}}` — exactly
-as the native `count: N` array beside it has always carried its padded default
-literal. Without it the field disagreed with itself: absent → length 0, one
-element on the wire → N, explicitly-empty wrapper → N. All three storage kinds
-need it, `sofab::InlineVector<T, N>` included: its inline buffer has N slots but
-its *logical* length starts at 0, and the braced form is the only way to set it
-(the container has no `resize()`). A count-less array has no N and stays empty.
-This costs no bytes — §2 omission measures the **elements that reach the wire**
-(`sofabgen::trimEmpty` / `trimObjs` for a `count: N` array, `size()` for a
-count-less one, which is constructed empty), not a padded container length, so an
-all-default array is still dropped whole and an all-default message still encodes
-to zero bytes.
+- an element **before the last one** that equals its element default is omitted
+  and leaves an id **gap** — a `string`/`blob` leaf is simply not written, and a
+  struct/union/row element is **not framed** either (`os.writeLazy`, whose
+  lazily-held frame vanishes when the nested serialize writes no child);
+- the **last** element is always written — a leaf as its value, a sequence
+  element as an **empty frame** (`os.write`, the frame-keeping form) — because
+  its presence is what carries the length.
 
-**3. The encoder stops at M.** A `count: N` array's canonical wire carries only
-`[0, M)`, M being one past the last element differing from the element default —
-"even for sequence-form elements" (§3/§5.1). Interior all-default elements keep
-their frame (element presence is what carries the length); only the trailing run
-goes. `M == 0` writes no child at all, so the lazily-opened wrapper is dropped by
-its closer and the whole field is omitted (§2). A dynamic array is never narrowed
-— it has no N to refill from, so a trailing default element is significant
-(generator#248).
+So `{"a", ""}`, `{"a"}` and `{}` are three distinct values that encode and decode
+distinctly, and `{"", ""}` travels as its final element alone, at id 1. A
+declared `count: N` changes none of it: N is a capacity and can never restore an
+elided tail, so the counted and count-less arrays emit the identical loop.
 
-Rule 3 is only lossless *because* of rule 2: without the refill, the elision
-would shorten the array on every decode/encode cycle instead of normalising it.
+**3. The field wrapper itself still closes with the dropping end.** A
+sequence-typed *field* — as opposed to an *element* — is omitted when it is
+empty, and absence reconstructs it (§2). An all-default message still encodes to
+zero bytes.
 
-**4. A dynamic array always writes its last element.** A count-less array
-recovers its length as highest-present-id + 1 (§5.1), so the element at the
-highest index is the only one whose *presence* carries the length: MESSAGE_SPEC
-§2 requires it on the wire even when it equals the element default. A
-struct/union/row element was already framed unconditionally, but a **leaf**
-(`string`/`blob`) element is otherwise omitted when empty, which lost data —
-
-    ["a", ""]  encoded exactly like ["a"]  and decoded one element short
-    ["", ""]   encoded to nothing          and decoded as []
-
-so the per-element omit test for a leaf carries an `|| _i0 + 1 == _n0` disjunct
-on a dynamic array. `["", ""]` therefore travels as its final element alone, at
-id 1. Interior gaps are untouched — `["", "b"]` still elides id 0. A `count: N`
-array gets no such guard: its length is N whatever the wire carries, which is why
-it elides the whole trailing run instead (rule 3), and its leaf trim stays. Both
-halves move together, since the writer and `_isDefault` share one expression per
-field (below): trimming a dynamic `[""]` in the predicate would omit a field the
-serialize loop writes.
-
-Only the heap profile (`corelib: cpp`) is affected: the embedded profile requires
-a `count` on every array in both storage modes, so it has no dynamic wrapper
-array to guard.
-
-Every generated struct, union and message therefore also carries
-`bool _isDefault() const noexcept` — the explicit form of the "was any child
-written?" test the lazy framing already answers implicitly for a *field*, needed
-here because an *element* must be judged before the loop opens. The serialize
-loop and `_isDefault` are generated from **one** expression per field, so the
-writer and the predicate cannot drift: a predicate that narrowed a field the
-writer does not (or the reverse) would either omit a field that is on the wire or
-keep one that is not.
+Every generated struct, union and message also carries
+`bool _isDefault() const noexcept`: the explicit form of the "was any child
+written?" test the lazy framing answers implicitly. It and the serialize loop are
+generated from **one** expression per field, so the writer and the predicate
+cannot drift — a predicate that called a field default which the writer puts on
+the wire would omit it.
 
 Two consequences worth knowing:
 
 - A mistyped child inside a wrapper array is skipped with **no container
   mutation** — the wire-type decision precedes the gap-fill, so it cannot leave a
   phantom default element behind (generator#249).
-- An array of **fixed-length rows** (`array` of `array u32, count 3`) trims a
-  trailing run of *empty* rows only. A fixed row is never empty (its size is its
-  count), so such an array is not narrowed — the same behaviour as the other
-  targets.
+- An array of **fixed-length rows** (`array` of `array u32, count 3`) applies
+  rule 2 to the row's own default value, which for a `std::array<T,N>` row is the
+  N element defaults rather than emptiness — an all-zero interior row is omitted,
+  and the last row is always written.
 
 ## Struct member order (widest-first)
 

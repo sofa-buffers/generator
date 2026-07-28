@@ -390,26 +390,19 @@ func (g *gen) cppDefault(f *ir.Field) string {
 		if isNativeArrayElem(f.Elem) {
 			return g.cppNativeArrayBraces(f)
 		}
-		// A composite-element array is a wrapper sequence. Its declared default is
-		// still not materialized (§2), but its LENGTH is not a wire property: a
-		// `count: N` array holds N elements whether or not the field ever reaches
-		// the wire (MESSAGE_SPEC §5.1 — "N for every target"). The native array
-		// next to it has always been materialized here; the wrapper one was not,
-		// so the two disagreed about the same schema, and the field disagreed with
-		// itself: an omitted field stayed empty while both an explicitly-empty
-		// wrapper and a partially-transmitted one refilled to N through
-		// sofabgen::fillTo, which only runs once the sequence is actually opened.
+		// A composite-element array is a wrapper sequence, and its construction
+		// value is the EMPTY array — with or without a declared `count: N`.
 		//
-		// Elements are value-initialized (`{}`), matching that fill's
-		// emplace_back() and the collectors' gap-fill: a declared per-element
-		// default is not materialized anywhere today. The braced form is what both
-		// storage kinds accept — std::vector takes the initializer_list, and
-		// sofab::InlineVector<T,N> routes it through its assign(), which is the
-		// only way to give that container a logical length (it has no resize()).
-		// A dynamic (count-less) array has no N and stays empty.
-		if f.HasCount && f.Count > 0 {
-			return cppWrapperArrayBraces(f.Count)
-		}
+		// `count` is a CAPACITY, not a length (MESSAGE_SPEC §3): it never reaches
+		// the wire and never adds an element, so a fresh count: N array holds
+		// nothing, exactly like a count-less one. Both std::vector and
+		// sofab::InlineVector<T,N> carry their own logical length, so both express
+		// that directly — which is also what makes 0..N all representable here,
+		// and what "the wire count M IS the length" needs of the storage.
+		//
+		// The declared `default` is still not materialized (§2); absent and
+		// explicitly-empty therefore denote the same value, which is what lets
+		// emitSerializeArray close the field wrapper with the dropping end.
 		return "{}"
 	}
 	return "{}"
@@ -418,34 +411,21 @@ func (g *gen) cppDefault(f *ir.Field) string {
 // cppNativeArrayBraces renders a native scalar array's schema default as a braced
 // initializer ({v0, v1, ...}).
 //
-// A `count: N` array holds exactly N elements (MESSAGE_SPEC §3, ARCHITECTURE
-// §11) — in every storage mode. `std::array<T,N>` gets that from aggregate
-// initialization: `{}` zero-fills the whole array and `{10, 20}` zero-fills the
-// tail. `std::vector<T>` (the allow_dynamic storage) has no such rule — `{}`
-// constructs it EMPTY — so there the initializer is written out to all N
-// elements. Without it a bounded array starts at size 0 and generated code that
-// indexes elements 0..N-1 writes into nothing.
+// It is NOT padded out to a declared `count: N`: that is a capacity, not a length
+// (MESSAGE_SPEC §3), so the default stands exactly as written — and so does the
+// value it is compared against, which is what keeps a shorter array distinct from
+// the padded one.
+//
+// The storage still has the last word on what "length" means here. A
+// std::vector<T> (the count-less heap array, and the allow_dynamic storage for a
+// bounded one) takes the initializer verbatim and carries the length itself. A
+// std::array<T,N> has no logical length: aggregate initialization zero-fills
+// whatever the initializer leaves out, so its value is always N elements and a
+// short default names the same value as the tail-padded one. See
+// docs/generator/cpp.md.
 func (g *gen) cppNativeArrayBraces(f *ir.Field) string {
 	vals, _ := f.Default.([]any)
-	parts := g.cppArrayElemLits(f, vals)
-	if f.HasCount && g.dynNativeArray(f.Elem, f.Count) {
-		zero := g.cppArrayElemLit(f.Elem, f.ElemRef, elemZeroValue(f.Elem))
-		for int64(len(parts)) < f.Count {
-			parts = append(parts, zero)
-		}
-	}
-	return "{" + strings.Join(parts, ", ") + "}"
-}
-
-// cppWrapperArrayBraces renders a `count: N` wrapper array's construction value:
-// N value-initialized elements ({{}, {}, ...}). See cppDefault for why the
-// length, unlike the element values, is materialized.
-func cppWrapperArrayBraces(n int64) string {
-	parts := make([]string, n)
-	for i := range parts {
-		parts[i] = "{}"
-	}
-	return "{" + strings.Join(parts, ", ") + "}"
+	return "{" + strings.Join(g.cppArrayElemLits(f, vals), ", ") + "}"
 }
 
 func (g *gen) cppArrayElemLits(f *ir.Field, vals []any) []string {
@@ -454,18 +434,6 @@ func (g *gen) cppArrayElemLits(f *ir.Field, vals []any) []string {
 		parts[i] = g.cppArrayElemLit(f.Elem, f.ElemRef, v)
 	}
 	return parts
-}
-
-// elemZeroValue is the IR-typed zero an unset array element takes.
-func elemZeroValue(elem ir.Kind) any {
-	switch elem {
-	case ir.KindBool:
-		return false
-	case ir.KindFP32, ir.KindFP64:
-		return float64(0)
-	default:
-		return int64(0)
-	}
 }
 
 // cppArrayElemLit renders one native-array element default as a C++ literal typed
@@ -495,45 +463,6 @@ func (g *gen) cppArrayElemLit(elem ir.Kind, ref *ir.TypeRef, v any) string {
 	default: // u8..i32, bitfield
 		return scalarLit(v)
 	}
-}
-
-// cppFixedArrayNeedsReset reports whether a fixed native array field's decode
-// must clear the member to the element default before the wire elements land.
-//
-// A `count: N` array decodes to exactly N elements: M from the wire, the ELEMENT
-// default (zero) at [M,N) (MESSAGE_SPEC §3). The std::array<T,N> member starts at
-// the field's *declaration* default, so with a non-zero SCHEMA default the tail
-// the corelib's span read never touches would wrongly keep that schema default:
-// with `default: [1,2,3]` on `count: 5`, a value of [1,2,0,0,0] encodes (trimmed)
-// to the 2-element wire [1,2] and would decode back as [1,2,3,0,0] — a corrupted
-// round-trip. Clearing first makes the tail the element default.
-//
-// The schema default is the value of an ABSENT field (sparse omission,
-// MESSAGE_SPEC S2); it is reconstructed from the member's construction default
-// and is untouched by this reset, which only runs once the field is PRESENT.
-//
-// A field with no schema default (or an all-zero one) already declares an
-// all-zero array, so it needs no reset and its generated code is unchanged.
-func (g *gen) cppFixedArrayNeedsReset(f *ir.Field) bool {
-	if f.Kind != ir.KindArray || !isNativeArrayElem(f.Elem) {
-		return false
-	}
-	// Only fixed storage: a count-less array lowers to a std::vector that decode
-	// resizes to the wire count, so it has no stale tail to clear.
-	if g.dynNativeArray(f.Elem, f.Count) || f.Count <= 0 {
-		return false
-	}
-	vals, ok := f.Default.([]any)
-	if !ok {
-		return false
-	}
-	zero := g.cppArrayElemLit(f.Elem, f.ElemRef, 0)
-	for _, v := range vals {
-		if g.cppArrayElemLit(f.Elem, f.ElemRef, v) != zero {
-			return true
-		}
-	}
-	return false
 }
 
 func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {

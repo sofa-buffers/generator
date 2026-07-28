@@ -42,6 +42,7 @@ messages:
   vecf64: { payload: { a: { id: 0, type: fp64 } } }
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
+  vecpa: { payload: { a: { id: 0, type: array, items: { type: struct, count: 8, fields: { k: { id: 0, type: u32 } } } } } }
 YAML
 
 # Exercises every field-type family (ints, u64, fp, bool, string, enum, bitfield,
