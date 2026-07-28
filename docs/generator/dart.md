@@ -136,6 +136,34 @@ that gap is ever closed, the wrapper needs an `if (value != default) { …;
 e.endSequenceKeep(); }` guard so an explicitly-empty value differing from a
 non-empty default still reaches the wire as the empty wrapper (§2, §3).
 
+#### The last element of a dynamic array is always written (§2)
+
+A `string`/`blob` array element is a **leaf**, not a frame: it is omitted when it
+equals the element default (empty), leaving an id gap the decoder restores. That
+is right for an interior element, and wrong for the **last** one of a *dynamic*
+array — such an array recovers its length as *highest present id + 1* (§5.1), so
+the element at the highest index is the only one whose **presence** carries the
+length. Dropping it made `["a", ""]` encode exactly like `["a"]` and decode one
+element short, and `["", ""]` encode to nothing at all. So the leaf omit test
+carries an `|| _i == list.length - 1` disjunct (`lastElemGuard`) whenever the
+array is count-less:
+
+| value | wire | decodes as |
+|---|---|---|
+| `["a", ""]` | `06 02 0a 61 0a 02 07` | `["a", ""]` |
+| `["a"]` | `06 02 0a 61 07` | `["a"]` |
+| `["", ""]` | `06 0a 02 07` | `["", ""]` — final element alone, at id 1 |
+| `[]` | *(nothing)* | `[]` |
+| `["", "b"]` | `06 0a 0a 62 07` | `["", "b"]` — interior gap still elided |
+
+Sequence-form elements (`struct`/`union`/nested row) never had the problem —
+they are framed unconditionally — so this holds both element kinds to one
+standard. A `count: N` array is **exempt**: its length is N whatever the wire
+carries, which is why it elides the whole trailing default run instead, and the
+guard is emitted only for the dynamic case. `elemCountExpr` gates its leaf trim
+on the same `fixed` flag, so the writer and `_isDefault` still agree: a dynamic
+`[""]` is *not* default, and the field it writes is not omitted.
+
 ### Decode model
 
 `corelib-dart` exposes the **push child-visitor** decode (like Go): a

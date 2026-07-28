@@ -744,10 +744,32 @@ func (g *gen) elemCountExpr(val string, elem ir.Kind, ref *ir.TypeRef, items *ir
 	return val + ".length"
 }
 
+// lastElemGuard is the "|| this is the last element" disjunct that keeps a
+// DYNAMIC wrapper array's final element on the wire whatever its value
+// (MESSAGE_SPEC §2, "the last element of a dynamic array is always present").
+// Such an array recovers its length as highest-present-id + 1 (§5.1), so the
+// element at the highest index is the only one whose PRESENCE carries the
+// length: dropping it would encode ["a", ""] exactly like ["a"] and decode one
+// element short. Sequence-form elements never needed this -- they are framed
+// unconditionally -- so this closes the gap on the leaf side and holds both
+// element kinds to one standard. A fixed-count array needs none of it: its
+// length is N whatever the wire carries, which is why it elides the entire
+// trailing default run instead (§3/§5.1), so the guard is omitted there and the
+// trailing run collapses as before -- the same `fixed` flag that keeps the leaf
+// trim in elemCountExpr fixed-only, so writer and predicate cannot drift.
+func lastElemGuard(iv, val string, fixed bool) string {
+	if fixed {
+		return ""
+	}
+	return fmt.Sprintf(" || %s == %s.length - 1", iv, val)
+}
+
 // marshalWrapperArray writes a wrapper-sequence array (string/blob/struct/union
 // or nested array). Elements are keyed by 0-based index; string/blob leaves are
-// omitted when equal to the element default (empty). `fixed` marks a declared
-// `count: N` array, whose canonical wire stops at M (see elemCountExpr).
+// omitted when equal to the element default (empty), except at the one position
+// whose presence carries a dynamic array's length (see lastElemGuard). `fixed`
+// marks a declared `count: N` array, whose canonical wire stops at M (see
+// elemCountExpr).
 func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	nv := fmt.Sprintf("_n%d", depth)
@@ -766,11 +788,11 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 	switch elem {
 	case ir.KindString:
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
-		f.line("%sfor (var %s = 0; %s < %s.length; %s++) { if (%s[%s].isNotEmpty) e.writeString(%s, %s[%s]); }", ind, iv, iv, val, iv, val, iv, iv, val, iv)
+		f.line("%sfor (var %s = 0; %s < %s.length; %s++) { if (%s[%s].isNotEmpty%s) e.writeString(%s, %s[%s]); }", ind, iv, iv, val, iv, val, iv, lastElemGuard(iv, val, fixed), iv, val, iv)
 		f.line("%se.%s();", ind, seqEnd)
 	case ir.KindBlob:
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
-		f.line("%sfor (var %s = 0; %s < %s.length; %s++) { if (%s[%s].isNotEmpty) e.writeBlob(%s, %s[%s]); }", ind, iv, iv, val, iv, val, iv, iv, val, iv)
+		f.line("%sfor (var %s = 0; %s < %s.length; %s++) { if (%s[%s].isNotEmpty%s) e.writeBlob(%s, %s[%s]); }", ind, iv, iv, val, iv, val, iv, lastElemGuard(iv, val, fixed), iv, val, iv)
 		f.line("%se.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)

@@ -578,3 +578,47 @@ func TestDartFixedWrapperArrayIsMaterializedToN(t *testing.T) {
 		t.Errorf("an all-default count:N wrapper array must still read as default:\n%s", out)
 	}
 }
+
+// The last element of a DYNAMIC wrapper array is always written, whatever its
+// value (MESSAGE_SPEC §2). Such an array recovers its length as highest-present-
+// id + 1 (§5.1), so the element at the highest index is the only one whose
+// PRESENCE carries the length: dropping a trailing default leaf encoded ["a", ""]
+// exactly like ["a"] and decoded one element short. Sequence-form elements never
+// had the problem -- they are framed unconditionally -- so this holds both
+// element kinds to one standard. A fixed-count array is exempt: its length is N
+// whatever the wire carries, so it still elides the whole trailing run.
+func TestDartDynamicArrayAlwaysWritesLastElement(t *testing.T) {
+	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }\n" +
+		"      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }\n" +
+		"      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+
+	for _, want := range []string{
+		// dynamic: the last index escapes the omit test
+		"if (dynstr[_i0].isNotEmpty || _i0 == dynstr.length - 1) e.writeString(_i0, dynstr[_i0]);",
+		"if (dynblob[_i0].isNotEmpty || _i0 == dynblob.length - 1) e.writeBlob(_i0, dynblob[_i0]);",
+		// fixed: no guard -- the trailing run still collapses, the decoder refills to N
+		"if (fixedstr[_i0].isNotEmpty) e.writeString(_i0, fixedstr[_i0]);",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated Dart missing %q:\n%s", want, out)
+		}
+	}
+	// The all-default predicate has to follow the writer: a dynamic [""] now puts
+	// an element on the wire, so the field is NOT default and must not be omitted.
+	// Trimming it here would drop a field that the marshal loop writes.
+	if !strings.Contains(out, "if (!(dynstr.length == 0)) return false;") {
+		t.Errorf("_isDefault must not trim a dynamic string array:\n%s", out)
+	}
+	if !strings.Contains(out, "if (!(dynblob.length == 0)) return false;") {
+		t.Errorf("_isDefault must not trim a dynamic blob array:\n%s", out)
+	}
+	if strings.Contains(out, "_trimLen(dynstr") || strings.Contains(out, "_trimLen(dynblob") {
+		t.Errorf("a dynamic string/blob array must not be trimmed:\n%s", out)
+	}
+	// The fixed one keeps its trim on both sides.
+	if !strings.Contains(out, "if (!(_trimLen(fixedstr, (x) => x.isEmpty) == 0)) return false;") {
+		t.Errorf("a count:N string array must still be trimmed:\n%s", out)
+	}
+}
