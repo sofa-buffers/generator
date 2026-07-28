@@ -279,12 +279,15 @@ func (g *gen) dartDefaultValue(f *ir.Field) string {
 	return strings.TrimPrefix(init, " = ")
 }
 
-// dartArrayLiteral renders a native scalar array field's schema default (padded
-// to `count` with the element default for a fixed-count array) as a Dart list
-// literal; ("", false) for a wrapper-sequence array or a count-less array with
-// no default. A `count: N` array is fixed-length, so with no schema default it
-// still materializes N element defaults (MESSAGE_SPEC S3), matching the
-// fixed-storage camp's zero-filled [T; N].
+// dartArrayLiteral renders a native scalar array field's schema default as a
+// Dart list literal; ("", false) for a wrapper-sequence array or an array with
+// no declared default.
+//
+// It is NOT padded to a declared `count: N`: that is a capacity, not a length
+// (MESSAGE_SPEC §3), so the default stands exactly as written -- and so does the
+// value it is compared against, which is what keeps a length-N all-zero array
+// distinct from the empty one. A count:N array with no declared default starts
+// EMPTY, like every other array.
 func (g *gen) dartArrayLiteral(f *ir.Field) (string, bool) {
 	if !nativeArrayElem(f.Elem) {
 		return "", false
@@ -292,36 +295,13 @@ func (g *gen) dartArrayLiteral(f *ir.Field) (string, bool) {
 	et := g.dartArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
 	vals, ok := f.Default.([]any)
 	if !ok {
-		if f.Default == nil && f.HasCount {
-			zero := elemZero(f.Elem)
-			parts := make([]string, f.Count)
-			for i := range parts {
-				parts[i] = zero
-			}
-			return fmt.Sprintf("<%s>[%s]", et, strings.Join(parts, ", ")), true
-		}
 		return "", false
 	}
 	parts := make([]string, len(vals))
 	for i, v := range vals {
 		parts[i] = g.elemLit(f.Elem, v)
 	}
-	parts = g.tailPadLiteral(f, parts)
 	return fmt.Sprintf("<%s>[%s]", et, strings.Join(parts, ", ")), true
-}
-
-// tailPadLiteral extends a `count: N` array's schema default to exactly N
-// elements with the element default (MESSAGE_SPEC S3). Dynamic arrays keep the
-// default exactly as written.
-func (g *gen) tailPadLiteral(f *ir.Field, parts []string) []string {
-	if !f.HasCount {
-		return parts
-	}
-	zero := elemZero(f.Elem)
-	for int64(len(parts)) < f.Count {
-		parts = append(parts, zero)
-	}
-	return parts
 }
 
 // elemLit renders one native-array element value as a Dart literal.
@@ -336,18 +316,6 @@ func (g *gen) elemLit(elem ir.Kind, v any) string {
 		return floatLit(v)
 	default: // integer / enum / bitfield
 		return scalarLit(v)
-	}
-}
-
-// elemZero is the Dart zero literal for a native-array element kind.
-func elemZero(elem ir.Kind) string {
-	switch elem {
-	case ir.KindBool:
-		return "false"
-	case ir.KindFP32, ir.KindFP64:
-		return "0.0"
-	default:
-		return "0"
 	}
 }
 

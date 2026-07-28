@@ -48,6 +48,11 @@ type gen struct {
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
 	sizeErr error
+	// tmpN names the narrowed-wrapper-array locals (`_t0`, `_t1`, ...) a marshal
+	// body declares. It is reset per emitted method so the names stay short and
+	// stable, and it counts per method rather than per nesting depth because two
+	// array FIELDS of one class share a scope and would otherwise collide.
+	tmpN int
 }
 
 // messageSize resolves a message's worst-case encoded size via the shared walk
@@ -199,10 +204,8 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 	// Hoist each native array's omit-compare default into a static: marshal only
 	// ever reads it (Arrays.equals / List.equals), so one shared instance suffices
 	// and encode stops allocating a fresh `new T[n]` literal on every call (issue
-	// #146 -- a `count: N` field's default is N elements, so for a large N or many
-	// array fields that per-encode garbage dominates). The mutable per-object
-	// initializer above stays a fresh allocation; this static is read-only. Mirrors
-	// the C# backend's `_arrdef_*` statics.
+	// #146). The mutable per-object initializer above stays a fresh allocation;
+	// this static is read-only. Mirrors the C# backend's `_arrdef_*` statics.
 	for _, fld := range fields {
 		if def, ok := g.javaArrayCompareDefault(fld); ok {
 			f.line("    private static final %s %s = %s;", g.javaType(fld), javaArrDefName(fld), def)
@@ -211,11 +214,16 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 	f.blank()
 
 	// marshal
+	g.tmpN = 0
 	f.line("    public void marshal(OStream os) throws IOException {")
 	for _, fld := range fields {
 		g.emitMarshal(f, fld)
 	}
 	f.line("    }")
+
+	g.emitIsDefault(f, fields)
+
+	g.emitReset(f, fields)
 
 	if isMessage {
 		ms := g.messageSize(name, fields)
@@ -258,7 +266,12 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		// sequence. Malformed input throws SofabException (INVALID) from feed;
 		// the caller owns end-of-input and decides whether a trailing
 		// INCOMPLETE is a truncation error.
+		// `out` is caller-supplied and may carry a previous decode. Absence is the
+		// encoding of an all-default field (MESSAGE_SPEC §2), and an absent field
+		// fires no callback at all, so the destination is re-armed HERE — the last
+		// point at which absence is still observable.
 		f.line("    public static DecodeStatus tryDecode(byte[] data, %s out) throws SofabException {", name)
+		f.line("        out.reset();")
 		f.line("        IStream is = new IStream();")
 		f.line("        is.feed(data, new %sVisitor(out));", name)
 		f.line("        return is.status();")
@@ -269,6 +282,160 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 
 	if isMessage {
 		g.emitVisitor(f, name, fields)
+	}
+}
+
+// emitIsDefault writes `isDefault()`: the object's all-default predicate, and the
+// exact negation of what marshal writes -- the object is default iff marshal would
+// emit no child at all, evaluated per field and recursively, never as a byte image
+// (MESSAGE_SPEC §2).
+//
+// Keep this in lockstep with emitMarshal: every arm below is written as the
+// negation of that field's write guard, from the very same expressions, so the two
+// cannot state different truth tables. A predicate that disagrees with the writer
+// either omits a field that is on the wire or keeps one that is not.
+//
+// Package-private on purpose: it is an encoder-internal predicate, never part of
+// the public message API.
+func (g *gen) emitIsDefault(f *jfile, fields []*ir.Field) {
+	f.line("    /** True when every field still equals its declared default, compared per field and recursively -- i.e. marshal would write nothing at all. */")
+	f.line("    boolean isDefault() {")
+	for _, fld := range fields {
+		f.line("        if (%s) return false;", g.fieldWritesExpr(fld))
+	}
+	f.line("        return true;")
+	f.line("    }")
+}
+
+// fieldWritesExpr is the boolean expression "marshal would put this field on the
+// wire", i.e. literally emitMarshal's write guard for the same field. isDefault is
+// built from it rather than from a hand-written "equals its default" twin so that
+// the two cannot state different truth tables: the object is default exactly when
+// no arm below fires.
+func (g *gen) fieldWritesExpr(fld *ir.Field) string {
+	acc := "this." + javaIdent(fld.Name)
+	switch fld.Kind {
+	case ir.KindBlob:
+		// emitMarshal's two blob guards, verbatim.
+		if def := g.javaDefaultValue(fld); def == "new byte[0]" || def == "Sbuf.EMPTY_BYTES" {
+			return fmt.Sprintf("%s == null || %s.length != 0", acc, acc)
+		}
+		return fmt.Sprintf("!java.util.Arrays.equals(%s, %s)", acc, g.javaDefaultValue(fld))
+	case ir.KindStruct, ir.KindUnion:
+		// Lazily framed, so the frame survives iff the nested marshal wrote a child
+		// -- exactly "the nested object is not default". A null field marshals as a
+		// fresh instance, whose fields are their declared defaults by construction,
+		// so a null is never written.
+		return fmt.Sprintf("%s != null && !%s.isDefault()", acc, acc)
+	case ir.KindArray:
+		return g.arrayWritesExpr(fld, acc)
+	}
+	// Scalar/string/enum/bitfield leaf: the writer's own omit condition.
+	return g.javaOmitCond(fld)
+}
+
+// arrayWritesExpr mirrors emitMarshalArray arm for arm: a native array is a leaf
+// field compared whole against its declared default, and a wrapper array puts
+// something on the wire iff it holds an element at all.
+//
+// A declared `count: N` takes no part in either test. `count` is a CAPACITY, never
+// a length (MESSAGE_SPEC §3): it never reaches the wire, so the value is compared
+// against the declared default exactly as written -- neither side padded to N --
+// and against the empty collection when no default is declared. A count:N array is
+// therefore default only when it is EMPTY; an all-zero N-element value is a
+// length-N array, which differs from the empty one and stays on the wire.
+func (g *gen) arrayWritesExpr(fld *ir.Field, acc string) string {
+	if primitiveArrayElem(fld.Elem) {
+		if _, ok := g.javaPrimArrayLiteral(fld); ok {
+			return fmt.Sprintf("!java.util.Arrays.equals(%s, %s)", acc, javaArrDefName(fld))
+		}
+		return fmt.Sprintf("%s != null && %s.length != 0", acc, acc)
+	}
+	if nativeArrayElem(fld.Elem) { // boolean array (boxed List<Boolean>)
+		if _, ok := g.javaNativeArrayLiteral(fld); ok {
+			return fmt.Sprintf("!%s.equals(%s)", javaArrDefName(fld), acc)
+		}
+		return fmt.Sprintf("%s != null && !%s.isEmpty()", acc, acc)
+	}
+	// Wrapper array: the writer emits a child for every element it holds, because
+	// the LAST element is written whatever its value (§2) -- so "no child is
+	// written" is exactly "the array is empty", and the two cannot drift apart.
+	return fmt.Sprintf("!%s.isEmpty()", elemListExpr(acc))
+}
+
+// emitReset writes `reset()`: every field back to its declared default, in place.
+//
+// It exists because MESSAGE_SPEC §2 made ABSENCE the encoding of an all-default
+// sequence. The visitor's §7.4 clear (a wrapper array is replaced whole by a later
+// occurrence) hangs off sequenceBegin/arrayBegin — a callback an omitted field
+// never fires. Decoding into a REUSED destination therefore left the previous
+// decode's elements standing, so the decoded array held data that was not in the
+// message. Absence is only observable before the feed starts, so the reset has to
+// happen there: tryDecode(data, out) calls out.reset() first, and the §7.4 clear
+// stays exactly as it is for the re-opened-wrapper case it actually covers.
+//
+// "In place" is the point of a reuse API: a List is cleared (keeping its capacity)
+// and a nested object is reset recursively rather than re-allocated, and a
+// primitive array is refilled from the shared default when its length already
+// matches. It is public so a caller who drives the Visitor directly — feeding
+// chunks itself, with no tryDecode to hook — can re-arm a destination the same way
+// (corelib-cpp exposes IStreamImpl::reset() for the same reason).
+func (g *gen) emitReset(f *jfile, fields []*ir.Field) {
+	f.line("    /** Restores every field to its declared default, in place; call before reusing an instance as a decode destination. */")
+	f.line("    public void reset() {")
+	for _, fld := range fields {
+		g.emitResetField(f, fld)
+	}
+	f.line("    }")
+}
+
+func (g *gen) emitResetField(f *jfile, fld *ir.Field) {
+	acc := "this." + javaIdent(fld.Name)
+	switch fld.Kind {
+	case ir.KindStruct, ir.KindUnion:
+		// Recurse rather than re-allocate; a null field is materialized once.
+		f.line("        if (%s == null) %s = new %s(); else %s.reset();", acc, acc, g.typeName(fld.Ref.Key), acc)
+	case ir.KindArray:
+		if primitiveArrayElem(fld.Elem) {
+			// A declared default is copied back over the existing storage when the
+			// length already matches, so the reuse path allocates nothing. An array
+			// with no declared default is the shared zero-length constant, which is
+			// exactly its field initializer.
+			if _, ok := g.javaPrimArrayLiteral(fld); ok {
+				d := javaArrDefName(fld)
+				f.line("        if (%s != null && %s.length == %s.length) System.arraycopy(%s, 0, %s, 0, %s.length);", acc, acc, d, d, acc, d)
+				f.line("        else %s = %s.clone();", acc, d)
+				return
+			}
+			f.line("        %s = %s;", acc, emptyPrimConst(fld.Elem))
+			return
+		}
+		// List-backed: the boolean array (which may carry a materialized default) and
+		// every wrapper sequence (whose declared per-element default is not
+		// materialized, so the element defaults ARE its default — the same rule the
+		// dropping closer relies on).
+		f.line("        %s = Sbuf.resetList(%s);", acc, acc)
+		if nativeArrayElem(fld.Elem) {
+			if _, ok := g.javaNativeArrayLiteral(fld); ok {
+				f.line("        %s.addAll(%s);", acc, javaArrDefName(fld))
+			}
+		}
+	default:
+		// Scalar/string/blob leaf: assign the same literal the field initializer uses.
+		f.line("        %s = %s;", acc, g.javaDefaultValue(fld))
+	}
+}
+
+// emptyPrimConst is the shared zero-length primitive-array constant backing a
+// dynamic (count-less, default-less) array field — the same value javaInit gives it.
+func emptyPrimConst(elem ir.Kind) string {
+	switch primArrayBase(elem) {
+	case "float":
+		return "Sbuf.EMPTY_FLOATS"
+	case "double":
+		return "Sbuf.EMPTY_DOUBLES"
+	default:
+		return "Sbuf.EMPTY_LONGS"
 	}
 }
 
@@ -299,10 +466,14 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 		f.line("        if (!Arrays.equals(%s, %s)) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, g.javaDefaultValue(fld), fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
-		// A sequence is always framed; its child fields are omitted per-field by
-		// the nested marshal (MESSAGE_SPEC S2). An all-default nested object thus
-		// becomes an empty wrapper sequence, not a dropped field.
-		f.line("        os.writeSequenceBegin(%d); (%s == null ? new %s() : %s).marshal(os); os.writeSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key), acc)
+		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
+		// field is no exception, so the frame is opened LAZILY -- the corelib holds
+		// the header back until a child field actually appears. The nested marshal
+		// omits every child that equals its default, so "no child was written" IS
+		// "the object equals its declared default", evaluated per field and
+		// recursively, with no byte image ever compared. An all-default nested
+		// object is therefore dropped, not emitted as an empty wrapper.
+		f.line("        os.writeSequenceBeginLazy(%d); (%s == null ? new %s() : %s).marshal(os); os.writeSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key), acc)
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
@@ -315,9 +486,15 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 }
 
 func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
-	// A native scalar array is a leaf field: omit it when equal to its default
-	// (materialized at construction), else when empty. A composite/dynamic-element
-	// array is a wrapper sequence and is always framed (never whole-omitted).
+	// A native scalar array is a leaf field: omit it when equal to its default,
+	// else when empty. A composite/dynamic-element array is a wrapper sequence:
+	// opened lazily, closed with the dropping end at field level, so an empty one
+	// is omitted rather than framed empty (MESSAGE_SPEC §2).
+	//
+	// A declared `count: N` takes no part in either test. `count` is a CAPACITY,
+	// never a length (§3): it never reaches the wire, so the value is compared
+	// against the declared default exactly as written -- neither side padded to N
+	// -- and against the empty collection when no default is declared.
 	if primitiveArrayElem(fld.Elem) {
 		// Primitive array (long[]/float[]/double[]): omit when equal to its default
 		// (Arrays.equals), else when empty; write straight to the OStream primitive
@@ -327,7 +504,7 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("        if (%s != null && %s.length != 0) {", acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, fld.HasCount)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, "")
 		f.line("        }")
 		return
 	}
@@ -337,11 +514,19 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("        if (%s != null && !%s.isEmpty()) {", acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, fld.HasCount)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, "")
 		f.line("        }")
 		return
 	}
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, fld.HasCount)
+	// The field-level wrapper frame is dropped when no element is written, and
+	// absence then reconstructs the field's default. That is correct because a
+	// wrapper array's declared `default` is not materialized today (the generated
+	// field initializer is the empty collection), so absent and explicitly-empty
+	// denote the same value. If that gap is ever closed, this call needs a guard --
+	// `if (value != default) { ... os.writeSequenceEndKeep(); }` -- so that a value
+	// differing from a non-empty default still reaches the wire as the empty
+	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, "")
 }
 
 // javaArrDefName is the static field holding a native array field's omit-compare
@@ -366,24 +551,66 @@ func (g *gen) javaArrayCompareDefault(fld *ir.Field) (string, bool) {
 	return "", false
 }
 
-// trimExpr wraps a native array expression in the trailing-default-run trim a
-// fixed-count array's canonical encoding requires (MESSAGE_SPEC §3). Only a
-// declared `count: N` array is fixed-length; a dynamic (count-less) array has no
-// N to refill from, so a trailing default element is significant and stays.
-// Elements compare by BIT PATTERN, not by ==, so a trailing -0.0 (which == 0.0
-// in Java) survives the round-trip instead of being silently trimmed to +0.0.
-func trimExpr(val string, elem ir.Kind, fixed bool) string {
-	if !fixed {
-		return val
+// elemListExpr is the list a WRAPPER array's marshal loop runs over, and the very
+// same expression its all-default predicate tests: the value as written, with only
+// a null absorbed to the empty list.
+//
+// Nothing is narrowed here and nothing may be. The wire count IS a compact array's
+// length and the highest wrapper id IS its last index (MESSAGE_SPEC §3/§5.1), so
+// dropping a trailing default element would not merely re-shape the bytes, it
+// would SHORTEN the value -- with or without a declared `count: N`, which is a
+// capacity and can never restore an elided tail. What the interior may drop is
+// decided per element inside the loop (see lastElemExpr), never over the whole
+// array.
+func elemListExpr(val string) string { return "Sbuf.orEmpty(" + val + ")" }
+
+// lastElemExpr is the "this element is the array's last" test, at loop position iv
+// over the list lv.
+//
+// It is the whole of the positional half of MESSAGE_SPEC §2's element rule. A
+// wrapper array carries no length field: its decoded length is *highest present
+// id + 1* (§5.1), so the element at the highest index is the only one whose
+// PRESENCE carries the length, and nothing that carries the length may be elided.
+// Everything before it may be: an interior element equal to the element default is
+// indistinguishable from an absent one, because the decoder restores an absent id
+// from that same default. Hence: interior sparse, last always written.
+//
+// A declared `count: N` changes nothing here. N is a capacity, not a length (§3),
+// so it can never restore an elided tail -- the same test applies with or without
+// one. And the test is read off the position in the VALUE, at run time; the schema
+// cannot answer it.
+func lastElemExpr(iv, lv string) string {
+	return fmt.Sprintf("%s == %s.size() - 1", iv, lv)
+}
+
+// seqEndStmt closes a lazily-opened wrapper sequence, choosing between the two
+// closers the corelib offers. Every sequence is opened LAZILY (the corelib holds
+// the header back until a child is written), so the closer alone decides whether a
+// contentless one survives: writeSequenceEnd drops it, writeSequenceEndKeep forces
+// the empty frame out.
+//
+// keepIf is the condition under which an empty frame must survive:
+//   - "" -- never. A sequence-typed FIELD (a struct/union field, an array
+//     wrapper): an all-default one is omitted and absence reconstructs it (§2).
+//   - a lastElemExpr -- a sequence-form array ELEMENT, kept only at the array's
+//     last index. In the interior it is dropped and leaves an id GAP, which is what
+//     makes an all-default element sparse like any other default value.
+func seqEndStmt(keepIf string) string {
+	if keepIf == "" {
+		return "os.writeSequenceEnd();"
 	}
-	switch elem {
-	case ir.KindFP32:
-		return "Sbuf.trimTailF32(" + val + ")"
-	case ir.KindFP64:
-		return "Sbuf.trimTailF64(" + val + ")"
-	default: // long-backed: integers, enum, bitfield, and the bool 0/1 image
-		return "Sbuf.trimTail(" + val + ")"
-	}
+	return fmt.Sprintf("if (%s) os.writeSequenceEndKeep(); else os.writeSequenceEnd();", keepIf)
+}
+
+// elemLoopList declares the local the marshal element loop runs over and returns
+// its name. The local exists for two reasons: Java re-evaluates a for-condition on
+// every iteration (Go's `range` evaluates its operand once), and the last-element
+// test must measure the very list the loop indexes.
+func (g *gen) elemLoopList(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
+	name := fmt.Sprintf("_t%d", g.tmpN)
+	g.tmpN++
+	f.line("%sList<%s> %s = %s;", ind, g.javaArrayElemType(elem, ref, items), name, elemListExpr(val))
+	return name
 }
 
 // marshalArray writes the array val as field idExpr. Numeric/enum/boolean/
@@ -396,11 +623,15 @@ func trimExpr(val string, elem ir.Kind, fixed bool) string {
 // false, `val` is a boxed List and is unboxed via a Sbuf.to*Array temporary —
 // the case for boolean arrays and for a nested array's inner rows (which stay
 // List<...>).
-// fixed is true only for a top-level `count: N` array FIELD: its trailing run of
-// default elements is elided on the wire and rebuilt by the decoder from the
-// schema count (MESSAGE_SPEC §3). Nested rows of an array-of-array are not
-// fixed-length in that sense, so the recursion below passes false.
-func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, prim, fixed bool) {
+//
+// Every element the value holds is written -- no trailing run is elided, of either
+// element kind, because the wire count IS the array's length (MESSAGE_SPEC §3) and
+// the highest wrapper id IS its last index (§5.1). What the interior may drop is a
+// value that is indistinguishable from absence, and only that.
+//
+// keepIf is the closer this call's own wrapper takes (see seqEndStmt); the native
+// element kinds open no sequence and ignore it.
+func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, prim bool, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
 	longs := "Sbuf.toLongArray(" + val + ")"
 	floats := "Sbuf.toFloatArray(" + val + ")"
@@ -410,39 +641,67 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, trimExpr(longs, elem, fixed))
+		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, longs)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		f.line("%sos.writeArraySigned(%s, %s);", ind, idExpr, trimExpr(longs, elem, fixed))
+		f.line("%sos.writeArraySigned(%s, %s);", ind, idExpr, longs)
 	case ir.KindBool:
-		// Trimming the 0/1 image is equivalent to trimming the booleans (false <-> 0).
-		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, trimExpr("Sbuf.boolToLongArray("+val+")", ir.KindU8, fixed))
+		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, "Sbuf.boolToLongArray("+val+")")
 	case ir.KindFP32:
-		f.line("%sos.writeArrayFp32(%s, %s);", ind, idExpr, trimExpr(floats, elem, fixed))
+		f.line("%sos.writeArrayFp32(%s, %s);", ind, idExpr, floats)
 	case ir.KindFP64:
-		f.line("%sos.writeArrayFp64(%s, %s);", ind, idExpr, trimExpr(doubles, elem, fixed))
+		f.line("%sos.writeArrayFp64(%s, %s);", ind, idExpr, doubles)
 	case ir.KindString:
-		// A string element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		// A string element is a leaf: in the array's INTERIOR it is omitted when it
+		// equals the element default (empty), leaving an id gap the decoder restores
+		// from that same default -- the ordinary sparse-field rule of MESSAGE_SPEC
+		// §2, applied to an element. At the LAST index it is written whatever its
+		// value: see lastElemExpr. A null element IS the element default, so it is
+		// normalized to "" first, and at the last index written rather than skipped.
 		ev := fmt.Sprintf("_e%d", depth)
-		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { String %s = %s.get(%s); if (%s != null && !%s.isEmpty()) os.writeString(%s, %s); }", ind, iv, iv, val, iv, ev, val, iv, ev, ev, iv, ev)
-		f.line("%sos.writeSequenceEnd();", ind)
+		lv := g.elemLoopList(f, ind, val, elem, ref, items)
+		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { String %s = %s.get(%s); if (%s == null) %s = \"\"; if (!%s.isEmpty() || %s) os.writeString(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, ev, lastElemExpr(iv, lv), iv, ev)
+		f.line("%s%s", ind, seqEndStmt(keepIf))
 	case ir.KindBlob:
-		// A blob element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		// A blob element is a leaf, exactly like the string element above.
 		ev := fmt.Sprintf("_e%d", depth)
-		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s != null && %s.length != 0) os.writeBlob(%s, %s); }", ind, iv, iv, val, iv, ev, val, iv, ev, ev, iv, ev)
-		f.line("%sos.writeSequenceEnd();", ind)
+		lv := g.elemLoopList(f, ind, val, elem, ref, items)
+		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s == null) %s = Sbuf.EMPTY_BYTES; if (%s.length != 0 || %s) os.writeBlob(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, ev, lastElemExpr(iv, lv), iv, ev)
+		f.line("%s%s", ind, seqEndStmt(keepIf))
 	case ir.KindStruct, ir.KindUnion:
-		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { os.writeSequenceBegin(%s); (%s.get(%s) == null ? new %s() : %s.get(%s)).marshal(os); os.writeSequenceEnd(); }", ind, iv, iv, val, iv, iv, val, iv, g.typeName(ref.Key), val, iv)
-		f.line("%sos.writeSequenceEnd();", ind)
+		// A sequence-form element obeys the SAME rule as the leaf elements above --
+		// one rule for both kinds -- and the lazily-held frame is where it is
+		// applied. The nested marshal writes no child exactly when the element equals
+		// its declared default, so the CLOSER alone decides: the dropping one in the
+		// interior, where an all-default element vanishes into an id gap; the keeping
+		// one at the last index, where it survives as an empty frame because that
+		// presence is what fixes the array's length.
+		lv := g.elemLoopList(f, ind, val, elem, ref, items)
+		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { os.writeSequenceBeginLazy(%s); (%s.get(%s) == null ? new %s() : %s.get(%s)).marshal(os); %s }", ind, iv, iv, lv, iv, iv, lv, iv, g.typeName(ref.Key), lv, iv, seqEndStmt(lastElemExpr(iv, lv)))
+		f.line("%s%s", ind, seqEndStmt(keepIf))
 	case ir.KindArray:
-		f.line("%sos.writeSequenceBegin(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) {", ind, iv, iv, val, iv)
-		g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s.get(%s)", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false, false)
+		lv := g.elemLoopList(f, ind, val, elem, ref, items)
+		ev := fmt.Sprintf("_e%d", depth)
+		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) {", ind, iv, iv, lv, iv)
+		f.line("%s    %s %s = %s.get(%s);", ind, g.javaArrayElemType(elem, ref, items), ev, lv, iv)
+		if nativeArrayElem(items.Elem) {
+			// A native row is a single count-prefixed value with no frame of its own,
+			// so the rule lands on the WRITE rather than on a closer: an interior row
+			// equal to the element default (the empty row) is not written at all, and
+			// the last row always is.
+			f.line("%s    if (!%s.isEmpty() || %s) {", ind, ev, lastElemExpr(iv, lv))
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, false, "")
+			f.line("%s    }", ind)
+		} else {
+			// A wrapper row has its own frame, so it takes the closer instead -- the
+			// same interior/last choice, expressed the same way as for a struct element
+			// above.
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, false, lastElemExpr(iv, lv))
+		}
 		f.line("%s}", ind)
-		f.line("%sos.writeSequenceEnd();", ind)
+		f.line("%s%s", ind, seqEndStmt(keepIf))
 	}
 }

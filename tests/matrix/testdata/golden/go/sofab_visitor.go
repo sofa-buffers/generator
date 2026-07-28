@@ -24,13 +24,17 @@ func (_visitorBase) BeginSequence(sofab.ID) (sofab.Visitor, error) { return _vis
 func (_visitorBase) EndSequence() error                            { return nil }
 
 // _strSeq / _bytesSeq collect the elements of a string / blob array. Elements are
-// keyed by index id: a default (empty) element is omitted on the
-// wire, so we place each value at its id and fill any gap with the element default
-// ("" / nil). Blob copies (the corelib value aliases the decode buffer).
-// cap is the schema fixed-count bound N (-1 == dynamic/unbounded): an element id
-// >= N is a schema-bound violation (an index at or past
-// the fixed count is INVALID, never grown-into), rejected before the slice grows,
-// which also bounds the id-keyed fill against an over-index amplification DoS.
+// keyed by index id: an INTERIOR element equal to the element default is omitted
+// on the wire, so we place each value at its id and fill any gap with the element
+// default ("" / nil). The array's LAST element is always on the wire, so the
+// decoded length -- highest present id + 1 -- is exact. Blob copies (the corelib
+// value aliases the decode buffer).
+// cap is the schema count bound N (-1 == dynamic/unbounded). N is a CAPACITY, not
+// a length: it never reaches the wire and never adds elements the wire did not
+// carry. All it does here is bound the array -- an element id >= N is a
+// schema-bound violation (INVALID, never grown-into) -- rejected before the slice
+// grows, which also bounds the id-keyed fill against an over-index amplification
+// DoS.
 // emax is the schema element maxlen bound (-1 == unbounded): an element whose
 // wire byte length exceeds emax is malformed input,
 // rejected as INVALID before the slice grows - never silently truncated.
@@ -77,9 +81,14 @@ func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
 }
 
 // _objSeq collects the elements of a struct/union array: each element is a nested
-// sequence decoded into a freshly appended T (PT is *T and a Visitor). Elements
-// arrive in ascending index order with no gaps, so appending tracks the index;
-// an element id >= cap (schema count N) is still rejected as INVALID (S5.1/S7).
+// sequence decoded into the element the child id names (PT is *T and a Visitor).
+// The element id IS the array index (S5.1), exactly as for the _strSeq/_bytesSeq
+// leaf paths above, so the element is PLACED at out[id] after gap-filling with
+// default elements -- never appended. Appending would shorten the array by the
+// size of any interior id gap -- and an omitted all-default interior element is
+// exactly such a gap -- and would decode a REOPENED id as a second element
+// instead of merging into the first (S7.4). An element id >= cap (schema count N)
+// is rejected as INVALID (S5.1/S7), which also bounds the gap-fill.
 type _objSeq[T any, PT interface {
 	*T
 	sofab.Visitor
@@ -94,8 +103,41 @@ func (s *_objSeq[T, PT]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
 		return nil, sofab.ErrInvalidMsg
 	}
 	var zero T
-	*s.out = append(*s.out, zero)
-	return PT(&(*s.out)[len(*s.out)-1]), nil
+	for len(*s.out) <= int(id) {
+		*s.out = append(*s.out, zero)
+	}
+	return PT(&(*s.out)[id]), nil
+}
+
+// _isDefaulter is implemented by every generated struct/union type: isDefault
+// reports whether the object equals its declared default, compared per child
+// field and recursively (S2) -- never as a byte image. It is the explicit form of
+// the predicate lazy framing applies implicitly ("not one child was written"),
+// generated from the very same per-field expressions the writer uses so the two
+// cannot drift apart.
+type _isDefaulter interface{ isDefault() bool }
+
+// _placeRow stores a decoded row of a matrix (an array whose elements are native
+// arrays) at the index its element id names, growing the outer slice with empty
+// rows so an id GAP decodes as an empty row instead of shifting every later row
+// down by one. Gaps are ordinary here: an interior row equal to the element
+// default (the empty row) is omitted by a conformant encoder (S2), and only the
+// LAST row is guaranteed present -- which is what makes the decoded length,
+// highest present id + 1, exact.
+//
+// cap is the outer array's schema count bound N (-1 == unbounded). N is a
+// capacity: it bounds the array (a row id >= N is INVALID, S5.1/S7) but never
+// adds rows. Rejecting before the grow also bounds the id-keyed fill against an
+// over-index amplification DoS.
+func _placeRow[T any](out *[][]T, cap int, id sofab.ID, row []T) error {
+	if cap >= 0 && int(id) >= cap {
+		return sofab.ErrInvalidMsg
+	}
+	for len(*out) <= int(id) {
+		*out = append(*out, nil)
+	}
+	(*out)[id] = row
+	return nil
 }
 
 // _uMatSeq / _sMatSeq / _f32MatSeq / _f64MatSeq / _boolMatSeq collect the rows of
@@ -103,66 +145,74 @@ func (s *_objSeq[T, PT]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
 type _uMatSeq[T ~uint8 | ~uint16 | ~uint32 | ~uint64] struct {
 	_visitorBase
 	out *[][]T
+	cap int
 }
 
-func (s *_uMatSeq[T]) UnsignedArray(_ sofab.ID, v []uint64) error {
-	*s.out = append(*s.out, sofab.NarrowUnsigned[T](v))
-	return nil
+func (s *_uMatSeq[T]) UnsignedArray(id sofab.ID, v []uint64) error {
+	return _placeRow(s.out, s.cap, id, sofab.NarrowUnsigned[T](v))
 }
 
 type _sMatSeq[T ~int8 | ~int16 | ~int32 | ~int64] struct {
 	_visitorBase
 	out *[][]T
+	cap int
 }
 
-func (s *_sMatSeq[T]) SignedArray(_ sofab.ID, v []int64) error {
-	*s.out = append(*s.out, sofab.NarrowSigned[T](v))
-	return nil
+func (s *_sMatSeq[T]) SignedArray(id sofab.ID, v []int64) error {
+	return _placeRow(s.out, s.cap, id, sofab.NarrowSigned[T](v))
 }
 
 type _f32MatSeq struct {
 	_visitorBase
 	out *[][]float32
+	cap int
 }
 
-func (s *_f32MatSeq) Float32Array(_ sofab.ID, v []float32) error {
-	*s.out = append(*s.out, v)
-	return nil
+func (s *_f32MatSeq) Float32Array(id sofab.ID, v []float32) error {
+	return _placeRow(s.out, s.cap, id, v)
 }
 
 type _f64MatSeq struct {
 	_visitorBase
 	out *[][]float64
+	cap int
 }
 
-func (s *_f64MatSeq) Float64Array(_ sofab.ID, v []float64) error {
-	*s.out = append(*s.out, v)
-	return nil
+func (s *_f64MatSeq) Float64Array(id sofab.ID, v []float64) error {
+	return _placeRow(s.out, s.cap, id, v)
 }
 
 type _boolMatSeq struct {
 	_visitorBase
 	out *[][]bool
+	cap int
 }
 
-func (s *_boolMatSeq) UnsignedArray(_ sofab.ID, v []uint64) error {
+func (s *_boolMatSeq) UnsignedArray(id sofab.ID, v []uint64) error {
 	row := make([]bool, len(v))
 	for i, x := range v {
 		row[i] = x != 0
 	}
-	*s.out = append(*s.out, row)
-	return nil
+	return _placeRow(s.out, s.cap, id, row)
 }
 
 // _seqSeq collects an array whose elements are themselves wrapper-sequence arrays:
-// each element opens a sequence collected into a fresh inner slice by mk.
+// each element opens a sequence collected into the inner slice its element id
+// names, by mk. Placed at out[id], never appended, for the same reason as
+// _placeRow above: an omitted all-default interior row leaves an id gap.
 type _seqSeq[T any] struct {
 	_visitorBase
 	out *[][]T
+	cap int
 	mk  func(*[]T) sofab.Visitor
 }
 
-func (s *_seqSeq[T]) BeginSequence(_ sofab.ID) (sofab.Visitor, error) {
-	*s.out = append(*s.out, nil)
-	return s.mk(&(*s.out)[len(*s.out)-1]), nil
+func (s *_seqSeq[T]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
+	if s.cap >= 0 && int(id) >= s.cap {
+		return nil, sofab.ErrInvalidMsg
+	}
+	for len(*s.out) <= int(id) {
+		*s.out = append(*s.out, nil)
+	}
+	return s.mk(&(*s.out)[id]), nil
 }

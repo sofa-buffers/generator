@@ -170,7 +170,7 @@ it; floats additionally allow `decimals` 0–15. All identifiers match
 | Blob | `blob` | optional `maxlen` (caps **decoded** bytes), `default` is base64 |
 | Enum | `type: enum` + `enum: {NAME: int \| {value,description}}` or `{$ref}` | values **signed 32-bit**, may be negative; `default` must be a declared value |
 | Bitfield | `type: bitfield` + `bits: {FLAG: {pos 0–63, default?}}` or `{$ref}` | each `pos` unique |
-| Array | `type: array` + `items: {type, count?, ...}` | element `type` ∈ numeric \| `string` \| `blob` \| `boolean` \| `enum` \| `bitfield` \| `struct` \| `union` \| `array` (composite/nested elements carry their own `fields`/`oneof`/`enum`/`bits`/`items`); `count` is **optional** — when present the array is **fixed-length `N`** (exactly `N` logical elements, §11 *fixed-count arrays*), so `default` length ≤ `count` and the unlisted trailing elements are the element default; without it the array is dynamic; `maxlen` only for string/blob elements |
+| Array | `type: array` + `items: {type, count?, ...}` | element `type` ∈ numeric \| `string` \| `blob` \| `boolean` \| `enum` \| `bitfield` \| `struct` \| `union` \| `array` (composite/nested elements carry their own `fields`/`oneof`/`enum`/`bits`/`items`); `count` is **optional** — it is a **capacity**: the array may carry `0 .. count` elements and `count` never reaches the wire (§11 *`count` is a capacity*), so a `default` shorter than `count` stays that length and is **not** padded; without it the array is unbounded; `maxlen` only for string/blob elements |
 | Struct | `type: struct` + `fields: {...}` or `{$ref}` | nested; **own id scope** |
 | Union | `type: union` + `oneof: {...}` or `{$ref}`, optional `default_id` | exactly one option; **own id scope** |
 
@@ -371,6 +371,15 @@ a reimplementation should emit code that honors all of them:
   touch the wire format from generated code (§1 firm boundary).
 - **Emit fields in ascending id order** — deterministic output, and lets the
   decoder (and where applicable the encoder) dispatch optimally.
+- **Use the closed public name set** (CORELIB_PLAN §6.1.1) — a generated type lands
+  in the *user's* namespace, so the entry points are fixed and only the casing
+  adapts: `encode()` / `decode(bytes)` / `try_decode(bytes)` for the one-shot
+  convenience, `serialize(ostream)` / `deserialize(istream, …)` for the streaming
+  pair the corelib drives, `decoder()` for the streaming reader. No second spelling
+  for either — no `serialize_to`, `to_bytes`, `from_bytes`, `decode_from`,
+  `decode_into`, `marshal`/`unmarshal`. **Not yet uniform:** the backends predate
+  this rule (TypeScript still emits `decodeFrom`/`decodeInto`; several ports lack
+  `try_decode`), so aligning them is an open, breaking API pass.
 - **Decode by `switch` on field id**, not an if-chain — compilers build a jump
   table; unknown ids fall through to the corelib's skip path, giving
   forward/backward compatibility for free.
@@ -380,6 +389,15 @@ a reimplementation should emit code that honors all of them:
 - **No reflection / no runtime schema** — all dispatch is concrete generated
   code. (The sole exception is C, which *deliberately* uses a static descriptor
   table for footprint.)
+- **Generated support code is allowed where the *schema* is what decides.** The
+  firm boundary is about the wire format, not about who owns every line: a
+  backend may emit small schema-driven helpers (Go's collector prelude
+  `sofab_visitor.go`, C++'s macro-guarded `namespace sofabgen` block, the
+  per-language sized-array descriptors of §11) when the rule they
+  implement depends on a schema `count` the corelib cannot see (CORELIB_PLAN §7).
+  Such a helper still only *calls* the corelib's typed API — it never touches
+  bytes. Emit it once per package/translation unit and guard it against
+  double-inclusion; do not grow it into a second runtime.
 - **Pick the narrowest correct type** — map each integer to its exact width;
   enum → smallest *signed* backing, bitfield → smallest *unsigned* backing; avoid
   widening on the hot path (§11 natural-width writes).
@@ -495,8 +513,15 @@ corelib; canonical set):
 `write_unsigned(id, v)` · `write_signed(id, v)` · `write_boolean(id, v)` ·
 `write_fp32(id, v)` · `write_fp64(id, v)` · `write_string(id, s)` ·
 `write_blob(id, ptr, len)` · `write_array_unsigned/signed(id, elems)` ·
-`write_array_fp32/fp64(id, elems)` · `write_sequence_begin(id)` ·
-`write_sequence_end()`.
+`write_array_fp32/fp64(id, elems)` · `write_sequence_begin_lazy(id)` ·
+`write_sequence_end()` · `write_sequence_end_keep()`.
+
+**Sequence framing is lazy** (CORELIB_PLAN §6): `begin_lazy` holds the header back
+until a field write proves the sequence non-default, `end` drops a frame that never
+got content, `end_keep` forces it out for an array **element**. See *Lazy sequence
+framing* in §11 for which closer goes where and why. The **C** backend does not use
+this path at all — its descriptor decides omission per field before opening, so it
+keeps the eager `sofab_ostream_write_sequence_begin`/`_end` pair.
 
 Integers are written at their **natural width** (the varint output is
 value-based, so the bytes are identical to a widened write; this lets
@@ -660,9 +685,9 @@ it explicitly:
 
 #### Decode verdict: over-count scalar arrays are INVALID (all families)
 
-MESSAGE_SPEC §3 makes a scalar-array field's schema `count` its **fixed length
-N** (the wire carries `0..N` elements; a short wire count means the rest are the
-element default — §11 *fixed-count arrays*), and §7 classifies "a
+MESSAGE_SPEC §3 makes a scalar-array field's schema `count` its **capacity `N`**
+(the wire carries `0..N` elements and that wire count IS the length — §11
+*`count` is a capacity*), and §7 classifies "a
 length or count above its maximum" as **INVALID** — silently accepting it is
 non-conformant. Every generated decoder therefore **rejects** a scalar array
 whose wire element count exceeds N: the whole decode fails with the backend's
@@ -765,9 +790,9 @@ The **sequence-form analogue** of the over-count scalar rule (generator#142).
 A `string`/`blob`/`struct`/`union` element array with a schema `count: N` lowers
 to a wrapper sequence whose child ids are the 0-based element index (§4, §9.2). An
 element whose wire id is `≥ N` is a schema-bound violation: MESSAGE_SPEC §5.1
-recovers a fixed-count wrapper array's length as **`N` for every target** (a
-growable-list target default-fills to `N` exactly like a pre-sized one) and §7
-makes an element id `≥ N` **`INVALID`**, *never silently truncated to `N`*. The
+recovers a wrapper array's length as *highest present id + 1* and `count` bounds
+it without ever adding elements the decoder did not receive, so §7 makes an
+element id `≥ N` **`INVALID`**, *never silently truncated to `N`*. The
 generated decoder therefore **rejects** an over-index element **before** growing
 the container — which also bounds the fill: the id is an unbounded varint, so an
 unguarded id-keyed grow materialised `id+1` elements and turned a ~9-byte message
@@ -1381,89 +1406,57 @@ metadata above. The `docs` target renders the same metadata as HTML page content
 
 ## 11. Cross-cutting design decisions
 
-- **Fixed-count arrays: the trailing-default-run rule** (MESSAGE_SPEC §3,
-  adopted in documentation#18; generator#136 / Crucible F-0010). A field
-  declared `count: N` is a **fixed-length** array of exactly `N` logical
-  elements — `count` is its *length*, not a capacity the value may fall short
-  of. A wire count `M < N` denotes an array whose last `N − M` elements equal
-  the **element default**. This binds both directions, and independently of a
-  backend's storage model:
-  - **Encode (every backend).** The canonical wire carries
-    `M' = 1 + index of the last element that differs from the element default`
-    (`M' = 0` when all are default); the trailing default run **must not** be
-    emitted. So `[7,8,9]` in a `count: 5` u32 field encodes as `23 03 07 08 09`,
-    never `23 05 07 08 09 00 00`. This is the array-level analogue of the
-    sparse-canonical field rule below. When the trimmed value additionally
-    **equals the field's (trimmed) default** — an all-element-default array with
-    no non-empty schema `default`, or one matching its `default` — the ordinary
-    §2 whole-field ≠-default test drops the field **entirely**; it is **not**
-    emitted as an explicit `count: 0` array (generator#139). A growable backend
-    must apply that omission test to the *trimmed* value, since the raw slice may
-    be empty or shorter than `N` and would never compare equal to the padded
-    `N`-element default.
-  - **Decode (every backend).** A decoder **must** materialize exactly `N`
-    elements — the `M` wire elements at `[0, M)`, element defaults at `[M, N)` —
-    so a pre-sized fixed array (`T[N]`, `std::array<T,N>`, `[T; N]`, `[N]T`) and
-    a growable list (`[]T`, `list`, `long[]`, `T[]`) recover the same value.
-    Fixed-storage backends get this from zero-initialized storage; growable
-    backends must pad explicitly.
-  - **"Equals the element default" means BIT-PATTERN equality, not `==`.**
-    `-0.0 == 0.0` is true in every target language, so a numeric compare would
-    trim a trailing `-0.0` and the decoder would rebuild it as `+0.0` — silent
-    round-trip data loss. The shared vectors deliberately treat `0.0` and `-0.0`
-    as distinct (`array_fp32_specials`), so the compare is on bits
-    (`math.Float64bits`, `f64::to_bits`, `Double.doubleToRawLongBits`,
-    `Object.is`, `@bitCast`, …). This also keeps NaN (bits ≠ 0) off the trim.
-  - **Dynamic (count-less) arrays are exempt** — there is no `N` to refill from,
-    so a trailing default element is significant and stays on the wire: `[7,0]`
-    encodes as count 2. Nested array-of-array **rows** are wrapper-sequence
-    elements, not `count: N` fields, and are likewise not trimmed.
-  - **Scope: native (count-prefixed) arrays only** — `u8…u64`, `i8…i64`,
-    `fp32`/`fp64`, `boolean`, `enum`, `bitfield`. String/blob/struct/union
-    element arrays are wrapper sequences with no wire count; their sparse
-    element-id gaps already carry the same meaning (§9.1).
-  - **`[M, N)` is the ELEMENT default, not the field's schema default.** A
-    schema `default:` describes the whole field when the field is *absent* from
-    the wire; once the field is *present* with count `M`, the trailing positions
-    are zero. Backends that decode into **pre-initialized fixed storage** must
-    therefore reset it: `std::array<T,N> f{1,2,3,0,0}` filled with only `M = 2`
-    wire elements would otherwise leak the schema default's `3` into position 2
-    (`[1,2,0,0,0]` → `23 02 01 02` → `[1,2,3,0,0]`). `cpp`/`rust`/`zig` emit that
-    reset at `array_begin`, **only** when the schema default is non-zero, so
-    every other schema's generated code is byte-identical. Growable backends are
-    immune — they replace the container wholesale on decode.
-  - **`c` satisfies the rule from the corelib, not from generated code**
-    (generator#136). It emits no encode *or* decode statements at all — only a
-    descriptor table that `corelib-c-cpp` walks — and
-    `SOFAB_OBJECT_FIELD_ARRAY` derives the element count structurally as
-    `sizeof(member) / sizeof(member[0]) == N`, with no used-length slot, so
-    neither half has a seam in generated code. Both therefore live in
-    `corelib-c-cpp` (corelib-c-cpp#87): `object.c` trims the trailing zero-element
-    run on encode, and `_bind_array_count` clears `[M, N)` on decode. The trim sits
-    on the C-only descriptor path deliberately — **not** in the
-    `sofab_ostream_write_array_of_*` writers, which the C++ wrapper calls directly
-    with dynamic `std::vector`s whose trailing defaults are significant. Generated
-    C is only canonical against a corelib carrying that fix; against an older one
-    it still interoperates (§3 requires decoders to accept a non-canonical
-    encoding). See `docs/generator/c.md`.
-  - **Why `cpp`/`rust`/`zig` keep their own `array_begin` reset** even though the
-    `c-cpp` profile now also gets the `[M, N)` clear from `corelib-c-cpp`: pure
-    `corelib: cpp`, `corelib-rs` and `corelib-zig` are separate libraries without
-    it, and the backends emit one code path per profile. Where it is redundant it
-    is free.
+- **`count` is a capacity, so the wire carries the length** (MESSAGE_SPEC §3,
+  documentation#29 `af536c4`; supersedes the trailing-default-run rule of
+  documentation#18 / generator#136 / Crucible F-0010). A field declared
+  `count: N` may carry **`0 .. N` elements**. `N` is the maximum, it **never
+  appears on the wire**, and it exists so a heap-less target can pre-size a
+  buffer and so an over-long array is `INVALID`. The wire count `M` **is** the
+  array's length.
+  - **Encode.** Every element the value holds is written, trailing element
+    defaults included — `[1,2,0,0]` in a `count: 4` u32 field is four elements,
+    not two, because `[1,2,0,0]` and `[1,2]` are different values. There is no
+    trailing-run elision. The ordinary §2 whole-field ≠-default test still
+    applies: an array equal to the field's declared `default` (the empty
+    collection when none is declared, compared element-wise, **never padded to
+    `N`**) is omitted entirely.
+  - **Decode.** The decoder materializes exactly the `M` elements it received.
+    There is **no fill to `N`**. `M > N` is `INVALID` (§7), `M = 0` is the empty
+    array.
+  - **Storage that cannot express `M < N`.** A backend whose `count: N` array
+    lowers to a fixed-size type (`T[N]`, `std::array<T,N>`, `[N]T`) has no
+    logical length to carry, so it always encodes `N` and settles a received
+    `M < N` at the element default. That is a conformant encoding of an
+    `N`-length value, but such a target cannot *send* a shorter array. Where
+    that matters the length has to be carried explicitly — the C backend does it
+    with a companion member (`SOFAB_OBJECT_FIELD_ARRAY_SIZED`, and
+    `SOFAB_OBJECT_DESCR_SEQ_SIZED` for a wrapper holder), following the
+    sized-blob convention that already paired a buffer with its length. The
+    length must be at least as wide as the element's alignment or it is padded
+    away from the slot; corelib-c-cpp asserts the adjacency at compile time.
+  - **The bit-pattern rule survives its cause.** The trim it protected is gone,
+    but "equals the element default" is still decided on **bits**, not `==`,
+    wherever the predicate is used (element sparsity below): `-0.0 == 0.0` holds
+    in every target language, so a numeric compare would drop a `-0.0` element
+    and rebuild it as `+0.0`. The shared vectors treat the two as distinct
+    (`array_fp32_specials`).
 - **Sparse-canonical encoding** — encoding is **always** sparse (no config
   toggle, MESSAGE_SPEC §2): a field equal to its effective default (schema
   `default:`, else type-zero) is skipped on encode and reconstructed on decode.
-  The `!= default` test is applied **per field, except a `sequence`** (a
-  `struct`/`union`, and the wrapper form of composite/dynamic-element arrays):
-  a sequence is always framed, so an all-default nested object becomes an *empty
-  wrapper sequence*, not a dropped field. **Within a wrapper array the same rule
+  The `!= default` test is applied **per field, and a `sequence`-typed field is
+  no exception** (a `struct`/`union`, and the wrapper form of
+  composite/dynamic-element arrays): an all-default sequence field is **omitted**,
+  not emitted as an empty wrapper — see *Lazy sequence framing* below for how the
+  backends express that in one forward pass. **Within a wrapper array the same rule
   reaches the elements** (id = index, MESSAGE_SPEC §2): a `string`/`blob`
   **element** is a leaf, so it is **omitted when it equals its element default
   (empty)** — leaving an id gap the decoder fills from the default, so trailing
   default elements collapse (`["a",""]` encodes as `["a"]`, `["",""]` as the
   empty wrapper). A `struct`/`union`/nested-array element is itself a sequence and
-  stays framed. (The compact native scalar arrays are exempt — they carry no
+  **stays framed even when all-default** — element presence is what carries a
+  dynamic array's length (*highest present id + 1*, MESSAGE_SPEC §5.1), so dropping
+  one would change the decoded length, not merely the bytes. (The compact native
+  scalar arrays are exempt — they carry no
   per-element header, so their elements are always serialized in full.) The
   corelibs are dumb codecs, so the
   rule lives in the **generated code**: every imperative backend emits per-field
@@ -1483,6 +1476,58 @@ metadata above. The `docs` target renders the same metadata as HTML page content
   `used_len == 0`) rather than compared against the image — so a non-empty blob
   default is materialised on decode but transmitted, not omitted, at its default
   value (issue #128; `docs/generator/c.md`).
+- **Lazy sequence framing** — the §2 rule above asks whether a sequence is emitted
+  from *what its children turn out to be*, while its header must precede them. The
+  backends never buffer a sub-message to find out; the corelib holds the header
+  back instead (CORELIB_PLAN §6, "Sequence framing"):
+  `begin_lazy(id)` pushes the id onto a pending run, the **first field write**
+  emits the whole run (outermost header first), `end()` **drops** a frame that got
+  no content, and `end_keep()` forces it out. Held-back ids are encoder state, not
+  buffer content, so a flush cannot split a run and the bytes stay independent of
+  the output-buffer size — the chunked-encode guarantee is untouched.
+  The closer is chosen **statically**, from the position in the schema:
+  | position | closer |
+  |---|---|
+  | `struct`/`union` field, array field (the wrapper) | `end` |
+  | wrapper-array **element** (`struct`/`union`/nested row) | `end_keep` |
+  The two failure directions are asymmetric, which makes `end_keep` the safe
+  default: the wrong `end_keep` costs one non-canonical empty frame a decoder
+  normalizes away, the wrong `end` silently changes an array's length. In C++ the
+  distinction rides on the corelib's two message writes — `write(id, msg)` is the
+  element form (keeps the frame), `writeLazy(id, msg)` the field form.
+  **C is the exception**: its message layer is the `object.h` descriptor, which
+  tests each field against its default *before* opening anything, so it keeps the
+  plain eager `sequence_begin`/`sequence_end` pair and needs no hold-back at all.
+  The guard that decides this in `sofab_object_encode` discriminates on the
+  **role** (`info->fixed_seq` — a wrapper holder's "fields" are element slots),
+  not on the field type: dropping the type check alone would elide interior array
+  elements and break §5.1.
+- **Wrapper-array elements: placement and positional sparsity** — inside a
+  wrapper sequence the child id **is** the array index (MESSAGE_SPEC §5.1), and
+  the array carries no length field, so the decoded length is *highest present
+  id + 1*. From that single fact both rules follow: **nothing that carries the
+  length may be elided, and everything else may be.**
+  | rule | encode | decode |
+  |---|---|---|
+  | **placement** | element written at its index | element decoded **into** `dest[id]` after gap-filling with element defaults — never appended |
+  | **interior sparsity** | an element before the last one that equals its element default is **omitted**, leaving an id gap — a `string`/`blob` is not written *and* a `struct`/`union`/nested-array element is **not framed** | the absent `dest[id]` is restored from the element default |
+  | **the last element** | **always** written — a leaf as its value, a sequence element as an **empty frame** | its presence is what fixes the length |
+  One rule governs both element kinds; the old carve-out ("a sequence element is
+  never omitted") is gone, and so is any dependence on whether the field declares
+  a `count`. `["a", ""]`, `["a"]` and `[]` are three distinct values with three
+  distinct encodings; `[x, default, default]` is element 0 plus an empty/default
+  element at id 2, with element 1 the gap.
+  Placement is also what gives §7.4 struct-merge on a **reopened** element id for
+  free: the second frame decodes into the element the first produced. Appending
+  instead shortens the array by any interior gap *and* turns a reopened id into a
+  second element (generator#247) — and once interior gaps became reachable, the
+  same defect in the **row** collectors of a matrix/nested array started shifting
+  every later row down by one, which is why those place by id too.
+  The closer choice is therefore **positional in the value** (last vs. interior),
+  not static from the schema position, and each backend generates the writer and
+  its all-default predicate from **one** expression: a predicate that narrows
+  where the writer does not, or the reverse, omits a field that is on the wire or
+  keeps one that is not.
 - **Widest-first member layout** — value-type backends declare struct members by
   alignment widest-first (8→4→2→1, stable within a width; composite/heap = 8) to
   cut native padding, via the shared `AlignRank`/`SortedForLayout`. Applied to C,

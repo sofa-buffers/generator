@@ -33,6 +33,35 @@ is raised to the largest schema bound of its kind — schema-bounded fields stay
 governed by their own bound. A key whose kind has no unbounded field emits
 nothing.
 
+## Arrays — `count` is a capacity
+
+Every array field maps to a Go slice, and the slice's length is the array's
+length. A schema `count: N` is a **capacity**, not a length: it never reaches the
+wire, it bounds the array (an element count or element id past `N` fails the
+decode as invalid), and it lets fixed-storage targets pre-size — but it never
+adds elements.
+
+The consequences you can observe from Go:
+
+- `New<Msg>()` leaves a `count: N` array **empty** unless the schema declares a
+  `default`, and a declared default shorter than `N` is materialized exactly as
+  written (never tail-padded to `N`).
+- Encode writes **every** element the slice holds. `[]uint32{1, 2, 0, 0}` and
+  `[]uint32{1, 2}` are different values with different bytes.
+- Decode yields exactly the elements the wire carried: `len()` after a round trip
+  equals `len()` before it, for both the compact scalar form and the wrapper form.
+- A field is omitted only when it **equals its default** — for an array with no
+  declared default, only when it is empty. An all-zero `[]uint32{0, 0, 0, 0}` is a
+  four-element value and stays on the wire.
+
+Inside a wrapper-sequence array (string/blob/struct/union/nested-array elements)
+the **interior is sparse**: an element equal to the element default is dropped and
+leaves an id gap, which decode restores from that same default. The **last**
+element is always written — as its value, or as an empty frame for a
+struct/union/nested element — because its presence is what carries the length.
+So `[]string{"a", ""}`, `[]string{"a"}` and `[]string{}` are three distinct values
+that encode and decode distinctly.
+
 ## Struct field order (widest-first)
 
 Generated struct fields are declared **widest-first** (8→4→2→1-byte alignment;

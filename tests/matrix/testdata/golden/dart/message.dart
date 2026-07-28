@@ -40,6 +40,44 @@ class Scalars {
     if (flag != true) { e.writeBool(7, flag); }
   }
 
+  /// Restores every field to its declared default, in place.
+  ///
+  /// A field is only written during decode when the wire carries it, and a
+  /// field equal to its default is not on the wire at all, so a destination
+  /// must start from the defaults for an absent field to read back as its
+  /// default. [tryDecode] does that for you; call this directly when driving
+  /// the decode visitor yourself, or to recycle an instance.
+  ///
+  /// Lists are cleared and refilled rather than replaced, so a reused
+  /// instance keeps its backing storage. (A list member assigned a
+  /// fixed-length list by the caller is the one exception -- see the fp32
+  /// array note in the generator docs.)
+  void reset() {
+    u8min = 0;
+    u8max = 255;
+    u64max = -1;
+    i8min = -128;
+    i64min = 0x8000000000000000;
+    f32 = 3.14;
+    _f32Fp32Bits = null;
+    f64 = -2.5;
+    flag = true;
+  }
+
+  /// Whether every field equals its declared default, compared per field and
+  /// recursively -- i.e. whether [marshal] would write no child at all.
+  bool get _isDefault {
+    if (!(u8min == 0)) return false;
+    if (!(u8max == 255)) return false;
+    if (!(u64max == -1)) return false;
+    if (!(i8min == -128)) return false;
+    if (!(i64min == 0x8000000000000000)) return false;
+    if (!(f32 == 3.14)) return false;
+    if (!(f64 == -2.5)) return false;
+    if (!(flag == true)) return false;
+    return true;
+  }
+
   /// Worst-case serialized size (schema-bounded fields; a cap for
   /// unbounded ones).
   static const int maxSize = 49;
@@ -50,7 +88,20 @@ class Scalars {
   /// returns the terminal decode outcome. `invalid` covers both malformed
   /// bytes and a schema-bound violation (over-count/over-index/over-maxlen);
   /// `incomplete` means the bytes end inside a field or an open sequence.
+  ///
+  /// [out] is REUSABLE: it is [reset] to the declared defaults first. That
+  /// reset is what makes a reused destination correct: a field equal to its
+  /// default is not written to the wire at all, nested objects and arrays
+  /// included, so nothing in the bytes can clear a value left over from an
+  /// earlier decode.
   static sofab.DecodeStatus tryDecode(Uint8List data, Scalars out) {
+    out.reset();
+    return _decodeInto(data, out);
+  }
+
+  /// Decodes into a destination the caller guarantees is already at its
+  /// defaults, so [decode]'s fresh instance skips the redundant reset.
+  static sofab.DecodeStatus _decodeInto(Uint8List data, Scalars out) {
     final e = _Dec();
     final st = sofab.Decoder.decode(data, _ScalarsVisitor(out, e));
     return e.inv ? sofab.DecodeStatus.invalid : st;
@@ -61,7 +112,7 @@ class Scalars {
   /// when a truncated or malformed message must be distinguished.
   static Scalars decode(Uint8List data) {
     final m = Scalars();
-    tryDecode(data, m);
+    _decodeInto(data, m);
     return m;
   }
 }

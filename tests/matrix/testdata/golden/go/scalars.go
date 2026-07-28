@@ -47,6 +47,34 @@ func (m *Scalars) marshal(e *sofab.Encoder) {
 	}
 }
 
+func (m *Scalars) isDefault() bool {
+	if !(m.U8min == 0) {
+		return false
+	}
+	if !(m.U8max == 255) {
+		return false
+	}
+	if !(m.U64max == 18446744073709551615) {
+		return false
+	}
+	if !(m.I8min == -128) {
+		return false
+	}
+	if !(m.I64min == -9223372036854775808) {
+		return false
+	}
+	if !(m.F32 == 3.14) {
+		return false
+	}
+	if !(m.F64 == -2.5) {
+		return false
+	}
+	if !(m.Flag == true) {
+		return false
+	}
+	return true
+}
+
 func (m *Scalars) Unsigned(id sofab.ID, v uint64) error {
 	switch id {
 	case 0:

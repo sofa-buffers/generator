@@ -26,6 +26,34 @@ struct Scalars : sofab::Message {
     static constexpr std::size_t _maxSize = 49;
 
     /**
+     * @brief Put every field back to its declared default, in place.
+     *
+     * A field whose value equals its default is absent from the encoded
+     * bytes, so nothing runs for it on decode and a destination decoded into
+     * twice keeps the earlier message's value - the elements of an array
+     * field included, since an array is only cleared when its sequence is
+     * actually present. The clear therefore has to happen before the bytes
+     * are fed, not from a callback an absent field never fires.
+     *
+     * @ref try_decode calls this for you. Drive a stream yourself (e.g.
+     * @c sofab::IStreamInline) and it is yours to call between messages,
+     * alongside the stream's own reset for the decoder state.
+     *
+     * Containers are cleared, not reallocated: the capacity a reused
+     * destination has already paid for is kept.
+     */
+    void reset() noexcept {
+        u8min = 0;
+        u8max = 255;
+        u64max = 18446744073709551615ULL;
+        i8min = -128;
+        i64min = (-9223372036854775807LL - 1);
+        f32 = 3.14f;
+        f64 = -2.5;
+        flag = true;
+    }
+
+    /**
      * @brief Encode this message into a new byte vector.
      * @return The encoded bytes (empty if the message encodes to nothing).
      */
@@ -66,17 +94,47 @@ struct Scalars : sofab::Message {
     }
 
     /**
-     * @brief Decode a message, reporting whether the input was acceptable.
+     * @brief Decode a message into @p out, reporting whether the input was
+     *        acceptable.
+     *
+     * @p out is put back to its declared defaults first (@ref reset) and
+     * then decoded into directly, so it may be reused across messages
+     * without carrying anything over and without giving its buffers back.
+     *
      * @param data Encoded bytes.
      * @param len  Number of bytes at @p data.
-     * @param out  Receives the message on success; untouched otherwise.
+     * @param out  Receives the message; on a rejected input it holds the
+     *             fields decoded before the error, never an older message's.
      * @return The decode result; check @c ok() before reading @p out.
      */
     static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Scalars &out) {
-        sofab::IStreamObject<Scalars> in;
-        sofab::IStreamImpl::Result r = in.feed(data, len);
-        if (r.ok()) { out = *in; }
-        return r;
+        out.reset();
+        sofab::IStreamInline *_isp = nullptr;
+        sofab::IStreamInline _is{[&out, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {
+            out.deserialize(*_isp, _id, _size, _count);
+        }};
+        _isp = &_is;
+        return _is.feed(data, len);
+    }
+
+    /**
+     * @brief True when every field still holds its declared default.
+     *
+     * The exact negation of @ref serialize: an object is default when
+     * serialize would write nothing at all for it, tested per field and
+     * recursively. Used to find the last non-default element of an array
+     * declared with a `count`, whose encoding stops one past it.
+     */
+    bool _isDefault() const noexcept {
+        if (!(u8min == 0)) { return false; }
+        if (!(u8max == 255)) { return false; }
+        if (!(u64max == 18446744073709551615ULL)) { return false; }
+        if (!(i8min == -128)) { return false; }
+        if (!(i64min == (-9223372036854775807LL - 1))) { return false; }
+        if (!(f32 == 3.14f)) { return false; }
+        if (!(f64 == -2.5)) { return false; }
+        if (!(flag == true)) { return false; }
+        return true;
     }
 
     /**

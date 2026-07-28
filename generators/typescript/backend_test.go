@@ -129,7 +129,9 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 	for _, want := range []string{
 		`if (c.id >= 4) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 4"); const _id = c.id; while (arr.length <= _id) arr.push("");`,
 		`if (c.id >= 3) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 3"); const _id = c.id; while (arr.length <= _id) arr.push(new Uint8Array());`,
-		`if (c.id >= 2) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 2"); arr.push(MBpElem.decodeFrom(c));`,
+		// The struct-element path now places by id like the leaf paths above; the
+		// guard runs first and so also bounds the gap-fill (generator#247).
+		`if (c.id >= 2) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 2"); const _id = c.id; while (arr.length <= _id) arr.push(new MBpElem()); MBpElem.decodeInto(c, arr[_id]!);`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing over-index guard %q", want)
@@ -263,7 +265,19 @@ func TestTSStructural(t *testing.T) {
 		"MyfirstmessageSomestruct.decodeInto(c, o.somestruct); break;",
 		`while (c.readHeader()) { if ((c.wire as WireType) !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); continue; } if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); const _s = c.readString(); if (_utf8Len(_s) > 16) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 16"); arr[_id] = _s; }`, // wrapper-element §7.3 wire guard (#189) + id-aware string-list, over-index + over-maxlen rejected (S2/S5.1/S7/S7.1, #142)
 		"o.someu64 = c.readUnsigned() as bigint; break;", // u64 -> bigint, number-first
-		"os.writeSequenceBegin(",                         // nested framing (marshal unchanged)
+		// MESSAGE_SPEC §2: a struct/union FIELD opens lazily and closes with the
+		// dropping end, so an all-default nested object is omitted, not framed empty.
+		"    os.writeSequenceBeginLazy(20);\n    this.somestruct.marshal(os);\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(21);\n    this.someunion.marshal(os);\n    os.writeSequenceEnd();\n",
+		// A wrapper-array FIELD is a sequence too: lazy + dropping end at depth 0,
+		// while each ELEMENT chooses its closer POSITIONALLY (§2) — the keeping one
+		// at the last index, whose presence carries the array's length (§5.1), the
+		// dropping one in the interior, where an all-default element leaves an id gap.
+		"    os.writeSequenceBeginLazy(23);\n    this.somestructarray.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(25);\n    this.someunionarray.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+		// A leaf string/blob wrapper array is a FIELD as well.
+		"    os.writeSequenceBeginLazy(18);\n",
+		"    os.writeSequenceBeginLazy(19);\n",
 		"export enum MyfirstmessageSomeenum {",
 	} {
 		if !strings.Contains(mod, want) {
@@ -275,6 +289,9 @@ func TestTSStructural(t *testing.T) {
 	for _, gone := range []string{
 		"_visitor()", "ChunkAcc", "type Visitor", "sequenceBegin(",
 		"stringListVisitor", "unsigned(id: number, value: bigint)",
+		// The eager begin no longer exists in corelib-ts: every sequence is opened
+		// with writeSequenceBeginLazy (MESSAGE_SPEC §2).
+		"os.writeSequenceBegin(",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("message.ts should no longer emit %q (push/visitor decode removed)", gone)
@@ -282,8 +299,67 @@ func TestTSStructural(t *testing.T) {
 	}
 	// Fast-encode marshal tidy-up: a leaf string list uses an indexed for (no
 	// per-encode closure) rather than .forEach.
-	if !strings.Contains(mod, "for (let _i0 = 0; _i0 < this.somestringarray.length; _i0++) {") {
+	if !strings.Contains(mod, "for (let _i0 = 0, _a0 = this.somestringarray; _i0 < _a0.length; _i0++) {") {
 		t.Error("message.ts missing indexed-for string-list marshal (fast-encode)")
+	}
+}
+
+// TestTSLazySequenceFraming pins the MESSAGE_SPEC §2 closer table. Every sequence
+// opens with writeSequenceBeginLazy; the CLOSER decides whether a contentless one
+// survives:
+//
+//	struct/union FIELD         -> writeSequenceEnd()      may vanish when all-default
+//	array FIELD (the wrapper)  -> writeSequenceEnd()      may vanish when empty
+//	wrapper-array ELEMENT      -> POSITIONAL: Keep at the last index, drop before it
+//
+// The element row is the one the schema cannot answer: it is decided from the
+// position in the VALUE at run time, because only the last element's presence
+// carries the array's length (§5.1).
+//
+// example.yaml has no array of composite rows, so the depth > 0 nested-row case
+// (an ELEMENT that is itself a wrapper sequence) is only covered here.
+func TestTSLazySequenceFraming(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s:    { id: 0, type: struct, fields: { x: { id: 0, type: i32 } } }\n" +
+		"      ss:   { id: 1, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }\n" +
+		"      strs: { id: 2, type: array, items: { type: string } }\n" +
+		"      rows: { id: 3, type: array, items: { type: array, items: { type: string } } }\n" +
+		"      blobs: { id: 4, type: array, items: { type: blob } }\n"
+	mod := genTSWith(t, src, map[string]any{})
+
+	// FIELDs: struct field, leaf-string wrapper array, blob wrapper array, and the
+	// composite/nested-array wrappers — all closed with the dropping end.
+	for _, want := range []string{
+		"    os.writeSequenceBeginLazy(0);\n    this.s.marshal(os);\n    os.writeSequenceEnd();\n",
+		// The leaf runs are walked whole — nothing is narrowed away — and the last
+		// element escapes the omit test (§2, see TestTSArrayElementSparsityIsPositional).
+		"    os.writeSequenceBeginLazy(2);\n    for (let _i0 = 0, _a0 = this.strs; _i0 < _a0.length; _i0++) {",
+		"    os.writeSequenceBeginLazy(4);\n    for (let _i0 = 0, _a0 = this.blobs; _i0 < _a0.length; _i0++) {",
+		"    os.writeSequenceBeginLazy(1);\n    this.ss.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+		// The nested row is an ELEMENT of `rows`, so its own wrapper takes the
+		// positional closer too; the outer `rows` wrapper is a FIELD and may vanish.
+		"    os.writeSequenceBeginLazy(3);\n    this.rows.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      for (let _i1 = 0, _a1 = _e0; _i1 < _a1.length; _i1++) {\n        if (_a1[_i1]! !== \"\" || _i1 === _a1.length - 1) {\n          os.writeString(_i1, _a1[_i1]!);\n        }\n      }\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing lazy-framing shape %q\n%s", want, mod)
+		}
+	}
+	// The eager begin is gone from corelib-ts entirely: emitting it would not
+	// compile.
+	if strings.Contains(mod, "os.writeSequenceBegin(") {
+		t.Error("message.ts must not emit the removed eager os.writeSequenceBegin()")
+	}
+	// Exactly one keeping close per sequence-form ELEMENT site (the struct element
+	// and the nested row), each guarded by its last-index test, and no keeping close
+	// on any FIELD wrapper — a FIELD closes unconditionally with the dropping end.
+	if got, want := strings.Count(mod, "os.writeSequenceEndKeep();"), 2; got != want {
+		t.Errorf("writeSequenceEndKeep() count = %d, want %d (one per wrapper-array element site)", got, want)
+	}
+	if got, want := strings.Count(mod, "if (_i0 === _a0.length - 1) {"), 2; got != want {
+		t.Errorf("positional closer guard count = %d, want %d (one per sequence-form element site)", got, want)
+	}
+	if got, want := strings.Count(mod, "os.writeSequenceBeginLazy("), 7; got != want {
+		t.Errorf("writeSequenceBeginLazy() count = %d, want %d (5 fields + 2 element frames)", got, want)
 	}
 }
 
@@ -327,31 +403,32 @@ func TestTSInt64Long(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "long"})
 	for _, want := range []string{
 		`import { OStream, Cursor, WireType, Long, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`,
-		// Long[] backing field + accessor pair; setter converts once. us is
-		// `count: 8`, so its implied default is 8 Long zeros (issue#136).
-		"private _us: Long[] = [Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO];",
+		// Long[] backing field + accessor pair; setter converts once. `count: 8` is a
+		// CAPACITY, not a length (§3), so a fresh us is the EMPTY array — not 8
+		// Long zeros.
+		"private _us: Long[] = [];",
 		"get us(): Long[] { return this._us; }",
 		"set us(vals: readonly (Long | bigint | number)[]) { this._us = vals.map(Long.fromValue); }",
-		// Nested array: Long[][] with a per-row setter conversion.
+		// Nested array: Long[][] with a per-row setter conversion. `count: 2` adds no
+		// rows either.
 		"private _rows: Long[][] = [];",
 		"set rows(vals: readonly (readonly (Long | bigint | number)[])[]) { this._rows = vals.map((_v0) => _v0.map(Long.fromValue)); }",
-		// Marshal reads the backing field; 64-bit arrays use the Long writers.
-		// These are `count: N` fields, so the trailing default run is trimmed
-		// (issue#136) by the Long flavour of the trim (word-pair compare). The
-		// omission guard compares against the implied N-element default.
-		"if (!longArrEq(this._us, [Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO, Long.ZERO])) {",
-		"os.writeUnsignedArrayLong(0, _trimTailLong(this._us));",
-		"os.writeSignedArrayLong(1, _trimTailLong(this._is));",
-		"function _trimTailLong(a: readonly Long[]): readonly Long[] {",
+		// Marshal reads the backing field; 64-bit arrays use the Long writers, and
+		// the value goes out whole — no trailing run is elided, because the wire
+		// count IS the length (§3). With no declared default the omit test is the
+		// emptiness of the value.
+		"if (this._us.length !== 0) {",
+		"os.writeUnsignedArrayLong(0, this._us);",
+		"os.writeSignedArrayLong(1, this._is);",
 		// Defaulted Long array: materialized Long default + longArrEq guard.
 		`private _ud: Long[] = [Long.fromValue(1n), Long.fromValue(18446744073709551615n)];`,
 		"if (!longArrEq(this._ud, [Long.fromValue(1n), Long.fromValue(18446744073709551615n)])) {",
 		"function longArrEq(a: readonly Long[], b: readonly Long[]): boolean {",
-		// Decode bypasses the setter (readers return canonical Long[]); a wire
-		// count above the schema capacity rejects as INVALID (generator#100), and a
-		// wire count below it refills the elided trailing default run (issue#136).
-		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(8); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.ZERO); break; }`,
-		`case 1: { if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } const _a = c.readSignedArrayLong(8); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "is: array count above schema capacity 8"); o._is = _padTo(_a, 8, Long.ZERO); break; }`,
+		// Decode bypasses the setter (readers return canonical Long[]); a wire count
+		// above the schema capacity rejects as INVALID (generator#100), and a wire
+		// count below it is simply the array's length — nothing is filled in.
+		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(8); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _a; break; }`,
+		`case 1: { if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } const _a = c.readSignedArrayLong(8); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "is: array count above schema capacity 8"); o._is = _a; break; }`,
 		// toJSON prints via Long.toString with the schema signedness.
 		`"us": this._us.map((_x0) => _x0.toString(false)),`,
 		`"is": this._is.map((_x0) => _x0.toString(true)),`,
@@ -366,7 +443,12 @@ func TestTSInt64Long(t *testing.T) {
 			t.Errorf("int64: long message.ts missing %q", want)
 		}
 	}
-	for _, gone := range []string{"bigint[]", "writeUnsignedArray(0", "readUnsignedArray()"} {
+	for _, gone := range []string{
+		"bigint[]", "writeUnsignedArray(0", "readUnsignedArray()",
+		// The trim/pad pair belonged to the superseded fixed-length reading of
+		// `count` and is gone with it (MESSAGE_SPEC af536c4).
+		"_trimTailLong", "_trimTail", "_padTo",
+	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("int64: long message.ts should not emit %q", gone)
 		}
@@ -377,8 +459,8 @@ func TestTSInt64Number(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "number"})
 	for _, want := range []string{
 		// Arrays are Long-backed exactly as in long mode.
-		"os.writeUnsignedArrayLong(0, _trimTailLong(this._us));",
-		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(8); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _padTo(_a, 8, Long.ZERO); break; }`,
+		"os.writeUnsignedArrayLong(0, this._us);",
+		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArrayLong(8); if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o._us = _a; break; }`,
 		// Scalars are plain numbers: number default, !== 0 guard, Number() decode.
 		"u: number = 0;",
 		"i: number = -7;",
@@ -445,9 +527,8 @@ messages:
 }
 
 // fixedCountDef pairs a `count: N` field with a dynamic (count-less) one for
-// every native element kind the trailing-default-run rule touches, plus a
-// nested array-of-array and a non-native (string) element array — neither of
-// which is in scope.
+// every native element kind, plus a nested array-of-array and a non-native
+// (string) element array.
 const fixedCountDef = `
 version: 1
 $defs:
@@ -472,66 +553,59 @@ messages:
       fstr:  { id: 11, type: array, items: { type: string, count: 2, maxlen: 8 } }
 `
 
-// TestTSFixedCountTrailingDefaultRun: a `count: N` native array is FIXED-LENGTH
-// (MESSAGE_SPEC §3) — the encoder emits only through the last non-default
-// element and the decoder refills [M, N) with the element default (issue#136).
-// Dynamic arrays keep every element (a trailing default is significant there),
-// and neither nested rows nor wrapper-sequence (string) element arrays are in
-// scope.
-func TestTSFixedCountTrailingDefaultRun(t *testing.T) {
+// TestTSCompactArrayKeepsItsTail: a `count: N` native array carries EVERY element
+// it holds, trailing defaults included, because the wire count M IS the array's
+// length (MESSAGE_SPEC §3, af536c4) — [1,2,0,0] and [1,2] are different values.
+// A count:N array is written and read exactly like the dynamic one beside it: the
+// count only bounds M, it never elides a tail on encode and never fills one back
+// in on decode. The trim/pad pair that implemented the superseded fixed-length
+// reading is gone from the module entirely.
+func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 	mod := genTSWith(t, fixedCountDef, map[string]any{})
 	for _, want := range []string{
-		// Encode: fixed-count native arrays trim, one form per element kind.
-		"os.writeUnsignedArray(0, _trimTail(this.fu32, 0));",
-		"os.writeSignedArray(2, _trimTail(this.fi16, 0));",
-		"os.writeFp32Array(3, _trimTail(this.ffp32, 0));",
-		"os.writeFp64Array(4, _trimTail(this.ffp64, 0));",
-		"os.writeUnsignedArray(6, _trimTail(this.fbool.map((_e0) => (_e0 ? 1 : 0)), 0));",
-		"os.writeSignedArray(8, _trimTail(this.fenum, 0 as EnumMode));",
-		"os.writeUnsignedArray(9, _trimTail(this.fbits, 0));",
-		// Decode: refill to exactly the schema count, after the over-count reject.
-		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray(5) as number[]; if (_a.length > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); o.fu32 = _padTo(_a, 5, 0); break; }`,
-		`o.ffp64 = _padTo(_a, 3, 0); break; }`,
-		`o.fbool = _padTo(_a, 4, false); break; }`,
-		`o.fenum = _padTo(_a, 2, 0 as EnumMode); break; }`,
-		// The default test is a BIT-PATTERN compare (Object.is), so a trailing
-		// -0 / NaN is not a default and is never trimmed away.
-		"while (n > 0 && Object.is(a[n - 1], zero)) n--;",
-		"function _padTo<T>(a: T[], n: number, zero: T): T[] {",
+		// Encode: the value goes out untouched, one form per element kind, and each
+		// is byte-identical in shape to its dynamic sibling below.
+		"os.writeUnsignedArray(0, this.fu32);",
+		"os.writeSignedArray(2, this.fi16);",
+		"os.writeFp32Array(3, this.ffp32);",
+		"os.writeFp64Array(4, this.ffp64);",
+		"os.writeUnsignedArray(6, this.fbool.map((_e0) => (_e0 ? 1 : 0)));",
+		"os.writeSignedArray(8, this.fenum);",
+		"os.writeUnsignedArray(9, this.fbits);",
+		// Decode: the M elements that arrived ARE the value, taken as they come.
+		// The over-count reject stays — `count` still bounds M (generator#100).
+		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray(5) as number[]; if (_a.length > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); o.fu32 = _a; break; }`,
+		`o.ffp64 = _a; break; }`,
+		`o.fbool = _a; break; }`,
+		`o.fenum = _a; break; }`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-count message.ts missing %q", want)
 		}
 	}
 	for _, gone := range []string{
-		// Dynamic (count-less) arrays: no trim on encode, no refill on decode.
-		"_trimTail(this.du32", "_trimTail(this.dfp64", "_trimTail(this.dbool",
-		"os.writeUnsignedArray(1, _trimTail", "os.writeFp64Array(5, _trimTail",
-		"o.du32 = _padTo", "o.dfp64 = _padTo", "o.dbool = _padTo",
-		// A nested row is not a field: rows are never trimmed.
-		"_trimTail(_e0", "_trimTail(_e1",
-		// === would trim a trailing -0.0 (bit-pattern-distinct from +0.0).
-		"=== 0) n--", "!== 0) n--",
+		// The whole trim-on-encode / fill-on-decode pair is gone: it was correct only
+		// under the superseded reading of `count` as a length.
+		"_trimTail", "_trimTailLong", "_padTo",
+		"_trimStrs", "_trimBlobs", "_trimObjs", "_trimRows",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("fixed-count message.ts should not emit %q", gone)
 		}
 	}
-	// Dynamic arrays keep their plain writer call unchanged.
+	// Dynamic arrays keep their plain writer call unchanged — the point being that
+	// the counted ones above now read identically.
 	for _, want := range []string{
 		"os.writeUnsignedArray(1, this.du32);",
 		"os.writeFp64Array(5, this.dfp64);",
 		"os.writeUnsignedArray(7, this.dbool.map((_e0) => (_e0 ? 1 : 0)));",
-		// Nested rows lower to the untrimmed inner writer.
-		"os.writeUnsignedArray(_i0, _e0);",
+		// A nested native row is written under the positional guard: an interior
+		// empty row is not written at all, the last one always is.
+		"      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        os.writeUnsignedArray(_i0, _e0);\n      }\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-count message.ts missing unchanged dynamic form %q", want)
 		}
-	}
-	// A wrapper-sequence (string) element array is out of scope even with count.
-	if strings.Contains(mod, "_trimTail(this.fstr") || strings.Contains(mod, "o.fstr = _padTo") {
-		t.Error("string-element arrays are wrapper sequences: must not trim/pad")
 	}
 }
 
@@ -555,51 +629,59 @@ messages:
       fe:    { id: 7, type: array, items: { type: enum, count: 2, enum: { $ref: "#/$defs/enum/Mode" } } }
       fu64:  { id: 8, type: array, items: { type: u64, count: 3 }, default: [1] }
       strs:  { id: 9, type: array, items: { type: string, count: 2, maxlen: 8 } }
+      dstrs: { id: 10, type: array, items: { type: string, maxlen: 8 } }
 `
 
-// TestTSFixedCountDefaultLength: a `count: N` array is FIXED-LENGTH, so its
-// value is always exactly N elements (MESSAGE_SPEC §3) — with no schema default
-// that is N element defaults, and a short schema default is tail-padded to N.
-// This matches the fixed-storage backends' zero-filled `[T; N]`. Reached through
-// the omission path: an all-default array never touches the wire, so without the
-// materialized default it would decode back empty here and as N zeros there.
-func TestTSFixedCountDefaultLength(t *testing.T) {
+// TestTSCountIsACapacityNotADefaultLength: a `count: N` array's declared default
+// is whatever the schema wrote and nothing more (MESSAGE_SPEC §3, af536c4). N is a
+// CAPACITY: it never reaches the wire, so it can neither manufacture a default nor
+// pad a short one out to N — a fresh count:N array is the EMPTY array, exactly like
+// the dynamic one beside it, and both native and wrapper element kinds agree on
+// that. The omit guard compares against that same unpadded default, which is what
+// keeps an all-zero length-N value (a length-N array) distinct from the empty one.
+func TestTSCountIsACapacityNotADefaultLength(t *testing.T) {
 	mod := genTSWith(t, fixedDefaultDef, map[string]any{})
 	for _, want := range []string{
-		// No schema default -> N element defaults, per element kind.
-		"none: number[] = [0, 0, 0, 0, 0];",
-		"ff: number[] = [0, 0];",
-		"fe: EnumMode[] = [(0 as EnumMode), (0 as EnumMode)];",
-		// Short schema default -> tail-padded to N.
-		"short: number[] = [1, 2, 0, 0, 0];",
-		"fb: boolean[] = [true, false, false];",
-		"fu64: bigint[] = [1n, 0n, 0n];",
-		// Exactly-N default is unchanged.
+		// No schema default -> the empty array, whatever the count.
+		"none: number[] = [];",
+		"ff: number[] = [];",
+		"fe: EnumMode[] = [];",
+		// A schema default stands exactly as written — not padded out to N.
+		"short: number[] = [1, 2];",
+		"fb: boolean[] = [true];",
+		"fu64: bigint[] = [1n];",
 		"exact: number[] = [1, 2, 3];",
-		// The omission guard compares against that same materialized default, so
-		// an all-default fixed array is omitted whole (no bytes at all).
-		"if (!arrEq(this.none, [0, 0, 0, 0, 0])) {",
-		"if (!arrEq(this.short, [1, 2, 0, 0, 0])) {",
+		// The omit guard reads that same unpadded default; a count:N array with no
+		// default is omitted only when it is EMPTY.
+		"if (this.none.length !== 0) {",
+		"if (!arrEq(this.short, [1, 2])) {",
+		// A count:N WRAPPER array constructs empty for the same reason.
+		`strs: string[] = [];`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-default message.ts missing %q", want)
 		}
 	}
 	for _, gone := range []string{
-		// Dynamic arrays are NOT fixed-length: no synthesized default, no padding.
-		"dyn: number[] = [0",
-		"dynd: number[] = [1, 2, 0",
-		// A string-element array is a wrapper sequence: still starts empty.
-		"strs: string[] = [\"\"",
+		// No count-derived materialization and no padding, of either element kind.
+		"none: number[] = [0",
+		"short: number[] = [1, 2, 0",
+		"fb: boolean[] = [true, false",
+		"fu64: bigint[] = [1n, 0n",
+		"fe: EnumMode[] = [(0 as EnumMode)",
+		`strs: string[] = [""`,
+		"if (!arrEq(this.none,",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("fixed-default message.ts should not emit %q", gone)
 		}
 	}
+	// The dynamic controls are unchanged — which is the point: the two kinds now
+	// read identically.
 	for _, want := range []string{
-		"dyn: number[] = [];",      // no default, dynamic -> empty
-		"dynd: number[] = [1, 2];", // dynamic default kept verbatim (not padded)
-		"strs: string[] = [];",
+		"dyn: number[] = [];",      // no default -> empty
+		"dynd: number[] = [1, 2];", // declared default kept verbatim
+		"dstrs: string[] = [];",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-default message.ts missing unchanged dynamic form %q", want)
@@ -607,14 +689,14 @@ func TestTSFixedCountDefaultLength(t *testing.T) {
 	}
 }
 
-// TestTSFixedCountDefaultLong: the Long-backed 64-bit modes materialize the same
-// N-element default as Long values (and compare it with longArrEq).
-func TestTSFixedCountDefaultLong(t *testing.T) {
+// TestTSCountIsACapacityNotADefaultLengthLong: the Long-backed 64-bit modes render
+// the same unpadded default as Long values (and compare it with longArrEq).
+func TestTSCountIsACapacityNotADefaultLengthLong(t *testing.T) {
 	for _, mode := range []string{"long", "number"} {
 		mod := genTSWith(t, fixedDefaultDef, map[string]any{"int64": mode})
 		for _, want := range []string{
-			"private _fu64: Long[] = [Long.fromValue(1n), Long.ZERO, Long.ZERO];",
-			"if (!longArrEq(this._fu64, [Long.fromValue(1n), Long.ZERO, Long.ZERO])) {",
+			"private _fu64: Long[] = [Long.fromValue(1n)];",
+			"if (!longArrEq(this._fu64, [Long.fromValue(1n)])) {",
 		} {
 			if !strings.Contains(mod, want) {
 				t.Errorf("int64: %s fixed-default message.ts missing %q", mode, want)
@@ -625,7 +707,79 @@ func TestTSFixedCountDefaultLong(t *testing.T) {
 
 // TestTSNoFixedCountNoHelpers: a schema without any fixed-count native array
 // must not carry the trim/pad helpers (they would be dead code).
-func TestTSNoFixedCountNoHelpers(t *testing.T) {
+// TestTSFixlenSubtypeImportMatchesUse is the durable form of generator#246:
+// rather than pinning one import line per shape, it asserts the INVARIANT the
+// gate exists for — the module imports FixlenSubtype exactly when its body
+// references it. schemaHasFixlenGuard used to inspect field kinds plus one level
+// of NATIVE array element only, so a schema whose sole fixlen use is a wrapper
+// ELEMENT guard (array<string>, or a nested array<array<fp32>> row) emitted a
+// module naming a symbol it never imported: ReferenceError at decode, and tsc
+// fails on it.
+func TestTSFixlenSubtypeImportMatchesUse(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool // FixlenSubtype expected in the import line
+		src  string
+	}{
+		{"wrapper string array", true, `
+      tags: { id: 0, type: array, items: { type: string } }
+      n:    { id: 1, type: u32 }`},
+		{"wrapper blob array", true, `
+      parts: { id: 0, type: array, items: { type: blob } }
+      n:     { id: 1, type: u32 }`},
+		{"nested string rows", true, `
+      rows: { id: 0, type: array, items: { type: array, items: { type: string } } }
+      n:    { id: 1, type: u32 }`},
+		{"nested fp32 rows", true, `
+      grid: { id: 0, type: array, items: { type: array, items: { type: fp32 } } }
+      n:    { id: 1, type: u32 }`},
+		{"doubly nested blob rows", true, `
+      cube: { id: 0, type: array, items: { type: array, items: { type: array, items: { type: blob } } } }
+      n:    { id: 1, type: u32 }`},
+		// Reached through a struct element: guarded inside that struct's own class,
+		// which the named-type walk already covers.
+		{"string inside a struct element", true, `
+      items: { id: 0, type: array, items: { type: struct, fields: { s: { id: 0, type: string } } } }
+      n:     { id: 1, type: u32 }`},
+		// Negatives — the import must stay out, else every module carries a dead name.
+		{"native integer array", false, `
+      a: { id: 0, type: array, items: { type: u32 } }
+      n: { id: 1, type: u32 }`},
+		{"nested integer rows", false, `
+      m: { id: 0, type: array, items: { type: array, items: { type: i32 } } }
+      n: { id: 1, type: u32 }`},
+		{"struct elements without fixlen", false, `
+      items: { id: 0, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }
+      n:     { id: 1, type: u32 }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mod := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:"+tc.src+"\n", map[string]any{})
+			imp, body, ok := strings.Cut(mod, "\n")
+			for ok && !strings.HasPrefix(imp, "import {") {
+				imp, body, ok = strings.Cut(body, "\n")
+			}
+			if !ok {
+				t.Fatalf("no corelib import line in:\n%s", mod)
+			}
+			imported := strings.Contains(imp, "FixlenSubtype")
+			used := strings.Contains(body, "FixlenSubtype")
+			if used != tc.want {
+				t.Fatalf("expected the emitted guards to reference FixlenSubtype=%v; module:\n%s", tc.want, mod)
+			}
+			if imported != used {
+				t.Errorf("import/use mismatch: imported=%v used=%v (imported without use = dead name; used without import = ReferenceError + tsc failure)\n%s",
+					imported, used, mod)
+			}
+		})
+	}
+}
+
+// TestTSNoTrimOrPadHelpers: the trim-on-encode / fill-on-decode helper family
+// implemented the superseded fixed-length reading of `count` and is gone from
+// every module (MESSAGE_SPEC af536c4), counted arrays included. The corelib still
+// ships its equivalents; the generator simply never calls them.
+func TestTSNoTrimOrPadHelpers(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -633,11 +787,20 @@ messages:
     payload:
       a: { id: 0, type: array, items: { type: u32 } }
       s: { id: 1, type: string }
+      f: { id: 2, type: array, items: { type: u32, count: 4 } }
+      w: { id: 3, type: array, items: { type: string, count: 4, maxlen: 8 } }
+      o: { id: 4, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }
+      r: { id: 5, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
 `
-	mod := genTSWith(t, src, map[string]any{})
-	for _, gone := range []string{"_trimTail", "_trimTailLong", "_padTo"} {
-		if strings.Contains(mod, gone) {
-			t.Errorf("schema with no fixed-count array must not emit %q", gone)
+	for _, mode := range []string{"bigint", "long", "number"} {
+		mod := genTSWith(t, src, map[string]any{"int64": mode})
+		for _, gone := range []string{
+			"_trimTail", "_trimTailLong", "_padTo",
+			"_trimStrs", "_trimBlobs", "_trimObjs", "_trimRows",
+		} {
+			if strings.Contains(mod, gone) {
+				t.Errorf("int64: %s module must not emit %q", mode, gone)
+			}
 		}
 	}
 }
@@ -699,12 +862,11 @@ func TestTSInt64Default(t *testing.T) {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
 			`import { OStream, Cursor, WireType, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`,
-			// count: 8 with no schema default -> 8 element defaults (issue#136).
-			"us: bigint[] = [0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n];",
-			// count: 8 -> the trailing default run is trimmed on encode and
-			// refilled on decode; the bigint element default is 0n (issue#136).
-			"os.writeUnsignedArray(0, _trimTail(this.us, 0n));",
-			`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray(8) as bigint[]; if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o.us = _padTo(_a, 8, 0n); break; }`,
+			// count: 8 is a CAPACITY, so a fresh array is empty (§3, af536c4).
+			"us: bigint[] = [];",
+			// ...and the value goes out whole, the wire count being its length.
+			"os.writeUnsignedArray(0, this.us);",
+			`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray(8) as bigint[]; if (_a.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); o.us = _a; break; }`,
 			"u: bigint = 0n;",
 		} {
 			if !strings.Contains(mod, want) {
@@ -755,8 +917,419 @@ messages:
 			t.Errorf("message.ts must not replace a nested member (%q):\n%s", bad, mod)
 		}
 	}
-	// A wrapper-array ELEMENT is genuinely new per index, so it keeps decodeFrom.
-	if !strings.Contains(mod, "MEElem.decodeFrom(c)") {
-		t.Errorf("array elements must still use decodeFrom (fresh per index):\n%s", mod)
+	// A wrapper-array ELEMENT is not new per arrival either: the element id IS the
+	// array index (§5.1), so a REOPENED element id re-opens that element's scope and
+	// must merge into it exactly like a re-opened field (§7.4, generator#247). It
+	// therefore decodes INTO the element placed at that index, never into a fresh
+	// object that would be appended alongside.
+	if !strings.Contains(mod, "MEElem.decodeInto(c, arr[_id]!);") {
+		t.Errorf("array elements must decode INTO the element at their id:\n%s", mod)
+	}
+	if strings.Contains(mod, "arr.push(MEElem.decodeFrom(c))") {
+		t.Errorf("array elements must not be appended id-blind:\n%s", mod)
+	}
+}
+
+// TestTSArrayElementSparsityIsPositional is the codegen statement of MESSAGE_SPEC
+// §2's ONE element rule (af536c4), the same for both element kinds and the same
+// with or without a declared `count`: an element before the last one that equals
+// its element default is omitted, leaving an id GAP — a string/blob leaf simply not
+// written, a struct/union/nested-array element not framed either — while the LAST
+// element is always written, as its value or as an empty frame.
+//
+// The choice is made from the position in the VALUE, at run time. That is what the
+// superseded reading could not express: it picked the closer statically from the
+// schema (sequence elements were framed unconditionally, the trailing all-default
+// run was narrowed off before the loop), which is why `count: N` had to be a
+// length. It is a capacity, so the run-time test is the only thing left.
+//
+// Byte targets, verified against corelib-ts through a built project — every hex is
+// a regenerated shared test vector (serialized_sparse):
+//
+//	array_string_trailing_default          ["a",""]      06020a610a0207
+//	array_string_all_default               ["",""]       060a0207
+//	array_string_leading_default           ["","x",""]   060a0a78120207
+//	array_string_gap                       ["a","","c"]  06020a61120a6307
+//	array_struct_interior_default_element  [{1},{},{3}]  06060001071600030707
+//	array_struct_all_default_elements      [{},{}]       060e0707
+func TestTSArrayElementSparsityIsPositional(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      fblobs:  { id: 3, type: array, items: { type: blob, count: 2, maxlen: 4 } }
+      rows:    { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+`, map[string]any{})
+
+	for _, want := range []string{
+		// A sequence-form ELEMENT takes the positional closer: keep the frame at the
+		// last index (its presence fixes the length), drop it in the interior (an
+		// all-default element vanishes into an id gap). Counted and dynamic alike —
+		// `count: 5` buys the fixed array no exemption.
+		"    os.writeSequenceBeginLazy(0);\n    this.fixed.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(1);\n    this.dynamic.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+		// A leaf element gets the same rule as an unconditional `|| last` disjunct,
+		// walking the value whole — nothing is narrowed away first.
+		"    for (let _i0 = 0, _a0 = this.fstrs; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]! !== \"\" || _i0 === _a0.length - 1) {\n        os.writeString(_i0, _a0[_i0]!);\n      }\n    }\n",
+		"    for (let _i0 = 0, _a0 = this.fblobs; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]!.length !== 0 || _i0 === _a0.length - 1) {\n        os.writeBlob(_i0, _a0[_i0]!);\n      }\n    }\n",
+		// A NATIVE nested row has no frame of its own, so the rule lands on the write.
+		"    this.rows.forEach((_e0, _i0, _a0) => {\n      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        os.writeUnsignedArray(_i0, _e0);\n      }\n    });\n",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing positional element rule %q:\n%s", want, mod)
+		}
+	}
+	// A sequence-typed FIELD is NOT positional: it always takes the dropping closer,
+	// so an empty array is omitted and absence reconstructs it (§2).
+	if got, want := strings.Count(mod, "\n    os.writeSequenceEnd();\n"), 5; got != want {
+		t.Errorf("field-level dropping closers = %d, want %d (one per array field)", got, want)
+	}
+	// Nothing narrows the run before the loop any more: the wire count IS the length
+	// (§3) and the highest wrapper id IS the last index (§5.1).
+	for _, gone := range []string{"_trimObjs", "_trimStrs", "_trimBlobs", "_trimRows", "_trimTail", "_padTo"} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("message.ts must not narrow an array run with %q:\n%s", gone, mod)
+		}
+	}
+	// isDefault is the exact negation of what marshal writes. The writer emits a
+	// child for EVERY element the value holds (the last one whatever its value), so
+	// "no child is written" is exactly "the array is empty" — for every kind, with
+	// or without a count. Anything narrower would omit a field that is on the wire.
+	for _, want := range []string{
+		"if (!(this.fixed.length === 0)) return false;",
+		"if (!(this.dynamic.length === 0)) return false;",
+		"if (!(this.fstrs.length === 0)) return false;",
+		"if (!(this.fblobs.length === 0)) return false;",
+		"if (!(this.rows.length === 0)) return false;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("isDefault must mirror the marshal loop, missing %q:\n%s", want, mod)
+		}
+	}
+}
+
+// generator#247: a wrapper array's element id IS the array index (§5.1), so an
+// element is PLACED at arr[id] after gap-filling — never appended. Appending
+// shortens the array by the size of any interior id gap and decodes a REOPENED id
+// as a second element instead of merging into the first (§7.4).
+//
+// Under af536c4 an interior gap is no longer exotic: an interior element equal to
+// its element default is omitted by every conformant encoder, so id-blind
+// collection now silently shifts every later element down by one. What the count
+// does NOT do is add elements — a decoded wrapper array is exactly as long as the
+// highest present id + 1, never filled out to N.
+func TestTSWrapperElementsArePlacedByID(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      objs: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } } }
+      dyn:  { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      strs: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      rows: { id: 3, type: array, items: { type: array, count: 3, items: { type: u32, count: 3 } } }
+      wrows: { id: 4, type: array, items: { type: array, count: 3, items: { type: string, maxlen: 8 } } }
+`, map[string]any{})
+
+	for _, want := range []string{
+		// placement, not append — and the gap-fill that precedes it
+		"const _id = c.id; while (arr.length <= _id) arr.push(new VecObjsElem()); VecObjsElem.decodeInto(c, arr[_id]!);",
+		"const _id = c.id; while (arr.length <= _id) arr.push(new VecDynElem()); VecDynElem.decodeInto(c, arr[_id]!);",
+		`const _id = c.id; while (arr.length <= _id) arr.push(""); `,
+		// A nested ROW is placed by id too. This was the id-blind append: it was
+		// unreachable while every row was written, and an interior gap makes it
+		// reachable, shifting every later row down one index.
+		"const _id = c.id; while (arr.length <= _id) arr.push([]); arr[_id] = c.readUnsignedArray(3) as number[];",
+		// ...including a wrapper row, whose own collector — typed with the ROW's type,
+		// see TestTSNestedWrapperRowCollectorTypes — runs inside the placement.
+		"const _id = c.id; while (arr.length <= _id) arr.push([]); arr[_id] = ((): string[] =>",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
+	}
+	// The defects this replaced: appending ignored the id entirely.
+	for _, bad := range []string{
+		"arr.push(VecObjsElem.decodeFrom(c))",
+		"arr.push(c.readUnsignedArray(3) as number[])",
+		"arr.push(((): string[] =>",
+	} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("elements must not be appended id-blind (%q):\n%s", bad, mod)
+		}
+	}
+	// `count: N` never ADDS an element: the decoded length is highest present id + 1,
+	// exactly as for a count-less array, because the last element is always on the
+	// wire. The fill-to-N that the superseded fixed-length reading needed is gone.
+	for _, gone := range []string{
+		"while (arr.length < 4) arr.push(new VecObjsElem());",
+		`while (arr.length < 3) arr.push("");`,
+		"while (arr.length < 3) arr.push([]);",
+		"while (_r.length < ",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("a decoded wrapper array must not be filled to N (%q):\n%s", gone, mod)
+		}
+	}
+	// The cap bound still rejects an out-of-range element id, which also bounds the
+	// gap-fill above — a capacity is still a bound, just not a length.
+	if !strings.Contains(mod, `if (c.id >= 4) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 4");`) {
+		t.Errorf("the over-index guard must survive:\n%s", mod)
+	}
+}
+
+// A `count: N` array constructs EMPTY, of every element kind — native and wrapper
+// alike (MESSAGE_SPEC §3, af536c4). N is a capacity, so it never manufactures
+// elements the value does not have; the field's declared default is the empty
+// collection, an absent field decodes back to it, and a fresh message still
+// encodes to zero bytes.
+//
+// The superseded reading materialized N element defaults here, which made an
+// all-zero length-N array indistinguishable from the empty one and dropped both.
+func TestTSCountNArrayConstructsEmpty(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      strs:   { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      nums:   { id: 1, type: array, items: { type: u32, count: 3 } }
+      blobs:  { id: 2, type: array, items: { type: blob, count: 2, maxlen: 4 } }
+      objs:   { id: 3, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }
+      rows:   { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+      dstrs:  { id: 5, type: array, items: { type: string, maxlen: 8 } }
+      dobjs:  { id: 6, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+`, map[string]any{})
+
+	for _, want := range []string{
+		"strs: string[] = [];",
+		"nums: number[] = [];",
+		"blobs: Uint8Array[] = [];",
+		"objs: VecObjsElem[] = [];",
+		"rows: number[][] = [];",
+		// The count-less controls, unchanged — the point being that both kinds now
+		// read identically.
+		"dstrs: string[] = [];",
+		"dobjs: VecDobjsElem[] = [];",
+		// A fresh message still encodes to nothing: every array field is default.
+		"if (!(this.nums.length === 0)) return false;",
+		"if (!(this.strs.length === 0)) return false;",
+		"if (!(this.objs.length === 0)) return false;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
+	}
+	for _, gone := range []string{
+		`strs: string[] = ["`,
+		"nums: number[] = [0",
+		"blobs: Uint8Array[] = [new Uint8Array()",
+		"objs: VecObjsElem[] = [new VecObjsElem()",
+		"rows: number[][] = [[]",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("a count:N array must not materialize N elements (%q):\n%s", gone, mod)
+		}
+	}
+}
+
+// isDefault must be emitted for every generated class and must be the exact
+// negation of marshal's per-field write guards (MESSAGE_SPEC §2) — including a
+// nested object, which is default iff ITS marshal writes no child.
+func TestTSIsDefaultMirrorsMarshalGuards(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  m:
+    payload:
+      n:    { id: 0, type: u8, default: 7 }
+      s:    { id: 1, type: string, default: "hi" }
+      b:    { id: 2, type: blob, maxlen: 4 }
+      sub:  { id: 3, type: struct, fields: { x: { id: 0, type: i32 } } }
+      nat:  { id: 4, type: array, items: { type: i32, count: 3 }, default: [1, 2, 3] }
+      dynn: { id: 5, type: array, items: { type: u8 } }
+`, map[string]any{})
+	for _, want := range []string{
+		"if (!(this.n === 7)) return false;",
+		`if (!(this.s === "hi")) return false;`,
+		"if (!(this.b.length === 0)) return false;",
+		"if (!(this.sub.isDefault())) return false;",
+		"if (!(arrEq(this.nat, [1, 2, 3]))) return false;",
+		"if (!(this.dynn.length === 0)) return false;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("isDefault missing %q:\n%s", want, mod)
+		}
+	}
+	// Every class carries the predicate, nested types included.
+	if strings.Count(mod, "isDefault(): boolean {") != 2 {
+		t.Errorf("every generated class must carry isDefault:\n%s", mod)
+	}
+	// A field-less class is trivially default.
+	empty := genTSWith(t, "version: 1\nmessages:\n  e:\n    payload: {}\n", map[string]any{})
+	if !strings.Contains(empty, "isDefault(): boolean {\n    return true;\n  }") {
+		t.Errorf("a field-less class must be trivially default:\n%s", empty)
+	}
+}
+
+// The LAST element of a wrapper array is always written, whatever its value, and a
+// declared `count` changes nothing about that (MESSAGE_SPEC §2, af536c4). Such an
+// array recovers its length as highest-present-id + 1 (§5.1), so the element at
+// the highest index is the only one whose PRESENCE carries the length: dropping a
+// trailing default leaf would encode ["a", ""] exactly like ["a"] and decode one
+// element short.
+//
+// The count:N row is the one af536c4 moved. It used to be exempt — its length was
+// "N whatever the wire carries", so the whole trailing run was elided — and it now
+// obeys the same rule as its count-less sibling, character for character.
+func TestTSLastArrayElementIsAlwaysWritten(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      dynstr:    { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      dynblob:   { id: 1, type: array, items: { type: blob, maxlen: 8 } }
+      fixedstr:  { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      fixedblob: { id: 3, type: array, items: { type: blob, count: 3, maxlen: 8 } }
+`, map[string]any{})
+
+	for _, want := range []string{
+		// The run is walked whole and the last index escapes the omit test — the same
+		// shape with and without a count.
+		"for (let _i0 = 0, _a0 = this.dynstr; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]! !== \"\" || _i0 === _a0.length - 1) {",
+		"for (let _i0 = 0, _a0 = this.fixedstr; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]! !== \"\" || _i0 === _a0.length - 1) {",
+		"for (let _i0 = 0, _a0 = this.dynblob; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]!.length !== 0 || _i0 === _a0.length - 1) {",
+		"for (let _i0 = 0, _a0 = this.fixedblob; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]!.length !== 0 || _i0 === _a0.length - 1) {",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
+	}
+	// A bare omit test with no last-index escape would encode ["a",""] as ["a"].
+	if strings.Contains(mod, "if (_a0[_i0]! !== \"\") {") || strings.Contains(mod, "if (_a0[_i0]!.length !== 0) {") {
+		t.Errorf("no leaf element may be omitted without the last-index escape:\n%s", mod)
+	}
+	// The all-default predicate follows the writer: [""] now puts an element on the
+	// wire, so the field is NOT default and must not be omitted — of either kind.
+	for _, want := range []string{
+		"if (!(this.dynstr.length === 0)) return false;",
+		"if (!(this.dynblob.length === 0)) return false;",
+		"if (!(this.fixedstr.length === 0)) return false;",
+		"if (!(this.fixedblob.length === 0)) return false;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("isDefault must mirror the marshal loop, missing %q:\n%s", want, mod)
+		}
+	}
+	for _, gone := range []string{"_trimStrs", "_trimBlobs"} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("no string/blob array may be trimmed, counted or not (%q):\n%s", gone, mod)
+		}
+	}
+}
+
+// TestTSNestedWrapperRowCollectorTypes: a nested array whose ROW is itself a
+// wrapper sequence — array<array<string>>, array<array<blob>>,
+// array<array<struct>> and the same one level deeper — must declare its inline
+// row collector with the ROW's type, not the container type of the level above.
+//
+// tsArrayType already answers with the container type for the level it is handed,
+// so appending another "[]" in elemDecode declared `const _r: string[][]` for a
+// row that the very next statements fill with LEAF strings (`_r.push("")`,
+// `_r[_id] = c.readString()`). The emitted module then failed tsc with TS2345
+// "Argument of type 'string' is not assignable to parameter of type 'string[]'"
+// plus TS2322 follow-ons on the same line — the TypeScript analogue of the C++
+// defect fixed as generator#250. Native rows (array<array<u32>>) never went
+// through this path and are kept here as the control.
+func TestTSNestedWrapperRowCollectorTypes(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+$defs:
+  struct:
+    Point:
+      x: { id: 0, type: i32 }
+      y: { id: 1, type: i32 }
+messages:
+  NestedRows:
+    payload:
+      strrows:    { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }
+      blobrows:   { id: 1, type: array, items: { type: array, count: 2, items: { type: blob, count: 2, maxlen: 4 } } }
+      structrows: { id: 2, type: array, items: { type: array, count: 2, items: { type: struct, count: 2, fields: { $ref: '#/$defs/struct/Point' } } } }
+      strcube:    { id: 3, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } } }
+      numrows:    { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+`, map[string]any{})
+
+	// The row collector is declared with the row's own type: one "[]" less than the
+	// member it is placed into. Depth 3 wraps the depth-2 collector, so the outer
+	// row is string[][] and the inner one string[].
+	for _, tc := range []struct{ member, row string }{
+		{"string[][]", "string[]"},
+		{"Uint8Array[][]", "Uint8Array[]"},
+		{"StructPoint[][]", "StructPoint[]"},
+		{"string[][][]", "string[][]"},
+	} {
+		if !strings.Contains(mod, "const arr: "+tc.member+" = [];") {
+			t.Fatalf("expected a member declared %q:\n%s", tc.member, mod)
+		}
+		want := "arr[_id] = ((): " + tc.row + " => { const _r: " + tc.row + " = [];"
+		if !strings.Contains(mod, want) {
+			// The pristine emission put tc.member here instead: the collector carried
+			// the container type of the level above while its body collected that
+			// container's leaf elements.
+			t.Errorf("row collector for %s must be typed %s, missing %q:\n%s", tc.member, tc.row, want, mod)
+		}
+	}
+
+	// Structural invariant, independent of the shapes above: in every emitted row
+	// collector `((): T => { const _r: T = []; … _r.push(D)`, the gap-fill default D
+	// must be the default of T's ELEMENT type. A collector typed one level too high
+	// gets exactly that wrong, whatever the shape.
+	elemDefault := map[string]string{"string": `""`, "Uint8Array": "new Uint8Array()"}
+	collectors := 0
+	for rest := mod; ; {
+		i := strings.Index(rest, "((): ")
+		if i < 0 {
+			break
+		}
+		rest = rest[i+len("((): "):]
+		j := strings.Index(rest, " => { const _r: ")
+		if j < 0 {
+			continue
+		}
+		collectors++
+		rowT := rest[:j]
+		if !strings.HasSuffix(rowT, "[]") {
+			t.Errorf("row collector type %q is not an array type:\n%s", rowT, mod)
+			continue
+		}
+		elem := strings.TrimSuffix(rowT, "[]")
+		want, ok := elemDefault[elem]
+		if !ok {
+			if strings.HasSuffix(elem, "[]") {
+				want = "[]" // a deeper row: the empty row is the element default
+			} else {
+				want = "new " + elem + "()" // struct/union element
+			}
+		}
+		body := rest[j:]
+		if e := strings.Index(body, "; })()"); e >= 0 {
+			body = body[:e]
+		}
+		if !strings.Contains(body, "_r.push("+want+")") {
+			t.Errorf("collector typed %s must gap-fill with the %s default %s:\n%s", rowT, elem, want, body)
+		}
+	}
+	if collectors != 5 { // 3 depth-2 rows + the depth-3 row and its inner row
+		t.Errorf("expected 5 row collectors, found %d:\n%s", collectors, mod)
+	}
+
+	// Control: a row of native scalars still reads in one corelib call, untouched.
+	if !strings.Contains(mod, "arr[_id] = c.readUnsignedArray(3) as number[];") {
+		t.Errorf("a native row must still read in one call:\n%s", mod)
 	}
 }

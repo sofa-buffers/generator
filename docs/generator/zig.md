@@ -43,16 +43,94 @@ integer, shared with the Rust backend's rules so all ports agree.
 | numeric / bool / fp | `u8`…`u64`, `i8`…`i64`, `bool`, `f32`, `f64` |
 | enum / bitfield | narrowest backing integer (`i8`/`i16`/`i32`, `u8`…`u64`) |
 | string / blob | `[]const u8` |
-| native numeric/enum/bool/bitfield array (`count N`) | `[N]T` (stack, allocation-free) |
+| native numeric/enum/bool/bitfield array (`count N`) | `FixedArray(T, N)` — `[N]T` inline capacity **plus** `len` (stack, allocation-free) |
 | native array without `count` | `[]const T` |
-| string/blob/struct/union/nested array | `[]const T` |
+| string/blob/struct/union/nested array | `[]const T` (a `count: N` bounds it; it is not materialized) |
 | struct / union | the generated struct type |
+
+### `count: N` is a capacity, so the storage carries a length
+
+`count: N` is a **capacity**, never a length (MESSAGE_SPEC §3): a field holds
+0..N elements and the wire count `M` **is** the length. A bare `[N]T` can only
+ever *be* `N` long, so it cannot represent that value — this backend's count:N
+native arrays are therefore `FixedArray(T, N)`, a small generated type holding
+`items: [N]T` plus `len: usize`:
+
+```zig
+nums: FixedArray(u32, 3) = .{},                                   // no default: the EMPTY array
+seed: FixedArray(u32, 5) = .{ .items = .{ 1, 2, 3, 0, 0 }, .len = 3 }, // default: [1, 2, 3] — 3 long, not 5
+```
+
+The value is `items[0..len]` (`.slice()`); `items[len..]` is spare capacity that
+never reaches the wire. `.init(&.{ 1, 2 })` / `.set(&.{ 1, 2 })` build one. This
+keeps a bounded array **allocation-free on both encode and decode**, which is the
+point of `count` on this max-speed target — turning it into a heap slice would
+make a bounded schema allocate. A declared `default` stands exactly as written
+and is never padded out to `N`, so a fresh count:N array is the *empty* array
+(it used to be `N` element defaults).
 
 Per message:
 
 - `marshal(self, os: *sofab.OStream) sofab.Error!void` — sparse-canonical
   field writes into any caller-configured `OStream` (fixed buffer, or a flush
   sink for streaming).
+
+  Sequences are opened with the corelib's **`writeSequenceBeginLazy(id)`**,
+  which holds the header back until a child field actually appears — so the
+  `≠ default` test of MESSAGE_SPEC §2 applies to a sequence-typed field for
+  free, with no whole-object comparison and no buffering: "the nested
+  `marshal` wrote no child" *is* "the value equals its declared default".
+  Which **closer** follows is decided per position — statically for a *field*,
+  and from the index in the **value** for an *element*:
+
+  | position | closer |
+  |---|---|
+  | `struct` / `union` field | `writeSequenceEnd` — an all-default nested object is **omitted** |
+  | wrapper-array field (the array itself) | `writeSequenceEnd` — an empty array is omitted; absence reconstructs it |
+  | wrapper-array **element**, last index | `writeSequenceEndKeep` — the empty frame stays |
+  | wrapper-array **element**, interior | `writeSequenceEnd` — the frame drops, leaving an id **gap** |
+
+  That element split is the whole of the rule. An array carries no length field:
+  its decoded length is *highest present id + 1* (MESSAGE_SPEC §5.1), so the
+  element at the highest index is the only one whose **presence** carries the
+  length, and nothing that carries the length may be elided. Everything before it
+  may be: an interior element equal to the element default is indistinguishable
+  from an absent one, because the decoder restores an absent id from that same
+  default. So: **interior sparse, last always written** — as its value for a
+  leaf, as an empty frame for a sequence element. Sequence-form elements used to
+  have a carve-out (framed unconditionally); they no longer do, and one rule now
+  covers both element kinds. Consequently an all-default message encodes to zero
+  bytes.
+
+  A declared `count: N` changes none of it. `N` is a capacity, not a length
+  (§3), so it can never restore an elided tail: **no trailing run is elided**, of
+  either element kind, with or without a count. `["a", ""]` stays distinct from
+  `["a"]`, `["", ""]` is written as its final element alone at id 1, and
+  `["", "x", ""]` elides element 0 into a gap while keeping element 2. The
+  compact form follows the same principle from the other side: the wire count IS
+  the length, so `[1, 2, 0, 0]` keeps its trailing zeros and stays distinct from
+  `[1, 2]`.
+
+  A **native** nested row (an array-of-native-array element) has no frame of its
+  own, so the rule lands on the write itself: an interior empty row is not
+  written at all, and the last row always is (as a count-0 array if that is what
+  it is).
+
+  Every generated `struct`/`union` carries `pub fn isDefault()`: the explicit
+  form of the "no child was written" test the lazy framing encodes implicitly for
+  a *field*. Its per-field terms are generated from the very expressions
+  `marshal` writes each field under, so the predicate and the writer cannot drift
+  apart — one that disagreed would omit a field that is on the wire, or keep one
+  that is not. An array field's own omit test is now simply emptiness: the writer
+  emits a child for every element it holds, so "no child is written" is exactly
+  "the array is empty".
+
+  A wrapper array's declared `default` is not materialized in the
+  generated field initializer today (it is the empty collection), so absent
+  and explicitly-empty denote the same value and the plain dropping closer is
+  correct; closing that gap would require an
+  `if (value != default) { …; writeSequenceEndKeep(); }` guard on the field
+  wrapper.
 - `encode(self, alloc) ![]u8` — convenience wrapper: streams through a stack
   scratch buffer into an allocated byte slice via the corelib flush sink.
 - `decode(alloc, data) DecodeError!Message` — one-shot decode on the
@@ -79,13 +157,52 @@ vtable). Element stores are bounds-checked explicitly — ReleaseFast compiles
 without implicit bounds checks, so hostile counts/ids degrade to dropped
 elements, never out-of-bounds writes.
 
+### Array elements are placed by id, and nothing is filled in
+
+A wrapper array's element **id IS the array index** (MESSAGE_SPEC §5.1). Every
+element kind honours that, not just the `string`/`blob` leaves that go through
+`sofab.arrays.setElem`:
+
+- `struct`/`union` elements and wrapper nested rows: `sequenceBegin` grows the
+  destination to `id + 1` — default-filling the id gaps an omitted element
+  leaves — records the index in a per-frame `ei_*` register, and descends into
+  `_at(path, ei)`. Appending instead (generator#247) shortened the array by the
+  size of any interior id gap and decoded a **reopened** element id as a second
+  element rather than merging into the first; placement gives the §7.4
+  struct-merge for free.
+- **native rows** (an array whose elements are native arrays): `arrayBegin`
+  used to *append* a row per header, ignoring the element id. That was
+  unreachable while every row was framed; the §2 interior-sparse rule makes an
+  omitted empty row reachable, and an appending collector then shifts every
+  later row down by one. Rows are now placed at `_at(path, id)` too, with the
+  same `ei_*` register carrying the index into the element stores.
+
+The `count: N` over-index reject runs first in every case (an id `≥ N` is
+INVALID, §5.1/§7), which also bounds the id-keyed gap-fill against an over-index
+amplification.
+
+**Nothing is filled in on the way out.** The wire count `M` IS a compact array's
+length and the highest present element id IS a wrapper array's last index
+(§3/§5.1), so what arrived is the whole value: no `sequenceEnd` refill to `N`,
+no `[M, N)` tail on a native array, and no `count: N` array materialized to `N`
+element defaults at construction — a fresh one is empty, wrapper and native
+alike. A count:N native array's `len` is reset at its array header (an
+explicitly empty array decodes to the *empty* array) and advanced by the element
+stores; the reset is gated on the announced wire **kind**, so a header
+contradicting the declared element type is skipped like an unknown id and leaves
+a correctly typed earlier occurrence intact (§7.3/§7.4).
+
+`sequenceBegin` still resets a wrapper array field to `&.{}` before its elements
+land: an array wrapper IS the array's value, so a later occurrence replaces it
+whole rather than merging by index (§7.4).
+
 ## Unbounded fields
 
 There is no `no_std`-style sizing gate: `corelib-zig` is the family's
 max-speed port, and the generated code takes an allocator on the decode
 path, so a string/blob without `maxlen` or an array without `count` is fine —
-bounded native arrays still lower to fixed `[N]T` stack storage and skip the
-allocator entirely.
+bounded native arrays still lower to inline `FixedArray(T, N)` stack storage and
+skip the allocator entirely.
 
 Two receiver-side protections cover those unbounded fields on decode:
 

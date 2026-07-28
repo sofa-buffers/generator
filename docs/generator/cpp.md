@@ -20,13 +20,25 @@ embedded profile. The three usable combinations:
 | `corelib` | `allow_dynamic` | Storage | Bounds | Heap |
 |---|---|---|---|---|
 | `cpp` (default) | *ignored* | `std::string` / `std::vector` | optional; `max_dyn_*` caps what the schema leaves open | yes |
-| `c-cpp` | `false` (default) | `FixedString<N>` / `FixedBytes<N>` / `std::array` / `InlineVector<T,N>` | **mandatory** | none on the message path |
+| `c-cpp` | `false` (default) | `FixedString<N>` / `FixedBytes<N>` / `InlineVector<T,N>` | **mandatory** | none on the message path |
 | `c-cpp` | `true` | `std::string` / `std::vector` | **mandatory** | yes |
 
-The two `c-cpp` rows accept exactly the same schemas and produce byte-identical
-encode output and the same `_maxSize`, so the switch is a per-device decision and
-never a schema change. What differs is where a field's bytes live, and therefore
-what a message costs to hold and to move.
+The two `c-cpp` rows accept exactly the same schemas and produce the same
+`_maxSize`, so the switch is a per-device decision and never a schema change.
+What differs is where a field's bytes live, and therefore what a message costs to
+hold and to move.
+
+Encode output is byte-identical too, and so is what a decode reconstructs — for
+every field kind, with no exception. That holds because **every array member
+carries a logical length**, whichever container it lands in: `std::vector<T>` on
+the heap profiles, `sofab::InlineVector<T, N>` (inline slots plus a `len_`) on
+the heap-free one. Since `count` is a capacity and the wire count is the array's
+length (MESSAGE_SPEC §3), a member that could not be shorter than N could not
+express what the wire can say: `[1, 2]` on a `count: 4` field would be four
+elements in one storage mode and two in the other, and the wire `7b 02 01 02`
+would come back as `[1, 2]` on one leg and `[1, 2, 0, 0]` on the other. A
+`std::array<T, N>` was exactly such a member, and it is no longer used for one.
+See *`count` is a capacity* below.
 
 ### `encode()` and `encodeTo()`
 
@@ -36,6 +48,57 @@ actually written — no staging buffer and no copy. `encodeTo(dst, cap)` writes
 into storage the caller already owns and allocates nothing at all; it returns the
 byte count, or `0` if the message does not fit in `cap`, in which case `dst`
 holds however much was written before that was discovered.
+
+### `reset()` and decoding a second message
+
+Every generated message and nested type also gets a public `void reset() noexcept`
+that puts each field back to its **declared default, in place** — containers are
+cleared rather than reallocated, so a destination reused across messages keeps the
+capacity it has already paid for, and a struct or union member recurses into its
+own `reset()` instead of being assigned a fresh temporary.
+
+It exists because a field whose value equals its default is **absent** from the
+encoded bytes (MESSAGE_SPEC §2), a sequence-typed one included. An absent field
+delivers no `deserialize()` callback, so nothing on the callback side can clear a
+destination that is decoded into twice: the "a later occurrence replaces the array
+whole" clear inside `sofab::StringSeq` / `BlobSeq` / `sofabgen::WrapperSeq` hangs
+off the sequence header, which an omitted field never sends. Clearing has to happen where
+absence is still observable — at the start of the decode.
+
+So: **drive a stream yourself and `reset()` is yours to call** between messages,
+alongside the corelib's own `IStreamImpl::reset()` for the decoder state (the two
+halves: the destination is yours, the decoder state is the stream's).
+
+```cpp
+sofab::IStreamObject<Telemetry> in;
+in.feed(first.data(), first.size());
+in.reset();                       // decoder state AND the message it owns
+in.feed(second.data(), second.size());
+
+Telemetry dst;                    // a destination you own
+sofab::IStreamInline *sp = nullptr;
+sofab::IStreamInline s{[&](sofab::id id, std::size_t sz, std::size_t ct) {
+    dst.deserialize(*sp, id, sz, ct);
+}};
+sp = &s;
+s.feed(first.data(), first.size());
+s.reset(); dst.reset();           // both halves, or the first message survives
+s.feed(second.data(), second.size());
+```
+
+`try_decode` handles this for you, differently per profile:
+
+| profile | shape | `out` on a rejected input |
+|---|---|---|
+| `corelib: cpp` | `out.reset()`, then an `IStreamInline` decodes into `out` directly — no second instance, no copy, no buffer handed back | the fields decoded before the error |
+| `corelib: c-cpp` | decodes into a fresh `IStreamObject` and copies the result over `out` | untouched |
+
+The fixed profile keeps the copy on purpose. Its containers are inline, so there
+is no allocation to hand back and nothing to reuse, and the instance it decodes
+into starts at the declared defaults every time — while its `IStreamObject`
+dispatches through a C-ABI function pointer where `IStreamInline` holds a
+`std::function`. Routing the decode through a callback there would put that
+machinery in `.text` on the targets that have the least of it.
 
 Setting any of the three `max_dyn_*` keys also derives a streaming reassembly cap, passed as
 `sofab::Limits{max_buffered_field}` into the one-shot decode entry points, that
@@ -84,8 +147,10 @@ container: a string with no `maxlen` → `std::string`, a blob with no `maxlen` 
 `std::vector<std::uint8_t>`, and an array with no `count` → `std::vector<T>` —
 including a **native scalar array** (e.g. an `array` of `u32` with no count is
 `std::vector<std::uint32_t>`, not `std::array<T, 0>`). A **bounded** native array
-(count present) stays a fixed `std::array<T, N>`. Decode sizes a dynamic native
-vector to the wire element count before filling it, and the
+(count present) is a `std::vector<T>` too: `count` is a capacity, so the member
+still has to hold anything from 0 to N elements, and only a length-carrying
+container can. Decode sizes a native vector to the wire element count before
+filling it, and the
 [`max_dyn_array_count`](#options) cap (when set) rejects an over-cap count as
 `Error::LimitExceeded` before any allocation.
 
@@ -95,8 +160,11 @@ vector to the wire element count before filling it, and the
 heap-free containers — there is no separate knob. This removes hidden dynamic
 allocation from the generated message code. If a target has the resources for a
 heap, use `corelib: cpp` (which uses `std::vector`/`std::string`). Wire output is
-identical either way — this is purely an in-memory representation change, so the
-shared conformance vectors and every sha256 stay the same.
+identical either way for every value both representations can hold — this is an
+in-memory representation change, so the shared conformance vectors and every
+sha256 stay the same. The one value that only one of them can hold is a
+`count: N` array of native scalars shorter than N; see
+[`count` is a capacity](#count-is-a-capacity).
 
 What `c-cpp` produces vs `cpp` (all sized from the schema's `maxlen`/`count`):
 
@@ -107,13 +175,37 @@ What `c-cpp` produces vs `cpp` (all sized from the schema's `maxlen`/`count`):
 | string array (`count N`, elem `maxlen M`) | `std::vector<std::string>` | `sofab::InlineVector<sofab::FixedString<M>, N>` |
 | blob array (`count N`, elem `maxlen M`) | `std::vector<std::vector<std::uint8_t>>` | `sofab::InlineVector<sofab::FixedBytes<M>, N>` |
 | struct / union / matrix array (`count N`) | `std::vector<T>` | `sofab::InlineVector<T, N>` |
-| native numeric/enum/bool/bitfield array | `std::array<T, N>` | `std::array<T, N>` (already fixed) |
+| native numeric/enum/bool/bitfield array (`count N`) | `std::vector<T>` | `sofab::InlineVector<T, N>` |
+
+A **boolean** array's element type differs between the two corelibs:
+`bool` on `corelib: cpp`, **`std::uint8_t`** on `corelib: c-cpp` (in both storage
+modes). corelib-c-cpp's decoder is *deferred* — `read()`/`readArray()` record the
+destination's **address** and the C runtime writes the element bytes after the
+field callback has returned — so the destination has to be the member itself and
+needs one addressable byte per element. `std::vector<bool>` is the bit-packed
+specialisation: it has no `data()` and no byte per element, so it cannot be a
+decode destination at all. Both c-cpp storage modes take the same element type so
+that `allow_dynamic` stays a storage switch and not an API change. The wire is
+unaffected — a boolean array has always travelled as an unsigned array of 0/1
+bytes, which is now exactly what the member holds.
 
 All three fixed-capacity containers — `sofab::FixedString<N>`,
 `sofab::FixedBytes<N>` and `sofab::InlineVector<T,N>` — live in the corelib-c-cpp
 wrapper (`sofab.hpp`) as a single source of truth; the generator only references
 them (nothing container-shaped is emitted into the generated headers, so a fix to
-a container is a corelib change, not a codegen change).
+a container is a corelib change, not a codegen change — the one generated block,
+`namespace sofabgen`, holds the wrapper-array element collector described
+[below](#wrapper-arrays-element-placement-and-the-sparse-element-rule), which is
+bounded by the schema `count` and so cannot live in a corelib, plus
+`sofabgen::RawArray` — a *view*, not a container: it owns no storage and only
+lets the corelib see an **enum** array member's elements as the enum's backing
+integer, which is what the wire carries. It exists because the deferred decoder
+must bind the member itself, so the temporary the `corelib: cpp` leg converts
+through would dangle. It reinterprets the *elements*, never the container:
+casting a `std::vector<T>` to a `std::array<T, N>` would make the vector's own
+begin/end/capacity words its first N elements, so wire bytes would overwrite the
+begin pointer and the destructor would free a pointer assembled from the
+message).
 
 `sofab::FixedString<N>` is a heap-free, `std::string`-friendly fixed-capacity
 string (implicit construct/assign from `std::string`/`std::string_view`/`const
@@ -127,19 +219,27 @@ length distinct from the capacity `N`** — a blob shorter than its `maxlen`, an
 array shorter than its `count`. `std::array<T,N>` is always exactly length `N`, so
 it cannot represent "3 of a possible 5"; `std::vector` would represent it but
 reintroduces the heap this profile exists to avoid. So a purpose-built inline
-container (inline `std::array` storage + a separate `len_`) is the only fit — and
-where a field really *is* fixed-length (the native numeric arrays), the generator
-does use plain `std::array<T,N>`. `InlineVector`'s inline storage also never
+container (inline `std::array` storage + a separate `len_`) is the only fit —
+which is what makes every array express the 0..N that §3 and §5.1 ask of it.
+That now includes the **native scalar** arrays, which used to be the one
+exception: they were plain `std::array<T,N>` and so had no length, which is the
+gap [`count` is a capacity](#count-is-a-capacity) used to record and no longer
+does. `InlineVector` gained a `resize()` for it (corelib-c-cpp), which is what
+lets `IStreamImpl::readArray` keep ownership of the tag / bound / reset / bind
+order for inline storage too — without it, readArray took its fixed-extent
+branch, set the logical length to 0 and dropped the array silently.
+`InlineVector`'s inline storage also never
 reallocates, so a bound-then-filled element is address-stable — strictly safer
 under the corelib-c-cpp deferred decoder than a `std::vector` + `reserve()`.
-The generated per-element collectors (`_FixedStrSeq` / `_FixedBlobSeq`) place a
-string/blob element at its wire index `id` by growing the `InlineVector` up to
-that slot; because `emplace_back()` is a no-op once the vector is full, an
-untrusted element index `id >= N` is **dropped** (the fill loop is guarded by the
-container capacity) rather than spun on forever — the corelib skips the element's
-payload since the callback binds no destination, mirroring the native-array
-over-capacity drop (MESSAGE_SPEC §5.1). Without the guard a 4-byte message could
-hang the decoder (issue #126, DoS).
+The per-element collectors (`sofab::FixedStringSeq` / `FixedBlobSeq` for the
+leaves, `sofabgen::WrapperSeq` for structs, unions and rows) place an element at
+its wire index `id` by growing the `InlineVector` up to that slot; because
+`emplace_back()` is a no-op once the vector is full, an untrusted element index
+`id >= N` is **dropped** (the fill loop is guarded by the container capacity, and
+`WrapperSeq` rejects the index outright before the loop) rather than spun on
+forever — the corelib skips the element's payload since the callback binds no
+destination, mirroring the native-array over-capacity drop (MESSAGE_SPEC §5.1).
+Without the guard a 4-byte message could hang the decoder (issue #126, DoS).
 Because they are non-aggregates with `initializer_list` constructors, a brace-init
 like `msg.field = {"a", "b"}` sets the logical length correctly rather than
 silently leaving it at zero (which would drop the field from the wire). A
@@ -163,7 +263,7 @@ where those fields live:
 |---|---|---|
 | `string, maxlen 8` | `sofab::FixedString<8>` | `std::string` |
 | `blob, maxlen 8` | `sofab::FixedBytes<8>` | `std::vector<std::uint8_t>` |
-| `array u32, count 3` | `std::array<std::uint32_t, 3>` | `std::vector<std::uint32_t>` |
+| `array u32, count 3` | `sofab::InlineVector<std::uint32_t, 3>` | `std::vector<std::uint32_t>` |
 | `array string, count 2, maxlen 4` | `sofab::InlineVector<sofab::FixedString<4>, 2>` | `std::vector<std::string>` |
 
 Inline is the default and the one that guarantees no allocation at all: the
@@ -177,9 +277,11 @@ The bounds do not weaken. What was the inline container's capacity becomes an
 explicit check on the decode path (`_size > maxlen` / `_count > count` →
 `invalidate()`, and `cap`/`elemMax` on the sequence collectors), placed after the
 §7.3 wire-type guard and before the resize — so an over-long field is rejected as
-`INVALID` rather than allocating what the bound exists to prevent. Encode output
-and `_maxSize` are identical in both modes, so the two interoperate byte for
-byte.
+`INVALID` rather than allocating what the bound exists to prevent. `_maxSize` is
+identical in both modes, and so is encode output — for every value, with no
+exception: both containers a bounded field can land in carry a logical length, so
+there is no value one mode can hold and the other cannot. See
+[`count` is a capacity](#count-is-a-capacity).
 
 The `encode()` convenience method still returns a `std::vector<std::uint8_t>`
 (heap) for host-side use; embedded callers use the non-allocating
@@ -199,6 +301,168 @@ targets:
     corelib: c-cpp        # embedded profile; every field must be bounded
     allow_dynamic: true   # optional: std::string/std::vector storage (needs a heap)
 ```
+
+## Nested arrays (arrays of arrays)
+
+An array of arrays lowers to a wrapper sequence whose elements are the **rows**
+(MESSAGE_SPEC §5.1: an element id IS its index). How a row is read depends on
+what the row holds, and there are exactly two cases:
+
+- **A row of native scalars** (`array<array<u32>>`, `array<array<fp32>>`) is a
+  span of trivially-copyable values, so `sofabgen::WrapperSeq` places the row at
+  its element id and hands it to `is.read(row)`.
+- **A row of strings, blobs, structs/unions or further arrays** is itself a
+  wrapper *sequence*. It is neither a span of scalars nor an `IStreamMessage`, so
+  `is.read(row)` has nothing to do with it — handing the row container to
+  `MessageSeq<T>` fails the corelib's `static_assert("Unsupported span element
+  type in IStream::read()")` and the header does not compile (generator#250).
+  These rows get a small **generated row collector** instead: it places the row
+  at its element id and then reads the row with exactly the emission the first
+  level uses — `sofab::StringSeq` / `BlobSeq` / `sofabgen::WrapperSeq` on the
+  `cpp` leg, `sofab::FixedStringSeq` / `FixedBlobSeq` / `sofabgen::WrapperSeq` on
+  the `c-cpp` leg.
+
+The collector is generated rather than shipped by the corelib because what a row
+costs to read is the *schema's* business (its element bounds and element type),
+not the wire format's — the corelib still owns every byte that is actually read.
+It is emitted as a local struct at the point of use, and it nests: depth 3
+(`array<array<array<string>>>`) wraps the depth-2 collector, so there are no
+per-shape special cases. The two spec rules it carries are the same ones the
+corelib collectors carry: §5.1 placement plus the over-index reject at the schema
+`count` (the fixed profile reads that bound off the `InlineVector` capacity,
+which also stops a saturating `emplace_back()` from spinning — issue #126), and
+§7.4 replace-whole (`prepare()` on the `cpp` leg, `readSequence()`'s own clear on
+the `c-cpp` leg). Both legs produce byte-identical wire output for these shapes,
+as for every other.
+
+> **Gap.** A nested row of `enum` or `boolean` elements
+> (`array<array<enum>>`, `array<array<boolean>>`) still does not compile: those
+> element kinds are value-converted through a native-typed temporary rather than
+> read in place, which the row path does not do yet. First-level `array<enum>` /
+> `array<boolean>` are unaffected.
+
+## `count` is a capacity
+
+A schema `count: N` is a **capacity**, never a length (MESSAGE_SPEC §3). It never
+reaches the wire, it bounds the array — an element count or an element id past
+`N` fails the decode as `INVALID` — and it lets the embedded profile pre-size
+its storage. It never adds an element.
+
+What follows from that, in C++:
+
+- A fresh `count: N` **wrapper** array (string/blob/struct/union/row elements) is
+  **empty**, in all three storage kinds — `std::vector`, and
+  `sofab::InlineVector<T, N>`, whose N inline slots are a capacity and whose
+  *logical* length starts at 0. A declared `default` shorter than `N` is
+  materialized exactly as written and never tail-padded.
+- Encode writes **every** element the container holds. `{1, 2, 0, 0}` and
+  `{1, 2}` are different values with different bytes; there is no
+  trailing-default-run elision on either element kind any more.
+- Decode yields exactly the elements the wire carried. Nothing is filled in past
+  the highest element the wire named, so `size()` after a round trip equals
+  `size()` before it.
+- A field is omitted only when it **equals its default** — for an array with no
+  declared default, only when it is empty.
+
+### Every profile agrees, because every array member has a length
+
+A `count: N` array of **native scalars** used to be stored in `std::array<T, N>`
+on the default `cpp` profile and on `c-cpp` with `allow_dynamic: false`. That
+container has no logical length — its value is always N elements — so those two
+profiles could not express a shorter array at all, and the *same schema* then had
+two different wire images and two different decode results. That broke the
+byte-identity promise this document makes at the top and the one `checkBounded`
+enforces ("the storage switch never changes the wire").
+
+Every array member is length-carrying now, so for a `count: 4` `u32` array all
+three profiles agree, in both directions:
+
+| value | wire (all three profiles) | decodes back to |
+|---|---|---|
+| `[1, 2, 0, 0]` | `7b 04 01 02 00 00` | `[1, 2, 0, 0]` |
+| `[1, 2]` | `7b 02 01 02` | `[1, 2]` |
+| `[]` | `7b 00` | `[]` |
+| equal to the declared default | field omitted | the declared default |
+
+What makes it true: `std::vector<T>` on `corelib: cpp` and on `c-cpp` with
+`allow_dynamic: true`; `sofab::InlineVector<T, N>` on `c-cpp` with
+`allow_dynamic: false` — inline slots plus a `len_`, so the heap-free profile
+stays heap-free while still expressing 0..N. `InlineVector` needed one addition
+for this, a `resize()`, so that `IStreamImpl::readArray` recognises it as a
+*resizable* destination and sizes it to the wire count; before that it fell to
+readArray's fixed-extent branch, which set the length to 0 and dropped the array.
+
+**Cost.** On the `maxspeed` profile this replaces an inline `std::array` member
+with a heap `std::vector`, and that is not free: on the
+`examples/messages/realworld/vehicle_telemetry.yaml` bench row (`cpp-cpp`) it is
+**+5.5% encode and +21.7% decode** Ir/op. It is paid because there is no
+alternative that keeps the wire honest: `sofab::InlineVector` lives in
+corelib-c-cpp only, corelib-cpp ships no length-carrying inline container, and
+generated headers deliberately define no containers of their own. The heap-free
+row (`cpp-c-cpp`) is unaffected on encode (-0.02%) and +1.1% on decode, for
++3.2%/+4.4% `.text`.
+
+## Wrapper arrays: element placement and the sparse element rule
+
+An array of strings, blobs, structs, unions or rows travels as a **sequence whose
+child id is the element's index** (MESSAGE_SPEC §5.1), and its decoded length is
+*highest present id + 1*.
+
+The generated header carries a small `namespace sofabgen` block for the element
+collector, emitted once per header behind `#ifndef SOFABGEN_WRAPPER_SEQ_HELPERS`
+at global scope, so several generated headers — even with different `namespace`
+settings — can be included into one translation unit. It is the only thing the
+generator emits outside its configured namespace, and it holds no state.
+
+**1. An element is placed at its id, never appended.** `sofabgen::WrapperSeq`
+gap-fills the destination with default elements up to `id` and then decodes into
+`dest[id]`. Appending would shorten the array by the size of every interior id
+gap — and rule 2 makes such gaps ordinary input — and would decode a **reopened**
+element id as a second element instead of continuing the first (§7.4
+struct-merge, which placement gives for free). An element id at or past `count`
+is rejected as `INVALID` **before** the fill, which also bounds it
+(generator#247). The leaf collectors stay in the corelib —
+`sofab::StringSeq`/`BlobSeq` and `FixedStringSeq`/`FixedBlobSeq` always placed;
+this is the object path agreeing with them. The corelib collectors that append
+id-blind (`MessageSeq` / `FixedMessageSeq`) are not used by generated code.
+
+**2. The interior is sparse; the last element is always written.** One rule, both
+element kinds, decided from the position in the **value** at run time:
+
+- an element **before the last one** that equals its element default is omitted
+  and leaves an id **gap** — a `string`/`blob` leaf is simply not written, and a
+  struct/union/row element is **not framed** either (`os.writeLazy`, whose
+  lazily-held frame vanishes when the nested serialize writes no child);
+- the **last** element is always written — a leaf as its value, a sequence
+  element as an **empty frame** (`os.write`, the frame-keeping form) — because
+  its presence is what carries the length.
+
+So `{"a", ""}`, `{"a"}` and `{}` are three distinct values that encode and decode
+distinctly, and `{"", ""}` travels as its final element alone, at id 1. A
+declared `count: N` changes none of it: N is a capacity and can never restore an
+elided tail, so the counted and count-less arrays emit the identical loop.
+
+**3. The field wrapper itself still closes with the dropping end.** A
+sequence-typed *field* — as opposed to an *element* — is omitted when it is
+empty, and absence reconstructs it (§2). An all-default message still encodes to
+zero bytes.
+
+Every generated struct, union and message also carries
+`bool _isDefault() const noexcept`: the explicit form of the "was any child
+written?" test the lazy framing answers implicitly. It and the serialize loop are
+generated from **one** expression per field, so the writer and the predicate
+cannot drift — a predicate that called a field default which the writer puts on
+the wire would omit it.
+
+Two consequences worth knowing:
+
+- A mistyped child inside a wrapper array is skipped with **no container
+  mutation** — the wire-type decision precedes the gap-fill, so it cannot leave a
+  phantom default element behind (generator#249).
+- An array of **rows** (`array` of `array u32, count 3`) applies rule 2 to the
+  row's own default value, which — now that a row carries a length like any other
+  array — is the EMPTY row: an empty interior row is omitted and leaves an id gap,
+  and the last row is always written.
 
 ## Struct member order (widest-first)
 

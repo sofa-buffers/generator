@@ -153,8 +153,6 @@ type helperUse struct {
 	overIdxArr  bool // count-bearing wrapper array -> import SofabError for the over-index reject (generator#142)
 	maxlenField bool // bounded string/blob (scalar or wrapper element) -> import SofabError for the over-maxlen reject (MESSAGE_SPEC §7.1)
 	strMaxlen   bool // bounded string (scalar or wrapper element) -> emit the allocation-free _utf8Len helper for its decode-side maxlen check (blobs measure .length directly)
-	trimTail    bool // fixed-count non-Long native array -> encode-side trailing-default-run trim
-	trimTailLng bool // fixed-count Long-backed native array -> Long flavour of the trim
 }
 
 // arrayOverIndexed reports whether an array field (recursively through nested
@@ -231,15 +229,10 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 				use.strMaxlen = true
 			}
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
+				// A `count: N` native array decodes with the over-count reject, which
+				// throws SofabError (generator#100).
 				if fld.HasCount {
 					use.countedArr = true
-					// The fixed-count trailing-default-run rule needs the trim on
-					// encode and _padTo on decode (_padTo rides on countedArr).
-					if g.longBacked(fld) {
-						use.trimTailLng = true
-					} else {
-						use.trimTail = true
-					}
 				}
 				if _, ok := g.nativeArrayDefault(fld); ok {
 					if g.longBacked(fld) {
@@ -436,10 +429,14 @@ func (g *gen) tsDefault(f *ir.Field) string {
 		// A native scalar array is a leaf field: materialize its schema default so
 		// an omitted (default-valued) array reconstructs correctly on decode and so
 		// marshal can compare against it. Composite arrays are wrapper sequences
-		// (always framed) and start empty.
-		// A `count: N` native array is fixed-length even with no schema default:
-		// its value is N element defaults, so nativeArrayDefault materializes
-		// them (MESSAGE_SPEC §3).
+		// whose declared default is not materialized, so they start empty -- which is
+		// what makes their dropping closer correct (§2).
+		//
+		// A declared `count: N` adds nothing on either side. `count` is a CAPACITY,
+		// not a length (MESSAGE_SPEC §3): a fresh count:N array is the EMPTY array,
+		// not N element defaults, and a `default` shorter than N stands for itself
+		// rather than being padded out to N. That is also what the field's omit test
+		// compares against, and what an absent field decodes back to.
 		if nativeArrayElem(f.Elem) {
 			if lit, ok := g.nativeArrayDefault(f); ok {
 				return lit
@@ -455,32 +452,15 @@ func (g *gen) tsDefault(f *ir.Field) string {
 // (Long.fromValue under the Long-backed modes), enum elements are cast to the
 // enum type, booleans/floats/integers are their JSON-native form.
 //
-// A `count: N` array is exactly N elements long (MESSAGE_SPEC §3), so its
-// default is tail-padded to N with the element default — and a counted array
-// with NO schema default still has one: N element defaults. Without this a
-// fresh (or all-default, hence omitted-on-the-wire) array would materialize
-// empty on this growable backend while the fixed-storage camp yields N zeros —
-// the same §3 divergence as the trailing default run, reached through the
-// omission path without any array touching the wire.
+// Not padded to a declared `count: N`: that is a capacity, not a length
+// (MESSAGE_SPEC §3), so the default stands exactly as written — and so does the
+// value it is compared against, which is what keeps a length-N all-zero array
+// distinct from the empty one. A counted array with no schema default therefore
+// has no default beyond the empty collection.
 func (g *gen) nativeArrayDefault(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
 	if !ok {
-		// No schema default: only a counted array has an implied one.
-		if f.Default != nil || !f.HasCount {
-			return "", false
-		}
-	}
-	// Pad with the element's zero value and render it through the same per-kind
-	// switch as a listed one, so every representation mode stays consistent.
-	// Copy first: appending to the IR's own slice could write past its length
-	// into shared backing storage.
-	vals = append([]any(nil), vals...)
-	for int64(len(vals)) < f.Count {
-		if f.Elem == ir.KindBool {
-			vals = append(vals, false)
-		} else {
-			vals = append(vals, 0)
-		}
+		return "", false
 	}
 	parts := make([]string, len(vals))
 	for i, v := range vals {

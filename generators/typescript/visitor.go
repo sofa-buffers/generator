@@ -135,13 +135,14 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			// A wire element count above the schema `count` capacity is INVALID
 			// per MESSAGE_SPEC §3+§7 — reject the whole message, never keep-all
 			// (generator#100). Count-less (dynamic) arrays have no bound.
-			// A `count: N` array is fixed-length: a wire count M < N means the
-			// elements at [M, N) are the element default, which the encoder does
-			// not transmit. Materialize them so the decoded field always has
-			// exactly N elements (MESSAGE_SPEC §3).
+			//
+			// The wire count M IS the array's length (§3): the M elements that
+			// arrived are the whole value, so they are taken as they come. A
+			// declared `count: N` is a CAPACITY and bounds M; it never adds
+			// elements, so there is nothing to fill in at [M, N).
 			if x.HasCount {
-				f.line("      case %d: { %sconst _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s = _padTo(_a, %d, %s); break; }",
-					x.ID, guard, g.nativeArrayRead(x.Elem, x.ElemRef, fmt.Sprintf("%d", x.Count)), x.Count, x.Name, x.Count, acc, x.Count, g.elemZero(x))
+				f.line("      case %d: { %sconst _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s = _a; break; }",
+					x.ID, guard, g.nativeArrayRead(x.Elem, x.ElemRef, fmt.Sprintf("%d", x.Count)), x.Count, x.Name, x.Count, acc)
 				return
 			}
 			f.line("      case %d: %s%s = %s; break;", x.ID, guard, acc, g.nativeArrayRead(x.Elem, x.ElemRef, ""))
@@ -220,6 +221,30 @@ func tsFixSub(k ir.Kind) string {
 	return ""
 }
 
+// fieldHasFixlenGuard reports whether any guard emitted for x — tsWireGuardCond
+// on the field itself, plus one tsElemWireGuardCond per level of the array
+// element chain — names a FixlenSubtype member. A fixlen kind anywhere in that
+// chain does it: as a native array element the containing array's guard carries
+// the subtype (WireType.ArrayFixlen is ambiguous), and as a wrapper element the
+// element's own guard does (WireType.Fixlen is). A struct/union element carries
+// no subtype; its own fields are scanned separately through the named types.
+func fieldHasFixlenGuard(x *ir.Field) bool {
+	if tsFixSub(x.Kind) != "" {
+		return true
+	}
+	if x.Kind != ir.KindArray {
+		return false
+	}
+	for elem, items := x.Elem, x.ElemItems; ; elem, items = items.Elem, items.ElemItems {
+		if tsFixSub(elem) != "" {
+			return true
+		}
+		if elem != ir.KindArray || items == nil {
+			return false
+		}
+	}
+}
+
 // tsWireGuardCond renders the §7.3 condition a field header must satisfy before
 // its schema-typed reader may run: the wire type the declared type maps to, plus
 // the fixlen subtype where the wire type alone is ambiguous. c.fixSub is the
@@ -265,26 +290,6 @@ func (g *gen) tsElemWireGuardCond(elem ir.Kind, ref *ir.TypeRef, items *ir.Array
 		cond += " || c.fixSub !== " + sub
 	}
 	return cond
-}
-
-// elemZero renders a native array field's element default — zero for every
-// native element kind — as the value _padTo fills a fixed-count array's elided
-// trailing run with. A Long is immutable, so one shared zero instance is safe
-// across the padded slots.
-func (g *gen) elemZero(x *ir.Field) string {
-	switch x.Elem {
-	case ir.KindU64, ir.KindI64:
-		if g.longArrays() {
-			return "Long.ZERO"
-		}
-		return "0n"
-	case ir.KindBool:
-		return "false"
-	case ir.KindEnum:
-		return "0 as " + g.typeName(x.ElemRef.Key)
-	default: // u8/u16/u32, i8/i16/i32, fp32/fp64, bitfield
-		return "0"
-	}
 }
 
 // nativeArrayRead returns the expression reading a whole native scalar array off
@@ -349,15 +354,25 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 			}
 			return g.nativeArrayRead(items.Elem, items.ElemRef, cnt)
 		}
+		// tsArrayType already answers with the CONTAINER type for the level it is
+		// handed: given the row's element kind (plus the row's own ElemItems for a
+		// deeper row) it returns exactly the row's type — string[] for a row of
+		// strings, string[][] for a row of rows of strings. Appending another "[]"
+		// declared the collector with the container type of the level ABOVE while
+		// its body collected the row's LEAF elements, so a string[][] accumulator
+		// was pushed "" and assigned a string: TS2345/TS2322 on every
+		// array<array<string|blob|struct>> and one level deeper (generator#250's
+		// TypeScript analogue). The row collector's type must be the row's.
 		rowT := g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems)
-		return "((): " + rowT + "[] => { const _r: " + rowT + "[] = []; while (c.readHeader()) { " +
+		return "((): " + rowT + " => { const _r: " + rowT + " = []; while (c.readHeader()) { " +
 			g.seqCollectBody("_r", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax) + " } return _r; })()"
 	}
 	return "undefined as never"
 }
 
-// capOf maps a schema fixed-count bound to a wrapper array's cap: N when the
-// array declares a count, -1 (dynamic/unbounded) otherwise.
+// capOf maps a schema count bound to a wrapper array's cap: N when the array
+// declares a count, -1 (unbounded) otherwise. N is a CAPACITY: the decoder uses it
+// only to reject an out-of-range element id, never to size the result.
 func capOf(hasCount bool, count int64) int64 {
 	if hasCount {
 		return count
@@ -365,12 +380,29 @@ func capOf(hasCount bool, count int64) int64 {
 	return -1
 }
 
+// elemDefaultNew renders a FRESH wrapper-array element default, the value the
+// placement gap-fill grows the array with. Every composite element is mutable, so
+// each slot gets its own instance — sharing one would let a later decode into slot
+// i show up in slot j.
+func (g *gen) elemDefaultNew(elem ir.Kind, ref *ir.TypeRef) string {
+	switch elem {
+	case ir.KindString:
+		return `""`
+	case ir.KindBlob:
+		return "new Uint8Array()"
+	case ir.KindStruct, ir.KindUnion:
+		return "new " + g.typeName(ref.Key) + "()"
+	}
+	return "[]" // a nested row: the empty array is the row default
+}
+
 // seqCollectBody returns the body of a `while (c.readHeader()) { ... }` loop that
-// places one decoded element into arr. String/blob leaf elements are keyed by
-// their wire id (MESSAGE_SPEC S2): a default (empty) element is omitted on the
-// wire, so we grow arr with the element default ("" / empty bytes) and place the
-// value at its id, restoring any gap. Composite elements (struct/union/nested-
-// array) are always framed, never omitted, so they push in arrival order.
+// places one decoded element into arr. EVERY element kind is keyed by its wire id
+// (MESSAGE_SPEC §5.1: the element id IS the array index): an INTERIOR element
+// equal to the element default is omitted on the wire, so we grow arr with the
+// element default and place the value at its id, restoring any gap. The array's
+// LAST element is always on the wire, so the decoded length — highest present id
+// + 1 — is exact.
 func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64, maxHas bool, maxVal int64) string {
 	// §5.1 makes every wrapper element a normal field with its own (id, type)
 	// header, so §7.3 applies to it: an element whose wire type (or fixlen subtype)
@@ -408,8 +440,31 @@ func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *i
 				arr + "[_id] = _b;"
 		}
 		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); " + arr + "[_id] = c.readBlob();"
+	case ir.KindStruct, ir.KindUnion:
+		// The element id IS the array index (§5.1), exactly as for the string/blob
+		// leaf paths above, so the element is PLACED at arr[id] after gap-filling
+		// with default elements — never appended. Appending would shorten the array
+		// by the size of any interior id gap, and would decode a REOPENED element id
+		// as a second element instead of merging into the first (§7.4) — which
+		// placement gives for free, because decodeInto continues the element an
+		// earlier opening already populated. The over-index guard above rejects an
+		// element id >= N, which also bounds the gap-fill.
+		t := g.typeName(ref.Key)
+		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new " + t + "()); " +
+			t + ".decodeInto(c, " + arr + "[_id]!);"
 	default:
-		return guard + arr + ".push(" + g.elemDecode(elem, ref, items) + ");"
+		// A nested-array element (a matrix row, native or wrapper) is placed at the
+		// index its element id names, growing arr with empty rows so an id GAP decodes
+		// as an empty row instead of shifting every later row down by one. Rows were
+		// pushed id-blind here: unreachable while every row was written, but an
+		// interior row equal to the element default (the empty row) is now omitted
+		// (§2), and only the LAST row is guaranteed present — which is what makes the
+		// decoded length, highest present id + 1, exact. The over-index guard above
+		// rejects a row id >= N, which also bounds the gap-fill. A REPEATED row id
+		// replaces the row rather than appending a second one, which is what §7.4
+		// asks of an array wrapper.
+		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(" + g.elemDefaultNew(elem, ref) + "); " +
+			arr + "[_id] = " + g.elemDecode(elem, ref, items) + ";"
 	}
 }
 
@@ -437,46 +492,6 @@ function arrEq(a: ArrayLike<unknown>, b: ArrayLike<unknown>): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
-}`
-
-// trimTailHelper is the encode-side trailing-default-run trim a fixed-count
-// (`count: N`) native array's canonical wire requires: only the elements up to
-// the last non-default one are emitted, and the decoder rebuilds the rest from
-// the schema count. Elements compare by BIT PATTERN (Object.is), never by ===:
-// -0 === 0 is true, so === would silently trim a trailing -0 to +0; Object.is
-// also keeps a trailing NaN (never the default) on the wire.
-const trimTailHelper = `// _trimTail returns a's leading run up to and including the last element that
-// differs from the element default, i.e. it drops the trailing default run. Used
-// only for fixed-count arrays, whose declared count lets the decoder rebuild the
-// dropped run. Elements compare with Object.is (bit pattern), so a trailing -0 or
-// NaN is not a default and survives the round-trip.
-function _trimTail<T>(a: readonly T[], zero: T): readonly T[] {
-  let n = a.length;
-  while (n > 0 && Object.is(a[n - 1], zero)) n--;
-  return n === a.length ? a : a.slice(0, n);
-}`
-
-// trimTailLongHelper is the Long[] flavour of the trim: a Long is an object
-// identity, so the element default is tested by (low, high) word pair (Object.is
-// would compare references and never match).
-const trimTailLongHelper = `// _trimTailLong is _trimTail for Long[]: the element default (zero) is tested by
-// (low, high) word pair, since Long objects are identities.
-function _trimTailLong(a: readonly Long[]): readonly Long[] {
-  let n = a.length;
-  while (n > 0 && a[n - 1]!.low === 0 && a[n - 1]!.high === 0) n--;
-  return n === a.length ? a : a.slice(0, n);
-}`
-
-// padToHelper is the decode-side counterpart of the trim: a fixed-count array
-// decodes to exactly its schema count, so the trailing default run the encoder
-// elided is materialized back. The corelib readers hand back a freshly allocated
-// plain array, so the grow is in place.
-const padToHelper = `// _padTo grows a to exactly n elements with the element default. A fixed-count
-// array always decodes to its schema count: a wire count M < N means the elements
-// at [M, N) are the element default, which the encoder does not transmit.
-function _padTo<T>(a: T[], n: number, zero: T): T[] {
-  while (a.length < n) a.push(zero);
-  return a;
 }`
 
 // utf8LenHelper counts a string's UTF-8 byte length without allocating — no

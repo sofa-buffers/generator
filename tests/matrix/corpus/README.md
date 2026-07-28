@@ -4,12 +4,15 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
 (`go test ./tests/matrix/`):
 
 - **`defs/`** — valid definitions. Each one is validated, lowered to an IR, and
-  **generated across all 8 language backends** (with a parse check on the Go
-  output). Covers: scalar boundaries, `fp` `decimals`, strings/blobs (incl.
-  without `maxlen`), every array kind (numeric, array-of-string, array-of-blob),
-  enums (shorthand + object form, negative values), bitfields (pos 0 and 63),
-  nested structs, unions with `default_id`, large/non-contiguous field ids,
-  metadata (`deprecated`/`unit`/`description`), and `$ref` reuse.
+  **generated across every registered language backend** (with a parse check on
+  the Go output). Covers: scalar boundaries, `fp` `decimals`, strings/blobs
+  (incl. without `maxlen`), every array kind (numeric, array-of-string,
+  array-of-blob), wrapper-sequence **elements** in fixed/dynamic pairs
+  (`seq_elements.yaml`), nested wrapper **rows** at depth 2 and 3 with their
+  native-row control (`nested_rows.yaml`), enums (shorthand + object form,
+  negative values), bitfields (pos 0 and 63), nested structs, unions with
+  `default_id`, large/non-contiguous field ids, metadata
+  (`deprecated`/`unit`/`description`), and `$ref` reuse.
 - **`invalid/`** — definitions that **must be rejected** by the hard gate
   (duplicate ids, out-of-range defaults, enum/union default mismatch, bitfield
   pos collision, blob/string default over `maxlen`, oversize/negative u64,

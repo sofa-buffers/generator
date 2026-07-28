@@ -144,15 +144,12 @@ func (g *gen) pyDefault(f *ir.Field) string {
 		// lazy lambda so the referenced class need not be defined yet.
 		return fmt.Sprintf("field(default_factory=lambda: %s())", g.typeName(f.Ref.Key))
 	case ir.KindArray:
-		// A NATIVE scalar array is a leaf field: materialize its schema default so
-		// an omitted default array reconstructs correctly and marshal can compare
-		// against it. A `count: N` native array is fixed-length even with NO schema
-		// default: its value is N element defaults, so materialize those too.
-		// Without this a fresh (or all-default, hence omitted-on-the-wire) array
-		// would be an empty list on this growable backend while the fixed-storage
-		// camp yields N zeros — the same MESSAGE_SPEC §3 divergence as the trailing
-		// default run, reached through the omission path. Composite arrays are
-		// wrapper sequences (always framed) and start empty.
+		// An array field gets exactly its declared `default` and nothing else. A
+		// declared `count: N` is a CAPACITY, not a length (MESSAGE_SPEC §3), so a
+		// fresh count:N array is the EMPTY list -- not N element defaults -- and a
+		// `default` shorter than N stands for itself rather than being padded out to
+		// N. That is also what the field's omit test compares against, and what an
+		// absent field decodes back to.
 		if lit, ok := g.pyNativeArrayDefault(f); ok {
 			return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
 		}
@@ -163,8 +160,9 @@ func (g *gen) pyDefault(f *ir.Field) string {
 
 // isNativeArrayElem reports whether an array element uses a native scalar array
 // wire type (vs. a wrapper sequence). Native arrays are a leaf field (omitted as
-// a whole when equal to their default); composite/dynamic-element arrays are
-// always framed.
+// a whole when equal to their default); a composite/dynamic-element array is a
+// wrapper sequence, opened lazily and closed with the dropping end at field level
+// (MESSAGE_SPEC §2).
 func isNativeArrayElem(elem ir.Kind) bool {
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
@@ -175,23 +173,24 @@ func isNativeArrayElem(elem ir.Kind) bool {
 	return false
 }
 
-// pyNativeArrayDefault renders a native array field's materialized default as a
-// Python list literal; ("", false) when the field has no materialized default (a
-// wrapper-sequence array, or a dynamic array with no schema default — both start
+// pyNativeArrayDefault renders a native array field's DECLARED default as a
+// Python list literal; ("", false) when the field declares none (a
+// wrapper-sequence array, or any array without a schema `default` — both start
 // empty). It is the single gate for "does this array have a default literal?",
 // shared by the dataclass field default and marshal's omit-when-default compare,
 // which must agree exactly.
+//
+// A declared `count: N` does not create a default: it is a capacity, not a length
+// (MESSAGE_SPEC §3), so a fresh count:N array is the empty list.
 func (g *gen) pyNativeArrayDefault(f *ir.Field) (string, bool) {
-	if !isNativeArrayElem(f.Elem) || (f.Default == nil && !f.HasCount) {
+	if !isNativeArrayElem(f.Elem) || f.Default == nil {
 		return "", false
 	}
 	return g.pyNativeArrayLiteral(f)
 }
 
 // pyNativeArrayLiteral renders a native scalar array's default as a Python list
-// literal ([...]); ("", false) when there is no default. A `count: N` array with
-// no schema default has one anyway — N element defaults — so a nil Default is
-// not a miss for it (callers gate on HasCount).
+// literal ([...]); ("", false) when the Default is not a list.
 func (g *gen) pyNativeArrayLiteral(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
 	if !ok && f.Default != nil {
@@ -209,15 +208,10 @@ func (g *gen) pyNativeArrayLiteral(f *ir.Field) (string, bool) {
 		}
 		parts[i] = scalarLit(v)
 	}
-	// A `count: N` array is exactly N elements long: a shorter schema default
-	// leaves the trailing ones at the element default. Tail-pad to N so this
-	// backend's initial value matches the fixed-storage camp's zero-filled
-	// `[T; N]` / `std::array<T, N>` (MESSAGE_SPEC §3).
-	if f.HasCount {
-		for int64(len(parts)) < f.Count {
-			parts = append(parts, pyElemZero(f.Elem))
-		}
-	}
+	// Not padded to a declared `count: N`: that is a capacity, not a length
+	// (MESSAGE_SPEC §3), so the default stands exactly as written -- and so does
+	// the value it is compared against, which is what keeps a length-N all-zero
+	// array distinct from the empty one.
 	return "[" + strings.Join(parts, ", ") + "]", true
 }
 

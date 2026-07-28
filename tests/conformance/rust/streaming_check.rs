@@ -34,7 +34,7 @@ fn main() {
     //   stack/cur    the location stack, pushed and popped around nested
     //                sequences; a chunk boundary can fall between the push and
     //                the pop
-    //   ai/afill     native-array fill progress, which must survive a boundary
+    //   afill        native-array fill progress, which must survive a boundary
     //                falling between two elements
     //
     // The strings and blobs below are deliberately long: at every chunk size
@@ -66,35 +66,50 @@ fn main() {
     debug_assert!(m.somestring.len() <= 50);
     m.someblob = (0u8..16).collect();
 
-    // native arrays: assign in place, the schema count fixes the length
-    for (i, v) in m.someuintarray.iter_mut().enumerate() {
-        *v = (i as u32 + 1) * 100_000;
+    // native arrays: `count: N` is a CAPACITY, not a length (MESSAGE_SPEC S3), so
+    // a fresh field holds only its declared default -- clear that and fill each
+    // array to its full N, which is what makes the encoded message the widest one
+    // this schema allows.
+    m.someuintarray.clear();
+    for i in 0..4u32 {
+        m.someuintarray.push((i + 1) * 100_000);
     }
-    for (i, v) in m.someintarray.iter_mut().enumerate() {
-        *v = -((i as i32 + 1) * 100_000);
+    m.someintarray.clear();
+    for i in 0..5i32 {
+        m.someintarray.push(-((i + 1) * 100_000));
     }
-    for (i, v) in m.somefloatarray.iter_mut().enumerate() {
-        *v = i as f32 + 0.5;
+    m.somefloatarray.clear();
+    for i in 0..3 {
+        m.somefloatarray.push(i as f32 + 0.5);
     }
-    for (i, v) in m.someenumarray.iter_mut().enumerate() {
-        *v = (i % 2) as i8;
+    m.someenumarray.clear();
+    for i in 0..4 {
+        m.someenumarray.push((i % 2) as i8);
     }
-    for v in m.someboolarray.iter_mut() {
-        *v = true;
+    m.someboolarray.clear();
+    for _ in 0..8 {
+        m.someboolarray.push(true);
     }
-    for (i, v) in m.somebitfieldarray.iter_mut().enumerate() {
-        *v = (i as u8) | 1;
+    m.somebitfieldarray.clear();
+    for i in 0..3u8 {
+        m.somebitfieldarray.push(i | 1);
     }
 
     // wrapper-sequence arrays: their elements are child fields keyed by index, so
     // a boundary can fall between two elements or inside one element's payload.
+    // Filled to N for the same reason as the native arrays above -- and no
+    // further: an element id >= N is INVALID (S5.1/S7), which is what the outer
+    // count: 2 on `somematrix` pins.
+    m.somestringarray.clear();
     for i in 0..5 {
         m.somestringarray.push(format!("elem-{i:08}")); // 13 <= maxlen 16
     }
-    for i in 0..3u8 {
-        m.someblobarray.push(vec![i; 8]); // 8 == maxlen 8
+    m.someblobarray.clear();
+    for i in 0..3 {
+        m.someblobarray.push(vec![i as u8; 8]); // 8 == maxlen 8
     }
-    for i in 0..4u32 {
+    m.somematrix.clear();
+    for i in 0..2u32 {
         m.somematrix.push(vec![i * 11, i * 22, i * 33]);
     }
 

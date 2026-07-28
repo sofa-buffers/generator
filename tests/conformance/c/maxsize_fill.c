@@ -53,6 +53,19 @@ int main(void)
     m.f_blob_len = 7;
     memset(m.f_blob, 0xAB, 7);
 
+    /* An array's LENGTH is what reaches the wire (MESSAGE_SPEC §3/§5.1) and
+     * `count` is only its capacity, so a full message has to say it is full: the
+     * companion length member of a compact array, and the element count of a
+     * length-carrying wrapper holder, are both set to the capacity. Leaving them
+     * at 0 encodes the empty array and makes this "full" message short. */
+    m.f_arr_u32_len  = 5;
+    m.f_arr_u64_len  = 3;
+    m.f_arr_fp32_len = 4;
+    m.f_arr_fp64_len = 2;
+    m.f_arr_str.len  = 3;
+    /* A blob holder carries an element count too, distinct from each element's own
+     * used-length: the count leads the holder, the element length leads its slot. */
+    m.f_arr_blob.len = 2;
     for (int i = 0; i < 5; i++) { m.f_arr_u32[i]  = UINT32_MAX; }
     for (int i = 0; i < 3; i++) { m.f_arr_u64[i]  = UINT64_MAX; }
     for (int i = 0; i < 4; i++) { m.f_arr_fp32[i] = 1.0f; }

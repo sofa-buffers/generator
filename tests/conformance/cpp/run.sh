@@ -42,11 +42,20 @@ messages:
   vecf64: { payload: { a: { id: 0, type: fp64 } } }
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
+  vecpa: { payload: { a: { id: 0, type: array, items: { type: struct, count: 8, fields: { k: { id: 0, type: u32 } } } } } }
 YAML
 
 # Exercises every field-type family (ints, u64, fp, bool, string, enum, bitfield,
 # fixed array, blob, string array, blob array, nested struct, union).
-IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"someu64":18446744073709551615,"somestringarray":["a","b","c","d","e"]}'
+#
+# someenumarray / someboolarray are filled deliberately. They used to be left at
+# their schema default, so no message this harness produced ever carried one --
+# and the c-cpp decode arm for both, which reached the member through a
+# reinterpret_cast of the CONTAINER (a std::vector's begin/end/capacity words
+# taken as its first N elements, overwritten by wire bytes), was never executed.
+# The leg stayed green while emitting a use-after-free reachable from any
+# received message. An array kind nothing fills is an array kind nothing tests.
+IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"someu64":18446744073709551615,"somestringarray":["a","b","c","d","e"],"someenumarray":[2,1,2,0],"someboolarray":[true,false,true,true,false,true,true,false],"somebitfieldarray":[1,2,3]}'
 
 # run_variant LABEL CORELIB DYNAMIC INCLUDE MAKEVARS...
 #   CORELIB  - "" for pure corelib-cpp, "c-cpp" for the corelib-c-cpp wrapper.
@@ -126,6 +135,9 @@ run_variant() {
         '"someblob":\[10,20,30\]' \
         '"somestringarray":\["a","b","c","d","e"\]' \
         '"someblobarray":\[\[1\],\[2\],\[3\]\]' \
+        '"someenumarray":\[2,1,2,0\]' \
+        '"someboolarray":\[true,false,true,true,false,true,true,false\]' \
+        '"somebitfieldarray":\[1,2,3\]' \
         '"deepint":-99' \
         '"option1":4242'; do
         echo "$OUT" | grep -q "$chk" || { echo "FAIL: [$label] round-trip missing $chk"; echo "  got: $OUT"; exit 1; }
@@ -371,11 +383,17 @@ run_variant() {
 
     echo "==> [$label] corpus + realworld: every definition compiles"
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
-        # no_maxlen.yaml exists to exercise genuinely unbounded string/blob fields.
-        # The embedded profile rejects those by design — in both storage modes —
-        # so it is not a definition this leg can compile, and skipping it is the
-        # honest outcome rather than a bound invented for the test.
-        case "$corelib:$(basename "$def")" in c-cpp:no_maxlen.yaml) continue ;; esac
+        # no_maxlen.yaml and seq_elements_dyn.yaml exist to exercise genuinely
+        # unbounded fields — unbounded string/blob, and the count-less wrapper
+        # arrays that must never be narrowed or refilled. The embedded profile
+        # rejects those by design — in both storage modes — so they are not
+        # definitions this leg can compile, and skipping them is the honest
+        # outcome rather than a bound invented for the test. Their bounded
+        # counterparts (seq_elements, nested_rows) do compile here, so this leg
+        # keeps its wrapper-element coverage.
+        case "$corelib:$(basename "$def")" in
+        c-cpp:no_maxlen.yaml | c-cpp:seq_elements_dyn.yaml) continue ;;
+        esac
         name=$(basename "$def" .yaml)
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp --in "$def" --out "$WORK/corpus-$label/$name" >/dev/null )
         for h in "$WORK"/corpus-"$label"/"$name"/*.hpp; do

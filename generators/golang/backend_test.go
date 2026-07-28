@@ -243,7 +243,8 @@ func TestGoStructuralInvariants(t *testing.T) {
 		"func NewMyfirstmessage() *Myfirstmessage",
 		"func DecodeMyfirstmessage(",
 		"sofab.AcceptBytes(data, m)", // zero-copy cursor decode
-		"e.WriteSequenceBegin(",      // nested struct/union framing (marshal unchanged)
+		"e.WriteSequenceBeginLazy(",  // nested struct/union framing (MESSAGE_SPEC S2)
+		"e.WriteSequenceEndKeep()",   // ... and an array ELEMENT keeps its frame
 		"`json:\"somei8\"`",          // canonical json tags
 	} {
 		if !strings.Contains(msg, want) {
@@ -258,6 +259,11 @@ func TestGoStructuralInvariants(t *testing.T) {
 			t.Errorf("myfirstmessage.go should no longer contain %q (pull-parser replaced by visitor)", notWant)
 		}
 	}
+	// Every sequence is opened lazily: the eager begin no longer exists in the
+	// corelib, and emitting it would not even compile (MESSAGE_SPEC S2).
+	if strings.Contains(strings.ReplaceAll(msg, "e.WriteSequenceBeginLazy(", ""), "e.WriteSequenceBegin(") {
+		t.Errorf("myfirstmessage.go must open every sequence with WriteSequenceBeginLazy:\n%s", msg)
+	}
 	// The decode prelude (embedded no-op base + collectors) is emitted once.
 	prelude := files["sofab_visitor.go"]
 	for _, want := range []string{
@@ -271,6 +277,60 @@ func TestGoStructuralInvariants(t *testing.T) {
 	types := files["types.go"]
 	if !strings.Contains(types, "type MyfirstmessageSomeenum int8") {
 		t.Errorf("enum backing type missing/incorrect:\n%s", firstLines(types, 12))
+	}
+}
+
+// MESSAGE_SPEC §2: every sequence opens with the lazy begin, so the CLOSER alone
+// decides whether a contentless one survives -- and where it is chosen from is the
+// whole of the element rule. A sequence-typed FIELD (a struct/union field, an
+// array wrapper) is decided by the SCHEMA: it always closes with the dropping
+// WriteSequenceEnd, so an all-default one is omitted. A wrapper-array ELEMENT (a
+// struct element, a nested row) is decided by its position in the VALUE, at run
+// time: the dropping closer in the array's interior, where an all-default element
+// vanishes into an id gap, and WriteSequenceEndKeep at the last index, where its
+// presence is what fixes the decoded length (§5.1).
+func TestGoSequenceCloserIsPositional(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      nested: { id: 0, type: struct, fields: { x: { id: 0, type: i32 } } }
+      strs:   { id: 1, type: array, items: { type: string } }
+      structs: { id: 2, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }
+      rows:   { id: 3, type: array, items: { type: array, items: { type: string } } }
+`)
+	got := genGo(t, s, map[string]any{"package": "messages"})["vec.go"]
+	for _, want := range []string{
+		// struct FIELD: lazy begin, dropping end -- no run-time choice at all
+		"\te.WriteSequenceBeginLazy(0)\n\tm.Nested.marshal(e)\n\te.WriteSequenceEnd()\n",
+		// string-array wrapper FIELD (id 1): dropping end
+		"\te.WriteSequenceBeginLazy(1)\n",
+		// struct-array wrapper FIELD (id 2) holding ELEMENT frames whose closer is
+		// picked from the element's index in the value
+		"\te.WriteSequenceBeginLazy(2)\n\tfor _i0, _e0 := range m.Structs {\n\t\te.WriteSequenceBeginLazy(sofab.ID(_i0))\n\t\t_e0.marshal(e)\n\t\tif _i0 == len(m.Structs)-1 {\n\t\t\te.WriteSequenceEndKeep()\n\t\t} else {\n\t\t\te.WriteSequenceEnd()\n\t\t}\n\t}\n\te.WriteSequenceEnd()\n",
+		// nested array: the outer wrapper is a FIELD (end), each row an ELEMENT
+		// (kept only at the last index)
+		"\te.WriteSequenceBeginLazy(3)\n\tfor _i0, _e0 := range m.Rows {\n\t\te.WriteSequenceBeginLazy(sofab.ID(_i0))\n",
+		"\t\tif _i0 == len(m.Rows)-1 {\n\t\t\te.WriteSequenceEndKeep()\n\t\t} else {\n\t\t\te.WriteSequenceEnd()\n\t\t}\n\t}\n\te.WriteSequenceEnd()\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("vec.go missing %q:\n%s", want, got)
+		}
+	}
+	// An ELEMENT must never take the keeping closer unconditionally: that framed
+	// every all-default interior element, which the sparse rule now omits.
+	if strings.Contains(got, "_e0.marshal(e)\n\t\te.WriteSequenceEndKeep()\n") {
+		t.Errorf("an array element must not close unconditionally with the keeping end:\n%s", got)
+	}
+	// The string-array FIELD must close with the dropping end, never the keeping
+	// one -- getting this backwards costs two bytes per all-default array field.
+	if !strings.Contains(got, "\t\te.WriteString(sofab.ID(_i0), _e0)\n\t\t}\n\t}\n\te.WriteSequenceEnd()\n") {
+		t.Errorf("string-array wrapper FIELD must close with WriteSequenceEnd:\n%s", got)
+	}
+	// The eager begin no longer exists in corelib-go; emitting it would not compile.
+	if strings.Contains(strings.ReplaceAll(got, "WriteSequenceBeginLazy(", ""), "WriteSequenceBegin(") {
+		t.Errorf("no sequence may use the eager begin:\n%s", got)
 	}
 }
 
@@ -468,5 +528,193 @@ messages:
 	plain := genGo(t, s, map[string]any{})
 	if strings.Contains(plain["sofab_visitor.go"], "MaxDyn") || strings.Contains(plain["dyn.go"], "WithMax") {
 		t.Error("unset limits must emit no limit plumbing")
+	}
+}
+
+// `count: N` is a CAPACITY, not a length (MESSAGE_SPEC §3): it never reaches the
+// wire, the wire count M IS the array's length, and nothing that carries that
+// length may be elided. So the whole trim-on-encode / fill-on-decode pair is gone
+// -- from both array forms -- and a count:N array is generated exactly like a
+// count-less one except for the bound it still enforces.
+func TestGoArrayCountIsCapacityNotLength(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      fnums:   { id: 3, type: array, items: { type: u32, count: 4 } }
+      fdef:    { id: 4, type: array, items: { type: u32, count: 4 }, default: [1, 2] }
+`)
+	files := genGo(t, s, map[string]any{"package": "messages"})
+	got, prelude := files["vec.go"], files["sofab_visitor.go"]
+
+	// Both array kinds loop over the value itself: there is no M to narrow to.
+	for _, want := range []string{
+		"for _i0, _e0 := range m.Fixed {",
+		"for _i0, _e0 := range m.Dynamic {",
+		"for _i0, _e0 := range m.Fstrs {",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("vec.go missing %q:\n%s", want, got)
+		}
+	}
+	// A count:N native array is emitted whole, and its omit test compares the value
+	// as it stands -- not a trailing-trimmed image of it.
+	if !strings.Contains(got, "\tif len(m.Fnums) != 0 {\n\t\tsofab.WriteUnsignedArray(e, 3, m.Fnums)\n\t}") {
+		t.Errorf("a count:N native array must be written whole:\n%s", got)
+	}
+	// A `default` shorter than the count stands for itself: it is NOT padded to N,
+	// on either side of the comparison.
+	if !strings.Contains(got, "if !slices.Equal(m.Fdef, []uint32{1, 2}) {") {
+		t.Errorf("a short count:N default must not be padded to N:\n%s", got)
+	}
+	// isDefault has to reach the same verdict as the writer, or it omits a field
+	// that is on the wire (or keeps one that is not). Both are now the plain value.
+	for _, want := range []string{
+		"len(m.Fixed) == 0",
+		"len(m.Dynamic) == 0",
+		"len(m.Fstrs) == 0",
+		"len(m.Fnums) == 0",
+		"slices.Equal(m.Fdef, []uint32{1, 2})",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("isDefault must test the plain value, missing %q:\n%s", want, got)
+		}
+	}
+	// Nothing anywhere may trim on encode or refill on decode.
+	for _, banned := range []string{
+		"_trimObjs", "_trimStrs", "_trimBlobs", "_trimRows",
+		"sofab.TrimTail", "sofab.PadTo", "_fillTo",
+	} {
+		for name, src := range map[string]string{"vec.go": got, "sofab_visitor.go": prelude} {
+			if strings.Contains(src, banned) {
+				t.Errorf("%s still uses the superseded fixed-length machinery %q:\n%s", name, banned, src)
+			}
+		}
+	}
+	// A fresh count:N array is the EMPTY array, not N element defaults: the
+	// constructor materializes a declared default and nothing else.
+	if strings.Contains(got, "m.Fixed = make(") || strings.Contains(got, "m.Fstrs = make(") {
+		t.Errorf("a count:N wrapper array must not be materialized to N:\n%s", got)
+	}
+	if !strings.Contains(got, "m.Fdef = []uint32{1, 2}\n") {
+		t.Errorf("a declared array default must still be materialized:\n%s", got)
+	}
+	if strings.Contains(got, "m.Fnums = []uint32{0, 0, 0, 0}") {
+		t.Errorf("a count:N native array with no default must stay empty:\n%s", got)
+	}
+	// The bound itself is untouched -- that is all `count` still does.
+	if !strings.Contains(got, "cap: 5") || !strings.Contains(got, "if len(v) > 4 {") {
+		t.Errorf("the count bound must still be enforced:\n%s", got)
+	}
+}
+
+// MESSAGE_SPEC §2 governs both element kinds with ONE rule, and the rule is
+// positional: an element before the last one that equals its element default is
+// omitted -- a string/blob leaf simply not written, a sequence element not framed
+// either -- while the element at the LAST index is always written, as its value or
+// as an empty frame. Only the last index carries the array's length (§5.1); an
+// interior gap is restored from the element default and is therefore free.
+//
+// This holds with or without a declared `count`: a capacity can never restore an
+// elided tail.
+func TestGoElementSparsityIsPositional(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
+      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      fixedobj: { id: 3, type: array, items: { type: struct, count: 3, fields: { k: { id: 0, type: u32 } } } }
+      mat:      { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+`)
+	got := genGo(t, s, map[string]any{"package": "messages"})["vec.go"]
+
+	for _, want := range []string{
+		// leaf elements: the last index escapes the omit test -- count or no count
+		"\t\tif _e0 != \"\" || _i0 == len(m.Dynstr)-1 {",
+		"\t\tif len(_e0) != 0 || _i0 == len(m.Dynblob)-1 {",
+		"\t\tif _e0 != \"\" || _i0 == len(m.Fixedstr)-1 {",
+		// sequence elements: the same rule, applied through the closer
+		"\t\tif _i0 == len(m.Fixedobj)-1 {\n\t\t\te.WriteSequenceEndKeep()\n\t\t} else {\n\t\t\te.WriteSequenceEnd()\n\t\t}",
+		// a native row carries no frame of its own, so the rule lands on the write
+		"\t\tif len(_e0) != 0 || _i0 == len(m.Mat)-1 {\n\t\t\tsofab.WriteUnsignedArray(e, sofab.ID(_i0), _e0)\n\t\t}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("vec.go missing %q:\n%s", want, got)
+		}
+	}
+	// The predicate follows the writer: every non-empty array now puts at least one
+	// element on the wire, so "default" is exactly "empty" for every element kind.
+	for _, want := range []string{"len(m.Dynstr) == 0", "len(m.Fixedstr) == 0", "len(m.Fixedobj) == 0"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("isDefault must be plain emptiness, missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// A wrapper array's element id IS the array index (§5.1), so an element is PLACED
+// at dest[id] after gap-filling from the element default -- never appended. That
+// is what restores an interior element the sparse rule omitted; appending would
+// shorten the array by the size of every gap and would decode a REOPENED id as a
+// second element instead of merging into the first (§7.4).
+//
+// The decoded length is highest present id + 1, exact because the last element is
+// never elided. Nothing is filled in beyond it: a schema `count` is a capacity, so
+// it bounds the id but never adds an element the wire did not carry.
+func TestGoWrapperElementsArePlacedByID(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      objs: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } } }
+      mat:  { id: 1, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+      rows: { id: 2, type: array, items: { type: array, count: 2, items: { type: string, maxlen: 4 } } }
+`)
+	files := genGo(t, s, map[string]any{"package": "messages"})
+	prelude := files["sofab_visitor.go"]
+
+	for _, want := range []string{
+		// struct elements: place, not append -- and the gap-fill that precedes it
+		"\tfor len(*s.out) <= int(id) {\n\t\t*s.out = append(*s.out, zero)\n\t}\n\treturn PT(&(*s.out)[id]), nil",
+		// native matrix rows: same, through the shared _placeRow
+		"func _placeRow[T any](out *[][]T, cap int, id sofab.ID, row []T) error {",
+		"\tfor len(*out) <= int(id) {\n\t\t*out = append(*out, nil)\n\t}\n\t(*out)[id] = row",
+		"func (s *_uMatSeq[T]) UnsignedArray(id sofab.ID, v []uint64) error {\n\treturn _placeRow(s.out, s.cap, id, sofab.NarrowUnsigned[T](v))",
+		// wrapper rows: same again
+		"func (s *_seqSeq[T]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {",
+		"\tfor len(*s.out) <= int(id) {\n\t\t*s.out = append(*s.out, nil)\n\t}\n\treturn s.mk(&(*s.out)[id]), nil",
+		// the over-index guard bounds every id-keyed fill
+		"if s.cap >= 0 && int(id) >= s.cap {",
+		"\tif cap >= 0 && int(id) >= cap {\n\t\treturn sofab.ErrInvalidMsg\n\t}",
+	} {
+		if !strings.Contains(prelude, want) {
+			t.Errorf("sofab_visitor.go missing %q:\n%s", want, prelude)
+		}
+	}
+	// The defects this replaced: appending ignored the id entirely.
+	for _, banned := range []string{
+		"*s.out = append(*s.out, zero)\n\treturn PT(&(*s.out)[len(*s.out)-1]), nil",
+		"*s.out = append(*s.out, sofab.NarrowUnsigned[T](v))",
+		"return s.mk(&(*s.out)[len(*s.out)-1]), nil",
+		// ...and the refill that made the superseded trailing elision lossless.
+		"EndSequence() error { return _fillTo",
+		"func (s *_objSeq[T, PT]) EndSequence() error {",
+	} {
+		if strings.Contains(prelude, banned) {
+			t.Errorf("sofab_visitor.go must no longer contain %q:\n%s", banned, prelude)
+		}
+	}
+	// Every collector carries the outer array's count bound, matrices included.
+	for _, want := range []string{"cap: 4", "&_uMatSeq[uint32]{out: &m.Mat, cap: 2}", "&_seqSeq[string]{out: &m.Rows, cap: 2,"} {
+		if !strings.Contains(files["vec.go"], want) {
+			t.Errorf("vec.go must pass the schema count as the collector cap, missing %q:\n%s", want, files["vec.go"])
+		}
 	}
 }

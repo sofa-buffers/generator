@@ -38,6 +38,20 @@ export class Scalars {
     }
   }
 
+  // True iff marshal would write no child at all, i.e. this object equals its
+  // declared default -- compared per field and recursively, never as a byte image.
+  isDefault(): boolean {
+    if (!(this.u8min === 0)) return false;
+    if (!(this.u8max === 255)) return false;
+    if (!(this.u64max === 18446744073709551615n)) return false;
+    if (!(this.i8min === -128)) return false;
+    if (!(this.i64min === -9223372036854775808n)) return false;
+    if (!(this.f32 === 3.14)) return false;
+    if (!(this.f64 === -2.5)) return false;
+    if (!(this.flag === true)) return false;
+    return true;
+  }
+
   toJSON(): Record<string, unknown> {
     return {
       "u8min": this.u8min,

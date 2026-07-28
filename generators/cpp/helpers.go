@@ -217,44 +217,41 @@ func isNativeArrayElem(k ir.Kind) bool {
 	return false
 }
 
-// dynNativeArray reports whether a native-element array lowers to a growable
-// std::vector rather than a fixed std::array: the heap (corelib: cpp) profile
-// with no schema count. Such an array carries no compile-time capacity, so it
-// must be sized to the wire element count before the corelib's span-based
-// read/write (#112). A bounded native array (count present) stays a fixed
-// std::array; the fixed profile keeps std::array and rejects the count-less case
-// in checkBounded.
-// dynNativeArray reports whether a native scalar array is stored in a
-// std::vector rather than a std::array. Two independent reasons: the pure
-// corelib-cpp profile has no count (its arrays are genuinely unbounded), or the
-// c-cpp profile was asked for heap storage — where the count still exists and
-// becomes a decode-time bound rather than the container's capacity.
-func (g *gen) dynNativeArray(elem ir.Kind, count int64) bool {
+// dynNativeArray reports whether a native scalar array is stored in a growable
+// std::vector rather than the corelib's heap-free sofab::InlineVector<T, N>.
+//
+// Since `count: N` became a CAPACITY and the wire count became the array's
+// LENGTH (MESSAGE_SPEC §3, documentation#29), EVERY native array has to carry a
+// logical length of its own: without one it cannot hold a value shorter than N,
+// so [1, 2] on a `count: 4` field would encode as four elements on one profile
+// and two on another — the same schema, two different wire images. So the only
+// question left is WHERE the elements live, which is the heap-free decision and
+// nothing else: inline storage on `c-cpp` without allow_dynamic, the heap
+// everywhere else. std::array<T, N> is not an answer to either question and is
+// no longer used for an array member.
+func (g *gen) dynNativeArray(elem ir.Kind) bool {
 	if !isNativeArrayElem(elem) {
 		return false
 	}
-	if g.fixed {
-		return g.allowDynamic
-	}
-	return count <= 0
+	return !(g.fixed && !g.allowDynamic)
 }
 
 // cppArrayContainer is the C++ member type for an array with the given element.
-// A bounded native element is a fixed std::array<T, count>; a count-less native
-// element on the heap profile is a growable std::vector<T> (NOT std::array<T, 0>,
-// which cannot hold any element — #112). For composite/dynamic elements the
-// default profile uses std::vector<T>; the fixed profile lowers a bounded array
-// (count present, and for blobs the element maxlen present) to an
-// InlineVector<T, count> — fixed inline storage with a separate logical length,
-// no heap. A string/blob element additionally needs its element maxlen to be
-// sized; without it the array stays std::vector.
+// Every array member is length-carrying: a growable std::vector<T>, or — on the
+// heap-free c-cpp storage mode, for a bounded array — the corelib's
+// InlineVector<T, count>, which is inline storage plus a separate logical
+// length. That is uniform across element kinds now: a native scalar array is
+// sized exactly like a wrapper array, because `count` is a capacity for both and
+// the wire count is the length for both (MESSAGE_SPEC §3). A string/blob element
+// additionally needs its element maxlen to be sized inline; without it the array
+// stays std::vector.
 func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64) string {
 	et := g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax)
 	if isNativeArrayElem(elem) {
-		if g.dynNativeArray(elem, count) {
+		if g.dynNativeArray(elem) {
 			return "std::vector<" + et + ">"
 		}
-		return fmt.Sprintf("std::array<%s, %d>", et, count)
+		return fmt.Sprintf("sofab::InlineVector<%s, %d>", et, count)
 	}
 	if g.fixed && !g.allowDynamic && count > 0 {
 		switch elem {
@@ -288,6 +285,20 @@ func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, e
 		}
 		return "std::vector<std::uint8_t>"
 	case ir.KindBool:
+		// On the c-cpp leg a boolean array's element is the wire's own
+		// std::uint8_t, not bool. corelib-c-cpp's decoder is DEFERRED: read()
+		// records the destination's ADDRESS and the C runtime writes the element
+		// bytes after the field callback has returned, so the destination must be
+		// the member itself and must have one addressable byte per element.
+		// std::vector<bool> is the bit-packed specialisation -- no data(), no byte
+		// per element -- so it cannot be a decode destination at all, and the
+		// std::array<bool, N> leg was only ever reached through a
+		// reinterpret_cast. One element type for both c-cpp storage modes keeps
+		// the two legs' generated API identical, which is the profile promise.
+		// corelib-cpp decodes synchronously through a temporary, so it keeps bool.
+		if g.fixed {
+			return "std::uint8_t"
+		}
 		return "bool"
 	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
 		return g.typeName(ref.Key)
@@ -386,12 +397,23 @@ func (g *gen) cppDefault(f *ir.Field) string {
 	case ir.KindArray:
 		// A native scalar array is a leaf: materialize its schema default at
 		// construction (zero-filled when none) so an omitted default array
-		// reconstructs correctly and serialize can compare against it. A
-		// composite/dynamic-element array is a wrapper sequence (always framed) and
-		// is left empty.
+		// reconstructs correctly and serialize can compare against it.
 		if isNativeArrayElem(f.Elem) {
 			return g.cppNativeArrayBraces(f)
 		}
+		// A composite-element array is a wrapper sequence, and its construction
+		// value is the EMPTY array — with or without a declared `count: N`.
+		//
+		// `count` is a CAPACITY, not a length (MESSAGE_SPEC §3): it never reaches
+		// the wire and never adds an element, so a fresh count: N array holds
+		// nothing, exactly like a count-less one. Both std::vector and
+		// sofab::InlineVector<T,N> carry their own logical length, so both express
+		// that directly — which is also what makes 0..N all representable here,
+		// and what "the wire count M IS the length" needs of the storage.
+		//
+		// The declared `default` is still not materialized (§2); absent and
+		// explicitly-empty therefore denote the same value, which is what lets
+		// emitSerializeArray close the field wrapper with the dropping end.
 		return "{}"
 	}
 	return "{}"
@@ -400,23 +422,21 @@ func (g *gen) cppDefault(f *ir.Field) string {
 // cppNativeArrayBraces renders a native scalar array's schema default as a braced
 // initializer ({v0, v1, ...}).
 //
-// A `count: N` array holds exactly N elements (MESSAGE_SPEC §3, ARCHITECTURE
-// §11) — in every storage mode. `std::array<T,N>` gets that from aggregate
-// initialization: `{}` zero-fills the whole array and `{10, 20}` zero-fills the
-// tail. `std::vector<T>` (the allow_dynamic storage) has no such rule — `{}`
-// constructs it EMPTY — so there the initializer is written out to all N
-// elements. Without it a bounded array starts at size 0 and generated code that
-// indexes elements 0..N-1 writes into nothing.
+// It is NOT padded out to a declared `count: N`: that is a capacity, not a length
+// (MESSAGE_SPEC §3), so the default stands exactly as written — and so does the
+// value it is compared against, which is what keeps a shorter array distinct from
+// the padded one.
+//
+// The storage no longer has a say in it: both containers a native array can land
+// in — std::vector<T> and sofab::InlineVector<T, N> — take the initializer
+// verbatim and carry the resulting length themselves, so a default shorter than
+// N stays shorter than N on every profile. That is what the container change
+// bought: previously a std::array<T,N> zero-filled whatever the initializer left
+// out, and the same schema then had two different construction values (and two
+// different wire images). See docs/generator/cpp.md.
 func (g *gen) cppNativeArrayBraces(f *ir.Field) string {
 	vals, _ := f.Default.([]any)
-	parts := g.cppArrayElemLits(f, vals)
-	if f.HasCount && g.dynNativeArray(f.Elem, f.Count) {
-		zero := g.cppArrayElemLit(f.Elem, f.ElemRef, elemZeroValue(f.Elem))
-		for int64(len(parts)) < f.Count {
-			parts = append(parts, zero)
-		}
-	}
-	return "{" + strings.Join(parts, ", ") + "}"
+	return "{" + strings.Join(g.cppArrayElemLits(f, vals), ", ") + "}"
 }
 
 func (g *gen) cppArrayElemLits(f *ir.Field, vals []any) []string {
@@ -425,18 +445,6 @@ func (g *gen) cppArrayElemLits(f *ir.Field, vals []any) []string {
 		parts[i] = g.cppArrayElemLit(f.Elem, f.ElemRef, v)
 	}
 	return parts
-}
-
-// elemZeroValue is the IR-typed zero an unset array element takes.
-func elemZeroValue(elem ir.Kind) any {
-	switch elem {
-	case ir.KindBool:
-		return false
-	case ir.KindFP32, ir.KindFP64:
-		return float64(0)
-	default:
-		return int64(0)
-	}
 }
 
 // cppArrayElemLit renders one native-array element default as a C++ literal typed
@@ -466,45 +474,6 @@ func (g *gen) cppArrayElemLit(elem ir.Kind, ref *ir.TypeRef, v any) string {
 	default: // u8..i32, bitfield
 		return scalarLit(v)
 	}
-}
-
-// cppFixedArrayNeedsReset reports whether a fixed native array field's decode
-// must clear the member to the element default before the wire elements land.
-//
-// A `count: N` array decodes to exactly N elements: M from the wire, the ELEMENT
-// default (zero) at [M,N) (MESSAGE_SPEC §3). The std::array<T,N> member starts at
-// the field's *declaration* default, so with a non-zero SCHEMA default the tail
-// the corelib's span read never touches would wrongly keep that schema default:
-// with `default: [1,2,3]` on `count: 5`, a value of [1,2,0,0,0] encodes (trimmed)
-// to the 2-element wire [1,2] and would decode back as [1,2,3,0,0] — a corrupted
-// round-trip. Clearing first makes the tail the element default.
-//
-// The schema default is the value of an ABSENT field (sparse omission,
-// MESSAGE_SPEC S2); it is reconstructed from the member's construction default
-// and is untouched by this reset, which only runs once the field is PRESENT.
-//
-// A field with no schema default (or an all-zero one) already declares an
-// all-zero array, so it needs no reset and its generated code is unchanged.
-func (g *gen) cppFixedArrayNeedsReset(f *ir.Field) bool {
-	if f.Kind != ir.KindArray || !isNativeArrayElem(f.Elem) {
-		return false
-	}
-	// Only fixed storage: a count-less array lowers to a std::vector that decode
-	// resizes to the wire count, so it has no stale tail to clear.
-	if g.dynNativeArray(f.Elem, f.Count) || f.Count <= 0 {
-		return false
-	}
-	vals, ok := f.Default.([]any)
-	if !ok {
-		return false
-	}
-	zero := g.cppArrayElemLit(f.Elem, f.ElemRef, 0)
-	for _, v := range vals {
-		if g.cppArrayElemLit(f.Elem, f.ElemRef, v) != zero {
-			return true
-		}
-	}
-	return false
 }
 
 func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {

@@ -1,0 +1,44 @@
+# Wrapper-sequence ELEMENT coverage: the shapes whose element frames carry the
+# §3/§5.1 trailing-default elision and the §5.1 place-by-element-id rule.
+#
+# Every field here is a wrapper array — one whose elements lower to sequence
+# frames rather than to a native array wire type — because that is the position
+# where the element id doubles as the array index.
+#
+# Every array here is bounded, so the fixed-storage targets (c, and cpp with
+# corelib: c-cpp) generate it too: this is the fixed-count half of the rule --
+# elide the trailing default run on encode, default-fill back to N on decode.
+# The count-less half, which must do neither, needs unbounded arrays and so lives
+# in seq_elements_dyn.yaml alongside the other deliberately-unbounded schema.
+# Nested rows (`array<array<…>>`) live in nested_rows.yaml.
+version: 1
+$defs:
+  struct:
+    Kv:
+      k: { id: 0, type: u32 }
+      v: { id: 1, type: string, maxlen: 16 }
+messages:
+  SeqElements:
+    payload:
+      # fixed-count struct elements: the #247/#248 shape
+      fixed_structs:
+        id: 0
+        type: array
+        items: { type: struct, count: 5, fields: { $ref: '#/$defs/struct/Kv' } }
+      # union elements carry default_id, so "all-default" is not "all-zero"
+      fixed_unions:
+        id: 2
+        type: array
+        items:
+          type: union
+          count: 3
+          default_id: 0
+          oneof:
+            small: { id: 0, type: u8 }
+            text:  { id: 1, type: string, maxlen: 8 }
+      # leaf elements: a default element leaves an id GAP rather than a frame
+      fixed_strs:  { id: 3, type: array, items: { type: string, count: 4, maxlen: 8 } }
+      fixed_blobs: { id: 5, type: array, items: { type: blob, count: 2, maxlen: 4 } }
+      # a scalar after the arrays, so a decoder that mis-tracks an element frame
+      # corrupts a field it can be caught on
+      tail: { id: 6, type: u32, default: 9 }

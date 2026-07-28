@@ -16,6 +16,25 @@ class Scalars:
     f64: float = -2.5
     flag: bool = True
 
+    def _is_default(self) -> bool:
+        if not (self.u8min == 0):
+            return False
+        if not (self.u8max == 255):
+            return False
+        if not (self.u64max == 18446744073709551615):
+            return False
+        if not (self.i8min == -128):
+            return False
+        if not (self.i64min == -9223372036854775808):
+            return False
+        if not (self.f32 == 3.14):
+            return False
+        if not (self.f64 == -2.5):
+            return False
+        if not (self.flag == True):
+            return False
+        return True
+
     def _marshal(self, e: Encoder) -> None:
         if self.u8min != 0:
             e.write_unsigned(0, int(self.u8min))

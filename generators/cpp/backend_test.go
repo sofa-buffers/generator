@@ -162,14 +162,14 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"std::vector<std::uint32_t> arr = {};",           // unbounded native -> vector (was std::array<T,0>)
-		"std::vector<bool> bl = {};",                     // unbounded bool -> vector
-		"std::array<std::uint32_t, 4> fixed = {};",       // bounded native array unchanged
-		"std::vector<std::vector<std::uint32_t>> matrix", // matrix rows are dynamic vectors too
-		"is.readArray(arr);",                             // readArray sizes the vector to the wire count
-		"if (arr != std::vector<std::uint32_t>{}) {",     // whole-omit compares to an empty vector
-		"std::size_t _count) noexcept override",          // _count is named for the resize
-		"sofab::MessageSeq<std::vector<std::uint32_t>>",  // matrix rows collected by the corelib helper
+		"std::vector<std::uint32_t> arr = {};",                          // unbounded native -> vector (was std::array<T,0>)
+		"std::vector<bool> bl = {};",                                    // unbounded bool -> vector
+		"std::vector<std::uint32_t> fixed = {};",                        // a bounded native array is length-carrying too
+		"std::vector<std::vector<std::uint32_t>> matrix",                // matrix rows are dynamic vectors too
+		"is.readArray(arr);",                                            // readArray sizes the vector to the wire count
+		"if (arr != std::vector<std::uint32_t>{}) {",                    // whole-omit compares to an empty vector
+		"std::size_t _count) noexcept override",                         // _count is named for the resize
+		"sofabgen::WrapperSeq<std::vector<std::vector<std::uint32_t>>>", // matrix rows collected by the generated placer
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap header missing %q:\n%s", want, h)
@@ -208,13 +208,14 @@ func TestCppOverIndexWrapperArray(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	// The bounds are handed to the corelib's collectors; the guards themselves live
-	// in corelib-cpp (sofab::StringSeq / BlobSeq / MessageSeq), not in generated
-	// code, so this asserts what the generator DECLARES rather than the check.
+	// The string/blob bounds are handed to the corelib's collectors, whose guards
+	// live in corelib-cpp (sofab::StringSeq / BlobSeq); the object path collects
+	// through the generated placer, which carries the same bound as `cap`. Either
+	// way this asserts what the generator DECLARES rather than the check itself.
 	for _, want := range []string{
-		"{ sofab::StringSeq _r0{bs, 4, 16}; is.read(_r0); }", // bounded string -> cap 4, elem maxlen 16
-		"{ sofab::BlobSeq _r0{bb, 3, 16}; is.read(_r0); }",   // bounded blob -> cap 3, elem maxlen 16
-		"_r0.cap = 2;", // bounded struct -> MessageSeq cap 2
+		"{ sofab::StringSeq _r0{bs, 4, 16}; is.read(_r0); }", // bounded string -> cap 4, elem maxlen 16, never refilled
+		"{ sofab::BlobSeq _r0{bb, 3, 16}; is.read(_r0); }",   // bounded blob -> cap 3, elem maxlen 16, never refilled
+		"_r0.cap = 2;", // bounded struct -> placer cap 2
 		"{ sofab::StringSeq _r0{ds, -1, -1}; is.read(_r0); }", // dynamic string -> unbounded cap + maxlen
 		"_r0.cap = -1;", // dynamic struct -> unbounded
 	} {
@@ -222,8 +223,8 @@ func TestCppOverIndexWrapperArray(t *testing.T) {
 			t.Errorf("heap over-index bound missing %q:\n%s", want, h)
 		}
 	}
-	// The collectors are corelib types now: a generated header must not define its
-	// own copies on the pure path.
+	// The leaf collectors are corelib types: a generated header must not define
+	// its own copies of those on the pure path.
 	for _, notWant := range []string{"struct _StrSeq", "struct _BlobSeq", "struct _MsgSeq"} {
 		if strings.Contains(h, notWant) {
 			t.Errorf("the pure path must use the corelib collector, not emit %q:\n%s", notWant, h)
@@ -283,16 +284,16 @@ func TestCppFixedContainers(t *testing.T) {
 	for _, want := range []string{
 		"sofab::FixedBytes<16> bl = {};",                                               // scalar blob -> fixed
 		"sofab::FixedString<8> s = \"\";",                                              // bounded string -> FixedString
-		"std::array<std::uint32_t, 4> nums = {};",                                      // native array unchanged
-		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",                     // blob sequence -> inline
-		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",                    // string sequence -> inline
+		"sofab::InlineVector<std::uint32_t, 4> nums = {};",                             // native array is inline + length-carrying
+		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",                     // blob sequence -> inline, EMPTY (count is a capacity)
+		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",                    // string sequence -> inline, EMPTY (count is a capacity)
 		"sofab::InlineVector<MPtsElem",                                                 // struct sequence -> inline (prefix)
 		"if (bl != sofab::FixedBytes<16>{}) {",                                         // blob default-compare typed
 		"is.readString(s, _size, 8);",                                                  // FixedString decode, bound carried into the corelib read
 		"is.readBlob(bl, _size, 16);",                                                  // FixedBytes decode, likewise (issue #95)
 		"static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",     // blob-seq collector
 		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
-		"static sofab::FixedMessageSeq<sofab::InlineVector<",                           // struct-seq collector
+		"static sofabgen::WrapperSeq<sofab::InlineVector<",                             // struct-seq collector (places by element index)
 		// over-index element rejected INVALID (generator#149), no infinite loop (issue #126)
 		"std::size_t encodeTo(std::uint8_t *dst", // heap-free encode
 	} {
@@ -410,7 +411,7 @@ func TestCppDynamicStorage(t *testing.T) {
 	}
 	for _, want := range []string{
 		"sofab::FixedString<12> s", "sofab::FixedBytes<8> b",
-		"std::array<std::uint32_t, 4> a", "sofab::InlineVector<sofab::FixedString<5>, 2> t",
+		"sofab::InlineVector<std::uint32_t, 4> a", "sofab::InlineVector<sofab::FixedString<5>, 2> t",
 	} {
 		if !strings.Contains(fix, want) {
 			t.Errorf("inline storage: missing %q", want)
@@ -505,7 +506,9 @@ func TestCppContainersByCorelib(t *testing.T) {
 // TestCppSparse: the C++ serialize is always sparse-canonical (MESSAGE_SPEC S2),
 // with no config toggle. A scalar/string/blob leaf is written under an
 // "if (v != default)" guard; a native scalar array (leaf) is whole-omitted vs a
-// materialized default; a struct/union and a composite array stay ALWAYS framed.
+// materialized default; a struct/union field and a composite-array field are
+// framed LAZILY, so an all-default one is omitted rather than emitted as an empty
+// wrapper -- the corelib decides that from "was any child written".
 func TestCppSparse(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      a: { id: 0, type: u32, default: 7 }\n" +
@@ -516,24 +519,25 @@ func TestCppSparse(t *testing.T) {
 		"      st: { id: 5, type: struct, fields: { x: { id: 0, type: i32 } } }\n"
 	h := headerFromYAML(t, src, "m.hpp")
 	for _, want := range []string{
-		"if (a != 7) { (void)os.write(0, a); }",               // scalar guard
-		`if (s != "") {`,                                      // string guard (empty default)
-		"if (bl != std::vector<std::uint8_t>{}) {",            // blob guard
-		"std::array<std::int32_t, 3> nums = {1, 2, 3};",       // native array default materialized
-		"if (nums != std::array<std::int32_t, 3>{1, 2, 3}) {", // native array whole-omit
-		"(void)os.write(5, st);",                              // struct ALWAYS framed (no guard)
+		"if (a != 7) { (void)os.write(0, a); }",             // scalar guard
+		`if (s != "") {`,                                    // string guard (empty default)
+		"if (bl != std::vector<std::uint8_t>{}) {",          // blob guard
+		"std::vector<std::int32_t> nums = {1, 2, 3};",       // native array default materialized
+		"if (nums != std::vector<std::int32_t>{1, 2, 3}) {", // native array whole-omit
+		"(void)os.writeLazy(5, st);",                        // struct framed lazily (no guard)
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q", want)
 		}
 	}
-	// A composite array is always framed: emitted via sequenceBegin, never guarded
-	// by an "if (strs != ...)" whole-omission.
+	// A composite array carries no whole-omission guard in generated code: the
+	// wrapper frame is opened lazily and the corelib drops it when no element was
+	// written (S2). Its field declares no default, so the lazy form is correct.
 	if strings.Contains(h, "if (strs !=") {
-		t.Error("composite array must be always framed (no whole-omission guard)")
+		t.Error("composite array must not carry a whole-omission guard")
 	}
-	if !strings.Contains(h, "(void)os.sequenceBegin(4);") {
-		t.Error("composite array must be framed via sequenceBegin")
+	if !strings.Contains(h, "(void)os.sequenceBeginLazy(4);") {
+		t.Error("composite array field must be framed via sequenceBeginLazy")
 	}
 }
 
@@ -724,53 +728,75 @@ const trimSrc = "version: 1\nmessages:\n  M:\n    payload:\n" +
 	"      bls: { id: 3, type: array, items: { type: boolean, count: 4 } }\n" +
 	"      matrix: { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }\n"
 
-// TestCppFixedCountTrimsTrailingDefaultRun: a `count: N` native array is
-// FIXED-LENGTH, so its canonical wire carries only elements [0, M') — M' being
-// one past the last non-default element — and the decoder rebuilds [M', N) from
-// the schema count (MESSAGE_SPEC §3, finding F-0010). Handing the whole
-// std::array<T,N> to the corelib emits the trailing default run, because the
-// span-based write takes .size() == N. Both corelibs take a std::span through
-// the same templated OStream::write, so both profiles trim identically.
-func TestCppFixedCountTrimsTrailingDefaultRun(t *testing.T) {
+// TestCppNativeArrayWritesEveryElement: `count: N` is a CAPACITY, not a length
+// (MESSAGE_SPEC §3 as tightened by documentation#29): the wire count M IS the
+// array's length, so nothing that carries it may be elided. The
+// trailing-default-run trim this backend used to apply (sofab::trimTail) was
+// correct only under the superseded fixed-length reading and is gone -- with it
+// [1,2,3,0,0] would encode exactly like [1,2,3] and decode two elements short.
+// Both corelibs write through the same templated span overload, so both profiles
+// hand over the whole container.
+func TestCppNativeArrayWritesEveryElement(t *testing.T) {
 	for _, corelib := range []string{"cpp", "c-cpp"} {
 		t.Run(corelib, func(t *testing.T) {
 			h, err := genHeader(t, trimSrc, "m.hpp", map[string]any{"namespace": "sofabuffers", "corelib": corelib})
 			if err != nil {
 				t.Fatalf("generate: %v", err)
 			}
-			// The trim helper lives in corelib-cpp on the pure path (sofab::trimTail)
-			// and is still emitted for the c-cpp wrapper, which links a different
-			// corelib. Both compare the element's BYTE IMAGE, never == -- a trailing
-			// -0.0 equals 0.0 but is not the default and must stay on the wire.
-			trim := "sofab::trimTail"
 			wants := []string{
-				// Numeric + float fields trim in place.
-				"(void)os.write(0, " + trim + "(u32s));",
-				"(void)os.write(1, " + trim + "(f32s));",
-				// Enum/bool value-convert through a native temp; the converted image is
-				// trimmed (enum default 0 -> backing 0, false -> 0).
-				"(void)os.write(2, " + trim + "(_t0)); }",
-				"(void)os.write(3, " + trim + "(_t0)); }",
+				// Numeric + float fields hand the container over whole.
+				"(void)os.write(0, u32s);",
+				"(void)os.write(1, f32s);",
+				// An enum value-converts through a native temp, element for element.
+				"(void)os.write(2, _t0); }",
+			}
+			// A boolean array's element is bool on the corelib-cpp leg (converted
+			// through a temp) and std::uint8_t on the c-cpp leg, where the member
+			// already holds the wire bytes and is handed over whole.
+			if corelib == "c-cpp" {
+				wants = append(wants, "(void)os.write(3, bls);")
+			} else {
+				wants = append(wants, "(void)os.write(3, _t0); }")
 			}
 			for _, want := range wants {
 				if !strings.Contains(h, want) {
 					t.Errorf("[%s] header missing %q:\n%s", corelib, want, h)
 				}
 			}
-			// A nested matrix row is a wrapper-sequence element, not a `count: N`
-			// field: the rule is scoped to fields, so rows are never trimmed.
-			if !strings.Contains(h, "(void)os.write(_i0++, _e0);") {
-				t.Errorf("[%s] nested array row must not be trimmed:\n%s", corelib, h)
+			// The superseded helper must not be called at all any more. The corelibs
+			// still ship it (marked deprecated) so older generated code compiles;
+			// this generator must not reach for it.
+			if strings.Contains(h, "trimTail") {
+				t.Errorf("[%s] a native array must not be trimmed (count is a capacity):\n%s", corelib, h)
 			}
-			// Decode is unchanged: the fixed std::array already materializes N
-			// elements, zero-filled by the in-class initializer, so [M, N) is already
-			// the element default. Over-count stays INVALID on the heap profile.
-			if !strings.Contains(h, "std::array<std::uint32_t, 5> u32s = {};") {
-				t.Errorf("[%s] fixed-count array must stay a zero-filled std::array:\n%s", corelib, h)
+			// A nested matrix ROW is an array ELEMENT, so it takes the positional
+			// rule: an interior row equal to the element default is not written and
+			// leaves an id gap; the last row always is. The row has no frame of its
+			// own (it is one count-prefixed value), so the rule lands on the write.
+			rowType := "std::vector<std::uint32_t>"
+			if corelib == "c-cpp" {
+				rowType = "sofab::InlineVector<std::uint32_t, 3>"
+			}
+			if !strings.Contains(h, "if (_e0 != "+rowType+"{} || _i0 + 1 == _n0) {") {
+				t.Errorf("[%s] a matrix row must be omitted in the interior when default:\n%s", corelib, h)
+			}
+			if !strings.Contains(h, "(void)os.write(static_cast<sofab::id>(_i0), _e0);") {
+				t.Errorf("[%s] a matrix row must still be written whole:\n%s", corelib, h)
+			}
+			// The member carries a LENGTH: a `count: 5` array with no default is
+			// EMPTY, not five zeros, so the profiles cannot disagree about what
+			// [1, 2] means on this field.
+			wantMember := "std::vector<std::uint32_t> u32s = {};"
+			if corelib == "c-cpp" {
+				wantMember = "sofab::InlineVector<std::uint32_t, 5> u32s = {};"
+			}
+			if !strings.Contains(h, wantMember) {
+				t.Errorf("[%s] a count:N array must be length-carrying (%s):\n%s", corelib, wantMember, h)
 			}
 			// Both corelibs read through readArray, which carries the bound and
 			// performs the reset behind the tag match; the c-cpp signature also
-			// takes the wire count, since it sizes a dynamic destination.
+			// takes the wire count, since it sizes a dynamic destination. Nothing
+			// follows it: there is no fill-back to N (§3).
 			wantRead := "is.readArray(u32s, 5);"
 			if corelib == "c-cpp" {
 				wantRead = "is.readArray(u32s, _count, 5);"
@@ -778,14 +804,16 @@ func TestCppFixedCountTrimsTrailingDefaultRun(t *testing.T) {
 			if !strings.Contains(h, wantRead) {
 				t.Errorf("[%s] fixed-count decode must read the whole array (%s):\n%s", corelib, wantRead, h)
 			}
+			if strings.Contains(h, "fillTo") {
+				t.Errorf("[%s] decode must not refill a count:N array (count is a capacity):\n%s", corelib, h)
+			}
 		})
 	}
 }
 
-// TestCppDynamicArrayNotTrimmed: a count-less (dynamic) array has no schema N to
-// refill from at decode, so a trailing default element is SIGNIFICANT and must
-// reach the wire. Only the heap profile has dynamic arrays (the fixed profile
-// rejects an unbounded array in checkBounded).
+// TestCppDynamicArrayNotTrimmed: neither a count-less nor a `count: N` array is
+// narrowed on encode -- since documentation#29 the two are the same rule, so the
+// counted one lost its carve-out too.
 func TestCppDynamicArrayNotTrimmed(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      dyn: { id: 0, type: array, items: { type: u32 } }\n" +
@@ -802,16 +830,14 @@ func TestCppDynamicArrayNotTrimmed(t *testing.T) {
 		"(void)os.write(1, dynf);",
 		"(void)os.write(2, _t0); }",
 		"(void)os.write(3, _t0); }",
-		"(void)os.write(4, sofab::trimTail(fixed));", // the counted one still trims
+		"(void)os.write(4, fixed);", // the counted one no longer trims either
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q:\n%s", want, h)
 		}
 	}
-	for _, bad := range []string{"_trimTail(dyn)", "_trimTail(dynf)"} {
-		if strings.Contains(h, bad) {
-			t.Errorf("dynamic array must not be trimmed, found %q:\n%s", bad, h)
-		}
+	if strings.Contains(h, "trimTail") {
+		t.Errorf("no array may be trimmed any more:\n%s", h)
 	}
 }
 
@@ -840,7 +866,11 @@ func TestCppFixedCountResetsSchemaDefaultTail(t *testing.T) {
 			}
 			// The member still declares the schema default: an ABSENT field must
 			// reconstruct to it (sparse-omission contract, MESSAGE_SPEC S2).
-			if !strings.Contains(h, "std::array<std::uint32_t, 5> c = {1, 2, 3};") {
+			wantC := "std::vector<std::uint32_t> c = {1, 2, 3};"
+			if corelib == "c-cpp" {
+				wantC = "sofab::InlineVector<std::uint32_t, 5> c = {1, 2, 3};"
+			}
+			if !strings.Contains(h, wantC) {
 				t.Errorf("[%s] schema default must stay the member's declaration default:\n%s", corelib, h)
 			}
 			// A non-zero schema default must be reset on decode so the elements the
@@ -951,7 +981,16 @@ messages:
 	}
 	// NOTHING in a pure-corelib-cpp deserialize compares a wire type any more —
 	// that is the point of the seam. A single leftover comparison is a regression.
-	if strings.Contains(h, "is.wire() !=") || strings.Contains(h, "is.fixType() !=") {
+	//
+	// Scoped to the message types: the shared wrapper-array collector emitted
+	// ahead of the namespace does compare one, because an ELEMENT skipped for a
+	// contradicting wire type must leave the container untouched and only the
+	// collector can see that (there is no typed read to fold the decision into).
+	body := h
+	if i := strings.Index(body, "#endif // SOFABGEN_WRAPPER_SEQ_HELPERS"); i >= 0 {
+		body = body[i:]
+	}
+	if strings.Contains(body, "is.wire() !=") || strings.Contains(body, "is.fixType() !=") {
 		t.Errorf("the pure-cpp deserialize must carry no wire comparison at all\n%s", h)
 	}
 }
@@ -1009,14 +1048,15 @@ messages:
       native: { id: 3, type: array, items: { type: u32, count: 3 } }
 `, "m.hpp")
 	// The replace-whole reset moved out of the case arm entirely: it is prepare()
-	// on the corelib's collectors (sofab::StringSeq / BlobSeq / MessageSeq), which
+	// on the collectors (corelib sofab::StringSeq / BlobSeq for the leaves, the
+	// generated sofabgen::WrapperSeq for the object path), which
 	// IStreamImpl::read calls once the SequenceStart tag matched — so it can no
 	// longer wipe a valid earlier occurrence on a §7.3-skipped one. The arms must
-	// therefore carry no clear at all, and must name the corelib collectors.
+	// therefore carry no clear at all, and must name a collector.
 	for _, want := range []string{
 		"sofab::StringSeq _r0{strs,",
 		"sofab::BlobSeq _r0{blobs,",
-		"sofab::MessageSeq<",
+		"sofabgen::WrapperSeq<",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("m.hpp missing corelib collector %q\n%s", want, h)
@@ -1029,16 +1069,20 @@ messages:
 	}
 }
 
-// TestCppDynamicNativeArrayIsSizedToCount pins that a `count: N` array holds N
-// elements after construction in BOTH storage modes.
+// TestCppNativeArrayIsNotPaddedToCount pins the construction value of a
+// `count: N` native array in BOTH storage modes, now that `count` is a CAPACITY
+// rather than a length (MESSAGE_SPEC §3 / documentation#29).
 //
-// std::array<T,N> gets that for free from aggregate initialization; std::vector
-// (the allow_dynamic storage) does not — `= {}` constructs it empty. A bounded
-// array that starts empty is not merely a different representation of the same
-// value: generated code indexes elements 0..N-1, so writes to every element are
-// silently discarded. Found by the MAX_SIZE fill check, which encoded 137 bytes
-// where the schema says 234 — exactly the four native arrays missing.
-func TestCppDynamicNativeArrayIsSizedToCount(t *testing.T) {
+// The growable storage (allow_dynamic) carries its own length, so it expresses
+// 0..N: a fresh array is EMPTY and a declared `default` shorter than N is
+// materialized exactly as written, never tail-padded. That is what keeps
+// [10, 20] a two-element value distinct from [10, 20, 0, 0].
+//
+// The fixed std::array<T,N> has no logical length at all, so its value is always
+// N elements: the aggregate initializer zero-fills whatever the default leaves
+// out, and a shorter value is simply not representable there. That divergence is
+// storage, not spec — see docs/generator/cpp.md.
+func TestCppNativeArrayIsNotPaddedToCount(t *testing.T) {
 	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
 		"      zeros:   { id: 0, type: array, items: { type: u32, count: 4 } }\n" +
 		"      partial: { id: 1, type: array, items: { type: u32, count: 4 }, default: [10, 20] }\n" +
@@ -1050,30 +1094,58 @@ func TestCppDynamicNativeArrayIsSizedToCount(t *testing.T) {
 		t.Fatalf("generate allow_dynamic: %v", err)
 	}
 	for _, want := range []string{
-		"std::vector<std::uint32_t> zeros = {0, 0, 0, 0};",
-		"std::vector<std::uint32_t> partial = {10, 20, 0, 0};",
-		"std::vector<float> floats = {0.0f, 0.0f, 0.0f};",
-		"std::vector<bool> flags = {false, false};",
+		"std::vector<std::uint32_t> zeros = {};",
+		"std::vector<std::uint32_t> partial = {10, 20};",
+		"std::vector<float> floats = {};",
+		// A boolean array's element is std::uint8_t on the c-cpp leg: the C
+		// decoder writes into the destination's own bytes and std::vector<bool>
+		// is the bit-packed specialisation, which has none.
+		"std::vector<std::uint8_t> flags = {};",
 	} {
 		if !strings.Contains(dyn, want) {
-			t.Errorf("a bounded array in dynamic storage must construct with all %d elements, missing %q:\n%s",
-				4, want, dyn)
+			t.Errorf("a bounded array in dynamic storage must not be padded to its count, missing %q:\n%s", want, dyn)
 		}
 	}
+	// The JSON harness index-assigns into the container, so a growable one has to
+	// be sized to the input first -- otherwise an empty member swallows every
+	// element (the same MAX_SIZE fill symptom the padding used to hide).
+	dynJSON, err := genHeader(t, src, "harness/json.hpp", map[string]any{"corelib": "c-cpp", "allow_dynamic": true, "emit": "project"})
+	if err != nil {
+		t.Fatalf("generate allow_dynamic project: %v", err)
+	}
+	if !strings.Contains(dynJSON, "o.zeros.resize(sofab_json_array_size(c));") {
+		t.Errorf("a growable native array must be sized from the JSON input:\n%s", dynJSON)
+	}
 
-	// The fixed profile keeps the idiomatic aggregate form — std::array fills the
-	// tail itself, so spelling out the zeros would be noise.
+	// The heap-free storage mode expresses the SAME values, in sofab::InlineVector
+	// -- inline slots plus a logical length. That is the whole point: without a
+	// length it could only ever hold N elements, so [10, 20] on a count: 4 field
+	// would be a different value (and a different wire image) here than under
+	// allow_dynamic, for one and the same schema.
 	fixed, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp"})
 	if err != nil {
 		t.Fatalf("generate fixed: %v", err)
 	}
 	for _, want := range []string{
-		"std::array<std::uint32_t, 4> zeros = {};",
-		"std::array<std::uint32_t, 4> partial = {10, 20};",
+		"sofab::InlineVector<std::uint32_t, 4> zeros = {};",
+		"sofab::InlineVector<std::uint32_t, 4> partial = {10, 20};",
 	} {
 		if !strings.Contains(fixed, want) {
-			t.Errorf("fixed storage should keep the aggregate form, missing %q:\n%s", want, fixed)
+			t.Errorf("heap-free storage must carry a length, missing %q:\n%s", want, fixed)
 		}
+	}
+	if strings.Contains(fixed, "std::array<std::uint32_t, 4>") {
+		t.Errorf("no native array member may be a bare std::array any more:\n%s", fixed)
+	}
+	// The JSON path sizes BOTH containers now: InlineVector has a resize() too
+	// (corelib-c-cpp), so neither leg index-assigns into a container that is the
+	// wrong length.
+	fixedJSON, err := genHeader(t, src, "harness/json.hpp", map[string]any{"corelib": "c-cpp", "emit": "project"})
+	if err != nil {
+		t.Fatalf("generate fixed project: %v", err)
+	}
+	if !strings.Contains(fixedJSON, "o.zeros.resize(sofab_json_array_size(c));") {
+		t.Errorf("an inline native array must be sized from the JSON input too:\n%s", fixedJSON)
 	}
 }
 
@@ -1123,5 +1195,772 @@ func TestCppDeprecatedSuppressionSpansTheClass(t *testing.T) {
 	}
 	if strings.Contains(plain, "diagnostic") {
 		t.Errorf("no deprecated field: no pragma should be emitted:\n%s", plain)
+	}
+}
+
+// TestCppResetPutsEveryFieldBackInPlace pins the generated reset() and the reuse
+// contract it exists for.
+//
+// A field whose value equals its declared default is omitted from the encoded
+// bytes entirely - a sequence-typed one included. An omitted field delivers no
+// deserialize() callback, so nothing on the callback side can clear a reused
+// destination: the array-replaces-whole clear inside the wrapper collectors
+// hangs off the sequence header, which an absent field never sends. The clear
+// therefore has to happen at the START of the decode, which is what reset() is.
+func TestCppResetPutsEveryFieldBackInPlace(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      items:  { id: 0, type: array, items: { type: struct, count: 4, fields: { x: { id: 0, type: i32 } } } }\n" +
+		"      names:  { id: 1, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
+		"      nums:   { id: 2, type: array, items: { type: u16, count: 3 }, default: [7, 8, 9] }\n" +
+		"      nested: { id: 3, type: struct, fields: { a: { id: 0, type: i32, default: -4 }, s: { id: 1, type: string, maxlen: 8, default: \"hi\" } } }\n" +
+		"      tag:    { id: 4, type: i32, default: 3 }\n"
+	h, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"    void reset() noexcept {",
+		// Every member goes back to the value its DECLARATION carries, so the
+		// reset and the wire-absent value cannot drift apart. A `count: N` array
+		// is EMPTY at rest -- `count` is a capacity, not a length (MESSAGE_SPEC
+		// §3) -- and a declared default shorter than the count stands as written.
+		"        items = {};",
+		"        names = {};",
+		"        nums = {7, 8, 9};",
+		"        tag = 3;",
+		// A struct member recurses instead of being assigned a fresh temporary:
+		// in place, so the nested containers keep their capacity too.
+		"        nested.reset();",
+		// The nested type carries its own reset, with its own declared defaults.
+		"        a = -4;",
+		"        s = \"hi\";",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("reset() missing %q:\n%s", want, h)
+		}
+	}
+	// Public: a caller driving the stream itself owns its destination and needs
+	// the same call. It must not be tucked below a private:.
+	if strings.Contains(h, "private:") {
+		t.Errorf("reset() must stay public - generated messages have no private section:\n%s", h)
+	}
+	// The reuse entry point resets the caller's destination and then decodes
+	// straight into it. Staging in a second instance and copying across would
+	// mask the staleness but throw away every buffer `out` already holds, which
+	// is the only reason to pass a destination in.
+	for _, want := range []string{
+		"static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, M &out) {",
+		"        out.reset();",
+		"        sofab::IStreamInline _is{[&out, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {",
+		"            out.deserialize(*_isp, _id, _size, _count);",
+		"        return _is.feed(data, len);",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("try_decode missing %q:\n%s", want, h)
+		}
+	}
+	if strings.Contains(h, "out = *in;") {
+		t.Errorf("try_decode must decode into the caller's destination, not copy into it:\n%s", h)
+	}
+	// The reset runs before the bytes are fed - after would undo the decode.
+	if strings.Index(h, "out.reset();") > strings.Index(h, "return _is.feed(data, len);") {
+		t.Errorf("out.reset() must precede the feed:\n%s", h)
+	}
+	// The sequence-start clear is untouched: a re-opened wrapper still replaces
+	// the array whole rather than merging into the earlier occurrence.
+	if !strings.Contains(h, "sofabgen::WrapperSeq<std::vector<MItemsElem>> _r0; _r0.out = &items;") {
+		t.Errorf("the wrapper collector (and its replace-whole clear) must be unchanged:\n%s", h)
+	}
+}
+
+// TestCppTryDecodeCarriesTheDerivedReassemblyCap: IStreamInline takes the field
+// callback first, so a configured cap rides in as a TRAILING argument - the
+// IStreamObject spelling (the cap as the only argument) does not compile there.
+func TestCppTryDecodeCarriesTheDerivedReassemblyCap(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      a: { id: 0, type: array, items: { type: u32 } }\n"
+	h, err := genHeader(t, src, "m.hpp", map[string]any{"max_dyn_array_count": 8})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if !strings.Contains(h, "}, sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}};") {
+		t.Errorf("try_decode's stream must carry the cap after the callback:\n%s", h)
+	}
+	// The uncapped case passes the callback alone (the fixed profile's
+	// IStreamInline has no limits parameter at all).
+	plain, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate plain: %v", err)
+	}
+	if strings.Contains(plain, "sofab::Limits") {
+		t.Errorf("no cap configured: no Limits argument:\n%s", plain)
+	}
+}
+
+// TestCppFixedProfileKeepsItsDecodeShape: the heap-free profile still emits
+// reset(), but try_decode keeps decoding into a fresh instance and copying it
+// over the destination.
+//
+// There is nothing to reuse there - the containers are inline, so the copy is a
+// memcpy with no allocation to hand back - and the destination it decodes into
+// starts at the declared defaults every time, so it cannot go stale. Routing it
+// through a callback instead would put std::function in .text on the targets
+// that have the least of it: this profile's IStreamObject dispatches through a
+// C-ABI function pointer, IStreamInline does not.
+func TestCppFixedProfileKeepsItsDecodeShape(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      names: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
+		"      tag:   { id: 1, type: i32, default: 3 }\n"
+	h, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"    void reset() noexcept {",
+		"        names = {};",
+		"        tag = 3;",
+		"        sofab::IStreamObject<M> in;",
+		"        if (r.ok()) { out = *in; }",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("fixed profile missing %q:\n%s", want, h)
+		}
+	}
+	// No callback plumbing: that is the whole point of keeping this shape.
+	// (reset()'s doc comment names IStreamInline as the thing a caller might be
+	// driving; what must not appear is a stream instantiated here.)
+	if strings.Contains(h, "sofab::IStreamInline _is") {
+		t.Errorf("the fixed profile must not route try_decode through a std::function:\n%s", h)
+	}
+}
+
+// nestedWrapperRowsSrc is the shape of generator#250: a nested array whose ROW
+// is itself a wrapper sequence (string / blob / struct elements), at depth 2 and
+// depth 3, alongside a native-row control that must keep its existing lowering.
+const nestedWrapperRowsSrc = "version: 1\nmessages:\n  M:\n    payload:\n" +
+	"      strrows:    { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }\n" +
+	"      blobrows:   { id: 1, type: array, items: { type: array, count: 2, items: { type: blob,   count: 3, maxlen: 8 } } }\n" +
+	"      structrows: { id: 2, type: array, items: { type: array, count: 2, items: { type: struct, count: 3, fields: { a: { id: 0, type: u32 } } } } }\n" +
+	"      deep:       { id: 3, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } } }\n" +
+	"      urows:      { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }\n"
+
+// TestCppNestedWrapperRowsHeap: a row of strings/blobs/structs is a wrapper
+// SEQUENCE — neither a span of scalars nor an IStreamMessage — so handing the
+// ROW CONTAINER to sofab::MessageSeq<T> makes its is.read(row) fail the
+// corelib's "Unsupported span element type in IStream::read()" static_assert and
+// the whole header stops compiling (generator#250). Such a row gets a generated
+// collector that places the row at its element id and reads it with the SAME
+// emission the first level uses (StringSeq / BlobSeq / MessageSeq over the
+// ELEMENT type). A row of native scalars is unaffected: the corelib collector
+// reads it directly.
+func TestCppNestedWrapperRowsHeap(t *testing.T) {
+	h, err := genHeader(t, nestedWrapperRowsSrc, "m.hpp", map[string]any{"namespace": "sofabuffers"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		// string rows: outer collector with the schema count as its cap, inner read
+		// through the corelib's string collector over the ROW.
+		"struct _S0 : sofab::IStreamMessage {",
+		"std::vector<std::vector<std::string>> *out = nullptr;",
+		"long cap = 2;",
+		"{ sofab::StringSeq _r1{_e0, 3, 8}; is.read(_r1); }",
+		"_S0 _r0; _r0.out = &strrows; is.read(_r0);",
+		// blob rows
+		"{ sofab::BlobSeq _r1{_e0, 3, 8}; is.read(_r1); }",
+		// struct rows: MessageSeq over the ELEMENT type, not the row container
+		"{ sofabgen::WrapperSeq<std::vector<MStructrowsElemElem>> _r1; _r1.out = &_e0; _r1.cap = 3; is.read(_r1); }",
+		// depth 3: the row collector nests, one level further
+		"struct _S1 : sofab::IStreamMessage {",
+		"{ sofab::StringSeq _r2{_e1, 3, 8}; is.read(_r2); }",
+		// §5.1 placement + over-index reject, §7.4 replace-whole
+		"if (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
+		"while (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();",
+		"void prepare() noexcept { if (out) out->clear(); }",
+		// native rows keep the corelib collector
+		"sofabgen::WrapperSeq<std::vector<std::vector<std::uint32_t>>> _r0; _r0.out = &urows;",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("nested wrapper rows missing %q:\n%s", want, h)
+		}
+	}
+	// The bug itself: a row CONTAINER handed to MessageSeq<T> is the
+	// non-compiling adapter. None of these may appear.
+	for _, notWant := range []string{
+		"sofab::MessageSeq<std::vector<std::string>>",
+		"sofab::MessageSeq<std::vector<std::vector<std::uint8_t>>>",
+		"sofab::MessageSeq<std::vector<MStructrowsElemElem>>",
+		"sofab::MessageSeq<std::vector<std::vector<std::string>>>",
+	} {
+		if strings.Contains(h, notWant) {
+			t.Errorf("wrapper row must not be read as %q (static_assert in IStream::read):\n%s", notWant, h)
+		}
+	}
+}
+
+// TestCppNestedWrapperRowsFixed: the same shape on the footprint leg
+// (corelib: c-cpp). The collector is static — the C decoder dereferences it
+// after the callback returns — reads through readSequence (which clears the
+// destination for §7.4), and takes its §5.1 over-index bound from the inline
+// container's capacity, which also stops InlineVector's saturating
+// emplace_back() from spinning on an over-index id (issue #126).
+func TestCppNestedWrapperRowsFixed(t *testing.T) {
+	h, err := fixedHeader(t, nestedWrapperRowsSrc, "m.hpp", nil)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		"struct _S0 : sofab::IStreamMessage {",
+		"sofab::InlineVector<sofab::InlineVector<sofab::FixedString<8>, 3>, 2> *out = nullptr;",
+		"if (static_cast<std::size_t>(_id) >= out->capacity()) { is.invalidate(); return; }",
+		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r1;",
+		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r1; is.readSequence(_r1, _e0); }",
+		"static _S0 _r0; is.readSequence(_r0, strrows);",
+		"static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>> _r1;",
+		"static sofabgen::WrapperSeq<sofab::InlineVector<MStructrowsElemElem, 3>> _r1; _r1.cap = 3;",
+		"struct _S1 : sofab::IStreamMessage {",
+		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r2;",
+		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r2; is.readSequence(_r2, _e1); }",
+		// native rows keep the corelib collector
+		"static sofabgen::WrapperSeq<sofab::InlineVector<sofab::InlineVector<std::uint32_t, 3>, 2>> _r0; _r0.cap = 2;",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("fixed nested wrapper rows missing %q:\n%s", want, h)
+		}
+	}
+	for _, notWant := range []string{
+		"sofab::FixedMessageSeq<sofab::InlineVector<sofab::InlineVector<sofab::FixedString<8>, 3>, 2>>",
+		"sofab::FixedMessageSeq<sofab::InlineVector<sofab::InlineVector<sofab::FixedBytes<8>, 3>, 2>>",
+		"sofab::FixedMessageSeq<sofab::InlineVector<sofab::InlineVector<MStructrowsElemElem, 3>, 2>>",
+	} {
+		if strings.Contains(h, notWant) {
+			t.Errorf("wrapper row must not be read as %q (static_assert in IStream::read):\n%s", notWant, h)
+		}
+	}
+	// The heap storage mode of the same leg: the bound is no longer a container
+	// capacity, so it rides in as `cap`, and the row vector is reserved so
+	// placing a later row never moves a still-bound earlier one.
+	d, err := fixedHeader(t, nestedWrapperRowsSrc, "m.hpp", map[string]any{"allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("generate dynamic: %v", err)
+	}
+	for _, want := range []string{
+		"long cap = 2;",
+		"if (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
+		"strrows.reserve(2);",
+		"static _S0 _r0; is.readSequence(_r0, strrows);",
+		"static sofab::StringSeq _r1; _r1.cap = 3; _r1.elemMax = 8;",
+	} {
+		if !strings.Contains(d, want) {
+			t.Errorf("c-cpp allow_dynamic nested wrapper rows missing %q:\n%s", want, d)
+		}
+	}
+}
+
+// wrapperSeqSrc: a `count: N` struct array next to a dynamic one and a
+// `count: N` string array, so one header shows every narrowing decision.
+const wrapperSeqSrc = "version: 1\nmessages:\n  vec:\n    payload:\n" +
+	"      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }\n" +
+	"      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }\n" +
+	"      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }\n"
+
+// TestCppWrapperElementsArePlacedByID: a wrapper array's element id IS the array
+// index (MESSAGE_SPEC §5.1), so an element is PLACED at dest[id] after
+// gap-filling -- never appended. Appending shortens the array by the size of any
+// interior id gap and decodes a REOPENED id as a second element instead of
+// merging into the first (§7.4). The leaf string/blob collectors in both
+// corelibs always got this right; corelib-c-cpp's Fixed/MessageSeq did not, so
+// the object path collects through a generated placer on BOTH profiles
+// (generator#247).
+//
+// Interior id gaps used to be unreachable -- every element was framed -- which
+// is what made the appending shape survive as long as it did. Since
+// documentation#29 an interior all-default element is omitted, so a gap is
+// ordinary input and placement is load-bearing.
+func TestCppWrapperElementsArePlacedByID(t *testing.T) {
+	for _, corelib := range []string{"cpp", "c-cpp"} {
+		t.Run(corelib, func(t *testing.T) {
+			cfg := map[string]any{}
+			src := wrapperSeqSrc
+			if corelib == "c-cpp" {
+				cfg["corelib"] = "c-cpp"
+				cfg["allow_dynamic"] = true
+				// The embedded profile requires a count on every array.
+				src = strings.Replace(src, "items: { type: struct, fields:", "items: { type: struct, count: 2, fields:", 1)
+			}
+			h, err := genHeader(t, src, "vec.hpp", cfg)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			for _, want := range []string{
+				// placement, not append -- and the gap-fill that precedes it
+				"while (out->size() <= static_cast<std::size_t>(id)) { (void)out->emplace_back(); }",
+				"Elem &row = (*out)[static_cast<std::size_t>(id)];",
+				// the over-index reject, which also bounds the gap-fill
+				"if (cap >= 0 && static_cast<long>(id) >= cap) { is.invalidate(); return; }",
+				// the schema count rides in as that bound, and only as that bound
+				"_r0.cap = 5;",
+			} {
+				if !strings.Contains(h, want) {
+					t.Errorf("[%s] vec.hpp missing %q:\n%s", corelib, want, h)
+				}
+			}
+			// The corelib collectors that append id-blind must be gone from the
+			// object path on both profiles -- that is the defect being replaced.
+			for _, notWant := range []string{"sofab::FixedMessageSeq<", "sofab::MessageSeq<"} {
+				if strings.Contains(h, notWant) {
+					t.Errorf("[%s] the appending collector %q must not be used any more:\n%s", corelib, notWant, h)
+				}
+			}
+			// `count: N` is a CAPACITY: it bounds the element id and nothing else.
+			// The refill to N that used to follow every wrapper read turned ["a"]
+			// into ["a", "", ""] on a count: 3 field -- a different value, since
+			// the length is highest present id + 1 (§3/§5.1).
+			if strings.Contains(h, "fillTo") {
+				t.Errorf("[%s] a decoded wrapper array must never be refilled to its count:\n%s", corelib, h)
+			}
+		})
+	}
+	h, err := genHeader(t, wrapperSeqSrc, "vec.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if !strings.Contains(h, "_r0.cap = -1; is.read(_r0); }") {
+		t.Errorf("a count-less wrapper array must read with an unbounded cap:\n%s", h)
+	}
+}
+
+// TestCppWrapperArrayInteriorIsSparseLastElementKept: one rule for both element
+// kinds, positional in the VALUE (MESSAGE_SPEC §2 as tightened by
+// documentation#29). An element before the last one that equals its element
+// default is omitted and leaves an id GAP -- a string leaf simply not written, a
+// struct element not framed either -- while the LAST element is always written,
+// as its value or as an empty frame.
+//
+// The superseded reading trimmed the trailing default run of a `count: N` array
+// and framed every interior sequence element unconditionally. Both are gone, and
+// a declared count changes nothing: the counted and count-less arrays below emit
+// the identical loop.
+func TestCppWrapperArrayInteriorIsSparseLastElementKept(t *testing.T) {
+	h, err := genHeader(t, wrapperSeqSrc, "vec.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	// A struct element: the CLOSER is what carries the rule. writeLazy drops a
+	// contentless interior frame; write keeps it at the last index.
+	for _, want := range []string{
+		"const std::size_t _n0 = fixed.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { if (_i0 + 1 == _n0) { (void)os.write(static_cast<sofab::id>(_i0), fixed[_i0]); } else { (void)os.writeLazy(static_cast<sofab::id>(_i0), fixed[_i0]); } }",
+		"const std::size_t _n0 = dynamic.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { if (_i0 + 1 == _n0) { (void)os.write(static_cast<sofab::id>(_i0), dynamic[_i0]); } else { (void)os.writeLazy(static_cast<sofab::id>(_i0), dynamic[_i0]); } }",
+		// A string element: the same rule on the write itself, since the leaf has
+		// no frame. The counted array gets the same guard as a count-less one.
+		"const std::size_t _n0 = fstrs.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = fstrs[_i0]; if (!_e0.empty() || _i0 + 1 == _n0) {",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("element rule missing %q:\n%s", want, h)
+		}
+	}
+	// The FIELD wrapper still closes with the dropping end: an EMPTY array is
+	// omitted and absence reconstructs it (§2).
+	if !strings.Contains(h, "(void)os.sequenceBeginLazy(0);") || !strings.Contains(h, "(void)os.sequenceEnd();") {
+		t.Errorf("the field wrapper must stay lazily opened and dropped by its closer:\n%s", h)
+	}
+	// _isDefault is the exact negation of what serialize writes. The writer emits
+	// a child for every element it holds, so "no child written" is exactly "the
+	// array is empty" -- with or without a count. Narrowing on one side only is
+	// the drift that omits a field which is on the wire.
+	for _, want := range []string{
+		"if (!(fixed.size() == 0)) { return false; }",
+		"if (!(dynamic.size() == 0)) { return false; }",
+		"if (!(fstrs.size() == 0)) { return false; }",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("_isDefault must be computed from the same expression as serialize, missing %q:\n%s", want, h)
+		}
+	}
+	// The superseded narrowing helpers must not be emitted at all.
+	for _, bad := range []string{"trimObjs", "trimEmpty", "trimTail", "fillTo"} {
+		if strings.Contains(h, bad) {
+			t.Errorf("the superseded helper %q must be gone:\n%s", bad, h)
+		}
+	}
+}
+
+// TestCppMistypedWrapperElementLeavesNoPhantom: a child inside a wrapper array
+// whose wire type contradicts the declared element is skipped exactly like an
+// unknown id (MESSAGE_SPEC §7.3) -- and a skip must leave the container
+// byte-for-byte as it was. Both C++ profiles used to grow the container first
+// and only then discover the mismatch, leaving a phantom default-initialised
+// element behind (generator#249).
+//
+// The assertion is on ORDER: the wire-type decision has to precede every
+// mutation, which is the only shape that cannot leave the phantom.
+func TestCppMistypedWrapperElementLeavesNoPhantom(t *testing.T) {
+	for _, corelib := range []string{"cpp", "c-cpp"} {
+		t.Run(corelib, func(t *testing.T) {
+			cfg := map[string]any{}
+			src := wrapperSeqSrc
+			if corelib == "c-cpp" {
+				cfg["corelib"] = "c-cpp"
+				cfg["allow_dynamic"] = true
+				src = strings.Replace(src, "items: { type: struct, fields:", "items: { type: struct, count: 2, fields:", 1)
+			}
+			h, err := genHeader(t, src, "vec.hpp", cfg)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			gate := "if (is.wire() != Tag::SequenceStart) { return; }"
+			grow := "while (out->size() <= static_cast<std::size_t>(id)) { (void)out->emplace_back(); }"
+			gi, wi := strings.Index(h, gate), strings.Index(h, grow)
+			if gi < 0 {
+				t.Fatalf("[%s] the element wire-type gate is missing:\n%s", corelib, h)
+			}
+			if wi < 0 {
+				t.Fatalf("[%s] the placement fill is missing:\n%s", corelib, h)
+			}
+			if gi > wi {
+				t.Errorf("[%s] the wire-type gate must precede any container growth, or a skipped child leaves a phantom element:\n%s", corelib, h)
+			}
+			// The gate is only for element kinds read as their own sequence; a
+			// nested-array row is not one, hence the compile-time guard.
+			if !strings.Contains(h, "if constexpr (std::is_base_of_v<sofab::IStreamMessage, Elem>) {") {
+				t.Errorf("[%s] the gate must be scoped to sequence-shaped elements:\n%s", corelib, h)
+			}
+		})
+	}
+}
+
+// TestCppCountIsACapacityNotALength pins the length a `count: N` array has at
+// rest, in all three storage kinds.
+//
+// documentation#29 settles it on the schema's side: `count` is a CAPACITY. It
+// never reaches the wire, it bounds the array, it lets fixed-storage targets
+// pre-size -- and it never adds an element. A fresh count: N wrapper array is
+// therefore EMPTY, not N element defaults, in every storage kind that can say so:
+// the heap profile's std::vector, the c-cpp allow_dynamic std::vector, and the
+// c-cpp inline sofab::InlineVector, whose logical length is separate from its N
+// inline slots.
+//
+// The one container that cannot say so is std::array<T,N>, which the native
+// arrays keep: it has no logical length, so its value is always N elements. That
+// divergence is storage, not spec (docs/generator/cpp.md).
+func TestCppCountIsACapacityNotALength(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }\n" +
+		"      blobs: { id: 1, type: array, items: { type: blob, count: 2, maxlen: 4 } }\n" +
+		"      pts:   { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n" +
+		"      nums:  { id: 3, type: array, items: { type: u32, count: 3 } }\n"
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]any
+		want []string
+	}{
+		{"heap", map[string]any{}, []string{
+			"std::vector<std::string> strs = {};",
+			"std::vector<std::vector<std::uint8_t>> blobs = {};",
+			"std::vector<std::uint32_t> nums = {};",
+		}},
+		{"c-cpp-inline", map[string]any{"corelib": "c-cpp"}, []string{
+			"sofab::InlineVector<sofab::FixedString<8>, 3> strs = {};",
+			"sofab::InlineVector<sofab::FixedBytes<4>, 2> blobs = {};",
+			"sofab::InlineVector<std::uint32_t, 3> nums = {};",
+		}},
+		{"c-cpp-dynamic", map[string]any{"corelib": "c-cpp", "allow_dynamic": true}, []string{
+			"std::vector<std::string> strs = {};",
+			"std::vector<std::vector<std::uint8_t>> blobs = {};",
+			"std::vector<std::uint32_t> nums = {};",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := genHeader(t, src, "m.hpp", tc.cfg)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			// A struct element's member type is a generated row name, so only its
+			// initializer is pinned; reset() must agree with the declaration.
+			want := append(tc.want, " pts = {};", "        strs = {};")
+			for _, w := range want {
+				if !strings.Contains(h, w) {
+					t.Errorf("[%s] missing %q:\n%s", tc.name, w, h)
+				}
+			}
+			// The construction default is what an ABSENT field reconstructs to, so
+			// materializing N elements here would make absence mean the length-N
+			// all-default array rather than the empty one.
+			for _, bad := range []string{"strs = {{}, {}, {}};", "blobs = {{}, {}};", "pts = {{}, {}};"} {
+				if strings.Contains(h, bad) {
+					t.Errorf("[%s] a count:N wrapper array must be constructed EMPTY, found %q:\n%s", tc.name, bad, h)
+				}
+			}
+			// §2 is untouched: an empty array is omitted whole -- and since every
+			// element the value holds is written, empty is exactly "no child".
+			if !strings.Contains(h, "if (!(strs.size() == 0)) { return false; }") {
+				t.Errorf("[%s] the omission predicate must be the array's emptiness:\n%s", tc.name, h)
+			}
+		})
+	}
+
+	// A count-less array behaves identically -- which is the point: one rule.
+	dyn, err := genHeader(t, "version: 1\nmessages:\n  m:\n    payload:\n"+
+		"      strs: { id: 0, type: array, items: { type: string } }\n", "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate dynamic: %v", err)
+	}
+	if !strings.Contains(dyn, "std::vector<std::string> strs = {};") {
+		t.Errorf("a count-less wrapper array must stay empty:\n%s", dyn)
+	}
+}
+
+// The last element of a wrapper array is always written, whatever its value, and
+// a declared `count: N` makes no difference (MESSAGE_SPEC §2, documentation#29).
+// Such an array recovers its length as highest-present-id + 1 (§5.1), so the
+// element at the highest index is the only one whose PRESENCE carries the
+// length: dropping a trailing default leaf encodes ["a", ""] exactly like ["a"]
+// and decodes one element short, and ["", ""] as nothing at all. The counted
+// array used to be exempt -- it elided its whole trailing run and the decoder
+// refilled to N -- which `count` being a capacity makes non-conformant.
+//
+// Only the heap profile (corelib: cpp) can carry a count-less field at all: the
+// embedded profile requires a `count` on every array in BOTH storage modes --
+// asserted at the end -- which is exactly why the counted array has to obey the
+// same rule for the two profiles to agree on the bytes.
+func TestCppWrapperArrayAlwaysWritesLastElement(t *testing.T) {
+	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }\n" +
+		"      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }\n" +
+		"      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }\n"
+	h, err := genHeader(t, src, "vec.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		// Dynamic: the element loop runs over the whole container, and the last
+		// index escapes the omit test.
+		"const std::size_t _n0 = dynstr.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = dynstr[_i0]; if (!_e0.empty() || _i0 + 1 == _n0) {",
+		"const std::size_t _n0 = dynblob.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = dynblob[_i0]; if (!_e0.empty() || _i0 + 1 == _n0) {",
+		// Counted: the SAME loop and the same guard -- no carve-out left.
+		"const std::size_t _n0 = fixedstr.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = fixedstr[_i0]; if (!_e0.empty() || _i0 + 1 == _n0) {",
+		// The all-default predicate has to follow the writer: a dynamic [""] now
+		// puts an element on the wire, so the field is NOT default and must not be
+		// omitted. Narrowing it here would drop a field the serialize loop writes.
+		"if (!(dynstr.size() == 0)) { return false; }",
+		"if (!(dynblob.size() == 0)) { return false; }",
+		// The counted one is measured the same way.
+		"if (!(fixedstr.size() == 0)) { return false; }",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("vec.hpp missing %q:\n%s", want, h)
+		}
+	}
+	if strings.Contains(h, "trimEmpty") {
+		t.Errorf("no leaf array may be narrowed any more:\n%s", h)
+	}
+
+	for _, cfg := range []map[string]any{
+		{"corelib": "c-cpp"},
+		{"corelib": "c-cpp", "allow_dynamic": true},
+	} {
+		if _, err := genHeader(t, src, "vec.hpp", cfg); err == nil {
+			t.Errorf("cfg %v: the embedded profile must reject a count-less array", cfg)
+		}
+	}
+}
+
+// TestCppClibEnumBoolArrayNeverCastsTheContainer is the regression guard for the
+// memory corruption the c-cpp enum/boolean array decode used to emit.
+//
+// It was:
+//
+//	std::vector<Color> cols;                                   // three pointers
+//	is.read(reinterpret_cast<std::array<std::int8_t, 3> &>(cols));
+//
+// The cast reinterprets the vector's OWN begin/end/capacity words as its first N
+// elements, so a received message's bytes overwrite the begin pointer and the
+// destructor then frees a pointer partly assembled from the wire. It is reachable
+// from any message that fills an enum or boolean array on
+// `corelib: c-cpp` + `allow_dynamic: true`.
+//
+// The two element kinds are fixed differently, because the corelib-c-cpp decoder
+// is DEFERRED (it records the destination's address and fills it after the field
+// callback returns), so the corelib-cpp shape -- read into a temporary of the
+// wire type, convert afterwards -- would bind a dangling pointer:
+//
+//   - boolean: the member's element type BECOMES the wire's std::uint8_t, so the
+//     member is a native destination like any other and readArray binds it
+//     directly. std::vector<bool> could never have been a destination anyway: it
+//     is the bit-packed specialisation and has no data().
+//   - enum: the member keeps its scoped enum element (the generated API and JSON
+//     stay value-typed) and readArray binds it through sofabgen::RawArray, which
+//     reinterprets the ELEMENTS -- the same narrow cast the scalar enum arm makes
+//     -- and forwards resize()/size() so readArray still owns the tag check, the
+//     schema-bound check and the reset, in that order.
+func TestCppClibEnumBoolArrayNeverCastsTheContainer(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      cols: { id: 0, type: array, items: { type: enum, count: 3, enum: { RED: 0, GREEN: 1 } } }\n" +
+		"      flags: { id: 1, type: array, items: { type: boolean, count: 4 } }\n"
+
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]any
+		want []string
+	}{
+		{
+			name: "allow_dynamic",
+			cfg:  map[string]any{"corelib": "c-cpp", "allow_dynamic": true},
+			want: []string{
+				"std::vector<std::uint8_t> flags = {};",
+				"is.readArray(flags, _count, 4);",
+				"{ sofabgen::RawArray<std::vector<MColsElem>, std::int8_t> _t0{&cols}; is.readArray(_t0, _count, 3); }",
+			},
+		},
+		{
+			name: "inline",
+			cfg:  map[string]any{"corelib": "c-cpp"},
+			want: []string{
+				"is.readArray(flags, _count, 4);",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := genHeader(t, src, "m.hpp", tc.cfg)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			// The whole point: no decode destination is ever reached through a cast
+			// of its CONTAINER.
+			if strings.Contains(h, "reinterpret_cast<std::array<") {
+				t.Errorf("an array member must never be decoded through a container cast:\n%s", h)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(h, want) {
+					t.Errorf("missing %q:\n%s", want, h)
+				}
+			}
+			// RawArray reinterprets the elements, never the container, and it never
+			// takes ownership of the ordering readArray documents.
+			if strings.Contains(h, "RawArray") && !strings.Contains(h, "reinterpret_cast<Wire *>(out->data())") {
+				t.Errorf("RawArray must view the member's ELEMENTS:\n%s", h)
+			}
+		})
+	}
+
+	// corelib-cpp is synchronous, so it keeps bool elements and the temporary.
+	pure, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate cpp: %v", err)
+	}
+	if !strings.Contains(pure, "std::vector<bool> flags") {
+		t.Errorf("the corelib-cpp leg keeps bool elements:\n%s", pure)
+	}
+	if strings.Contains(pure, "sofabgen::RawArray") {
+		t.Errorf("the corelib-cpp leg needs no element view:\n%s", pure)
+	}
+}
+
+// TestCppNativeCountArrayCarriesALength pins the container decision for a
+// `count: N` array of NATIVE scalars across all three profiles.
+//
+// Since `count` became a CAPACITY and the wire count became the array's LENGTH
+// (MESSAGE_SPEC §3, documentation#29), an array member that cannot be shorter
+// than N cannot represent what the wire can say. std::array<T, N> is exactly
+// such a member, and it was what two of the three profiles used -- so the same
+// schema had two wire images and, worse, two DECODE results: `7b 02 01 02`
+// (wire count 2) came back as [1, 2] on one leg and [1, 2, 0, 0] on the other.
+// That is the byte-identity promise in docs/generator/cpp.md and in
+// checkBounded -- "the storage switch never changes the wire" -- broken.
+//
+// So every native array member is length-carrying now: std::vector<T> on the
+// heap profiles, sofab::InlineVector<T, N> (inline slots + len_) on the
+// heap-free c-cpp storage mode. std::array is gone from array members entirely.
+func TestCppNativeCountArrayCarriesALength(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      nums: { id: 0, type: array, items: { type: u32, count: 4 } }\n" +
+		"      part: { id: 1, type: array, items: { type: i32, count: 4 }, default: [10, 20] }\n" +
+		"      rows: { id: 2, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }\n"
+
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]any
+		want []string
+	}{
+		{
+			// maxspeed: the decision that changed here. A bounded native array was
+			// std::array<T, N> on this profile too.
+			name: "cpp-maxspeed",
+			cfg:  map[string]any{},
+			want: []string{
+				"std::vector<std::uint32_t> nums = {};",
+				"std::vector<std::int32_t> part = {10, 20};",
+				"std::vector<std::vector<std::uint32_t>> rows = {};",
+				"is.readArray(nums, 4);",
+			},
+		},
+		{
+			// heap-free: inline storage, but with a logical length.
+			name: "c-cpp-inline",
+			cfg:  map[string]any{"corelib": "c-cpp"},
+			want: []string{
+				"sofab::InlineVector<std::uint32_t, 4> nums = {};",
+				"sofab::InlineVector<std::int32_t, 4> part = {10, 20};",
+				"sofab::InlineVector<sofab::InlineVector<std::uint32_t, 3>, 2> rows = {};",
+				"is.readArray(nums, _count, 4);",
+			},
+		},
+		{
+			// unchanged by this commit -- pinned so the three legs cannot drift.
+			name: "c-cpp-dynamic",
+			cfg:  map[string]any{"corelib": "c-cpp", "allow_dynamic": true},
+			want: []string{
+				"std::vector<std::uint32_t> nums = {};",
+				"std::vector<std::int32_t> part = {10, 20};",
+				"std::vector<std::vector<std::uint32_t>> rows = {};",
+				"is.readArray(nums, _count, 4);",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := genHeader(t, src, "m.hpp", tc.cfg)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(h, want) {
+					t.Errorf("missing %q:\n%s", want, h)
+				}
+			}
+			// The whole point: no array member is a fixed-extent container any more.
+			// A std::array<T,N> member is precisely the thing that cannot express a
+			// value shorter than N.
+			if strings.Contains(h, "std::array<std::uint32_t, 4>") ||
+				strings.Contains(h, "std::array<std::int32_t, 4>") ||
+				strings.Contains(h, "std::array<std::uint32_t, 3>") {
+				t.Errorf("a count:N native array must not be a fixed-extent std::array:\n%s", h)
+			}
+			// A declared default shorter than N stays shorter than N -- on every
+			// profile. Under std::array the initializer was zero-filled out to N, so
+			// [10, 20] and [10, 20, 0, 0] named the same construction value.
+			if strings.Contains(h, "part = {10, 20, 0, 0}") {
+				t.Errorf("a short default must not be padded to the count:\n%s", h)
+			}
+		})
+	}
+
+	// The encode temp an enum array converts through must not touch a heap on the
+	// heap-free profile, and must be the VALUE's length -- never the schema count,
+	// which would put N elements on the wire for a shorter value.
+	enumSrc := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      cols: { id: 0, type: array, items: { type: enum, count: 3, enum: { A: 0, B: 1 } } }\n"
+	fixedEnum, err := genHeader(t, enumSrc, "m.hpp", map[string]any{"corelib": "c-cpp"})
+	if err != nil {
+		t.Fatalf("generate enum fixed: %v", err)
+	}
+	if !strings.Contains(fixedEnum, "{ sofab::InlineVector<std::int8_t, 3> _t0; _t0.resize(cols.size());") {
+		t.Errorf("the heap-free enum encode temp must be inline and value-length:\n%s", fixedEnum)
+	}
+	heapEnum, err := genHeader(t, enumSrc, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate enum heap: %v", err)
+	}
+	if !strings.Contains(heapEnum, "{ std::vector<std::int8_t> _t0; _t0.resize(cols.size());") {
+		t.Errorf("the heap enum encode temp must be value-length:\n%s", heapEnum)
 	}
 }

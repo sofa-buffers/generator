@@ -26,6 +26,17 @@ public sealed class Scalars {
         if (this.f64 != -2.5) { os.WriteFp64(6, this.f64); }
         if (this.flag != true) { os.WriteBoolean(7, this.flag); }
     }
+    public bool IsDefault() {
+        if (!(this.u8min == 0)) return false;
+        if (!(this.u8max == 255)) return false;
+        if (!(this.u64max == 18446744073709551615UL)) return false;
+        if (!(this.i8min == -128)) return false;
+        if (!(this.i64min == -9223372036854775808L)) return false;
+        if (!(this.f32 == 3.14f)) return false;
+        if (!(this.f64 == -2.5)) return false;
+        if (!(this.flag == true)) return false;
+        return true;
+    }
     public const int MaxSize = 49;
     // Per-thread scratch buffer: Encode() marshals into it and returns an
     // exact-size copy, so the worst-case buffer is not re-allocated (and

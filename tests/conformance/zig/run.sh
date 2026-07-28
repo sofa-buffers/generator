@@ -36,6 +36,7 @@ messages:
   vecf64: { payload: { a: { id: 0, type: fp64 } } }
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
+  vecua: { payload: { a: { id: 0, type: array, items: { type: u32, count: 8 } } } }
 YAML
 
 printf 'generic: { emit: project }\n' > "$WORK/cfg.yaml"
@@ -73,9 +74,33 @@ OUT=$(printf '%s' "$IN" | "$WORK/ex/zig-out/bin/harness" encode myfirstmessage |
 echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "$OUT" | grep -q '"someblob":\[10,20,30\]' || { echo "FAIL: blob round-trip"; exit 1; }
-echo "$OUT" | grep -q '"somestringarray":\["a","b","c"\]' || { echo "FAIL: string array round-trip"; exit 1; }
+# somestringarray declares count: 5, but `count` is a CAPACITY, never a length
+# (MESSAGE_SPEC S3, documentation af536c4): the wire carries 0..5 elements and
+# the wire count IS the length. Three strings in, three strings back -- nothing
+# is filled in at [M, N). The five-element form asserted here before pinned the
+# superseded fixed-length reading of `count`.
+echo "$OUT" | grep -q '"somestringarray":\["a","b","c"\]' || { echo "FAIL: string array round-trip (count:5 is a capacity, not a length)"; exit 1; }
 echo "$OUT" | grep -q '"somefp32":2.5' || { echo "FAIL: fp32 round-trip"; exit 1; }
 echo "==> round-trip OK"
+
+# `count` is a CAPACITY, never a length (MESSAGE_SPEC S3, documentation af536c4).
+# someuintarray declares count: 4 (id 15 -> header 0x7b). Two things follow, and
+# both are asserted here because each was the opposite before:
+#   - the wire count M IS the length: a 2-element wire decodes to 2 elements, not
+#     to 4 with the tail refilled from the schema count;
+#   - nothing that carries the length may be elided: [1,2,0,0] keeps its trailing
+#     default run on the wire and round-trips unchanged, instead of collapsing to
+#     the 2-element [1,2] that the decoder then padded back out.
+echo "==> count:N native array carries its length (MESSAGE_SPEC S3)"
+printf '\173\002\001\002' > "$WORK/shortcount.bin"
+OUT=$("$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/shortcount.bin") \
+    || { echo "FAIL: a wire count below the schema count must decode"; exit 1; }
+echo "$OUT" | grep -q '"someuintarray":\[1,2\]' || { echo "FAIL: M < N must decode as M elements, not be filled to N; got: $OUT"; exit 1; }
+OUT=$(printf '%s' '{"someuintarray":[1,2,0,0]}' | "$WORK/ex/zig-out/bin/harness" encode myfirstmessage \
+    | "$WORK/ex/zig-out/bin/harness" decode myfirstmessage) \
+    || { echo "FAIL: trailing-default array must round-trip"; exit 1; }
+echo "$OUT" | grep -q '"someuintarray":\[1,2,0,0\]' || { echo "FAIL: a trailing default run must stay on the wire; got: $OUT"; exit 1; }
+echo "==> count-is-capacity OK"
 
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
@@ -263,7 +288,8 @@ echo "==> fixlen subtype skip OK"
 # the wrapper before it checks the wire type.
 # Wire: 96 01 (seq start id 18) 02 0a 61 (string id 0 "a") 07 (seq end)
 #       90 01 (id 18, UNSIGNED) 05
-# Asserted as a prefix: heap profiles render ["a"], fixed-capacity ones pad.
+# Asserted as a prefix: every profile renders ["a"] now that `count` adds no
+# elements, but a fixed-capacity target that still padded would print ["a","",...].
 echo "==> mis-typed later occurrence must not clear the array (MESSAGE_SPEC S7.4, generator#175)"
 printf '\226\001\002\012\141\007\220\001\005' > "$WORK/skipped_occ_array.bin"
 OUT=$("$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/skipped_occ_array.bin") \

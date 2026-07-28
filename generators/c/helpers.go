@@ -80,6 +80,28 @@ func blobDefaultRawLen(f *ir.Field) (int64, bool) {
 	return int64(len(raw)), true
 }
 
+// arrayDefaultLen returns the element count of a compact array field's declared
+// default, and whether it is worth materializing. MESSAGE_SPEC §3 makes `count`
+// a capacity and the wire count the length, so a short `default` stays short —
+// it is NOT padded out to N. The length is the value here, so unlike
+// cArrayDefaultInit this reports an all-zero default too ([0,0,0] is a
+// three-element array, not the empty one); only an absent or empty default has
+// nothing to record, and that is the zero the memset already leaves.
+func arrayDefaultLen(f *ir.Field) (int64, bool) {
+	if f.Kind != ir.KindArray {
+		return 0, false
+	}
+	vals, ok := f.Default.([]any)
+	if !ok || len(vals) == 0 {
+		return 0, false
+	}
+	n := int64(len(vals))
+	if n > f.Count { // validation rejects this; clamp so storage is never overrun
+		n = f.Count
+	}
+	return n, true
+}
+
 // cArrayDefaultInit renders a native scalar array's schema default as a C brace
 // initializer ("{ e0, e1, ... }"); ("", false) when there is no default or every
 // element is zero (the array member is then left zero-initialized). Composite /

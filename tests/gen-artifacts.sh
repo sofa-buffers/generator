@@ -28,7 +28,8 @@ done
 # must be bounded whatever storage it uses — allow_dynamic selects std::string /
 # std::vector for those bounded fields, it does not make a bound optional. So the
 # deliberately-unbounded corpus inputs are handled the same way as for the C
-# target below: no_maxlen is skipped, example.yaml's `somemap` gets a capacity.
+# target below: no_maxlen and seq_elements_dyn are skipped, example.yaml's
+# `somemap` gets a capacity.
 # rust's rs-no-std follows the same rule since generator#241, so it gets the same
 # handling.
 # Same rationale as tests/conformance/{cpp,rust}/run.sh.
@@ -47,9 +48,9 @@ if [ -n "$ALT_CORELIB" ]; then
 fi
 
 # The heapless C target has no allow_dynamic escape and rejects unbounded fields
-# (generator#104): no_maxlen is a deliberately-unbounded schema (skipped, not a C
-# input), and example.yaml's intentionally-dynamic `somemap` gets an explicit
-# capacity — same handling as tests/conformance/c/run.sh. `count` never reaches
+# (generator#104): no_maxlen and seq_elements_dyn are deliberately-unbounded
+# schemas (skipped, not C inputs), and example.yaml's intentionally-dynamic
+# `somemap` gets an explicit capacity — same handling as tests/conformance/c/run.sh. `count` never reaches
 # the wire, so the generated wire bytes are unchanged.
 if [ "$LANG_KEY" = "c" ] || [ "$ALT_CORELIB" = "c-cpp" ] || [ "$ALT_CORELIB" = "rs-no-std" ]; then
     C_EXAMPLE=$(mktemp)
@@ -66,7 +67,7 @@ for def in $DEFS; do
     src="$def"
     if [ "$LANG_KEY" = "c" ]; then
         case "$name" in
-            no_maxlen) continue ;;
+            no_maxlen | seq_elements_dyn) continue ;;
             example)   src="$C_EXAMPLE" ;;
         esac
     fi
@@ -76,7 +77,7 @@ for def in $DEFS; do
         alt_src="$def"
         if [ "$ALT_CORELIB" = "c-cpp" ] || [ "$ALT_CORELIB" = "rs-no-std" ]; then
             case "$name" in
-                no_maxlen) continue ;;
+                no_maxlen | seq_elements_dyn) continue ;;
                 example)   alt_src="$C_EXAMPLE" ;;
             esac
         fi

@@ -60,3 +60,72 @@ announced count (no array-end callback needed), survives a chunk boundary (the
 counter lives in the visitor), leaves legitimate arrays untouched, and still
 decodes a real scalar arriving at that id after the array. The fp arrays are never
 armed — their elements go to the float callbacks and cannot reach a scalar arm.
+
+## Arrays — `count` is a capacity
+
+A schema `count: N` is a **capacity**, not a length: it never reaches the wire, it
+bounds the array (an element count or element id past `N` fails the decode as
+invalid), and it lets fixed-storage targets pre-size — but it never adds elements.
+The wire count `M` **is** a compact array's length, and a wrapper array's length is
+*highest present id + 1*.
+
+What that looks like from C#:
+
+- `new <Msg>()` leaves a `count: N` array **empty** unless the schema declares a
+  `default`, and a declared default shorter than `N` is materialized exactly as
+  written (never tail-padded to `N`). Native arrays keep their `T[]` /
+  `List<T>` initializer; a wrapper array is `new()`.
+- `Marshal` writes **every** element the value holds. `new uint[]{1, 2, 0, 0}` and
+  `new uint[]{1, 2}` are different values with different bytes.
+- Decode yields exactly the elements the wire carried. A primitive `count: N`
+  array allocates `new T[count]` — the `#100` schema-capacity guard already
+  rejected `count > N`, so the untrusted count can never over-allocate — and a
+  `List<T>` one clears and appends. `SequenceEnd` is a bare scope pop: there is no
+  length left to reconstruct.
+- A field is omitted only when it **equals its default** — for an array with no
+  declared default, only when it is empty. An all-zero `new uint[4]` is a
+  four-element value and stays on the wire.
+
+## Wrapper arrays: element placement and positional sparsity (issues #247, #248)
+
+A wrapper array's element id **is** the array index (MESSAGE_SPEC §5.1). Two pieces
+implement that here, one per direction.
+
+**Sparsity (encode) is positional, and one rule serves both element kinds.** An
+element *before the last one* that equals its element default is omitted, leaving an
+id **gap** the decoder restores from that same default; the **last** element is
+always written, as its value or as an empty frame, because its presence is what
+fixes the decoded length. For a leaf that is the `|| _i0 == _n0 - 1` disjunct in the
+omit test (`lastElemExpr`); for a `struct`/`union`/nested-row element it is the
+**closer**, chosen at run time from the position in the value —
+`WriteSequenceEndKeep` at the last index, the dropping `WriteSequenceEnd` in the
+interior, where an all-default element writes no child and its lazily-held frame
+vanishes into the gap. A native nested row has no frame of its own, so the rule
+lands on the write itself. A sequence-typed **field** (a struct field, an array
+wrapper) still always takes the dropping closer: an all-default one is omitted and
+absence reconstructs it (§2).
+
+So `["a", ""]` → `06 02 0a 61 0a 02 07`, `["", ""]` → `06 0a 02 07`, `["", "x", ""]`
+→ `06 0a 0a 78 12 02 07`, and an all-default two-element struct array → `06 0e 07 07`
+— element 1 as an empty frame, element 0 as a gap. The three values `["a", ""]`,
+`["a"]` and `[]` encode and decode distinctly. A declared `count: N` changes none of
+it: a capacity can never restore an elided tail.
+
+**Placement (decode).** Every element kind is placed at `list[id]` after gap-filling
+with the element default — never appended. Appending shortens the array by every
+interior gap (which sparsity now makes routine) and decodes a **reopened** id as a
+second element rather than merging into the first (§7.4, which placement gives for
+free). The flat visitor descends into an element scope on `SequenceBegin(id)` (or,
+for a native row, on `ArrayBegin(id)`), and the element's own callbacks arrive
+*after* that descent, so the id is latched in a per-scope field, `_ix<Scope>`, that
+the whole child sub-tree addresses through. Each array scope is a distinct static
+location and the scope tree is acyclic, so one latch per scope is enough. The `#142`
+over-index guard rejects `id >= N` first, which also bounds the gap-fill against an
+over-index amplification DoS — including on the row collectors, which had no bound
+of their own while they appended.
+
+`IsDefault()` — every class carries it — is the exact negation of what `Marshal`
+writes, evaluated per field and recursively: the explicit form of the "not one child
+was written" test the lazy framing performs. Because the last element is always
+written, a wrapper array is default exactly when it is **empty**, so the writer and
+the predicate cannot drift apart.

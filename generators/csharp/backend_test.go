@@ -275,9 +275,10 @@ messages:
 		// initial reservation grown on demand — never `new ulong[count]`.
 		"case (Root, 1): if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[Math.Min(count, ArrayInitCap)]; break;",
 		"m.arr = EnsureCap(m.arr, ai, acap); m.arr[ai++] = (ulong)value;",
-		// Bounded array: only the #100 schema-capacity guard, and a fixed-length
-		// alloc at the schema count (generator#136) — the guard still bounds it.
-		"case (Root, 2): if (count > 100000) throw new SofabException(SofabError.InvalidMessage, \"barr: array count above schema capacity 100000\"); m.barr = new int[100000]; break;",
+		// Bounded array: only the #100 schema-capacity guard, and an alloc at the
+		// WIRE count -- `count: N` is a capacity, so M is the length (§3) and the
+		// guard is what still bounds the untrusted count.
+		"case (Root, 2): if (count > 100000) throw new SofabException(SofabError.InvalidMessage, \"barr: array count above schema capacity 100000\"); m.barr = new int[count]; break;",
 		// Unbounded string: `total` checked before any accumulation.
 		"if (total > MaxDynStringLen) {",
 		"case (Root, 0): throw new SofabException(SofabError.LimitExceeded, \"s: string length above configured limit 4096\");",
@@ -309,131 +310,19 @@ messages:
 			t.Errorf("no-config Message.cs missing hardened count-less arm %q", want)
 		}
 	}
-	// The bounded array allocates its fixed schema length, never lazy growth.
-	if !strings.Contains(plain, "m.barr = new int[100000]; break;") {
-		t.Error("bounded array must allocate its fixed schema count")
+	// The bounded array allocates the wire count exactly (bounded by its schema
+	// capacity guard), never lazy growth and never N.
+	if !strings.Contains(plain, "m.barr = new int[count]; break;") {
+		t.Error("bounded array must allocate the wire count")
 	}
 }
 
-// TestCsFixedCountTrailingDefaultRun covers MESSAGE_SPEC §3 (generator#136): a
-// `count: N` native array is FIXED-LENGTH. Encode emits only elements [0, M')
-// (M' = one past the last non-default element); decode materializes exactly N,
-// refilling the elided trailing default run. Dynamic (count-less) arrays are
-// unaffected — a trailing default element is significant there.
-func TestCsFixedCountTrailingDefaultRun(t *testing.T) {
-	const src = `
-version: 1
-$defs:
-  enum:
-    Color: { none: 0, red: 1 }
-  bitfield:
-    Perm: { read: { pos: 0 }, write: { pos: 1 } }
-messages:
-  m:
-    payload:
-      fx:   { id: 0, type: array, items: { type: u32, count: 5 } }
-      dyn:  { id: 1, type: array, items: { type: u32 } }
-      ffs:  { id: 2, type: array, items: { type: i16, count: 3 } }
-      ff32: { id: 3, type: array, items: { type: fp32, count: 4 } }
-      ff64: { id: 4, type: array, items: { type: fp64, count: 2 } }
-      fb:   { id: 5, type: array, items: { type: boolean, count: 3 } }
-      fe:   { id: 6, type: array, items: { type: enum, count: 3, enum: { $ref: "#/$defs/enum/Color" } } }
-      fp:   { id: 7, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Perm" } } }
-      dyne: { id: 8, type: array, items: { type: enum, enum: { $ref: "#/$defs/enum/Color" } } }
-      nest: { id: 9, type: array, items: { type: array, count: 2, items: { type: u32, count: 4 } } }
-`
-	m := buildModule(t, []byte(src), "fixed.yaml", map[string]any{})
-
-	for _, want := range []string{
-		// Helpers: bit-pattern comparison, incl. the float overloads.
-		"internal static class SofabFixedArray {",
-		"internal static T[] TrimTail<T>(T[] a) where T : struct {",
-		"while (n > 0 && BitConverter.SingleToInt32Bits(a[n - 1]) == 0) n--;",
-		"while (n > 0 && BitConverter.DoubleToInt64Bits(a[n - 1]) == 0) n--;",
-
-		// Encode: every fixed native array trims its trailing default run.
-		"os.WriteArrayUnsigned(0, SofabFixedArray.TrimTail(this.fx));",
-		"os.WriteArraySigned(2, SofabFixedArray.TrimTail(this.ffs));",
-		"os.WriteArrayFp32(3, SofabFixedArray.TrimTailF32(this.ff32));",
-		"os.WriteArrayFp64(4, SofabFixedArray.TrimTailF64(this.ff64));",
-		"os.WriteArrayUnsigned(5, SofabFixedArray.TrimTail(Array.ConvertAll(this.fb.ToArray(), _x => _x ? (byte)1 : (byte)0)));",
-		"os.WriteArraySigned(6, SofabFixedArray.TrimTail(Array.ConvertAll(this.fe.ToArray(), _x => (sbyte)_x)));",
-		"os.WriteArrayUnsigned(7, SofabFixedArray.TrimTail(Array.ConvertAll(this.fp.ToArray(), _x => (byte)_x)));",
-
-		// Decode: materialize exactly the schema count N, not the wire count.
-		"m.fx = new uint[5]; break;",
-		"m.ffs = new short[3]; break;",
-		"m.ff32 = new float[4]; break;",
-		"m.ff64 = new double[2]; break;",
-		// A fixed List<T> (bool/enum/bitfield) is pre-filled to N defaults and
-		// then written by index, so [M, N) survives as the element default.
-		"m.fb.Clear(); for (int _p = 0; _p < 3; _p++) m.fb.Add(default(bool)); break;",
-		"m.fe.Clear(); for (int _p = 0; _p < 3; _p++) m.fe.Add(default(EnumColor)); break;",
-		"m.fp.Clear(); for (int _p = 0; _p < 2; _p++) m.fp.Add(default(BitfieldPerm)); break;",
-		"case (Root, 5): if (afill == 0) break; afill--; m.fb[ai++] = value != 0; break;",
-		"case (Root, 6): if (afill == 0) break; afill--; m.fe[ai++] = (EnumColor)value; break;",
-		"case (Root, 7): if (afill == 0) break; afill--; m.fp[ai++] = (BitfieldPerm)value; break;",
-	} {
-		if !strings.Contains(m, want) {
-			t.Errorf("Message.cs missing %q", want)
-		}
-	}
-
-	for _, bad := range []string{
-		// Dynamic arrays: no trim on encode, no fixed alloc / pre-fill on decode.
-		"SofabFixedArray.TrimTail(this.dyn)",
-		"SofabFixedArray.TrimTail(Array.ConvertAll(this.dyne",
-		"m.dyne.Clear(); for (int _p",
-	} {
-		if strings.Contains(m, bad) {
-			t.Errorf("Message.cs must not contain %q (dynamic arrays are unchanged)", bad)
-		}
-	}
-	// Dynamic arrays keep their untrimmed write and append-based decode.
-	for _, want := range []string{
-		"os.WriteArrayUnsigned(1, this.dyn);",
-		"os.WriteArraySigned(8, Array.ConvertAll(this.dyne.ToArray(), _x => (sbyte)_x));",
-		"case (Root, 8): if (afill == 0) break; afill--; m.dyne.Add((EnumColor)value); break;",
-		"case (Root, 8): m.dyne.Clear(); break;",
-		"m.dyn = new uint[Math.Min(count, ArrayInitCap)]; break;",
-		"case (Root, 1): if (afill == 0) break; afill--; m.dyn = EnsureCap(m.dyn, ai, acap); m.dyn[ai++] = (uint)value; break;",
-	} {
-		if !strings.Contains(m, want) {
-			t.Errorf("Message.cs missing untouched dynamic-array form %q", want)
-		}
-	}
-	// Nested array-of-array rows are NOT fixed: only ir.Field carries the
-	// fixed-length contract, so inner rows pass fixed=false and never trim.
-	if !strings.Contains(m, "os.WriteArrayUnsigned(_i0, this.nest[_i0].ToArray());") {
-		t.Error("nested inner array rows must keep their untrimmed write")
-	}
-	// The over-count guard still precedes (and thus bounds) the eager alloc.
-	if !strings.Contains(m, `case (Root, 0): if (count > 5) throw new SofabException(SofabError.InvalidMessage, "fx: array count above schema capacity 5"); m.fx = new uint[5]; break;`) {
-		t.Error("the #100 over-count guard must still precede the fixed-length alloc")
-	}
-}
-
-// TestCsFixedHelpersOmitted: a schema with no fixed-count native array emits no
-// trim helper class at all.
-func TestCsFixedHelpersOmitted(t *testing.T) {
-	const src = `
-version: 1
-messages:
-  m: { payload: { dyn: { id: 0, type: array, items: { type: u32 } } } }
-`
-	if m := buildModule(t, []byte(src), "dynonly.yaml", map[string]any{}); strings.Contains(m, "SofabFixedArray") {
-		t.Error("no fixed-count native array -> no trim helpers")
-	}
-}
-
-// TestCsFixedCountDefaultIsNElements covers the second F-0010 route (#136): the
-// OMISSION path. A `count: N` native array is fixed-length, so its value is
-// ALWAYS exactly N elements — with no schema default that is N element
-// defaults, and a short schema default leaves the unlisted trailing elements at
-// the element default. An all-default array is omitted by the sparse rule and so
-// never reaches ArrayBegin; without an N-element initializer it would decode
-// back as length 0 here while the fixed-storage backends yield N zeros.
-func TestCsFixedCountDefaultIsNElements(t *testing.T) {
+// `count: N` is a CAPACITY, not a length (MESSAGE_SPEC §3): it never reaches the
+// wire, the wire count M IS the array's length, and nothing that carries that
+// length may be elided. So the whole trim-on-encode / fill-on-decode pair is gone
+// — from both array forms — and a count:N array is generated exactly like a
+// count-less one except for the bound it still enforces.
+func TestCsArrayCountIsCapacityNotLength(t *testing.T) {
 	const src = `
 version: 1
 $defs:
@@ -444,68 +333,328 @@ $defs:
 messages:
   m:
     payload:
-      fx:    { id: 0, type: array, items: { type: u32, count: 5 } }
-      fxd:   { id: 1, type: array, items: { type: u32, count: 5 }, default: [1, 2] }
-      full:  { id: 2, type: array, items: { type: u32, count: 3 }, default: [1, 2, 3] }
-      dyn:   { id: 3, type: array, items: { type: u32 } }
-      dynd:  { id: 4, type: array, items: { type: u32 }, default: [1, 2] }
-      f32s:  { id: 5, type: array, items: { type: fp32, count: 4 }, default: [1.5] }
-      f64s:  { id: 6, type: array, items: { type: fp64, count: 2 } }
-      bools: { id: 7, type: array, items: { type: boolean, count: 3 } }
-      enums: { id: 8, type: array, items: { type: enum, count: 3, enum: { $ref: "#/$defs/enum/Color" } }, default: [2] }
-      perms: { id: 9, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Perm" } } }
-      strs:  { id: 10, type: array, items: { type: string, count: 2, maxlen: 8 } }
+      fx:   { id: 0, type: array, items: { type: u32, count: 5 } }
+      dyn:  { id: 1, type: array, items: { type: u32 } }
+      ffs:  { id: 2, type: array, items: { type: i16, count: 3 } }
+      ff32: { id: 3, type: array, items: { type: fp32, count: 4 }, default: [1.5] }
+      ff64: { id: 4, type: array, items: { type: fp64, count: 2 } }
+      fb:   { id: 5, type: array, items: { type: boolean, count: 3 } }
+      fe:   { id: 6, type: array, items: { type: enum, count: 3, enum: { $ref: "#/$defs/enum/Color" } }, default: [2] }
+      fp:   { id: 7, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Perm" } } }
+      fxd:  { id: 8, type: array, items: { type: u32, count: 5 }, default: [1, 2] }
+      strs: { id: 9, type: array, items: { type: string, count: 2, maxlen: 8 } }
 `
-	m := buildModule(t, []byte(src), "fixeddef.yaml", map[string]any{})
+	m := buildModule(t, []byte(src), "capacity.yaml", map[string]any{})
+
+	// Nothing narrows anything any more: the trim helper class is gone whole, and
+	// with it every per-class TrimTail. Its presence would mean a call site that
+	// still shortens a value.
+	for _, gone := range []string{"SofabFixedArray", "TrimTail", "TrimTailF32", "TrimTailF64", "TrimStrs", "TrimBlobs", "TrimRows", "Filled<"} {
+		if strings.Contains(m, gone) {
+			t.Errorf("`count` is a capacity: %q must not be emitted:\n%s", gone, m)
+		}
+	}
 
 	for _, want := range []string{
-		// No schema default: N element defaults. `new T[N]` keeps the emitted
-		// source O(1) in N rather than spelling out N zero literals.
-		"public uint[] fx = new uint[5];",
-		"public double[] f64s = new double[2];",
-		"public List<bool> bools = new List<bool>(new bool[3]);",
-		"public List<BitfieldPerm> perms = new List<BitfieldPerm>(new BitfieldPerm[2]);",
-		// Short schema default: tail-padded to exactly N.
-		"public uint[] fxd = new uint[]{1, 2, 0, 0, 0};",
-		"public float[] f32s = new float[]{1.5f, 0f, 0f, 0f};",
-		"public List<EnumColor> enums = new List<EnumColor>{(EnumColor)(2), (EnumColor)(0), (EnumColor)(0)};",
-		// An already-N-long default is untouched.
-		"public uint[] full = new uint[]{1, 2, 3};",
-		// The omit-compare default is hoisted into a static (Marshal only reads
-		// it), so encode never allocates a fresh N-element literal per call.
-		"private static readonly uint[] _arrdef_fx = new uint[5];",
-		"private static readonly uint[] _arrdef_fxd = new uint[]{1, 2, 0, 0, 0};",
-		"if (!System.Linq.Enumerable.SequenceEqual(this.fx, _arrdef_fx)) {",
-		"if (!System.Linq.Enumerable.SequenceEqual(this.bools, _arrdef_bools)) {",
+		// Encode writes every element the value holds, count:N and count-less alike.
+		"os.WriteArrayUnsigned(0, this.fx);",
+		"os.WriteArrayUnsigned(1, this.dyn);",
+		"os.WriteArraySigned(2, this.ffs);",
+		"os.WriteArrayFp32(3, this.ff32);",
+		"os.WriteArrayFp64(4, this.ff64);",
+		"os.WriteArrayUnsigned(5, Array.ConvertAll(this.fb.ToArray(), _x => _x ? (byte)1 : (byte)0));",
+		"os.WriteArraySigned(6, Array.ConvertAll(this.fe.ToArray(), _x => (sbyte)_x));",
+		"os.WriteArrayUnsigned(7, Array.ConvertAll(this.fp.ToArray(), _x => (byte)_x));",
+
+		// A fresh count:N array is EMPTY (nothing materialized to N), and a declared
+		// default shorter than N stands exactly as written (never tail-padded).
+		"public uint[] fx = Array.Empty<uint>();",
+		"public double[] ff64 = Array.Empty<double>();",
+		"public List<bool> fb = new();",
+		"public List<BitfieldPerm> fp = new();",
+		"public List<string> strs = new();",
+		"public float[] ff32 = new float[]{1.5f};",
+		"public List<EnumColor> fe = new List<EnumColor>{(EnumColor)(2)};",
+		"public uint[] fxd = new uint[]{1, 2};",
+		"private static readonly uint[] _arrdef_fxd = new uint[]{1, 2};",
+
+		// Decode takes the M elements that arrived and nothing else: the primitive
+		// arrays allocate the WIRE count (the #100 guard still bounds it by N), the
+		// List<T> ones clear and append.
+		`case (Root, 0): if (count > 5) throw new SofabException(SofabError.InvalidMessage, "fx: array count above schema capacity 5"); m.fx = new uint[count]; break;`,
+		`case (Root, 3): if (count > 4) throw new SofabException(SofabError.InvalidMessage, "ff32: array count above schema capacity 4"); m.ff32 = new float[count]; break;`,
+		`case (Root, 5): if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fb: array count above schema capacity 3"); m.fb.Clear(); break;`,
+		"case (Root, 5): if (afill == 0) break; afill--; m.fb.Add(value != 0); break;",
+		"case (Root, 6): if (afill == 0) break; afill--; m.fe.Add((EnumColor)value); break;",
+		"case (Root, 7): if (afill == 0) break; afill--; m.fp.Add((BitfieldPerm)value); break;",
+
+		// A count:N array with no declared default is default only when EMPTY: an
+		// all-zero length-N value is a different value and stays on the wire.
+		"if (this.fx != null && this.fx.Length != 0) {",
+		"if (!(this.fx == null || this.fx.Length == 0)) return false;",
+		"if (!(this.strs.Count == 0)) return false;",
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("Message.cs missing %q", want)
+			t.Errorf("Message.cs missing %q:\n%s", want, m)
 		}
 	}
 
 	for _, bad := range []string{
-		// Dynamic arrays are NOT fixed-length: no synthesized default, no
-		// tail-pad, and no whole-field omit-compare when they have no default.
-		"public uint[] dyn = new uint[",
-		"_arrdef_dyn ",
-		"public uint[] dynd = new uint[]{1, 2, 0",
-		// A wrapper-sequence array is always framed: never whole-omitted, so it
-		// gets no compare default.
-		"_arrdef_strs",
+		// The superseded shapes: an N-sized alloc, an N-element pre-fill, an
+		// index-based List write, an N-padded literal, and the SequenceEnd refill.
+		"m.fx = new uint[5];",
+		"m.fb.Clear(); for (int _p",
+		"m.fb[ai++]",
+		"public uint[] fxd = new uint[]{1, 2, 0",
+		"public float[] ff32 = new float[]{1.5f, 0f",
+		"while (m.strs.Count < 2) m.strs.Add",
 	} {
 		if strings.Contains(m, bad) {
-			t.Errorf("Message.cs must not contain %q", bad)
+			t.Errorf("Message.cs must not contain the superseded fixed-length form %q:\n%s", bad, m)
 		}
 	}
+	// SequenceEnd is a bare scope pop: there is no length to reconstruct.
+	if !strings.Contains(m, "public void SequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }") {
+		t.Errorf("SequenceEnd must be a bare scope pop:\n%s", m)
+	}
+}
+
+// MESSAGE_SPEC §2 governs both element kinds with ONE rule, and the rule is
+// positional: an element before the last one that equals its element default is
+// omitted — a string/blob leaf simply not written, a sequence element not framed
+// either — while the element at the LAST index is always written, as its value or
+// as an empty frame. Only the last index carries the array's length (§5.1); an
+// interior gap is restored from the element default and is therefore free.
+//
+// The choice is made from the position in the VALUE, at run time; the schema
+// cannot answer it. This holds with or without a declared `count`: a capacity can
+// never restore an elided tail.
+func TestCsElementSparsityIsPositional(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  vec:
+    payload:
+      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
+      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      fixedobj: { id: 3, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+      dynobj:   { id: 4, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      rows:     { id: 5, type: array, items: { type: array, count: 2, items: { type: u32 } } }
+      srows:    { id: 6, type: array, items: { type: array, items: { type: string, maxlen: 8 } } }
+`
+	m := buildModule(t, []byte(src), "vec.yaml", map[string]any{})
+
 	for _, want := range []string{
-		"public uint[] dyn = Array.Empty<uint>();",
-		"public uint[] dynd = new uint[]{1, 2};",
-		"public List<string> strs = new();",
-		// A dynamic array with no default keeps the allocation-free emptiness test.
-		"if (this.dyn != null && this.dyn.Length != 0) {",
+		// LEAF elements: the omit test is `!= default || last`, unconditionally —
+		// the count:N array is written exactly like the count-less one beside it.
+		`for (int _i0 = 0, _n0 = this.dynstr.Count; _i0 < _n0; _i0++) { if ((this.dynstr[_i0] ?? "") != "" || _i0 == _n0 - 1) os.WriteString(_i0, this.dynstr[_i0] ?? ""); }`,
+		`for (int _i0 = 0, _n0 = this.dynblob.Count; _i0 < _n0; _i0++) { if ((this.dynblob[_i0] ?? Array.Empty<byte>()).Length != 0 || _i0 == _n0 - 1) os.WriteBlob(_i0, this.dynblob[_i0] ?? Array.Empty<byte>()); }`,
+		`for (int _i0 = 0, _n0 = this.fixedstr.Count; _i0 < _n0; _i0++) { if ((this.fixedstr[_i0] ?? "") != "" || _i0 == _n0 - 1) os.WriteString(_i0, this.fixedstr[_i0] ?? ""); }`,
+
+		// SEQUENCE elements: the same rule, applied to the lazily-held frame. The
+		// dropping closer in the interior (an all-default element writes no child, so
+		// the frame vanishes and leaves an id gap), the keeping one at the last index.
+		"os.WriteSequenceBeginLazy(_i0); (this.fixedobj[_i0] ?? new VecFixedobjElem()).Marshal(os);\n" +
+			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();",
+		"os.WriteSequenceBeginLazy(_i0); (this.dynobj[_i0] ?? new VecDynobjElem()).Marshal(os);\n" +
+			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();",
+
+		// A NATIVE nested row has no frame of its own, so the rule lands on the write.
+		"            if (this.rows[_i0].Count != 0 || _i0 == _n0 - 1) {\n" +
+			"                os.WriteArrayUnsigned(_i0, this.rows[_i0].ToArray());\n" +
+			"            }",
+		// A WRAPPER nested row does have one, so it takes the closer instead.
+		"            for (int _i1 = 0, _n1 = this.srows[_i0].Count; _i1 < _n1; _i1++) { if ((this.srows[_i0][_i1] ?? \"\") != \"\" || _i1 == _n1 - 1) os.WriteString(_i1, this.srows[_i0][_i1] ?? \"\"); }\n" +
+			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();",
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("Message.cs missing untouched dynamic form %q", want)
+			t.Errorf("Message.cs missing %q:\n%s", want, m)
+		}
+	}
+
+	// The superseded shapes: an unconditional keeping closer on every element
+	// (sequence elements used to be framed whatever their value), and a leaf omit
+	// test with no last-index escape on a count:N array.
+	if strings.Contains(m, "Marshal(os); os.WriteSequenceEndKeep();") {
+		t.Errorf("a sequence element must not be framed unconditionally:\n%s", m)
+	}
+	if strings.Contains(m, `if ((this.fixedstr[_i0] ?? "") != "") os.WriteString`) {
+		t.Errorf("a count:N leaf element must still keep its last index:\n%s", m)
+	}
+
+	// IsDefault follows the writer exactly: the last element is always written, so
+	// "no child is written" is "the array is empty" — for every element kind and
+	// with or without a count. Anything narrower would omit a field that is on the
+	// wire (a [""] or a [{}] is one element, not nothing).
+	for _, want := range []string{
+		"if (!(this.dynstr.Count == 0)) return false;",
+		"if (!(this.dynblob.Count == 0)) return false;",
+		"if (!(this.fixedstr.Count == 0)) return false;",
+		"if (!(this.fixedobj.Count == 0)) return false;",
+		"if (!(this.rows.Count == 0)) return false;",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("IsDefault must test emptiness alone: missing %q:\n%s", want, m)
+		}
+	}
+}
+
+// MESSAGE_SPEC §2: every sequence opens with the lazy begin, so the CLOSER alone
+// decides whether a contentless one survives — and where it is chosen from is the
+// whole of the element rule. A sequence-typed FIELD (a struct/union field, an
+// array wrapper) is decided by the SCHEMA: it always closes with the dropping
+// WriteSequenceEnd, so an all-default one is omitted. A wrapper-array ELEMENT (a
+// struct element, a nested row) is decided by its position in the VALUE, at run
+// time.
+func TestCsSequenceFramingClosers(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      nested:
+        id: 0
+        type: struct
+        fields:
+          a: { id: 0, type: u32 }
+      structs:
+        id: 1
+        type: array
+        items:
+          type: struct
+          fields:
+            b: { id: 0, type: u32 }
+      names: { id: 2, type: array, items: { type: string, maxlen: 8 } }
+      grid:
+        id: 3
+        type: array
+        items:
+          type: array
+          items: { type: string, maxlen: 8 }
+`
+	m := buildModule(t, []byte(src), "m.yaml", map[string]any{})
+	for _, want := range []string{
+		// FIELD: a struct field may vanish whole when every child is at its default.
+		"os.WriteSequenceBeginLazy(0); (this.nested ?? new MNested()).Marshal(os); os.WriteSequenceEnd();",
+		// FIELD: the wrapper of a struct-element array, closed by the dropping end.
+		"        os.WriteSequenceBeginLazy(1);\n" +
+			"        for (int _i0 = 0, _n0 = this.structs.Count; _i0 < _n0; _i0++) {\n" +
+			"            os.WriteSequenceBeginLazy(_i0); (this.structs[_i0] ?? new MStructsElem()).Marshal(os);\n" +
+			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();\n" +
+			"        }\n" +
+			"        os.WriteSequenceEnd();",
+		// FIELD: the wrapper of a string array — an EMPTY array drops the wrapper too
+		// (the last element is always written, so a non-empty one never vanishes, §2).
+		"        os.WriteSequenceBeginLazy(2);\n" +
+			"        for (int _i0 = 0, _n0 = this.names.Count; _i0 < _n0; _i0++) { if ((this.names[_i0] ?? \"\") != \"\" || _i0 == _n0 - 1) os.WriteString(_i0, this.names[_i0] ?? \"\"); }\n" +
+			"        os.WriteSequenceEnd();",
+		// FIELD: the wrapper of an array-of-array, whose ROWS are elements and so take
+		// the positional closer one level in.
+		"        os.WriteSequenceBeginLazy(3);\n" +
+			"        for (int _i0 = 0, _n0 = this.grid.Count; _i0 < _n0; _i0++) {\n" +
+			"            os.WriteSequenceBeginLazy(_i0);\n" +
+			"            for (int _i1 = 0, _n1 = this.grid[_i0].Count; _i1 < _n1; _i1++) { if ((this.grid[_i0][_i1] ?? \"\") != \"\" || _i1 == _n1 - 1) os.WriteString(_i1, this.grid[_i0][_i1] ?? \"\"); }\n" +
+			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();\n" +
+			"        }\n" +
+			"        os.WriteSequenceEnd();",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q:\n%s", want, m)
+		}
+	}
+	// The eager begin is gone from the corelib; emitting it would not compile.
+	if strings.Contains(m, "WriteSequenceBegin(") {
+		t.Error("eager WriteSequenceBegin must not be emitted; the corelib only has WriteSequenceBeginLazy")
+	}
+	// Exactly two ELEMENT sites (the struct element, the nested row), each spelling
+	// the run-time choice once; and no unconditional keeping closer anywhere.
+	if got := strings.Count(m, "if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();"); got != 2 {
+		t.Errorf("positional closer count = %d, want 2 (struct element + nested row)", got)
+	}
+	if got := strings.Count(m, "os.WriteSequenceEndKeep();"); got != 2 {
+		t.Errorf("WriteSequenceEndKeep count = %d, want 2 (both inside a positional choice)", got)
+	}
+}
+
+// A wrapper array's element id IS the array index (§5.1), so an element is PLACED
+// at dest[id] after gap-filling from the element default — never appended. That is
+// what restores an interior element the sparse rule omitted; appending would
+// shorten the array by the size of every gap and would decode a REOPENED id as a
+// second element instead of merging into the first (§7.4).
+//
+// The decoded length is highest present id + 1, exact because the last element is
+// never elided. Nothing is filled in beyond it: a schema `count` is a capacity, so
+// it bounds the id but never adds an element the wire did not carry.
+//
+// The matrix/nested-row collectors were the one place still appending id-blind.
+// That was unreachable while every row was written; interior sparsity makes an
+// interior gap reachable, and an appending collector then shifts every later row
+// down by one.
+func TestCsWrapperElementsArePlacedByID(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  vec:
+    payload:
+      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      rows:    { id: 3, type: array, items: { type: array, count: 2, items: { type: u32 } } }
+      srows:   { id: 4, type: array, items: { type: array, items: { type: string, maxlen: 8 } } }
+`
+	m := buildModule(t, []byte(src), "m.yaml", map[string]any{})
+
+	for _, want := range []string{
+		// struct element: gap-fill, latch the id, descend — the element scope then
+		// addresses the element the id named, not the last one.
+		"case (Root_fixed, _): if (id >= 5) throw new SofabException(SofabError.InvalidMessage, " +
+			"\"Root_fixed element: array index above schema capacity 5\"); " +
+			"while (m.@fixed.Count <= id) m.@fixed.Add(new VecFixedElem()); _ixRoot_fixed = id; cur = Root_fixed_e; break;",
+		"case (Root_fixed_e, 0): m.@fixed[_ixRoot_fixed].k = (uint)value; break;",
+		// a count-less array is placed by id too: its length is highest id + 1.
+		"while (m.dynamic.Count <= id) m.dynamic.Add(new VecDynamicElem()); _ixRoot_dynamic = id;",
+		// string leaf element: placed, with the gap filled from the element default.
+		"case (Root_fstrs, _): if (id >= 3) throw new SofabException(SofabError.InvalidMessage, " +
+			"\"Root_fstrs element: array index above schema capacity 3\"); " +
+			"while (m.fstrs.Count <= id) m.fstrs.Add(\"\"); m.fstrs[id] = _s; break;",
+		// NATIVE row (the id-blind collector): placed at out[id], bounded by the outer
+		// array's count, and the fill then addresses the latched row.
+		"case (Root_rows, _): if (id >= 2) throw new SofabException(SofabError.InvalidMessage, " +
+			"\"Root_rows element: array index above schema capacity 2\"); " +
+			"while (m.rows.Count <= id) m.rows.Add(new List<uint>()); m.rows[id] = new List<uint>(); _ixRoot_rows = id; break;",
+		"case (Root_rows, _): if (afill == 0) break; afill--; m.rows[_ixRoot_rows].Add((uint)value); break;",
+		// WRAPPER row: same placement, then the descent.
+		"case (Root_srows, _): while (m.srows.Count <= id) m.srows.Add(new List<string>()); " +
+			"m.srows[id] = new List<string>(); _ixRoot_srows = id; cur = Root_srows_e; break;",
+		"case (Root_srows_e, _): while (m.srows[_ixRoot_srows].Count <= id) m.srows[_ixRoot_srows].Add(\"\"); m.srows[_ixRoot_srows][id] = _s; break;",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q:\n%s", want, m)
+		}
+	}
+
+	// The defects this replaced: an id-blind append, and "the last element" as the
+	// decode target.
+	for _, bad := range []string{
+		"m.rows.Add(new List<uint>()); break;",
+		"m.srows.Add(new List<string>()); cur = Root_srows_e;",
+		"m.rows[m.rows.Count - 1]",
+		"m.srows[m.srows.Count - 1]",
+		"m.@fixed[m.@fixed.Count - 1]",
+	} {
+		if strings.Contains(m, bad) {
+			t.Errorf("a row must not be collected id-blind: %q:\n%s", bad, m)
+		}
+	}
+	// And nothing is filled in past the highest id: `count` adds no elements.
+	for _, bad := range []string{
+		"while (m.@fixed.Count < 5)",
+		"while (m.fstrs.Count < 3)",
+		"while (m.rows.Count < 2)",
+	} {
+		if strings.Contains(m, bad) {
+			t.Errorf("a capacity must not default-fill the array: %q:\n%s", bad, m)
 		}
 	}
 }

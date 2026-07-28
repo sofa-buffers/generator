@@ -89,10 +89,13 @@ type objectPlan struct {
 	hasDeprecated bool
 	// fixedSeq marks a synthetic fixed-count sequence holder (buildHolder): its
 	// fields are the element slots 0..field_count-1 of a bounded string/blob/
-	// struct/union/nested array. emitDescriptor emits SOFAB_OBJECT_DESCR_SEQ so the
-	// corelib rejects an over-index element id (>= N) as INVALID instead of skipping
-	// it like an unknown message field (MESSAGE_SPEC §7/§7.1, generator#149 /
-	// corelib-c-cpp#94). A message / struct / union object leaves this false.
+	// struct/union/nested array. emitDescriptor emits SOFAB_OBJECT_DESCR_SEQ_SIZED,
+	// which does two things: the corelib rejects an over-index element id (>= N) as
+	// INVALID instead of skipping it like an unknown message field (MESSAGE_SPEC
+	// §7/§7.1, generator#149 / corelib-c-cpp#94), and the holder's leading `len`
+	// member gives it every length 0..N as MESSAGE_SPEC §5.1 requires (highest
+	// present id + 1) instead of only 0 and N. A message / struct / union object
+	// leaves this false.
 	fixedSeq bool
 }
 
@@ -263,6 +266,17 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 			}
 			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
+			// A compact array's declared default is an array of its OWN length, not
+			// one padded out to the capacity (§2/§3/§6): `default: [1,2,3]` on a
+			// `count: 5` field is the three-element [1,2,3]. The length lives in the
+			// companion member, which sofab_object_init seeds from the default image
+			// (at offset - width) exactly as it seeds the buffer — so the image has to
+			// carry it, including when every declared element is zero and the value
+			// image itself is elided ([0,0,0] is the LENGTH-3 array of zeros, not the
+			// empty array).
+			if n, ok := arrayDefaultLen(f); ok {
+				p.defaults = append(p.defaults, defaultInit{ident: cIdent(f.Name) + "_len", expr: fmt.Sprintf("%d", n)})
+			}
 			if expr, ok := g.cDefaultInit(f); ok {
 				p.defaults = append(p.defaults, defaultInit{ident: cIdent(f.Name), expr: expr})
 				if n, ok := blobDefaultRawLen(f); ok {
@@ -322,6 +336,18 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 	// checkBounded guarantees a count on every array, so the capacity is the
 	// schema count directly (no zero-sizing fallback).
 	cap := spec.count
+	// Every holder leads with its element-count member (0..N): MESSAGE_SPEC §5.1
+	// gives a wrapper array the length *highest present id + 1*, and `count` is only
+	// its capacity, so without one the C holder could express nothing but 0 (every
+	// slot default -> the enclosing object omits the field) and N.
+	//
+	// It has to be the FIRST member of the holder: SOFAB_OBJECT_DESCR_SEQ_SIZED
+	// reads it at offset 0 (and asserts offsetof == 0 at compile time). That anchor
+	// is what makes the count work for every element kind — a blob element and a
+	// native inner-array row are themselves SIZED and start with their own
+	// used-length, so an anchor relative to slot 0 addressed that instead, and those
+	// two kinds had to go without.
+	lead := fmt.Sprintf("%s len; ", lenC(g.cAlignArray(spec)))
 	switch spec.elem {
 	case ir.KindString, ir.KindBlob:
 		// checkBounded guarantees the element maxlen, so the storage is the schema
@@ -330,7 +356,7 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 			// +1 for the NUL the corelib's read_string reserves, so a maxlen-byte
 			// wire string element is accepted at its schema bound (#103). A string
 			// element recovers its length from the NUL, so no companion is needed.
-			p.members = append(p.members, member{decl: fmt.Sprintf("char items[%d][%d];", cap, spec.max+1)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%schar items[%d][%d];", lead, cap, spec.max+1)})
 			for i := int64(0); i < cap; i++ {
 				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 					"    SOFAB_OBJECT_FIELD(%d, %s, items[%d], SOFAB_OBJECT_FIELDTYPE_STRING),", i, p.cType, i)})
@@ -342,8 +368,11 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 			// sub-maxlen element re-encodes zero-padded and an all-zero element drops
 			// (issue #130). Emit each element as a { len; buf[M]; } struct so the
 			// length abuts the byte buffer (alignment 1) for the BLOB_SIZED macro.
+			// The holder's own count is `lead`, at offset 0 — the per-slot length in
+			// the way of the old anchor is items[0].len, which is why this kind could
+			// not carry a count until the anchor moved.
 			lenT := blobLenC(spec.max)
-			p.members = append(p.members, member{decl: fmt.Sprintf("struct { %s len; uint8_t buf[%d]; } items[%d];", lenT, spec.max, cap)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%sstruct { %s len; uint8_t buf[%d]; } items[%d];", lead, lenT, spec.max, cap)})
 			for i := int64(0); i < cap; i++ {
 				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 					"    SOFAB_OBJECT_FIELD_BLOB_SIZED(%d, %s, items[%d].buf, items[%d].len),", i, p.cType, i, i)})
@@ -357,7 +386,7 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 		if err := g.collect(ek, g.cType(ek, spec.ref.Target.Name), spec.ref.Target.Fields, plans, order); err == nil {
 			p.nested = append(p.nested, ek)
 		}
-		p.members = append(p.members, member{decl: fmt.Sprintf("%s items[%d];", plans[ek].cType, cap)})
+		p.members = append(p.members, member{decl: fmt.Sprintf("%s%s items[%d];", lead, plans[ek].cType, cap)})
 		for i := int64(0); i < cap; i++ {
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, items[%d], SOFAB_OBJECT_FIELDTYPE_SEQUENCE, 0),", i, p.cType, i)})
@@ -369,19 +398,26 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 			ik := key + "/inner"
 			ip := g.buildHolder(ik, inner, plans, order)
 			p.nested = append(p.nested, ik)
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s items[%d];", ip.cType, cap)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s%s items[%d];", lead, ip.cType, cap)})
 			for i := int64(0); i < cap; i++ {
 				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 					"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, items[%d], SOFAB_OBJECT_FIELDTYPE_SEQUENCE, 0),", i, p.cType, i)})
 			}
 		} else {
-			// Inner element is a native array: a 2-D C array, each row an array
-			// field (id = index). checkBounded guarantees the inner count.
+			// Inner element is a native array: each row is a compact array field
+			// (id = index), and by §3 the row's wire count is its LENGTH — so each
+			// row is a SIZED array, a { len; vals[icap]; } slot exactly like a sized
+			// blob element. checkBounded guarantees the inner count. The per-row
+			// length occupies the byte before items[0].vals, which is why this kind
+			// could not carry a holder count until the anchor moved to offset 0;
+			// `lead` is that count, and at offset 0 the two never meet.
 			icap := inner.count
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s items[%d][%d];", g.arrayElemCType(inner.elem, inner.ref), cap, icap)})
+			et := g.arrayElemCType(inner.elem, inner.ref)
+			iw := lenWidth(icap, cScalarWidth(et))
+			p.members = append(p.members, member{decl: fmt.Sprintf("%sstruct { %s len; %s vals[%d]; } items[%d];", lead, lenC(iw), et, icap, cap)})
 			for i := int64(0); i < cap; i++ {
 				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
-					"    SOFAB_OBJECT_FIELD_ARRAY(%d, %s, items[%d], %s),", i, p.cType, i, arrayFieldType(inner.elem))})
+					"    SOFAB_OBJECT_FIELD_ARRAY_SIZED(%d, %s, items[%d].vals, items[%d].len, %s),", i, p.cType, i, i, arrayFieldType(inner.elem))})
 			}
 		}
 	}
@@ -445,8 +481,20 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 	case ir.KindArray:
 		// Native array element (numeric/enum/boolean/bitfield): enum -> signed,
 		// boolean/bitfield -> unsigned, value-converted (not a sequence).
-		decl = fmt.Sprintf("%s %s[%d];", g.arrayElemCType(f.Elem, f.ElemRef), mn, f.Count)
-		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_ARRAY(%d, %s, %s, %s),", f.ID, cType, mn, arrayFieldType(f.Elem))
+		//
+		// MESSAGE_SPEC §3: `count: N` is the array's CAPACITY and the wire count M
+		// is its LENGTH — every element held is written, trailing element defaults
+		// included ([1,2,3,0,0] and [1,2,3] are different values). A plain
+		// SOFAB_OBJECT_FIELD_ARRAY derives the count structurally from
+		// sizeof(field)/sizeof(field[0]), i.e. the capacity, so it can express only
+		// the length N and a decode of M < N re-encodes as N. The sized descriptor
+		// pairs the buffer with a companion length member holding 0..N — the array
+		// counterpart of the sized blob above, with the same adjacency requirement
+		// (see lenWidth for how the width is chosen).
+		et := g.arrayElemCType(f.Elem, f.ElemRef)
+		w := lenWidth(f.Count, cScalarWidth(et))
+		decl = fmt.Sprintf("%s %s_len; %s %s[%d];", lenC(w), mn, et, mn, f.Count)
+		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_ARRAY_SIZED(%d, %s, %s, %s_len, %s),", f.ID, cType, mn, mn, arrayFieldType(f.Elem))
 	default:
 		return "", "", fmt.Errorf("field %q: unsupported kind %s for C backend", f.Name, f.Kind)
 	}
@@ -483,17 +531,144 @@ func (g *gen) emitStruct(h *cfile, p *objectPlan) {
 // 0..maxlen for a sized blob's companion length member. The width is recorded in
 // the descriptor (SOFAB_OBJECT_FIELD_BLOB_SIZED reads sizeof(lfield)), so keeping
 // it minimal costs no wire bytes and only a byte or two of struct storage.
-func blobLenC(maxlen int64) string {
-	switch {
-	case maxlen <= 0xFF:
+func blobLenC(maxlen int64) string { return lenC(countWidth(maxlen)) }
+
+// lenC names the unsigned C type of a companion length member of byte width w
+// (the descriptor stores only sizeof(lfield), one of 1/2/4/8).
+func lenC(w int64) string {
+	switch w {
+	case 1:
 		return "uint8_t"
-	case maxlen <= 0xFFFF:
+	case 2:
 		return "uint16_t"
-	case maxlen <= 0xFFFFFFFF:
+	case 4:
 		return "uint32_t"
 	default:
 		return "uint64_t"
 	}
+}
+
+// countWidth is the narrowest 1/2/4/8-byte width that can hold 0..n.
+func countWidth(n int64) int64 {
+	switch {
+	case n <= 0xFF:
+		return 1
+	case n <= 0xFFFF:
+		return 2
+	case n <= 0xFFFFFFFF:
+		return 4
+	default:
+		return 8
+	}
+}
+
+// lenWidth picks a companion length member's byte width for a run of `count`
+// elements whose storage alignment is `align`.
+//
+// Two constraints, and the wider one wins. It must hold 0..count, and it must be
+// at least as wide as one element: the descriptor records only the width and
+// reads the length at <buffer offset − width>, so the two members have to be
+// ADJACENT, and a length narrower than the buffer's alignment is padded away
+// from it ({ uint8_t len; uint32_t v[4]; } puts v at offset 4, three bytes past
+// the length). corelib-c-cpp asserts that adjacency at compile time
+// (SOFAB_OBJECT_ASSERT_LEN_ADJACENT, a negative array bound), so getting this
+// wrong is a build error rather than a silent misread — but it is chosen here
+// deliberately, not discovered by trial. Both inputs are powers of two ≤ 8, so
+// the maximum is one too and a member of that width sits at a multiple of it,
+// which makes the following buffer's alignment automatic.
+func lenWidth(count, align int64) int64 {
+	w := countWidth(count)
+	if align > w {
+		w = align
+	}
+	return w
+}
+
+// cScalarWidth is the size (and, for every type the backend emits, the
+// alignment) of a scalar C type named by uintC/intC/enumC/bitfieldC/arrayElemC.
+func cScalarWidth(t string) int64 {
+	switch t {
+	case "uint8_t", "int8_t", "char":
+		return 1
+	case "uint16_t", "int16_t":
+		return 2
+	case "uint32_t", "int32_t", "float":
+		return 4
+	default: // uint64_t, int64_t, double
+		return 8
+	}
+}
+
+// cAlign is the storage alignment of the C member a field lowers to. It is
+// derived from the schema alone (never from a built plan), so the message
+// emitter and the JSON harness agree without sharing state. Alignment matters
+// here because a sized array / sized wrapper holder places its length member
+// immediately before the storage it describes: see lenWidth.
+func (g *gen) cAlign(f *ir.Field) int64 {
+	switch f.Kind {
+	case ir.KindU8, ir.KindI8, ir.KindBool:
+		return 1
+	case ir.KindU16, ir.KindI16:
+		return 2
+	case ir.KindU32, ir.KindI32, ir.KindFP32:
+		return 4
+	case ir.KindU64, ir.KindI64, ir.KindFP64:
+		return 8
+	case ir.KindEnum:
+		return cScalarWidth(enumC(f.Ref.Target))
+	case ir.KindBitfield:
+		return cScalarWidth(bitfieldC(f.Ref.Target))
+	case ir.KindString:
+		return 1 // char[]
+	case ir.KindBlob:
+		return cScalarWidth(blobLenC(f.Maxlen)) // { len; uint8_t buf[]; }
+	case ir.KindStruct, ir.KindUnion:
+		return g.cAlignFields(f.Ref.Target.Fields)
+	case ir.KindArray:
+		return g.cAlignArray(specOfField(f))
+	}
+	return 1
+}
+
+// cAlignFields is the alignment of a generated struct: the widest of its members.
+func (g *gen) cAlignFields(fields []*ir.Field) int64 {
+	var a int64 = 1
+	for _, f := range fields {
+		if x := g.cAlign(f); x > a {
+			a = x
+		}
+	}
+	return a
+}
+
+// cAlignArray is the alignment of the member an array field lowers to — which is
+// also the width of the length member that member leads with, for every form: a
+// compact array leads with its element count, and every wrapper holder leads with
+// its element count too (buildHolder's `lead`). lenWidth is that width: wide
+// enough to hold 0..N, and never narrower than the storage it precedes.
+//
+// For a compact array (SOFAB_OBJECT_FIELD_ARRAY_SIZED) the second half is a hard
+// requirement — the descriptor finds the length at <offset − width>, so padding
+// between them would be read as the length. For a holder the corelib reads the
+// count at offset 0 and no longer cares (SOFAB_OBJECT_DESCR_SEQ_SIZED), but the
+// rule is kept: a narrower count buys nothing, it only turns its own spare bytes
+// into dead padding ahead of the aligned slots.
+func (g *gen) cAlignArray(spec arraySpec) int64 {
+	switch spec.elem {
+	case ir.KindString:
+		return lenWidth(spec.count, 1) // char items[N][max+1]
+	case ir.KindBlob:
+		// struct { blobLen len; uint8_t buf[max]; } items[N]
+		return lenWidth(spec.count, cScalarWidth(blobLenC(spec.max)))
+	case ir.KindStruct, ir.KindUnion:
+		return lenWidth(spec.count, g.cAlignFields(spec.ref.Target.Fields))
+	case ir.KindArray:
+		// Either an inner holder or a struct { rowLen len; T vals[icap]; } row —
+		// cAlignArray(inner) is the slot's alignment in both cases.
+		return lenWidth(spec.count, g.cAlignArray(specOfItems(spec.items)))
+	}
+	// Compact (native) array: <len> <elem>[count].
+	return lenWidth(spec.count, cScalarWidth(g.arrayElemCType(spec.elem, spec.ref)))
 }
 
 // deprecatedDecl inserts the GCC/Clang deprecated attribute onto a struct-member
@@ -548,8 +723,8 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(%s, %d, %s, %d, &%s);",
 			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, g.defaultsSym(p.key))
 	} else if p.fixedSeq {
-		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_SEQ(%s, %d, %s, %d);",
-			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount)
+		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_SEQ_SIZED(%s, %d, %s, %d, %s, len);",
+			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, p.cType)
 	} else {
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR(%s, %d, %s, %d);",
 			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount)
@@ -707,6 +882,16 @@ func (g *gen) capabilities(m *ir.Message) capset {
 	// through nested arrays and into struct/union element fields.
 	var arrCaps func(spec arraySpec)
 	arrCaps = func(spec arraySpec) {
+		// Every array form now carries a companion length member somewhere (the
+		// compact array's, the wrapper holder's element count, a sized blob/row
+		// element's), and the corelib reads it through _load_uint — whose 8-byte
+		// case is compiled out by SOFAB_DISABLE_INT64_SUPPORT. An 8-byte-aligned
+		// element forces an 8-byte length (lenWidth), so such a schema genuinely
+		// needs 64-bit value support even when no field is a 64-bit integer: guard
+		// it loudly instead of silently reading every length as 0.
+		if g.cAlignArray(spec) == 8 {
+			caps.value64 = true
+		}
 		switch spec.elem {
 		case ir.KindString, ir.KindBlob:
 			caps.sequence = true

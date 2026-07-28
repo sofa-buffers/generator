@@ -57,6 +57,7 @@ var zigKeywords = map[string]bool{
 // JSON name (emitted from the schema name) are unaffected.
 var zigDeclClash = map[string]bool{
 	"marshal": true, "encode": true, "decode": true, "MAX_SIZE": true,
+	"isDefault": true,
 }
 
 // zigIdent renders a schema field name as a Zig identifier: @"name" for a
@@ -198,9 +199,14 @@ func bitfieldBacking(nt *ir.NamedType) string {
 }
 
 // fixedNativeArray reports whether an array field is a native-element array
-// with a statically known length -- the case that lowers to a fixed Zig array
-// [N]T (stack, allocation-free) instead of a heap slice. Returns the element
-// Zig type and N.
+// with a declared `count: N` -- the case that lowers to the inline
+// FixedArray(T, N) (stack, allocation-free) instead of a heap slice. Returns the
+// element Zig type and N.
+//
+// N is the CAPACITY, not the length (MESSAGE_SPEC §3): the field carries 0..N
+// elements and the wire count M IS the length, so the storage is `[N]T` PLUS a
+// `len` -- a bare `[N]T` can only ever be N long and cannot express M < N. See
+// FixedArray in emitSupport.
 func (g *gen) fixedNativeArray(f *ir.Field) (elem string, n int64, ok bool) {
 	if f.Kind != ir.KindArray || !isNativeArrayElem(f.Elem) || !f.HasCount {
 		return "", 0, false
@@ -225,7 +231,7 @@ func (g *gen) zigType(f *ir.Field) string {
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
 		if elem, n, ok := g.fixedNativeArray(f); ok {
-			return fmt.Sprintf("[%d]%s", n, elem)
+			return fmt.Sprintf("FixedArray(%s, %d)", elem, n)
 		}
 		return "[]const " + g.zigArrayElem(f.Elem, f.ElemRef, f.ElemItems)
 	}
@@ -235,7 +241,7 @@ func (g *gen) zigType(f *ir.Field) string {
 // zigArrayElem is the Zig type of an array element, recursing for nested
 // arrays. Numeric/bool map to their scalar Zig type; enum/bitfield to their
 // integer backing; struct/union to the shared type name; a nested array is
-// always a slice (only a direct field lowers to a fixed [N]T).
+// always a slice (only a direct field lowers to inline FixedArray storage).
 func (g *gen) zigArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
 	switch elem {
 	case ir.KindString, ir.KindBlob:
@@ -289,16 +295,24 @@ func (g *gen) zigFieldDefault(f *ir.Field) string {
 		return `""`
 	case ir.KindArray:
 		// A native scalar array is a leaf: materialize its schema default so an
-		// omitted default array reconstructs correctly. A fixed-count native
-		// array is a stack [N]T; a dynamic one stays a slice. Composite arrays
-		// are wrapper sequences (always framed) and stay an empty slice.
-		if elem, n, ok := g.fixedNativeArray(f); ok {
-			return g.zigFixedArrayDefault(f, elem, n)
+		// omitted default array reconstructs correctly. A count:N native array is
+		// inline FixedArray storage; a count-less one is a slice. Composite arrays
+		// are wrapper sequences whose declared default is not materialized, so they
+		// stay the EMPTY slice -- which is what makes their dropping closer correct
+		// (§2).
+		//
+		// A declared `count: N` adds nothing here: it is a CAPACITY, never a length
+		// (MESSAGE_SPEC §3), so a fresh count:N array is the EMPTY array -- not N
+		// element defaults -- and a `default` shorter than N stands for itself
+		// rather than being padded out to N.
+		if _, n, ok := g.fixedNativeArray(f); ok {
+			return g.zigFixedArrayDefault(f, n)
 		}
 		if isNativeArrayElem(f.Elem) {
 			if parts, ok := g.zigNativeArrayParts(f); ok {
 				return "&.{ " + parts + " }"
 			}
+			return "&.{}"
 		}
 		return "&.{}"
 	default: // struct/union: all children default, so .{} is right
@@ -310,7 +324,7 @@ func (g *gen) zigFieldDefault(f *ir.Field) string {
 // list (comma-joined, no brackets); ("", false) when there is no default.
 func (g *gen) zigNativeArrayParts(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
-	if !ok {
+	if !ok || len(vals) == 0 {
 		return "", false
 	}
 	parts := make([]string, len(vals))
@@ -332,64 +346,37 @@ func zigElemLit(elem ir.Kind, v any) string {
 	}
 }
 
-// zigFixedArrayNeedsReset reports whether a fixed native array field's decode
-// must clear the destination on arrayBegin before the wire elements land.
+// zigFixedArrayDefault renders the initializer of a `count: N` native array,
+// i.e. of a FixedArray(T, N).
 //
-// A `count: N` array decodes to exactly N elements: M from the wire, the ELEMENT
-// default (zero) at [M,N) (MESSAGE_SPEC S3). The [N]T destination starts at the
-// field's declaration default, so with a non-zero SCHEMA default the untouched
-// tail would wrongly keep that schema default: with `default: [1,2,3]` on
-// `count: 5`, a value of [1,2,0,0,0] encodes (trimmed) to the 2-element wire
-// [1,2] and would decode back as [1,2,3,0,0] -- a corrupted round-trip. Clearing
-// first makes the tail the element default, matching the other backends.
+// The VALUE is the declared `default` exactly as written: `.len` is its element
+// count, never N. A declared `count: N` is a capacity, not a length
+// (MESSAGE_SPEC §3), so a short default stands for itself instead of being
+// padded out to N -- with `default: [1, 2]` on `count: 5` the field's value is
+// the 2-element array [1, 2], which is also what its omit test compares against
+// and what an absent field decodes back to.
 //
-// A field with no schema default (or an all-zero one) already declares an
-// all-zero array, so it needs no reset and its generated code is unchanged.
-func (g *gen) zigFixedArrayNeedsReset(f *ir.Field) bool {
-	if _, _, ok := g.fixedNativeArray(f); !ok {
-		return false
-	}
+// `.items` is the inline storage, so it is always N wide; the slots past `.len`
+// are spare capacity and never reach the wire. With no default the whole thing
+// is `.{}` -- the EMPTY array, zero-length, which is what a fresh count:N array
+// now is.
+func (g *gen) zigFixedArrayDefault(f *ir.Field, n int64) string {
 	vals, ok := f.Default.([]any)
-	if !ok {
-		return false
+	if !ok || len(vals) == 0 {
+		return ".{}"
 	}
-	zero := zigElemZero(f.Elem)
+	parts := make([]string, 0, n)
 	for _, v := range vals {
-		if zigElemLit(f.Elem, v) != zero {
-			return true
-		}
+		parts = append(parts, zigElemLit(f.Elem, v))
 	}
-	return false
-}
-
-// zigFixedArrayDefault renders the initializer of a fixed native array [N]T.
-// With a schema default it is an explicit N-element literal -- the given
-// values, tail-padded with the element zero (matching the Rust/C++ backends,
-// so every port encodes the same N elements). With no default it is the
-// splat of the element zero.
-func (g *gen) zigFixedArrayDefault(f *ir.Field, elem string, n int64) string {
-	zero := "0"
-	switch f.Elem {
-	case ir.KindFP32, ir.KindFP64:
-		zero = "0.0"
-	case ir.KindBool:
-		zero = "false"
+	if int64(len(parts)) > n { // schema-invalid; never widen the storage
+		parts = parts[:n]
 	}
-	if vals, ok := f.Default.([]any); ok {
-		parts := make([]string, 0, n)
-		for _, v := range vals {
-			if f.Elem == ir.KindFP32 || f.Elem == ir.KindFP64 {
-				parts = append(parts, zigFloat(v))
-			} else {
-				parts = append(parts, fmt.Sprintf("%v", v))
-			}
-		}
-		for int64(len(parts)) < n {
-			parts = append(parts, zero)
-		}
-		return ".{ " + strings.Join(parts, ", ") + " }"
+	length := len(parts)
+	for int64(len(parts)) < n {
+		parts = append(parts, zigElemZero(f.Elem))
 	}
-	return fmt.Sprintf("@splat(%s)", zero)
+	return fmt.Sprintf(".{ .items = .{ %s }, .len = %d }", strings.Join(parts, ", "), length)
 }
 
 func (g *gen) zigIntDefault(f *ir.Field) string {

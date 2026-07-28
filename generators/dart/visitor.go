@@ -9,8 +9,8 @@ import (
 // ---- decode visitor -------------------------------------------------------
 
 // emitVisitor emits the push child-visitor for an object's id scope. Scalars
-// bind straight into a member; native arrays arrive whole and are copied (and,
-// for a fixed-count array, padded to N); nested structs/unions and every
+// bind straight into a member; native arrays arrive whole and are copied
+// (exactly as long as the wire made them); nested structs/unions and every
 // wrapper-sequence array descend via onSequenceStart into a child visitor. A
 // struct/union descent returns the EXISTING member's visitor, so a re-opened
 // scope merges (MESSAGE_SPEC §7.4); an array wrapper clears its list first, so a
@@ -137,8 +137,13 @@ func maxlenHdrGuard(sub string, n int64) string {
 
 // emitArrayDecode appends the decode arm(s) for an array field to the right
 // callback bucket. Native scalar arrays bind into the member (with an over-count
-// INVALID guard and a fixed-count pad); wrapper-sequence arrays clear their list
-// and descend into a collector.
+// INVALID guard); wrapper-sequence arrays clear their list and descend into a
+// collector.
+//
+// The wire count M IS the array's length (MESSAGE_SPEC §3): the M elements that
+// arrived are the whole value, so they are taken exactly as they come. A
+// declared `count: N` is a CAPACITY -- it bounds M (the guard below) but never
+// adds elements, so there is nothing to fill in at [M, N).
 func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string) string, seqArm func(int64, string) string, uArr, sArr, f32Arr, f64Arr, seq, arrBegin *[]string) {
 	guard := ""
 	if fld.HasCount {
@@ -152,31 +157,20 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 			*arrBegin = append(*arrBegin, arm(fld.ID, fmt.Sprintf("if (count > %d) e.inv = true;", fld.Count)))
 		}
 	}
-	pad := ""
-	if fld.HasCount && fld.Elem != ir.KindFP32 {
-		// A `count: N` array is fixed-length: positions [M, N) are the element
-		// default. A growable list must materialize them (MESSAGE_SPEC S3). fp32 is
-		// exempt: _f32copy allocates exactly N and leaves the tail at the +0.0 default.
-		pad = fmt.Sprintf("\n        _padTo(%s, %d, %s);", acc, fld.Count, elemZero(fld.Elem))
-	}
 	switch {
 	case unsignedArrayElem(fld.Elem) && fld.Elem == ir.KindBool:
-		*uArr = append(*uArr, arm(fld.ID, guard+acc+" = [for (final _v in values) _v != 0];"+pad))
+		*uArr = append(*uArr, arm(fld.ID, guard+acc+" = [for (final _v in values) _v != 0];"))
 	case unsignedArrayElem(fld.Elem):
-		*uArr = append(*uArr, arm(fld.ID, guard+acc+" = List<int>.from(values);"+pad))
+		*uArr = append(*uArr, arm(fld.ID, guard+acc+" = List<int>.from(values);"))
 	case signedArrayElem(fld.Elem):
-		*sArr = append(*sArr, arm(fld.ID, guard+acc+" = List<int>.from(values);"+pad))
+		*sArr = append(*sArr, arm(fld.ID, guard+acc+" = List<int>.from(values);"))
 	case fld.Elem == ir.KindFP32:
-		// Bit-exact copy into a fresh Float32List (length N for a fixed-count array,
-		// else the wire count): a per-element widen through a double would quiet a
-		// signaling/payload NaN (MESSAGE_SPEC S4.6). writeFp32Array re-emits a Float32List raw.
-		n := "values.length"
-		if fld.HasCount {
-			n = fmt.Sprintf("%d", fld.Count)
-		}
-		*f32Arr = append(*f32Arr, arm(fld.ID, fmt.Sprintf("%s%s = _f32copy(values, %s);", guard, acc, n)))
+		// Bit-exact copy into a fresh Float32List of the WIRE count: a per-element
+		// widen through a double would quiet a signaling/payload NaN (MESSAGE_SPEC
+		// S4.6). writeFp32Array re-emits a Float32List raw.
+		*f32Arr = append(*f32Arr, arm(fld.ID, fmt.Sprintf("%s%s = _f32copy(values, values.length);", guard, acc)))
 	case fld.Elem == ir.KindFP64:
-		*f64Arr = append(*f64Arr, arm(fld.ID, guard+acc+" = List<double>.from(values);"+pad))
+		*f64Arr = append(*f64Arr, arm(fld.ID, guard+acc+" = List<double>.from(values);"))
 	default: // wrapper-sequence array (string/blob/struct/union/nested)
 		et := g.dartArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems)
 		coll := g.collector(acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), emaxOf(fld.ElemMaxHas, fld.ElemMax))
@@ -197,21 +191,23 @@ func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.Arr
 		t := g.typeName(ref.Key)
 		return fmt.Sprintf("_ObjSeq<%s>(%s, %d, e, () => %s(), (x) => %s(x, e))", t, out, cap, t, visitorName(t))
 	case ir.KindArray:
+		// The row collectors take the OUTER array's cap: a row's element id is its
+		// index in this array (§5.1), so cap is what bounds it.
 		if nativeArrayElem(items.Elem) {
 			switch {
 			case items.Elem == ir.KindBool:
-				return fmt.Sprintf("_BoolMat(%s, e)", out)
+				return fmt.Sprintf("_BoolMat(%s, %d, e)", out, cap)
 			case items.Elem == ir.KindFP32 || items.Elem == ir.KindFP64:
-				return fmt.Sprintf("_DblMat(%s, %v, e)", out, items.Elem == ir.KindFP64)
+				return fmt.Sprintf("_DblMat(%s, %d, %v, e)", out, cap, items.Elem == ir.KindFP64)
 			default:
-				return fmt.Sprintf("_IntMat(%s, %v, e)", out, signedArrayElem(items.Elem))
+				return fmt.Sprintf("_IntMat(%s, %d, %v, e)", out, cap, signedArrayElem(items.Elem))
 			}
 		}
-		// Array of wrapper arrays: each element opens a sequence collected into a
-		// fresh inner list by a recursively-built collector.
+		// Array of wrapper arrays: each element opens a sequence collected into the
+		// inner list its element id names, by a recursively-built collector.
 		innerT := g.dartArrayElemType(items.Elem, items.ElemRef, items.ElemItems)
 		inner := g.collector("p", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), emaxOf(items.ElemMaxHas, items.ElemMax))
-		return fmt.Sprintf("_SeqSeq<%s>(%s, e, (p) => %s)", innerT, out, inner)
+		return fmt.Sprintf("_SeqSeq<%s>(%s, %d, e, (p) => %s)", innerT, out, cap, inner)
 	}
 	return "null"
 }
@@ -253,7 +249,6 @@ func emitSwitch(f *dfile, sig string, arms []string) {
 type needs struct {
 	dec                             bool
 	bytesEq, listEq, u8len          bool
-	trimInt, trimF32, trimF64, pad  bool
 	f32copy, f32bits                bool
 	strSeq, blobSeq, objSeq         bool
 	intMat, dblMat, boolMat, seqSeq bool
@@ -305,24 +300,9 @@ func (g *gen) scanField(fld *ir.Field, n *needs) {
 			if _, ok := fld.Default.([]any); ok {
 				n.listEq = true
 			}
-			switch fld.Elem {
-			case ir.KindFP32:
-				// fp32 arrays bind through _f32copy (bit-exact), which also allocates
-				// the fixed-count length — so no _padTo.
+			if fld.Elem == ir.KindFP32 {
+				// fp32 arrays bind through _f32copy (bit-exact).
 				n.f32copy = true
-				if fld.HasCount {
-					n.trimF32 = true
-				}
-			case ir.KindFP64:
-				if fld.HasCount {
-					n.pad = true
-					n.trimF64 = true
-				}
-			default:
-				if fld.HasCount {
-					n.pad = true
-					n.trimInt = true
-				}
 			}
 			return
 		}
@@ -408,54 +388,6 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		f.line("}")
 		f.blank()
 	}
-	if n.trimInt {
-		f.line("// Trailing-default-run trim for a fixed-count int array:")
-		f.line("// drop the trailing run of element-default (0) values the canonical wire elides.")
-		f.line("List<int> _trimInt(List<int> a) {")
-		f.line("  var n = a.length;")
-		f.line("  while (n > 0 && a[n - 1] == 0) { n--; }")
-		f.line("  return n == a.length ? a : a.sublist(0, n);")
-		f.line("}")
-		f.blank()
-	}
-	if n.trimF32 || n.trimF64 {
-		f.line("// Float trims compare by BIT PATTERN, so a trailing -0.0 (== 0.0) survives the")
-		f.line("// round-trip and a NaN is never mistaken for the default.")
-	}
-	if n.trimF32 {
-		f.line("List<double> _trimF32(List<double> a) {")
-		f.line("  final bd = ByteData(4);")
-		f.line("  var n = a.length;")
-		f.line("  while (n > 0) {")
-		f.line("    bd.setFloat32(0, a[n - 1]);")
-		f.line("    if (bd.getInt32(0) != 0) break;")
-		f.line("    n--;")
-		f.line("  }")
-		f.line("  return n == a.length ? a : a.sublist(0, n);")
-		f.line("}")
-		f.blank()
-	}
-	if n.trimF64 {
-		f.line("List<double> _trimF64(List<double> a) {")
-		f.line("  final bd = ByteData(8);")
-		f.line("  var n = a.length;")
-		f.line("  while (n > 0) {")
-		f.line("    bd.setFloat64(0, a[n - 1]);")
-		f.line("    if (bd.getInt64(0) != 0) break;")
-		f.line("    n--;")
-		f.line("  }")
-		f.line("  return n == a.length ? a : a.sublist(0, n);")
-		f.line("}")
-		f.blank()
-	}
-	if n.pad {
-		f.line("// Grow [a] to exactly [n] elements with the element default [zero]: a decoded")
-		f.line("// fixed-count array has exactly its schema count elements.")
-		f.line("void _padTo<T>(List<T> a, int n, T zero) {")
-		f.line("  while (a.length < n) { a.add(zero); }")
-		f.line("}")
-		f.blank()
-	}
 	if n.f32bits {
 		f.line("// Widen the 32 raw wire bits of an fp32 NaN to a display double for element")
 		f.line("// access; the exact bits are kept alongside for a bit-for-bit re-encode.")
@@ -465,8 +397,7 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 	}
 	if n.f32copy {
 		f.line("// Bit-exact fp32 array copy into a fresh Float32List of length [n] (>= the")
-		f.line("// source length; a fixed-count array passes its schema N, leaving the tail at")
-		f.line("// the +0.0 default). A raw byte copy preserves a signaling/payload NaN that a")
+		f.line("// source length). A raw byte copy preserves a signaling/payload NaN that a")
 		f.line("// per-element widen through a Dart double would quiet; writeFp32Array")
 		f.line("// re-emits a Float32List's bytes verbatim.")
 		f.line("Float32List _f32copy(Float32List v, int n) {")
@@ -480,10 +411,20 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 }
 
 // emitCollectors emits the wrapper-sequence collector visitors the schema uses.
-// Each is keyed by the 0-based element index id; the cap (schema count N, or -1
-// for a dynamic array) rejects an over-index element as INVALID before the list
-// grows (MESSAGE_SPEC §5.1/§7 — also bounding an over-index amplification DoS),
-// and emax (element maxlen, or -1) rejects an over-length string/blob element.
+// Each is keyed by the 0-based element index id: an element is PLACED at
+// out[id] after gap-filling with element defaults, never appended, because an
+// INTERIOR element equal to the element default is omitted on the wire and
+// leaves an id GAP (MESSAGE_SPEC §2). The array's LAST element is always on the
+// wire, so the decoded length -- highest present id + 1 -- is exact, and nothing
+// is filled in afterwards.
+//
+// cap is the schema count N, or -1 for a count-less array. N is a CAPACITY, not
+// a length (§3): it never reaches the wire and never adds elements the wire did
+// not carry. All it does here is bound the array -- an element id >= N is a
+// schema-bound violation (INVALID, never grown-into) -- rejected before the list
+// grows, which also bounds the id-keyed gap-fill against an over-index
+// amplification DoS. emax (element maxlen, or -1) rejects an over-length
+// string/blob element the same way.
 func (g *gen) emitCollectors(f *dfile, n needs) {
 	if n.strSeq {
 		f.line("class _StrSeq extends sofab.MessageVisitor {")
@@ -520,6 +461,12 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.blank()
 	}
 	if n.objSeq {
+		// The element id IS the array index (§5.1), so an element is PLACED at
+		// out[id] after gap-filling with default elements -- never appended.
+		// Appending would shorten the array by the size of any interior id gap --
+		// and an omitted all-default interior element is exactly such a gap -- and
+		// would decode a REOPENED id as a second element instead of merging into the
+		// first (§7.4, which placement gives for free).
 		f.line("class _ObjSeq<T> extends sofab.MessageVisitor {")
 		f.line("  _ObjSeq(this.out, this.cap, this.e, this.make, this.vis);")
 		f.line("  final List<T> out;")
@@ -536,13 +483,21 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("}")
 		f.blank()
 	}
+	// The matrix / nested-row collectors below place a row at the index its element
+	// id names, exactly like the leaf and object collectors above: an interior row
+	// equal to the element default (the empty row) is omitted by a conformant
+	// encoder (§2), and appending would shift every later row down by one. cap is
+	// the OUTER array's schema count, which bounds that id (§5.1/§7) and with it
+	// the gap-fill.
 	if n.intMat {
 		f.line("class _IntMat extends sofab.MessageVisitor {")
-		f.line("  _IntMat(this.out, this.signed, this.e);")
+		f.line("  _IntMat(this.out, this.cap, this.signed, this.e);")
 		f.line("  final List<List<int>> out;")
+		f.line("  final int cap;")
 		f.line("  final bool signed;")
 		f.line("  final _Dec e;")
 		f.line("  void _row(int id, Int64List v) {")
+		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
 		f.line("    while (out.length <= id) { out.add(<int>[]); }")
 		f.line("    out[id] = List<int>.from(v);")
 		f.line("  }")
@@ -555,19 +510,22 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 	}
 	if n.dblMat {
 		f.line("class _DblMat extends sofab.MessageVisitor {")
-		f.line("  _DblMat(this.out, this.f64, this.e);")
+		f.line("  _DblMat(this.out, this.cap, this.f64, this.e);")
 		f.line("  final List<List<double>> out;")
+		f.line("  final int cap;")
 		f.line("  final bool f64;")
 		f.line("  final _Dec e;")
 		f.line("  @override")
 		f.line("  void onFp32Array(int id, Float32List values) {")
 		f.line("    if (f64) return;")
+		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
 		f.line("    while (out.length <= id) { out.add(<double>[]); }")
 		f.line("    out[id] = _f32copy(values, values.length); // bit-exact: keep an fp32 NaN's bits")
 		f.line("  }")
 		f.line("  @override")
 		f.line("  void onFp64Array(int id, Float64List values) {")
 		f.line("    if (!f64) return;")
+		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
 		f.line("    while (out.length <= id) { out.add(<double>[]); }")
 		f.line("    out[id] = List<double>.from(values);")
 		f.line("  }")
@@ -576,11 +534,13 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 	}
 	if n.boolMat {
 		f.line("class _BoolMat extends sofab.MessageVisitor {")
-		f.line("  _BoolMat(this.out, this.e);")
+		f.line("  _BoolMat(this.out, this.cap, this.e);")
 		f.line("  final List<List<bool>> out;")
+		f.line("  final int cap;")
 		f.line("  final _Dec e;")
 		f.line("  @override")
 		f.line("  void onUnsignedArray(int id, Int64List values) {")
+		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
 		f.line("    while (out.length <= id) { out.add(<bool>[]); }")
 		f.line("    out[id] = [for (final v in values) v != 0];")
 		f.line("  }")
@@ -589,12 +549,14 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 	}
 	if n.seqSeq {
 		f.line("class _SeqSeq<T> extends sofab.MessageVisitor {")
-		f.line("  _SeqSeq(this.out, this.e, this.make);")
+		f.line("  _SeqSeq(this.out, this.cap, this.e, this.make);")
 		f.line("  final List<List<T>> out;")
+		f.line("  final int cap;")
 		f.line("  final _Dec e;")
 		f.line("  final sofab.MessageVisitor Function(List<T>) make;")
 		f.line("  @override")
 		f.line("  sofab.MessageVisitor? onSequenceStart(int id) {")
+		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return null; }")
 		f.line("    while (out.length <= id) { out.add(<T>[]); }")
 		f.line("    return make(out[id]);")
 		f.line("  }")

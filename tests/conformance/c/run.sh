@@ -337,10 +337,12 @@ echo "==> corpus + realworld: every definition compiles"
 # BIG descriptor profile so wide field ids (up to 2^31-1) fit the descriptor.
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
-    # no_maxlen is a deliberately-unbounded schema (dynamic-path coverage for heap
-    # targets); the heapless C target requires bounds on every field, so it is not
-    # a valid C input — the negative test below asserts it is rejected.
-    [ "$name" = "no_maxlen" ] && continue
+    # no_maxlen and seq_elements_dyn are deliberately-unbounded schemas (dynamic-path
+    # coverage for heap targets); the heapless C target requires bounds on every
+    # field, so neither is a valid C input — the negative test below asserts
+    # no_maxlen is rejected. Their bounded counterparts (seq_elements, nested_rows)
+    # are compiled here, so the C target keeps its wrapper-element coverage.
+    case "$name" in no_maxlen | seq_elements_dyn) continue ;; esac
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     for c in "$WORK"/corpus/"$name"/*.c; do
         gcc -std=c99 -Wall -DSOFAB_OBJECT_DESCR_PROFILE=3 -I"$INC" -I"$WORK/corpus/$name" -c "$c" -o /dev/null \
