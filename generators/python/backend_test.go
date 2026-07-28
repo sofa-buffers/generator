@@ -1,6 +1,7 @@
 package python
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -81,17 +82,19 @@ func TestPythonStructural(t *testing.T) {
 
 // TestPythonLazySequenceFraming: MESSAGE_SPEC §2 omits a sequence-typed FIELD
 // whose value equals its declared default instead of framing it empty, so every
-// sequence opens with write_sequence_begin_lazy and the CLOSER — chosen
-// statically from the position in the schema, never from the value — decides
-// whether a contentless one survives:
+// sequence opens with write_sequence_begin_lazy and the CLOSER alone decides
+// whether a contentless one survives — and where that choice is made from is the
+// whole of the element rule:
 //
-//	struct/union FIELD          -> write_sequence_end       (may vanish)
-//	array wrapper FIELD         -> write_sequence_end       (may vanish)
-//	wrapper-array ELEMENT       -> write_sequence_end_keep  (always framed)
+//	struct/union FIELD    -> write_sequence_end  (decided by the SCHEMA: may vanish)
+//	array wrapper FIELD   -> write_sequence_end  (decided by the SCHEMA: may vanish)
+//	wrapper-array ELEMENT -> decided by its position in the VALUE, at run time:
+//	                         the dropping end in the array's interior, the keeping
+//	                         end at the last index
 //
-// An ELEMENT must keep its frame because element presence is what carries a
-// dynamic array's length (§5.1): dropping an all-default element would change the
-// decoded LENGTH, not merely the bytes.
+// Only the LAST element's presence carries the array's length (§5.1), so only it
+// must survive as an empty frame; an interior all-default element is a gap the
+// decoder restores from the element default.
 func TestPythonLazySequenceFraming(t *testing.T) {
 	const src = `
 version: 1
@@ -119,17 +122,23 @@ messages:
 			"            if _e0 != \"\" or _i0 == len(self.strs) - 1:\n                e.write_string(_i0, _e0)\n        e.write_sequence_end()\n",
 		"        e.write_sequence_begin_lazy(3)\n        for _i0, _e0 in enumerate(self.blobs):\n" +
 			"            if len(_e0) != 0 or _i0 == len(self.blobs) - 1:\n                e.write_bytes(_i0, bytes(_e0))\n        e.write_sequence_end()\n",
-		// struct ELEMENT inside a wrapper array: keeping close; the wrapper FIELD
-		// around it still closes with the dropping end.
+		// struct ELEMENT inside a wrapper array: the closer is picked from the
+		// element's index in the value; the wrapper FIELD around it still closes
+		// unconditionally with the dropping end.
 		"        e.write_sequence_begin_lazy(4)\n        for _i0, _e0 in enumerate(self.objs):\n" +
 			"            e.write_sequence_begin_lazy(_i0)\n            _e0._marshal(e)\n" +
-			"            e.write_sequence_end_keep()\n        e.write_sequence_end()\n",
-		// array-of-array: the nested ROW is an ELEMENT (keeping close), as is each
-		// struct element inside it; only the depth-0 wrapper may vanish.
+			"            if _i0 == len(self.objs) - 1:\n                e.write_sequence_end_keep()\n" +
+			"            else:\n                e.write_sequence_end()\n        e.write_sequence_end()\n",
+		// array-of-array: the nested ROW is an ELEMENT, as is each struct element
+		// inside it -- both take the positional closer; only the depth-0 wrapper is
+		// decided statically.
 		"        e.write_sequence_begin_lazy(5)\n        for _i0, _e0 in enumerate(self.deep):\n" +
 			"            e.write_sequence_begin_lazy(_i0)\n            for _i1, _e1 in enumerate(_e0):\n" +
 			"                e.write_sequence_begin_lazy(_i1)\n                _e1._marshal(e)\n" +
-			"                e.write_sequence_end_keep()\n            e.write_sequence_end_keep()\n" +
+			"                if _i1 == len(_e0) - 1:\n                    e.write_sequence_end_keep()\n" +
+			"                else:\n                    e.write_sequence_end()\n" +
+			"            if _i0 == len(self.deep) - 1:\n                e.write_sequence_end_keep()\n" +
+			"            else:\n                e.write_sequence_end()\n" +
 			"        e.write_sequence_end()\n",
 	} {
 		if !strings.Contains(mod, want) {
@@ -141,9 +150,13 @@ messages:
 	if strings.Contains(mod, "e.write_sequence_begin(") {
 		t.Error("generated code must not call the removed eager write_sequence_begin")
 	}
-	// Exactly three ELEMENT frames in this schema (objs element, deep row, deep
-	// element) — a keeping close anywhere else would pin a wrapper FIELD that §2
-	// says must be droppable.
+	// An ELEMENT must never take the keeping closer unconditionally: that framed
+	// every all-default interior element, which the sparse rule now omits. Each of
+	// the three element frames in this schema (objs element, deep row, deep
+	// element) is guarded, so every keep is paired with a drop.
+	if strings.Contains(mod, "_marshal(e)\n            e.write_sequence_end_keep()") {
+		t.Errorf("an array element must not close unconditionally with the keeping end:\n%s", mod)
+	}
 	if n := strings.Count(mod, "e.write_sequence_end_keep()"); n != 3 {
 		t.Errorf("expected 3 write_sequence_end_keep() calls (array ELEMENTS only), got %d", n)
 	}
@@ -339,12 +352,13 @@ messages:
 	}
 }
 
-// TestPythonFixedCountTrailingDefaultRun: a `count: N` native array is
-// FIXED-LENGTH (MESSAGE_SPEC §3) — encode elides the trailing element-default
-// run, decode rebuilds it out to N. A dynamic (count-less) array has no N to
-// refill from, so its trailing default is significant and must survive
-// untouched (generator#136 / F-0010).
-func TestPythonFixedCountTrailingDefaultRun(t *testing.T) {
+// TestPythonArrayCountIsCapacityNotLength: `count: N` is a CAPACITY, not a
+// length (MESSAGE_SPEC §3). It never reaches the wire, the wire count M IS the
+// array's length, and nothing that carries that length may be elided. So the whole
+// trim-on-encode / fill-on-decode pair is gone -- from both array forms -- and a
+// count:N array is generated exactly like a count-less one except for the bound it
+// still enforces.
+func TestPythonArrayCountIsCapacityNotLength(t *testing.T) {
 	const src = `
 version: 1
 $defs:
@@ -354,143 +368,68 @@ messages:
   T:
     payload:
       fixedU32:  { id: 0, type: array, items: { type: u32, count: 5 } }
-      fixedI16:  { id: 1, type: array, items: { type: i16, count: 3 } }
-      fixedF32:  { id: 2, type: array, items: { type: fp32, count: 2 } }
-      fixedF64:  { id: 3, type: array, items: { type: fp64, count: 2 } }
-      fixedBool: { id: 4, type: array, items: { type: boolean, count: 4 } }
-      fixedEnum: { id: 5, type: array, items: { type: enum, enum: { $ref: "#/$defs/enum/Mode" }, count: 2 } }
-      dynU32:    { id: 6, type: array, items: { type: u32 } }
-      dynStrs:   { id: 7, type: array, items: { type: string } }
+      fixedF32:  { id: 1, type: array, items: { type: fp32, count: 2 } }
+      fixedBool: { id: 2, type: array, items: { type: boolean, count: 4 } }
+      fixedEnum: { id: 3, type: array, items: { type: enum, enum: { $ref: "#/$defs/enum/Mode" }, count: 2 } }
+      shortDflt: { id: 4, type: array, items: { type: u32, count: 5 }, default: [1, 2] }
+      dynU32:    { id: 5, type: array, items: { type: u32 } }
+      fixedStrs: { id: 6, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      fixedObjs: { id: 7, type: array, items: { type: struct, count: 3, fields: { k: { id: 0, type: u32 } } } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	for _, want := range []string{
-		// helpers + the math import the float trim's bit-pattern compare needs
-		"import math",
-		"def _trim_tail(a: list, zero) -> list:",
-		"def _trim_tail_float(a: list) -> list:",
-		"def _pad_to(a: list, n: int, zero) -> list:",
-		// encode: fixed native arrays trim their trailing default run
-		"e.write_unsigned_array(0, _trim_tail(self.fixedU32, 0))",
-		"e.write_signed_array(1, _trim_tail(self.fixedI16, 0))",
-		"e.write_float32_array(2, _trim_tail_float(self.fixedF32))",
-		"e.write_float64_array(3, _trim_tail_float(self.fixedF64))",
-		"e.write_unsigned_array(4, _trim_tail([1 if _v else 0 for _v in self.fixedBool], 0))",
-		"e.write_signed_array(5, _trim_tail([int(_v) for _v in self.fixedEnum], 0))",
-		// decode: fixed native arrays refill to exactly the schema count
-		"self.fixedU32 = _pad_to(self.fixedU32, 5, 0)",
-		"self.fixedI16 = _pad_to(self.fixedI16, 3, 0)",
-		"self.fixedF32 = _pad_to(self.fixedF32, 2, 0.0)",
-		"self.fixedF64 = _pad_to(self.fixedF64, 2, 0.0)",
-		"self.fixedBool = _pad_to(self.fixedBool, 4, False)",
-		"self.fixedEnum = _pad_to(self.fixedEnum, 2, 0)",
-	} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("message.py missing %q", want)
-		}
-	}
-	for _, bad := range []string{
-		// dynamic arrays: no trim on encode, no fill on decode
-		"e.write_unsigned_array(6, _trim_tail(self.dynU32, 0))",
-		"_pad_to(self.dynU32",
-		"_pad_to(self.dynStrs",
-	} {
-		if strings.Contains(mod, bad) {
-			t.Errorf("message.py must not contain %q (dynamic arrays are unchanged)", bad)
-		}
-	}
-	if !strings.Contains(mod, "e.write_unsigned_array(6, self.dynU32)") {
-		t.Error("dynamic u32 array must encode untrimmed")
-	}
-	// The over-count guard must still reject a wire count > N, now decided at the
-	// count header (fld.count) so INVALID dominates a truncated tail (generator#216).
-	if !strings.Contains(mod, "if fld.count > 5:") {
-		t.Error("over-count SofaDecodeError guard regressed")
-	}
-}
 
-// TestPythonFixedCountDefaultIsNElements: a `count: N` native array is
-// fixed-length, so its VALUE is always N elements — with no schema default that
-// is N element defaults, and a short schema default leaves the unlisted trailing
-// elements at the element default. Without this a fresh (or all-default, hence
-// omitted) array would be an empty list here while the fixed-storage camp
-// (`[T; N]` / `std::array<T, N>`) yields N zeros — the same MESSAGE_SPEC §3
-// divergence as the trailing default run, reached through the omission path
-// (generator#136 / F-0010).
-func TestPythonFixedCountDefaultIsNElements(t *testing.T) {
-	const src = `
-version: 1
-$defs:
-  enum:
-    Mode: { Off: { value: 0 }, Active: { value: 1 } }
-messages:
-  T:
-    payload:
-      noDflt:    { id: 0, type: array, items: { type: u32, count: 5 } }
-      shortDflt: { id: 1, type: array, items: { type: u32, count: 5 }, default: [1, 2] }
-      fullDflt:  { id: 2, type: array, items: { type: i32, count: 3 }, default: [1, 2, 3] }
-      fixedF64:  { id: 3, type: array, items: { type: fp64, count: 3 } }
-      fixedBool: { id: 4, type: array, items: { type: boolean, count: 4 } }
-      fixedEnum: { id: 5, type: array, items: { type: enum, enum: { $ref: "#/$defs/enum/Mode" }, count: 2 } }
-      dynU32:    { id: 6, type: array, items: { type: u32 } }
-      dynStrs:   { id: 7, type: array, items: { type: string } }
-      fixedStrs: { id: 8, type: array, items: { type: string, count: 3 } }
-`
-	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	for _, want := range []string{
-		// no schema default -> N element defaults, per element kind
-		"noDflt: list[int] = field(default_factory=lambda: [0, 0, 0, 0, 0])",
-		"fixedF64: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])",
-		"fixedBool: list[bool] = field(default_factory=lambda: [False, False, False, False])",
-		"fixedEnum: list[EnumMode] = field(default_factory=lambda: [0, 0])",
-		// a short schema default is tail-padded to N
-		"shortDflt: list[int] = field(default_factory=lambda: [1, 2, 0, 0, 0])",
-		// an already-N-long default is unchanged
-		"fullDflt: list[int] = field(default_factory=lambda: [1, 2, 3])",
-		// marshal's omit-when-default compare must use the SAME padded literal,
-		// so an all-default (fresh) object still omits the field entirely.
-		"if self.noDflt != [0, 0, 0, 0, 0]:",
-		"if self.shortDflt != [1, 2, 0, 0, 0]:",
-		"if self.fixedBool != [False, False, False, False]:",
-		// DYNAMIC arrays -- native or wrapper -- have no N and keep starting empty
-		"dynU32: list[int] = field(default_factory=list)",
-		"dynStrs: list[str] = field(default_factory=list)",
-		// ...but a count:N WRAPPER array is fixed-length just like the native one
-		// above, so it is materialized to N element defaults too (S5.1). This line
-		// used to read `field(default_factory=list)`, which pinned the pre-refill
-		// behaviour rather than a rule -- see TestPythonFixedCountWrapperArrayIsN.
-		`fixedStrs: list[str] = field(default_factory=lambda: ["" for _ in range(3)])`,
+		// Encode writes the value whole: no trim wrapper anywhere.
+		"e.write_unsigned_array(0, self.fixedU32)",
+		"e.write_float32_array(1, self.fixedF32)",
+		"e.write_unsigned_array(2, [1 if _v else 0 for _v in self.fixedBool])",
+		"e.write_signed_array(3, [int(_v) for _v in self.fixedEnum])",
+		// The omit test is the ordinary != default, against the value as it stands:
+		// the EMPTY list when nothing is declared, the declared literal otherwise.
+		"if len(self.fixedU32) != 0:",
 		"if len(self.dynU32) != 0:",
+		"if self.shortDflt != [1, 2]:",
+		// A fresh count:N array is the EMPTY list -- both element kinds, so the two
+		// forms agree, and neither materializes N elements it never received.
+		"fixedU32: list[int] = field(default_factory=list)",
+		"fixedBool: list[bool] = field(default_factory=list)",
+		"fixedStrs: list[str] = field(default_factory=list)",
+		"fixedObjs: list[TFixedObjsElem] = field(default_factory=list)",
+		// ...while a declared default is still materialized, exactly as written.
+		"shortDflt: list[int] = field(default_factory=lambda: [1, 2])",
+		// _is_default has to reach the same verdict as the writer, or it omits a
+		// field that is on the wire (or keeps one that is not).
+		"if not (len(self.fixedU32) == 0):",
+		"if not (self.shortDflt == [1, 2]):",
+		"if not (len(self.fixedStrs) == 0):",
+		"if not (len(self.fixedObjs) == 0):",
+		// The bound itself is untouched -- that is all `count` still does.
+		"if fld.count > 5:",
+		"if _ef0.id >= 3:",
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("message.py missing %q", want)
+			t.Errorf("message.py missing %q:\n%s", want, mod)
 		}
 	}
-	// A dynamic native array has no N to pad to, so it must not gain a literal
-	// default (that would also flip its marshal gate).
-	if strings.Contains(mod, "dynU32: list[int] = field(default_factory=lambda:") {
-		t.Error("a count-less array must not get a materialized default")
-	}
-}
-
-// A schema whose only fixed-count native arrays are integral must not emit the
-// float trim helper or import math (they would be dead code).
-func TestPythonFixedCountNoFloatHelperWhenUnused(t *testing.T) {
-	const src = `
-version: 1
-messages:
-  T:
-    payload:
-      fixedU32: { id: 0, type: array, items: { type: u32, count: 3 } }
-`
-	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	for _, bad := range []string{"import math", "_trim_tail_float"} {
+	// Nothing anywhere may trim on encode, refill on decode, or pad a short default
+	// out to N -- and with the helpers unreferenced, `import math` goes with them.
+	for _, bad := range []string{
+		"_trim_tail", "_trim_tail_float", "_pad_to", "_trim_empty", "_trim_objs",
+		"import math",
+		// the padded renderings of the two array defaults above
+		"[0, 0, 0, 0, 0]", "[1, 2, 0, 0, 0]",
+		// a count:N wrapper array materialized to N element defaults
+		"for _ in range(3)",
+	} {
 		if strings.Contains(mod, bad) {
-			t.Errorf("message.py must not contain %q for an all-integral schema", bad)
+			t.Errorf("message.py still carries the superseded fixed-length machinery %q:\n%s", bad, mod)
 		}
 	}
 }
 
-// A schema with no fixed-count native array must not emit the helpers at all.
+// The removed helpers are gone from the backend, so no schema can reach them --
+// not a count-bearing float array (which used to pull in `import math` for the
+// bit-pattern trim), not a count-bearing wrapper array.
 func TestPythonNoFixedArrayHelpersWhenUnused(t *testing.T) {
 	const src = `
 version: 1
@@ -498,11 +437,13 @@ messages:
   T:
     payload:
       dynU32: { id: 0, type: array, items: { type: u32 } }
+      fixed:  { id: 1, type: array, items: { type: fp64, count: 3 } }
+      fstrs:  { id: 2, type: array, items: { type: string, count: 3, maxlen: 4 } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	for _, bad := range []string{"_trim_tail", "_pad_to", "import math"} {
+	for _, bad := range []string{"_trim_tail", "_pad_to", "_trim_empty", "_trim_objs", "import math"} {
 		if strings.Contains(mod, bad) {
-			t.Errorf("message.py must not contain %q when no fixed-count array exists", bad)
+			t.Errorf("message.py must not contain %q:\n%s", bad, mod)
 		}
 	}
 }
@@ -814,285 +755,16 @@ func importLine(t *testing.T, mod string) string {
 	return ""
 }
 
-// A count:N wrapper array's canonical wire stops at M -- one past its last
-// non-default element (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements")
-// -- and M == 0 leaves the whole wrapper omitted (§2). generator#248: the
-// element loop used to run over the whole container, framing every trailing
-// all-default element, so a decoder that accepted the non-canonical form
-// re-encoded it unchanged instead of normalising. A DYNAMIC array has no N to
-// refill from, so its trailing default element is significant and must still be
-// framed.
-func TestPythonFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
-	const src = `
-version: 1
-messages:
-  vec:
-    payload:
-      fixed:
-        id: 0
-        type: array
-        items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } }
-      dynamic:
-        id: 1
-        type: array
-        items: { type: struct, fields: { k: { id: 0, type: u32 } } }
-      fstrs: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
-`
-	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-
-	for _, want := range []string{
-		"def _trim_objs(a: list) -> list:",
-		"    while n > 0 and a[n - 1]._is_default():",
-		// The fixed array narrows to M before framing anything...
-		"for _i0, _e0 in enumerate(_trim_objs(self.fixed)):",
-		// ...while the dynamic one keeps every element, trailing defaults included.
-		"for _i0, _e0 in enumerate(self.dynamic):",
-		// An interior all-default element is still framed: only the TRAILING run
-		// goes, and M == 0 writes no child so the lazy wrapper is dropped (§2).
-		"            e.write_sequence_begin_lazy(_i0)\n            _e0._marshal(e)\n            e.write_sequence_end_keep()\n",
-		// _is_default is the exact negation of what _marshal writes, so it must
-		// narrow a field exactly when the marshal loop does -- disagreeing would
-		// either omit a field that is on the wire or keep one that is not.
-		"if not (len(_trim_objs(self.fixed)) == 0):",
-		"if not (len(self.dynamic) == 0):",
-		"if not (len(_trim_empty(self.fstrs)) == 0):",
-	} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("message.py missing %q:\n%s", want, mod)
-		}
-	}
-	// The defect this replaced: the loop ran over the whole container.
-	if strings.Contains(mod, "for _i0, _e0 in enumerate(self.fixed):") {
-		t.Errorf("count:N struct array must loop to M, not over the whole list:\n%s", mod)
-	}
-	if strings.Contains(mod, "if not (len(_trim_objs(self.dynamic)) == 0):") {
-		t.Errorf("_is_default must NOT narrow the dynamic array:\n%s", mod)
-	}
-}
-
-// generator#247: a wrapper array's element id IS the array index (§5.1), so an
-// element is PLACED at target[id] after gap-filling -- never appended. Appending
-// shortened the array by the size of any interior id gap and decoded a REOPENED
-// id as a second element instead of merging into the first (§7.4). The leaf
-// string/blob element paths next to it always got this right.
+// MESSAGE_SPEC §2 governs both element kinds with ONE rule, and the rule is
+// positional: an element before the last one that equals its element default is
+// omitted -- a string/blob leaf simply not written, a sequence element not framed
+// either -- while the element at the LAST index is always written, as its value or
+// as an empty frame. Only the last index carries the array's length (§5.1); an
+// interior gap is restored from the element default and is therefore free.
 //
-// The N-fill when the sequence scope closes is what makes the §3/§5.1 trailing
-// elision lossless: without it, re-encoding a decoded fixed array shortens it on
-// every round trip.
-func TestPythonWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
-	const src = `
-version: 1
-messages:
-  vec:
-    payload:
-      objs:
-        id: 0
-        type: array
-        items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } }
-      strs: { id: 1, type: array, items: { type: string, count: 3, maxlen: 8 } }
-      dyn:
-        id: 2
-        type: array
-        items: { type: struct, fields: { k: { id: 0, type: u32 } } }
-`
-	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-
-	for _, want := range []string{
-		// placement, not append -- and the gap-fill that precedes it
-		"                    while len(self.objs) <= _ef0.id:\n" +
-			"                        self.objs.append(VecObjsElem())\n" +
-			"                    self.objs[_ef0.id]._unmarshal(d)\n",
-		// N-fill when the sequence scope closes, for every fixed wrapper kind
-		"                while len(self.objs) < 4:\n                    self.objs.append(VecObjsElem())\n",
-		"                while len(self.strs) < 3:\n                    self.strs.append(\"\")\n",
-		// the over-index guard still bounds both the decode and the gap-fill
-		"if _ef0.id >= 4:",
-	} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("message.py missing %q:\n%s", want, mod)
-		}
-	}
-	// The defect this replaced: decode built a fresh element and appended it,
-	// consulting the id only for the capacity check.
-	if strings.Contains(mod, "self.objs.append(_e0)") {
-		t.Errorf("struct elements must not be appended id-blind:\n%s", mod)
-	}
-	// A dynamic (count-less) array has no N to refill from: it is placed by id
-	// like every wrapper array, but never filled.
-	if !strings.Contains(mod, "while len(self.dyn) <= _ef0.id:") {
-		t.Errorf("dynamic struct array must still place by element id:\n%s", mod)
-	}
-	if strings.Contains(mod, "while len(self.dyn) < ") {
-		t.Errorf("dynamic array must not be default-filled:\n%s", mod)
-	}
-}
-
-// TestPythonFixedCountWrapperArrayIsN: a `count: N` array's value is N elements
-// long whether or not the field ever reaches the wire (MESSAGE_SPEC §5.1 -- the
-// length "is N for every target"). The decode-side refill can only run once the
-// sequence scope has actually been opened, so materializing a fixed-count
-// WRAPPER array at construction is what makes the three absent-ish forms agree:
-//
-//	absent field            -> N   (construction default; nothing overwrites it)
-//	one element on the wire -> N   (gap-fill + refill at SEQUENCE_END)
-//	explicitly-empty wrapper-> N   (refill at SEQUENCE_END)
-//
-// Before this, the first row decoded at 0 while the other two decoded at N, and
-// the count:3 NATIVE array sitting next to it decoded at 3 in all three -- the
-// same field disagreeing with itself and with its neighbour.
-//
-// A DYNAMIC (count-less) wrapper array has no N to size from and stays empty.
-func TestPythonFixedCountWrapperArrayIsN(t *testing.T) {
-	const src = `
-version: 1
-messages:
-  probe:
-    payload:
-      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }
-      nums:  { id: 1, type: array, items: { type: u32, count: 3 } }
-      blobs: { id: 2, type: array, items: { type: blob, count: 2, maxlen: 4 } }
-      pts:
-        id: 3
-        type: array
-        items: { type: struct, count: 2, fields: { x: { id: 0, type: i32, default: -1 } } }
-      dyn:   { id: 4, type: array, items: { type: string, maxlen: 8 } }
-      rows:
-        id: 5
-        type: array
-        items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } }
-`
-	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	for _, want := range []string{
-		// The wrapper array is materialized in the SAME place the native one is,
-		// with the element default the decode-side gap-fill already writes. A
-		// comprehension, not a repeated literal: a shared mutable element would
-		// alias every slot (and every instance) onto one object.
-		`strs: list[str] = field(default_factory=lambda: ["" for _ in range(3)])`,
-		`blobs: list[bytes] = field(default_factory=lambda: [b"" for _ in range(2)])`,
-		`pts: list[ProbePtsElem] = field(default_factory=lambda: [ProbePtsElem() for _ in range(2)])`,
-		// the native neighbour, unchanged -- this is the behaviour being matched
-		"nums: list[int] = field(default_factory=lambda: [0, 0, 0])",
-		// a count-less wrapper array has no N and stays empty
-		"dyn: list[str] = field(default_factory=list)",
-		// A nested-array ROW has no element default on the decode side either
-		// (pyWrapperElemZero declines it, so unmarshalArray emits no refill);
-		// materializing it here alone would reintroduce the very split above.
-		"rows: list[list[str]] = field(default_factory=list)",
-	} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("message.py missing %q:\n%s", want, mod)
-		}
-	}
-	// The pre-fix rendering, in either spelling.
-	for _, bad := range []string{
-		"strs: list[str] = field(default_factory=list)",
-		"blobs: list[bytes] = field(default_factory=list)",
-	} {
-		if strings.Contains(mod, bad) {
-			t.Errorf("count:N wrapper array must not start empty (%q):\n%s", bad, mod)
-		}
-	}
-	// The S2 omission must survive materialization: the marshal gate for a wrapper
-	// array narrows to M (one past the last non-default element), so a fresh
-	// all-default object still writes no child and the field stays off the wire.
-	for _, want := range []string{
-		"if not (len(_trim_empty(self.strs)) == 0):",
-		"if not (len(_trim_objs(self.pts)) == 0):",
-	} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("message.py missing %q:\n%s", want, mod)
-		}
-	}
-
-	// Execute the table. Gated on a corelib-py checkout, like TestPythonConformance.
-	corelib := os.Getenv("SOFAB_PY_CORELIB")
-	if corelib == "" {
-		t.Skip("set SOFAB_PY_CORELIB to a corelib-py checkout to execute the decode table")
-	}
-	py, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not found")
-	}
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "message.py"), []byte(mod), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Wire vectors, all for `strs` (id 0, a wrapper sequence):
-	//   absent            -- no bytes at all
-	//   one element       -- 06 (seq begin id 0) 02 0a 61 (string elem id 0 = "a") 07
-	//   explicitly empty  -- 06 07
-	const driver = `
-import sys
-from message import Probe
-cases = {
-    "absent":   b"",
-    "one":      bytes([0x06, 0x02, 0x0A, 0x61, 0x07]),
-    "empty":    bytes([0x06, 0x07]),
-}
-bad = []
-for name, wire in cases.items():
-    m = Probe.decode(wire)
-    if len(m.strs) != 3 or len(m.nums) != 3 or len(m.blobs) != 2 or len(m.pts) != 2:
-        bad.append("%s: strs=%r nums=%r blobs=%r pts=%r" % (name, m.strs, m.nums, m.blobs, m.pts))
-    if m.dyn != [] or m.rows != []:
-        bad.append("%s: dynamic array grew: dyn=%r rows=%r" % (name, m.dyn, m.rows))
-fresh = Probe()
-if len(fresh.strs) != 3 or len(fresh.pts) != 2 or fresh.pts[0].x != -1:
-    bad.append("fresh: strs=%r pts=%r" % (fresh.strs, fresh.pts))
-# elements must be distinct objects, within an instance and across instances
-fresh.pts[0].x = 7
-if fresh.pts[1].x != -1 or Probe().pts[0].x != -1:
-    bad.append("aliased struct elements: %r" % (fresh.pts,))
-# an all-default fixed array is still omitted whole (S2)
-if Probe().encode() != b"":
-    bad.append("fresh object must encode to nothing, got %r" % (Probe().encode(),))
-# the single element still lands at its index, with the rest defaulted
-one = Probe.decode(cases["one"])
-if one.strs != ["a", "", ""]:
-    bad.append("placement: %r" % (one.strs,))
-if bad:
-    sys.exit("\n".join(bad))
-`
-	cmd := exec.Command(py, "-c", driver)
-	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(corelib, "src")+string(os.PathListSeparator)+dir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("fixed-count wrapper array did not decode at N:\n%s", out)
-	}
-}
-
-// TestPythonNoWrapperTrimHelpersWhenUnused keeps the helper emission honest:
-// _trim_empty / _trim_objs are referenced only by a wrapper (sequence-form)
-// array, so a schema without one must not carry them. A dynamic struct array
-// references neither — it is never narrowed.
-func TestPythonNoWrapperTrimHelpersWhenUnused(t *testing.T) {
-	const src = `
-version: 1
-messages:
-  T:
-    payload:
-      dynU32: { id: 0, type: array, items: { type: u32 } }
-      dynObjs:
-        id: 1
-        type: array
-        items: { type: struct, fields: { k: { id: 0, type: u32 } } }
-`
-	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	for _, bad := range []string{"_trim_empty", "_trim_objs"} {
-		if strings.Contains(mod, bad) {
-			t.Errorf("message.py must not contain %q when no array references it:\n%s", bad, mod)
-		}
-	}
-}
-
-// The last element of a DYNAMIC wrapper array is always written, whatever its
-// value (MESSAGE_SPEC §2). Such an array recovers its length as highest-present-
-// id + 1 (§5.1), so the element at the highest index is the only one whose
-// PRESENCE carries the length: dropping a trailing default leaf encoded ["a", ""]
-// exactly like ["a"] and decoded one element short. Sequence-form elements never
-// had the problem -- they are framed unconditionally -- so this holds both
-// element kinds to one standard. A fixed-count array is exempt: its length is N
-// whatever the wire carries, so it still elides the whole trailing run.
-func TestPythonDynamicArrayAlwaysWritesLastElement(t *testing.T) {
+// This holds with or without a declared `count`: a capacity can never restore an
+// elided tail.
+func TestPythonElementSparsityIsPositional(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -1101,40 +773,262 @@ messages:
       dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
       dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
       fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      fixedobj: { id: 3, type: array, items: { type: struct, count: 3, fields: { k: { id: 0, type: u32 } } } }
+      mat:      { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+      rows:     { id: 5, type: array, items: { type: array, count: 2, items: { type: string, maxlen: 4 } } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
 	for _, want := range []string{
-		// dynamic: the last index escapes the omit test
+		// leaf elements: the last index escapes the omit test -- count or no count
 		`            if _e0 != "" or _i0 == len(self.dynstr) - 1:`,
 		"            if len(_e0) != 0 or _i0 == len(self.dynblob) - 1:",
-		// fixed: no guard -- the trailing run still collapses, the decoder refills to N
-		`            if _e0 != "":`,
-		// ...and the fixed one is the only string array still narrowed.
-		"for _i0, _e0 in enumerate(_trim_empty(self.fixedstr)):",
-		"for _i0, _e0 in enumerate(self.dynstr):",
-		"for _i0, _e0 in enumerate(self.dynblob):",
+		`            if _e0 != "" or _i0 == len(self.fixedstr) - 1:`,
+		// sequence elements: the same rule, applied through the closer
+		"            if _i0 == len(self.fixedobj) - 1:\n                e.write_sequence_end_keep()\n" +
+			"            else:\n                e.write_sequence_end()\n",
+		// a native row carries no frame of its own, so the rule lands on the write
+		"            if len(_e0) != 0 or _i0 == len(self.mat) - 1:\n                e.write_unsigned_array(_i0, _e0)\n",
+		// a wrapper row has a frame, so it takes the closer
+		"            if _i0 == len(self.rows) - 1:\n                e.write_sequence_end_keep()\n" +
+			"            else:\n                e.write_sequence_end()\n",
+		// every array loops over the value itself: there is no M to narrow to
+		"for _i0, _e0 in enumerate(self.fixedstr):",
+		"for _i0, _e0 in enumerate(self.fixedobj):",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
 		}
 	}
-	// The all-default predicate has to follow the writer: a dynamic [""] now puts
-	// an element on the wire, so the field is NOT default and must not be omitted.
-	// Trimming it here would drop a field that the marshal loop writes.
+	// The predicate follows the writer: every non-empty array now puts at least one
+	// element on the wire, so "default" is exactly "empty" for every element kind.
 	for _, want := range []string{
 		"if not (len(self.dynstr) == 0):",
-		"if not (len(self.dynblob) == 0):",
-		// The fixed one keeps its trim on both sides.
-		"if not (len(_trim_empty(self.fixedstr)) == 0):",
+		"if not (len(self.fixedstr) == 0):",
+		"if not (len(self.fixedobj) == 0):",
+		"if not (len(self.rows) == 0):",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("_is_default must be plain emptiness, missing %q:\n%s", want, mod)
+		}
+	}
+	// The two defects this replaced: an unconditional keeping closer on an element,
+	// and the fixed-count leaf's missing last-element guard.
+	if strings.Contains(mod, "_marshal(e)\n            e.write_sequence_end_keep()") {
+		t.Errorf("an array element must not close unconditionally with the keeping end:\n%s", mod)
+	}
+	if strings.Contains(mod, `            if _e0 != "":`) {
+		t.Errorf("a count:N leaf element must take the same last-element guard as a dynamic one:\n%s", mod)
+	}
+}
+
+// A wrapper array's element id IS the array index (§5.1), so an element is PLACED
+// at target[id] after gap-filling from the element default -- never appended. That
+// is what restores an interior element the sparse rule omitted; appending would
+// shorten the array by the size of every gap and would decode a REOPENED id as a
+// second element instead of merging into the first (§7.4).
+//
+// The row collectors are the ones that had it wrong: a matrix row and a wrapper row
+// were both appended id-blind. That was unreachable while every row was framed
+// unconditionally, but an interior gap is now ordinary, and an appending collector
+// shifts every later row down by one.
+//
+// The decoded length is highest present id + 1, exact because the last element is
+// never elided. Nothing is filled in beyond it: a schema `count` is a capacity, so
+// it bounds the id but never adds an element the wire did not carry.
+func TestPythonWrapperElementsArePlacedByID(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  vec:
+    payload:
+      objs: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } } }
+      strs: { id: 1, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      mat:  { id: 2, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+      rows: { id: 3, type: array, items: { type: array, count: 2, items: { type: string, maxlen: 4 } } }
+      dyn:  { id: 4, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+
+	for _, want := range []string{
+		// struct elements: place, not append -- and the gap-fill that precedes it
+		"                    while len(self.objs) <= _ef0.id:\n" +
+			"                        self.objs.append(VecObjsElem())\n" +
+			"                    self.objs[_ef0.id]._unmarshal(d)\n",
+		// leaf elements, unchanged: they always got this right
+		"                    while len(self.strs) <= _ef0.id:\n" +
+			"                        self.strs.append(\"\")\n",
+		// native matrix rows: read the row, then place it at its id
+		"                    _e0 = d.read_unsigned_array()\n" +
+			"                    while len(self.mat) <= _ef0.id:\n" +
+			"                        self.mat.append([])\n" +
+			"                    self.mat[_ef0.id] = _e0\n",
+		// wrapper rows: same again
+		"                    while len(self.rows) <= _ef0.id:\n" +
+			"                        self.rows.append([])\n" +
+			"                    self.rows[_ef0.id] = _e0\n",
+		// the over-index guard bounds every id-keyed fill
+		"if _ef0.id >= 4:",
+		"if _ef0.id >= 2:",
+		// a count-less array is placed by id like every other, just unbounded
+		"while len(self.dyn) <= _ef0.id:",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
 		}
 	}
-	for _, bad := range []string{"_trim_empty(self.dynstr)", "_trim_empty(self.dynblob)"} {
+	// The defects this replaced: rows appended id-blind, and the N-refill that made
+	// the superseded trailing elision lossless.
+	for _, bad := range []string{
+		"self.mat.append(_e0)",
+		"self.rows.append(_e0)",
+		"while len(self.objs) < 4:",
+		"while len(self.strs) < 3:",
+		"_pad_to(",
+	} {
 		if strings.Contains(mod, bad) {
-			t.Errorf("a dynamic leaf array must not be trimmed, found %q:\n%s", bad, mod)
+			t.Errorf("message.py must no longer contain %q:\n%s", bad, mod)
 		}
 	}
+}
+
+// TestPythonWireArraySparsity is the byte-level statement of the whole change,
+// executed against corelib-py. Every hex below is a regenerated shared test vector
+// (the serialized_sparse form), so these are cross-language byte targets, not this
+// backend's opinion:
+//
+//	array_string_trailing_default          ["a",""]      06020a610a0207
+//	array_string_all_default               ["",""]       060a0207
+//	array_string_leading_default           ["","x",""]   060a0a78120207
+//	array_string_gap                       ["a","","c"]  06020a61120a6307
+//	array_struct_interior_default_element  [{1},{},{3}]  06060001071600030707
+//	array_struct_all_default_elements      [{},{}]       060e0707
+//	array_unsigned_trailing_defaults       [1,2,0,0]     030401020000
+//	array_of_string_arrays                 [["a"],[]]    0606020a61070e0707
+//
+// Every probe declares a `count` deliberately: a capacity must change none of it
+// (§3). Round-tripping is exact -- ["a",""], ["a"] and [] are three distinct values
+// with three distinct encodings, and nothing is added or dropped on the way back.
+func TestPythonWireArraySparsity(t *testing.T) {
+	corelib := os.Getenv("SOFAB_PY_CORELIB")
+	if corelib == "" {
+		t.Skip("set SOFAB_PY_CORELIB to a corelib-py checkout")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not found")
+	}
+	for _, probe := range []struct {
+		what  string
+		def   string
+		cases []struct{ in, wantHex, wantJSON string }
+	}{
+		{"count:N string elements", "{ type: string, count: 4, maxlen: 8 }", []struct{ in, wantHex, wantJSON string }{
+			// interior gap at index 1, last element carries a value
+			{`["a","","c"]`, "06020a61120a6307", `["a", "", "c"]`},
+			// the trailing default IS the last element: written, so length 2 survives
+			{`["a",""]`, "06020a610a0207", `["a", ""]`},
+			// all-default: the interior one drops, the final one is written alone at
+			// id 1 -- this is NOT the empty array
+			{`["",""]`, "060a0207", `["", ""]`},
+			// leading default leaves a gap, trailing default is written
+			{`["","x",""]`, "060a0a78120207", `["", "x", ""]`},
+			// no element at all: the wrapper stays contentless and the FIELD is
+			// omitted (§2), decoding to the empty array -- length 0, not 4
+			{`[]`, "", `[]`},
+		}},
+		{"count-less string elements", "{ type: string, maxlen: 8 }", []struct{ in, wantHex, wantJSON string }{
+			{`["a",""]`, "06020a610a0207", `["a", ""]`},
+			{`["",""]`, "060a0207", `["", ""]`},
+			{`[]`, "", `[]`},
+		}},
+		{"count:N struct elements", "{ type: struct, count: 4, fields: { k: { id: 0, type: u32 } } }", []struct{ in, wantHex, wantJSON string }{
+			// the interior all-default element is NOT framed: id 1 is a gap, and the
+			// array still decodes at length 3 from id 2
+			{`[{"k":1},{"k":0},{"k":3}]`, "06060001071600030707", `[{"k": 1}, {"k": 0}, {"k": 3}]`},
+			// all-default elements: interior drops, the last keeps its empty frame
+			{`[{"k":0},{"k":0}]`, "060e0707", `[{"k": 0}, {"k": 0}]`},
+			// a single all-default element is the last one: an empty frame at id 0
+			{`[{"k":0}]`, "06060707", `[{"k": 0}]`},
+			// only element 0 set, in a count:4 array -- no trailing fill to 4
+			{`[{"k":1}]`, "060600010707", `[{"k": 1}]`},
+			{`[]`, "", `[]`},
+		}},
+		{"count:N u32 elements", "{ type: u32, count: 4 }", []struct{ in, wantHex, wantJSON string }{
+			// the wire count IS the length: the trailing zeros are part of the value
+			{`[1,2,0,0]`, "030401020000", `[1, 2, 0, 0]`},
+			{`[1,2]`, "03020102", `[1, 2]`},
+			// all-zero at length 4 is a length-4 array: it differs from the empty
+			// default, so it stays on the wire (a capacity is not a minimum length)
+			{`[0,0,0,0]`, "030400000000", `[0, 0, 0, 0]`},
+			// only the EMPTY array is the field's default, and only it is omitted
+			{`[]`, "", `[]`},
+		}},
+		{"wrapper rows", "{ type: array, count: 3, items: { type: string, maxlen: 8 } }", []struct{ in, wantHex, wantJSON string }{
+			// the empty row is LAST, so it keeps its frame: length 2 survives
+			{`[["a"],[]]`, "0606020a61070e0707", `[["a"], []]`},
+			// now the empty row is INTERIOR -- not framed, an id gap, and the decoder
+			// restores it as an empty row at index 0
+			{`[[],["a"]]`, "060e020a610707", `[[], ["a"]]`},
+			{`[["a","b"],[],["c"]]`, "0606020a610a0a620716020a630707", `[["a", "b"], [], ["c"]]`},
+		}},
+		{"native rows", "{ type: array, count: 3, items: { type: u32, count: 3 } }", []struct{ in, wantHex, wantJSON string }{
+			// a native row has no frame: the LAST empty row is written as an empty
+			// count-prefixed array at id 1 (0b 00)
+			{`[[1],[]]`, "060301010b0007", `[[1], []]`},
+			// the interior empty row is dropped, so id 0 is a gap
+			{`[[],[1]]`, "060b010107", `[[], [1]]`},
+			{`[[1,2],[],[3]]`, "060302010213010307", `[[1, 2], [], [3]]`},
+		}},
+	} {
+		dir := pyProject(t, "version: 1\nmessages:\n  vec:\n    payload:\n"+
+			"      arr: { id: 0, type: array, items: "+probe.def+" }\n")
+		for _, c := range probe.cases {
+			in := `{"arr":` + c.in + `}`
+			wire := pyHarness(t, corelib, dir, "encode", []byte(in))
+			if got := hex.EncodeToString(wire); got != c.wantHex {
+				t.Errorf("%s: encode %s: got %s, want %s", probe.what, in, got, c.wantHex)
+				continue
+			}
+			out := pyHarness(t, corelib, dir, "decode", wire)
+			var back struct {
+				Arr json.RawMessage `json:"arr"`
+			}
+			if err := json.Unmarshal(out, &back); err != nil {
+				t.Fatalf("%s: decode %s: %v (%s)", probe.what, in, err, out)
+			}
+			if got := string(back.Arr); got != c.wantJSON {
+				t.Errorf("%s: round-trip %s: got %s, want %s", probe.what, in, got, c.wantJSON)
+			}
+		}
+	}
+}
+
+// pyProject generates a runnable Python project for src into a temp dir.
+func pyProject(t *testing.T, src string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for path, content := range genPy(t, schema(t, src), map[string]any{"emit": "project"}) {
+		if err := os.WriteFile(filepath.Join(dir, path), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// pyHarness runs the generated harness against corelib-py and returns its stdout.
+func pyHarness(t *testing.T, corelib, dir, mode string, in []byte) []byte {
+	t.Helper()
+	cmd := exec.Command("python3", "harness.py", mode, "vec")
+	cmd.Dir = dir
+	cmd.Stdin = bytes.NewReader(in)
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(corelib, "src"))
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = string(ee.Stderr)
+		}
+		t.Fatalf("harness %s %q: %v\n%s", mode, in, err, stderr)
+	}
+	return out
 }

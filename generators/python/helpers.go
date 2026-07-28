@@ -144,30 +144,15 @@ func (g *gen) pyDefault(f *ir.Field) string {
 		// lazy lambda so the referenced class need not be defined yet.
 		return fmt.Sprintf("field(default_factory=lambda: %s())", g.typeName(f.Ref.Key))
 	case ir.KindArray:
-		// A NATIVE scalar array is a leaf field: materialize its schema default so
-		// an omitted default array reconstructs correctly and marshal can compare
-		// against it. A `count: N` native array is fixed-length even with NO schema
-		// default: its value is N element defaults, so materialize those too.
-		// Without this a fresh (or all-default, hence omitted-on-the-wire) array
-		// would be an empty list on this growable backend while the fixed-storage
-		// camp yields N zeros — the same MESSAGE_SPEC §3 divergence as the trailing
-		// default run, reached through the omission path.
+		// An array field gets exactly its declared `default` and nothing else. A
+		// declared `count: N` is a CAPACITY, not a length (MESSAGE_SPEC §3), so a
+		// fresh count:N array is the EMPTY list -- not N element defaults -- and a
+		// `default` shorter than N stands for itself rather than being padded out to
+		// N. That is also what the field's omit test compares against, and what an
+		// absent field decodes back to.
 		if lit, ok := g.pyNativeArrayDefault(f); ok {
 			return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
 		}
-		// A `count: N` WRAPPER array is fixed-length for exactly the same reason:
-		// S5.1 says its length "is N for every target", regardless of whether the
-		// field ever reaches the wire. The decode-side refill can only run when the
-		// sequence scope was actually opened, so without materializing here the
-		// field disagreed with itself -- absent decoded at length 0 while a single
-		// element on the wire, or an explicitly-empty wrapper, decoded at N -- and
-		// disagreed with the count:N native array sitting next to it, which has
-		// always been materialized from the padded literal above.
-		if lit, ok := g.pyWrapperArrayDefault(f); ok {
-			return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
-		}
-		// Dynamic (count-less) arrays have no N and start empty, which is what makes
-		// dropping their closer correct (§2).
 		return "field(default_factory=list)"
 	}
 	return "None"
@@ -188,50 +173,24 @@ func isNativeArrayElem(elem ir.Kind) bool {
 	return false
 }
 
-// pyNativeArrayDefault renders a native array field's materialized default as a
-// Python list literal; ("", false) when the field has no materialized default (a
-// wrapper-sequence array, or a dynamic array with no schema default — both start
+// pyNativeArrayDefault renders a native array field's DECLARED default as a
+// Python list literal; ("", false) when the field declares none (a
+// wrapper-sequence array, or any array without a schema `default` — both start
 // empty). It is the single gate for "does this array have a default literal?",
 // shared by the dataclass field default and marshal's omit-when-default compare,
 // which must agree exactly.
+//
+// A declared `count: N` does not create a default: it is a capacity, not a length
+// (MESSAGE_SPEC §3), so a fresh count:N array is the empty list.
 func (g *gen) pyNativeArrayDefault(f *ir.Field) (string, bool) {
-	if !isNativeArrayElem(f.Elem) || (f.Default == nil && !f.HasCount) {
+	if !isNativeArrayElem(f.Elem) || f.Default == nil {
 		return "", false
 	}
 	return g.pyNativeArrayLiteral(f)
 }
 
-// pyWrapperArrayDefault renders a `count: N` WRAPPER array's materialized
-// default -- N element defaults -- as a Python list expression; ("", false) for
-// a dynamic array (no N to size from) or a native one (pyNativeArrayDefault owns
-// those). A wrapper array's own declared `default` is still not materialized;
-// the elements are the ELEMENT default, which is exactly what the decode-side
-// gap-fill and refill in unmarshalArray already write, so all three of absent,
-// partially transmitted and explicitly empty land on the same N-element value.
-//
-// A comprehension, not a repeated literal: the element expression must be
-// evaluated afresh per position or every slot of a struct/union array would
-// alias one shared instance. Rendered inside the caller's default_factory
-// lambda, so a referenced class need not be defined yet.
-//
-// A nested-array row is deliberately excluded (pyWrapperElemZero has no default
-// for it, and the decode path does not refill one either): materializing it here
-// alone would create the very absent-vs-on-the-wire split this fix removes.
-func (g *gen) pyWrapperArrayDefault(f *ir.Field) (string, bool) {
-	if isNativeArrayElem(f.Elem) || !f.HasCount {
-		return "", false
-	}
-	zero, ok := g.pyWrapperElemZero(f.Elem, f.ElemRef)
-	if !ok {
-		return "", false
-	}
-	return fmt.Sprintf("[%s for _ in range(%d)]", zero, f.Count), true
-}
-
 // pyNativeArrayLiteral renders a native scalar array's default as a Python list
-// literal ([...]); ("", false) when there is no default. A `count: N` array with
-// no schema default has one anyway — N element defaults — so a nil Default is
-// not a miss for it (callers gate on HasCount).
+// literal ([...]); ("", false) when the Default is not a list.
 func (g *gen) pyNativeArrayLiteral(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
 	if !ok && f.Default != nil {
@@ -249,15 +208,10 @@ func (g *gen) pyNativeArrayLiteral(f *ir.Field) (string, bool) {
 		}
 		parts[i] = scalarLit(v)
 	}
-	// A `count: N` array is exactly N elements long: a shorter schema default
-	// leaves the trailing ones at the element default. Tail-pad to N so this
-	// backend's initial value matches the fixed-storage camp's zero-filled
-	// `[T; N]` / `std::array<T, N>` (MESSAGE_SPEC §3).
-	if f.HasCount {
-		for int64(len(parts)) < f.Count {
-			parts = append(parts, pyElemZero(f.Elem))
-		}
-	}
+	// Not padded to a declared `count: N`: that is a capacity, not a length
+	// (MESSAGE_SPEC §3), so the default stands exactly as written -- and so does
+	// the value it is compared against, which is what keeps a length-N all-zero
+	// array distinct from the empty one.
 	return "[" + strings.Join(parts, ", ") + "]", true
 }
 

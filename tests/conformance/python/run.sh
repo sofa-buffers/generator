@@ -231,8 +231,12 @@ grep -qi "limit" "$WORK/limit-err.txt" || { echo "FAIL: over-cap decode error sh
 (cd "$WORK/nolimitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null || { echo "FAIL: unset limit must keep count 5 decodable"; exit 1; }
 echo "==> decode-limit reject OK"
 
+# Conformance covers the per-field scalar vectors; WireArraySparsity covers the
+# array ones -- the MESSAGE_SPEC S2 element rule and S3's "count is a capacity",
+# both byte-exact against the regenerated shared vectors, both executed through a
+# generated project driving corelib-py.
 echo "==> shared-vector byte-exact conformance"
-( cd "$ROOT" && SOFAB_PY_CORELIB="$CORELIB" go test ./generators/python/ -run Conformance -count=1 )
+( cd "$ROOT" && SOFAB_PY_CORELIB="$CORELIB" go test ./generators/python/ -run 'Conformance|WireArraySparsity' -count=1 )
 
 echo "==> corpus + realworld: every definition imports"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do

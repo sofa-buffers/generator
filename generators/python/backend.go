@@ -101,9 +101,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 	// (generator#100) and the over-index wrapper-array guard (generator#142), so
 	// import it only when a fixed-count array of either kind exists — an
 	// unconditional import would be unused for other schemas.
-	if schemaHasCountedFloatArray(s) {
-		f.line("import math")
-	}
 	names := []string{"Encoder", "Decoder"}
 	if schemaHasCountedNativeArray(s) || schemaHasCountedWrapperArray(s) || schemaHasMaxlenStringBlob(s) {
 		names = append(names, "SofaDecodeError")
@@ -116,9 +113,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	f.line("from sofab import %s", strings.Join(names, ", "))
 	f.blank()
-
-	g.emitFixedArrayHelpers(f, s)
-	g.emitWrapperTrimHelpers(f, s)
 
 	if g.limits.any() {
 		f.line("# Receiver-side decode limits, baked from the sofabgen config")
@@ -230,16 +224,6 @@ func schemaHasMaxlenStringBlob(s *ir.Schema) bool {
 			return true
 		}
 		return fld.Kind == ir.KindArray && arrHas(fld.Elem, fld.ElemItems, fld.ElemMaxHas)
-	})
-}
-
-// schemaHasCountedFloatArray reports whether any field is a fixed-count fp32/
-// fp64 array — the only case whose trim needs the bit-pattern (signed-zero)
-// comparison, and so the only case that needs `import math`.
-func schemaHasCountedFloatArray(s *ir.Schema) bool {
-	return schemaHasField(s, func(fld *ir.Field) bool {
-		return fld.Kind == ir.KindArray && fld.HasCount &&
-			(fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64)
 	})
 }
 
@@ -390,123 +374,6 @@ func schemaHasField(s *ir.Schema, pred func(*ir.Field) bool) bool {
 		}
 	}
 	return false
-}
-
-// emitFixedArrayHelpers emits the module-private helpers a fixed-count (`count:
-// N`) native array's canonical encoding needs (MESSAGE_SPEC §3): _trim_tail /
-// _trim_tail_float drop the trailing element-default run on encode, _pad_to
-// rebuilds it on decode. Emitted only when the schema actually has such a
-// field, so other schemas keep a helper-free module.
-func (g *gen) emitFixedArrayHelpers(f *pyfile, s *ir.Schema) {
-	if !schemaHasCountedNativeArray(s) {
-		return
-	}
-	f.line("def _trim_tail(a: list, zero) -> list:")
-	f.line(`    """Return a[:M'], M' being one past the last non-default element (0 if all`)
-	f.line("    default). A fixed-count array's canonical wire carries exactly those M'")
-	f.line("    elements; the decoder rebuilds the trailing default run from the schema")
-	f.line(`    count."""`)
-	f.line("    n = len(a)")
-	f.line("    while n > 0 and a[n - 1] == zero:")
-	f.line("        n -= 1")
-	f.line("    return a[:n]")
-	f.blank()
-	if schemaHasCountedFloatArray(s) {
-		f.line("def _trim_tail_float(a: list) -> list:")
-		f.line(`    """_trim_tail for floats, comparing by BIT PATTERN rather than ==: a`)
-		f.line("    trailing -0.0 (which == 0.0) and a trailing NaN are distinct values and")
-		f.line(`    must survive the round-trip instead of being trimmed to +0.0."""`)
-		f.line("    n = len(a)")
-		f.line("    while n > 0 and a[n - 1] == 0.0 and math.copysign(1.0, a[n - 1]) > 0.0:")
-		f.line("        n -= 1")
-		f.line("    return a[:n]")
-		f.blank()
-	}
-	f.line("def _pad_to(a: list, n: int, zero) -> list:")
-	f.line(`    """Return a grown to exactly n elements with the element default. A`)
-	f.line("    fixed-count array decodes to exactly its schema count regardless of the")
-	f.line("    wire count, so the trailing default run the encoder elided is")
-	f.line(`    materialized here."""`)
-	f.line("    if len(a) >= n:")
-	f.line("        return a")
-	f.line("    return a + [zero] * (n - len(a))")
-	f.blank()
-}
-
-// emitWrapperTrimHelpers emits the module-private helpers that narrow a WRAPPER
-// (sequence-form) array to the M its canonical wire carries — one past the last
-// element differing from the element default (MESSAGE_SPEC §3/§5.1, which says
-// "even for sequence-form elements"; generator#248). They are the sequence-form
-// counterpart of _trim_tail, emitted only when some array actually references
-// them so other schemas keep a helper-free module.
-func (g *gen) emitWrapperTrimHelpers(f *pyfile, s *ir.Schema) {
-	empty, objs := schemaTrimUse(s)
-	if empty {
-		f.line("def _trim_empty(a: list) -> list:")
-		f.line(`    """Return a[:M], M being one past the last non-EMPTY element. It narrows a`)
-		f.line("    wrapper array whose element default is the empty value (string, blob, or a")
-		f.line("    nested row) to the M its canonical wire carries; only the TRAILING run")
-		f.line("    goes, since an interior element's presence is what carries the array's")
-		f.line(`    length."""`)
-		f.line("    n = len(a)")
-		f.line("    while n > 0 and len(a[n - 1]) == 0:")
-		f.line("        n -= 1")
-		f.line("    return a[:n]")
-		f.blank()
-	}
-	if objs {
-		f.line("def _trim_objs(a: list) -> list:")
-		f.line(`    """_trim_empty for struct/union elements, whose element default is the`)
-		f.line("    all-default object rather than an empty container: an element is dropped")
-		f.line("    from the trailing run when _is_default() holds, which is the same")
-		f.line("    per-field, recursive test _marshal applies.")
-		f.line("    M == 0 leaves no element at all, so the lazily-opened wrapper is dropped")
-		f.line(`    by its closer and the whole field is omitted."""`)
-		f.line("    n = len(a)")
-		f.line("    while n > 0 and a[n - 1]._is_default():")
-		f.line("        n -= 1")
-		f.line("    return a[:n]")
-		f.blank()
-	}
-}
-
-// schemaTrimUse reports which wrapper-trim helpers the emitted module will
-// reference. It must enumerate exactly the elemTrimExpr call sites — marshalArray
-// and arrayIsDefaultExpr both run off that one expression, with the same
-// (element kind, fixed) pair — or a generated module would call a helper that was
-// never emitted.
-func schemaTrimUse(s *ir.Schema) (empty, objs bool) {
-	var walk func(elem ir.Kind, items *ir.ArrayElem, fixed bool)
-	walk = func(elem ir.Kind, items *ir.ArrayElem, fixed bool) {
-		switch elem {
-		case ir.KindString, ir.KindBlob:
-			// Trimmed only when fixed: a dynamic array's last element is always
-			// written, so it is never narrowed. See elemTrimExpr.
-			if fixed {
-				empty = true
-			}
-		case ir.KindStruct, ir.KindUnion:
-			if fixed {
-				objs = true
-			}
-		case ir.KindArray:
-			if fixed {
-				empty = true
-			}
-			if items != nil {
-				// marshalArray recurses into a row with fixed=false (a row is an
-				// ELEMENT, not a `count: N` field — MESSAGE_SPEC §3).
-				walk(items.Elem, items.ElemItems, false)
-			}
-		}
-	}
-	schemaHasField(s, func(fld *ir.Field) bool {
-		if fld.Kind == ir.KindArray && !isNativeArrayElem(fld.Elem) {
-			walk(fld.Elem, fld.ElemItems, fld.HasCount)
-		}
-		return false
-	})
-	return empty, objs
 }
 
 func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
@@ -676,12 +543,10 @@ func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field)
 // emitIsDefault emits the object's all-default predicate. It is the exact
 // negation of what _marshal writes: the object is default iff _marshal would
 // emit no child at all, evaluated per field and recursively (MESSAGE_SPEC §2).
-// Every generated dataclass carries it so that a `count: N` wrapper array can
-// find M -- one past its last non-default element -- BEFORE opening the element
-// loop (§3/§5.1), which the implicit "no child was written" test the lazy framing
-// encodes cannot answer in time. Keep this in lockstep with emitMarshal: a
-// predicate that disagrees with the writer either drops a non-default element or
-// keeps a default one.
+// Keep this in lockstep with emitMarshal -- both are generated from
+// fieldIsDefaultExpr's per-field expressions for exactly that reason. A predicate
+// that disagrees with the writer omits a field that is on the wire, or keeps one
+// that is not.
 func (g *gen) emitIsDefault(f *pyfile, fields []*ir.Field) {
 	f.line("    def _is_default(self) -> bool:")
 	if len(fields) == 0 {
@@ -716,10 +581,13 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 	return fmt.Sprintf("%s == %s", acc, g.pyDefault(fld))
 }
 
-// arrayIsDefaultExpr mirrors emitMarshalArray: a native array compares against
-// the materialized default the dataclass carries (or emptiness when it has
-// none), a wrapper array is default iff it would write no child -- every element
-// equal to the element default.
+// arrayIsDefaultExpr mirrors emitMarshalArray. An array's declared `count: N` is
+// a CAPACITY, never a length (MESSAGE_SPEC §3), so it takes no part in this test:
+// the value is compared against the declared default exactly as written, with no
+// padding to N on either side, and against the empty collection when none is
+// declared. A count:N array is therefore default only when it is EMPTY -- an
+// all-zero N-element value is a length-N array, which differs from the empty one
+// and stays on the wire.
 func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	if isNativeArrayElem(fld.Elem) {
 		if lit, ok := g.pyNativeArrayDefault(fld); ok {
@@ -727,14 +595,10 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 		}
 		return fmt.Sprintf("len(%s) == 0", acc)
 	}
-	// Wrapper array: no child is written iff every element is the element
-	// default. For string/blob leaves the writer already omits a default element
-	// individually, so "all elements default" is the emptiness of the whole run.
-	// fld.HasCount must be threaded through unchanged: narrowing here but not in
-	// the marshal loop (or the reverse) is exactly the drift this shared helper
-	// exists to prevent -- it would call a dynamic [{}] "default" while the writer
-	// still frames its one empty element, omitting a field that is on the wire.
-	return fmt.Sprintf("len(%s) == 0", elemTrimExpr(acc, fld.Elem, fld.HasCount))
+	// Wrapper array: the writer emits a child for every element it holds, because
+	// the LAST element is written whatever its value (§2) -- so "no child is
+	// written" is exactly "the array is empty", and the two cannot drift apart.
+	return fmt.Sprintf("len(%s) == 0", acc)
 }
 
 func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
@@ -785,100 +649,72 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
 	// (materialized in the dataclass), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence, opened lazily and closed by the dropping end
 	// (see marshalArray) -- an empty one vanishes instead of being framed empty.
+	//
+	// A declared `count: N` takes no part in either test. `count` is a CAPACITY,
+	// never a length (§3): it never reaches the wire, so the value is compared
+	// against the declared default exactly as written -- neither side padded to N
+	// -- and against the empty collection when no default is declared.
 	if isNativeArrayElem(fld.Elem) {
 		if lit, ok := g.pyNativeArrayDefault(fld); ok {
 			f.line("        if %s != %s:", acc, lit)
 		} else {
 			f.line("        if len(%s) != 0:", acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
 	// absence then reconstructs the field's default. That is correct because a
 	// wrapper array's declared `default` is not materialized today -- the dataclass
-	// default is the empty list, or for a `count: N` array N ELEMENT defaults, which
-	// this writer trims away to nothing all the same -- so absent and
-	// explicitly-empty denote the same value. If
-	// that gap is ever closed, this call needs a guard --
+	// default is the empty list -- so absent and explicitly-empty denote the same
+	// value. If that gap is ever closed, this call needs a guard --
 	// `if value != default: ... e.write_sequence_end_keep()` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
-	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
+	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC §2, §3).
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 }
 
-// trimExpr wraps a native array expression in the trailing-default-run trim a
-// fixed-count array's canonical encoding requires (MESSAGE_SPEC §3). Only a
-// declared `count: N` array is fixed-length; a dynamic (count-less) array has no
-// N to refill from, so a trailing default element is significant and stays.
-func trimExpr(val string, elem ir.Kind, fixed bool) string {
-	if !fixed {
-		return val
-	}
-	switch elem {
-	case ir.KindFP32, ir.KindFP64:
-		return fmt.Sprintf("_trim_tail_float(%s)", val)
-	default:
-		// enum/bitfield/bool have already been lowered to their int image, whose
-		// zero is the element default; ints compare by value == bit pattern.
-		return fmt.Sprintf("_trim_tail(%s, 0)", val)
-	}
-}
-
-// elemTrimExpr narrows a WRAPPER array to the M its canonical wire carries: one
-// past the last element differing from the element default (MESSAGE_SPEC §3/§5.1,
-// which says "even for sequence-form elements"). Only a declared `count: N` array
-// is fixed-length and may be narrowed -- a dynamic array has no N to refill from,
-// so a trailing default ELEMENT is significant and stays framed. Interior
-// all-default elements are never dropped by this: element presence carries the
-// length, so only the trailing run goes. Both the marshal loop and _is_default
-// run off this one expression, so the writer and the predicate cannot disagree.
+// lastElemExpr is the "this element is the array's last" test, at loop position
+// iv over the value val.
 //
-// A string/blob element is a leaf the writer already omits individually when it
-// equals the element default, so narrowing the trailing run does not change the
-// bytes -- it exists so the all-default predicate is computed from the very same
-// expression the writer loops over, and cannot drift away from it. That holds
-// only where the leaf may actually be omitted: on a DYNAMIC array the last
-// element is always written (see lastElemGuard), so trimming here would call a
-// dynamic [""] "default" and omit a field the marshal loop puts on the wire.
-func elemTrimExpr(val string, elem ir.Kind, fixed bool) string {
-	switch elem {
-	case ir.KindString, ir.KindBlob:
-		if !fixed {
-			return val
-		}
-		return fmt.Sprintf("_trim_empty(%s)", val)
-	case ir.KindStruct, ir.KindUnion:
-		if !fixed {
-			return val
-		}
-		return fmt.Sprintf("_trim_objs(%s)", val)
-	case ir.KindArray:
-		if !fixed {
-			return val
-		}
-		return fmt.Sprintf("_trim_empty(%s)", val)
-	}
-	return val
+// It is the whole of the positional half of MESSAGE_SPEC §2's element rule. A
+// wrapper array carries no length field: its decoded length is *highest present
+// id + 1* (§5.1), so the element at the highest index is the only one whose
+// PRESENCE carries the length, and nothing that carries the length may be elided.
+// Everything before it may be: an interior element equal to the element default
+// is indistinguishable from an absent one, because the decoder restores an absent
+// id from that same default. Hence: interior sparse, last always written.
+//
+// A declared `count: N` changes nothing here. N is a capacity, not a length (§3),
+// so it can never restore an elided tail -- the same test applies with or without
+// one.
+func lastElemExpr(iv, val string) string {
+	return fmt.Sprintf("%s == len(%s) - 1", iv, val)
 }
 
-// lastElemGuard is the "or this is the last element" disjunct that keeps a
-// DYNAMIC wrapper array's final element on the wire whatever its value
-// (MESSAGE_SPEC §2, "the last element of a dynamic array is always present").
-// Such an array recovers its length as highest-present-id + 1 (§5.1), so the
-// element at the highest index is the only one whose PRESENCE carries the
-// length: dropping it would encode ["a", ""] exactly like ["a"] and decode one
-// element short. Sequence-form elements never needed this -- they are framed
-// unconditionally -- so this closes the gap on the leaf side and holds both
-// element kinds to one standard. A fixed-count array needs none of it: its
-// length is N whatever the wire carries, which is why it elides the entire
-// trailing default run instead (§3/§5.1), so the guard is omitted there and the
-// trailing run collapses as before.
-func lastElemGuard(iv, val string, fixed bool) string {
-	if fixed {
-		return ""
+// emitSeqEnd closes the wrapper sequence opened at ind, choosing between the two
+// closers the corelib offers. Every sequence is opened LAZILY (the corelib holds
+// the header back until a child is written), so the closer alone decides whether
+// a contentless one survives: write_sequence_end drops it, write_sequence_end_keep
+// forces the empty frame out.
+//
+// keepIf is the condition under which an empty frame must survive:
+//   - "" -- never. A sequence-typed FIELD (a struct/union field, an array
+//     wrapper): an all-default one is omitted and absence reconstructs it (§2).
+//   - a lastElemExpr -- a sequence-form array ELEMENT, kept only at the array's
+//     last index. In the interior it is dropped and leaves an id GAP, which is
+//     what makes an all-default element sparse like any other default value.
+//     Note this is decided from the position in the VALUE, at run time; the
+//     schema cannot answer it.
+func emitSeqEnd(f *pyfile, ind, keepIf string) {
+	if keepIf == "" {
+		f.line("%se.write_sequence_end()", ind)
+		return
 	}
-	return fmt.Sprintf(" or %s == len(%s) - 1", iv, val)
+	f.line("%sif %s:", ind, keepIf)
+	f.line("%s    e.write_sequence_end_keep()", ind)
+	f.line("%selse:", ind)
+	f.line("%s    e.write_sequence_end()", ind)
 }
 
 // marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
@@ -886,77 +722,81 @@ func lastElemGuard(iv, val string, fixed bool) string {
 // unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
 // whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
 // arrays.
-func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
+//
+// Every element the value holds is written -- no trailing run is elided, of
+// either element kind, because the wire count IS the array's length (§3) and the
+// highest wrapper id IS its last index (§5.1). What the interior may drop is a
+// value that is indistinguishable from absence, and only that.
+//
+// keepIf is the closer this call's own wrapper takes (see emitSeqEnd); the native
+// element kinds open no sequence and ignore it.
+func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
-	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether a
-	// contentless one survives, and it is picked statically from the position in the
-	// schema, never from the value. A wrapper array at depth 0 is a sequence-typed
-	// FIELD, so it closes with the dropping end -- an all-default (here: empty) array
-	// is omitted and absence reconstructs it. A nested row (depth > 0) is an array
-	// ELEMENT, and element presence is what carries a dynamic array's length (S5.1),
-	// so it closes with the keeping end.
-	seqEnd := "write_sequence_end"
-	if depth > 0 {
-		seqEnd = "write_sequence_end_keep"
-	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, trimExpr(val, elem, fixed))
+		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, val)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("%se.write_signed_array(%s, %s)", ind, idExpr, trimExpr(val, elem, fixed))
+		f.line("%se.write_signed_array(%s, %s)", ind, idExpr, val)
 	case ir.KindEnum:
-		f.line("%se.write_signed_array(%s, %s)", ind, idExpr, trimExpr(fmt.Sprintf("[int(_v) for _v in %s]", val), elem, fixed))
+		f.line("%se.write_signed_array(%s, [int(_v) for _v in %s])", ind, idExpr, val)
 	case ir.KindBool:
-		// Trimming the 0/1 image is equivalent to trimming the bools (False <-> 0).
-		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, trimExpr(fmt.Sprintf("[1 if _v else 0 for _v in %s]", val), elem, fixed))
+		f.line("%se.write_unsigned_array(%s, [1 if _v else 0 for _v in %s])", ind, idExpr, val)
 	case ir.KindBitfield:
-		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, trimExpr(fmt.Sprintf("[int(_v) for _v in %s]", val), elem, fixed))
+		f.line("%se.write_unsigned_array(%s, [int(_v) for _v in %s])", ind, idExpr, val)
 	case ir.KindFP32:
-		f.line("%se.write_float32_array(%s, %s)", ind, idExpr, trimExpr(val, elem, fixed))
+		f.line("%se.write_float32_array(%s, %s)", ind, idExpr, val)
 	case ir.KindFP64:
-		f.line("%se.write_float64_array(%s, %s)", ind, idExpr, trimExpr(val, elem, fixed))
+		f.line("%se.write_float64_array(%s, %s)", ind, idExpr, val)
 	case ir.KindString:
-		// A string element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2) --
-		// except at the one position whose presence carries the length, see
-		// lastElemGuard.
+		// A string element is a leaf: in the array's INTERIOR it is omitted when it
+		// equals the element default (empty), leaving an id gap the decoder restores
+		// from that same default -- the ordinary sparse-field rule of MESSAGE_SPEC
+		// §2, applied to an element. At the LAST index it is written whatever its
+		// value: see lastElemExpr.
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
-		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, elemTrimExpr(val, elem, fixed))
-		f.line(`%s    if %s != ""%s:`, ind, ev, lastElemGuard(iv, val, fixed))
+		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
+		f.line(`%s    if %s != "" or %s:`, ind, ev, lastElemExpr(iv, val))
 		f.line("%s        e.write_string(%s, %s)", ind, iv, ev)
-		f.line("%se.%s()", ind, seqEnd)
+		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
-		// A blob element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2) --
-		// except at the one position whose presence carries the length, see
-		// lastElemGuard.
+		// A blob element is a leaf, exactly like the string element above.
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
-		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, elemTrimExpr(val, elem, fixed))
-		f.line("%s    if len(%s) != 0%s:", ind, ev, lastElemGuard(iv, val, fixed))
+		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
+		f.line("%s    if len(%s) != 0 or %s:", ind, ev, lastElemExpr(iv, val))
 		f.line("%s        e.write_bytes(%s, bytes(%s))", ind, iv, ev)
-		f.line("%se.%s()", ind, seqEnd)
+		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
+		// A sequence-form element obeys the SAME rule as the leaf elements above --
+		// one rule for both kinds -- and the lazily-held frame is where it is
+		// applied. The nested _marshal writes no child exactly when the element
+		// equals its declared default, so the CLOSER alone decides: the dropping one
+		// in the interior, where an all-default element vanishes into an id gap; the
+		// keeping one at the last index, where it survives as an empty frame because
+		// that presence is what fixes the array's length.
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
-		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, elemTrimExpr(val, elem, fixed))
-		// An INTERIOR element is framed unconditionally: dropping it would leave an
-		// id gap and change the decoded length, not just the bytes (S5.1). The
-		// TRAILING all-default run is already gone -- the loop runs to M, not to
-		// len (S3/S5.1) -- and M == 0 writes no child at all, so the lazily-opened
-		// wrapper is dropped and the field is omitted (S2).
+		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
 		f.line("%s    e.write_sequence_begin_lazy(%s)", ind, iv)
 		f.line("%s    %s._marshal(e)", ind, ev)
-		f.line("%s    e.write_sequence_end_keep()", ind)
-		f.line("%se.%s()", ind, seqEnd)
+		emitSeqEnd(f, ind+"    ", lastElemExpr(iv, val))
+		emitSeqEnd(f, ind, keepIf)
 	case ir.KindArray:
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
-		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, elemTrimExpr(val, elem, fixed))
-		// A nested array-of-array row is an ir.ArrayElem, not a field: the
-		// fixed-length rule is scoped to top-level array FIELDS, so a row never
-		// trims (MESSAGE_SPEC §3). The row itself is an ELEMENT, so the recursion
-		// (depth+1) closes it with the keeping end.
-		g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
-		f.line("%se.%s()", ind, seqEnd)
+		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
+		if isNativeArrayElem(items.Elem) {
+			// A native row is a single count-prefixed value with no frame of its own,
+			// so the rule lands on the WRITE rather than on a closer: an interior row
+			// equal to the element default (the empty row) is not written at all, and
+			// the last row always is.
+			f.line("%s    if len(%s) != 0 or %s:", ind, ev, lastElemExpr(iv, val))
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
+		} else {
+			// A wrapper row has its own frame, so it takes the closer instead -- the
+			// same interior/last choice, expressed the same way as for a struct
+			// element above.
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, val))
+		}
+		emitSeqEnd(f, ind, keepIf)
 	}
 }
 
@@ -1021,28 +861,11 @@ func (g *gen) emitUnmarshalArray(f *pyfile, fld *ir.Field, acc string) {
 		f.line("                if fld.count > %d:", fld.Count)
 		f.line(`                    raise SofaDecodeError("%s: array count above schema capacity %d")`, fld.Name, fld.Count)
 	}
+	// The wire count M IS the array's length (MESSAGE_SPEC §3): the M elements that
+	// arrived are the whole value, so they are taken as they come. A declared
+	// `count: N` is a capacity and bounds M (above); it never adds elements, so
+	// there is nothing to fill in at [M, N).
 	g.unmarshalArray(f, "                ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax, 0)
-	// A `count: N` array is fixed-length: the wire may carry M <= N elements,
-	// and positions [M, N) are the element default. A growable container must
-	// materialize them so the decoded value has exactly N elements on every
-	// storage model (MESSAGE_SPEC §3).
-	if fld.HasCount && isNativeArrayElem(fld.Elem) {
-		f.line("                %s = _pad_to(%s, %d, %s)", acc, acc, fld.Count, pyElemZero(fld.Elem))
-	}
-}
-
-// pyElemZero is the element default of a native array element, as the Python
-// value the decode path materializes (enum/bitfield elements decode to their
-// int image, matching unmarshalArray).
-func pyElemZero(elem ir.Kind) string {
-	switch elem {
-	case ir.KindBool:
-		return "False"
-	case ir.KindFP32, ir.KindFP64:
-		return "0.0"
-	default:
-		return "0"
-	}
 }
 
 // unmarshalArray reads an array into `target`, mirroring marshalArray: native
@@ -1084,9 +907,11 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *i
 		}
 		switch elem {
 		case ir.KindString:
-			// A string element is keyed by index id: a default (empty) element is
-			// omitted on the wire, so place the value at its id and fill any gap
-			// with the element default "" (MESSAGE_SPEC S2).
+			// A string element is keyed by index id: an INTERIOR element equal to the
+			// element default is omitted on the wire, so place the value at its id and
+			// fill any gap with the element default "" (MESSAGE_SPEC §2). The array's
+			// LAST element is always present, so the decoded length -- highest present
+			// id + 1 -- is exact.
 			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
 			f.line(`%s        %s.append("")`, ind, target)
 			// A bounded string element whose UTF-8 BYTE length exceeds the element
@@ -1125,36 +950,17 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *i
 			f.line("%s        %s.append(%s())", ind, target, g.typeName(ref.Key))
 			f.line("%s    %s[%s.id]._unmarshal(d)", ind, target, ef)
 		case ir.KindArray:
+			// A ROW is keyed by its element id exactly like every other element kind
+			// (§5.1), so it is PLACED at target[id] after gap-filling with empty rows
+			// -- never appended. Appending was unreachable while every row was framed
+			// unconditionally; under §2's sparse rule an interior row equal to the
+			// element default (the empty row) is omitted, and an appending collector
+			// would then shift every later row down by one. The over-index guard above
+			// rejects a row id >= N, which also bounds this gap-fill.
 			g.unmarshalArray(f, ind+"    ", ev, items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax, depth+1)
-			f.line("%s    %s.append(%s)", ind, target, ev)
-		}
-		// The sequence scope has closed: a `count: N` wrapper array is fixed-length,
-		// so default-fill it back out to N (MESSAGE_SPEC §5.1 -- the length "is N for
-		// every target", and "a growable-list target MUST default-fill to N exactly
-		// like a pre-sized one"). This is what makes the §3/§5.1 trailing-run elision
-		// on the encode side LOSSLESS: without it, re-encoding a decoded fixed array
-		// would not normalise it, it would SHORTEN it on every round trip. A dynamic
-		// (count-less) array has no N to refill from -- its length is highest present
-		// id + 1 -- and is never filled.
-		if zero, ok := g.pyWrapperElemZero(elem, ref); ok && cap >= 0 {
-			f.line("%swhile len(%s) < %d:", ind, target, cap)
-			f.line("%s    %s.append(%s)", ind, target, zero)
+			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
+			f.line("%s        %s.append([])", ind, target)
+			f.line("%s    %s[%s.id] = %s", ind, target, ef, ev)
 		}
 	}
-}
-
-// pyWrapperElemZero is the element default of a wrapper (sequence-form) array,
-// as a Python expression evaluated afresh per position -- a shared mutable
-// instance would alias every filled slot onto one object. ("", false) for a
-// nested-array row, whose fill the Go reference backend also leaves out.
-func (g *gen) pyWrapperElemZero(elem ir.Kind, ref *ir.TypeRef) (string, bool) {
-	switch elem {
-	case ir.KindString:
-		return `""`, true
-	case ir.KindBlob:
-		return `b""`, true
-	case ir.KindStruct, ir.KindUnion:
-		return g.typeName(ref.Key) + "()", true
-	}
-	return "", false
 }
