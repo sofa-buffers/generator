@@ -313,8 +313,8 @@ recode_exact() { # label message octal-wire
 recode_exact "scalar sNaN"    vecf32 '\002\040\001\000\200\177'
 recode_exact "scalar qNaN"    vecf32 '\002\040\001\000\300\177'
 recode_exact "scalar -NaN"    vecf32 '\002\040\001\000\300\377'
-# array: 05 (id0 arrayFixlen) 03 (count) 20 (fp32 subtype) + 3x4 LE bytes, all
-# non-zero so the canonical trailing-default trim keeps all three elements.
+# array: 05 (id0 arrayFixlen) 03 (count) 20 (fp32 subtype) + 3x4 LE bytes. The
+# wire count IS the array's length (MESSAGE_SPEC S3), so all three come back.
 recode_exact "array 3xNaN"    vecf32a '\005\003\040\001\000\200\177\001\000\300\177\001\000\300\377'
 echo "==> fp32 sNaN round-trip OK"
 

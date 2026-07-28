@@ -65,9 +65,7 @@ class Scalars {
   }
 
   /// Whether every field equals its declared default, compared per field and
-  /// recursively -- i.e. whether [marshal] would write no child at all. A
-  /// `count: N` array of sequence-form elements uses this to find how many of
-  /// its elements the canonical encoding carries.
+  /// recursively -- i.e. whether [marshal] would write no child at all.
   bool get _isDefault {
     if (!(u8min == 0)) return false;
     if (!(u8max == 255)) return false;

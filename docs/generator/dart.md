@@ -50,18 +50,6 @@ enum values (which a plain Dart `enum` cannot express) and 64-bit bitfields work
 | string / blob / struct / union / nested array | `List<String>` / `List<Uint8List>` / `List<T>` / `List<List<…>>` |
 | struct / union | the generated class type |
 
-A **`count: N` array is materialized to N elements by its initializer**, native
-and wrapper alike: `List<int> nums = <int>[0, 0, 0]` next to
-`List<String> strs = <String>['', '', '']`, and likewise `Uint8List(0)` /
-`T()` / `<E>[]` elements for a blob, struct/union and nested-row array. Its
-value is N elements long whether or not the field ever reaches the wire (§5.1:
-the length "is N for every target"), so an *absent* `count: 3` string array must
-read back at length 3 exactly like the `count: 3` u32 array beside it — the
-`onSequenceEnd` fill described under [Decode model](#decode-model) cannot cover
-that case, because it can only fill a sequence that was actually opened.
-`reset()` restores the same N. A **count-less** array has no N to materialize
-and starts (and resets) empty.
-
 Per message:
 
 - `void marshal(sofab.Encoder e)` — sparse-canonical field writes into any
@@ -77,6 +65,37 @@ Per message:
 - `void reset()` — every field back to its declared default, **in place**. See
   [Reusing a destination](#reusing-a-destination); `tryDecode` calls it for you.
 
+### Arrays — `count` is a capacity
+
+Every array field maps to a Dart `List`, and the list's length is the array's
+length. A schema `count: N` is a **capacity**, not a length: it never reaches the
+wire, it bounds the array (an element count or element id past `N` fails the
+decode as INVALID), and it lets fixed-storage targets pre-size — but it never
+adds elements.
+
+The consequences you can observe from Dart:
+
+- A fresh `<Msg>()` leaves a `count: N` array **empty** unless the schema
+  declares a `default`, and a declared default shorter than `N` is materialized
+  exactly as written (never tail-padded to `N`). `reset()` restores the same
+  thing. This holds for native and wrapper element kinds alike.
+- `marshal` writes **every** element the list holds. `<int>[1, 2, 0, 0]` and
+  `<int>[1, 2]` are different values with different bytes.
+- Decode yields exactly the elements the wire carried: `length` after a round
+  trip equals `length` before it, for both the compact scalar form and the
+  wrapper form.
+- A field is omitted only when it **equals its default** — for an array with no
+  declared default, only when it is empty. An all-zero `<int>[0, 0, 0, 0]` is a
+  four-element value and stays on the wire.
+
+Inside a wrapper-sequence array (string/blob/struct/union/nested-array elements)
+the **interior is sparse**: an element equal to the element default is dropped
+and leaves an id gap, which decode restores from that same default. The **last**
+element is always written — as its value, or as an empty frame for a
+struct/union/nested element — because its presence is what carries the length.
+So `<String>['a', '']`, `<String>['a']` and `<String>[]` are three distinct
+values that encode and decode distinctly.
+
 ### Encode model — lazy sequence framing (MESSAGE_SPEC §2)
 
 The `≠ default` omit test is per field and a **sequence-typed field is no
@@ -87,89 +106,72 @@ equal to its default, "no child was written" *is* "the value equals its declared
 default", evaluated per field and recursively — no buffering and no runtime
 whole-object compare.
 
-The **closer** is what decides whether a contentless frame survives, and the
-backend picks it statically from the position in the schema, never from the value:
+The **closer** is what decides whether a contentless frame survives:
 
 | position | closer emitted |
 |---|---|
 | `struct` / `union` field | `e.endSequence()` — frame dropped when empty |
 | array field (the wrapper) | `e.endSequence()` — frame dropped when empty |
-| wrapper-array **element** (`struct`/`union`/nested row) | `e.endSequenceKeep()` — frame always emitted |
+| wrapper-array **element** (`struct`/`union`/nested row) | `endSequenceKeep()` at the **last** index, `endSequence()` in the interior |
 
-An element keeps its frame because element presence is what carries a dynamic
-array's length (*highest present id + 1*, §5.1): dropping an all-default element
-would change the decoded **length**, not merely the bytes. Consequence: an
-all-default message encodes to **zero bytes**.
+A sequence-typed **field** always drops: an all-default one is omitted and
+absence reconstructs it. Consequence: an all-default message encodes to **zero
+bytes**.
 
-#### Where the element loop stops (§3/§5.1)
+An **element** is the one place the choice is positional, decided from the index
+in the *value* at run time — the schema cannot answer it:
 
-"Frame always emitted" is scoped to the elements the loop reaches, and a
-`count: N` array's element loop stops at **M** — one past its last element that
-differs from the element default — because that is what its canonical wire
-carries, *"even for sequence-form elements"*. So:
+```dart
+e.beginSequenceLazy(_i0); objs[_i0].marshal(e);
+if (_i0 == objs.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }
+```
 
-- an **interior** all-default element still gets its empty frame (element
-  presence carries the length);
-- the **trailing** run of all-default elements is elided;
-- `M == 0` writes no child at all, so the lazily-opened wrapper is dropped by
-  `endSequence` and the whole field is omitted (§2);
-- a **count-less** array is never narrowed: it has no `N` to refill from, so a
-  trailing default element is significant and keeps its frame.
+#### One sparse rule for both element kinds (§2)
 
-M comes from the generated `_trimLen(list, isDefault)` helper, and the
-all-default predicate it takes is the generated `bool get _isDefault` every class
-carries — the explicit form of the "no child was written" test the lazy framing
-already encodes implicitly for a *field*, needed here because an *element* must
-be judged **before** the loop opens. The marshal loop and `_isDefault` are
-generated from the **same** expression, so the writer and the predicate cannot
-drift apart: a predicate that narrowed a field the writer does not (or the
-reverse) would omit a field that is on the wire, or keep one that is not.
+An array element **before the last one** that equals its element default is
+omitted, leaving an id **gap** the decoder restores from that same default — a
+`string`/`blob` leaf is simply not written, a `struct`/`union`/nested-array
+element is **not framed** either. The **last** element is always written: a leaf
+as its value, a sequence element as an **empty frame**, because a wrapper array
+recovers its length as *highest present id + 1* (§5.1) and nothing that carries
+the length may be elided.
 
-The elision is only lossless because decode default-fills the array back out to
-`N` — see [Decode model](#decode-model).
+A leaf element expresses it on the write (`lastElemExpr`):
 
-The array wrapper may use the dropping closer because a wrapper array's declared
-`default` is not materialized by this backend (the generated field starts either
-empty or, for `count: N`, at N *element* defaults — never at the declared array
-default), so *absent* and *explicitly empty* denote the same value. If
-that gap is ever closed, the wrapper needs an `if (value != default) { …;
-e.endSequenceKeep(); }` guard so an explicitly-empty value differing from a
-non-empty default still reaches the wire as the empty wrapper (§2, §3).
+```dart
+if (fstrs[_i0].isNotEmpty || _i0 == fstrs.length - 1) e.writeString(_i0, fstrs[_i0]);
+```
 
-#### The last element of a dynamic array is always written (§2)
+a sequence element on the closer (above), and a **native nested row** — which has
+no frame of its own, being a single count-prefixed value — on the write again,
+with `isNotEmpty` as its element-default test.
 
-A `string`/`blob` array element is a **leaf**, not a frame: it is omitted when it
-equals the element default (empty), leaving an id gap the decoder restores. That
-is right for an interior element, and wrong for the **last** one of a *dynamic*
-array — such an array recovers its length as *highest present id + 1* (§5.1), so
-the element at the highest index is the only one whose **presence** carries the
-length. Dropping it made `["a", ""]` encode exactly like `["a"]` and decode one
-element short, and `["", ""]` encode to nothing at all. So the leaf omit test
-carries an `|| _i == list.length - 1` disjunct (`lastElemGuard`) whenever the
-array is count-less:
+A declared `count: N` changes none of this: `count` is a capacity, so it can
+never restore an elided tail. The same test applies with or without one.
 
 | value | wire | decodes as |
 |---|---|---|
-| `["a", ""]` | `06 02 0a 61 0a 02 07` | `["a", ""]` |
-| `["a"]` | `06 02 0a 61 07` | `["a"]` |
-| `["", ""]` | `06 0a 02 07` | `["", ""]` — final element alone, at id 1 |
+| `['a', '']` | `06 02 0a 61 0a 02 07` | `['a', '']` |
+| `['a']` | `06 02 0a 61 07` | `['a']` |
+| `['', '']` | `06 0a 02 07` | `['', '']` — final element alone, at id 1 |
+| `['', 'x', '']` | `06 0a 0a 78 12 02 07` | `['', 'x', '']` |
 | `[]` | *(nothing)* | `[]` |
-| `["", "b"]` | `06 0a 0a 62 07` | `["", "b"]` — interior gap still elided |
+| `[{k:1}, {k:0}, {k:3}]` | `06 06 00 01 07 16 00 03 07 07` | same — id 1 is a gap |
+| `[{k:0}, {k:0}]` | `06 0e 07 07` | same — the last frame survives alone |
 
-Sequence-form elements (`struct`/`union`/nested row) never had the problem —
-they are framed unconditionally — so this holds both element kinds to one
-standard. A `count: N` array is **exempt**: its length is N whatever the wire
-carries, which is why it elides the whole trailing default run instead, and the
-guard is emitted only for the dynamic case. `elemCountExpr` gates its leaf trim
-on the same `fixed` flag, so the writer and `_isDefault` still agree: a dynamic
-`[""]` is *not* default, and the field it writes is not omitted.
+The array wrapper may use the dropping closer because a wrapper array's declared
+`default` is not materialized by this backend (the generated field starts empty),
+so *absent* and *explicitly empty* denote the same value. If that gap is ever
+closed, the wrapper needs an `if (value != default) { …; e.endSequenceKeep(); }`
+guard so an explicitly-empty value differing from a non-empty default still
+reaches the wire as the empty wrapper (§2, §3).
 
 ### Decode model
 
 `corelib-dart` exposes the **push child-visitor** decode (like Go): a
 `MessageVisitor` whose `onSequenceStart(id)` returns a child visitor for a nested
 scope, and whose native arrays arrive whole through a distinct `on*Array`
-callback. Two consequences the generated code relies on:
+callback. Three consequences the generated code relies on:
 
 - **MESSAGE_SPEC S7.3 / S7.4 are settled structurally.** A contradictory header —
   a wrong wire type, a fixlen subtype mismatch, or an integer/fp **array** at a
@@ -184,26 +186,23 @@ callback. Two consequences the generated code relies on:
   cleared before the decode starts (see [Reusing a
   destination](#reusing-a-destination)).
 
-- **A wrapper element's id IS its array index (§5.1).** The `_ObjSeq` /
-  `_StrSeq` / `_BlobSeq` collectors gap-fill with default elements up to the
-  child id and then decode **into** `out[id]` — never append. Appending would
-  shorten the array by the size of any interior id gap, and would decode a
-  *re-opened* element id as a second element instead of merging into the first
-  (§7.4, which placement gives for free). The over-index guard (`id >= cap` is
-  INVALID) also bounds the gap-fill.
+- **A wrapper element's id IS its array index (§5.1).** *Every* collector —
+  `_ObjSeq` / `_StrSeq` / `_BlobSeq` for the leaf and object kinds, and
+  `_IntMat` / `_DblMat` / `_BoolMat` / `_SeqSeq` for the row kinds — gap-fills
+  with default elements up to the child id and then decodes **into** `out[id]`,
+  never appends. Appending would shorten the array by the size of any interior
+  id gap — and an omitted all-default interior element is exactly such a gap —
+  and would decode a *re-opened* element id as a second element instead of
+  merging into the first (§7.4, which placement gives for free). The over-index
+  guard (`id >= cap` is INVALID) also bounds the gap-fill; the row collectors
+  take the **outer** array's `cap`, since a row's element id is its index in
+  that array.
 
-- **A `count: N` wrapper array is default-filled back out to N.** Its length "is
-  N for every target — a growable-list target MUST default-fill to N exactly like
-  a pre-sized one" (§5.1), so each collector overrides `onSequenceEnd` to restore
-  positions `[M, N)` when the wrapper scope closes. This is the prerequisite for
-  the encode-side trailing elision above: without it the trim would not
-  *normalise* the array, it would **shorten** it on every round trip. A
-  count-less array (`cap < 0`) is left at its wire length. `onSequenceEnd` only
-  runs for a wrapper the wire actually opened, so it is only half the rule: an
-  **omitted** field never reaches a collector at all, and gets its N from the
-  field initializer / `reset()` instead (see [Generated
-  shape](#generated-shape)). Between them, absent, partially-transmitted and
-  explicitly-empty all land at N.
+- **Nothing is filled in after the wire.** The wire count M *is* a compact
+  array's length and *highest present id + 1* is a wrapper array's, so the
+  elements that arrived are the whole value. A `count: N` bounds M (over-count /
+  over-index → INVALID) but never adds elements, so a decoded array has exactly
+  the length the sender gave it.
 
 - **INVALID verdicts ride a sticky flag.** The corelib's visitor callbacks return
   `void`, so a generated visitor cannot fail the decode mid-stream. The over-count
@@ -234,10 +233,8 @@ reason), and for recycling an instance between encodes.
 It restores each field in place, so a reused instance keeps its backing storage:
 a nested `struct`/`union` member is `reset()` recursively rather than
 reconstructed, and a list is `clear()`ed (and, when it has a materialized value,
-refilled from a literal). A native array's literal is `const`, which the compiler
-canonicalizes — that refill allocates nothing; a `count: N` **wrapper** array's
-is deliberately *not*, since a struct/union element has to be a fresh instance
-per reset rather than one shared across every reset of every message. Two
+refilled from its declared default's literal). That literal is `const`, which the
+compiler canonicalizes — so the refill allocates nothing. Two
 kinds are assigned instead, because Dart has no in-place form for them: a `blob`
 (`Uint8List` is fixed-length) and an **fp32 array**, whose member holds the
 fixed-length `Float32List` that decode installs to keep a signaling NaN's bits
@@ -275,10 +272,10 @@ the generated code uses that path:
   bits were captured, else `writeFp32` — the `!= default` omit test is unchanged
   (a NaN never equals the default).
 - **Array** — elements bind through `_f32copy`, a **raw byte copy** into a fresh
-  `Float32List` (never `List<double>.from`, which widens each element). A
-  fixed-count array is allocated at its schema `N`, leaving the tail at the `+0.0`
-  default (so no separate `_padTo`); `writeFp32Array` re-emits a `Float32List`'s
-  bytes verbatim. Nested fp32 rows (`_DblMat`) copy the same way.
+  `Float32List` (never `List<double>.from`, which widens each element) of exactly
+  the wire count — a `count: N` is a capacity and adds no elements;
+  `writeFp32Array` re-emits a `Float32List`'s bytes verbatim. Nested fp32 rows
+  (`_DblMat`) copy the same way.
 
 The `recode` harness mode (wire → object → wire, no JSON) round-trips a signaling,
 a payload/quiet, and a negative NaN — scalar and array — byte-for-byte in

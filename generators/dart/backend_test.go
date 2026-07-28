@@ -112,14 +112,15 @@ func TestSparseOmitGuards(t *testing.T) {
 	}
 }
 
-// TestLazySequenceFraming locks MESSAGE_SPEC S2 framing: every sequence is opened
-// with beginSequenceLazy, and the CLOSER is picked statically from the position in
-// the schema. A struct/union FIELD and an array wrapper FIELD close with the
-// dropping endSequence, so an all-default one is omitted instead of emitted as an
-// empty frame; a wrapper-array ELEMENT closes with endSequenceKeep, because element
-// presence is what carries a dynamic array's length (S5.1). example.yaml has a
-// struct field (id 20), a union field (id 21), a struct-array (id 23) and a
-// union-array (id 25).
+// TestLazySequenceFraming locks MESSAGE_SPEC §2 framing: every sequence is opened
+// with beginSequenceLazy, and the CLOSER is what decides whether a contentless one
+// survives. A struct/union FIELD and an array wrapper FIELD close with the dropping
+// endSequence, so an all-default one is omitted instead of emitted as an empty
+// frame. A sequence-form array ELEMENT chooses POSITIONALLY, from the index in the
+// value at run time: the keeping closer at the array's last index (its presence is
+// what carries the length, §5.1), the dropping one in the interior, where an
+// all-default element vanishes into an id gap. example.yaml has a struct field
+// (id 20), a union field (id 21), a struct-array (id 23) and a union-array (id 25).
 func TestLazySequenceFraming(t *testing.T) {
 	out := genFor(t, exampleDef, map[string]any{})
 	for _, want := range []string{
@@ -128,9 +129,11 @@ func TestLazySequenceFraming(t *testing.T) {
 		"e.beginSequenceLazy(21); someunion.marshal(e); e.endSequence();",
 		// FIELD: the struct-array wrapper (id 23) -- also the dropping closer.
 		"e.beginSequenceLazy(23);",
-		// ELEMENT: a struct/union element keeps its frame even when all-default.
-		"e.beginSequenceLazy(_i0); somestructarray[_i0].marshal(e); e.endSequenceKeep();",
-		"e.beginSequenceLazy(_i0); someunionarray[_i0].marshal(e); e.endSequenceKeep();",
+		// ELEMENT: the closer is chosen from the position in the VALUE.
+		"e.beginSequenceLazy(_i0); somestructarray[_i0].marshal(e);\n" +
+			"      if (_i0 == somestructarray.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }",
+		"e.beginSequenceLazy(_i0); someunionarray[_i0].marshal(e);\n" +
+			"      if (_i0 == someunionarray.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("sequence framing missing %q", want)
@@ -140,10 +143,10 @@ func TestLazySequenceFraming(t *testing.T) {
 	if strings.Contains(out, "e.beginSequence(") {
 		t.Error("eager e.beginSequence( emitted; every sequence must open with beginSequenceLazy")
 	}
-	// The wrapper FIELD must close with the dropping end. Count both closers: the
-	// keeping one appears exactly once per sequence-form element loop body.
-	if got, want := strings.Count(out, "e.endSequenceKeep();"), strings.Count(out, ".marshal(e); e.endSequenceKeep();"); got != want {
-		t.Errorf("endSequenceKeep used outside an array element body: %d keeping closers, %d element bodies", got, want)
+	// The keeping closer must never appear unconditionally: it is only ever reached
+	// through the last-element test.
+	if got, want := strings.Count(out, "e.endSequenceKeep();"), strings.Count(out, ".length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }"); got != want {
+		t.Errorf("endSequenceKeep emitted unconditionally: %d keeping closers, %d positional choices", got, want)
 	}
 }
 
@@ -170,17 +173,19 @@ func TestResetRestoresDefaults(t *testing.T) {
 		// an all-default struct in the next message is omitted entirely.
 		"    somestruct.reset();",
 		"    someunion.reset();",
-		// Wrapper-sequence arrays (string/blob/struct/union/nested) clear -- and,
-		// since all three of these declare `count: N`, refill to N element defaults:
-		// a count:N array is N long whether or not the field reaches the wire
-		// (S5.1), exactly like the native count:N arrays below.
-		"    somestringarray..clear()..addAll(<String>['', '', '', '', '']);",
-		"    somestructarray..clear()..addAll(<MyfirstmessageSomestructarrayElem>[MyfirstmessageSomestructarrayElem(), MyfirstmessageSomestructarrayElem(), MyfirstmessageSomestructarrayElem()]);",
-		"    somematrix..clear()..addAll(<List<int>>[<int>[], <int>[]]);",
-		// A native array with a materialized default is cleared and refilled from a
+		// Wrapper-sequence arrays (string/blob/struct/union/nested) reset to EMPTY,
+		// their declared `count: N` notwithstanding: N is a capacity, not a length
+		// (§3), so a fresh array holds no elements -- which is also what an absent
+		// field decodes back to.
+		"    somestringarray.clear();",
+		"    somestructarray.clear();",
+		"    somematrix.clear();",
+		// A native array with a declared default is cleared and refilled from a
 		// const literal: no reallocation of the list, none of the default either.
+		// The literal is the default EXACTLY as written, never padded out to N --
+		// someenumarray declares count: 4 with a 3-element default.
 		"    someuintarray..clear()..addAll(const <int>[0, 1, 1000, 4294967295]);",
-		"    someenumarray..clear()..addAll(const <int>[2, 1, 0, 0]);",
+		"    someenumarray..clear()..addAll(const <int>[2, 1, 0]);",
 		// fp32 arrays are the one exception: decode installs a fixed-length
 		// Float32List (bit-exact NaN copy), which cannot be cleared.
 		"    somefloatarray = <double>[0.0, -1.5, 3.25];",
@@ -215,10 +220,10 @@ func TestResetIsInPlaceForReuse(t *testing.T) {
 	body := out[strings.Index(out, "  void reset() {"):]
 	body = body[:strings.Index(body, "\n  }")]
 	for _, want := range []string{
-		// `names` is count:2, so it is refilled to its 2 element defaults, not left
-		// empty -- in place, like the native count:3 `nums` beside it. `dyn` is
-		// count-less: no N to refill from, so it stays at the bare clear.
-		"    names..clear()..addAll(<String>['', '']);",
+		// `names` is count:2 with no declared default, so it resets EMPTY -- a
+		// capacity adds no elements (§3). `nums` refills from its declared default,
+		// in place. `dyn` is count-less and has none: the bare clear.
+		"    names.clear();",
 		"    nums..clear()..addAll(const <int>[1, 2, 3]);",
 		"    dyn.clear();",
 	} {
@@ -231,10 +236,11 @@ func TestResetIsInPlaceForReuse(t *testing.T) {
 	}
 }
 
-// TestNestedRowKeepsItsFrame: a nested array row is an ELEMENT (depth > 0), so its
-// wrapper closes with endSequenceKeep even though the identically-shaped field-level
-// wrapper (depth 0) closes with the dropping endSequence.
-func TestNestedRowKeepsItsFrame(t *testing.T) {
+// TestNestedRowClosesPositionally: a nested wrapper row is an ELEMENT (depth > 0),
+// so its closer is chosen from its index in the value -- keeping at the last row,
+// dropping in the interior, where an empty row becomes an id gap. The identically-
+// shaped field-level wrapper (depth 0) always drops.
+func TestNestedRowClosesPositionally(t *testing.T) {
 	def := filepath.Join(t.TempDir(), "matrix.yaml")
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      rows: { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } }\n"
@@ -245,12 +251,12 @@ func TestNestedRowKeepsItsFrame(t *testing.T) {
 	if !strings.Contains(out, "e.beginSequenceLazy(0);") {
 		t.Error("array FIELD wrapper not opened lazily")
 	}
-	// depth 0 (the field) drops, depth 1 (the row element) keeps.
-	if !strings.Contains(out, "e.endSequenceKeep();") {
-		t.Error("nested row (an array ELEMENT) must close with endSequenceKeep")
+	if !strings.Contains(out, "      if (_i0 == rows.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }") {
+		t.Errorf("a nested wrapper row must choose its closer positionally:\n%s", out)
 	}
-	if strings.Count(out, "e.endSequence();") != 1 {
-		t.Errorf("expected exactly one dropping closer (the field wrapper), got %d", strings.Count(out, "e.endSequence();"))
+	// The FIELD wrapper is the only unconditional dropping closer.
+	if got := strings.Count(out, "    e.endSequence();\n"); got != 1 {
+		t.Errorf("expected exactly one unconditional dropping closer (the field wrapper), got %d:\n%s", got, out)
 	}
 }
 
@@ -273,7 +279,8 @@ func TestFp32SignalingNaNPreserved(t *testing.T) {
 		"if (somefp32.isNaN && _somefp32Fp32Bits != null) { e.writeFp32Bits(8, _somefp32Fp32Bits!); }",
 		// Array: a bit-exact Float32List copy, never a widening List<double>.from.
 		"Float32List _f32copy(Float32List v, int n) {",
-		"o.somefloatarray = _f32copy(values, 3);",
+		// exactly the wire count: `count: 3` is a capacity and adds no elements (§3)
+		"o.somefloatarray = _f32copy(values, values.length);",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("fp32 sNaN codegen missing %q", want)
@@ -404,221 +411,216 @@ func writeDef(t *testing.T, src string) string {
 	return def
 }
 
-const trimDef = "version: 1\nmessages:\n  vec:\n    payload:\n" +
+// capDef exercises every array shape the `count`-is-a-capacity rule touches:
+// a count:N and a count-less struct array, count:N string/blob wrapper arrays, a
+// count:N native array with and without a declared default, a native matrix and a
+// wrapper-row matrix.
+const capDef = "version: 1\nmessages:\n  vec:\n    payload:\n" +
 	"      fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }\n" +
 	"      dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }\n" +
-	"      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }\n"
+	"      fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }\n" +
+	"      fblobs:  { id: 3, type: array, items: { type: blob, count: 4, maxlen: 8 } }\n" +
+	"      fnums:   { id: 4, type: array, items: { type: u32, count: 4 } }\n" +
+	"      withdef: { id: 5, type: array, items: { type: u32, count: 4 }, default: [1, 2] }\n" +
+	"      rows:    { id: 6, type: array, items: { type: array, count: 3, items: { type: u32, count: 3 } } }\n" +
+	"      srows:   { id: 7, type: array, items: { type: array, count: 3, items: { type: string, maxlen: 4 } } }\n"
 
-// A count:N wrapper array's canonical wire stops at M -- one past its last
-// non-default element (MESSAGE_SPEC S3/S5.1, "even for sequence-form elements")
-// -- and M == 0 leaves the whole wrapper omitted (S2). generator#248: the
-// element loop used to run to length, framing every trailing all-default
-// element, so a decoder that accepted the non-canonical form re-encoded it
-// unchanged instead of normalising. A DYNAMIC array has no N to refill from, so
-// its trailing default element is significant and must still be framed.
-func TestDartFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
-	out := genFor(t, writeDef(t, trimDef), map[string]any{})
+// A schema `count: N` is a CAPACITY, never a length (MESSAGE_SPEC §3, af536c4):
+// it never reaches the wire, it bounds the array, and it never adds an element the
+// value does not hold. So a count:N array starts and resets EMPTY unless a default
+// is declared, a short declared default stands exactly as written, and the field's
+// omit test is the ordinary `!= default` compare with nothing padded to N on
+// either side. An all-zero length-N value differs from the empty one and stays on
+// the wire.
+func TestDartCountIsACapacityNotALength(t *testing.T) {
+	out := genFor(t, writeDef(t, capDef), map[string]any{})
 
-	// The fixed array narrows to M before framing anything...
-	if !strings.Contains(out, "for (var _i0 = 0, _n0 = _trimLen(fixed, (x) => x._isDefault); _i0 < _n0; _i0++) {") {
-		t.Errorf("count:N struct array must loop to M, not length:\n%s", out)
-	}
-	// ...while the dynamic one keeps every element, trailing defaults included.
-	if !strings.Contains(out, "for (var _i0 = 0, _n0 = dynamic_.length; _i0 < _n0; _i0++) {") {
-		t.Errorf("dynamic struct array must not be narrowed:\n%s", out)
-	}
-	// An interior all-default element is still framed: only the TRAILING run goes.
-	if !strings.Contains(out, "e.beginSequenceLazy(_i0); fixed[_i0].marshal(e); e.endSequenceKeep();") {
-		t.Errorf("interior elements must keep the framing closer:\n%s", out)
+	for _, want := range []string{
+		// Initializers: empty for every count:N array, wrapper and native alike.
+		"  List<VecFixedElem> fixed = <VecFixedElem>[];",
+		"  List<String> fstrs = <String>[];",
+		"  List<Uint8List> fblobs = <Uint8List>[];",
+		"  List<int> fnums = <int>[];",
+		// A declared default is materialized EXACTLY as written -- count: 4 with a
+		// 2-element default stays 2 elements long.
+		"  List<int> withdef = <int>[1, 2];",
+		// reset() restores the same thing, in place.
+		"    fixed.clear();",
+		"    fstrs.clear();",
+		"    fblobs.clear();",
+		"    fnums.clear();",
+		"    withdef..clear()..addAll(const <int>[1, 2]);",
+		// The field omit test: emptiness, or an exact compare against the declared
+		// default -- neither side padded to N.
+		"    if (fnums.isNotEmpty) { e.writeUnsignedArray(4, fnums); }",
+		"    if (!_listEq(withdef, <int>[1, 2])) { e.writeUnsignedArray(5, withdef); }",
+		// ...and _isDefault is the exact negation of it.
+		"    if (!(fnums.isEmpty)) return false;",
+		"    if (!(_listEq(withdef, <int>[1, 2]))) return false;",
+		// A wrapper array writes a child for every element it holds (the last one
+		// unconditionally), so "no child written" IS "empty" -- for count:N and
+		// count-less alike, no narrowing on either side.
+		"    if (!(fixed.isEmpty)) return false;",
+		"    if (!(dynamic_.isEmpty)) return false;",
+		"    if (!(fstrs.isEmpty)) return false;",
+		"    if (!(rows.isEmpty)) return false;",
+		"    if (!(srows.isEmpty)) return false;",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated Dart missing %q:\n%s", want, out)
+		}
 	}
 
-	// _isDefault is the exact negation of what marshal writes, so it must narrow a
-	// field exactly when the marshal loop does -- disagreeing would either omit a
-	// field that is on the wire or keep one that is not.
-	if !strings.Contains(out, "if (!(_trimLen(fixed, (x) => x._isDefault) == 0)) return false;") {
-		t.Errorf("_isDefault must narrow the fixed array like marshal does:\n%s", out)
-	}
-	if !strings.Contains(out, "if (!(dynamic_.length == 0)) return false;") {
-		t.Errorf("_isDefault must NOT narrow the dynamic array:\n%s", out)
-	}
-	if !strings.Contains(out, "if (!(_trimLen(fstrs, (x) => x.isEmpty) == 0)) return false;") {
-		t.Errorf("_isDefault for a string wrapper array must test the trimmed run:\n%s", out)
-	}
-	// The all-default predicate itself: emitted for every class, per field and
-	// recursively, so an ELEMENT can be judged before the element loop opens.
-	if !strings.Contains(out, "bool get _isDefault {") {
-		t.Errorf("every generated class must carry the all-default predicate:\n%s", out)
-	}
-	if !strings.Contains(out, "int _trimLen<T>(List<T> a, bool Function(T) isDef) {") {
-		t.Errorf("the M helper must be emitted:\n%s", out)
+	// The superseded fixed-length reading, in every form it took: a count:N array
+	// materialized to N element defaults, a short default tail-padded to N, the
+	// trailing-run trim on encode and the fill-to-N on decode.
+	for _, notWant := range []string{
+		"<VecFixedElem>[VecFixedElem(),",
+		"<String>['', '',",
+		"<Uint8List>[Uint8List(0),",
+		"<int>[0, 0, 0, 0]",
+		"<int>[1, 2, 0, 0]",
+		"_trimLen(", "_trimInt(", "_trimF32(", "_trimF64(", "_padTo(",
+		"void onSequenceEnd()",
+	} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("`count` is a capacity: %q must not be generated:\n%s", notWant, out)
+		}
 	}
 }
 
-// generator#247 (already correct in Dart -- pinned as a regression): a wrapper
-// array's element id IS the array index (S5.1), so an element is PLACED at
-// out[id] after gap-filling -- never appended. Appending would shorten the array
-// by the size of any interior id gap and would decode a REOPENED id as a second
-// element instead of merging into the first (S7.4).
-//
-// The N-fill on onSequenceEnd is what makes the S3/S5.1 trailing elision
-// lossless: without it, re-encoding a decoded fixed array shortens it on every
-// round trip. That is the prerequisite generator#248 could not land without.
-func TestDartWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
-	out := genFor(t, writeDef(t, trimDef), map[string]any{})
+// One sparse rule, both element kinds, with or without a declared count
+// (MESSAGE_SPEC §2, af536c4): an element BEFORE the last one that equals its
+// element default is omitted, leaving an id GAP -- a string/blob leaf is not
+// written, a struct/union/nested-array element is not framed either. The LAST
+// element is always written: a leaf as its value, a sequence element as an empty
+// frame. The choice is positional, from the index in the VALUE at run time; the
+// schema cannot answer it.
+func TestDartArrayElementSparsityIsPositional(t *testing.T) {
+	out := genFor(t, writeDef(t, capDef), map[string]any{})
 
 	for _, want := range []string{
-		// placement, not append -- and the gap-fill that precedes it
-		"    while (out.length <= id) { out.add(make()); }\n    return vis(out[id]);",
-		// N-fill when the sequence scope closes, for every wrapper collector
-		"  void onSequenceEnd() {\n    if (cap < 0) return;\n    while (out.length < cap) { out.add(make()); }\n  }",
-		"  void onSequenceEnd() {\n    if (cap < 0) return;\n    while (out.length < cap) { out.add(''); }\n  }",
-		// the over-index guard still bounds both the placement and the gap-fill
-		"    if (cap >= 0 && id >= cap) { e.inv = true; return null; }",
-		// the schema count reaches the collector as its cap; the dynamic one is -1
+		// Leaf elements: the omit test escapes at the last index. Unconditional now
+		// -- the count:N carve-out ("its length is N whatever the wire carries") is
+		// gone, so fstrs/fblobs carry the very same guard a count-less array does.
+		"for (var _i0 = 0; _i0 < fstrs.length; _i0++) { if (fstrs[_i0].isNotEmpty || _i0 == fstrs.length - 1) e.writeString(_i0, fstrs[_i0]); }",
+		"for (var _i0 = 0; _i0 < fblobs.length; _i0++) { if (fblobs[_i0].isNotEmpty || _i0 == fblobs.length - 1) e.writeBlob(_i0, fblobs[_i0]); }",
+		// Sequence-form elements: the loop runs to length (no trailing elision) and
+		// the CLOSER decides -- dropping in the interior, keeping at the last index.
+		"    for (var _i0 = 0; _i0 < fixed.length; _i0++) {\n" +
+			"      e.beginSequenceLazy(_i0); fixed[_i0].marshal(e);\n" +
+			"      if (_i0 == fixed.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }\n" +
+			"    }",
+		"    for (var _i0 = 0; _i0 < dynamic_.length; _i0++) {\n" +
+			"      e.beginSequenceLazy(_i0); dynamic_[_i0].marshal(e);\n" +
+			"      if (_i0 == dynamic_.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }\n" +
+			"    }",
+		// A NATIVE row has no frame of its own, so the rule lands on the write.
+		"      if (rows[_i0].isNotEmpty || _i0 == rows.length - 1) e.writeUnsignedArray(_i0, rows[_i0]);",
+		// A WRAPPER row has one, so it takes the closer -- and its own elements obey
+		// the same rule one level down.
+		"      if (_i0 == srows.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }",
+		"if (srows[_i0][_i1].isNotEmpty || _i1 == srows[_i0].length - 1) e.writeString(_i1, srows[_i0][_i1]);",
+		// A sequence-typed FIELD still always drops.
+		"    e.endSequence();",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated Dart missing %q:\n%s", want, out)
+		}
+	}
+
+	// The superseded shapes: an unconditional keeping closer on an element (the
+	// old "sequence elements are framed unconditionally" carve-out), and a leaf
+	// omit test with no last-element escape (the old fixed-count trailing elision).
+	for _, notWant := range []string{
+		"marshal(e); e.endSequenceKeep();",
+		"if (fstrs[_i0].isNotEmpty) e.writeString",
+		"if (fblobs[_i0].isNotEmpty) e.writeBlob",
+	} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("superseded element rule still generated (%q):\n%s", notWant, out)
+		}
+	}
+}
+
+// Decode: a wrapper element's id IS its array index (§5.1), so EVERY collector
+// places at out[id] after gap-filling -- never appends. Interior sparsity makes an
+// interior gap reachable for the first time, and an appending collector would shift
+// every later element down by one. The row collectors (_IntMat / _DblMat /
+// _BoolMat / _SeqSeq) were the ones appending id-blind in this backend's siblings;
+// here they already placed by id but carried no bound, so they also gain the outer
+// array's cap -- which rejects an over-index row and bounds the gap-fill against an
+// over-index amplification DoS.
+func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
+	out := genFor(t, writeDef(t, capDef), map[string]any{})
+
+	for _, want := range []string{
+		// leaf / object collectors: guard, gap-fill, place
+		"    if (cap >= 0 && id >= cap) { e.inv = true; return; }\n" +
+			"    if (emax >= 0 && _u8len(value) > emax) { e.inv = true; return; }\n" +
+			"    while (out.length <= id) { out.add(''); }\n" +
+			"    out[id] = value;",
+		"    if (cap >= 0 && id >= cap) { e.inv = true; return null; }\n" +
+			"    while (out.length <= id) { out.add(make()); }\n" +
+			"    return vis(out[id]);",
+		// native-row collector: bounded placement, not an append
+		"  void _row(int id, Int64List v) {\n" +
+			"    if (cap >= 0 && id >= cap) { e.inv = true; return; }\n" +
+			"    while (out.length <= id) { out.add(<int>[]); }\n" +
+			"    out[id] = List<int>.from(v);\n" +
+			"  }",
+		// wrapper-row collector: same
+		"    if (cap >= 0 && id >= cap) { e.inv = true; return null; }\n" +
+			"    while (out.length <= id) { out.add(<T>[]); }\n" +
+			"    return make(out[id]);",
+		// the schema count reaches every collector as its cap; count-less is -1, and
+		// the ROW collectors take the OUTER array's cap (a row id is its index there)
 		"_ObjSeq<VecFixedElem>(o.fixed, 5, e,",
 		"_ObjSeq<VecDynamicElem>(o.dynamic_, -1, e,",
 		"_StrSeq(o.fstrs, 3, 8, e)",
+		"_BlobSeq(o.fblobs, 4, 8, e)",
+		"_IntMat(o.rows, 3, false, e)",
+		"_SeqSeq<String>(o.srows, 3, e, (p) => _StrSeq(p, -1, 4, e))",
+		// M elements arrived, M is the length: the count word is bounded, nothing
+		// is filled in behind it.
+		"        if (values.length > 4) { e.inv = true; return; }\n        o.fnums = List<int>.from(values);\n        return;",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
 		}
 	}
-	// The defect the placement replaced: appending ignores the id entirely.
-	if strings.Contains(out, "out.add(make());\n    return vis(out[out.length - 1]);") {
-		t.Errorf("_ObjSeq must not append id-blind:\n%s", out)
-	}
-}
 
-// A blob wrapper array gets the same N-fill, and an emax-bounded element keeps
-// its guard: the fill must not disturb the over-index / over-maxlen rejects.
-func TestDartBlobWrapperArrayFillsToN(t *testing.T) {
-	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
-		"      blobs: { id: 0, type: array, items: { type: blob, count: 4, maxlen: 8 } }\n"
-	out := genFor(t, writeDef(t, src), map[string]any{})
-	for _, want := range []string{
-		"  void onSequenceEnd() {\n    if (cap < 0) return;\n    while (out.length < cap) { out.add(Uint8List(0)); }\n  }",
-		"    if (emax >= 0 && value.length > emax) { e.inv = true; return; }",
-		"_BlobSeq(o.blobs, 4, 8, e)",
+	// The id-blind append the reference backend had to fix, in both row shapes.
+	for _, notWant := range []string{
+		"out.add(List<int>.from(v));",
+		"out.add(<T>[]);\n    return make(out[out.length - 1]);",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("blob wrapper array missing %q:\n%s", want, out)
+		if strings.Contains(out, notWant) {
+			t.Errorf("a row collector must not append id-blind (%q):\n%s", notWant, out)
 		}
 	}
 }
 
-// A DYNAMIC wrapper array must be left alone end to end: no trim on the marshal
-// side (a trailing default element is significant when there is no N to refill
-// from) and no fill on the decode side (its length is highest-present-id + 1).
-func TestDartDynamicWrapperArrayIsNeitherTrimmedNorFilled(t *testing.T) {
+// An fp32 array binds through the bit-exact _f32copy, and its length is the WIRE
+// count -- a `count: N` is a capacity and pre-allocates nothing (§3). Pinned
+// separately because the fp32 path used to pass the schema N here, which was the
+// fill-to-N in disguise.
+func TestDartFp32ArrayTakesTheWireLength(t *testing.T) {
 	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
-		"      strs: { id: 0, type: array, items: { type: string, maxlen: 8 } }\n" +
-		"      objs: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }\n"
+		"      f32s: { id: 0, type: array, items: { type: fp32, count: 3 } }\n" +
+		"      f64s: { id: 1, type: array, items: { type: fp64, count: 3 } }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
-	if strings.Contains(out, "_trimLen(") {
-		t.Errorf("a schema with no count:N wrapper array must not emit the M helper:\n%s", out)
-	}
-	if !strings.Contains(out, "_StrSeq(o.strs, -1, 8, e)") || !strings.Contains(out, "_ObjSeq<VecObjsElem>(o.objs, -1, e,") {
-		t.Errorf("dynamic wrapper arrays must pass cap -1:\n%s", out)
-	}
-	// cap -1 short-circuits the fill at runtime; the guard must be present.
-	if !strings.Contains(out, "    if (cap < 0) return;") {
-		t.Errorf("the N-fill must short-circuit for a dynamic array:\n%s", out)
-	}
-}
-
-// A `count: N` array's value is N elements long whether or not the field ever
-// reaches the wire (S5.1: the length "is N for every target"). The native kinds
-// have always been materialized at construction from their padded default
-// literal; a WRAPPER array was not, so the two disagreed about the same schema
-// -- a count:3 u32 array at length 3 next to a count:3 string array at length 0
-// -- and the wrapper field disagreed with ITSELF: the collector's onSequenceEnd
-// fill can only fill a sequence that was actually opened, so an absent field
-// stayed empty while an explicitly-empty wrapper came back at N.
-//
-// Both the field initializer and reset() must materialize N element defaults,
-// or decode()'s fresh destination and tryDecode()'s reused one would disagree.
-func TestDartFixedWrapperArrayIsMaterializedToN(t *testing.T) {
-	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
-		"      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }\n" +
-		"      nums:  { id: 1, type: array, items: { type: u32, count: 3 } }\n" +
-		"      blobs: { id: 2, type: array, items: { type: blob, count: 2, maxlen: 8 } }\n" +
-		"      objs:  { id: 3, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }\n" +
-		"      dyn:   { id: 4, type: array, items: { type: string, maxlen: 8 } }\n"
-	out := genFor(t, writeDef(t, src), map[string]any{})
-
 	for _, want := range []string{
-		// The wrapper initializer sits right beside the native one it must match.
-		"  List<String> strs = <String>['', '', ''];",
-		"  List<int> nums = <int>[0, 0, 0];",
-		"  List<Uint8List> blobs = <Uint8List>[Uint8List(0), Uint8List(0)];",
-		"  List<VecObjsElem> objs = <VecObjsElem>[VecObjsElem(), VecObjsElem()];",
-		// reset() restores the same N, in place -- and NOT `const` for a struct
-		// element, which must be a fresh instance per reset.
-		"    strs..clear()..addAll(<String>['', '', '']);",
-		"    blobs..clear()..addAll(<Uint8List>[Uint8List(0), Uint8List(0)]);",
-		"    objs..clear()..addAll(<VecObjsElem>[VecObjsElem(), VecObjsElem()]);",
-		// A count-less wrapper array has no N: it starts and resets empty.
-		"  List<String> dyn = <String>[];",
-		"    dyn.clear();",
+		"o.f32s = _f32copy(values, values.length);",
+		"o.f64s = List<double>.from(values);",
+		"  List<double> f32s = <double>[];",
+		"  List<double> f64s = <double>[];",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
 		}
 	}
-	// The defect: a fixed-count wrapper array left at the count-less empty literal.
-	if strings.Contains(out, "  List<String> strs = <String>[];") {
-		t.Errorf("count:3 string array must not be materialized empty:\n%s", out)
-	}
-	if strings.Contains(out, "    strs.clear();") {
-		t.Errorf("count:3 string array must not reset to empty:\n%s", out)
-	}
-	// Materializing N defaults must not put the field on the wire: an all-default
-	// wrapper is still omitted whole (S2), which is what the M-trim buys.
-	if !strings.Contains(out, "if (!(_trimLen(strs, (x) => x.isEmpty) == 0)) return false;") {
-		t.Errorf("an all-default count:N wrapper array must still read as default:\n%s", out)
-	}
-}
-
-// The last element of a DYNAMIC wrapper array is always written, whatever its
-// value (MESSAGE_SPEC §2). Such an array recovers its length as highest-present-
-// id + 1 (§5.1), so the element at the highest index is the only one whose
-// PRESENCE carries the length: dropping a trailing default leaf encoded ["a", ""]
-// exactly like ["a"] and decoded one element short. Sequence-form elements never
-// had the problem -- they are framed unconditionally -- so this holds both
-// element kinds to one standard. A fixed-count array is exempt: its length is N
-// whatever the wire carries, so it still elides the whole trailing run.
-func TestDartDynamicArrayAlwaysWritesLastElement(t *testing.T) {
-	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
-		"      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }\n" +
-		"      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }\n" +
-		"      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }\n"
-	out := genFor(t, writeDef(t, src), map[string]any{})
-
-	for _, want := range []string{
-		// dynamic: the last index escapes the omit test
-		"if (dynstr[_i0].isNotEmpty || _i0 == dynstr.length - 1) e.writeString(_i0, dynstr[_i0]);",
-		"if (dynblob[_i0].isNotEmpty || _i0 == dynblob.length - 1) e.writeBlob(_i0, dynblob[_i0]);",
-		// fixed: no guard -- the trailing run still collapses, the decoder refills to N
-		"if (fixedstr[_i0].isNotEmpty) e.writeString(_i0, fixedstr[_i0]);",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("generated Dart missing %q:\n%s", want, out)
-		}
-	}
-	// The all-default predicate has to follow the writer: a dynamic [""] now puts
-	// an element on the wire, so the field is NOT default and must not be omitted.
-	// Trimming it here would drop a field that the marshal loop writes.
-	if !strings.Contains(out, "if (!(dynstr.length == 0)) return false;") {
-		t.Errorf("_isDefault must not trim a dynamic string array:\n%s", out)
-	}
-	if !strings.Contains(out, "if (!(dynblob.length == 0)) return false;") {
-		t.Errorf("_isDefault must not trim a dynamic blob array:\n%s", out)
-	}
-	if strings.Contains(out, "_trimLen(dynstr") || strings.Contains(out, "_trimLen(dynblob") {
-		t.Errorf("a dynamic string/blob array must not be trimmed:\n%s", out)
-	}
-	// The fixed one keeps its trim on both sides.
-	if !strings.Contains(out, "if (!(_trimLen(fixedstr, (x) => x.isEmpty) == 0)) return false;") {
-		t.Errorf("a count:N string array must still be trimmed:\n%s", out)
+	if strings.Contains(out, "_f32copy(values, 3)") || strings.Contains(out, "_padTo(") {
+		t.Errorf("an fp32/fp64 count:N array must not be pre-sized to N:\n%s", out)
 	}
 }
