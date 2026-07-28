@@ -61,75 +61,71 @@ counter lives in the visitor), leaves legitimate arrays untouched, and still
 decodes a real scalar arriving at that id after the array. The fp arrays are never
 armed — their elements go to the float callbacks and cannot reach a scalar arm.
 
-## Wrapper arrays: placement, N-fill and the trailing run (issues #247, #248)
+## Arrays — `count` is a capacity
 
-A wrapper array's element id **is** the array index (MESSAGE_SPEC §5.1), and a
-`count: N` array's canonical wire stops at `M`, one past its last non-default
-element — "even for sequence-form elements" (§3/§5.1). Four pieces implement that
-here, and they only work together.
+A schema `count: N` is a **capacity**, not a length: it never reaches the wire, it
+bounds the array (an element count or element id past `N` fails the decode as
+invalid), and it lets fixed-storage targets pre-size — but it never adds elements.
+The wire count `M` **is** a compact array's length, and a wrapper array's length is
+*highest present id + 1*.
 
-**Construction.** A `count: N` wrapper field's initializer is
-`SofabFixedArray.Filled<T>(N, () => <element default>)` — `N` element defaults
-before any wire byte is seen, exactly as the `count: N` native field beside it is
-materialized from `new T[N]` (or its tail-padded literal). Without it the field
-disagreed with **itself**: an absent field decoded at length 0 while the same
-field with one element on the wire — or with an explicitly-empty wrapper — came
-back at `N`, because the N-fill below can only fill a sequence that was actually
-opened. `mk()` is called per element rather than one value being repeated: a
-struct/union or nested-row element is mutable, so `N` copies of one reference
-would alias. A **dynamic** wrapper array has no `N` and starts empty. The element
-default is `csSeqElemDefault`, the one expression the decode-side gap-fill also
-reads, so a fresh array and a decoded one cannot disagree about what it is.
-Whole-field omission is unaffected: `N` element defaults still narrow to `M == 0`.
+What that looks like from C#:
 
-**Placement (decode).** The flat visitor descends into an element scope on
-`SequenceBegin(id)`. The element's own fields arrive *after* that descent, so the
-id is latched in a per-scope field, `_ix<Scope>`, and the whole child sub-tree
-addresses `list[_ix<Scope>]`. The list is gap-filled with default elements up to
-`id` first. Appending instead — "the element just added" — shortened the array by
-any interior id gap and decoded a **reopened** id as a second element rather than
-merging into the first (§7.4, which placement gives for free). Each array scope is
-a distinct static location and the scope tree is acyclic, so one latch per scope is
-enough. The `#142` over-index guard still rejects `id >= N` first, which also
-bounds the gap-fill.
+- `new <Msg>()` leaves a `count: N` array **empty** unless the schema declares a
+  `default`, and a declared default shorter than `N` is materialized exactly as
+  written (never tail-padded to `N`). Native arrays keep their `T[]` /
+  `List<T>` initializer; a wrapper array is `new()`.
+- `Marshal` writes **every** element the value holds. `new uint[]{1, 2, 0, 0}` and
+  `new uint[]{1, 2}` are different values with different bytes.
+- Decode yields exactly the elements the wire carried. A primitive `count: N`
+  array allocates `new T[count]` — the `#100` schema-capacity guard already
+  rejected `count > N`, so the untrusted count can never over-allocate — and a
+  `List<T>` one clears and appends. `SequenceEnd` is a bare scope pop: there is no
+  length left to reconstruct.
+- A field is omitted only when it **equals its default** — for an array with no
+  declared default, only when it is empty. An all-zero `new uint[4]` is a
+  four-element value and stays on the wire.
 
-**N-fill (decode).** `SequenceEnd` runs while `cur` still names the scope being
-closed, so it default-fills that array back out to `N` — §5.1 requires the length
-to be `N` "for every target", and a growable `List<T>` must fill exactly like
-pre-sized storage. This is the prerequisite for the trim below: without it the
-elision would not *normalise* a decoded array, it would **shorten** it on every
-round trip. A count-less array has no `N` and is never filled (its length is
-highest-present-id + 1).
+## Wrapper arrays: element placement and positional sparsity (issues #247, #248)
 
-**Trim (encode).** The element loop runs to `M`, not to `Count`. Interior
-all-default elements keep their frame (`WriteSequenceEndKeep`) — element presence
-is what carries the length — and `M == 0` writes no child at all, so the lazily
-opened wrapper is dropped and the field is omitted (§2). `M` comes from
-`elemTrimExpr`: a static `TrimTail` on the element class (backed by the generated
-`IsDefault()`, emitted only for types actually used as a `count: N` element), or
-`SofabFixedArray.TrimStrs/TrimBlobs/TrimRows` for the other element kinds. A
-**dynamic** array is never narrowed — with no `N` to refill from, a trailing
-default element is significant — so every one of those narrowings is emitted only
-for a `count: N` **field**, and a nested row (always an element, never a field)
-loops to `Count`.
+A wrapper array's element id **is** the array index (MESSAGE_SPEC §5.1). Two pieces
+implement that here, one per direction.
 
-**The last element of a dynamic array is always present** (§2, tightened by
-documentation#29). A count-less array recovers its length as highest-present-id
-+ 1 (§5.1), so the element at the highest index is the only one whose *presence*
-carries the length. A leaf `string`/`blob` element is otherwise omitted when it
-equals the element default, which made `["a", ""]` encode exactly like `["a"]`
-and decode one element short, and `["", ""]` encode to nothing at all. The omit
-test therefore carries a `|| _i0 == _n0 - 1` disjunct (`lastElemGuard`) whenever
-the array is dynamic: `["", ""]` is written as its final element alone, at id 1
-(`06 0a 02 07`), while an interior gap is still elided (`["", "b"]` →
-`06 0a 0a 62 07`). Struct/union/row elements never needed it — they are framed
-unconditionally. A `count: N` array keeps no guard: its length is `N` whatever
-the wire carries, which is why it elides the whole trailing run instead.
+**Sparsity (encode) is positional, and one rule serves both element kinds.** An
+element *before the last one* that equals its element default is omitted, leaving an
+id **gap** the decoder restores from that same default; the **last** element is
+always written, as its value or as an empty frame, because its presence is what
+fixes the decoded length. For a leaf that is the `|| _i0 == _n0 - 1` disjunct in the
+omit test (`lastElemExpr`); for a `struct`/`union`/nested-row element it is the
+**closer**, chosen at run time from the position in the value —
+`WriteSequenceEndKeep` at the last index, the dropping `WriteSequenceEnd` in the
+interior, where an all-default element writes no child and its lazily-held frame
+vanishes into the gap. A native nested row has no frame of its own, so the rule
+lands on the write itself. A sequence-typed **field** (a struct field, an array
+wrapper) still always takes the dropping closer: an all-default one is omitted and
+absence reconstructs it (§2).
+
+So `["a", ""]` → `06 02 0a 61 0a 02 07`, `["", ""]` → `06 0a 02 07`, `["", "x", ""]`
+→ `06 0a 0a 78 12 02 07`, and an all-default two-element struct array → `06 0e 07 07`
+— element 1 as an empty frame, element 0 as a gap. The three values `["a", ""]`,
+`["a"]` and `[]` encode and decode distinctly. A declared `count: N` changes none of
+it: a capacity can never restore an elided tail.
+
+**Placement (decode).** Every element kind is placed at `list[id]` after gap-filling
+with the element default — never appended. Appending shortens the array by every
+interior gap (which sparsity now makes routine) and decodes a **reopened** id as a
+second element rather than merging into the first (§7.4, which placement gives for
+free). The flat visitor descends into an element scope on `SequenceBegin(id)` (or,
+for a native row, on `ArrayBegin(id)`), and the element's own callbacks arrive
+*after* that descent, so the id is latched in a per-scope field, `_ix<Scope>`, that
+the whole child sub-tree addresses through. Each array scope is a distinct static
+location and the scope tree is acyclic, so one latch per scope is enough. The `#142`
+over-index guard rejects `id >= N` first, which also bounds the gap-fill against an
+over-index amplification DoS — including on the row collectors, which had no bound
+of their own while they appended.
 
 `IsDefault()` — every class carries it — is the exact negation of what `Marshal`
-writes, evaluated per field and recursively: the explicit form of the "no child was
-written" test the lazy framing already performs for a *field*, needed because an
-*element* must be judged **before** the loop opens. It and the marshal loop are
-generated from the one `elemTrimExpr`, so the writer and the predicate cannot
-drift: a predicate that narrowed a field the writer does not would omit a field
-that is on the wire.
+writes, evaluated per field and recursively: the explicit form of the "not one child
+was written" test the lazy framing performs. Because the last element is always
+written, a wrapper array is default exactly when it is **empty**, so the writer and
+the predicate cannot drift apart.

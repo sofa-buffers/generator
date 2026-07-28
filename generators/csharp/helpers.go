@@ -204,11 +204,9 @@ func (g *gen) csArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem
 }
 
 // csSeqElemDefault renders the element default of a WRAPPER (sequence) array:
-// the value both the construction-time fill of a `count: N` field and the
-// SequenceEnd gap-fill put in a position no wire element reached. ("", false)
-// for a native element, which is not a wrapper. One expression serves both
-// sides so a fresh array and a decoded one cannot disagree about what "the
-// element default" is.
+// the value the decode-side gap-fill puts at an index no wire element reached —
+// which is exactly the value the encoder omitted there (MESSAGE_SPEC §2).
+// ("", false) for a native element, which is not a wrapper.
 func (g *gen) csSeqElemDefault(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) (string, bool) {
 	switch elem {
 	case ir.KindString:
@@ -268,20 +266,11 @@ func (g *gen) csInit(f *ir.Field) string {
 		if lit, ok := g.csNativeArrayLiteral(f); ok {
 			return " = " + lit
 		}
-		// A `count: N` WRAPPER array is N elements long from construction, exactly
-		// like the native one above (MESSAGE_SPEC §5.1: the length "is N for every
-		// target — a growable-list target MUST default-fill to N"). Without this the
-		// field disagreed with itself: an absent field stayed empty at length 0 while
-		// one element on the wire — or an explicitly-empty wrapper — came back at N,
-		// because the SequenceEnd refill can only fill a sequence that was actually
-		// opened. Elements are the element default, the very value that gap-fill
-		// appends. A DYNAMIC (count-less) wrapper array has no N and stays empty.
-		if f.HasCount {
-			if zero, ok := g.csSeqElemDefault(f.Elem, f.ElemRef, f.ElemItems); ok {
-				return fmt.Sprintf(" = SofabFixedArray.Filled<%s>(%d, () => %s)",
-					g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems), f.Count, zero)
-			}
-		}
+		// A WRAPPER array starts EMPTY, with or without a declared `count: N`.
+		// `count` is a CAPACITY, not a length (MESSAGE_SPEC §3): it never reaches the
+		// wire and never adds elements, so a fresh count:N array is the empty array —
+		// which is also what its omit test compares against and what an absent field
+		// decodes back to.
 		return " = new()"
 	case ir.KindString:
 		if s, ok := f.Default.(string); ok {
@@ -350,17 +339,6 @@ func (g *gen) csNativeArrayLiteral(f *ir.Field) (string, bool) {
 	}
 	vals, ok := f.Default.([]any)
 	if !ok {
-		// A `count: N` native array is fixed-length even with no schema default:
-		// its value is N element defaults, so materialize them. Without this a
-		// fresh (or all-default, hence omitted-on-the-wire) array would decode to
-		// an empty list on this growable backend while the fixed-storage camp
-		// yields N zeros — the same MESSAGE_SPEC §3 divergence as the trailing
-		// default run, reached through the omission path. Constructing from a
-		// zeroed T[N] keeps the emitted source O(1) for a large N.
-		if f.Default == nil && f.HasCount {
-			et := g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
-			return fmt.Sprintf("new List<%s>(new %s[%d])", et, et, f.Count), true
-		}
 		return "", false
 	}
 	elemType := g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
@@ -383,33 +361,11 @@ func (g *gen) csNativeArrayLiteral(f *ir.Field) (string, bool) {
 			parts[i] = scalarLit(v)
 		}
 	}
-	parts = g.tailPadLiteral(f, parts, elemType)
+	// Not padded to a declared `count: N`: that is a capacity, not a length
+	// (MESSAGE_SPEC §3), so the default stands exactly as written — and so does the
+	// value it is compared against, which is what keeps a length-N all-zero array
+	// distinct from the empty one.
 	return fmt.Sprintf("new List<%s>{%s}", elemType, strings.Join(parts, ", ")), true
-}
-
-// tailPadLiteral extends a `count: N` array's schema default to exactly N
-// elements with the element default: the array is fixed-length, so a shorter
-// schema default leaves the trailing elements at the element default, and this
-// backend's initial value must match the fixed-storage camp's zero-filled
-// `[T; N]` / `std::array<T, N>` (MESSAGE_SPEC §3). Dynamic arrays keep the
-// default exactly as written.
-func (g *gen) tailPadLiteral(f *ir.Field, parts []string, elemType string) []string {
-	if !f.HasCount {
-		return parts
-	}
-	zero := "0"
-	switch f.Elem {
-	case ir.KindBool:
-		zero = "false"
-	case ir.KindFP32:
-		zero = "0f"
-	case ir.KindEnum, ir.KindBitfield:
-		zero = "(" + elemType + ")(0)"
-	}
-	for int64(len(parts)) < f.Count {
-		parts = append(parts, zero)
-	}
-	return parts
 }
 
 // csPrimArrayLiteral renders a primitive (numeric/fp) array field's schema
@@ -422,12 +378,6 @@ func (g *gen) csPrimArrayLiteral(f *ir.Field) (string, bool) {
 	}
 	vals, ok := f.Default.([]any)
 	if !ok {
-		// A `count: N` array with no schema default is N element defaults, not an
-		// empty array (see csNativeArrayLiteral). `new T[N]` is zero-filled and
-		// keeps the emitted source O(1) for a large N.
-		if f.Default == nil && f.HasCount {
-			return fmt.Sprintf("new %s[%d]", g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems), f.Count), true
-		}
 		return "", false
 	}
 	elemType := g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
@@ -442,7 +392,7 @@ func (g *gen) csPrimArrayLiteral(f *ir.Field) (string, bool) {
 			parts[i] = scalarLit(v)
 		}
 	}
-	parts = g.tailPadLiteral(f, parts, elemType)
+	// Not padded to a declared `count: N` (see csNativeArrayLiteral).
 	return fmt.Sprintf("new %s[]{%s}", elemType, strings.Join(parts, ", ")), true
 }
 
@@ -632,20 +582,14 @@ func (g *gen) arrayElemAddRHS(elem ir.Kind, ref *ir.TypeRef, v string) string {
 	}
 }
 
-// lastElem is the accessor for the most-recently-added element of List `list`,
-// used as the target when decoding into an array element in-place.
-func lastElem(list string) string {
-	return list + "[" + list + ".Count - 1]"
-}
-
 // ixVar names the visitor field holding the element index an array scope is
 // currently decoding into. A wrapper element's id IS its array index
 // (MESSAGE_SPEC §5.1 — generator#247), so the element scope must address
 // `list[id]`, not "the last element"; the id is latched here by SequenceBegin
-// because the element's own callbacks arrive later, under the child scope. Each
-// array scope has its own variable (scopes are a static, acyclic tree, so no
-// scope is ever re-entered while active) and a nested scope's path composes off
-// its parent's, exactly as the append-based accessor did.
+// (or, for a native inner row, by ArrayBegin) because the element's own
+// callbacks arrive later, under the child scope. Each array scope has its own
+// variable (scopes are a static, acyclic tree, so no scope is ever re-entered
+// while active) and a nested scope's path composes off its parent's.
 func ixVar(loc string) string { return "_ix" + loc }
 
 // elemAt is the accessor for the element an array scope is decoding into.
