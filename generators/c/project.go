@@ -207,9 +207,8 @@ func (g *gen) fieldToJSON(h *cfile, f *ir.Field) {
 // arrRef locates one array value in the generated C storage: `store` is the
 // member the elements live in (the array itself for a compact array, the holder
 // object for a wrapper array) and `length` is the C expression for how many
-// elements it currently holds — the companion length member, or the literal
-// capacity for the two un-sized holder forms (see holderSized). `lenType` is
-// that member's C type, empty when there is none to write back.
+// elements it currently holds — always a companion length member, since every
+// array form the backend emits carries one. `lenType` is that member's C type.
 type arrRef struct{ store, length, lenType string }
 
 // arrayRef resolves the storage of an array VALUE reached through acc, given its
@@ -219,10 +218,7 @@ func (g *gen) arrayRef(spec arraySpec, acc string) arrRef {
 	if !isHolderElem(spec.elem) {
 		return arrRef{store: acc, length: acc + "_len", lenType: lenC(g.cAlignArray(spec))}
 	}
-	if holderSized(spec) {
-		return arrRef{store: acc, length: acc + ".len", lenType: lenC(g.cAlignArray(spec))}
-	}
-	return arrRef{store: acc, length: fmt.Sprintf("%d", spec.count)}
+	return arrRef{store: acc, length: acc + ".len", lenType: lenC(g.cAlignArray(spec))}
 }
 
 // arrayRefSlot resolves an INNER array value held in a holder slot. A nested

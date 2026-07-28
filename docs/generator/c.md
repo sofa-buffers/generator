@@ -79,8 +79,8 @@ i.e. from the capacity and nothing else. A capacity-only object can hold no arra
 shorter than `N`, and a decode of `M < N` re-encodes as `N`.
 
 So every array form is emitted in its **length-carrying** variant: a companion
-member declared immediately before the storage, whose width the descriptor
-records.
+member whose width the descriptor records, placed where that descriptor can find
+it (see [two different anchors](#where-the-length-lives-two-different-anchors)).
 
 **Compact (numeric/enum/boolean/bitfield) arrays** — `SOFAB_OBJECT_FIELD_ARRAY_SIZED`:
 
@@ -94,13 +94,14 @@ SOFAB_OBJECT_FIELD_ARRAY_SIZED(id, message_M_t, <name>, <name>_len,
 Encode writes exactly `<name>_len` elements — trailing element defaults included;
 decode stores the received `M` back into it. `M > N` stays `SOFAB_RET_E_INVALID_MSG`.
 
-**Wrapper-array holders** (`string`/`struct`/`union` elements, and an array of
-arrays whose inner element is itself a wrapper) — `SOFAB_OBJECT_DESCR_SEQ_SIZED`:
+**Wrapper-array holders** — every element kind: `string`, `blob`, `struct`,
+`union`, a native inner-array row, and an array of arrays whose inner element is
+itself a wrapper — `SOFAB_OBJECT_DESCR_SEQ_SIZED`:
 
 ```c
 typedef struct { uint8_t len; char items[N][maxlen + 1]; } message_M_sa_elems_t;
 …
-SOFAB_OBJECT_DESCR_SEQ_SIZED(fields, N, NULL, 0, message_M_sa_elems_t, items[0], len)
+SOFAB_OBJECT_DESCR_SEQ_SIZED(fields, N, NULL, 0, message_M_sa_elems_t, len)
 ```
 
 `len` holds `0..N`; encode walks the slots `[0, len)` and always writes the one
@@ -109,43 +110,63 @@ at `len - 1`; decode stores *highest present id + 1* back into it, so a received
 the empty array, which the enclosing object's ≠-default test omits whole (the
 canonical encoding, §2).
 
+### Where the length lives: two different anchors
+
+The descriptor records only the length's **width**, never its offset, so each form
+needs an anchor to read it from — and the two kinds of descriptor have different
+ones available:
+
+| form | descriptor | anchor | why |
+| --- | --- | --- | --- |
+| compact array, sized blob | **field** | *storage offset − width* | a field descriptor knows one address, the field's own `offset`, so "immediately before the storage" is the only anchor it has |
+| wrapper-array holder | **object** | **offset 0 of the holder** | an object descriptor describes the whole object, so the object's start is well defined for every element kind |
+
+The field forms therefore require the length and the storage to be **adjacent**,
+which corelib-c-cpp asserts at compile time (`SOFAB_OBJECT_ASSERT_LEN_ADJACENT`, a
+negative array bound). The holder form requires only that the count be the
+holder's **first** member, asserted the same way
+(`SOFAB_OBJECT_ASSERT_LEN_FIRST`). Either mistake is a build error, never a silent
+misread.
+
+That distinction is what lets **every** element kind carry a count. A `blob`
+element and a native inner-array **row** are themselves length-carrying (issues
+#128/#130) — each slot *begins* with its own used-length — so an anchor relative to
+slot 0 addressed element 0's length instead, and those two holders could express
+only the two lengths `0` and `N`. Anchored at offset 0 the two members never meet:
+
+```c
+typedef struct {
+    uint8_t len;                                            /* holder count, 0..N */
+    struct { uint8_t len; uint8_t buf[maxlen]; } items[N];   /* per-element length */
+} message_M_ba_elems_t;
+```
+
+All five wrapper element kinds — `string`, `blob`, `struct`/`union`, a native
+inner-array row and a nested wrapper row — express every length `0 … N`.
+
 ### How the length's width is chosen
 
-The descriptor stores only the length's **width** and reads it at
-*storage offset − width*, so the two members have to be **adjacent** — and unlike
-a sized blob's byte buffer (alignment 1, which abuts any width) an element slot
-can be aligned strictly enough to pad a narrower length away from it:
-`{ uint8_t len; uint32_t v[4]; }` puts `v` at offset 4, three bytes past the
-length. The generator therefore picks
+The generator picks
 
-> width = max(narrowest width holding `0..count`, the element's alignment)
+> width = max(narrowest width holding `0..count`, the storage's alignment)
 
 — `uint8_t` for byte-wide elements and for a `string` holder (`char[]`, alignment
 1), `uint32_t` for a `u32`/`fp32` array or a struct holder whose element's widest
 member is 4 bytes, `uint64_t` for `u64`/`fp64`/8-byte-aligned struct elements.
 Both inputs are powers of two ≤ 8, so the wider one is too, and the storage that
-follows is automatically aligned. corelib-c-cpp asserts the adjacency at compile
-time anyway (`SOFAB_OBJECT_ASSERT_LEN_ADJACENT`, a negative array bound), so a
-mistake here is a build error rather than a silent misread.
+follows is automatically aligned.
+
+For the **field** forms the second term is a requirement: a narrower length would
+be padded away from the storage (`{ uint8_t len; uint32_t v[4]; }` puts `v` at
+offset 4, three bytes past the length) and the *offset − width* read would address
+the padding. For a **holder** it is not — offset 0 needs no adjacency — but the
+rule is kept anyway, because a narrower count buys nothing: it only turns its own
+spare bytes into dead padding ahead of the aligned slots.
 
 An 8-byte length is read through the corelib's `_load_uint`, whose 8-byte case
 `SOFAB_DISABLE_INT64_SUPPORT` compiles out — so a schema that forces one also
 emits the `SOFAB_DISABLE_INT64_SUPPORT` capability guard, even when no field is a
 64-bit integer.
-
-### Two holders that cannot carry a length
-
-A `blob` array element and a native inner-array **row** are themselves
-length-carrying (issues #128/#130): each keeps its own used-length in the byte
-immediately before its buffer — which is the one address the holder's element
-count would have to occupy. Those two holders therefore stay
-`SOFAB_OBJECT_DESCR_SEQ` (un-sized): their value occupies every slot, the last
-index is `count - 1`, and the lengths `1 … N-1` are not expressible. Both round
-trip exactly (an interior default element is omitted and reconstructed in place,
-an all-default holder is omitted whole as the empty array); what is lost is only
-the ability to *say* "two of a possible three" for those two element kinds. Each
-row/element keeps its own `SOFAB_OBJECT_FIELD_ARRAY_SIZED` /
-`SOFAB_OBJECT_FIELD_BLOB_SIZED`, so an inner array's own length is exact.
 
 ### Declared array defaults are not padded
 

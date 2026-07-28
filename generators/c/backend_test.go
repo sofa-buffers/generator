@@ -367,7 +367,7 @@ messages:
 
 // TestOverIndexSeqHolderDescriptor: a fixed-count string/blob/struct wrapper
 // array lowers to a synthetic element-slot holder (`_elems`), which must be
-// emitted as SOFAB_OBJECT_DESCR_SEQ so the corelib rejects an over-index element
+// emitted as a SOFAB_OBJECT_DESCR_SEQ* form so the corelib rejects an over-index element
 // id (>= N) as INVALID instead of skipping it (MESSAGE_SPEC §7/§7.1, generator#149
 // / corelib-c-cpp#94). The message object and the struct element's *own* type
 // descriptor (`_elem`) are ordinary objects — unknown ids there are
@@ -384,8 +384,8 @@ messages:
 `)
 	c := files["m.c"]
 	for _, want := range []string{
-		"_sa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // string holder (carries its element count)
-		"_ba_elems = SOFAB_OBJECT_DESCR_SEQ(",       // blob holder (un-sized: the slot's own length is in the way)
+		"_sa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // string holder
+		"_ba_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // blob holder
 		"_pa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // struct holder
 	} {
 		if !strings.Contains(c, want) {
@@ -536,7 +536,8 @@ messages:
 // holder materializes all N slots, so without a length member it can express
 // nothing but 0 (every slot default — the enclosing object omits the field) and
 // N. The holder therefore leads with an element-count member and is emitted as
-// SOFAB_OBJECT_DESCR_SEQ_SIZED.
+// SOFAB_OBJECT_DESCR_SEQ_SIZED. The count is the holder's FIRST member, which is
+// where the descriptor reads it (offset 0).
 func TestWrapperHolderSized(t *testing.T) {
 	files := genCFromYAML(t, `
 version: 1
@@ -560,7 +561,7 @@ messages:
 		}
 	}
 	for _, want := range []string{
-		"_sa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(_message_fields_message_m_sa_elems, 3, NULL, 0, message_m_sa_elems_t, items[0], len);",
+		"_sa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(_message_fields_message_m_sa_elems, 3, NULL, 0, message_m_sa_elems_t, len);",
 		"_pa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
 		"_wa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
 		"_na_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
@@ -575,15 +576,21 @@ messages:
 	if strings.Contains(c, "_elems = SOFAB_OBJECT_DESCR_SEQ(") {
 		t.Errorf("m.c left a wrapper holder without its element count (§5.1):\n%s", c)
 	}
+	// The macro names no element slot: anchoring the count at the holder's start is
+	// what lets EVERY element kind carry one (see TestSizedElementHolderCarriesCount).
+	if strings.Contains(c, "SOFAB_OBJECT_DESCR_SEQ_SIZED(") && strings.Contains(c, ", items[0], len);") {
+		t.Errorf("m.c still locates the holder count relative to slot 0:\n%s", c)
+	}
 }
 
-// TestSizedElementHolderStaysUnsized: the two element kinds whose slot is itself
+// TestSizedElementHolderCarriesCount: the two element kinds whose slot is itself
 // length-carrying — a blob element and a native inner-array row (issues #128/#130)
-// — put their own used-length in the one byte the holder's element count would
-// have to occupy (the descriptor reads it at <first slot offset − width>). Those
-// holders stay un-sized, and each row/element keeps its OWN sized descriptor: a
-// row's wire count is its length too (§3).
-func TestSizedElementHolderStaysUnsized(t *testing.T) {
+// — begin with their own used-length, so a holder count placed one width before
+// slot 0 would BE that length. Anchoring the holder count at offset 0 instead
+// separates the two, and these holders carry their element count like every other
+// kind. Each row/element still keeps its OWN sized descriptor: a row's wire count
+// is its length too (§3).
+func TestSizedElementHolderCarriesCount(t *testing.T) {
 	files := genCFromYAML(t, `
 version: 1
 messages:
@@ -593,12 +600,19 @@ messages:
       rows: { id: 1, type: array, items: { type: array, count: 2, items: { type: u16, count: 3 } } }
 `)
 	h, c := files["m.h"], files["m.c"]
-	if !strings.Contains(h, "struct { uint16_t len; uint16_t vals[3]; } items[2];") {
-		t.Errorf("m.h: a native inner-array row must be a sized { len; vals[]; } slot:\n%s", h)
+	for _, want := range []string{
+		// The holder count comes FIRST; the per-slot length stays inside the slot.
+		"uint8_t len; struct { uint8_t len; uint8_t buf[4]; } items[3];",
+		"uint16_t len; struct { uint16_t len; uint16_t vals[3]; } items[2];",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.h missing %q:\n%s", want, h)
+		}
 	}
 	for _, want := range []string{
-		"_ba_elems = SOFAB_OBJECT_DESCR_SEQ(",
-		"_rows_elems = SOFAB_OBJECT_DESCR_SEQ(",
+		"_ba_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"_rows_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(0, message_m_ba_elems_t, items[0].buf, items[0].len),",
 		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(0, message_m_rows_elems_t, items[0].vals, items[0].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
 		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(1, message_m_rows_elems_t, items[1].vals, items[1].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
 	} {
@@ -606,8 +620,8 @@ messages:
 			t.Errorf("m.c missing %q:\n%s", want, c)
 		}
 	}
-	if strings.Contains(c, "SOFAB_OBJECT_DESCR_SEQ_SIZED(") {
-		t.Errorf("m.c: a holder whose slots carry their own length has no room for an element count:\n%s", c)
+	if strings.Contains(c, "_elems = SOFAB_OBJECT_DESCR_SEQ(") {
+		t.Errorf("m.c left a self-sized-slot holder without its element count (§5.1):\n%s", c)
 	}
 }
 
@@ -666,21 +680,21 @@ messages:
 	hs := files["harness/main.c"]
 	for _, want := range []string{
 		"_i0 < (int)(o->a_len)",  // compact array renders its length
-		"_i0 < (int)(o->sa.len)", // sized holder renders its element count
+		"_i0 < (int)(o->sa.len)", // string holder renders its element count
+		"_i0 < (int)(o->ba.len)", // blob holder does too, now that it has one
 		"o->a_len = (uint32_t)_n0;",
 		"o->sa.len = (uint8_t)_n0;",
+		"o->ba.len = (uint8_t)_n0;",
 	} {
 		if !strings.Contains(hs, want) {
 			t.Errorf("harness/main.c missing %q:\n%s", want, hs)
 		}
 	}
-	// The blob holder has no element count, so it (and only it) renders its capacity.
-	if !strings.Contains(hs, "_i0 < (int)(3)") {
-		t.Errorf("harness/main.c: an un-sized holder renders its capacity:\n%s", hs)
-	}
-	// Nothing may still loop to a compact array's capacity.
-	if strings.Contains(hs, "_i0 < (int)(5)") {
-		t.Errorf("harness/main.c still renders a compact array to its capacity:\n%s", hs)
+	// Nothing may loop to a capacity any more: every array form carries a length.
+	for _, bad := range []string{"_i0 < (int)(5)", "_i0 < (int)(3)"} {
+		if strings.Contains(hs, bad) {
+			t.Errorf("harness/main.c still renders an array to its capacity (%q):\n%s", bad, hs)
+		}
 	}
 }
 

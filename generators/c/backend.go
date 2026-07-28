@@ -89,17 +89,14 @@ type objectPlan struct {
 	hasDeprecated bool
 	// fixedSeq marks a synthetic fixed-count sequence holder (buildHolder): its
 	// fields are the element slots 0..field_count-1 of a bounded string/blob/
-	// struct/union/nested array. emitDescriptor emits SOFAB_OBJECT_DESCR_SEQ so the
-	// corelib rejects an over-index element id (>= N) as INVALID instead of skipping
-	// it like an unknown message field (MESSAGE_SPEC §7/§7.1, generator#149 /
-	// corelib-c-cpp#94). A message / struct / union object leaves this false.
+	// struct/union/nested array. emitDescriptor emits SOFAB_OBJECT_DESCR_SEQ_SIZED,
+	// which does two things: the corelib rejects an over-index element id (>= N) as
+	// INVALID instead of skipping it like an unknown message field (MESSAGE_SPEC
+	// §7/§7.1, generator#149 / corelib-c-cpp#94), and the holder's leading `len`
+	// member gives it every length 0..N as MESSAGE_SPEC §5.1 requires (highest
+	// present id + 1) instead of only 0 and N. A message / struct / union object
+	// leaves this false.
 	fixedSeq bool
-	// seqLen marks a fixedSeq holder that also leads with an element-count member
-	// ("len", declared immediately before slot 0): emitDescriptor then uses
-	// SOFAB_OBJECT_DESCR_SEQ_SIZED, so the holder expresses every length 0..N as
-	// MESSAGE_SPEC §5.1 requires (highest present id + 1) instead of only 0 and N.
-	// See holderSized for the two element kinds that cannot carry one.
-	seqLen bool
 }
 
 // defaultInit is one designated-initializer entry (".field = expr") in an
@@ -335,20 +332,22 @@ func isHolderElem(k ir.Kind) bool {
 func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPlan, order *[]string) *objectPlan {
 	// A holder's fields are the fixed element slots 0..N-1, so an over-index element
 	// id (>= N) is INVALID, not an unknown-field skip: mark it a fixed-seq holder.
-	p := &objectPlan{key: key, cType: g.cType(key, "elems"), descr: g.descrSym(key), fixedSeq: true, seqLen: holderSized(spec)}
+	p := &objectPlan{key: key, cType: g.cType(key, "elems"), descr: g.descrSym(key), fixedSeq: true}
 	// checkBounded guarantees a count on every array, so the capacity is the
 	// schema count directly (no zero-sizing fallback).
 	cap := spec.count
-	// A sized holder leads with its element-count member (0..N): MESSAGE_SPEC §5.1
+	// Every holder leads with its element-count member (0..N): MESSAGE_SPEC §5.1
 	// gives a wrapper array the length *highest present id + 1*, and `count` is only
 	// its capacity, so without one the C holder could express nothing but 0 (every
-	// slot default -> the enclosing object omits the field) and N. `lead` is that
-	// declaration, empty for the two element kinds whose own per-slot length already
-	// occupies the byte before slot 0 (see holderSized).
-	lead := ""
-	if p.seqLen {
-		lead = fmt.Sprintf("%s len; ", lenC(g.cAlignArray(spec)))
-	}
+	// slot default -> the enclosing object omits the field) and N.
+	//
+	// It has to be the FIRST member of the holder: SOFAB_OBJECT_DESCR_SEQ_SIZED
+	// reads it at offset 0 (and asserts offsetof == 0 at compile time). That anchor
+	// is what makes the count work for every element kind — a blob element and a
+	// native inner-array row are themselves SIZED and start with their own
+	// used-length, so an anchor relative to slot 0 addressed that instead, and those
+	// two kinds had to go without.
+	lead := fmt.Sprintf("%s len; ", lenC(g.cAlignArray(spec)))
 	switch spec.elem {
 	case ir.KindString, ir.KindBlob:
 		// checkBounded guarantees the element maxlen, so the storage is the schema
@@ -369,8 +368,11 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 			// sub-maxlen element re-encodes zero-padded and an all-zero element drops
 			// (issue #130). Emit each element as a { len; buf[M]; } struct so the
 			// length abuts the byte buffer (alignment 1) for the BLOB_SIZED macro.
+			// The holder's own count is `lead`, at offset 0 — the per-slot length in
+			// the way of the old anchor is items[0].len, which is why this kind could
+			// not carry a count until the anchor moved.
 			lenT := blobLenC(spec.max)
-			p.members = append(p.members, member{decl: fmt.Sprintf("struct { %s len; uint8_t buf[%d]; } items[%d];", lenT, spec.max, cap)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%sstruct { %s len; uint8_t buf[%d]; } items[%d];", lead, lenT, spec.max, cap)})
 			for i := int64(0); i < cap; i++ {
 				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 					"    SOFAB_OBJECT_FIELD_BLOB_SIZED(%d, %s, items[%d].buf, items[%d].len),", i, p.cType, i, i)})
@@ -405,13 +407,14 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 			// Inner element is a native array: each row is a compact array field
 			// (id = index), and by §3 the row's wire count is its LENGTH — so each
 			// row is a SIZED array, a { len; vals[icap]; } slot exactly like a sized
-			// blob element. checkBounded guarantees the inner count. That per-row
-			// length is what makes this holder un-sized (holderSized): it already
-			// occupies the byte before items[0].vals.
+			// blob element. checkBounded guarantees the inner count. The per-row
+			// length occupies the byte before items[0].vals, which is why this kind
+			// could not carry a holder count until the anchor moved to offset 0;
+			// `lead` is that count, and at offset 0 the two never meet.
 			icap := inner.count
 			et := g.arrayElemCType(inner.elem, inner.ref)
 			iw := lenWidth(icap, cScalarWidth(et))
-			p.members = append(p.members, member{decl: fmt.Sprintf("struct { %s len; %s vals[%d]; } items[%d];", lenC(iw), et, icap, cap)})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%sstruct { %s len; %s vals[%d]; } items[%d];", lead, lenC(iw), et, icap, cap)})
 			for i := int64(0); i < cap; i++ {
 				p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 					"    SOFAB_OBJECT_FIELD_ARRAY_SIZED(%d, %s, items[%d].vals, items[%d].len, %s),", i, p.cType, i, i, arrayFieldType(inner.elem))})
@@ -638,51 +641,34 @@ func (g *gen) cAlignFields(fields []*ir.Field) int64 {
 	return a
 }
 
-// cAlignArray is the alignment of the member an array field lowers to. For every
-// SIZED form (compact array, string/struct/union holder, holder-of-holders) that
-// is exactly the width of the length member the form leads with, so
-// holderLenWidth/arrayLenWidth read it straight back.
+// cAlignArray is the alignment of the member an array field lowers to — which is
+// also the width of the length member that member leads with, for every form: a
+// compact array leads with its element count, and every wrapper holder leads with
+// its element count too (buildHolder's `lead`). lenWidth is that width: wide
+// enough to hold 0..N, and never narrower than the storage it precedes.
+//
+// For a compact array (SOFAB_OBJECT_FIELD_ARRAY_SIZED) the second half is a hard
+// requirement — the descriptor finds the length at <offset − width>, so padding
+// between them would be read as the length. For a holder the corelib reads the
+// count at offset 0 and no longer cares (SOFAB_OBJECT_DESCR_SEQ_SIZED), but the
+// rule is kept: a narrower count buys nothing, it only turns its own spare bytes
+// into dead padding ahead of the aligned slots.
 func (g *gen) cAlignArray(spec arraySpec) int64 {
 	switch spec.elem {
 	case ir.KindString:
-		return lenWidth(spec.count, 1)
+		return lenWidth(spec.count, 1) // char items[N][max+1]
 	case ir.KindBlob:
-		// Un-sized holder: struct { blobLen len; uint8_t buf[max]; } items[N].
-		return cScalarWidth(blobLenC(spec.max))
+		// struct { blobLen len; uint8_t buf[max]; } items[N]
+		return lenWidth(spec.count, cScalarWidth(blobLenC(spec.max)))
 	case ir.KindStruct, ir.KindUnion:
 		return lenWidth(spec.count, g.cAlignFields(spec.ref.Target.Fields))
 	case ir.KindArray:
-		inner := specOfItems(spec.items)
-		if isHolderElem(inner.elem) {
-			return lenWidth(spec.count, g.cAlignArray(inner))
-		}
-		// Un-sized holder: struct { rowLen len; T vals[icap]; } items[N].
-		return g.cAlignArray(inner)
+		// Either an inner holder or a struct { rowLen len; T vals[icap]; } row —
+		// cAlignArray(inner) is the slot's alignment in both cases.
+		return lenWidth(spec.count, g.cAlignArray(specOfItems(spec.items)))
 	}
 	// Compact (native) array: <len> <elem>[count].
 	return lenWidth(spec.count, cScalarWidth(g.arrayElemCType(spec.elem, spec.ref)))
-}
-
-// holderSized reports whether an array's wrapper-array holder can carry an
-// element-count member, i.e. whether it is emitted as SOFAB_OBJECT_DESCR_SEQ_SIZED.
-//
-// The macro locates the count at <first element slot offset − width>, so the
-// byte before slot 0 has to be free. It is free for a string element (char[]),
-// for a struct/union element and for a holder-of-holders element. It is NOT free
-// for a blob element or for a native inner-array row: those slots are themselves
-// SIZED (each carries its own used-length immediately before its buffer, issues
-// #128/#130), and that length occupies the one address the holder's count would
-// need. Those two holders therefore stay un-sized — their value occupies every
-// slot, the last index is count-1, and the lengths 1..N-1 are not expressible in
-// C (documented in docs/generator/c.md).
-func holderSized(spec arraySpec) bool {
-	switch spec.elem {
-	case ir.KindString, ir.KindStruct, ir.KindUnion:
-		return true
-	case ir.KindArray:
-		return isHolderElem(spec.items.Elem)
-	}
-	return false
 }
 
 // deprecatedDecl inserts the GCC/Clang deprecated attribute onto a struct-member
@@ -736,12 +722,9 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 		c.line("};")
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(%s, %d, %s, %d, &%s);",
 			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, g.defaultsSym(p.key))
-	} else if p.fixedSeq && p.seqLen {
-		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_SEQ_SIZED(%s, %d, %s, %d, %s, items[0], len);",
-			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, p.cType)
 	} else if p.fixedSeq {
-		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_SEQ(%s, %d, %s, %d);",
-			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount)
+		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_SEQ_SIZED(%s, %d, %s, %d, %s, len);",
+			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, p.cType)
 	} else {
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR(%s, %d, %s, %d);",
 			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount)
