@@ -413,6 +413,10 @@ func (g *gen) emitSeqHelpers(f *hfile, m *ir.Message) {
 	f.line(" * empty, so narrowing the trailing run does not change the bytes. It exists so")
 	f.line(" * that the \"is this whole field still at its default?\" test is computed from")
 	f.line(" * the very same expression the writer loops over, and cannot drift from it.")
+	f.line(" *")
+	f.line(" * Only an array declared with a `count` is narrowed this way. A count-less one")
+	f.line(" * always writes its LAST element, empty or not -- that element's presence is")
+	f.line(" * what carries the decoded length -- so it measures size() instead.")
 	f.line(" */")
 	f.line("template <typename Container>")
 	f.line("std::size_t trimEmpty(const Container &a) noexcept {")
@@ -961,11 +965,19 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 // dropped by this: element presence carries the length, so only the trailing run
 // goes.
 //
+// The leaf (string/blob) trim is fixed-only for exactly that reason, and has to
+// stay in lockstep with lastElemGuard: a dynamic array now writes its final
+// element whatever its value (§2), so narrowing M here would make _isDefault
+// call a dynamic [""] default and omit a field the serialize loop writes.
+//
 // Both the serialize loop and _isDefault run off this one expression, so the
 // writer and the predicate cannot disagree about which elements exist.
 func (g *gen) elemCountExpr(val string, elem ir.Kind, fixed bool) string {
 	switch elem {
 	case ir.KindString, ir.KindBlob:
+		if !fixed {
+			return fmt.Sprintf("%s.size()", val)
+		}
 		return fmt.Sprintf("sofabgen::trimEmpty(%s)", val)
 	case ir.KindStruct, ir.KindUnion:
 		if !fixed {
@@ -1063,6 +1075,29 @@ func (g *gen) trimExpr(val string, trim bool) string {
 	return fmt.Sprintf("sofab::trimTail(%s)", val)
 }
 
+// lastElemGuard is the "|| this is the last element" disjunct that keeps a
+// DYNAMIC wrapper array's final element on the wire whatever its value
+// (MESSAGE_SPEC §2, "the last element of a dynamic array is always present").
+// Such an array recovers its length as highest-present-id + 1 (§5.1), so the
+// element at the highest index is the only one whose PRESENCE carries the
+// length: dropping it would encode ["a", ""] exactly like ["a"] and decode one
+// element short, and ["", ""] as nothing at all. Sequence-form elements never
+// needed this -- they are framed unconditionally -- so this closes the gap on
+// the leaf side and holds both element kinds to one standard. A fixed-count
+// array needs none of it: its length is N whatever the wire carries, which is
+// why it elides the entire trailing default run instead (§3/§5.1), so the guard
+// is omitted there and the trailing run collapses as before.
+//
+// iv is the loop index and nv the element count M; the loop body only runs with
+// M >= 1, but the comparison is written additively so the unsigned M - 1 never
+// appears.
+func lastElemGuard(iv, nv string, fixed bool) string {
+	if fixed {
+		return ""
+	}
+	return fmt.Sprintf(" || %s + 1 == %s", iv, nv)
+}
+
 // serializeArray writes an array value as field idExpr, mirroring the Go/Python
 // backends: numeric/bitfield elements use the native array wire type directly;
 // enum (->signed) and boolean (->0/1 unsigned) are value-converted through a
@@ -1121,17 +1156,21 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		// A blob element is a leaf: omit it when it equals the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2). The
 		// index still advances on an omitted element so surviving ids stay aligned.
+		// The one exception is the position whose presence carries a dynamic
+		// array's length -- see lastElemGuard.
 		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ const std::size_t %s = %s; for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty()) { (void)os.write(static_cast<sofab::id>(%s), %s.data(), static_cast<std::int32_t>(%s.size())); } } }",
-			ind, nv, g.elemCountExpr(val, elem, trim), iv, iv, nv, iv, ev, val, iv, ev, iv, ev, ev)
+		f.line("%s{ const std::size_t %s = %s; for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty()%s) { (void)os.write(static_cast<sofab::id>(%s), %s.data(), static_cast<std::int32_t>(%s.size())); } } }",
+			ind, nv, g.elemCountExpr(val, elem, trim), iv, iv, nv, iv, ev, val, iv, ev, lastElemGuard(iv, nv, trim), iv, ev, ev)
 		f.line("%s(void)os.%s();", ind, seqEnd)
 	case ir.KindString:
 		// A string element is a leaf: omit it when it equals the element default
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2). The
 		// index still advances on an omitted element so surviving ids stay aligned.
+		// The one exception is the position whose presence carries a dynamic
+		// array's length -- see lastElemGuard.
 		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ const std::size_t %s = %s; for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty()) { (void)os.write(static_cast<sofab::id>(%s), %s); } } }",
-			ind, nv, g.elemCountExpr(val, elem, trim), iv, iv, nv, iv, ev, val, iv, ev, iv, ev)
+		f.line("%s{ const std::size_t %s = %s; for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty()%s) { (void)os.write(static_cast<sofab::id>(%s), %s); } } }",
+			ind, nv, g.elemCountExpr(val, elem, trim), iv, iv, nv, iv, ev, val, iv, ev, lastElemGuard(iv, nv, trim), iv, ev)
 		f.line("%s(void)os.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
 		// An INTERIOR struct/union element is itself a sequence and is ALWAYS

@@ -1654,3 +1654,62 @@ func TestCppFixedCountWrapperArrayIsMaterializedToN(t *testing.T) {
 		t.Errorf("a count-less wrapper array has no N and must stay empty:\n%s", dyn)
 	}
 }
+
+// The last element of a DYNAMIC wrapper array is always written, whatever its
+// value (MESSAGE_SPEC §2). Such an array recovers its length as
+// highest-present-id + 1 (§5.1), so the element at the highest index is the only
+// one whose PRESENCE carries the length: dropping a trailing default leaf
+// encoded ["a", ""] exactly like ["a"] and decoded one element short, and
+// ["", ""] as nothing at all. Sequence-form elements never had the problem --
+// they are framed unconditionally -- so this holds both element kinds to one
+// standard. A fixed-count array is exempt: its length is N whatever the wire
+// carries, so it still elides the whole trailing run.
+//
+// Only the heap profile (corelib: cpp) can carry such a field at all: the
+// embedded profile requires a `count` on every array in BOTH storage modes, so
+// the guard is unreachable there and the change is a no-op for them -- asserted
+// at the end.
+func TestCppDynamicArrayAlwaysWritesLastElement(t *testing.T) {
+	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }\n" +
+		"      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }\n" +
+		"      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }\n"
+	h, err := genHeader(t, src, "vec.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		// Dynamic: the element loop runs over the whole container, and the last
+		// index escapes the omit test.
+		"const std::size_t _n0 = dynstr.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = dynstr[_i0]; if (!_e0.empty() || _i0 + 1 == _n0) {",
+		"const std::size_t _n0 = dynblob.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = dynblob[_i0]; if (!_e0.empty() || _i0 + 1 == _n0) {",
+		// Fixed: no guard -- the trailing run still collapses and the decoder
+		// refills to N.
+		"const std::size_t _n0 = sofabgen::trimEmpty(fixedstr); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = fixedstr[_i0]; if (!_e0.empty()) {",
+		// The all-default predicate has to follow the writer: a dynamic [""] now
+		// puts an element on the wire, so the field is NOT default and must not be
+		// omitted. Narrowing it here would drop a field the serialize loop writes.
+		"if (!(dynstr.size() == 0)) { return false; }",
+		"if (!(dynblob.size() == 0)) { return false; }",
+		// The fixed one keeps its trim on both sides.
+		"if (!(sofabgen::trimEmpty(fixedstr) == 0)) { return false; }",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("vec.hpp missing %q:\n%s", want, h)
+		}
+	}
+	for _, bad := range []string{"sofabgen::trimEmpty(dynstr)", "sofabgen::trimEmpty(dynblob)"} {
+		if strings.Contains(h, bad) {
+			t.Errorf("a dynamic leaf array must not be narrowed, found %q:\n%s", bad, h)
+		}
+	}
+
+	for _, cfg := range []map[string]any{
+		{"corelib": "c-cpp"},
+		{"corelib": "c-cpp", "allow_dynamic": true},
+	} {
+		if _, err := genHeader(t, src, "vec.hpp", cfg); err == nil {
+			t.Errorf("cfg %v: the embedded profile must reject a count-less array", cfg)
+		}
+	}
+}

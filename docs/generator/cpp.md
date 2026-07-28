@@ -298,8 +298,8 @@ as for every other.
 ## Wrapper arrays: element placement, refill, trailing-run trim
 
 An array of strings, blobs, structs, unions or rows travels as a **sequence whose
-child id is the element's index** (MESSAGE_SPEC §5.1). Three rules govern that
-shape, and all three are decided by the schema `count` — which only the generator
+child id is the element's index** (MESSAGE_SPEC §5.1). Four rules govern that
+shape, and all four are decided by the schema `count` — which only the generator
 knows (CORELIB_PLAN §7), so they live in generated code rather than in either
 corelib.
 
@@ -337,9 +337,11 @@ element on the wire → N, explicitly-empty wrapper → N. All three storage kin
 need it, `sofab::InlineVector<T, N>` included: its inline buffer has N slots but
 its *logical* length starts at 0, and the braced form is the only way to set it
 (the container has no `resize()`). A count-less array has no N and stays empty.
-This costs no bytes — §2 omission measures **elements** (`sofabgen::trimEmpty` /
-`trimObjs`), not the container's size, so an all-default array is still dropped
-whole and an all-default message still encodes to zero bytes.
+This costs no bytes — §2 omission measures the **elements that reach the wire**
+(`sofabgen::trimEmpty` / `trimObjs` for a `count: N` array, `size()` for a
+count-less one, which is constructed empty), not a padded container length, so an
+all-default array is still dropped whole and an all-default message still encodes
+to zero bytes.
 
 **3. The encoder stops at M.** A `count: N` array's canonical wire carries only
 `[0, M)`, M being one past the last element differing from the element default —
@@ -352,6 +354,29 @@ its closer and the whole field is omitted (§2). A dynamic array is never narrow
 
 Rule 3 is only lossless *because* of rule 2: without the refill, the elision
 would shorten the array on every decode/encode cycle instead of normalising it.
+
+**4. A dynamic array always writes its last element.** A count-less array
+recovers its length as highest-present-id + 1 (§5.1), so the element at the
+highest index is the only one whose *presence* carries the length: MESSAGE_SPEC
+§2 requires it on the wire even when it equals the element default. A
+struct/union/row element was already framed unconditionally, but a **leaf**
+(`string`/`blob`) element is otherwise omitted when empty, which lost data —
+
+    ["a", ""]  encoded exactly like ["a"]  and decoded one element short
+    ["", ""]   encoded to nothing          and decoded as []
+
+so the per-element omit test for a leaf carries an `|| _i0 + 1 == _n0` disjunct
+on a dynamic array. `["", ""]` therefore travels as its final element alone, at
+id 1. Interior gaps are untouched — `["", "b"]` still elides id 0. A `count: N`
+array gets no such guard: its length is N whatever the wire carries, which is why
+it elides the whole trailing run instead (rule 3), and its leaf trim stays. Both
+halves move together, since the writer and `_isDefault` share one expression per
+field (below): trimming a dynamic `[""]` in the predicate would omit a field the
+serialize loop writes.
+
+Only the heap profile (`corelib: cpp`) is affected: the embedded profile requires
+a `count` on every array in both storage modes, so it has no dynamic wrapper
+array to guard.
 
 Every generated struct, union and message therefore also carries
 `bool _isDefault() const noexcept` — the explicit form of the "was any child
