@@ -747,9 +747,16 @@ func TestCppNativeArrayWritesEveryElement(t *testing.T) {
 				// Numeric + float fields hand the container over whole.
 				"(void)os.write(0, u32s);",
 				"(void)os.write(1, f32s);",
-				// Enum/bool value-convert through a native temp, element for element.
+				// An enum value-converts through a native temp, element for element.
 				"(void)os.write(2, _t0); }",
-				"(void)os.write(3, _t0); }",
+			}
+			// A boolean array's element is bool on the corelib-cpp leg (converted
+			// through a temp) and std::uint8_t on the c-cpp leg, where the member
+			// already holds the wire bytes and is handed over whole.
+			if corelib == "c-cpp" {
+				wants = append(wants, "(void)os.write(3, bls);")
+			} else {
+				wants = append(wants, "(void)os.write(3, _t0); }")
 			}
 			for _, want := range wants {
 				if !strings.Contains(h, want) {
@@ -1078,7 +1085,10 @@ func TestCppNativeArrayIsNotPaddedToCount(t *testing.T) {
 		"std::vector<std::uint32_t> zeros = {};",
 		"std::vector<std::uint32_t> partial = {10, 20};",
 		"std::vector<float> floats = {};",
-		"std::vector<bool> flags = {};",
+		// A boolean array's element is std::uint8_t on the c-cpp leg: the C
+		// decoder writes into the destination's own bytes and std::vector<bool>
+		// is the bit-packed specialisation, which has none.
+		"std::vector<std::uint8_t> flags = {};",
 	} {
 		if !strings.Contains(dyn, want) {
 			t.Errorf("a bounded array in dynamic storage must not be padded to its count, missing %q:\n%s", want, dyn)
@@ -1731,5 +1741,96 @@ func TestCppWrapperArrayAlwaysWritesLastElement(t *testing.T) {
 		if _, err := genHeader(t, src, "vec.hpp", cfg); err == nil {
 			t.Errorf("cfg %v: the embedded profile must reject a count-less array", cfg)
 		}
+	}
+}
+
+// TestCppClibEnumBoolArrayNeverCastsTheContainer is the regression guard for the
+// memory corruption the c-cpp enum/boolean array decode used to emit.
+//
+// It was:
+//
+//	std::vector<Color> cols;                                   // three pointers
+//	is.read(reinterpret_cast<std::array<std::int8_t, 3> &>(cols));
+//
+// The cast reinterprets the vector's OWN begin/end/capacity words as its first N
+// elements, so a received message's bytes overwrite the begin pointer and the
+// destructor then frees a pointer partly assembled from the wire. It is reachable
+// from any message that fills an enum or boolean array on
+// `corelib: c-cpp` + `allow_dynamic: true`.
+//
+// The two element kinds are fixed differently, because the corelib-c-cpp decoder
+// is DEFERRED (it records the destination's address and fills it after the field
+// callback returns), so the corelib-cpp shape -- read into a temporary of the
+// wire type, convert afterwards -- would bind a dangling pointer:
+//
+//   - boolean: the member's element type BECOMES the wire's std::uint8_t, so the
+//     member is a native destination like any other and readArray binds it
+//     directly. std::vector<bool> could never have been a destination anyway: it
+//     is the bit-packed specialisation and has no data().
+//   - enum: the member keeps its scoped enum element (the generated API and JSON
+//     stay value-typed) and readArray binds it through sofabgen::RawArray, which
+//     reinterprets the ELEMENTS -- the same narrow cast the scalar enum arm makes
+//     -- and forwards resize()/size() so readArray still owns the tag check, the
+//     schema-bound check and the reset, in that order.
+func TestCppClibEnumBoolArrayNeverCastsTheContainer(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      cols: { id: 0, type: array, items: { type: enum, count: 3, enum: { RED: 0, GREEN: 1 } } }\n" +
+		"      flags: { id: 1, type: array, items: { type: boolean, count: 4 } }\n"
+
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]any
+		want []string
+	}{
+		{
+			name: "allow_dynamic",
+			cfg:  map[string]any{"corelib": "c-cpp", "allow_dynamic": true},
+			want: []string{
+				"std::vector<std::uint8_t> flags = {};",
+				"is.readArray(flags, _count, 4);",
+				"{ sofabgen::RawArray<std::vector<MColsElem>, std::int8_t> _t0{&cols}; is.readArray(_t0, _count, 3); }",
+			},
+		},
+		{
+			name: "inline",
+			cfg:  map[string]any{"corelib": "c-cpp"},
+			want: []string{
+				"is.readArray(flags, _count, 4);",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := genHeader(t, src, "m.hpp", tc.cfg)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			// The whole point: no decode destination is ever reached through a cast
+			// of its CONTAINER.
+			if strings.Contains(h, "reinterpret_cast<std::array<") {
+				t.Errorf("an array member must never be decoded through a container cast:\n%s", h)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(h, want) {
+					t.Errorf("missing %q:\n%s", want, h)
+				}
+			}
+			// RawArray reinterprets the elements, never the container, and it never
+			// takes ownership of the ordering readArray documents.
+			if strings.Contains(h, "RawArray") && !strings.Contains(h, "reinterpret_cast<Wire *>(out->data())") {
+				t.Errorf("RawArray must view the member's ELEMENTS:\n%s", h)
+			}
+		})
+	}
+
+	// corelib-cpp is synchronous, so it keeps bool elements and the temporary.
+	pure, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate cpp: %v", err)
+	}
+	if !strings.Contains(pure, "std::array<bool, 4> flags") {
+		t.Errorf("the corelib-cpp leg keeps bool elements:\n%s", pure)
+	}
+	if strings.Contains(pure, "sofabgen::RawArray") {
+		t.Errorf("the corelib-cpp leg needs no element view:\n%s", pure)
 	}
 }

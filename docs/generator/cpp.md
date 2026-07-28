@@ -173,6 +173,18 @@ What `c-cpp` produces vs `cpp` (all sized from the schema's `maxlen`/`count`):
 | struct / union / matrix array (`count N`) | `std::vector<T>` | `sofab::InlineVector<T, N>` |
 | native numeric/enum/bool/bitfield array | `std::array<T, N>` | `std::array<T, N>` (already fixed) |
 
+A **boolean** array's element type differs between the two corelibs:
+`bool` on `corelib: cpp`, **`std::uint8_t`** on `corelib: c-cpp` (in both storage
+modes). corelib-c-cpp's decoder is *deferred* — `read()`/`readArray()` record the
+destination's **address** and the C runtime writes the element bytes after the
+field callback has returned — so the destination has to be the member itself and
+needs one addressable byte per element. `std::vector<bool>` is the bit-packed
+specialisation: it has no `data()` and no byte per element, so it cannot be a
+decode destination at all. Both c-cpp storage modes take the same element type so
+that `allow_dynamic` stays a storage switch and not an API change. The wire is
+unaffected — a boolean array has always travelled as an unsigned array of 0/1
+bytes, which is now exactly what the member holds.
+
 All three fixed-capacity containers — `sofab::FixedString<N>`,
 `sofab::FixedBytes<N>` and `sofab::InlineVector<T,N>` — live in the corelib-c-cpp
 wrapper (`sofab.hpp`) as a single source of truth; the generator only references
@@ -180,7 +192,16 @@ them (nothing container-shaped is emitted into the generated headers, so a fix t
 a container is a corelib change, not a codegen change — the one generated block,
 `namespace sofabgen`, holds the wrapper-array element collector described
 [below](#wrapper-arrays-element-placement-and-the-sparse-element-rule), which is
-bounded by the schema `count` and so cannot live in a corelib).
+bounded by the schema `count` and so cannot live in a corelib, plus
+`sofabgen::RawArray` — a *view*, not a container: it owns no storage and only
+lets the corelib see an **enum** array member's elements as the enum's backing
+integer, which is what the wire carries. It exists because the deferred decoder
+must bind the member itself, so the temporary the `corelib: cpp` leg converts
+through would dangle. It reinterprets the *elements*, never the container:
+casting a `std::vector<T>` to a `std::array<T, N>` would make the vector's own
+begin/end/capacity words its first N elements, so wire bytes would overwrite the
+begin pointer and the destructor would free a pointer assembled from the
+message).
 
 `sofab::FixedString<N>` is a heap-free, `std::string`-friendly fixed-capacity
 string (implicit construct/assign from `std::string`/`std::string_view`/`const

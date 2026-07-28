@@ -218,6 +218,7 @@ func (g *gen) header(m *ir.Message) []byte {
 	// do not: the schema `count` N is what decides placement, refill and the
 	// trailing-run trim, and N is known here (CORELIB_PLAN §7 split), so they are
 	// generated.
+	g.emitRawArrayHelper(f, m)
 	g.emitSeqHelpers(f, m)
 	f.line("namespace %s {", g.ns)
 	f.blank()
@@ -293,6 +294,105 @@ func (g *gen) needsSeqHelpers(m *ir.Message) bool {
 		}
 	}
 	return false
+}
+
+// needsRawArray reports whether this header decodes an ENUM array through the
+// corelib-c-cpp wrapper, which is the one case that needs the sofabgen::RawArray
+// element view: the member's element type is the scoped enum (so JSON and the
+// generated API stay value-typed) while the wire element is its backing integer.
+// Every other native array's member element already IS the wire element type.
+func (g *gen) needsRawArray(m *ir.Message) bool {
+	if !g.clib {
+		return false
+	}
+	has := func(fields []*ir.Field) bool {
+		for _, fld := range fields {
+			if fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum {
+				return true
+			}
+		}
+		return false
+	}
+	if has(m.Fields) {
+		return true
+	}
+	for _, key := range g.reachable(m) {
+		nt := g.schema.Named[key]
+		if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && has(nt.Fields) {
+			return true
+		}
+	}
+	return false
+}
+
+// emitRawArrayHelper writes sofabgen::RawArray, the element-level view an enum
+// array's decode destination takes on the corelib-c-cpp leg.
+//
+// corelib-c-cpp is a DEFERRED decoder: is.read()/readArray() record the
+// destination's ADDRESS and the C runtime writes the bytes after the field
+// callback returns. So the destination must be the member itself; a temporary of
+// the wire element type -- the shape the synchronous corelib-cpp leg uses -- would
+// dangle. But the member's element type is the scoped enum, which the corelib's
+// span read does not know how to tag.
+//
+// RawArray closes exactly that gap and nothing else: it reinterprets the
+// ELEMENTS (a std::vector<Color>'s bytes ARE an array of Color's backing type),
+// forwards resize()/size() to the member, and hands the whole thing to
+// readArray, which keeps ownership of the tag check, the schema-bound check, the
+// reset and the bind, in that order. It is emphatically NOT a cast of the
+// CONTAINER: reinterpreting a std::vector as a std::array of its elements makes
+// the vector's begin/end/capacity words the first elements, so wire bytes
+// overwrite the begin pointer and the destructor frees a pointer partly
+// assembled from the message.
+func (g *gen) emitRawArrayHelper(f *hfile, m *ir.Message) {
+	if !g.needsRawArray(m) {
+		return
+	}
+	f.line("#ifndef SOFABGEN_RAW_ARRAY_HELPER")
+	f.line("#define SOFABGEN_RAW_ARRAY_HELPER")
+	f.line("/// Native-array element view shared by every sofabgen-generated header.")
+	f.line("namespace sofabgen {")
+	f.blank()
+	f.line("/**")
+	f.line(" * @brief Views a native array member as a sequence of its WIRE element type.")
+	f.line(" *")
+	f.line(" * An enum array's member elements are the scoped enum; the wire elements are")
+	f.line(" * the enum's backing integer. The two have the same size and the same object")
+	f.line(" * representation, so the member's own storage IS a valid destination -- which")
+	f.line(" * matters because corelib-c-cpp binds a destination by ADDRESS and fills it")
+	f.line(" * after the field callback returns, so a temporary would dangle.")
+	f.line(" *")
+	f.line(" * The view forwards `resize()`/`size()` to the member and exposes `data()`")
+	f.line(" * as the wire element type, which is all `IStreamImpl::readArray` needs: it")
+	f.line(" * keeps the tag check, the schema-count check, the reset and the bind, in")
+	f.line(" * that order. The view itself is never used after readArray returns -- only")
+	f.line(" * the member's storage stays bound.")
+	f.line(" *")
+	f.line(" * @tparam Container Destination container (the member).")
+	f.line(" * @tparam Wire      Wire element type (the enum's backing integer).")
+	f.line(" */")
+	f.line("template <typename Container, typename Wire>")
+	f.line("struct RawArray {")
+	f.line("    using value_type = Wire;")
+	f.line("    Container *out;  ///< The member this view writes through.")
+	f.blank()
+	f.line("    /** @brief Prepare the member for @p n elements, as readArray would itself. */")
+	f.line("    void resize(std::size_t n) noexcept {")
+	f.line("        if constexpr (requires { out->resize(n); }) { out->resize(n); }")
+	f.line("        else { *out = Container{}; (void)n; }")
+	f.line("    }")
+	f.line("    std::size_t size() const noexcept { return out->size(); }")
+	f.line("    Wire *data() noexcept { return reinterpret_cast<Wire *>(out->data()); }")
+	f.line("    const Wire *data() const noexcept { return reinterpret_cast<const Wire *>(out->data()); }")
+	f.line("    Wire *begin() noexcept { return data(); }")
+	f.line("    Wire *end() noexcept { return data() + size(); }")
+	f.line("    const Wire *begin() const noexcept { return data(); }")
+	f.line("    const Wire *end() const noexcept { return data() + size(); }")
+	f.line("};")
+	f.blank()
+	f.line("} // namespace sofabgen")
+	f.line("#endif // SOFABGEN_RAW_ARRAY_HELPER")
+	f.blank()
 }
 
 // emitSeqHelpers writes the wrapper-array element collector shared by every
@@ -1068,7 +1168,13 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 				ind, bk, count, tv, iv, iv, count, iv, tv, iv, bk, val, iv, idExpr, tv)
 		}
 	case ir.KindBool:
-		if g.dynNativeArray(elem, count) {
+		if g.clib {
+			// On the c-cpp leg the element already IS the wire's std::uint8_t (see
+			// cppArrayElem), so there is nothing to convert: the member is written
+			// directly, exactly like a numeric array. The bytes are the same ones
+			// the bool->0/1 temporary produced.
+			f.line("%s(void)os.write(%s, %s);", ind, idExpr, val)
+		} else if g.dynNativeArray(elem, count) {
 			f.line("%s{ std::vector<std::uint8_t> %s(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
 				ind, tv, val, iv, iv, val, iv, tv, iv, val, iv, idExpr, tv)
 		} else {
@@ -1265,6 +1371,30 @@ func elemMaxOr(has bool, m int64) int64 {
 	return -1
 }
 
+// nativeArrayRead emits the read for an array whose MEMBER element type is
+// already the wire element type -- every numeric/bitfield array, and a boolean
+// array on the c-cpp leg, where the element is std::uint8_t. No conversion, no
+// temporary, no cast: the corelib binds the member itself.
+func (g *gen) nativeArrayRead(f *hfile, ind, target string, count int64, hasCount bool, cap int64, depth int) {
+	if g.clib && depth == 0 {
+		// readArray settles the tag before it prepares the destination, checks
+		// the wire count against the schema bound before any resize, and only
+		// then binds — so inline and dynamic storage emit the same call and the
+		// arm needs no guard and no reset of its own.
+		f.line("%sis.readArray(%s, _count, %d);", ind, target, cap)
+		return
+	}
+	if g.clib {
+		f.line("%sis.read(%s);", ind, target)
+		return
+	}
+	// readArray carries the tag, the schema count, the configured policy cap
+	// and the reset — see IStreamImpl::readArray for the order they must run
+	// in. A count-less array sizes to the wire count inside it, so it can no
+	// longer decode empty (#112).
+	f.line("%sis.readArray(%s%s);", ind, target, g.cppArrayBounds(count, hasCount))
+}
+
 func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, elemMaxHas bool, elemMax int64, depth int) {
 	tv := fmt.Sprintf("_t%d", depth)
 	iv := fmt.Sprintf("_i%d", depth)
@@ -1280,26 +1410,25 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindFP32, ir.KindFP64, ir.KindBitfield:
-		if g.clib && depth == 0 {
-			// readArray settles the tag before it prepares the destination, checks
-			// the wire count against the schema bound before any resize, and only
-			// then binds — so inline and dynamic storage emit the same call and the
-			// arm needs no guard and no reset of its own.
-			f.line("%sis.readArray(%s, _count, %d);", ind, target, cap)
-		} else if g.clib {
-			f.line("%sis.read(%s);", ind, target)
-		} else {
-			// readArray carries the tag, the schema count, the configured policy cap
-			// and the reset — see IStreamImpl::readArray for the order they must run
-			// in. A count-less array sizes to the wire count inside it, so it can no
-			// longer decode empty (#112).
-			f.line("%sis.readArray(%s%s);", ind, target, g.cppArrayBounds(count, hasCount))
-		}
+		g.nativeArrayRead(f, ind, target, count, hasCount, cap, depth)
 	case ir.KindEnum:
 		bk := enumBacking(ref.Target)
 		et := g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax)
 		if g.clib {
-			f.line("%sis.read(reinterpret_cast<std::array<%s, %d> &>(%s));", ind, bk, count, target)
+			// corelib-c-cpp's decoder is DEFERRED: readArray records the
+			// destination's ADDRESS and the C runtime writes the element bytes after
+			// this callback has returned, so the destination has to be the member
+			// itself -- a temporary would dangle, which is why this arm cannot take
+			// the corelib-cpp shape below. What it must NOT do is reinterpret the
+			// CONTAINER: casting a std::vector<E> to a std::array<int8, N> made the
+			// vector's own begin/end/capacity words the first N elements, so wire
+			// bytes overwrote the begin pointer and the destructor freed a pointer
+			// assembled from the message. RawArray reinterprets the ELEMENTS
+			// instead -- exactly what the scalar enum arm does -- and forwards
+			// resize/size, so readArray keeps ownership of the tag/bound/reset
+			// order and the bytes land in the member's own storage.
+			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; is.readArray(%s, _count, %d); }",
+				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, tv, cap)
 		} else if g.dynNativeArray(elem, count) {
 			// The temp carries the read (and with it the tag/bound/reset decision);
 			// the member is only resized and filled once that succeeded, so a
@@ -1312,7 +1441,12 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		}
 	case ir.KindBool:
 		if g.clib {
-			f.line("%sis.read(reinterpret_cast<std::array<std::uint8_t, %d> &>(%s));", ind, count, target)
+			// On the c-cpp leg the element already IS the wire's std::uint8_t
+			// (cppArrayElem), so the member is a native destination like any other
+			// and takes the numeric arm verbatim -- no conversion, and above all no
+			// reinterpret_cast of the container, which is what corrupted a
+			// std::vector<bool>'s control words under allow_dynamic.
+			g.nativeArrayRead(f, ind, target, count, hasCount, cap, depth)
 		} else if g.dynNativeArray(elem, count) {
 			f.line("%s{ std::vector<std::uint8_t> %s; if (is.readArray(%s%s)) { %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = %s[%s] != 0; } }",
 				ind, tv, tv, g.cppArrayBounds(count, hasCount), target, tv, iv, iv, tv, iv, target, iv, tv, iv)

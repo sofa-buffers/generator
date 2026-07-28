@@ -47,7 +47,15 @@ YAML
 
 # Exercises every field-type family (ints, u64, fp, bool, string, enum, bitfield,
 # fixed array, blob, string array, blob array, nested struct, union).
-IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"someu64":18446744073709551615,"somestringarray":["a","b","c","d","e"]}'
+#
+# someenumarray / someboolarray are filled deliberately. They used to be left at
+# their schema default, so no message this harness produced ever carried one --
+# and the c-cpp decode arm for both, which reached the member through a
+# reinterpret_cast of the CONTAINER (a std::vector's begin/end/capacity words
+# taken as its first N elements, overwritten by wire bytes), was never executed.
+# The leg stayed green while emitting a use-after-free reachable from any
+# received message. An array kind nothing fills is an array kind nothing tests.
+IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"someu64":18446744073709551615,"somestringarray":["a","b","c","d","e"],"someenumarray":[2,1,2,0],"someboolarray":[true,false,true,true,false,true,true,false],"somebitfieldarray":[1,2,3]}'
 
 # run_variant LABEL CORELIB DYNAMIC INCLUDE MAKEVARS...
 #   CORELIB  - "" for pure corelib-cpp, "c-cpp" for the corelib-c-cpp wrapper.
@@ -127,6 +135,9 @@ run_variant() {
         '"someblob":\[10,20,30\]' \
         '"somestringarray":\["a","b","c","d","e"\]' \
         '"someblobarray":\[\[1\],\[2\],\[3\]\]' \
+        '"someenumarray":\[2,1,2,0\]' \
+        '"someboolarray":\[true,false,true,true,false,true,true,false\]' \
+        '"somebitfieldarray":\[1,2,3\]' \
         '"deepint":-99' \
         '"option1":4242'; do
         echo "$OUT" | grep -q "$chk" || { echo "FAIL: [$label] round-trip missing $chk"; echo "  got: $OUT"; exit 1; }

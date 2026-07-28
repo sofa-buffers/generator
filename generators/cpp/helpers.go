@@ -288,6 +288,20 @@ func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, e
 		}
 		return "std::vector<std::uint8_t>"
 	case ir.KindBool:
+		// On the c-cpp leg a boolean array's element is the wire's own
+		// std::uint8_t, not bool. corelib-c-cpp's decoder is DEFERRED: read()
+		// records the destination's ADDRESS and the C runtime writes the element
+		// bytes after the field callback has returned, so the destination must be
+		// the member itself and must have one addressable byte per element.
+		// std::vector<bool> is the bit-packed specialisation -- no data(), no byte
+		// per element -- so it cannot be a decode destination at all, and the
+		// std::array<bool, N> leg was only ever reached through a
+		// reinterpret_cast. One element type for both c-cpp storage modes keeps
+		// the two legs' generated API identical, which is the profile promise.
+		// corelib-cpp decodes synchronously through a temporary, so it keeps bool.
+		if g.fixed {
+			return "std::uint8_t"
+		}
 		return "bool"
 	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
 		return g.typeName(ref.Key)
