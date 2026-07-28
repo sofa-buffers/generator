@@ -140,7 +140,10 @@ the field-level closer and the field is omitted entirely (§2).
 Two invariants hold this together:
 
 - **A dynamic (count-less) array is never narrowed.** It has no `N` to refill
-  from, so a trailing default element is significant and keeps its frame.
+  from, so a trailing default element is significant and keeps its frame. That
+  makes `Sbuf.trimTailStrings`/`trimTailBlobs` a `count: N`-only path; the
+  dynamic side goes through `Sbuf.orEmpty`, which is the identity minus the null
+  the trims used to absorb.
 - **Decode default-fills a `count: N` wrapper array back out to `N`** when the
   sequence scope closes (`sequenceEnd`). §5.1 makes the length `N` "for every
   target — a growable-list target MUST default-fill to `N` exactly like a
@@ -167,6 +170,40 @@ The narrowing expression is generated once (`elemTrimExpr`) and used by both the
 marshal loop and `isDefault`. If the predicate narrowed a field the writer did not
 (or the reverse), the result would be a field omitted though it is on the wire, or
 kept though it is not.
+
+### The last element of a dynamic array is always present
+
+§2, tightened by documentation#29 (`a3e35e2`), makes one position exempt from the
+per-element sparse rule: **the last element of a dynamic wrapper array is always
+written**, whatever its value. The array recovers its length as *highest present
+id + 1* (§5.1), so that element's PRESENCE is the only thing carrying the length.
+Omitting it lost data outright — `["a", ""]` encoded exactly like `["a"]` and
+decoded one element short, and `["", ""]` encoded to nothing and decoded as `[]`,
+so two different values shared one encoding.
+
+Only the **leaf** (`string`/`blob`) element paths needed it: a `struct`/`union`/
+nested-row element is framed unconditionally by `writeSequenceEndKeep()` and was
+already conformant, which is exactly the two-standards gap this closes. The guard
+is the `|| _i == _t.size() - 1` disjunct `lastElemGuard` appends to the element's
+omit test, emitted only when the array is dynamic. A `count: N` array is exempt —
+its length is `N` whatever the wire carries — so it still elides the entire
+trailing default run and its bytes are unchanged.
+
+Measured on this backend (probe field `dyn: { type: array, items: { type: string,
+maxlen: 8 } }`, before → after):
+
+| value | before | after |
+|-------|--------|-------|
+| `["a", ""]` | `06020a6107` → `["a"]` | `06020a610a0207` → `["a", ""]` |
+| `["a"]` | `06020a6107` | `06020a6107` |
+| `["", ""]` | *(nothing)* → `[]` | `060a0207` → `["", ""]` — final element alone, at id 1 |
+| `[]` | *(nothing)* | *(nothing)* |
+| `["", "b"]` | `060a0a6207` | `060a0a6207` — interior gap still elided |
+
+Both halves move together. `elemTrimExpr`'s leaf trim becomes `count: N`-only at
+the same time, because `isDefault` is generated from it: left trimming, the
+predicate would call a dynamic `[""]` all-default and omit a field the marshal
+loop now writes.
 
 ## `reset()` — the decode side of §2
 

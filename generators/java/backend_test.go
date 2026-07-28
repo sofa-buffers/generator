@@ -845,3 +845,58 @@ messages:
 		t.Errorf("a materialized wrapper array must not gain a whole-omission guard:\n%s", m)
 	}
 }
+
+// The last element of a DYNAMIC wrapper array is always written, whatever its
+// value (MESSAGE_SPEC §2, tightened by documentation#29). Such an array recovers
+// its length as highest-present-id + 1 (§5.1), so the element at the highest
+// index is the only one whose PRESENCE carries the length: dropping a trailing
+// default leaf encoded ["a", ""] exactly like ["a"] and decoded one element
+// short, and ["", ""] encoded to nothing and decoded as []. Sequence-form
+// elements never had the problem -- they are framed unconditionally by the
+// keeping closer -- so this holds both element kinds to one standard. A count:N
+// array is exempt: its length is N whatever the wire carries, so it still elides
+// the whole trailing run.
+func TestJavaDynamicArrayAlwaysWritesLastElement(t *testing.T) {
+	got := genJavaFromYAML(t, `
+version: 1
+messages:
+  Vec:
+    payload:
+      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
+      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`, map[string]any{})["src/main/java/message/Vec.java"]
+
+	for _, want := range []string{
+		// Dynamic: the last index escapes the omit test. A null element is the
+		// element default, so it is normalized before the guard can write it.
+		`List<String> _t0 = Sbuf.orEmpty(this.dynstr);`,
+		`String _e0 = _t0.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t0.size() - 1) os.writeString(_i0, _e0);`,
+		`List<byte[]> _t1 = Sbuf.orEmpty(this.dynblob);`,
+		`byte[] _e0 = _t1.get(_i0); if (_e0 == null) _e0 = Sbuf.EMPTY_BYTES; if (_e0.length != 0 || _i0 == _t1.size() - 1) os.writeBlob(_i0, _e0);`,
+		// Fixed: no guard -- the trailing run still collapses and the decoder
+		// refills to N.
+		`List<String> _t2 = Sbuf.trimTailStrings(this.fixedstr);`,
+		`String _e0 = _t2.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty()) os.writeString(_i0, _e0);`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Vec.java missing %q:\n%s", want, got)
+		}
+	}
+	// The all-default predicate has to follow the writer: a dynamic [""] now puts
+	// an element on the wire, so the field is NOT default and must not be omitted.
+	// Trimming it here would drop a field the marshal loop writes.
+	for _, want := range []string{
+		"if (!Sbuf.orEmpty(this.dynstr).isEmpty()) return false;",
+		"if (!Sbuf.orEmpty(this.dynblob).isEmpty()) return false;",
+		// The fixed one keeps its trim on both sides.
+		"if (!Sbuf.trimTailStrings(this.fixedstr).isEmpty()) return false;",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("isDefault must mirror the marshal loop, missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "trimTailStrings(this.dynstr)") || strings.Contains(got, "trimTailBlobs(this.dynblob)") {
+		t.Errorf("a dynamic leaf array must never be trimmed:\n%s", got)
+	}
+}

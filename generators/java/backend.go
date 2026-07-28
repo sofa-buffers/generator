@@ -613,7 +613,8 @@ func trimExpr(val string, elem ir.Kind, fixed bool) string {
 // past the last element differing from the element default (MESSAGE_SPEC §3/§5.1,
 // which says "even for sequence-form elements"). Only a declared `count: N` array
 // is fixed-length and may be narrowed -- a DYNAMIC array has no N to refill from,
-// so a trailing default element is significant and stays framed. Interior
+// so a trailing default element is significant and stays on the wire (a leaf one
+// via lastElemGuard, a sequence-form one via its keeping closer). Interior
 // all-default elements are never dropped by this: element presence carries the
 // length, so only the trailing run goes.
 //
@@ -622,8 +623,16 @@ func trimExpr(val string, elem ir.Kind, fixed bool) string {
 func (g *gen) elemTrimExpr(val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool) string {
 	switch elem {
 	case ir.KindString:
+		// Dynamic: identity, save for the null the trim used to absorb. The local
+		// it binds is also what lastElemGuard measures the last index against.
+		if !fixed {
+			return "Sbuf.orEmpty(" + val + ")"
+		}
 		return "Sbuf.trimTailStrings(" + val + ")"
 	case ir.KindBlob:
+		if !fixed {
+			return "Sbuf.orEmpty(" + val + ")"
+		}
 		return "Sbuf.trimTailBlobs(" + val + ")"
 	case ir.KindStruct, ir.KindUnion:
 		if !fixed {
@@ -637,6 +646,25 @@ func (g *gen) elemTrimExpr(val string, elem ir.Kind, ref *ir.TypeRef, items *ir.
 		return "Sbuf.trimTailRows(" + val + ")"
 	}
 	return val
+}
+
+// lastElemGuard is the "|| this is the last element" disjunct that keeps a
+// DYNAMIC wrapper array's final LEAF element on the wire whatever its value
+// (MESSAGE_SPEC §2, "the last element of a dynamic array is always present").
+// Such an array recovers its length as highest-present-id + 1 (§5.1), so the
+// element at the highest index is the only one whose PRESENCE carries the
+// length: dropping it would encode ["a", ""] exactly like ["a"] and decode one
+// element short. Sequence-form elements never needed this -- they are framed
+// unconditionally, by the keeping closer -- so this closes the gap on the leaf
+// side and holds both element kinds to one standard. A fixed-count array needs
+// none of it: its length is N whatever the wire carries, which is why it elides
+// the entire trailing default run instead (§3/§5.1), so the guard is omitted
+// there and the trailing run collapses as before.
+func lastElemGuard(iv, lv string, fixed bool) string {
+	if fixed {
+		return ""
+	}
+	return fmt.Sprintf(" || %s == %s.size() - 1", iv, lv)
 }
 
 // elemLoopList declares the narrowed local the marshal element loop runs over and
@@ -703,19 +731,27 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 		f.line("%sos.writeArrayFp64(%s, %s);", ind, idExpr, trimExpr(doubles, elem, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2) --
+		// except at the one position whose presence carries the length, see
+		// lastElemGuard. A null element IS the element default, so it is
+		// normalized to "" first: at the last index of a dynamic array it is
+		// written rather than skipped.
 		ev := fmt.Sprintf("_e%d", depth)
 		lv := g.elemLoopList(f, ind, val, elem, ref, items, fixed)
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { String %s = %s.get(%s); if (%s != null && !%s.isEmpty()) os.writeString(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, iv, ev)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { String %s = %s.get(%s); if (%s == null) %s = \"\"; if (!%s.isEmpty()%s) os.writeString(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, ev, lastElemGuard(iv, lv, fixed), iv, ev)
 		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindBlob:
 		// A blob element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2) --
+		// except at the one position whose presence carries the length, see
+		// lastElemGuard. A null element IS the element default, so it is
+		// normalized to the empty blob first: at the last index of a dynamic
+		// array it is written rather than skipped.
 		ev := fmt.Sprintf("_e%d", depth)
 		lv := g.elemLoopList(f, ind, val, elem, ref, items, fixed)
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s != null && %s.length != 0) os.writeBlob(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, iv, ev)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s == null) %s = Sbuf.EMPTY_BYTES; if (%s.length != 0%s) os.writeBlob(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, ev, lastElemGuard(iv, lv, fixed), iv, ev)
 		f.line("%sos.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:
 		// An INTERIOR element frame closes with the KEEPING end: a struct/union

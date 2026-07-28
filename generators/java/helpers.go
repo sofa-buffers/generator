@@ -545,7 +545,11 @@ final class Sbuf {
     // it equals the element default, so trimming their trailing run does not move
     // a single byte -- those two exist so that the all-default predicate is
     // computed from the very same expression the writer loops over and cannot
-    // drift away from it.
+    // drift away from it. They are reached only for a count:N array: a DYNAMIC
+    // array's last element is always written (S2), so narrowing it here would make
+    // the predicate omit a field the writer puts on the wire. orEmpty is the
+    // dynamic counterpart -- identity, minus the null the trims used to absorb.
+    static <T> List<T> orEmpty(List<T> a) { return a == null ? java.util.Collections.emptyList() : a; }
     static List<String> trimTailStrings(List<String> a) {
         if (a == null) return java.util.Collections.emptyList();
         int n = a.size();
