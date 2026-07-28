@@ -84,15 +84,18 @@ Measured on the full-scale arena message (best-of-3, corelib-ts #19/#20):
 
 `marshal(os)` opens **every** nested sequence with the corelib's
 `os.writeSequenceBeginLazy(id)`, which holds the header back until a child field
-is actually written. Which closer follows is decided at generation time from the
-position in the schema — never from the value, so there is no runtime predicate
-in the generated code:
+is actually written. The closer alone then decides whether a contentless sequence
+survives:
 
 | Position | Closer | Effect |
 |---|---|---|
 | `struct`/`union` **field** | `os.writeSequenceEnd()` | an all-default nested object is **omitted**, not framed empty |
-| wrapper-array **field** | `os.writeSequenceEnd()` | an array narrowing to nothing is omitted; absence reconstructs the field's construction default (empty when dynamic, `N` element defaults when `count: N` — see below) |
-| wrapper-array **element** (`struct`/`union`, nested row) | `os.writeSequenceEndKeep()` | the frame always survives — element presence is what carries the array's length (*highest present id + 1*) |
+| wrapper-array **field** | `os.writeSequenceEnd()` | an **empty** array is omitted; absence reconstructs the field's construction default (the empty collection, `count: N` or not) |
+| wrapper-array **element** (`struct`/`union`, nested row) | **positional** — `os.writeSequenceEndKeep()` at the array's LAST index, `os.writeSequenceEnd()` in the interior | the last element's presence carries the array's length (*highest present id + 1*); an interior all-default element becomes an id gap (see below) |
+
+The first two rows are decided at generation time from the position in the schema.
+The third cannot be: it depends on the position in the **value**, so it is the one
+run-time predicate the generated marshal carries.
 
 This is MESSAGE_SPEC §2 / CORELIB_PLAN §6. The visible consequence: a message
 whose every field equals its default now encodes to **zero bytes**, and a nested
@@ -120,85 +123,119 @@ element-chain walk lives in `fieldHasFixlenGuard` (visitor.go); the maxlen /
 over-index gates already descend the same way (`arrayHasBoundedStrBlob`,
 `arrayOverIndexed`).
 
-## Wrapper arrays: `M` on encode, `N` on decode
+## Arrays: `count` is a capacity, the wire carries the length
 
-A `count: N` wrapper array's canonical wire stops at **`M`** — one past its last
-element that differs from the element default — "even for sequence-form elements"
-(MESSAGE_SPEC §3/§5.1). `marshal` therefore narrows the container *before* the
-element loop, through one of `_trimStrs` / `_trimBlobs` / `_trimObjs` /
-`_trimRows`; only the **trailing** run goes, an interior all-default element keeps
-its frame (element presence is what carries the length). `M === 0` writes no child
-at all, so the lazily-opened wrapper is dropped by `writeSequenceEnd()` and the
-whole field is omitted (§2). A **dynamic** (count-less) array has no `N` to refill
-from, so its trailing default element is significant and is never narrowed.
+MESSAGE_SPEC `af536c4` settles `count` on the schema's side: it is a **capacity**,
+never a length. A field carries `0 .. N` elements; the wire count `M` **is** a
+compact array's length, and a wrapper array's length is *highest present id + 1*.
+Nothing that carries a length may be elided, so the trim-on-encode /
+fill-on-decode pair this backend used to ship (`_trimTail`/`_trimTailLong`,
+`_padTo`, `_trimStrs`/`_trimBlobs`/`_trimObjs`/`_trimRows`) is **gone** — with it
+the padding of a short `default` out to `N` and the materialization of a fresh
+`count: N` array to `N` elements. The corelib still exports those helpers; the
+generator simply stops calling them.
 
-### The last element of a dynamic array is always written
+What that leaves is one sparse rule, the same for both element kinds and the same
+with or without a declared `count`:
 
-MESSAGE_SPEC §2 (tightened by documentation#29): *the last element of a dynamic
-array is always present*. Such an array recovers its length as **highest present
-id + 1** (§5.1), so the element at the highest index is the only one whose
-*presence* carries the length. The `string`/`blob` element loops therefore carry a
-`|| _i0 === _a0.length - 1` disjunct next to their omit test (`lastElemGuard` in
-`backend.go`), emitted only when the array is dynamic:
+> An element **before the last one** that equals its element default is omitted,
+> leaving an id **gap** — a `string`/`blob` leaf simply not written, a
+> `struct`/`union`/nested-array element **not framed** either. The **last** element
+> is **always** written: a leaf as its value, a sequence element as an **empty
+> frame**.
+
+A `count: N` array is therefore written and read exactly like its count-less
+sibling. `count` still *bounds* the array — an element id `≥ N` (generator#142)
+and a wire count `M > N` (generator#100) are both `InvalidMsg` — but it never adds
+an element the wire did not carry, and `[1,2,3,0,0]` and `[1,2,3]` are two
+different values with two different encodings.
+
+### The closer is positional, at run time
+
+The consequence for the framing table above: the wrapper-array **element** row is
+no longer decided from the schema. `emitSeqEnd` (backend.go) takes a `keepIf`
+condition and emits the two-armed closer when it is non-empty:
 
 ```ts
-for (let _i0 = 0, _a0 = this.dyn; _i0 < _a0.length; _i0++) {
-  if (_a0[_i0]! !== "" || _i0 === _a0.length - 1) {
-    os.writeString(_i0, _a0[_i0]!);
+this.objs.forEach((_e0, _i0, _a0) => {
+  os.writeSequenceBeginLazy(_i0);
+  _e0.marshal(os);
+  if (_i0 === _a0.length - 1) {   // lastElemExpr
+    os.writeSequenceEndKeep();    // last: the empty frame survives
+  } else {
+    os.writeSequenceEnd();        // interior: an all-default element is a gap
   }
-}
+});
+os.writeSequenceEnd();            // the FIELD wrapper still drops unconditionally
 ```
 
-Without it `["a", ""]` encoded exactly like `["a"]` and decoded one element short,
-and `["", ""]` vanished entirely; now `["", ""]` is its final element **alone at
-id 1** (`060a0207`) while an interior gap is still elided (`["", "b"]` →
-`060a0a6207`). Struct/union/nested-row elements never needed the guard — they are
-framed unconditionally. A `count: N` array is exempt: its length is `N` whatever
-the wire carries, which is why it elides the whole trailing run instead, so
-`elemTrimExpr` applies `_trimStrs`/`_trimBlobs` **only** to fixed arrays and
-`scanArrayTrims` gates the helper emission on the same flag.
-
-Every generated class carries `isDefault(): boolean` for this: the explicit form
-of the "no child was written" test the lazy framing already encodes implicitly for
-a *field*, needed here because an *element* must be judged before the loop opens.
-It is generated as the exact negation of `marshal`'s per-field write guards, and
-reads the **same** narrowed expression the element loop walks — a predicate that
-narrowed a field the writer did not (or the reverse) would either omit a field
-that is on the wire or keep one that is not (generator#248).
-
-The decode counterpart, and what makes the elision lossless: a wrapper element is
-**placed at `arr[id]`** after gap-filling with default elements — never appended,
-because the element id *is* the array index (§5.1). A reopened element id then
-merges into the element already there (§7.4, `T.decodeInto(c, arr[_id]!)`) instead
-of appending a second one (generator#247). When the sequence scope closes, a
-`count: N` array is default-filled back out to `N`, the wrapper-array counterpart
-of `_padTo` on native arrays: without it the trailing elision would not re-shape
-the bytes, it would **shorten** the decoded array on every round trip. The
-generator#142 over-index guard still rejects an element id `≥ N`, which also
-bounds the gap-fill.
-
-That close-of-scope fill can only fill a sequence that was actually **opened**, so
-it is only half the rule. A `count: N` array's value is `N` elements long whether
-or not the field ever reaches the wire (§5.1: the length "is `N` for every
-target"), so the field is also **materialized to `N` element defaults at
-construction** — in `tsDefault`, the same place `nativeArrayDefault` has always
-materialized a native `count: N` array:
+The nested `marshal` writes no child exactly when the element equals its declared
+default, so the closer alone decides. A leaf element expresses the same rule as an
+unconditional `|| _i0 === _a0.length - 1` disjunct next to its omit test
+(`lastElemExpr`), and a **native** nested row — which has no frame of its own —
+gets it on the write itself:
 
 ```ts
-strs: string[] = ["", "", ""];                                  // count: 3, string
-blobs: Uint8Array[] = [new Uint8Array(), new Uint8Array()];     // count: 2, blob
-objs: VecObjsElem[] = [new VecObjsElem(), new VecObjsElem()];   // count: 2, struct
-nums: number[] = [0, 0, 0];                                     // count: 3, u32 (unchanged)
-dyn: string[] = [];                                             // dynamic: stays empty
+this.rows.forEach((_e0, _i0, _a0) => {
+  if (_e0.length !== 0 || _i0 === _a0.length - 1) {
+    os.writeUnsignedArray(_i0, _e0);
+  }
+});
 ```
 
-Without it the two array kinds disagreed about the same schema, and the wrapper
-field disagreed with *itself*: absent → length 0, one element on the wire → `N`,
-explicitly-empty wrapper → `N`. Elements are the element default (the value the
-close-of-scope fill and the placement gap-fill use), each composite slot its own
-instance so a write into slot *i* cannot surface in slot *j*. Nothing about the
-bytes changes: the trims narrow those `N` defaults away, so `marshal` writes no
-child and `isDefault()` stays true — a fresh message still encodes to zero bytes.
+A sequence-typed **field** (a `struct`/`union` field, an array wrapper) still takes
+the dropping closer unconditionally: an empty array is omitted and absence
+reconstructs it (§2).
+
+Byte targets, all regenerated shared vectors (`serialized_sparse`) and all verified
+against corelib-ts through a built project:
+
+| value | wire |
+|---|---|
+| `["a",""]` | `06020a610a0207` |
+| `["",""]` | `060a0207` |
+| `["","x",""]` | `060a0a78120207` |
+| `["a","","c"]` | `06020a61120a6307` |
+| `[{k:1},{k:0},{k:3}]` | `06060001071600030707` (interior frame gone) |
+| `[{k:0},{k:0}]` | `060e0707` (last frame kept) |
+| `[1,2,0,0]` (`count: 4` u32) | `030401020000` |
+
+Every generated class still carries `isDefault(): boolean` — the explicit form of
+the "not one child was written" test the lazy framing applies implicitly, generated
+from the very same per-field expressions `marshal` uses so the two cannot drift
+apart. For an array field the predicate is now simply `.length === 0`: the writer
+emits a child for **every** element the value holds, so "no child is written" is
+exactly "the array is empty".
+
+### Decode: placed by id, never filled to `N`
+
+A wrapper element is **placed at `arr[id]`** after gap-filling with default
+elements — never appended, because the element id *is* the array index (§5.1). A
+reopened element id then merges into the element already there (§7.4,
+`T.decodeInto(c, arr[_id]!)`) instead of appending a second one (generator#247).
+
+That placement now covers **nested rows** too. `seqCollectBody`'s row arm used to
+`arr.push(...)` id-blind, which was unreachable while every row was written; an
+interior gap makes it reachable, and an appending collector shifts every later row
+down by one index. Rows are placed at `arr[_id]`, gap-filled with the empty row,
+bounded by the outer array's `count` — which is also what closes the over-index
+hole that arm had.
+
+Nothing is filled in afterwards. The `M` elements that arrived **are** the value,
+so a decoded array's length is the wire's, `count: N` or not, and a `count: N`
+field constructs **empty**:
+
+```ts
+strs: string[] = [];      // count: 3, string   -- a capacity adds no elements
+nums: number[] = [];      // count: 3, u32
+objs: VecObjsElem[] = []; // count: 2, struct
+dyn:  string[] = [];      // dynamic: identical
+short: number[] = [1, 2]; // count: 5, default [1,2] -- NOT padded out to 5
+```
+
+The field's declared default is what the schema wrote and nothing more, on both
+sides of the omit test — which is what keeps an all-zero length-`N` value (a
+length-`N` array) distinct from the empty one and on the wire.
 
 ## Benchmark row
 

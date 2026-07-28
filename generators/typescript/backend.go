@@ -165,34 +165,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("%s", longArrEqHelper)
 		f.blank()
 	}
-	if use.trimTail {
-		f.line("%s", trimTailHelper)
-		f.blank()
-	}
-	if use.trimTailLng {
-		f.line("%s", trimTailLongHelper)
-		f.blank()
-	}
-	if use.countedArr {
-		f.line("%s", padToHelper)
-		f.blank()
-	}
-	if use.trimStrs {
-		f.line("%s", trimStrsHelper)
-		f.blank()
-	}
-	if use.trimBlobs {
-		f.line("%s", trimBlobsHelper)
-		f.blank()
-	}
-	if use.trimObjs {
-		f.line("%s", trimObjsHelper)
-		f.blank()
-	}
-	if use.trimRows {
-		f.line("%s", trimRowsHelper)
-		f.blank()
-	}
 	if use.strMaxlen {
 		f.line("%s", utf8LenHelper)
 		f.blank()
@@ -357,16 +329,14 @@ func (g *gen) longConvert(val string, elem ir.Kind, items *ir.ArrayElem, depth i
 // emitIsDefault emits the object's all-default predicate. It is the exact
 // negation of what marshal writes: the object equals its declared default iff
 // marshal would emit no child at all, evaluated per field and recursively
-// (MESSAGE_SPEC §2). Every generated class carries it so that a `count: N`
-// wrapper array can find M — one past its last non-default element — BEFORE
-// opening the element loop (§3/§5.1), which the lazy framing's implicit "no child
-// was written" test cannot answer in time (it only reports after the fact, per
-// FIELD). Keep this in lockstep with emitMarshal: a predicate that disagrees with
-// the writer either omits a field that is on the wire or keeps one that is not.
+// (MESSAGE_SPEC §2). It is the explicit form of the predicate lazy framing applies
+// implicitly ("not one child was written"), generated from the very same per-field
+// expressions the writer uses so the two cannot drift apart. Keep this in lockstep
+// with emitMarshal: a predicate that disagrees with the writer either omits a
+// field that is on the wire or keeps one that is not.
 func (g *gen) emitIsDefault(f *tsfile, fields []*ir.Field) {
 	f.line("  // True iff marshal would write no child at all, i.e. this object equals its")
 	f.line("  // declared default -- compared per field and recursively, never as a byte image.")
-	f.line("  // Used to find where a fixed-count wrapper array's trailing default run starts.")
 	f.line("  isDefault(): boolean {")
 	for _, fld := range fields {
 		f.line("    if (!(%s)) return false;", g.fieldIsDefaultExpr(fld))
@@ -396,10 +366,13 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 	return fmt.Sprintf("%s === %s", acc, g.tsDefault(fld))
 }
 
-// arrayIsDefaultExpr mirrors emitMarshalArray: a native array compares against
-// its materialized default exactly as the writer's guard does, a wrapper array is
-// default iff it would write no child — every element equal to the element
-// default, judged on the very same narrowed run the marshal loop walks.
+// arrayIsDefaultExpr mirrors emitMarshalArray. An array's declared `count: N` is a
+// CAPACITY, never a length (MESSAGE_SPEC §3), so it takes no part in this test: the
+// value is compared against the declared default exactly as written, with no
+// padding to N on either side, and against the empty collection when none is
+// declared. A count:N array is therefore default only when it is EMPTY — an
+// all-zero N-element value is a length-N array, which differs from the empty one
+// and stays on the wire.
 func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	if nativeArrayElem(fld.Elem) {
 		if def, ok := g.nativeArrayDefault(fld); ok {
@@ -411,17 +384,10 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 		}
 		return fmt.Sprintf("%s.length === 0", acc)
 	}
-	// Wrapper array: no child is written iff every element is the element default.
-	// A struct/union or nested-row element is framed unconditionally, so "no child"
-	// is the emptiness of the narrowed run; for string/blob leaves the writer omits
-	// a default element individually — except the last one of a DYNAMIC array, which
-	// it always writes (lastElemGuard) — so it is the emptiness of the run
-	// elemTrimExpr hands the marshal loop, trimmed only when the array is fixed.
-	// fld.HasCount must be threaded through unchanged: narrowing here but not in the
-	// marshal loop (or the reverse) is exactly the drift this shared helper exists to
-	// prevent — it would call a dynamic [{}] "default" while the writer still frames
-	// its one empty element, omitting a field that is on the wire.
-	return fmt.Sprintf("%s.length === 0", g.elemTrimExpr(acc, fld.Elem, fld.HasCount))
+	// Wrapper array: the writer emits a child for every element it holds, because
+	// the LAST element is written whatever its value (§2) — so "no child is written"
+	// is exactly "the array is empty", and the two cannot drift apart.
+	return fmt.Sprintf("%s.length === 0", acc)
 }
 
 func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
@@ -481,6 +447,11 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 	// (materialized at construction), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence, opened lazily and closed with the dropping end
 	// at depth 0 (see marshalArray), so it too vanishes when no element is written.
+	//
+	// A declared `count: N` takes no part in either test. `count` is a CAPACITY,
+	// never a length (§3): it never reaches the wire, so the value is compared
+	// against the declared default exactly as written — neither side padded to N —
+	// and against the empty collection when no default is declared.
 	if nativeArrayElem(fld.Elem) {
 		if def, ok := g.nativeArrayDefault(fld); ok {
 			// Long elements are object identities: compare with the (low, high)
@@ -493,7 +464,7 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("    if (%s.length !== 0) {", acc)
 		}
-		g.marshalArray(f, "      ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
+		g.marshalArray(f, "      ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 		f.line("    }")
 		return
 	}
@@ -505,197 +476,155 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 	// `if (!eq(value, default)) { ... os.writeSequenceEndKeep(); }` -- so that a
 	// value differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
-	g.marshalArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.HasCount, 0)
+	g.marshalArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 }
 
-// trimExpr wraps a native array expression in the trailing-default-run trim a
-// fixed-count array's canonical encoding requires (MESSAGE_SPEC §3): only the
-// elements up to the last non-default one go on the wire, and the decoder
-// rebuilds the rest from the declared count. Only a declared `count: N` array is
-// fixed-length; a dynamic (count-less) array has no N to refill from, so a
-// trailing default element is significant and stays.
-func (g *gen) trimExpr(val string, elem ir.Kind, ref *ir.TypeRef, fixed bool) string {
-	if !fixed {
-		return val
-	}
-	switch elem {
-	case ir.KindU64, ir.KindI64:
-		if g.longArrays() {
-			return fmt.Sprintf("_trimTailLong(%s)", val)
-		}
-		return fmt.Sprintf("_trimTail(%s, 0n)", val)
-	case ir.KindEnum:
-		return fmt.Sprintf("_trimTail(%s, 0 as %s)", val, g.typeName(ref.Key))
-	default: // u8/u16/u32, i8/i16/i32, fp32/fp64, bitfield, and the bool 0/1 image
-		return fmt.Sprintf("_trimTail(%s, 0)", val)
-	}
-}
-
-// elemTrimExpr narrows a wrapper array to the M its canonical wire carries: one
-// past the last element differing from the element default (MESSAGE_SPEC §3/§5.1,
-// which says "even for sequence-form elements"). Only a declared `count: N` array
-// is fixed-length and may be narrowed — a dynamic array has no N to refill from,
-// so a trailing default ELEMENT is significant and stays framed. Interior
-// all-default elements are never dropped by this: element presence carries the
-// length, so only the trailing run goes. Both the marshal loop and isDefault run
-// off this one expression, so the writer and the predicate cannot disagree.
+// lastElemExpr is the "this element is the array's last" test, at loop position
+// iv over the value av.
 //
-// A string/blob element of a FIXED array is a leaf the writer already omits
-// individually when it equals the element default, so trimming its trailing run
-// does not change the bytes — the trim exists so the all-default predicate is
-// computed from the very same expression the writer loops over, and cannot drift
-// away from it. On a DYNAMIC array the leaf trim would be wrong, not merely
-// redundant: the writer now always emits the last element (see lastElemGuard), so
-// a trimmed [""] would read as "no child written" and isDefault would omit a
-// field the marshal loop puts on the wire.
-func (g *gen) elemTrimExpr(val string, elem ir.Kind, fixed bool) string {
-	switch elem {
-	case ir.KindString:
-		if !fixed {
-			return val
-		}
-		return fmt.Sprintf("_trimStrs(%s)", val)
-	case ir.KindBlob:
-		if !fixed {
-			return val
-		}
-		return fmt.Sprintf("_trimBlobs(%s)", val)
-	case ir.KindStruct, ir.KindUnion:
-		if !fixed {
-			return val
-		}
-		return fmt.Sprintf("_trimObjs(%s)", val)
-	case ir.KindArray:
-		if !fixed {
-			return val
-		}
-		return fmt.Sprintf("_trimRows(%s)", val)
-	}
-	return val
+// It is the whole of the positional half of MESSAGE_SPEC §2's element rule. A
+// wrapper array carries no length field: its decoded length is *highest present
+// id + 1* (§5.1), so the element at the highest index is the only one whose
+// PRESENCE carries the length, and nothing that carries the length may be elided.
+// Everything before it may be: an interior element equal to the element default is
+// indistinguishable from an absent one, because the decoder restores an absent id
+// from that same default. Hence: interior sparse, last always written.
+//
+// A declared `count: N` changes nothing here. N is a capacity, not a length (§3),
+// so it can never restore an elided tail — the same test applies with or without
+// one.
+func lastElemExpr(iv, av string) string {
+	return fmt.Sprintf("%s === %s.length - 1", iv, av)
 }
 
-// lastElemGuard is the "|| this is the last element" disjunct that keeps a
-// DYNAMIC wrapper array's final element on the wire whatever its value
-// (MESSAGE_SPEC §2, "the last element of a dynamic array is always present").
-// Such an array recovers its length as highest-present-id + 1 (§5.1), so the
-// element at the highest index is the only one whose PRESENCE carries the
-// length: dropping it would encode ["a", ""] exactly like ["a"] and decode one
-// element short. Sequence-form elements never needed this — they are framed
-// unconditionally — so this closes the gap on the leaf side and holds both
-// element kinds to one standard. A fixed-count array needs none of it: its
-// length is N whatever the wire carries, which is why it elides the entire
-// trailing default run instead (§3/§5.1), so the guard is omitted there and the
-// trailing run collapses as before.
-func lastElemGuard(iv, av string, fixed bool) string {
-	if fixed {
-		return ""
+// emitSeqEnd closes the wrapper sequence opened at ind, choosing between the two
+// closers the corelib offers. Every sequence is opened LAZILY (the corelib holds
+// the header back until a child is written), so the closer alone decides whether a
+// contentless one survives: writeSequenceEnd drops it, writeSequenceEndKeep forces
+// the empty frame out.
+//
+// keepIf is the condition under which an empty frame must survive:
+//   - "" — never. A sequence-typed FIELD (a struct/union field, an array wrapper):
+//     an all-default one is omitted and absence reconstructs it (§2).
+//   - a lastElemExpr — a sequence-form array ELEMENT, kept only at the array's
+//     last index. In the interior it is dropped and leaves an id GAP, which is
+//     what makes an all-default element sparse like any other default value.
+//     Note this is decided from the position in the VALUE, at run time; the schema
+//     cannot answer it.
+func emitSeqEnd(f *tsfile, ind, keepIf string) {
+	if keepIf == "" {
+		f.line("%sos.writeSequenceEnd();", ind)
+		return
 	}
-	return fmt.Sprintf(" || %s === %s.length - 1", iv, av)
+	f.line("%sif (%s) {", ind, keepIf)
+	f.line("%s  os.writeSequenceEndKeep();", ind)
+	f.line("%s} else {", ind)
+	f.line("%s  os.writeSequenceEnd();", ind)
+	f.line("%s}", ind)
 }
 
 // marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
 // bitfield elements use the native array wire type (enum->signed, bool/bitfield->
 // unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
 // whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
-// arrays. `fixed` marks a declared `count: N` field, whose trailing default run
-// is trimmed off the wire (MESSAGE_SPEC §3).
-func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool, depth int) {
+// arrays.
+//
+// Every element the value holds is written — no trailing run is elided, of either
+// element kind, because the wire count IS the array's length (§3) and the highest
+// wrapper id IS its last index (§5.1). What the interior may drop is a value that
+// is indistinguishable from absence, and only that.
+//
+// keepIf is the closer this call's own wrapper takes (see emitSeqEnd); the native
+// element kinds open no sequence and ignore it.
+func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
 	ev := fmt.Sprintf("_e%d", depth)
 	iv := fmt.Sprintf("_i%d", depth)
 	av := fmt.Sprintf("_a%d", depth)
-	// MESSAGE_SPEC S2: every sequence is opened lazily; the CLOSER decides whether a
-	// contentless one survives, and it is picked statically from the position in the
-	// schema, never from the value. A wrapper array is a sequence-typed FIELD, so at
-	// depth 0 it closes with the dropping end -- an all-default array is omitted and
-	// absence reconstructs it. A nested row (depth > 0) is an array ELEMENT, and
-	// element presence is what carries a dynamic array's length (S5.1), so it closes
-	// with the keeping end.
-	seqEnd := "writeSequenceEnd"
-	if depth > 0 {
-		seqEnd = "writeSequenceEndKeep"
-	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32:
-		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
+		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
 	case ir.KindU64:
 		if g.longArrays() {
-			f.line("%sos.writeUnsignedArrayLong(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
+			f.line("%sos.writeUnsignedArrayLong(%s, %s);", ind, idExpr, val)
 		} else {
-			f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
+			f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
 		}
 	case ir.KindI8, ir.KindI16, ir.KindI32:
-		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
+		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
 	case ir.KindI64:
 		if g.longArrays() {
-			f.line("%sos.writeSignedArrayLong(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
+			f.line("%sos.writeSignedArrayLong(%s, %s);", ind, idExpr, val)
 		} else {
-			f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
+			f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
 		}
 	case ir.KindEnum:
-		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
+		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
 	case ir.KindBool:
-		// Trimming the 0/1 image is equivalent to trimming the booleans
-		// (false <-> 0), and keeps the compare off the object-ish boolean path.
-		img := fmt.Sprintf("%s.map((%s) => (%s ? 1 : 0))", val, ev, ev)
-		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, g.trimExpr(img, ir.KindU8, nil, fixed))
+		f.line("%sos.writeUnsignedArray(%s, %s.map((%s) => (%s ? 1 : 0)));", ind, idExpr, val, ev, ev)
 	case ir.KindBitfield:
-		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
+		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
 	case ir.KindFP32:
-		f.line("%sos.writeFp32Array(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
+		f.line("%sos.writeFp32Array(%s, %s);", ind, idExpr, val)
 	case ir.KindFP64:
-		f.line("%sos.writeFp64Array(%s, %s);", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
+		f.line("%sos.writeFp64Array(%s, %s);", ind, idExpr, val)
 	case ir.KindString:
 		// Leaf sequence: an indexed for (not .forEach) avoids a per-marshal closure
 		// allocation and inlines the monomorphic write body. A string element is a
-		// leaf keyed by index id: omit it when equal to the element default (empty),
-		// leaving an id gap the decoder restores (MESSAGE_SPEC S2) -- except at the
-		// one position whose presence carries the length, see lastElemGuard. The
-		// narrowed run is bound ONCE in the loop init (scoped to the for statement, so
-		// sibling array fields cannot collide) and is what both the writer and
-		// isDefault see.
+		// leaf keyed by index id: in the array's INTERIOR it is omitted when it equals
+		// the element default (empty), leaving an id gap the decoder restores from
+		// that same default — the ordinary sparse-field rule of MESSAGE_SPEC §2,
+		// applied to an element. At the LAST index it is written whatever its value:
+		// see lastElemExpr. The value is bound ONCE in the loop init (scoped to the
+		// for statement, so sibling array fields cannot collide).
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, g.elemTrimExpr(val, elem, fixed), iv, av, iv)
-		f.line("%s  if (%s[%s]! !== \"\"%s) {", ind, av, iv, lastElemGuard(iv, av, fixed))
+		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, val, iv, av, iv)
+		f.line("%s  if (%s[%s]! !== \"\" || %s) {", ind, av, iv, lastElemExpr(iv, av))
 		f.line("%s    os.writeString(%s, %s[%s]!);", ind, iv, av, iv)
 		f.line("%s  }", ind)
 		f.line("%s}", ind)
-		f.line("%sos.%s();", ind, seqEnd)
+		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
-		// A blob element is a leaf keyed by index id: omit it when equal to the
-		// element default (empty), leaving an id gap the decoder restores
-		// (MESSAGE_SPEC S2) -- except at the one position whose presence carries the
-		// length, see lastElemGuard.
+		// A blob element is a leaf, exactly like the string element above.
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, g.elemTrimExpr(val, elem, fixed), iv, av, iv)
-		f.line("%s  if (%s[%s]!.length !== 0%s) {", ind, av, iv, lastElemGuard(iv, av, fixed))
+		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, val, iv, av, iv)
+		f.line("%s  if (%s[%s]!.length !== 0 || %s) {", ind, av, iv, lastElemExpr(iv, av))
 		f.line("%s    os.writeBlob(%s, %s[%s]!);", ind, iv, av, iv)
 		f.line("%s  }", ind)
 		f.line("%s}", ind)
-		f.line("%sos.%s();", ind, seqEnd)
+		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
+		// A sequence-form element obeys the SAME rule as the leaf elements above —
+		// one rule for both kinds — and the lazily-held frame is where it is applied.
+		// The nested marshal writes no child exactly when the element equals its
+		// declared default, so the CLOSER alone decides: the dropping one in the
+		// interior, where an all-default element vanishes into an id gap; the keeping
+		// one at the last index, where it survives as an empty frame because that
+		// presence is what fixes the array's length.
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s%s.forEach((%s, %s) => {", ind, g.elemTrimExpr(val, elem, fixed), ev, iv)
-		// An INTERIOR element is framed unconditionally: dropping it would leave an id
-		// gap and change the decoded length, not just the bytes (S5.1). The TRAILING
-		// all-default run is already gone — the loop runs to M, not to length
-		// (S3/S5.1) — and M === 0 writes no child at all, so the lazily-opened wrapper
-		// is dropped and the whole field is omitted (S2).
+		f.line("%s%s.forEach((%s, %s, %s) => {", ind, val, ev, iv, av)
 		f.line("%s  os.writeSequenceBeginLazy(%s);", ind, iv)
 		f.line("%s  %s.marshal(os);", ind, ev)
-		f.line("%s  os.writeSequenceEndKeep();", ind)
+		emitSeqEnd(f, ind+"  ", lastElemExpr(iv, av))
 		f.line("%s});", ind)
-		f.line("%sos.%s();", ind, seqEnd)
+		emitSeqEnd(f, ind, keepIf)
 	case ir.KindArray:
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s%s.forEach((%s, %s) => {", ind, g.elemTrimExpr(val, elem, fixed), ev, iv)
-		// A nested row's own CONTENT is never narrowed: the trailing-default-run rule
-		// is scoped to fields (MESSAGE_SPEC §3), so the recursion passes fixed=false.
-		// The row's frame is kept (depth + 1 > 0 selects writeSequenceEndKeep) because
-		// element presence carries the outer array's length (MESSAGE_SPEC §5.1); the
-		// outer array's own trailing run of EMPTY rows is what elemTrimExpr dropped
-		// above, and only for a declared `count: N` field.
-		g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, false, depth+1)
+		f.line("%s%s.forEach((%s, %s, %s) => {", ind, val, ev, iv, av)
+		if nativeArrayElem(items.Elem) {
+			// A native row is a single count-prefixed value with no frame of its own,
+			// so the rule lands on the WRITE rather than on a closer: an interior row
+			// equal to the element default (the empty row) is not written at all, and
+			// the last row always is.
+			f.line("%s  if (%s.length !== 0 || %s) {", ind, ev, lastElemExpr(iv, av))
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
+			f.line("%s  }", ind)
+		} else {
+			// A wrapper row has its own frame, so it takes the closer instead — the
+			// same interior/last choice, expressed the same way as for a struct element
+			// above.
+			g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, av))
+		}
 		f.line("%s});", ind)
-		f.line("%sos.%s();", ind, seqEnd)
+		emitSeqEnd(f, ind, keepIf)
 	}
 }

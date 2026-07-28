@@ -40,7 +40,6 @@ export class Scalars {
 
   // True iff marshal would write no child at all, i.e. this object equals its
   // declared default -- compared per field and recursively, never as a byte image.
-  // Used to find where a fixed-count wrapper array's trailing default run starts.
   isDefault(): boolean {
     if (!(this.u8min === 0)) return false;
     if (!(this.u8max === 255)) return false;
