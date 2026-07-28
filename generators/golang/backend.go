@@ -757,8 +757,14 @@ func (g *gen) trimExpr(val string, elem ir.Kind, ref *ir.TypeRef, fixed bool) st
 func (g *gen) elemTrimExpr(val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool) string {
 	switch elem {
 	case ir.KindString:
+		if !fixed {
+			return val
+		}
 		return fmt.Sprintf("_trimStrs(%s)", val)
 	case ir.KindBlob:
+		if !fixed {
+			return val
+		}
 		return fmt.Sprintf("_trimBlobs(%s)", val)
 	case ir.KindStruct, ir.KindUnion:
 		if !fixed {
@@ -773,6 +779,25 @@ func (g *gen) elemTrimExpr(val string, elem ir.Kind, ref *ir.TypeRef, items *ir.
 		return fmt.Sprintf("_trimRows[%s](%s)", g.goArrayElem(items.Elem, items.ElemRef, items.ElemItems), val)
 	}
 	return val
+}
+
+// lastElemGuard is the "|| this is the last element" disjunct that keeps a
+// DYNAMIC wrapper array's final element on the wire whatever its value
+// (MESSAGE_SPEC §2, "the last element of a dynamic array is always present").
+// Such an array recovers its length as highest-present-id + 1 (§5.1), so the
+// element at the highest index is the only one whose PRESENCE carries the
+// length: dropping it would encode ["a", ""] exactly like ["a"] and decode one
+// element short. Sequence-form elements never needed this -- they are framed
+// unconditionally -- so this closes the gap on the leaf side and holds both
+// element kinds to one standard. A fixed-count array needs none of it: its
+// length is N whatever the wire carries, which is why it elides the entire
+// trailing default run instead (§3/§5.1), so the guard is omitted there and the
+// trailing run collapses as before.
+func lastElemGuard(iv, val string, fixed bool) string {
+	if fixed {
+		return ""
+	}
+	return fmt.Sprintf(" || %s == len(%s)-1", iv, val)
 }
 
 // marshalArray writes the array val as field idExpr. Numeric/enum/boolean/
@@ -820,10 +845,12 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%se.WriteFloat64Array(%s, %s)", ind, idExpr, g.trimExpr(val, elem, ref, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2) --
+		// except at the one position whose presence carries the length, see
+		// lastElemGuard.
 		f.line("%se.WriteSequenceBeginLazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
-		f.line("%s\tif %s != \"\" {", ind, ev)
+		f.line("%s\tif %s != \"\"%s {", ind, ev, lastElemGuard(iv, val, fixed))
 		f.line("%s\t\te.WriteString(sofab.ID(%s), %s)", ind, iv, ev)
 		f.line("%s\t}", ind)
 		f.line("%s}", ind)
@@ -833,7 +860,7 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
 		f.line("%se.WriteSequenceBeginLazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
-		f.line("%s\tif len(%s) != 0 {", ind, ev)
+		f.line("%s\tif len(%s) != 0%s {", ind, ev, lastElemGuard(iv, val, fixed))
 		f.line("%s\t\te.WriteBytes(sofab.ID(%s), %s)", ind, iv, ev)
 		f.line("%s\t}", ind)
 		f.line("%s}", ind)

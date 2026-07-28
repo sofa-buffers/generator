@@ -613,3 +613,49 @@ messages:
 		t.Errorf("vec.go must pass the schema count as the collector cap:\n%s", files["vec.go"])
 	}
 }
+
+// The last element of a DYNAMIC wrapper array is always written, whatever its
+// value (MESSAGE_SPEC §2). Such an array recovers its length as highest-present-
+// id + 1 (§5.1), so the element at the highest index is the only one whose
+// PRESENCE carries the length: dropping a trailing default leaf encoded ["a", ""]
+// exactly like ["a"] and decoded one element short. Sequence-form elements never
+// had the problem -- they are framed unconditionally -- so this holds both
+// element kinds to one standard. A fixed-count array is exempt: its length is N
+// whatever the wire carries, so it still elides the whole trailing run.
+func TestGoDynamicArrayAlwaysWritesLastElement(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
+      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`)
+	got := genGo(t, s, map[string]any{"package": "messages"})["vec.go"]
+
+	for _, want := range []string{
+		// dynamic: the last index escapes the omit test
+		"\t\tif _e0 != \"\" || _i0 == len(m.Dynstr)-1 {",
+		"\t\tif len(_e0) != 0 || _i0 == len(m.Dynblob)-1 {",
+		// fixed: no guard -- the trailing run still collapses, the decoder refills to N
+		"\t\tif _e0 != \"\" {",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("vec.go missing %q:\n%s", want, got)
+		}
+	}
+	// The all-default predicate has to follow the writer: a dynamic [""] now puts
+	// an element on the wire, so the field is NOT default and must not be omitted.
+	// Trimming it here would drop a field that the marshal loop writes.
+	if !strings.Contains(got, "len(m.Dynstr) == 0") {
+		t.Errorf("isDefault must not trim a dynamic string array:\n%s", got)
+	}
+	if strings.Contains(got, "_trimStrs(m.Dynstr)") {
+		t.Errorf("a dynamic string array must not be trimmed:\n%s", got)
+	}
+	// The fixed one keeps its trim on both sides.
+	if !strings.Contains(got, "len(_trimStrs(m.Fixedstr)) == 0") {
+		t.Errorf("a count:N string array must still be trimmed:\n%s", got)
+	}
+}
