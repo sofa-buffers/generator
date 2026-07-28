@@ -82,6 +82,34 @@ fi
 (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
 echo "==> over-index reject OK"
 
+# Over-count NESTED NATIVE row (MESSAGE_SPEC S3+S7.1): a row of a nested native
+# array declares its own `count`, and a row whose wire element count exceeds that
+# capacity is INVALID exactly like a top-level native array -- the bound has to be
+# taken at the ROW's count header, which is the row element's header inside the
+# wrapper. example.yaml has no nested row, so this uses its own definition.
+# Wire: 06 (sequence_begin id 0) 03 (row id 0, unsigned array) N <elements> 07.
+echo "==> over-count nested native row must reject (MESSAGE_SPEC S3+S7.1)"
+cat > "$WORK/rows-def.yaml" <<YAML
+version: 1
+messages:
+  rows:
+    payload:
+      a: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/rows-def.yaml" --out "$WORK/rowsproj" )
+printf '\006\003\004\001\002\003\004\007' > "$WORK/row-over.bin"
+printf '\006\003\003\001\002\003\007' > "$WORK/row-ok.bin"
+if (cd "$WORK/rowsproj" && python3 harness.py decode rows) < "$WORK/row-over.bin" >/dev/null 2>&1; then
+    echo "FAIL: nested native row of 4 (> inner count 3) must be INVALID"; exit 1
+fi
+(cd "$WORK/rowsproj" && python3 harness.py decode rows) < "$WORK/row-ok.bin" >/dev/null || { echo "FAIL: control (row of 3 == count 3) must decode"; exit 1; }
+# Over-count AND truncated: INVALID dominates INCOMPLETE (S5.2) -- the count is
+# known from the row header before a single element is consumed.
+printf '\006\003\004\001' > "$WORK/row-over-trunc.bin"
+ERR=$( (cd "$WORK/rowsproj" && python3 harness.py decode rows) < "$WORK/row-over-trunc.bin" 2>&1 >/dev/null || true )
+echo "$ERR" | grep -q 'SofaDecodeError' || { echo "FAIL: over-count(4>3)+truncated row must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
+echo "==> nested-row over-count reject OK"
+
 # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12) declares
 # maxlen: 16. A 17-byte blob exceeds it -> INVALID, never truncated. Wire: 62 (blob
 # id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes; control is 16 bytes.
@@ -236,7 +264,7 @@ echo "==> decode-limit reject OK"
 # both byte-exact against the regenerated shared vectors, both executed through a
 # generated project driving corelib-py.
 echo "==> shared-vector byte-exact conformance"
-( cd "$ROOT" && SOFAB_PY_CORELIB="$CORELIB" go test ./generators/python/ -run 'Conformance|WireArraySparsity' -count=1 )
+( cd "$ROOT" && SOFAB_PY_CORELIB="$CORELIB" go test ./generators/python/ -run 'Conformance|WireArraySparsity|NestedNativeRowCountBound' -count=1 )
 
 echo "==> corpus + realworld: every definition imports"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do

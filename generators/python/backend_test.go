@@ -1032,3 +1032,125 @@ func pyHarness(t *testing.T, corelib, dir, mode string, in []byte) []byte {
 	}
 	return out
 }
+
+// pyHarnessTry runs the generated harness like pyHarness but WITHOUT failing the
+// test on a non-zero exit: it returns stderr and whether the run succeeded, so a
+// decode that MUST be rejected can be asserted on.
+func pyHarnessTry(t *testing.T, corelib, dir, mode string, in []byte) (string, bool) {
+	t.Helper()
+	cmd := exec.Command("python3", "harness.py", mode, "vec")
+	cmd.Dir = dir
+	cmd.Stdin = bytes.NewReader(in)
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(corelib, "src"))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stderr.String(), err == nil
+}
+
+// TestPythonNestedNativeRowCountBound: a nested NATIVE row (array<array<u32>>,
+// array<array<fp32>>) declares its own `count`, and a wire element count M above
+// that capacity N is INVALID (MESSAGE_SPEC §3+§7.1) exactly as for a top-level
+// native array — the capacity bounds M, and the message is rejected whole, never
+// truncated and never kept.
+//
+// A row is read through the very same native branch as a top-level array, and
+// that branch used to ignore the cap it was handed: the bound was emitted OUTSIDE
+// it, once, for the top-level field only, so every nested row was unbounded and
+// Python accepted rows every other backend rejects. A row's count header is the
+// row ELEMENT's header in the enclosing wrapper loop (`_ef<depth-1>.count`) —
+// the only place a row's count can be bounded at all — so the guard belongs with
+// the native read, at whatever depth that read happens.
+//
+// Emitting it before the read also keeps the §5.2 ordering the top-level guard
+// already had: a row that is BOTH over-count and truncated is INVALID, not
+// INCOMPLETE, because the count is known from the header before any element is
+// consumed.
+func TestPythonNestedNativeRowCountBound(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      numrows: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+      fprows:  { id: 1, type: array, items: { type: array, count: 2, items: { type: fp32, count: 2 } } }
+      dynrows: { id: 2, type: array, items: { type: array, count: 2, items: { type: u32 } } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		"if _ef0.count > 3:",
+		`raise SofaDecodeError("numrows row: array count above schema capacity 3")`,
+		"if _ef0.count > 2:",
+		`raise SofaDecodeError("fprows row: array count above schema capacity 2")`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing nested-row count bound %q:\n%s", want, mod)
+		}
+	}
+	// A count-less row is unbounded — no guard invented for it.
+	if strings.Contains(mod, `raise SofaDecodeError("dynrows row: array count`) {
+		t.Errorf("a count-less nested row must carry no over-count guard:\n%s", mod)
+	}
+	// INVALID must dominate INCOMPLETE (§5.2): the guard precedes the read that
+	// would otherwise raise SofaIncompleteError on a truncated tail.
+	guard := strings.Index(mod, "if _ef0.count > 3:")
+	read := strings.Index(mod, "_e0 = d.read_unsigned_array()")
+	if guard < 0 || read < 0 || guard > read {
+		t.Errorf("the row count guard must precede the row read (guard=%d read=%d)", guard, read)
+	}
+
+	// Lockstep with the on-demand import: when the ONLY counted native array in
+	// the schema is a nested row (the outer array count-less), SofaDecodeError is
+	// still raised and so must still be imported — otherwise the guard is a
+	// NameError at decode time.
+	rows := string(genPy(t, schema(t, `
+version: 1
+messages:
+  M:
+    payload:
+      rows: { id: 0, type: array, items: { type: array, items: { type: u32, count: 3 } } }
+`), map[string]any{})["message.py"])
+	if !strings.Contains(rows, "from sofab import Encoder, Decoder, SofaDecodeError, WireType\n") {
+		t.Errorf("a nested-row-only over-count guard still needs SofaDecodeError imported:\n%s", rows)
+	}
+
+	// And the behaviour itself, against corelib-py.
+	corelib := os.Getenv("SOFAB_PY_CORELIB")
+	if corelib == "" {
+		t.Skip("set SOFAB_PY_CORELIB to a corelib-py checkout for the decode half")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not found")
+	}
+	dir := pyProject(t, "version: 1\nmessages:\n  vec:\n    payload:\n"+
+		"      arr: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }\n")
+	for _, c := range []struct {
+		what   string
+		hex    string
+		reject bool
+	}{
+		// 06 seq_begin(id 0) | 03 row(id 0, unsigned array) 03 count | 01 02 03 | 07 end
+		{"row at the capacity", "06030301020307", false},
+		// ...and one element past it: M = 4 > N = 3 is INVALID.
+		{"row one past the capacity", "0603040102030407", true},
+		// the row at index 1 (header 0b) is bounded too, not just the first one
+		{"second row past the capacity", "060301010b040102030407", true},
+		// over-count AND truncated: INVALID wins over INCOMPLETE (§5.2)
+		{"row over-count and truncated", "06030401", true},
+	} {
+		wire, err := hex.DecodeString(c.hex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stderr, ok := pyHarnessTry(t, corelib, dir, "decode", wire)
+		if c.reject {
+			if ok {
+				t.Errorf("%s (%s): decode must be INVALID, it succeeded", c.what, c.hex)
+			} else if !strings.Contains(stderr, "SofaDecodeError") {
+				t.Errorf("%s (%s): must be INVALID (SofaDecodeError), got:\n%s", c.what, c.hex, stderr)
+			}
+		} else if !ok {
+			t.Errorf("%s (%s): must decode, got:\n%s", c.what, c.hex, stderr)
+		}
+	}
+}

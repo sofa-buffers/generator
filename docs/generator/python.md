@@ -98,10 +98,33 @@ of *native* array element misses `array<string>`, `array<blob>` and nested rows
 such as `array<array<fp32>>`, all of which name `FixlenSubtype` from an element
 guard while no field is fixlen. When adding a gate, ask which emitter it mirrors
 and whether that emitter can fire for an element or a nested row; if it can, the
-walk must descend (`fieldHasFixlenGuard`, `schemaHasCountedWrapperArray` and
-`schemaHasMaxlenStringBlob` do). Gates whose emitter is structurally top-level
-only — `schemaHasCountedNativeArray`, mirroring the fixed-count native-array
-over-count reject, which is emitted for array *fields* alone — correctly do not.
+walk must descend. Every gate here descends today: `fieldHasFixlenGuard`,
+`schemaHasCountedWrapperArray`, `schemaHasMaxlenStringBlob` — and
+`schemaHasCountedNativeArray`, which mirrors the over-count reject and was the
+second half of the same trap. That reject was once emitted for array *fields*
+alone, so the gate scanned fields alone; when the reject moved to the native
+*read* (see "Array counts are bounded at the read", below) it started firing for
+nested rows too, and a schema whose only counted native array is a row —
+`rows: array<array<u32 count: 3>>`, outer count-less — would have raised a
+`NameError` instead of the reject. Assume nothing is top-level only.
+
+## Array counts are bounded at the read
+
+A wire element count `M` above a native array's schema capacity `N` is INVALID
+(§3+§7.1) — rejected whole, never clamped. `emitCountGuard` emits that bound
+alongside the native read in `unmarshalArray`, from the `.count` of the header
+that delivered the array (`arrayFieldVar`: the message loop's `fld` at the top
+level, the enclosing wrapper loop's `_ef<depth-1>` for a row), and always
+*before* the read, so a message that is both over-count and truncated is INVALID
+rather than INCOMPLETE (§5.2).
+
+It lives with the read rather than at the field because a **nested native row**
+(`array<array<u32>>`) carries its own `count` and is read through that very same
+branch: the row's count header is the row element's header inside the wrapper
+loop, which is the only place a row's capacity can be enforced at all. Bounding
+the field instead left every row unbounded — Python accepted rows the rest of the
+family rejects. Wrapper-element arrays have no count header and are bounded by
+element id instead (§5.1, the over-index guard).
 
 ## Benchmark row
 

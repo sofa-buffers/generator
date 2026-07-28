@@ -156,29 +156,28 @@ func (g *gen) module(s *ir.Schema) []byte {
 	return f.bytes()
 }
 
-// schemaHasCountedNativeArray reports whether any message or named-type field
-// is a native scalar array with a schema `count` — the fields whose decode
-// emits the over-count SofaDecodeError guard (generator#100).
+// schemaHasCountedNativeArray reports whether any field (recursively through
+// nested-array element items) is a native scalar array with a schema `count` —
+// the arrays whose decode emits the over-count SofaDecodeError guard
+// (generator#100). The recursion is what keeps this in lockstep with the
+// emitter: a nested native ROW carries its own capacity and is bounded at its
+// own count header, so a schema whose ONLY counted native array is such a row
+// (a count-less outer array of counted u32 rows) still needs the import — a
+// top-level-only scan would leave the raise NameError at decode time.
 func schemaHasCountedNativeArray(s *ir.Schema) bool {
-	counted := func(fields []*ir.Field) bool {
-		for _, fld := range fields {
-			if fld.Kind == ir.KindArray && fld.HasCount && isNativeArrayElem(fld.Elem) {
-				return true
-			}
+	var arrHas func(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool
+	arrHas = func(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool {
+		if hasCount && isNativeArrayElem(elem) {
+			return true
+		}
+		if elem == ir.KindArray && items != nil {
+			return arrHas(items.Elem, items.ElemItems, items.HasCount)
 		}
 		return false
 	}
-	for _, key := range s.NamedOrder {
-		if counted(s.Named[key].Fields) {
-			return true
-		}
-	}
-	for _, m := range s.Messages {
-		if counted(m.Fields) {
-			return true
-		}
-	}
-	return false
+	return schemaHasField(s, func(fld *ir.Field) bool {
+		return fld.Kind == ir.KindArray && arrHas(fld.Elem, fld.ElemItems, fld.HasCount)
+	})
 }
 
 // schemaHasCountedWrapperArray reports whether any field (recursively through
@@ -849,39 +848,70 @@ func capOf(hasCount bool, count int64) int64 {
 }
 
 func (g *gen) emitUnmarshalArray(f *pyfile, fld *ir.Field, acc string) {
-	// A wire element count above the schema `count` capacity is INVALID per
-	// MESSAGE_SPEC §3+§7 — reject the whole message, never keep-all
-	// (generator#100). Decide it at the count header: the wire element count is on
-	// the delivered Field (`fld.count`, read by d.next() before any element), so
-	// rejecting here — BEFORE read_*_array() would raise SofaIncompleteError on a
-	// truncated tail — makes INVALID dominate INCOMPLETE per §5.2 (generator#216 /
-	// F-0032). A check on len() after the read never fires when truncation cuts the
-	// array short of the announced count. Count-less (dynamic) arrays have no bound.
-	if fld.HasCount && isNativeArrayElem(fld.Elem) {
-		f.line("                if fld.count > %d:", fld.Count)
-		f.line(`                    raise SofaDecodeError("%s: array count above schema capacity %d")`, fld.Name, fld.Count)
-	}
 	// The wire count M IS the array's length (MESSAGE_SPEC §3): the M elements that
 	// arrived are the whole value, so they are taken as they come. A declared
-	// `count: N` is a capacity and bounds M (above); it never adds elements, so
-	// there is nothing to fill in at [M, N).
-	g.unmarshalArray(f, "                ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax, 0)
+	// `count: N` is a capacity and bounds M (emitCountGuard, inside); it never adds
+	// elements, so there is nothing to fill in at [M, N).
+	g.unmarshalArray(f, "                ", acc, fld.Name, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax, 0)
+}
+
+// arrayFieldVar names the generated variable holding the Field header that
+// delivered the array being read at `depth`: the message loop's `fld` for a
+// top-level array field, and the enclosing wrapper loop's `_ef<depth-1>` for a
+// nested row (the row's own header, read by that loop's d.next()).
+func arrayFieldVar(depth int) string {
+	if depth == 0 {
+		return "fld"
+	}
+	return fmt.Sprintf("_ef%d", depth-1)
+}
+
+// emitCountGuard rejects a NATIVE array whose wire element count exceeds the
+// schema `count` capacity N. Such a count is INVALID per MESSAGE_SPEC §3+§7 —
+// reject the whole message, never keep-all (generator#100). Decide it at the
+// count header: the wire element count is on the delivered Field (`.count`, read
+// by d.next() before any element), so rejecting BEFORE read_*_array() — which
+// would raise SofaIncompleteError on a truncated tail — makes INVALID dominate
+// INCOMPLETE per §5.2 (generator#216 / F-0032). A check on len() after the read
+// never fires when truncation cuts the array short of the announced count.
+//
+// This lives with the native READ rather than at the top-level field, because a
+// nested native row (array<array<u32>>) is read through exactly the same branch
+// and carries its own capacity: its count header is the row element's header in
+// the enclosing wrapper loop, and bounding it there is the only place the row's
+// `count` can be enforced at all. Count-less (dynamic) arrays have no bound;
+// wrapper-element arrays have no count header and are bounded by element id
+// instead (§5.1, the over-index guard below).
+func emitCountGuard(f *pyfile, ind, loc string, cap int64, depth int) {
+	if cap < 0 {
+		return
+	}
+	f.line("%sif %s.count > %d:", ind, arrayFieldVar(depth), cap)
+	f.line(`%s    raise SofaDecodeError("%s: array count above schema capacity %d")`, ind, loc, cap)
 }
 
 // unmarshalArray reads an array into `target`, mirroring marshalArray: native
 // array readers for numeric/enum/boolean/bitfield elements, a wrapper-sequence
 // loop for string/blob/struct/union/array elements. Recurses for nested arrays.
-func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64, elemMaxHas bool, elemMax int64, depth int) {
+//
+// `loc` is the schema location named in a rejection message (the field name at
+// the top level, suffixed per nesting level for a row).
+func (g *gen) unmarshalArray(f *pyfile, ind, target, loc string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64, elemMaxHas bool, elemMax int64, depth int) {
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
+		emitCountGuard(f, ind, loc, cap, depth)
 		f.line("%s%s = d.read_unsigned_array()", ind, target)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+		emitCountGuard(f, ind, loc, cap, depth)
 		f.line("%s%s = d.read_signed_array()", ind, target)
 	case ir.KindBool:
+		emitCountGuard(f, ind, loc, cap, depth)
 		f.line("%s%s = [bool(_v) for _v in d.read_unsigned_array()]", ind, target)
 	case ir.KindFP32:
+		emitCountGuard(f, ind, loc, cap, depth)
 		f.line("%s%s = d.read_float32_array()", ind, target)
 	case ir.KindFP64:
+		emitCountGuard(f, ind, loc, cap, depth)
 		f.line("%s%s = d.read_float64_array()", ind, target)
 	default: // string/blob/struct/union/array -> wrapper sequence
 		ef := fmt.Sprintf("_ef%d", depth)
@@ -957,7 +987,7 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target string, elem ir.Kind, ref *i
 			// element default (the empty row) is omitted, and an appending collector
 			// would then shift every later row down by one. The over-index guard above
 			// rejects a row id >= N, which also bounds this gap-fill.
-			g.unmarshalArray(f, ind+"    ", ev, items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax, depth+1)
+			g.unmarshalArray(f, ind+"    ", ev, loc+" row", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax, depth+1)
 			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
 			f.line("%s        %s.append([])", ind, target)
 			f.line("%s    %s[%s.id] = %s", ind, target, ef, ev)
