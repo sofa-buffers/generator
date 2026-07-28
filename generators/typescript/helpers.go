@@ -170,9 +170,13 @@ type helperUse struct {
 func scanArrayTrims(use *helperUse, elem ir.Kind, items *ir.ArrayElem, fixed bool) {
 	switch elem {
 	case ir.KindString:
-		use.trimStrs = true
+		if fixed {
+			use.trimStrs = true
+		}
 	case ir.KindBlob:
-		use.trimBlobs = true
+		if fixed {
+			use.trimBlobs = true
+		}
 	case ir.KindStruct, ir.KindUnion:
 		if fixed {
 			use.trimObjs = true

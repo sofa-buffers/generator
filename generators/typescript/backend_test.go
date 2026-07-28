@@ -326,12 +326,14 @@ func TestTSLazySequenceFraming(t *testing.T) {
 	// composite/nested-array wrappers — all closed with the dropping end.
 	for _, want := range []string{
 		"    os.writeSequenceBeginLazy(0);\n    this.s.marshal(os);\n    os.writeSequenceEnd();\n",
-		"    os.writeSequenceBeginLazy(2);\n    for (let _i0 = 0, _a0 = _trimStrs(this.strs); _i0 < _a0.length; _i0++) {",
-		"    os.writeSequenceBeginLazy(4);\n    for (let _i0 = 0, _a0 = _trimBlobs(this.blobs); _i0 < _a0.length; _i0++) {",
+		// Both are DYNAMIC, so the run is walked untrimmed and the last element
+		// escapes the omit test (§2, see TestTSDynamicArrayAlwaysWritesLastElement).
+		"    os.writeSequenceBeginLazy(2);\n    for (let _i0 = 0, _a0 = this.strs; _i0 < _a0.length; _i0++) {",
+		"    os.writeSequenceBeginLazy(4);\n    for (let _i0 = 0, _a0 = this.blobs; _i0 < _a0.length; _i0++) {",
 		"    os.writeSequenceBeginLazy(1);\n    this.ss.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
 		// The nested row is an ELEMENT of `rows`, so its own wrapper keeps its
 		// frame; the outer `rows` wrapper is a FIELD and may vanish.
-		"    os.writeSequenceBeginLazy(3);\n    this.rows.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      for (let _i1 = 0, _a1 = _trimStrs(_e0); _i1 < _a1.length; _i1++) {\n        if (_a1[_i1]! !== \"\") {\n          os.writeString(_i1, _a1[_i1]!);\n        }\n      }\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(3);\n    this.rows.forEach((_e0, _i0) => {\n      os.writeSequenceBeginLazy(_i0);\n      for (let _i1 = 0, _a1 = _e0; _i1 < _a1.length; _i1++) {\n        if (_a1[_i1]! !== \"\" || _i1 === _a1.length - 1) {\n          os.writeString(_i1, _a1[_i1]!);\n        }\n      }\n      os.writeSequenceEndKeep();\n    });\n    os.writeSequenceEnd();\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing lazy-framing shape %q\n%s", want, mod)
@@ -1130,5 +1132,61 @@ messages:
 	empty := genTSWith(t, "version: 1\nmessages:\n  e:\n    payload: {}\n", map[string]any{})
 	if !strings.Contains(empty, "isDefault(): boolean {\n    return true;\n  }") {
 		t.Errorf("a field-less class must be trivially default:\n%s", empty)
+	}
+}
+
+// The last element of a DYNAMIC wrapper array is always written, whatever its
+// value (MESSAGE_SPEC §2). Such an array recovers its length as highest-present-
+// id + 1 (§5.1), so the element at the highest index is the only one whose
+// PRESENCE carries the length: dropping a trailing default leaf encoded ["a", ""]
+// exactly like ["a"] and decoded one element short. Sequence-form elements never
+// had the problem — they are framed unconditionally — so this holds both element
+// kinds to one standard. A fixed-count array is exempt: its length is N whatever
+// the wire carries, so it still elides the whole trailing run.
+func TestTSDynamicArrayAlwaysWritesLastElement(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
+      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`, map[string]any{})
+
+	for _, want := range []string{
+		// dynamic: the run is walked untrimmed and the last index escapes the omit test
+		"for (let _i0 = 0, _a0 = this.dynstr; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]! !== \"\" || _i0 === _a0.length - 1) {",
+		"for (let _i0 = 0, _a0 = this.dynblob; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]!.length !== 0 || _i0 === _a0.length - 1) {",
+		// fixed: no guard — the trailing run still collapses, the decoder refills to N
+		"for (let _i0 = 0, _a0 = _trimStrs(this.fixedstr); _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]! !== \"\") {",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
+	}
+	// The all-default predicate has to follow the writer: a dynamic [""] now puts
+	// an element on the wire, so the field is NOT default and must not be omitted.
+	// Trimming it here would drop a field the marshal loop writes.
+	for _, want := range []string{
+		"if (!(this.dynstr.length === 0)) return false;",
+		"if (!(this.dynblob.length === 0)) return false;",
+		// The fixed one keeps its trim on both sides.
+		"if (!(_trimStrs(this.fixedstr).length === 0)) return false;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("isDefault must mirror the marshal loop, missing %q:\n%s", want, mod)
+		}
+	}
+	if strings.Contains(mod, "_trimStrs(this.dynstr)") || strings.Contains(mod, "_trimBlobs(this.dynblob)") {
+		t.Errorf("a dynamic string/blob array must not be trimmed:\n%s", mod)
+	}
+	// Helper emission mirrors elemTrimExpr: _trimStrs is still referenced by the
+	// fixed field, _trimBlobs by nothing at all — emitting it would be dead code.
+	if !strings.Contains(mod, "function _trimStrs(") {
+		t.Errorf("_trimStrs must still be emitted for the count:N string array:\n%s", mod)
+	}
+	if strings.Contains(mod, "function _trimBlobs(") {
+		t.Errorf("_trimBlobs must not be emitted when only a dynamic blob array exists:\n%s", mod)
 	}
 }

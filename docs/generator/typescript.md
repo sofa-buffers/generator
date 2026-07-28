@@ -132,6 +132,32 @@ at all, so the lazily-opened wrapper is dropped by `writeSequenceEnd()` and the
 whole field is omitted (§2). A **dynamic** (count-less) array has no `N` to refill
 from, so its trailing default element is significant and is never narrowed.
 
+### The last element of a dynamic array is always written
+
+MESSAGE_SPEC §2 (tightened by documentation#29): *the last element of a dynamic
+array is always present*. Such an array recovers its length as **highest present
+id + 1** (§5.1), so the element at the highest index is the only one whose
+*presence* carries the length. The `string`/`blob` element loops therefore carry a
+`|| _i0 === _a0.length - 1` disjunct next to their omit test (`lastElemGuard` in
+`backend.go`), emitted only when the array is dynamic:
+
+```ts
+for (let _i0 = 0, _a0 = this.dyn; _i0 < _a0.length; _i0++) {
+  if (_a0[_i0]! !== "" || _i0 === _a0.length - 1) {
+    os.writeString(_i0, _a0[_i0]!);
+  }
+}
+```
+
+Without it `["a", ""]` encoded exactly like `["a"]` and decoded one element short,
+and `["", ""]` vanished entirely; now `["", ""]` is its final element **alone at
+id 1** (`060a0207`) while an interior gap is still elided (`["", "b"]` →
+`060a0a6207`). Struct/union/nested-row elements never needed the guard — they are
+framed unconditionally. A `count: N` array is exempt: its length is `N` whatever
+the wire carries, which is why it elides the whole trailing run instead, so
+`elemTrimExpr` applies `_trimStrs`/`_trimBlobs` **only** to fixed arrays and
+`scanArrayTrims` gates the helper emission on the same flag.
+
 Every generated class carries `isDefault(): boolean` for this: the explicit form
 of the "no child was written" test the lazy framing already encodes implicitly for
 a *field*, needed here because an *element* must be judged before the loop opens.

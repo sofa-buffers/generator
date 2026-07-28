@@ -414,7 +414,9 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	// Wrapper array: no child is written iff every element is the element default.
 	// A struct/union or nested-row element is framed unconditionally, so "no child"
 	// is the emptiness of the narrowed run; for string/blob leaves the writer omits
-	// a default element individually, so it is the emptiness of the trimmed run.
+	// a default element individually — except the last one of a DYNAMIC array, which
+	// it always writes (lastElemGuard) — so it is the emptiness of the run
+	// elemTrimExpr hands the marshal loop, trimmed only when the array is fixed.
 	// fld.HasCount must be threaded through unchanged: narrowing here but not in the
 	// marshal loop (or the reverse) is exactly the drift this shared helper exists to
 	// prevent — it would call a dynamic [{}] "default" while the writer still frames
@@ -538,15 +540,25 @@ func (g *gen) trimExpr(val string, elem ir.Kind, ref *ir.TypeRef, fixed bool) st
 // length, so only the trailing run goes. Both the marshal loop and isDefault run
 // off this one expression, so the writer and the predicate cannot disagree.
 //
-// A string/blob element is a leaf the writer already omits individually when it
-// equals the element default, so trimming its trailing run does not change the
-// bytes — the trim exists so the all-default predicate is computed from the very
-// same expression the writer loops over, and cannot drift away from it.
+// A string/blob element of a FIXED array is a leaf the writer already omits
+// individually when it equals the element default, so trimming its trailing run
+// does not change the bytes — the trim exists so the all-default predicate is
+// computed from the very same expression the writer loops over, and cannot drift
+// away from it. On a DYNAMIC array the leaf trim would be wrong, not merely
+// redundant: the writer now always emits the last element (see lastElemGuard), so
+// a trimmed [""] would read as "no child written" and isDefault would omit a
+// field the marshal loop puts on the wire.
 func (g *gen) elemTrimExpr(val string, elem ir.Kind, fixed bool) string {
 	switch elem {
 	case ir.KindString:
+		if !fixed {
+			return val
+		}
 		return fmt.Sprintf("_trimStrs(%s)", val)
 	case ir.KindBlob:
+		if !fixed {
+			return val
+		}
 		return fmt.Sprintf("_trimBlobs(%s)", val)
 	case ir.KindStruct, ir.KindUnion:
 		if !fixed {
@@ -560,6 +572,25 @@ func (g *gen) elemTrimExpr(val string, elem ir.Kind, fixed bool) string {
 		return fmt.Sprintf("_trimRows(%s)", val)
 	}
 	return val
+}
+
+// lastElemGuard is the "|| this is the last element" disjunct that keeps a
+// DYNAMIC wrapper array's final element on the wire whatever its value
+// (MESSAGE_SPEC §2, "the last element of a dynamic array is always present").
+// Such an array recovers its length as highest-present-id + 1 (§5.1), so the
+// element at the highest index is the only one whose PRESENCE carries the
+// length: dropping it would encode ["a", ""] exactly like ["a"] and decode one
+// element short. Sequence-form elements never needed this — they are framed
+// unconditionally — so this closes the gap on the leaf side and holds both
+// element kinds to one standard. A fixed-count array needs none of it: its
+// length is N whatever the wire carries, which is why it elides the entire
+// trailing default run instead (§3/§5.1), so the guard is omitted there and the
+// trailing run collapses as before.
+func lastElemGuard(iv, av string, fixed bool) string {
+	if fixed {
+		return ""
+	}
+	return fmt.Sprintf(" || %s === %s.length - 1", iv, av)
 }
 
 // marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
@@ -617,12 +648,14 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 		// Leaf sequence: an indexed for (not .forEach) avoids a per-marshal closure
 		// allocation and inlines the monomorphic write body. A string element is a
 		// leaf keyed by index id: omit it when equal to the element default (empty),
-		// leaving an id gap the decoder restores (MESSAGE_SPEC S2). The narrowed run
-		// is bound ONCE in the loop init (scoped to the for statement, so sibling
-		// array fields cannot collide) and is what both the writer and isDefault see.
+		// leaving an id gap the decoder restores (MESSAGE_SPEC S2) -- except at the
+		// one position whose presence carries the length, see lastElemGuard. The
+		// narrowed run is bound ONCE in the loop init (scoped to the for statement, so
+		// sibling array fields cannot collide) and is what both the writer and
+		// isDefault see.
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, g.elemTrimExpr(val, elem, fixed), iv, av, iv)
-		f.line("%s  if (%s[%s]! !== \"\") {", ind, av, iv)
+		f.line("%s  if (%s[%s]! !== \"\"%s) {", ind, av, iv, lastElemGuard(iv, av, fixed))
 		f.line("%s    os.writeString(%s, %s[%s]!);", ind, iv, av, iv)
 		f.line("%s  }", ind)
 		f.line("%s}", ind)
@@ -630,10 +663,11 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindBlob:
 		// A blob element is a leaf keyed by index id: omit it when equal to the
 		// element default (empty), leaving an id gap the decoder restores
-		// (MESSAGE_SPEC S2).
+		// (MESSAGE_SPEC S2) -- except at the one position whose presence carries the
+		// length, see lastElemGuard.
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, g.elemTrimExpr(val, elem, fixed), iv, av, iv)
-		f.line("%s  if (%s[%s]!.length !== 0) {", ind, av, iv)
+		f.line("%s  if (%s[%s]!.length !== 0%s) {", ind, av, iv, lastElemGuard(iv, av, fixed))
 		f.line("%s    os.writeBlob(%s, %s[%s]!);", ind, iv, av, iv)
 		f.line("%s  }", ind)
 		f.line("%s}", ind)
