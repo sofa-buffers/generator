@@ -111,14 +111,14 @@ messages:
 		"        e.write_sequence_begin_lazy(0)\n        self.st._marshal(e)\n        e.write_sequence_end()\n",
 		"        e.write_sequence_begin_lazy(1)\n        self.un._marshal(e)\n        e.write_sequence_end()\n",
 		// string/blob wrapper FIELD: the leaf elements are omitted when default,
-		// and the wrapper itself closes with the dropping end at field level. The
-		// run is narrowed to M first — a no-op on the BYTES for a leaf element the
-		// writer already omits individually, but it keeps the loop and the
-		// _is_default predicate running off one expression (generator#248).
-		"        e.write_sequence_begin_lazy(2)\n        for _i0, _e0 in enumerate(_trim_empty(self.strs)):\n" +
-			"            if _e0 != \"\":\n                e.write_string(_i0, _e0)\n        e.write_sequence_end()\n",
-		"        e.write_sequence_begin_lazy(3)\n        for _i0, _e0 in enumerate(_trim_empty(self.blobs)):\n" +
-			"            if len(_e0) != 0:\n                e.write_bytes(_i0, bytes(_e0))\n        e.write_sequence_end()\n",
+		// and the wrapper itself closes with the dropping end at field level.
+		// These two arrays are DYNAMIC, so they are not narrowed and their LAST
+		// element is written whatever its value — its presence is what carries the
+		// recovered length (MESSAGE_SPEC §2/§5.1).
+		"        e.write_sequence_begin_lazy(2)\n        for _i0, _e0 in enumerate(self.strs):\n" +
+			"            if _e0 != \"\" or _i0 == len(self.strs) - 1:\n                e.write_string(_i0, _e0)\n        e.write_sequence_end()\n",
+		"        e.write_sequence_begin_lazy(3)\n        for _i0, _e0 in enumerate(self.blobs):\n" +
+			"            if len(_e0) != 0 or _i0 == len(self.blobs) - 1:\n                e.write_bytes(_i0, bytes(_e0))\n        e.write_sequence_end()\n",
 		// struct ELEMENT inside a wrapper array: keeping close; the wrapper FIELD
 		// around it still closes with the dropping end.
 		"        e.write_sequence_begin_lazy(4)\n        for _i0, _e0 in enumerate(self.objs):\n" +
@@ -1080,6 +1080,61 @@ messages:
 	for _, bad := range []string{"_trim_empty", "_trim_objs"} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("message.py must not contain %q when no array references it:\n%s", bad, mod)
+		}
+	}
+}
+
+// The last element of a DYNAMIC wrapper array is always written, whatever its
+// value (MESSAGE_SPEC §2). Such an array recovers its length as highest-present-
+// id + 1 (§5.1), so the element at the highest index is the only one whose
+// PRESENCE carries the length: dropping a trailing default leaf encoded ["a", ""]
+// exactly like ["a"] and decoded one element short. Sequence-form elements never
+// had the problem -- they are framed unconditionally -- so this holds both
+// element kinds to one standard. A fixed-count array is exempt: its length is N
+// whatever the wire carries, so it still elides the whole trailing run.
+func TestPythonDynamicArrayAlwaysWritesLastElement(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  vec:
+    payload:
+      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
+      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+
+	for _, want := range []string{
+		// dynamic: the last index escapes the omit test
+		`            if _e0 != "" or _i0 == len(self.dynstr) - 1:`,
+		"            if len(_e0) != 0 or _i0 == len(self.dynblob) - 1:",
+		// fixed: no guard -- the trailing run still collapses, the decoder refills to N
+		`            if _e0 != "":`,
+		// ...and the fixed one is the only string array still narrowed.
+		"for _i0, _e0 in enumerate(_trim_empty(self.fixedstr)):",
+		"for _i0, _e0 in enumerate(self.dynstr):",
+		"for _i0, _e0 in enumerate(self.dynblob):",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q:\n%s", want, mod)
+		}
+	}
+	// The all-default predicate has to follow the writer: a dynamic [""] now puts
+	// an element on the wire, so the field is NOT default and must not be omitted.
+	// Trimming it here would drop a field that the marshal loop writes.
+	for _, want := range []string{
+		"if not (len(self.dynstr) == 0):",
+		"if not (len(self.dynblob) == 0):",
+		// The fixed one keeps its trim on both sides.
+		"if not (len(_trim_empty(self.fixedstr)) == 0):",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q:\n%s", want, mod)
+		}
+	}
+	for _, bad := range []string{"_trim_empty(self.dynstr)", "_trim_empty(self.dynblob)"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("a dynamic leaf array must not be trimmed, found %q:\n%s", bad, mod)
 		}
 	}
 }

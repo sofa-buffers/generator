@@ -480,8 +480,11 @@ func schemaTrimUse(s *ir.Schema) (empty, objs bool) {
 	walk = func(elem ir.Kind, items *ir.ArrayElem, fixed bool) {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			// Trimmed regardless of `count`: see elemTrimExpr.
-			empty = true
+			// Trimmed only when fixed: a dynamic array's last element is always
+			// written, so it is never narrowed. See elemTrimExpr.
+			if fixed {
+				empty = true
+			}
 		case ir.KindStruct, ir.KindUnion:
 			if fixed {
 				objs = true
@@ -834,10 +837,16 @@ func trimExpr(val string, elem ir.Kind, fixed bool) string {
 // A string/blob element is a leaf the writer already omits individually when it
 // equals the element default, so narrowing the trailing run does not change the
 // bytes -- it exists so the all-default predicate is computed from the very same
-// expression the writer loops over, and cannot drift away from it.
+// expression the writer loops over, and cannot drift away from it. That holds
+// only where the leaf may actually be omitted: on a DYNAMIC array the last
+// element is always written (see lastElemGuard), so trimming here would call a
+// dynamic [""] "default" and omit a field the marshal loop puts on the wire.
 func elemTrimExpr(val string, elem ir.Kind, fixed bool) string {
 	switch elem {
 	case ir.KindString, ir.KindBlob:
+		if !fixed {
+			return val
+		}
 		return fmt.Sprintf("_trim_empty(%s)", val)
 	case ir.KindStruct, ir.KindUnion:
 		if !fixed {
@@ -851,6 +860,25 @@ func elemTrimExpr(val string, elem ir.Kind, fixed bool) string {
 		return fmt.Sprintf("_trim_empty(%s)", val)
 	}
 	return val
+}
+
+// lastElemGuard is the "or this is the last element" disjunct that keeps a
+// DYNAMIC wrapper array's final element on the wire whatever its value
+// (MESSAGE_SPEC §2, "the last element of a dynamic array is always present").
+// Such an array recovers its length as highest-present-id + 1 (§5.1), so the
+// element at the highest index is the only one whose PRESENCE carries the
+// length: dropping it would encode ["a", ""] exactly like ["a"] and decode one
+// element short. Sequence-form elements never needed this -- they are framed
+// unconditionally -- so this closes the gap on the leaf side and holds both
+// element kinds to one standard. A fixed-count array needs none of it: its
+// length is N whatever the wire carries, which is why it elides the entire
+// trailing default run instead (§3/§5.1), so the guard is omitted there and the
+// trailing run collapses as before.
+func lastElemGuard(iv, val string, fixed bool) string {
+	if fixed {
+		return ""
+	}
+	return fmt.Sprintf(" or %s == len(%s) - 1", iv, val)
 }
 
 // marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
@@ -890,18 +918,22 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%se.write_float64_array(%s, %s)", ind, idExpr, trimExpr(val, elem, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2) --
+		// except at the one position whose presence carries the length, see
+		// lastElemGuard.
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, elemTrimExpr(val, elem, fixed))
-		f.line(`%s    if %s != "":`, ind, ev)
+		f.line(`%s    if %s != ""%s:`, ind, ev, lastElemGuard(iv, val, fixed))
 		f.line("%s        e.write_string(%s, %s)", ind, iv, ev)
 		f.line("%se.%s()", ind, seqEnd)
 	case ir.KindBlob:
 		// A blob element is a leaf: omit it when equal to the element default
-		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2).
+		// (empty), leaving an id gap the decoder restores (MESSAGE_SPEC S2) --
+		// except at the one position whose presence carries the length, see
+		// lastElemGuard.
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, elemTrimExpr(val, elem, fixed))
-		f.line("%s    if len(%s) != 0:", ind, ev)
+		f.line("%s    if len(%s) != 0%s:", ind, ev, lastElemGuard(iv, val, fixed))
 		f.line("%s        e.write_bytes(%s, bytes(%s))", ind, iv, ev)
 		f.line("%se.%s()", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:

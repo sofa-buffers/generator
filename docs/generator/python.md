@@ -48,6 +48,28 @@ instance, onto one object. Materializing costs nothing on the wire: the marshal
 gate for a wrapper array narrows it to M (one past the last non-default element)
 first, so a fresh object still writes no child and the field stays omitted (§2).
 
+## The last element of a dynamic wrapper array is always written
+
+A dynamic (count-less) wrapper array recovers its length as *highest present id
++ 1* (§5.1), so the element at the highest index is the only one whose
+**presence** carries the length. `lastElemGuard` adds the `or _i0 ==
+len(...) - 1` disjunct to the `string`/`blob` leaf omit test for exactly that
+position: without it `["a", ""]` encoded byte-for-byte like `["a"]` and decoded
+one element short, and `["", ""]` encoded to nothing at all. `["", ""]` is now
+written as its final element alone, at id 1 (`060a0207`). Interior gaps are
+untouched — `["", "b"]` still elides element 0 (`060a0a6207`) — and `[]` still
+vanishes entirely, so the empty array keeps its zero-byte encoding.
+
+Struct/union/nested-row elements never needed the guard: they are framed
+unconditionally, which already made their presence unconditional.
+
+A `count: N` array is exempt — its length is N whatever the wire carries, which
+is why it elides the whole trailing default run instead — so `lastElemGuard`
+returns nothing there, and the leaf arm of `elemTrimExpr` is fixed-only for the
+same reason. Both halves are gated on the same flag deliberately: the marshal
+loop and `_is_default` run off that one expression, and trimming a dynamic
+`[""]` while the writer frames it would omit a field that is on the wire.
+
 ## On-demand corelib imports
 
 The generated `message.py` imports from `sofab` only the names its own body can
