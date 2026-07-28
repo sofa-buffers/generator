@@ -487,13 +487,19 @@ func (g *gen) emitMarshalArray(f *zfile, fld *ir.Field, acc string) {
 // length, so only the trailing run goes. Both the marshal loop and isDefault run
 // off this one expression, so the writer and the predicate cannot disagree.
 //
-// A string/blob element is a leaf the writer already omits individually when it
-// equals the element default, so narrowing that run does not change the bytes --
-// it exists so the predicate is computed from the very expression the writer
-// loops over.
+// A string/blob element is a leaf the writer omits individually when it equals
+// the element default, so narrowing a FIXED array's run does not change the
+// bytes -- it exists so the predicate is computed from the very expression the
+// writer loops over. On a DYNAMIC array the trim is dropped instead: its final
+// element is always written (see lastElemGuard), so a trailing default leaf is
+// on the wire and trimming here would make isDefault call a dynamic [""]
+// "default" and omit a field the marshal loop writes.
 func (g *gen) elemTrimExpr(val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, fixed bool) string {
 	switch elem {
 	case ir.KindString, ir.KindBlob:
+		if !fixed {
+			return val
+		}
 		// Both are []const u8 in Zig, so one slice-shaped trim covers them.
 		return fmt.Sprintf("_trimSlices(u8, %s)", val)
 	case ir.KindStruct, ir.KindUnion:
@@ -508,6 +514,28 @@ func (g *gen) elemTrimExpr(val string, elem ir.Kind, ref *ir.TypeRef, items *ir.
 		return fmt.Sprintf("_trimSlices(%s, %s)", g.zigArrayElem(items.Elem, items.ElemRef, items.ElemItems), val)
 	}
 	return val
+}
+
+// lastElemGuard is the "or this is the last element" disjunct that keeps a
+// DYNAMIC wrapper array's final element on the wire whatever its value
+// (MESSAGE_SPEC S2, "the last element of a dynamic array is always present").
+// Such an array recovers its length as highest-present-id + 1 (S5.1), so the
+// element at the highest index is the only one whose PRESENCE carries the
+// length: dropping it would encode ["a", ""] exactly like ["a"] and decode one
+// element short. Sequence-form elements never needed this -- they are framed
+// unconditionally -- so this closes the gap on the leaf side and holds both
+// element kinds to one standard. A fixed-count array needs none of it: its
+// length is N whatever the wire carries, which is why it elides the entire
+// trailing default run instead (S3/S5.1), so the guard is omitted there and the
+// trailing run collapses as before.
+//
+// val is the very slice the loop runs over, so `.len - 1` cannot underflow --
+// the guard is only ever evaluated from inside the loop body, i.e. len >= 1.
+func lastElemGuard(iv, val string, fixed bool) string {
+	if fixed {
+		return ""
+	}
+	return fmt.Sprintf(" or %s == %s.len - 1", iv, val)
 }
 
 // trimExpr wraps a native array expression in the trailing-default-run trim that
@@ -570,16 +598,17 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 		f.line("%stry os.writeArrayFp64(%s, %s);", ind, idExpr, trimExpr(val, fixed))
 	case ir.KindString:
 		// A string element is a leaf: omit it when equal to the element
-		// default (empty), leaving an id gap the decoder restores.
+		// default (empty), leaving an id gap the decoder restores -- except at
+		// the one position whose presence carries the length, see lastElemGuard.
 		f.line("%stry os.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, 0..) |%s, %s| {", ind, elemTrim, ev, iv)
-		f.line("%s    if (%s.len != 0) try os.writeString(@intCast(%s), %s);", ind, ev, iv, ev)
+		f.line("%s    if (%s.len != 0%s) try os.writeString(@intCast(%s), %s);", ind, ev, lastElemGuard(iv, elemTrim, fixed), iv, ev)
 		f.line("%s}", ind)
 		f.line("%stry os.%s();", ind, seqEnd)
 	case ir.KindBlob:
 		f.line("%stry os.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, 0..) |%s, %s| {", ind, elemTrim, ev, iv)
-		f.line("%s    if (%s.len != 0) try os.writeBlob(@intCast(%s), %s);", ind, ev, iv, ev)
+		f.line("%s    if (%s.len != 0%s) try os.writeBlob(@intCast(%s), %s);", ind, ev, lastElemGuard(iv, elemTrim, fixed), iv, ev)
 		f.line("%s}", ind)
 		f.line("%stry os.%s();", ind, seqEnd)
 	case ir.KindStruct, ir.KindUnion:

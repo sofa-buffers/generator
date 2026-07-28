@@ -709,15 +709,17 @@ messages:
 	for _, want := range []string{
 		// FIELD wrappers, one per array field: closed with the dropping end, so an
 		// empty array is omitted and absence reconstructs it.
-		// (the element loop runs over the narrowed run -- see elemTrimExpr)
-		"try os.writeSequenceBeginLazy(1);\n        for (_trimSlices(u8, self.s), 0..) |_e0, _i0| {\n            if (_e0.len != 0) try os.writeString(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
-		"try os.writeSequenceBeginLazy(2);\n        for (_trimSlices(u8, self.b), 0..) |_e0, _i0| {\n            if (_e0.len != 0) try os.writeBlob(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
+		// (the element loop runs over the narrowed run -- see elemTrimExpr; these
+		// arrays are dynamic, so there is no narrowing and the last element
+		// escapes the omit test -- see lastElemGuard)
+		"try os.writeSequenceBeginLazy(1);\n        for (self.s, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.s.len - 1) try os.writeString(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
+		"try os.writeSequenceBeginLazy(2);\n        for (self.b, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.b.len - 1) try os.writeBlob(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
 		// A struct ELEMENT keeps its frame even with every child at its default.
 		"            try os.writeSequenceBeginLazy(@intCast(_i0));\n            try _e0.marshal(os);\n            try os.writeSequenceEndKeep();\n        }\n        try os.writeSequenceEnd();",
 		// A nested array row is an ELEMENT too: its own frame is kept, while the
 		// field wrapper around the rows still closes with the dropping end.
 		"try os.writeSequenceBeginLazy(4);\n        for (self.nest, 0..) |_e0, _i0| {\n            try os.writeSequenceBeginLazy(@intCast(_i0));",
-		"                if (_e1.len != 0) try os.writeString(@intCast(_i1), _e1);\n            }\n            try os.writeSequenceEndKeep();\n        }\n        try os.writeSequenceEnd();",
+		"                if (_e1.len != 0 or _i1 == _e0.len - 1) try os.writeString(@intCast(_i1), _e1);\n            }\n            try os.writeSequenceEndKeep();\n        }\n        try os.writeSequenceEnd();",
 		// Array of arrays of structs: row frame AND per-struct element frame kept.
 		"                try os.writeSequenceBeginLazy(@intCast(_i1));\n                try _e1.marshal(os);\n                try os.writeSequenceEndKeep();\n            }\n            try os.writeSequenceEndKeep();\n        }\n        try os.writeSequenceEnd();",
 	} {
@@ -929,5 +931,59 @@ messages:
 	// so its lazily-opened wrapper is dropped and the field stays off the wire.
 	if !strings.Contains(m, "if (_trimSlices(u8, self.strs).len != 0) return false;") {
 		t.Errorf("the materialized default must still test as default:\n%s", m)
+	}
+}
+
+// The last element of a DYNAMIC wrapper array is always written, whatever its
+// value (MESSAGE_SPEC §2). Such an array recovers its length as highest-present-
+// id + 1 (§5.1), so the element at the highest index is the only one whose
+// PRESENCE carries the length: dropping a trailing default leaf encoded ["a", ""]
+// exactly like ["a"] and decoded one element short. Sequence-form elements never
+// had the problem -- they are framed unconditionally -- so this holds both
+// element kinds to one standard. A fixed-count array is exempt: its length is N
+// whatever the wire carries, so it still elides the whole trailing run.
+func TestZigDynamicArrayAlwaysWritesLastElement(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
+      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	for _, want := range []string{
+		// dynamic: the last index escapes the omit test, and the loop runs over
+		// the untrimmed slice so `.len - 1` IS the last index.
+		"for (self.dynstr, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.dynstr.len - 1) try os.writeString(@intCast(_i0), _e0);",
+		"for (self.dynblob, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.dynblob.len - 1) try os.writeBlob(@intCast(_i0), _e0);",
+		// fixed: no guard -- the trailing run still collapses, the decoder refills to N
+		"for (_trimSlices(u8, self.fixedstr), 0..) |_e0, _i0| {\n            if (_e0.len != 0) try os.writeString(@intCast(_i0), _e0);",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing %q:\n%s", want, m)
+		}
+	}
+	// The all-default predicate has to follow the writer: a dynamic [""] now puts
+	// an element on the wire, so the field is NOT default and must not be omitted.
+	// Trimming it here would drop a field that the marshal loop writes.
+	if !strings.Contains(m, "if (self.dynstr.len != 0) return false;") {
+		t.Errorf("isDefault must not trim a dynamic string array:\n%s", m)
+	}
+	if !strings.Contains(m, "if (self.dynblob.len != 0) return false;") {
+		t.Errorf("isDefault must not trim a dynamic blob array:\n%s", m)
+	}
+	if strings.Contains(m, "_trimSlices(u8, self.dynstr)") || strings.Contains(m, "_trimSlices(u8, self.dynblob)") {
+		t.Errorf("a dynamic string/blob array must not be trimmed:\n%s", m)
+	}
+	// The fixed one keeps its trim on both sides.
+	if !strings.Contains(m, "if (_trimSlices(u8, self.fixedstr).len != 0) return false;") {
+		t.Errorf("a count:N string array must still be trimmed:\n%s", m)
 	}
 }

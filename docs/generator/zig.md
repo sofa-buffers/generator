@@ -83,6 +83,23 @@ Per message:
   is omitted (§2). A **dynamic** (count-less) array has no `N` to refill from, so
   a trailing default element is significant there and is never narrowed away.
 
+  That significance also binds the **leaf** side. A `string`/`blob` element is
+  not framed — it is omitted individually whenever it equals the element default
+  (empty), leaving an id gap the decoder restores. At the **last** index of a
+  *dynamic* array that omission is lossy: the array recovers its length as
+  *highest present id + 1*, so the final element is the only one whose
+  **presence** carries the length. The generated omit test therefore gains an
+  `or _iN == <slice>.len - 1` disjunct there (MESSAGE_SPEC §2, "the last element
+  of a dynamic array is always present"): `["a", ""]` used to encode exactly like
+  `["a"]` and decode one element short, and `["", ""]` encoded to nothing at all.
+  Now `["", ""]` is written as its final element **alone**, at id 1 — interior
+  gaps are untouched, so `["", "b"]` still elides element 0. A `count: N` array
+  gets no such guard: its length is `N` whatever the wire carries, which is why
+  it elides the whole trailing run instead. For the same reason `elemTrimExpr`
+  narrows a `string`/`blob` run only when the array is fixed — narrowing a
+  dynamic one would make `isDefault` call `[""]` "default" and omit a field the
+  marshal loop writes.
+
   Every generated `struct`/`union` carries `pub fn isDefault()` for this: it is
   the explicit form of the "no child was written" test the lazy framing already
   encodes implicitly for a *field*, needed because an *element* must be judged
