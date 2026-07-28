@@ -68,15 +68,20 @@ fn main() {
 
     // 3. a wrapper array of heapless strings: element boundaries and payload
     //    boundaries both fall inside chunks.
-    // `a` is `count: 8`, so its Default is already 8 elements long (S5.1) — the
-    // elements are assigned in place; a push would run past the heapless capacity.
+    // `a` is `count: 8` — a CAPACITY, not a length (S3), so its Default is the
+    // EMPTY array: the heapless::Vec holding it has capacity 8 and length 0, which
+    // is exactly how a fixed-storage target expresses 0..N. Fill it by pushing.
     let mut arr = Vecsa::default();
-    assert_eq!(arr.a.len(), 8, "a count: 8 wrapper array defaults to 8 elements");
-    for (i, v) in arr.a.iter_mut().enumerate() {
-        *v = std::format!("element-{i:03}")
-            .as_str()
-            .try_into()
-            .expect("fits the element maxlen");
+    assert_eq!(arr.a.len(), 0, "a count: 8 wrapper array defaults to empty");
+    for i in 0..8 {
+        arr.a
+            .push(
+                std::format!("element-{i:03}")
+                    .as_str()
+                    .try_into()
+                    .expect("fits the element maxlen"),
+            )
+            .expect("fits the schema count");
     }
     let wire = arr.encode();
     let want = Vecsa::try_decode(&wire).expect("one-shot decode failed");

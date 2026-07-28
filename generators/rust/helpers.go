@@ -139,45 +139,29 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 		return g.rustBlobNew(f.HasMaxlen, "", false)
 	case ir.KindArray:
 		// A native scalar array is a leaf: materialize its schema default so an
-		// omitted default array reconstructs correctly. A fixed-count native array
-		// is a stack `[elem; N]`; a dynamic one stays a heap Vec. A wrapper array's
-		// declared `default:` is still not materialized -- only its LENGTH is (see
-		// rustSeqFilled), so an all-default one is still the empty-run value whose
-		// dropping closer §2 needs.
-		if elem, n, ok := g.fixedNativeArray(f); ok {
-			return g.rustFixedArrayDefault(f, elem, n)
-		}
+		// omitted default array reconstructs correctly.
+		//
+		// A declared `count: N` materializes NOTHING. It is a CAPACITY, not a
+		// length (MESSAGE_SPEC §3): it sizes the container's capacity and bounds
+		// the decode, but it never adds elements, so a fresh `count: N` array --
+		// native or wrapper -- is the EMPTY array, and a declared `default`
+		// shorter than N stands exactly as written rather than being padded out
+		// to N. That is also what the field's omit test compares against, and
+		// what an absent field decodes back to.
 		if isNativeArrayElem(f.Elem) {
-			// No declared default: a `count: N` array still defaults to N element
-			// defaults, exactly as [T; N] did and as C/C++ aggregate init gives.
-			// `vec!` is a std macro, so the no_std profile builds the same value
-			// from an array literal instead -- a #![no_std] crate has alloc, not
-			// the prelude macro.
-			if f.Default == nil && f.HasCount {
-				if g.noStd {
-					return fmt.Sprintf("[%s; %d].to_vec()", rustElemZeroLit(f.Elem), f.Count)
-				}
-				return fmt.Sprintf("vec![%s; %d]", rustElemZeroLit(f.Elem), f.Count)
-			}
-			if parts, ok := g.rustNativeArrayPartsN(f); ok {
-				if g.noStd {
-					// dynamic (count-less) native array under allow_dynamic -> alloc Vec.
+			if parts, ok := g.rustNativeArrayParts(f); ok {
+				switch {
+				case !g.noStd:
+					return "vec![" + parts + "]"
+				case g.allowDynamic || !f.HasCount:
+					// alloc storage: an array literal converts straight into it.
 					return "[" + parts + "].to_vec()"
+				default:
+					// heapless::Vec<T, N>: fill by extend_from_slice, the same
+					// heap-free builder shape rustBlobNew uses.
+					return fmt.Sprintf("{ let mut _v = %s; let _ = _v.extend_from_slice(&[%s]); _v }", g.rustSeqNew(f.HasCount), parts)
 				}
-				return "vec![" + parts + "]"
 			}
-		}
-		// A `count: N` wrapper array's value is N elements long whether or not the
-		// field ever reaches the wire (S5.1: the length "is N for every target").
-		// The native arrays above have always been materialized here; the wrapper
-		// ones were not, which left the two kinds disagreeing about the same schema
-		// -- a count:3 u32 array reading back at length 3 next to a count:3 string
-		// array at length 0 -- and left the field disagreeing with itself: the
-		// sequence_end refill (elemFill) can only fill a sequence that was actually
-		// OPENED, so an explicitly-empty wrapper decoded at N while an omitted field
-		// stayed empty.
-		if fill := g.rustSeqFilled(f); fill != "" {
-			return fill
 		}
 		return g.rustSeqNew(f.HasCount)
 	default: // struct/union: all children default, so Default::default() is right
@@ -188,33 +172,11 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 // rustNativeArrayParts renders a native scalar array's schema default element
 // list (comma-joined, no brackets); ("", false) when there is no default.
 // Element literals are unconstrained and infer to the field's element type.
-// rustNativeArrayPartsN is rustNativeArrayParts, tail-padded to the schema
-// `count` when there is one. A `count: N` array's default is exactly N elements
-// — the declared values, then the element default — in every target: C and C++
-// get that from aggregate initialization, which zero-fills what a braced
-// initializer leaves out. A Vec has no such rule, so the padding is explicit
-// here; otherwise an omitted field would reconstruct with fewer elements than
-// the same schema yields elsewhere.
-func (g *gen) rustNativeArrayPartsN(f *ir.Field) (string, bool) {
-	parts, ok := g.rustNativeArrayParts(f)
-	if !ok || !f.HasCount {
-		return parts, ok
-	}
-	have := int64(0)
-	if parts != "" {
-		have = int64(len(strings.Split(parts, ", ")))
-	}
-	zero := rustElemZeroLit(f.Elem)
-	for ; have < f.Count; have++ {
-		if parts == "" {
-			parts = zero
-		} else {
-			parts += ", " + zero
-		}
-	}
-	return parts, true
-}
-
+//
+// It is NOT padded out to a declared `count: N`: that is a capacity, not a
+// length (MESSAGE_SPEC §3), so the default stands exactly as written -- and so
+// does the value it is compared against, which is what keeps a length-N all-zero
+// array distinct from the empty one.
 func (g *gen) rustNativeArrayParts(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
 	if !ok {
@@ -310,60 +272,21 @@ func (g *gen) rustSeqNew(hasCount bool) string {
 	}
 }
 
-// rustSeqFilled is the Default for a `count: N` WRAPPER array: the container of
-// rustSeqNew, filled with N element defaults. "" when the field is not one, i.e.
-// when the container must stay empty.
-//
-// The set of fields filled here is exactly the set elemFill refills at
-// sequence_end -- string/blob (fkSeqArr) and struct/union (fkStructArr)
-// elements. Nested-array ROWS are deliberately excluded from BOTH: a row's
-// writer emits its array header unconditionally (serializeArray's KindArray
-// arm), so materialized rows would reach the wire instead of being narrowed
-// away, and the array would grow on every round trip. Construction and refill
-// have to agree about that, or the field is inconsistent the other way round.
-//
-// Elements are the type's default (empty string/blob, all-default struct or
-// union), matching elemFill's `Default::default()`; a declared per-element
-// default is not materialized anywhere today. That keeps the filled value
-// byte-neutral: a default leaf element is omitted individually and the trailing
-// all-default run is narrowed off by elemTrimExpr, so an untouched `count: N`
-// wrapper array still writes no child and is still dropped by its closer (§2).
-//
-// One loop shape serves both profiles: under no_std the container is a
-// heapless::Vec whose capacity IS N, so the pushes cannot fail, but the loop
-// stops when the length stops growing anyway -- the same guard elemFill uses, so
-// a fixed-capacity container can never spin here.
-func (g *gen) rustSeqFilled(f *ir.Field) string {
-	if !f.HasCount || !isWrapperElem(f.Elem) || f.Elem == ir.KindArray {
-		return ""
-	}
-	return fmt.Sprintf("{ let mut _v = %s; while _v.len() < %d { let _n = _v.len(); let _ = _v.push(Default::default()); if _v.len() == _n { break; } } _v }",
-		g.rustSeqNew(true), f.Count)
-}
-
-// rustLeafCmp compares a scalar/string leaf field against its default with the
-// given operator. A string compares against its &str default (as_str() under
+// rustLeafNe is the `!= default` omit-guard for a scalar/string leaf field
+// (MESSAGE_SPEC §2). A string compares against its &str default (as_str() under
 // no_std, where the field is a heapless/alloc string); other scalars against
-// their materialized default value.
-//
-// One builder serves both the `!=` omit-guard emitSerialize writes and the `==`
-// arm of is_default, so the write decision and the all-default predicate read the
-// same operands — including for a NaN default, where both sides agree the field
-// is never equal to it.
-func (g *gen) rustLeafCmp(acc string, f *ir.Field, op string) string {
+// their materialized default value -- including a NaN default, which the field is
+// then never equal to, so it always reaches the wire.
+func (g *gen) rustLeafNe(acc string, f *ir.Field) string {
 	if f.Kind == ir.KindString {
 		lit, _ := f.Default.(string)
 		if g.noStd {
-			return fmt.Sprintf("%s.as_str() %s %q", acc, op, lit)
+			return fmt.Sprintf("%s.as_str() != %q", acc, lit)
 		}
-		return fmt.Sprintf("%s %s %q", acc, op, lit)
+		return fmt.Sprintf("%s != %q", acc, lit)
 	}
-	return fmt.Sprintf("%s %s %s", acc, op, g.rustFieldDefault(f))
+	return fmt.Sprintf("%s != %s", acc, g.rustFieldDefault(f))
 }
-
-// rustLeafNe is the boolean omit-guard `<lhs> != <default>` for a scalar/string
-// leaf field (MESSAGE_SPEC §2).
-func (g *gen) rustLeafNe(acc string, f *ir.Field) string { return g.rustLeafCmp(acc, f, "!=") }
 
 func (g *gen) rustIntDefault(f *ir.Field) string {
 	if f.Kind == ir.KindBitfield {
@@ -422,36 +345,13 @@ func (g *gen) typeName(key string) string {
 	return b.String()
 }
 
-// fixedNativeArray reports whether an array field is a native-element array with
-// a statically known length — the case that lowers to a fixed Rust array
-// `[elem; N]` (stack, heap-free) instead of a heap `Vec<elem>`, mirroring the C++
-// backend's `std::array<T, N>`. Returns the element Rust type and N. Native but
-// count-less (dynamic) arrays, and composite-element arrays, keep `Vec`.
-func (g *gen) fixedNativeArray(f *ir.Field) (elem string, n int64, ok bool) {
-	if f.Kind != ir.KindArray || !isNativeArrayElem(f.Elem) || !f.HasCount {
-		return "", 0, false
-	}
-	// Under allow_dynamic a native array is a Vec like every other container; the
-	// schema count stays mandatory and becomes a decode-path check instead of the
-	// array's length.
-	// Inline fixed-size storage belongs to exactly one profile: no_std without
-	// allow_dynamic, the one with no allocator to reach for. Everywhere else a
-	// bounded array goes in that profile's dynamic container, like a bounded
-	// string or blob: all three are variable-length up to their declared maximum
-	// (§3 trims an array's trailing default run), so the maximum is a bound, not a
-	// storage decision.
-	//
-	// This gives up the [T; N] the std profile used to emit, measured as a
-	// maxspeed win in cd8e9eb. Two things outweighed it: within one struct a
-	// `count: N` array was inline while a count-less one was a Vec, so declaring a
-	// bound silently changed the storage; and `len()` then meant "the schema
-	// count" on one field and "what the message carried" on the next. The
-	// allocation is worth revisiting once the storage model is settled.
-	if !g.noStd || g.allowDynamic {
-		return "", 0, false
-	}
-	return g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax), f.Count, true
-}
+// Native `count: N` arrays deliberately have NO inline `[T; N]` storage. `count`
+// is a capacity, not a length (MESSAGE_SPEC §3): a field holds 0..N elements and
+// the wire count M IS its length, which a Rust array of exactly N cannot express
+// -- it would round-trip a 3-element message into a 5-element value. Every native
+// array therefore lives in the profile's variable-length container: `Vec<T>` on
+// std, and `heapless::Vec<T, N>` under no_std, whose capacity is N, whose Default
+// has length 0, and which is still inline and heap-free.
 
 // rustStr / rustBlob / rustSeq map a variable-length string, blob, or wrapper
 // sequence to its storage type per profile: std String/Vec (default), or under
@@ -505,87 +405,6 @@ func (g *gen) rustSeq(elem string, hasCount bool, count int64) string {
 	}
 }
 
-// rustFixedArrayDefault renders the Default value of a fixed native array
-// `[elem; N]`. With a schema default it is an explicit array literal of exactly N
-// elements — the given values, tail-padded with the element zero (matching the
-// C++ `std::array` aggregate-init that zero-fills unspecified trailing elements,
-// so both backends encode the same N elements). With no default it is the
-// type-zero repeat literal (`[0; N]` / `[0.0; N]` / `[false; N]`).
-func (g *gen) rustFixedArrayDefault(f *ir.Field, elem string, n int64) string {
-	zero := rustElemZeroLit(f.Elem)
-	if vals, ok := f.Default.([]any); ok {
-		parts := make([]string, 0, n)
-		for _, v := range vals {
-			parts = append(parts, rustElemLit(f.Elem, v))
-		}
-		for int64(len(parts)) < n {
-			parts = append(parts, zero)
-		}
-		return "[" + strings.Join(parts, ", ") + "]"
-	}
-	return fmt.Sprintf("[%s; %d]", zero, n)
-}
-
-// rustElemZeroLit / rustElemLit render a native array element's zero literal and
-// a schema-default element literal. They are the single source of truth for both
-// the Default image and the needs-reset test, so the two cannot disagree.
-func rustElemZeroLit(k ir.Kind) string {
-	switch k {
-	case ir.KindFP32, ir.KindFP64:
-		return "0.0"
-	case ir.KindBool:
-		return "false"
-	default:
-		return "0"
-	}
-}
-
-func rustElemLit(k ir.Kind, v any) string {
-	if k == ir.KindFP32 || k == ir.KindFP64 {
-		return rustFloat(v)
-	}
-	return fmt.Sprintf("%v", v)
-}
-
-// rustFixedArrayZero renders the all-element-default image of a fixed native
-// array `[elem; N]` (`[0; N]` / `[0.0; N]` / `[false; N]`). This is what a
-// short wire count decodes the tail to (MESSAGE_SPEC §3: elements [M, N) are the
-// ELEMENT default), which is not the same as the field's Default image once the
-// field carries a schema `default:`.
-func (g *gen) rustFixedArrayZero(f *ir.Field, n int64) string {
-	return fmt.Sprintf("[%s; %d]", rustElemZeroLit(f.Elem), n)
-}
-
-// rustFixedArrayNeedsReset reports whether a fixed native array's Default image
-// differs from its all-element-default image — i.e. whether the field carries a
-// non-zero schema `default:`. Only such a field needs decode's array_begin to
-// wipe the constructor image before the M wire elements are stored: positions
-// [M, N) must read back as the ELEMENT default, and the schema default would
-// otherwise leak through the untouched tail. Returns the zero image to reset to.
-// Gating on this keeps every other schema's generated code byte-identical.
-func (g *gen) rustFixedArrayNeedsReset(f *ir.Field) (zeroImage string, need bool) {
-	_, n, ok := g.fixedNativeArray(f)
-	if !ok {
-		return "", false
-	}
-	zero := g.rustFixedArrayZero(f, n)
-	vals, ok := f.Default.([]any)
-	if !ok {
-		return zero, false // no schema default: the constructor is already the zero image
-	}
-	// Compare element-wise rather than against the rendered image: an explicit
-	// all-zero default (`[0, 0, 0]`) is semantically the zero image even though it
-	// renders differently from the `[0; N]` repeat literal, and must not pay for a
-	// reset. A -0.0 default does need one: [M, N) must read back as +0.0.
-	elemZero := rustElemZeroLit(f.Elem)
-	for _, v := range vals {
-		if rustElemLit(f.Elem, v) != elemZero {
-			return zero, true
-		}
-	}
-	return zero, false
-}
-
 func (g *gen) rustType(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
@@ -607,9 +426,6 @@ func (g *gen) rustType(f *ir.Field) string {
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
-		if elem, n, ok := g.fixedNativeArray(f); ok {
-			return fmt.Sprintf("[%s; %d]", elem, n)
-		}
 		return g.rustSeq(g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax), f.HasCount, f.Count)
 	}
 	return "()"

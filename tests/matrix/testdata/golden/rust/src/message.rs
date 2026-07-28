@@ -71,7 +71,7 @@ mod scalars_dec {
     pub fn decode(data: &[u8]) -> Scalars {
         let mut m = Scalars::default();
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0, askip: 0 };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, askip: 0 };
             let mut is = IStream::new();
             let _ = is.feed(data, &mut v);
         }
@@ -84,7 +84,7 @@ mod scalars_dec {
         let invalid;
         let fed;
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0, askip: 0 };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, askip: 0 };
             let mut is = IStream::new();
             fed = is.feed(data, &mut v);
             overflow = v.err;
@@ -123,13 +123,12 @@ mod scalars_dec {
         acc: Vec<u8>,
         err: bool,
         inv: bool,
-        ai: usize,
         askip: usize,
     }
 
     impl Decoder {
         pub fn new() -> Self {
-            Self { m: Scalars::default(), is: IStream::new(), stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, ai: 0, askip: 0 }
+            Self { m: Scalars::default(), is: IStream::new(), stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, askip: 0 }
         }
 
         /// Feed the next chunk. `Ok(())` if it ended on a field boundary,
@@ -137,16 +136,15 @@ mod scalars_dec {
         /// answers whether the MESSAGE is done, only whether these bytes were.
         pub fn feed(&mut self, chunk: &[u8]) -> Result<(), sofab::Error> {
             let fed = {
-                let mut v = V { m: &mut self.m, stack: core::mem::take(&mut self.stack), cur: self.cur, acc: core::mem::take(&mut self.acc), err: self.err, inv: self.inv, ai: self.ai, askip: self.askip };
+                let mut v = V { m: &mut self.m, stack: core::mem::take(&mut self.stack), cur: self.cur, acc: core::mem::take(&mut self.acc), err: self.err, inv: self.inv, askip: self.askip };
                 let r = self.is.feed(chunk, &mut v);
                 // `..` covers `m`, ending its borrow before the write-back.
-                let V { stack, cur, acc, err, inv, ai, askip, .. } = v;
+                let V { stack, cur, acc, err, inv, askip, .. } = v;
                 self.stack = stack;
                 self.cur = cur;
                 self.acc = acc;
                 self.err = err;
                 self.inv = inv;
-                self.ai = ai;
                 self.askip = askip;
                 r
             };
@@ -187,7 +185,6 @@ struct V<'a> {
     acc: Vec<u8>,
     err: bool,
     inv: bool,
-    ai: usize, // index into the fixed native array currently being filled
     askip: usize, // elements left to discard from a wire-type-contradictory array
 }
 
@@ -225,7 +222,6 @@ impl<'a> Visitor for V<'a> {
         }
     }
     fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {
-        self.ai = 0;
         self.askip = match kind {
             ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {
                 _ => count,

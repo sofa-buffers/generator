@@ -95,11 +95,10 @@ func TestRustStructural(t *testing.T) {
 		"pub somefloatarray: Vec<f32>,",                // bounded fp array
 		"pub someboolarray: Vec<bool>,",                // bounded bool array
 		"someuintarray: vec![0, 1, 1000, 4294967295],", // default is an N-element array literal
-		"someboolarray: vec![true, true, false, false, false, false, false, false],", // default is exactly N                                   // short default tail-padded to N
-		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {",              // omit-guard is a default compare
-		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear();",    // bounds-checked store (generator#78); over-count rejects (generator#100)
-		"ai: usize", // fill index on the visitor
-		"if offset == 0 && chunk.len() >= total {", // string/blob single-shot fast path
+		"someboolarray: vec![true, true, false],",      // the declared default exactly as written -- `count` never pads it
+		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {",                                                         // omit-guard is a default compare
+		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear() ",                                               // over-count rejects (generator#100/#216), then the wire's M elements are collected
+		"if offset == 0 && chunk.len() >= total {",                                                                              // string/blob single-shot fast path
 		"match core::str::from_utf8(&chunk[..total]) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }", // strict UTF-8: invalid -> INVALID (issue #85, subsumes #80)
 	} {
 		if !strings.Contains(m, want) {
@@ -245,8 +244,8 @@ messages:
 		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
-		"(_Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.mat.push(Vec::new()) },",
-		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.mat.last_mut().unwrap().push(value as u32); } }; },",
+		"(_Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
+		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
 		"(_Loc::Root, 0) => if total > MAX_DYN_STRING_LEN { self.lim = true; return; },",
@@ -538,7 +537,13 @@ messages:
 	}
 }
 
-func TestRustTrimsFixedCountArraysOnly(t *testing.T) {
+// MESSAGE_SPEC §3 (af536c4): `count: N` is a CAPACITY, so the wire count M IS the
+// array's length and nothing that carries a length may be elided. The
+// trailing-default-run trim a fixed-count array used to apply is therefore gone,
+// for every element family and both storage modes -- the value goes to the wire
+// exactly as it stands. The corelib still ships the helpers; the generator simply
+// stops calling them.
+func TestRustNativeArraysAreNeverTrimmed(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -554,13 +559,13 @@ messages:
 `
 	// The count-less arrays belong to the std profile only: no_std requires a bound
 	// on every array in both storage modes, so its legs take the same schema minus
-	// those two fields. What they demonstrate — a dynamic array is never trimmed,
-	// having no N to refill from — is a std-profile property by construction.
+	// those two fields.
 	srcBounded := strings.Replace(src, "      dynu:    { id: 5, type: array, items: { type: u32 } }\n", "", 1)
 	srcBounded = strings.Replace(srcBounded, "      dynf32:  { id: 6, type: array, items: { type: fp32 } }\n", "", 1)
 
 	for _, cfg := range []map[string]any{
-		{}, // std corelib-rs
+		{},                       // std corelib-rs
+		{"corelib": "rs-no-std"}, // #![no_std], heapless storage
 		{"corelib": "rs-no-std", "allow_dynamic": true}, // #![no_std], alloc storage
 		{"corelib": "rs-no-std", "no_std": false},       // no-std corelib, std crate
 	} {
@@ -571,7 +576,6 @@ messages:
 		m := moduleFromYAML(t, in, cfg)
 		if in == src {
 			for _, want := range []string{
-				// Dynamic arrays keep every element.
 				"os.write_array_unsigned(5, &self.dynu)",
 				"os.write_array_fp32(6, &self.dynf32)",
 			} {
@@ -580,61 +584,30 @@ messages:
 				}
 			}
 		}
+		// A `count: N` array writes exactly what it holds, like a count-less one.
 		for _, want := range []string{
-			// Fixed-count native arrays are trimmed, per element family.
-			"os.write_array_unsigned(0, sofab::trim_tail(&self.fixedu[..], 0))",
-			"os.write_array_signed(1, sofab::trim_tail(&self.fixedi[..], 0))",
-			"os.write_array_fp32(2, sofab::trim_tail_f32(&self.fixedf32[..]))",
-			"os.write_array_fp64(3, sofab::trim_tail_f64(&self.fixedf64[..]))",
-			// bool trims its 0/1 u8 image (false <-> 0).
-			"os.write_array_unsigned(4, sofab::trim_tail(&_t0[..], 0))",
+			"os.write_array_unsigned(0, &self.fixedu)",
+			"os.write_array_signed(1, &self.fixedi)",
+			"os.write_array_fp32(2, &self.fixedf32)",
+			"os.write_array_fp64(3, &self.fixedf64)",
+			"os.write_array_unsigned(4, &_t0)", // bool via its 0/1 u8 image
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q", cfg, want)
 			}
 		}
-		// The helpers live in the corelib (corelib-rs / corelib-rs-no-std), not in
-		// a per-crate prelude: identical text served both profiles, which is what
-		// made them corelib material in the first place.
-		if strings.Contains(m, "fn _trim_tail") {
-			t.Errorf("message.rs (%v) must not carry a trim prelude; the corelib owns it", cfg)
-		}
-		for _, bad := range []string{"trim_tail(&self.dynu", "trim_tail_f32(&self.dynf32"} {
+		// No trim of any kind, from the corelib or a local prelude.
+		for _, bad := range []string{"trim_tail", "_trim_seq", "fn is_default"} {
 			if strings.Contains(m, bad) {
-				t.Errorf("message.rs (%v) must not contain %q", cfg, bad)
+				t.Errorf("message.rs (%v) must not contain %q -- `count` is a capacity, so nothing is elided", cfg, bad)
 			}
 		}
 	}
 }
 
-// Only a fixed-count array is trimmed. A schema with no fixed-count native
-// array must not reach for the corelib trim at all.
-func TestRustTrimsOnlyFixedCountArrays(t *testing.T) {
-	const noFixed = `
-version: 1
-messages:
-  m:
-    payload:
-      dynu: { id: 0, type: array, items: { type: u32 } }
-`
-	if m := moduleFromYAML(t, noFixed, map[string]any{}); strings.Contains(m, "trim_tail") {
-		t.Error("no fixed-count array: nothing to trim, so no trim call")
-	}
-	const onlyU = `
-version: 1
-messages:
-  m:
-    payload:
-      fixedu: { id: 0, type: array, items: { type: u32, count: 4 } }
-`
-	m := moduleFromYAML(t, onlyU, map[string]any{})
-	if !strings.Contains(m, "sofab::trim_tail(&self.fixedu[..], 0)") {
-		t.Error("a fixed-count array must be trimmed via the corelib helper")
-	}
-}
-
-// A nested array-of-array row has `count:`-shaped storage but is not a
-// fixed-length field, so its elements are never trimmed.
+// A nested array-of-array row is written exactly as it stands too: the only
+// thing the interior may drop is a row indistinguishable from absence (the empty
+// one), never a trailing default ELEMENT inside a row.
 func TestRustNestedArrayRowsNotTrimmed(t *testing.T) {
 	const src = `
 version: 1
@@ -644,17 +617,22 @@ messages:
       grid: { id: 0, type: array, items: { type: array, items: { type: u32, count: 3 } } }
 `
 	m := moduleFromYAML(t, src, map[string]any{})
-	if strings.Contains(m, "_trim_tail") {
+	if strings.Contains(m, "trim_tail") || strings.Contains(m, "_trim_seq") {
 		t.Errorf("nested array row must not be trimmed:\n%s", m)
+	}
+	// The row itself takes the positional rule: an interior EMPTY row is skipped,
+	// the last row is written whatever it holds.
+	if !strings.Contains(m, "if !_e0.is_empty() || _i0 + 1 == self.grid.len() {") {
+		t.Errorf("a native row must take the interior-sparse / last-always rule:\n%s", m)
 	}
 }
 
-// A `count: N` array's Default image must be exactly N elements: a short schema
-// default is tail-padded with the element default, and a default-less field is
-// the zero repeat literal. (A default longer than N is rejected upstream by
-// parser.Validate, so N is always the rendered length.) This is what makes the
-// decode-side trailing-default run well defined (MESSAGE_SPEC §3).
-func TestRustFixedArrayDefaultIsExactlyN(t *testing.T) {
+// `count: N` is a CAPACITY, never a length (MESSAGE_SPEC §3), so it materializes
+// nothing: a fresh count:N array is EMPTY, and a declared `default` shorter than N
+// stands exactly as written rather than being tail-padded out to N. The omit
+// guard compares against that same unpadded literal, so a field sitting on its
+// default is still omitted.
+func TestRustCountDoesNotPadTheDefault(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -665,30 +643,50 @@ messages:
       fullf: { id: 2, type: array, items: { type: fp32, count: 2 }, default: [1.5] }
       boolp: { id: 3, type: array, items: { type: boolean, count: 3 }, default: [true] }
 `
-	m := moduleFromYAML(t, src, map[string]any{})
-	for _, want := range []string{
-		"short: vec![1, 2, 0, 0, 0],",
-		"none: vec![0; 3],",
-		"fullf: vec![1.5, 0.0],",
-		"boolp: vec![true, false, false],",
+	for _, tc := range []struct {
+		name  string
+		cfg   map[string]any
+		wants []string
+	}{
+		{"std", map[string]any{}, []string{
+			"short: vec![1, 2],",
+			"none: Vec::new(),",
+			"fullf: vec![1.5],",
+			"boolp: vec![true],",
+		}},
+		{"no-std-static", map[string]any{"corelib": "rs-no-std"}, []string{
+			"short: { let mut _v = heapless::Vec::new(); let _ = _v.extend_from_slice(&[1, 2]); _v },",
+			"none: heapless::Vec::new(),",
+			"fullf: { let mut _v = heapless::Vec::new(); let _ = _v.extend_from_slice(&[1.5]); _v },",
+			"boolp: { let mut _v = heapless::Vec::new(); let _ = _v.extend_from_slice(&[true]); _v },",
+		}},
 	} {
-		if !strings.Contains(m, want) {
-			t.Errorf("message.rs missing %q", want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			m := moduleFromYAML(t, src, tc.cfg)
+			for _, want := range tc.wants {
+				if !strings.Contains(m, want) {
+					t.Errorf("message.rs missing %q:\n%s", want, m)
+				}
+			}
+			// The write guard reads the SAME unpadded literal.
+			if !strings.Contains(m, "if &self.short[..] != &[1, 2][..] {") {
+				t.Errorf("the omit guard must compare against the unpadded default:\n%s", m)
+			}
+			// A default-less count:N array is default only when EMPTY: an all-zero
+			// N-element value is a length-N array and stays on the wire.
+			if !strings.Contains(m, "if !self.none.is_empty() {") {
+				t.Errorf("a default-less count:N array must be omitted only when empty:\n%s", m)
+			}
+		})
 	}
 }
 
-// A `count: N` WRAPPER array's value is N elements long whether or not the field
-// ever reaches the wire (MESSAGE_SPEC S5.1: the length "is N for every target"),
-// so Default materializes N element defaults exactly like the native array next
-// to it. Without this the field disagreed with itself -- the sequence_end refill
-// only fires on a sequence that was actually opened, so an absent count:3 string
-// array decoded at length 0 while one carrying a single element decoded at 3.
-//
-// The filled set is exactly the set sequence_end refills: a DYNAMIC array has no
-// N and stays empty, and nested-array ROWS are excluded from both (their writer
-// emits every row unconditionally, so materialized rows would reach the wire).
-func TestRustFixedCountWrapperArrayMaterializesN(t *testing.T) {
+// The wrapper half of the same rule: a `count: N` wrapper array is constructed
+// EMPTY on every profile. `count` sizes the container's capacity (heapless::Vec<_,
+// N> under no_std) and bounds the decode, but it never adds elements, so the
+// field's initial value is the empty array -- the same value an absent field
+// decodes back to, and the same one its dropping closer omits.
+func TestRustCountNWrapperArrayStartsEmpty(t *testing.T) {
 	const src = `
 version: 1
 $defs:
@@ -704,8 +702,6 @@ messages:
       rows:    { id: 3, type: array, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } }
       nums:    { id: 4, type: array, items: { type: u32, count: 3 } }
 `
-	// heapless::Vec is capacity-bounded, not pre-sized: its Default is length 0,
-	// so the static no_std profile needs the same fill as the std one.
 	for _, tc := range []struct {
 		name string
 		cfg  map[string]any
@@ -717,17 +713,20 @@ messages:
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := moduleFromYAML(t, src, tc.cfg)
-			fill := func(field string, n int) string {
-				return fmt.Sprintf("%s: { let mut _v = %s; while _v.len() < %d {", field, tc.ctor, n)
-			}
-			for _, want := range []string{fill("strs", 3), fill("blobs", 2), fill("structs", 2)} {
+			for _, field := range []string{"strs", "blobs", "structs", "rows", "nums"} {
+				want := fmt.Sprintf("%s: %s,", field, tc.ctor)
 				if !strings.Contains(m, want) {
 					t.Errorf("message.rs missing %q:\n%s", want, m)
 				}
 			}
-			// A nested-array row container is never filled.
-			if want := fmt.Sprintf("rows: %s,", tc.ctor); !strings.Contains(m, want) {
-				t.Errorf("nested rows must stay empty, missing %q", want)
+			// No fill of any kind, at construction or when the scope closes.
+			if strings.Contains(m, "while _v.len() <") {
+				t.Errorf("a count:N array must not be pre-filled -- count is a capacity:\n%s", m)
+			}
+			for _, field := range []string{"strs", "structs"} {
+				if strings.Contains(m, fmt.Sprintf("while self.m.%s.len() < ", field)) {
+					t.Errorf("a count:N array must not be filled to N on sequence_end:\n%s", m)
+				}
 			}
 		})
 	}
@@ -749,63 +748,43 @@ messages:
 	}
 }
 
-// Decode side of MESSAGE_SPEC S3: the encoder trims the trailing default run, so
-// positions [M, N) of a PRESENT fixed-count array are never stored and must read
-// back as the ELEMENT default (zero). A non-zero schema `default:` would leak
-// through that untouched tail, so array_begin wipes it first. The reset is
-// emitted only where it is needed, so every other schema stays byte-identical.
-func TestRustFixedArrayResetsNonZeroDefaultOnDecode(t *testing.T) {
+// Decode side of MESSAGE_SPEC §3: the wire count M IS the array's length, so a
+// present native array is CLEARED and then collects exactly the M elements that
+// arrived -- no pre-size to N, no wipe of a schema-default tail, no refill of
+// [M, N). The over-count reject stays at the count header (generator#216): it must
+// be decided before the elements are read, so INVALID dominates a truncated tail
+// (§5.2). Both storage modes take the same shape now that a count:N native array
+// is a capacity-bounded container rather than an inline [T; N].
+func TestRustNativeArrayDecodeClearsAndCollects(t *testing.T) {
 	const src = `
 version: 1
 messages:
   m:
     payload:
       defd:   { id: 0, type: array, items: { type: u32, count: 5 }, default: [1, 2, 3] }
-      zerod:  { id: 1, type: array, items: { type: u32, count: 3 }, default: [0, 0, 0] }
       nodef:  { id: 2, type: array, items: { type: u32, count: 3 } }
       fdef:   { id: 3, type: array, items: { type: fp32, count: 3 }, default: [1.5] }
-      bdef:   { id: 4, type: array, items: { type: boolean, count: 3 }, default: [true] }
 `
 	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
 		m := moduleFromYAML(t, src, cfg)
-		// Non-zero defaults reset to the element-default image on array_begin, now
-		// behind the over-count guard (generator#216): the count header is rejected
-		// as INVALID before the reset, so a truncated over-count array cannot mask
-		// the violation as INCOMPLETE (MESSAGE_SPEC S5.2).
-		// What follows the guard depends on the storage: an inline [T; N] is wiped
-		// to the element-default image, a Vec is cleared and refilled by push.
-		resets := []string{
-			"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear(); self.m.defd.resize(5, 0); },",
-			"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear(); self.m.fdef.resize(3, 0.0); },",
-			"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef.clear(); self.m.bdef.resize(3, false); },",
-		}
-		if cfg["corelib"] == "rs-no-std" {
-			resets = []string{
-				"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd = [0; 5]; },",
-				"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef = [0.0; 3]; },",
-				"(_Loc::Root, 4) => { if count > 3 { self.inv = true; return; } self.m.bdef = [false; 3]; },",
-			}
-		}
-		for _, want := range resets {
-			if !strings.Contains(m, want) {
-				t.Errorf("message.rs (%v) missing reset %q", cfg, want)
-			}
-		}
-		// The over-count reject is emitted at the count header for EVERY fixed-count
-		// array, including one with no reset (generator#216): nodef (count 3, no
-		// default) gets a bare guard arm and still no element assignment.
-		if !strings.Contains(m, "(_Loc::Root, 2) => { if count > 3 { self.inv = true; return; }") {
-			t.Errorf("message.rs (%v) missing over-count guard for nodef (id 2)", cfg)
-		}
-		// An all-zero or absent default already reads back as zero: no reset, so
-		// these schemas' generated code is unchanged.
-		for _, bad := range []string{
-			"self.m.zerod = [0; 3]",
-			"self.m.nodef = [0; 3]",
+		for _, want := range []string{
+			"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear() },",
+			"(_Loc::Root, 2) => { if count > 3 { self.inv = true; return; } self.m.nodef.clear() },",
+			"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear() },",
 		} {
-			if strings.Contains(m, bad) {
-				t.Errorf("message.rs (%v) must not emit a redundant reset %q", cfg, bad)
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
 			}
+		}
+		// The elements are collected, not written into a pre-sized tail: no resize,
+		// no indexed store, and no fill index on the visitor at all.
+		for _, bad := range []string{".resize(", "self.ai", "= [0; 5]"} {
+			if strings.Contains(m, bad) {
+				t.Errorf("message.rs (%v) must not contain %q -- M is the length:\n%s", cfg, bad, m)
+			}
+		}
+		if !strings.Contains(m, "self.m.defd.push(value as u32)") {
+			t.Errorf("message.rs (%v) must collect elements by push:\n%s", cfg, m)
 		}
 	}
 }
@@ -953,14 +932,15 @@ messages:
 	}
 }
 
-// A count:N wrapper array's canonical wire stops at M -- one past its last
-// non-default element (MESSAGE_SPEC §3/§5.1, "even for sequence-form elements")
-// -- and M == 0 leaves the whole wrapper omitted (§2). generator#248: the element
-// loop used to run to len(), framing every trailing all-default element, so a
-// decoder that accepted the non-canonical form re-encoded it unchanged instead of
-// normalising. A DYNAMIC array has no N to refill from, so its trailing default
-// element is significant and must still be framed.
-func TestRustFixedWrapperArrayTrimsTrailingDefaultRun(t *testing.T) {
+// MESSAGE_SPEC §2 (af536c4): ONE sparse rule for both element kinds, and it is
+// POSITIONAL IN THE VALUE, not static from the schema. An element before the last
+// one that equals its element default is omitted and leaves an id GAP -- a
+// string/blob leaf is not written, a struct/union/nested element is not framed --
+// while the LAST element is always written, as its value or as an empty frame.
+// `count: N` changes nothing: it is a capacity, so it can never restore an elided
+// tail. Sequence-form elements previously had a carve-out and were framed
+// unconditionally, and a count:N array elided its whole trailing run instead.
+func TestRustWrapperElementSparsityIsPositional(t *testing.T) {
 	src := `
 version: 1
 messages:
@@ -969,72 +949,65 @@ messages:
       fixed:   { id: 0, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
       dynamic: { id: 1, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
       fstrs:   { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      dstrs:   { id: 3, type: array, items: { type: string, maxlen: 8 } }
+      dblobs:  { id: 4, type: array, items: { type: blob, maxlen: 8 } }
 `
-	// std only: the no_std profile rejects the deliberately count-less `dynamic`.
+	// std only: the no_std profile rejects the deliberately count-less fields.
 	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
 
-	// The fixed array narrows to M before framing anything...
-	if !strings.Contains(got, "for (_i0, _e0) in _trim_seq(&self.fixed, |_x| _x.is_default()).iter().enumerate() {") {
-		t.Errorf("count:N struct array must loop to M, not len:\n%s", got)
+	// Both struct arrays loop over the value itself -- no narrowing, count or not.
+	for _, want := range []string{
+		"for (_i0, _e0) in self.fixed.iter().enumerate() {",
+		"for (_i0, _e0) in self.dynamic.iter().enumerate() {",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a wrapper array must loop over its own elements, missing %q:\n%s", want, got)
+		}
 	}
-	// ...while the dynamic one keeps every element, trailing defaults included.
-	if !strings.Contains(got, "for (_i0, _e0) in self.dynamic.iter().enumerate() {") {
-		t.Errorf("dynamic struct array must not be narrowed:\n%s", got)
+	// The element's CLOSER is chosen at run time from its index: the keeping one at
+	// the last index, the dropping one in the interior (which is what turns an
+	// all-default interior element into an id gap). The field's own wrapper still
+	// always takes the dropping closer.
+	for _, want := range []string{
+		"let _ = os.write_sequence_begin_lazy(_i0 as Id); _e0.serialize(os);\n            if _i0 + 1 == self.fixed.len() { let _ = os.write_sequence_end_keep(); } else { let _ = os.write_sequence_end(); }\n        }\n        let _ = os.write_sequence_end();",
+		"let _ = os.write_sequence_begin_lazy(_i0 as Id); _e0.serialize(os);\n            if _i0 + 1 == self.dynamic.len() { let _ = os.write_sequence_end_keep(); } else { let _ = os.write_sequence_end(); }\n        }\n        let _ = os.write_sequence_end();",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("positional closer expected:\n%s", got)
+		}
 	}
-	// An interior all-default element is still framed: only the TRAILING run goes,
-	// and M == 0 leaves the wrapper contentless for the DROPPING closer to omit.
-	if !strings.Contains(got, "for (_i0, _e0) in _trim_seq(&self.fixed, |_x| _x.is_default()).iter().enumerate() {\n            let _ = os.write_sequence_begin_lazy(_i0 as Id); _e0.serialize(os); let _ = os.write_sequence_end_keep();\n        }\n        let _ = os.write_sequence_end();") {
-		t.Errorf("interior framing + dropping field closer expected:\n%s", got)
+	// The leaf elements take the same rule through the same expression, count:N and
+	// count-less alike.
+	for _, want := range []string{
+		"for (_i0, _e0) in self.fstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.fstrs.len() { let _ = os.write_str(_i0 as Id, _e0); } }",
+		"for (_i0, _e0) in self.dstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dstrs.len() { let _ = os.write_str(_i0 as Id, _e0); } }",
+		"for (_i0, _e0) in self.dblobs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dblobs.len() { let _ = os.write_blob(_i0 as Id, _e0); } }",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.rs missing %q:\n%s", want, got)
+		}
 	}
-	// The element predicate is generated from the writer's own guard, negated.
-	if !strings.Contains(got, "fn is_default(&self) -> bool {\n        if !(self.k == 0) { return false; }\n        true\n    }") {
-		t.Errorf("the element type must carry the writer's negated guard:\n%s", got)
+	// Nothing is narrowed and no all-default predicate survives: the writer emits a
+	// child for every element it holds, so "no child written" IS "the array is
+	// empty" and the two can no longer drift.
+	for _, bad := range []string{"_trim_seq", "fn is_default"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("message.rs must not contain %q:\n%s", bad, got)
+		}
 	}
-	// A string element is a leaf the writer already omits individually, so
-	// narrowing it changes no bytes -- but it must run off the SAME expression, or
-	// the predicate and the writer could drift.
-	if !strings.Contains(got, "_trim_seq(&self.fstrs, |_x| _x.is_empty())") {
-		t.Errorf("count:N string array must be narrowed through the shared helper:\n%s", got)
-	}
-}
-
-// The narrowing helper and the is_default predicate are emitted only for schemas
-// that need them: a footprint build must not carry a predicate no writer calls.
-func TestRustTrimHelperIsGatedOnUse(t *testing.T) {
-	noArrays := moduleFromYAML(t, `
-version: 1
-messages:
-  m:
-    payload:
-      a: { id: 0, type: u32 }
-      s: { id: 1, type: struct, fields: { k: { id: 0, type: u32 } } }
-`, map[string]any{"corelib": "rs"})
-	if strings.Contains(noArrays, "_trim_seq") || strings.Contains(noArrays, "fn is_default") {
-		t.Errorf("a schema with no count:N wrapper array must carry neither:\n%s", noArrays)
-	}
-	// A DYNAMIC wrapper array is never narrowed, so it needs neither.
-	dyn := moduleFromYAML(t, `
-version: 1
-messages:
-  m:
-    payload:
-      d: { id: 0, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
-`, map[string]any{"corelib": "rs"})
-	if strings.Contains(dyn, "_trim_seq") || strings.Contains(dyn, "fn is_default") {
-		t.Errorf("a dynamic wrapper array must not be narrowed:\n%s", dyn)
+	if !strings.Contains(got, "let _ = os.write_sequence_begin_lazy(0);\n        for (_i0, _e0) in self.fixed") {
+		t.Errorf("the field wrapper is still opened lazily:\n%s", got)
 	}
 }
 
-// generator#247: a wrapper array's element id IS the array index (§5.1), so an
-// element is PLACED at dest[id] after gap-filling -- never appended. Appending
-// shortened the array by the size of any interior id gap and decoded a REOPENED
-// id as a second element instead of merging into the first (§7.4). The leaf
-// string/blob path next to it always got this right.
-//
-// The N-fill when the sequence scope closes is what makes the §3/§5.1 trailing
-// elision lossless: without it, re-encoding a decoded fixed array shortens it on
-// every round trip.
-func TestRustWrapperElementsArePlacedByIDAndFilledToN(t *testing.T) {
+// generator#247, extended: a wrapper array's element id IS the array index (§5.1),
+// so an element is PLACED at dest[id] after gap-filling -- never appended. Under
+// the af536c4 rule an interior gap is REACHABLE for every element kind (an
+// all-default interior element is omitted), so the matrix-row and wrapper-row
+// collectors -- which appended id-blind -- would shift every later row down by
+// one. They place by id now, bounded by the outer array's count, which also closes
+// the over-index hole they had.
+func TestRustWrapperElementsArePlacedByID(t *testing.T) {
 	src := `
 version: 1
 messages:
@@ -1042,6 +1015,8 @@ messages:
     payload:
       objs: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } } }
       strs: { id: 1, type: array, items: { type: string, count: 3, maxlen: 8 } }
+      mat:  { id: 2, type: array, items: { type: array, count: 4, items: { type: u32, count: 3 } } }
+      rows: { id: 3, type: array, items: { type: array, count: 4, items: { type: string, count: 3, maxlen: 8 } } }
 `
 	for _, cfg := range []map[string]any{
 		{"corelib": "rs"}, // std
@@ -1049,38 +1024,54 @@ messages:
 		{"corelib": "rs-no-std", "allow_dynamic": true}, // no_std, alloc
 	} {
 		got := moduleFromYAML(t, src, cfg)
-		// Placement, not append: gap-fill to id, then descend into out[id]. The
-		// over-index reject runs first, so it bounds the fill.
+		// Struct elements: gap-fill to id under the over-index guard, then descend
+		// into out[id].
 		if !strings.Contains(got, "(_Loc::Root_objs, _) => { if id as usize >= 4 { self.inv = true; return; } while self.m.objs.len() <= id as usize {") {
 			t.Errorf("(%v) struct element must gap-fill under the over-index guard:\n%s", cfg, got)
 		}
 		if !strings.Contains(got, "self._ix0 = id as usize; _Loc::Root_objs_e },") {
 			t.Errorf("(%v) struct element must record the element id as its index:\n%s", cfg, got)
 		}
-		// Every read of the element addresses out[id], not the last element pushed.
 		if !strings.Contains(got, "self.m.objs[self._ix0].k") {
 			t.Errorf("(%v) element fields must be addressed by index:\n%s", cfg, got)
 		}
+		// Matrix rows: array_begin opens the row the id names, and elements push into
+		// THAT row rather than into the last one appended.
+		if !strings.Contains(got, "(_Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; return; } while self.m.mat.len() <= id as usize {") ||
+			!strings.Contains(got, "self._ix1 = id as usize; },") {
+			t.Errorf("(%v) a matrix row must be opened at out[id], bounded by the outer count:\n%s", cfg, got)
+		}
+		if !strings.Contains(got, "if let Some(_r) = self.m.mat.get_mut(self._ix1) {") {
+			t.Errorf("(%v) matrix elements must land in the row the id named:\n%s", cfg, got)
+		}
+		// Wrapper rows: same, through the row's own sequence_begin.
+		if !strings.Contains(got, "(_Loc::Root_rows, _) => { if id as usize >= 4 { self.inv = true; return; } while self.m.rows.len() <= id as usize {") ||
+			!strings.Contains(got, "self._ix2 = id as usize; _Loc::Root_rows_e },") {
+			t.Errorf("(%v) a wrapper row must be placed at out[id]:\n%s", cfg, got)
+		}
+		if !strings.Contains(got, "self.m.rows[self._ix2]") {
+			t.Errorf("(%v) wrapper-row elements must address the row by index:\n%s", cfg, got)
+		}
 		// The defect this replaced: append + last_mut() ignored the id entirely.
-		if strings.Contains(got, "self.m.objs.last_mut().unwrap()") {
-			t.Errorf("(%v) struct elements must not be appended id-blind:\n%s", cfg, got)
+		if strings.Contains(got, ".last_mut().unwrap()") {
+			t.Errorf("(%v) no collector may append id-blind any more:\n%s", cfg, got)
 		}
-		// The index survives between feed calls -- an element can straddle a chunk.
-		if !strings.Contains(got, "_ix0: usize,") || !strings.Contains(got, "self._ix0 = _ix0;") {
-			t.Errorf("(%v) the element index must be part of the persistent state:\n%s", cfg, got)
+		// The indices survive between feed calls -- an element can straddle a chunk.
+		for _, ix := range []string{"_ix0", "_ix1", "_ix2"} {
+			if !strings.Contains(got, ix+": usize,") || !strings.Contains(got, "self."+ix+" = "+ix+";") {
+				t.Errorf("(%v) %s must be part of the persistent state:\n%s", cfg, ix, got)
+			}
 		}
-		// N-fill when the sequence scope closes, for BOTH element kinds.
-		if !strings.Contains(got, "_Loc::Root_objs => { while self.m.objs.len() < 4 {") {
-			t.Errorf("(%v) a count:N struct array must be filled to N on sequence_end:\n%s", cfg, got)
-		}
-		if !strings.Contains(got, "_Loc::Root_strs => { while self.m.strs.len() < 3 {") {
-			t.Errorf("(%v) a count:N string array must be filled to N on sequence_end:\n%s", cfg, got)
+		// No fill-to-N when a scope closes: `count` is a capacity, and the elements
+		// the wire carried are the whole value.
+		if strings.Contains(got, "while self.m.objs.len() < 4") || strings.Contains(got, "while self.m.strs.len() < 3") {
+			t.Errorf("(%v) a count:N wrapper array must not be filled to N:\n%s", cfg, got)
 		}
 	}
 }
 
-// A dynamic (count-less) wrapper array has no N to refill from: its length is
-// highest-present-id + 1, so it must never be default-filled.
+// A count-less wrapper array is treated identically -- placement by id was never
+// about the count, and there is nothing to fill on either kind.
 func TestRustDynamicWrapperArrayIsNeverFilled(t *testing.T) {
 	got := moduleFromYAML(t, `
 version: 1
@@ -1090,51 +1081,9 @@ messages:
       objs: { id: 0, type: array, items: { type: struct, fields: { k: { id: 0, type: u32 } } } }
 `, map[string]any{"corelib": "rs"})
 	if strings.Contains(got, "_Loc::Root_objs => { while self.m.objs.len() <") {
-		t.Errorf("a dynamic wrapper array must not be filled:\n%s", got)
+		t.Errorf("a wrapper array must not be filled:\n%s", got)
 	}
-	// It still places by id -- #247 is independent of the count.
 	if !strings.Contains(got, "self._ix0 = id as usize; _Loc::Root_objs_e },") {
 		t.Errorf("a dynamic wrapper array must still place elements by id:\n%s", got)
-	}
-}
-
-// The last element of a DYNAMIC wrapper array is always written, whatever its
-// value (MESSAGE_SPEC §2). Such an array recovers its length as highest-present-
-// id + 1 (§5.1), so the element at the highest index is the only one whose
-// PRESENCE carries the length: dropping a trailing default leaf encoded ["a", ""]
-// exactly like ["a"] and decoded one element short. Sequence-form elements never
-// had the problem -- they are framed unconditionally -- so this holds both
-// element kinds to one standard. A fixed-count array is exempt: its length is N
-// whatever the wire carries, so it still elides the whole trailing run.
-func TestRustDynamicArrayAlwaysWritesLastElement(t *testing.T) {
-	// std only: the no_std profile rejects a count-less array outright (in both
-	// storage modes, allow_dynamic included), so a dynamic wrapper array can only
-	// exist here and the change is a no-op for the footprint profile.
-	got := moduleFromYAML(t, `
-version: 1
-messages:
-  vec:
-    payload:
-      dynstr:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
-      dynblob:  { id: 1, type: array, items: { type: blob, maxlen: 8 } }
-      fixedstr: { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
-`, map[string]any{"corelib": "rs"})
-
-	for _, want := range []string{
-		// dynamic: the last index escapes the omit test
-		"for (_i0, _e0) in self.dynstr.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dynstr.len() { let _ = os.write_str(_i0 as Id, _e0); } }",
-		"for (_i0, _e0) in self.dynblob.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dynblob.len() { let _ = os.write_blob(_i0 as Id, _e0); } }",
-		// fixed: no guard -- the trailing run still collapses, the decoder refills to N
-		"for (_i0, _e0) in _trim_seq(&self.fixedstr, |_x| _x.is_empty()).iter().enumerate() { if !_e0.is_empty() { let _ = os.write_str(_i0 as Id, _e0); } }",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("message.rs missing %q:\n%s", want, got)
-		}
-	}
-	// The all-default predicate has to follow the writer: a dynamic [""] now puts
-	// an element on the wire, so the field is NOT default and must not be trimmed
-	// here -- elemTrimExpr's !fixed early return is what keeps the two in step.
-	if strings.Contains(got, "_trim_seq(&self.dynstr") || strings.Contains(got, "_trim_seq(&self.dynblob") {
-		t.Errorf("a dynamic string/blob array must not be narrowed:\n%s", got)
 	}
 }

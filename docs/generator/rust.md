@@ -92,7 +92,7 @@ schema's `maxlen`/`count`):
 | string (`maxlen N`) | `String` | `heapless::String<N>` |
 | blob (`maxlen N`) | `Vec<u8>` | `heapless::Vec<u8, N>` |
 | string/blob/struct/nested array (`count N`) | `Vec<T>` | `heapless::Vec<T, N>` |
-| native numeric/enum/bool array (`count N`) | `[T; N]` | `[T; N]` (already fixed) |
+| native numeric/enum/bool array (`count N`) | `Vec<T>` | `heapless::Vec<T, N>` |
 
 The generated code also: emits `#![no_std]` on the crate root (`src/lib.rs`);
 encodes into a fixed `heapless::Vec<u8, MAX_SIZE>` (no `vec!`); decodes with a
@@ -122,7 +122,7 @@ With every field bounded, the switch chooses where those fields live:
 |---|---|---|
 | `string, maxlen 8` | `heapless::String<8>` | `alloc::string::String` |
 | `blob, maxlen 8` | `heapless::Vec<u8, 8>` | `alloc::vec::Vec<u8>` |
-| `array u32, count 4` | `[u32; 4]` | `alloc::vec::Vec<u32>` |
+| `array u32, count 4` | `heapless::Vec<u32, 4>` | `alloc::vec::Vec<u32>` |
 | `array string, count 2, maxlen 4` | `heapless::Vec<heapless::String<4>, 2>` | `alloc::vec::Vec<alloc::string::String>` |
 
 Heapless is the default and the one that guarantees no allocation at all: the
@@ -146,108 +146,104 @@ targets:
     allow_dynamic: true      # optional: alloc storage (needs an allocator)
 ```
 
-## Wrapper arrays: element placement, the N-fill, and the trailing run
+## Arrays — `count` is a capacity
+
+Every array field maps to a variable-length container, and the container's length
+is the array's length. A schema `count: N` is a **capacity**, not a length: it
+never reaches the wire, it bounds the array (an element count or element id past
+`N` fails the decode as `Error::InvalidMsg`), and it sizes the fixed-capacity
+container the `no_std` profile uses — but it never adds elements.
+
+That is why a native `count: N` array is **not** an inline `[T; N]` on any
+profile. A Rust array of exactly `N` cannot express 0..N, so a three-element
+message would round-trip into a five-element value. Under `no_std` the container
+is `heapless::Vec<T, N>` instead: capacity `N`, `Default` length 0, still inline
+and heap-free, and able to hold exactly what arrived.
+
+The consequences you can observe from Rust:
+
+- `Default` leaves a `count: N` array **empty** unless the schema declares a
+  `default`, and a declared default shorter than `N` is materialized exactly as
+  written (never tail-padded to `N`).
+- Encode writes **every** element the container holds. `vec![1u32, 2, 0, 0]` and
+  `vec![1u32, 2]` are different values with different bytes, and nothing is
+  trimmed — the corelib still ships `trim_tail`/`trim_tail_f32`/`trim_tail_f64`,
+  the generator simply stops calling them.
+- Decode yields exactly the elements the wire carried: `len()` after a round trip
+  equals `len()` before it, for both the compact scalar form and the wrapper form.
+- A field is omitted only when it **equals its default** — for an array with no
+  declared default, only when it is empty. An all-zero `vec![0u32; 4]` is a
+  four-element value and stays on the wire.
+
+Practical consequence for hand-written code: fill an array by **pushing**, not by
+assigning through `iter_mut()`. A fresh `count: N` array has no elements to
+iterate over.
+
+## Wrapper arrays: element placement and the sparse interior
 
 A **wrapper array** is an array whose elements are `string`, `blob`,
 `struct`/`union`, or another array: instead of a native array wire type it
 lowers to a sequence whose **child id is the element's array index**
-(MESSAGE_SPEC §5.1). Three rules follow from that, and the flat visitor has to
-implement all three (generator#247, generator#248).
+(MESSAGE_SPEC §5.1). Two rules follow from that, and the flat visitor has to
+implement both.
 
 **Placement, not append.** Decode gap-fills the container with element defaults
 up to the wire id and then decodes **into** `container[id]`. Appending would
 shorten the array by the size of any interior id gap (`elem0, elem2` is a
 *three*-element array whose middle element is the default), and would decode a
 **reopened** element id as a second element instead of merging into the first —
-where placement gives §7.4's struct-merge for free. The `string`/`blob` element
-path always did this; `struct`/`union` elements now do too.
+where placement gives §7.4's struct-merge for free.
 
 The corelib's `Visitor` is flat — sequence begin/end events, no child visitor
 object — so there is nowhere for a child collector to hold the index. Each
-`struct`/`union` wrapper-array frame therefore owns one `usize` slot in the
-visitor state (`_ix0`, `_ix1`, …), set from the element id at
-`sequence_begin`, and the descended element location addresses its object as
-`<path>[self._ixN]`. One slot per frame, not a stack: a decode location can only
-be active once at a time, so no depth arithmetic is needed. The slots are part
-of the *persistent* state, because an element can straddle a chunk boundary in
-the incremental decoder. The over-index reject (`id >= N` → `InvalidMsg`) runs
-**before** the gap-fill, which is what bounds it — and, on `no_std`, what keeps
-the index inside the `heapless::Vec` capacity.
+wrapper-array frame that decodes elements at an id therefore owns one `usize`
+slot in the visitor state (`_ix0`, `_ix1`, …), set from the element id at
+`sequence_begin` (or at `array_begin`, for a row of a matrix), and the element's
+own location addresses it as `<path>[self._ixN]`. One slot per frame, not a
+stack: a decode location can only be active once at a time, so no depth
+arithmetic is needed. The slots are part of the *persistent* state, because an
+element can straddle a chunk boundary in the incremental decoder. The over-index
+reject (`id >= N` → `InvalidMsg`) runs **before** the gap-fill, which is what
+bounds it — and, on `no_std`, what keeps the index inside the `heapless::Vec`
+capacity.
 
-**The N-fill.** When a `count: N` wrapper array's sequence scope closes, decode
-default-fills it back out to `N`: §5.1 says the length "is N for every target —
-a growable-list target MUST default-fill to N exactly like a pre-sized one".
-This is visible in the decoded value (a `count: 5` string array carrying three
-elements reads back as five, the last two empty). A **dynamic** (count-less)
-array is never filled: its length is highest-present-id + 1.
+This applies to **every** element kind, including the two row collectors — a
+matrix (`array of array of u32`) and an array of wrapper arrays. Those appended
+in arrival order for as long as a row was always written; an interior gap is
+reachable now, and an appending collector would have shifted every later row down
+by one. Placing by id also gave those two collectors the over-index bound they
+previously lacked.
 
-The fill at `sequence_end` is only half of it: it can fill a sequence that was
-actually **opened**, and an omitted field opens nothing. So `Default` for the
-same field **materializes the N elements too**, exactly like the native
-`count: N` array next to it (`vec![0; 3]`, `[0; 3]`). Without that the field
-disagreed with itself — absent decoded at 0, one element on the wire at N,
-explicitly-empty at N — and disagreed with the native array beside it under the
-same schema. Both profiles need it: `heapless::Vec<T, N>` is capacity-bounded,
-not pre-sized, so its `Default` is length 0 as much as `Vec`'s is.
+**One sparse rule, positional in the value.** An element before the last one that
+equals its element default is **omitted**, leaving an id gap that decode restores
+from that same default:
 
-This costs no bytes. The declared `default:` of a wrapper array is still not
-materialized — only the length is — so the value is N *element* defaults, which
-the trailing-run narrowing below removes again: an untouched `count: N` wrapper
-array still writes no child and is still dropped by its closer (§2).
+- a `string`/`blob` leaf is simply not written;
+- a `struct`/`union` element is **not framed** — its lazily-opened frame takes the
+  *dropping* closer, so an all-default element vanishes entirely;
+- a native row (a matrix row) has no frame of its own, so the rule lands on the
+  write: an empty row is not written at all;
+- a wrapper row takes the dropping closer like a struct element.
 
-Practical consequence for hand-written code: a `count: N` wrapper array is
-assigned **in place** (`for (i, v) in m.strs.iter_mut().enumerate()`), like every
-other fixed-count array. Pushing onto it appends past N, and the resulting wire
-is rejected as over-count.
+The **last** element is always written — as its value, or as an empty frame —
+because its presence is what carries the length (§5.1: highest present id + 1).
+So `vec!["a".to_string(), String::new()]`, `vec!["a".to_string()]` and `vec![]`
+are three distinct values that encode and decode distinctly, and `[{}, {}]` stays
+distinguishable from `[]`.
 
-**The trailing run.** Encode narrows a `count: N` wrapper array to `M` — one
-past its last element differing from the element default — before the element
-loop, because that is what its canonical wire carries (§3/§5.1, "even for
-sequence-form elements"). Interior all-default elements keep their frame, since
-element presence is what carries the length; only the trailing run goes. `M == 0`
-writes no child at all, so the lazily-opened wrapper is dropped by its closer and
-the whole field is omitted (§2). The narrowing is only *lossless* because of the
-N-fill above — without it, re-encoding a decoded array would shorten it on every
-round trip rather than normalise it.
+The choice is made from the position in the **value**, at run time — the schema
+cannot answer it — so the generated loop carries `_i0 + 1 == <arr>.len()` for the
+leaf kinds and picks between `write_sequence_end_keep()` and
+`write_sequence_end()` for the sequence kinds. A sequence-typed **field** (a
+struct field, or an array's own wrapper) is different: it always takes the
+dropping closer, because an all-default field is omitted and absence
+reconstructs it (§2).
 
-Both the writer loop and the all-default predicate are generated from **one**
-expression (`elemTrimExpr`, threading `HasCount` through unchanged), and a
-`struct`/`union` element type gets an `is_default()` built by negating the very
-guards its `serialize` writes. A predicate that narrowed a field the writer does
-not — or the reverse — would omit a field that is on the wire, or keep one that
-is not. `is_default()` and the `_trim_seq` helper are emitted only for the
-schemas that use them, so a footprint build carries neither.
-
-**The last element of a dynamic array is always present** (§2, tightened by
-documentation#29). A dynamic array recovers its length as highest-present-id + 1
-(§5.1), so the element at the highest index is the only one whose *presence*
-carries the length. A `string`/`blob` element is otherwise a leaf the writer
-omits whenever it equals the element default — which dropped that one element
-too, so `["a", ""]` encoded exactly like `["a"]` and decoded one element short,
-and `["", ""]` encoded to nothing at all. The omit test therefore carries a
-`|| _i0 + 1 == <arr>.len()` disjunct (`lastElemGuard`), and `["", ""]` goes on
-the wire as its final element **alone, at id 1**. Interior gaps are untouched:
-`["", "b"]` still elides index 0. `struct`/`union`/row elements never needed the
-guard — they are framed unconditionally — so this holds both element kinds to one
-standard.
-
-A `count: N` array is exempt and gets no guard: its length is `N` whatever the
-wire carries, which is why it elides the entire trailing default run instead.
-That is the same `HasCount` flag `elemTrimExpr` gates its narrowing on, and
-deliberately so — narrowing a dynamic `[""]` in the predicate while the writer
-frames its one element is exactly the drift the shared expression exists to
-prevent. Under `corelib: rs-no-std` this is all inert: that profile rejects a
-count-less array outright (in both storage modes, `allow_dynamic` included), so a
-dynamic wrapper array can only exist on the std profile.
-
-**Nested-array rows are excluded** from the narrowing, the fill, and the
-`Default` materialization — the three have to agree, or the field is inconsistent
-the other way round. A row's
-writer emits an array header unconditionally, so a row is never "not written" the
-way a default string element or an all-default struct element is: dropping a
-trailing empty row would remove a child that *is* on the wire, and there is no
-row refill to put it back. Under `no_std` a `count: M` inner array is also a
-`[T; M]`, which has no empty state to test for.
+`count: N` changes none of this. It is a capacity, so it can never restore an
+elided tail, and the same rule applies with or without one. The all-default
+predicate the old trailing-run narrowing needed (`is_default()`, `_trim_seq`) is
+gone with it: the writer now emits a child for every element the array holds, so
+"no child was written" is exactly "the array is empty" and the two cannot drift.
 
 ## Struct field order
 

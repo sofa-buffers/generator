@@ -13,9 +13,9 @@ type frameKind int
 const (
 	fkStruct       frameKind = iota // root / struct / union / struct-array element: named fields
 	fkSeqArr                        // array of string/blob: elements pushed in string()/blob()
-	fkStructArr                     // array of struct/union: per-element sequence pushes a default and descends
-	fkNestedNative                  // array of native array: array_begin pushes an inner Vec, elements push to the last
-	fkArrArr                        // array of (string/blob/struct/nested) array: per-element sequence descends
+	fkStructArr                     // array of struct/union: per-element sequence descends into the element the id names
+	fkNestedNative                  // array of native array: array_begin opens the row the id names, elements push into it
+	fkArrArr                        // array of (string/blob/struct/nested) array: per-element sequence descends into the row the id names
 )
 
 // frame is one sequence container reachable from a message. loc is the _Loc
@@ -35,13 +35,13 @@ type frame struct {
 	// cap is the wrapper array's schema fixed-count bound N (-1 == dynamic/no
 	// count): a wrapper element id >= N is a schema-bound violation (MESSAGE_SPEC
 	// §5.1/§7), rejected as INVALID (self.inv = true) before the Vec grows — which
-	// also bounds an over-index heap-amplification fill. Set on the array frames
-	// (fkSeqArr / fkStructArr / fkArrArr).
+	// also bounds an over-index heap-amplification fill. Set on every array frame
+	// (fkSeqArr / fkStructArr / fkNestedNative / fkArrArr).
 	cap int64
 	// ixVar is the visitor-state field holding the CURRENT element index of a
-	// fkStructArr frame (generator#247). The element id IS the array index (§5.1),
-	// and the flat visitor has no child-visitor object to hold that index for it,
-	// so the descended element location addresses its object as
+	// fkStructArr / fkArrArr / fkNestedNative frame (generator#247). The element id
+	// IS the array index (§5.1), and the flat visitor has no child-visitor object
+	// to hold that index for it, so the element's own location addresses it as
 	// `<path>[self.<ixVar>]`. One field per frame rather than a shared stack: a
 	// location can only be active once at a time, so its index needs no depth
 	// arithmetic. It is part of the persistent visitor state because an element can
@@ -71,8 +71,8 @@ func boundOf(has bool, v int64) int64 {
 	return -1
 }
 
-// overIndexGuard returns the reject clause for a fixed-count string/blob wrapper
-// array: an element id >= N sets self.inv (surfaced as Error::InvalidMsg) and
+// overIndexGuard returns the reject clause for a fixed-count wrapper array: an
+// element id >= N sets self.inv (surfaced as Error::InvalidMsg) and
 // returns before the Vec grows (MESSAGE_SPEC §5.1/§7 — issue #142), which also
 // bounds an over-index heap-amplification fill. Empty for a dynamic array
 // (cap == -1). Emitted on BOTH profiles: on no_std it fires ahead of the heapless
@@ -85,42 +85,6 @@ func overIndexGuard(cap int64) string {
 		return ""
 	}
 	return fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", cap)
-}
-
-// overIndexMark is the sequence_begin variant of overIndexGuard for nested-array
-// wrapper elements: those append in arrival order (dense, no id-keyed growth, so
-// no amplification), so the fresh row is still pushed — keeping the descended
-// element location's last_mut() valid — but an id >= N marks the decode INVALID
-// (§5.1/§7). std profile only; on no_std the heapless Vec<_, N> is
-// capacity-bounded and drops the element (issue #126).
-func (g *gen) overIndexMark(cap int64) string {
-	if g.noStd || cap < 0 {
-		return ""
-	}
-	return fmt.Sprintf("if id as usize >= %d { self.inv = true; } ", cap)
-}
-
-// elemFill default-fills a decoded wrapper array out to the schema count N when
-// its sequence scope closes (MESSAGE_SPEC §5.1: the length "is N for every target
-// -- a growable-list target MUST default-fill to N exactly like a pre-sized
-// one"). It is also what makes the §3/§5.1 trailing elision LOSSLESS: without it
-// the encoder's narrowing would not re-shape the bytes, it would SHORTEN the
-// array on every round trip. Empty for a dynamic array (cap == -1), whose length
-// is highest-present-id + 1 and which must therefore never be filled.
-//
-// The filled tail is byte-neutral on re-encode: a default string/blob element is
-// omitted individually and a trailing all-default struct element is narrowed away
-// again, so the wire is unchanged and only the decoded VALUE gains the length
-// §5.1 requires. Under no_std push can fail (fixed capacity), so the loop stops
-// when the length stops growing rather than spinning.
-func (g *gen) elemFill(path string, cap int64) string {
-	if cap < 0 {
-		return ""
-	}
-	if g.noStd {
-		return fmt.Sprintf("while %s.len() < %d { let _n = %s.len(); let _ = %s.push(Default::default()); if %s.len() == _n { break; } }", path, cap, path, path, path)
-	}
-	return fmt.Sprintf("while %s.len() < %d { %s.push(Default::default()); }", path, cap, path)
 }
 
 // ixVarsOf lists the element-index state slots the message's frames need
@@ -198,16 +162,22 @@ func (g *gen) frames(m *ir.Message) []frame {
 			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el, cap: cap, ixVar: ix})
 			walkFields(el, fmt.Sprintf("%s[self.%s]", path, ix), ref.Target.Fields)
 		case ir.KindArray:
-			// The element is an inner array (items). A native inner array is handled
-			// by a single wrapper frame (array_begin pushes a new inner Vec, elements
-			// push to the last); a wrapper inner array descends recursively with its
-			// own inner count bound.
+			// The element is an inner array (items). A native inner row is handled by
+			// a single wrapper frame (array_begin opens the row the id names, elements
+			// push into it); a wrapper inner row descends recursively with its own
+			// inner count bound.
+			// Both row collectors place the row at out[id] (§5.1) through their own
+			// index slot, exactly like the struct-element frame above: an interior
+			// row equal to the element default is omitted (§2), so appending would
+			// close that gap and shift every later row down by one.
+			ix := fmt.Sprintf("_ix%d", nix)
+			nix++
 			if isNativeArrayElem(items.Elem) {
-				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef, elemDyn: !items.HasCount, cap: cap})
+				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef, elemDyn: !items.HasCount, cap: cap, ixVar: ix})
 			} else {
 				el := loc + "_e"
-				out = append(out, frame{loc: loc, path: path, kind: fkArrArr, elemLoc: el, cap: cap})
-				addArray(el, path+".last_mut().unwrap()", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
+				out = append(out, frame{loc: loc, path: path, kind: fkArrArr, elemLoc: el, cap: cap, ixVar: ix})
+				addArray(el, fmt.Sprintf("%s[self.%s]", path, ix), items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -426,7 +396,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// active (generator#102) — std profile only, so the no_std inits never carry it.
 	limInit := ""
 	if g.limits.any() {
-		limInit = " lim: false,"
+		limInit = ", lim: false"
 	}
 	askipInit := ""
 	if arrSkip {
@@ -441,12 +411,12 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	for _, ix := range ixVars {
 		askipInit += ", " + ix + ": 0"
 	}
-	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false,%s ai: 0%s };", limInit, askipInit)
+	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false%s%s };", limInit, askipInit)
 	if g.noStd {
 		if needAcc {
-			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, err: false, inv: false, ai: 0%s };", accNew, askipInit)
+			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, err: false, inv: false%s };", accNew, askipInit)
 		} else {
-			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, err: false, inv: false, ai: 0%s };", askipInit)
+			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, err: false, inv: false%s };", askipInit)
 		}
 	}
 	// Infallible, best-effort decode: kept for back-compat. It discards feed's
@@ -646,7 +616,6 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if g.limits.any() {
 		f.line("    lim: bool,")
 	}
-	f.line("    ai: usize, // index into the fixed native array currently being filled")
 	// §7.3 array-vs-scalar skip counter (generator#183): an integer array whose id
 	// is declared as a SCALAR is a wire-type contradiction and must be skipped like
 	// an unknown id. corelib-rs delivers array elements through the same
@@ -668,7 +637,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// visitor has no child-visitor object to carry it, so the element location
 	// addresses its object through this slot instead of the last one pushed.
 	for _, ix := range ixVars {
-		f.line("    %s: usize, // current element index of a struct/union wrapper array", ix)
+		f.line("    %s: usize, // index of the wrapper-array element currently decoding", ix)
 	}
 	f.line("}")
 	f.blank()
@@ -706,15 +675,14 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				}
 			}
 		case fkNestedNative:
-			tgt := fr.path + ".last_mut().unwrap()"
 			var store string
 			switch {
 			case isUnsignedElem(fr.elemKind):
-				store = g.pushExpr(tgt, "value as "+numRustType(fr.elemKind))
+				store = g.rowStore(fr, "value as "+numRustType(fr.elemKind))
 			case fr.elemKind == ir.KindBool:
-				store = g.pushExpr(tgt, "value != 0")
+				store = g.rowStore(fr, "value != 0")
 			case fr.elemKind == ir.KindBitfield:
-				store = g.pushExpr(tgt, "value as "+bitfieldBacking(fr.elemRef.Target))
+				store = g.rowStore(fr, "value as "+bitfieldBacking(fr.elemRef.Target))
 			default:
 				continue
 			}
@@ -748,13 +716,12 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				}
 			}
 		case fkNestedNative:
-			tgt := fr.path + ".last_mut().unwrap()"
 			var store string
 			switch {
 			case isSignedElem(fr.elemKind):
-				store = g.pushExpr(tgt, "value as "+numRustType(fr.elemKind))
+				store = g.rowStore(fr, "value as "+numRustType(fr.elemKind))
 			case fr.elemKind == ir.KindEnum:
-				store = g.pushExpr(tgt, "value as "+enumBacking(fr.elemRef.Target))
+				store = g.rowStore(fr, "value as "+enumBacking(fr.elemRef.Target))
 			default:
 				continue
 			}
@@ -903,14 +870,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	}
 
 	if emitArrayBegin {
-		// array_begin clears a native-array target (scalar array field) or starts a
-		// fresh inner Vec (nested native array).
-		// Reset the fixed-array fill index for every array. Fixed `[T; N]` fields are
-		// pre-allocated in the struct default, so they need no per-begin action; a
-		// dynamic native array clears its Vec; a nested-native scope pushes a fresh
-		// inner Vec.
+		// array_begin resets a native-array target (a scalar array field) or opens
+		// the row an id names (a nested native array).
+		//
+		// Every native array is cleared, whatever its declared `count`. The wire
+		// count M IS the array's length (MESSAGE_SPEC §3) -- `count: N` is a
+		// capacity that bounds M and sizes the container, never a length that
+		// pre-fills it -- so the M elements that arrive are the whole value and
+		// there is no [M, N) tail to size, wipe or refill.
 		f.line("    fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {")
-		f.line("        self.ai = 0;")
 		g.emitArraySkipArm(f, fs, arrSkip)
 		g.emitArrayFillArm(f, fs, use.scalarArray)
 		f.line("        match (self.cur, id) {")
@@ -919,63 +887,43 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			case fkStruct:
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
+						clear := fmt.Sprintf("%s.%s.clear()", fr.path, rustIdent(fld.Name))
 						if fld.HasCount {
 							// Over-count reject at the count header (generator#216 / F-0032):
 							// a wire element count above the schema `count` N is INVALID
-							// (MESSAGE_SPEC 3+7), and deciding it HERE — before the elements
+							// (MESSAGE_SPEC §3+§7), and deciding it HERE — before the elements
 							// are read — makes INVALID dominate a truncated tail per §5.2. A
-							// check only at the element store (emitNativeArrayStore) never
-							// fires when truncation cuts the array short of N, so an
-							// over-count-AND-truncated array would misreport INCOMPLETE.
-							overcount := fmt.Sprintf("if count > %d { self.inv = true; return; } ", fld.Count)
-							// A fixed `[T; N]` is pre-allocated in the struct default, so
-							// the M wire elements store straight into it and no clear is
-							// needed to make room. But the encoder trims the trailing
-							// default run (MESSAGE_SPEC S3), so positions [M, N) are never
-							// stored and must read back as the ELEMENT default (zero). A
-							// non-zero schema `default:` would otherwise leak through that
-							// untouched tail, so wipe it to the zero image first. Reaching
-							// array_begin means the field is PRESENT on the wire, so this
-							// never disturbs the sparse-omission contract: an ABSENT field
-							// keeps its full schema default.
-							// Under allow_dynamic the same bounded array lives in a Vec,
-							// which has no pre-allocated tail to wipe — it is cleared and
-							// the M wire elements are pushed. The bound above is what the
-							// [T; N] length used to provide, so it must be emitted for
-							// both storage modes; only what follows it differs.
-							reset := ""
-							if _, _, fixed := g.fixedNativeArray(fld); fixed {
-								if zero, need := g.rustFixedArrayNeedsReset(fld); need {
-									reset = fmt.Sprintf("%s.%s = %s;", fr.path, rustIdent(fld.Name), zero)
-								}
-							} else {
-								// Size the Vec to N with element defaults, so the §3
-								// refill of the trimmed tail is the same act as for a
-								// [T; N]: the M wire elements overwrite [0, M) and
-								// [M, N) reads back as the element default.
-								reset = fmt.Sprintf("%s.%s.clear(); %s.%s.resize(%d, %s);",
-									fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name),
-									fld.Count, rustElemZeroLit(fld.Elem))
-							}
-							f.line("            (_Loc::%s, %d) => { %s%s },", fr.loc, fld.ID, overcount, reset)
+							// check only at the element store never fires when truncation cuts
+							// the array short of N, so an over-count-AND-truncated array would
+							// misreport INCOMPLETE.
+							f.line("            (_Loc::%s, %d) => { if count > %d { self.inv = true; return; } %s },", fr.loc, fld.ID, fld.Count, clear)
 							continue
 						}
 						// Unbounded array under an active receiver cap (generator#102):
 						// reject an over-cap wire count at the header, before any
 						// elements accumulate.
-						if g.limits.arrayHas && !fld.HasCount {
-							f.line("            (_Loc::%s, %d) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s.%s.clear() },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+						if g.limits.arrayHas {
+							f.line("            (_Loc::%s, %d) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s },", fr.loc, fld.ID, clear)
 							continue
 						}
-						f.line("            (_Loc::%s, %d) => %s.%s.clear(),", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+						f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, clear)
 					}
 				}
 			case fkNestedNative:
+				// The row's element id IS its index in the outer array (§5.1), so the
+				// row is OPENED AT out[id] -- grown into with empty rows, never
+				// appended. Appending was id-blind: an interior row equal to the
+				// element default (the empty row) is omitted by a conformant encoder
+				// (§2) and leaves an id gap, which would then shift every later row
+				// down by one. The over-index reject runs first, so it also bounds the
+				// gap-fill against an amplification DoS -- a bound this collector did
+				// not have before.
+				lim := ""
 				if g.limits.arrayHas && fr.elemDyn {
-					f.line("            (_Loc::%s, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s },", fr.loc, g.pushExpr(fr.path, g.innerNew()))
-					continue
+					lim = "if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } "
 				}
-				f.line("            (_Loc::%s, _) => %s,", fr.loc, g.pushExpr(fr.path, g.innerNew()))
+				f.line("            (_Loc::%s, _) => { %s%s%s self.%s = id as usize; },",
+					fr.loc, lim, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar)
 			}
 		}
 		f.line("            _ => {}")
@@ -1012,37 +960,23 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				f.line("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
 					fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
 			case fkArrArr:
-				f.line("            (_Loc::%s, _) => { %s %s_Loc::%s },", fr.loc, g.pushStmt(fr.path, g.innerNew()), g.overIndexMark(fr.cap), fr.elemLoc)
+				// Same rule as fkStructArr above: the element id IS the row's index
+				// (§5.1), so the row is placed at out[id] rather than appended -- an
+				// interior all-default row is omitted (§2) and leaves an id gap that
+				// an appending collector would close, shifting every later row down.
+				f.line("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
+					fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
 			}
 		}
 		f.line("            _ => self.cur,")
 		f.line("        };")
 		f.line("    }")
 		f.line("    fn sequence_end(&mut self) {")
-		// The scope that closes here is self.cur, so a `count: N` wrapper array is
-		// default-filled back out to N before the pop (§5.1) -- the prerequisite the
-		// encoder's trailing-run narrowing (generator#248) needs to stay lossless.
-		// Nested-array rows are excluded: their writer emits every row
-		// unconditionally, so filling would add rows that then reach the wire.
-		var fills []string
-		for _, fr := range fs {
-			if fr.kind != fkSeqArr && fr.kind != fkStructArr {
-				continue
-			}
-			if fill := g.elemFill(fr.path, fr.cap); fill != "" {
-				fills = append(fills, fmt.Sprintf("            _Loc::%s => { %s }", fr.loc, fill))
-			}
-		}
-		if len(fills) > 0 {
-			f.line("        // A `count: N` wrapper array's decoded length is N (S5.1): fill the")
-			f.line("        // elements the canonical wire elided back in as element defaults.")
-			f.line("        match self.cur {")
-			for _, a := range fills {
-				f.line("%s", a)
-			}
-			f.line("            _ => {}")
-			f.line("        }")
-		}
+		// Nothing to reconcile here: the wrapper array's decoded length is *highest
+		// present id + 1* (MESSAGE_SPEC §5.1) and every element that carries it has
+		// already been placed. A declared `count: N` is a capacity, so there is no
+		// fill-to-N -- filling would turn the M elements the wire carried into N,
+		// which is a different value.
 		f.line("        self.cur = self.stack.pop().unwrap_or(_Loc::Root);")
 		f.line("    }")
 	}
@@ -1120,23 +1054,14 @@ func (g *gen) emitMaxlenGuard(f *rfile, fs []frame, kind ir.Kind) {
 }
 
 // emitNativeArrayStore emits one match arm for a direct native array element: a
-// bounds-checked indexed store `if self.ai < N { x[self.ai] = rhs; self.ai += 1; }`
-// for a fixed `[T; N]` array, or a `.push(rhs)` for a dynamic (count-less) `Vec`
-// array. The bound keeps an over-count element from the indexed write — which
-// would panic, a crash/DoS on untrusted data (generator#78) — and flags the
-// message as malformed: a wire element count above the schema's `count` is
-// INVALID per MESSAGE_SPEC 3+7 and must reject, not clamp (generator#100).
+// `.push(rhs)` into the field's container, which array_begin cleared. Every
+// native array takes the same shape, `count: N` or not -- the wire count M IS
+// the array's length (MESSAGE_SPEC §3), so the elements that arrive are simply
+// collected, and the container's capacity (a schema-sized heapless::Vec under
+// no_std) is N. An over-count array was already rejected at its count header
+// (INVALID per §3+§7, never clamped -- generator#100/#216), which is also what
+// keeps the push inside a fixed capacity.
 func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
-	// A `count: N` array is fixed-length whatever holds it: MESSAGE_SPEC §3 has
-	// the encoder trim the trailing default run and the DECODER rebuild it from N,
-	// so the field must end up with N elements, not with the M the wire carried.
-	// The Vec is sized to N in array_begin, so both storage shapes take the same
-	// indexed store; only a count-less array pushes, because it has no N to
-	// rebuild from and every element it carries is significant.
-	if fld.HasCount && isNativeArrayElem(fld.Elem) {
-		f.line("            (_Loc::%s, %d) => { %sif self.ai < %d { %s.%s[self.ai] = %s; self.ai += 1; } else { self.inv = true; } }", fr.loc, fld.ID, fillGuard, fld.Count, fr.path, rustIdent(fld.Name), rhs)
-		return
-	}
 	store := g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs)
 	if g.limits.arrayHas && !fld.HasCount {
 		store = g.limArrayStore(store)
@@ -1154,8 +1079,9 @@ const fillGuard = "if self.afill == 0 { return; } self.afill -= 1; "
 // limArrayStore wraps an unbounded-array element store so it is dropped once
 // the sticky lim flag is set (generator#102): the over-cap array was rejected
 // at its count header, so its elements must not accumulate either. For a
-// nested-native array this also keeps the last_mut().unwrap() safe after the
-// tripped array_begin skipped its inner-Vec push.
+// nested-native array this also keeps the elements out of whatever row the index
+// slot still names, after the tripped array_begin returned without opening a new
+// one (rowStore's get_mut is what makes that a no-op rather than a panic).
 func (g *gen) limArrayStore(expr string) string {
 	return fmt.Sprintf("{ if !self.lim { %s; } }", expr)
 }
@@ -1166,7 +1092,7 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 	f.line("        match (self.cur, id) {")
 	for _, fr := range fs {
 		if fr.kind == fkNestedNative && fr.elemKind == kind {
-			store := g.pushExpr(fr.path+".last_mut().unwrap()", "value")
+			store := g.rowStore(fr, "value")
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
@@ -1187,9 +1113,21 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 	f.line("    }")
 }
 
-// pushExpr / pushStmt / innerNew handle the heapless-vs-heap container push: under
-// no_std push returns a Result that must be consumed (let _ = ...) and inner
-// containers are heapless::Vec; the std path uses a bare Vec push.
+// rowStore pushes one element into the row of a nested-native array (an array
+// whose elements are native arrays) that the element belongs to: the row at the
+// index its own array_begin recorded, since the element id IS the row's index in
+// the outer array (§5.1). `get_mut` rather than an index expression, so an
+// element that arrives without its array_begin -- which is what a §7.3-skipped or
+// limit-rejected header leaves behind -- is a no-op instead of a panic on
+// untrusted input.
+func (g *gen) rowStore(fr frame, val string) string {
+	return fmt.Sprintf("if let Some(_r) = %s.get_mut(self.%s) { %s }", fr.path, fr.ixVar, g.pushStmt("_r", val))
+}
+
+// pushExpr / pushStmt handle the heapless-vs-heap container push: under
+// no_std push returns a Result that must be consumed (let _ = ...); the std path
+// uses a bare Vec push. A grown-into row is `Default::default()` on both, which
+// is the empty container whichever one the profile chose.
 func (g *gen) pushExpr(target, val string) string {
 	if g.noStd {
 		return fmt.Sprintf("{ let _ = %s.push(%s); }", target, val)
@@ -1202,20 +1140,6 @@ func (g *gen) pushStmt(target, val string) string {
 		return fmt.Sprintf("let _ = %s.push(%s);", target, val)
 	}
 	return fmt.Sprintf("%s.push(%s);", target, val)
-}
-
-// innerNew is the empty row of a nested array, which must match the row type the
-// outer container holds: heapless under the default no_std storage, alloc when
-// allow_dynamic put the whole field on the allocator.
-func (g *gen) innerNew() string {
-	switch {
-	case g.noStd && g.allowDynamic:
-		return "alloc::vec::Vec::new()"
-	case g.noStd:
-		return "heapless::Vec::new()"
-	default:
-		return "Vec::new()"
-	}
 }
 
 // seqElemGrow emits the id-indexed growth prefix for a wrapper-sequence string/
@@ -1277,14 +1201,14 @@ func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, a
 	if g.limits.any() {
 		out = append(out, vField{"lim", "bool", "false", true})
 	}
-	out = append(out, vField{"ai", "usize", "0", true})
 	if arrSkip {
 		out = append(out, vField{"askip", "usize", "0", true})
 	}
 	if scalarArray {
 		out = append(out, vField{"afill", "usize", "0", true})
 	}
-	// One index slot per struct/union wrapper-array frame: the array index of the
+	// One index slot per wrapper-array frame that decodes ELEMENTS at an id --
+	// struct/union elements, wrapper rows and native rows: the array index of the
 	// element currently being decoded (generator#247). It must survive between feed
 	// calls, since an element can straddle a chunk boundary.
 	for _, ix := range ixVars {
