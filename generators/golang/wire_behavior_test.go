@@ -20,7 +20,8 @@ import (
 //   - enum/boolean/bitfield arrays reuse the signed/unsigned array wire types
 //   - struct/union/nested arrays lower to wrapper sequences
 //   - a sequence-typed FIELD whose value is all-default is omitted, while an
-//     all-default array ELEMENT keeps its frame (MESSAGE_SPEC S2).
+//     array ELEMENT is sparse in the interior and always written at the last
+//     index (MESSAGE_SPEC S2).
 
 func requireGoCorelib(t *testing.T) string {
 	t.Helper()
@@ -222,12 +223,14 @@ func TestNestedArrayWireRoundTrip(t *testing.T) {
 
 // TestEmptyArrayFieldWireIsOmitted pins the MESSAGE_SPEC §2 rule for an array
 // FIELD: the wrapper sequence is opened lazily and dropped when no element is
-// written, so an empty (all-element-default) array is OMITTED rather than framed
-// as an empty wrapper. That is the canonical encoding precisely because the
-// field's declared default is the empty collection, so absence reconstructs the
-// same value -- the array still round-trips as length 0. (A string array lowers
-// to a sequence; an empty numeric array has no legal native encoding, so string
-// is the right probe.)
+// written, so an EMPTY array is OMITTED rather than framed as an empty wrapper.
+// That is the canonical encoding precisely because the field's declared default is
+// the empty collection, so absence reconstructs the same value.
+//
+// A declared `count: 3` does not change this and does not change the decoded
+// length either: `count` is a capacity, not a length (§3), so the omitted field
+// and the legacy empty wrapper both decode to the EMPTY array -- length 0, not 3.
+// A one-element wire decodes at length 1.
 func TestEmptyArrayFieldWireIsOmitted(t *testing.T) {
 	corelib := requireGoCorelib(t)
 	def := "version: 1\nmessages:\n  vec:\n    payload:\n" +
@@ -237,92 +240,185 @@ func TestEmptyArrayFieldWireIsOmitted(t *testing.T) {
 	empty := encHex(t, bin, "vec", `{"arr":[]}`)
 	one := encHex(t, bin, "vec", `{"arr":["x"]}`)
 	if empty != "" {
-		t.Errorf("an all-default array field must be omitted, got %s", empty)
+		t.Errorf("an empty array field must be omitted, got %s", empty)
 	}
 	if one == "" {
 		t.Error("a populated array must be on the wire, got empty payload")
 	}
-	// Round-trip LENGTH is not what distinguishes these encodings: this array
-	// declares count: 3, and a fixed-count array's length is N for every target
-	// (S5.1) -- the decoder refills the elided trailing run rather than reporting
-	// a short array. So all three forms below decode at length 3, exactly like the
-	// count: 3 NATIVE array that has always been materialized to N. Asserting 1
-	// and 0 here pinned the disagreement between the two array kinds, not a rule.
-	// What the omission buys is bytes, which the encHex assertions above pin.
 	for _, tc := range []struct {
 		what string
 		hex  string
+		want int
 	}{
-		{"the omitted field", empty},
-		{"a one-element wire", one},
-		// The pre-uniform encoding (an explicit empty wrapper, 06 07) stays
-		// readable and denotes the very same value -- a decoder normalizes it away.
-		{"a legacy empty wrapper", "0607"},
+		{"the omitted field", empty, 0},
+		{"a one-element wire", one, 1},
+		// The pre-uniform encoding (an explicit empty wrapper, 06 07) stays readable
+		// and denotes the very same value -- a decoder normalizes it away.
+		{"a legacy empty wrapper", "0607", 0},
 	} {
-		if n := arrLen(t, bin, "vec", tc.hex); n != 3 {
-			t.Errorf("%s must decode to the schema count 3, got %d", tc.what, n)
+		if n := arrLen(t, bin, "vec", tc.hex); n != tc.want {
+			t.Errorf("%s must decode at length %d, got %d", tc.what, tc.want, n)
 		}
 	}
 }
 
-// TestWireAllDefaultStructElementsKeepFrames is the other half of MESSAGE_SPEC §2:
-// the field-level omission must NOT reach array ELEMENTS. Element presence is
-// what carries a dynamic array's length (highest present id + 1, §5.1), so two
-// all-default struct elements must still reach the wire as begin+end frames and
-// decode back at length 2 -- dropping them would change the VALUE, not just the
-// bytes. This is what the keeping closer (WriteSequenceEndKeep) buys.
-func TestWireAllDefaultStructElementsKeepFrames(t *testing.T) {
+// TestWireArrayElementSparsityIsPositional is the byte-level statement of
+// MESSAGE_SPEC §2's one element rule, for both element kinds at once. Every hex
+// below is a regenerated shared test vector (the serialized_sparse form), so these
+// are cross-language byte targets, not this backend's opinion:
+//
+//	array_string_trailing_default          ["a",""]      06020a610a0207
+//	array_string_all_default               ["",""]       060a0207
+//	array_string_leading_default           ["","x",""]   060a0a78120207
+//	array_string_gap                       ["a","","c"]  06020a61120a6307
+//	array_struct_interior_default_element  [{1},{},{3}]  06060001071600030707
+//	array_struct_all_default_elements      [{},{}]       060e0707
+//
+// The rule: an element before the last one that equals its element default is
+// omitted (a leaf not written, a sequence element not framed either), leaving an id
+// GAP the decoder restores from that default; the LAST element is always written,
+// as its value or as an empty frame, because its presence is what fixes the decoded
+// length. Round-tripping is therefore exact -- ["a",""], ["a"] and [] are three
+// distinct values with three distinct encodings.
+func TestWireArrayElementSparsityIsPositional(t *testing.T) {
 	corelib := requireGoCorelib(t)
-	def := "version: 1\nmessages:\n  vec:\n    payload:\n" +
-		"      arr: {id: 0, type: array, items: {type: struct, fields: {x: {id: 0, type: i32}, y: {id: 1, type: i32}}}}\n"
-	bin := buildGoHarnessCfg(t, corelib, def, nil)
+	// count: 4 deliberately -- a capacity must change none of this (§3).
+	strDef := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      arr: {id: 0, type: array, items: {type: string, count: 4, maxlen: 8}}\n"
+	objDef := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      arr: {id: 0, type: array, items: {type: struct, count: 4, fields: {k: {id: 0, type: u32}}}}\n"
 
-	// Wrapper seq_begin id 0 (06), element frames 06 07 (id 0) and 0e 07 (id 1) --
-	// each begin+end with no child -- then the wrapper's end 07.
-	allDefault := `{"arr":[{"x":0,"y":0},{"x":0,"y":0}]}`
-	if got, want := encHex(t, bin, "vec", allDefault), "0606070e0707"; got != want {
-		t.Errorf("all-default struct elements must keep their frames: got %s, want %s", got, want)
-	}
-	if n := arrLen(t, bin, "vec", encHex(t, bin, "vec", allDefault)); n != 2 {
-		t.Errorf("two all-default struct elements must decode at length 2, got %d", n)
-	}
-	// The wrapper itself is still a FIELD: with no element at all it is omitted.
-	if got := encHex(t, bin, "vec", `{"arr":[]}`); got != "" {
-		t.Errorf("an empty struct array field must be omitted, got %s", got)
+	for _, probe := range []struct {
+		what  string
+		def   string
+		cases []struct{ in, wantHex, wantJSON string }
+	}{
+		{"string elements", strDef, []struct{ in, wantHex, wantJSON string }{
+			// interior gap at index 1, last element carries a value
+			{`{"arr":["a","","c"]}`, "06020a61120a6307", `{"arr":["a","","c"]}`},
+			// the trailing default is the LAST element: written, so length 2 survives
+			{`{"arr":["a",""]}`, "06020a610a0207", `{"arr":["a",""]}`},
+			// all-default: the interior one drops, the final one is written alone at
+			// id 1 -- this is NOT the empty array
+			{`{"arr":["",""]}`, "060a0207", `{"arr":["",""]}`},
+			// leading default leaves a gap, trailing default is written
+			{`{"arr":["","x",""]}`, "060a0a78120207", `{"arr":["","x",""]}`},
+			// no element at all: the wrapper stays contentless and the FIELD is
+			// omitted (§2), decoding to the empty array
+			{`{"arr":[]}`, "", `{"arr":null}`},
+		}},
+		{"struct elements", objDef, []struct{ in, wantHex, wantJSON string }{
+			// the interior all-default element is NOT framed: id 1 is a gap, and the
+			// array still decodes at length 3 from id 2
+			{`{"arr":[{"k":1},{"k":0},{"k":3}]}`, "06060001071600030707", `{"arr":[{"k":1},{"k":0},{"k":3}]}`},
+			// all-default elements: interior drops, the last keeps its empty frame
+			{`{"arr":[{"k":0},{"k":0}]}`, "060e0707", `{"arr":[{"k":0},{"k":0}]}`},
+			// a single all-default element is the last one: an empty frame at id 0
+			{`{"arr":[{"k":0}]}`, "06060707", `{"arr":[{"k":0}]}`},
+			{`{"arr":[]}`, "", `{"arr":null}`},
+		}},
+	} {
+		bin := buildGoHarnessCfg(t, corelib, probe.def, nil)
+		for _, c := range probe.cases {
+			if got := encHex(t, bin, "vec", c.in); got != c.wantHex {
+				t.Errorf("%s: encode %s: got %s, want %s", probe.what, c.in, got, c.wantHex)
+			}
+			if got := roundTrip(t, bin, "vec", c.in); got != normJSON(t, c.wantJSON) {
+				t.Errorf("%s: round-trip %s: got %s, want %s", probe.what, c.in, got, normJSON(t, c.wantJSON))
+			}
+		}
 	}
 }
 
-// TestWrapperArrayStringElementSparse pins MESSAGE_SPEC §2 element-level omission:
-// inside a wrapper-sequence array a string element equal to its element default
-// (empty) is dropped, leaving an id gap the decoder restores; trailing default
-// elements collapse, and an array whose elements all collapse leaves the wrapper
-// FIELD contentless, which §2 omits. The hex here is the cross-language canonical
-// form (verified byte-identical against C, C++, Rust, Python, TypeScript, Java, C#).
-func TestWrapperArrayStringElementSparse(t *testing.T) {
+// TestWireNestedRowSparsityIsPositional applies the same rule one level down, to
+// an array whose elements are themselves arrays. A row equal to the element default
+// (the empty row) is omitted in the interior and written at the last index -- as an
+// empty count-prefixed array for a native row, as an empty frame for a wrapper row.
+// The wrapper-row shape is the shared vector array_of_string_arrays
+// ([["a"],[]] -> 0606020a61070e0707).
+func TestWireNestedRowSparsityIsPositional(t *testing.T) {
+	corelib := requireGoCorelib(t)
+	rowsDef := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      arr: {id: 0, type: array, items: {type: array, count: 3, items: {type: string, maxlen: 8}}}\n"
+	matDef := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      arr: {id: 0, type: array, items: {type: array, count: 3, items: {type: u32, count: 3}}}\n"
+
+	rows := buildGoHarnessCfg(t, corelib, rowsDef, nil)
+	// [["a"],[]]: the empty row is LAST, so it keeps its frame and the outer array
+	// decodes at length 2.
+	if got, want := encHex(t, rows, "vec", `{"arr":[["a"],[]]}`), "0606020a61070e0707"; got != want {
+		t.Errorf("a trailing empty wrapper row must keep its frame: got %s, want %s", got, want)
+	}
+	// [[],["a"]]: now the empty row is INTERIOR -- not framed, an id gap, and the
+	// decoder restores it as an empty row at index 0.
+	if got, want := encHex(t, rows, "vec", `{"arr":[[],["a"]]}`), "060e020a610707"; got != want {
+		t.Errorf("an interior empty wrapper row must leave a gap: got %s, want %s", got, want)
+	}
+	// (encoding/json renders an empty Go slice as null, so an empty row reads as
+	// null on the way back -- the LENGTH is what these pin.)
+	for _, c := range []struct{ in, want string }{
+		{`{"arr":[["a"],[]]}`, `{"arr":[["a"],null]}`},
+		{`{"arr":[[],["a"]]}`, `{"arr":[null,["a"]]}`},
+		{`{"arr":[["a","b"],[],["c"]]}`, `{"arr":[["a","b"],null,["c"]]}`},
+	} {
+		if got := roundTrip(t, rows, "vec", c.in); got != normJSON(t, c.want) {
+			t.Errorf("wrapper-row round-trip %s: got %s, want %s", c.in, got, normJSON(t, c.want))
+		}
+	}
+
+	mat := buildGoHarnessCfg(t, corelib, matDef, nil)
+	// [[1],[]]: id 0 unsigned array (03 01 01), then the LAST row as an empty
+	// count-prefixed array at id 1 (0b 00).
+	if got, want := encHex(t, mat, "vec", `{"arr":[[1],[]]}`), "060301010b0007"; got != want {
+		t.Errorf("a trailing empty native row must be written: got %s, want %s", got, want)
+	}
+	// [[],[1]]: the interior empty row is dropped, so id 0 is a gap.
+	if got, want := encHex(t, mat, "vec", `{"arr":[[],[1]]}`), "060b010107"; got != want {
+		t.Errorf("an interior empty native row must leave a gap: got %s, want %s", got, want)
+	}
+	for _, c := range []struct{ in, want string }{
+		// a row that was WRITTEN comes back as an empty slice; one restored from a
+		// gap is nil, which encoding/json renders as null. Same value, same length.
+		{`{"arr":[[1],[]]}`, `{"arr":[[1],[]]}`},
+		{`{"arr":[[],[1]]}`, `{"arr":[null,[1]]}`},
+		{`{"arr":[[1,2],[],[3]]}`, `{"arr":[[1,2],null,[3]]}`},
+	} {
+		if got := roundTrip(t, mat, "vec", c.in); got != normJSON(t, c.want) {
+			t.Errorf("native-row round-trip %s: got %s, want %s", c.in, got, normJSON(t, c.want))
+		}
+	}
+}
+
+// TestWireCompactArrayKeepsItsTail is the compact-array half of the same
+// principle: a count-prefixed scalar array carries EVERY element it holds, trailing
+// defaults included, because the wire count M IS the length -- dropping a trailing
+// zero would shorten the array. [1,2,0,0] and [1,2] are different values.
+// 030401020000 is the regenerated shared vector array_unsigned_trailing_defaults,
+// whose dense and sparse forms are now identical.
+func TestWireCompactArrayKeepsItsTail(t *testing.T) {
 	corelib := requireGoCorelib(t)
 	def := "version: 1\nmessages:\n  vec:\n    payload:\n" +
-		"      arr: {id: 0, type: array, items: {type: string, count: 4, maxlen: 8}}\n"
+		"      arr: {id: 0, type: array, items: {type: u32, count: 4}}\n"
 	bin := buildGoHarnessCfg(t, corelib, def, nil)
 
-	cases := []struct {
-		in, wantHex, wantJSON string
-	}{
-		// gap at index 1: seq_begin(0), str(0)="a", str(2)="c", seq_end
-		{`{"arr":["a","","c"]}`, "06020a61120a6307", `{"arr":["a","","c"]}`},
-		// trailing default collapses: only str(0)="a" survives
-		{`{"arr":["a",""]}`, "06020a6107", `{"arr":["a"]}`},
-		// every element dropped leaves the wrapper contentless, and a wrapper is a
-		// FIELD: it is omitted entirely (MESSAGE_SPEC S2), decoding to a nil slice
-		{`{"arr":["",""]}`, "", `{"arr":null}`},
-		// leading gap kept (str(1)="x"), trailing default collapses
-		{`{"arr":["","x",""]}`, "060a0a7807", `{"arr":["","x"]}`},
-	}
-	for _, c := range cases {
+	for _, c := range []struct{ in, wantHex string }{
+		{`{"arr":[1,2,0,0]}`, "030401020000"},
+		{`{"arr":[1,2]}`, "03020102"},
+		// all-zero at length 4 is a length-4 array: it differs from the empty
+		// default, so it stays on the wire (a capacity is not a minimum length).
+		{`{"arr":[0,0,0,0]}`, "030400000000"},
+		// only the EMPTY array is the field's default, and only it is omitted.
+		{`{"arr":[]}`, ""},
+	} {
 		if got := encHex(t, bin, "vec", c.in); got != c.wantHex {
 			t.Errorf("encode %s: got %s, want %s", c.in, got, c.wantHex)
 		}
-		if got := roundTrip(t, bin, "vec", c.in); got != normJSON(t, c.wantJSON) {
-			t.Errorf("round-trip %s: got %s, want %s", c.in, got, normJSON(t, c.wantJSON))
+		want := c.in
+		if c.wantHex == "" {
+			want = `{"arr":null}` // an omitted field decodes to the empty slice
+		}
+		if got := roundTrip(t, bin, "vec", c.in); got != normJSON(t, want) {
+			t.Errorf("round-trip %s: got %s, want %s", c.in, got, normJSON(t, want))
 		}
 	}
 }
@@ -397,16 +493,22 @@ func TestOverCountScalarArrayRejected(t *testing.T) {
 	}
 }
 
-// TestFixedCountArrayAllDefaultOmitted pins issue #139: a count:N native array
-// whose value is all-element-default (empty OR all-zero) is OMITTED (MESSAGE_SPEC
-// S2), not emitted as an explicit empty array. A populated array is trimmed to
-// its non-default prefix (S3) while its all-default siblings stay omitted, and a
-// count:N array with a non-empty schema default is omitted only when it equals
-// that default. (0.17.2 regressed to emitting every count:N array explicitly.)
-func TestFixedCountArrayAllDefaultOmitted(t *testing.T) {
+// TestCountedArrayOmittedOnlyWhenItEqualsItsDefault: the field-level omit test for
+// a `count: N` native array is the ordinary != default test of MESSAGE_SPEC §2,
+// applied to the value exactly as it stands. `count` is a capacity, so nothing is
+// padded to N on either side of that comparison (§3):
+//
+//   - the EMPTY array is the default when none is declared -> omitted;
+//   - an all-ZERO array of length N is a length-N value, which differs from the
+//     empty one -> on the wire, every element of it (this is the behaviour the
+//     superseded fixed-length reading got wrong in the other direction: it called
+//     [0,0,0,0,0] "all-default" and dropped the field);
+//   - a declared `default` shorter than N stands for itself -> the field is
+//     omitted only when the value equals it exactly.
+func TestCountedArrayOmittedOnlyWhenItEqualsItsDefault(t *testing.T) {
 	corelib := requireGoCorelib(t)
 	def := "version: 1\nmessages:\n  probe:\n    payload:\n" +
-		"      u8s:  {id: 0, type: array, items: {type: u8, count: 5}}\n" +
+		"      u16s: {id: 0, type: array, items: {type: u16, count: 5}}\n" +
 		"      i8s:  {id: 1, type: array, items: {type: i8, count: 5}}\n" +
 		"      f32s: {id: 2, type: array, items: {type: fp32, count: 3}}\n" +
 		"      bls:  {id: 3, type: array, items: {type: boolean, count: 4}}\n" +
@@ -414,29 +516,44 @@ func TestFixedCountArrayAllDefaultOmitted(t *testing.T) {
 		"      withdef: {id: 5, type: array, items: {type: u32, count: 3}, default: [1, 2]}\n"
 	bin := buildGoHarnessCfg(t, corelib, def, nil)
 
-	// (a) Every array at its default -> empty payload (all fields omitted). withdef
-	//     equals its own default [1,2], so it is omitted too.
-	allDefault := `{"u8s":[],"i8s":[],"f32s":[],"bls":[],"u32s":[],"withdef":[1,2]}`
+	// (a) Every array at its default -> empty payload. The default is the EMPTY
+	//     array everywhere but withdef, which equals its own declared [1,2].
+	allDefault := `{"u16s":[],"i8s":[],"f32s":[],"bls":[],"u32s":[],"withdef":[1,2]}`
 	if got := encHex(t, bin, "probe", allDefault); got != "" {
-		t.Errorf("all-default count:N arrays must be omitted (issue #139): got %q", got)
+		t.Errorf("arrays equal to their default must be omitted: got %q", got)
 	}
 
-	// (b) An all-ZERO (non-empty) count:N array is still all-default -> omitted.
-	allZero := `{"u8s":[0,0,0,0,0],"i8s":[],"f32s":[],"bls":[false,false,false,false],"u32s":[],"withdef":[1,2,0]}`
-	if got := encHex(t, bin, "probe", allZero); got != "" {
-		t.Errorf("all-zero count:N arrays must be omitted (issue #139): got %q", got)
+	// (b) An all-ZERO array is NOT the empty array: it is a length-N value and
+	//     stays on the wire, tail included. id 0 unsigned array (03) count 5 + five 00;
+	//     id 3 boolean array lowers to unsigned (0x1b) count 4 + four 00.
+	allZero := `{"u16s":[0,0,0,0,0],"i8s":[],"f32s":[],"bls":[false,false,false,false],"u32s":[],"withdef":[1,2]}`
+	if got, want := encHex(t, bin, "probe", allZero), "030500000000001b0400000000"; got != want {
+		t.Errorf("an all-zero count:N array must stay on the wire: got %q, want %q", got, want)
 	}
 
-	// (c) Populate one array; only it is on the wire (trimmed), siblings omitted.
-	//     id 4 ARRAY_UNSIGNED (wire 3): header (4<<3)|3 = 0x23; count 3; 07 08 09.
-	oneSet := `{"u8s":[],"i8s":[],"f32s":[],"bls":[],"u32s":[7,8,9,0,0],"withdef":[1,2]}`
-	if got := encHex(t, bin, "probe", oneSet); got != "2303070809" {
-		t.Errorf("only the populated array (trimmed) must be on the wire: got %q", got)
+	// (c) A populated array is written whole -- the trailing default run is part of
+	//     the value. id 4 ARRAY_UNSIGNED: header (4<<3)|3 = 0x23, count 5.
+	oneSet := `{"u16s":[],"i8s":[],"f32s":[],"bls":[],"u32s":[7,8,9,0,0],"withdef":[1,2]}`
+	if got, want := encHex(t, bin, "probe", oneSet), "23050708090000"; got != want {
+		t.Errorf("a populated count:N array must keep its tail: got %q, want %q", got, want)
 	}
 
 	// (d) A count:N array overriding its non-empty schema default is on the wire.
-	overDef := `{"u8s":[],"i8s":[],"f32s":[],"bls":[],"u32s":[],"withdef":[1,2,9]}`
+	overDef := `{"u16s":[],"i8s":[],"f32s":[],"bls":[],"u32s":[],"withdef":[1,2,9]}`
 	if got := encHex(t, bin, "probe", overDef); got == "" {
 		t.Error("a count:N array overriding its schema default must be on the wire")
+	}
+	// ...and every probe round-trips at exactly the length it was given -- no
+	// element added, none dropped. (encoding/json renders an empty Go slice as
+	// null, which is how an omitted field comes back.)
+	for _, c := range []struct{ in, want string }{
+		{allDefault, `{"u16s":null,"i8s":null,"f32s":null,"bls":null,"u32s":null,"withdef":[1,2]}`},
+		{allZero, `{"u16s":[0,0,0,0,0],"i8s":null,"f32s":null,"bls":[false,false,false,false],"u32s":null,"withdef":[1,2]}`},
+		{oneSet, `{"u16s":null,"i8s":null,"f32s":null,"bls":null,"u32s":[7,8,9,0,0],"withdef":[1,2]}`},
+		{overDef, `{"u16s":null,"i8s":null,"f32s":null,"bls":null,"u32s":null,"withdef":[1,2,9]}`},
+	} {
+		if got := roundTrip(t, bin, "probe", c.in); got != normJSON(t, c.want) {
+			t.Errorf("round-trip %s: got %s, want %s", c.in, got, normJSON(t, c.want))
+		}
 	}
 }
