@@ -525,15 +525,6 @@ func signedArrayElem(k ir.Kind) bool {
 		k == ir.KindEnum
 }
 
-// intArrayElem reports whether an array element is delivered through the
-// integer scalar callbacks (Unsigned/Signed) — the callbacks a lone scalar
-// field shares, which is what makes the MESSAGE_SPEC §7.3 array-vs-scalar skip
-// necessary (generator#183). fp32/fp64 elements deliver through Fp32/Fp64 and
-// so can never land in a scalar integer arm.
-func intArrayElem(k ir.Kind) bool {
-	return unsignedArrayElem(k) || signedArrayElem(k)
-}
-
 // fpArrayElem reports whether an array element is delivered through the fp
 // callbacks (Fp32/Fp64) — the fixlen array wire type.
 func fpArrayElem(k ir.Kind) bool {
