@@ -295,6 +295,17 @@ same strict path and now agree on invalid input, **subsuming #80**. Validity is 
 property of the complete payload: a split multi-byte sequence stays `INCOMPLETE`.
 Encode-side strictness is corelib-side (`OStream::write_string`).
 
+**Only a materialized string is validated (issue #257).** corelib-rs delivers every
+fixlen-string field to `fn string(...)` — an unknown id and a §7.3 wire-type
+contradiction included — so the callback opens with a `match (self.cur, id)` over
+the string destinations that `return`s on anything else. Everything after it
+(`acc`, `from_utf8`, the sticky `inv`) therefore runs only for a payload this scope
+actually reads, which is what CORELIB_PLAN §6.4 requires, and a skipped payload can
+never leave bytes in `acc` for a later declared field to inherit. The `maxlen` and
+`max_dyn_string_len` pre-checks sit behind the guard: they are destination-scoped
+themselves, so §5.2's INVALID-over-INCOMPLETE ordering is unchanged. `blob()` has no
+such guard — bytes carry no encoding.
+
 ## §7.3: an integer array at a scalar id (issue #183)
 
 MESSAGE_SPEC **§7.3** skips a field whose header wire type contradicts its

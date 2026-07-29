@@ -286,6 +286,70 @@ func maxlenThrow(name, noun string, max int64) string {
 		name, noun, max)
 }
 
+// emitDestGuard writes the skip gate at the very top of the string() callback
+// (CORELIB_PLAN §6.4, generator#257): "skipped fields are never validated".
+// Skipping is a length jump over bytes that are not inspected (§5.2), and UTF-8
+// validation runs only where a `string` is materialized — read into a
+// destination. So the destination is resolved FIRST: every (cur, id) that
+// declares a string, plus the wrapper-sequence rows whose element kind is
+// string, falls through; anything else returns right here.
+//
+// Returning here is what makes the skip a true skip: an unknown id, or a §7.3
+// wire-type contradiction routed down the same path, never reaches _utf8() and
+// never enters the shared `acc` (so a later declared field cannot inherit its
+// bytes). Without it a lone continuation byte at an undeclared id turned an
+// otherwise valid message into INVALID_MSG.
+//
+// Placed ahead of the maxlen/limit guards, which are already destination-scoped
+// and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is
+// preserved.
+func (g *gen) emitDestGuard(f *jfile, fs []frame, kind ir.Kind) {
+	// Frames that can materialize a value of this kind, in emission order.
+	type destFrame struct {
+		idx int
+		ids []int64 // empty => every id lands here (wrapper-sequence row)
+	}
+	var dests []destFrame
+	for _, fr := range fs {
+		if fr.kind == fkSeqLeaf && fr.elemKind == kind {
+			dests = append(dests, destFrame{idx: fr.idx})
+			continue
+		}
+		if fr.kind != fkNormal {
+			continue
+		}
+		var ids []int64
+		for _, fld := range fr.fields {
+			if fld.Kind == kind {
+				ids = append(ids, fld.ID)
+			}
+		}
+		if len(ids) > 0 {
+			dests = append(dests, destFrame{idx: fr.idx, ids: ids})
+		}
+	}
+	if len(dests) == 0 {
+		return
+	}
+	f.line("        // A payload this scope does not declare is skipped: its bytes are jumped")
+	f.line("        // over, never inspected. Resolve the destination first and leave before a")
+	f.line("        // byte is buffered, decoded or checked.")
+	f.line("        switch (cur) {")
+	for _, d := range dests {
+		if len(d.ids) == 0 {
+			f.line("        case %d: break;", d.idx)
+			continue
+		}
+		var labels []string
+		for _, id := range d.ids {
+			labels = append(labels, fmt.Sprintf("case %d:", id))
+		}
+		f.line("        case %d: switch (id) { %s break; default: return; } break;", d.idx, strings.Join(labels, " "))
+	}
+	f.line("        default: return;")
+	f.line("        }")
+}
+
 // emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
 // of the string()/blob() callback, the bounded-field twin of emitLenLimitGuard:
 // every field of this kind that declares a schema `maxlen` (scalar fields and
@@ -561,6 +625,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	// string. Single-shot: when the whole payload arrives in one chunk, decode
 	// straight from the input slice, skipping the (synchronized) ByteArrayOutputStream.
 	f.line("    public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
+	g.emitDestGuard(f, fs, ir.KindString)
 	if limStr {
 		g.emitLenLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN", "string length", g.limits.stringLen)
 	}

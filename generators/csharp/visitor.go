@@ -216,6 +216,54 @@ func (g *gen) emitLenGuard(f *cfile, fs []frame, kind ir.Kind, constName, what s
 	f.line("        }")
 }
 
+// emitDestGuard writes the skip gate at the very top of the String callback
+// (CORELIB_PLAN §6.4, generator#257): "skipped fields are never validated".
+// Skipping is a length jump over bytes that are not inspected (§5.2), and UTF-8
+// validation runs only where a `string` is materialized — read into a
+// destination. So the destination is resolved FIRST: every (loc, id) that
+// declares a string, plus the wrapper-sequence rows whose element kind is
+// string, falls through; anything else returns right here.
+//
+// Returning here is what makes the skip a true skip: an unknown id, or a §7.3
+// wire-type contradiction routed down the same path, never reaches _Utf8() and
+// never enters the shared `acc` (so a later declared field cannot inherit its
+// bytes). Without it a lone continuation byte at an undeclared id turned an
+// otherwise valid message into InvalidMessage.
+//
+// Placed ahead of the maxlen/limit guards, which are already destination-scoped
+// and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is
+// preserved. The case labels mirror the materializing switch below one for one,
+// so a loc is never both a `(loc, _)` row and a `(loc, id)` field arm.
+func (g *gen) emitDestGuard(f *cfile, fs []frame, kind ir.Kind) {
+	var labels []string
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == kind {
+				labels = append(labels, fmt.Sprintf("case (%s, _):", fr.loc))
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == kind {
+				labels = append(labels, fmt.Sprintf("case (%s, %d):", fr.loc, fld.ID))
+			}
+		}
+	}
+	if len(labels) == 0 {
+		return
+	}
+	f.line("        // A payload this scope does not declare is skipped: its bytes are jumped")
+	f.line("        // over, never inspected. Resolve the destination first and leave before a")
+	f.line("        // byte is buffered, decoded or checked.")
+	f.line("        switch ((cur, id)) {")
+	for _, l := range labels {
+		f.line("            %s", l)
+	}
+	f.line("                break;")
+	f.line("            default: return;")
+	f.line("        }")
+}
+
 // emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
 // of the String/Blob callback, the bounded-field twin of emitLenGuard: every
 // field of that kind with a schema `maxlen` (scalar fields and wrapper-sequence
@@ -498,6 +546,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// straight from the contiguous input slice; the per-byte List<byte> accumulator
 	// is only the fallback for a genuinely split payload.
 	f.line("    public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
+	g.emitDestGuard(f, fs, ir.KindString)
 	// MESSAGE_SPEC §7.1: a bounded string whose wire byte length exceeds its
 	// schema maxlen is malformed input, rejected as INVALID at the `total` header
 	// before any bytes accumulate (never truncated).

@@ -81,11 +81,25 @@ Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `String` is a Unicode type, so it is **always strict** (MESSAGE_SPEC §8 /
 CORELIB_PLAN §6.4) — no config key in generated code. The platform
 `new String(bytes, UTF_8)` is **lossy** (substitutes `U+FFFD`), which §8 forbids in
-every mode, so the visitor decodes through a generated `_utf8(...)` helper backed by
-a REPORTing `CharsetDecoder` (`onMalformedInput`/`onUnmappableCharacter` =
-`REPORT`); a `CharacterCodingException` becomes `SofabException(INVALID_MSG)` — the
-same channel as the over-count guards. The check runs once the full `total` bytes
+every mode, so the visitor decodes through a generated `_utf8(...)` helper: an
+allocation-free `Utf8.valid(...)` well-formedness scan, then the JVM-intrinsic
+`new String(b, off, len, UTF_8)` (which never substitutes on already-valid input).
+Invalid bytes become `SofabException(INVALID_MSG)` — the same channel as the
+over-count guards. (This replaced a REPORTing `CharsetDecoder`, which allocated a
+decoder + `CharBuffer` per call; the scan-then-intrinsic pair measured ~43 % faster
+on the arena strings at zero per-string allocation.) The check runs once the full `total` bytes
 are present. Encode-side strictness is corelib-side (`OStream.writeString`).
+
+**Only a materialized string is validated (issue #257).** corelib-java delivers
+every fixlen-string field to `string(...)` — an unknown id and a §7.3 wire-type
+contradiction included — so the callback opens with a `switch (cur)` over the string
+destinations whose every non-matching path `return`s. `_utf8(...)` and `acc`
+therefore run only for a payload this scope actually reads, which is what
+CORELIB_PLAN §6.4 requires, and a skipped payload can never leave bytes in `acc` for
+a later declared field to inherit. The `maxlen` and `max_dyn_string_len` pre-checks
+sit behind the guard: they are destination-scoped themselves, so §5.2's
+INVALID-over-INCOMPLETE ordering is unchanged. `blob(...)` has no such guard — bytes
+carry no encoding.
 
 ## §7.3: a mis-typed array header (issues #183, #193, #254)
 

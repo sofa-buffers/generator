@@ -43,6 +43,16 @@ backed by `new System.Text.UTF8Encoding(false, /*throwOnInvalidBytes*/ true)`; a
 same channel as the over-count guards. The check runs once the full `total` bytes
 are present. Encode-side strictness is corelib-side (`OStream.WriteString`).
 
+**Only a materialized string is validated (issue #257).** corelib-cs delivers every
+fixlen-string field to `String(...)` — an unknown id and a §7.3 wire-type
+contradiction included — so the callback opens with a `switch ((cur, id))` over the
+string destinations whose `default` `return`s. `_Utf8(...)` and `acc` therefore run
+only for a payload this scope actually reads, which is what CORELIB_PLAN §6.4
+requires, and a skipped payload can never leave bytes in `acc` for a later declared
+field to inherit. The `maxlen` and `max_dyn_string_len` pre-checks sit behind the
+guard: they are destination-scoped themselves, so §5.2's INVALID-over-INCOMPLETE
+ordering is unchanged. `Blob(...)` has no such guard — bytes carry no encoding.
+
 ## §7.3: a mis-typed array header (issues #183, #193, #254)
 
 MESSAGE_SPEC **§7.3** skips a field whose header wire type contradicts its
