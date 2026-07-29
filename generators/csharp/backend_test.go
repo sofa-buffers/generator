@@ -131,12 +131,14 @@ func TestCsArrayAtScalarSkip(t *testing.T) {
 		"public void Fp64(int id, double value) {\n        if (askip > 0) { askip--; return; }",
 		// Visitor state.
 		"private int askip = 0;",
-		// Armed in ArrayBegin, per array kind.
+		// Armed in ArrayBegin, one arm per array kind (#254).
 		"askip = kind switch {",
-		"            ArrayKind.Unsigned or ArrayKind.Signed => (cur, id) switch {",
+		"            ArrayKind.Unsigned => (cur, id) switch {",
+		"            ArrayKind.Signed => (cur, id) switch {",
 		"            ArrayKind.Fixlen => (cur, id) switch {",
-		// Declared integer arrays disarm under the int arm; so does the nested
-		// native inner scope. The fp32 array disarms under the Fixlen arm (#193).
+		// Each declared array disarms under ITS OWN kind: the u32 array (id 2) and
+		// the nested u16 inner scope under Unsigned, the i32 array (id 3) under
+		// Signed, the fp32 array (id 4) under Fixlen (#193).
 		"                (Root, 2) => 0,",
 		"                (Root, 3) => 0,",
 		"                (Root_na, _) => 0,",
@@ -153,6 +155,78 @@ func TestCsArrayAtScalarSkip(t *testing.T) {
 		if strings.Contains(m, bad) {
 			t.Errorf("scalar id must not disarm the array-skip counter (%q):\n%s", bad, m)
 		}
+	}
+	// Unsigned and Signed are not one case (generator#254): the u32 array (id 2)
+	// must not disarm the counter for an array-signed header, nor the i32 array
+	// (id 3) for an array-unsigned one.
+	if strings.Contains(m, "ArrayKind.Unsigned or ArrayKind.Signed") {
+		t.Errorf("Unsigned and Signed must be separate arms (generator#254):\n%s", m)
+	}
+	for _, want := range []string{
+		"            ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 2) => 0,\n                (Root_na, _) => 0,\n                _ => count,\n            },",
+		"            ArrayKind.Signed => (cur, id) switch {\n                (Root, 3) => 0,\n                _ => count,\n            },",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing per-kind skip arm %q:\n%s", want, m)
+		}
+	}
+}
+
+// TestCsMistypedArrayNotAllocated: MESSAGE_SPEC §7.3 — "A decoder ... MUST NOT
+// decode its payload into the declared field." A native array field whose header
+// carries the WRONG array kind (an array-signed header at a u8[]-declared id) is
+// skipped like an unknown id, and skipping includes NOT RESIZING the declared
+// field from the skipped header's count: the leak generator#254 pins is the
+// LENGTH, not the element — csharp re-encoded `a6 06 04 01 06 07` as
+// `a6 06 03 01 00 07`, a one-element unsigned array the wire never carried.
+//
+// Both halves are asserted: the skip counter is armed per array kind (above), and
+// every ArrayBegin allocation arm is fronted by the kind test — which comes
+// BEFORE the schema bound, so an over-count MIS-TYPED array is skipped rather
+// than rejected as a false InvalidMessage (§7.3: "the schema bound applied only
+// to a field that survives it").
+func TestCsMistypedArrayNotAllocated(t *testing.T) {
+	src := []byte(`
+version: 1
+$defs:
+  enum:
+    E: { A: 0, B: 1 }
+messages:
+  M:
+    payload:
+      ua: { id: 0, type: array, items: { type: u8, count: 5 } }
+      ia: { id: 1, type: array, items: { type: i8, count: 5 } }
+      fa: { id: 2, type: array, items: { type: fp32, count: 3 } }
+      ba: { id: 3, type: array, items: { type: boolean, count: 2 } }
+      ea: { id: 4, type: array, items: { type: enum, count: 2, enum: { $ref: "#/$defs/enum/E" } } }
+      da: { id: 5, type: array, items: { type: u16 } }
+`)
+	m := buildModule(t, src, "in.yaml", map[string]any{"namespace": "S"})
+	for _, want := range []string{
+		// The kind test fronts the allocation AND precedes the schema bound.
+		`case (Root, 0): if (kind != ArrayKind.Unsigned) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "ua: array count above schema capacity 5"); m.ua = new byte[count]; break;`,
+		`case (Root, 1): if (kind != ArrayKind.Signed) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "ia: array count above schema capacity 5"); m.ia = new sbyte[count]; break;`,
+		`case (Root, 2): if (kind != ArrayKind.Fixlen) break; if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fa: array count above schema capacity 3"); m.fa = new float[count]; break;`,
+		// A boolean/enum array is a List: clearing it is decoding into it too, so
+		// the kind test fronts the Clear() as well. boolean rides the Unsigned wire
+		// type, enum the Signed one.
+		`case (Root, 3): if (kind != ArrayKind.Unsigned) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ba: array count above schema capacity 2"); m.ba.Clear(); break;`,
+		`case (Root, 4): if (kind != ArrayKind.Signed) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ea: array count above schema capacity 2"); m.ea.Clear(); break;`,
+		// A count-less array has no schema bound, but still gets the kind test.
+		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; m.da = new ushort[Math.Min(count, ArrayInitCap)]; break;`,
+		// The skip counter is armed per kind; each id disarms under its own kind only.
+		"            ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 3) => 0,\n                (Root, 5) => 0,\n                _ => count,\n            },",
+		"            ArrayKind.Signed => (cur, id) switch {\n                (Root, 1) => 0,\n                (Root, 4) => 0,\n                _ => count,\n            },",
+		"            ArrayKind.Fixlen => (cur, id) switch {\n                (Root, 2) => 0,\n                _ => count,\n            },",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing §7.3 mis-typed-array guard %q:\n%s", want, m)
+		}
+	}
+	// The bound must never precede the kind test: an over-count mis-typed array is
+	// skipped, not a false InvalidMessage.
+	if strings.Contains(m, "case (Root, 0): if (count > 5)") {
+		t.Error("the schema bound must sit BEHIND the §7.3 kind test (generator#254)")
 	}
 }
 
@@ -273,12 +347,12 @@ messages:
 		"private const long MaxDynStringLen = 4096;",
 		// Unbounded array: LimitExceeded at the count header, then a bounded
 		// initial reservation grown on demand — never `new ulong[count]`.
-		"case (Root, 1): if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[Math.Min(count, ArrayInitCap)]; break;",
+		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[Math.Min(count, ArrayInitCap)]; break;",
 		"m.arr = EnsureCap(m.arr, ai, acap); m.arr[ai++] = (ulong)value;",
 		// Bounded array: only the #100 schema-capacity guard, and an alloc at the
 		// WIRE count -- `count: N` is a capacity, so M is the length (§3) and the
 		// guard is what still bounds the untrusted count.
-		"case (Root, 2): if (count > 100000) throw new SofabException(SofabError.InvalidMessage, \"barr: array count above schema capacity 100000\"); m.barr = new int[count]; break;",
+		"case (Root, 2): if (kind != ArrayKind.Signed) break; if (count > 100000) throw new SofabException(SofabError.InvalidMessage, \"barr: array count above schema capacity 100000\"); m.barr = new int[count]; break;",
 		// Unbounded string: `total` checked before any accumulation.
 		"if (total > MaxDynStringLen) {",
 		"case (Root, 0): throw new SofabException(SofabError.LimitExceeded, \"s: string length above configured limit 4096\");",
@@ -302,7 +376,7 @@ messages:
 		t.Error("unset limits must emit no limit plumbing")
 	}
 	for _, want := range []string{
-		"case (Root, 1): m.arr = new ulong[Math.Min(count, ArrayInitCap)]; break;",
+		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; m.arr = new ulong[Math.Min(count, ArrayInitCap)]; break;",
 		"m.arr = EnsureCap(m.arr, ai, acap); m.arr[ai++] = (ulong)value;",
 		"private static T[] EnsureCap<T>(T[] a, int i, int cap) {",
 	} {
@@ -381,9 +455,9 @@ messages:
 		// Decode takes the M elements that arrived and nothing else: the primitive
 		// arrays allocate the WIRE count (the #100 guard still bounds it by N), the
 		// List<T> ones clear and append.
-		`case (Root, 0): if (count > 5) throw new SofabException(SofabError.InvalidMessage, "fx: array count above schema capacity 5"); m.fx = new uint[count]; break;`,
-		`case (Root, 3): if (count > 4) throw new SofabException(SofabError.InvalidMessage, "ff32: array count above schema capacity 4"); m.ff32 = new float[count]; break;`,
-		`case (Root, 5): if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fb: array count above schema capacity 3"); m.fb.Clear(); break;`,
+		`case (Root, 0): if (kind != ArrayKind.Unsigned) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "fx: array count above schema capacity 5"); m.fx = new uint[count]; break;`,
+		`case (Root, 3): if (kind != ArrayKind.Fixlen) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "ff32: array count above schema capacity 4"); m.ff32 = new float[count]; break;`,
+		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fb: array count above schema capacity 3"); m.fb.Clear(); break;`,
 		"case (Root, 5): if (afill == 0) break; afill--; m.fb.Add(value != 0); break;",
 		"case (Root, 6): if (afill == 0) break; afill--; m.fe.Add((EnumColor)value); break;",
 		"case (Root, 7): if (afill == 0) break; afill--; m.fp.Add((BitfieldPerm)value); break;",
@@ -619,8 +693,9 @@ messages:
 			"\"Root_fstrs element: array index above schema capacity 3\"); " +
 			"while (m.fstrs.Count <= id) m.fstrs.Add(\"\"); m.fstrs[id] = _s; break;",
 		// NATIVE row (the id-blind collector): placed at out[id], bounded by the outer
-		// array's count, and the fill then addresses the latched row.
-		"case (Root_rows, _): if (id >= 2) throw new SofabException(SofabError.InvalidMessage, " +
+		// array's count, and the fill then addresses the latched row. The §7.3 kind
+		// test fronts both (generator#254): a mis-typed row is skipped whole.
+		"case (Root_rows, _): if (kind != ArrayKind.Unsigned) break; if (id >= 2) throw new SofabException(SofabError.InvalidMessage, " +
 			"\"Root_rows element: array index above schema capacity 2\"); " +
 			"while (m.rows.Count <= id) m.rows.Add(new List<uint>()); m.rows[id] = new List<uint>(); _ixRoot_rows = id; break;",
 		"case (Root_rows, _): if (afill == 0) break; afill--; m.rows[_ixRoot_rows].Add((uint)value); break;",

@@ -165,13 +165,18 @@ class ScalarsVisitor implements Visitor {
     }
     public void arrayBegin(int id, ArrayKind kind, int count) {
         ai = 0;
-        // An integer array delivered at an id
-        // that does not declare one is a wire-type contradiction -- arm a discard
-        // counter so unsigned()/signed() drop exactly `count` elements. Every id
-        // that really declares an integer-element array disarms it below.
+        // A native array delivered at an id that does not declare one
+        // of the SAME array kind is a wire-type contradiction -- arm a discard
+        // counter so the element callbacks drop exactly `count` elements. Every id
+        // that really declares an array of that element kind disarms it below.
         askip = 0;
         afill = 0;
-        if (kind == ArrayKind.UNSIGNED || kind == ArrayKind.SIGNED) {
+        if (kind == ArrayKind.UNSIGNED) {
+            askip = count;
+            switch (cur) {
+            }
+        }
+        else if (kind == ArrayKind.SIGNED) {
             askip = count;
             switch (cur) {
             }

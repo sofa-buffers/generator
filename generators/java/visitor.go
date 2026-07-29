@@ -343,83 +343,68 @@ func (g *gen) emitMaxlenGuard(f *jfile, fs []frame, kind ir.Kind, noun string) {
 }
 
 // emitArraySkipArm arms the §7.3 discard counter at the top of arrayBegin
-// (generator#183). Only INTEGER arrays are armed: their elements land in
-// unsigned()/signed(), the very callbacks a lone scalar shares, so an array
-// header at an id whose declared type is a scalar would otherwise be decoded
+// (generator#183). Native arrays are armed: their elements land in
+// unsigned()/signed()/fp32()/fp64(), the very callbacks a lone scalar shares, so an
+// array header at an id whose declared type is a scalar would otherwise be decoded
 // instead of skipped — the one wire-type contradiction the id dispatch cannot
 // detect on its own (MESSAGE_SPEC §7.3: skip it like an unknown id). Every
 // (scope, id) that genuinely declares a native array of the matching element
 // kind disarms the counter, so a legitimate array stores normally; everything
 // else — a scalar-declared id, an unknown id — discards exactly `count` elements,
-// after which a real scalar at the same id still decodes. Integer arrays are
-// armed under UNSIGNED/SIGNED (elements land in unsigned()/signed()) and fp
-// arrays under FIXLEN (elements land in fp32()/fp64(), generator#193). The
-// counter self-terminates on `count`, so no array-end callback is needed, and it
-// lives in the visitor, so it survives a feed chunk boundary.
+// after which a real scalar at the same id still decodes.
+//
+// One arm per wire ArrayKind, and each arm disarms ONLY at the ids whose declared
+// element type maps to that very kind (generator#254): UNSIGNED covers u*/boolean/
+// bitfield, SIGNED covers i*/enum, FIXLEN covers fp32/fp64. Treating UNSIGNED and
+// SIGNED as one case let an array-signed header at an unsigned-declared array id
+// disarm the counter, i.e. decode a header §7.3 says to skip. The counter
+// self-terminates on `count`, so no array-end callback is needed, and it lives in
+// the visitor, so it survives a feed chunk boundary.
 func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
-	f.line("        // An integer array delivered at an id")
-	f.line("        // that does not declare one is a wire-type contradiction -- arm a discard")
-	f.line("        // counter so unsigned()/signed() drop exactly `count` elements. Every id")
-	f.line("        // that really declares an integer-element array disarms it below.")
+	f.line("        // A native array delivered at an id that does not declare one")
+	f.line("        // of the SAME array kind is a wire-type contradiction -- arm a discard")
+	f.line("        // counter so the element callbacks drop exactly `count` elements. Every id")
+	f.line("        // that really declares an array of that element kind disarms it below.")
 	f.line("        askip = 0;")
 	f.line("        afill = 0;")
-	f.line("        if (kind == ArrayKind.UNSIGNED || kind == ArrayKind.SIGNED) {")
-	f.line("            askip = count;")
-	f.line("            switch (cur) {")
-	for _, fr := range fs {
-		switch fr.kind {
-		case fkNativeMat:
-			// A nested-native row: elements arrive without an id switch, so the
-			// whole frame disarms the skip and arms the fill (integer inner only).
-			if fr.innerElem != ir.KindFP32 && fr.innerElem != ir.KindFP64 {
-				f.line("            case %d: askip = 0; afill = count; break;", fr.idx)
-			}
-		case fkNormal:
-			var ids []string
-			for _, fld := range fr.fields {
-				if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) &&
-					fld.Elem != ir.KindFP32 && fld.Elem != ir.KindFP64 {
-					ids = append(ids, fmt.Sprintf("case %d:", fld.ID))
+	arm := func(lead, wireKind string, want func(ir.Kind) bool) {
+		f.line("        %s (kind == ArrayKind.%s) {", lead, wireKind)
+		f.line("            askip = count;")
+		f.line("            switch (cur) {")
+		for _, fr := range fs {
+			switch fr.kind {
+			case fkNativeMat:
+				// A nested-native row: elements arrive without an id switch, so the
+				// whole frame disarms the skip and arms the fill — but only when the
+				// row's kind on the wire is the one the inner element declares.
+				if want(fr.innerElem) {
+					f.line("            case %d: askip = 0; afill = count; break;", fr.idx)
+				}
+			case fkNormal:
+				var ids []string
+				for _, fld := range fr.fields {
+					if fld.Kind == ir.KindArray && want(fld.Elem) {
+						ids = append(ids, fmt.Sprintf("case %d:", fld.ID))
+					}
+				}
+				if len(ids) > 0 {
+					f.line("            case %d: switch (id) {", fr.idx)
+					f.line("                %s askip = 0; afill = count; break;", strings.Join(ids, " "))
+					f.line("            } break;")
 				}
 			}
-			if len(ids) > 0 {
-				f.line("            case %d: switch (id) {", fr.idx)
-				f.line("                %s askip = 0; afill = count; break;", strings.Join(ids, " "))
-				f.line("            } break;")
-			}
 		}
+		f.line("            }")
+		f.line("        }")
 	}
-	f.line("            }")
-	f.line("        }")
+	arm("if", "UNSIGNED", unsignedArrayElem)
+	arm("else if", "SIGNED", signedArrayElem)
 	// Fixlen (fp32/fp64) arrays deliver through fp32()/fp64(), the callbacks a lone
 	// fp scalar shares (generator#193), so they are armed exactly like the integer
-	// branch: arm the skip counter by default, then disarm at every id that really
-	// declares an fp array (arming its fill instead) so a legitimate array stores.
-	f.line("        else if (kind == ArrayKind.FIXLEN) {")
-	f.line("            askip = count;")
-	f.line("            switch (cur) {")
-	for _, fr := range fs {
-		switch fr.kind {
-		case fkNativeMat:
-			if fr.innerElem == ir.KindFP32 || fr.innerElem == ir.KindFP64 {
-				f.line("            case %d: askip = 0; afill = count; break;", fr.idx)
-			}
-		case fkNormal:
-			var ids []string
-			for _, fld := range fr.fields {
-				if fld.Kind == ir.KindArray && (fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64) {
-					ids = append(ids, fmt.Sprintf("case %d:", fld.ID))
-				}
-			}
-			if len(ids) > 0 {
-				f.line("            case %d: switch (id) {", fr.idx)
-				f.line("                %s askip = 0; afill = count; break;", strings.Join(ids, " "))
-				f.line("            } break;")
-			}
-		}
-	}
-	f.line("            }")
-	f.line("        }")
+	// arms. The fixlen SUBTYPE (fp32 vs fp64) is not visible in this hook — the
+	// corelib collapses both into ArrayKind.FIXLEN — so a subtype contradiction is
+	// caught downstream, where the element lands in fp32() or fp64().
+	arm("else if", "FIXLEN", fpArrayElem)
 }
 
 // emitArraySkipGuard prepends the §7.3 discard clause to unsigned()/signed()
@@ -676,12 +661,18 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			if limArr && !fr.innerHasCount {
 				guard = limitThrowGuard("count > MAX_DYN_ARRAY_COUNT", locName(fr.loc), "array count above configured limit", g.limits.arrayCount) + " "
 			}
+			// A row whose header carries a different array kind than the inner
+			// element declares is skipped whole (§7.3, generator#254): its elements
+			// are already discarded by the skip counter above, and the row itself
+			// must not be materialized either. Checked FIRST, so a bound below can
+			// only ever reject a row that survives the kind test.
+			kindGuard := arrayKindGuard(fr.innerElem)
 			// The row's element id IS its index in the outer array (§5.1), so it is
 			// PLACED there after gap-filling with empty rows -- never appended.
 			// Appending ignored the id, which an interior gap (an omitted all-default
 			// row, §2) turns into a one-off shift of every later row. The outer
 			// array's count bounds the id, which also bounds the gap fill.
-			f.line("        case %d: %s%sSbuf.placeRow(%s, id); %s = id; break;", fr.idx, guard, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc))
+			f.line("        case %d: %s%s%sSbuf.placeRow(%s, id); %s = id; break;", fr.idx, kindGuard, guard, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc))
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -689,6 +680,15 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		}
 		var arms []string
 		for _, fld := range fr.fields {
+			// §7.3 comes FIRST (generator#254): a header whose array kind is not the
+			// one this field's declared element type maps to must be skipped exactly
+			// like an unknown id -- its elements are dropped by the skip counter
+			// above, and the declared field must not be touched at all, which
+			// includes not being RESIZED from the skipped header's count. Ordering
+			// matters as much as the test: the schema bound below applies only to a
+			// field that survives this check, so an over-count MIS-TYPED array is
+			// skipped, not a false INVALID.
+			kindGuard := arrayKindGuard(fld.Elem)
 			// A wire element count above the schema `count` capacity is INVALID
 			// per MESSAGE_SPEC §3+§7 — reject up front, never clamp or keep-all
 			// (generator#100). Unchecked wrapper: Visitor callbacks cannot throw
@@ -711,9 +711,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// filled exactly like a count-less one.
 			target := fr.path + "." + javaIdent(fld.Name)
 			if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) {
-				arms = append(arms, jcase(fld.ID, guard+target+" = new "+primArrayBase(fld.Elem)+"[Math.min(count, ARRAY_INIT_CAP)]"))
+				arms = append(arms, jcase(fld.ID, kindGuard+guard+target+" = new "+primArrayBase(fld.Elem)+"[Math.min(count, ARRAY_INIT_CAP)]"))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) { // boolean List
-				arms = append(arms, jcase(fld.ID, guard+target+".clear()"))
+				arms = append(arms, jcase(fld.ID, kindGuard+guard+target+".clear()"))
 			}
 		}
 		if len(arms) > 0 {
@@ -890,6 +890,48 @@ func isUnsignedElem(k ir.Kind) bool {
 }
 func isSignedElem(k ir.Kind) bool {
 	return k == ir.KindI8 || k == ir.KindI16 || k == ir.KindI32 || k == ir.KindI64
+}
+
+// unsignedArrayElem / signedArrayElem / fpArrayElem partition the native array
+// element kinds by the wire ArrayKind an array of them maps to (MESSAGE_SPEC
+// §1/§3): unsigned-array for u*/boolean/bitfield, signed-array for i*/enum,
+// fixlen-array for fp32/fp64. A header carrying any OTHER kind at such a field is
+// a wire-type contradiction and must be skipped whole (§7.3, generator#254) —
+// never stored, and never sized into the declared field.
+func unsignedArrayElem(k ir.Kind) bool {
+	return isUnsignedElem(k) || k == ir.KindBool || k == ir.KindBitfield
+}
+func signedArrayElem(k ir.Kind) bool {
+	return isSignedElem(k) || k == ir.KindEnum
+}
+func fpArrayElem(k ir.Kind) bool {
+	return k == ir.KindFP32 || k == ir.KindFP64
+}
+
+// arrayWireKind is the ArrayKind constant an array of `k` is encoded with — the
+// only kind whose header may decode into that field.
+func arrayWireKind(k ir.Kind) string {
+	switch {
+	case unsignedArrayElem(k):
+		return "UNSIGNED"
+	case signedArrayElem(k):
+		return "SIGNED"
+	case fpArrayElem(k):
+		return "FIXLEN"
+	}
+	return ""
+}
+
+// arrayKindGuard is the leading clause of an arrayBegin arm: leave the arm
+// untouched unless the header's array kind is the one this element type maps to
+// (§7.3). Emitted BEFORE the schema-bound guard so a mis-typed header is skipped
+// rather than rejected (generator#254).
+func arrayKindGuard(k ir.Kind) string {
+	wk := arrayWireKind(k)
+	if wk == "" {
+		return ""
+	}
+	return "if (kind != ArrayKind." + wk + ") break; "
 }
 
 // nativeArrayElem reports whether an array element is carried by the native array

@@ -139,6 +139,43 @@ OUT=$($H decode myfirstmessage < "$WORK/control.bin") \
 echo "$OUT" | grep -q '"someuintarray":\[1,2,3,4\]' || { echo "FAIL: declared array must still decode to [1,2,3,4]; got: $OUT"; exit 1; }
 echo "==> array-at-scalar skip OK"
 
+# MIS-TYPED ARRAY KIND at an ARRAY-declared id (MESSAGE_SPEC S7.3, generator#254):
+# the residual case of the rule above. someuintarray (id 15) declares u32[4], which
+# maps to the ARRAY_UNSIGNED wire type; a header carrying ARRAY_SIGNED at that id is
+# just as contradictory as an array at a scalar id and MUST be skipped whole --
+# which includes NOT RESIZING the declared field from the skipped header's count
+# ("MUST NOT decode its payload into the declared field"). What used to leak here is
+# the LENGTH, not the element: the message re-encoded as a ONE-element array holding
+# 0, so the assertion is that someuintarray is still its full 4-element default.
+# Wire: 7c = id 15 with wire type ARRAY_SIGNED (4), 01 = count 1, 06 = zig-zag 3.
+# Mirror: 83 01 = id 16 (declared i32[5]) with ARRAY_UNSIGNED (3), count 1, 05.
+# Over-count mis-typed: 7c 05 ... = 5 elements at a count:4 field. The schema bound
+# applies only to a field that SURVIVES S7.3, so this is skipped, NOT a false
+# INVALID -- contrast overcount.bin above, which is correctly typed and IS INVALID.
+# Control: 7b 01 05 is id 15 with the correct ARRAY_UNSIGNED wire type -> [5].
+echo "==> mis-typed array kind at an array id must skip, not resize (S7.3, generator#254)"
+printf '\174\001\006' > "$WORK/mistyped_array.bin"
+printf '\203\001\001\005' > "$WORK/mistyped_array_mirror.bin"
+printf '\174\005\002\004\006\010\012' > "$WORK/mistyped_array_overcount.bin"
+printf '\173\001\005' > "$WORK/mistyped_array_control.bin"
+OUT=$($H decode myfirstmessage < "$WORK/mistyped_array.bin") \
+    || { echo "FAIL: mis-typed array kind must skip, not fail the decode"; exit 1; }
+echo "$OUT" | grep -q '"someuintarray":\[0,1,1000,4294967295\]' \
+    || { echo "FAIL: a skipped array must not resize someuintarray (default [0,1,1000,4294967295]); got: $OUT"; exit 1; }
+OUT=$($H decode myfirstmessage < "$WORK/mistyped_array_mirror.bin") \
+    || { echo "FAIL: mis-typed array kind (unsigned header at a signed array) must skip"; exit 1; }
+echo "$OUT" | grep -q '"someintarray":\[10,20,300,4000,50000\]' \
+    || { echo "FAIL: a skipped array must not resize someintarray (default [10,20,300,4000,50000]); got: $OUT"; exit 1; }
+OUT=$($H decode myfirstmessage < "$WORK/mistyped_array_overcount.bin") \
+    || { echo "FAIL: an over-count MIS-TYPED array must be skipped, not INVALID"; exit 1; }
+echo "$OUT" | grep -q '"someuintarray":\[0,1,1000,4294967295\]' \
+    || { echo "FAIL: over-count mis-typed array must leave someuintarray at its default; got: $OUT"; exit 1; }
+OUT=$($H decode myfirstmessage < "$WORK/mistyped_array_control.bin") \
+    || { echo "FAIL: control (correct ARRAY_UNSIGNED wire type) must decode"; exit 1; }
+echo "$OUT" | grep -q '"someuintarray":\[5\]' \
+    || { echo "FAIL: control must decode someuintarray to [5]; got: $OUT"; exit 1; }
+echo "==> mis-typed array kind skip OK"
+
 # fp ARRAY delivered to a SCALAR-declared fp id (MESSAGE_SPEC S7.3, generator#193):
 # the fp analogue of the integer case above. corelib-java streams a fixlen (fp)
 # array element-by-element through the very fp32()/fp64() callbacks a lone scalar
