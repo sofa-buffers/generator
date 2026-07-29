@@ -1207,6 +1207,14 @@ start; **rust, rust-no-std, java and csharp were fixed to match** (Crucible F-00
 codegen defect G-0024). `blob` needs no such guard — it carries no encoding, so
 there is nothing to validate on the way past.
 
+The degenerate case is part of the rule: a message that declares **no string at
+all** still gets the callback (the visitor interface declares it, and the corelib
+still routes string fields at unknown ids to it), and every string reaching it is
+skipped by definition — so its **body is empty**, not guarded. Decoding one only
+to drop it is the same §6.4 violation with every string skipped instead of some.
+Rust gets this for free (the callback is emitted only when the schema uses
+strings); java and csharp emit the empty body explicitly.
+
 **go and dart still validate on skip**, and cannot be fixed here alone: both
 corelibs hand the visitor a *finished* language string, so the check is inside the
 corelib and the generator has no seam to place a guard in front of. Moving them

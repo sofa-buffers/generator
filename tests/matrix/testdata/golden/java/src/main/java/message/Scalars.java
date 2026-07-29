@@ -136,18 +136,8 @@ class ScalarsVisitor implements Visitor {
         throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "string: invalid UTF-8"));
     }
     public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
-        String _s;
-        if (offset == 0 && chunkLength >= total) {
-            _s = _utf8(data, chunkOffset, total);
-        } else {
-            if (acc == null) acc = new java.io.ByteArrayOutputStream();
-            acc.write(data, chunkOffset, chunkLength);
-            if (acc.size() < total) return;
-            _s = _utf8(acc.toByteArray(), 0, total);
-            acc.reset();
-        }
-        switch (cur) {
-        }
+        // No field of this message is a string, so every string payload the
+        // decoder delivers is skipped whole -- its bytes are never inspected.
     }
     public void blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
         byte[] _b;

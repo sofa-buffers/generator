@@ -52,6 +52,9 @@ requires, and a skipped payload can never leave bytes in `acc` for a later decla
 field to inherit. The `maxlen` and `max_dyn_string_len` pre-checks sit behind the
 guard: they are destination-scoped themselves, so §5.2's INVALID-over-INCOMPLETE
 ordering is unchanged. `Blob(...)` has no such guard — bytes carry no encoding.
+A schema that declares no string at all gets an **empty** `String(...)` body —
+every string reaching it is skipped by definition, and decoding one only to drop
+it is the same violation.
 
 ## §7.3: a mis-typed array header (issues #183, #193, #254)
 

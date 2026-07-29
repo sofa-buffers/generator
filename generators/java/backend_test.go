@@ -1026,6 +1026,33 @@ messages:
 	}
 }
 
+// A message that declares NO string still gets a string() callback (Visitor
+// declares it, and the corelib still routes string fields at unknown ids to it),
+// but every string reaching it is skipped by definition — so the body must be
+// empty. Decoding one only to drop it is the same §6.4 violation, just with
+// every string skipped instead of some.
+func TestJavaStringFreeSchemaNeverDecodesAString(t *testing.T) {
+	files := genJavaFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+      b: { id: 1, type: blob, maxlen: 8 }
+`, map[string]any{})
+	src := files["src/main/java/message/M.java"]
+	fn := javaMethod(t, src, "    public void string(int id,")
+	for _, forbidden := range []string{"_utf8(", "acc", "switch (cur)", "String _s;"} {
+		if strings.Contains(fn, forbidden) {
+			t.Errorf("a string-free schema must not %q in string():\n%s", forbidden, fn)
+		}
+	}
+	// The callback is still declared -- Visitor requires it.
+	if !strings.Contains(src, "public void string(int id,") {
+		t.Errorf("string() must still be declared:\n%s", src)
+	}
+}
+
 // javaMethod returns the generated method body starting at `head` up to the next
 // top-level `    public ` line, so an ordering assertion inside one callback
 // cannot accidentally match text from a neighbouring one.

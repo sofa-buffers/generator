@@ -793,6 +793,32 @@ messages:
 	}
 }
 
+// A message that declares NO string still gets a String callback (the Visitor
+// interface declares it, and the corelib still routes string fields at unknown
+// ids to it), but every string reaching it is skipped by definition — so the
+// body must be empty. Decoding one only to drop it is the same §6.4 violation,
+// just with every string skipped instead of some.
+func TestCsStringFreeSchemaNeverDecodesAString(t *testing.T) {
+	m := buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+      b: { id: 1, type: blob, maxlen: 8 }
+`), "nostr.yaml", map[string]any{})
+	fn := csMethod(t, m, "    public void String(int id,")
+	for _, forbidden := range []string{"_Utf8(", "acc", "switch ((cur, id))", "string _s;"} {
+		if strings.Contains(fn, forbidden) {
+			t.Errorf("a string-free schema must not %q in String():\n%s", forbidden, fn)
+		}
+	}
+	// The callback is still declared -- the Visitor interface requires it.
+	if !strings.Contains(m, "public void String(int id,") {
+		t.Errorf("String() must still be declared:\n%s", m)
+	}
+}
+
 // csMethod returns the generated method body starting at `head` up to the next
 // top-level `    public ` line, so an ordering assertion inside one callback
 // cannot accidentally match text from a neighbouring one.

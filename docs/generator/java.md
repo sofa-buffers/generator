@@ -99,7 +99,9 @@ CORELIB_PLAN §6.4 requires, and a skipped payload can never leave bytes in `acc
 a later declared field to inherit. The `maxlen` and `max_dyn_string_len` pre-checks
 sit behind the guard: they are destination-scoped themselves, so §5.2's
 INVALID-over-INCOMPLETE ordering is unchanged. `blob(...)` has no such guard — bytes
-carry no encoding.
+carry no encoding. A schema that declares no string at all gets an **empty**
+`string(...)` body rather than a guarded one — every string reaching it is skipped
+by definition, and decoding one only to drop it is the same violation.
 
 ## §7.3: a mis-typed array header (issues #183, #193, #254)
 

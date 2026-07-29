@@ -216,6 +216,89 @@ func (g *gen) emitLenGuard(f *cfile, fs []frame, kind ir.Kind, constName, what s
 	f.line("        }")
 }
 
+// stringDestLabels collects the switch labels for every (loc, id) that can
+// materialize a string: the string-declaring fields plus the wrapper-sequence
+// rows whose element kind is string. An empty result means the message never
+// materializes a string at all.
+func (g *gen) stringDestLabels(fs []frame) []string {
+	var labels []string
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == ir.KindString {
+				labels = append(labels, fmt.Sprintf("case (%s, _):", fr.loc))
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindString {
+				labels = append(labels, fmt.Sprintf("case (%s, %d):", fr.loc, fld.ID))
+			}
+		}
+	}
+	return labels
+}
+
+// emitStringCb writes the String visitor callback. Single-shot: when the whole
+// payload arrives in one chunk, decode straight from the contiguous input slice;
+// the per-byte List<byte> accumulator is only the fallback for a genuinely split
+// payload.
+//
+// A message that declares no string at all still gets the callback — the Visitor
+// interface declares it, and the corelib still delivers string fields to a
+// message that has none — but its body is EMPTY. Every string reaching it is by
+// definition skipped, and an empty body is what skipping means: decoding one
+// only to drop it would validate a payload nobody reads, which is what
+// CORELIB_PLAN §6.4 forbids (generator#257).
+func (g *gen) emitStringCb(f *cfile, fs []frame, limStr bool) {
+	f.line("    public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
+	defer f.line("    }")
+
+	labels := g.stringDestLabels(fs)
+	if len(labels) == 0 {
+		f.line("        // No field of this message is a string, so every string payload the")
+		f.line("        // decoder delivers is skipped whole -- its bytes are never inspected.")
+		return
+	}
+	g.emitDestGuard(f, labels)
+	// MESSAGE_SPEC §7.1: a bounded string whose wire byte length exceeds its
+	// schema maxlen is malformed input, rejected as INVALID at the `total` header
+	// before any bytes accumulate (never truncated).
+	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
+	if limStr {
+		// generator#102: reject an over-cap unbounded string at its `total`
+		// header, before the fast path decodes or the accumulator grows.
+		g.emitLenGuard(f, fs, ir.KindString, "MaxDynStringLen", "string length", g.limits.stringLen)
+	}
+	f.line("        string _s;")
+	f.line("        if (offset == 0 && chunkLength >= total) {")
+	f.line("            _s = _Utf8(data, chunkOffset, total);")
+	f.line("        } else {")
+	f.line("            acc ??= new List<byte>();")
+	f.line("            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
+	f.line("            if (acc.Count < total) return;")
+	f.line("            _s = _Utf8(acc.ToArray(), 0, total);")
+	f.line("            acc.Clear();")
+	f.line("        }")
+	f.line("        switch ((cur, id)) {")
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == ir.KindString {
+				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
+				// element is omitted on the wire, so place each value at its id and
+				// grow the list, filling any gap with the element default ("").
+				f.line("            case (%s, _): %swhile (%s.Count <= id) %s.Add(\"\"); %s[id] = _s; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, fr.path)
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindString {
+				f.line("            case (%s, %d): %s.%s = _s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
+			}
+		}
+	}
+	f.line("        }")
+}
+
 // emitDestGuard writes the skip gate at the very top of the String callback
 // (CORELIB_PLAN §6.4, generator#257): "skipped fields are never validated".
 // Skipping is a length jump over bytes that are not inspected (§5.2), and UTF-8
@@ -234,24 +317,7 @@ func (g *gen) emitLenGuard(f *cfile, fs []frame, kind ir.Kind, constName, what s
 // and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is
 // preserved. The case labels mirror the materializing switch below one for one,
 // so a loc is never both a `(loc, _)` row and a `(loc, id)` field arm.
-func (g *gen) emitDestGuard(f *cfile, fs []frame, kind ir.Kind) {
-	var labels []string
-	for _, fr := range fs {
-		if fr.isArr {
-			if fr.elem == kind {
-				labels = append(labels, fmt.Sprintf("case (%s, _):", fr.loc))
-			}
-			continue
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == kind {
-				labels = append(labels, fmt.Sprintf("case (%s, %d):", fr.loc, fld.ID))
-			}
-		}
-	}
-	if len(labels) == 0 {
-		return
-	}
+func (g *gen) emitDestGuard(f *cfile, labels []string) {
 	f.line("        // A payload this scope does not declare is skipped: its bytes are jumped")
 	f.line("        // over, never inspected. Resolve the destination first and leave before a")
 	f.line("        // byte is buffered, decoded or checked.")
@@ -542,49 +608,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("        catch (System.Text.DecoderFallbackException) { throw new SofabException(SofabError.InvalidMessage, \"string: invalid UTF-8\"); }")
 	f.line("    }")
 
-	// String. Single-shot: when the whole payload arrives in one chunk, decode
-	// straight from the contiguous input slice; the per-byte List<byte> accumulator
-	// is only the fallback for a genuinely split payload.
-	f.line("    public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
-	g.emitDestGuard(f, fs, ir.KindString)
-	// MESSAGE_SPEC §7.1: a bounded string whose wire byte length exceeds its
-	// schema maxlen is malformed input, rejected as INVALID at the `total` header
-	// before any bytes accumulate (never truncated).
-	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
-	if limStr {
-		// generator#102: reject an over-cap unbounded string at its `total`
-		// header, before the fast path decodes or the accumulator grows.
-		g.emitLenGuard(f, fs, ir.KindString, "MaxDynStringLen", "string length", g.limits.stringLen)
-	}
-	f.line("        string _s;")
-	f.line("        if (offset == 0 && chunkLength >= total) {")
-	f.line("            _s = _Utf8(data, chunkOffset, total);")
-	f.line("        } else {")
-	f.line("            acc ??= new List<byte>();")
-	f.line("            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
-	f.line("            if (acc.Count < total) return;")
-	f.line("            _s = _Utf8(acc.ToArray(), 0, total);")
-	f.line("            acc.Clear();")
-	f.line("        }")
-	f.line("        switch ((cur, id)) {")
-	for _, fr := range fs {
-		if fr.isArr {
-			if fr.elem == ir.KindString {
-				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
-				// element is omitted on the wire, so place each value at its id and
-				// grow the list, filling any gap with the element default ("").
-				f.line("            case (%s, _): %swhile (%s.Count <= id) %s.Add(\"\"); %s[id] = _s; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, fr.path)
-			}
-			continue
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindString {
-				f.line("            case (%s, %d): %s.%s = _s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
-			}
-		}
-	}
-	f.line("        }")
-	f.line("    }")
+	g.emitStringCb(f, fs, limStr)
 
 	// Blob. Single-shot on the whole-in-one-chunk fast path (see String).
 	f.line("    public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
