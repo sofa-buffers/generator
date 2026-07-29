@@ -273,6 +273,13 @@ func (g *gen) emitArraySkipGuard(f *cfile) {
 // stores normally; everything else (a scalar-declared id, an unknown id, a
 // wrapper-sequence id) discards exactly `count` elements, after which a real
 // scalar at the same id still decodes. Mirrors emitArrayFillArm.
+//
+// One arm per wire ArrayKind, and each arm disarms ONLY where the declared
+// element type maps to that very kind (generator#254): Unsigned covers
+// u*/boolean/bitfield, Signed covers i*/enum, Fixlen covers fp32/fp64. Folding
+// Unsigned and Signed into one arm let an array-signed header at an
+// unsigned-declared array id disarm the counter, i.e. decode a header S7.3 says
+// to skip.
 func (g *gen) emitArraySkipArm(f *cfile, fs []frame) {
 	arm := func(pat string, want func(ir.Kind) bool) {
 		f.line("            %s => (cur, id) switch {", pat)
@@ -296,8 +303,12 @@ func (g *gen) emitArraySkipArm(f *cfile, fs []frame) {
 	f.line("        // matching element kind is a wire-type contradiction: discard its")
 	f.line("        // `count` elements, exactly as an unknown id would be skipped.")
 	f.line("        askip = kind switch {")
-	arm("ArrayKind.Unsigned or ArrayKind.Signed", func(k ir.Kind) bool { return intArrayElem(k) })
-	arm("ArrayKind.Fixlen", func(k ir.Kind) bool { return k == ir.KindFP32 || k == ir.KindFP64 })
+	arm("ArrayKind.Unsigned", unsignedArrayElem)
+	arm("ArrayKind.Signed", signedArrayElem)
+	// The fixlen SUBTYPE (fp32 vs fp64) is not visible in this hook — the corelib
+	// collapses both into ArrayKind.Fixlen — so a subtype contradiction is caught
+	// downstream, where the element lands in Fp32() or Fp64().
+	arm("ArrayKind.Fixlen", fpArrayElem)
 	f.line("            _ => 0,")
 	f.line("        };")
 }
@@ -310,39 +321,31 @@ func (g *gen) emitArraySkipArm(f *cfile, fs []frame) {
 // its fill arm and is skipped. Every native element kind is covered because both
 // the integer fills (Unsigned/Signed) and the fp fills (Fp32/Fp64) are gated.
 func (g *gen) emitArrayFillArm(f *cfile, fs []frame) {
+	arm := func(pat string, want func(ir.Kind) bool) {
+		f.line("            %s => (cur, id) switch {", pat)
+		for _, fr := range fs {
+			if fr.isArr {
+				if fr.elem == ir.KindArray && want(fr.items.Elem) {
+					f.line("                (%s, _) => count,", fr.loc)
+				}
+				continue
+			}
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindArray && want(fld.Elem) {
+					f.line("                (%s, %d) => count,", fr.loc, fld.ID)
+				}
+			}
+		}
+		f.line("                _ => 0,")
+		f.line("            },")
+	}
 	f.line("        afill = kind switch {")
-	f.line("            ArrayKind.Unsigned or ArrayKind.Signed => (cur, id) switch {")
-	for _, fr := range fs {
-		if fr.isArr {
-			if fr.elem == ir.KindArray && intArrayElem(fr.items.Elem) {
-				f.line("                (%s, _) => count,", fr.loc)
-			}
-			continue
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindArray && intArrayElem(fld.Elem) {
-				f.line("                (%s, %d) => count,", fr.loc, fld.ID)
-			}
-		}
-	}
-	f.line("                _ => 0,")
-	f.line("            },")
-	f.line("            ArrayKind.Fixlen => (cur, id) switch {")
-	for _, fr := range fs {
-		if fr.isArr {
-			if fr.elem == ir.KindArray && (fr.items.Elem == ir.KindFP32 || fr.items.Elem == ir.KindFP64) {
-				f.line("                (%s, _) => count,", fr.loc)
-			}
-			continue
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindArray && (fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64) {
-				f.line("                (%s, %d) => count,", fr.loc, fld.ID)
-			}
-		}
-	}
-	f.line("                _ => 0,")
-	f.line("            },")
+	// One arm per wire ArrayKind, exactly complementary to emitArraySkipArm: a
+	// header whose kind is not the one the declared element maps to arms the skip
+	// counter, never a fill (generator#254).
+	arm("ArrayKind.Unsigned", unsignedArrayElem)
+	arm("ArrayKind.Signed", signedArrayElem)
+	arm("ArrayKind.Fixlen", fpArrayElem)
 	f.line("            _ => 0,")
 	f.line("        };")
 }
@@ -597,11 +600,25 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 					guard = fmt.Sprintf("if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"%s element: array count above configured limit %d\"); ",
 						fr.loc, g.limits.arrayCount)
 				}
-				f.line("            case (%s, _): %s%sbreak;", fr.loc, guard, g.placeRow(fr))
+				// A row whose header carries a different array kind than the inner
+				// element declares is skipped whole (S7.3, generator#254): its elements
+				// are already discarded by the skip counter above, and the row itself
+				// must not be materialized either. Checked FIRST, so any bound below
+				// only ever rejects a row that survives the kind test.
+				f.line("            case (%s, _): %s%s%sbreak;", fr.loc, arrayKindGuard(fr.items.Elem), guard, g.placeRow(fr))
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
+			// S7.3 comes FIRST (generator#254): a header whose array kind is not the
+			// one this field's declared element type maps to must be skipped exactly
+			// like an unknown id -- its elements are dropped by the skip counter
+			// above, and the declared field must not be touched at all, which
+			// includes not being RESIZED (or cleared) from the skipped header's
+			// count. Ordering matters as much as the test: the schema bound below
+			// applies only to a field that survives this check, so an over-count
+			// MIS-TYPED array is skipped, not a false InvalidMessage.
+			kindGuard := arrayKindGuard(fld.Elem)
 			// A wire element count above the schema `count` capacity is INVALID
 			// per MESSAGE_SPEC §3+§7 — reject up front, never clamp or keep-all
 			// (generator#100). The guard also bounds the eager `new T[count]`
@@ -627,11 +644,11 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				if !fld.HasCount {
 					alloc = "new %s[Math.Min(count, ArrayInitCap)]"
 				}
-				f.line("            case (%s, %d): %s%s.%s = "+alloc+"; break;", fr.loc, fld.ID, guard, fr.path, csIdent(fld.Name), g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
+				f.line("            case (%s, %d): %s%s%s.%s = "+alloc+"; break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name), g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				// List<T> (boolean/enum/bitfield): cleared and appended to, with or
 				// without a count -- the M elements the wire carried are the whole value.
-				f.line("            case (%s, %d): %s%s.%s.Clear(); break;", fr.loc, fld.ID, guard, fr.path, csIdent(fld.Name))
+				f.line("            case (%s, %d): %s%s%s.%s.Clear(); break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name))
 			}
 		}
 	}

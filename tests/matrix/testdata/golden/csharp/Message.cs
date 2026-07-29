@@ -143,7 +143,10 @@ internal sealed class ScalarsVisitor : IVisitor {
         // matching element kind is a wire-type contradiction: discard its
         // `count` elements, exactly as an unknown id would be skipped.
         askip = kind switch {
-            ArrayKind.Unsigned or ArrayKind.Signed => (cur, id) switch {
+            ArrayKind.Unsigned => (cur, id) switch {
+                _ => count,
+            },
+            ArrayKind.Signed => (cur, id) switch {
                 _ => count,
             },
             ArrayKind.Fixlen => (cur, id) switch {
@@ -152,7 +155,10 @@ internal sealed class ScalarsVisitor : IVisitor {
             _ => 0,
         };
         afill = kind switch {
-            ArrayKind.Unsigned or ArrayKind.Signed => (cur, id) switch {
+            ArrayKind.Unsigned => (cur, id) switch {
+                _ => 0,
+            },
+            ArrayKind.Signed => (cur, id) switch {
                 _ => 0,
             },
             ArrayKind.Fixlen => (cur, id) switch {

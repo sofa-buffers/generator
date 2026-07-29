@@ -87,23 +87,45 @@ a REPORTing `CharsetDecoder` (`onMalformedInput`/`onUnmappableCharacter` =
 same channel as the over-count guards. The check runs once the full `total` bytes
 are present. Encode-side strictness is corelib-side (`OStream.writeString`).
 
-## §7.3: an integer array at a scalar id (issue #183)
+## §7.3: a mis-typed array header (issues #183, #193, #254)
 
 MESSAGE_SPEC **§7.3** skips a field whose header wire type contradicts its
 declared type. This backend's corelib settles almost every case *structurally* —
 a mismatched header lands in a differently-typed visitor callback with no case for
-that id — but not one: it streams an integer array's elements through the **same**
-`unsigned()/signed()` callbacks a lone scalar uses, so an integer array header at a
-scalar-declared id of the same signedness would be stored element by element.
+that id — but not the array kinds: it streams an array's elements through the
+**same** `unsigned()/signed()/fp32()/fp64()` callbacks a lone scalar uses, so an
+array header at a scalar-declared id of the same shape would be stored element by
+element.
 
 The generated visitor therefore carries a skip counter. `arrayBegin` arms
-`askip = count` when the announced kind is the unsigned or signed integer kind
-and the `(scope, id)` pair is **not** a declared integer-element native array;
-the two scalar callbacks then discard while armed. It self-terminates on the
-announced count (no array-end callback needed), survives a chunk boundary (the
-counter lives in the visitor), leaves legitimate arrays untouched, and still
-decodes a real scalar arriving at that id after the array. The fp arrays are never
-armed — their elements go to the float callbacks and cannot reach a scalar arm.
+`askip = count`, then disarms (and arms the mirror fill counter `afill`) only at a
+`(scope, id)` pair that really declares a native array **of the announced kind**;
+the shared callbacks discard while armed. It self-terminates on the announced count
+(no array-end callback needed), survives a chunk boundary (the counter lives in the
+visitor), leaves legitimate arrays untouched, and still decodes a real scalar
+arriving at that id after the array. There is one arm per wire array kind, and the
+element types partition across them exactly as the encoder maps them (#254):
+
+| declared element | wire array kind | elements arrive in |
+|---|---|---|
+| `u8`…`u64`, `boolean`, `bitfield` | `ArrayKind.UNSIGNED` | `unsigned()` |
+| `i8`…`i64`, `enum`               | `ArrayKind.SIGNED`   | `signed()` |
+| `fp32`, `fp64`                    | `ArrayKind.FIXLEN`   | `fp32()` / `fp64()` |
+
+Arming per kind is only half of the rule. §7.3 also forbids decoding the payload
+**into the declared field**, and *sizing* the destination is decoding into it: an
+`ARRAY_SIGNED` header at a `u8[]`-declared id used to leave that field holding a
+one-element array the wire never carried — the leak was the **length**, not the
+element. So every allocation arm in `arrayBegin` (the primitive `new T[…]`, the
+`List` `clear()`, and a native matrix row's `placeRow`) is fronted by
+`if (kind != ArrayKind.X) break;`, emitted **before** the schema-`count` bound.
+The order is normative: the bound applies only to a field that survives §7.3, so an
+over-count *mis-typed* array is skipped rather than rejected as a false
+`INVALID_MSG`.
+
+The fixlen **subtype** (fp32 vs fp64) is not visible in `arrayBegin` —
+`ArrayKind.FIXLEN` collapses both — so a subtype contradiction is caught downstream,
+where the element lands in `fp32()` or `fp64()` and finds no fill arm.
 
 ## §2: sequence framing — which closer `marshal` emits
 

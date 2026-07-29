@@ -525,13 +525,39 @@ func signedArrayElem(k ir.Kind) bool {
 		k == ir.KindEnum
 }
 
-// intArrayElem reports whether an array element is delivered through the
-// integer scalar callbacks (Unsigned/Signed) — the callbacks a lone scalar
-// field shares, which is what makes the MESSAGE_SPEC §7.3 array-vs-scalar skip
-// necessary (generator#183). fp32/fp64 elements deliver through Fp32/Fp64 and
-// so can never land in a scalar integer arm.
-func intArrayElem(k ir.Kind) bool {
-	return unsignedArrayElem(k) || signedArrayElem(k)
+// fpArrayElem reports whether an array element is delivered through the fp
+// callbacks (Fp32/Fp64) — the fixlen array wire type.
+func fpArrayElem(k ir.Kind) bool {
+	return k == ir.KindFP32 || k == ir.KindFP64
+}
+
+// csArrayWireKind is the ArrayKind an array of `k` is encoded with (MESSAGE_SPEC
+// §1/§3) — the only header kind that may decode into such a field.
+func csArrayWireKind(k ir.Kind) string {
+	switch {
+	case unsignedArrayElem(k):
+		return "Unsigned"
+	case signedArrayElem(k):
+		return "Signed"
+	case fpArrayElem(k):
+		return "Fixlen"
+	}
+	return ""
+}
+
+// arrayKindGuard is the leading clause of an ArrayBegin arm: leave the arm
+// untouched unless the header's array kind is the one this element type maps to.
+// A mis-typed header must be skipped exactly like an unknown id (S7.3), which
+// includes not RESIZING the declared field from its count. Emitted BEFORE the
+// schema-bound guard, so the bound applies only to a field that survives the kind
+// test — an over-count mis-typed array is skipped, not a false InvalidMessage
+// (generator#254).
+func arrayKindGuard(k ir.Kind) string {
+	wk := csArrayWireKind(k)
+	if wk == "" {
+		return ""
+	}
+	return "if (kind != ArrayKind." + wk + ") break; "
 }
 
 // nativeArrayElem reports whether an array element encodes as a native array
