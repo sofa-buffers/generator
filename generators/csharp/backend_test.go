@@ -733,3 +733,104 @@ messages:
 		}
 	}
 }
+
+// TestCsSkippedStringIsNotValidated: a `string` payload the visitor will not
+// materialize must be skipped whole — its bytes jumped over, never inspected
+// (CORELIB_PLAN §6.4, generator#257 / Crucible F-0038). corelib-cs hands EVERY
+// fixlen-string field to the generated String() callback, unknown ids and §7.3
+// wire-type contradictions included, so the callback itself is what decides
+// whether a payload is read. It used to call _Utf8() first and switch on
+// (cur, id) second, so a lone continuation byte at an id the scope does not
+// declare threw InvalidMessage out of an otherwise valid message.
+//
+// The fix is order: resolve the destination first and return when nothing
+// matches, so no byte is decoded or appended to the shared `acc`.
+func TestCsSkippedStringIsNotValidated(t *testing.T) {
+	m := buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      s:  { id: 0, type: string, maxlen: 16 }
+      n:
+        id: 1
+        type: struct
+        fields:
+          t: { id: 2, type: string, maxlen: 8 }
+      sa: { id: 3, type: array, items: { type: string, count: 4, maxlen: 8 } }
+`), "skip.yaml", map[string]any{})
+	fn := csMethod(t, m, "    public void String(int id,")
+
+	guardEnd := strings.Index(fn, "default: return;")
+	if guardEnd < 0 {
+		t.Fatalf("String() missing the §6.4 destination guard:\n%s", fn)
+	}
+	guard := fn[:guardEnd]
+	for _, want := range []string{
+		"case (Root, 0):",    // the scalar string
+		"case (Root_n, 2):",  // the nested struct's string
+		"case (Root_sa, _):", // every id of the string-array row
+	} {
+		if !strings.Contains(guard, want) {
+			t.Errorf("String() missing destination arm %q:\n%s", want, fn)
+		}
+	}
+	// The guard precedes the UTF-8 decode and the accumulator alike, so a skipped
+	// payload is neither validated nor able to leave bytes behind for a later
+	// declared field to inherit.
+	for _, after := range []string{"_Utf8(", "acc"} {
+		if i := strings.Index(fn, after); i < 0 || guardEnd > i {
+			t.Errorf("String(): the destination guard must precede %q:\n%s", after, fn)
+		}
+	}
+	// The maxlen reject stays destination-scoped behind it.
+	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
+		t.Errorf("String(): the maxlen reject must survive behind the guard:\n%s", fn)
+	}
+	// A blob carries no encoding, so Blob() keeps the plain shape.
+	if strings.Contains(csMethod(t, m, "    public void Blob(int id,"), "default: return;") {
+		t.Errorf("Blob() must not carry a destination guard:\n%s", m)
+	}
+}
+
+// A message that declares NO string still gets a String callback (the Visitor
+// interface declares it, and the corelib still routes string fields at unknown
+// ids to it), but every string reaching it is skipped by definition — so the
+// body must be empty. Decoding one only to drop it is the same §6.4 violation,
+// just with every string skipped instead of some.
+func TestCsStringFreeSchemaNeverDecodesAString(t *testing.T) {
+	m := buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+      b: { id: 1, type: blob, maxlen: 8 }
+`), "nostr.yaml", map[string]any{})
+	fn := csMethod(t, m, "    public void String(int id,")
+	for _, forbidden := range []string{"_Utf8(", "acc", "switch ((cur, id))", "string _s;"} {
+		if strings.Contains(fn, forbidden) {
+			t.Errorf("a string-free schema must not %q in String():\n%s", forbidden, fn)
+		}
+	}
+	// The callback is still declared -- the Visitor interface requires it.
+	if !strings.Contains(m, "public void String(int id,") {
+		t.Errorf("String() must still be declared:\n%s", m)
+	}
+}
+
+// csMethod returns the generated method body starting at `head` up to the next
+// top-level `    public ` line, so an ordering assertion inside one callback
+// cannot accidentally match text from a neighbouring one.
+func csMethod(t *testing.T, src, head string) string {
+	t.Helper()
+	i := strings.Index(src, head)
+	if i < 0 {
+		t.Fatalf("no %q in:\n%s", head, src)
+	}
+	rest := src[i+len(head):]
+	if j := strings.Index(rest, "\n    public "); j >= 0 {
+		return src[i : i+len(head)+j]
+	}
+	return src[i:]
+}

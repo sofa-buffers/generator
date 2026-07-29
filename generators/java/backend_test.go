@@ -963,3 +963,108 @@ messages:
 		}
 	}
 }
+
+// TestJavaSkippedStringIsNotValidated: a `string` payload the visitor will not
+// materialize must be skipped whole — its bytes jumped over, never inspected
+// (CORELIB_PLAN §6.4, generator#257 / Crucible F-0038). corelib-java hands EVERY
+// fixlen-string field to the generated string() callback, unknown ids and §7.3
+// wire-type contradictions included, so the callback itself is what decides
+// whether a payload is read. It used to call _utf8() first and dispatch on
+// (cur, id) second, so a lone continuation byte at an id the scope does not
+// declare threw INVALID_MSG out of an otherwise valid message.
+//
+// The fix is order: resolve the destination first and return when nothing
+// matches, so no byte is decoded or written into the shared `acc`.
+func TestJavaSkippedStringIsNotValidated(t *testing.T) {
+	files := genJavaFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      s:  { id: 0, type: string, maxlen: 16 }
+      n:
+        id: 1
+        type: struct
+        fields:
+          t: { id: 2, type: string, maxlen: 8 }
+      sa: { id: 3, type: array, items: { type: string, count: 4, maxlen: 8 } }
+`, map[string]any{})
+	fn := javaMethod(t, files["src/main/java/message/M.java"], "    public void string(int id,")
+
+	// The outer `default: return;` closing the (cur) switch — the inner per-id
+	// switches carry one too, so match on the outer indentation.
+	const guardTail = "\n        default: return;\n        }"
+	guardEnd := strings.Index(fn, guardTail)
+	if guardEnd < 0 {
+		t.Fatalf("string() missing the §6.4 destination guard:\n%s", fn)
+	}
+	guard := fn[:guardEnd]
+	for _, want := range []string{
+		"case 0: switch (id) { case 0: break; default: return; } break;", // the scalar string
+		"case 1: switch (id) { case 2: break; default: return; } break;", // the nested struct's string
+		"case 2: break;", // the string-array row: every id
+	} {
+		if !strings.Contains(guard, want) {
+			t.Errorf("string() missing destination arm %q:\n%s", want, fn)
+		}
+	}
+	// The guard precedes the UTF-8 decode and the accumulator alike, so a skipped
+	// payload is neither validated nor able to leave bytes behind for a later
+	// declared field to inherit.
+	for _, after := range []string{"_utf8(", "acc"} {
+		if i := strings.Index(fn, after); i < 0 || guardEnd > i {
+			t.Errorf("string(): the destination guard must precede %q:\n%s", after, fn)
+		}
+	}
+	// The maxlen reject stays destination-scoped behind it.
+	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
+		t.Errorf("string(): the maxlen reject must survive behind the guard:\n%s", fn)
+	}
+	// A blob carries no encoding, so blob() keeps the plain shape.
+	if strings.Contains(javaMethod(t, files["src/main/java/message/M.java"], "    public void blob(int id,"), "default: return;") {
+		t.Errorf("blob() must not carry a destination guard:\n%s", files["src/main/java/message/M.java"])
+	}
+}
+
+// A message that declares NO string still gets a string() callback (Visitor
+// declares it, and the corelib still routes string fields at unknown ids to it),
+// but every string reaching it is skipped by definition — so the body must be
+// empty. Decoding one only to drop it is the same §6.4 violation, just with
+// every string skipped instead of some.
+func TestJavaStringFreeSchemaNeverDecodesAString(t *testing.T) {
+	files := genJavaFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+      b: { id: 1, type: blob, maxlen: 8 }
+`, map[string]any{})
+	src := files["src/main/java/message/M.java"]
+	fn := javaMethod(t, src, "    public void string(int id,")
+	for _, forbidden := range []string{"_utf8(", "acc", "switch (cur)", "String _s;"} {
+		if strings.Contains(fn, forbidden) {
+			t.Errorf("a string-free schema must not %q in string():\n%s", forbidden, fn)
+		}
+	}
+	// The callback is still declared -- Visitor requires it.
+	if !strings.Contains(src, "public void string(int id,") {
+		t.Errorf("string() must still be declared:\n%s", src)
+	}
+}
+
+// javaMethod returns the generated method body starting at `head` up to the next
+// top-level `    public ` line, so an ordering assertion inside one callback
+// cannot accidentally match text from a neighbouring one.
+func javaMethod(t *testing.T, src, head string) string {
+	t.Helper()
+	i := strings.Index(src, head)
+	if i < 0 {
+		t.Fatalf("no %q in:\n%s", head, src)
+	}
+	rest := src[i+len(head):]
+	if j := strings.Index(rest, "\n    public "); j >= 0 {
+		return src[i : i+len(head)+j]
+	}
+	return src[i:]
+}

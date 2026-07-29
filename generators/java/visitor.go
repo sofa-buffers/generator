@@ -286,6 +286,142 @@ func maxlenThrow(name, noun string, max int64) string {
 		name, noun, max)
 }
 
+// emitStringCb writes the string() visitor callback. Single-shot: when the whole
+// payload arrives in one chunk, decode straight from the input slice, skipping
+// the (synchronized) ByteArrayOutputStream.
+//
+// A message that declares no string at all still gets the callback — Visitor
+// declares it, and the corelib still delivers string fields to a message that
+// has none — but its body is EMPTY. Every string reaching it is by definition
+// skipped, and an empty body is what skipping means: decoding one only to drop
+// it would validate a payload nobody reads, which is what CORELIB_PLAN §6.4
+// forbids (generator#257). Java rejects unreachable statements, so this is a
+// separate shape rather than a guard placed in front of dead code.
+func (g *gen) emitStringCb(f *jfile, fs []frame, limStr bool) {
+	f.line("    public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
+	defer f.line("    }")
+
+	dests := kindDests(fs, ir.KindString)
+	if len(dests) == 0 {
+		f.line("        // No field of this message is a string, so every string payload the")
+		f.line("        // decoder delivers is skipped whole -- its bytes are never inspected.")
+		return
+	}
+	g.emitDestGuard(f, fs, dests)
+	if limStr {
+		g.emitLenLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN", "string length", g.limits.stringLen)
+	}
+	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
+	f.line("        String _s;")
+	f.line("        if (offset == 0 && chunkLength >= total) {")
+	f.line("            _s = _utf8(data, chunkOffset, total);")
+	f.line("        } else {")
+	f.line("            if (acc == null) acc = new java.io.ByteArrayOutputStream();")
+	f.line("            acc.write(data, chunkOffset, chunkLength);")
+	f.line("            if (acc.size() < total) return;")
+	f.line("            _s = _utf8(acc.toByteArray(), 0, total);")
+	f.line("            acc.reset();")
+	f.line("        }")
+	f.line("        switch (cur) {")
+	for _, fr := range fs {
+		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindString {
+			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
+			// element is omitted on the wire, so place the value at its id and fill
+			// any gap with the element default ("").
+			f.line("        case %d: %swhile (%s.size() <= id) %s.add(\"\"); %s.set(id, _s); break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
+			continue
+		}
+		if fr.kind != fkNormal {
+			continue
+		}
+		var arms []string
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindString {
+				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+" = _s"))
+			}
+		}
+		if len(arms) > 0 {
+			g.frameSwitch(f, fr.idx, arms)
+		}
+	}
+	f.line("        }")
+}
+
+// destFrame is one frame that can materialize a value of the scanned kind:
+// `ids` empty means every id lands there (a wrapper-sequence row).
+type destFrame struct {
+	idx int
+	ids []int64
+}
+
+// kindDests collects the frames that can materialize `kind`, in emission order.
+// An empty result means the message never materializes a value of that kind.
+func kindDests(fs []frame, kind ir.Kind) []destFrame {
+	var dests []destFrame
+	for _, fr := range fs {
+		if fr.kind == fkSeqLeaf && fr.elemKind == kind {
+			dests = append(dests, destFrame{idx: fr.idx})
+			continue
+		}
+		if fr.kind != fkNormal {
+			continue
+		}
+		var ids []int64
+		for _, fld := range fr.fields {
+			if fld.Kind == kind {
+				ids = append(ids, fld.ID)
+			}
+		}
+		if len(ids) > 0 {
+			dests = append(dests, destFrame{idx: fr.idx, ids: ids})
+		}
+	}
+	return dests
+}
+
+// emitDestGuard writes the skip gate at the very top of the string() callback
+// (CORELIB_PLAN §6.4, generator#257): "skipped fields are never validated".
+// Skipping is a length jump over bytes that are not inspected (§5.2), and UTF-8
+// validation runs only where a `string` is materialized — read into a
+// destination. So the destination is resolved FIRST: every (cur, id) that
+// declares a string, plus the wrapper-sequence rows whose element kind is
+// string, falls through; anything else returns right here.
+//
+// Returning here is what makes the skip a true skip: an unknown id, or a §7.3
+// wire-type contradiction routed down the same path, never reaches _utf8() and
+// never enters the shared `acc` (so a later declared field cannot inherit its
+// bytes). Without it a lone continuation byte at an undeclared id turned an
+// otherwise valid message into INVALID_MSG.
+//
+// Placed ahead of the maxlen/limit guards, which are already destination-scoped
+// and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is
+// preserved.
+//
+// A schema with no field of this kind at all has no destination *anywhere*, so
+// the callback body is empty rather than guarded — see stringDests, whose empty
+// result is what the caller keys that on. (The callback itself is still emitted:
+// Visitor declares it, and the corelib still delivers strings to a message that
+// declares none.)
+func (g *gen) emitDestGuard(f *jfile, fs []frame, dests []destFrame) {
+	f.line("        // A payload this scope does not declare is skipped: its bytes are jumped")
+	f.line("        // over, never inspected. Resolve the destination first and leave before a")
+	f.line("        // byte is buffered, decoded or checked.")
+	f.line("        switch (cur) {")
+	for _, d := range dests {
+		if len(d.ids) == 0 {
+			f.line("        case %d: break;", d.idx)
+			continue
+		}
+		var labels []string
+		for _, id := range d.ids {
+			labels = append(labels, fmt.Sprintf("case %d:", id))
+		}
+		f.line("        case %d: switch (id) { %s break; default: return; } break;", d.idx, strings.Join(labels, " "))
+	}
+	f.line("        default: return;")
+	f.line("        }")
+}
+
 // emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
 // of the string()/blob() callback, the bounded-field twin of emitLenLimitGuard:
 // every field of this kind that declares a schema `maxlen` (scalar fields and
@@ -560,45 +696,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 
 	// string. Single-shot: when the whole payload arrives in one chunk, decode
 	// straight from the input slice, skipping the (synchronized) ByteArrayOutputStream.
-	f.line("    public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
-	if limStr {
-		g.emitLenLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN", "string length", g.limits.stringLen)
-	}
-	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
-	f.line("        String _s;")
-	f.line("        if (offset == 0 && chunkLength >= total) {")
-	f.line("            _s = _utf8(data, chunkOffset, total);")
-	f.line("        } else {")
-	f.line("            if (acc == null) acc = new java.io.ByteArrayOutputStream();")
-	f.line("            acc.write(data, chunkOffset, chunkLength);")
-	f.line("            if (acc.size() < total) return;")
-	f.line("            _s = _utf8(acc.toByteArray(), 0, total);")
-	f.line("            acc.reset();")
-	f.line("        }")
-	f.line("        switch (cur) {")
-	for _, fr := range fs {
-		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindString {
-			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
-			// element is omitted on the wire, so place the value at its id and fill
-			// any gap with the element default ("").
-			f.line("        case %d: %swhile (%s.size() <= id) %s.add(\"\"); %s.set(id, _s); break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
-			continue
-		}
-		if fr.kind != fkNormal {
-			continue
-		}
-		var arms []string
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindString {
-				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+" = _s"))
-			}
-		}
-		if len(arms) > 0 {
-			g.frameSwitch(f, fr.idx, arms)
-		}
-	}
-	f.line("        }")
-	f.line("    }")
+	g.emitStringCb(f, fs, limStr)
 
 	// blob. Single-shot on the whole-in-one-chunk fast path (see string).
 	f.line("    public void blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")

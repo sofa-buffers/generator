@@ -1163,7 +1163,8 @@ type for opaque bytes): an invalid-UTF-8 `string` that is *materialized* is the
 different settings still interoperate on all valid data. **No silent U+FFFD in any
 mode**: lossy replacement mutates the payload and breaks the byte-exact round-trip,
 so it is forbidden. Skipped fields are never validated (validation runs only where a
-string is read into a destination). Where the string is materialized decides where
+string is read into a destination) — see *Placement* below, which is where the
+codegen half of that rule lives. Where the string is materialized decides where
 the generator carries responsibility:
 
 - **Codegen-materialized Unicode targets (Rust, Java, C#) are always strict** — a
@@ -1171,8 +1172,9 @@ the generator carries responsibility:
   is the strict constructor and the option is a documented no-op (always ON). The
   generator emits the strict path directly: Rust `core::str::from_utf8` (Err → the
   sticky `inv` flag → `InvalidMsg`; the two Rust profiles now agree, **subsuming
-  #80**), Java a REPORTing `CharsetDecoder` (the platform `new String(…, UTF_8)` is
-  lossy), C# a `UTF8Encoding(throwOnInvalidBytes: true)` (`Encoding.UTF8.GetString`
+  #80**), Java an allocation-free `Utf8.valid` scan followed by the JVM-intrinsic
+  `new String(…, UTF_8)` (the platform constructor alone is lossy), C# a
+  `UTF8Encoding(throwOnInvalidBytes: true)` (`Encoding.UTF8.GetString`
   is lossy) — invalid bytes throw the same `INVALID_MSG` channel as the over-count
   guards. No config key is threaded into generated code.
 - **Codegen-materialized byte-container target (Zig)** — the borrowed `[]const u8`
@@ -1186,6 +1188,41 @@ the generator carries responsibility:
   corelib, so the check is corelib-internal; the generator emits no UTF-8 code for
   them. Encode-side strictness is corelib-side for **every** target (the generator
   encodes via `os.writeString(id, value)` into the corelib's OStream).
+
+**Placement — the destination is resolved first (normative, generator#257).** For
+every codegen-materialized target the corelib delivers **all** string payloads to
+the generated `string()` callback, an unknown id and a §7.3 wire-type contradiction
+included: the push visitor, not the corelib, is what decides whether a payload is
+materialized. So the callback must resolve the destination **before** it does
+anything else — a `(scope, id)` match over the string-declaring fields and the
+string wrapper-sequence rows, returning immediately when nothing matches. Only
+inside a matched arm may it accumulate, transcode, validate, or set a sticky
+invalid flag. Emitting the UTF-8 check ahead of that dispatch validates payloads
+the message never reads, which is exactly what CORELIB_PLAN §6.4 forbids, and it
+also lets a skipped payload's bytes enter the shared chunk accumulator where a
+later declared field would inherit them. The schema-`maxlen` and receiver-limit
+pre-checks are themselves destination-scoped, so they sit behind the guard and
+§5.2's INVALID-over-INCOMPLETE ordering is unaffected. Zig had this order from the
+start; **rust, rust-no-std, java and csharp were fixed to match** (Crucible F-0038,
+codegen defect G-0024). `blob` needs no such guard — it carries no encoding, so
+there is nothing to validate on the way past.
+
+The degenerate case is part of the rule: a message that declares **no string at
+all** still gets the callback (the visitor interface declares it, and the corelib
+still routes string fields at unknown ids to it), and every string reaching it is
+skipped by definition — so its **body is empty**, not guarded. Decoding one only
+to drop it is the same §6.4 violation with every string skipped instead of some.
+Rust gets this for free (the callback is emitted only when the schema uses
+strings); java and csharp emit the empty body explicitly.
+
+**go and dart still validate on skip**, and cannot be fixed here alone: both
+corelibs hand the visitor a *finished* language string, so the check is inside the
+corelib and the generator has no seam to place a guard in front of. Moving them
+takes a two-half change — the corelib stops validating and exposes a `utf8_valid`
+primitive (go) or delivers raw wire bytes (dart), and the backend then validates
+inside each matched arm, like zig. Neither half is correct on its own (the corelib
+half alone accepts invalid UTF-8 at a *declared* field), so they land together,
+after this one.
 
 The validator is a real UTF-8 validator (rejects overlong forms incl. `C0 80`,
 surrogates `U+D800`–`U+DFFF`, and code points above `U+10FFFF`; permits embedded

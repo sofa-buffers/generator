@@ -1133,3 +1133,89 @@ messages:
 		t.Errorf("a dynamic wrapper array must still place elements by id:\n%s", got)
 	}
 }
+
+// TestRustSkippedStringIsNotValidated: a `string` payload the visitor will not
+// materialize must be skipped whole — its bytes jumped over, never inspected
+// (CORELIB_PLAN §6.4, generator#257 / Crucible F-0038). corelib-rs hands EVERY
+// fixlen-string field to the generated `string()` callback, unknown ids and
+// §7.3 wire-type contradictions included, so the callback itself is what decides
+// whether a payload is read. It used to transcode first and dispatch second, so
+// a lone continuation byte at an id the scope does not declare set the sticky
+// `inv` flag and turned an otherwise valid message into INVALID.
+//
+// The fix is order: resolve the destination first and return when nothing
+// matches, so no byte is buffered into `acc`, transcoded, or checked.
+func TestRustSkippedStringIsNotValidated(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      s:  { id: 0, type: string, maxlen: 16 }
+      n:
+        id: 1
+        type: struct
+        fields:
+          t: { id: 2, type: string, maxlen: 8 }
+      sa: { id: 3, type: array, items: { type: string, count: 4, maxlen: 8 } }
+`
+	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
+		m := moduleFromYAML(t, src, cfg)
+		fn := sliceFn(t, m, "    fn string(")
+		// The destination guard is the FIRST statement of string(), ahead of the
+		// maxlen guard and ahead of every from_utf8.
+		guard := fn[:strings.Index(fn, "_ => return,")+len("_ => return,")]
+		for _, want := range []string{
+			"(_Loc::Root, 0) => {},",    // the scalar string
+			"(_Loc::Root_n, 2) => {},",  // the nested struct's string
+			"(_Loc::Root_sa, _) => {},", // every id of the string-array row
+		} {
+			if !strings.Contains(guard, want) {
+				t.Errorf("string() (%v) missing destination arm %q:\n%s", cfg, want, fn)
+			}
+		}
+		gi, ui := strings.Index(fn, "_ => return,"), strings.Index(fn, "from_utf8")
+		if gi < 0 || ui < 0 || gi > ui {
+			t.Errorf("string() (%v): the destination guard must precede every UTF-8 check:\n%s", cfg, fn)
+		}
+		// ...and ahead of the accumulator, so a skipped payload can never leave
+		// bytes behind for a later declared field to inherit.
+		if ai := strings.Index(fn, "self.acc"); ai >= 0 && gi > ai {
+			t.Errorf("string() (%v): the destination guard must precede the accumulator:\n%s", cfg, fn)
+		}
+		// The maxlen guard stays destination-scoped behind it, so a declared
+		// over-maxlen payload is still INVALID before any byte accumulates.
+		if mi := strings.Index(fn, "self.inv = true; return; },"); mi < 0 || gi > mi {
+			t.Errorf("string() (%v): the maxlen reject must survive behind the guard:\n%s", cfg, fn)
+		}
+	}
+}
+
+// A blob carries no encoding, so its callback keeps the plain shape: the guard is
+// a string-only concern and blob() must not grow one.
+func TestRustSkippedBlobKeepsPlainShape(t *testing.T) {
+	m := moduleFromYAML(t, `
+version: 1
+messages:
+  m: { payload: { b: { id: 0, type: blob, maxlen: 16 } } }
+`, map[string]any{})
+	if strings.Contains(sliceFn(t, m, "    fn blob("), "_ => return,") {
+		t.Errorf("blob() must not carry a destination guard:\n%s", m)
+	}
+}
+
+// sliceFn returns the generated function body starting at `head` up to the next
+// top-level `    fn ` line, so an assertion about ordering inside one callback
+// cannot accidentally match text from a neighbouring one.
+func sliceFn(t *testing.T, module, head string) string {
+	t.Helper()
+	i := strings.Index(module, head)
+	if i < 0 {
+		t.Fatalf("no %q in:\n%s", head, module)
+	}
+	rest := module[i+len(head):]
+	if j := strings.Index(rest, "\n    fn "); j >= 0 {
+		return module[i : i+len(head)+j]
+	}
+	return module[i:]
+}

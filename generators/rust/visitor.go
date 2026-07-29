@@ -789,6 +789,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.str {
 		// string: scalar strings + string-array elements
 		f.line("    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
+		g.emitDestGuard(f, fs, ir.KindString)
 		g.emitMaxlenGuard(f, fs, ir.KindString)
 		if g.limits.stringHas {
 			g.emitLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN")
@@ -1032,6 +1033,50 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("}") // impl Visitor
 	f.line("}") // mod <name>_dec
 	f.blank()
+}
+
+// emitDestGuard emits the skip gate at the very top of the string callback
+// (CORELIB_PLAN §6.4, generator#257): "skipped fields are never validated".
+// Skipping is a length jump over bytes that are not inspected (§5.2), and
+// UTF-8 validation runs only where a `string` is materialized — read into a
+// destination. So the destination is resolved FIRST: every (loc, id) that
+// declares a string, plus the wrapper-sequence rows whose element kind is
+// string, falls through; anything else returns right here.
+//
+// Returning here is what makes the skip a true skip: an unknown id, or a §7.3
+// wire-type contradiction routed down the same path, never accumulates into
+// the shared `acc` (so a later declared field cannot inherit its bytes), never
+// transcodes, and never trips the sticky `inv` flag. Without it a 3-byte
+// isolate carrying a lone continuation byte at an undeclared id turned an
+// otherwise valid message into INVALID.
+//
+// Placed ahead of the maxlen/limit guards, which are already destination-scoped
+// and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is
+// preserved.
+func (g *gen) emitDestGuard(f *rfile, fs []frame, kind ir.Kind) {
+	var arms []string
+	for _, fr := range fs {
+		if fr.kind == fkSeqArr && fr.elemKind == kind {
+			arms = append(arms, fmt.Sprintf("            (_Loc::%s, _) => {},", fr.loc))
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == kind {
+				arms = append(arms, fmt.Sprintf("            (_Loc::%s, %d) => {},", fr.loc, fld.ID))
+			}
+		}
+	}
+	if len(arms) == 0 {
+		return
+	}
+	f.line("        // A payload this scope does not declare is skipped: its bytes are jumped")
+	f.line("        // over, never inspected. Resolve the destination first and leave before a")
+	f.line("        // byte is buffered, decoded or checked.")
+	f.line("        match (self.cur, id) {")
+	for _, a := range arms {
+		f.line("%s", a)
+	}
+	f.line("            _ => return,")
+	f.line("        }")
 }
 
 // emitLimitGuard emits the receiver-side decode-limit pre-check (generator#102)
