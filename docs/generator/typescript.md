@@ -251,6 +251,65 @@ The field's declared default is what the schema wrote and nothing more, on both
 sides of the omit test — which is what keeps an all-zero length-`N` value (a
 length-`N` array) distinct from the empty one and on the wire.
 
+## fp32 signaling NaN (issue #235)
+
+A JS `number` is a 64-bit double, so widening an `fp32` through it **quiets** a
+signaling NaN (`0x7F800001` → `0x7FC00001`) and a decoded value could never be
+re-encoded bit-for-bit, violating the MESSAGE_SPEC §4.6 float round-trip.
+TypeScript was the last of the 13 drivers with this gap; every other fp32 value
+is unaffected, because any non-NaN fp32 narrows back to its own bits exactly.
+
+`corelib-ts` supplies the bit-preserving channel on both paths, so the fix is
+purely in what the generated code consumes — **no corelib change**:
+
+| direction | scalar | native array |
+|---|---|---|
+| read | `Cursor.readFp32Raw()` | `Cursor.readFp32ArrayRaw(schemaCount?)` |
+| write | `OStream.writeFixlen(id, bytes, FixlenSubtype.Fp32)` | `OStream.writeFp32ArrayRaw(id, payload)` |
+
+There is deliberately no scalar `writeFp32Raw`: `writeFixlen` with subtype fp32
+emits the identical `fixlenHead(id, 4, Fp32)` + 4 raw bytes, and corelib-ts's own
+doc comment on `readFp32Raw` prescribes that route.
+
+**Generated shape.** Every fp32 position — a scalar field and a native `fp32[]`
+field, in messages and named types alike — grows a companion slot beside the
+value:
+
+```ts
+f32: number = 0;
+f32Fp32Raw: Uint8Array | null = null;   // wire bytes, captured only for a NaN
+```
+
+- **Decode** reads the raw bytes, derives the convenience number from those same
+  bytes (`_fp32FromRaw`, an allocation-free shared scratch word), and stores a
+  **copy** of the bytes when the value is a NaN — the raw readers return a view
+  aliasing the decoder's buffer, valid only until it is reused (`readBlob`'s
+  contract), and a decoded object outlives one feed. The store is unconditional,
+  so a re-opened field id (§7.4) drops what an earlier occurrence captured.
+- **Encode** consults the capture only for a value that is *still* a NaN: the
+  scalar writes `writeFixlen(…, FixlenSubtype.Fp32)`, the array re-renders its
+  payload through `_fp32ArrayRaw`, which takes captured bits per element and
+  renders every other element from its number. So assigning `msg.f32 = 2.5` (or
+  `msg.arr[0] = 2.5`) after a decode always wins over a stale capture.
+- **The omission test does not move.** §2 decides presence from the *value*:
+  emit iff it differs from the default. Reading "carries raw bytes" as "was
+  present" makes an explicit `+0.0` re-encode instead of normalizing away — a
+  divergence from the other 12 drivers, pinned by
+  `TestTSFp32RawDoesNotMoveTheOmissionTest`.
+- The companion is wire state, not value state: it stays out of `toJSON()` /
+  `fromJSON()`, so the JSON surface and the harness's `encode`/`decode` output are
+  byte-identical to before. The new `recode` harness mode (wire → object → wire,
+  no JSON) is what exercises this — JSON renders every NaN as `null` and cannot
+  tell a signaling one from a quiet one. `tests/conformance/typescript/run.sh`
+  round-trips a signaling, a quiet, a negative and a negative-signaling NaN at the
+  scalar position and at an `fp32[]` element position.
+
+fp32 only: a JS number **is** an fp64, so an fp64 NaN payload already survives
+and its paths are untouched. **Known limit:** an fp32 row nested inside a wrapper
+array (`array<array<fp32>>`) still widens through `readFp32Array` — a row has no
+field of its own to hang the companion on. Same class of gap as the C++ nested
+wrapper rows; not reachable from the two positions this issue measures.
+
 ## Benchmark row
 
 Row `ts-bigint` and `ts-long` (one per `int64` mode) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with

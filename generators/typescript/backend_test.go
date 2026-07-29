@@ -88,7 +88,10 @@ func TestTSWireTypeGuard(t *testing.T) {
 		// fp32/fp64/string/blob share WireType.Fixlen, so the guard also checks the
 		// fixlen subtype (corelib-ts#58); the fp arrays share ArrayFixlen likewise.
 		"case 2: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } o.c = c.readString(); break;",
-		"case 3: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp32) { c.skip(c.wire); break; } o.d = c.readFp32(); break;",
+		// fp32 reads its four wire bytes rather than the widened number (§4.6,
+		// generator#235 — see TestTSFp32SignalingNaNRawChannel); the guard in front
+		// of it is the same one every other fixlen field gets.
+		"case 3: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp32) { c.skip(c.wire); break; } const _r = c.readFp32Raw();",
 		"case 4: if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; } ME.decodeInto(c, o.e); break;", // nested message, decoded into the existing member (§7.4)
 		"case 5: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.f = c.readUnsignedArray() as number[]; break;",
 		"case 6: if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } o.g = c.readSignedArray() as number[]; break;",
@@ -180,7 +183,10 @@ func TestTSHeaderBoundReject(t *testing.T) {
 	// the dynamic array passes nothing (unbounded — no header arg).
 	for _, want := range []string{
 		"c.readUnsignedArray(4) as number[]", // ua, count 4 -> header reject
-		"c.readFp32Array(3)",                 // fa, count 3 -> header reject
+		// fp32 arrays read the raw payload (§4.6, generator#235), but the schema
+		// count still goes into the reader: the header reject is what makes INVALID
+		// dominate a truncated over-count, and it must not be lost to the raw path.
+		"c.readFp32ArrayRaw(3)", // fa, count 3 -> header reject
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing header-bound reader call %q:\n%s", want, mod)
@@ -1331,5 +1337,170 @@ messages:
 	// Control: a row of native scalars still reads in one corelib call, untouched.
 	if !strings.Contains(mod, "arr[_id] = c.readUnsignedArray(3) as number[];") {
 		t.Errorf("a native row must still read in one call:\n%s", mod)
+	}
+}
+
+// fp32RawDef exercises every position the fp32 raw-bits channel covers: an fp32
+// scalar (with and without a schema default), a fixed-count fp32 array, a dynamic
+// fp32 array, and the same pair inside a struct — plus fp64 neighbours, which must
+// stay on the plain number path.
+const fp32RawDef = `version: 1
+messages:
+  m:
+    payload:
+      f32:  { id: 0, type: fp32 }
+      f32d: { id: 1, type: fp32, default: 1.5 }
+      fa:   { id: 2, type: array, items: { type: fp32, count: 3 } }
+      da:   { id: 3, type: array, items: { type: fp32 } }
+      f64:  { id: 4, type: fp64 }
+      d64:  { id: 5, type: array, items: { type: fp64, count: 3 } }
+      st:   { id: 6, type: struct, fields: { inner: { id: 0, type: fp32 }, innera: { id: 1, type: array, items: { type: fp32, count: 2 } } } }
+`
+
+// TestTSFp32SignalingNaNRawChannel pins the fix for generator#235: a JS number is
+// a 64-bit double, so widening an fp32 SIGNALING NaN into one quiets it
+// (0x7F800001 -> 0x7FC00001) and the field can never be re-encoded bit-for-bit
+// (MESSAGE_SPEC §4.6). The generated code must therefore drive corelib-ts's raw
+// channel — Cursor.readFp32Raw / readFp32ArrayRaw on the way in, and
+// OStream.writeFixlen(subtype fp32) / writeFp32ArrayRaw on the way out — at BOTH
+// fp32 positions: the scalar field and the native fp32 array's elements.
+//
+// Measured before the fix, scalar and array alike: in 02 20 0100807f -> out
+// 02 20 0100c07f. TypeScript was the last of the 13 drivers to quiet it.
+func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
+	mod := genTSWith(t, fp32RawDef, map[string]any{})
+	for _, want := range []string{
+		// The raw-bits companion sits beside the value, per fp32 position, in
+		// messages and in named types alike.
+		"f32Fp32Raw: Uint8Array | null = null;",
+		"f32dFp32Raw: Uint8Array | null = null;",
+		"faFp32Raw: Uint8Array | null = null;",
+		"daFp32Raw: Uint8Array | null = null;",
+		"innerFp32Raw: Uint8Array | null = null;",
+		"inneraFp32Raw: Uint8Array | null = null;",
+
+		// Scalar decode: the four wire bytes, widened for the value consumer, and
+		// COPIED — readFp32Raw hands back a view aliasing the decoder's buffer,
+		// valid only until it is reused (readBlob's contract), and the object
+		// outlives one feed. The bytes are kept only for a NaN, and the assignment
+		// is unconditional so a re-opened id (§7.4) drops an earlier capture.
+		"const _r = c.readFp32Raw(); const _v = _fp32FromRaw(_r, 0); o.f32 = _v; o.f32Fp32Raw = Number.isNaN(_v) ? _r.slice() : null;",
+		// Scalar encode: the captured bytes go out verbatim. corelib-ts 0.9.0 has no
+		// writeFp32Raw by design — writeFixlen with subtype fp32 emits the identical
+		// fixlenHead(id, 4, Fp32) + 4 bytes.
+		"if (Number.isNaN(this.f32) && this.f32Fp32Raw !== null && this.f32Fp32Raw.length === 4) {",
+		"os.writeFixlen(0, this.f32Fp32Raw, FixlenSubtype.Fp32);",
+		"os.writeFp32(0, this.f32);", // the number path survives for every non-NaN
+
+		// Array decode: the raw payload, the schema count still passed to the reader
+		// (INVALID at the count word must keep dominating a truncated over-count),
+		// the over-count reject kept, and the payload copied only when some element
+		// is a NaN.
+		"const _p = c.readFp32ArrayRaw(3);",
+		"const _n = _p.length >> 2;",
+		`if (_n > 3) throw new SofabError(SofabErrorCode.InvalidMsg, "fa: array count above schema capacity 3");`,
+		"for (let _i = 0; _i < _n; _i++) { const _v = _dv.getFloat32(_i * 4, true); if (Number.isNaN(_v)) _nan = true; _a[_i] = _v; }",
+		"o.fa = _a;",
+		"o.faFp32Raw = _nan ? _p.slice() : null;",
+		"const _p = c.readFp32ArrayRaw();", // dynamic array: unbounded, no count arg
+		// Array encode: the payload is re-rendered from the value, taking captured
+		// bits only for an element that is still the NaN it decoded as.
+		"os.writeFp32ArrayRaw(2, _fp32ArrayRaw(this.fa, this.faFp32Raw));",
+		"os.writeFp32Array(2, this.fa);", // no capture -> the plain writer, unchanged
+
+		// Both helpers, emitted because both positions occur.
+		"function _fp32FromRaw(raw: Uint8Array, off: number): number {",
+		"function _fp32ArrayRaw(vals: readonly number[], raw: Uint8Array): Uint8Array {",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("fp32 raw channel missing %q:\n%s", want, mod)
+		}
+	}
+
+	// The quieting readers must be gone from the fp32 paths entirely — this is the
+	// defect itself, not a style point. (fp64 keeps its own readers; they are
+	// spelled differently and are asserted below.)
+	for _, gone := range []string{"c.readFp32();", "c.readFp32Array("} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("fp32 still decodes through a JS number (%q quiets a signaling NaN):\n%s", gone, mod)
+		}
+	}
+
+	// fp64 is untouched: a JS number IS an fp64, so its NaN payload round-trips
+	// through the plain readers. Widening the fix to fp64 would be pure cost.
+	for _, want := range []string{"o.f64 = c.readFp64(); break;", "c.readFp64Array(3)", "os.writeFp64(4, this.f64);", "os.writeFp64Array(5, this.d64);"} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("fp64 must keep the plain number path, missing %q:\n%s", want, mod)
+		}
+	}
+	if strings.Contains(mod, "f64Fp32Raw") || strings.Contains(mod, "d64Fp32Raw") {
+		t.Errorf("fp64 must not grow an fp32 raw-bits companion:\n%s", mod)
+	}
+}
+
+// TestTSFp32RawDoesNotMoveTheOmissionTest is the other half of generator#235, and
+// the mistake it guards is the one that reproduces most easily: reading "the field
+// carried raw bytes" as "the field was present". It is not. MESSAGE_SPEC §2 decides
+// presence from the VALUE alone — emit iff it differs from its default — and a
+// signaling NaN is ≠ 0 as a value anyway, so it goes out on the value test alone.
+// Widening the guard to `this.f32 !== 0 || this.f32Fp32Raw !== null` re-emits an
+// input that carried an explicit +0.0 instead of normalizing it away, which is a
+// divergence from all 12 other drivers.
+func TestTSFp32RawDoesNotMoveTheOmissionTest(t *testing.T) {
+	mod := genTSWith(t, fp32RawDef, map[string]any{})
+	for _, want := range []string{
+		// marshal: the value test, byte for byte what it was before the raw channel.
+		"    if (this.f32 !== 0) {",
+		"    if (this.f32d !== 1.5) {",
+		"    if (this.fa.length !== 0) {",
+		// isDefault: the exact negation of the same test, likewise untouched.
+		"if (!(this.f32 === 0)) return false;",
+		"if (!(this.f32d === 1.5)) return false;",
+		"if (!(this.fa.length === 0)) return false;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("the §2 omission test must not move, missing %q:\n%s", want, mod)
+		}
+	}
+	// No presence test anywhere may consult the raw slot.
+	for _, gone := range []string{
+		"this.f32 !== 0 || this.f32Fp32Raw",
+		"this.f32Fp32Raw !== null || ",
+		"if (!(this.f32 === 0 && this.f32Fp32Raw",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("presence must not be decided from the raw slot (%q):\n%s", gone, mod)
+		}
+	}
+	// The companion is wire state, not value state: it stays out of the JSON
+	// surface, so a JSON round-trip (and the generated harness) is unchanged.
+	for _, gone := range []string{`"f32Fp32Raw":`, `"faFp32Raw":`, `"f32Fp32Raw" in d`} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("the raw companion must stay out of the JSON surface (%q):\n%s", gone, mod)
+		}
+	}
+}
+
+// TestTSFp32RawHelpersOnlyWhereNeeded: the two helpers are module-level, so an
+// unconditional emit would put dead code in every module. Each is emitted only
+// where its position actually occurs.
+func TestTSFp32RawHelpersOnlyWhereNeeded(t *testing.T) {
+	scalarOnly := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: fp32 }\n", map[string]any{})
+	if !strings.Contains(scalarOnly, "function _fp32FromRaw(") {
+		t.Errorf("an fp32 scalar needs _fp32FromRaw:\n%s", scalarOnly)
+	}
+	if strings.Contains(scalarOnly, "function _fp32ArrayRaw(") {
+		t.Errorf("no fp32 array -> no _fp32ArrayRaw:\n%s", scalarOnly)
+	}
+	arrayOnly := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: array, items: { type: fp32 } }\n", map[string]any{})
+	if !strings.Contains(arrayOnly, "function _fp32ArrayRaw(") {
+		t.Errorf("an fp32 array needs _fp32ArrayRaw:\n%s", arrayOnly)
+	}
+	if strings.Contains(arrayOnly, "function _fp32FromRaw(") {
+		t.Errorf("no fp32 scalar -> no _fp32FromRaw:\n%s", arrayOnly)
+	}
+	none := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: fp64 }\n      b: { id: 1, type: array, items: { type: fp64 } }\n", map[string]any{})
+	if strings.Contains(none, "_fp32") {
+		t.Errorf("an fp32-free schema must not name the fp32 raw channel at all:\n%s", none)
 	}
 }

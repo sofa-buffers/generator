@@ -97,6 +97,50 @@ func (g *gen) storage(recv string, f *ir.Field) string {
 	return recv + "." + f.Name
 }
 
+// fp32RawCompanion reports whether a field carries the fp32 raw-bits companion
+// slot (generator#235): an fp32 scalar, or a NATIVE fp32 array (element kind
+// fp32). Both decode through a JS number, which cannot carry an fp32 NaN payload
+// (MESSAGE_SPEC §4.6), so the wire bytes are kept beside the value. An fp32 row
+// nested inside a wrapper array is NOT covered — its rows have no field of their
+// own to hang the companion on; see docs/generator/typescript.md.
+func fp32RawCompanion(f *ir.Field) bool {
+	return f.Kind == ir.KindFP32 || (f.Kind == ir.KindArray && f.Elem == ir.KindFP32)
+}
+
+// fp32RawName is the property name of a field's fp32 raw-bits companion. The
+// `Fp32Raw` suffix (rather than a bare `Raw`) keeps it clear what the slot holds
+// and makes a collision with a sibling field's name vanishingly unlikely.
+func fp32RawName(name string) string { return name + "Fp32Raw" }
+
+// fp32RawDoc is the TSDoc on that companion slot. It says what a consumer needs
+// to know and nothing more: where the bytes come from, that they are not the
+// value, and that they cannot silently outvote the value.
+func fp32RawDoc(f *ir.Field) string {
+	if f.Kind == ir.KindFP32 {
+		return "Wire bytes of `" + f.Name + "`, captured on decode only when the decoded value is a\n" +
+			"NaN, so that a signaling NaN re-encodes bit-for-bit: a JS number is a 64-bit\n" +
+			"double and cannot carry an fp32 NaN's payload bits.\n" +
+			"\n" +
+			"Not part of the value. marshal ignores these bytes unless `" + f.Name + "` is still a\n" +
+			"NaN, so assigning `" + f.Name + "` by hand always wins, and they never reach\n" +
+			"toJSON()/fromJSON()."
+	}
+	return "Wire payload of `" + f.Name + "`, captured on decode only when some element is a\n" +
+		"NaN, so that a signaling NaN element re-encodes bit-for-bit: a JS number is a\n" +
+		"64-bit double and cannot carry an fp32 NaN's payload bits.\n" +
+		"\n" +
+		"Not part of the value. marshal renders every element from `" + f.Name + "` and takes\n" +
+		"these bytes only for an element that is still the NaN it decoded as, so assigning\n" +
+		"an element by hand always wins, and they never reach toJSON()/fromJSON()."
+}
+
+// fp32RawStorage is the expression the generated code uses to reach that
+// companion — the twin of storage() for the value slot. An fp32 field is never
+// Long-backed, so there is no private backing field to bypass here.
+func (g *gen) fp32RawStorage(recv string, f *ir.Field) string {
+	return recv + "." + fp32RawName(f.Name)
+}
+
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
 	var b strings.Builder
@@ -153,6 +197,8 @@ type helperUse struct {
 	overIdxArr  bool // count-bearing wrapper array -> import SofabError for the over-index reject (generator#142)
 	maxlenField bool // bounded string/blob (scalar or wrapper element) -> import SofabError for the over-maxlen reject (MESSAGE_SPEC §7.1)
 	strMaxlen   bool // bounded string (scalar or wrapper element) -> emit the allocation-free _utf8Len helper for its decode-side maxlen check (blobs measure .length directly)
+	fp32Raw     bool // fp32 scalar field -> emit _fp32FromRaw (the §4.6 bit-exact scalar channel, generator#235)
+	fp32ArrRaw  bool // native fp32 array field -> emit _fp32ArrayRaw (its array half)
 }
 
 // arrayOverIndexed reports whether an array field (recursively through nested
@@ -227,6 +273,15 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 			}
 			if fld.Kind == ir.KindArray && arrayHasBoundedString(fld.Elem, fld.ElemItems, fld.ElemMaxHas) {
 				use.strMaxlen = true
+			}
+			// The fp32 raw-bits channel (§4.6): the scalar half widens the wire bytes
+			// through _fp32FromRaw, the array half re-renders them through
+			// _fp32ArrayRaw. Each helper is emitted only where its position occurs.
+			if fld.Kind == ir.KindFP32 {
+				use.fp32Raw = true
+			}
+			if fld.Kind == ir.KindArray && fld.Elem == ir.KindFP32 {
+				use.fp32ArrRaw = true
 			}
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				// A `count: N` native array decodes with the over-count reject, which

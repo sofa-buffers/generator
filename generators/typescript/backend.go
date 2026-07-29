@@ -169,6 +169,14 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("%s", utf8LenHelper)
 		f.blank()
 	}
+	if use.fp32Raw {
+		f.line("%s", fp32RawHelper)
+		f.blank()
+	}
+	if use.fp32ArrRaw {
+		f.line("%s", fp32ArrayRawHelper)
+		f.blank()
+	}
 
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
@@ -269,6 +277,16 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 		}
 		f.emitDoc("  ", fieldDoc(fld))
 		f.line("  %s: %s = %s;", fld.Name, g.tsType(fld), g.tsDefault(fld))
+		if fp32RawCompanion(fld) {
+			// The value slot above is the field's API; this is its wire companion
+			// (MESSAGE_SPEC §4.6, generator#235). A JS number is a 64-bit double and
+			// cannot carry an fp32 NaN's payload bits, so decode parks the raw wire
+			// bytes here whenever the decoded value is a NaN — and only then. marshal
+			// re-emits them verbatim for a value that is still that NaN; every other
+			// value renders from the number, which is exact for every non-NaN fp32.
+			f.emitDoc("  ", fp32RawDoc(fld))
+			f.line("  %s: Uint8Array | null = null;", fp32RawName(fld.Name))
+		}
 	}
 	f.blank()
 
@@ -392,6 +410,10 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 
 func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 	acc := g.storage("this", fld)
+	rawAcc := ""
+	if fp32RawCompanion(fld) {
+		rawAcc = g.fp32RawStorage("this", fld)
+	}
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -401,7 +423,28 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 	case ir.KindBool:
 		write = fmt.Sprintf("os.writeBoolean(%d, %s);", fld.ID, acc)
 	case ir.KindFP32:
-		write = fmt.Sprintf("os.writeFp32(%d, %s);", fld.ID, acc)
+		// The omission test is untouched: emit iff the value differs from its
+		// default (MESSAGE_SPEC §2), decided on the VALUE alone. Carrying wire bytes
+		// says nothing about presence — widening the test to "or the raw slot is
+		// set" would re-emit an explicit +0.0 that §2 requires omitted.
+		//
+		// Inside that guard the raw channel is a rendering concern only: the four
+		// captured bytes are re-emitted verbatim for a value that is still the NaN
+		// it decoded as, because a JS number cannot carry an fp32 NaN's payload
+		// (§4.6, generator#235). Every other value — including a NaN the caller set
+		// by hand, and any value assigned over a decoded one — renders from the
+		// number, which is exact for every non-NaN fp32. There is no scalar
+		// writeFp32Raw in corelib-ts by design: writeFixlen with subtype fp32 emits
+		// the identical fixlenHead(id, 4, Fp32) + 4 raw bytes (corelib-ts's own doc
+		// comment on readFp32Raw prescribes this route).
+		f.line("    if (%s !== %s) {", acc, g.tsDefault(fld))
+		f.line("      if (Number.isNaN(%s) && %s !== null && %s.length === 4) {", acc, rawAcc, rawAcc)
+		f.line("        os.writeFixlen(%d, %s, FixlenSubtype.Fp32);", fld.ID, rawAcc)
+		f.line("      } else {")
+		f.line("        os.writeFp32(%d, %s);", fld.ID, acc)
+		f.line("      }")
+		f.line("    }")
+		return
 	case ir.KindFP64:
 		write = fmt.Sprintf("os.writeFp64(%d, %s);", fld.ID, acc)
 	case ir.KindString:
@@ -463,6 +506,22 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 			f.line("    if (!%s(%s, %s)) {", eq, acc, def)
 		} else {
 			f.line("    if (%s.length !== 0) {", acc)
+		}
+		if fld.Elem == ir.KindFP32 {
+			// The array half of the §4.6 raw channel (generator#235). The omission
+			// test above is untouched — the raw payload takes no part in deciding
+			// presence — and inside it the captured wire bytes only supply the bits a
+			// JS number cannot carry: _fp32ArrayRaw re-renders every element from its
+			// number except the ones that are still the NaN they decoded as. With no
+			// capture (a fresh or hand-built value) the plain writer runs, unchanged.
+			raw := g.fp32RawStorage("this", fld)
+			f.line("      if (%s !== null) {", raw)
+			f.line("        os.writeFp32ArrayRaw(%d, _fp32ArrayRaw(%s, %s));", fld.ID, acc, raw)
+			f.line("      } else {")
+			g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			f.line("      }")
+			f.line("    }")
+			return
 		}
 		g.marshalArray(f, "      ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 		f.line("    }")
