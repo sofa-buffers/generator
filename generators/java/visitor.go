@@ -491,11 +491,13 @@ func (g *gen) emitMaxlenGuard(f *jfile, fs []frame, kind ir.Kind, noun string) {
 //
 // One arm per wire ArrayKind, and each arm disarms ONLY at the ids whose declared
 // element type maps to that very kind (generator#254): UNSIGNED covers u*/boolean/
-// bitfield, SIGNED covers i*/enum, FIXLEN covers fp32/fp64. Treating UNSIGNED and
-// SIGNED as one case let an array-signed header at an unsigned-declared array id
-// disarm the counter, i.e. decode a header §7.3 says to skip. The counter
-// self-terminates on `count`, so no array-end callback is needed, and it lives in
-// the visitor, so it survives a feed chunk boundary.
+// bitfield, SIGNED covers i*/enum, FP32 covers fp32 and FP64 covers fp64. Treating
+// UNSIGNED and SIGNED as one case let an array-signed header at an
+// unsigned-declared array id disarm the counter, i.e. decode a header §7.3 says to
+// skip; the same reasoning splits the two fixlen subtypes (generator#259 /
+// Crucible F-0042). The counter self-terminates on `count`, so no array-end
+// callback is needed, and it lives in the visitor, so it survives a feed chunk
+// boundary.
 func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 	f.line("        // A native array delivered at an id that does not declare one")
 	f.line("        // of the SAME array kind is a wire-type contradiction -- arm a discard")
@@ -535,12 +537,18 @@ func (g *gen) emitArraySkipArm(f *jfile, fs []frame) {
 	}
 	arm("if", "UNSIGNED", unsignedArrayElem)
 	arm("else if", "SIGNED", signedArrayElem)
-	// Fixlen (fp32/fp64) arrays deliver through fp32()/fp64(), the callbacks a lone
-	// fp scalar shares (generator#193), so they are armed exactly like the integer
-	// arms. The fixlen SUBTYPE (fp32 vs fp64) is not visible in this hook — the
-	// corelib collapses both into ArrayKind.FIXLEN — so a subtype contradiction is
-	// caught downstream, where the element lands in fp32() or fp64().
-	arm("else if", "FIXLEN", fpArrayElem)
+	// Fixlen arrays deliver through fp32()/fp64(), the callbacks a lone fp scalar
+	// shares (generator#193), so they are armed exactly like the integer arms — but
+	// with ONE ARM PER SUBTYPE (generator#259 / Crucible F-0042). corelib-java used
+	// to collapse fp32 and fp64 into a single ArrayKind.FIXLEN, announced on the
+	// count word before the fixlen_word had even been read; per CORELIB_PLAN §4.8 it
+	// now announces the array after the fixlen_word and names FP32 or FP64. That
+	// makes an fp64 header at a declared fp32[] slot (and vice versa) a wire-type
+	// contradiction this hook can see: the field's own arm is not entered, so the
+	// discard counter stays armed and the declared array is never sized from the
+	// skipped header's count (§7.3).
+	arm("else if", "FP32", fp32ArrayElem)
+	arm("else if", "FP64", fp64ArrayElem)
 }
 
 // emitArraySkipGuard prepends the §7.3 discard clause to unsigned()/signed()
@@ -785,7 +793,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// includes not being RESIZED from the skipped header's count. Ordering
 			// matters as much as the test: the schema bound below applies only to a
 			// field that survives this check, so an over-count MIS-TYPED array is
-			// skipped, not a false INVALID.
+			// skipped, not a false INVALID. Since the fixlen kinds are per subtype
+			// (generator#259 / Crucible F-0042), that now covers an fp64 header at a
+			// declared fp32[N] too: it is skipped, never bounded and never sized.
 			kindGuard := arrayKindGuard(fld.Elem)
 			// A wire element count above the schema `count` capacity is INVALID
 			// per MESSAGE_SPEC §3+§7 — reject up front, never clamp or keep-all
@@ -990,20 +1000,26 @@ func isSignedElem(k ir.Kind) bool {
 	return k == ir.KindI8 || k == ir.KindI16 || k == ir.KindI32 || k == ir.KindI64
 }
 
-// unsignedArrayElem / signedArrayElem / fpArrayElem partition the native array
-// element kinds by the wire ArrayKind an array of them maps to (MESSAGE_SPEC
-// §1/§3): unsigned-array for u*/boolean/bitfield, signed-array for i*/enum,
-// fixlen-array for fp32/fp64. A header carrying any OTHER kind at such a field is
-// a wire-type contradiction and must be skipped whole (§7.3, generator#254) —
-// never stored, and never sized into the declared field.
+// unsignedArrayElem / signedArrayElem / fp32ArrayElem / fp64ArrayElem partition
+// the native array element kinds by the wire ArrayKind an array of them maps to
+// (MESSAGE_SPEC §1/§3): unsigned-array for u*/boolean/bitfield, signed-array for
+// i*/enum, and — since the fixlen header names its element subtype (CORELIB_PLAN
+// §4.8) — FP32 for fp32 and FP64 for fp64, one kind each rather than a single
+// collapsed "fixlen" bucket. A header carrying any OTHER kind at such a field is a
+// wire-type contradiction and must be skipped whole (§7.3, generator#254 and
+// generator#259 / Crucible F-0042) — never stored, and never sized into the
+// declared field.
 func unsignedArrayElem(k ir.Kind) bool {
 	return isUnsignedElem(k) || k == ir.KindBool || k == ir.KindBitfield
 }
 func signedArrayElem(k ir.Kind) bool {
 	return isSignedElem(k) || k == ir.KindEnum
 }
-func fpArrayElem(k ir.Kind) bool {
-	return k == ir.KindFP32 || k == ir.KindFP64
+func fp32ArrayElem(k ir.Kind) bool {
+	return k == ir.KindFP32
+}
+func fp64ArrayElem(k ir.Kind) bool {
+	return k == ir.KindFP64
 }
 
 // arrayWireKind is the ArrayKind constant an array of `k` is encoded with — the
@@ -1014,8 +1030,10 @@ func arrayWireKind(k ir.Kind) string {
 		return "UNSIGNED"
 	case signedArrayElem(k):
 		return "SIGNED"
-	case fpArrayElem(k):
-		return "FIXLEN"
+	case fp32ArrayElem(k):
+		return "FP32"
+	case fp64ArrayElem(k):
+		return "FP64"
 	}
 	return ""
 }

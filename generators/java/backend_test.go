@@ -277,7 +277,8 @@ func TestJavaMaxlenReject(t *testing.T) {
 // a discard counter with the announced count and those callbacks must drop
 // exactly that many (generator#183 for integers, #193 for fp). Ids that genuinely
 // declare a native array of the matching element kind disarm it — integer arrays
-// under UNSIGNED/SIGNED, fp arrays under FIXLEN.
+// under UNSIGNED/SIGNED, fp32 arrays under FP32 and fp64 arrays under FP64
+// (generator#259: the fixlen kinds name their element subtype).
 func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      u:  { id: 0, type: u8, default: 7 }\n" +
@@ -295,11 +296,14 @@ func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 		"        else if (kind == ArrayKind.SIGNED) {\n            askip = count;\n            switch (cur) {",
 		// Each declared array disarms the skip AND arms the fill under ITS OWN kind:
 		// the u32 array (id 2) under UNSIGNED, the i32 array (id 3) under SIGNED,
-		// the fp32 array (id 4) under FIXLEN.
+		// the fp32 array (id 4) under FP32.
 		"                case 2: askip = 0; afill = count; break;",
 		"                case 3: askip = 0; afill = count; break;",
-		"        else if (kind == ArrayKind.FIXLEN) {\n            askip = count;\n            switch (cur) {",
+		"        else if (kind == ArrayKind.FP32) {\n            askip = count;\n            switch (cur) {",
 		"                case 4: askip = 0; afill = count; break;",
+		// The FP64 arm exists too and arms the counter unconditionally: this schema
+		// declares no fp64 array, so an fp64 header at ANY id discards its elements.
+		"        else if (kind == ArrayKind.FP64) {\n            askip = count;\n            switch (cur) {",
 		// Discarded at the top of every callback an array shares with a scalar.
 		"    public void unsigned(int id, long value) {\n        // Drop an element of an array",
 		"    public void signed(int id, long value) {\n        // Drop an element of an array",
@@ -313,10 +317,15 @@ func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 			t.Errorf("M.java missing §7.3 array-skip guard %q", want)
 		}
 	}
-	// The fp32 array is armed in the FIXLEN branch, never grouped with the integer
+	// The fp32 array is armed in the FP32 branch, never grouped with the integer
 	// arms — id 4 must not appear alongside ids 2/3 under UNSIGNED/SIGNED.
 	if strings.Contains(m, "case 2: case 3: case 4: askip = 0") {
-		t.Error("an fp32 array must be armed under FIXLEN, not the integer arm")
+		t.Error("an fp32 array must be armed under FP32, not the integer arm")
+	}
+	// The collapsed fixlen kind is gone from the ABI (generator#259): naming it
+	// would not compile against the corelib.
+	if strings.Contains(m, "ArrayKind.FIXLEN") {
+		t.Error("ArrayKind.FIXLEN no longer exists; arrays must be keyed by FP32/FP64 (generator#259)")
 	}
 	// The unsigned- and signed-array kinds are NOT one case: an unsigned-declared
 	// and a signed-declared array id must never disarm each other (generator#254).
@@ -364,7 +373,7 @@ messages:
 		// The kind test fronts the allocation AND precedes the schema bound.
 		`case 0: if (kind != ArrayKind.UNSIGNED) break; if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ua: array count above schema capacity 5")); m.ua = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
 		`case 1: if (kind != ArrayKind.SIGNED) break; if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ia: array count above schema capacity 5")); m.ia = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
-		`case 2: if (kind != ArrayKind.FIXLEN) break; if (count > 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "fa: array count above schema capacity 3")); m.fa = new float[Math.min(count, ARRAY_INIT_CAP)]; break;`,
+		`case 2: if (kind != ArrayKind.FP32) break; if (count > 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "fa: array count above schema capacity 3")); m.fa = new float[Math.min(count, ARRAY_INIT_CAP)]; break;`,
 		// A boolean array is a List: clearing it is decoding into it too, so the
 		// kind test fronts the clear as well. boolean maps to the UNSIGNED kind.
 		`case 3: if (kind != ArrayKind.UNSIGNED) break; if (count > 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ba: array count above schema capacity 2")); m.ba.clear(); break;`,
@@ -387,6 +396,57 @@ messages:
 	// skipped, not a false INVALID.
 	if strings.Contains(m, `case 0: if (count > 5)`) {
 		t.Error("the schema bound must sit BEHIND the §7.3 kind test (generator#254)")
+	}
+}
+
+// TestJavaFixlenArrayKindPerSubtype: generator#259 / Crucible F-0042. A fixlen
+// array header carries a second word (the fixlen_word) naming its element
+// subtype, and CORELIB_PLAN §4.8 fixes the decode order so the array is announced
+// only AFTER that word has been read — count under the format ceiling first, then
+// the subtype, then MESSAGE_SPEC §7.3, and only then a schema bound. corelib-java
+// therefore dropped the collapsed ArrayKind.FIXLEN and reports FP32 / FP64.
+//
+// Codegen has to key the arms by subtype to match. Two things are pinned:
+//  1. a declared fp32[N] appears ONLY under the FP32 arm and a declared fp64[N]
+//     ONLY under FP64, so an fp64 header at the fp32 slot leaves the discard
+//     counter armed (its elements are dropped) and never touches the field;
+//  2. the schema `count > N` bound stays INSIDE the matched arm, behind the kind
+//     test, so an over-count header of the OTHER subtype is skipped rather than
+//     rejected as a false INVALID.
+func TestJavaFixlenArrayKindPerSubtype(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      fa: { id: 0, type: array, items: { type: fp32, count: 3 } }\n" +
+		"      da: { id: 1, type: array, items: { type: fp64, count: 4 } }\n" +
+		"      ua: { id: 2, type: array, items: { type: u32, count: 5 } }\n"
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+	for _, want := range []string{
+		// One arm per subtype, each arming the discard counter for every id that
+		// does not declare an array of exactly that subtype.
+		"        else if (kind == ArrayKind.FP32) {\n            askip = count;\n            switch (cur) {",
+		"        else if (kind == ArrayKind.FP64) {\n            askip = count;\n            switch (cur) {",
+		// The kind test fronts the allocation and the schema bound sits behind it.
+		`case 0: if (kind != ArrayKind.FP32) break; if (count > 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "fa: array count above schema capacity 3")); m.fa = new float[Math.min(count, ARRAY_INIT_CAP)]; break;`,
+		`case 1: if (kind != ArrayKind.FP64) break; if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "da: array count above schema capacity 4")); m.da = new double[Math.min(count, ARRAY_INIT_CAP)]; break;`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing fixlen subtype arm %q", want)
+		}
+	}
+	// The two fixlen ids must never share an arm: grouping them is exactly the bug
+	// the collapsed FIXLEN kind caused — an fp64 header sizing a declared float[].
+	if strings.Contains(m, "case 0: case 1: askip = 0") {
+		t.Error("an fp32 and an fp64 array must not disarm the same arm (generator#259)")
+	}
+	if strings.Contains(m, "ArrayKind.FP32 || kind == ArrayKind.FP64") {
+		t.Error("FP32 and FP64 must be separate arms (generator#259)")
+	}
+	// Nothing may still name the removed collapsed kind.
+	if strings.Contains(m, "ArrayKind.FIXLEN") {
+		t.Error("ArrayKind.FIXLEN was removed from the corelib ABI (generator#259)")
+	}
+	// The bound must not float ahead of the kind test on either fixlen path.
+	if strings.Contains(m, `case 0: if (count > 3)`) || strings.Contains(m, `case 1: if (count > 4)`) {
+		t.Error("the schema count bound must sit INSIDE the matched kind arm (generator#259)")
 	}
 }
 

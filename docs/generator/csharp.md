@@ -56,7 +56,7 @@ A schema that declares no string at all gets an **empty** `String(...)` body —
 every string reaching it is skipped by definition, and decoding one only to drop
 it is the same violation.
 
-## §7.3: a mis-typed array header (issues #183, #193, #254)
+## §7.3: a mis-typed array header (issues #183, #193, #254, #259)
 
 MESSAGE_SPEC **§7.3** skips a field whose header wire type contradicts its
 declared type. This backend's corelib settles almost every case *structurally* —
@@ -80,7 +80,8 @@ maps them (#254):
 |---|---|---|
 | `u8`…`u64`, `boolean`, `bitfield` | `ArrayKind.Unsigned` | `Unsigned()` |
 | `i8`…`i64`, `enum`               | `ArrayKind.Signed`   | `Signed()` |
-| `fp32`, `fp64`                    | `ArrayKind.Fixlen`   | `Fp32()` / `Fp64()` |
+| `fp32`                            | `ArrayKind.Fp32`     | `Fp32()` |
+| `fp64`                            | `ArrayKind.Fp64`     | `Fp64()` |
 
 Arming per kind is only half of the rule. §7.3 also forbids decoding the payload
 **into the declared field**, and *sizing* the destination is decoding into it: an
@@ -93,9 +94,30 @@ order is normative: the bound applies only to a field that survives §7.3, so an
 over-count *mis-typed* array is skipped rather than rejected as a false
 `InvalidMessage`.
 
-The fixlen **subtype** (fp32 vs fp64) is not visible in `ArrayBegin` —
-`ArrayKind.Fixlen` collapses both — so a subtype contradiction is caught downstream,
-where the element lands in `Fp32()` or `Fp64()` and finds no fill arm.
+### The fixlen subtype is part of the key (issue #259)
+
+A fixlen array carries a second header word, the `fixlen_word`, naming its element
+*subtype*. CORELIB_PLAN **§4.8** fixes the decode order around it: read the element
+count (format ceiling only, allocating nothing), read the `fixlen_word`, and only
+then offer the field — because a subtype that contradicts the declared element type
+makes the field a §7.3 **skip**, and a skipped field's element count is not this
+array's count, so no schema bound may be applied to it.
+
+corelib-cs implements that order: `IVisitor.ArrayBegin` fires *after* the
+`fixlen_word`, and `ArrayKind` names the subtype (`Fp32 = 2`, `Fp64 = 3`) instead of
+one collapsed `Fixlen` category. So the generated arms are keyed by subtype exactly
+as they are keyed `Unsigned` apart from `Signed`: a declared `fp32[N]` appears only
+under `ArrayKind.Fp32`, a declared `fp64[N]` only under `ArrayKind.Fp64`, in both
+`kind switch` blocks and in the `if (kind != ArrayKind.X) break;` clause fronting
+the allocation arm.
+
+The bound stays **inside** the matched arm, behind that kind test. An fp64 header
+arriving at an `fp32[4]`-declared id therefore takes the skip path whatever its
+count says: the declared `float[]` is not sized, cleared or allocated, the `count`
+bound is never consulted, and `askip` discards the elements that follow. Hoisting
+the bound out — or folding the two subtypes back into one arm — turns an
+over-count fp64 header at an fp32 slot into a false `InvalidMessage` and lets a
+`float[]` be sized from a header that was never this field's value.
 
 ## Arrays — `count` is a capacity
 

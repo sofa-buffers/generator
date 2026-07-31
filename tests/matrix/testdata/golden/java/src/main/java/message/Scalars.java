@@ -171,7 +171,12 @@ class ScalarsVisitor implements Visitor {
             switch (cur) {
             }
         }
-        else if (kind == ArrayKind.FIXLEN) {
+        else if (kind == ArrayKind.FP32) {
+            askip = count;
+            switch (cur) {
+            }
+        }
+        else if (kind == ArrayKind.FP64) {
             askip = count;
             switch (cur) {
             }

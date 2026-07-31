@@ -139,7 +139,10 @@ internal sealed class ScalarsVisitor : IVisitor {
             ArrayKind.Signed => (cur, id) switch {
                 _ => count,
             },
-            ArrayKind.Fixlen => (cur, id) switch {
+            ArrayKind.Fp32 => (cur, id) switch {
+                _ => count,
+            },
+            ArrayKind.Fp64 => (cur, id) switch {
                 _ => count,
             },
             _ => 0,
@@ -151,7 +154,10 @@ internal sealed class ScalarsVisitor : IVisitor {
             ArrayKind.Signed => (cur, id) switch {
                 _ => 0,
             },
-            ArrayKind.Fixlen => (cur, id) switch {
+            ArrayKind.Fp32 => (cur, id) switch {
+                _ => 0,
+            },
+            ArrayKind.Fp64 => (cur, id) switch {
                 _ => 0,
             },
             _ => 0,

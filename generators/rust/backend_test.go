@@ -240,11 +240,11 @@ messages:
 		"lim: bool,",
 		// Unbounded array: count checked in array_begin before any elements land,
 		// and the element store is dropped once the flag is set.
-		"(_Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.arr.clear() },",
+		"(_, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.arr.clear() },",
 		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
-		"(_Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
+		"(_, _Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
 		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
@@ -768,9 +768,11 @@ messages:
 	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
-			"(_Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear() },",
-			"(_Loc::Root, 2) => { if count > 3 { self.inv = true; return; } self.m.nodef.clear() },",
-			"(_Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear() },",
+			"(_, _Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear() },",
+			"(_, _Loc::Root, 2) => { if count > 3 { self.inv = true; return; } self.m.nodef.clear() },",
+			// The fp32 array's arm is keyed to its own subtype, so an fp64 header
+			// at id 3 never reaches this bound (generator#259).
+			"(ArrayKind::Fp32, _Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear() },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -819,8 +821,8 @@ messages:
 		for _, want := range []string{
 			// row id vs the OUTER count, then element count vs the INNER count,
 			// both before the row is opened or grown, both disarming the fill.
-			"(_Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {",
-			"(_Loc::Root_fmat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 4 { self.inv = true; self.afill = 0; return; } while self.m.fmat.len() <= id as usize {",
+			"(_, _Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {",
+			"(ArrayKind::Fp32, _Loc::Root_fmat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 4 { self.inv = true; self.afill = 0; return; } while self.m.fmat.len() <= id as usize {",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -842,9 +844,9 @@ messages:
 // callbacks a lone scalar uses, so the id dispatch alone cannot tell them apart;
 // array_begin arms `askip` with the announced count and the scalar callbacks
 // discard exactly that many. A legitimately declared array of the matching
-// element kind disarms it (integer arrays under Unsigned/Signed, fp arrays under
-// Fixlen), and a schema with no native array at all still emits the guard so a
-// stray array header is skipped.
+// element kind disarms it (integer arrays under Unsigned/Signed, fp32 arrays
+// under Fp32, fp64 arrays under Fp64 -- generator#259), and a schema with no
+// native array at all still emits the guard so a stray array header is skipped.
 func TestRustArrayAtScalarIdSkips(t *testing.T) {
 	const src = `
 version: 1
@@ -864,10 +866,11 @@ messages:
 			"if self.askip > 0 { self.askip -= 1; return; }", // consumed by unsigned/signed/fp32/fp64
 			"self.askip = match kind {",
 			"ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {",
-			"(_Loc::Root, 2) => 0,", // declared u32 array: elements store normally
-			"(_Loc::Root, 3) => 0,", // declared i32 array: likewise
-			"(_Loc::Root, 4) => 0,", // declared fp32 array: disarms under the fp (_) branch (#193)
-			"_ => count,",           // every other id (scalar or unknown) discards
+			"(_Loc::Root, 2) => 0,",                     // declared u32 array: elements store normally
+			"(_Loc::Root, 3) => 0,",                     // declared i32 array: likewise
+			"ArrayKind::Fp32 => match (self.cur, id) {", // subtype-keyed fixlen arm (#259)
+			"(_Loc::Root, 4) => 0,",                     // declared fp32 array: disarms under Fp32 (#193)
+			"_ => count,",                               // every other id (scalar or unknown) discards
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing §7.3 array-at-scalar guard %q:\n%s", cfg, want, m)
@@ -923,6 +926,115 @@ messages:
 		if !strings.Contains(nostdScalar, "require!") || !strings.Contains(nostdScalar, cap) {
 			t.Errorf("no_std scalar-only require!() must assert full wire-type set incl %q (generator#215):\n%s", cap, nostdScalar)
 		}
+	}
+}
+
+// TestRustFixlenArrayArmsAreKeyedByElementSubtype: a fixlen array header is
+// routed by its ELEMENT SUBTYPE, not by a collapsed "fixlen" category
+// (CORELIB_PLAN §4.8, generator#259 / Crucible F-0042).
+//
+// The corelib now reads count -> fixlen_word -> array_begin, so `kind` names the
+// subtype actually on the wire (ArrayKind::Fp32 / ArrayKind::Fp64, ordinals 2 and
+// 3). A declared fp32[N] must therefore appear ONLY under the Fp32 arm and a
+// declared fp64[N] ONLY under Fp64, in all three of array_begin's matches.
+//
+// The defect this pins: with one collapsed fp arm, an fp64 header arriving at a
+// declared fp32[N] id disarmed the discard counter, cleared the declared
+// container and applied that field's schema `count` as a bound — so a header that
+// §7.3 says is a SKIPPED field could both wipe the field's value and reject the
+// whole message as INVALID on a bound that was never its bound. The count word is
+// read before the fixlen_word, so the bound has to sit INSIDE the kind-matched
+// arm; ahead of the kind test it decides on evidence the subtype later
+// contradicts.
+func TestRustFixlenArrayArmsAreKeyedByElementSubtype(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      f32s: { id: 1, type: array, items: { type: fp32, count: 4 } }
+      f64s: { id: 2, type: array, items: { type: fp64, count: 6 } }
+      ints: { id: 3, type: array, items: { type: u32, count: 8 } }
+`
+	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
+		m := moduleFromYAML(t, src, cfg)
+		for _, want := range []string{
+			// Skip counter: each fp field disarms only under its own subtype's arm,
+			// so the other subtype falls through to `_ => count` and is discarded.
+			"ArrayKind::Fp32 => match (self.cur, id) {\n                (_Loc::Root, 1) => 0,\n                _ => count,\n            },",
+			"ArrayKind::Fp64 => match (self.cur, id) {\n                (_Loc::Root, 2) => 0,\n                _ => count,\n            },",
+			// Fill counter: same keying, so a contradicting header arms nothing.
+			"ArrayKind::Fp32 => match (self.cur, id) {\n                (_Loc::Root, 1) => count,\n                _ => 0,\n            },",
+			"ArrayKind::Fp64 => match (self.cur, id) {\n                (_Loc::Root, 2) => count,\n                _ => 0,\n            },",
+			// Target match: keyed by (kind, loc, id), with the schema `count` bound
+			// and the clear both INSIDE the kind-matched arm.
+			"match (kind, self.cur, id) {",
+			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 4 { self.inv = true; return; } self.m.f32s.clear() },",
+			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; return; } self.m.f64s.clear() },",
+			// Integer arrays are unaffected: no second header word, so no subtype to
+			// contradict.
+			"(_, _Loc::Root, 3) => { if count > 8 { self.inv = true; return; } self.m.ints.clear() },",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing subtype-keyed fixlen arm %q:\n%s", cfg, want, m)
+			}
+		}
+		// The declared fp32 field must not be reachable from an Fp64 header, and
+		// vice versa — the whole point of the split.
+		for _, bad := range []string{
+			"(ArrayKind::Fp64, _Loc::Root, 1)",
+			"(ArrayKind::Fp32, _Loc::Root, 2)",
+			"(_, _Loc::Root, 1)",
+			"(_, _Loc::Root, 2)",
+			"ArrayKind::Fixlen",
+		} {
+			if strings.Contains(m, bad) {
+				t.Errorf("message.rs (%v) must not contain %q -- a fixlen arm is keyed to one subtype:\n%s", cfg, bad, m)
+			}
+		}
+		// Both subtypes named => {Unsigned, Signed, Fp32, Fp64} is exhaustive, so
+		// no trailing wildcard (it would be an unreachable pattern warning in the
+		// generated crate).
+		if strings.Contains(m, "            _ => count,\n        };") {
+			t.Errorf("message.rs (%v) must not emit an unreachable catch-all when both fp arms are named:\n%s", cfg, m)
+		}
+	}
+
+	// A schema that declares only ONE fp subtype must name only that variant and
+	// keep the catch-all. Under corelib-rs-no-std both Fp32 and Fp64 are
+	// #[cfg(feature = "fixlen")], so naming a variant the crate has no array for
+	// is a needless dependency on a feature the schema does not otherwise force;
+	// the catch-all arms the discard counter for the absent subtype instead.
+	only32 := moduleFromYAML(t, `
+version: 1
+messages:
+  m: { payload: { f: { id: 1, type: array, items: { type: fp32, count: 4 } } } }
+`, map[string]any{"corelib": "rs-no-std"})
+	if !strings.Contains(only32, "ArrayKind::Fp32 => match (self.cur, id) {") {
+		t.Errorf("fp32-only message.rs must name the Fp32 arm:\n%s", only32)
+	}
+	if strings.Contains(only32, "ArrayKind::Fp64") {
+		t.Errorf("fp32-only message.rs must not name Fp64 (feature-gated under no_std):\n%s", only32)
+	}
+	if !strings.Contains(only32, "            _ => count,\n        };") {
+		t.Errorf("fp32-only message.rs must keep the catch-all that discards an fp64 header:\n%s", only32)
+	}
+
+	// A schema with NO fp array at all names neither variant: the generated crate
+	// must compile under no_std whatever fixlen provisioning it ends up with, and
+	// an fp header at any id is discarded through the catch-all.
+	noFP := moduleFromYAML(t, `
+version: 1
+messages:
+  m: { payload: { a: { id: 1, type: array, items: { type: u16, count: 4 } } } }
+`, map[string]any{"corelib": "rs-no-std"})
+	for _, bad := range []string{"ArrayKind::Fp32", "ArrayKind::Fp64"} {
+		if strings.Contains(noFP, bad) {
+			t.Errorf("fp-free message.rs must not name %q:\n%s", bad, noFP)
+		}
+	}
+	if !strings.Contains(noFP, "            _ => count,\n        };") {
+		t.Errorf("fp-free message.rs must discard an fp array header through the catch-all:\n%s", noFP)
 	}
 }
 
@@ -1083,7 +1195,7 @@ messages:
 		}
 		// Matrix rows: array_begin opens the row the id names, and elements push into
 		// THAT row rather than into the last one appended.
-		if !strings.Contains(got, "(_Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {") ||
+		if !strings.Contains(got, "(_, _Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {") ||
 			!strings.Contains(got, "self._ix1 = id as usize; },") {
 			t.Errorf("(%v) a matrix row must be opened at out[id], bounded by the outer count:\n%s", cfg, got)
 		}

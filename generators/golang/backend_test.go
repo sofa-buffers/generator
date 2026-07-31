@@ -173,10 +173,14 @@ func TestGoHeaderVisitorReject(t *testing.T) {
 	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
 	msg := files["m.go"]
 	for _, want := range []string{
-		"func (m *M) ArrayBegin(id sofab.ID, count int) error {",
+		"func (m *M) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error {",
 		"func (m *M) FixlenHeader(id sofab.ID, subtype int, length int) error {",
-		"if count > 4 {", // native u32 array (id 0) count bound
-		"if count > 3 {", // fixlen fp32 array (id 1) count bound
+		// Each count guard is gated on the wire ArrayKind an array of the DECLARED
+		// element type maps to: ArrayBegin fires for any array header at a field id,
+		// and a contradicting kind must be skipped, not measured against this
+		// field's capacity (§7.3, generator#259).
+		"if kind == sofab.ArrayUnsigned && count > 4 {", // native u32 array (id 0)
+		"if kind == sofab.ArrayFp32 && count > 3 {",     // fixlen fp32 array (id 1)
 		// Each maxlen guard is gated on the DECLARED fixlen subtype (2 = string,
 		// 3 = blob): FixlenHeader fires for any subtype at a field id, and a
 		// contradicting one must be skipped, not measured against this field's
@@ -188,10 +192,11 @@ func TestGoHeaderVisitorReject(t *testing.T) {
 			t.Errorf("m.go missing header-visitor guard %q:\n%s", want, msg)
 		}
 	}
-	// The bound must never be enforced on length alone — an un-gated compare is
-	// exactly the generator#224 defect (an fp64 landing on a `maxlen: 4` blob was
-	// rejected as INVALID instead of skipped).
-	for _, notWant := range []string{"if length > 8 {", "if length > 16 {"} {
+	// Neither bound may ever be enforced on the wire count/length alone — an
+	// un-gated compare is exactly the generator#224 (maxlen) and generator#259
+	// (count) defect: a fixlen value or array whose subtype contradicts the
+	// declaration was rejected as INVALID instead of skipped.
+	for _, notWant := range []string{"if length > 8 {", "if length > 16 {", "if count > 4 {", "if count > 3 {"} {
 		if strings.Contains(msg, notWant) {
 			t.Errorf("m.go: maxlen header guard %q is not gated on the fixlen subtype (generator#224):\n%s", notWant, msg)
 		}
@@ -223,11 +228,78 @@ func TestGoHeaderVisitorReject(t *testing.T) {
 		{"count only", "version: 1\nmessages:\n  Q:\n    payload:\n      a: { id: 0, type: array, items: { type: u32, count: 4 } }\n"},
 	} {
 		out := genGo(t, schemaFromYAMLString(t, tc.src), map[string]any{"package": "q"})["q.go"]
-		for _, want := range []string{"func (m *Q) ArrayBegin(id sofab.ID, count int) error {", "func (m *Q) FixlenHeader(id sofab.ID, subtype int, length int) error {"} {
+		for _, want := range []string{"func (m *Q) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error {", "func (m *Q) FixlenHeader(id sofab.ID, subtype int, length int) error {"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("q.go (%s): a bounded type must implement the whole HeaderVisitor, missing %q:\n%s", tc.name, want, out)
 			}
 		}
+	}
+}
+
+// TestGoFixlenArrayKindPerSubtype pins generator#259 / Crucible F-0042: a fixlen
+// array's element SUBTYPE decides whether the header is the declared field's
+// value at all, so the schema count bound may only be applied to a header whose
+// kind matches what the schema declared at that id. fp32 and fp64 are therefore
+// separate kinds (the corelib dropped the collapsed FIXLEN kind and reports
+// sofab.ArrayFp32 / sofab.ArrayFp64 after reading the fixlen_word), and each
+// declared array's guard names exactly one of them.
+//
+// The defect this pins: an fp64 array of 8 elements arriving at a declared
+// `array<fp32, count 5>` was rejected as INVALID by the un-gated `count > 5`,
+// where MESSAGE_SPEC §7.3 requires it to be skipped and the field left alone.
+func TestGoFixlenArrayKindPerSubtype(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      fa: { id: 0, type: array, items: { type: fp32, count: 5 } }\n" +
+		"      da: { id: 1, type: array, items: { type: fp64, count: 7 } }\n" +
+		"      ua: { id: 2, type: array, items: { type: u16,  count: 9 } }\n" +
+		"      ia: { id: 3, type: array, items: { type: i16,  count: 9 } }\n" +
+		"      ea: { id: 4, type: array, items: { type: enum, count: 2, enum: { A: 0, B: 1 } } }\n" +
+		"      ba: { id: 5, type: array, items: { type: boolean, count: 2 } }\n"
+	msg := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})["m.go"]
+	for _, want := range []string{
+		// A declared fp32 array is bounded only under ArrayFp32, a declared fp64
+		// array only under ArrayFp64 — never the other way round, and never on a
+		// count that arrived under the sibling subtype.
+		"case 0:\n\t\tif kind == sofab.ArrayFp32 && count > 5 {",
+		"case 1:\n\t\tif kind == sofab.ArrayFp64 && count > 7 {",
+		// Integer arrays are keyed the same way, on the single wire kind their
+		// element type maps to; enum rides the signed array wire type and
+		// boolean the unsigned one.
+		"case 2:\n\t\tif kind == sofab.ArrayUnsigned && count > 9 {",
+		"case 3:\n\t\tif kind == sofab.ArraySigned && count > 9 {",
+		"case 4:\n\t\tif kind == sofab.ArraySigned && count > 2 {",
+		"case 5:\n\t\tif kind == sofab.ArrayUnsigned && count > 2 {",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("m.go missing kind-keyed count bound %q:\n%s", want, msg)
+		}
+	}
+	// The collapsed kind is gone from the corelib ABI: nothing may name it, and no
+	// arm may accept both fixlen subtypes at one declared field.
+	for _, notWant := range []string{
+		"sofab.ArrayFixlen",
+		"sofab.ArrayFp32 || kind == sofab.ArrayFp64",
+		"sofab.ArrayFp64 || kind == sofab.ArrayFp32",
+	} {
+		if strings.Contains(msg, notWant) {
+			t.Errorf("m.go: a fixlen array must be keyed by its own subtype alone, found %q:\n%s", notWant, msg)
+		}
+	}
+	// Each declared fixlen array names its own kind and only its own: the fp32
+	// field must not appear under ArrayFp64, nor the fp64 field under ArrayFp32.
+	for _, tc := range []struct {
+		kind string
+		n    int
+	}{{"sofab.ArrayFp32", 1}, {"sofab.ArrayFp64", 1}} {
+		if got := strings.Count(msg, tc.kind); got != tc.n {
+			t.Errorf("m.go: %s named %d times, want %d:\n%s", tc.kind, got, tc.n, msg)
+		}
+	}
+	// And the hook still carries the kind — a stale signature would satisfy
+	// sofab.HeaderVisitor structurally nowhere, but it would compile locally and
+	// silently drop every header reject, so pin the exact one the corelib declares.
+	if !strings.Contains(msg, "func (m *M) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error {") {
+		t.Errorf("m.go: ArrayBegin must take the wire ArrayKind:\n%s", msg)
 	}
 }
 

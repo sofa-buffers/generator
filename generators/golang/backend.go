@@ -872,10 +872,12 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			if fld.HasCount {
 				guard = fmt.Sprintf("if len(v) > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", fld.Count)
 				// Native arrays (unsigned/signed/fp32/fp64) fire ArrayBegin at the
-				// count word; wrapper-sequence arrays descend via BeginSequence and
+				// header; wrapper-sequence arrays descend via BeginSequence and
 				// have no header hook, so bound them at the collector's cap instead.
+				// The bound is keyed on the wire kind of the DECLARED element type
+				// (generator#259 / F-0042) — see overcountHdrGuard.
 				if isNativeArrayElem(fld.Elem) {
-					arrBegin = append(arrBegin, arm(fld.ID, overcountHdrGuard(fld.Count)))
+					arrBegin = append(arrBegin, arm(fld.ID, overcountHdrGuard(goArrayWireKind(fld.Elem), fld.Count)))
 				}
 			}
 			// The wire count M IS the array's length (MESSAGE_SPEC §3): the M
@@ -911,9 +913,14 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	// Optional HeaderVisitor extension (corelib sofab.HeaderVisitor): emitted only
 	// when a field declares a count/maxlen bound, so a type without bounds does not
 	// implement the interface and the decoder's max-speed path is unchanged
-	// (generator#216). ArrayBegin/FixlenHeader fire at the header word, before the
-	// truncation check, so an over-count/over-maxlen field that is also truncated is
+	// (generator#216). ArrayBegin/FixlenHeader fire at the array/fixlen header, before
+	// the truncation check, so an over-count/over-maxlen field that is also truncated is
 	// INVALID, not INCOMPLETE (§5.2 anti-folding).
+	//
+	// Both hooks fire for ANY wire kind arriving at a bounded field id, so both arm
+	// bodies gate their compare on the kind the schema declared — ArrayBegin on
+	// sofab.ArrayKind (generator#259), FixlenHeader on the fixlen subtype
+	// (generator#224). A contradicting kind is a §7.3 skip, not a bound violation.
 	//
 	// HeaderVisitor declares BOTH methods, and the cursor reaches the hooks through
 	// a single `v.(HeaderVisitor)` assertion — so emitting only the one kind a type
@@ -922,7 +929,7 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	// with no arms is an empty switch (a no-op returning nil), which costs a call per
 	// bounded field and nothing on the bound-free max-speed path.
 	if len(arrBegin) > 0 || len(fixHdr) > 0 {
-		emitIDSwitchAlways(f, recv, "ArrayBegin(id sofab.ID, count int) error", arrBegin)
+		emitIDSwitchAlways(f, recv, "ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error", arrBegin)
 		emitIDSwitchAlways(f, recv, "FixlenHeader(id sofab.ID, subtype int, length int) error", fixHdr)
 	}
 
@@ -1023,11 +1030,48 @@ func capOf(hasCount bool, count int64) int64 {
 }
 
 // overcountHdrGuard is the ArrayBegin arm body rejecting a native array whose
-// wire element count exceeds the schema count N as INVALID, at the count word
+// wire element count exceeds the schema count N as INVALID, at the array header
 // (generator#216). Reused for every native-array kind (unsigned/signed/fp32/fp64
 // arrays all fire ArrayBegin). gofmt fixes the indentation on emit.
-func overcountHdrGuard(n int64) string {
-	return fmt.Sprintf("if count > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", n)
+//
+// The compare is gated on `kind`, the element kind the wire header declares, and
+// fires only when it matches the kind the schema declared at this id
+// (generator#259 / Crucible F-0042, CORELIB_PLAN §4.8). ArrayBegin fires for ANY
+// array header at a field id — the corelib resolves the wire kind but cannot know
+// the declared one, which is schema knowledge only the generated code has — and
+// an array whose element kind contradicts the declaration is SKIPPED under
+// MESSAGE_SPEC §7.3: the field was never that array's value, so the array's
+// element count is not this field's count and the schema bound must not be
+// applied to it. Un-gated, an fp64 array of 8 elements landing on a declared
+// `array<fp32, count 5>` was rejected as INVALID instead of skipped.
+//
+// This is also why the corelib defers the hook for a fixlen array until after the
+// fixlen_word: the kind handed in is the real element subtype, never a guess. A
+// message that ends between the count word and the fixlen_word is therefore
+// INCOMPLETE — no bound can be judged yet — which is the intended verdict.
+func overcountHdrGuard(kind string, n int64) string {
+	return fmt.Sprintf("if kind == sofab.%s && count > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", kind, n)
+}
+
+// goArrayWireKind is the sofab.ArrayKind constant naming the wire element kind an
+// array of `elem` is encoded with — what ArrayBegin reports for a header that IS
+// this field's value. fp32 and fp64 are distinct kinds (they are two subtypes of
+// the one fixlen-array wire type, told apart by the fixlen_word); bool/bitfield
+// ride the unsigned array wire type and enum the signed one, exactly as
+// isUnsignedNativeArray/isSignedNativeArray group them for the payload callbacks.
+// The corelib spells these constants with an Array prefix because the bare
+// Unsigned/Signed names are taken by its element-type constraints.
+func goArrayWireKind(elem ir.Kind) string {
+	switch {
+	case elem == ir.KindFP32:
+		return "ArrayFp32"
+	case elem == ir.KindFP64:
+		return "ArrayFp64"
+	case isSignedNativeArray(elem):
+		return "ArraySigned"
+	default:
+		return "ArrayUnsigned"
+	}
 }
 
 // The fixlen subtype tag carried in the low 3 bits of a fixlen word (MESSAGE_SPEC

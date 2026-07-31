@@ -212,6 +212,66 @@ callback. Three consequences the generated code relies on:
   "generated guard, sticky flag" model. The receiver-side `max_dyn_*` limits are
   enforced by the corelib itself (a `DecoderLimits`), the Go/Python/TS family.
 
+#### Header hooks, and why each bound sits inside a kind test (issue #259)
+
+A schema bound is rejected at the **header word**, before the corelib's
+truncation check, so a field that is both over-bound and truncated is INVALID
+rather than INCOMPLETE (MESSAGE_SPEC §5.2, generator#216). Two hooks carry it:
+
+| hook | fires at | guard |
+| --- | --- | --- |
+| `onArrayBegin(id, kind, count)` | the array header | `count > N` for a `count: N` native array |
+| `onFixlenHeader(id, subtype, length)` | the fixlen length word | `length > maxlen` for a bounded `string`/`blob` |
+
+Both fire for **whatever** arrived at a field id. The corelib resolves the wire
+kind/subtype but cannot know the *declared* one — that is schema knowledge only
+the generated code holds — so both guards are written as a conjunction, the
+declared kind first:
+
+```dart
+@override
+void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
+  switch (id) {
+    case 0:
+      if (kind == sofab.ArrayKind.fp32 && count > 3) e.inv = true;   // fp32[3]
+      return;
+    case 1:
+      if (kind == sofab.ArrayKind.fp64 && count > 5) e.inv = true;   // fp64[5]
+      return;
+  }
+}
+```
+
+The nesting is the point. An array whose element kind contradicts the
+declaration **was never this field's value** (§7.3): it is a skipped field, so
+its element count is not this field's count and must not be measured against
+`N`. Bounding first would turn a skippable contradiction into INVALID — an
+`fp64` array header announcing 8 elements landing on the declared `fp32[3]`
+above must be *skipped* and the message *accepted*.
+
+That is also why `sofab.ArrayKind` keeps `fp32` and `fp64` apart instead of one
+collapsed `fixlen` (CORELIB_PLAN §4.8): a fixlen array's `count` word precedes
+its `fixlen_word`, so a hook fired between the two words could only report "some
+fixlen array" and the test above could not be written at all. `corelib-dart`
+fires `onArrayBegin` **past** the `fixlen_word` for `arrayFixlen`, carrying the
+real element subtype; integer arrays have no second word and keep firing on the
+count word. A message ending *between* the two words is INCOMPLETE, not INVALID
+— the decoder cannot yet know which field it is looking at.
+
+Only the guard needs the explicit test. The **skip** stays structural, as
+everywhere else in this backend: the whole-array callbacks
+(`onUnsignedArray` / `onSignedArray` / `onFp32Array` / `onFp64Array`) are already
+kind-dispatched by the corelib, so a contradicting array lands in a callback with
+no arm for that id and evaporates — leaving a correctly typed earlier occurrence
+of the same id intact (§7.4). The ports whose corelibs stream array *elements*
+(C#, Rust, Zig) need an explicit discard counter here; Dart does not. Nothing in
+`onArrayBegin` sizes, clears or allocates the declared field either, so a skipped
+header cannot disturb it.
+
+Wrapper-sequence arrays (`string`/`blob`/`struct`/`union`/nested-array elements)
+fire no array header at all — they descend through `onSequenceStart` and are
+bounded at the collector's `cap` instead.
+
 ### Reusing a destination
 
 `tryDecode(data, out)` lets the caller supply the destination, so the same object

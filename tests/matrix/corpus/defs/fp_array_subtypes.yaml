@@ -1,0 +1,27 @@
+# Both fixlen array element subtypes in ONE message.
+#
+# A fixlen array header names its element subtype (fp32 or fp64), and a backend
+# keys each declared array's decode arm to its own subtype so a header of the
+# other one is skipped rather than measured against this field's `count`. When a
+# message declares only one subtype the emitted match still needs a catch-all for
+# the other; when it declares BOTH, the four element kinds are exhaustive and the
+# catch-all is dropped. That second form is what this definition compiles -- no
+# other corpus definition declares an fp32 array and an fp64 array together, so
+# without it a regression in the exhaustive form would surface at a user's build
+# rather than in CI.
+#
+# Counted arrays only, so every target sweeps it: the fixed-capacity profiles
+# (c, cpp with corelib c-cpp, rust no_std) can size every field.
+version: 1
+messages:
+  FpArrays:
+    summary: A message declaring both fixlen array element subtypes.
+    payload:
+      singles: { id: 0, type: array, items: { type: fp32, count: 4 }, description: "32-bit float elements." }
+      doubles: { id: 1, type: array, items: { type: fp64, count: 3 }, description: "64-bit float elements." }
+      # An integer array beside them: its arm must stay reachable for an integer
+      # header while the two fp arms are keyed by subtype.
+      counts:  { id: 2, type: array, items: { type: u32, count: 2 } }
+      # Scalars of both widths, so the fp32/fp64 value callbacks are emitted too.
+      one:     { id: 3, type: fp32 }
+      two:     { id: 4, type: fp64 }

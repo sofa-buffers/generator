@@ -525,22 +525,31 @@ func signedArrayElem(k ir.Kind) bool {
 		k == ir.KindEnum
 }
 
-// fpArrayElem reports whether an array element is delivered through the fp
-// callbacks (Fp32/Fp64) — the fixlen array wire type.
-func fpArrayElem(k ir.Kind) bool {
-	return k == ir.KindFP32 || k == ir.KindFP64
-}
+// fp32ArrayElem / fp64ArrayElem report whether an array element is delivered
+// through Fp32() / Fp64() respectively — the two fixlen array wire subtypes.
+// They are deliberately kept apart rather than folded into one "is fp" test:
+// CORELIB_PLAN §4.8 makes the fixlen SUBTYPE part of the header, so an fp64
+// header at an fp32-declared id is a MESSAGE_SPEC §7.3 wire-type contradiction
+// that must be skipped, and a single predicate could not express that
+// (generator#259 / Crucible F-0042).
+func fp32ArrayElem(k ir.Kind) bool { return k == ir.KindFP32 }
+func fp64ArrayElem(k ir.Kind) bool { return k == ir.KindFP64 }
 
 // csArrayWireKind is the ArrayKind an array of `k` is encoded with (MESSAGE_SPEC
-// §1/§3) — the only header kind that may decode into such a field.
+// §1/§3) — the only header kind that may decode into such a field. A fixlen
+// array names its element subtype (Fp32/Fp64), never a collapsed "fixlen"
+// category: the corelib's ArrayKind carries the subtype since CORELIB_PLAN §4.8
+// moved the array-header hook past the fixlen_word (generator#259).
 func csArrayWireKind(k ir.Kind) string {
 	switch {
 	case unsignedArrayElem(k):
 		return "Unsigned"
 	case signedArrayElem(k):
 		return "Signed"
-	case fpArrayElem(k):
-		return "Fixlen"
+	case fp32ArrayElem(k):
+		return "Fp32"
+	case fp64ArrayElem(k):
+		return "Fp64"
 	}
 	return ""
 }

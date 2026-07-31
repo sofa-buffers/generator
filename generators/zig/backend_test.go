@@ -347,7 +347,7 @@ messages:
 		// The over-count reject stays at the count header (generator#216), now
 		// followed by the length reset and gated on the wire kind.
 		"1 => if (kind == .unsigned) { if (count > 5) { self.inv = true; return; } self.m.d.len = 0; },",
-		"4 => if (kind == .fixlen) { if (count > 3) { self.inv = true; return; } self.m.f.len = 0; },",
+		"4 => if (kind == .fp32) { if (count > 3) { self.inv = true; return; } self.m.f.len = 0; },",
 		"5 => if (kind == .signed) { if (count > 2) { self.inv = true; return; } self.m.e.len = 0; },",
 		// The store advances the length: M elements arrive, M is the length.
 		"1 => { if (self.afill != 0) { self.afill -= 1; sofab.arrays.putChecked(&self.m.d.items, &self.ai, @truncate(value), &self.inv); self.m.d.len = self.ai; } },",
@@ -410,7 +410,7 @@ messages:
 		"const max_dyn_string_len: usize = 4096;",
 		// Unbounded fields are guarded at the count/length header, before the
 		// field's storage is taken.
-		"1 => if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.arr = _allocN(u64, self.alloc, count); },",
+		"1 => if (kind == .unsigned) { if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.arr = _allocN(u64, self.alloc, count); } },",
 		"0 => if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.s = chunk; } },",
 		// InvalidMessage (generator#100) takes precedence over LimitExceeded.
 		"if (v.inv) return error.InvalidMessage;",
@@ -596,9 +596,10 @@ func TestZigDeterministic(t *testing.T) {
 // lone scalar uses, so the id dispatch alone cannot tell them apart; arrayBegin
 // arms `askip` with the announced count and the scalar callbacks discard exactly
 // that many. A declared array of the matching element kind disarms it — integer
-// arrays under .unsigned/.signed, fp arrays under .fixlen — and a message with no
-// native array at all still emits arrayBegin purely to arm the guard, with `_`
-// for the unused id, which Zig requires.
+// arrays under .unsigned/.signed, fp arrays under the prong for their own element
+// subtype (.fp32 / .fp64, generator#259) — and a message with no native array at
+// all still emits arrayBegin purely to arm the guard, with `_` for the unused id,
+// which Zig requires.
 func TestZigArrayAtScalarSkip(t *testing.T) {
 	s := buildSchema(t, `
 version: 1
@@ -622,10 +623,11 @@ messages:
 		"pub fn arrayBegin(self: *_dec_M, id: sofab.Id, kind: sofab.ArrayKind, count: usize) void {",
 		"self.askip = switch (kind) {",
 		"            .unsigned, .signed => switch (self.cur) {",
-		"            .fixlen => switch (self.cur) {",
+		"            .fp32 => switch (self.cur) {",
+		"            .fp64 => switch (self.cur) {",
 		"                    2 => 0,", // declared u32 array disarms under .unsigned/.signed
 		"                    3 => 0,", // declared i32 array disarms
-		"                    4 => 0,", // declared fp32 array disarms under .fixlen (#193)
+		"                    4 => 0,", // declared fp32 array disarms under .fp32 (#193, #259)
 		"                    else => count,",
 	} {
 		if !strings.Contains(m, want) {
@@ -655,6 +657,110 @@ messages:
 	if !strings.Contains(scalarOnly, "pub fn arrayBegin(self: *_dec_M, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {") {
 		t.Errorf("scalar-only message.zig must emit arrayBegin with an unused id:\n%s", scalarOnly)
 	}
+}
+
+// TestZigFixlenArrayKindBySubtype: a fixlen array's `count` word precedes its
+// `fixlen_word`, so a receiver cannot know whether the array that arrived IS the
+// declared field's value until the element subtype is in hand. CORELIB_PLAN §4.8
+// therefore fires arrayBegin past the fixlen_word and reports the SUBTYPE —
+// ArrayKind is {unsigned = 0, signed = 1, fp32 = 2, fp64 = 3}, the collapsed
+// `fixlen` member is gone (generator#259 / Crucible F-0042).
+//
+// What the generated arms must do with that:
+//
+//   - a declared fp32[N] is listed ONLY under .fp32, a declared fp64[N] ONLY
+//     under .fp64 — never under both, which is what a collapsed kind forced;
+//   - the schema `count > N` bound sits INSIDE the kind test, so an fp64 header
+//     at the fp32 slot is never measured against the fp32 field's N. Bounding
+//     first would turn a skippable wire-type contradiction (§7.3) into INVALID;
+//   - under the non-matching kind the id disarms nothing: it takes
+//     `else => count`, so the elements are discarded, and the declared field is
+//     not sized, cleared or otherwise touched — a correctly typed earlier
+//     occurrence survives (§7.4).
+func TestZigFixlenArrayKindBySubtype(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      s32: { id: 0, type: fp32 }
+      s64: { id: 1, type: fp64 }
+      a32: { id: 2, type: array, items: { type: fp32, count: 5 } }
+      a64: { id: 3, type: array, items: { type: fp64, count: 7 } }
+      au:  { id: 4, type: array, items: { type: u32, count: 3 } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	for _, want := range []string{
+		// The bound lives behind the kind test, keyed by the field's OWN subtype.
+		"2 => if (kind == .fp32) { if (count > 5) { self.inv = true; return; } self.m.a32.len = 0; },",
+		"3 => if (kind == .fp64) { if (count > 7) { self.inv = true; return; } self.m.a64.len = 0; },",
+		// Integer arrays are untouched by all of this: there is no second word on
+		// that path, so .unsigned/.signed stay one prong.
+		"4 => if (kind == .unsigned) { if (count > 3) { self.inv = true; return; } self.m.au.len = 0; },",
+		// Three prongs cover all four ArrayKind members, so no else prong (Zig
+		// rejects an unreachable one).
+		"        self.askip = switch (kind) {",
+		"        self.afill = switch (kind) {",
+		"            .unsigned, .signed => switch (self.cur) {",
+		"            .fp32 => switch (self.cur) {",
+		"            .fp64 => switch (self.cur) {",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing %q:\n%s", want, m)
+		}
+	}
+	// The collapsed kind is gone from the emitted code entirely.
+	if strings.Contains(m, ".fixlen") {
+		t.Errorf("ArrayKind.fixlen no longer exists in corelib-zig; emitted code must not name it:\n%s", m)
+	}
+
+	// Each fp arm lists its own id and only its own id. Slice out the .fp32 and
+	// .fp64 prongs of the skip arm and check membership in both directions: id 2
+	// (fp32[5]) disarms under .fp32 and NOT under .fp64, id 3 the mirror. That is
+	// the whole fix — under the other prong the id falls to `else => count` and
+	// the array is discarded like one at an unknown id.
+	skip := between(t, m, "self.askip = switch (kind) {", "self.afill = switch (kind) {")
+	fp32Arm := between(t, skip, ".fp32 => switch (self.cur) {", ".fp64 => switch (self.cur) {")
+	fp64Arm := skip[strings.Index(skip, ".fp64 => switch (self.cur) {"):]
+	for _, tc := range []struct {
+		arm, name string
+		want      string // the id that must disarm here
+		notWant   string // the id that must NOT
+	}{
+		{fp32Arm, ".fp32", "2 => 0,", "3 => 0,"},
+		{fp64Arm, ".fp64", "3 => 0,", "2 => 0,"},
+	} {
+		if !strings.Contains(tc.arm, tc.want) {
+			t.Errorf("the %s skip arm must disarm %q:\n%s", tc.name, tc.want, tc.arm)
+		}
+		if strings.Contains(tc.arm, tc.notWant) {
+			t.Errorf("the %s skip arm must NOT disarm %q (that field's subtype is the other one):\n%s", tc.name, tc.notWant, tc.arm)
+		}
+		if !strings.Contains(tc.arm, "else => count,") {
+			t.Errorf("the %s skip arm must discard every other id:\n%s", tc.name, tc.arm)
+		}
+	}
+}
+
+// between returns the slice of s strictly between the first occurrence of from
+// and the first occurrence of to after it, failing the test if either is absent.
+func between(t *testing.T, s, from, to string) string {
+	t.Helper()
+	i := strings.Index(s, from)
+	if i < 0 {
+		t.Fatalf("missing %q in:\n%s", from, s)
+	}
+	rest := s[i+len(from):]
+	j := strings.Index(rest, to)
+	if j < 0 {
+		t.Fatalf("missing %q after %q in:\n%s", to, from, s)
+	}
+	return rest[:j]
 }
 
 // TestZigLazySequenceFraming: MESSAGE_SPEC §2 omits a sequence-typed FIELD whose
@@ -896,7 +1002,7 @@ messages:
 	for _, want := range []string{
 		// The row is placed at its element id, after the gap-fill, and the index is
 		// recorded so the element stores address THAT row.
-		".root_mat => if (id >= 4) { self.inv = true; } else { self.ei_root_mat = id; if (sofab.arrays.grow([]const u32, self.alloc, &(self.m.mat), @as(usize, id) + 1, &.{})) { _at(self.m.mat, id).* = _allocN(u32, self.alloc, count); } },",
+		".root_mat => if (kind == .unsigned) if (id >= 4) { self.inv = true; } else { self.ei_root_mat = id; if (sofab.arrays.grow([]const u32, self.alloc, &(self.m.mat), @as(usize, id) + 1, &.{})) { _at(self.m.mat, id).* = _allocN(u32, self.alloc, count); } },",
 		"self.ei_root_mat < self.m.mat.len) sofab.arrays.putGrowing(_at(self.m.mat, self.ei_root_mat), self.alloc, &self.ai, self.an,",
 		// The fp row collector is the same shape.
 		"if (self.ei_root_dyn < self.m.dyn.len) sofab.arrays.putGrowing(_at(self.m.dyn, self.ei_root_dyn), self.alloc, &self.ai, self.an, value)",

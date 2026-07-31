@@ -471,11 +471,12 @@ func (g *gen) nestedNativeArm(fr frame, signed bool) string {
 // emitArraySkipArm arms the §7.3 discard counter in arrayBegin (generator#183,
 // extended to fp by generator#193). Every array kind whose elements land in a
 // callback a scalar shares is armed: integers under .unsigned/.signed, fp under
-// .fixlen. Every (scope, id) that genuinely declares a native array of the
-// matching element kind disarms it (=> 0), so a legitimate array stores normally;
-// everything else — a scalar-declared id, an unknown id — discards exactly
-// `count` elements, after which a real scalar at the same id still decodes.
-// Mirrors emitArrayFillArm.
+// .fp32/.fp64 by element subtype (generator#259 / F-0042). Every (scope, id) that
+// genuinely declares a native array of the matching element kind disarms it
+// (=> 0), so a legitimate array stores normally; everything else — a
+// scalar-declared id, an unknown id, an fp64 array at a declared fp32 id —
+// discards exactly `count` elements, after which a real scalar at the same id
+// still decodes. Mirrors emitArrayFillArm.
 
 // arraySkipUsesID reports whether the §7.3 skip arm switches on `id`, i.e.
 // whether the message declares any native-element array (integer or fp) to
@@ -514,7 +515,8 @@ func arrayFillUsesID(fs []frame) bool {
 // emitArrayFillArm arms the §7.3 fill counter in arrayBegin (generator#188), the
 // mirror of emitArraySkipArm. It is armed at a legitimate native-array position
 // matching the wire array kind — integer arrays under .unsigned/.signed, fp
-// arrays under .fixlen — and 0 elsewhere, so a bare scalar at an array id
+// arrays under the prong for their own element subtype, .fp32 or .fp64
+// (generator#259) — and 0 elsewhere, so a bare scalar at an array id
 // (afill == 0) falls through its fill arm and is skipped.
 func (g *gen) emitArrayFillArm(f *zfile, fs []frame, fillArm bool) {
 	if !fillArm {
@@ -548,11 +550,16 @@ func (g *gen) emitArrayFillArm(f *zfile, fs []frame, fillArm bool) {
 		f.line("                else => 0,")
 		f.line("            },")
 	}
-	// ArrayKind is exactly {unsigned, signed, fixlen}; listing all three leaves no
-	// room for an else prong (Zig rejects an unreachable one).
+	// ArrayKind is exactly {unsigned, signed, fp32, fp64}; the three prongs below
+	// cover all four, leaving no room for an else prong (Zig rejects an
+	// unreachable one). The fp prongs are keyed by ELEMENT SUBTYPE
+	// (generator#259): a declared fp32[N] arms its fill only under .fp32, so an
+	// fp64 header at that id falls to `else => 0` and its elements are discarded
+	// by the skip counter instead of being stored into the wrong field.
 	f.line("        self.afill = switch (kind) {")
 	emit(".unsigned, .signed", func(k ir.Kind) bool { return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64 })
-	emit(".fixlen", func(k ir.Kind) bool { return k == ir.KindFP32 || k == ir.KindFP64 })
+	emit(".fp32", func(k ir.Kind) bool { return k == ir.KindFP32 })
+	emit(".fp64", func(k ir.Kind) bool { return k == ir.KindFP64 })
 	f.line("        };")
 }
 
@@ -588,12 +595,17 @@ func (g *gen) emitArraySkipArm(f *zfile, fs []frame, arrSkip bool) {
 		f.line("                else => count,")
 		f.line("            },")
 	}
-	// ArrayKind is exactly {unsigned, signed, fixlen}; listing all three leaves no
-	// room for an else prong (Zig rejects an unreachable one), mirroring
-	// emitArrayFillArm.
+	// ArrayKind is exactly {unsigned, signed, fp32, fp64}; the three prongs below
+	// cover all four, leaving no room for an else prong (Zig rejects an
+	// unreachable one), mirroring emitArrayFillArm. Keying the fp prongs by
+	// element subtype (generator#259) is what arms the discard counter for an
+	// fp64 array arriving at a declared fp32 field: that id disarms only under
+	// .fp32, so under .fp64 it takes `else => count` and the array is skipped
+	// whole, exactly like one at an unknown id.
 	f.line("        self.askip = switch (kind) {")
 	emit(".unsigned, .signed", func(k ir.Kind) bool { return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64 })
-	emit(".fixlen", func(k ir.Kind) bool { return k == ir.KindFP32 || k == ir.KindFP64 })
+	emit(".fp32", func(k ir.Kind) bool { return k == ir.KindFP32 })
+	emit(".fp64", func(k ir.Kind) bool { return k == ir.KindFP64 })
 	f.line("        };")
 }
 
@@ -885,6 +897,15 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 					// contradicts the declared element type is skipped like an unknown
 					// id and a correctly typed earlier occurrence survives it (§7.3,
 					// §7.4) -- this arm must not clear an array it will not refill.
+					//
+					// For a fixlen array the kind names the ELEMENT SUBTYPE (.fp32 /
+					// .fp64), not just "fixlen" (CORELIB_PLAN §4.8, generator#259).
+					// That matters for where the over-count guard sits: it is INSIDE
+					// the kind test, so an fp64 header at a declared fp32[N] slot is
+					// never measured against N. Bounding first would turn a skippable
+					// contradiction into INVALID -- §7.3 decides the subtype BEFORE
+					// any schema bound, and only a field that survives that test is
+					// bounded at all.
 					arm := fmt.Sprintf("if (kind == .%s) { %s %s.%s.len = 0; }",
 						wireArrayKind(fld.Elem), guard, fr.path, zigIdent(fld.Name))
 					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, arm))
@@ -901,10 +922,19 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 						// direct dynamic native array gets the guard. an = 0
 						// drops the rejected array's elements: a field over
 						// the cap never allocates (generator#102).
-						fa.arms = append(fa.arms, fmt.Sprintf("%d => if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { %s; },", fld.ID, body))
+						body = fmt.Sprintf("if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { %s; }", body)
 					} else {
-						fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, body))
+						body += ";"
 					}
+					// A count-less array has no schema bound to misapply, but it
+					// still must not ALLOCATE from a header that is being skipped
+					// (CORELIB_PLAN §4.8 / MESSAGE_SPEC §7.3, generator#259). The
+					// wire count of a contradicting header is not this field's
+					// length, so sizing from it is an eager allocation for elements
+					// that will never arrive -- the same hazard the receiver-limit
+					// work closed for legitimate headers. Gate on the declared
+					// element kind, exactly like the counted arm above.
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => if (kind == .%s) { %s },", fld.ID, wireArrayKind(fld.Elem), body))
 				}
 			}
 			if len(fa.arms) > 0 {
@@ -927,6 +957,11 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 			if g.limits.arrayHas && fr.elemDynCount {
 				body = fmt.Sprintf("if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else %s", body)
 			}
+			// Same rule as the leaf arms: a row is grown and sized only for a
+			// header whose element kind matches the one this row declares. A
+			// contradicting header is skipped whole, so it must not grow the outer
+			// slice nor size the row it would land in (generator#259).
+			body = fmt.Sprintf("if (kind == .%s) %s", wireArrayKind(fr.elemKind), body)
 			idUsed, countUsed = true, true
 			all = append(all, frameArms{fr: fr, body: body})
 		}
@@ -988,11 +1023,21 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 
 // wireArrayKind is the corelib ArrayKind a native array element type is
 // delivered under: integers (and bool, enum, bitfield) as .unsigned / .signed by
-// signedness of the backing type, fp as .fixlen.
+// signedness of the backing type, fp as .fp32 / .fp64 by element width.
+//
+// The fp kinds name the ELEMENT SUBTYPE, not merely "a fixlen array"
+// (CORELIB_PLAN §4.8, generator#259 / Crucible F-0042). A fixlen array's count
+// word precedes its fixlen_word, so a receiver that only learns "fixlen" cannot
+// tell a contradicting fp64 array from a declared fp32 array's value, and would
+// apply the declared field's schema bound to an array it must instead skip
+// (MESSAGE_SPEC §7.3). corelib-zig fires arrayBegin past the fixlen_word and
+// reports .fp32 / .fp64, so the id arm can key on the subtype.
 func wireArrayKind(elem ir.Kind) string {
 	switch {
-	case elem == ir.KindFP32 || elem == ir.KindFP64:
-		return "fixlen"
+	case elem == ir.KindFP32:
+		return "fp32"
+	case elem == ir.KindFP64:
+		return "fp64"
 	case isSignedElem(elem) || elem == ir.KindEnum:
 		return "signed"
 	default: // unsigned numeric, bool, bitfield
