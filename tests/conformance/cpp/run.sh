@@ -228,9 +228,20 @@ run_variant() {
         [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-maxlen(17>16)+truncated -> $ST (want INVALID)"; exit 1; }
         ST=$(printf '\142\203\001\001' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
         [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(16==16)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
-        # over-index: somestringarray (id 18) count 5; 96 01 (seq) 2a (elem index 5>=5) <EOF>.
-        ST=$(printf '\226\001\052' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+        # over-index: somestringarray (id 18) count 5. A string element rides the
+        # FIXLEN wire type, and S7.3 is decided from the fixlen word's subtype -- a
+        # header alone does not yet say whether this is an element of THIS array.
+        # So the over-index reject fires from the fixlen word on, not on the element
+        # header (corelib-cpp#59 / c-cpp#119). 96 01 (seq id 18) 2a (elem index
+        # 5 >= 5, fixlen) 0a (fixlen word: len 1, subtype string) <EOF>: the payload
+        # is truncated, and the bound still wins.
+        ST=$(printf '\226\001\052\012' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
         [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-index(id5>=5)+truncated -> $ST (want INVALID)"; exit 1; }
+        # Cut BETWEEN the element header and its fixlen word: the subtype is not yet
+        # known, so S7.3 cannot be decided and no schema bound may be applied yet.
+        # INCOMPLETE, the analogue of S4.8's ruling for a fixlen array's two words.
+        ST=$(printf '\226\001\052' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+        [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] over-index cut before the fixlen word -> $ST (want INCOMPLETE)"; exit 1; }
         ST=$(printf '\226\001\042' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
         [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(id4<5)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
         echo "==> [$label] schema-bound/truncation ordering OK"
