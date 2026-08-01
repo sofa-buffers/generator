@@ -1,9 +1,0 @@
-# Corelib branches this branch is developed against (docs/CI.md).
-# Delete before merging: every entry pins a corelib to unmerged code.
-#
-# generator#257 / Crucible F-0038, Class B: a SKIPPED string must not be
-# UTF-8-validated. go and dart hand the visitor a finished language string, so
-# the corelib cannot tell a bound field from a skipped one -- the check moves to
-# the generated destination, and the corelib half has to land with this one.
-SOFAB_CORELIB_GO_REF=fix/F-0038-skip-no-utf8-validation
-SOFAB_CORELIB_DART_REF=fix/F-0038-skip-no-utf8-validation
