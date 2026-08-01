@@ -798,8 +798,21 @@ element id `≥ N` **`INVALID`**, *never silently truncated to `N`*. The
 generated decoder therefore **rejects** an over-index element **before** growing
 the container — which also bounds the fill: the id is an unbounded varint, so an
 unguarded id-keyed grow materialised `id+1` elements and turned a ~9-byte message
-into an arbitrarily large allocation (a heap-amplification DoS). Who enforces it
-splits exactly like the scalar case:
+into an arbitrarily large allocation (a heap-amplification DoS).
+
+**§7.3 is decided first, and for a fixlen element that needs the fixlen word.**
+An element header whose wire type — or, for a `string`/`blob`/fp element type,
+whose fixlen subtype — contradicts the declared element type is *skipped* exactly
+as an unknown id is (§7.3), so it never becomes an element and its id is not an
+array index this bound could measure (§7.4: "an occurrence skipped under §7.3 is
+not an occurrence"). For a fixlen element type the subtype is known only at the
+fixlen word, so a message ending **between** the element header and that word is
+`INCOMPLETE`, not `INVALID` — the analogue of §4.8's ruling for a fixlen array's
+two words. From the fixlen word on the reject is immediate and never waits for
+payload bytes. Format-level rejects still fire on a skipped element's own
+metadata; §7.3 subordinates the *schema* bound only.
+
+Who enforces it splits exactly like the scalar case:
 
 - **Heap families reject** — the 10 heap backends (`go`, `rust` std, `cpp`
   `corelib-cpp`, both Python, `java`, `typescript`, `csharp`, `zig`, `dart`) emit a
