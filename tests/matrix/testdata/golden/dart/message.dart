@@ -11,6 +11,17 @@ class _Dec {
   bool inv = false;
 }
 
+// The base every generated visitor extends. It exists to turn the corelib's
+// VALIDATING onStringBytes default into a no-op skip: whether a string may be
+// inspected at all is a schema question, so an id this scope does not declare
+// must return without validating and without flagging INVALID -- its bytes are
+// jumped over, never inspected. A scope with string destinations overrides this
+// and falls through to the same no-op for every id it does not match.
+abstract class _Visitor extends sofab.MessageVisitor {
+  @override
+  void onStringBytes(int id, Uint8List bytes) {}
+}
+
 // Widen the 32 raw wire bits of an fp32 NaN to a display double for element
 // access; the exact bits are kept alongside for a bit-for-bit re-encode.
 double _f32FromBits(int bits) =>
@@ -117,7 +128,7 @@ class Scalars {
   }
 }
 
-class _ScalarsVisitor extends sofab.MessageVisitor {
+class _ScalarsVisitor extends _Visitor {
   _ScalarsVisitor(this.o, this.e);
   final Scalars o;
   final _Dec e;
