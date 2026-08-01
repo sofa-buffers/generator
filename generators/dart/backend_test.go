@@ -59,7 +59,8 @@ func TestModuleShape(t *testing.T) {
 		"Uint8List encode() => sofab.Encoder.encodeToBytes(marshal);",
 		"static sofab.DecodeStatus tryDecode(Uint8List data, Myfirstmessage out) {",
 		"static Myfirstmessage decode(Uint8List data) {",
-		"class _MyfirstmessageVisitor extends sofab.MessageVisitor {",
+		"abstract class _Visitor extends sofab.MessageVisitor {",
+		"class _MyfirstmessageVisitor extends _Visitor {",
 		"static const int maxSize =",
 	} {
 		if !strings.Contains(out, want) {
@@ -743,6 +744,77 @@ func TestDartSkippedStringIsNotValidated(t *testing.T) {
 	if strings.Contains(out, "void onBlob(int id, Uint8List value)") &&
 		strings.Contains(out, "utf8Valid(value)") {
 		t.Errorf("blob must never be UTF-8-validated:\n%s", out)
+	}
+}
+
+// TestDartStringFreeScopeSkipsStrings: the residual of #257 (generator#265 /
+// Crucible F-0038). #257 fixed the scopes that HAVE a string field; a scope with
+// none emitted no onStringBytes override at all and therefore inherited
+// sofab.MessageVisitor's default — which validates the payload as UTF-8 and
+// flags the decode INVALID. That default is right for a hand-written visitor
+// (it has no schema, so every string it is handed is one it wanted) and wrong
+// for generated code, where the id decides: an undeclared string is a skip whose
+// bytes are never inspected (CORELIB_PLAN §6.4, MESSAGE_SPEC §7.3).
+//
+// A lone continuation byte at an undeclared id — `4a 0a 8a` — therefore turned
+// an otherwise valid message INVALID in dart alone, on 12 implementations that
+// accept it. The fix is one shared base carrying the no-op, so the property
+// holds for every visitor by construction and not per emission site.
+func TestDartStringFreeScopeSkipsStrings(t *testing.T) {
+	// Nothing here declares a string: the top-level message, its nested struct,
+	// and every collector scope (blob array, struct array, native matrix) are all
+	// string-free — exactly the scopes that inherited the validating default.
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a:  { id: 0, type: u32 }\n" +
+		"      b:  { id: 1, type: blob, maxlen: 8 }\n" +
+		"      n:  { id: 2, type: struct, fields: { k: { id: 0, type: u32 } } }\n" +
+		"      ba: { id: 3, type: array, items: { type: blob, count: 4, maxlen: 8 } }\n" +
+		"      sa: { id: 4, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }\n" +
+		"      m:  { id: 5, type: array, items: { type: array, count: 2, items: { type: u32, count: 2 } } }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+
+	// The base exists and its onStringBytes returns without touching the bytes.
+	if !strings.Contains(out, "abstract class _Visitor extends sofab.MessageVisitor {\n  @override\n  void onStringBytes(int id, Uint8List bytes) {}\n}") {
+		t.Errorf("the shared visitor base must neutralize the validating onStringBytes default:\n%s", out)
+	}
+	// Every generated visitor routes through it. Extending the corelib class
+	// directly is the defect: that is what re-inherits the validating default.
+	for _, decl := range []string{
+		"class _MVisitor extends _Visitor {",
+		"class _MNVisitor extends _Visitor {",
+		"class _BlobSeq extends _Visitor {",
+		"class _ObjSeq<T> extends _Visitor {",
+		"class _IntMat extends _Visitor {",
+	} {
+		if !strings.Contains(out, decl) {
+			t.Errorf("missing %q — every visitor must extend the base:\n%s", decl, out)
+		}
+	}
+	if n := strings.Count(out, "extends sofab.MessageVisitor {"); n != 1 {
+		t.Errorf("only the base may extend sofab.MessageVisitor directly, found %d:\n%s", n, out)
+	}
+	// A string-free module still must not validate, transcode or import for one.
+	if strings.Contains(out, "utf8Valid") || strings.Contains(out, "utf8.decode") {
+		t.Errorf("a string-free schema must never validate or transcode a string:\n%s", out)
+	}
+}
+
+// A string-declaring scope keeps its own arms and still falls through to the
+// base's no-op for every id it does not match — the switch has no default arm,
+// so an unmatched id leaves the method without inspecting the bytes.
+func TestDartStringScopeFallsThroughToSkip(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s: { id: 0, type: string, maxlen: 8 }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+	if !strings.Contains(out, "class _MVisitor extends _Visitor {") {
+		t.Errorf("a string-declaring visitor must extend the base too:\n%s", out)
+	}
+	i := strings.Index(out, "void onStringBytes(int id, Uint8List bytes) {\n    switch (id) {")
+	if i < 0 {
+		t.Fatalf("expected an id switch in the string destination override:\n%s", out)
+	}
+	if j := strings.Index(out[i:], "default:"); j >= 0 && j < strings.Index(out[i:], "\n  }") {
+		t.Errorf("the override must fall out of the switch for an unmatched id, not handle it:\n%s", out)
 	}
 }
 

@@ -381,3 +381,32 @@ Two consequences worth knowing:
 - The generated module imports `dart:convert` **only when it decodes a string**.
   `dart analyze` reports an unused import, and the corpus sweep builds definitions
   that have no string at all.
+
+### Every visitor extends `_Visitor` (issue #265)
+
+Overriding `onStringBytes` in the scopes that *have* a string field is only half
+the property. `sofab.MessageVisitor`'s **default** for that method validates the
+payload and flags the decode INVALID — correct for a hand-written visitor, which
+has no schema and therefore wanted every string it is handed, and wrong for
+generated code, where the id decides. A scope with no string field emitted no
+override at all and so inherited it: an undeclared string reaching the top-level
+visitor of a string-free message was rejected instead of skipped. Three bytes
+(`4a 0a 8a` — unknown id 9, a lone continuation byte) were enough, and dart was
+alone against twelve implementations that accept them.
+
+The prelude therefore emits one base, and **every** generated visitor extends it —
+the per-type visitors and all wrapper-array collectors alike:
+
+```dart
+abstract class _Visitor extends sofab.MessageVisitor {
+  @override
+  void onStringBytes(int id, Uint8List bytes) {}
+}
+```
+
+A scope that declares strings overrides it again with its id switch and falls out
+of that switch — into this same no-op — for every id it does not match. Putting
+the no-op on a shared base rather than at each emission site is deliberate: it
+makes the property hold by construction, including for collectors added later,
+which is exactly what the per-site shape failed to do. Schema names cannot begin
+with `_`, so the name cannot collide with a generated type.

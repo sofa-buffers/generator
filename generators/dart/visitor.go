@@ -93,7 +93,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 		}
 	}
 
-	f.line("class %s extends sofab.MessageVisitor {", visitorName(typeName))
+	f.line("class %s extends %s {", visitorName(typeName), visitorBase)
 	f.line("  %s(this.o, this.e);", visitorName(typeName))
 	f.line("  final %s o;", typeName)
 	f.line("  final _Dec e;")
@@ -104,6 +104,10 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// is a NaN, carrying the raw 32 bits so a signaling/payload NaN survives §4.6.
 	emitSwitch(f, "void onFp32Bits(int id, int bits)", f32bits)
 	emitSwitch(f, "void onFp64(int id, double value)", f64)
+	// A scope with no string destination emits NOTHING here and inherits the
+	// no-op on _Visitor, which is what makes an undeclared string a skip rather
+	// than a validated payload (generator#265). It must never fall through to
+	// sofab.MessageVisitor's validating default -- see emitVisitorBase.
 	emitSwitch(f, "void onStringBytes(int id, Uint8List bytes)", str)
 	emitSwitch(f, "void onBlob(int id, Uint8List value)", blob)
 	emitSwitch(f, "void onUnsignedArray(int id, Int64List values)", uArr)
@@ -389,6 +393,43 @@ func (g *gen) scanArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, 
 	}
 }
 
+// visitorBase is the name every generated visitor extends instead of
+// sofab.MessageVisitor. Schema names cannot begin with `_`, so it cannot collide
+// with a generated type.
+const visitorBase = "_Visitor"
+
+// emitVisitorBase writes that base. Its whole job is to neutralize ONE corelib
+// default: sofab.MessageVisitor.onStringBytes validates the payload as UTF-8 and
+// flags the decode INVALID when it is not. That is the correct default for a
+// HAND-WRITTEN visitor -- it has no schema, so every string it is handed is one
+// it wanted -- but it is wrong for generated code, where the id decides. A
+// string at an id this scope does not declare is a SKIP: its bytes are jumped
+// over and never inspected (CORELIB_PLAN §6.4, which MESSAGE_SPEC §7.3 extends
+// to a wire type contradicting the schema), so the corelib doc for that method
+// requires a generated consumer to resolve the destination first and return
+// without validating when there is none.
+//
+// A scope that declares string fields overrides this again with its own switch
+// and falls out of it -- into this same no-op -- for every unmatched id. A scope
+// with NO string field emitted no override at all before generator#265, and so
+// inherited the validating default: an undeclared string reaching e.g. the
+// top-level visitor of a string-free message was rejected instead of skipped.
+// Putting the no-op on a shared base rather than at each class keeps that true
+// for every visitor by construction, including collectors added later.
+func emitVisitorBase(f *dfile) {
+	f.line("// The base every generated visitor extends. It exists to turn the corelib's")
+	f.line("// VALIDATING onStringBytes default into a no-op skip: whether a string may be")
+	f.line("// inspected at all is a schema question, so an id this scope does not declare")
+	f.line("// must return without validating and without flagging INVALID -- its bytes are")
+	f.line("// jumped over, never inspected. A scope with string destinations overrides this")
+	f.line("// and falls through to the same no-op for every id it does not match.")
+	f.line("abstract class %s extends sofab.MessageVisitor {", visitorBase)
+	f.line("  @override")
+	f.line("  void onStringBytes(int id, Uint8List bytes) {}")
+	f.line("}")
+	f.blank()
+}
+
 func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 	n := g.computeNeeds(s)
 	if !n.dec && !g.limits.any() {
@@ -403,6 +444,7 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		f.line("  bool inv = false;")
 		f.line("}")
 		f.blank()
+		emitVisitorBase(f)
 	}
 	if n.bytesEq {
 		f.line("bool _bytesEq(Uint8List a, Uint8List b) {")
@@ -478,7 +520,7 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 // string/blob element the same way.
 func (g *gen) emitCollectors(f *dfile, n needs) {
 	if n.strSeq {
-		f.line("class _StrSeq extends sofab.MessageVisitor {")
+		f.line("class _StrSeq extends %s {", visitorBase)
 		f.line("  _StrSeq(this.out, this.cap, this.emax, this.e);")
 		f.line("  final List<String> out;")
 		f.line("  final int cap;")
@@ -498,7 +540,7 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.blank()
 	}
 	if n.blobSeq {
-		f.line("class _BlobSeq extends sofab.MessageVisitor {")
+		f.line("class _BlobSeq extends %s {", visitorBase)
 		f.line("  _BlobSeq(this.out, this.cap, this.emax, this.e);")
 		f.line("  final List<Uint8List> out;")
 		f.line("  final int cap;")
@@ -521,7 +563,7 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		// and an omitted all-default interior element is exactly such a gap -- and
 		// would decode a REOPENED id as a second element instead of merging into the
 		// first (§7.4, which placement gives for free).
-		f.line("class _ObjSeq<T> extends sofab.MessageVisitor {")
+		f.line("class _ObjSeq<T> extends %s {", visitorBase)
 		f.line("  _ObjSeq(this.out, this.cap, this.e, this.make, this.vis);")
 		f.line("  final List<T> out;")
 		f.line("  final int cap;")
@@ -544,7 +586,7 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 	// the OUTER array's schema count, which bounds that id (§5.1/§7) and with it
 	// the gap-fill.
 	if n.intMat {
-		f.line("class _IntMat extends sofab.MessageVisitor {")
+		f.line("class _IntMat extends %s {", visitorBase)
 		f.line("  _IntMat(this.out, this.cap, this.signed, this.e);")
 		f.line("  final List<List<int>> out;")
 		f.line("  final int cap;")
@@ -563,7 +605,7 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.blank()
 	}
 	if n.dblMat {
-		f.line("class _DblMat extends sofab.MessageVisitor {")
+		f.line("class _DblMat extends %s {", visitorBase)
 		f.line("  _DblMat(this.out, this.cap, this.f64, this.e);")
 		f.line("  final List<List<double>> out;")
 		f.line("  final int cap;")
@@ -587,7 +629,7 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.blank()
 	}
 	if n.boolMat {
-		f.line("class _BoolMat extends sofab.MessageVisitor {")
+		f.line("class _BoolMat extends %s {", visitorBase)
 		f.line("  _BoolMat(this.out, this.cap, this.e);")
 		f.line("  final List<List<bool>> out;")
 		f.line("  final int cap;")
@@ -602,7 +644,7 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.blank()
 	}
 	if n.seqSeq {
-		f.line("class _SeqSeq<T> extends sofab.MessageVisitor {")
+		f.line("class _SeqSeq<T> extends %s {", visitorBase)
 		f.line("  _SeqSeq(this.out, this.cap, this.e, this.make);")
 		f.line("  final List<List<T>> out;")
 		f.line("  final int cap;")

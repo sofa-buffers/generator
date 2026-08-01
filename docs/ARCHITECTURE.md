@@ -1296,6 +1296,20 @@ the destination needs instead, and each backend picked it up:
 Neither half is correct alone: the corelib half by itself accepts invalid UTF-8 at
 a *declared* field, so the two land together.
 
+Overriding the hook where a destination exists is still only half the property, as
+dart showed (#265). A corelib's string hook has to keep a **validating default**
+for hand-written visitors — they carry no schema, so every string they are handed
+is one they wanted. Generated code is the opposite case, and a scope with *no*
+string destination emitted no override at all and inherited that default: an
+undeclared string reaching the top-level visitor of a string-free message was
+rejected instead of skipped. The rule for any push backend is therefore that the
+skip is emitted for **every** visitor scope, not only the ones with somewhere to
+put a string — dart carries it on a shared `_Visitor` base every generated visitor
+extends, java/csharp emit the callback unconditionally with a resolve-then-leave
+prologue (#258). Where a backend can make the property structural rather than
+per-emission-site, it should: that is what stops the next collector class from
+silently re-inheriting the default.
+
 The validator is a real UTF-8 validator (rejects overlong forms incl. `C0 80`,
 surrogates `U+D800`–`U+DFFF`, and code points above `U+10FFFF`; permits embedded
 `U+0000`), and validity is a property of the **complete** payload — a multi-byte
