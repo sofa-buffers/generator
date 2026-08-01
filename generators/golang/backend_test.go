@@ -139,7 +139,10 @@ func TestGoMaxlenReject(t *testing.T) {
 	if got := strings.Count(msg, "if len(v) > 8 {"); got != 2 {
 		t.Errorf("expected exactly 2 scalar maxlen guards (string+blob), got %d:\n%s", got, msg)
 	}
-	if !strings.Contains(msg, "case 2:\n\t\tm.U = v") {
+	// The unbounded string carries no maxlen guard -- but it does carry the UTF-8
+	// check, which is not a bound: it fires wherever a string is MATERIALIZED
+	// (generator#257), bounded or not.
+	if !strings.Contains(msg, "case 2:\n\t\tif !sofab.Utf8Valid([]byte(v)) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.U = v") {
 		t.Errorf("m.go: unbounded string (id 2) must store without a maxlen guard:\n%s", msg)
 	}
 	// The wrapper-element guard lives in the shared prelude.
@@ -788,5 +791,49 @@ messages:
 		if !strings.Contains(files["vec.go"], want) {
 			t.Errorf("vec.go must pass the schema count as the collector cap, missing %q:\n%s", want, files["vec.go"])
 		}
+	}
+}
+
+// TestGoSkippedStringIsNotValidated: UTF-8 validation belongs where a `string`
+// is MATERIALIZED — read into a declared destination — never on a payload the
+// decoder is skipping (CORELIB_PLAN §6.4, generator#257 / Crucible F-0038).
+//
+// corelib-go used to validate inside the cursor, which cannot tell a field this
+// visitor binds from one it skips, so an unknown id carrying invalid UTF-8 failed
+// the whole decode. The corelib dropped that check and exports `sofab.Utf8Valid`
+// instead; the generated destination arms are now what validate. A skipped field
+// reaches no arm, so it is never inspected — which is the whole point.
+func TestGoSkippedStringIsNotValidated(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s:  { id: 0, type: string, maxlen: 8 }\n" +
+		"      u:  { id: 1, type: string }\n" +
+		"      n:  { id: 2, type: struct, fields: { t: { id: 0, type: string } } }\n" +
+		"      sa: { id: 3, type: array, items: { type: string, count: 4 } }\n"
+	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
+	msg := files["m.go"]
+
+	// Every materializing destination validates: the bounded scalar, the
+	// unbounded scalar (both on the message type) and the nested struct's field
+	// (its own type, emitted alongside).
+	all := ""
+	for _, f := range files {
+		all += f
+	}
+	if got := strings.Count(all, "if !sofab.Utf8Valid([]byte(v)) {"); got != 4 {
+		t.Errorf("want a UTF-8 check at each string destination + the collector, got %d:\n%s", got, all)
+	}
+	// It sits behind the maxlen guard, which decides on the wire length alone.
+	if !strings.Contains(msg, "if len(v) > 8 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tif !sofab.Utf8Valid([]byte(v)) {") {
+		t.Errorf("the maxlen reject must stay ahead of the UTF-8 check:\n%s", msg)
+	}
+	// The wrapper-array element path validates in the shared collector.
+	prelude := files["sofab_visitor.go"]
+	if !strings.Contains(prelude, "if !sofab.Utf8Valid([]byte(v)) {") {
+		t.Errorf("_strSeq must validate the element it materializes:\n%s", prelude)
+	}
+	// A blob carries no encoding, so its arms must not grow a check.
+	if strings.Contains(msg, "Bytes(id sofab.ID, v []byte) error") &&
+		strings.Contains(msg, "Utf8Valid(v)") {
+		t.Errorf("blob must never be UTF-8-validated:\n%s", msg)
 	}
 }

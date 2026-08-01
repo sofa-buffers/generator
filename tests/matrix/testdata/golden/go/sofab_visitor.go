@@ -52,6 +52,12 @@ func (s *_strSeq) String(id sofab.ID, v string) error {
 	if s.emax >= 0 && len(v) > s.emax {
 		return sofab.ErrInvalidMsg
 	}
+	// The element is being materialized, so this is where its UTF-8 is checked.
+	// A payload the decoder skips never reaches a collector at all, which is
+	// exactly the point: validation follows the destination, not the wire.
+	if !sofab.Utf8Valid([]byte(v)) {
+		return sofab.ErrInvalidMsg
+	}
 	for len(*s.out) <= int(id) {
 		*s.out = append(*s.out, "")
 	}

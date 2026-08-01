@@ -1244,9 +1244,10 @@ the generator carries responsibility:
   primitive (folds to `true` when compiled off), so generated code is identical
   across build configs and flipping the flag never regenerates it. `blob` elements
   are stored verbatim — the wrap is emitted only for `string`.
-- **Corelib-materialized targets (c, cpp, go, py, ts)** build the string inside the
+- **Corelib-materialized targets (c, cpp, py, ts)** build the string inside the
   corelib, so the check is corelib-internal; the generator emits no UTF-8 code for
-  them. Encode-side strictness is corelib-side for **every** target (the generator
+  them. (`go` and `dart` were in this group until the skip-placement work moved
+  them out — see *Placement* below.) Encode-side strictness is corelib-side for **every** target (the generator
   encodes via `os.writeString(id, value)` into the corelib's OStream).
 
 **Placement — the destination is resolved first (normative, generator#257).** For
@@ -1275,14 +1276,25 @@ to drop it is the same §6.4 violation with every string skipped instead of some
 Rust gets this for free (the callback is emitted only when the schema uses
 strings); java and csharp emit the empty body explicitly.
 
-**go and dart still validate on skip**, and cannot be fixed here alone: both
-corelibs hand the visitor a *finished* language string, so the check is inside the
-corelib and the generator has no seam to place a guard in front of. Moving them
-takes a two-half change — the corelib stops validating and exposes a `utf8_valid`
-primitive (go) or delivers raw wire bytes (dart), and the backend then validates
-inside each matched arm, like zig. Neither half is correct on its own (the corelib
-half alone accepts invalid UTF-8 at a *declared* field), so they land together,
-after this one.
+**go and dart moved too, as a two-half change.** Both corelibs used to hand the
+visitor a *finished* language string, so the check sat inside the corelib and the
+generator had no seam to guard. Each corelib gave up that check and exposed what
+the destination needs instead, and each backend picked it up:
+
+- **go** — `sofab.Utf8Valid(bytes) bool`, called in every arm that stores a
+  string: the scalar fields and the `_strSeq` wrapper-element collector. The
+  primitive carries its own compile-time gate, so generated code calls it
+  unconditionally and never depends on the corelib's build configuration.
+- **dart** — `MessageVisitor.onStringBytes(id, bytes)` delivers the **raw wire
+  bytes**. The generated visitor overrides that instead of `onString`, so the arm
+  resolves the destination first and only then calls `utf8Valid` + `utf8.decode`.
+  A pleasant side effect: a schema `maxlen` is a *byte* bound, and the raw bytes
+  are the wire length, so the guard no longer re-encodes to measure. The generated
+  module imports `dart:convert` only when it actually decodes a string — an unused
+  import is a `dart analyze` warning.
+
+Neither half is correct alone: the corelib half by itself accepts invalid UTF-8 at
+a *declared* field, so the two land together.
 
 The validator is a real UTF-8 validator (rejects overlong forms incl. `C0 80`,
 surrogates `U+D800`–`U+DFFF`, and code points above `U+10FFFF`; permits embedded

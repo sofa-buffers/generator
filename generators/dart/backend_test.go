@@ -562,10 +562,14 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 
 	for _, want := range []string{
 		// leaf / object collectors: guard, gap-fill, place
+		// The string collector takes RAW wire bytes now: the destination (this
+		// collector, at this id) is resolved before the payload is validated or
+		// transcoded, so a skipped string is never inspected (generator#257).
 		"    if (cap >= 0 && id >= cap) { e.inv = true; return; }\n" +
-			"    if (emax >= 0 && _u8len(value) > emax) { e.inv = true; return; }\n" +
+			"    if (emax >= 0 && bytes.length > emax) { e.inv = true; return; }\n",
+		"    if (!sofab.utf8Valid(bytes)) { e.inv = true; return; }\n" +
 			"    while (out.length <= id) { out.add(''); }\n" +
-			"    out[id] = value;",
+			"    out[id] = utf8.decode(bytes);",
 		"    if (cap >= 0 && id >= cap) { e.inv = true; return null; }\n" +
 			"    while (out.length <= id) { out.add(make()); }\n" +
 			"    return vis(out[id]);",
@@ -692,5 +696,65 @@ func TestDartArrayHeaderBoundIsKeyedByElementKind(t *testing.T) {
 		if strings.Contains(out, notWant) {
 			t.Errorf("array header bound is not keyed by the declared element kind (%q):\n%s", notWant, out)
 		}
+	}
+}
+
+// TestDartSkippedStringIsNotValidated: UTF-8 validation belongs where a `string`
+// is MATERIALIZED — read into a declared destination — never on a payload the
+// decoder is skipping (CORELIB_PLAN §6.4, generator#257 / Crucible F-0038).
+//
+// corelib-dart used to hand the visitor a finished `String`, which forced it to
+// validate and transcode before the consumer could say whether it even wanted
+// the field. It now delivers raw wire bytes through `onStringBytes`, so the
+// generated arm resolves the destination first and only then checks and decodes.
+// A skipped field reaches no arm and is never inspected.
+func TestDartSkippedStringIsNotValidated(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s:  { id: 0, type: string, maxlen: 8 }\n" +
+		"      u:  { id: 1, type: string }\n" +
+		"      b:  { id: 2, type: blob, maxlen: 8 }\n" +
+		"      sa: { id: 3, type: array, items: { type: string, count: 4 } }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+
+	// The decoder's string entry point is the raw-bytes one; the transcoding
+	// `onString` override is gone.
+	if !strings.Contains(out, "void onStringBytes(int id, Uint8List bytes)") {
+		t.Errorf("the visitor must take raw wire bytes:\n%s", out)
+	}
+	if strings.Contains(out, "void onString(int id, String value)") {
+		t.Errorf("onString must no longer be overridden — it cannot resolve a destination first:\n%s", out)
+	}
+	// Validate then transcode, inside the arm.
+	for _, want := range []string{
+		"if (!sofab.utf8Valid(bytes)) { e.inv = true; return; }",
+		"o.s = utf8.decode(bytes);",
+		"o.u = utf8.decode(bytes);",
+		"import 'dart:convert';", // needed for the decode, emitted because a string exists
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated Dart missing %q:\n%s", want, out)
+		}
+	}
+	// The maxlen bound reads the wire length directly now — no re-encode.
+	if !strings.Contains(out, "if (bytes.length > 8) { e.inv = true; return; }") {
+		t.Errorf("the maxlen bound must measure the raw wire bytes:\n%s", out)
+	}
+	// A blob carries no encoding: its arm must not validate.
+	if strings.Contains(out, "void onBlob(int id, Uint8List value)") &&
+		strings.Contains(out, "utf8Valid(value)") {
+		t.Errorf("blob must never be UTF-8-validated:\n%s", out)
+	}
+}
+
+// A schema with no string at all must not carry the `dart:convert` import:
+// `dart analyze` reports an unused import, and the corpus sweep builds exactly
+// such definitions.
+func TestDartNoConvertImportWithoutStrings(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: { id: 0, type: u32 }\n" +
+		"      b: { id: 1, type: blob, maxlen: 8 }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+	if strings.Contains(out, "import 'dart:convert';") {
+		t.Errorf("a string-free schema must not import dart:convert:\n%s", out)
 	}
 }

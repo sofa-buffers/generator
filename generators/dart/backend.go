@@ -137,6 +137,15 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
 	f.line("// ignore_for_file: unused_field, unused_element, deprecated_member_use_from_same_package")
+	// dart:convert is for utf8.decode in the string destinations: the corelib
+	// hands the visitor RAW wire bytes (onStringBytes) so the destination can be
+	// resolved before anything is validated or transcoded, and transcoding is
+	// therefore ours. Emitted only when the module actually decodes a string --
+	// `dart analyze` treats an unused import as a warning, and the corpus sweep
+	// builds definitions that have no string at all.
+	if g.computeNeeds(s).str {
+		f.line("import 'dart:convert';")
+	}
 	f.line("import 'dart:typed_data';")
 	f.line("import 'package:sofabuffers/sofabuffers.dart' as sofab;")
 	f.blank()
