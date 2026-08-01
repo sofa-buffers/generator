@@ -103,7 +103,7 @@ carry no encoding. A schema that declares no string at all gets an **empty**
 `string(...)` body rather than a guarded one — every string reaching it is skipped
 by definition, and decoding one only to drop it is the same violation.
 
-## §7.3: a mis-typed array header (issues #183, #193, #254)
+## §7.3: a mis-typed array header (issues #183, #193, #254, #259)
 
 MESSAGE_SPEC **§7.3** skips a field whose header wire type contradicts its
 declared type. This backend's corelib settles almost every case *structurally* —
@@ -126,7 +126,8 @@ element types partition across them exactly as the encoder maps them (#254):
 |---|---|---|
 | `u8`…`u64`, `boolean`, `bitfield` | `ArrayKind.UNSIGNED` | `unsigned()` |
 | `i8`…`i64`, `enum`               | `ArrayKind.SIGNED`   | `signed()` |
-| `fp32`, `fp64`                    | `ArrayKind.FIXLEN`   | `fp32()` / `fp64()` |
+| `fp32`                            | `ArrayKind.FP32`     | `fp32()` |
+| `fp64`                            | `ArrayKind.FP64`     | `fp64()` |
 
 Arming per kind is only half of the rule. §7.3 also forbids decoding the payload
 **into the declared field**, and *sizing* the destination is decoding into it: an
@@ -139,9 +140,36 @@ The order is normative: the bound applies only to a field that survives §7.3, s
 over-count *mis-typed* array is skipped rather than rejected as a false
 `INVALID_MSG`.
 
-The fixlen **subtype** (fp32 vs fp64) is not visible in `arrayBegin` —
-`ArrayKind.FIXLEN` collapses both — so a subtype contradiction is caught downstream,
-where the element lands in `fp32()` or `fp64()` and finds no fill arm.
+### The fixlen arm is keyed by subtype (issue #259)
+
+A fixlen array header carries a **second** word after the count — the
+`fixlen_word` naming the element subtype and its width. CORELIB_PLAN §4.8 fixes
+the order in which that header is judged: the count is read under the format
+ceiling only (it allocates nothing), then the `fixlen_word`, then §7.3 decides
+whether the field is contradicted, and only a field that *survives* is measured
+against its schema `count`. corelib-java announces the array from the
+`fixlen_word` handler accordingly, and `ArrayKind` lost the collapsed `FIXLEN`
+member in favour of `FP32` and `FP64` (ordinals are normative family-wide:
+`UNSIGNED = 0`, `SIGNED = 1`, `FP32 = 2`, `FP64 = 3`).
+
+The generated visitor mirrors that split: `arrayBegin` emits **two** fixlen arms,
+and a declared `fp32[N]` field id is listed only under `FP32` while a declared
+`fp64[N]` is listed only under `FP64`. An `fp64` header arriving at an `fp32[N]`
+slot therefore never reaches that field's arm — the discard counter stays armed
+and drops exactly `count` elements, and the declared `float[]` is not sized,
+cleared or allocated. Previously both subtypes shared one arm, so the fp64 header
+*did* size the declared `float[]` before the mismatch was noticed downstream in
+`fp64()`.
+
+The schema-`count` bound stays **inside** the matched arm, behind
+`if (kind != ArrayKind.FP32) break;`, for the same reason it sits behind the
+integer kind tests: a header of the *other* subtype must reach the skip path, not
+the reject path. An over-count `fp64` array at a declared `fp32[3]` is a §7.3
+skip, not `INVALID_MSG`.
+
+This split also stops a skipped `fp64` header from sizing a declared `float[]`,
+but it is not the whole of finding F-0039 — that finding's primary face is a
+non-fixlen `ARRAY_SIGNED` header at a `u8[]` slot, a different codegen path.
 
 ## §2: sequence framing — which closer `marshal` emits
 

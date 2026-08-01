@@ -744,14 +744,16 @@ Whether the fix is generator-only splits by the corelib's decode model:
   header-thrown INVALID) dominate the later `Incomplete`, so only the header wiring
   was missing. **Done via that hook:**
   - **Go** — corelib `sofab.HeaderVisitor` (optional interface: `ArrayBegin(id,
-    count)` at the count word, `FixlenHeader(id, subtype, length)` at the length
-    word, both before the truncation check). The generator emits these methods on a
+    kind, count)` at the array header, `FixlenHeader(id, subtype, length)` at the
+    length word, both before the truncation check; for a fixlen array `ArrayBegin`
+    fires *after* the `fixlen_word`, so `kind` names the element subtype — see
+    §4.8 below). The generator emits these methods on a
     type whenever a field declares a `count`/`maxlen` bound (`if count > N { return
     sofab.ErrInvalidMsg }` / `if subtype == S && length > N …`), so a bound-free type
     does not implement the interface and the max-speed decode path is unchanged.
     Both methods are emitted together — the interface is all-or-nothing (see §7.3
     below) — and the `maxlen` guard is gated on the declared fixlen subtype.
-  - **Dart** — corelib `MessageVisitor.onArrayBegin(id, count)` /
+  - **Dart** — corelib `MessageVisitor.onArrayBegin(id, kind, count)` /
     `onFixlenHeader(id, subtype, length)` overrides set the sticky `e.inv`, which
     `tryDecode` reads before returning the incomplete status. Emitted only for
     bounded fields, and subtype-gated as above.
@@ -961,11 +963,12 @@ The fix is **generator-only** — all five corelibs already announce `arrayBegin
 with the count before any element, so the generated visitor only has to consult
 it. Every backend emits the same two-part shape:
 
-- in the generated `arrayBegin`, arm a per-visitor counter: `askip = count` when
-  the announced `kind` is the unsigned or signed integer kind **and** the
-  `(scope, id)` pair is not a declared integer-element native array; `0`
-  otherwise. Arrays of any other kind (the fp arrays) are never armed — their
-  elements go to `fp32`/`fp64` and can never reach a scalar arm.
+- in the generated `arrayBegin`, arm a per-visitor counter: `askip = count`
+  unless the `(scope, id)` pair declares a native array **of the announced
+  `kind`**; `0` otherwise. Every wire array kind is armed, not just the integer
+  ones: an fp array's elements reach the `fp32`/`fp64` callbacks, which a scalar
+  `fp32`/`fp64` field shares (generator#193), so the same blind spot exists
+  there.
 - in `unsigned` / `signed`, discard while armed: `if askip > 0 { askip -= 1;
   return; }`.
 
@@ -981,6 +984,50 @@ compile); and Zig rejects unused function parameters, so `arrayBegin` takes `id`
 only when the message has an integer array to disarm for. On the four backends
 whose `arrayBegin` was previously emitted only for messages that *have* a native
 array, it is now emitted whenever the guard needs somewhere to arm itself.
+
+#### A fixlen array's element subtype decides before any schema bound (§4.8)
+
+An array header carries a wire *kind*; for the fixlen array wire type it carries
+a second word, the `fixlen_word`, which says whether the elements are `fp32` (4
+bytes) or `fp64` (8 bytes). CORELIB_PLAN §4.8 fixes the order in which those are
+consumed: **count** (a format ceiling only) → **`fixlen_word`** → a §7.3 skip on
+a contradicting subtype, *without* applying the schema `count` → the schema bound
+only for a field that survives that test.
+
+Generated code could not express that, because the array-header hook fired
+before the `fixlen_word` and reported a collapsed `Fixlen` kind — which says the
+array is a fixlen array but not whether its elements are `fp32` or `fp64`. An
+`fp64` array arriving at a declared `fp32[N]` slot was therefore indistinguishable
+from the real thing: it was measured against `N`, and an over-count turned a
+*skippable* contradiction into `INVALID`. Sizing the declared container from it
+was the same error in the other direction.
+
+The push-API corelibs changed to make the rule implementable (Crucible F-0042,
+generator#259). The hook now fires **after** the `fixlen_word`, and `ArrayKind`
+is `{Unsigned = 0, Signed = 1, Fp32 = 2, Fp64 = 3}` — the collapsed `Fixlen`
+member is gone. The ordinals are normative and shared family-wide; `corelib-ts`
+is the reference. Two corelibs gained a `kind` parameter they never had
+(`corelib-go`'s `ArrayBegin(id, kind, count)`, `corelib-dart`'s
+`onArrayBegin(id, kind, count)`).
+
+Every push-API backend therefore emits **one arm per wire array kind**, and a
+declared fixlen array appears only under the arm for its *own* element subtype.
+Three things live inside that arm and nowhere else: the schema `count > N`
+reject, the receiver-side `max_dyn_array_count` reject, and any sizing or
+clearing of the declared container. A header of a non-matching kind falls through
+to the discard counter and is consumed without touching the field. Integer arrays
+are unaffected — that path has no second word.
+
+`c`, `cpp` and `python` need no change: their descriptor and pull APIs already
+deliver a field after both words, which MESSAGE_SPEC §7.3 explicitly blesses, and
+they are the differential control for this behaviour.
+
+One gap is deliberately left open: **rust still keys its integer-array arms
+kind-agnostically**, so an fp header arriving at a declared *integer* array id
+still applies that field's bound and clears it. That is the generator#254 /
+Crucible F-0039 face, fixed for `java` and `csharp` only and never for `rust`; it
+is a different codegen path and is tracked on its own. The other five backends
+key their integer arms too.
 
 #### Who can satisfy §7.3, and why (audited)
 

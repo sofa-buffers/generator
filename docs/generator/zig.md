@@ -264,10 +264,61 @@ and the `(scope, id)` pair is **not** a declared integer-element native array;
 the two scalar callbacks then discard while armed. It self-terminates on the
 announced count (no array-end callback needed), survives a chunk boundary (the
 counter lives in the visitor), leaves legitimate arrays untouched, and still
-decodes a real scalar arriving at that id after the array. The fp arrays are never
-armed — their elements go to the float callbacks and cannot reach a scalar arm.
+decodes a real scalar arriving at that id after the array. Fixlen arrays are armed
+the same way (issue #193): their elements stream through the `fp32()/fp64()`
+callbacks a lone float scalar uses, so they need the identical guard.
 
 The corelib calls `arrayBegin` through `@hasDecl`, so emitting it for the guard
 alone is enough — it is now emitted for messages that have no native array at all.
 Zig rejects unused function parameters, so it takes `id` only when the message
 declares an integer array to disarm for; otherwise the parameter stays `_`.
+
+## §4.8: the fixlen array arm is keyed by element subtype (issue #259)
+
+`sofab.ArrayKind` is `{ unsigned = 0, signed = 1, fp32 = 2, fp64 = 3 }` — the fp
+members name the **element subtype**, not merely "some fixlen array". That is
+forced by the wire layout: a fixlen array's `count` word comes *before* its
+`fixlen_word`, so at the moment the count is known nobody can yet say whether the
+array that arrived *is* the declared field's value. corelib-zig therefore fires
+`arrayBegin` only past the `fixlen_word` and reports the subtype it just read
+(CORELIB_PLAN §4.8; the collapsed `fixlen` member was removed).
+
+The generated arms follow the same key. A declared `array<fp32, count: N>` is
+listed **only** under `.fp32`, a declared `array<fp64, count: N>` **only** under
+`.fp64`:
+
+```zig
+self.askip = switch (kind) {
+    .unsigned, .signed => switch (self.cur) { ... },
+    .fp32 => switch (self.cur) {
+        .root => switch (id) { 2 => 0, else => count },
+        else => count,
+    },
+    .fp64 => switch (self.cur) {
+        .root => switch (id) { 3 => 0, else => count },
+        else => count,
+    },
+};
+switch (self.cur) {
+    .root => switch (id) {
+        2 => if (kind == .fp32) { if (count > 5) { self.inv = true; return; } self.m.a32.len = 0; },
+        3 => if (kind == .fp64) { if (count > 7) { self.inv = true; return; } self.m.a64.len = 0; },
+        ...
+```
+
+Three prongs cover all four members, so there is no `else` prong — Zig rejects an
+unreachable one.
+
+**Why the schema bound sits inside the kind test.** §7.3 decides the wire-type
+contradiction *first*; a schema bound applies only to a field that survives that
+test. Reading the `count > N` guard before the kind test would measure an fp64
+array against the fp32 field's `N` and flag the message INVALID, when the correct
+verdict is to skip the array and keep whatever a correctly typed earlier
+occurrence left in the field (§7.4). Behind the test, an `fp64` header at the
+`fp32` slot matches nothing: it is neither bounded nor sized nor cleared, and its
+id falls to `else => count` in the `.fp64` skip arm, so its elements are discarded
+exactly like an array at an unknown id.
+
+Integer arrays are untouched by all of this — there is no second word on the
+`.unsigned`/`.signed` path, so the count header already carries everything the arm
+needs and the two kinds stay a single prong.

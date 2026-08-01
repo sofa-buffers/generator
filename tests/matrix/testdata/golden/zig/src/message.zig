@@ -153,7 +153,10 @@ const _dec_Scalars = struct {
             .unsigned, .signed => switch (self.cur) {
                 else => count,
             },
-            .fixlen => switch (self.cur) {
+            .fp32 => switch (self.cur) {
+                else => count,
+            },
+            .fp64 => switch (self.cur) {
                 else => count,
             },
         };

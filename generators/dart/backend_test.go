@@ -318,9 +318,11 @@ func TestProjectFiles(t *testing.T) {
 func TestDartHeaderVisitorReject(t *testing.T) {
 	out := genFor(t, exampleDef, map[string]any{})
 	for _, want := range []string{
-		"void onArrayBegin(int id, int count) {",
+		"void onArrayBegin(int id, sofab.ArrayKind kind, int count) {",
 		"void onFixlenHeader(int id, int subtype, int length) {",
-		"if (count > 4) e.inv = true;", // someuintarray, count 4
+		// Gated on the DECLARED element kind, exactly like the maxlen guard below
+		// (§7.3, generator#259) -- see TestDartArrayHeaderBoundIsKeyedByElementKind.
+		"if (kind == sofab.ArrayKind.unsigned && count > 4) e.inv = true;", // someuintarray, count 4
 		// Each maxlen guard is gated on the DECLARED fixlen subtype: onFixlenHeader
 		// fires for any subtype at a field id, and a contradicting one must be
 		// skipped, not measured against this field's bound (§7.3, generator#224).
@@ -337,9 +339,13 @@ func TestDartHeaderVisitorReject(t *testing.T) {
 	for _, notWant := range []string{
 		"if (length > 50) e.inv = true;",
 		"if (length > 16) e.inv = true;",
+		// ...and the array count bound is the same defect one hook over
+		// (generator#259 / F-0042): an un-gated compare measures a contradicting
+		// array kind against this field's N.
+		"if (count > 4) e.inv = true;",
 	} {
 		if strings.Contains(out, notWant) {
-			t.Errorf("maxlen header guard %q is not gated on the fixlen subtype (generator#224)", notWant)
+			t.Errorf("header guard %q is not gated on the declared kind/subtype (generator#224, generator#259)", notWant)
 		}
 	}
 	// A message with no bounded field must NOT override the header hooks, keeping
@@ -622,5 +628,69 @@ func TestDartFp32ArrayTakesTheWireLength(t *testing.T) {
 	}
 	if strings.Contains(out, "_f32copy(values, 3)") || strings.Contains(out, "_padTo(") {
 		t.Errorf("an fp32/fp64 count:N array must not be pre-sized to N:\n%s", out)
+	}
+}
+
+// The array header hook carries the element KIND, and the schema `count` bound
+// sits INSIDE the test for the field's own declared kind (generator#259 /
+// Crucible F-0042, CORELIB_PLAN §4.8).
+//
+// onArrayBegin fires for whatever array kind lands on a field id -- the corelib
+// reports what arrived but only the generated code knows what was DECLARED -- and
+// an array whose element kind contradicts the declaration was never this field's
+// value (MESSAGE_SPEC §7.3). It is a skipped field, so its element count is not
+// this field's count and must not be measured against N. The two fp kinds are
+// therefore kept apart on the wire hook: a fixlen array's count word precedes its
+// fixlen_word, so a collapsed "fixlen" kind could not tell an fp64 header at a
+// declared fp32[N] slot from a real one, and the over-count bound would reject a
+// message that must be ACCEPTED (the driver: an fp64 array announcing 8 elements
+// arriving at `f32s`, declared `count: 3`).
+//
+// The skip needs no emitted code: the whole-array callbacks are kind-dispatched
+// by the corelib, so the contradicting array lands in a callback with no arm for
+// this id and evaporates -- leaving any correctly typed earlier occurrence of the
+// same id intact (§7.4).
+func TestDartArrayHeaderBoundIsKeyedByElementKind(t *testing.T) {
+	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
+		"      f32s: { id: 0, type: array, items: { type: fp32, count: 3 } }\n" +
+		"      f64s: { id: 1, type: array, items: { type: fp64, count: 5 } }\n" +
+		"      us:   { id: 2, type: array, items: { type: u32, count: 7 } }\n" +
+		"      ss:   { id: 3, type: array, items: { type: i32, count: 9 } }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+
+	for _, want := range []string{
+		// The hook gained the kind parameter; the old two-argument override no
+		// longer overrides anything the corelib calls.
+		"  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {",
+		// One arm per field, each testing ONLY its own declared element kind, with
+		// the bound behind that test. A declared fp32 appears under fp32 and a
+		// declared fp64 under fp64 -- never one shared "fixlen" arm.
+		"      case 0:\n        if (kind == sofab.ArrayKind.fp32 && count > 3) e.inv = true;\n        return;",
+		"      case 1:\n        if (kind == sofab.ArrayKind.fp64 && count > 5) e.inv = true;\n        return;",
+		// Integer arrays take the same shape -- there is no second wire word on
+		// that path, but the declared kind still gates the bound.
+		"      case 2:\n        if (kind == sofab.ArrayKind.unsigned && count > 7) e.inv = true;\n        return;",
+		"      case 3:\n        if (kind == sofab.ArrayKind.signed && count > 9) e.inv = true;\n        return;",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated Dart missing %q:\n%s", want, out)
+		}
+	}
+
+	for _, notWant := range []string{
+		// The pre-#259 arity: it compiles against nothing the corelib calls.
+		"void onArrayBegin(int id, int count)",
+		// A collapsed fixlen kind cannot separate the two fp slots at all.
+		"sofab.ArrayKind.fixlen",
+		// An un-gated bound rejects a header that §7.3 says to skip.
+		"if (count > 3) e.inv = true;",
+		"if (count > 5) e.inv = true;",
+		// The fp32 field's N must never be reachable from the fp64 arm (and back).
+		"if (kind == sofab.ArrayKind.fp64 && count > 3)",
+		"if (kind == sofab.ArrayKind.fp32 && count > 5)",
+	} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("array header bound is not keyed by the declared element kind (%q):\n%s", notWant, out)
+		}
 	}
 }

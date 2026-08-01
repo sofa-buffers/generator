@@ -390,10 +390,11 @@ func (g *gen) emitArraySkipGuard(f *cfile) {
 //
 // One arm per wire ArrayKind, and each arm disarms ONLY where the declared
 // element type maps to that very kind (generator#254): Unsigned covers
-// u*/boolean/bitfield, Signed covers i*/enum, Fixlen covers fp32/fp64. Folding
-// Unsigned and Signed into one arm let an array-signed header at an
+// u*/boolean/bitfield, Signed covers i*/enum, Fp32 covers fp32 and Fp64 covers
+// fp64. Folding Unsigned and Signed into one arm let an array-signed header at an
 // unsigned-declared array id disarm the counter, i.e. decode a header S7.3 says
-// to skip.
+// to skip; folding fp32 and fp64 into one "fixlen" arm did the same for the two
+// fixlen subtypes (generator#259).
 func (g *gen) emitArraySkipArm(f *cfile, fs []frame) {
 	arm := func(pat string, want func(ir.Kind) bool) {
 		f.line("            %s => (cur, id) switch {", pat)
@@ -419,10 +420,13 @@ func (g *gen) emitArraySkipArm(f *cfile, fs []frame) {
 	f.line("        askip = kind switch {")
 	arm("ArrayKind.Unsigned", unsignedArrayElem)
 	arm("ArrayKind.Signed", signedArrayElem)
-	// The fixlen SUBTYPE (fp32 vs fp64) is not visible in this hook — the corelib
-	// collapses both into ArrayKind.Fixlen — so a subtype contradiction is caught
-	// downstream, where the element lands in Fp32() or Fp64().
-	arm("ArrayKind.Fixlen", fpArrayElem)
+	// The fixlen SUBTYPE (fp32 vs fp64) IS visible in this hook: the corelib reads
+	// the fixlen_word before announcing the array (CORELIB_PLAN §4.8), so an fp64
+	// header arriving at an fp32-declared id lands in the Fp64 arm, matches nothing
+	// there and arms the discard counter — the subtype contradiction is a §7.3 skip
+	// decided here, not downstream (generator#259).
+	arm("ArrayKind.Fp32", fp32ArrayElem)
+	arm("ArrayKind.Fp64", fp64ArrayElem)
 	f.line("            _ => 0,")
 	f.line("        };")
 }
@@ -430,10 +434,11 @@ func (g *gen) emitArraySkipArm(f *cfile, fs []frame) {
 // emitArrayFillArm arms the S7.3 fill counter in ArrayBegin (generator#188), the
 // mirror of emitArraySkipArm. It is armed at a legitimate native-array position
 // whose declared element kind matches the array kind on the wire — integer arrays
-// under Unsigned/Signed, fp arrays under Fixlen — and stays 0 everywhere else, so
-// a bare scalar delivered at an array id (no ArrayBegin, afill == 0) falls through
-// its fill arm and is skipped. Every native element kind is covered because both
-// the integer fills (Unsigned/Signed) and the fp fills (Fp32/Fp64) are gated.
+// under Unsigned/Signed, fp32 arrays under Fp32 and fp64 arrays under Fp64 — and
+// stays 0 everywhere else, so a bare scalar delivered at an array id (no
+// ArrayBegin, afill == 0) falls through its fill arm and is skipped. Every native
+// element kind is covered because both the integer fills (Unsigned/Signed) and
+// the fp fills (Fp32/Fp64) are gated.
 func (g *gen) emitArrayFillArm(f *cfile, fs []frame) {
 	arm := func(pat string, want func(ir.Kind) bool) {
 		f.line("            %s => (cur, id) switch {", pat)
@@ -456,10 +461,12 @@ func (g *gen) emitArrayFillArm(f *cfile, fs []frame) {
 	f.line("        afill = kind switch {")
 	// One arm per wire ArrayKind, exactly complementary to emitArraySkipArm: a
 	// header whose kind is not the one the declared element maps to arms the skip
-	// counter, never a fill (generator#254).
+	// counter, never a fill (generator#254, extended to the two fixlen subtypes by
+	// generator#259).
 	arm("ArrayKind.Unsigned", unsignedArrayElem)
 	arm("ArrayKind.Signed", signedArrayElem)
-	arm("ArrayKind.Fixlen", fpArrayElem)
+	arm("ArrayKind.Fp32", fp32ArrayElem)
+	arm("ArrayKind.Fp64", fp64ArrayElem)
 	f.line("            _ => 0,")
 	f.line("        };")
 }

@@ -226,11 +226,9 @@ impl<'a> Visitor for V<'a> {
             ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {
                 _ => count,
             },
-            _ => match (self.cur, id) {
-                _ => count,
-            },
+            _ => count,
         };
-        match (self.cur, id) {
+        match (kind, self.cur, id) {
             _ => {}
         }
     }

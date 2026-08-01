@@ -306,15 +306,76 @@ func (g *gen) emitArraySkipGuard(f *rfile, arrSkip bool) {
 	f.line("        if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id")
 }
 
+// wantIntElem / wantFP32Elem / wantFP64Elem are the three element-kind
+// predicates that key an array_begin arm to a wire ArrayKind. They partition the
+// native array element kinds exactly as the corelib's ArrayKind partitions the
+// wire: integers (delivered as Unsigned/Signed), fp32 and fp64.
+func wantIntElem(k ir.Kind) bool {
+	return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64
+}
+func wantFP32Elem(k ir.Kind) bool { return k == ir.KindFP32 }
+func wantFP64Elem(k ir.Kind) bool { return k == ir.KindFP64 }
+
+// anyArrayElem reports whether the message declares at least one native array
+// whose element kind satisfies want — i.e. whether an arm keyed to that kind
+// would carry any field at all.
+//
+// This is also the emission condition for naming ArrayKind::Fp32 /
+// ArrayKind::Fp64 in generated code. Under the no_std profile both variants are
+// `#[cfg(feature = "fixlen")]`, so naming one in a crate built without `fixlen`
+// would not compile. A schema that declares an fp array necessarily provisions
+// `fixlen` (capabilities(), which today provisions the full wire-type set
+// unconditionally), and a schema that declares none never names the variant —
+// the catch-all arm covers that wire kind instead. That keeps the emission
+// correct even if the provisioned feature set is ever narrowed again.
+func anyArrayElem(fs []frame, want func(ir.Kind) bool) bool {
+	for _, fr := range fs {
+		switch fr.kind {
+		case fkStruct:
+			for _, fld := range fr.fields {
+				if fld.Kind == ir.KindArray && want(fld.Elem) {
+					return true
+				}
+			}
+		case fkNestedNative:
+			if want(fr.elemKind) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// arrayKindPat is the ArrayKind pattern that fronts a native array field's arm
+// in array_begin's target match. A fixlen array is keyed to its own declared
+// element subtype, so a header of the *other* fp subtype never reaches the
+// field's arm; an integer array stays kind-agnostic (`_`), see the target
+// match's own comment.
+func arrayKindPat(k ir.Kind) string {
+	switch k {
+	case ir.KindFP32:
+		return "ArrayKind::Fp32"
+	case ir.KindFP64:
+		return "ArrayKind::Fp64"
+	default:
+		return "_"
+	}
+}
+
 // emitArraySkipArm arms the §7.3 discard counter in array_begin
 // (generator#183, extended to fp by generator#193). Every array kind whose
 // elements land in a callback a scalar shares is armed: integers land in
 // unsigned()/signed(), fp lands in fp32()/fp64(). Every (scope, id) that
 // genuinely declares a native array of that element kind disarms it (=> 0), so a
 // legitimate array stores normally; everything else — a scalar-declared id, an
-// unknown id — discards exactly `count` elements, after which a real scalar at
-// the same id still decodes. Mirrors emitArrayFillArm: the fp branch matches `_`,
-// not ArrayKind::Fixlen, because the no_std profile feature-gates that variant.
+// unknown id, an fp64 header at a declared fp32 array — discards exactly `count`
+// elements, after which a real scalar at the same id still decodes.
+//
+// The fixlen arm is keyed by element SUBTYPE (Fp32 / Fp64), not by a collapsed
+// "some fixlen array" (CORELIB_PLAN §4.8, generator#259 / Crucible F-0042): the
+// corelib now delivers array_begin only after the fixlen_word, so `kind` names
+// the subtype actually on the wire, and a declared fp32[N] must disarm only for
+// an Fp32 header. See emitArrayKindArms for why the catch-all is conditional.
 func (g *gen) emitArraySkipArm(f *rfile, fs []frame, arrSkip bool) {
 	if !arrSkip {
 		return
@@ -339,18 +400,43 @@ func (g *gen) emitArraySkipArm(f *rfile, fs []frame, arrSkip bool) {
 		f.line("            },")
 	}
 	f.line("        self.askip = match kind {")
-	emit("ArrayKind::Unsigned | ArrayKind::Signed", func(k ir.Kind) bool { return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64 })
-	emit("_", func(k ir.Kind) bool { return k == ir.KindFP32 || k == ir.KindFP64 })
+	g.emitArrayKindArms(f, fs, emit, "            _ => count,")
 	f.line("        };")
+}
+
+// emitArrayKindArms lays out the ArrayKind-keyed arms shared by the skip and
+// fill counters: the integer arm (always emitted, since it also carries the
+// "nothing declared here" default for integer headers), then an Fp32 and an Fp64
+// arm for each fp element subtype the schema actually declares, then a catch-all
+// carrying `dflt`.
+//
+// The catch-all is omitted exactly when both fp arms were named, because
+// {Unsigned, Signed, Fp32, Fp64} is then already exhaustive and a trailing `_`
+// would be an unreachable pattern (a Rust warning in generated code). When
+// either fp subtype is undeclared the catch-all is what arms the counter for a
+// header of that kind — a declared-fp32 message must still discard the elements
+// of an fp64 array that arrives at any id.
+func (g *gen) emitArrayKindArms(f *rfile, fs []frame, emit func(pat string, want func(ir.Kind) bool), dflt string) {
+	emit("ArrayKind::Unsigned | ArrayKind::Signed", wantIntElem)
+	fp32, fp64 := anyArrayElem(fs, wantFP32Elem), anyArrayElem(fs, wantFP64Elem)
+	if fp32 {
+		emit("ArrayKind::Fp32", wantFP32Elem)
+	}
+	if fp64 {
+		emit("ArrayKind::Fp64", wantFP64Elem)
+	}
+	if !fp32 || !fp64 {
+		f.line("%s", dflt)
+	}
 }
 
 // emitArrayFillArm arms the §7.3 fill counter in array_begin (generator#188), the
 // mirror of emitArraySkipArm: armed with the element count at a legitimate
 // native-array position matching the wire array kind (integer arrays under
-// Unsigned/Signed, fp arrays under Fixlen), 0 everywhere else, so a bare scalar
-// at an array id (afill == 0) falls through its fill arm and is skipped.
-// ArrayKind is exactly {Unsigned, Signed, Fixlen}, so the outer match is
-// exhaustive without a wildcard.
+// Unsigned/Signed, fp32 arrays under Fp32, fp64 arrays under Fp64), 0 everywhere
+// else, so a bare scalar at an array id (afill == 0) falls through its fill arm
+// and is skipped — and so does an fp64 array header that lands on a declared
+// fp32 array, which is a §7.3 skip, not that field's value (generator#259).
 func (g *gen) emitArrayFillArm(f *rfile, fs []frame, fillArm bool) {
 	if !fillArm {
 		return
@@ -374,12 +460,8 @@ func (g *gen) emitArrayFillArm(f *rfile, fs []frame, fillArm bool) {
 		f.line("                _ => 0,")
 		f.line("            },")
 	}
-	// The fp branch matches `_`, not `ArrayKind::Fixlen`: under the no_std profile
-	// the Fixlen variant is feature-gated and may not exist, exactly as
-	// emitArraySkipArm names only Unsigned|Signed and lets `_` cover the rest.
 	f.line("        self.afill = match kind {")
-	emit("ArrayKind::Unsigned | ArrayKind::Signed", func(k ir.Kind) bool { return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64 })
-	emit("_", func(k ir.Kind) bool { return k == ir.KindFP32 || k == ir.KindFP64 })
+	g.emitArrayKindArms(f, fs, emit, "            _ => 0,")
 	f.line("        };")
 }
 
@@ -923,15 +1005,42 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// capacity that bounds M and sizes the container, never a length that
 		// pre-fills it -- so the M elements that arrive are the whole value and
 		// there is no [M, N) tail to size, wipe or refill.
+		//
+		// The target match is keyed by (kind, loc, id), not just (loc, id): a
+		// fixlen array announces its element SUBTYPE, and a declared fp32[N] is
+		// only reached by an Fp32 header. An fp64 header at that id contradicts
+		// the declared type, so the whole field is skipped (§7.3) -- it is not
+		// that field's value, so its schema `count` is not this header's bound
+		// and its container is not cleared. Both of those live INSIDE the arm,
+		// behind the kind test, for exactly that reason: the header must fall
+		// through to the discard counter armed above, never to a reject.
+		//
+		// Integer arrays keep the kind-agnostic `_` pattern, and that is a KNOWN
+		// GAP, not a claim that there is nothing to guard. An fp32/fp64 (or
+		// mis-signed integer) header arriving at a declared integer array id still
+		// reaches that field's arm here: it applies the field's schema `count`
+		// bound to a count that is not the field's, and clears the container --
+		// while the discard counter armed above is simultaneously throwing the
+		// elements away. The two halves contradict each other.
+		//
+		// It is left alone deliberately. That face is generator#254 / Crucible
+		// F-0039, which was fixed for java and csharp only and never for rust; it
+		// is a different codegen path (its primary form is a non-fixlen
+		// ARRAY_SIGNED header at a u8[] slot) and it is tracked on its own. Fixing
+		// it here would change what an over-count MIS-TYPED header decodes to in
+		// rust, which is outside what the fixlen-subtype work decides. rust is the
+		// last of the six backends still carrying it: java, csharp, zig, go and
+		// dart all key their integer arms by kind.
 		f.line("    fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {")
 		g.emitArraySkipArm(f, fs, arrSkip)
 		g.emitArrayFillArm(f, fs, use.scalarArray)
-		f.line("        match (self.cur, id) {")
+		f.line("        match (kind, self.cur, id) {")
 		for _, fr := range fs {
 			switch fr.kind {
 			case fkStruct:
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
+						kp := arrayKindPat(fld.Elem)
 						clear := fmt.Sprintf("%s.%s.clear()", fr.path, rustIdent(fld.Name))
 						if fld.HasCount {
 							// Over-count reject at the count header (generator#216 / F-0032):
@@ -941,17 +1050,22 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 							// check only at the element store never fires when truncation cuts
 							// the array short of N, so an over-count-AND-truncated array would
 							// misreport INCOMPLETE.
-							f.line("            (_Loc::%s, %d) => { if count > %d { self.inv = true; return; } %s },", fr.loc, fld.ID, fld.Count, clear)
+							//
+							// It sits inside the kind-keyed arm (generator#259 / F-0042): the
+							// count word is read before the fixlen_word, so a bound applied on
+							// the strength of the count alone would reject a header that turns
+							// out to belong to no declared field at all.
+							f.line("            (%s, _Loc::%s, %d) => { if count > %d { self.inv = true; return; } %s },", kp, fr.loc, fld.ID, fld.Count, clear)
 							continue
 						}
 						// Unbounded array under an active receiver cap (generator#102):
 						// reject an over-cap wire count at the header, before any
 						// elements accumulate.
 						if g.limits.arrayHas {
-							f.line("            (_Loc::%s, %d) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s },", fr.loc, fld.ID, clear)
+							f.line("            (%s, _Loc::%s, %d) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s },", kp, fr.loc, fld.ID, clear)
 							continue
 						}
-						f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, clear)
+						f.line("            (%s, _Loc::%s, %d) => %s,", kp, fr.loc, fld.ID, clear)
 					}
 				}
 			case fkNestedNative:
@@ -971,8 +1085,12 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				// row is not a bound at all on decode, and a row grows to whatever
 				// element count the wire announces (std) or silently drops the excess
 				// past its heapless capacity (no_std), instead of INVALID per §3+§7.
-				f.line("            (_Loc::%s, _) => { %s%s self.%s = id as usize; },",
-					fr.loc, g.rowGuards(fr), g.seqElemGrow(fr.path), fr.ixVar)
+				//
+				// Keyed by the row's own element subtype for the same reason as the
+				// leaf arms: an fp64 row header at a declared fp32 row is a skipped
+				// field, so neither of these bounds is its bound.
+				f.line("            (%s, _Loc::%s, _) => { %s%s self.%s = id as usize; },",
+					arrayKindPat(fr.elemKind), fr.loc, g.rowGuards(fr), g.seqElemGrow(fr.path), fr.ixVar)
 			}
 		}
 		f.line("            _ => {}")

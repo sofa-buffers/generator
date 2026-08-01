@@ -113,7 +113,7 @@ func TestCsMaxlenReject(t *testing.T) {
 // with the announced element count and the scalar callbacks discard exactly that
 // many. Only ids that genuinely declare a native array of that element kind (and
 // nested native inner-array scopes) disarm it — integer arrays under
-// Unsigned/Signed, fp arrays under Fixlen.
+// Unsigned/Signed, fp32 arrays under Fp32, fp64 arrays under Fp64.
 func TestCsArrayAtScalarSkip(t *testing.T) {
 	src := []byte("version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      u:  { id: 0, type: u8 }\n" +
@@ -135,10 +135,11 @@ func TestCsArrayAtScalarSkip(t *testing.T) {
 		"askip = kind switch {",
 		"            ArrayKind.Unsigned => (cur, id) switch {",
 		"            ArrayKind.Signed => (cur, id) switch {",
-		"            ArrayKind.Fixlen => (cur, id) switch {",
+		"            ArrayKind.Fp32 => (cur, id) switch {",
+		"            ArrayKind.Fp64 => (cur, id) switch {",
 		// Each declared array disarms under ITS OWN kind: the u32 array (id 2) and
 		// the nested u16 inner scope under Unsigned, the i32 array (id 3) under
-		// Signed, the fp32 array (id 4) under Fixlen (#193).
+		// Signed, the fp32 array (id 4) under Fp32 (#193, re-keyed by subtype in #259).
 		"                (Root, 2) => 0,",
 		"                (Root, 3) => 0,",
 		"                (Root_na, _) => 0,",
@@ -165,10 +166,19 @@ func TestCsArrayAtScalarSkip(t *testing.T) {
 	for _, want := range []string{
 		"            ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 2) => 0,\n                (Root_na, _) => 0,\n                _ => count,\n            },",
 		"            ArrayKind.Signed => (cur, id) switch {\n                (Root, 3) => 0,\n                _ => count,\n            },",
+		// The fp32 array is the ONLY disarming id under Fp32, and no id at all
+		// disarms under Fp64: this message declares no fp64 array, so every fp64
+		// header it can receive is a §7.3 skip (generator#259).
+		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 4) => 0,\n                _ => count,\n            },",
+		"            ArrayKind.Fp64 => (cur, id) switch {\n                _ => count,\n            },",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing per-kind skip arm %q:\n%s", want, m)
 		}
+	}
+	// The collapsed fixlen category is gone from the ABI (generator#259).
+	if strings.Contains(m, "ArrayKind.Fixlen") {
+		t.Errorf("ArrayKind.Fixlen no longer exists; fixlen arrays are keyed by subtype:\n%s", m)
 	}
 }
 
@@ -206,7 +216,7 @@ messages:
 		// The kind test fronts the allocation AND precedes the schema bound.
 		`case (Root, 0): if (kind != ArrayKind.Unsigned) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "ua: array count above schema capacity 5"); m.ua = new byte[count]; break;`,
 		`case (Root, 1): if (kind != ArrayKind.Signed) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "ia: array count above schema capacity 5"); m.ia = new sbyte[count]; break;`,
-		`case (Root, 2): if (kind != ArrayKind.Fixlen) break; if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fa: array count above schema capacity 3"); m.fa = new float[count]; break;`,
+		`case (Root, 2): if (kind != ArrayKind.Fp32) break; if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fa: array count above schema capacity 3"); m.fa = new float[count]; break;`,
 		// A boolean/enum array is a List: clearing it is decoding into it too, so
 		// the kind test fronts the Clear() as well. boolean rides the Unsigned wire
 		// type, enum the Signed one.
@@ -217,7 +227,7 @@ messages:
 		// The skip counter is armed per kind; each id disarms under its own kind only.
 		"            ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 3) => 0,\n                (Root, 5) => 0,\n                _ => count,\n            },",
 		"            ArrayKind.Signed => (cur, id) switch {\n                (Root, 1) => 0,\n                (Root, 4) => 0,\n                _ => count,\n            },",
-		"            ArrayKind.Fixlen => (cur, id) switch {\n                (Root, 2) => 0,\n                _ => count,\n            },",
+		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 2) => 0,\n                _ => count,\n            },",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing §7.3 mis-typed-array guard %q:\n%s", want, m)
@@ -227,6 +237,74 @@ messages:
 	// skipped, not a false InvalidMessage.
 	if strings.Contains(m, "case (Root, 0): if (count > 5)") {
 		t.Error("the schema bound must sit BEHIND the §7.3 kind test (generator#254)")
+	}
+}
+
+// TestCsFixlenArrayKeyedBySubtype: a fixlen array header names its element
+// SUBTYPE, so fp32 and fp64 are two distinct wire kinds, not one collapsed
+// "fixlen" category (CORELIB_PLAN §4.8 / generator#259 / Crucible F-0042).
+// corelib-cs now reads the fixlen_word BEFORE announcing the array, so
+// ArrayBegin carries ArrayKind.Fp32 or ArrayKind.Fp64 — and generated code must
+// key on it, exactly as it already keys Unsigned apart from Signed
+// (generator#254).
+//
+// What that buys, on a schema declaring both an fp32[4] and an fp64[2]:
+//
+//   - an fp64 header at the fp32-declared id fails the arm's kind test, so the
+//     declared float[] is never sized, cleared or allocated from it;
+//   - the schema `count` bound sits BEHIND that kind test, so an OVER-COUNT
+//     fp64 header at the fp32 slot is skipped (MESSAGE_SPEC §7.3) instead of
+//     rejected as a false InvalidMessage — a skipped field's element count is
+//     not this array's count and no schema bound may be applied to it;
+//   - the skip counter is armed for the non-matching subtype, so the elements
+//     that follow are discarded one by one like an unknown id's.
+func TestCsFixlenArrayKeyedBySubtype(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      f32: { id: 0, type: array, items: { type: fp32, count: 4 } }
+      f64: { id: 1, type: array, items: { type: fp64, count: 2 } }
+      dyn: { id: 2, type: array, items: { type: fp32 } }
+`
+	m := buildModule(t, []byte(src), "fixlen.yaml", map[string]any{"namespace": "S"})
+	for _, want := range []string{
+		// Each declared fixlen array is fronted by ITS OWN subtype's kind test, with
+		// the schema capacity bound behind it.
+		`case (Root, 0): if (kind != ArrayKind.Fp32) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "f32: array count above schema capacity 4"); m.f32 = new float[count]; break;`,
+		`case (Root, 1): if (kind != ArrayKind.Fp64) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "f64: array count above schema capacity 2"); m.f64 = new double[count]; break;`,
+		// A count-less fixlen array has no schema bound but still gets the kind test.
+		`case (Root, 2): if (kind != ArrayKind.Fp32) break; m.dyn = new float[Math.Min(count, ArrayInitCap)]; break;`,
+		// The skip counter: the fp32 ids disarm only under Fp32, the fp64 id only
+		// under Fp64. An fp64 header at id 0 therefore arms `count` discards.
+		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 2) => 0,\n                _ => count,\n            },",
+		"            ArrayKind.Fp64 => (cur, id) switch {\n                (Root, 1) => 0,\n                _ => count,\n            },",
+		// The fill counter is the exact complement: armed only under the matching
+		// subtype, so a mis-typed header never stores an element either.
+		"        afill = kind switch {",
+		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => count,\n                (Root, 2) => count,\n                _ => 0,\n            },",
+		"            ArrayKind.Fp64 => (cur, id) switch {\n                (Root, 1) => count,\n                _ => 0,\n            },",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing subtype-keyed fixlen arm %q:\n%s", want, m)
+		}
+	}
+	for _, bad := range []string{
+		// The collapsed category is gone from the corelib ABI entirely.
+		"ArrayKind.Fixlen",
+		// The bound must never precede the kind test, on either subtype: an
+		// over-count MIS-TYPED fixlen header is a skip, not an InvalidMessage.
+		"case (Root, 0): if (count > 4)",
+		"case (Root, 1): if (count > 2)",
+		// An fp64 id must never disarm the fp32 counter, nor the reverse: that is
+		// exactly the fold that let a declared float[] be sized from an fp64 header.
+		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 1) => 0,",
+		"            ArrayKind.Fp64 => (cur, id) switch {\n                (Root, 0) => 0,",
+	} {
+		if strings.Contains(m, bad) {
+			t.Errorf("Message.cs must not contain %q (generator#259):\n%s", bad, m)
+		}
 	}
 }
 
@@ -456,7 +534,7 @@ messages:
 		// arrays allocate the WIRE count (the #100 guard still bounds it by N), the
 		// List<T> ones clear and append.
 		`case (Root, 0): if (kind != ArrayKind.Unsigned) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "fx: array count above schema capacity 5"); m.fx = new uint[count]; break;`,
-		`case (Root, 3): if (kind != ArrayKind.Fixlen) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "ff32: array count above schema capacity 4"); m.ff32 = new float[count]; break;`,
+		`case (Root, 3): if (kind != ArrayKind.Fp32) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "ff32: array count above schema capacity 4"); m.ff32 = new float[count]; break;`,
 		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fb: array count above schema capacity 3"); m.fb.Clear(); break;`,
 		"case (Root, 5): if (afill == 0) break; afill--; m.fb.Add(value != 0); break;",
 		"case (Root, 6): if (afill == 0) break; afill--; m.fe.Add((EnumColor)value); break;",

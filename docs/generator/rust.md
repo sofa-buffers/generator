@@ -321,8 +321,10 @@ and the `(scope, id)` pair is **not** a declared integer-element native array;
 the two scalar callbacks then discard while armed. It self-terminates on the
 announced count (no array-end callback needed), survives a chunk boundary (the
 counter lives in the visitor), leaves legitimate arrays untouched, and still
-decodes a real scalar arriving at that id after the array. The fp arrays are never
-armed — their elements go to the float callbacks and cannot reach a scalar arm.
+decodes a real scalar arriving at that id after the array. Float arrays are armed
+the same way (issue #193): the corelib streams a fixlen array's elements through
+the very `fp32()`/`fp64()` callbacks a lone float scalar uses, so those two
+callbacks carry the guard too — keyed by element subtype, see the next section.
 
 Under `no_std` the guard is emitted only when the schema turns on the `array`
 Cargo feature: without it `corelib-rs-no-std` cannot decode an array wire type at
@@ -330,3 +332,65 @@ all, so no element can reach a scalar callback, and referencing the feature-gate
 `ArrayKind` would not compile. `corelib-rs` (std) compiles every wire type in, so
 the `std` profile always carries the guard — including for a message with no array
 field, where `array_begin` is emitted purely to arm it.
+
+## §7.3: a fixlen array is keyed by its element subtype (issue #259)
+
+A fixlen (float) array carries **two** header words: the element count, then the
+`fixlen_word` that names the element subtype. `ArrayKind` therefore names that
+subtype — `Unsigned = 0`, `Signed = 1`, `Fp32 = 2`, `Fp64 = 3` — and the corelib
+delivers `array_begin` only *after* the `fixlen_word` has been read and validated.
+(Integer arrays have no second word, so their call still follows the count varint
+directly.)
+
+That ordering is what makes the generated decoder's three `array_begin` matches
+key on `kind`:
+
+```rust
+fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {
+    self.askip = match kind {
+        ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) { /* int arrays */ _ => count },
+        ArrayKind::Fp32 => match (self.cur, id) { (_Loc::Root, 1) => 0, _ => count },
+        ArrayKind::Fp64 => match (self.cur, id) { (_Loc::Root, 2) => 0, _ => count },
+    };
+    self.afill = match kind { /* the same keying, armed with `count` */ };
+    match (kind, self.cur, id) {
+        (ArrayKind::Fp32, _Loc::Root, 1) => { if count > 4 { self.inv = true; return; } self.m.f32s.clear() },
+        (ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; return; } self.m.f64s.clear() },
+        (_, _Loc::Root, 3) => { if count > 8 { self.inv = true; return; } self.m.ints.clear() },
+        _ => {}
+    }
+}
+```
+
+A declared `fp32[N]` appears **only** under `Fp32`, a declared `fp64[N]` **only**
+under `Fp64`. An `fp64` header arriving at an `fp32`-declared id matches none of
+its arms, so it falls through to `_ => count` on the skip counter and its elements
+are discarded — a §7.3 skip, exactly like an array at an unknown id.
+
+### Why the `count` bound sits *inside* the arm
+
+The element count is on the wire **before** the subtype. A bound applied on the
+strength of the count alone would therefore be decided before it is known whether
+the header belongs to this field at all. Put `if count > N { inv }` ahead of the
+kind test and an `fp64` array whose count exceeds a *different* field's declared
+`fp32` capacity rejects the whole message as `InvalidMsg` — on a bound that was
+never its bound, for a field §7.3 says is skipped whole. For the same reason the
+container's `clear()` is inside the arm: a skipped field must not lose the value
+it already holds.
+
+The order the arm enforces is: format ceiling (the corelib's own `ARRAY_MAX`, on
+the count word) → subtype → §7.3 kind test → schema bound, for a field that
+survives all three.
+
+### Feature gating under `no_std`
+
+In `corelib-rs-no-std` the whole `ArrayKind` enum is `#[cfg(feature = "array")]`
+and `Fp32`/`Fp64` are additionally `#[cfg(feature = "fixlen")]`. The generator
+names `ArrayKind::Fp32` or `ArrayKind::Fp64` **only when the schema actually
+declares a native array of that element subtype** — a schema that declares none
+keeps the catch-all, which arms the discard counter for that wire kind anyway. So
+a crate never depends on `fixlen` for a variant it has no field for.
+
+When both subtypes *are* declared, `{Unsigned, Signed, Fp32, Fp64}` is exhaustive
+and the trailing `_` arm is dropped; emitting it would be an unreachable-pattern
+warning in the generated crate.

@@ -454,6 +454,32 @@ func nativeArrayElem(k ir.Kind) bool {
 	return unsignedArrayElem(k) || signedArrayElem(k) || k == ir.KindFP32 || k == ir.KindFP64
 }
 
+// wireArrayKind is the corelib `sofab.ArrayKind` an array of `k` elements is
+// announced under at onArrayBegin: integers (and bool/enum/bitfield) as
+// unsigned/signed by the backing type's signedness, floats by element WIDTH --
+// `fp32` and `fp64` are two DISTINCT kinds, never one collapsed "fixlen".
+//
+// That split is what makes the schema `count` bound implementable in the order
+// MESSAGE_SPEC §7.3 requires (CORELIB_PLAN §4.8, generator#259 / Crucible
+// F-0042). A fixlen array carries its element count BEFORE its element subtype,
+// so a header hook fired between the two words could only report "some fixlen
+// array": a receiver bounding `count` there would measure an fp64 header against
+// a declared fp32[N], a field the subtype says was never this field's value at
+// all. corelib-dart therefore fires onArrayBegin PAST the fixlen_word carrying
+// the real subtype, and the generated arm keys on it.
+func wireArrayKind(k ir.Kind) string {
+	switch {
+	case k == ir.KindFP32:
+		return "fp32"
+	case k == ir.KindFP64:
+		return "fp64"
+	case signedArrayElem(k):
+		return "signed"
+	default: // unsigned numeric, bool, bitfield
+		return "unsigned"
+	}
+}
+
 // seqArrayElem: an array element that lowers to a wrapper sequence
 // (string/blob/struct/union, or a nested array).
 func seqArrayElem(k ir.Kind) bool {

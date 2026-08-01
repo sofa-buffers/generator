@@ -77,6 +77,31 @@ fi
 "$H" decode myfirstmessage < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
+# Fixlen-array element subtype decides BEFORE the schema count bound
+# (CORELIB_PLAN S4.8, generator#259 / Crucible F-0042). somefloatarray declares
+# fp32 with count: 3 at id 17 -> array-fixlen header 8d 01 (17<<3 | 5). A fixlen
+# array carries a fixlen_word after its count: 20 = 4-byte elements (fp32),
+# 41 = 8-byte elements (fp64).
+#
+#   fp64 header, count 5 at the fp32-declared id: the subtype contradicts the
+#   declared element type, so the field is SKIPPED (MESSAGE_SPEC S7.3) and its
+#   count is not this field's count -- it must NOT be measured against 3. The
+#   payload is 5 x 8 zero bytes, so the message is complete and must DECODE.
+#
+#   fp32 header, count 5 at the same id: the subtype matches, so this really is
+#   the field's count and the schema bound applies -- still INVALID (S3+S7).
+#
+# Before the subtype reached the array header hook the two were indistinguishable
+# and both rejected, which is the defect this pins.
+echo "==> fixlen-array subtype decides before the count bound (generator#259)"
+printf '\215\001\005\101\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000' > "$WORK/fp64_at_fp32.bin"
+printf '\215\001\005\040\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000' > "$WORK/fp32_overcount.bin"
+"$H" decode myfirstmessage < "$WORK/fp64_at_fp32.bin" >/dev/null || { echo "FAIL: fp64 array at an fp32-declared id must be skipped, not bounded"; exit 1; }
+if "$H" decode myfirstmessage < "$WORK/fp32_overcount.bin" >/dev/null 2>&1; then
+    echo "FAIL: fp32 array with count 5 > 3 at its own id must stay INVALID"; exit 1
+fi
+echo "==> fixlen-array subtype ordering OK"
+
 # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
 # MESSAGE_SPEC S5.2). someuintarray declares count 4; a header announcing 6 elements
 # (> 4) followed by only 2 elements then EOF is BOTH schema-invalid and truncated.

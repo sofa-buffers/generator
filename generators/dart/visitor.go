@@ -29,6 +29,12 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// arrived, so a truncated over-bound field never reaches them — the header hook
 	// is what makes the over-bound win the tie. tryDecode already reads the sticky
 	// e.inv before returning the incomplete status, so the flag alone suffices.
+	//
+	// Both hooks fire for ANY wire kind/subtype landing on a field id — the corelib
+	// resolves what arrived but cannot know what was DECLARED — so both arms gate
+	// their bound on the declared kind: a contradicting header is a §7.3 skip and
+	// must never be measured against this field's bound (generator#224 for
+	// onFixlenHeader, generator#259 / F-0042 for onArrayBegin).
 	var arrBegin, fixHdr []string
 
 	arm := func(id int64, body string) string {
@@ -100,7 +106,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// Header hooks fire at the count/length word before the truncation check
 	// (generator#216). Emitted only when a field declares a bound, so a type with
 	// none does not override them and the corelib's max-speed path is unchanged.
-	emitSwitch(f, "void onArrayBegin(int id, int count)", arrBegin)
+	emitSwitch(f, "void onArrayBegin(int id, sofab.ArrayKind kind, int count)", arrBegin)
 	emitSwitch(f, "void onFixlenHeader(int id, int subtype, int length)", fixHdr)
 	// onSequenceStart is ALWAYS overridden: the base returns `this` (descend),
 	// which would misread an unknown nested sequence as this object's fields.
@@ -135,6 +141,37 @@ func maxlenHdrGuard(sub string, n int64) string {
 	return fmt.Sprintf("if (subtype == sofab.FixlenType.%s && length > %d) e.inv = true;", sub, n)
 }
 
+// arrayCountHdrGuard is the onArrayBegin arm body rejecting a native array whose
+// wire element count exceeds the schema `count` N as INVALID, at the array
+// header (generator#100 for the bound, generator#216 for moving it to the
+// header).
+//
+// The bound sits INSIDE the kind test, and that nesting is the whole point of
+// generator#259 / Crucible F-0042. onArrayBegin fires for ANY array kind landing
+// on this field id: the corelib reports the kind that arrived but cannot know
+// the DECLARED one, which is schema knowledge only the generated code has. An
+// array whose element kind contradicts the declaration was never this field's
+// value (MESSAGE_SPEC §7.3) — it is a skipped field, so its element count is not
+// this field's count and must not be measured against N. Bounding first would
+// turn a skippable contradiction into INVALID: an fp64 array header announcing 8
+// elements at a declared `fp32[5]` slot must be SKIPPED and the message
+// ACCEPTED, not rejected as over-count.
+//
+// That is also why `fp32` and `fp64` are separate kinds rather than one
+// "fixlen": a fixlen array's count word precedes its fixlen_word, so the hook
+// has to fire past the subtype (CORELIB_PLAN §4.8) for this test to be able to
+// distinguish them at all.
+//
+// The skip itself needs no code here. The whole-array callbacks
+// (onUnsignedArray/onSignedArray/onFp32Array/onFp64Array) are already
+// kind-dispatched by the corelib, so a contradicting array lands in a callback
+// with no arm for this id and evaporates — which also leaves a correctly typed
+// earlier occurrence of the same id intact (§7.4). This pre-dispatch hook is the
+// one place the kind has to be tested explicitly.
+func arrayCountHdrGuard(kind string, n int64) string {
+	return fmt.Sprintf("if (kind == sofab.ArrayKind.%s && count > %d) e.inv = true;", kind, n)
+}
+
 // emitArrayDecode appends the decode arm(s) for an array field to the right
 // callback bucket. Native scalar arrays bind into the member (with an over-count
 // INVALID guard); wrapper-sequence arrays clear their list and descend into a
@@ -150,11 +187,11 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 		// A wire element count above the schema `count` is INVALID (MESSAGE_SPEC
 		// §3+§7): reject, never clamp (generator#100).
 		guard = fmt.Sprintf("if (values.length > %d) { e.inv = true; return; }\n        ", fld.Count)
-		// Native arrays fire onArrayBegin at the count word; wrapper-sequence arrays
+		// Native arrays fire onArrayBegin at the array header; wrapper-sequence arrays
 		// descend via onSequenceStart (no header hook) and are bounded at the
 		// collector cap instead. So the header reject is only for the native kinds.
 		if nativeArrayElem(fld.Elem) {
-			*arrBegin = append(*arrBegin, arm(fld.ID, fmt.Sprintf("if (count > %d) e.inv = true;", fld.Count)))
+			*arrBegin = append(*arrBegin, arm(fld.ID, arrayCountHdrGuard(wireArrayKind(fld.Elem), fld.Count)))
 		}
 	}
 	switch {

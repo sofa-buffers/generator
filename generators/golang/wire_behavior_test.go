@@ -557,3 +557,73 @@ func TestCountedArrayOmittedOnlyWhenItEqualsItsDefault(t *testing.T) {
 		}
 	}
 }
+
+// --- fixlen-array subtype before the count bound (generator#259) -----------
+
+// TestFixlenArrayBoundAppliesOnlyToItsOwnSubtype is the behavioral half of
+// generator#259 / Crucible F-0042, run against the real corelib: a fixlen array
+// header carries its element subtype in a fixlen_word AFTER the count, and that
+// subtype -- not the count -- decides whether the header is the declared field's
+// value at all. An array whose subtype contradicts the declaration is skipped
+// (MESSAGE_SPEC §7.3), so the schema `count` capacity must NOT be applied to its
+// count: the field was never that array's value.
+//
+// The wire bytes below are hand-built. `05`/`0d` are the field headers for id 0
+// and id 1 with the fixlen-array wire type (0b101); `03` is id 0 with the
+// unsigned-array type (0b011). `20` is the fixlen_word for fp32 (subtype 0,
+// elem_len 4) and `41` the one for fp64 (subtype 1, elem_len 8).
+func TestFixlenArrayBoundAppliesOnlyToItsOwnSubtype(t *testing.T) {
+	corelib := requireGoCorelib(t)
+	def := "version: 1\nmessages:\n  probe:\n    payload:\n" +
+		"      f32s: {id: 0, type: array, items: {type: fp32, count: 5}}\n" +
+		"      f64s: {id: 1, type: array, items: {type: fp64, count: 5}}\n"
+	bin := buildGoHarnessCfg(t, corelib, def, nil)
+
+	const (
+		z32 = "0000000000000000000000000000000000000000000000000000000000000000" // 32 zero bytes
+		z64 = z32 + z32                                                          // 64 zero bytes
+		z24 = "000000000000000000000000000000000000000000000000"                 // 24 zero bytes
+		z12 = "000000000000000000000000"                                         // 12 zero bytes
+		z8  = "0000000000000000"                                                 // 8 zero bytes
+	)
+	// Everything below must ACCEPT: the header is not this field's value, so it
+	// is consumed and dropped, the declared field keeps its default (null), and
+	// no capacity is judged -- not even when the mis-typed count is over it.
+	for _, c := range []struct{ name, in string }{
+		// THE PRIMARY VECTOR: 8 fp64 elements at a declared array<fp32, count 5>.
+		{"over-count fp64 at the fp32 slot", "05" + "08" + "41" + z64},
+		{"in-count fp64 at the fp32 slot", "05" + "03" + "41" + z24},
+		// The mirror: 8 fp32 elements at a declared array<fp64, count 5>.
+		{"over-count fp32 at the fp64 slot", "0d" + "08" + "20" + z32},
+		// One step earlier on the wire: an integer-array header at a fixlen slot
+		// is the same §7.3 skip, and its count is likewise not this field's.
+		{"over-count unsigned array at the fp32 slot", "03" + "08" + z8},
+		// A zero-count fixlen array still carries its fixlen_word, so the header
+		// still resolves to the contradicting subtype and is still skipped.
+		{"zero-count fp64 at the fp32 slot", "05" + "00" + "41"},
+	} {
+		if got := decJSON(t, bin, "probe", c.in); got != normJSON(t, `{"f32s":null,"f64s":null}`) {
+			t.Errorf("%s: must be skipped with the declared fields untouched, got %s", c.name, got)
+		}
+	}
+	// THE CONTROL that proves the bound was re-keyed and not removed: the same
+	// count of 8 under the MATCHING subtype is over the capacity of 5 -> INVALID.
+	decExpectErr(t, bin, "probe", "05"+"08"+"20"+z32)
+	decExpectErr(t, bin, "probe", "0d"+"08"+"41"+z64)
+	// ...and the matching subtype within the capacity still delivers its value,
+	// including the empty array an in-bound zero count stands for.
+	for _, c := range []struct{ in, want string }{
+		{"05" + "03" + "20" + z12, `{"f32s":[0,0,0],"f64s":null}`},
+		{"0d" + "03" + "41" + z24, `{"f32s":null,"f64s":[0,0,0]}`},
+		{"05" + "00" + "20", `{"f32s":[],"f64s":null}`},
+	} {
+		if got := decJSON(t, bin, "probe", c.in); got != normJSON(t, c.want) {
+			t.Errorf("matching subtype %s: got %s, want %s", c.in, got, normJSON(t, c.want))
+		}
+	}
+	// §7.4: an occurrence skipped under §7.3 is not an occurrence, so a correctly
+	// typed earlier array survives a mis-typed later one at the same id.
+	if got := decJSON(t, bin, "probe", "05"+"03"+"20"+z12+"05"+"02"+"41"+"0000000000000000"+z8); got != normJSON(t, `{"f32s":[0,0,0],"f64s":null}`) {
+		t.Errorf("a skipped later occurrence must not clobber the earlier value, got %s", got)
+	}
+}
