@@ -63,11 +63,18 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 		case ir.KindFP64:
 			f64 = append(f64, arm(fld.ID, acc+" = value;"))
 		case ir.KindString:
-			body := acc + " = value;"
+			// The corelib delivers RAW wire bytes and does not validate them: its
+			// cursor cannot tell a field this visitor binds from one it skips, and a
+			// skipped payload must never be inspected. So the destination is
+			// resolved first -- by reaching this arm at all -- and only then are the
+			// bytes checked and transcoded (CORELIB_PLAN §6.4, generator#257).
+			body := "if (!sofab.utf8Valid(bytes)) { e.inv = true; return; }\n        " +
+				acc + " = utf8.decode(bytes);"
 			if fld.HasMaxlen {
 				// A wire byte length above the schema maxlen is malformed input
-				// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate.
-				body = fmt.Sprintf("if (_u8len(value) > %d) { e.inv = true; return; }\n        %s", fld.Maxlen, body)
+				// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate. The raw
+				// bytes ARE the wire length, so this needs no re-encode.
+				body = fmt.Sprintf("if (bytes.length > %d) { e.inv = true; return; }\n        %s", fld.Maxlen, body)
 				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard("string", fld.Maxlen)))
 			}
 			str = append(str, arm(fld.ID, body))
@@ -97,7 +104,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// is a NaN, carrying the raw 32 bits so a signaling/payload NaN survives §4.6.
 	emitSwitch(f, "void onFp32Bits(int id, int bits)", f32bits)
 	emitSwitch(f, "void onFp64(int id, double value)", f64)
-	emitSwitch(f, "void onString(int id, String value)", str)
+	emitSwitch(f, "void onStringBytes(int id, Uint8List bytes)", str)
 	emitSwitch(f, "void onBlob(int id, Uint8List value)", blob)
 	emitSwitch(f, "void onUnsignedArray(int id, Int64List values)", uArr)
 	emitSwitch(f, "void onSignedArray(int id, Int64List values)", sArr)
@@ -284,10 +291,15 @@ func emitSwitch(f *dfile, sig string, arms []string) {
 // needs records which prelude helpers and collector classes a schema actually
 // uses, so only those are emitted (clean output; nothing unused).
 type needs struct {
-	dec                             bool
-	bytesEq, listEq, u8len          bool
-	f32copy, f32bits                bool
-	strSeq, blobSeq, objSeq         bool
+	dec                     bool
+	bytesEq, listEq, u8len  bool
+	f32copy, f32bits        bool
+	strSeq, blobSeq, objSeq bool
+	// str: the module decodes a `string` somewhere -- a scalar field or a
+	// wrapper-array element. It gates the `dart:convert` import, because the
+	// string destinations are what call utf8.decode; a schema with no string at
+	// all would otherwise carry an unused import, which `dart analyze` flags.
+	str                             bool
 	intMat, dblMat, boolMat, seqSeq bool
 }
 
@@ -329,6 +341,7 @@ func (g *gen) scanField(fld *ir.Field, n *needs) {
 			n.bytesEq = true
 		}
 	case ir.KindString:
+		n.str = true
 		if fld.HasMaxlen {
 			n.u8len = true
 		}
@@ -351,6 +364,7 @@ func (g *gen) scanArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, 
 	switch elem {
 	case ir.KindString:
 		n.strSeq = true
+		n.str = true
 		if elemMaxHas {
 			n.u8len = true
 		}
@@ -471,11 +485,14 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("  final int emax;")
 		f.line("  final _Dec e;")
 		f.line("  @override")
-		f.line("  void onString(int id, String value) {")
+		f.line("  void onStringBytes(int id, Uint8List bytes) {")
 		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
-		f.line("    if (emax >= 0 && _u8len(value) > emax) { e.inv = true; return; }")
+		f.line("    if (emax >= 0 && bytes.length > emax) { e.inv = true; return; }")
+		f.line("    // The element is being materialized, so this is where its UTF-8 is")
+		f.line("    // checked. A skipped payload never reaches a collector at all.")
+		f.line("    if (!sofab.utf8Valid(bytes)) { e.inv = true; return; }")
 		f.line("    while (out.length <= id) { out.add(''); }")
-		f.line("    out[id] = value;")
+		f.line("    out[id] = utf8.decode(bytes);")
 		f.line("  }")
 		f.line("}")
 		f.blank()

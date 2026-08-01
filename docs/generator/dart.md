@@ -359,8 +359,25 @@ symbol to toggle on). Tracked: Ir/op.
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
 
-## Strict UTF-8 (issue #85)
+## Strict UTF-8 — validated at the destination (issues #85, #257)
 
-A `string` is materialized inside the corelib (`corelib-dart` validates strictly
-and never substitutes `U+FFFD`, MESSAGE_SPEC S8), so the generator emits no UTF-8
-code for strings — the check is corelib-side, both encode and decode.
+Encode-side strictness is corelib-side (`Encoder.writeString` never substitutes
+`U+FFFD`, MESSAGE_SPEC §8). **Decode is not**, and that changed: the corelib used
+to hand the visitor a finished `String`, which forced it to validate and transcode
+before the consumer could say whether it even wanted the field — so a `string` the
+decoder was *skipping* got validated too, which CORELIB_PLAN §6.4 forbids.
+
+`MessageVisitor.onStringBytes(int id, Uint8List bytes)` now delivers the **raw wire
+bytes**, and the generated visitor overrides that instead of `onString`. Each arm
+resolves its destination first, then calls `sofab.utf8Valid(bytes)` and
+`utf8.decode(bytes)`. A skipped field reaches no arm and is never inspected. Invalid
+bytes at a materialized position set the sticky `e.inv`, the same channel as the
+schema-bound rejects; `blob` is never validated.
+
+Two consequences worth knowing:
+
+- A schema `maxlen` is a **byte** bound, and the raw bytes *are* the wire length,
+  so the guard reads `bytes.length` instead of re-encoding the decoded string.
+- The generated module imports `dart:convert` **only when it decodes a string**.
+  `dart analyze` reports an unused import, and the corpus sweep builds definitions
+  that have no string at all.

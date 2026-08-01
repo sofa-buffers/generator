@@ -77,6 +77,28 @@ if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage <
 fi
 echo "==> fixlen-array subtype ordering OK"
 
+# A SKIPPED string is never UTF-8-validated (CORELIB_PLAN S6.4, generator#257 /
+# Crucible F-0038). Validation belongs where a `string` is MATERIALIZED -- read
+# into a declared destination -- never on a payload the decoder jumps over. The
+# corelib's visitor path deliberately does not validate (its cursor cannot tell a
+# bound field from a skipped one), so the generated destination arms do, via
+# sofab.Utf8Valid.
+#
+#   id 99 is undeclared: 9a 06 (99<<3|2, fixlen) 0a (fixlen word: len 1, subtype
+#   string) 8a (a lone continuation byte, invalid UTF-8). The field is skipped,
+#   so the byte is never inspected and the message decodes to all-defaults.
+#
+#   somestring is declared at id 11: 5a (11<<3|2) 0a 8a. Same byte, now
+#   materialized -- INVALID.
+echo "==> a skipped string is not UTF-8-validated (generator#257)"
+printf '\232\006\012\212' > "$WORK/skipped_bad_utf8.bin"
+printf '\132\012\212'      > "$WORK/declared_bad_utf8.bin"
+(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/skipped_bad_utf8.bin" >/dev/null) || { echo "FAIL: invalid UTF-8 at a SKIPPED id must not fail the decode"; exit 1; }
+if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/declared_bad_utf8.bin" >/dev/null 2>&1); then
+    echo "FAIL: invalid UTF-8 in a DECLARED string must be INVALID"; exit 1
+fi
+echo "==> skipped-string UTF-8 OK"
+
 # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
 # MESSAGE_SPEC S5.2). someuintarray declares count 4; a header announcing 6 elements
 # (> 4) followed by only 2 elements then EOF is BOTH schema-invalid and truncated.

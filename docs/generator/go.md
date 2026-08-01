@@ -128,3 +128,20 @@ the **toggle (symbol `main.run_<workload>`)** method. Tracked: Ir/op.
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+## Strict UTF-8 — validated at the destination (issues #85, #257)
+
+corelib-go's visitor path deliberately does **not** UTF-8-validate: its cursor
+cannot tell a field this visitor binds from one it is skipping, and a skipped
+payload must never be inspected (CORELIB_PLAN §6.4). So the check belongs to the
+destination, and generated code makes it — `sofab.Utf8Valid(bytes)` in every arm
+that stores a `string`: the scalar fields, and the `_strSeq` collector for a
+wrapper-array element. A skipped field reaches no arm, so it is never inspected,
+which is the whole point.
+
+The primitive carries its own **compile-time** gate (a footprint build folds it to
+a constant `true`), so generated code calls it unconditionally and never has to be
+regenerated for a different corelib build. Invalid bytes at a materialized position
+are `sofab.ErrInvalidMsg`, the same channel as the schema-bound rejects. `blob` is
+never validated — bytes carry no encoding. Encode-side strictness stays
+corelib-side (`Encoder.WriteString`).

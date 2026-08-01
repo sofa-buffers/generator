@@ -164,6 +164,12 @@ func (s *_strSeq) String(id sofab.ID, v string) error {
 	if s.emax >= 0 && len(v) > s.emax {
 		return sofab.ErrInvalidMsg
 	}
+	// The element is being materialized, so this is where its UTF-8 is checked.
+	// A payload the decoder skips never reaches a collector at all, which is
+	// exactly the point: validation follows the destination, not the wire.
+	if !sofab.Utf8Valid([]byte(v)) {
+		return sofab.ErrInvalidMsg
+	}
 	for len(*s.out) <= int(id) {
 		*s.out = append(*s.out, "")
 	}
@@ -832,6 +838,16 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 		}
 		return fmt.Sprintf("if len(v) > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", max)
 	}
+	// utf8Guard rejects invalid UTF-8 in a `string` being MATERIALIZED. It is
+	// emitted inside the arm that resolves the destination and nowhere else:
+	// validation belongs where a string is read into a field, never on a payload
+	// the decoder is skipping (CORELIB_PLAN §6.4, generator#257). The corelib's
+	// visitor path deliberately does not validate — the cursor cannot tell a field
+	// this visitor binds from one it skips — so the check is ours to make here.
+	// sofab.Utf8Valid carries its own compile-time gate, so it is called
+	// unconditionally and generated code never depends on the corelib's build
+	// configuration.
+	utf8Guard := "if !sofab.Utf8Valid([]byte(v)) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t"
 	for _, fld := range fields {
 		acc := "m." + goFieldName(fld.Name)
 		switch fld.Kind {
@@ -852,7 +868,7 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 		case ir.KindString:
 			// A wire byte length above the schema maxlen is malformed input
 			// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate.
-			str = append(str, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+acc+" = v"))
+			str = append(str, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+utf8Guard+acc+" = v"))
 			if fld.HasMaxlen {
 				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard(fixSubString, fld.Maxlen)))
 			}
