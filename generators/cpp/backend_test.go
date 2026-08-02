@@ -1964,3 +1964,67 @@ func TestCppNativeCountArrayCarriesALength(t *testing.T) {
 		t.Errorf("the heap enum encode temp must be value-length:\n%s", heapEnum)
 	}
 }
+
+// MESSAGE_SPEC §7.1 + documentation#32 (issue #266, Crucible F-0033 / G-0026):
+// the declared integer width is a normative VALIDITY bound.
+//
+// corelib-cpp's typed read() ends in `value = static_cast<T>(raw)` — the mask
+// §7.1 forbids, applied where generated code cannot see the raw value. So a
+// narrow destination reads through a 64-bit temporary and range-checks before the
+// store. §7.3 is unaffected: read() picks its expected wire type from signedness
+// alone, so u8 and u64 frame identically and a contradicting tag still returns
+// false and stores nothing.
+func TestCppDeclaredWidthIsAValidityBound(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  W:
+    payload:
+      a_u8:   { id: 0, type: u8 }
+      c_u32:  { id: 2, type: u32 }
+      d_u64:  { id: 3, type: u64 }
+      e_i8:   { id: 4, type: i8 }
+      g_i32:  { id: 6, type: i32 }
+      h_i64:  { id: 7, type: i64 }
+`
+	got := headerFromYAML(t, src, "w.hpp")
+	for _, want := range []string{
+		"{ std::uint64_t _v; if (is.read(_v)) { if (_v > 255) { is.invalidate(); return; } a_u8 = static_cast<std::uint8_t>(_v); } }",
+		"{ std::uint64_t _v; if (is.read(_v)) { if (_v > 4294967295) { is.invalidate(); return; } c_u32 = static_cast<std::uint32_t>(_v); } }",
+		"{ std::int64_t _v; if (is.read(_v)) { if (_v < -128 || _v > 127) { is.invalidate(); return; } e_i8 = static_cast<std::int8_t>(_v); } }",
+		"{ std::int64_t _v; if (is.read(_v)) { if (_v < -2147483648 || _v > 2147483647) { is.invalidate(); return; } g_i32 = static_cast<std::int32_t>(_v); } }",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("w.hpp missing width guard %q:\n%s", want, got)
+		}
+	}
+	// 64-bit destinations keep the direct typed read: nothing to bound.
+	for _, want := range []string{"is.read(d_u64);", "is.read(h_i64);"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("w.hpp: a 64-bit destination must keep its direct read (%q):\n%s", want, got)
+		}
+	}
+}
+
+// The c-cpp (footprint) profile was ALREADY conformant — its deferred descriptor
+// carries the declared width to the corelib, which rejects there — so it must not
+// grow a second, generator-side guard.
+func TestCppCCppKeepsItsOwnWidthReject(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  W:
+    payload:
+      a_u8:  { id: 0, type: u8 }
+      c_u32: { id: 2, type: u32 }
+`
+	got, err := fixedHeader(t, src, "w.hpp", map[string]any{"corelib": "c-cpp", "allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, gone := range []string{"std::uint64_t _v;", "is.invalidate(); return; } a_u8"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("c-cpp must not gain a generator-side width guard (%q):\n%s", gone, got)
+		}
+	}
+}

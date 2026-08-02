@@ -63,11 +63,15 @@ class Scalars:
                     d.skip()
                     continue
                 self.u8min = d.unsigned()
+                if self.u8min > 255:
+                    raise SofaDecodeError("u8min: value outside declared width u8")
             elif fld.id == 1:
                 if fld.type != WireType.UNSIGNED:
                     d.skip()
                     continue
                 self.u8max = d.unsigned()
+                if self.u8max > 255:
+                    raise SofaDecodeError("u8max: value outside declared width u8")
             elif fld.id == 2:
                 if fld.type != WireType.UNSIGNED:
                     d.skip()
@@ -78,6 +82,8 @@ class Scalars:
                     d.skip()
                     continue
                 self.i8min = d.signed()
+                if self.i8min < -128 or self.i8min > 127:
+                    raise SofaDecodeError("i8min: value outside declared width i8")
             elif fld.id == 4:
                 if fld.type != WireType.SIGNED:
                     d.skip()

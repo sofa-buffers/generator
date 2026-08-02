@@ -349,8 +349,11 @@ messages:
 		"1 => if (kind == .unsigned) { if (count > 5) { self.inv = true; return; } self.m.d.len = 0; },",
 		"4 => if (kind == .fp32) { if (count > 3) { self.inv = true; return; } self.m.f.len = 0; },",
 		"5 => if (kind == .signed) { if (count > 2) { self.inv = true; return; } self.m.e.len = 0; },",
-		// The store advances the length: M elements arrive, M is the length.
-		"1 => { if (self.afill != 0) { self.afill -= 1; sofab.arrays.putChecked(&self.m.d.items, &self.ai, @truncate(value), &self.inv); self.m.d.len = self.ai; } },",
+		// The store advances the length: M elements arrive, M is the length. The
+		// §7.1 width guard for the u32 element sits inside the fill guard and ahead
+		// of the store, and the cast is @intCast because the value provably fits by
+		// then (see TestZigDeclaredWidthIsAValidityBound).
+		"1 => { if (self.afill != 0) { self.afill -= 1; if (value > 4294967295) { self.inv = true; return; } sofab.arrays.putChecked(&self.m.d.items, &self.ai, @intCast(value), &self.inv); self.m.d.len = self.ai; } },",
 		// The storage type itself.
 		"pub fn FixedArray(comptime T: type, comptime N: usize) type {",
 		"        pub fn slice(self: *const Self) []const T {",
@@ -417,7 +420,7 @@ messages:
 		"if (v.lim) return error.LimitExceeded;",
 		// The schema-bounded array keeps its generator#100 guard, now behind the
 		// generator#188 fill guard (a bare scalar at this array id is skipped).
-		"2 => { if (self.afill != 0) { self.afill -= 1; sofab.arrays.putChecked(&self.m.barr.items, &self.ai, @truncate(value), &self.inv); self.m.barr.len = self.ai; } },",
+		"2 => { if (self.afill != 0) { self.afill -= 1; if (value < -2147483648 or value > 2147483647) { self.inv = true; return; } sofab.arrays.putChecked(&self.m.barr.items, &self.ai, @intCast(value), &self.inv); self.m.barr.len = self.ai; } },",
 		// Hardened eager allocation: the untrusted wire count is capped here, and
 		// sofab.arrays.putGrowing extends the slice as elements actually arrive.
 		"return sofab.arrays.allocN(T, a, @min(n, 1024));",
@@ -959,7 +962,7 @@ messages:
 		// placement, not append -- and the gap-fill that precedes it
 		"                if (!sofab.arrays.grow(VecObjsElem, self.alloc, &(self.m.objs), @as(usize, id) + 1, .{})) break :blk .dead;\n                self.ei_root_objs = id;\n                break :blk .root_objs_e;",
 		// the child stores address that element, never the last appended one
-		"0 => _at(self.m.objs, self.ei_root_objs).k = @truncate(value),",
+		"_at(self.m.objs, self.ei_root_objs).k = @intCast(value); },",
 		// the cap bound still rejects an out-of-range element id, which also
 		// bounds the gap-fill above
 		"                if (id >= 4) { self.inv = true; break :blk .dead; }",
@@ -1119,5 +1122,53 @@ messages:
 		if !strings.Contains(m, want) {
 			t.Errorf("isDefault must test emptiness alone: missing %q:\n%s", want, m)
 		}
+	}
+}
+
+// MESSAGE_SPEC §7.1 + documentation#32 (issue #266, Crucible F-0033 / G-0026):
+// the declared integer width is a normative VALIDITY bound. This is the backend
+// where the defect was written down as intent — storeCast used to @truncate with
+// the comment "the declared width is a storage hint" — so the test also pins the
+// cast: @intCast, reached only for a value the guard has already let through.
+func TestZigDeclaredWidthIsAValidityBound(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  W:
+    payload:
+      a_u8:   { id: 0, type: u8 }
+      c_u32:  { id: 2, type: u32 }
+      d_u64:  { id: 3, type: u64 }
+      e_i8:   { id: 4, type: i8 }
+      g_i32:  { id: 6, type: i32 }
+      h_i64:  { id: 7, type: i64 }
+      arr_u8: { id: 8, type: array, items: { type: u8, count: 4 } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	for _, want := range []string{
+		"0 => { if (value > 255) { self.inv = true; return; } self.m.a_u8 = @intCast(value); },",
+		"2 => { if (value > 4294967295) { self.inv = true; return; } self.m.c_u32 = @intCast(value); },",
+		"4 => { if (value < -128 or value > 127) { self.inv = true; return; } self.m.e_i8 = @intCast(value); },",
+		"6 => { if (value < -2147483648 or value > 2147483647) { self.inv = true; return; } self.m.g_i32 = @intCast(value); },",
+		// Array element: guard inside the fill guard, so a §7.3 skip stays a skip.
+		"8 => { if (self.afill != 0) { self.afill -= 1; if (value > 255) { self.inv = true; return; }",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing width guard %q:\n%s", want, m)
+		}
+	}
+	// 64-bit destinations pass through with neither guard nor cast.
+	for _, want := range []string{"3 => self.m.d_u64 = value,", "7 => self.m.h_i64 = value,"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig: a 64-bit destination must store unguarded (%q):\n%s", want, m)
+		}
+	}
+	// The masking cast is gone: nothing may @truncate a decoded scalar any more.
+	if strings.Contains(m, "@truncate(value)") {
+		t.Errorf("a decoded value must never be masked to the declared width (§7.1):\n%s", m)
 	}
 }

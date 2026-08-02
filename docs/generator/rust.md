@@ -382,6 +382,47 @@ The order the arm enforces is: format ceiling (the corelib's own `ARRAY_MAX`, on
 the count word) → subtype → §7.3 kind test → schema bound, for a field that
 survives all three.
 
+## §7.1: the declared integer width is a validity bound (issue #266)
+
+`u8`/`u16`/`u32` and `i8`/`i16`/`i32` destinations reject a wire value outside
+their declared range as `InvalidMsg`. The width is a normative bound, not a
+storage hint (MESSAGE_SPEC §1/§7.1), so the value is neither masked nor kept:
+
+```rust
+fn unsigned(&mut self, id: Id, value: Unsigned) {
+    match (self.cur, id) {
+        (_Loc::Root, 0) => { if value > 255 { self.inv = true; return; } self.m.a_u8 = value as u8 },
+        (_Loc::Root, 3) => self.m.d_u64 = value as u64,   // u64: no guard, none reachable
+        (_Loc::Root, 8) => { if self.afill == 0 { return; } self.afill -= 1;
+                             if value > 255 { self.inv = true; return; }
+                             self.m.arr_u8.push(value as u8); },
+        _ => {}
+    }
+}
+
+fn signed(&mut self, id: Id, value: Signed) {
+    match (self.cur, id) {
+        (_Loc::Root, 4) => { if value < -128 || value > 127 { self.inv = true; return; } self.m.e_i8 = value as i8 },
+        _ => {}
+    }
+}
+```
+
+Three things the shape encodes:
+
+- **The `as` cast was the bug.** `value as u8` is precisely the mask §7.1
+  forbids; the guard has to run before it, or the truncation has already
+  happened.
+- **`u64`/`i64` get no guard.** Their range *is* the accumulator the value
+  arrives in, so a comparison would be dead code — and Clippy would rightly say
+  so.
+- **In an array arm the guard follows `afill`.** An over-width scalar at an array
+  id with no `array_begin` in front of it is a §7.3 skip; guarding ahead of the
+  fill check would reject a message the skip clause says is fine.
+
+Both profiles are identical here — the bound is a schema fact, so `no_std`
+changes nothing about it.
+
 ### Feature gating under `no_std`
 
 In `corelib-rs-no-std` the whole `ArrayKind` enum is `#[cfg(feature = "array")]`

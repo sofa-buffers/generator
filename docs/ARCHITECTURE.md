@@ -890,6 +890,67 @@ MUST agree on which messages are valid," regardless of allocation strategy.
   fix on its own — the c-cpp `IStreamImpl` exposes no `invalidate()` hook (the
   same gap the over-index reject hit) — so it is tracked as **corelib-c-cpp#90**.
 
+#### Decode verdict: an over-width integer is INVALID (every target but `c`/`cpp-c-cpp`)
+
+The **value** axis of the same rule, and the newest of the three. MESSAGE_SPEC
+§1:45 used to call the declared integer width a *"storage hint"* and put
+value-range *"outside this clause"* in §7, which left reject / mask / keep as
+three defensible readings. `documentation` commit `70f9123` (documentation#32)
+closed that hole: the declared width is now a **normative validity bound**, and
+§7/§7.1 name an over-width scalar alongside `M > N` and `maxlen` as a
+**schema-bound INVALID**. It **MUST NOT** be masked to the width and **MUST NOT**
+be kept.
+
+The check cannot live in the corelib. CORELIB_PLAN §4.1 accumulates every integer
+into a ≥64-bit accumulator and delivers *that*; only the schema knows the
+destination was declared `u8`. So this is §7's own division of labour — "the
+corelib cannot know the schema, so schema-bound violations are detected, and
+reported, by generated code" — and the guard belongs in the emitted store arm,
+beside the `count`, wrapper-element-id and `maxlen` guards already there.
+
+- **The narrow kinds only.** `u8`/`u16`/`u32` and `i8`/`i16`/`i32` are bounded;
+  `u64`/`i64` span the delivery accumulator itself, so no reachable value can
+  breach them and **no guard is emitted** for them. The one shared source of the
+  ranges is `ir.NarrowRange` — backends import `ir` and nothing else, so the
+  bound cannot drift between targets.
+- **Every store, not just the scalar field.** A declared width binds wherever the
+  schema declares it: message fields, struct/union members, and native array
+  elements alike.
+- **Placement inside an array arm is normative, not cosmetic.** The guard goes
+  *after* the fill guard, never before. An over-width scalar arriving at an array
+  id with no `array_begin` in front of it is a **§7.3 skip**; rejecting it ahead
+  of the fill check would convert that skip into a spurious INVALID and make the
+  two clauses contradict each other.
+- **`c` and `cpp-c-cpp` were already conformant** and are deliberately untouched.
+  Their descriptor-driven store path has the declared width at exactly the right
+  point and already answers `INVALID`; adding a second guard would only duplicate
+  it. This is the one decode verdict where the footprint pair led and the other
+  eleven profiles followed.
+- **Enums and bitfields are out of scope.** Their backing width is a property of
+  the named type, not of the field, and an out-of-range *enum* value is a
+  different question (unknown-variant handling) from an over-width integer.
+- **`cpp` needed a different shape from the rest.** corelib-cpp's typed `read()`
+  ends in `value = static_cast<T>(raw)` — the mask itself, applied where
+  generated code cannot see the raw value. A narrow destination therefore reads
+  through a 64-bit temporary and range-checks before the store. §7.3 is
+  unaffected: `read()` derives its expected wire type from signedness alone, so
+  `u64` and `u8` frame identically and a contradicting tag still stores nothing.
+
+**One gap remains, and it is not generator-fixable: `cpp` array elements.**
+`IStream::readArray` converts elements *inside* corelib-cpp
+(`sp[i] = static_cast<Elem>(raw)`), so a narrow array element is still masked and
+the raw value never reaches generated code. Routing arrays through a wide
+temporary would defeat the bulk/zero-copy path the maxspeed profile exists for,
+so closing it needs a corelib-cpp field or hook — structurally the same situation
+as the `corelib-c-cpp#90` maxlen gap above. Scalar fields and struct/union
+members on `cpp` are covered, as are array elements on every other backend
+(they convert in generated code, where the raw value is visible).
+
+Reproducers (Crucible F-0033, codegen defect G-0026, generator#266): `00 ff 7f`
+is id 0 / `u8` / value 16383 and must be `INVALID`, as must 256 into a `u8` and
+70000 into a `u16`; the in-range control `00 ff 01` (value 255) must still decode
+and round-trip unchanged.
+
 #### Decode verdict: a contradictory wire type is SKIPPED, not fatal (§7.3)
 
 MESSAGE_SPEC **§7.3** requires a field whose header wire type is not the one its
@@ -899,7 +960,10 @@ mismatch, not a malformed message: the header itself is well-formed, so the
 decoder stays synced and simply does not deliver that field. Note this is a
 *type* check, never a value-range check — `u8`/`u16`/`u32`/`u64`/`boolean`/`enum`/
 `bitfield` all map to the unsigned-integer wire type, so a header carrying it is
-well-formed for any of them.
+well-formed for any of them. The **value** carried by such a header is a separate
+question, decided later and by a different rule: see the over-width verdict
+above, whose guard deliberately sits *behind* this skip so that a §7.3 mismatch
+never reaches it.
 
 The generated readers are **schema-typed**: each case arm calls the reader for the
 field's declared type. That reader assumes it is only invoked for its matching

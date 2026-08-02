@@ -345,3 +345,29 @@ The §7.4 clear in the visitor is unchanged and still required: it covers a
 *re-opened* wrapper within one message, which must replace the array whole.
 `reset()` covers the field that never appears at all. The two are different
 events and both are needed.
+
+## §7.1: the declared integer width is a validity bound (issue #266)
+
+A `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination rejects a value outside its
+declared range through the same unchecked `INVALID_MSG` channel as the maxlen
+guard. The width is a normative bound, not a storage hint (MESSAGE_SPEC
+§1/§7.1): the value is neither masked nor kept.
+
+```java
+case 0: if (value < 0 || value > 255L) throw new java.io.UncheckedIOException(
+    new SofabException(SofabError.INVALID_MSG, "a_u8: value outside declared width u8"));
+    m.a_u8 = value; break;
+case 3: m.d_u64 = value; break;   // u64: nothing narrower to bound
+```
+
+**The `value < 0` term is load-bearing, not defensive noise.** The corelib
+delivers an unsigned wire value as a Java `long`, which has no unsigned
+counterpart: a `u64` at or above 2^63 arrives with its sign bit set, so
+`value > 255L` alone would read it as negative and wave through exactly the
+largest values. Every narrow maximum is below 2^63, so treating negative as
+out-of-range is correct for all of them. C# needs no such term (`Unsigned`
+delivers a `ulong`); Dart does, for the same reason as Java.
+
+In an array arm the guard follows the fill guard, never precedes it: an
+over-width scalar at an array id with no `arrayBegin` in front of it is a §7.3
+skip, and guarding earlier would turn that skip into a spurious INVALID.

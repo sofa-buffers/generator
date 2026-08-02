@@ -69,7 +69,11 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	guard := fmt.Sprintf("if (%s) { c.skip(c.wire); break; } ", g.tsWireGuardCond(x))
 	switch x.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindBitfield:
-		f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
+		if cond := widthCond("_v", x.Kind); cond != "" {
+			f.line("      case %d: { %sconst _v = Number(c.readUnsigned()); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v; break; }", x.ID, guard, cond, x.Name, x.Kind, acc)
+		} else {
+			f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
+		}
 	case ir.KindU64:
 		if g.numberScalars() {
 			f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
@@ -79,7 +83,7 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	case ir.KindBool:
 		f.line("      case %d: %s%s = Boolean(c.readUnsigned()); break;", x.ID, guard, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32:
-		f.line("      case %d: %s%s = Number(c.readSigned()); break;", x.ID, guard, acc)
+		f.line("      case %d: { %sconst _v = Number(c.readSigned()); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v; break; }", x.ID, guard, widthCond("_v", x.Kind), x.Name, x.Kind, acc)
 	case ir.KindI64:
 		if g.numberScalars() {
 			f.line("      case %d: %s%s = Number(c.readSigned()); break;", x.ID, guard, acc)
@@ -164,8 +168,12 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			// declared `count: N` is a CAPACITY and bounds M; it never adds
 			// elements, so there is nothing to fill in at [M, N).
 			if x.HasCount {
-				f.line("      case %d: { %sconst _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s = _a; break; }",
-					x.ID, guard, g.nativeArrayRead(x.Elem, x.ElemRef, fmt.Sprintf("%d", x.Count)), x.Count, x.Name, x.Count, acc)
+				f.line("      case %d: { %sconst _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s%s = _a; break; }",
+					x.ID, guard, g.nativeArrayRead(x.Elem, x.ElemRef, fmt.Sprintf("%d", x.Count)), x.Count, x.Name, x.Count, widthScan("_a", x.Name, x.Elem), acc)
+				return
+			}
+			if scan := widthScan("_a", x.Name, x.Elem); scan != "" {
+				f.line("      case %d: { %sconst _a = %s; %s%s = _a; break; }", x.ID, guard, g.nativeArrayRead(x.Elem, x.ElemRef, ""), scan, acc)
 				return
 			}
 			f.line("      case %d: %s%s = %s; break;", x.ID, guard, acc, g.nativeArrayRead(x.Elem, x.ElemRef, ""))
@@ -365,6 +373,33 @@ func (g *gen) tsElemWireGuardCond(elem ir.Kind, ref *ir.TypeRef, items *ir.Array
 // at the call site only fires once every element has arrived, so it cannot beat a
 // truncated over-count; the header argument is what does. cnt is "" for an
 // unbounded array (today's behavior, no bound).
+// widthCond renders the §7.1 out-of-declared-width test for the expression
+// `v` against Kind k, or "" for the kinds whose range is not narrower than what
+// the reader returns (documentation#32). TypeScript keeps a decoded integer in a
+// `number`, so nothing masks an out-of-range value here — the defect was that it
+// was KEPT — and the throw is the same InvalidMsg channel as the maxlen and
+// count rejects.
+func widthCond(v string, k ir.Kind) string {
+	lo, hi, ok := ir.NarrowRange(k)
+	if !ok {
+		return ""
+	}
+	if lo < 0 {
+		return fmt.Sprintf("%s < %d || %s > %d", v, lo, v, hi)
+	}
+	return fmt.Sprintf("%s > %d", v, hi)
+}
+
+// widthScan renders the element scan for a native array of narrow-integer
+// elements: one out-of-range element makes the whole message INVALID.
+func widthScan(arr, name string, elem ir.Kind) string {
+	cond := widthCond("_e", elem)
+	if cond == "" {
+		return ""
+	}
+	return fmt.Sprintf("for (const _e of %s) if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s element: value outside declared width %s\"); ", arr, cond, name, elem)
+}
+
 func (g *gen) nativeArrayRead(elem ir.Kind, ref *ir.TypeRef, cnt string) string {
 	switch elem {
 	case ir.KindU64:

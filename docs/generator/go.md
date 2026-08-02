@@ -145,3 +145,33 @@ regenerated for a different corelib build. Invalid bytes at a materialized posit
 are `sofab.ErrInvalidMsg`, the same channel as the schema-bound rejects. `blob` is
 never validated — bytes carry no encoding. Encode-side strictness stays
 corelib-side (`Encoder.WriteString`).
+
+## §7.1: the declared integer width is a validity bound (issue #266)
+
+A `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination rejects a wire value outside its
+declared range with `sofab.ErrInvalidMsg`. The width is a normative bound, not a
+storage hint (MESSAGE_SPEC §1/§7.1) — the `uint8(v)` conversion that follows IS
+the mask §7.1 forbids, so the guard has to precede it:
+
+```go
+func (m *W) Unsigned(id sofab.ID, v uint64) error {
+	switch id {
+	case 0:
+		if v > 255 {
+			return sofab.ErrInvalidMsg
+		}
+		m.AU8 = uint8(v)
+	case 3:
+		m.DU64 = uint64(v) // u64: range is the parameter's own, no guard
+	}
+	return nil
+}
+```
+
+Native array ELEMENTS carry the same bound. The corelib hands the whole array
+over as `[]uint64`/`[]int64` and `sofab.Narrow*` converts element-wise
+afterwards, so the raw values are still visible and one scan precedes the
+narrowing — a single out-of-range element makes the message INVALID.
+
+No negative-value term is needed on the unsigned side: `Unsigned` delivers a
+`uint64`, so the comparison is already unsigned.

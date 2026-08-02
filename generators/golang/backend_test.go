@@ -837,3 +837,46 @@ func TestGoSkippedStringIsNotValidated(t *testing.T) {
 		t.Errorf("blob must never be UTF-8-validated:\n%s", msg)
 	}
 }
+
+// MESSAGE_SPEC §7.1 + documentation#32 (issue #266, Crucible F-0033 / G-0026):
+// the declared integer width is a normative VALIDITY bound. An out-of-range value
+// is INVALID — never masked by the uint8(v) conversion, never kept. u64/i64 span
+// the visitor parameter's own range and get no guard.
+func TestGoDeclaredWidthIsAValidityBound(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  W:
+    payload:
+      a_u8:   { id: 0, type: u8 }
+      c_u32:  { id: 2, type: u32 }
+      d_u64:  { id: 3, type: u64 }
+      e_i8:   { id: 4, type: i8 }
+      g_i32:  { id: 6, type: i32 }
+      h_i64:  { id: 7, type: i64 }
+      arr_u8: { id: 8, type: array, items: { type: u8, count: 4 } }
+`
+	got := genGo(t, schemaFromYAMLString(t, src), map[string]any{})["w.go"]
+	for _, want := range []string{
+		"if v > 255 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.AU8 = uint8(v)",
+		"if v > 4294967295 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.CU32 = uint32(v)",
+		"if v < -128 || v > 127 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.EI8 = int8(v)",
+		"if v < -2147483648 || v > 2147483647 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.GI32 = int32(v)",
+		// The array's ELEMENTS carry the same bound: the corelib hands the whole
+		// array over as []uint64, so one scan precedes the narrowing conversion.
+		"for _, _x := range v {\n\t\t\tif _x > 255 {\n\t\t\t\treturn sofab.ErrInvalidMsg\n\t\t\t}\n\t\t}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("w.go missing width guard %q:\n%s", want, got)
+		}
+	}
+	// u64/i64 store bare.
+	for _, want := range []string{"m.DU64 = uint64(v)", "m.HI64 = int64(v)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("w.go missing unguarded 64-bit store %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "if v > 18446744073709551615") || strings.Contains(got, "if v > 9223372036854775807") {
+		t.Errorf("a 64-bit destination must not be width-guarded:\n%s", got)
+	}
+}

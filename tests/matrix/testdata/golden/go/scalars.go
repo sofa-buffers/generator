@@ -78,8 +78,14 @@ func (m *Scalars) isDefault() bool {
 func (m *Scalars) Unsigned(id sofab.ID, v uint64) error {
 	switch id {
 	case 0:
+		if v > 255 {
+			return sofab.ErrInvalidMsg
+		}
 		m.U8min = uint8(v)
 	case 1:
+		if v > 255 {
+			return sofab.ErrInvalidMsg
+		}
 		m.U8max = uint8(v)
 	case 2:
 		m.U64max = uint64(v)
@@ -92,6 +98,9 @@ func (m *Scalars) Unsigned(id sofab.ID, v uint64) error {
 func (m *Scalars) Signed(id sofab.ID, v int64) error {
 	switch id {
 	case 3:
+		if v < -128 || v > 127 {
+			return sofab.ErrInvalidMsg
+		}
 		m.I8min = int8(v)
 	case 4:
 		m.I64min = int64(v)

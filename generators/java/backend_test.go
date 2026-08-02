@@ -899,8 +899,10 @@ func TestJavaWrapperElementsArePlacedByID(t *testing.T) {
 		// placement, not append -- and the gap-fill that precedes it
 		"while (m.fixed.size() <= id) m.fixed.add(new VecFixedElem()); _ex_Root_fixed = id;",
 		"while (m.dynamic.size() <= id) m.dynamic.add(new VecDynamicElem()); _ex_Root_dynamic = id;",
-		// a child field of the element resolves through the PLACED index
-		"case 0: m.fixed.get(_ex_Root_fixed).k = value; break;",
+		// a child field of the element resolves through the PLACED index (the §7.1
+		// width guard for the u32 destination precedes the store; see
+		// TestJavaDeclaredWidthIsAValidityBound)
+		"m.fixed.get(_ex_Root_fixed).k = value; break;",
 		// leaf elements were always placed by id
 		"while (m.fstrs.size() <= id) m.fstrs.add(\"\"); m.fstrs.set(id, _s); break;",
 		"while (m.dblbs.size() <= id) m.dblbs.add(new byte[0]); m.dblbs.set(id, _b); break;",
@@ -1127,4 +1129,47 @@ func javaMethod(t *testing.T, src, head string) string {
 		return src[i : i+len(head)+j]
 	}
 	return src[i:]
+}
+
+// MESSAGE_SPEC §7.1 + documentation#32 (issue #266, Crucible F-0033 / G-0026):
+// the declared integer width is a normative VALIDITY bound, rejected through the
+// same unchecked INVALID_MSG channel as the maxlen guard.
+//
+// The `value < 0` term on the unsigned side is load-bearing, not noise: the
+// corelib delivers an unsigned wire value as a Java long, so a u64 at or above
+// 2^63 arrives with its sign bit set and `value > 255` alone would let exactly
+// the largest values through.
+func TestJavaDeclaredWidthIsAValidityBound(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  W:
+    payload:
+      a_u8:   { id: 0, type: u8 }
+      c_u32:  { id: 2, type: u32 }
+      d_u64:  { id: 3, type: u64 }
+      e_i8:   { id: 4, type: i8 }
+      g_i32:  { id: 6, type: i32 }
+      h_i64:  { id: 7, type: i64 }
+      arr_u8: { id: 8, type: array, items: { type: u8, count: 4 } }
+`
+	got := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/W.java"]
+	for _, want := range []string{
+		`case 0: if (value < 0 || value > 255L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "a_u8: value outside declared width u8")); m.a_u8 = value; break;`,
+		`case 2: if (value < 0 || value > 4294967295L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "c_u32: value outside declared width u32")); m.c_u32 = value; break;`,
+		`case 4: if (value < -128L || value > 127L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "e_i8: value outside declared width i8")); m.e_i8 = value; break;`,
+		`case 6: if (value < -2147483648L || value > 2147483647L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "g_i32: value outside declared width i32")); m.g_i32 = value; break;`,
+		// An array element carries the same bound, guarded AFTER the fill guard so a
+		// §7.3-skipped bare scalar at the array id is not turned into an INVALID.
+		`case 8: if (afill == 0) break; afill--; if (value < 0 || value > 255L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "arr_u8 element: value outside declared width u8"));`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("W.java missing width guard %q:\n%s", want, got)
+		}
+	}
+	for _, want := range []string{"case 3: m.d_u64 = value; break;", "case 7: m.h_i64 = value; break;"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("W.java: a 64-bit destination must store unguarded (%q):\n%s", want, got)
+		}
+	}
 }

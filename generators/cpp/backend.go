@@ -1266,7 +1266,32 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		}
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindBool, ir.KindFP32, ir.KindFP64, ir.KindStruct, ir.KindUnion:
-		f.line("            is.read(%s);", acc)
+		// MESSAGE_SPEC §7.1: the declared integer width is a validity bound, so an
+		// over-width value is INVALID — never masked to the width. corelib-cpp's
+		// typed read() ends in `value = static_cast<T>(raw)`, which IS that mask and
+		// leaves the raw value invisible to us, so a narrow destination is read
+		// through a 64-bit temporary instead and range-checked before the store.
+		//
+		// The §7.3 behaviour is unchanged by the wider temporary: read() picks its
+		// expected wire type from the signedness alone (Wire::Unsigned for every u*,
+		// Wire::Signed for every i*), so u64 and u8 frame identically. A
+		// contradicting tag still returns false and the arm stores nothing — the
+		// skip, not a reject.
+		//
+		// c-cpp is deliberately excluded: it is already conformant (its deferred
+		// descriptor carries the declared width to the corelib, which rejects there),
+		// and it has no such read() to route around.
+		if lo, hi, narrow := ir.NarrowRange(fld.Kind); narrow && !g.clib {
+			tmp := "std::uint64_t"
+			cond := fmt.Sprintf("_v > %d", hi)
+			if lo < 0 {
+				tmp = "std::int64_t"
+				cond = fmt.Sprintf("_v < %d || _v > %d", lo, hi)
+			}
+			f.line("            { %s _v; if (is.read(_v)) { if (%s) { is.invalidate(); return; } %s = static_cast<%s>(_v); } }", tmp, cond, acc, g.cppType(fld))
+		} else {
+			f.line("            is.read(%s);", acc)
+		}
 	case ir.KindBlob:
 		// corelib-c-cpp binds blobs with the BLOB tag via its read(void*, size_t)
 		// overload into the address-stable vector buffer; corelib-cpp reads a

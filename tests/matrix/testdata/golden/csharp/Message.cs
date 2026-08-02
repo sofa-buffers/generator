@@ -78,8 +78,8 @@ internal sealed class ScalarsVisitor : IVisitor {
     public void Unsigned(int id, ulong value) {
         if (askip > 0) { askip--; return; }   // discard a contradictory array at a scalar id
         switch ((cur, id)) {
-            case (Root, 0): m.u8min = (byte)value; break;
-            case (Root, 1): m.u8max = (byte)value; break;
+            case (Root, 0): if (value > 255) throw new SofabException(SofabError.InvalidMessage, "u8min: value outside declared width u8"); m.u8min = (byte)value; break;
+            case (Root, 1): if (value > 255) throw new SofabException(SofabError.InvalidMessage, "u8max: value outside declared width u8"); m.u8max = (byte)value; break;
             case (Root, 2): m.u64max = (ulong)value; break;
             case (Root, 7): m.flag = value != 0; break;
         }
@@ -87,7 +87,7 @@ internal sealed class ScalarsVisitor : IVisitor {
     public void Signed(int id, long value) {
         if (askip > 0) { askip--; return; }   // discard a contradictory array at a scalar id
         switch ((cur, id)) {
-            case (Root, 3): m.i8min = (sbyte)value; break;
+            case (Root, 3): if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, "i8min: value outside declared width i8"); m.i8min = (sbyte)value; break;
             case (Root, 4): m.i64min = (long)value; break;
         }
     }

@@ -192,9 +192,9 @@ impl<'a> Visitor for V<'a> {
     fn unsigned(&mut self, id: Id, value: Unsigned) {
         if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id
         match (self.cur, id) {
-            (_Loc::Root, 0) => self.m.u8min = value as u8,
-            (_Loc::Root, 1) => self.m.u8max = value as u8,
-            (_Loc::Root, 2) => self.m.u64max = value as u64,
+            (_Loc::Root, 0) => { if value > 255 { self.inv = true; return; } self.m.u8min = value as u8 },
+            (_Loc::Root, 1) => { if value > 255 { self.inv = true; return; } self.m.u8max = value as u8 },
+            (_Loc::Root, 2) => { self.m.u64max = value as u64 },
             (_Loc::Root, 7) => self.m.flag = value != 0,
             _ => {}
         }
@@ -202,8 +202,8 @@ impl<'a> Visitor for V<'a> {
     fn signed(&mut self, id: Id, value: Signed) {
         if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id
         match (self.cur, id) {
-            (_Loc::Root, 3) => self.m.i8min = value as i8,
-            (_Loc::Root, 4) => self.m.i64min = value as i64,
+            (_Loc::Root, 3) => { if value < -128 || value > 127 { self.inv = true; return; } self.m.i8min = value as i8 },
+            (_Loc::Root, 4) => { self.m.i64min = value as i64 },
             _ => {}
         }
     }

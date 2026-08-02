@@ -594,7 +594,9 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 		"_SeqSeq<String>(o.srows, 3, e, (p) => _StrSeq(p, -1, 4, e))",
 		// M elements arrived, M is the length: the count word is bounded, nothing
 		// is filled in behind it.
-		"        if (values.length > 4) { e.inv = true; return; }\n        o.fnums = List<int>.from(values);\n        return;",
+		("        if (values.length > 4) { e.inv = true; return; }\n" +
+			"        for (final _v in values) { if (_v < 0 || _v > 4294967295) { e.inv = true; return; } }\n" +
+			"        o.fnums = List<int>.from(values);\n        return;"),
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
@@ -828,5 +830,48 @@ func TestDartNoConvertImportWithoutStrings(t *testing.T) {
 	out := genFor(t, writeDef(t, src), map[string]any{})
 	if strings.Contains(out, "import 'dart:convert';") {
 		t.Errorf("a string-free schema must not import dart:convert:\n%s", out)
+	}
+}
+
+// MESSAGE_SPEC §7.1 + documentation#32 (issue #266, Crucible F-0033 / G-0026):
+// the declared integer width is a normative VALIDITY bound.
+//
+// The `value < 0` term on the unsigned side is load-bearing: Dart's int is a
+// 64-bit SIGNED integer with no unsigned counterpart, so an unsigned wire value
+// at or above 2^63 arrives negative and `value > 255` alone would wave through
+// exactly the largest values.
+func TestDartDeclaredWidthIsAValidityBound(t *testing.T) {
+	got := genFor(t, writeDef(t, `
+version: 1
+messages:
+  W:
+    payload:
+      a_u8:   { id: 0, type: u8 }
+      c_u32:  { id: 2, type: u32 }
+      d_u64:  { id: 3, type: u64 }
+      e_i8:   { id: 4, type: i8 }
+      g_i32:  { id: 6, type: i32 }
+      h_i64:  { id: 7, type: i64 }
+      arr_u8: { id: 8, type: array, items: { type: u8, count: 4 } }
+`), map[string]any{})
+	for _, want := range []string{
+		"case 0:\n        if (value < 0 || value > 255) { e.inv = true; return; }\n        o.a_u8 = value;",
+		"case 2:\n        if (value < 0 || value > 4294967295) { e.inv = true; return; }\n        o.c_u32 = value;",
+		"case 4:\n        if (value < -128 || value > 127) { e.inv = true; return; }\n        o.e_i8 = value;",
+		"case 6:\n        if (value < -2147483648 || value > 2147483647) { e.inv = true; return; }\n        o.g_i32 = value;",
+		// The array arrives whole: one scan over the elements decides it.
+		"for (final _v in values) { if (_v < 0 || _v > 255) { e.inv = true; return; } }",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.dart missing width guard %q:\n%s", want, got)
+		}
+	}
+	for _, want := range []string{
+		"case 3:\n        o.d_u64 = value;",
+		"case 7:\n        o.h_i64 = value;",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.dart: a 64-bit destination must store unguarded (%q):\n%s", want, got)
+		}
 	}
 }

@@ -282,7 +282,10 @@ func (g *gen) msgLimitGuards(fields []*ir.Field) bool {
 // array's length (MESSAGE_SPEC §3), so the length follows the elements that
 // actually arrive; `count` bounds them but adds none, and nothing is filled in
 // at [M, N).
-func (g *gen) putCall(fr frame, fld *ir.Field, val string) string {
+// `guard` is the element's §7.1 declared-width rejection (widthGuard), placed
+// INSIDE the fill guard: an over-width scalar arriving at this id with no
+// arrayBegin in front of it (afill == 0) is a §7.3 skip and must not be rejected.
+func (g *gen) putCall(fr frame, fld *ir.Field, guard, val string) string {
 	acc := fr.path + "." + zigIdent(fld.Name)
 	var inner string
 	if _, _, ok := g.fixedNativeArray(fld); ok {
@@ -292,17 +295,53 @@ func (g *gen) putCall(fr frame, fld *ir.Field, val string) string {
 	}
 	// §7.3 fill guard (generator#188): only fill while arrayBegin has this array
 	// armed; a bare scalar at this id (afill == 0) falls through and is skipped.
-	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; %s; } }", inner)
+	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; %s%s; } }", guard, inner)
 }
 
 // storeCast renders the visitor value expression for a numeric destination
-// type: u64/i64 pass through, narrower integers truncate (the declared width
-// is a storage hint; the wire value is a single varint).
+// type: u64/i64 pass through, narrower integers are cast down.
+//
+// The cast is only ever reached for a value that FITS. The declared width is a
+// normative validity bound, not a storage hint (MESSAGE_SPEC §1/§7.1,
+// documentation#32), so widthGuard rejects an out-of-range value as INVALID
+// before the store — `@truncate` here would otherwise be exactly the masking §7.1
+// forbids. `@intCast` rather than `@truncate` makes that contract explicit: it
+// is checked in safe build modes, so a guard that ever failed to precede a store
+// is a panic in Debug/ReleaseSafe rather than a silently masked value.
 func storeCast(dest string, value string) string {
 	if dest == "u64" || dest == "i64" {
 		return value
 	}
-	return "@truncate(" + value + ")"
+	return "@intCast(" + value + ")"
+}
+
+// widthGuard renders the §7.1 declared-width rejection for a store into a
+// destination of Kind k, or "" for the 64-bit kinds (whose range IS the
+// accumulator the value arrives in). `self.inv` is the same sticky INVALID flag
+// the over-count and over-index guards set, surfaced by decode() as
+// error.InvalidMessage.
+//
+// The unsigned side needs no negative term: sofab.Unsigned is a u64.
+//
+// guardedStore wraps a scalar store arm in the block a guard needs. Zig prong
+// bodies are expressions, so a guarded store becomes `{ if (...) {...} store; }`
+// while an unguarded one stays the bare expression it was.
+func guardedStore(guard, stmt string) string {
+	if guard == "" {
+		return stmt
+	}
+	return "{ " + guard + stmt + "; }"
+}
+
+func widthGuard(k ir.Kind) string {
+	lo, hi, ok := ir.NarrowRange(k)
+	if !ok {
+		return ""
+	}
+	if lo < 0 {
+		return fmt.Sprintf("if (value < %d or value > %d) { self.inv = true; return; } ", lo, hi)
+	}
+	return fmt.Sprintf("if (value > %d) { self.inv = true; return; } ", hi)
 }
 
 func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
@@ -410,29 +449,29 @@ func (g *gen) intArm(fr frame, fld *ir.Field, signed bool) string {
 	if signed {
 		switch {
 		case isSignedElem(fld.Kind):
-			return fmt.Sprintf("%s = %s", acc, storeCast(numZigType(fld.Kind), "value"))
+			return guardedStore(widthGuard(fld.Kind), fmt.Sprintf("%s = %s", acc, storeCast(numZigType(fld.Kind), "value")))
 		case fld.Kind == ir.KindEnum:
 			return fmt.Sprintf("%s = %s", acc, storeCast(enumBacking(fld.Ref.Target), "value"))
 		case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
-			return g.putCall(fr, fld, storeCast(numZigType(fld.Elem), "value"))
+			return g.putCall(fr, fld, widthGuard(fld.Elem), storeCast(numZigType(fld.Elem), "value"))
 		case fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum:
-			return g.putCall(fr, fld, storeCast(enumBacking(fld.ElemRef.Target), "value"))
+			return g.putCall(fr, fld, "", storeCast(enumBacking(fld.ElemRef.Target), "value"))
 		}
 		return ""
 	}
 	switch {
 	case isUnsignedElem(fld.Kind):
-		return fmt.Sprintf("%s = %s", acc, storeCast(numZigType(fld.Kind), "value"))
+		return guardedStore(widthGuard(fld.Kind), fmt.Sprintf("%s = %s", acc, storeCast(numZigType(fld.Kind), "value")))
 	case fld.Kind == ir.KindBool:
 		return fmt.Sprintf("%s = value != 0", acc)
 	case fld.Kind == ir.KindBitfield:
 		return fmt.Sprintf("%s = %s", acc, storeCast(bitfieldBacking(fld.Ref.Target), "value"))
 	case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
-		return g.putCall(fr, fld, storeCast(numZigType(fld.Elem), "value"))
+		return g.putCall(fr, fld, widthGuard(fld.Elem), storeCast(numZigType(fld.Elem), "value"))
 	case fld.Kind == ir.KindArray && fld.Elem == ir.KindBool:
-		return g.putCall(fr, fld, "value != 0")
+		return g.putCall(fr, fld, "", "value != 0")
 	case fld.Kind == ir.KindArray && fld.Elem == ir.KindBitfield:
-		return g.putCall(fr, fld, storeCast(bitfieldBacking(fld.ElemRef.Target), "value"))
+		return g.putCall(fr, fld, "", storeCast(bitfieldBacking(fld.ElemRef.Target), "value"))
 	}
 	return ""
 }
@@ -464,8 +503,9 @@ func (g *gen) nestedNativeArm(fr frame, signed bool) string {
 	}
 	// §7.3 fill guard (generator#188), plus the placement guard: the row lives at
 	// the index arrayBegin recorded, not at the end of the outer slice, and that
-	// index is only addressable if the row's allocation succeeded.
-	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; if (self.%s < %s.len) sofab.arrays.putGrowing(_at(%s, self.%s), self.alloc, &self.ai, self.an, %s); } }", fr.idx, fr.path, fr.path, fr.idx, cast)
+	// index is only addressable if the row's allocation succeeded. The §7.1 width
+	// guard sits inside the fill guard for the same reason it does in putCall.
+	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; %sif (self.%s < %s.len) sofab.arrays.putGrowing(_at(%s, self.%s), self.alloc, &self.ai, self.an, %s); } }", widthGuard(fr.elemKind), fr.idx, fr.path, fr.path, fr.idx, cast)
 }
 
 // emitArraySkipArm arms the §7.3 discard counter in arrayBegin (generator#183,
@@ -691,7 +731,7 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 			case fld.Kind == kind:
 				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = value,", fld.ID, acc))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, g.putCall(fr, fld, "value")))
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, g.putCall(fr, fld, "", "value")))
 			}
 		}
 		if len(fa.arms) > 0 {

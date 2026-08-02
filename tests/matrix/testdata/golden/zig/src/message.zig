@@ -104,8 +104,8 @@ const _dec_Scalars = struct {
         if (self.askip > 0) { self.askip -= 1; return; }
         switch (self.cur) {
             .root => switch (id) {
-                0 => self.m.u8min = @truncate(value),
-                1 => self.m.u8max = @truncate(value),
+                0 => { if (value > 255) { self.inv = true; return; } self.m.u8min = @intCast(value); },
+                1 => { if (value > 255) { self.inv = true; return; } self.m.u8max = @intCast(value); },
                 2 => self.m.u64max = value,
                 7 => self.m.flag = value != 0,
                 else => {},
@@ -118,7 +118,7 @@ const _dec_Scalars = struct {
         if (self.askip > 0) { self.askip -= 1; return; }
         switch (self.cur) {
             .root => switch (id) {
-                3 => self.m.i8min = @truncate(value),
+                3 => { if (value < -128 or value > 127) { self.inv = true; return; } self.m.i8min = @intCast(value); },
                 4 => self.m.i64min = value,
                 else => {},
             },

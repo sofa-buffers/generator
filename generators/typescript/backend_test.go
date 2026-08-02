@@ -79,12 +79,14 @@ func TestTSWireTypeGuard(t *testing.T) {
 			mod = string(f.Content)
 		}
 	}
-	if !strings.Contains(mod, `import { OStream, Cursor, WireType, FixlenSubtype }`) {
+	// (SofabError/SofabErrorCode ride along because this schema's u8/i32 fields
+	// carry the §7.1 over-width reject — see TestTSDeclaredWidthIsAValidityBound.)
+	if !strings.Contains(mod, `import { OStream, Cursor, WireType, FixlenSubtype`) {
 		t.Errorf("message.ts missing WireType/FixlenSubtype import:\n%s", mod)
 	}
 	for _, want := range []string{
-		"case 0: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.a = Number(c.readUnsigned()); break;",
-		"case 1: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o.b = Number(c.readSigned()); break;",
+		"case 0: { if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } const _v = Number(c.readUnsigned()); if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, \"a: value outside declared width u8\"); o.a = _v; break; }",
+		"case 1: { if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } const _v = Number(c.readSigned()); if (_v < -2147483648 || _v > 2147483647) throw new SofabError(SofabErrorCode.InvalidMsg, \"b: value outside declared width i32\"); o.b = _v; break; }",
 		// fp32/fp64/string/blob share WireType.Fixlen, so the guard also checks the
 		// fixlen subtype (corelib-ts#58); the fp arrays share ArrayFixlen likewise.
 		"case 2: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } o.c = c.readString(); break;",
@@ -93,8 +95,8 @@ func TestTSWireTypeGuard(t *testing.T) {
 		// of it is the same one every other fixlen field gets.
 		"case 3: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp32) { c.skip(c.wire); break; } const _r = c.readFp32Raw();",
 		"case 4: if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; } ME.decodeInto(c, o.e); break;", // nested message, decoded into the existing member (§7.4)
-		"case 5: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.f = c.readUnsignedArray() as number[]; break;",
-		"case 6: if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } o.g = c.readSignedArray() as number[]; break;",
+		"case 5: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray() as number[]; for (const _e of _a) if (_e > 4294967295) throw new SofabError(SofabErrorCode.InvalidMsg, \"f element: value outside declared width u32\"); o.f = _a; break; }",
+		"case 6: { if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } const _a = c.readSignedArray() as number[]; for (const _e of _a) if (_e < -32768 || _e > 32767) throw new SofabError(SofabErrorCode.InvalidMsg, \"g element: value outside declared width i16\"); o.g = _a; break; }",
 		"case 7: if (c.wire !== WireType.ArrayFixlen || c.fixSub !== FixlenSubtype.Fp64) { c.skip(c.wire); break; } o.h = c.readFp64Array(); break;",
 		"case 8: {\n        if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; }", // composite array wrapper sequence (SequenceStart, no subtype)
 	} {
@@ -194,7 +196,10 @@ func TestTSHeaderBoundReject(t *testing.T) {
 	}
 	// The dynamic array must NOT gain a schema count (would wrongly reject a valid
 	// long array): its reader stays argument-free.
-	if !strings.Contains(mod, "o.da = c.readUnsignedArray() as number[]") {
+	// (The read now lands in a temp so the §7.1 element scan can precede the store;
+	// what matters here is that the reader itself is still called without a count.)
+	if !strings.Contains(mod, "const _a = c.readUnsignedArray() as number[];") ||
+		!strings.Contains(mod, "o.da = _a;") {
 		t.Errorf("dynamic array must keep the unbounded reader call:\n%s", mod)
 	}
 	// The harness exposes a `status` mode surfacing the §7 outcome so INVALID vs
@@ -580,7 +585,7 @@ func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 		"os.writeUnsignedArray(9, this.fbits);",
 		// Decode: the M elements that arrived ARE the value, taken as they come.
 		// The over-count reject stays — `count` still bounds M (generator#100).
-		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray(5) as number[]; if (_a.length > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); o.fu32 = _a; break; }`,
+		`case 0: { if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } const _a = c.readUnsignedArray(5) as number[]; if (_a.length > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); for (const _e of _a) if (_e > 4294967295) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32 element: value outside declared width u32"); o.fu32 = _a; break; }`,
 		`o.ffp64 = _a; break; }`,
 		`o.fbool = _a; break; }`,
 		`o.fenum = _a; break; }`,
@@ -1502,5 +1507,45 @@ func TestTSFp32RawHelpersOnlyWhereNeeded(t *testing.T) {
 	none := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: fp64 }\n      b: { id: 1, type: array, items: { type: fp64 } }\n", map[string]any{})
 	if strings.Contains(none, "_fp32") {
 		t.Errorf("an fp32-free schema must not name the fp32 raw channel at all:\n%s", none)
+	}
+}
+
+// MESSAGE_SPEC §7.1 + documentation#32 (issue #266, Crucible F-0033 / G-0026):
+// the declared integer width is a normative VALIDITY bound. A decoded integer
+// lives in a JS `number`, so nothing masked it — the defect was that it was KEPT
+// — and the throw uses the same InvalidMsg channel as the maxlen/count rejects.
+func TestTSDeclaredWidthIsAValidityBound(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  W:
+    payload:
+      a_u8:   { id: 0, type: u8 }
+      c_u32:  { id: 2, type: u32 }
+      d_u64:  { id: 3, type: u64 }
+      e_i8:   { id: 4, type: i8 }
+      g_i32:  { id: 6, type: i32 }
+      h_i64:  { id: 7, type: i64 }
+      arr_u8: { id: 8, type: array, items: { type: u8, count: 4 } }
+`
+	got := genTSWith(t, src, map[string]any{})
+	for _, want := range []string{
+		`const _v = Number(c.readUnsigned()); if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "a_u8: value outside declared width u8"); o.a_u8 = _v;`,
+		`const _v = Number(c.readUnsigned()); if (_v > 4294967295) throw new SofabError(SofabErrorCode.InvalidMsg, "c_u32: value outside declared width u32"); o.c_u32 = _v;`,
+		`const _v = Number(c.readSigned()); if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "e_i8: value outside declared width i8"); o.e_i8 = _v;`,
+		`const _v = Number(c.readSigned()); if (_v < -2147483648 || _v > 2147483647) throw new SofabError(SofabErrorCode.InvalidMsg, "g_i32: value outside declared width i32"); o.g_i32 = _v;`,
+		// The array arrives whole: one scan over the elements decides it.
+		`for (const _e of _a) if (_e > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "arr_u8 element: value outside declared width u8");`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.ts missing width guard %q:\n%s", want, got)
+		}
+	}
+	// 64-bit destinations keep the bare read (bigint-backed under the default
+	// int64 mode): their range is the reader's own, so there is nothing to bound.
+	for _, want := range []string{"o.d_u64 = c.readUnsigned() as bigint; break;", "o.h_i64 = c.readSigned() as bigint; break;"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.ts: a 64-bit destination must read unguarded (%q):\n%s", want, got)
+		}
 	}
 }
