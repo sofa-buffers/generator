@@ -435,3 +435,47 @@ a crate never depends on `fixlen` for a variant it has no field for.
 When both subtypes *are* declared, `{Unsigned, Signed, Fp32, Fp64}` is exhaustive
 and the trailing `_` arm is dropped; emitting it would be an unreachable-pattern
 warning in the generated crate.
+
+## §7.3/§5.2: a skip is scoped and inert (issues #268, #270, #271, #272, #273)
+
+Four defects, three causes, one theme: a construct the decoder discards must take
+its children with it and must arm nothing behind it.
+
+**`sequence_begin` has a dead scope.** Its default arm used to be
+`_ => self.cur` — "stay where you are" — so a sequence the schema does not
+declare here was entered and its children bound into the enclosing scope:
+
+```rust
+fn sequence_begin(&mut self, id: Id) {
+    self.stack.push(self.cur);
+    self.cur = match (self.cur, id) {
+        (_Loc::Root, 10) => _Loc::Root_known,
+        _ => _Loc::Dead,          // <- was `self.cur`
+    };
+}
+```
+
+`Dead` matches no callback arm, so the whole subtree is discarded. It needs no
+depth counter: a nested sequence inside a dead subtree matches no arm either, so
+it stays `Dead`, and the stack restores the live scope at the matching end.
+
+This is emitted **unconditionally** now, even for a message with no sequence of
+its own — corelib-rs's `Visitor` default is a no-op, so a missing override let an
+unknown sequence's children arrive with `cur` still on root. With no arms the
+emission collapses to `self.cur = _Loc::Dead;` and the parameter is named `_id`,
+so the crate stays warning-clean.
+
+**`array_begin` keys one arm per wire kind.** The integer kinds shared an arm
+(`ArrayKind::Unsigned | ArrayKind::Signed`) and the schema `count` was reachable
+through a wildcard kind. Both let a header §7.3 says to skip reach machinery
+belonging to a field it is not — the fill counter stayed armed and absorbed the
+next bare scalar (#270), and a fixlen header was measured against an integer
+field's `count` (#271). Each arm now names exactly one kind, so the kind check is
+the match.
+
+**A wrapper element is replaced, not appended to** (`no_std`, #273). The element
+sinks pushed into the destination without clearing it, so a repeated element id
+concatenated instead of overwriting (§7.4 last-wins) and the capacity check on the
+same line — written for an empty destination — misfired into `Error::BufferFull`
+on any repeat at any size. Chunk reassembly happens upstream in `acc`, so every
+arm receives one complete value and appending is never correct.

@@ -415,6 +415,80 @@ run_variant() {
     echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: [$label] control must keep 255; got: $OUT"; exit 1; }
     echo "==> [$label] declared-width reject OK"
 
+
+    # §7.3 / §5.2 skip family (generator#268 #270 #271 #272 #273 -- Crucible F-0044
+    # F-0045 F-0046 F-0047 F-0048). Each of these is a construct the decoder must
+    # DISCARD reaching machinery that belongs to a field it is not. The example
+    # schema has none of the required id/type positions, so probe with Crucible's
+    # shape.
+    cat > "$WORK/skip.yaml" <<'YAML'
+version: 1
+messages:
+  probe:
+    payload:
+      a: { id: 3, type: i16 }
+      arrays:
+        id: 100
+        type: struct
+        fields:
+          u8s: { id: 0, type: array, items: { type: u8, count: 5 } }
+          i8s: { id: 1, type: array, items: { type: i8, count: 5 } }
+      string_array: { id: 200, type: array, items: { type: string, count: 5, maxlen: 64 } }
+YAML
+    rust_build "$WORK/skip.yaml" "$WORK/skip-$label"
+    skip_decode() { (cd "$WORK/skip-$label" && cargo run -q -- decode probe) }
+
+    echo "==> [$label] a skipped subtree must not leak into the enclosing scope"
+    # #268: id 24 is absent from the schema, so the whole sequence is skipped --
+    # INCLUDING its child id 3, which at ROOT is the declared i16. Binding it would
+    # re-encode to the child header itself.
+    OUT=$(printf '\306\001\031\326\014\007' | skip_decode) \
+        || { echo "FAIL: [$label] an unknown sequence must be skipped, not fail"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"a":0' \
+        || { echo "FAIL: [$label] a child of an UNKNOWN sequence must not bind into root (#268); got: $OUT"; exit 1; }
+    # #272: the §7.3 twin -- a string_array ELEMENT position opened as a sequence
+    # must be skipped whole, so the string inside it is not that element.
+    OUT=$(printf '\306\014\306\014\002\022\113\101\007\007' | skip_decode) \
+        || { echo "FAIL: [$label] a mistyped sequence element must be skipped, not fail"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"string_array":\[\]' \
+        || { echo "FAIL: [$label] a child of a MISTYPED sequence element must not bind as that element (#272); got: $OUT"; exit 1; }
+    # Control: the same element correctly typed still decodes.
+    OUT=$(printf '\306\014\002\022\113\101\007' | skip_decode) \
+        || { echo "FAIL: [$label] a correctly typed string element must decode"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"string_array":\["KA"\]' \
+        || { echo "FAIL: [$label] control: a well-typed element must still bind; got: $OUT"; exit 1; }
+    echo "==> [$label] skipped-subtree containment OK"
+
+    echo "==> [$label] a §7.3-skipped array must leave no residue"
+    # #270: ARRAY_UNSIGNED at the declared i8[] (ARRAY_SIGNED) is skipped -- and must
+    # leave the fill counter DISARMED, or the bare scalar that follows at id 0 is
+    # absorbed into arrays.u8s.
+    OUT=$(printf '\246\006\013\001\004\000\000\007' | skip_decode) \
+        || { echo "FAIL: [$label] a kind-mismatched array must be skipped, not fail"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"u8s":\[\]' \
+        || { echo "FAIL: [$label] a skipped array must not absorb the NEXT scalar (#270); got: $OUT"; exit 1; }
+    # #271: ARRAY_FIXLEN at the same declared i8[] carries count 127, above that
+    # field's `count: 5`. The bound belongs to a field this header is not, so the
+    # array is skipped and the message is merely truncated -- INCOMPLETE, not INVALID.
+    ERR=$( (printf '\246\006\015\177\040' | skip_decode 2>&1 >/dev/null) || true )
+    echo "$ERR" | grep -q 'InvalidMsg' \
+        && { echo "FAIL: [$label] a bound must not be applied to a kind-mismatched array (#271); got: $ERR"; exit 1; }
+    # Control: over-count detection still works where the bound DOES apply.
+    ERR=$( (printf '\246\006\014\177\007' | skip_decode 2>&1 >/dev/null) || true )
+    echo "$ERR" | grep -q 'InvalidMsg' \
+        || { echo "FAIL: [$label] control: a well-typed over-count array must still be INVALID; got: $ERR"; exit 1; }
+    echo "==> [$label] skipped-array residue OK"
+
+    # #273: a repeated wrapper-array element id is REPLACED, not appended to
+    # (MESSAGE_SPEC §7.4 last-wins). Appending also tripped the capacity check into
+    # a bogus BufferFull on no_std.
+    echo "==> [$label] a repeated wrapper element must be replaced (§7.4)"
+    OUT=$(printf '\306\014\002\022\101\102\002\022\103\104\007' | skip_decode) \
+        || { echo "FAIL: [$label] a repeated element id must decode, not report BufferFull (#273)"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"string_array":\["CD"\]' \
+        || { echo "FAIL: [$label] last occurrence must win (#273); got: $OUT"; exit 1; }
+    echo "==> [$label] repeated-element replace OK"
+
     echo "==> [$label] shared-vector byte-exact conformance"
     python3 "$ROOT/tests/conformance/rust/check_vectors.py" "$corelib/assets/test_vectors.json" "$WORK/conf-$label"
 

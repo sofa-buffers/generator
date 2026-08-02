@@ -958,3 +958,32 @@ messages:
 		}
 	}
 }
+
+// generator#268 (Crucible F-0044) and #272 (F-0047): SequenceBegin's (cur, id)
+// switch had no default arm, so a sequence the schema does not declare at this
+// position was ENTERED and its children bound into the ENCLOSING scope — an
+// unknown sequence id carrying a child id 3 set the ROOT's field 3 (#268), and a
+// sequence opened at a string-array element position bound its string as that
+// element (#272). One missing default covers both: _DEAD matches no callback
+// case, so the whole subtree is discarded and the stack restores the live scope.
+func TestCsUnknownSequenceIsSkippedWhole(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  Probe:
+    payload:
+      a:            { id: 3, type: i16 }
+      known:        { id: 10, type: struct, fields: { k: { id: 0, type: u32 } } }
+      string_array: { id: 200, type: array, items: { type: string, count: 5, maxlen: 64 } }
+`
+	got := buildModule(t, []byte(src), "probe.yaml", map[string]any{})
+	for _, want := range []string{
+		"private const int _DEAD = -1;",
+		"case (Root, 10): cur = Root_known; break;",
+		"default: cur = _DEAD; break;",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Message.cs missing %q:\n%s", want, got)
+		}
+	}
+}

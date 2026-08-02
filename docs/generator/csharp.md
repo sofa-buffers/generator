@@ -207,3 +207,23 @@ Unlike Java and Dart, C# needs no negative-value term on the unsigned side:
 In an array arm the guard follows the fill guard, never precedes it — an
 over-width scalar at an array id with no `ArrayBegin` in front of it is a §7.3
 skip, not an INVALID.
+
+## §7.3/§5.2: an undeclared sequence is skipped whole (issues #268, #272)
+
+`SequenceBegin` switches on the `(cur, id)` tuple and had no default arm, so a
+sequence the schema does not declare at this position left `cur` on the enclosing
+scope and its children bound there — a child id 3 inside an unknown sequence set
+the root's own field 3 (#268), and a sequence opened at a string-array element
+position bound its string as that element (#272).
+
+One arm covers both, since the switch is flat:
+
+```csharp
+switch ((cur, id)) {
+    case (Root, 10): cur = Root_known; break;
+    default: cur = _DEAD; break;
+}
+```
+
+`_DEAD` is a scope no callback case matches, so the whole subtree is discarded;
+`SequenceEnd` pops the stack and restores the live scope at the matching end.

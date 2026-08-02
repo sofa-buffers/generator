@@ -345,3 +345,22 @@ Two deliberate changes:
 
 In an array arm the guard sits INSIDE the fill guard: an over-width scalar at an
 array id with no `arrayBegin` in front of it is a §7.3 skip, not an INVALID.
+
+## §7.3/§5.2: a skip is scoped and inert (issues #268, #270, #272)
+
+The zig half of the same family as the rust backend, with the same two causes.
+
+**`sequenceBegin` moves to `.dead`.** Both default arms were `else => self.cur`,
+so an unknown sequence id and a §7.3-mistyped element sequence were entered and
+their children bound into the enclosing scope. `.dead` already existed for a
+failed per-element allocation; it is now the general skipped-subtree scope.
+
+It is emitted **unconditionally**. corelib-zig's comptime duck typing is easy to
+misread here: `istream.zig` only guards the call with `@hasDecl` — it does **not**
+skip the subtree when the method is absent — so a scalar-only message without the
+override had the same leak. With no arms the body collapses to `self.cur = .dead;`.
+
+**`arrayBegin` keys one arm per wire kind** (`.unsigned` and `.signed`
+separately, not `.unsigned, .signed`), so an `.unsigned` header at a declared
+`i8[]` is skipped *and* leaves the fill counter at 0 — otherwise the next bare
+scalar is absorbed into that array.

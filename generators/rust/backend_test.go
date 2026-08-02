@@ -240,11 +240,11 @@ messages:
 		"lim: bool,",
 		// Unbounded array: count checked in array_begin before any elements land,
 		// and the element store is dropped once the flag is set.
-		"(_, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.arr.clear() },",
+		"(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.arr.clear() },",
 		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
-		"(_, _Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
+		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
 		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; return; } { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
@@ -768,8 +768,8 @@ messages:
 	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
-			"(_, _Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear() },",
-			"(_, _Loc::Root, 2) => { if count > 3 { self.inv = true; return; } self.m.nodef.clear() },",
+			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear() },",
+			"(ArrayKind::Unsigned, _Loc::Root, 2) => { if count > 3 { self.inv = true; return; } self.m.nodef.clear() },",
 			// The fp32 array's arm is keyed to its own subtype, so an fp64 header
 			// at id 3 never reaches this bound (generator#259).
 			"(ArrayKind::Fp32, _Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear() },",
@@ -821,7 +821,7 @@ messages:
 		for _, want := range []string{
 			// row id vs the OUTER count, then element count vs the INNER count,
 			// both before the row is opened or grown, both disarming the fill.
-			"(_, _Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {",
+			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {",
 			"(ArrayKind::Fp32, _Loc::Root_fmat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 4 { self.inv = true; self.afill = 0; return; } while self.m.fmat.len() <= id as usize {",
 		} {
 			if !strings.Contains(m, want) {
@@ -865,7 +865,7 @@ messages:
 			"askip: usize,", // the discard counter
 			"if self.askip > 0 { self.askip -= 1; return; }", // consumed by unsigned/signed/fp32/fp64
 			"self.askip = match kind {",
-			"ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {",
+			"ArrayKind::Unsigned => match (self.cur, id) {",
 			"(_Loc::Root, 2) => 0,",                     // declared u32 array: elements store normally
 			"(_Loc::Root, 3) => 0,",                     // declared i32 array: likewise
 			"ArrayKind::Fp32 => match (self.cur, id) {", // subtype-keyed fixlen arm (#259)
@@ -973,7 +973,7 @@ messages:
 			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; return; } self.m.f64s.clear() },",
 			// Integer arrays are unaffected: no second header word, so no subtype to
 			// contradict.
-			"(_, _Loc::Root, 3) => { if count > 8 { self.inv = true; return; } self.m.ints.clear() },",
+			"(ArrayKind::Unsigned, _Loc::Root, 3) => { if count > 8 { self.inv = true; return; } self.m.ints.clear() },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing subtype-keyed fixlen arm %q:\n%s", cfg, want, m)
@@ -1195,7 +1195,7 @@ messages:
 		}
 		// Matrix rows: array_begin opens the row the id names, and elements push into
 		// THAT row rather than into the last one appended.
-		if !strings.Contains(got, "(_, _Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {") ||
+		if !strings.Contains(got, "(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {") ||
 			!strings.Contains(got, "self._ix1 = id as usize; },") {
 			t.Errorf("(%v) a matrix row must be opened at out[id], bounded by the outer count:\n%s", cfg, got)
 		}
@@ -1383,6 +1383,183 @@ func TestRustDeclaredWidthIsAValidityBound(t *testing.T) {
 			if !strings.Contains(got, want) {
 				t.Errorf("[%s] a 64-bit destination must store unguarded (%q):\n%s", corelib, want, got)
 			}
+		}
+	}
+}
+
+// generator#270 (Crucible F-0045) and generator#271 (F-0046) are one slip seen
+// from two sides: array_begin keyed its arms on the kind FAMILY
+// (`ArrayKind::Unsigned | ArrayKind::Signed` in a single arm) and applied the
+// schema `count` through a wildcard-kind arm. Both let a header whose wire kind
+// §7.3 says to skip reach machinery that belongs to a field it is not.
+//
+//	#270: an ARRAY_UNSIGNED header at a declared `i8[]` was skipped but left the
+//	      fill counter armed, so the NEXT bare scalar was absorbed into the array.
+//	#271: an ARRAY_FIXLEN header at a declared `i8[]` was measured against that
+//	      field's `count`, rejecting the message on a bound that was never its.
+//
+// Every arm is now keyed to exactly one wire kind, so the §7.3 check is decided
+// by the match itself — before the counter is armed and before any bound.
+func TestRustArrayBeginArmsAreKeyedByWireKind(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  probe:
+    payload:
+      arrays:
+        id: 100
+        type: struct
+        fields:
+          u8s: { id: 0, type: array, items: { type: u8, count: 5 } }
+          i8s: { id: 1, type: array, items: { type: i8, count: 5 } }
+`
+	for _, cfg := range []map[string]any{{"corelib": "rs"}, {"corelib": "rs-no-std"}} {
+		got := moduleFromYAML(t, src, cfg)
+		for _, want := range []string{
+			// One arm per wire kind: never `Unsigned | Signed` collapsed together.
+			"ArrayKind::Unsigned => match (self.cur, id) {",
+			"ArrayKind::Signed => match (self.cur, id) {",
+			// The u8 array disarms the discard counter ONLY under Unsigned, the i8
+			// array ONLY under Signed — that is the §7.3 kind check (#270).
+			"            ArrayKind::Unsigned => match (self.cur, id) {\n                (_Loc::Root_arrays, 0) => 0,\n                _ => count,\n            },",
+			"            ArrayKind::Signed => match (self.cur, id) {\n                (_Loc::Root_arrays, 1) => 0,\n                _ => count,\n            },",
+			// ... and the fill counter is armed under the same keying, so a
+			// kind-mismatched header leaves it at 0 and the next bare scalar is not
+			// absorbed (#270).
+			"            ArrayKind::Unsigned => match (self.cur, id) {\n                (_Loc::Root_arrays, 0) => count,\n                _ => 0,\n            },",
+			// The schema `count` bound names the declared kind, so a fixlen header
+			// at an integer id matches no arm and is never measured (#271).
+			"(ArrayKind::Unsigned, _Loc::Root_arrays, 0) => { if count > 5 { self.inv = true; return; } self.m.arrays.u8s.clear() },",
+			"(ArrayKind::Signed, _Loc::Root_arrays, 1) => { if count > 5 { self.inv = true; return; } self.m.arrays.i8s.clear() },",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("(%v) array_begin must key on the wire kind, missing %q:\n%s", cfg, want, got)
+			}
+		}
+		// The defects themselves: a collapsed integer family, and a bound reachable
+		// through a wildcard kind.
+		if strings.Contains(got, "ArrayKind::Unsigned | ArrayKind::Signed") {
+			t.Errorf("(%v) the integer kinds must not share one arm (#270):\n%s", cfg, got)
+		}
+		if strings.Contains(got, "(_, _Loc::Root_arrays,") {
+			t.Errorf("(%v) a schema bound must not be reachable through a wildcard kind (#271):\n%s", cfg, got)
+		}
+	}
+}
+
+// generator#273 (Crucible F-0048): the no_std wrapper-array element sinks
+// appended into the destination where every sibling sink replaces it. A repeated
+// element id therefore concatenated instead of overwriting — violating
+// MESSAGE_SPEC §7.4 last-occurrence-wins — and the capacity check on the same
+// line, written for an empty destination, misfired into Error::BufferFull on any
+// repeat at any size. Chunk reassembly is handled upstream in `acc`, so every arm
+// here receives one complete value and appending is never correct.
+func TestRustNoStdWrapperElementIsReplacedNotAppended(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  probe:
+    payload:
+      string_array: { id: 200, type: array, items: { type: string, count: 5, maxlen: 64 } }
+      blob_array:   { id: 201, type: array, items: { type: blob,   count: 5, maxlen: 64 } }
+      scalar_str:   { id: 202, type: string, maxlen: 64 }
+`
+	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs-no-std"})
+	for _, want := range []string{
+		"if let Some(_e) = self.m.string_array.get_mut(id as usize) { _e.clear(); let _ = _e.push_str(_s);",
+		"if let Some(_e) = self.m.blob_array.get_mut(id as usize) { _e.clear(); let _ = _e.extend_from_slice(_b);",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a wrapper element must be replaced, not appended to, missing %q:\n%s", want, got)
+		}
+	}
+	// The defect: a push into an element that was never cleared.
+	for _, bad := range []string{
+		"get_mut(id as usize) { let _ = _e.push_str(_s);",
+		"get_mut(id as usize) { let _ = _e.extend_from_slice(_b);",
+	} {
+		if strings.Contains(got, bad) {
+			t.Errorf("a wrapper element must not be appended to (%q):\n%s", bad, got)
+		}
+	}
+	// The scalar sink already got this right and must keep doing so.
+	if !strings.Contains(got, "self.m.scalar_str.clear(); let _ = self.m.scalar_str.push_str(_s);") {
+		t.Errorf("the scalar string sink must still clear before writing:\n%s", got)
+	}
+}
+
+// generator#268 (Crucible F-0044) and generator#272 (F-0047): sequence_begin's
+// default arm was `_ => self.cur`, i.e. "stay where you are". A sequence the
+// schema does not declare at this position was therefore ENTERED, and its
+// children bound into the ENCLOSING scope:
+//
+//	#268: an unknown sequence id carrying a child id 3 set the ROOT's field 3.
+//	#272: a sequence opened at a string-array ELEMENT position (a §7.3 wire-type
+//	      contradiction) bound its string as that element.
+//
+// Both are one missing default: an undeclared (scope, id) must move to a dead
+// scope that matches no arm, so the whole subtree — children included — is
+// discarded. The stack alone restores the live scope at the matching end, so no
+// depth counter is needed.
+func TestRustUnknownSequenceIsSkippedWhole(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  probe:
+    payload:
+      a:            { id: 3, type: i16 }
+      known:        { id: 10, type: struct, fields: { k: { id: 0, type: u32 } } }
+      string_array: { id: 200, type: array, items: { type: string, count: 5, maxlen: 64 } }
+`
+	for _, cfg := range []map[string]any{{"corelib": "rs"}, {"corelib": "rs-no-std"}} {
+		got := moduleFromYAML(t, src, cfg)
+		if !strings.Contains(got, "    Dead,\n}") {
+			t.Errorf("(%v) _Loc needs a Dead scope for skipped subtrees:\n%s", cfg, got)
+		}
+		// The declared positions still descend...
+		if !strings.Contains(got, "(_Loc::Root, 10) => _Loc::Root_known,") {
+			t.Errorf("(%v) a declared nested struct must still be entered:\n%s", cfg, got)
+		}
+		// ... and everything else is discarded whole.
+		if !strings.Contains(got, "            _ => _Loc::Dead,") {
+			t.Errorf("(%v) sequence_begin's default arm must skip, not stay:\n%s", cfg, got)
+		}
+		// The defect itself.
+		if strings.Contains(got, "_ => self.cur,") {
+			t.Errorf("(%v) `_ => self.cur` lets a skipped subtree's children bind into the enclosing scope (#268/#272):\n%s", cfg, got)
+		}
+	}
+}
+
+// The same skip has to exist for a message that declares NO sequence of its own.
+// The corelib cannot know which ids the schema declares, so it delivers every
+// sequence; a message with no sequence_begin override at all would let the
+// children of an unknown sequence arrive with `cur` still on root and bind there.
+func TestRustScalarOnlyMessageStillSkipsAnUnknownSequence(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  probe:
+    payload:
+      a: { id: 3, type: i16 }
+`
+	for _, cfg := range []map[string]any{{"corelib": "rs"}, {"corelib": "rs-no-std"}} {
+		got := moduleFromYAML(t, src, cfg)
+		// Emitted even though nothing here is a sequence, and `id` is named _id so
+		// the generated crate stays warning-clean with no arms to read it.
+		want := "    fn sequence_begin(&mut self, _id: Id) {\n" +
+			"        self.stack.push(self.cur);\n" +
+			"        self.cur = _Loc::Dead;\n" +
+			"    }"
+		if cfg["corelib"] == "rs-no-std" {
+			want = strings.Replace(want, "self.stack.push(self.cur);", "let _ = self.stack.push(self.cur);", 1)
+		}
+		if !strings.Contains(got, want) {
+			t.Errorf("(%v) a scalar-only message must still override sequence_begin to skip:\n%s", cfg, got)
+		}
+		// A wildcard-only match would be a Clippy match_single_binding.
+		if strings.Contains(got, "match (self.cur, id) {\n            _ => _Loc::Dead,") {
+			t.Errorf("(%v) with no arms, emit the assignment rather than a single-binding match:\n%s", cfg, got)
 		}
 	}
 }

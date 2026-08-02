@@ -435,3 +435,32 @@ delivers a `ulong`).
 
 A native array arrives whole as a `List<int>`, so one scan over the elements
 decides it: a single out-of-range element makes the message INVALID.
+
+## §7.3: a mistyped sequence element is skipped, not entered (issue #272)
+
+A wrapper-array element position opened as a sequence must be skipped whole. The
+message visitors always overrode `onSequenceStart` and returned `null` for an
+unmatched id — but the leaf element collectors (`_StrSeq`, `_BlobSeq`) declare no
+sequence of their own and so never overrode it at all, inheriting
+`sofab.MessageVisitor`'s **descending** default, which returns `this`. A sequence
+arriving at an element position therefore descended into the collector itself and
+its child string bound as that element.
+
+The fix sits on the shared `_Visitor` base, beside the `onStringBytes` no-op that
+is there for exactly the same reason:
+
+```dart
+abstract class _Visitor extends sofab.MessageVisitor {
+  @override
+  void onStringBytes(int id, Uint8List bytes) {}
+  @override
+  sofab.MessageVisitor? onSequenceStart(int id) => null;
+}
+```
+
+Both defaults are corelib behaviour that is right for a hand-written visitor —
+which has no schema, so everything it is handed is something it wanted — and wrong
+for generated code, where the id decides. Putting them on the base rather than at
+each class keeps it true for collectors added later. The object and row
+collectors, whose elements genuinely *are* sequences, override it back to a
+descent.

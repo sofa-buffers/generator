@@ -176,6 +176,7 @@ mod scalars_dec {
 #[derive(Clone, Copy, PartialEq)]
 enum _Loc {
     Root,
+    Dead,
 }
 
 struct V<'a> {
@@ -223,7 +224,10 @@ impl<'a> Visitor for V<'a> {
     }
     fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {
         self.askip = match kind {
-            ArrayKind::Unsigned | ArrayKind::Signed => match (self.cur, id) {
+            ArrayKind::Unsigned => match (self.cur, id) {
+                _ => count,
+            },
+            ArrayKind::Signed => match (self.cur, id) {
                 _ => count,
             },
             _ => count,
@@ -231,6 +235,13 @@ impl<'a> Visitor for V<'a> {
         match (kind, self.cur, id) {
             _ => {}
         }
+    }
+    fn sequence_begin(&mut self, _id: Id) {
+        self.stack.push(self.cur);
+        self.cur = _Loc::Dead;
+    }
+    fn sequence_end(&mut self) {
+        self.cur = self.stack.pop().unwrap_or(_Loc::Root);
     }
 }
 }

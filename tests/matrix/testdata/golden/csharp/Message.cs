@@ -66,6 +66,7 @@ public sealed class Scalars {
 internal sealed class ScalarsVisitor : IVisitor {
     private readonly Scalars m;
     private int cur = 0;
+    private const int _DEAD = -1;
     private int ai = 0;                // index into the primitive array currently being filled
     private int askip = 0;             // elements left to discard from a wire-type-contradictory array
     private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)
@@ -169,6 +170,7 @@ internal sealed class ScalarsVisitor : IVisitor {
         if (sp == stk.Length) System.Array.Resize(ref stk, sp * 2);
         stk[sp++] = cur;
         switch ((cur, id)) {
+            default: cur = _DEAD; break;
         }
     }
     public void SequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }

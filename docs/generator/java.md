@@ -371,3 +371,29 @@ delivers a `ulong`); Dart does, for the same reason as Java.
 In an array arm the guard follows the fill guard, never precedes it: an
 over-width scalar at an array id with no `arrayBegin` in front of it is a §7.3
 skip, and guarding earlier would turn that skip into a spurious INVALID.
+
+## §7.3/§5.2: an undeclared sequence is skipped whole (issues #268, #272)
+
+`sequenceBegin` dispatches on `switch (cur)` with an inner `switch (id)`, and
+neither had a default arm — so a sequence the schema does not declare at this
+position left `cur` on the enclosing scope and its children bound there. A child
+id 3 inside an unknown sequence set the root's own field 3; a sequence opened at a
+string-array element position bound its string as that element.
+
+Both switches now end in `default: cur = _DEAD; break;`, where `_DEAD` is a scope
+no callback case matches:
+
+```java
+switch (cur) {
+case 0: switch (id) {
+    case 10: cur = 1; break;
+    default: cur = _DEAD; break;      // undeclared id in a scope that has some
+} break;
+case 1: cur = _DEAD; break;           // a scope that declares none at all
+default: cur = _DEAD; break;          // and any scope with no case above
+}
+```
+
+The third arm is the one #272 needed: a leaf array scope had no `case` in the
+outer switch, so the dispatch fell straight through and left `cur` untouched.
+`sequenceEnd` pops the stack as before, which is what restores the live scope.

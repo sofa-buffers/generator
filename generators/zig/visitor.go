@@ -353,12 +353,14 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("const _dec_%s = struct {", name)
 	f.line("    m: *%s,", name)
 	f.line("    alloc: std.mem.Allocator,")
-	if use.sequence {
-		// The corelib rejects nesting deeper than MAX_DEPTH (255), so 256
-		// slots always suffice -- no heap, no overflow handling.
-		f.line("    stack: [256]_Loc = undefined,")
-		f.line("    sp: usize = 0,")
-	}
+	// Always present, even for a message that declares no sequence of its own:
+	// sequenceBegin is emitted unconditionally so an unknown sequence's CHILDREN
+	// are skipped rather than bound into the enclosing scope (generator#268), and
+	// it needs somewhere to push. The corelib rejects nesting deeper than
+	// MAX_DEPTH (255), so 256 slots always suffice -- no heap, no overflow
+	// handling.
+	f.line("    stack: [256]_Loc = undefined,")
+	f.line("    sp: usize = 0,")
 	f.line("    cur: _Loc = .root,")
 	// Sticky malformed-message flag: a fixed native array received more
 	// elements than its schema count (generator#100); decode() then rejects
@@ -408,7 +410,7 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		f.line("        %s,", fr.loc)
 	}
-	f.line("        dead, // a per-element allocation failed; ignore the subtree")
+	f.line("        dead, // skipped subtree: an undeclared sequence id, a S7.3 wire-type mismatch, or a failed per-element allocation")
 	f.line("    };")
 
 	if use.unsigned {
@@ -435,9 +437,11 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	if use.scalarArray || arrSkip {
 		g.emitArrayBegin(f, fs, name, arrSkip)
 	}
-	if use.sequence {
-		g.emitSequence(f, fs, name)
-	}
+	// Unconditional: corelib-zig only checks @hasDecl for the callback, it does NOT
+	// skip the subtree on its own (istream.zig T_SEQUENCE_START), so a visitor
+	// without sequenceBegin would let an unknown sequence's children arrive with
+	// `cur` still on the enclosing scope and bind there (generator#268 / F-0044).
+	g.emitSequence(f, fs, name)
 	f.line("};")
 	f.blank()
 }
@@ -597,10 +601,28 @@ func (g *gen) emitArrayFillArm(f *zfile, fs []frame, fillArm bool) {
 	// fp64 header at that id falls to `else => 0` and its elements are discarded
 	// by the skip counter instead of being stored into the wrong field.
 	f.line("        self.afill = switch (kind) {")
-	emit(".unsigned, .signed", func(k ir.Kind) bool { return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64 })
+	// One arm per wire kind, never a collapsed integer family: a declared `i8[]`
+	// must disarm only for .signed, so an .unsigned header at that id is skipped
+	// AND leaves the fill counter at 0 -- otherwise the NEXT bare scalar is
+	// absorbed into the array (generator#270 / Crucible F-0045).
+	emit(".unsigned", wantUnsignedArrayElem)
+	emit(".signed", wantSignedArrayElem)
 	emit(".fp32", func(k ir.Kind) bool { return k == ir.KindFP32 })
 	emit(".fp64", func(k ir.Kind) bool { return k == ir.KindFP64 })
 	f.line("        };")
+}
+
+// wantUnsignedArrayElem / wantSignedArrayElem split the integer element kinds by
+// the wire ARRAY KIND they map to (§1): signed integers and enum travel as
+// .signed, unsigned integers, bool and bitfield as .unsigned. Keeping them apart
+// is what makes the §7.3 kind check decide before the counters are armed
+// (generator#270).
+func wantUnsignedArrayElem(k ir.Kind) bool {
+	return isNativeArrayElem(k) && !wantSignedArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64
+}
+
+func wantSignedArrayElem(k ir.Kind) bool {
+	return isSignedElem(k) || k == ir.KindEnum
 }
 
 func (g *gen) emitArraySkipArm(f *zfile, fs []frame, arrSkip bool) {
@@ -643,7 +665,12 @@ func (g *gen) emitArraySkipArm(f *zfile, fs []frame, arrSkip bool) {
 	// .fp32, so under .fp64 it takes `else => count` and the array is skipped
 	// whole, exactly like one at an unknown id.
 	f.line("        self.askip = switch (kind) {")
-	emit(".unsigned, .signed", func(k ir.Kind) bool { return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64 })
+	// One arm per wire kind, never a collapsed integer family: a declared `i8[]`
+	// must disarm only for .signed, so an .unsigned header at that id is skipped
+	// AND leaves the fill counter at 0 -- otherwise the NEXT bare scalar is
+	// absorbed into the array (generator#270 / Crucible F-0045).
+	emit(".unsigned", wantUnsignedArrayElem)
+	emit(".signed", wantSignedArrayElem)
 	emit(".fp32", func(k ir.Kind) bool { return k == ir.KindFP32 })
 	emit(".fp64", func(k ir.Kind) bool { return k == ir.KindFP64 })
 	f.line("        };")
@@ -1150,6 +1177,15 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	f.line("            self.stack[self.sp] = self.cur;")
 	f.line("            self.sp += 1;")
 	f.line("        }")
+	if len(all) == 0 {
+		// Nothing is declared as a sequence anywhere in this message, so every
+		// sequence that arrives is unknown; the switch would carry only its else.
+		f.line("        self.cur = .dead;")
+		f.line("    }")
+		f.blank()
+		g.emitSequenceEnd(f, name)
+		return
+	}
 	f.line("        self.cur = switch (self.cur) {")
 	for _, fa := range all {
 		if fa.body != "" {
@@ -1160,13 +1196,24 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 		for _, arm := range fa.arms {
 			f.line("                %s", arm)
 		}
-		f.line("                else => self.cur,")
+		f.line("                else => .dead,")
 		f.line("            },")
 	}
-	f.line("            else => self.cur,")
+	// The default arms are a SKIP, not "stay where you are". A sequence id the
+	// schema does not declare in this scope -- an unknown id (§5.2/§4.9) or one
+	// landing on a position declared as something else (§7.3) -- must be discarded
+	// WHOLE, children included. Staying put let those children bind into the
+	// enclosing scope (generator#268 / F-0044, generator#272 / F-0047). No depth
+	// counter is needed: every begin pushes and every end pops, and a nested
+	// sequence inside a dead subtree matches no arm either, so it stays .dead.
+	f.line("            else => .dead,")
 	f.line("        };")
 	f.line("    }")
 	f.blank()
+	g.emitSequenceEnd(f, name)
+}
+
+func (g *gen) emitSequenceEnd(f *zfile, name string) {
 	f.line("    pub fn sequenceEnd(self: *_dec_%s) void {", name)
 	// Nothing to fill in on the way out: the wire count M IS a compact array's
 	// length and the highest present element id IS a wrapper array's last index

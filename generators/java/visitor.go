@@ -597,6 +597,11 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("class %sVisitor implements Visitor {", name)
 	f.line("    private final %s m;", name)
 	f.line("    private int cur = 0;")
+	// The SKIPPED-SUBTREE scope. sequenceBegin moves here for any (scope, id) the
+	// schema does not declare, and every callback dispatches on `cur` with a case
+	// per real scope -- so nothing matches while cur is _DEAD and the whole subtree
+	// is discarded, children included (generator#268 / #272).
+	f.line("    private static final int _DEAD = -1;")
 	f.line("    private int ai = 0;                 // index into the primitive array currently being filled")
 	// §7.3 array-vs-scalar skip counter (generator#183): an integer array whose id
 	// is declared as a SCALAR is a wire-type contradiction and must be skipped like
@@ -894,11 +899,20 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 					arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+".clear(); cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
 				}
 			}
-			if len(arms) > 0 {
+			// A skipping default even when this scope declares no sequence at all:
+			// reaching sequenceBegin here at all means an id that is not one of them.
+			if len(arms) == 0 {
+				f.line("        case %d: cur = _DEAD; break;", fr.idx)
+			} else {
+				arms = append(arms, "default: cur = _DEAD; break;")
 				g.frameSwitch(f, fr.idx, arms)
 			}
 		}
 	}
+	// And the same for a scope with no case above -- a leaf array scope, say --
+	// where the switch would otherwise fall straight through and leave `cur` on the
+	// enclosing frame (generator#272).
+	f.line("        default: cur = _DEAD; break;")
 	f.line("        }")
 	f.line("    }")
 	g.emitSequenceEnd(f)
