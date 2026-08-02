@@ -286,6 +286,32 @@ func maxlenThrow(name, noun string, max int64) string {
 		name, noun, max)
 }
 
+// widthThrow renders the declared-width rejection (MESSAGE_SPEC §7.1,
+// documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination receiving a
+// value outside its declared range is malformed input, rejected through the same
+// unchecked INVALID_MSG channel as maxlenThrow — never masked to the width, never
+// kept. Returns "" for the 64-bit kinds, whose range IS the accumulator the value
+// arrives in.
+//
+// The `value < 0` term is not redundant on the unsigned side. The corelib
+// delivers an unsigned wire value as a Java `long`, which has no unsigned type: a
+// u64 at or above 2^63 arrives with its sign bit set, so `value > 255` alone
+// would read it as negative and let precisely the largest values through the
+// guard. Treating negative as out-of-range is correct for every narrow kind,
+// since all of their maxima are below 2^63.
+func widthThrow(k ir.Kind, name string) string {
+	lo, hi, ok := ir.NarrowRange(k)
+	if !ok {
+		return ""
+	}
+	cond := fmt.Sprintf("value < 0 || value > %dL", hi)
+	if lo < 0 {
+		cond = fmt.Sprintf("value < %dL || value > %dL", lo, hi)
+	}
+	return fmt.Sprintf("if (%s) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"%s: value outside declared width %s\")); ",
+		cond, name, k)
+}
+
 // emitStringCb writes the string() visitor callback. Single-shot: when the whole
 // payload arrives in one chunk, decode straight from the input slice, skipping
 // the (synchronized) ByteArrayOutputStream.
@@ -938,7 +964,7 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 				// Gated like the fkNormal fills (generator#188): a matrix inner row
 				// is armed by its own arrayBegin; a bare scalar in the matrix scope
 				// (afill == 0) is skipped.
-				f.line("        case %d: if (afill == 0) break; afill--; %s.add(%s); break;", fr.idx, row, matConv(fr.innerElem))
+				f.line("        case %d: if (afill == 0) break; afill--; %s%s.add(%s); break;", fr.idx, widthThrow(fr.innerElem, fr.loc+" element"), row, matConv(fr.innerElem))
 			}
 			continue
 		}
@@ -960,15 +986,18 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 			var stmt string
 			switch act {
 			case "add":
-				stmt = fillGuard + target + ".add(value)"
+				stmt = fillGuard + widthThrow(fld.Elem, fld.Name+" element") + target + ".add(value)"
 			case "addBool":
 				stmt = fillGuard + target + ".add(value != 0)"
 			case "index":
 				// Grow the backing array on demand (never trust the wire count), up
 				// to the announced count, so a valid array ends exactly M long.
-				stmt = fillGuard + target + " = ensureCap(" + target + ", ai, acap); " + target + "[ai++] = value"
+				// The width guard follows the fill guard, never precedes it: an
+				// over-width scalar at an array id with no arrayBegin in front of it
+				// is a §7.3 skip, not an INVALID.
+				stmt = fillGuard + widthThrow(fld.Elem, fld.Name+" element") + target + " = ensureCap(" + target + ", ai, acap); " + target + "[ai++] = value"
 			default:
-				stmt = target + " " + act
+				stmt = widthThrow(fld.Kind, fld.Name) + target + " " + act
 			}
 			arms = append(arms, jcase(fld.ID, stmt))
 		}

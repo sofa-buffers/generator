@@ -858,8 +858,11 @@ messages:
 		// leaf elements, unchanged: they always got this right
 		"                    while len(self.strs) <= _ef0.id:\n" +
 			"                        self.strs.append(\"\")\n",
-		// native matrix rows: read the row, then place it at its id
+		// native matrix rows: read the row, check the elements against the declared
+		// u32 width (§7.1), then place it at its id
 		"                    _e0 = d.read_unsigned_array()\n" +
+			"                    if any(_v > 4294967295 for _v in _e0):\n" +
+			"                        raise SofaDecodeError(\"mat row element: value outside declared width u32\")\n" +
 			"                    while len(self.mat) <= _ef0.id:\n" +
 			"                        self.mat.append([])\n" +
 			"                    self.mat[_ef0.id] = _e0\n",
@@ -1151,6 +1154,54 @@ messages:
 			}
 		} else if !ok {
 			t.Errorf("%s (%s): must decode, got:\n%s", c.what, c.hex, stderr)
+		}
+	}
+}
+
+// MESSAGE_SPEC §7.1 + documentation#32 (issue #266, Crucible F-0033 / G-0026):
+// the declared integer width is a normative VALIDITY bound. Python's int is
+// unbounded, so nothing masked the value here — the defect was that an
+// out-of-range value was simply KEPT — and the raise aborts the decode.
+func TestPythonDeclaredWidthIsAValidityBound(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  W:
+    payload:
+      a_u8:   { id: 0, type: u8 }
+      c_u32:  { id: 2, type: u32 }
+      d_u64:  { id: 3, type: u64 }
+      e_i8:   { id: 4, type: i8 }
+      g_i32:  { id: 6, type: i32 }
+      h_i64:  { id: 7, type: i64 }
+      arr_u8: { id: 8, type: array, items: { type: u8, count: 4 } }
+`
+	got := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		"self.a_u8 = d.unsigned()\n                if self.a_u8 > 255:\n" +
+			`                    raise SofaDecodeError("a_u8: value outside declared width u8")`,
+		"self.c_u32 = d.unsigned()\n                if self.c_u32 > 4294967295:\n" +
+			`                    raise SofaDecodeError("c_u32: value outside declared width u32")`,
+		"self.e_i8 = d.signed()\n                if self.e_i8 < -128 or self.e_i8 > 127:\n" +
+			`                    raise SofaDecodeError("e_i8: value outside declared width i8")`,
+		"self.g_i32 = d.signed()\n                if self.g_i32 < -2147483648 or self.g_i32 > 2147483647:\n" +
+			`                    raise SofaDecodeError("g_i32: value outside declared width i32")`,
+		// The array arrives whole, so one scan over the elements decides it.
+		"if any(_v > 255 for _v in self.arr_u8):\n" +
+			`                    raise SofaDecodeError("arr_u8 element: value outside declared width u8")`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.py missing width guard %q:\n%s", want, got)
+		}
+	}
+	// 64-bit destinations read bare: the next line is the following field's read,
+	// not a bound check.
+	for _, want := range []string{
+		"self.d_u64 = d.unsigned()\n            elif",
+		"self.h_i64 = d.signed()\n            elif",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.py: a 64-bit destination must read unguarded (%q):\n%s", want, got)
 		}
 	}
 }

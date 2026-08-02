@@ -142,17 +142,41 @@ func hasDynPrimArray(fs []frame) bool {
 	return false
 }
 
+// widthThrow renders the declared-width rejection (MESSAGE_SPEC §7.1,
+// documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination receiving a
+// value outside its declared range is malformed input and fails the decode with
+// InvalidMessage — never masked to the width by the `(byte)value` cast that
+// follows, never kept. "" for the 64-bit kinds, whose range IS the accumulator.
+//
+// C# needs no negative-value term on the unsigned side: Unsigned delivers a
+// `ulong`, so the comparison is already unsigned (unlike Java's `long`).
+func widthThrow(k ir.Kind, name string) string {
+	lo, hi, ok := ir.NarrowRange(k)
+	if !ok {
+		return ""
+	}
+	cond := fmt.Sprintf("value > %d", hi)
+	if lo < 0 {
+		cond = fmt.Sprintf("value < %d || value > %d", lo, hi)
+	}
+	return fmt.Sprintf("if (%s) throw new SofabException(SofabError.InvalidMessage, \"%s: value outside declared width %s\"); ", cond, name, k)
+}
+
 // primFill is the statement filling the next slot of the primitive array field
 // `target`. A `count: N` array was allocated at exactly the WIRE count M by
 // ArrayBegin — M IS the array's length (MESSAGE_SPEC §3) and the generator#100
 // guard already rejected M > N — so the elements land in place with nothing to
 // fill in behind them. A count-less array starts small and grows on demand via
 // EnsureCap, so an untrusted wire count never allocates.
-func primFill(target string, fld *ir.Field, rhs string) string {
+//
+// `guard` is the element's §7.1 width rejection (widthThrow), placed AFTER
+// fillGuard and never before it: an over-width scalar at an array id with no
+// ArrayBegin in front of it is a §7.3 skip, not an INVALID.
+func primFill(target string, fld *ir.Field, guard, rhs string) string {
 	if !fld.HasCount {
-		return fillGuard + fmt.Sprintf("%s = EnsureCap(%s, ai, acap); %s[ai++] = %s;", target, target, target, rhs)
+		return fillGuard + guard + fmt.Sprintf("%s = EnsureCap(%s, ai, acap); %s[ai++] = %s;", target, target, target, rhs)
 	}
-	return fillGuard + fmt.Sprintf("%s[ai++] = %s;", target, rhs)
+	return fillGuard + guard + fmt.Sprintf("%s[ai++] = %s;", target, rhs)
 }
 
 // fillGuard fronts every native-array fill arm (generator#188): the fill runs
@@ -168,8 +192,8 @@ const fillGuard = "if (afill == 0) break; afill--; "
 // without a declared `count: N`: the wire count M IS the array's length
 // (MESSAGE_SPEC §3), so the M elements that arrived are the whole value and a
 // capacity N never adds any behind them.
-func nativeListFill(target, rhs string) string {
-	return fillGuard + fmt.Sprintf("%s.Add(%s);", target, rhs)
+func nativeListFill(target, guard, rhs string) string {
+	return fillGuard + guard + fmt.Sprintf("%s.Add(%s);", target, rhs)
 }
 
 // placeRow is the statement that stores a decoded ROW of a nested array (an array
@@ -550,22 +574,22 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && unsignedArrayElem(fr.items.Elem) {
-				f.line("            case (%s, _): %s%s.Add(%s); break;", fr.loc, fillGuard, elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
+				f.line("            case (%s, _): %s%s%s.Add(%s); break;", fr.loc, fillGuard, widthThrow(fr.items.Elem, fr.loc+" element"), elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64:
-				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.csType(fld))
+				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld))
 			case fld.Kind == ir.KindBitfield:
 				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
 			case fld.Kind == ir.KindBool:
 				f.line("            case (%s, %d): %s.%s = value != 0; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && unsignedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			case fld.Kind == ir.KindArray && unsignedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			}
 		}
 	}
@@ -580,20 +604,20 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && signedArrayElem(fr.items.Elem) {
-				f.line("            case (%s, _): %s%s.Add(%s); break;", fr.loc, fillGuard, elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
+				f.line("            case (%s, _): %s%s%s.Add(%s); break;", fr.loc, fillGuard, widthThrow(fr.items.Elem, fr.loc+" element"), elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
-				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.csType(fld))
+				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld))
 			case fld.Kind == ir.KindEnum:
 				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && signedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			case fld.Kind == ir.KindArray && signedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			}
 		}
 	}
@@ -816,7 +840,7 @@ func (g *gen) emitFloatVisit(f *cfile, fs []frame, kind ir.Kind, cb, ctype strin
 			case fld.Kind == kind:
 				f.line("            case (%s, %d): %s.%s = value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, "value"))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, "", "value"))
 			}
 		}
 	}

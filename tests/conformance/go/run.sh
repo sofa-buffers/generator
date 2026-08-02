@@ -343,6 +343,47 @@ fi
 (cd "$WORK/nolim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/over102.bin" >/dev/null) || { echo "FAIL: without limits the same bytes must decode"; exit 1; }
 echo "==> decode limits OK (over-cap rejected, in-cap + unlimited accepted)"
 
+# Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
+# generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
+# declared width is INVALID: it MUST NOT be masked to the width and MUST NOT be
+# kept. The example schema has no narrow-int field at a known id, so probe with a
+# dedicated one.
+#
+# Wire: id 0 unsigned -> header 0x00, then the varint.
+#   ff 7f    = 16383   (the reported reproducer)
+#   80 02    = 256     (one past a u8)
+#   ff 01    = 255     (the in-range control: must decode AND round-trip)
+#   f0 a2 04 = 70000   (one field up, at the u16)
+cat > "$WORK/width.yaml" <<'YAML'
+version: 1
+messages:
+  probe: { payload: { a: { id: 0, type: u8 }, b: { id: 1, type: u16 }, c: { id: 2, type: u64 } } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/width.yaml" --out "$WORK/width" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/width/go.mod"
+( cd "$WORK/width" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build ./... )
+width_decode() { (cd "$WORK/width" && GOFLAGS=-mod=mod go run ./harness decode probe) }
+
+echo "==> over-width scalar must be INVALID (S7.1, generator#266)"
+if printf '\000\377\177' | width_decode >/dev/null 2>&1; then
+    echo "FAIL: 16383 into a u8 must be INVALID, not masked to 255 and not kept"; exit 1
+fi
+if printf '\000\200\002' | width_decode >/dev/null 2>&1; then
+    echo "FAIL: 256 into a u8 must be INVALID"; exit 1
+fi
+if printf '\010\360\242\004' | width_decode >/dev/null 2>&1; then
+    echo "FAIL: 70000 into a u16 must be INVALID"; exit 1
+fi
+# The in-range control still decodes, keeps its exact value, and round-trips: the
+# guard must reject only what is genuinely out of range.
+OUT=$(printf '\000\377\001' | width_decode) || { echo "FAIL: in-range control 255 must decode"; exit 1; }
+echo "$OUT" | grep -q '"a":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
+# A u64 destination has no narrower bound: the same large value is simply valid.
+OUT=$(printf '\020\377\377\377\377\377\377\377\377\377\001' | width_decode) \
+    || { echo "FAIL: a u64 field must accept the full 64-bit range"; exit 1; }
+echo "$OUT" | grep -q '"c":18446744073709551615' || { echo "FAIL: u64 max must survive; got: $OUT"; exit 1; }
+echo "==> declared-width reject OK"
+
 echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_GO_CORELIB="$CORELIB" go test ./generators/golang/ -run "Conformance|Wire" -count=1 )
 

@@ -131,10 +131,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if use.long {
 		imports = append(imports, "Long")
 	}
-	if use.countedArr || use.overIdxArr || use.maxlenField {
+	if use.countedArr || use.overIdxArr || use.maxlenField || use.narrowInt {
 		// The over-count scalar-array reject (generator#100), the over-index
-		// wrapper-array reject (generator#142), and the over-maxlen string/blob
-		// reject (MESSAGE_SPEC §7.1) all throw SofabError.
+		// wrapper-array reject (generator#142), the over-maxlen string/blob reject
+		// and the over-width integer reject (MESSAGE_SPEC §7.1, generator#266) all
+		// throw SofabError.
 		imports = append(imports, "SofabError", "SofabErrorCode")
 	}
 	f.line("import { %s } from %q;", strings.Join(imports, ", "), corelibPkg)

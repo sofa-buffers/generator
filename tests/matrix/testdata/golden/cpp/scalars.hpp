@@ -171,16 +171,16 @@ struct Scalars : sofab::Message {
     void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
         switch (id) {
         case 0:
-            is.read(u8min);
+            { std::uint64_t _v; if (is.read(_v)) { if (_v > 255) { is.invalidate(); return; } u8min = static_cast<std::uint8_t>(_v); } }
             break;
         case 1:
-            is.read(u8max);
+            { std::uint64_t _v; if (is.read(_v)) { if (_v > 255) { is.invalidate(); return; } u8max = static_cast<std::uint8_t>(_v); } }
             break;
         case 2:
             is.read(u64max);
             break;
         case 3:
-            is.read(i8min);
+            { std::int64_t _v; if (is.read(_v)) { if (_v < -128 || _v > 127) { is.invalidate(); return; } i8min = static_cast<std::int8_t>(_v); } }
             break;
         case 4:
             is.read(i64min);

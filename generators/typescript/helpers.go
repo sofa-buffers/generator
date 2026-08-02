@@ -196,6 +196,7 @@ type helperUse struct {
 	countedArr  bool // count-bearing native array -> import SofabError for the over-count reject (generator#100)
 	overIdxArr  bool // count-bearing wrapper array -> import SofabError for the over-index reject (generator#142)
 	maxlenField bool // bounded string/blob (scalar or wrapper element) -> import SofabError for the over-maxlen reject (MESSAGE_SPEC §7.1)
+	narrowInt   bool // narrow integer destination (scalar or native array element) -> import SofabError for the over-width reject (MESSAGE_SPEC §7.1, generator#266)
 	strMaxlen   bool // bounded string (scalar or wrapper element) -> emit the allocation-free _utf8Len helper for its decode-side maxlen check (blobs measure .length directly)
 	fp32Raw     bool // fp32 scalar field -> emit _fp32FromRaw (the §4.6 bit-exact scalar channel, generator#235)
 	fp32ArrRaw  bool // native fp32 array field -> emit _fp32ArrayRaw (its array half)
@@ -224,6 +225,19 @@ func arrayHasBoundedStrBlob(elem ir.Kind, items *ir.ArrayElem, elemMaxHas bool) 
 	}
 	if elem == ir.KindArray && items != nil {
 		return arrayHasBoundedStrBlob(items.Elem, items.ElemItems, items.ElemMaxHas)
+	}
+	return false
+}
+
+// arrayHasNarrowInt reports whether an array field (recursively through nested
+// element items) has a narrow-integer element — the shape whose decode emits the
+// over-width SofabError guard (MESSAGE_SPEC §7.1, generator#266).
+func arrayHasNarrowInt(elem ir.Kind, items *ir.ArrayElem) bool {
+	if ir.IsNarrow(elem) {
+		return true
+	}
+	if elem == ir.KindArray && items != nil {
+		return arrayHasNarrowInt(items.Elem, items.ElemItems)
 	}
 	return false
 }
@@ -265,6 +279,17 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 			}
 			if fld.Kind == ir.KindArray && arrayHasBoundedStrBlob(fld.Elem, fld.ElemItems, fld.ElemMaxHas) {
 				use.maxlenField = true
+			}
+			// A narrow integer destination decodes with the over-width reject, which
+			// throws SofabError (MESSAGE_SPEC §7.1, generator#266). Scalar fields and
+			// native array elements alike — nested rows reach this through their own
+			// field, so the element check follows the same recursion as the bounds
+			// above.
+			if ir.IsNarrow(fld.Kind) {
+				use.narrowInt = true
+			}
+			if fld.Kind == ir.KindArray && arrayHasNarrowInt(fld.Elem, fld.ElemItems) {
+				use.narrowInt = true
 			}
 			// A bounded string (scalar or wrapper element) decodes its maxlen check
 			// via the allocation-free _utf8Len helper (issue #153).

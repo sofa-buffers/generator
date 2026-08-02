@@ -136,9 +136,11 @@ class _ScalarsVisitor extends _Visitor {
   void onUnsigned(int id, int value) {
     switch (id) {
       case 0:
+        if (value < 0 || value > 255) { e.inv = true; return; }
         o.u8min = value;
         return;
       case 1:
+        if (value < 0 || value > 255) { e.inv = true; return; }
         o.u8max = value;
         return;
       case 2:
@@ -153,6 +155,7 @@ class _ScalarsVisitor extends _Visitor {
   void onSigned(int id, int value) {
     switch (id) {
       case 3:
+        if (value < -128 || value > 127) { e.inv = true; return; }
         o.i8min = value;
         return;
       case 4:

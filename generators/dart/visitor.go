@@ -48,11 +48,11 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 		acc := "o." + dartIdent(fld.Name)
 		switch fld.Kind {
 		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-			uns = append(uns, arm(fld.ID, acc+" = value;"))
+			uns = append(uns, arm(fld.ID, widthGuard(fld.Kind)+acc+" = value;"))
 		case ir.KindBool:
 			uns = append(uns, arm(fld.ID, acc+" = value != 0;"))
 		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-			sig = append(sig, arm(fld.ID, acc+" = value;"))
+			sig = append(sig, arm(fld.ID, widthGuard(fld.Kind)+acc+" = value;"))
 		case ir.KindFP32:
 			// onFp32 fires for a non-NaN value: bind it and drop any bits a prior
 			// (re-opened, §7.4) NaN occurrence captured. onFp32Bits fires for a NaN:
@@ -192,6 +192,44 @@ func arrayCountHdrGuard(kind string, n int64) string {
 // arrived are the whole value, so they are taken exactly as they come. A
 // declared `count: N` is a CAPACITY -- it bounds M (the guard below) but never
 // adds elements, so there is nothing to fill in at [M, N).
+// widthGuard renders the §7.1 declared-width rejection for a scalar store
+// (documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination carrying a
+// value outside its declared range is malformed input, INVALID — never masked to
+// the width, never kept. "" for u64/i64. `e.inv` is the same sticky flag the
+// maxlen and count rejects set.
+//
+// The `value < 0` term is not redundant on the unsigned side: Dart's int is a
+// 64-bit SIGNED integer with no unsigned counterpart, so an unsigned wire value
+// at or above 2^63 arrives negative and `value > 255` alone would wave through
+// exactly the largest values. Every narrow maximum is below 2^63, so treating
+// negative as out-of-range is right for all of them.
+func widthGuard(k ir.Kind) string {
+	lo, hi, ok := ir.NarrowRange(k)
+	if !ok {
+		return ""
+	}
+	cond := fmt.Sprintf("value < 0 || value > %d", hi)
+	if lo < 0 {
+		cond = fmt.Sprintf("value < %d || value > %d", lo, hi)
+	}
+	return fmt.Sprintf("if (%s) { e.inv = true; return; }\n        ", cond)
+}
+
+// arrayWidthGuard is the same bound for a native array's ELEMENTS. The corelib
+// hands the whole array over as a List<int>, so the raw values are still visible
+// and one scan decides the array.
+func arrayWidthGuard(elem ir.Kind) string {
+	lo, hi, ok := ir.NarrowRange(elem)
+	if !ok {
+		return ""
+	}
+	cond := fmt.Sprintf("_v < 0 || _v > %d", hi)
+	if lo < 0 {
+		cond = fmt.Sprintf("_v < %d || _v > %d", lo, hi)
+	}
+	return fmt.Sprintf("for (final _v in values) { if (%s) { e.inv = true; return; } }\n        ", cond)
+}
+
 func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string) string, seqArm func(int64, string) string, uArr, sArr, f32Arr, f64Arr, seq, arrBegin *[]string) {
 	guard := ""
 	if fld.HasCount {
@@ -209,9 +247,9 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 	case unsignedArrayElem(fld.Elem) && fld.Elem == ir.KindBool:
 		*uArr = append(*uArr, arm(fld.ID, guard+acc+" = [for (final _v in values) _v != 0];"))
 	case unsignedArrayElem(fld.Elem):
-		*uArr = append(*uArr, arm(fld.ID, guard+acc+" = List<int>.from(values);"))
+		*uArr = append(*uArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem)+acc+" = List<int>.from(values);"))
 	case signedArrayElem(fld.Elem):
-		*sArr = append(*sArr, arm(fld.ID, guard+acc+" = List<int>.from(values);"))
+		*sArr = append(*sArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem)+acc+" = List<int>.from(values);"))
 	case fld.Elem == ir.KindFP32:
 		// Bit-exact copy into a fresh Float32List of the WIRE count: a per-element
 		// widen through a double would quiet a signaling/payload NaN (MESSAGE_SPEC

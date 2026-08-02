@@ -763,7 +763,7 @@ messages:
 		"case (Root_fixed, _): if (id >= 5) throw new SofabException(SofabError.InvalidMessage, " +
 			"\"Root_fixed element: array index above schema capacity 5\"); " +
 			"while (m.@fixed.Count <= id) m.@fixed.Add(new VecFixedElem()); _ixRoot_fixed = id; cur = Root_fixed_e; break;",
-		"case (Root_fixed_e, 0): m.@fixed[_ixRoot_fixed].k = (uint)value; break;",
+		"m.@fixed[_ixRoot_fixed].k = (uint)value; break;",
 		// a count-less array is placed by id too: its length is highest id + 1.
 		"while (m.dynamic.Count <= id) m.dynamic.Add(new VecDynamicElem()); _ixRoot_dynamic = id;",
 		// string leaf element: placed, with the gap filled from the element default.
@@ -776,7 +776,10 @@ messages:
 		"case (Root_rows, _): if (kind != ArrayKind.Unsigned) break; if (id >= 2) throw new SofabException(SofabError.InvalidMessage, " +
 			"\"Root_rows element: array index above schema capacity 2\"); " +
 			"while (m.rows.Count <= id) m.rows.Add(new List<uint>()); m.rows[id] = new List<uint>(); _ixRoot_rows = id; break;",
-		"case (Root_rows, _): if (afill == 0) break; afill--; m.rows[_ixRoot_rows].Add((uint)value); break;",
+		// the §7.1 width guard for the u32 element follows afill-- and precedes the
+		// store (see TestCsDeclaredWidthIsAValidityBound)
+		"case (Root_rows, _): if (afill == 0) break; afill--; if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, " +
+			"\"Root_rows element: value outside declared width u32\"); m.rows[_ixRoot_rows].Add((uint)value); break;",
 		// WRAPPER row: same placement, then the descent.
 		"case (Root_srows, _): while (m.srows.Count <= id) m.srows.Add(new List<string>()); " +
 			"m.srows[id] = new List<string>(); _ixRoot_srows = id; cur = Root_srows_e; break;",
@@ -911,4 +914,47 @@ func csMethod(t *testing.T, src, head string) string {
 		return src[i : i+len(head)+j]
 	}
 	return src[i:]
+}
+
+// MESSAGE_SPEC §7.1 + documentation#32 (issue #266, Crucible F-0033 / G-0026):
+// the declared integer width is a normative VALIDITY bound. An out-of-range value
+// is InvalidMessage — never masked by the `(byte)value` cast, never kept.
+//
+// Unlike Java, C# needs no negative-value term: Unsigned delivers a ulong, so the
+// comparison is already unsigned.
+func TestCsDeclaredWidthIsAValidityBound(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  W:
+    payload:
+      a_u8:   { id: 0, type: u8 }
+      c_u32:  { id: 2, type: u32 }
+      d_u64:  { id: 3, type: u64 }
+      e_i8:   { id: 4, type: i8 }
+      g_i32:  { id: 6, type: i32 }
+      h_i64:  { id: 7, type: i64 }
+      arr_u8: { id: 8, type: array, items: { type: u8, count: 4 } }
+`
+	got := buildModule(t, []byte(src), "w.yaml", map[string]any{})
+	for _, want := range []string{
+		`case (Root, 0): if (value > 255) throw new SofabException(SofabError.InvalidMessage, "a_u8: value outside declared width u8"); m.a_u8 = (byte)value; break;`,
+		`case (Root, 2): if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, "c_u32: value outside declared width u32"); m.c_u32 = (uint)value; break;`,
+		`case (Root, 4): if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, "e_i8: value outside declared width i8"); m.e_i8 = (sbyte)value; break;`,
+		`case (Root, 6): if (value < -2147483648 || value > 2147483647) throw new SofabException(SofabError.InvalidMessage, "g_i32: value outside declared width i32"); m.g_i32 = (int)value; break;`,
+		// Array elements: the guard follows the fill guard (§7.3 skip stays a skip).
+		`case (Root, 8): if (afill == 0) break; afill--; if (value > 255) throw new SofabException(SofabError.InvalidMessage, "arr_u8 element: value outside declared width u8");`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Message.cs missing width guard %q:\n%s", want, got)
+		}
+	}
+	for _, want := range []string{
+		"case (Root, 3): m.d_u64 = (ulong)value; break;",
+		"case (Root, 7): m.h_i64 = (long)value; break;",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Message.cs: a 64-bit destination must store unguarded (%q):\n%s", want, got)
+		}
+	}
 }

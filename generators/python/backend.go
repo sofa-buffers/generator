@@ -799,13 +799,58 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 	}
 }
 
+// emitWidthGuard writes the §7.1 declared-width rejection for the value just read
+// into `acc` (documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination
+// carrying a value outside its declared range is malformed input. Python's int is
+// unbounded, so nothing masks the value here — the whole defect on this backend
+// was that an out-of-range value was simply KEPT — and the raise aborts the
+// decode before the object is handed back. Nothing is emitted for u64/i64.
+//
+// Mirrors the blob arm's read-then-check order rather than reading into a temp:
+// the guard reads better beside the store, and a raised decode never returns the
+// object it was filling.
+func emitWidthGuard(f *pyfile, ind, acc, name string, k ir.Kind) {
+	lo, hi, ok := ir.NarrowRange(k)
+	if !ok {
+		return
+	}
+	cond := fmt.Sprintf("%s > %d", acc, hi)
+	if lo < 0 {
+		cond = fmt.Sprintf("%s < %d or %s > %d", acc, lo, acc, hi)
+	}
+	f.line("%sif %s:", ind, cond)
+	f.line(`%s    raise SofaDecodeError("%s: value outside declared width %s")`, ind, name, k)
+}
+
+// emitArrayWidthGuard is the same §7.1 bound for a native array's ELEMENTS. The
+// corelib returns the whole array as a list of unbounded ints, so one scan over
+// it decides the array — one out-of-range element makes the message INVALID.
+func emitArrayWidthGuard(f *pyfile, ind, target, loc string, elem ir.Kind) {
+	lo, hi, ok := ir.NarrowRange(elem)
+	if !ok {
+		return
+	}
+	cond := fmt.Sprintf("_v > %d", hi)
+	if lo < 0 {
+		cond = fmt.Sprintf("_v < %d or _v > %d", lo, hi)
+	}
+	f.line("%sif any(%s for _v in %s):", ind, cond, target)
+	f.line(`%s    raise SofaDecodeError("%s element: value outside declared width %s")`, ind, loc, elem)
+}
+
 func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 	acc := "self." + pyIdent(fld.Name)
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("                %s = d.unsigned()", acc)
+		if fld.Kind != ir.KindBitfield {
+			emitWidthGuard(f, "                ", acc, fld.Name, fld.Kind)
+		}
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		f.line("                %s = d.signed()", acc)
+		if fld.Kind != ir.KindEnum {
+			emitWidthGuard(f, "                ", acc, fld.Name, fld.Kind)
+		}
 	case ir.KindBool:
 		f.line("                %s = d.bool()", acc)
 	case ir.KindFP32:
@@ -901,9 +946,15 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target, loc string, elem ir.Kind, r
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		emitCountGuard(f, ind, loc, cap, depth)
 		f.line("%s%s = d.read_unsigned_array()", ind, target)
+		if elem != ir.KindBitfield {
+			emitArrayWidthGuard(f, ind, target, loc, elem)
+		}
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		emitCountGuard(f, ind, loc, cap, depth)
 		f.line("%s%s = d.read_signed_array()", ind, target)
+		if elem != ir.KindEnum {
+			emitArrayWidthGuard(f, ind, target, loc, elem)
+		}
 	case ir.KindBool:
 		emitCountGuard(f, ind, loc, cap, depth)
 		f.line("%s%s = [bool(_v) for _v in d.read_unsigned_array()]", ind, target)

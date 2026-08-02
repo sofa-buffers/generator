@@ -133,3 +133,24 @@ the **subtract** method. Tracked: Ir/op.
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+## §7.1: the declared integer width is a validity bound (issue #266)
+
+A `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination rejects a value outside its
+declared range with `SofaDecodeError`. Python's `int` is unbounded, so nothing
+here ever masked the value — the defect was that an out-of-range value was simply
+**kept**:
+
+```python
+self.a_u8 = d.unsigned()
+if self.a_u8 > 255:
+    raise SofaDecodeError("a_u8: value outside declared width u8")
+self.d_u64 = d.unsigned()          # u64: nothing narrower to bound
+```
+
+The read-then-check order mirrors the existing `blob` maxlen arm rather than
+reading into a temporary: the guard reads better beside the store, and a raised
+decode never returns the object it was filling.
+
+A native array arrives whole, so one `any(...)` scan over the elements decides
+it — a single out-of-range element makes the message INVALID.

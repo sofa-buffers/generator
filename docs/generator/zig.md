@@ -322,3 +322,26 @@ exactly like an array at an unknown id.
 Integer arrays are untouched by all of this — there is no second word on the
 `.unsigned`/`.signed` path, so the count header already carries everything the arm
 needs and the two kinds stay a single prong.
+
+## §7.1: the declared integer width is a validity bound (issue #266)
+
+This is the backend where the defect was written down as intent. `storeCast`
+used to emit `@truncate(value)` with the comment *"the declared width is a
+storage hint"* — precisely the masking MESSAGE_SPEC §1/§7.1 now forbids.
+
+```zig
+0 => { if (value > 255) { self.inv = true; return; } self.m.a_u8 = @intCast(value); },
+3 => self.m.d_u64 = value,   // u64: range is sofab.Unsigned's own, no guard
+```
+
+Two deliberate changes:
+
+- `self.inv` is the same sticky INVALID flag the over-count and over-index
+  guards set, surfaced by `decode()` as `error.InvalidMessage`.
+- The cast is now `@intCast`, not `@truncate`. It is only ever reached for a
+  value the guard has already let through, and `@intCast` is checked in safe
+  build modes — so a guard that ever failed to precede a store becomes a panic
+  in Debug/ReleaseSafe rather than a silently masked value.
+
+In an array arm the guard sits INSIDE the fill guard: an over-width scalar at an
+array id with no `arrayBegin` in front of it is a §7.3 skip, not an INVALID.

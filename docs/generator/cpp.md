@@ -481,3 +481,40 @@ the **toggle** method. Tracked: Ir/op for both; `cpp-c-cpp` also `.text`/`.data`
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+## §7.1: the declared integer width is a validity bound (issue #266)
+
+A `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination rejects a value outside its
+declared range with `is.invalidate()`. The width is a normative bound, not a
+storage hint (MESSAGE_SPEC §1/§7.1).
+
+This backend needed a different shape from the others. corelib-cpp's typed
+`read()` ends in `value = static_cast<T>(raw)` — that IS the mask §7.1 forbids,
+and it happens where generated code cannot see the raw value. So a narrow
+destination reads through a 64-bit temporary and range-checks before the store:
+
+```cpp
+case 0: { std::uint64_t _v; if (is.read(_v)) {
+            if (_v > 255) { is.invalidate(); return; }
+            a_u8 = static_cast<std::uint8_t>(_v); } } break;
+case 3: is.read(d_u64); break;   // u64: the direct typed read, nothing to bound
+```
+
+§7.3 is unaffected by the wider temporary: `read()` derives its expected wire
+type from signedness alone (`Wire::Unsigned` for every `u*`, `Wire::Signed` for
+every `i*`), so `u64` and `u8` frame identically. A contradicting tag still
+returns `false` and the arm stores nothing — the skip, not a reject.
+
+**The `c-cpp` profile is exempt and untouched.** It was already conformant: its
+deferred descriptor carries the declared width to the corelib, which rejects
+there. Adding a generator-side guard would only duplicate it.
+
+### Known gap: array elements on the maxspeed profile
+
+`is.readArray(dst, count)` converts elements inside corelib-cpp
+(`sp[i] = static_cast<Elem>(raw)`), so a narrow array element is still masked and
+the raw value never reaches generated code. Routing arrays through a wide
+temporary would defeat the bulk/zero-copy path this profile exists for, so this
+one needs a corelib-cpp change — the same shape as the `corelib-c-cpp#90` maxlen
+gap. Scalars, struct/union members and every other backend's array elements are
+covered.

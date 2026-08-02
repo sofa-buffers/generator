@@ -789,7 +789,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			for _, fld := range fr.fields {
 				switch {
 				case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64 || fld.Kind == ir.KindBitfield:
-					f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), g.rustType(fld))
+					f.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind), fr.path, rustIdent(fld.Name), g.rustType(fld))
 				case fld.Kind == ir.KindBool:
 					f.line("            (_Loc::%s, %d) => %s.%s = value != 0,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 				case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
@@ -815,7 +815,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => { %s%s; },", fr.loc, fillGuard, store)
+			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, widthGuard(fr.elemKind), store)
 		}
 	}
 	f.line("            _ => {}")
@@ -832,7 +832,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			for _, fld := range fr.fields {
 				switch {
 				case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
-					f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), g.rustType(fld))
+					f.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind), fr.path, rustIdent(fld.Name), g.rustType(fld))
 				case fld.Kind == ir.KindEnum:
 					f.line("            (_Loc::%s, %d) => %s.%s = value as %s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), enumBacking(fld.Ref.Target))
 				case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
@@ -854,7 +854,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => { %s%s; },", fr.loc, fillGuard, store)
+			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, widthGuard(fr.elemKind), store)
 		}
 	}
 	f.line("            _ => {}")
@@ -1277,7 +1277,10 @@ func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string
 	if g.limits.arrayHas && !fld.HasCount {
 		store = g.limArrayStore(store)
 	}
-	f.line("            (_Loc::%s, %d) => { %s%s; },", fr.loc, fld.ID, fillGuard, store)
+	// widthGuard AFTER fillGuard: an element only breaches the declared width once
+	// it is actually being stored (§7.1). Ahead of the fill check it would reject a
+	// bare scalar at an array id, which §7.3 says to skip.
+	f.line("            (_Loc::%s, %d) => { %s%s%s; },", fr.loc, fld.ID, fillGuard, widthGuard(fld.Elem), store)
 }
 
 // fillGuard fronts every native-array fill arm (generator#188): the fill runs
@@ -1286,6 +1289,36 @@ func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string
 // without storing and is skipped like an unknown id, the mirror of the askip
 // guard that skips an array delivered at a scalar id (MESSAGE_SPEC §7.3).
 const fillGuard = "if self.afill == 0 { return; } self.afill -= 1; "
+
+// widthGuard returns the §7.1 over-width reject clause for a store into a
+// destination the schema declares with Kind k, or "" when k spans the whole
+// accumulator the value arrives in (the 64-bit kinds, where no reachable value
+// can breach the bound).
+//
+// The declared width is a normative validity bound, not a storage hint
+// (MESSAGE_SPEC §1/§7.1, documentation#32): an out-of-range value is INVALID and
+// must be neither masked to the width nor kept. Without this clause the `value as
+// u8` that follows is exactly the mask the clause forbids. Same sticky flag, and
+// so the same Error::InvalidMsg, as the maxlen and count guards.
+//
+// Placement matters as much as the comparison. In an ARRAY arm the clause goes
+// *after* fillGuard, never before: an over-width scalar arriving at an array id
+// with no array_begin in front of it is a §7.3 skip, and rejecting it ahead of
+// the fill check would turn that skip into a spurious INVALID.
+// The comparison form follows from the kind itself: a u* destination is
+// delivered through unsigned() as a u64, where only the upper bound is
+// reachable, while an i* destination arrives through signed() as an i64 and
+// needs both ends.
+func widthGuard(k ir.Kind) string {
+	lo, hi, ok := ir.NarrowRange(k)
+	if !ok {
+		return ""
+	}
+	if lo < 0 {
+		return fmt.Sprintf("if value < %d || value > %d { self.inv = true; return; } ", lo, hi)
+	}
+	return fmt.Sprintf("if value > %d { self.inv = true; return; } ", hi)
+}
 
 // limArrayStore wraps an unbounded-array element store so it is dropped once
 // the sticky lim flag is set (generator#102): the over-cap array was rejected

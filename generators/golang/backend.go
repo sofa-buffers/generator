@@ -838,6 +838,39 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 		}
 		return fmt.Sprintf("if len(v) > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", max)
 	}
+	// widthGuard rejects a scalar whose value falls outside the range its declared
+	// integer width allows (MESSAGE_SPEC §7.1, documentation#32). The width is a
+	// normative validity bound, not a storage hint: the `uint8(v)` conversion that
+	// follows IS the mask §7.1 forbids, so the check has to precede it. "" for
+	// u64/i64, whose range is the visitor parameter's own.
+	//
+	// No negative-value term is needed on the unsigned side: Unsigned delivers a
+	// uint64, so the comparison is already unsigned.
+	widthGuard := func(k ir.Kind) string {
+		lo, hi, ok := ir.NarrowRange(k)
+		if !ok {
+			return ""
+		}
+		if lo < 0 {
+			return fmt.Sprintf("if v < %d || v > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", lo, hi)
+		}
+		return fmt.Sprintf("if v > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", hi)
+	}
+	// arrayWidthGuard is the same bound for a native array's ELEMENTS. The corelib
+	// hands the whole array over as []uint64/[]int64 and sofab.Narrow* then converts
+	// element-wise, so the raw values are still visible here and the scan runs
+	// before the narrowing — one out-of-range element makes the message INVALID.
+	arrayWidthGuard := func(elem ir.Kind) string {
+		lo, hi, ok := ir.NarrowRange(elem)
+		if !ok {
+			return ""
+		}
+		cond := fmt.Sprintf("_x > %d", hi)
+		if lo < 0 {
+			cond = fmt.Sprintf("_x < %d || _x > %d", lo, hi)
+		}
+		return fmt.Sprintf("for _, _x := range v {\n\t\t\tif %s {\n\t\t\t\treturn sofab.ErrInvalidMsg\n\t\t\t}\n\t\t}\n\t\t", cond)
+	}
 	// utf8Guard rejects invalid UTF-8 in a `string` being MATERIALIZED. It is
 	// emitted inside the arm that resolves the destination and nowhere else:
 	// validation belongs where a string is read into a field, never on a payload
@@ -852,13 +885,13 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 		acc := "m." + goFieldName(fld.Name)
 		switch fld.Kind {
 		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-			uns = append(uns, arm(fld.ID, fmt.Sprintf("%s = %s(v)", acc, goNumType(fld.Kind))))
+			uns = append(uns, arm(fld.ID, widthGuard(fld.Kind)+fmt.Sprintf("%s = %s(v)", acc, goNumType(fld.Kind))))
 		case ir.KindBitfield:
 			uns = append(uns, arm(fld.ID, fmt.Sprintf("%s = %s(v)", acc, g.typeName(fld.Ref.Key))))
 		case ir.KindBool:
 			uns = append(uns, arm(fld.ID, acc+" = v != 0"))
 		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-			sig = append(sig, arm(fld.ID, fmt.Sprintf("%s = %s(v)", acc, goNumType(fld.Kind))))
+			sig = append(sig, arm(fld.ID, widthGuard(fld.Kind)+fmt.Sprintf("%s = %s(v)", acc, goNumType(fld.Kind))))
 		case ir.KindEnum:
 			sig = append(sig, arm(fld.ID, fmt.Sprintf("%s = %s(v)", acc, g.typeName(fld.Ref.Key))))
 		case ir.KindFP32:
@@ -902,9 +935,9 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			// never adds elements, so there is nothing to fill in at [M, N).
 			switch {
 			case isUnsignedNativeArray(fld.Elem):
-				uArr = append(uArr, arm(fld.ID, guard+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
+				uArr = append(uArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem)+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
 			case isSignedNativeArray(fld.Elem):
-				sArr = append(sArr, arm(fld.ID, guard+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
+				sArr = append(sArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem)+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
 			case fld.Elem == ir.KindFP32:
 				f32Arr = append(f32Arr, arm(fld.ID, guard+acc+" = v"))
 			case fld.Elem == ir.KindFP64:

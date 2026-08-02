@@ -317,3 +317,23 @@ the **subtract** method. Tracked: Ir/op.
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+## §7.1: the declared integer width is a validity bound (issue #266)
+
+A `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination rejects a value outside its
+declared range with `SofabErrorCode.InvalidMsg` — the same channel as the maxlen
+and count rejects. A decoded integer lives in a JS `number`, so nothing masked it
+here; the defect was that an out-of-range value was **kept**.
+
+```ts
+case 0: { const _v = Number(c.readUnsigned());
+          if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg,
+            "a_u8: value outside declared width u8");
+          o.a_u8 = _v; break; }
+case 3: o.d_u64 = c.readUnsigned() as bigint; break;   // u64: nothing to bound
+```
+
+The read lands in a temporary so the check can precede the store. Native arrays
+read into `_a` and then scan it once — a single out-of-range element makes the
+message INVALID. `u64`/`i64` keep their bare read in both int64 modes (bigint and
+Long): their range is the reader's own.

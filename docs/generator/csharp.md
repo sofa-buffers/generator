@@ -187,3 +187,23 @@ writes, evaluated per field and recursively: the explicit form of the "not one c
 was written" test the lazy framing performs. Because the last element is always
 written, a wrapper array is default exactly when it is **empty**, so the writer and
 the predicate cannot drift apart.
+
+## §7.1: the declared integer width is a validity bound (issue #266)
+
+A `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination rejects a value outside its
+declared range with `SofabError.InvalidMessage`. The width is a normative bound,
+not a storage hint (MESSAGE_SPEC §1/§7.1): the `(byte)value` cast that follows IS
+the mask §7.1 forbids, so the guard precedes it.
+
+```csharp
+case (Root, 0): if (value > 255) throw new SofabException(SofabError.InvalidMessage,
+    "a_u8: value outside declared width u8"); m.a_u8 = (byte)value; break;
+case (Root, 3): m.d_u64 = (ulong)value; break;   // u64: nothing narrower to bound
+```
+
+Unlike Java and Dart, C# needs no negative-value term on the unsigned side:
+`Unsigned` delivers a `ulong`, so the comparison is already unsigned.
+
+In an array arm the guard follows the fill guard, never precedes it — an
+over-width scalar at an array id with no `ArrayBegin` in front of it is a §7.3
+skip, not an INVALID.

@@ -410,3 +410,28 @@ the no-op on a shared base rather than at each emission site is deliberate: it
 makes the property hold by construction, including for collectors added later,
 which is exactly what the per-site shape failed to do. Schema names cannot begin
 with `_`, so the name cannot collide with a generated type.
+
+## §7.1: the declared integer width is a validity bound (issue #266)
+
+A `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination rejects a value outside its
+declared range by setting the sticky `e.inv` — the same INVALID channel as the
+maxlen and count rejects. Dart never masked the value (its `int` holds the whole
+64-bit range), so the defect here was that an out-of-range value was simply
+**kept**.
+
+```dart
+case 0:
+  if (value < 0 || value > 255) { e.inv = true; return; }
+  o.a_u8 = value;
+case 3:
+  o.d_u64 = value;   // u64: nothing narrower to bound
+```
+
+**The `value < 0` term is load-bearing.** Dart's `int` is a 64-bit SIGNED
+integer with no unsigned counterpart, so an unsigned wire value at or above 2^63
+arrives negative and `value > 255` alone would wave through exactly the largest
+values. Java needs the same term for the same reason; C# does not (`Unsigned`
+delivers a `ulong`).
+
+A native array arrives whole as a `List<int>`, so one scan over the elements
+decides it: a single out-of-range element makes the message INVALID.

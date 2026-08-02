@@ -245,7 +245,7 @@ messages:
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
 		"(_, _Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
-		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
+		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; return; } { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
 		"(_Loc::Root, 0) => if total > MAX_DYN_STRING_LEN { self.lim = true; return; },",
@@ -1330,4 +1330,59 @@ func sliceFn(t *testing.T, module, head string) string {
 		return module[i : i+len(head)+j]
 	}
 	return module[i:]
+}
+
+// widthSrc: one field per declared integer width plus a narrow array — the shape
+// every backend's §7.1 test uses.
+const widthSrc = `
+version: 1
+messages:
+  W:
+    payload:
+      a_u8:   { id: 0, type: u8 }
+      b_u16:  { id: 1, type: u16 }
+      c_u32:  { id: 2, type: u32 }
+      d_u64:  { id: 3, type: u64 }
+      e_i8:   { id: 4, type: i8 }
+      f_i16:  { id: 5, type: i16 }
+      g_i32:  { id: 6, type: i32 }
+      h_i64:  { id: 7, type: i64 }
+      arr_u8: { id: 8, type: array, items: { type: u8, count: 4 } }
+`
+
+// MESSAGE_SPEC §7.1 + documentation#32 (issue #266, Crucible F-0033 / G-0026):
+// the declared integer width is a normative VALIDITY bound, not a storage hint.
+// A value outside it is INVALID — never masked to the width by the `as u8` cast,
+// never kept. u64/i64 span the delivery accumulator, so they get no guard at all.
+func TestRustDeclaredWidthIsAValidityBound(t *testing.T) {
+	for _, corelib := range []string{"rs", "rs-no-std"} {
+		got := moduleFromYAML(t, widthSrc, map[string]any{"corelib": corelib})
+		for _, want := range []string{
+			"if value > 255 { self.inv = true; return; } self.m.a_u8 = value as u8",
+			"if value > 65535 { self.inv = true; return; } self.m.b_u16 = value as u16",
+			"if value > 4294967295 { self.inv = true; return; } self.m.c_u32 = value as u32",
+			"if value < -128 || value > 127 { self.inv = true; return; } self.m.e_i8 = value as i8",
+			"if value < -32768 || value > 32767 { self.inv = true; return; } self.m.f_i16 = value as i16",
+			"if value < -2147483648 || value > 2147483647 { self.inv = true; return; } self.m.g_i32 = value as i32",
+			// An ARRAY element carries the same bound, and the guard follows the fill
+			// guard: an over-width scalar at an array id with no array_begin is a
+			// §7.3 skip, which must not become an INVALID.
+			"if self.afill == 0 { return; } self.afill -= 1; if value > 255 { self.inv = true; return; }",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("[%s] message.rs missing width guard %q:\n%s", corelib, want, got)
+			}
+		}
+		// The 64-bit destinations must NOT be guarded: their range IS the u64/i64
+		// the value arrives in, so a comparison would be dead code (and Clippy
+		// would say so). Their arms carry the store and nothing else.
+		for _, want := range []string{
+			"(_Loc::Root, 3) => { self.m.d_u64 = value as u64 },",
+			"(_Loc::Root, 7) => { self.m.h_i64 = value as i64 },",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("[%s] a 64-bit destination must store unguarded (%q):\n%s", corelib, want, got)
+			}
+		}
+	}
 }

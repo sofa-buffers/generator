@@ -93,8 +93,8 @@ class ScalarsVisitor implements Visitor {
         if (askip > 0) { askip--; return; }
         switch (cur) {
         case 0: switch (id) {
-            case 0: m.u8min = value; break;
-            case 1: m.u8max = value; break;
+            case 0: if (value < 0 || value > 255L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "u8min: value outside declared width u8")); m.u8min = value; break;
+            case 1: if (value < 0 || value > 255L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "u8max: value outside declared width u8")); m.u8max = value; break;
             case 2: m.u64max = value; break;
             case 7: m.flag = value != 0; break;
         } break;
@@ -106,7 +106,7 @@ class ScalarsVisitor implements Visitor {
         if (askip > 0) { askip--; return; }
         switch (cur) {
         case 0: switch (id) {
-            case 3: m.i8min = value; break;
+            case 3: if (value < -128L || value > 127L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "i8min: value outside declared width i8")); m.i8min = value; break;
             case 4: m.i64min = value; break;
         } break;
         }

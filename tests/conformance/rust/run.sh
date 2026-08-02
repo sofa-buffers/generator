@@ -392,6 +392,29 @@ run_variant() {
     echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: [$label] skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
     echo "==> [$label] skipped occurrence keeps struct OK"
 
+
+    # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
+    # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
+    # declared width is INVALID: it MUST NOT be masked to the width, and MUST NOT be
+    # kept. someu8 is id 0 (header 0x00 = 0<<3 | unsigned), someu16 is id 1 (0x08).
+    #   00 ff 7f = 16383 into a u8 -- the reported reproducer
+    #   00 80 02 = 256   into a u8 -- one past the width
+    #   08 f0 a2 04 = 70000 into a u16
+    #   00 ff 01 = 255   into a u8 -- the in-range control: must decode and keep 255
+    echo "==> [$label] over-width scalar must be INVALID (S7.1, generator#266)"
+    printf '\000\377\177'     > "$WORK/w_u8_16383.bin"
+    printf '\000\200\002'     > "$WORK/w_u8_256.bin"
+    printf '\010\360\242\004' > "$WORK/w_u16_70000.bin"
+    printf '\000\377\001'     > "$WORK/w_u8_255_ctl.bin"
+    for v in w_u8_16383 w_u8_256 w_u16_70000; do
+        if (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/$v.bin" >/dev/null 2>&1); then
+            echo "FAIL: [$label] $v must be INVALID (S7.1) -- neither masked nor kept"; exit 1
+        fi
+    done
+    OUT=$(cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/w_u8_255_ctl.bin") || { echo "FAIL: [$label] in-range control 255 must decode"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: [$label] control must keep 255; got: $OUT"; exit 1; }
+    echo "==> [$label] declared-width reject OK"
+
     echo "==> [$label] shared-vector byte-exact conformance"
     python3 "$ROOT/tests/conformance/rust/check_vectors.py" "$corelib/assets/test_vectors.json" "$WORK/conf-$label"
 
