@@ -1393,10 +1393,10 @@ func TestRustDeclaredWidthIsAValidityBound(t *testing.T) {
 // schema `count` through a wildcard-kind arm. Both let a header whose wire kind
 // §7.3 says to skip reach machinery that belongs to a field it is not.
 //
-//   #270: an ARRAY_UNSIGNED header at a declared `i8[]` was skipped but left the
-//         fill counter armed, so the NEXT bare scalar was absorbed into the array.
-//   #271: an ARRAY_FIXLEN header at a declared `i8[]` was measured against that
-//         field's `count`, rejecting the message on a bound that was never its.
+//	#270: an ARRAY_UNSIGNED header at a declared `i8[]` was skipped but left the
+//	      fill counter armed, so the NEXT bare scalar was absorbed into the array.
+//	#271: an ARRAY_FIXLEN header at a declared `i8[]` was measured against that
+//	      field's `count`, rejecting the message on a bound that was never its.
 //
 // Every arm is now keyed to exactly one wire kind, so the §7.3 check is decided
 // by the match itself — before the counter is armed and before any bound.
@@ -1493,9 +1493,9 @@ messages:
 // schema does not declare at this position was therefore ENTERED, and its
 // children bound into the ENCLOSING scope:
 //
-//   #268: an unknown sequence id carrying a child id 3 set the ROOT's field 3.
-//   #272: a sequence opened at a string-array ELEMENT position (a §7.3 wire-type
-//         contradiction) bound its string as that element.
+//	#268: an unknown sequence id carrying a child id 3 set the ROOT's field 3.
+//	#272: a sequence opened at a string-array ELEMENT position (a §7.3 wire-type
+//	      contradiction) bound its string as that element.
 //
 // Both are one missing default: an undeclared (scope, id) must move to a dead
 // scope that matches no arm, so the whole subtree — children included — is
