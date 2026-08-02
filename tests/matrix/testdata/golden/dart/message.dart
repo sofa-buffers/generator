@@ -44,7 +44,7 @@ class Scalars {
   int i8min = -128;
   int i64min = 0x8000000000000000;
   double f32 = 3.14;
-  int? _f32Fp32Bits;
+  int? f32Fp32Bits;
   double f64 = -2.5;
   bool flag = true;
 
@@ -55,7 +55,7 @@ class Scalars {
     if (i8min != -128) { e.writeSigned(3, i8min); }
     if (i64min != 0x8000000000000000) { e.writeSigned(4, i64min); }
     if (f32 != 3.14) {
-      if (f32.isNaN && _f32Fp32Bits != null) { e.writeFp32Bits(5, _f32Fp32Bits!); } else { e.writeFp32(5, f32); }
+      if (f32.isNaN && f32Fp32Bits != null) { e.writeFp32Bits(5, f32Fp32Bits!); } else { e.writeFp32(5, f32); }
     }
     if (f64 != -2.5) { e.writeFp64(6, f64); }
     if (flag != true) { e.writeBool(7, flag); }
@@ -80,7 +80,7 @@ class Scalars {
     i8min = -128;
     i64min = 0x8000000000000000;
     f32 = 3.14;
-    _f32Fp32Bits = null;
+    f32Fp32Bits = null;
     f64 = -2.5;
     flag = true;
   }
@@ -178,7 +178,7 @@ class _ScalarsVisitor extends _Visitor {
     switch (id) {
       case 5:
         o.f32 = value;
-        o._f32Fp32Bits = null;
+        o.f32Fp32Bits = null;
         return;
     }
   }
@@ -186,7 +186,7 @@ class _ScalarsVisitor extends _Visitor {
   void onFp32Bits(int id, int bits) {
     switch (id) {
       case 5:
-        o._f32Fp32Bits = bits;
+        o.f32Fp32Bits = bits;
         o.f32 = _f32FromBits(bits);
         return;
     }

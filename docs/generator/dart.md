@@ -464,3 +464,38 @@ for generated code, where the id decides. Putting them on the base rather than a
 each class keeps it true for collectors added later. The object and row
 collectors, whose elements genuinely *are* sequences, override it back to a
 descent.
+
+## §6.5: the fp32 raw-bits companion is public (issue #275)
+
+A scalar `fp32` field carries a companion `int? <name>Fp32Bits` holding the exact
+32 wire bits when the decoded value is a NaN, because a Dart `double` cannot
+carry an fp32 NaN's payload or signaling bit (MESSAGE_SPEC §4.6).
+
+**It is public, and that is the requirement rather than a convenience.**
+CORELIB_PLAN §6.5 obliges a double-only target to provide the raw-wire path *"for
+bit-exact consumers"* — a transcoder, a comparator, a materialized walk — not
+merely for the type's own re-encode. Dart privacy is per **library**, so a
+leading underscore put the bits out of reach of everything outside the generated
+file: the round-trip stayed bit-exact (which is why a round-trip-only test never
+saw it) while an external walk got the widened double, whose quiet bit is already
+set and whose signaling NaN is therefore unrecoverable.
+
+```dart
+class Probe {
+  double f32 = 0.0;
+  int? f32Fp32Bits;          // public: consumers read it, and callers may set it
+  ...
+  void marshal(sofab.Encoder e) {
+    if (f32 != 0.0) {
+      if (f32.isNaN && f32Fp32Bits != null) { e.writeFp32Bits(0, f32Fp32Bits!); }
+      else { e.writeFp32(0, f32); }
+    }
+```
+
+A **field** rather than a getter, matching the typescript backend's
+`<name>Fp32Raw`: a getter would close the *encode* side, and a caller who wants to
+emit a signaling NaN has no other way to say so — the `double` cannot carry it.
+
+Only the scalar position was ever affected. A decoded `fp32` **array** is a
+`Float32List` whose byte buffer is public, so a consumer could always read the
+untouched wire bits there; this is about field visibility, not Dart's float model.

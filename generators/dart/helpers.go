@@ -62,11 +62,26 @@ var dartKeywords = map[string]bool{
 	"Symbol": true, "Type": true, "Enum": true, "Record": true,
 }
 
-// fp32BitsField is the private companion `int?` holding the raw 32 wire bits of
-// an fp32 SCALAR field whose decoded value is a NaN, so a signaling/payload NaN
+// fp32BitsField is the companion `int?` holding the raw 32 wire bits of an fp32
+// SCALAR field whose decoded value is a NaN, so a signaling/payload NaN
 // re-encodes bit-for-bit — a Dart `double` cannot carry an fp32 NaN payload
 // (MESSAGE_SPEC §4.6). null means "no captured bits; derive from the double".
-func fp32BitsField(name string) string { return "_" + dartIdent(name) + "Fp32Bits" }
+//
+// PUBLIC, and that is the whole point (generator#275 / Crucible F-0049).
+// CORELIB_PLAN §6.5 requires a double-only target to provide the raw-wire path
+// "for bit-exact CONSUMERS" — a transcoder, a comparator, a materialized walk —
+// not merely for the type's own re-encode. Dart privacy is per LIBRARY, so a
+// leading underscore put the bits out of reach of every consumer outside the
+// generated file: the round-trip stayed bit-exact (which is why a
+// round-trip-only test never saw it) while any external walk got the widened
+// double, whose quiet bit is already set and whose signaling NaN is therefore
+// unrecoverable.
+//
+// The typescript backend — same language class, same corelib support — has
+// always exposed its equivalent (`<name>Fp32Raw`) as a public field. Matching
+// that also keeps the ENCODE side reachable: a caller who wants to emit a
+// signaling NaN has no other way to say so, since the double cannot carry it.
+func fp32BitsField(name string) string { return dartIdent(name) + "Fp32Bits" }
 
 // dartIdent mangles a field name that is a Dart reserved word with a trailing
 // underscore. It also guards a leading digit / empty name defensively (the
