@@ -286,9 +286,13 @@ messages:
 		// re-encode of the decoded str (#155).
 		`if d.fixlen_len() > 8:`,
 		`raise SofaDecodeError("s: string byte length above schema maxlen 8")`,
-		// (b) scalar blob: byte length of the bytes value.
-		`if len(self.b) > 8:`,
-		`raise SofaDecodeError("b: blob byte length above schema maxlen 8")`,
+		// (b) scalar blob: the same non-consuming length peek as the string, and for
+		// the same reason -- the verdict is latched at the length word, so a message
+		// truncated right after it is still INVALID rather than INCOMPLETE
+		// (generator#267 / F-0043, MESSAGE_SPEC S5.2).
+		`if d.fixlen_len() > 8:
+                    raise SofaDecodeError("b: blob byte length above schema maxlen 8")
+                self.b = d.bytes()`,
 		// (c) bounded wrapper string element (maxlen 5): wire byte length peek.
 		`if d.fixlen_len() > 5:`,
 		`raise SofaDecodeError("self.arr: string element byte length above schema maxlen 5")`,

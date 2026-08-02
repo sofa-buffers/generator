@@ -135,6 +135,24 @@ if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage <
     echo "FAIL: over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
 fi
 (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null) || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
+# ... and the same violation with the message cut RIGHT AFTER the word that
+# carries it (generator#267 / Crucible F-0043). S5.2 makes INVALID dominate
+# INCOMPLETE: once the bytes seen so far are already malformed, running out of
+# input cannot downgrade the verdict. The element id 5 is fully established by
+# the element header, so this is INVALID even though nothing follows.
+# Wire: 96 01 (seq start id 18) 2a (element id 5, fixlen) 0a (len 1, string) <EOF>
+echo "==> over-index + truncation must be INVALID, not INCOMPLETE (generator#267)"
+printf '\226\001\052\012' > "$WORK/overindex_trunc.bin"
+ERR=$( (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/overindex_trunc.bin" 2>&1 >/dev/null) || true )
+echo "$ERR" | grep -q 'invalid message' \
+    || { echo "FAIL: over-index(5>=5)+truncated must be INVALID, not INCOMPLETE; got: $ERR"; exit 1; }
+# Precision control: an IN-RANGE element id truncated at the same offset is a
+# clean truncation and MUST stay INCOMPLETE -- the bound must not turn every
+# short element into INVALID.
+printf '\226\001\042\012' > "$WORK/inindex_trunc.bin"
+ERR=$( (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/inindex_trunc.bin" 2>&1 >/dev/null) || true )
+echo "$ERR" | grep -q 'incomplete message' \
+    || { echo "FAIL: in-range(4<5)+truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
 echo "==> over-index reject OK"
 
 # Over-maxlen scalar blob (generator Option B / MESSAGE_SPEC S7.1): someblob (id 12)

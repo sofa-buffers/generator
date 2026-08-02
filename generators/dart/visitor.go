@@ -574,6 +574,24 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("  final int cap;")
 		f.line("  final int emax;")
 		f.line("  final _Dec e;")
+		// The element's schema bounds are decided at the LENGTH WORD, before a byte
+		// of payload is buffered. MESSAGE_SPEC S5.2 makes INVALID dominate
+		// INCOMPLETE, so a message truncated right after the word that carries the
+		// violating number must still be INVALID -- deciding it in onStringBytes,
+		// which never fires for such a message, reported INCOMPLETE instead
+		// (generator#267 / Crucible F-0043).
+		//
+		// Both bounds sit inside the declared-subtype test for the same reason the
+		// scalar header guard does: onFixlenHeader fires for ANY fixlen subtype at
+		// this id, and an element whose subtype contradicts the declaration was
+		// never this array's value (S7.3) -- so neither its id nor its length may be
+		// measured against this array's bounds.
+		f.line("  @override")
+		f.line("  void onFixlenHeader(int id, int subtype, int length) {")
+		f.line("    if (subtype != sofab.FixlenType.string) return;")
+		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
+		f.line("    if (emax >= 0 && length > emax) { e.inv = true; return; }")
+		f.line("  }")
 		f.line("  @override")
 		f.line("  void onStringBytes(int id, Uint8List bytes) {")
 		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
@@ -594,6 +612,14 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("  final int cap;")
 		f.line("  final int emax;")
 		f.line("  final _Dec e;")
+		// The blob twin of the string collector above: bounds latched at the length
+		// word (generator#267), gated on the declared subtype (S7.3).
+		f.line("  @override")
+		f.line("  void onFixlenHeader(int id, int subtype, int length) {")
+		f.line("    if (subtype != sofab.FixlenType.blob) return;")
+		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
+		f.line("    if (emax >= 0 && length > emax) { e.inv = true; return; }")
+		f.line("  }")
 		f.line("  @override")
 		f.line("  void onBlob(int id, Uint8List value) {")
 		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")

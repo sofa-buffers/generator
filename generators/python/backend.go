@@ -872,13 +872,22 @@ func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 		}
 		f.line("                %s = d.string()", acc)
 	case ir.KindBlob:
-		f.line("                %s = d.bytes()", acc)
-		// A bounded blob whose decoded byte length exceeds its schema maxlen is
-		// malformed input — reject, never truncate (MESSAGE_SPEC §7.1).
+		// A bounded blob whose byte length exceeds its schema maxlen is malformed
+		// input — reject, never truncate (MESSAGE_SPEC §7.1). Bound against the
+		// exact wire byte length the decoder already parsed (d.fixlen_len(), a
+		// non-consuming peek) BEFORE the payload is read, exactly as the string arm
+		// above does.
+		//
+		// The order is the whole point (generator#267 / Crucible F-0043): §5.2 makes
+		// INVALID dominate INCOMPLETE, so a message truncated right after the length
+		// word — where the violation is already fully established — must still be
+		// INVALID. Reading first and measuring the decoded bytes afterwards never
+		// reaches the check on such a message and reported INCOMPLETE instead.
 		if fld.HasMaxlen {
-			f.line("                if len(%s) > %d:", acc, fld.Maxlen)
+			f.line("                if d.fixlen_len() > %d:", fld.Maxlen)
 			f.line(`                    raise SofaDecodeError("%s: blob byte length above schema maxlen %d")`, fld.Name, fld.Maxlen)
 		}
+		f.line("                %s = d.bytes()", acc)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("                %s.deserialize(d)", acc)
 	case ir.KindArray:
