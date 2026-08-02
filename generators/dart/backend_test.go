@@ -169,7 +169,7 @@ func TestResetRestoresDefaults(t *testing.T) {
 		"    somestring = '';",
 		"    someblob = Uint8List.fromList(<int>[72, 101, 108, 108, 111]);",
 		// fp32 drops the captured NaN wire bits with the value (S4.6).
-		"    somefp32 = 0.0;\n    _somefp32Fp32Bits = null;",
+		"    somefp32 = 0.0;\n    somefp32Fp32Bits = null;",
 		// A nested struct/union is reset in place, recursively -- the nested case:
 		// an all-default struct in the next message is omitted entirely.
 		"    somestruct.reset();",
@@ -272,12 +272,12 @@ func TestFp32SignalingNaNPreserved(t *testing.T) {
 	for _, want := range []string{
 		// Scalar: a private companion bits slot, captured in onFp32Bits and cleared
 		// in onFp32, and re-emitted via writeFp32Bits when the value is a NaN.
-		"int? _somefp32Fp32Bits;",
+		"int? somefp32Fp32Bits;",
 		"void onFp32Bits(int id, int bits) {",
-		"o._somefp32Fp32Bits = bits;",
+		"o.somefp32Fp32Bits = bits;",
 		"o.somefp32 = _f32FromBits(bits);",
-		"o._somefp32Fp32Bits = null;",
-		"if (somefp32.isNaN && _somefp32Fp32Bits != null) { e.writeFp32Bits(8, _somefp32Fp32Bits!); }",
+		"o.somefp32Fp32Bits = null;",
+		"if (somefp32.isNaN && somefp32Fp32Bits != null) { e.writeFp32Bits(8, somefp32Fp32Bits!); }",
 		// Array: a bit-exact Float32List copy, never a widening List<double>.from.
 		"Float32List _f32copy(Float32List v, int n) {",
 		// exactly the wire count: `count: 3` is a capacity and adds no elements (§3)
@@ -921,5 +921,48 @@ messages:
 	// ... while the object collector, whose elements ARE sequences, still descends.
 	if !strings.Contains(got, "return vis(out[id]);") {
 		t.Errorf("a struct-element collector must still descend into its element:\n%s", got)
+	}
+}
+
+// generator#275 (Crucible F-0049): CORELIB_PLAN §6.5 requires a double-only
+// target to provide the raw-wire path "for bit-exact CONSUMERS" — a transcoder, a
+// comparator, a materialized walk — not merely for the type's own re-encode.
+//
+// Dart privacy is per LIBRARY, so the captured bits sitting behind a leading
+// underscore were out of reach of every consumer outside the generated file. The
+// round-trip stayed bit-exact, which is exactly why a round-trip-only test never
+// saw it, while any external walk got the widened double — whose quiet bit is
+// already set, so a signaling NaN is unrecoverable.
+//
+// The array position was never affected: a decoded fp32 array is a Float32List
+// whose byte buffer is public, so this is about scalar-field visibility alone.
+func TestDartFp32RawBitsAreConsumerVisible(t *testing.T) {
+	got := genFor(t, writeDef(t, `
+version: 1
+messages:
+  Probe:
+    payload:
+      f32:  { id: 0, type: fp32 }
+      arr:  { id: 1, type: array, items: { type: fp32, count: 4 } }
+`), map[string]any{})
+	// Public companion, reachable from another library.
+	if !strings.Contains(got, "  int? f32Fp32Bits;") {
+		t.Errorf("the fp32 raw-bits companion must be consumer-visible:\n%s", got)
+	}
+	// The defect: a library-private slot no consumer can read.
+	if strings.Contains(got, "_f32Fp32Bits") {
+		t.Errorf("the raw-bits companion must not be library-private (§6.5):\n%s", got)
+	}
+	// Behaviour is unchanged — it is still captured on a NaN decode, cleared on a
+	// non-NaN one, reset by reset(), and preferred by marshal.
+	for _, want := range []string{
+		"o.f32Fp32Bits = bits;",
+		"o.f32Fp32Bits = null;",
+		"f32Fp32Bits = null;",
+		"if (f32.isNaN && f32Fp32Bits != null)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the raw-bits channel must keep working, missing %q:\n%s", want, got)
+		}
 	}
 }
