@@ -1009,6 +1009,49 @@ by family (generator#174, Crucible F-0020):
   **array** delivered to a **scalar**-declared id of the same signedness, which
   needs an explicit guard on five of the six (see below).
 
+#### A skip must contain the whole subtree, and leave no residue behind it
+
+§7.3 says a contradicting field is skipped "exactly as a field with an unknown id
+is skipped", and CORELIB_PLAN §5.2/§4.9 say what skipping a *sequence* means:
+the entire sub-sequence is consumed and discarded, descending into nested
+sequences. A skip is therefore not just "do not store this header" — it has two
+further obligations that the flat-visitor backends each got wrong in a different
+way (Crucible F-0044/F-0045/F-0046/F-0047, generator#268/#270/#271/#272).
+
+**Containment: the children go with the parent.** A flat visitor tracks its
+position in a `cur` scope variable, and its `sequence_begin` dispatch had no
+default arm — an id the schema does not declare here left `cur` on the enclosing
+scope, so the skipped sequence's *children* bound into it. A child id 3 inside an
+unknown sequence set the root's own field 3; a sequence opened at a string-array
+element position bound its string as that element. The fix is one shared shape: a
+**dead scope** (`_Loc::Dead` in rust, `.dead` in zig, `_DEAD` in java/csharp) that
+no callback arm matches, so the whole subtree is discarded. No depth counter is
+needed — every begin pushes and every end pops, a nested sequence inside a dead
+subtree matches no arm either, and the stack alone restores the live scope at the
+matching end. Dart reaches the same result one level up: its collectors inherit a
+shared base whose `onSequenceStart` returns `null` instead of the corelib's
+descending `this`, beside the `onStringBytes` no-op that is there for exactly the
+same reason.
+
+This has to hold **even for a message that declares no sequence at all**. Neither
+corelib skips the subtree on its own — corelib-rs's trait default is a no-op and
+corelib-zig only checks `@hasDecl` — so a visitor that omitted the override let an
+unknown sequence's children arrive with `cur` still on root. Both backends now
+emit `sequence_begin`/`sequence_end` unconditionally.
+
+**No residue: the counters must not stay armed.** `array_begin` armed its §7.3
+discard and fill counters on the wire kind *family* (`Unsigned | Signed` in one
+arm), so an `ArrayUnsigned` header at a declared `i8[]` was skipped but left the
+fill counter armed — and the next bare scalar was absorbed into that array. The
+same collapsing let a schema `count` be applied through a wildcard-kind arm, so an
+`ArrayFixlen` header at an integer id was measured against a bound belonging to a
+field it is not. Both are fixed by keying **one arm per wire kind**, which makes
+the §7.3 check decide in the match itself — before any counter is armed and before
+any bound is applied, the order CORELIB_PLAN §4.8 requires.
+
+The lesson generalizes: a skip is only correct if it is *scoped* (children go with
+it) and *inert* (it arms nothing that a later field will read).
+
 #### The one mismatch structural skip cannot catch: an array at a scalar id
 
 For `rs`, `rs-no-std`, `cs`, `java` and `zig` the structural skip has a blind

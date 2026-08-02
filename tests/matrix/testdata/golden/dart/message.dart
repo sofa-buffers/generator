@@ -20,6 +20,16 @@ class _Dec {
 abstract class _Visitor extends sofab.MessageVisitor {
   @override
   void onStringBytes(int id, Uint8List bytes) {}
+  // Same reasoning, one wire type over: the corelib's onSequenceStart default
+  // returns `this`, i.e. DESCEND, which is right for a hand-written visitor and
+  // wrong here -- the schema decides whether a sequence at this position is one
+  // we bind. Returning null skips the sub-sequence WHOLE, children included. A
+  // scope that declares sequences overrides this and falls through to the same
+  // null for every id it does not match; a leaf element collector declares
+  // none, so it inherits the skip and a sequence arriving at an element
+  // position cannot bind its child as that element.
+  @override
+  sofab.MessageVisitor? onSequenceStart(int id) => null;
 }
 
 // Widen the 32 raw wire bits of an fp32 NaN to a display double for element

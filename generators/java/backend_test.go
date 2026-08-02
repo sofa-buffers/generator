@@ -1173,3 +1173,41 @@ messages:
 		}
 	}
 }
+
+// generator#268 (Crucible F-0044) and #272 (F-0047): sequenceBegin's dispatch had
+// no default arm, so a sequence the schema does not declare at this position was
+// ENTERED and its children bound into the ENCLOSING scope — an unknown sequence
+// id carrying a child id 3 set the ROOT's field 3 (#268), and a sequence opened
+// at a string-array element position bound its string as that element (#272).
+//
+// Both are one missing default: an undeclared (scope, id) moves to _DEAD, which
+// no callback case matches, so the whole subtree is discarded. The stack alone
+// restores the live scope at the matching end.
+func TestJavaUnknownSequenceIsSkippedWhole(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  Probe:
+    payload:
+      a:            { id: 3, type: i16 }
+      known:        { id: 10, type: struct, fields: { k: { id: 0, type: u32 } } }
+      string_array: { id: 200, type: array, items: { type: string, count: 5, maxlen: 64 } }
+`
+	got := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/Probe.java"]
+	for _, want := range []string{
+		"private static final int _DEAD = -1;",
+		// The declared position still descends ...
+		"case 10: cur = 1; break;",
+		// ... an undeclared id in a scope that HAS sequences is skipped ...
+		"default: cur = _DEAD; break;",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Probe.java missing %q:\n%s", want, got)
+		}
+	}
+	// ... and so is any id in a scope that declares none (the string-array element
+	// scope of #272), which used to fall straight through the outer switch.
+	if strings.Count(got, "cur = _DEAD; break;") < 2 {
+		t.Errorf("every scope must skip an undeclared sequence id (#272):\n%s", got)
+	}
+}

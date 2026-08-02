@@ -306,13 +306,12 @@ func (g *gen) emitArraySkipGuard(f *rfile, arrSkip bool) {
 	f.line("        if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id")
 }
 
-// wantIntElem / wantFP32Elem / wantFP64Elem are the three element-kind
-// predicates that key an array_begin arm to a wire ArrayKind. They partition the
-// native array element kinds exactly as the corelib's ArrayKind partitions the
-// wire: integers (delivered as Unsigned/Signed), fp32 and fp64.
-func wantIntElem(k ir.Kind) bool {
-	return isNativeArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64
-}
+// wantUnsignedArrayElem / wantSignedArrayElem / wantFP32Elem / wantFP64Elem are
+// the four element-kind predicates that key an array_begin arm to a wire
+// ArrayKind. They partition the native array element kinds exactly as the
+// corelib's ArrayKind partitions the wire — one predicate per kind, so the §7.3
+// kind check is decided by the match itself. (The first two live beside
+// arrayKindPat, which spells the same partition as a pattern.)
 func wantFP32Elem(k ir.Kind) bool { return k == ir.KindFP32 }
 func wantFP64Elem(k ir.Kind) bool { return k == ir.KindFP64 }
 
@@ -352,14 +351,35 @@ func anyArrayElem(fs []frame, want func(ir.Kind) bool) bool {
 // field's arm; an integer array stays kind-agnostic (`_`), see the target
 // match's own comment.
 func arrayKindPat(k ir.Kind) string {
-	switch k {
-	case ir.KindFP32:
+	switch {
+	case k == ir.KindFP32:
 		return "ArrayKind::Fp32"
-	case ir.KindFP64:
+	case k == ir.KindFP64:
 		return "ArrayKind::Fp64"
+	case wantSignedArrayElem(k):
+		return "ArrayKind::Signed"
 	default:
-		return "_"
+		return "ArrayKind::Unsigned"
 	}
+}
+
+// wantUnsignedArrayElem / wantSignedArrayElem split the integer element kinds by
+// the wire ARRAY KIND they map to (§1): signed integers and enum travel as
+// ArraySigned, unsigned integers, bool and bitfield as ArrayUnsigned.
+//
+// Keeping the two apart is what makes the §7.3 kind check decide before anything
+// else in array_begin. Collapsing them into one "integer array" family let an
+// ArrayUnsigned header disarm the discard counter of a declared `i8[]` — so the
+// mistyped array was skipped but left the fill counter armed, and the NEXT bare
+// scalar was absorbed into the array (generator#270 / Crucible F-0045) — and let
+// an ArrayFixlen header match an integer field's count bound, rejecting a message
+// on a bound belonging to a field that header is not (generator#271 / F-0046).
+func wantUnsignedArrayElem(k ir.Kind) bool {
+	return isNativeArrayElem(k) && !wantSignedArrayElem(k) && k != ir.KindFP32 && k != ir.KindFP64
+}
+
+func wantSignedArrayElem(k ir.Kind) bool {
+	return isSignedElem(k) || k == ir.KindEnum
 }
 
 // emitArraySkipArm arms the §7.3 discard counter in array_begin
@@ -417,7 +437,11 @@ func (g *gen) emitArraySkipArm(f *rfile, fs []frame, arrSkip bool) {
 // header of that kind — a declared-fp32 message must still discard the elements
 // of an fp64 array that arrives at any id.
 func (g *gen) emitArrayKindArms(f *rfile, fs []frame, emit func(pat string, want func(ir.Kind) bool), dflt string) {
-	emit("ArrayKind::Unsigned | ArrayKind::Signed", wantIntElem)
+	// One arm per wire kind, never a collapsed integer family: a declared `i8[]`
+	// must disarm only for ArraySigned, so an ArrayUnsigned header at that id is
+	// skipped AND leaves the fill counter at 0 (generator#270 / F-0045).
+	emit("ArrayKind::Unsigned", wantUnsignedArrayElem)
+	emit("ArrayKind::Signed", wantSignedArrayElem)
 	fp32, fp64 := anyArrayElem(fs, wantFP32Elem), anyArrayElem(fs, wantFP64Elem)
 	if fp32 {
 		emit("ArrayKind::Fp32", wantFP32Elem)
@@ -703,12 +727,16 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("    }")
 	f.blank()
 
-	// _Loc enum
+	// _Loc enum. Dead is the SKIPPED-SUBTREE scope: sequence_begin moves here for
+	// any (scope, id) the schema does not declare, and every callback arm is keyed
+	// to a real scope, so nothing matches while cur is Dead and the whole subtree
+	// is discarded. See the sequence_begin default arm (generator#268/#272).
 	f.line("#[derive(Clone, Copy, PartialEq)]")
 	f.line("enum _Loc {")
 	for _, fr := range fs {
 		f.line("    %s,", fr.loc)
 	}
+	f.line("    Dead,")
 	f.line("}")
 	f.blank()
 
@@ -893,7 +921,14 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					// clear() FIRST: the element is REPLACED, not appended to. A repeated
+					// element id is last-occurrence-wins (MESSAGE_SPEC §7.4), and chunk
+					// reassembly already happened above (`acc`), so every arm here
+					// receives one complete value. Without the clear a second occurrence
+					// concatenated onto the first, and the capacity check below — written
+					// for an empty destination — then tripped into Error::BufferFull on
+					// any repeat at any size (generator#273 / Crucible F-0048).
+					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { _e.clear(); let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -958,7 +993,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					// The blob twin of the string arm above: replace, never append
+					// (generator#273 / F-0048).
+					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { _e.clear(); let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
@@ -1098,22 +1135,27 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		f.line("    }")
 	}
 
-	if use.sequence {
+	// sequence_begin/sequence_end are emitted UNCONDITIONALLY, even for a message
+	// that declares no sequence of its own. The corelib cannot know which ids the
+	// schema declares, so it delivers every sequence and the generated code decides
+	// -- which means a message with no override at all would let the CHILDREN of an
+	// unknown sequence arrive with cur still on the enclosing scope and bind there
+	// (generator#268 / Crucible F-0044). Overriding it is what makes the skip real.
+	{
 		// sequence_begin: push current, descend. String/blob/composite array fields
 		// clear their Vec on entry; struct/nested-array wrapper frames push a fresh
 		// element and descend on each per-element sequence_begin.
-		f.line("    fn sequence_begin(&mut self, id: Id) {")
-		f.line("        %s", g.pushStmt("self.stack", "self.cur"))
-		f.line("        self.cur = match (self.cur, id) {")
+		var arms []string
+		add := func(format string, a ...any) { arms = append(arms, fmt.Sprintf(format, a...)) }
 		for _, fr := range fs {
 			switch fr.kind {
 			case fkStruct:
 				for _, fld := range fr.fields {
 					switch {
 					case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-						f.line("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
+						add("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
 					case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.loc+"_"+fld.Name)
+						add("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.loc+"_"+fld.Name)
 					}
 				}
 			case fkStructArr:
@@ -1124,19 +1166,50 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				// gap-fill (and, on no_std, keeps the index inside the heapless
 				// capacity); returning early leaves cur on the array frame, which the
 				// element's own sequence_end pops back off the already-pushed stack.
-				f.line("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
+				add("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
 					fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
 			case fkArrArr:
 				// Same rule as fkStructArr above: the element id IS the row's index
 				// (§5.1), so the row is placed at out[id] rather than appended -- an
 				// interior all-default row is omitted (§2) and leaves an id gap that
 				// an appending collector would close, shifting every later row down.
-				f.line("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
+				add("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
 					fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
 			}
 		}
-		f.line("            _ => self.cur,")
-		f.line("        };")
+		// The default arm is a SKIP, not "stay where you are". An id the schema does
+		// not declare here -- an unknown sequence (§5.2/§4.9), or a sequence landing
+		// on a position declared as something else (§7.3) -- must be discarded WHOLE,
+		// children included. Keeping cur put let those children bind into the
+		// enclosing scope: a child id 3 inside an unknown sequence set the root's own
+		// field 3 (generator#268), and a sequence opened at a string-array element
+		// position bound its string as that element (generator#272).
+		//
+		// Dead needs no depth counter: every sequence_begin pushes and every
+		// sequence_end pops, and a nested sequence inside a dead subtree matches no
+		// arm either, so it stays Dead and the stack alone restores the live scope
+		// at the matching end.
+		// `id` is only read by the arms; without any, name it _id so the generated
+		// crate stays warning-clean.
+		idParam := "id"
+		if len(arms) == 0 {
+			idParam = "_id"
+		}
+		f.line("    fn sequence_begin(&mut self, %s: Id) {", idParam)
+		f.line("        %s", g.pushStmt("self.stack", "self.cur"))
+		if len(arms) == 0 {
+			// The message declares no sequence at all, so every sequence that arrives
+			// is unknown. A match with only a wildcard would be a Clippy
+			// match_single_binding in generated code; the assignment says the same.
+			f.line("        self.cur = _Loc::Dead;")
+		} else {
+			f.line("        self.cur = match (self.cur, id) {")
+			for _, a := range arms {
+				f.line("%s", a)
+			}
+			f.line("            _ => _Loc::Dead,")
+			f.line("        };")
+		}
 		f.line("    }")
 		f.line("    fn sequence_end(&mut self) {")
 		// Nothing to reconcile here: the wrapper array's decoded length is *highest

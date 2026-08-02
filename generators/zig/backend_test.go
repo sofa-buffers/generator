@@ -625,7 +625,7 @@ messages:
 		"if (self.askip > 0) { self.askip -= 1; return; }",
 		"pub fn arrayBegin(self: *_dec_M, id: sofab.Id, kind: sofab.ArrayKind, count: usize) void {",
 		"self.askip = switch (kind) {",
-		"            .unsigned, .signed => switch (self.cur) {",
+		"            .unsigned => switch (self.cur) {",
 		"            .fp32 => switch (self.cur) {",
 		"            .fp64 => switch (self.cur) {",
 		"                    2 => 0,", // declared u32 array disarms under .unsigned/.signed
@@ -709,7 +709,7 @@ messages:
 		// rejects an unreachable one).
 		"        self.askip = switch (kind) {",
 		"        self.afill = switch (kind) {",
-		"            .unsigned, .signed => switch (self.cur) {",
+		"            .unsigned => switch (self.cur) {",
 		"            .fp32 => switch (self.cur) {",
 		"            .fp64 => switch (self.cur) {",
 	} {
@@ -1170,5 +1170,90 @@ messages:
 	// The masking cast is gone: nothing may @truncate a decoded scalar any more.
 	if strings.Contains(m, "@truncate(value)") {
 		t.Errorf("a decoded value must never be masked to the declared width (§7.1):\n%s", m)
+	}
+}
+
+// generator#268 (Crucible F-0044), #270 (F-0045) and #272 (F-0047) are the zig
+// half of the skip family. Two causes:
+//
+//   - arrayBegin armed its counters on the kind FAMILY (`.unsigned, .signed` in
+//     one arm), so an .unsigned header at a declared `i8[]` was skipped but left
+//     the fill counter armed and the NEXT bare scalar was absorbed (#270).
+//   - sequenceBegin's default arms were `else => self.cur` ("stay put"), so an
+//     unknown sequence id (#268) and a §7.3-mistyped element sequence (#272)
+//     were ENTERED and their children bound into the enclosing scope.
+func TestZigSkippedSubtreeAndArrayKindKeying(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  probe:
+    payload:
+      a: { id: 3, type: i16 }
+      arrays:
+        id: 100
+        type: struct
+        fields:
+          u8s: { id: 0, type: array, items: { type: u8, count: 5 } }
+          i8s: { id: 1, type: array, items: { type: i8, count: 5 } }
+      string_array: { id: 200, type: array, items: { type: string, count: 5, maxlen: 64 } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	for _, want := range []string{
+		// One arm per wire kind (#270).
+		"            .unsigned => switch (self.cur) {",
+		"            .signed => switch (self.cur) {",
+		// The declared position still descends...
+		"                100 => .root_arrays,",
+		// ... everything else is discarded whole (#268/#272).
+		"                else => .dead,",
+		"            else => .dead,",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing %q:\n%s", want, m)
+		}
+	}
+	// The defects themselves.
+	if strings.Contains(m, ".unsigned, .signed =>") {
+		t.Errorf("the integer kinds must not share one arrayBegin arm (#270):\n%s", m)
+	}
+	if strings.Contains(m, "else => self.cur,") {
+		t.Errorf("`else => self.cur` lets a skipped subtree's children bind into the enclosing scope (#268/#272):\n%s", m)
+	}
+}
+
+// The same skip must exist for a message that declares NO sequence of its own.
+// corelib-zig only checks @hasDecl for the callback (istream.zig
+// T_SEQUENCE_START) — it does not skip the subtree on its own — so a visitor
+// without sequenceBegin would let an unknown sequence's children arrive with
+// `cur` still on root and bind there.
+func TestZigScalarOnlyMessageStillSkipsAnUnknownSequence(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  probe:
+    payload:
+      a: { id: 3, type: i16 }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	want := "    pub fn sequenceBegin(self: *_dec_Probe, _: sofab.Id) void {\n" +
+		"        if (self.sp < self.stack.len) {\n" +
+		"            self.stack[self.sp] = self.cur;\n" +
+		"            self.sp += 1;\n" +
+		"        }\n" +
+		"        self.cur = .dead;\n" +
+		"    }"
+	if !strings.Contains(m, want) {
+		t.Errorf("a scalar-only message must still override sequenceBegin to skip:\n%s", m)
+	}
+	if !strings.Contains(m, "pub fn sequenceEnd(") {
+		t.Errorf("sequenceEnd must accompany it, or the stack never unwinds:\n%s", m)
 	}
 }

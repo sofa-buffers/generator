@@ -776,8 +776,14 @@ func TestDartStringFreeScopeSkipsStrings(t *testing.T) {
 	out := genFor(t, writeDef(t, src), map[string]any{})
 
 	// The base exists and its onStringBytes returns without touching the bytes.
-	if !strings.Contains(out, "abstract class _Visitor extends sofab.MessageVisitor {\n  @override\n  void onStringBytes(int id, Uint8List bytes) {}\n}") {
+	if !strings.Contains(out, "abstract class _Visitor extends sofab.MessageVisitor {\n  @override\n  void onStringBytes(int id, Uint8List bytes) {}\n") {
 		t.Errorf("the shared visitor base must neutralize the validating onStringBytes default:\n%s", out)
+	}
+	// The same base also neutralizes the DESCENDING onSequenceStart default, so a
+	// leaf element collector skips a sequence instead of binding its child
+	// (generator#272) -- see TestDartMistypedSequenceElementIsSkipped.
+	if !strings.Contains(out, "  sofab.MessageVisitor? onSequenceStart(int id) => null;\n}") {
+		t.Errorf("the shared visitor base must also neutralize the descending onSequenceStart default:\n%s", out)
 	}
 	// Every generated visitor routes through it. Extending the corelib class
 	// directly is the defect: that is what re-inherits the validating default.
@@ -873,5 +879,47 @@ messages:
 		if !strings.Contains(got, want) {
 			t.Errorf("message.dart: a 64-bit destination must store unguarded (%q):\n%s", want, got)
 		}
+	}
+}
+
+// generator#272 (Crucible F-0047): a wrapper-array ELEMENT position opened as a
+// sequence must be skipped whole (MESSAGE_SPEC §7.3), but the leaf element
+// collectors (_StrSeq / _BlobSeq) declare no sequence of their own and so never
+// overrode onSequenceStart — inheriting sofab.MessageVisitor's DESCENDING
+// default, which returns `this`. A sequence at an element position therefore
+// descended into the collector itself and its child string bound as that element.
+//
+// The fix sits on the shared base beside the onStringBytes no-op, so every
+// collector inherits the skip by construction — including ones added later.
+func TestDartMistypedSequenceElementIsSkipped(t *testing.T) {
+	got := genFor(t, writeDef(t, `
+version: 1
+messages:
+  Probe:
+    payload:
+      string_array: { id: 200, type: array, items: { type: string, count: 5, maxlen: 64 } }
+      blob_array:   { id: 201, type: array, items: { type: blob,   count: 5, maxlen: 64 } }
+      obj_array:    { id: 202, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
+`), map[string]any{})
+	if !strings.Contains(got, "sofab.MessageVisitor? onSequenceStart(int id) => null;") {
+		t.Errorf("the shared base must skip an undeclared sequence:\n%s", got)
+	}
+	// The leaf collectors must NOT override it back to a descent ...
+	for _, cls := range []string{"class _StrSeq", "class _BlobSeq"} {
+		i := strings.Index(got, cls)
+		if i < 0 {
+			t.Fatalf("%s not emitted:\n%s", cls, got)
+		}
+		body := got[i:]
+		if end := strings.Index(body, "\n}"); end > 0 {
+			body = body[:end]
+		}
+		if strings.Contains(body, "onSequenceStart") {
+			t.Errorf("%s must inherit the skipping base, not re-declare a descent:\n%s", cls, body)
+		}
+	}
+	// ... while the object collector, whose elements ARE sequences, still descends.
+	if !strings.Contains(got, "return vis(out[id]);") {
+		t.Errorf("a struct-element collector must still descend into its element:\n%s", got)
 	}
 }

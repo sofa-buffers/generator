@@ -509,6 +509,11 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("internal sealed class %sVisitor : IVisitor {", name)
 	f.line("    private readonly %s m;", name)
 	f.line("    private int cur = 0;")
+	// The SKIPPED-SUBTREE scope. SequenceBegin moves here for any (scope, id) the
+	// schema does not declare, and every callback dispatches on (cur, id) with a
+	// case per real scope -- so nothing matches while cur is _DEAD and the whole
+	// subtree is discarded, children included (generator#268 / #272).
+	f.line("    private const int _DEAD = -1;")
 	f.line("    private int ai = 0;                // index into the primitive array currently being filled")
 	// S7.3 array-vs-scalar skip counter (generator#183): an integer array whose id
 	// is declared as a SCALAR is a wire-type contradiction and must be skipped like
@@ -798,6 +803,14 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 			}
 		}
 	}
+	// The default arm is a SKIP, not "stay where you are". A sequence id the schema
+	// does not declare in this scope -- an unknown id (§5.2/§4.9), or one landing on
+	// a position declared as something else (§7.3) -- must be discarded WHOLE,
+	// children included. Falling through left `cur` on the enclosing frame, so a
+	// child id 3 inside an unknown sequence set the root's own field 3
+	// (generator#268), and a sequence opened at a string-array element position
+	// bound its string as that element (generator#272).
+	f.line("            default: cur = _DEAD; break;")
 	f.line("        }")
 	f.line("    }")
 	// The scope pop, and nothing else. There is no fill-to-N here: `count: N` is a

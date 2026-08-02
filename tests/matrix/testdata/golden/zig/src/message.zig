@@ -91,13 +91,15 @@ pub const Scalars = struct {
 const _dec_Scalars = struct {
     m: *Scalars,
     alloc: std.mem.Allocator,
+    stack: [256]_Loc = undefined,
+    sp: usize = 0,
     cur: _Loc = .root,
     inv: bool = false, // a scalar array over its schema count, or a wrapper element id >= count -> INVALID
     askip: usize = 0, // elements left to discard from a wire-type-contradictory array
 
     const _Loc = enum {
         root,
-        dead, // a per-element allocation failed; ignore the subtree
+        dead, // skipped subtree: an undeclared sequence id, a S7.3 wire-type mismatch, or a failed per-element allocation
     };
 
     pub fn unsigned(self: *_dec_Scalars, id: sofab.Id, value: sofab.Unsigned) void {
@@ -150,7 +152,10 @@ const _dec_Scalars = struct {
 
     pub fn arrayBegin(self: *_dec_Scalars, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {
         self.askip = switch (kind) {
-            .unsigned, .signed => switch (self.cur) {
+            .unsigned => switch (self.cur) {
+                else => count,
+            },
+            .signed => switch (self.cur) {
                 else => count,
             },
             .fp32 => switch (self.cur) {
@@ -160,6 +165,23 @@ const _dec_Scalars = struct {
                 else => count,
             },
         };
+    }
+
+    pub fn sequenceBegin(self: *_dec_Scalars, _: sofab.Id) void {
+        if (self.sp < self.stack.len) {
+            self.stack[self.sp] = self.cur;
+            self.sp += 1;
+        }
+        self.cur = .dead;
+    }
+
+    pub fn sequenceEnd(self: *_dec_Scalars) void {
+        if (self.sp > 0) {
+            self.sp -= 1;
+            self.cur = self.stack[self.sp];
+        } else {
+            self.cur = .root;
+        }
     }
 };
 
