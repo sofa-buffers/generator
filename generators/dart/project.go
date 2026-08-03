@@ -244,7 +244,15 @@ func u64ToJSON(acc string) string {
 func u64FromJSON(jx string) string {
 	// toSigned(64) yields a BigInt that fits Dart's signed 64-bit int exactly, so
 	// toInt() is lossless (unlike a plain toInt() which clamps).
-	return fmt.Sprintf("BigInt.parse(%s as String).toSigned(64).toInt()", jx)
+	//
+	// A bare JSON NUMBER is accepted as well as the quoted form this harness
+	// itself writes. The string is the canonical carrier -- a u64 above 2^53 has
+	// no exact JSON-number representation, which is why the codec emits one -- but
+	// hand-written and shared inputs spell small 64-bit values unquoted, and every
+	// other backend's harness reads them that way. Insisting on the string made
+	// the dart row of tests/bench unmeasurable: the shared payload writes
+	// "seconds": 1752739200 and the cast threw before a single op was timed.
+	return fmt.Sprintf("(%s is String ? BigInt.parse(%s as String) : BigInt.from((%s as num).toInt())).toSigned(64).toInt()", jx, jx, jx)
 }
 
 // emitBench emits the `bench <workload> <reps>` entry point (tests/bench,

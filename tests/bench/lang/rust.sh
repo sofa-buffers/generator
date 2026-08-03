@@ -110,7 +110,7 @@ pub extern "C" fn reset() -> ! {
     v.odometer_m = unsafe { core::ptr::read_volatile(0x2000_1000 as *const u64) };
     let n = {
         let mut os = OStream::new(&mut buf);
-        v.marshal(&mut os);
+        v.serialize(&mut os);
         os.bytes_used()
     };
     let acc = match VehicleTelemetry::try_decode(&buf[..n]) {
