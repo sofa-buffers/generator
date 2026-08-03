@@ -16,7 +16,7 @@ public sealed class Scalars {
     public double f64 = -2.5;
     public bool flag = true;
 
-    public void Marshal(OStream os) {
+    public void Serialize(OStream os) {
         if (this.u8min != 0) { os.WriteUnsigned(0, (ulong)this.u8min); }
         if (this.u8max != 255) { os.WriteUnsigned(1, (ulong)this.u8max); }
         if (this.u64max != 18446744073709551615UL) { os.WriteUnsigned(2, (ulong)this.u64max); }
@@ -41,15 +41,25 @@ public sealed class Scalars {
     // Per-thread scratch buffer: Encode() marshals into it and returns an
     // exact-size copy, so the worst-case buffer is not re-allocated (and
     // zeroed) on every call. Do not call Encode() reentrantly from a
-    // Marshal() override on the same thread.
+    // Serialize() override on the same thread.
     [ThreadStatic] private static byte[] _encScratch;
     public byte[] Encode() {
         var buf = _encScratch ??= new byte[MaxSize];
         var os = new OStream(buf);
-        Marshal(os);
+        Serialize(os);
         var outp = new byte[os.BytesUsed];
         Array.Copy(buf, outp, os.BytesUsed);
         return outp;
+    }
+    /// <summary>
+    /// Encode into a stream the caller owns, then flush the tail.
+    /// With a <c>FlushSink</c> on <paramref name="os"/> the buffer may be
+    /// smaller than the message: it is drained as it fills, so what bounds
+    /// memory is the buffer, not the message.
+    /// </summary>
+    public void EncodeTo(OStream os) {
+        Serialize(os);
+        os.Flush();
     }
     public static Scalars Decode(byte[] data) {
         var m = new Scalars();
@@ -60,6 +70,62 @@ public sealed class Scalars {
     public static DecodeStatus TryDecode(byte[] data, out Scalars msg) {
         msg = new Scalars();
         return new IStream().Feed(data, 0, data.Length, new ScalarsVisitor(msg));
+    }
+    /// <summary>
+    /// Incremental decoder for <see cref="Scalars"/>: hold one and feed the
+    /// message as bytes arrive, instead of buffering it whole first.
+    /// </summary>
+    /// <remarks>
+    /// The wire format has no end marker at the top level -- a message ends
+    /// where its bytes end -- so a feed cannot report that the MESSAGE is
+    /// complete, only that the bytes handed in ended on a field boundary
+    /// (<c>Complete</c>) or mid-field (<c>Incomplete</c>). Neither is a
+    /// failure mid-stream; the caller's own framing decides when the input
+    /// is over, and <c>Finish</c> then gives the verdict for the message as
+    /// a whole.
+    /// </remarks>
+    public sealed class Decoder {
+        private readonly Scalars _m = new Scalars();
+        private readonly IStream _is = new IStream();
+        private readonly ScalarsVisitor _v;
+
+        public Decoder() { _v = new ScalarsVisitor(_m); }
+
+        /// <summary>
+        /// Feed the next chunk, of any size. Returns <c>Complete</c> if it
+        /// ended on a field boundary, <c>Incomplete</c> if it ended mid-field
+        /// -- neither answers whether the MESSAGE is done.
+        /// </summary>
+        public DecodeStatus Feed(byte[] chunk) => _is.Feed(chunk, 0, chunk.Length, _v);
+
+        /// <summary>As <c>Feed</c>, over a slice of <paramref name="chunk"/>.</summary>
+        public DecodeStatus Feed(byte[] chunk, int off, int len) => _is.Feed(chunk, off, len, _v);
+
+        /// <summary>The outcome for everything fed so far.</summary>
+        public DecodeStatus Status => _is.Status;
+
+        /// <summary>The destination, holding whatever has been decoded so far.</summary>
+        public Scalars Message => _m;
+
+        /// <summary>
+        /// Take the decoded message once the caller's framing says the input
+        /// is over. Rejects a stream that ended mid-field rather than
+        /// returning a half-filled value; read <c>Message</c> to get it
+        /// anyway.
+        /// </summary>
+        /// <remarks>
+        /// This is an <c>InvalidOperationException</c> and not a
+        /// <c>SofabException</c> on purpose: an incomplete message is not a
+        /// malformed one. Nothing is wrong with the bytes -- the caller
+        /// declared end-of-input at a point they did not agree with.
+        /// </remarks>
+        public Scalars Finish() {
+            if (_is.Status != DecodeStatus.Complete) {
+                throw new InvalidOperationException(
+                    $"Scalars: stream ended mid-field ({_is.Status})");
+            }
+            return _m;
+        }
     }
 }
 
