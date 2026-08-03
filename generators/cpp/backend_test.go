@@ -167,7 +167,7 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 		"std::vector<std::uint32_t> fixed = {};",                            // a bounded native array is length-carrying too
 		"std::vector<std::vector<std::uint32_t>> matrix",                    // matrix rows are dynamic vectors too
 		"is.readArray(arr, -1, -1, sofab::ElemBound::of<std::uint32_t>());", // readArray sizes the vector to the wire count
-		"if (arr != std::vector<std::uint32_t>{}) {",                        // whole-omit compares to an empty vector
+		"if (!arr.empty()) {",                                               // whole-omit: no declared default -> empty()
 		"std::size_t _count) noexcept override",                             // _count is named for the resize
 		"sofabgen::WrapperSeq<std::vector<std::vector<std::uint32_t>>>",     // matrix rows collected by the generated placer
 	} {
@@ -288,7 +288,7 @@ func TestCppFixedContainers(t *testing.T) {
 		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",                     // blob sequence -> inline, EMPTY (count is a capacity)
 		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",                    // string sequence -> inline, EMPTY (count is a capacity)
 		"sofab::InlineVector<MPtsElem",                                                 // struct sequence -> inline (prefix)
-		"if (bl != sofab::FixedBytes<16>{}) {",                                         // blob default-compare typed
+		"if (!bl.empty()) {",                                                          // blob, no declared default -> empty()
 		"is.readString(s, _size, 8);",                                                  // FixedString decode, bound carried into the corelib read
 		"is.readBlob(bl, _size, 16);",                                                  // FixedBytes decode, likewise (issue #95)
 		"static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",     // blob-seq collector
@@ -520,8 +520,8 @@ func TestCppSparse(t *testing.T) {
 	h := headerFromYAML(t, src, "m.hpp")
 	for _, want := range []string{
 		"if (a != 7) { (void)os.write(0, a); }",             // scalar guard
-		`if (s != "") {`,                                    // string guard (empty default)
-		"if (bl != std::vector<std::uint8_t>{}) {",          // blob guard
+		"if (!s.empty()) {",                                 // string guard (empty default -> empty())
+		"if (!bl.empty()) {",                                // blob guard (empty default -> empty())
 		"std::vector<std::int32_t> nums = {1, 2, 3};",       // native array default materialized
 		"if (nums != std::vector<std::int32_t>{1, 2, 3}) {", // native array whole-omit
 		"(void)os.writeLazy(5, st);",                        // struct framed lazily (no guard)
