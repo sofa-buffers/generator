@@ -2049,7 +2049,16 @@ Both mirror the corelibs' own `bench/run_callgrind.sh`, which every corelib ship
   --toggle-collect=run_<workload>` around a single op. The `run_<w>` wrapper is
   `noinline` with external linkage. The barrier is on the **wrapper only**, so the
   corelib still inlines into the generated code — that inlining is the cost being
-  measured.
+  measured. **Go additionally warms up**, alone among the `toggle` rows: the op
+  collected is the *first* one, and Go's runtime builds itabs and resolves
+  type/name offsets lazily on first use, charging those one-time costs to it (18k
+  of a 55k decode; 5.5k of a 25k encode). Worse, they scale with how many types the
+  generated code converts to interfaces, so adding itabs reads as a per-op
+  regression that is not there. The generated harness runs an uncollected
+  `warmup_<w>` first, with the body duplicated rather than delegating to `run_<w>`
+  — toggling keys on entering the symbol whoever the caller is. One op suffices:
+  AOT, so no tiers to climb, and each warmed cost is a global first-touch cache.
+  c/cpp/rust/zig have no lazy runtime metadata and need none.
 * **`subtract`** (java, python, ts, csharp) — no native symbol (JIT'd/interpreted),
   so run at two rep counts and subtract: `Ir/op = (Ir(R2) − Ir(R1)) / (R2 − R1)`,
   cancelling startup, class loading and JIT compilation exactly. Needs a fixed

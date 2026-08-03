@@ -302,6 +302,22 @@ Go's symbols are package-mangled, so its toggle target is `main.run_<w>`
 name. Go also needs its runtime tamed — `GOMAXPROCS=1 GODEBUG=asyncpreemptoff=1
 GOGC=off` — or the "single op" is not a single op.
 
+Go additionally needs a **warmup**, which the other `toggle` rows do not. The op
+`toggle` collects is the *first* one, and Go's runtime builds interface tables and
+resolves type/name offsets lazily on first use (the allocator likewise touches each
+size class once). Those one-time costs land on the measured op: on the bench schema
+they were 18k Ir of a 55k decode (32%) and 5.5k Ir of a 25k encode (22%). They also
+scale with how many distinct types the generated code converts to interfaces, so a
+codegen change that adds itabs reads as a per-op regression that does not exist —
+it did, at +44% on decode, while the warmed number was *below* the previous value.
+The generated harness therefore runs an uncollected `warmup_<w>` first
+(`generators/golang/project.go`). One warmup op is enough: Go is AOT-compiled, so
+there are no JIT tiers to climb, and every cost being warmed is a global cache
+filled on first touch. The warmup duplicates the body rather than calling `run_<w>`
+— toggling keys on entering the symbol regardless of caller, so delegating would
+collect the warmup too. c, cpp, rust and zig have no lazily-initialized runtime
+metadata and need none of this.
+
 **`subtract`** (java, python, ts, csharp) — no native symbol exists (the hot code is
 JIT'd or interpreted), so run at two rep counts and subtract:
 

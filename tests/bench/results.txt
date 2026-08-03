@@ -14,27 +14,28 @@
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
-# corelib:   c-cpp 72732b8 | cpp 6d7a0bd | cs 0359c45 | go 057354a | java 6a5761e | py 98894d1 | rs f607768 | rs-no-std 9373315 | ts 7bbc499 | zig dcbb848
+# corelib:   c-cpp 6ee3fef | cpp 2466869 | cs 17f4277 | dart 1b83161 | go c6e0952 | java fedb0b7 | py bd5cb37 | rs 5255a0c | rs-no-std 5126032 | ts 72df317 | zig 29ca282
 #
 ## instruction cost
 row              profile    method    encode_ir/op  decode_ir/op
-c                footprint  toggle    19529         39684
-cpp-c-cpp        footprint  toggle    29812         36166
-cpp-cpp          maxspeed   toggle    13618         33830
-csharp           maxspeed   subtract  42528         72498
-go               maxspeed   toggle    24698         38513
-java             maxspeed   subtract  16333         36618
-python           maxspeed   subtract  842750        2052221
-rust-rs          maxspeed   toggle    10021         24886
-rust-rs-no-std   footprint  toggle    10321         32876
-ts-bigint        maxspeed   subtract  742014        750503
-ts-long          maxspeed   subtract  742021        750502
-zig              maxspeed   toggle    10411         18419
+c                footprint  toggle    24480         50612
+cpp-c-cpp        footprint  toggle    32630         37673
+cpp-cpp          maxspeed   toggle    13672         31043
+csharp           maxspeed   subtract  30830         67221
+dart             maxspeed   subtract  30427         48945
+go               maxspeed   toggle    19378         37354
+java             maxspeed   subtract  18265         34070
+python           maxspeed   subtract  900876        2180471
+rust-rs          maxspeed   toggle    8873          21158
+rust-rs-no-std   footprint  toggle    10189         29609
+ts-bigint        maxspeed   subtract  592261        837789
+ts-long          maxspeed   subtract  592258        837793
+zig              maxspeed   toggle    10698         19965
 
 ## toolchain
 tool                      version       rows
 arm-none-eabi-gcc         14.2.1        c,cpp-c-cpp
-dotnet                    9.0.315       csharp
+dotnet                    10.0.302      csharp
 g++                       15.2.0        cpp-c-cpp,cpp-cpp
 gcc                       15.2.0        c
 go                        1.24.4        go
@@ -48,9 +49,9 @@ zig                       0.16.0        zig
 
 ## footprint
 row              profile    arch            text    data   bss
-c                footprint  ARMv6-m         1636    0      0
-c                footprint  ARMv7-m+fp.dp   1636    0      0
-c                footprint  RV32IMC         1706    0      0
-cpp-c-cpp        footprint  ARMv6-m         5347    0      180
-cpp-c-cpp        footprint  ARMv7-m+fp.dp   5109    0      180
-rust-rs-no-std   footprint  thumbv6m        8301    0      0
+c                footprint  ARMv6-m         1720    0      0
+c                footprint  ARMv7-m+fp.dp   1708    0      0
+c                footprint  RV32IMC         1790    0      0
+cpp-c-cpp        footprint  ARMv6-m         6589    0      192
+cpp-c-cpp        footprint  ARMv7-m+fp.dp   6361    0      192
+rust-rs-no-std   footprint  thumbv6m        9145    0      0
