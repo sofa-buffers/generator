@@ -134,6 +134,22 @@ the **subtract** method. Tracked: Ir/op.
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
 
+**Which engine the row measures.** corelib-py ships two implementations — the
+pure-Python classes and a Cython accelerator (`sofab._speedups`) — and
+`sofab/__init__.py` takes the accelerator whenever it imports, falling back
+silently otherwise. The bench recipe puts the corelib's *source* tree on
+`PYTHONPATH` and builds nothing, so the row currently measures the **pure-Python**
+engine. That is why a corelib release noting "encode 3.0x, decode 1.5x" for the
+accelerator moved this row by zero instructions: the bench cannot see that code.
+
+The engine is not pinned — it is *recorded*, in the `## toolchain` table as
+`sofab-engine` (`pure` or `native`). Pinning it to pure would make a `maxspeed` row
+permanently blind to what ships; recording it means the day the extension is built
+the switch appears in the diff instead of silently rebasing every python number.
+To measure what ships, install Cython and build the extension (`pip install -e
+<corelib-py>`) before running the row. The devcontainer has no pip today, so this
+has never been measured — treat the python numbers as the fallback engine's.
+
 ## §7.1: the declared integer width is a validity bound (issue #266)
 
 A `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination rejects a value outside its

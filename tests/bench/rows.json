@@ -78,6 +78,27 @@
       ]
     },
     {
+      "//": "allow_dynamic is the other half of the footprint story: it decides WHERE",
+      "// ": "variable-length fields live -- inline, sized from the schema bound (the",
+      "//  ": "default measured above), or in a heap container holding what the message",
+      "//   ": "actually carries. It only does anything on c-cpp / no_std, which is why",
+      "//    ": "only the two footprint rows have a -dyn twin. READ THE PAIR, NOT THE ROW:",
+      "//     ": "text/data/bss cannot see the heap, so -dyn looks smaller while needing an",
+      "//      ": "allocator the inline build does not. The pair shows the trade; neither",
+      "//       ": "number alone is a footprint verdict.",
+      "id": "cpp-c-cpp-dyn",
+      "lang": "cpp",
+      "corelib": "corelib-c-cpp",
+      "corelib_env": "SOFAB_C_DIR",
+      "profile": "footprint",
+      "method": "toggle",
+      "config": "targets: { cpp: { corelib: c-cpp, allow_dynamic: true } }",
+      "archs": [
+        "ARMv6-m",
+        "ARMv7-m+fp.dp"
+      ]
+    },
+    {
       "id": "rust-rs-no-std",
       "lang": "rust",
       "corelib": "corelib-rs-no-std",
@@ -85,6 +106,22 @@
       "profile": "footprint",
       "method": "toggle",
       "config": "generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }",
+      "archs": [
+        "thumbv6m"
+      ]
+    },
+    {
+      "//": "The no_std half of the allow_dynamic pair -- see cpp-c-cpp-dyn above for",
+      "// ": "what the two numbers mean together. Here the containers become alloc::String",
+      "//  ": "/ alloc::Vec, so the crate pulls in `extern crate alloc` and needs a global",
+      "//   ": "allocator the inline build does not.",
+      "id": "rust-rs-no-std-dyn",
+      "lang": "rust",
+      "corelib": "corelib-rs-no-std",
+      "corelib_env": "SOFAB_RS_CORELIB",
+      "profile": "footprint",
+      "method": "toggle",
+      "config": "generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std, allow_dynamic: true } }",
       "archs": [
         "thumbv6m"
       ]

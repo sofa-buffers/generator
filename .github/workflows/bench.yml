@@ -38,7 +38,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        row: [c, cpp-cpp, cpp-c-cpp, rust-rs, rust-rs-no-std, zig, go, java, csharp, python, ts-bigint, ts-long]
+        # The -dyn rows are the allow_dynamic half of each footprint pair; they reuse
+        # their sibling's toolchain, which the `cpp-*` case and the startsWith('rust-')
+        # guard below already cover.
+        row: [c, cpp-cpp, cpp-c-cpp, cpp-c-cpp-dyn, rust-rs, rust-rs-no-std, rust-rs-no-std-dyn, zig, go, java, csharp, dart, python, ts-bigint, ts-long]
     steps:
       - uses: actions/checkout@v7
 
@@ -77,6 +80,10 @@ jobs:
       - uses: actions/setup-dotnet@v6
         if: matrix.row == 'csharp'
         with: { dotnet-version: "9.0.x" }
+
+      - uses: dart-lang/setup-dart@v1
+        if: matrix.row == 'dart'
+        with: { sdk: stable }
 
       - uses: actions/setup-python@v7
         if: matrix.row == 'python'

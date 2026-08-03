@@ -281,6 +281,18 @@ padding.
 Row `rust-rs` (corelib `rs`) and `rust-rs-no-std` (corelib `rs-no-std`) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with
 the **toggle** method. Tracked: Ir/op for both; `rust-rs-no-std` also `.text`/`.data`/`.bss` on thumbv6m.
 
+`rust-rs-no-std-dyn` is the same row with `allow_dynamic: true`, read as a pair with
+it. There is no `rust-rs-dyn`: on `std` the containers are `String`/`Vec` either way,
+so the flag is inert. Under `no_std` it swaps `heapless` storage sized from the schema
+bound for `alloc::String`/`alloc::Vec` — the crate then pulls in `extern crate alloc`,
+and a bare-metal target ships no allocator, so the footprint driver appends the most
+trivial bump allocator that can work (`tests/bench/lang/rust.sh`, only when the
+generated crate needs it). Never freeing makes its `.text` a **floor** — a real
+firmware allocator costs more, never less — and the arena lives at a fixed address so
+no arbitrary heap size lands in `.bss`. Measured: `.text` 9145 → 10649, `.bss` 0 → 4
+(the bump cursor). The runtime heap itself is outside what any static-section
+measurement can see.
+
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
 
