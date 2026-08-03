@@ -34,16 +34,38 @@ func (*Backend) Lang() string { return "cpp" }
 // Generate emits one header-only .hpp per message (with its reachable types).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	clib := cfgString(cfg, "corelib", "cpp") == "c-cpp"
-	// corelib-c-cpp targets embedded devices, so every field is schema-bounded
-	// (checkBounded) and the default storage is heap-free: strings ->
-	// sofab::FixedString<N>, blobs -> sofab::FixedBytes<N>, sequences ->
-	// sofab::InlineVector<T,N>, native arrays -> std::array<T,N>, all sized from
-	// the schema. allow_dynamic keeps the same bounds but puts those fields in
-	// std::string / std::vector, for a target that has a heap and would rather
-	// allocate what a message carries than its declared worst case.
-	fixed := clib
-	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: clib, fixed: fixed, allowDynamic: cfgBool(cfg, "allow_dynamic", false), size: generator.NewSizePolicy(cfg)}
-	if fixed {
+	// `allow_dynamic` is one switch with two defaults, because the two corelibs
+	// start from opposite ends:
+	//
+	//   corelib: c-cpp  -> false. An embedded target has no heap to spare, so
+	//                      heap-free storage is the point of the profile.
+	//   corelib: cpp    -> true.  A desktop/server target allocates what a message
+	//                      actually carries rather than its declared worst case,
+	//                      and that has always been this profile's behaviour.
+	//
+	// What it selects is the same on both: `false` stores a schema-bounded field
+	// inline (sofab::FixedString<N> / FixedBytes<N> / InlineVector<T,N>), `true`
+	// stores it in std::string / std::vector. The wire is identical either way --
+	// it is a storage decision and nothing else.
+	//
+	// The two differ in what happens to an UNBOUNDED field, and that follows from
+	// the profile rather than from the switch:
+	//
+	//   c-cpp: there is no fallback. checkBounded rejects the schema outright, in
+	//          both storage modes, so one schema stays valid for every c-cpp target.
+	//   cpp:   the field simply keeps its dynamic container. Static storage is
+	//          applied per field, wherever the schema gives a bound, so turning the
+	//          switch on never fails a build and never forces a schema migration --
+	//          a schema gets faster where it is already bounded.
+	//
+	// A bound is honoured whatever its size: there is deliberately no threshold
+	// above which a declared count/maxlen silently falls back to the heap. The
+	// schema states the intent; making the member type depend on a hidden byte
+	// budget would make it unpredictable from the schema.
+	allowDynamic := cfgBool(cfg, "allow_dynamic", !clib)
+	fixed := !allowDynamic
+	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: clib, fixed: fixed, allowDynamic: allowDynamic, size: generator.NewSizePolicy(cfg)}
+	if clib {
 		if err := g.checkBounded(s); err != nil {
 			return nil, err
 		}
@@ -72,19 +94,19 @@ type gen struct {
 	// existing buffer rather than resizing it, so generated decode must pre-size
 	// variable-length fields from the field length the deserialize callback gets.
 	clib bool
-	// fixed is the fixed-capacity (embedded) representation; it is always equal to
-	// clib (corelib-c-cpp always uses fixed containers, corelib-cpp always dynamic).
-	// Bounded strings become sofab::FixedString<N>, blobs sofab::FixedBytes<N>, and
-	// string/blob/struct/union/matrix sequence arrays sofab::InlineVector<T,N>, all
-	// sized from the schema — no heap on the message path.
+	// fixed is the fixed-capacity representation, i.e. !allowDynamic. It is a
+	// STORAGE property and is independent of clib: both C++ corelibs offer both
+	// modes. A bounded string becomes sofab::FixedString<N>, a blob
+	// sofab::FixedBytes<N>, an array sofab::InlineVector<T,N>, all sized from the
+	// schema — no heap on the message path. An UNBOUNDED field keeps its dynamic
+	// container (on c-cpp it cannot occur: checkBounded rejects it first).
 	fixed bool
-	// allowDynamic selects heap containers (std::string / std::vector) for the
-	// c-cpp profile's bounded fields instead of inline storage, for targets that
-	// have a heap and the C++ stdlib: a field then allocates what the message
-	// actually carries rather than its declared worst case, and moves instead of
-	// copying. It does NOT relax any bound — maxlen/count stay mandatory in both
-	// modes (checkBounded), so one schema stays valid for every c-cpp target and
-	// the generator turns each bound into an explicit check on the decode path.
+	// allowDynamic is the inverse of fixed, kept as its own field because it is
+	// what the config key spells. Default true on corelib: cpp, false on
+	// corelib: c-cpp — see Generate for why the two ends differ. It never relaxes
+	// a bound: on c-cpp maxlen/count stay mandatory in both modes (checkBounded),
+	// and on cpp a declared bound is still turned into an explicit decode-path
+	// check whichever container holds the field.
 	allowDynamic bool
 	// Receiver-side decode limits (generator#102), pure-corelib-cpp path only
 	// (the c-cpp wrapper is statically schema-bounded). Each is active when its
@@ -863,7 +885,7 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 			countParam = "std::size_t _count"
 			break
 		}
-		if fld.HasCount || g.limArrHas || g.dynNativeArray(fld.Elem) {
+		if fld.HasCount || g.limArrHas || g.dynNativeArray(fld.Elem, fld.Count) {
 			countParam = "std::size_t _count"
 			break
 		}
@@ -1312,12 +1334,14 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		if !g.clib && !fld.HasMaxlen && g.limStrHas {
 			f.line("            if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }")
 		}
-		if g.fixed {
-			// Both storage modes emit the same call: readString establishes the
-			// delivered type before it touches the destination (§7.3) and rejects
-			// past the maxlen before sizing it (§7.1) — so the arm is identical
-			// whether the destination is a FixedString or a std::string, and the
-			// bound is enforced the same way in both.
+		if g.clib {
+			// The c-cpp wrapper's three-argument form, for BOTH of its storage modes:
+			// it needs the delivered size to bind the destination before the deferred
+			// decoder fills it, and that is true of a std::string destination too.
+			// corelib-cpp decodes synchronously and takes readString(dst, bound) for
+			// either destination, so its arm is the !clib one below -- unchanged by
+			// the storage mode, which is why allow_dynamic needs no decode change
+			// there at all.
 			f.line("            is.readString(%s, _size, %d);", acc, maxlenOr(fld.HasMaxlen, fld.Maxlen))
 		} else if g.clib {
 			f.line("            %s.assign(_size, '\\0'); if (_size) is.read(%s);", acc, acc)
@@ -1367,7 +1391,7 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		if !g.clib && !fld.HasMaxlen && g.limBlobHas {
 			f.line("            if (_size > SOFAB_MAX_DYN_BLOB_LEN) { is.exceedLimit(); return; }")
 		}
-		if g.fixed {
+		if g.clib {
 			// As for the string arm above.
 			f.line("            is.readBlob(%s, _size, %d);", acc, maxlenOr(fld.HasMaxlen, fld.Maxlen))
 		} else if g.clib {
@@ -1462,7 +1486,9 @@ func elemMaxOr(has bool, m int64) int64 {
 // wire count IS the length (MESSAGE_SPEC §3), so the temp must be the value's
 // length and not the schema `count`.
 func (g *gen) nativeTemp(elemType string, count int64) string {
-	if g.fixed && !g.allowDynamic {
+	// Mirrors the member: inline only where the member itself is, i.e. under
+	// static storage AND with a count to size it from.
+	if g.fixed && count > 0 {
 		return fmt.Sprintf("sofab::InlineVector<%s, %d>", elemType, count)
 	}
 	return "std::vector<" + elemType + ">"
@@ -1558,10 +1584,13 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		// the object path was missing, and the schema count and element maxlen ride
 		// in as bounds. Nothing follows the read -- the length is what the ids
 		// established, and `count` never adds to it (§3).
-		if strings.HasPrefix(cont, "sofab::InlineVector") {
-			// Fixed string sequence: fill fixed inline FixedString slots by the
-			// element size via the scalar FixedString read, no heap. Static for the
-			// same deferred-decoder reason as the other fixed collectors.
+		if g.clib && strings.HasPrefix(cont, "sofab::InlineVector") {
+			// Fixed string sequence on the C wrapper: fill fixed inline FixedString
+			// slots by the element size via the scalar FixedString read, no heap.
+			// Static for the same deferred-decoder reason as the other fixed
+			// collectors. corelib-cpp needs none of this -- its sofab::StringSeq is
+			// a template deduced from the destination, so the plain arm below serves
+			// std::vector<std::string> and InlineVector<FixedString<M>, N> alike.
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::FixedStringSeq<%s> %s;", cont, rv),
 				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		} else if g.clib {
@@ -1575,10 +1604,12 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		}
 	case ir.KindBlob:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
-		if strings.HasPrefix(cont, "sofab::InlineVector") {
-			// Fixed blob sequence: fill fixed inline slots by the element size (the
-			// read(void*,size_t) blob overload), no heap. The collector is static
-			// because the corelib-c-cpp decoder dereferences it after this returns.
+		if g.clib && strings.HasPrefix(cont, "sofab::InlineVector") {
+			// Fixed blob sequence on the C wrapper: fill fixed inline slots by the
+			// element size (the read(void*,size_t) blob overload), no heap. The
+			// collector is static because the corelib-c-cpp decoder dereferences it
+			// after this returns. corelib-cpp uses the deduced sofab::BlobSeq below
+			// for either container.
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::FixedBlobSeq<%s> %s;", cont, rv),
 				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		} else if g.clib {

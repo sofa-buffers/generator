@@ -85,6 +85,14 @@ run_variant() {
         # optional, so the schemas below are bounded first (see EXAMPLE).
         printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: %s } }\n' "$corelib" "$dynamic" > "$WORK/cfg-$label.yaml"
         printf 'targets: { cpp: { namespace: sofabuffers, corelib: %s, allow_dynamic: %s } }\n' "$corelib" "$dynamic" > "$WORK/cfg-corpus-$label.yaml"
+    elif [ -n "$dynamic" ]; then
+        # Pure corelib-cpp with an explicit storage mode. allow_dynamic works on
+        # this corelib too, and here it is an optimisation rather than a
+        # requirement: bounded fields go inline, unbounded ones keep their dynamic
+        # container, so the SAME schemas as the default leg below are used -- no
+        # bounding pass, and the wire must come out identical either way.
+        printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers, allow_dynamic: %s } }\n' "$dynamic" > "$WORK/cfg-$label.yaml"
+        printf 'targets: { cpp: { namespace: sofabuffers, allow_dynamic: %s } }\n' "$dynamic" > "$WORK/cfg-corpus-$label.yaml"
     else
         printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-$label.yaml"
         printf 'targets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-corpus-$label.yaml"
@@ -457,6 +465,10 @@ run_variant() {
 
 # Pure C++20 corelib-cpp (default).
 run_variant cpp "" "" "-I$CPP/include" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC"
+# Same corelib, heap-free storage for every field the schema bounds. Runs the
+# unmodified schemas: on this corelib an unbounded field is not an error, it just
+# keeps its dynamic container.
+run_variant cpp-static "" false "-I$CPP/include" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC"
 
 # C++ wrapper over the C library, corelib-c-cpp (corelib: c-cpp). Only needs
 # SOFAB_C_DIR; the generated Makefile compiles + links its C sources.

@@ -2093,3 +2093,94 @@ messages:
 		t.Errorf("c-cpp must not gain the corelib-cpp element bound:\n%s", got)
 	}
 }
+
+// TestCppStaticStorageOnPureCorelib: allow_dynamic is a storage switch on BOTH
+// C++ corelibs, not a c-cpp-only one. On `corelib: cpp` it defaults to true (the
+// long-standing behaviour), and false selects the same heap-free containers the
+// embedded profile uses -- but per field, and without the embedded profile's
+// demand that every field be bounded.
+func TestCppStaticStorageOnPureCorelib(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s: { id: 0, type: string, maxlen: 12 }\n" +
+		"      b: { id: 1, type: blob, maxlen: 8 }\n" +
+		"      a: { id: 2, type: array, items: { type: u32, count: 4 } }\n" +
+		"      t: { id: 3, type: array, items: { type: string, count: 2, maxlen: 5 } }\n" +
+		"      fl: { id: 4, type: array, items: { type: boolean, count: 3 } }\n"
+
+	// The default on corelib: cpp is unchanged -- dynamic containers.
+	def, err := genHeader(t, src, "m.hpp", nil)
+	if err != nil {
+		t.Fatalf("default: %v", err)
+	}
+	if strings.Contains(def, "sofab::Fixed") || strings.Contains(def, "sofab::InlineVector") {
+		t.Error("corelib: cpp must still default to dynamic storage")
+	}
+
+	stat, err := genHeader(t, src, "m.hpp", map[string]any{"allow_dynamic": false})
+	if err != nil {
+		t.Fatalf("static: %v", err)
+	}
+	for _, want := range []string{
+		"sofab::FixedString<12> s", "sofab::FixedBytes<8> b",
+		"sofab::InlineVector<std::uint32_t, 4> a",
+		"sofab::InlineVector<sofab::FixedString<5>, 2> t",
+		// A boolean array element stays `bool` here: uint8_t is demanded by the C
+		// runtime's DEFERRED decoder, which is a corelib property, not a storage one.
+		"sofab::InlineVector<bool, 3> fl",
+	} {
+		if !strings.Contains(stat, want) {
+			t.Errorf("static storage on corelib: cpp: missing %q", want)
+		}
+	}
+	// The decode side is the pure-corelib one in BOTH storage modes: corelib-cpp's
+	// readString/readBlob and its deduced StringSeq/BlobSeq take either
+	// destination, so nothing here may reach for the C wrapper's API.
+	for _, bad := range []string{"FixedStringSeq", "FixedBlobSeq", "is.readSequence("} {
+		if strings.Contains(stat, bad) {
+			t.Errorf("static storage on corelib: cpp must not emit the c-cpp collector API: %q", bad)
+		}
+	}
+	if !strings.Contains(stat, "sofab::StringSeq _r0{t, 2, 5};") {
+		t.Errorf("expected the deduced StringSeq collector:\n%s", stat)
+	}
+}
+
+// TestCppStaticStorageFallsBackPerField: unlike the embedded profile, static
+// storage on `corelib: cpp` never fails a build over an unbounded field -- there
+// is simply no N to size inline storage with, so that one field keeps its
+// dynamic container while its bounded neighbours go inline. Turning the switch
+// on therefore never forces a schema migration.
+func TestCppStaticStorageFallsBackPerField(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      bs: { id: 0, type: string, maxlen: 8 }\n" +
+		"      us: { id: 1, type: string }\n" +
+		"      bb: { id: 2, type: blob, maxlen: 4 }\n" +
+		"      ub: { id: 3, type: blob }\n" +
+		"      ba: { id: 4, type: array, items: { type: u32, count: 3 } }\n" +
+		"      ua: { id: 5, type: array, items: { type: u32 } }\n" +
+		"      bt: { id: 6, type: array, items: { type: string, count: 2, maxlen: 4 } }\n" +
+		"      ut: { id: 7, type: array, items: { type: string } }\n"
+
+	h, err := genHeader(t, src, "m.hpp", map[string]any{"allow_dynamic": false})
+	if err != nil {
+		t.Fatalf("mixed schema must generate, not fail: %v", err)
+	}
+	for _, want := range []string{
+		"sofab::FixedString<8> bs", "std::string us",
+		"sofab::FixedBytes<4> bb", "std::vector<std::uint8_t> ub",
+		"sofab::InlineVector<std::uint32_t, 3> ba", "std::vector<std::uint32_t> ua",
+		"sofab::InlineVector<sofab::FixedString<4>, 2> bt", "std::vector<std::string> ut",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("per-field fallback: missing %q\n%s", want, h)
+		}
+	}
+
+	// The embedded profile still refuses the same schema, in BOTH its storage
+	// modes: there the bound is mandatory, not an optimisation.
+	for _, dyn := range []bool{false, true} {
+		if _, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp", "allow_dynamic": dyn}); err == nil {
+			t.Errorf("c-cpp allow_dynamic=%v: expected an unbounded-field error", dyn)
+		}
+	}
+}

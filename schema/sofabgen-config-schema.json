@@ -133,8 +133,7 @@
       "properties": {
         "allow_dynamic": {
           "type": "boolean",
-          "default": false,
-          "description": "corelib: c-cpp only. Store bounded fields in std::string/std::vector instead of fixed-capacity inline containers, for a target that has a heap and the C++ stdlib: a field then holds what a message actually carries rather than its declared worst case, and moves instead of copying. Bounds stay mandatory in both modes (an unbounded field is a generate-time error either way) and are enforced on the decode path, so the same schema and the same wire bytes serve both."
+          "description": "Storage for schema-bounded fields. false = heap-free inline containers (sofab::FixedString<N> / FixedBytes<N> / InlineVector<T,N>); true = std::string / std::vector, sized to what a message actually carries. The wire is identical either way -- this is a storage decision, never a format or API one. DEFAULT DEPENDS ON corelib: false for c-cpp (an embedded target has no heap to spare), true for cpp (a server target would rather allocate what it carries than its declared worst case). Unbounded fields differ by profile, not by this switch: c-cpp rejects them at generate time in both modes (maxlen/count are mandatory), while cpp simply leaves them in their dynamic container -- so static storage can be turned on there without changing the schema, and applies per field wherever a bound exists. A declared bound is honoured whatever its size; there is no threshold above which it silently falls back to the heap."
         },
         "corelib": {
           "type": "string",

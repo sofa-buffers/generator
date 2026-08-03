@@ -181,7 +181,10 @@ storage can be sized at compile time — an unbounded field there is a generatio
 error (a `checkBounded` pass names the offending field before any code is
 emitted). That holds in both C++ `c-cpp` storage modes: `allow_dynamic` chooses
 the container a *bounded* field lives in, never whether a bound is required
-(§9.3), and the `no_std` Rust profile follows the same rule; the **C** target has
+(§9.3), and the `no_std` Rust profile follows the same rule. The pure `cpp`
+profile also offers `allow_dynamic: false`, but there it is an optimisation
+rather than a requirement: it applies per field wherever a bound exists and
+leaves the rest dynamic, so it never turns an unbounded field into an error; the **C** target has
 no such escape — the C
 object model has no dynamic containers — so for C every string/blob needs a
 `maxlen` and every array a `count`, unconditionally. Blob
@@ -325,7 +328,7 @@ override.
 | `package` | go, java | Package name. |
 | `module_path`, `go_version` | go | `go.mod` fields. |
 | `symbol_prefix` | c | Prefix on generated C symbols. |
-| `allow_dynamic` | cpp (`c-cpp`) | Stores bounded fields in `std::string`/`std::vector` instead of inline containers, for a target with a heap; bounds stay mandatory and become decode-path checks (§9.3). |
+| `allow_dynamic` | cpp (both corelibs) | Storage for **bounded** fields: `true` = `std::string`/`std::vector`, `false` = inline `FixedString`/`FixedBytes`/`InlineVector`. Defaults `true` on `corelib: cpp`, `false` on `c-cpp`. On `c-cpp` bounds stay mandatory in both modes; on `cpp` an unbounded field simply keeps its dynamic container, so the switch applies per field and never fails a build (§9.3). |
 | `allow_dynamic` | rust (`rs-no-std`) | Stores bounded fields in `alloc::String`/`alloc::Vec` instead of heapless containers, for a target with an allocator; bounds stay mandatory and become decode-path checks (§9.3). |
 | `format` | docs (`html`) | Documentation output format of the non-code `docs` target; `html` is currently the only one. |
 | `no_std` | rust | With `corelib: rs-no-std`, emit the `#![no_std]` crate profile (default `true`). |
@@ -566,7 +569,12 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    `allow_dynamic` changes is where a *bounded* field lives: `std::string` /
    `std::vector` sized to what the message carries, with the `maxlen`/`count`
    enforced as an explicit reject instead of as the container's capacity. Encode
-   output is byte-identical between the two modes. **Rust `corelib: rs-no-std`
+   output is byte-identical between the two modes. **The same switch is available
+   on `corelib: cpp`**, where it defaults the other way (`true`) and applies per
+   field: bounded fields go inline, unbounded ones keep their dynamic container,
+   so heap-free storage is reachable at maxspeed without the embedded profile's
+   demand that every field be bounded. corelib-cpp's typed reads take either
+   destination, so the generated decode is identical in both of its modes. **Rust `corelib: rs-no-std`
    (`no_std`, on by default) is the direct analog** (`docs/generator/rust.md`):
    bounded strings/blobs/sequence arrays lower to `heapless::String<N>` /
    `heapless::Vec<T,N>` (the `heapless` crate; the corelib stays storage-agnostic),
