@@ -410,6 +410,23 @@ run_variant() {
     echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: [$label] control must keep 255; got: $OUT"; exit 1; }
     echo "==> [$label] declared-width reject OK"
 
+    # Declared ELEMENT width is a validity bound too (MESSAGE_SPEC S1/S7.1,
+    # generator#279 / Crucible F-0052). The scalar half is asserted above; this is
+    # the array half, which lives inside the corelib because readArray converts the
+    # elements itself -- generated code has to ARM the bound or the unbounded decode
+    # runs and masks. someuintarray (id 15) declares u32.
+    # Wire: 7b (id 15, array-unsigned) 01 (count 1) then the element varint.
+    echo "==> [$label] an over-width ARRAY ELEMENT must be INVALID (S7.1, generator#279)"
+    if printf '\173\001\200\200\200\200\020' | "$WORK/ex-$label/harness/harness" decode myfirstmessage >/dev/null 2>&1; then
+        echo "FAIL: [$label] 2^32 into a u32 array element must be INVALID, not masked and kept"; exit 1
+    fi
+    # Control: u32 max is in range and must still decode, keeping its exact value.
+    OUT=$(printf '\173\001\377\377\377\377\017' | "$WORK/ex-$label/harness/harness" decode myfirstmessage) \
+        || { echo "FAIL: [$label] u32 max must decode as an array element"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '4294967295' \
+        || { echo "FAIL: [$label] the in-range element must survive exactly; got: $OUT"; exit 1; }
+    echo "==> [$label] element-width reject OK"
+
     echo "==> [$label] shared-vector byte-exact conformance"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf-$label" )
     make -C "$WORK/conf-$label" "$@" >/dev/null

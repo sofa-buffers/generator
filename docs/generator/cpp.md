@@ -509,12 +509,30 @@ returns `false` and the arm stores nothing — the skip, not a reject.
 deferred descriptor carries the declared width to the corelib, which rejects
 there. Adding a generator-side guard would only duplicate it.
 
-### Known gap: array elements on the maxspeed profile
+### Array elements: the bound is armed, not inlined (issue #279)
 
-`is.readArray(dst, count)` converts elements inside corelib-cpp
-(`sp[i] = static_cast<Elem>(raw)`), so a narrow array element is still masked and
-the raw value never reaches generated code. Routing arrays through a wide
-temporary would defeat the bulk/zero-copy path this profile exists for, so this
-one needs a corelib-cpp change — the same shape as the `corelib-c-cpp#90` maxlen
-gap. Scalars, struct/union members and every other backend's array elements are
-covered.
+`is.readArray(dst, count)` converts the elements *inside* corelib-cpp
+(`sp[i] = static_cast<Elem>(raw)`), so the raw value never reaches generated code
+and the scalar trick above does not carry over. Routing arrays through a wide
+temporary would defeat the bulk/zero-copy path this profile exists for.
+
+corelib-cpp closed that by taking the bound as an argument, so the generator hands
+it in and the corelib enforces it at the point of conversion:
+
+```cpp
+is.readArray(u8s, 5, -1, sofab::ElemBound::of<std::uint8_t>());
+```
+
+Left at its default the argument is **unarmed** and the unbounded decode runs —
+which is what masked 5208 into a `u8` array down to 88 (Crucible F-0052). Two
+details of the emission are deliberate:
+
+- **64-bit elements get the argument too.** `ElemBound::of` returns unarmed for
+  them, so the corelib's own helper decides rather than a special case here.
+- **Floating-point elements do not.** `ElemBound::of<float>()` would cast
+  `std::numeric_limits<float>::max()` to `int64_t` inside a `constexpr` function
+  — out of range, so a hard compile error rather than a wrong bound. The corelib
+  ignores the argument for a non-integral element anyway.
+
+`c-cpp` keeps its own shape: it was already conformant through its descriptor
+path, and its `readArray` has a different signature.

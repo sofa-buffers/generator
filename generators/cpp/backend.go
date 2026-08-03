@@ -1405,7 +1405,7 @@ func (g *gen) nativeTemp(elemType string, count int64) string {
 // already the wire element type -- every numeric/bitfield array, and a boolean
 // array on the c-cpp leg, where the element is std::uint8_t. No conversion, no
 // temporary, no cast: the corelib binds the member itself.
-func (g *gen) nativeArrayRead(f *hfile, ind, target string, count int64, hasCount bool, cap int64, depth int) {
+func (g *gen) nativeArrayRead(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, count int64, hasCount bool, cap int64, depth int) {
 	if g.clib && depth == 0 {
 		// readArray settles the tag before it prepares the destination, checks
 		// the wire count against the schema bound before any resize, and only
@@ -1422,7 +1422,10 @@ func (g *gen) nativeArrayRead(f *hfile, ind, target string, count int64, hasCoun
 	// and the reset — see IStreamImpl::readArray for the order they must run
 	// in. A count-less array sizes to the wire count inside it, so it can no
 	// longer decode empty (#112).
-	f.line("%sis.readArray(%s%s);", ind, target, g.cppArrayBounds(count, hasCount))
+	// The element-width bound rides along on this leg (generator#279): the
+	// declared width is a validity bound (§1/§7.1) and readArray enforces it, but
+	// only once armed -- unarmed it runs the unbounded decode, which masks.
+	f.line("%sis.readArray(%s%s);", ind, target, g.cppArrayArgs(count, hasCount, g.cppElemBound(elem, ref)))
 }
 
 func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, elemMaxHas bool, elemMax int64, depth int) {
@@ -1440,7 +1443,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindFP32, ir.KindFP64, ir.KindBitfield:
-		g.nativeArrayRead(f, ind, target, count, hasCount, cap, depth)
+		g.nativeArrayRead(f, ind, target, elem, ref, count, hasCount, cap, depth)
 	case ir.KindEnum:
 		bk := enumBacking(ref.Target)
 		et := g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax)
@@ -1476,7 +1479,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			// and takes the numeric arm verbatim -- no conversion, and above all no
 			// reinterpret_cast of the container, which is what corrupted a
 			// std::vector<bool>'s control words under allow_dynamic.
-			g.nativeArrayRead(f, ind, target, count, hasCount, cap, depth)
+			g.nativeArrayRead(f, ind, target, elem, ref, count, hasCount, cap, depth)
 		} else {
 			f.line("%s{ std::vector<std::uint8_t> %s; if (is.readArray(%s%s)) { %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = %s[%s] != 0; } }",
 				ind, tv, tv, g.cppArrayBounds(count, hasCount), target, tv, iv, iv, tv, iv, target, iv, tv, iv)

@@ -58,9 +58,9 @@ func TestCppStructural(t *testing.T) {
 		"static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Myfirstmessage &out)",
 		"enum class MyfirstmessageSomeenum : std::int8_t {", // smallest signed backing
 		"std::uint64_t someu64 = 18446744073709551615ULL;",
-		"is.read(",                        // nested decode via is.read
-		"float somefp32 = 0.0f;",          // valid float literal
-		"is.readArray(someuintarray, 4);", // the over-count reject (generator#100) rides into readArray
+		"is.read(",               // nested decode via is.read
+		"float somefp32 = 0.0f;", // valid float literal
+		"is.readArray(someuintarray, 4, -1, sofab::ElemBound::of<std::uint32_t>());", // the over-count reject (generator#100) rides into readArray
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q", want)
@@ -162,14 +162,14 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"std::vector<std::uint32_t> arr = {};",                          // unbounded native -> vector (was std::array<T,0>)
-		"std::vector<bool> bl = {};",                                    // unbounded bool -> vector
-		"std::vector<std::uint32_t> fixed = {};",                        // a bounded native array is length-carrying too
-		"std::vector<std::vector<std::uint32_t>> matrix",                // matrix rows are dynamic vectors too
-		"is.readArray(arr);",                                            // readArray sizes the vector to the wire count
-		"if (arr != std::vector<std::uint32_t>{}) {",                    // whole-omit compares to an empty vector
-		"std::size_t _count) noexcept override",                         // _count is named for the resize
-		"sofabgen::WrapperSeq<std::vector<std::vector<std::uint32_t>>>", // matrix rows collected by the generated placer
+		"std::vector<std::uint32_t> arr = {};",                              // unbounded native -> vector (was std::array<T,0>)
+		"std::vector<bool> bl = {};",                                        // unbounded bool -> vector
+		"std::vector<std::uint32_t> fixed = {};",                            // a bounded native array is length-carrying too
+		"std::vector<std::vector<std::uint32_t>> matrix",                    // matrix rows are dynamic vectors too
+		"is.readArray(arr, -1, -1, sofab::ElemBound::of<std::uint32_t>());", // readArray sizes the vector to the wire count
+		"if (arr != std::vector<std::uint32_t>{}) {",                        // whole-omit compares to an empty vector
+		"std::size_t _count) noexcept override",                             // _count is named for the resize
+		"sofabgen::WrapperSeq<std::vector<std::vector<std::uint32_t>>>",     // matrix rows collected by the generated placer
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap header missing %q:\n%s", want, h)
@@ -577,7 +577,7 @@ messages:
 		// element count, never a byte budget.
 		"#define SOFAB_MAX_DYN_BUFFERED_FIELD 655364",
 		"if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }",
-		"is.readArray(arr, -1, SOFAB_MAX_DYN_ARRAY_COUNT);", // the cap rides into readArray
+		"is.readArray(arr, -1, SOFAB_MAX_DYN_ARRAY_COUNT, sofab::ElemBound::of<std::uint64_t>());", // the cap rides into readArray
 		"sofab::IStreamObject<Dyn> in{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}};",
 	} {
 		if !strings.Contains(h, want) {
@@ -797,7 +797,7 @@ func TestCppNativeArrayWritesEveryElement(t *testing.T) {
 			// performs the reset behind the tag match; the c-cpp signature also
 			// takes the wire count, since it sizes a dynamic destination. Nothing
 			// follows it: there is no fill-back to N (§3).
-			wantRead := "is.readArray(u32s, 5);"
+			wantRead := "is.readArray(u32s, 5, -1, sofab::ElemBound::of<std::uint32_t>());"
 			if corelib == "c-cpp" {
 				wantRead = "is.readArray(u32s, _count, 5);"
 			}
@@ -885,7 +885,7 @@ func TestCppFixedCountResetsSchemaDefaultTail(t *testing.T) {
 						t.Errorf("[%s] the arm must not reset %q — readArray does it behind the bound:\n%s", corelib, bad, h)
 					}
 				}
-				wantRead := "is.readArray(c, 5);"
+				wantRead := "is.readArray(c, 5, -1, sofab::ElemBound::of<std::uint32_t>());"
 				if corelib == "c-cpp" {
 					wantRead = "is.readArray(c, _count, 5);"
 				}
@@ -916,7 +916,7 @@ func TestCppDynamicArrayNoReset(t *testing.T) {
 	if strings.Contains(h, "\n            dyn = {};") {
 		t.Errorf("dynamic array must not emit a reset:\n%s", h)
 	}
-	if !strings.Contains(h, "is.readArray(dyn);") {
+	if !strings.Contains(h, "is.readArray(dyn, -1, -1, sofab::ElemBound::of<std::uint32_t>());") {
 		t.Errorf("dynamic array should read through readArray (which sizes it):\n%s", h)
 	}
 }
@@ -970,8 +970,8 @@ messages:
 	for _, want := range []string{
 		"is.readString(f, 8);",
 		"is.readBlob(g, 8);",
-		"is.readArray(i, 2);",
-		"is.readArray(j, 2);",
+		"is.readArray(i, 2, -1, sofab::ElemBound::of<std::uint32_t>());",
+		"is.readArray(j, 2, -1, sofab::ElemBound::of<std::int32_t>());",
 		"is.readArray(k, 2);",
 		"is.read(h);", // nested struct
 	} {
@@ -1891,7 +1891,7 @@ func TestCppNativeCountArrayCarriesALength(t *testing.T) {
 				"std::vector<std::uint32_t> nums = {};",
 				"std::vector<std::int32_t> part = {10, 20};",
 				"std::vector<std::vector<std::uint32_t>> rows = {};",
-				"is.readArray(nums, 4);",
+				"is.readArray(nums, 4, -1, sofab::ElemBound::of<std::uint32_t>());",
 			},
 		},
 		{
@@ -2026,5 +2026,70 @@ messages:
 		if strings.Contains(got, gone) {
 			t.Errorf("c-cpp must not gain a generator-side width guard (%q):\n%s", gone, got)
 		}
+	}
+}
+
+// generator#279 (Crucible F-0052): MESSAGE_SPEC §1/§7.1 makes the declared
+// element width a validity bound, and corelib-cpp enforces it inside readArray —
+// but only once the fourth argument is ARMED. Left at its default the unbounded
+// decode ran and an over-width element was masked to the width and kept: 5208
+// into a `u8` array came back as 88.
+//
+// The scalar position was already correct (generated code checks that one inline,
+// generator#266). This is the array half, which lives in the corelib because
+// readArray converts the elements itself.
+func TestCppReadArrayArmsTheElementWidthBound(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  W:
+    payload:
+      u8s:  { id: 0, type: array, items: { type: u8,   count: 5 } }
+      i8s:  { id: 1, type: array, items: { type: i8,   count: 5 } }
+      u64s: { id: 2, type: array, items: { type: u64,  count: 5 } }
+      f32s: { id: 3, type: array, items: { type: fp32, count: 5 } }
+`
+	got := headerFromYAML(t, src, "w.hpp")
+	for _, want := range []string{
+		// A narrow element carries its bound...
+		"is.readArray(u8s, 5, -1, sofab::ElemBound::of<std::uint8_t>());",
+		"is.readArray(i8s, 5, -1, sofab::ElemBound::of<std::int8_t>());",
+		// ...and so does a 64-bit one: ElemBound::of comes back UNARMED there, so
+		// the corelib's own helper decides, not an emission-time special case.
+		"is.readArray(u64s, 5, -1, sofab::ElemBound::of<std::uint64_t>());",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("w.hpp missing armed element bound %q:\n%s", want, got)
+		}
+	}
+	// A FLOAT element must NOT get one. This is not an optimization:
+	// ElemBound::of<float>() would cast numeric_limits<float>::max() to int64_t in
+	// a constexpr function — out of range, so a hard compile error. The corelib
+	// ignores the argument for a non-integral element anyway.
+	if strings.Contains(got, "ElemBound::of<float>") || strings.Contains(got, "ElemBound::of<double>") {
+		t.Errorf("a floating-point element must not be given an ElemBound:\n%s", got)
+	}
+	if !strings.Contains(got, "is.readArray(f32s, 5);") {
+		t.Errorf("an fp32 array must keep the unbounded read:\n%s", got)
+	}
+}
+
+// c-cpp was already conformant — it rejects an over-width element through its own
+// descriptor path — and its readArray has a different signature, so it must not
+// gain the argument.
+func TestCppCCppReadArrayKeepsItsOwnShape(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  W:
+    payload:
+      u8s: { id: 0, type: array, items: { type: u8, count: 5 } }
+`
+	got, err := fixedHeader(t, src, "w.hpp", map[string]any{"corelib": "c-cpp", "allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if strings.Contains(got, "ElemBound") {
+		t.Errorf("c-cpp must not gain the corelib-cpp element bound:\n%s", got)
 	}
 }
