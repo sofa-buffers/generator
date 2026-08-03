@@ -129,6 +129,16 @@ the **toggle (symbol `main.run_<workload>`)** method. Tracked: Ir/op.
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
 
+The emitted harness runs an uncollected `warmup_<workload>` before the measured
+`run_<workload>`, and that is load-bearing for this target specifically. `toggle`
+collects the *first* op, and Go's runtime builds interface tables and resolves
+type/name offsets lazily on first use — one-time costs that land on the measured
+op and that grow with the number of distinct types the generated code converts to
+interfaces. Unwarmed they were 32% of decode and 22% of encode here, enough that
+adding the generics visitor read as a 44% decode regression while the warmed
+number had actually improved. If you change how many itabs the generated code
+needs, this is the row to distrust first. See `emitBench` in `project.go`.
+
 ## Strict UTF-8 — validated at the destination (issues #85, #257)
 
 corelib-go's visitor path deliberately does **not** UTF-8-validate: its cursor

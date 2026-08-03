@@ -55,6 +55,20 @@ func (g *gen) readme(s *ir.Schema) string {
 //
 // noinline is on the wrapper only, so Encode/Decode and the corelib inline into it
 // as usual — that inlining is the cost being measured.
+//
+// Each op is preceded by an uncollected warmup_<workload>, and that is not
+// optional. Go is AOT-compiled, so there is no JIT to tier up — but the runtime
+// still builds interface tables and resolves type/name offsets LAZILY on first
+// use, and the allocator touches each size class for the first time. `toggle`
+// collects exactly one op, which is the first one, so without a warmup all of
+// that one-time cost is charged to the op. Measured on the bench schema, it was
+// 18k Ir (32%) of decode and 5.5k Ir (22%) of encode — enough that making codegen
+// more interface-heavy read as a 44% decode regression while steady-state per-op
+// work had actually got cheaper. One warmup op suffices: every one of those costs
+// is a global cache filled on first touch, never a per-op cost that decays —
+// checked at 1/2/3/5/10 warmups, which land within 95 Ir (0.25%) of each other
+// with no trend, i.e. below the 0.3% at which results.txt calls a value moved.
+// The warmup is a separate symbol so --toggle-collect cannot see it.
 func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
 	f.line("// Bench state at package scope: the results outlive the measured call so")
 	f.line("// main can observe them after collection stops, which is what keeps the op")
@@ -84,9 +98,32 @@ func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
 		f.line("\tbench%sOut = obj", typeName)
 		f.line("}")
 		f.blank()
+		f.line("// warmup_* pay the runtime's one-time costs (lazy itabs, type/name")
+		f.line("// offsets, first-touch allocator spans) so the collected op does not.")
+		f.line("// The body is DUPLICATED rather than delegating to run_*: toggling is")
+		f.line("// keyed on entering the symbol, whoever the caller is, so a warmup that")
+		f.line("// called run_* would be collected right along with the real op.")
+		f.line("//go:noinline")
+		f.line("func warmup_encode_%s() {", low)
+		f.line("\tb, err := bench%sIn.Encode()", typeName)
+		f.line("\tif err != nil {")
+		f.line("\t\tfail(err)")
+		f.line("\t}")
+		f.line("\tbench%sWire = b", typeName)
+		f.line("}")
+		f.blank()
+		f.line("//go:noinline")
+		f.line("func warmup_decode_%s() {", low)
+		f.line("\tobj, err := %s.Decode%s(bench%sWire)", pkgAlias, typeName, typeName)
+		f.line("\tif err != nil {")
+		f.line("\t\tfail(err)")
+		f.line("\t}")
+		f.line("\tbench%sOut = obj", typeName)
+		f.line("}")
+		f.blank()
 	}
 
-	f.line("// benchMain runs one op of <workload>. Everything here is setup and")
+	f.line("// benchMain runs one op of <workload>. Everything here is setup, warmup and")
 	f.line("// observation; only the run_* call is collected.")
 	f.line("func benchMain(w string, in []byte) int {")
 	for _, m := range s.Messages {
@@ -98,9 +135,11 @@ func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
 		f.line("\t\t\tfail(err)")
 		f.line("\t\t}")
 		f.line("\t\tif w == \"encode_%s\" {", low)
+		f.line("\t\t\twarmup_encode_%s() // one-time runtime costs (not collected)", low)
 		f.line("\t\t\trun_encode_%s()", low)
 		f.line("\t\t} else {")
-		f.line("\t\t\trun_encode_%s() // setup: the decode input (not collected)", low)
+		f.line("\t\t\twarmup_encode_%s() // setup: the decode input (not collected)", low)
+		f.line("\t\t\twarmup_decode_%s() // one-time runtime costs (not collected)", low)
 		f.line("\t\t\trun_decode_%s()", low)
 		f.line("\t\t}")
 		f.line("\t\tvar sink uint64")
