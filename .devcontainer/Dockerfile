@@ -76,8 +76,21 @@ ENV PATH=/usr/local/dart-sdk/bin:$PATH
 # rustup below (the footprint bench needs bare-metal targets apt rustc cannot
 # add); the .NET SDK (C#) is installed separately below because Ubuntu's apt does
 # not carry the .NET versions the generated C# project and corelib-cs target.
+#
+# cython3 + python3-dev + python3-setuptools are for corelib-py's ACCELERATOR, not
+# for the conformance harness (which is pure Python and needs none of them).
+# corelib-py ships `sofab._speedups`, a Cython extension, and `sofab/__init__.py`
+# imports it whenever it is importable — silently falling back otherwise. Without a
+# compiler for it the bench measures the fallback engine and cannot see the
+# accelerator at all: a corelib release noting "encode 3.0x, decode 1.5x" moved the
+# python row by zero instructions. With these three the extension can be built
+# (`python3 setup.py build_ext --inplace` in the corelib checkout), and the engine
+# that actually ran is recorded in results.txt as `sofab-engine`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
+        python3-dev \
+        python3-setuptools \
+        cython3 \
         default-jdk \
         maven \
     && rm -rf /var/lib/apt/lists/*

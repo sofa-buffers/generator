@@ -14,25 +14,43 @@
 #
 # Nothing to build; there is no footprint row (CPython ships no bare-metal target).
 #
-# WHICH ENGINE THIS MEASURES. corelib-py ships two: the pure-Python classes and a
-# Cython accelerator (`sofab._speedups`, built by its setup.py). `sofab/__init__.py`
-# imports the accelerator when it is importable and silently falls back otherwise.
-# PYTHONPATH below points at the corelib's SOURCE tree and nothing builds the
-# extension, so today this row measures the pure-Python engine — which is why the
-# corelib's "restore the accelerator's hot paths (encode 3.0x, decode 1.5x)" landed
-# without moving the row by a single instruction.
+# TWO ENGINES, TWO ROWS. corelib-py ships the pure-Python classes and a Cython
+# accelerator (`sofab._speedups`, built by its setup.py); `sofab/__init__.py` imports
+# the accelerator when it is importable and silently falls back otherwise. They are
+# 7.2x (encode) / 4.8x (decode) apart, so one number cannot stand for both: `python`
+# measures the fallback, `python-native` measures what a built wheel ships.
 #
-# That is not pinned here on purpose. Forcing SOFAB_PUREPYTHON=1 would make the row
-# permanently blind to the engine that actually ships, and python is a maxspeed row.
-# Instead format.py records the engine that ran in the `## toolchain` table
-# (`sofab-engine`), so the day the extension does get built the switch shows up in
-# the diff instead of silently rebasing every python number. To measure what ships:
-# install Cython and `pip install -e <corelib>` (or build_ext --inplace) before
-# running this row — the devcontainer has no pip today, so it cannot be done here.
+# Each row PINS its engine, and that is not optional. The two share one corelib
+# checkout (clone_corelib caches per run), so a build_ext done for python-native
+# would leave the extension sitting in the tree for the pure row to import — making
+# the result depend on row order. `pure` therefore forces SOFAB_PUREPYTHON=1 rather
+# than relying on the absence of a .so.
+#
+# python-native REFUSES to report a number it did not earn: without Cython the build
+# fails, and were it to fall through it would report the pure engine's cost under the
+# native row's name — the exact confusion these two rows exist to end. The engine that
+# actually ran is recorded either way, in the `## toolchain` table as `sofab-engine`.
 
 # bench_build_ir <gen_proj> <corelib>
 bench_build_ir() {
-    local proj="$1"
+    local proj="$1" corelib="$2"
+
+    if [ "${SOFAB_BENCH_ENGINE:-}" = native ]; then
+        # In-place: bench_ir_env puts <corelib>/src on PYTHONPATH, which is where
+        # --inplace drops the .so, so no install and no venv is involved.
+        ( cd "$corelib" && python3 setup.py build_ext --inplace ) >/dev/null 2>&1 || {
+            echo "     python-native: building sofab._speedups failed (Cython installed?)" >&2
+            return 1
+        }
+        # setup.py marks the extension optional=True, so a compile it cannot do is
+        # NOT a failure exit — verify the import instead of trusting the build.
+        PYTHONPATH="$corelib/src" python3 -c \
+            "import sofab, sys; sys.exit(0 if sofab.IMPL == 'native' else 1)" 2>/dev/null || {
+            echo "     python-native: built, but sofab.IMPL is not 'native'" >&2
+            return 1
+        }
+    fi
+
     python3 -m py_compile "$proj/harness.py" >/dev/null 2>&1
 }
 
@@ -43,7 +61,10 @@ bench_cmd_ir() {
 
 # bench_ir_env <proj> <corelib>
 #   corelib-py provides `sofab`; the generated harness does `import message` from
-#   its own project dir.
+#   its own project dir. SOFAB_PUREPYTHON pins the fallback engine for the `python`
+#   row — see the header: the extension may be sitting in the shared checkout.
 bench_ir_env() {
-    echo "PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 PYTHONPATH=$2/src:$1"
+    local pin=""
+    [ "${SOFAB_BENCH_ENGINE:-}" = native ] || pin="SOFAB_PUREPYTHON=1 "
+    echo "PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 ${pin}PYTHONPATH=$2/src:$1"
 }

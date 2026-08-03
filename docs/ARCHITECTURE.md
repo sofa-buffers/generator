@@ -2086,20 +2086,23 @@ regardless. Read those as pairs: turning it on trades static bytes for an alloca
 which on `c-cpp` drags in newlib's malloc (`.text` 6589 → 14287) and on bare-metal
 Rust needs one supplied by the footprint driver at all. What no static-section
 measurement can show is the heap the dynamic build then needs at runtime.
-Uncovered axes are named in `tests/bench/README.md`: the corelib build switches
-(`SOFAB_DISABLE_*`, cargo features, `sofab_no_strict_utf8`) — which is the footprint
-story itself — and the corelib runtime engines.
+A fourth is the corelib's own engine where it has one: `python` / `python-native`
+(below). Uncovered axes are named in `tests/bench/README.md`: the corelib build
+switches (`SOFAB_DISABLE_*`, cargo features, `sofab_no_strict_utf8`) — which is the
+footprint story itself — and corelib-ts's `setKernel` seam.
 
 **What ran is recorded, not assumed.** The header carries the corelib SHAs and the
 `## toolchain` table the compiler versions, because each moves numbers with the
 generator unchanged. `sofab-engine` is the same idea one level up: corelib-py picks
 between its pure-Python classes and its Cython accelerator at *import* time, silently,
-and the two are ~1.5–3× apart — so the engine that measured is written into the table
-rather than assumed. It reads `pure` today (the recipe builds no extension), which is
-why an accelerator perf release moved the row by zero instructions. Deliberately
-recorded and not pinned: pinning would make a `maxspeed` row permanently blind to the
-engine that ships, whereas recording makes the switch visible in the diff the day the
-extension is built. See `tests/bench/README.md`.
+and the two turn out to be **7.2× (encode) / 4.8× (decode)** apart — far too much for
+one row to stand for both, and for years only the fallback was measured (an
+accelerator perf release moved the row by zero instructions). Both are measured now,
+`python` and `python-native`, each pinning its own engine because they share a corelib
+checkout, and each row's actual engine is written into the table. `python-native`
+verifies `sofab.IMPL` before reporting: the extension is `optional=True`, so a failed
+compile is not a failed build, and a row that silently degraded would report the pure
+cost under the native name. See `tests/bench/README.md`.
 
 **Not measured / known gaps** (properties of the targets, not the harness): the C++
 `footprint` profile cannot build freestanding (the generated header pulls in
