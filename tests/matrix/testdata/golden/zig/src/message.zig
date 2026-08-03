@@ -29,7 +29,7 @@ pub const Scalars = struct {
     pub const MAX_SIZE: usize = 49;
 
     /// Write this value's fields to `os` (sparse-canonical encoding).
-    pub fn marshal(self: *const Scalars, os: *sofab.OStream) sofab.Error!void {
+    pub fn serialize(self: *const Scalars, os: *sofab.OStream) sofab.Error!void {
         if (self.u8min != 0) try os.writeUnsigned(0, self.u8min);
         if (self.u8max != 255) try os.writeUnsigned(1, self.u8max);
         if (self.u64max != 18446744073709551615) try os.writeUnsigned(2, self.u64max);
@@ -41,7 +41,7 @@ pub const Scalars = struct {
     }
 
     /// True when every field equals its declared default, compared per field
-    /// and recursively -- i.e. when marshal would write no child at all (S2).
+    /// and recursively -- i.e. when serialize would write no child at all (S2).
     pub fn isDefault(self: *const Scalars) bool {
         if (self.u8min != 0) return false;
         if (self.u8max != 255) return false;
@@ -59,7 +59,7 @@ pub const Scalars = struct {
         var sink: _EncodeSink = .{ .alloc = alloc };
         var scratch: [512]u8 = undefined;
         var os = sofab.OStream.initFlush(&scratch, 0, &sink, _EncodeSink.push);
-        try self.marshal(&os);
+        try self.serialize(&os);
         _ = os.flush();
         if (sink.failed) return error.OutOfMemory;
         return sink.list.toOwnedSlice(alloc);
@@ -84,6 +84,52 @@ pub const Scalars = struct {
         if (st == .incomplete) return error.IncompleteMessage;
         return m;
     }
+
+    /// Incremental decoder: hold one and feed the message as bytes arrive,
+    /// instead of buffering it whole first.
+    ///
+    /// The wire format has no end marker at the top level -- a message ends
+    /// where its bytes end -- so a feed cannot report that the MESSAGE is
+    /// complete, only that the bytes handed in ended on a field boundary
+    /// (.complete) or mid-field (.incomplete). Neither is a failure
+    /// mid-stream; the caller's own framing decides when the input is over,
+    /// and `finish` then gives the verdict for the message as a whole.
+    ///
+    /// BORROWING: a string or blob that arrives whole inside one chunk is
+    /// borrowed from that chunk, exactly as decode() borrows from its buffer
+    /// -- so a fed chunk must outlive the message. A payload SPLIT across
+    /// chunks has no such slice to borrow and is copied into `alloc`.
+    pub const Decoder = struct {
+        is: sofab.IStream = sofab.IStream.init(),
+        v: _dec_Scalars,
+
+        /// Feed the next chunk, of any size. `.complete` means the bytes
+        /// ended on a field boundary, `.incomplete` mid-field -- neither
+        /// answers whether the MESSAGE is done.
+        pub fn feed(self: *Decoder, chunk: []const u8) DecodeError!sofab.Status {
+            const st = try self.is.feed(chunk, &self.v);
+            if (self.v.inv) return error.InvalidMessage;
+            return st;
+        }
+
+        /// The outcome for everything fed so far, without feeding more.
+        pub fn status(self: *const Decoder) sofab.Status {
+            return self.is.status();
+        }
+
+        /// Declare end-of-input. Fails a stream that ended mid-field rather
+        /// than leaving the destination half-filled; the destination is the
+        /// caller's either way.
+        pub fn finish(self: *const Decoder) DecodeError!void {
+            if (self.is.status() == .incomplete) return error.IncompleteMessage;
+        }
+    };
+
+    /// An incremental decoder filling `out`: hold it and feed chunks as they
+    /// arrive, instead of buffering the whole message first.
+    pub fn decoder(out: *Scalars, alloc: std.mem.Allocator) Decoder {
+        return .{ .v = .{ .m = out, .alloc = alloc } };
+    }
 };
 
 /// Flat-visitor decoder for Scalars: a (location, id) state machine over the
@@ -94,6 +140,7 @@ const _dec_Scalars = struct {
     stack: [256]_Loc = undefined,
     sp: usize = 0,
     cur: _Loc = .root,
+    acc: std.ArrayList(u8) = .empty, // only a payload split across feed chunks lands here
     inv: bool = false, // a scalar array over its schema count, or a wrapper element id >= count -> INVALID
     askip: usize = 0, // elements left to discard from a wire-type-contradictory array
 
@@ -165,6 +212,23 @@ const _dec_Scalars = struct {
                 else => count,
             },
         };
+    }
+
+    /// Give the string/blob callbacks ONE contiguous payload, whatever the
+    /// feed chunking was. Returns null while the payload is still incomplete.
+    ///
+    /// A payload that arrives whole in one chunk -- always so on the
+    /// contiguous decode() path, and the common case when streaming -- is
+    /// returned as-is: the destination borrows the caller's bytes and nothing
+    /// is copied. Only a payload genuinely SPLIT across chunks is assembled
+    /// here, because there is no contiguous slice to borrow once the first
+    /// chunk is gone. That copy lives in `alloc`, like array storage.
+    fn _reassemble(self: *_dec_Scalars, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {
+        if (offset == 0 and chunk.len >= total) return chunk; // whole payload, borrow it
+        if (offset == 0) self.acc.clearRetainingCapacity();
+        self.acc.appendSlice(self.alloc, chunk) catch { self.inv = true; return null; };
+        if (self.acc.items.len < total) return null; // more chunks to come
+        return self.acc.items;
     }
 
     pub fn sequenceBegin(self: *_dec_Scalars, _: sofab.Id) void {

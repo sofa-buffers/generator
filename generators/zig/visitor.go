@@ -362,6 +362,11 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("    stack: [256]_Loc = undefined,")
 	f.line("    sp: usize = 0,")
 	f.line("    cur: _Loc = .root,")
+	// Reassembly buffer for a string/blob payload split across feed chunks.
+	// Untouched -- and never allocated -- on the contiguous path and on every
+	// streaming payload that happens to arrive whole in one chunk, which is what
+	// keeps the zero-copy borrow the common case rather than the exception.
+	f.line("    acc: std.ArrayList(u8) = .empty, // only a payload split across feed chunks lands here")
 	// Sticky malformed-message flag: a fixed native array received more
 	// elements than its schema count (generator#100); decode() then rejects
 	// with error.InvalidMessage. Always present so decode() can check it.
@@ -898,13 +903,16 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 			all = append(all, fa)
 		}
 	}
-	totalParam := "_"
-	if totalUsed {
-		totalParam = "total"
-	}
+	// `total` is always bound now: the reassembly preamble needs it to tell a
+	// whole payload from the first piece of a split one, whether or not any arm
+	// compares it against a maxlen.
+	_ = totalUsed
 	f.blank()
-	f.line("    pub fn %s(self: *_dec_%s, id: sofab.Id, %s: usize, offset: usize, chunk: []const u8) void {", cb, name, totalParam)
-	f.line("        if (offset != 0) return; // decode() is single-shot; a split payload means truncated input")
+	f.line("    pub fn %s(self: *_dec_%s, id: sofab.Id, total: usize, offset: usize, _chunk: []const u8) void {", cb, name)
+	// The corelib delivers a payload in as many pieces as the feed chunks split
+	// it into. Rebind `chunk` to the WHOLE payload so every arm below sees one
+	// contiguous slice and none of them has to know about chunking.
+	f.line("        const chunk = self._reassemble(total, offset, _chunk) orelse return;")
 	f.line("        switch (self.cur) {")
 	for _, fa := range all {
 		if fa.body != "" {
@@ -1167,6 +1175,26 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 			all = append(all, frameArms{fr: fr, body: b.String()})
 		}
 	}
+	// The string/blob reassembly helper. Emitted next to the callbacks that use
+	// it so the whole chunk-boundary story sits in one place.
+	f.blank()
+	f.line("    /// Give the string/blob callbacks ONE contiguous payload, whatever the")
+	f.line("    /// feed chunking was. Returns null while the payload is still incomplete.")
+	f.line("    ///")
+	f.line("    /// A payload that arrives whole in one chunk -- always so on the")
+	f.line("    /// contiguous decode() path, and the common case when streaming -- is")
+	f.line("    /// returned as-is: the destination borrows the caller's bytes and nothing")
+	f.line("    /// is copied. Only a payload genuinely SPLIT across chunks is assembled")
+	f.line("    /// here, because there is no contiguous slice to borrow once the first")
+	f.line("    /// chunk is gone. That copy lives in `alloc`, like array storage.")
+	f.line("    fn _reassemble(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
+	f.line("        if (offset == 0 and chunk.len >= total) return chunk; // whole payload, borrow it")
+	f.line("        if (offset == 0) self.acc.clearRetainingCapacity();")
+	f.line("        self.acc.appendSlice(self.alloc, chunk) catch { self.inv = true; return null; };")
+	f.line("        if (self.acc.items.len < total) return null; // more chunks to come")
+	f.line("        return self.acc.items;")
+	f.line("    }")
+
 	idParam := "_"
 	if idUsed {
 		idParam = "id"

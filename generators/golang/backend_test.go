@@ -311,7 +311,7 @@ func TestGoStructuralInvariants(t *testing.T) {
 	msg := files["myfirstmessage.go"]
 	for _, want := range []string{
 		"package messages",
-		"func (m *Myfirstmessage) marshal(e *sofab.Encoder)",
+		"func (m *Myfirstmessage) Serialize(e *sofab.Encoder)",
 		"_visitorBase", // struct embeds the no-op base
 		"func (m *Myfirstmessage) Unsigned(id sofab.ID, v uint64) error", // visitor decode
 		"func (m *Myfirstmessage) BeginSequence(id sofab.ID) (sofab.Visitor, error)",
@@ -378,12 +378,12 @@ messages:
 	got := genGo(t, s, map[string]any{"package": "messages"})["vec.go"]
 	for _, want := range []string{
 		// struct FIELD: lazy begin, dropping end -- no run-time choice at all
-		"\te.WriteSequenceBeginLazy(0)\n\tm.Nested.marshal(e)\n\te.WriteSequenceEnd()\n",
+		"\te.WriteSequenceBeginLazy(0)\n\tm.Nested.Serialize(e)\n\te.WriteSequenceEnd()\n",
 		// string-array wrapper FIELD (id 1): dropping end
 		"\te.WriteSequenceBeginLazy(1)\n",
 		// struct-array wrapper FIELD (id 2) holding ELEMENT frames whose closer is
 		// picked from the element's index in the value
-		"\te.WriteSequenceBeginLazy(2)\n\tfor _i0, _e0 := range m.Structs {\n\t\te.WriteSequenceBeginLazy(sofab.ID(_i0))\n\t\t_e0.marshal(e)\n\t\tif _i0 == len(m.Structs)-1 {\n\t\t\te.WriteSequenceEndKeep()\n\t\t} else {\n\t\t\te.WriteSequenceEnd()\n\t\t}\n\t}\n\te.WriteSequenceEnd()\n",
+		"\te.WriteSequenceBeginLazy(2)\n\tfor _i0, _e0 := range m.Structs {\n\t\te.WriteSequenceBeginLazy(sofab.ID(_i0))\n\t\t_e0.Serialize(e)\n\t\tif _i0 == len(m.Structs)-1 {\n\t\t\te.WriteSequenceEndKeep()\n\t\t} else {\n\t\t\te.WriteSequenceEnd()\n\t\t}\n\t}\n\te.WriteSequenceEnd()\n",
 		// nested array: the outer wrapper is a FIELD (end), each row an ELEMENT
 		// (kept only at the last index)
 		"\te.WriteSequenceBeginLazy(3)\n\tfor _i0, _e0 := range m.Rows {\n\t\te.WriteSequenceBeginLazy(sofab.ID(_i0))\n",
@@ -395,7 +395,7 @@ messages:
 	}
 	// An ELEMENT must never take the keeping closer unconditionally: that framed
 	// every all-default interior element, which the sparse rule now omits.
-	if strings.Contains(got, "_e0.marshal(e)\n\t\te.WriteSequenceEndKeep()\n") {
+	if strings.Contains(got, "_e0.Serialize(e)\n\t\te.WriteSequenceEndKeep()\n") {
 		t.Errorf("an array element must not close unconditionally with the keeping end:\n%s", got)
 	}
 	// The string-array FIELD must close with the dropping end, never the keeping

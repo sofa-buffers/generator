@@ -275,7 +275,7 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 	// default is omitted; a sequence is opened lazily and, at field level, closed
 	// with the dropping end (MESSAGE_SPEC §2).
 	f.line("    /// Write this value's fields to `os` (sparse-canonical encoding).")
-	f.line("    pub fn marshal(self: *const %s, os: *sofab.OStream) sofab.Error!void {", name)
+	f.line("    pub fn serialize(self: *const %s, os: *sofab.OStream) sofab.Error!void {", name)
 	needsSelf := len(fields) > 0
 	if !needsSelf {
 		f.line("        _ = self;")
@@ -295,7 +295,7 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 		f.line("        var sink: _EncodeSink = .{ .alloc = alloc };")
 		f.line("        var scratch: [512]u8 = undefined;")
 		f.line("        var os = sofab.OStream.initFlush(&scratch, 0, &sink, _EncodeSink.push);")
-		f.line("        try self.marshal(&os);")
+		f.line("        try self.serialize(&os);")
 		f.line("        _ = os.flush();")
 		f.line("        if (sink.failed) return error.OutOfMemory;")
 		f.line("        return sink.list.toOwnedSlice(alloc);")
@@ -325,6 +325,7 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 		f.line("        if (st == .incomplete) return error.IncompleteMessage;")
 		f.line("        return m;")
 		f.line("    }")
+		g.emitStreamDecoder(f, name, fields)
 	}
 	f.line("};")
 	f.blank()
@@ -339,7 +340,7 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 func (g *gen) emitIsDefault(f *zfile, name string, fields []*ir.Field) {
 	f.blank()
 	f.line("    /// True when every field equals its declared default, compared per field")
-	f.line("    /// and recursively -- i.e. when marshal would write no child at all (S2).")
+	f.line("    /// and recursively -- i.e. when serialize would write no child at all (S2).")
 	f.line("    pub fn isDefault(self: *const %s) bool {", name)
 	if len(fields) == 0 {
 		f.line("        _ = self;")
@@ -432,7 +433,7 @@ func (g *gen) emitMarshal(f *zfile, fld *ir.Field) {
 		// field and recursively. writeSequenceEnd therefore drops an all-default
 		// nested object entirely instead of emitting an empty wrapper.
 		f.line("        try os.writeSequenceBeginLazy(%d);", fld.ID)
-		f.line("        try %s.marshal(os);", acc)
+		f.line("        try %s.serialize(os);", acc)
 		f.line("        try os.writeSequenceEnd();")
 		return
 	case ir.KindArray:
@@ -583,7 +584,7 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 		f.line("%stry os.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, 0..) |*%s, %s| {", ind, val, ev, iv)
 		f.line("%s    try os.writeSequenceBeginLazy(@intCast(%s));", ind, iv)
-		f.line("%s    try %s.marshal(os);", ind, ev)
+		f.line("%s    try %s.serialize(os);", ind, ev)
 		emitSeqEnd(f, ind+"    ", lastElemExpr(iv, val))
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
@@ -712,4 +713,66 @@ func (g *gen) emitSupport(f *zfile, dynAlloc bool) {
 		f.line("    return sofab.arrays.allocN(T, a, n);")
 		f.line("}")
 	}
+}
+
+// emitStreamDecoder writes the public incremental decoder: a handle on the
+// corelib's resumable IStream plus the visitor state that has to survive
+// between chunks. The corelib already suspends and resumes at any byte
+// boundary; what was missing was a public handle, since `_dec_<Msg>` is not
+// `pub` (PLAN S5.6).
+//
+// The DESTINATION is the caller's, not a field of the Decoder. A Decoder that
+// owned its message would have to point its visitor at its own field, and Zig
+// moves structs by value -- returning one from a factory would leave that
+// pointer dangling. Taking `out: *Msg` keeps the decoder trivially movable.
+func (g *gen) emitStreamDecoder(f *zfile, name string, fields []*ir.Field) {
+	f.blank()
+	f.line("    /// Incremental decoder: hold one and feed the message as bytes arrive,")
+	f.line("    /// instead of buffering it whole first.")
+	f.line("    ///")
+	f.line("    /// The wire format has no end marker at the top level -- a message ends")
+	f.line("    /// where its bytes end -- so a feed cannot report that the MESSAGE is")
+	f.line("    /// complete, only that the bytes handed in ended on a field boundary")
+	f.line("    /// (.complete) or mid-field (.incomplete). Neither is a failure")
+	f.line("    /// mid-stream; the caller's own framing decides when the input is over,")
+	f.line("    /// and `finish` then gives the verdict for the message as a whole.")
+	f.line("    ///")
+	f.line("    /// BORROWING: a string or blob that arrives whole inside one chunk is")
+	f.line("    /// borrowed from that chunk, exactly as decode() borrows from its buffer")
+	f.line("    /// -- so a fed chunk must outlive the message. A payload SPLIT across")
+	f.line("    /// chunks has no such slice to borrow and is copied into `alloc`.")
+	f.line("    pub const Decoder = struct {")
+	f.line("        is: sofab.IStream = sofab.IStream.init(),")
+	f.line("        v: _dec_%s,", name)
+	f.blank()
+	f.line("        /// Feed the next chunk, of any size. `.complete` means the bytes")
+	f.line("        /// ended on a field boundary, `.incomplete` mid-field -- neither")
+	f.line("        /// answers whether the MESSAGE is done.")
+	f.line("        pub fn feed(self: *Decoder, chunk: []const u8) DecodeError!sofab.Status {")
+	f.line("            const st = try self.is.feed(chunk, &self.v);")
+	f.line("            if (self.v.inv) return error.InvalidMessage;")
+	if g.msgLimitGuards(fields) {
+		f.line("            if (self.v.lim) return error.LimitExceeded;")
+	}
+	f.line("            return st;")
+	f.line("        }")
+	f.blank()
+	f.line("        /// The outcome for everything fed so far, without feeding more.")
+	f.line("        pub fn status(self: *const Decoder) sofab.Status {")
+	f.line("            return self.is.status();")
+	f.line("        }")
+	f.blank()
+	f.line("        /// Declare end-of-input. Fails a stream that ended mid-field rather")
+	f.line("        /// than leaving the destination half-filled; the destination is the")
+	f.line("        /// caller's either way.")
+	f.line("        pub fn finish(self: *const Decoder) DecodeError!void {")
+	f.line("            if (self.is.status() == .incomplete) return error.IncompleteMessage;")
+	f.line("        }")
+	f.line("    };")
+	f.blank()
+	f.line("    /// An incremental decoder filling `out`: hold it and feed chunks as they")
+	f.line("    /// arrive, instead of buffering the whole message first.")
+	f.line("    pub fn decoder(out: *%s, alloc: std.mem.Allocator) Decoder {", name)
+	f.line("        return .{ .v = .{ .m = out, .alloc = alloc } };")
+	f.line("    }")
 }

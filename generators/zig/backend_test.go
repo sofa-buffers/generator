@@ -57,7 +57,7 @@ func TestZigStructural(t *testing.T) {
 	for _, want := range []string{
 		"const sofab = @import(\"sofab\");",
 		"pub const Myfirstmessage = struct {",
-		"pub fn marshal(self: *const Myfirstmessage, os: *sofab.OStream) sofab.Error!void {",
+		"pub fn serialize(self: *const Myfirstmessage, os: *sofab.OStream) sofab.Error!void {",
 		"pub fn encode(self: *const Myfirstmessage, alloc: std.mem.Allocator)",
 		"pub const DecodeError = sofab.Error || error{IncompleteMessage};",
 		"pub fn decode(alloc: std.mem.Allocator, data: []const u8) DecodeError!Myfirstmessage {",
@@ -78,7 +78,7 @@ func TestZigStructural(t *testing.T) {
 		"std.mem.sliceAsBytes",                                                               // bool array 0/1 lowering
 		"sofab.arrays.putChecked(&self.m.someuintarray.items, &self.ai,",                     // capacity-checked indexed store (generator#100)
 		"if (v.inv) return error.InvalidMessage;",                                            // over-count array rejected as INVALID (generator#100)
-		"if (offset != 0) return;",                                                           // single-shot payload guard
+		"const chunk = self._reassemble(total, offset, _chunk) orelse return;",               // one contiguous payload, whatever the chunking
 		"if (total > 50) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.somestring = chunk; } },", // bounded string: over-maxlen -> INVALID (§7.1); strict UTF-8 -> INVALID (issue #85); else zero-copy
 		"/// Unsigned 8-bit integer", // descriptions as doc comments
 	} {
@@ -93,7 +93,7 @@ func TestZigStructural(t *testing.T) {
 	if !strings.Contains(m, "try os.writeSequenceBeginLazy(20);") {
 		t.Error("nested struct field must be opened with writeSequenceBeginLazy")
 	}
-	if !strings.Contains(m, "try os.writeSequenceBeginLazy(20);\n        try self.somestruct.marshal(os);\n        try os.writeSequenceEnd();") {
+	if !strings.Contains(m, "try os.writeSequenceBeginLazy(20);\n        try self.somestruct.serialize(os);\n        try os.writeSequenceEnd();") {
 		t.Error("nested struct field must close with the dropping writeSequenceEnd")
 	}
 	// The eager begin is gone from the corelib; no call site may still use it.
@@ -101,13 +101,39 @@ func TestZigStructural(t *testing.T) {
 		t.Error("eager writeSequenceBegin must not be emitted any more")
 	}
 	// No heap containers in the message type: storage is fixed arrays + slices.
-	for _, notWant := range []string{
-		"ArrayList(", // only the encode sink may use a list, and only via _EncodeSink
-	} {
-		if strings.Count(m, notWant) > 1 { // once inside _EncodeSink
-			t.Errorf("message.zig should not use %q for field storage", notWant)
+	// The check is on the MESSAGE STRUCT, not the file: two pieces of codec
+	// machinery legitimately hold a list and are not field storage -- the encode
+	// sink's output buffer (_EncodeSink) and the decoder's chunk-reassembly
+	// buffer (_dec_*.acc, which only a payload split across feed chunks reaches).
+	if body, ok := structBody(m, "pub const Myfirstmessage = struct {"); !ok {
+		t.Error("message.zig: could not locate the Myfirstmessage struct")
+	} else if strings.Contains(body, "ArrayList(") {
+		t.Errorf("message.zig uses a heap container for field storage:\n%s", body)
+	}
+}
+
+// structBody returns the text between `header` and the matching closing brace at
+// the same nesting depth, so an invariant about a type's own members is not
+// fooled by machinery declared elsewhere in the file.
+func structBody(src, header string) (string, bool) {
+	i := strings.Index(src, header)
+	if i < 0 {
+		return "", false
+	}
+	rest := src[i+len(header):]
+	depth := 1
+	for j, r := range rest {
+		switch r {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return rest[:j], true
+			}
 		}
 	}
+	return "", false
 }
 
 // TestZigDecodeLimits: the max_dyn_* config keys bake receiver-side decode
@@ -824,13 +850,13 @@ messages:
 		"try os.writeSequenceBeginLazy(2);\n        for (self.b, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.b.len - 1) try os.writeBlob(@intCast(_i0), _e0);\n        }\n        try os.writeSequenceEnd();",
 		// A struct ELEMENT takes the SAME rule through its closer: the keeping one
 		// at the last index, the dropping one (an id gap) in the interior.
-		"            try os.writeSequenceBeginLazy(@intCast(_i0));\n            try _e0.marshal(os);\n            if (_i0 == self.st.len - 1) {\n                try os.writeSequenceEndKeep();\n            } else {\n                try os.writeSequenceEnd();\n            }\n        }\n        try os.writeSequenceEnd();",
+		"            try os.writeSequenceBeginLazy(@intCast(_i0));\n            try _e0.serialize(os);\n            if (_i0 == self.st.len - 1) {\n                try os.writeSequenceEndKeep();\n            } else {\n                try os.writeSequenceEnd();\n            }\n        }\n        try os.writeSequenceEnd();",
 		// A wrapper nested row is an ELEMENT too, with its own frame and the same
 		// positional closer; the field wrapper around the rows still drops.
 		"try os.writeSequenceBeginLazy(4);\n        for (self.nest, 0..) |_e0, _i0| {\n            try os.writeSequenceBeginLazy(@intCast(_i0));",
 		"                if (_e1.len != 0 or _i1 == _e0.len - 1) try os.writeString(@intCast(_i1), _e1);\n            }\n            if (_i0 == self.nest.len - 1) {\n                try os.writeSequenceEndKeep();\n            } else {\n                try os.writeSequenceEnd();\n            }\n        }\n        try os.writeSequenceEnd();",
 		// Array of arrays of structs: the rule applies independently at both depths.
-		"                try os.writeSequenceBeginLazy(@intCast(_i1));\n                try _e1.marshal(os);\n                if (_i1 == _e0.len - 1) {\n                    try os.writeSequenceEndKeep();\n                } else {\n                    try os.writeSequenceEnd();\n                }\n            }\n            if (_i0 == self.nst.len - 1) {",
+		"                try os.writeSequenceBeginLazy(@intCast(_i1));\n                try _e1.serialize(os);\n                if (_i1 == _e0.len - 1) {\n                    try os.writeSequenceEndKeep();\n                } else {\n                    try os.writeSequenceEnd();\n                }\n            }\n            if (_i0 == self.nst.len - 1) {",
 		// A NATIVE row has no frame of its own, so the rule lands on the write: an
 		// interior empty row is not written at all, the last one always is.
 		"        for (self.mat, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.mat.len - 1) {\n                try os.writeArrayUnsigned(@intCast(_i0), _e0);\n            }\n        }",
@@ -864,7 +890,7 @@ messages:
 		t.Fatalf("generate: %v", err)
 	}
 	sm := string(sff[0].Content)
-	if !strings.Contains(sm, "try os.writeSequenceBeginLazy(1);\n        try self.inner.marshal(os);\n        try os.writeSequenceEnd();") {
+	if !strings.Contains(sm, "try os.writeSequenceBeginLazy(1);\n        try self.inner.serialize(os);\n        try os.writeSequenceEnd();") {
 		t.Errorf("a struct FIELD must be opened lazily and closed with the dropping end:\n%s", sm)
 	}
 	if strings.Contains(sm, "writeSequenceEndKeep") {
@@ -906,7 +932,7 @@ messages:
 	}
 	// The count:N struct array's closer is positional, exactly like the dynamic
 	// one's: dropped in the interior (an id gap), kept at the last index.
-	if !strings.Contains(m, "            try os.writeSequenceBeginLazy(@intCast(_i0));\n            try _e0.marshal(os);\n            if (_i0 == self.fixed.len - 1) {\n                try os.writeSequenceEndKeep();\n            } else {\n                try os.writeSequenceEnd();\n            }\n") {
+	if !strings.Contains(m, "            try os.writeSequenceBeginLazy(@intCast(_i0));\n            try _e0.serialize(os);\n            if (_i0 == self.fixed.len - 1) {\n                try os.writeSequenceEndKeep();\n            } else {\n                try os.writeSequenceEnd();\n            }\n") {
 		t.Errorf("a count:N struct element must take the positional closer:\n%s", m)
 	}
 	// A count:N string element gets the same last-index escape as a dynamic one.

@@ -264,13 +264,13 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field) {
 	// encode / decode
 	f.line("    def encode(self) -> bytes:")
 	f.line("        e = Encoder()")
-	f.line("        self._marshal(e)")
+	f.line("        self.serialize(e)")
 	f.line("        return e.getvalue()")
 	f.blank()
 	f.line("    @classmethod")
 	f.line("    def decode(cls, data: bytes) -> %q:", name)
 	f.line("        o = cls()")
-	f.line("        o._unmarshal(Decoder(io.BytesIO(data)%s))", g.decoderArgs())
+	f.line("        o.deserialize(Decoder(io.BytesIO(data)%s))", g.decoderArgs())
 	f.line("        return o")
 	f.blank()
 }

@@ -55,8 +55,8 @@ func TestModuleShape(t *testing.T) {
 	for _, want := range []string{
 		"import 'package:sofabuffers/sofabuffers.dart' as sofab;",
 		"class Myfirstmessage {",
-		"void marshal(sofab.Encoder e) {",
-		"Uint8List encode() => sofab.Encoder.encodeToBytes(marshal);",
+		"void serialize(sofab.Encoder e) {",
+		"Uint8List encode() => sofab.Encoder.encodeToBytes(serialize);",
 		"static sofab.DecodeStatus tryDecode(Uint8List data, Myfirstmessage out) {",
 		"static Myfirstmessage decode(Uint8List data) {",
 		"abstract class _Visitor extends sofab.MessageVisitor {",
@@ -126,14 +126,14 @@ func TestLazySequenceFraming(t *testing.T) {
 	out := genFor(t, exampleDef, map[string]any{})
 	for _, want := range []string{
 		// FIELD: struct / union, opened lazily, dropped when no child was written.
-		"e.beginSequenceLazy(20); somestruct.marshal(e); e.endSequence();",
-		"e.beginSequenceLazy(21); someunion.marshal(e); e.endSequence();",
+		"e.beginSequenceLazy(20); somestruct.serialize(e); e.endSequence();",
+		"e.beginSequenceLazy(21); someunion.serialize(e); e.endSequence();",
 		// FIELD: the struct-array wrapper (id 23) -- also the dropping closer.
 		"e.beginSequenceLazy(23);",
 		// ELEMENT: the closer is chosen from the position in the VALUE.
-		"e.beginSequenceLazy(_i0); somestructarray[_i0].marshal(e);\n" +
+		"e.beginSequenceLazy(_i0); somestructarray[_i0].serialize(e);\n" +
 			"      if (_i0 == somestructarray.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }",
-		"e.beginSequenceLazy(_i0); someunionarray[_i0].marshal(e);\n" +
+		"e.beginSequenceLazy(_i0); someunionarray[_i0].serialize(e);\n" +
 			"      if (_i0 == someunionarray.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }",
 	} {
 		if !strings.Contains(out, want) {
@@ -196,8 +196,8 @@ func TestResetRestoresDefaults(t *testing.T) {
 		}
 	}
 	// Every generated object class carries one, message and named type alike.
-	if got, want := strings.Count(out, "  void reset() {"), strings.Count(out, "  void marshal(sofab.Encoder e) {"); got != want {
-		t.Errorf("reset() on %d classes, marshal on %d: every object class needs both", got, want)
+	if got, want := strings.Count(out, "  void reset() {"), strings.Count(out, "  void serialize(sofab.Encoder e) {"); got != want {
+		t.Errorf("reset() on %d classes, serialize on %d: every object class needs both", got, want)
 	}
 	// The S7.4 replace-on-reopen clear stays where it was.
 	if !strings.Contains(out, "        o.somestringarray = <String>[];") {
@@ -515,11 +515,11 @@ func TestDartArrayElementSparsityIsPositional(t *testing.T) {
 		// Sequence-form elements: the loop runs to length (no trailing elision) and
 		// the CLOSER decides -- dropping in the interior, keeping at the last index.
 		"    for (var _i0 = 0; _i0 < fixed.length; _i0++) {\n" +
-			"      e.beginSequenceLazy(_i0); fixed[_i0].marshal(e);\n" +
+			"      e.beginSequenceLazy(_i0); fixed[_i0].serialize(e);\n" +
 			"      if (_i0 == fixed.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }\n" +
 			"    }",
 		"    for (var _i0 = 0; _i0 < dynamic_.length; _i0++) {\n" +
-			"      e.beginSequenceLazy(_i0); dynamic_[_i0].marshal(e);\n" +
+			"      e.beginSequenceLazy(_i0); dynamic_[_i0].serialize(e);\n" +
 			"      if (_i0 == dynamic_.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }\n" +
 			"    }",
 		// A NATIVE row has no frame of its own, so the rule lands on the write.
@@ -540,7 +540,7 @@ func TestDartArrayElementSparsityIsPositional(t *testing.T) {
 	// old "sequence elements are framed unconditionally" carve-out), and a leaf
 	// omit test with no last-element escape (the old fixed-count trailing elision).
 	for _, notWant := range []string{
-		"marshal(e); e.endSequenceKeep();",
+		"serialize(e); e.endSequenceKeep();",
 		"if (fstrs[_i0].isNotEmpty) e.writeString",
 		"if (fblobs[_i0].isNotEmpty) e.writeBlob",
 	} {
@@ -954,7 +954,7 @@ messages:
 		t.Errorf("the raw-bits companion must not be library-private (§6.5):\n%s", got)
 	}
 	// Behaviour is unchanged — it is still captured on a NaN decode, cleared on a
-	// non-NaN one, reset by reset(), and preferred by marshal.
+	// non-NaN one, reset by reset(), and preferred by serialize.
 	for _, want := range []string{
 		"o.f32Fp32Bits = bits;",
 		"o.f32Fp32Bits = null;",

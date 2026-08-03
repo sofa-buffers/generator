@@ -474,7 +474,7 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 	f.blank()
 
 	// marshal
-	f.line("func (m *%s) marshal(e *sofab.Encoder) {", typeName)
+	f.line("func (m *%s) Serialize(e *sofab.Encoder) {", typeName)
 	for _, fld := range fields {
 		g.emitMarshalField(f, fld)
 	}
@@ -601,7 +601,7 @@ func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 		// recursively. WriteSequenceEnd then drops the contentless frame: an
 		// all-default nested object is omitted, not emitted as an empty wrapper.
 		f.line("\te.WriteSequenceBeginLazy(%d)", fld.ID)
-		f.line("\t%s.marshal(e)", acc)
+		f.line("\t%s.Serialize(e)", acc)
 		f.line("\te.WriteSequenceEnd()")
 		return
 	case ir.KindArray:
@@ -780,7 +780,7 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%se.WriteSequenceBeginLazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
 		f.line("%s\te.WriteSequenceBeginLazy(sofab.ID(%s))", ind, iv)
-		f.line("%s\t%s.marshal(e)", ind, ev)
+		f.line("%s\t%s.Serialize(e)", ind, ev)
 		emitSeqEnd(f, ind+"\t", lastElemExpr(iv, val))
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
@@ -1192,6 +1192,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f := newGoFile(g.pkg)
 	f.imp(corelibImport)
 	f.imp("bytes")
+	f.imp("io")
 
 	typeName := exported(m.Name)
 	if m.Summary != "" {
@@ -1213,11 +1214,26 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("func (m *%s) Encode() ([]byte, error) {", typeName)
 	f.line("\tvar buf bytes.Buffer")
 	f.line("\te := sofab.NewEncoder(&buf)")
-	f.line("\tm.marshal(e)")
+	f.line("\tm.Serialize(e)")
 	f.line("\tif err := e.Flush(); err != nil {")
 	f.line("\t\treturn nil, err")
 	f.line("\t}")
 	f.line("\treturn buf.Bytes(), nil")
+	f.line("}")
+	f.blank()
+	// Streaming encode. corelib-go's Encoder targets an io.Writer and drains its
+	// internal buffer into it as that fills, so the message never has to exist
+	// as one contiguous []byte -- what bounds memory is the writer, not the
+	// message. Encode() above is this with a bytes.Buffer.
+	f.line("// EncodeTo serializes the message straight into w.")
+	f.line("//")
+	f.line("// The encoder drains into w as its internal buffer fills, so the message is")
+	f.line("// never held whole in memory: what bounds memory is w, not the message.")
+	f.line("// Encode is this with a bytes.Buffer.")
+	f.line("func (m *%s) EncodeTo(w io.Writer) error {", typeName)
+	f.line("\te := sofab.NewEncoder(w)")
+	f.line("\tm.Serialize(e)")
+	f.line("\treturn e.Flush()")
 	f.line("}")
 	f.blank()
 	f.line("// Decode%s parses bytes into a new message (with defaults pre-applied).", typeName)

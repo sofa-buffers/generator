@@ -5,6 +5,7 @@ package message
 import (
 	"bytes"
 	"github.com/sofa-buffers/corelib-go"
+	"io"
 )
 
 // Scalars is a generated SofaBuffers object.
@@ -20,7 +21,7 @@ type Scalars struct {
 	Flag   bool    `json:"flag"`
 }
 
-func (m *Scalars) marshal(e *sofab.Encoder) {
+func (m *Scalars) Serialize(e *sofab.Encoder) {
 	if m.U8min != 0 {
 		e.WriteUnsigned(0, uint64(m.U8min))
 	}
@@ -142,11 +143,22 @@ func NewScalars() *Scalars {
 func (m *Scalars) Encode() ([]byte, error) {
 	var buf bytes.Buffer
 	e := sofab.NewEncoder(&buf)
-	m.marshal(e)
+	m.Serialize(e)
 	if err := e.Flush(); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// EncodeTo serializes the message straight into w.
+//
+// The encoder drains into w as its internal buffer fills, so the message is
+// never held whole in memory: what bounds memory is w, not the message.
+// Encode is this with a bytes.Buffer.
+func (m *Scalars) EncodeTo(w io.Writer) error {
+	e := sofab.NewEncoder(w)
+	m.Serialize(e)
+	return e.Flush()
 }
 
 // DecodeScalars parses bytes into a new message (with defaults pre-applied).

@@ -1,5 +1,5 @@
 // Package dart is the Dart throughput backend (PLAN §6.4): plain classes with a
-// streaming `marshal` over the corelib Encoder and a push child-visitor decode
+// streaming `serialize` over the corelib Encoder and a push child-visitor decode
 // against corelib-dart.
 //
 // corelib-dart's decode model is the push child-visitor (like Go): a
@@ -265,8 +265,8 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 	}
 	f.blank()
 
-	// marshal: sparse-canonical field writes in ascending id order.
-	f.line("  void marshal(sofab.Encoder e) {")
+	// serialize: sparse-canonical field writes in ascending id order.
+	f.line("  void serialize(sofab.Encoder e) {")
 	for _, fld := range fields {
 		g.emitMarshal(f, fld)
 	}
@@ -292,7 +292,22 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 			f.line("  static const int maxSize = %d;", ms.Size)
 		}
 		f.line("  /// Serializes this message to a fresh byte buffer.")
-		f.line("  Uint8List encode() => sofab.Encoder.encodeToBytes(marshal);")
+		f.line("  Uint8List encode() => sofab.Encoder.encodeToBytes(serialize);")
+		f.blank()
+		// Streaming encode. [serialize] writes the fields and nothing else, so a
+		// nested message can be written into an open frame; this is the entry
+		// point for a caller who owns the encoder, and it flushes the tail the
+		// last write left in the buffer. The Encoder's buffer may be smaller than
+		// the message -- its flush callback drains it as it fills.
+		f.line("  /// Encodes into an [sofab.Encoder] the caller owns, then flushes the tail.")
+		f.line("  ///")
+		f.line("  /// The encoder's buffer may be smaller than the message: it is drained")
+		f.line("  /// through the flush callback as it fills, so what bounds memory is the")
+		f.line("  /// buffer, not the message.")
+		f.line("  void encodeTo(sofab.Encoder e) {")
+		f.line("    serialize(e);")
+		f.line("    e.flush();")
+		f.line("  }")
 		f.blank()
 		f.line("  /// Status-surfacing one-shot decode: fills [out] and")
 		f.line("  /// returns the terminal decode outcome. `invalid` covers both malformed")
@@ -325,9 +340,27 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		f.line("    _decodeInto(data, m);")
 		f.line("    return m;")
 		f.line("  }")
+		f.blank()
+		// Streaming decode (PLAN S5.6). The corelib's Decoder is resumable and
+		// reassembles a payload split across chunks itself, so nothing here has
+		// to know about chunk boundaries; what was missing was a public handle,
+		// since the generated visitor is library-private.
+		f.line("  /// An incremental decoder filling [out]: hold it and feed chunks as they")
+		f.line("  /// arrive, instead of buffering the whole message first.")
+		f.line("  ///")
+		f.line("  /// [out] is [reset] first, for the reason [tryDecode] resets: an absent")
+		f.line("  /// field fires no callback, so a value left over from an earlier decode")
+		f.line("  /// would survive.")
+		f.line("  static %sDecoder decoder(%s out) {", name, name)
+		f.line("    out.reset();")
+		f.line("    return %sDecoder._(out);", name)
+		f.line("  }")
 	}
 	f.line("}")
 	f.blank()
+	if isMessage {
+		g.emitStreamDecoder(f, name)
+	}
 
 	g.emitVisitor(f, name, fields)
 }
@@ -412,7 +445,7 @@ func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
 // ---- all-default predicate -------------------------------------------------
 
 // emitIsDefault emits the object's all-default predicate. It is the exact
-// negation of what [marshal] writes: the object is default iff marshal would
+// negation of what [serialize] writes: the object is default iff serialize would
 // emit no child at all, evaluated per field and recursively (MESSAGE_SPEC §2).
 //
 // Keep this in lockstep with emitMarshal -- both are generated from
@@ -425,7 +458,7 @@ func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
 // are never array elements.
 func (g *gen) emitIsDefault(f *dfile, fields []*ir.Field) {
 	f.line("  /// Whether every field equals its declared default, compared per field and")
-	f.line("  /// recursively -- i.e. whether [marshal] would write no child at all.")
+	f.line("  /// recursively -- i.e. whether [serialize] would write no child at all.")
 	f.line("  bool get _isDefault {")
 	if len(fields) == 0 {
 		f.line("    return true;")
@@ -450,13 +483,13 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 		}
 		return fmt.Sprintf("%s.isEmpty", acc)
 	case ir.KindStruct, ir.KindUnion:
-		// Lazily framed: the frame survives iff the nested marshal wrote a child,
+		// Lazily framed: the frame survives iff the nested serialize wrote a child,
 		// which is exactly "the nested object is not default".
 		return fmt.Sprintf("%s._isDefault", acc)
 	case ir.KindArray:
 		return g.arrayIsDefaultExpr(fld, acc)
 	}
-	// Scalars, strings, enums, bitfields, bools and fp32/fp64: marshal writes iff
+	// Scalars, strings, enums, bitfields, bools and fp32/fp64: serialize writes iff
 	// `acc != default`. An fp32 NaN never equals the default, so the captured raw
 	// bits ride along with a value that is already non-default.
 	return fmt.Sprintf("%s == %s", acc, g.dartDefaultValue(fld))
@@ -486,7 +519,7 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	return fmt.Sprintf("%s.isEmpty", acc)
 }
 
-// ---- marshal --------------------------------------------------------------
+// ---- serialize --------------------------------------------------------------
 
 func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 	acc := dartIdent(fld.Name)
@@ -522,12 +555,12 @@ func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
 		// exception, so the frame is opened LAZILY -- the corelib holds the header
-		// back until a child field appears. The nested marshal omits each child that
+		// back until a child field appears. The nested serialize omits each child that
 		// equals its default, so "no child was written" IS "the object equals its
 		// declared default", evaluated per field and recursively. endSequence then
 		// drops the frame, so an all-default nested object is omitted rather than
 		// emitted as an empty wrapper.
-		f.line("    e.beginSequenceLazy(%d); %s.marshal(e); e.endSequence();", fld.ID, acc)
+		f.line("    e.beginSequenceLazy(%d); %s.serialize(e); e.endSequence();", fld.ID, acc)
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
@@ -708,14 +741,14 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
 		// one rule for both kinds -- and the lazily-held frame is where it is
-		// applied. The nested marshal writes no child exactly when the element
+		// applied. The nested serialize writes no child exactly when the element
 		// equals its declared default, so the CLOSER alone decides: the dropping one
 		// in the interior, where an all-default element vanishes into an id gap; the
 		// keeping one at the last index, where it survives as an empty frame because
 		// that presence is what fixes the array's length.
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
 		f.line("%sfor (var %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
-		f.line("%s  e.beginSequenceLazy(%s); %s[%s].marshal(e);", ind, iv, val, iv)
+		f.line("%s  e.beginSequenceLazy(%s); %s[%s].serialize(e);", ind, iv, val, iv)
 		emitSeqEnd(f, ind+"  ", lastElemExpr(iv, val))
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
@@ -755,4 +788,63 @@ func (g *gen) writeRowStmt(elem ir.Kind, idExpr, val string) string {
 	default:
 		return fmt.Sprintf("e.writeFp64Array(%s, %s);", idExpr, val)
 	}
+}
+
+// emitStreamDecoder writes the public incremental decoder: a handle on the
+// corelib's resumable Decoder plus the destination it fills. The corelib
+// suspends and resumes at any byte boundary AND reassembles a string/blob
+// payload split across chunks into a fresh Uint8List of its own, so this class
+// carries no parse state and borrows nothing from the fed chunks. What was
+// missing was reach: the generated visitor is library-private (PLAN S5.6).
+//
+// Top-level rather than nested, because Dart has no nested classes; the private
+// `._()` constructor keeps `decoder(out)` the only way to build one, so the
+// destination is always reset first.
+func (g *gen) emitStreamDecoder(f *dfile, name string) {
+	f.line("/// Incremental decoder for [%s]: hold one and feed the message as", name)
+	f.line("/// bytes arrive, instead of buffering it whole first.")
+	f.line("///")
+	f.line("/// The wire format has no end marker at the top level -- a message ends")
+	f.line("/// where its bytes end -- so a feed cannot report that the MESSAGE is")
+	f.line("/// complete, only that the bytes handed in ended on a field boundary")
+	f.line("/// (`complete`) or mid-field (`incomplete`). Neither is a failure")
+	f.line("/// mid-stream; the caller's own framing decides when the input is over, and")
+	f.line("/// [finish] then gives the verdict for the message as a whole.")
+	f.line("///")
+	f.line("/// Nothing is borrowed from the chunks you feed: the corelib copies each")
+	f.line("/// string/blob payload into storage of its own before it reaches the")
+	f.line("/// destination, so a chunk may be reused as soon as [feed] returns.")
+	f.line("class %sDecoder {", name)
+	f.line("  %sDecoder._(this._out) : _e = _Dec() {", name)
+	f.line("    _d = sofab.Decoder(%s(_out, _e)%s);", visitorName(name), g.limitsArg())
+	f.line("  }")
+	f.blank()
+	f.line("  final %s _out;", name)
+	f.line("  final _Dec _e;")
+	f.line("  late final sofab.Decoder _d;")
+	f.line("  sofab.DecodeStatus _st = sofab.DecodeStatus.complete;")
+	f.blank()
+	f.line("  /// Feeds the next chunk, of any size. `complete` means the bytes ended on")
+	f.line("  /// a field boundary, `incomplete` mid-field -- neither answers whether the")
+	f.line("  /// MESSAGE is done. `invalid` is terminal.")
+	f.line("  sofab.DecodeStatus feed(List<int> chunk) {")
+	f.line("    _st = _d.feed(chunk);")
+	f.line("    return status;")
+	f.line("  }")
+	f.blank()
+	f.line("  /// The outcome for everything fed so far, without feeding more.")
+	f.line("  sofab.DecodeStatus get status =>")
+	f.line("      _e.inv ? sofab.DecodeStatus.invalid : _st;")
+	f.blank()
+	f.line("  /// The destination, holding whatever has been decoded so far.")
+	f.line("  %s get message => _out;", name)
+	f.blank()
+	f.line("  /// Takes the decoded message once the caller's framing says the input is")
+	f.line("  /// over. Returns null if the stream ended mid-field or was rejected, so a")
+	f.line("  /// half-filled value is never mistaken for a whole one; read [status] for")
+	f.line("  /// which it was, or [message] to get it anyway.")
+	f.line("  %s? finish() =>", name)
+	f.line("      status == sofab.DecodeStatus.complete ? _out : null;")
+	f.line("}")
+	f.blank()
 }
