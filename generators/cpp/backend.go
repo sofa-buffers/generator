@@ -980,10 +980,57 @@ func (g *gen) emitIsDefault(f *hfile, fields []*ir.Field) {
 	f.blank()
 }
 
+// emptyDefault reports whether the field's declared default renders as the EMPTY
+// value of a container member, so "equals its default" can be spelled empty()
+// instead of a comparison against a materialized default.
+//
+// This is a readability change, NOT a performance one, and the numbers are here
+// so nobody re-derives them hoping otherwise. Measured on
+// examples/messages/realworld/vehicle_telemetry.yaml, callgrind toggle, -O3,
+// wire byte-identical throughout:
+//
+//	row          compiler   encode before -> after
+//	cpp-cpp      g++ 15.2      13672 -> 13634   (-0.28%)
+//	cpp-cpp      clang 21.1     11992 -> 11999   (+0.06%, noise)
+//	cpp-c-cpp    g++ 15.2      32630 -> 32627   (-0.01%)
+//
+// Decode is untouched -- these guards are encode-side only. The one real effect
+// is that `s == ""` no longer takes the literal's length with a runtime strlen
+// (28 Ir on g++; clang had already folded it away). The obvious other candidate
+// turned out not to exist: comparing against `sofab::InlineVector<T, N>{}` looks
+// like it value-initialises N inline slots per call, but operator== tests the
+// length first, so both compilers elide the temporary and the c-cpp row does not
+// move.
+//
+// What it does buy is that the guard stops depending on how cppDefault renders
+// an empty value, and it is exact rather than an approximation: a container
+// equals its empty default iff it holds nothing. Every container this can apply
+// to spells that empty() -- std::string, std::vector, and the corelibs'
+// sofab::FixedString / FixedBytes / InlineVector, verified present with an
+// identical definition in BOTH corelib-c-cpp and corelib-cpp.
+//
+// A NON-empty declared default keeps the comparison; there is nothing to shorten.
+func (g *gen) emptyDefault(f *ir.Field) bool {
+	switch f.Kind {
+	case ir.KindString:
+		return g.cppDefault(f) == `""`
+	case ir.KindBlob:
+		return g.cppDefault(f) == "{}"
+	case ir.KindArray:
+		// Wrapper arrays already test the length; only the native-array leg
+		// compares against a materialized container.
+		return isNativeArrayElem(f.Elem) && g.cppDefault(f) == "{}"
+	}
+	return false
+}
+
 // fieldIsDefaultExpr is the boolean expression "this field equals its default",
 // i.e. the negation of emitSerialize's write guard for the same field.
 func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 	acc := cppIdent(fld.Name)
+	if g.emptyDefault(fld) {
+		return fmt.Sprintf("%s.empty()", acc)
+	}
 	switch fld.Kind {
 	case ir.KindBlob:
 		return fmt.Sprintf("%s == %s%s", acc, g.cppType(fld), g.cppDefault(fld))
@@ -998,9 +1045,9 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 		// written, with neither side padded out to N.
 		if isNativeArrayElem(fld.Elem) {
 			// The same expression emitSerializeArray guards the whole field with.
-			// Note a std::array<T, N> is not a length-carrying container: its
-			// value IS N elements, so its default is the N-element default array
-			// and comparing against it is the whole test.
+			// Every array member is length-carrying now (std::vector or
+			// sofab::InlineVector), so this compares two values of the same length
+			// semantics; the empty-default case is spelled empty() above.
 			def := g.cppArrayContainer(fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax) + g.cppDefault(fld)
 			return fmt.Sprintf("%s == %s", acc, def)
 		}
@@ -1038,7 +1085,7 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 		// A blob is a leaf: sparse-canonical encoding (MESSAGE_SPEC S2) omits it
 		// when it equals its default (empty if none). The decoder reconstructs the
 		// omitted blob from the member's construction default.
-		f.line("        if (%s != %s%s) { (void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size())); }", acc, g.cppType(fld), g.cppDefault(fld), fld.ID, acc, acc)
+		f.line("        if (%s) { (void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size())); }", g.fieldIsNotDefaultExpr(fld), fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
@@ -1056,7 +1103,22 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default.
 	// Sparse encoding is canonical (MESSAGE_SPEC S2); the decoder reconstructs the
 	// omitted field from its member construction default.
-	f.line("        if (%s != %s) { %s }", acc, g.cppDefault(fld), write)
+	f.line("        if (%s) { %s }", g.fieldIsNotDefaultExpr(fld), write)
+}
+
+// fieldIsNotDefaultExpr is the write guard: the negation of fieldIsDefaultExpr,
+// spelled so the two cannot drift apart. Only the leaf kinds that guard with a
+// plain expression route through here; struct/union and wrapper arrays carry
+// their own framing-based test.
+func (g *gen) fieldIsNotDefaultExpr(fld *ir.Field) string {
+	acc := cppIdent(fld.Name)
+	if g.emptyDefault(fld) {
+		return fmt.Sprintf("!%s.empty()", acc)
+	}
+	if fld.Kind == ir.KindBlob {
+		return fmt.Sprintf("%s != %s%s", acc, g.cppType(fld), g.cppDefault(fld))
+	}
+	return fmt.Sprintf("%s != %s", acc, g.cppDefault(fld))
 }
 
 func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
@@ -1070,8 +1132,13 @@ func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
 	// against the declared default exactly as written -- neither side padded out
 	// to N -- and against the empty collection when no default is declared.
 	if isNativeArrayElem(fld.Elem) {
-		def := g.cppArrayContainer(fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax) + g.cppDefault(fld)
-		f.line("        if (%s != %s) {", acc, def)
+		guard := fmt.Sprintf("%s != %s%s", acc,
+			g.cppArrayContainer(fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax), g.cppDefault(fld))
+		if g.emptyDefault(fld) {
+			// No declared default: the test is simply "holds anything".
+			guard = fmt.Sprintf("!%s.empty()", acc)
+		}
+		f.line("        if (%s) {", guard)
 		g.serializeArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, "")
 		f.line("        }")
 		return
