@@ -69,7 +69,7 @@ func (g *gen) javaDefaultValue(f *ir.Field) string {
 
 // javaNativeArrayLiteral renders a native scalar array's schema default as an
 // immutable-List expression (List.of(...)); ("", false) when there is no default.
-// It is used both to materialize the field default and, in marshal, as the RHS to
+// It is used both to materialize the field default and, in serialize, as the RHS to
 // compare against for whole-array omission.
 //
 // A declared `count: N` takes no part in it. `count` is a CAPACITY, never a
@@ -244,7 +244,7 @@ func (g *gen) javaInit(f *ir.Field) string {
 		return " = new " + g.typeName(f.Ref.Key) + "()"
 	case ir.KindArray:
 		// A native scalar array is a leaf field: materialize its schema default so
-		// an omitted default array reconstructs correctly and marshal can compare
+		// an omitted default array reconstructs correctly and serialize can compare
 		// against it. A composite array is a wrapper sequence whose declared default
 		// is not materialized, which is what makes its dropping closer correct (§2).
 		if primitiveArrayElem(f.Elem) {
@@ -451,7 +451,7 @@ final class Sbuf {
     // taking a destination from the caller.
     static <T> List<T> resetList(List<T> l) { if (l == null) return new java.util.ArrayList<>(); l.clear(); return l; }
 
-    // orEmpty is the null-absorbing identity the marshal loop and the all-default
+    // orEmpty is the null-absorbing identity the serialize loop and the all-default
     // predicate both run a WRAPPER array through. No narrowing happens here and
     // none may: the wire count IS a compact array's length and the highest wrapper
     // id IS its last index (S3/S5.1), so dropping a trailing default element would

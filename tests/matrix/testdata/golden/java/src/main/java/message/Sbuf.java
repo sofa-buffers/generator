@@ -36,7 +36,7 @@ final class Sbuf {
     // taking a destination from the caller.
     static <T> List<T> resetList(List<T> l) { if (l == null) return new java.util.ArrayList<>(); l.clear(); return l; }
 
-    // orEmpty is the null-absorbing identity the marshal loop and the all-default
+    // orEmpty is the null-absorbing identity the serialize loop and the all-default
     // predicate both run a WRAPPER array through. No narrowing happens here and
     // none may: the wire count IS a compact array's length and the highest wrapper
     // id IS its last index (S3/S5.1), so dropping a trailing default element would

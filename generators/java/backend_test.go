@@ -50,7 +50,7 @@ func TestJavaStructural(t *testing.T) {
 		"package messages;",
 		"import org.sofabuffers.sofab.*;",
 		"public class Myfirstmessage {",
-		"public void marshal(OStream os) throws IOException",
+		"public void serialize(OStream os) throws IOException",
 		"public byte[] encode()",
 		"public static Myfirstmessage decode(byte[] data)",
 		"public static DecodeStatus tryDecode(byte[] data, Myfirstmessage out) throws SofabException", // status-surfacing decode (#105)
@@ -687,13 +687,13 @@ messages:
 	for _, want := range []string{
 		// A struct FIELD: opened lazily, closed with the dropping end, so an
 		// all-default nested object vanishes instead of becoming an empty wrapper.
-		"os.writeSequenceBeginLazy(0); (this.st == null ? new MSt() : this.st).marshal(os); os.writeSequenceEnd();",
+		"os.writeSequenceBeginLazy(0); (this.st == null ? new MSt() : this.st).serialize(os); os.writeSequenceEnd();",
 		// A wrapper-array FIELD (string/blob elements): same -- depth 0 drops.
 		"os.writeSequenceBeginLazy(1);",
 		"os.writeSequenceBeginLazy(2);",
 		// A struct ELEMENT chooses its closer from its position in the VALUE.
 		"os.writeSequenceBeginLazy(3);",
-		"os.writeSequenceBeginLazy(_i0); (_t2.get(_i0) == null ? new MObjsElem() : _t2.get(_i0)).marshal(os); if (_i0 == _t2.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
+		"os.writeSequenceBeginLazy(_i0); (_t2.get(_i0) == null ? new MObjsElem() : _t2.get(_i0)).serialize(os); if (_i0 == _t2.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
 		// A nested wrapper ROW is an element too, and takes the same choice.
 		"os.writeSequenceBeginLazy(4);",
 		"            if (_i0 == _t3.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
@@ -720,7 +720,7 @@ messages:
 	}
 	// An element is NEVER framed unconditionally any more: an all-default one in
 	// the interior must vanish into an id gap (§2).
-	if strings.Contains(m, ".marshal(os); os.writeSequenceEndKeep();") {
+	if strings.Contains(m, ".serialize(os); os.writeSequenceEndKeep();") {
 		t.Error("M.java: a sequence-form element must not take the keeping closer unconditionally")
 	}
 	// A wrapper array carries no whole-omission guard in generated code: the frame
@@ -840,8 +840,8 @@ func TestJavaWrapperArrayInteriorSparseLastAlwaysWritten(t *testing.T) {
 		// A sequence-form element takes the POSITIONAL closer: dropping in the
 		// interior (where an all-default element becomes an id gap), keeping at the
 		// last index. Identical for the count:N and the count-less array.
-		"(_t0.get(_i0) == null ? new VecFixedElem() : _t0.get(_i0)).marshal(os); if (_i0 == _t0.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
-		"(_t1.get(_i0) == null ? new VecDynamicElem() : _t1.get(_i0)).marshal(os); if (_i0 == _t1.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
+		"(_t0.get(_i0) == null ? new VecFixedElem() : _t0.get(_i0)).serialize(os); if (_i0 == _t0.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
+		"(_t1.get(_i0) == null ? new VecDynamicElem() : _t1.get(_i0)).serialize(os); if (_i0 == _t1.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
 		// A leaf element: the same rule, unconditional now rather than count-gated.
 		`String _e0 = _t2.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t2.size() - 1) os.writeString(_i0, _e0);`,
 		`String _e0 = _t3.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t3.size() - 1) os.writeString(_i0, _e0);`,
