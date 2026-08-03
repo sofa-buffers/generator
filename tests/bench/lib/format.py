@@ -81,8 +81,8 @@ def tool_version(argv):
     return m.group(0) if m else text.splitlines()[0]
 
 
-def python_engine(corelib_dir):
-    """Which corelib-py engine is importable — the thing that decides the row.
+def python_engine(corelib_dir, pin_pure):
+    """Which corelib-py engine a row actually got — the thing that decides its number.
 
     corelib-py picks at import time: the compiled Cython accelerator
     (``sofab._speedups``) when it is present, else the pure-Python classes, and the
@@ -91,9 +91,18 @@ def python_engine(corelib_dir):
     landed "restore the accelerator's hot paths (encode 3.0x, decode 1.5x)" without
     the row moving one instruction, because the bench had never built the extension.
     A row whose engine is invisible cannot be diffed, so record it like a compiler
-    version: ask the same interpreter, under the same PYTHONPATH the recipe uses.
+    version: ask the same interpreter, under the same environment the recipe used.
+
+    ``pin_pure`` mirrors the recipe's SOFAB_PUREPYTHON pin. It is not cosmetic: both
+    python rows share one corelib checkout, so once python-native has built the
+    extension in it, an unpinned probe would report "native" for the pure row too and
+    the table would contradict the numbers.
     """
     env = {**os.environ, "PYTHONPATH": str(Path(corelib_dir) / "src")}
+    if pin_pure:
+        env["SOFAB_PUREPYTHON"] = "1"
+    else:
+        env.pop("SOFAB_PUREPYTHON", None)
     try:
         out = subprocess.run(
             ["python3", "-c", "import sofab; print(sofab.IMPL)"],
@@ -274,16 +283,21 @@ def main():
                 repo, d = line.split("\t")
                 corelib_dirs[repo] = d
 
-    # The python row's engine belongs in this table for the same reason the
-    # compilers do: it decides the number, and it can change without the generator
-    # or the corelib SHA changing. Only when that row was measured — the label must
-    # not appear for a --rows run that never touched python.
-    py_rows = sorted(r["id"] for r in spec["rows"] if r["lang"] == "python")
-    if py_rows and "corelib-py" in corelib_dirs and any(r in irs for r in py_rows):
-        engine = python_engine(corelib_dirs["corelib-py"])
-        if engine:
-            toolchain_rows.append(("sofab-engine", engine, ",".join(py_rows)))
-            toolchain_rows.sort(key=lambda t: t[0])
+    # A python row's engine belongs in this table for the same reason the compilers
+    # do: it decides the number, and it can change without the generator or the
+    # corelib SHA changing. One line PER ROW, because the two python rows deliberately
+    # run different engines — a single line could only be wrong for one of them. Only
+    # for rows actually measured: the label must not appear for a --rows run that
+    # never touched python.
+    if "corelib-py" in corelib_dirs:
+        for row in sorted(spec["rows"], key=lambda r: r["id"]):
+            if row["lang"] != "python" or row["id"] not in irs:
+                continue
+            engine = python_engine(corelib_dirs["corelib-py"],
+                                   pin_pure=row.get("engine") != "native")
+            if engine:
+                toolchain_rows.append(("sofab-engine", engine, row["id"]))
+        toolchain_rows.sort(key=lambda t: (t[0], t[2]))
 
     if corelib_dirs:
         shas = []

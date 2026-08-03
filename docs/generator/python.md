@@ -134,21 +134,23 @@ the **subtract** method. Tracked: Ir/op.
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
 
-**Which engine the row measures.** corelib-py ships two implementations — the
-pure-Python classes and a Cython accelerator (`sofab._speedups`) — and
-`sofab/__init__.py` takes the accelerator whenever it imports, falling back
-silently otherwise. The bench recipe puts the corelib's *source* tree on
-`PYTHONPATH` and builds nothing, so the row currently measures the **pure-Python**
-engine. That is why a corelib release noting "encode 3.0x, decode 1.5x" for the
-accelerator moved this row by zero instructions: the bench cannot see that code.
+**Two engines, two rows.** corelib-py ships the pure-Python classes and a Cython
+accelerator (`sofab._speedups`), and `sofab/__init__.py` takes the accelerator
+whenever it imports, falling back silently otherwise. They are 7.2× (encode) and
+4.8× (decode) apart, so one number cannot stand for both:
 
-The engine is not pinned — it is *recorded*, in the `## toolchain` table as
-`sofab-engine` (`pure` or `native`). Pinning it to pure would make a `maxspeed` row
-permanently blind to what ships; recording it means the day the extension is built
-the switch appears in the diff instead of silently rebasing every python number.
-To measure what ships, install Cython and build the extension (`pip install -e
-<corelib-py>`) before running the row. The devcontainer has no pip today, so this
-has never been measured — treat the python numbers as the fallback engine's.
+| row | encode Ir/op | decode Ir/op |
+|---|---|---|
+| `python` | 900,876 | 2,180,471 |
+| `python-native` | 125,912 | 457,558 |
+
+`python-native` builds the extension and verifies `sofab.IMPL == "native"` before
+reporting — `setup.py` marks it `optional=True`, so a failed compile is not a failed
+build, and without the check the row would quietly report the pure engine's cost. It
+needs Cython (in the devcontainer image; pip-installed for that row in `bench.yml`).
+`python` pins `SOFAB_PUREPYTHON=1`, because both rows share one corelib checkout and
+would otherwise depend on which ran first. The engine each row got is recorded in the
+`## toolchain` table as `sofab-engine`.
 
 ## §7.1: the declared integer width is a validity bound (issue #266)
 

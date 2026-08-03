@@ -14,7 +14,7 @@
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
-# corelib:   c-cpp 6ee3fef | cpp 2466869 | cs 17f4277 | dart 1b83161 | go c6e0952 | java fedb0b7 | py bd5cb37 | rs 5255a0c | rs-no-std 5126032 | ts 72df317 | zig 29ca282
+# corelib:   c-cpp 6ee3fef | cpp 2466869 | cs 17f4277 | dart 1b83161 | go 762464f | java fedb0b7 | py bd5cb37 | rs 5255a0c | rs-no-std 5126032 | ts b9b3e4a | zig 29ca282
 #
 ## instruction cost
 row                profile    method    encode_ir/op  decode_ir/op
@@ -27,6 +27,7 @@ dart               maxspeed   subtract  30427         48945
 go                 maxspeed   toggle    19378         37354
 java               maxspeed   subtract  18265         34070
 python             maxspeed   subtract  900876        2180471
+python-native      maxspeed   subtract  125818        457812
 rust-rs            maxspeed   toggle    8873          21158
 rust-rs-no-std     footprint  toggle    10189         29609
 rust-rs-no-std-dyn footprint  toggle    10142         37828
@@ -43,10 +44,11 @@ gcc                       15.2.0        c
 go                        1.24.4        go
 javac                     25.0.3        java
 node                      24.18.0       ts-bigint,ts-long
-python3                   3.14.4        python
+python3                   3.14.4        python,python-native
 riscv64-unknown-elf-gcc   14.2.0        c
 rustc                     1.97.1        rust-rs,rust-rs-no-std,rust-rs-no-std-dyn
 sofab-engine              pure          python
+sofab-engine              native        python-native
 valgrind                  3.26.0        all
 zig                       0.16.0        zig
 

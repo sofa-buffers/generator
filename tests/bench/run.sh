@@ -190,6 +190,15 @@ measure_row() { # <row-id>
     local corelib gen
     corelib="$(corelib_for "$corelib_repo" "$corelib_env")"
 
+    # What the recipes may key on besides (proj, corelib). Two rows can share a lang
+    # AND a corelib checkout and still need to be built differently — python/
+    # python-native are the same corelib measured with its two engines — and the
+    # recipe signature has no room for that. `engine` is whatever rows.json declares
+    # for the row, empty when it declares none.
+    export SOFAB_BENCH_ROW="$id"
+    SOFAB_BENCH_ENGINE="$(q "print(next((r.get('engine','') for r in d['rows'] if r['id']=='$id'), ''))")"
+    export SOFAB_BENCH_ENGINE
+
     # Each lang recipe defines bench_size / bench_build_ir / bench_cmd_ir. Undefine
     # first: bash functions are global, so a row whose backend lacks the Ir verb
     # would otherwise inherit the previous row's.

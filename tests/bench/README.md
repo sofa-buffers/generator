@@ -160,14 +160,17 @@ change the numbers — and only what has a row gets measured. The axes that exis
 | corelib choice | `cpp`: `cpp` \| `c-cpp`; `rust`: `rs` \| `rs-no-std` | `cpp-cpp` / `cpp-c-cpp`, `rust-rs` / `rust-rs-no-std` |
 | `allow_dynamic` | `cpp` (only on `c-cpp`), `rust` (only on `no_std`) | `cpp-c-cpp-dyn`, `rust-rs-no-std-dyn` |
 | `int64` mode | `typescript`: `bigint` \| `long` | `ts-bigint`, `ts-long` |
+| corelib engine (python) | pure-Python vs the Cython `_speedups` accelerator | `python`, `python-native` |
 | corelib build switches | `SOFAB_DISABLE_*` (c-cpp), cargo features (rs-no-std), `sofab_no_strict_utf8` (go) | **nothing** — every row builds the defaults |
-| corelib runtime engine | py `_speedups`, ts `setKernel` | **nothing** — see the python section below |
+| corelib engine (ts) | `setKernel`: `jsKernel` vs native (N-API) / wasm | **nothing** |
 
-The bottom two rows of that table are the honest gaps. The build switches are the
-footprint story itself — dropping wire types is how a `c-cpp` or `rs-no-std` build
-gets small — and no row exercises them, so the file shows the all-features size only.
-The engines are worse for python, where which one runs is decided silently by the
-environment.
+The last two are the honest gaps. The build switches are the footprint story itself —
+dropping wire types is how a `c-cpp` or `rs-no-std` build gets small — and no row
+exercises them, so the file shows the all-features size only. The TypeScript kernels
+are a milder case than python's was: `jsKernel` is the deterministic default,
+swapping one in takes an explicit `setKernel()` call, and the native addon is a
+separate optional package that this repo does not ship — so the row measures a
+well-defined configuration, just not every one on offer.
 
 ### The `-dyn` rows: read the pair, not the row
 
@@ -402,29 +405,41 @@ Three things have to hold, and each one broke in practice before it worked:
    plain `node dist/harness.js`. A forking wrapper has no place in an
    instruction-exact measurement; see `lang/typescript.sh`.
 
-### The python row has two engines, and measures the slower one
+### python has two engines, so it has two rows
 
 corelib-py ships the pure-Python classes *and* a Cython accelerator
 (`sofab._speedups`, built by its `setup.py`). `sofab/__init__.py` imports the
 accelerator whenever it is importable and falls back to pure Python otherwise — an
 `ImportError` caught internally, with nothing in the process announcing which one
-won. `lang/python.sh` puts the corelib's **source tree** on `PYTHONPATH` and builds
-no extension, so the row measures pure Python. It always has.
+won. They are not close:
 
-The cost of that being invisible: corelib-py landed *"restore the accelerator's hot
-paths (encode 3.0x, decode 1.5x)"* and this row did not move by one instruction,
-because it cannot see that code. `python` is a `maxspeed` row, so the number is not
-describing the profile it claims.
+| row | encode Ir/op | decode Ir/op |
+|---|---|---|
+| `python` (pure) | 900,876 | 2,180,471 |
+| `python-native` | 125,912 | 457,558 |
+| | **7.2× apart** | **4.8× apart** |
 
-The engine is therefore **recorded, not pinned** — `format.py` asks the interpreter
-under the recipe's own `PYTHONPATH` and writes the answer to the `## toolchain`
-table as `sofab-engine` (`pure` / `native`). Pinning `SOFAB_PUREPYTHON=1` would have
-made the blindness permanent; recording it means that when the extension does get
-built, the engine switch lands in the diff next to the numbers it moved, exactly as
-a compiler version bump does. **To measure what ships**, install Cython and build
-the extension (`pip install -e <corelib-py>`) before running the row. The
-devcontainer has no pip, so this has never been done — the committed python numbers
-are the fallback engine's.
+For a long time only the fallback was measured, and silently: the recipe puts the
+corelib's *source tree* on `PYTHONPATH` and built no extension. The cost of that
+being invisible is easy to state — corelib-py landed *"restore the accelerator's hot
+paths (encode 3.0x, decode 1.5x)"* and the row did not move by one instruction,
+because it could not see that code.
+
+**Each row pins its own engine, and that is load-bearing.** The two share one corelib
+checkout (`clone_corelib` caches per run), so the `build_ext` done for
+`python-native` leaves the extension sitting in the tree — an unpinned `python` row
+would then import it and the result would depend on row order. `python` therefore
+forces `SOFAB_PUREPYTHON=1` rather than relying on the absence of a `.so`.
+
+**`python-native` refuses to report a number it did not earn.** `setup.py` marks the
+extension `optional=True`, so a compile it cannot do is not a failure exit — the
+recipe verifies `sofab.IMPL == "native"` and fails the row otherwise. Without that it
+would report the pure engine's cost under the native row's name, which is exactly the
+confusion these two rows exist to end. It needs Cython: the devcontainer installs it
+(`.devcontainer/Dockerfile`), and `bench.yml` pip-installs it for that row only.
+
+Either way the engine that actually ran is recorded, one line per row, in the
+`## toolchain` table as `sofab-engine`.
 
 ## Traps
 

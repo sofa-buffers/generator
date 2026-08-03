@@ -41,7 +41,7 @@ jobs:
         # The -dyn rows are the allow_dynamic half of each footprint pair; they reuse
         # their sibling's toolchain, which the `cpp-*` case and the startsWith('rust-')
         # guard below already cover.
-        row: [c, cpp-cpp, cpp-c-cpp, cpp-c-cpp-dyn, rust-rs, rust-rs-no-std, rust-rs-no-std-dyn, zig, go, java, csharp, dart, python, ts-bigint, ts-long]
+        row: [c, cpp-cpp, cpp-c-cpp, cpp-c-cpp-dyn, rust-rs, rust-rs-no-std, rust-rs-no-std-dyn, zig, go, java, csharp, dart, python, python-native, ts-bigint, ts-long]
     steps:
       - uses: actions/checkout@v7
 
@@ -86,8 +86,15 @@ jobs:
         with: { sdk: stable }
 
       - uses: actions/setup-python@v7
-        if: matrix.row == 'python'
+        if: startsWith(matrix.row, 'python')
         with: { python-version: "3.14" }
+
+      # Only python-native builds corelib-py's Cython extension. Without this the
+      # row does not silently degrade to the pure engine — the recipe verifies
+      # sofab.IMPL and fails the row instead — but it would fail every run.
+      - name: Cython (python-native only)
+        if: matrix.row == 'python-native'
+        run: python -m pip install --upgrade pip Cython
 
       - uses: actions/setup-node@v7
         if: startsWith(matrix.row, 'ts-')
