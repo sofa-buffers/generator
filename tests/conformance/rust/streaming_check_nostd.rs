@@ -102,9 +102,42 @@ fn main() {
         assert_eq!(got.a.len(), 8, "heapless array chunk size {size}: element count");
     }
 
+    // 4. a skipped subtree deeper than the scope stack (generator#283). This is
+    //    the profile the defect lived on: the stack is a fixed-capacity
+    //    heapless::Vec sized from the SCHEMA (here 4 entries), while nesting depth
+    //    comes from the WIRE — an unknown sequence may nest up to MAX_DEPTH (255)
+    //    and must be skipped, not overrun the stack. Levels inside a skipped
+    //    subtree are counted rather than stacked, and that counter is persistent
+    //    state, so a chunk boundary may fall anywhere inside the unwind.
+    //
+    //    Wire: open the wrapper array (id 0), nest 40 unknown sequences (id 60)
+    //    and close them all, then — back at the array scope — element 0 = "hi"
+    //    (fixlen: id 0, str subtype, 2 bytes), then close.
+    let mut deep: std::vec::Vec<u8> = std::vec![0x06];
+    deep.extend(core::iter::repeat([0xe6, 0x03]).take(40).flatten());
+    deep.extend(core::iter::repeat(0x07u8).take(40));
+    deep.extend([0x02, 0x12, b'h', b'i', 0x07]);
+    for size in [1usize, 3, 7, 64] {
+        let mut dec = Vecsa::decoder();
+        for chunk in deep.chunks(size) {
+            match dec.feed(chunk) {
+                Ok(()) | Err(sofab::Error::Incomplete) => continue,
+                Err(e) => panic!("heapless deep-nest chunk size {size}: feed failed: {e:?}"),
+            }
+        }
+        let got = dec.finish().expect("heapless deep-nest finish failed");
+        assert!(
+            got.a.len() == 1 && got.a[0].as_str() == "hi",
+            "heapless chunk size {size}: the element after a 40-deep unknown-sequence \
+unwind was lost (got {} element(s))",
+            got.a.len()
+        );
+    }
+
     println!(
         "streaming (pure heapless): {}-byte payload byte-identical through a 7-byte buffer; \
-value-identical at 7 chunk sizes; 8-element wrapper array at 4 chunk sizes",
+value-identical at 7 chunk sizes; 8-element wrapper array at 4 chunk sizes; a 40-deep \
+skipped subtree unwinds correctly at 4 chunk sizes",
         one_shot.len()
     );
 }

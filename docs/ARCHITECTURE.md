@@ -571,7 +571,9 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    bounded strings/blobs/sequence arrays lower to `heapless::String<N>` /
    `heapless::Vec<T,N>` (the `heapless` crate; the corelib stays storage-agnostic),
    `encode` fills a fixed `heapless::Vec<u8, MAX_SIZE>`, the location stack is a
-   bounded `heapless::Vec`, `serde` is gated behind a cargo feature, and the crate
+   bounded `heapless::Vec` sized from the schema (sound only because *skipped*
+   scopes are depth-counted rather than stacked — see "A skip must contain the
+   whole subtree" below), `serde` is gated behind a cargo feature, and the crate
    root carries `#![no_std]` — same wire bytes, same `allow_dynamic` rule for
    unbounded fields (an `alloc` fallback). A binary can't be `no_std` on a hosted
    target, so the firmware artifact is the lib (`cargo build --lib
@@ -1033,12 +1035,11 @@ scope, so the skipped sequence's *children* bound into it. A child id 3 inside a
 unknown sequence set the root's own field 3; a sequence opened at a string-array
 element position bound its string as that element. The fix is one shared shape: a
 **dead scope** (`_Loc::Dead` in rust, `.dead` in zig, `_DEAD` in java/csharp) that
-no callback arm matches, so the whole subtree is discarded. No depth counter is
-needed — every begin pushes and every end pops, a nested sequence inside a dead
-subtree matches no arm either, and the stack alone restores the live scope at the
-matching end. Dart reaches the same result one level up: its collectors inherit a
-shared base whose `onSequenceStart` returns `null` instead of the corelib's
-descending `this`, beside the `onStringBytes` no-op that is there for exactly the
+no callback arm matches, so the whole subtree is discarded — a nested sequence
+inside a dead subtree matches no arm either, so it stays dead, and the live scope
+is restored at the matching end. Dart reaches the same result one level up: its
+collectors inherit a shared base whose `onSequenceStart` returns `null` instead
+of the corelib's descending `this`, beside the `onStringBytes` no-op that is there for exactly the
 same reason.
 
 This has to hold **even for a message that declares no sequence at all**. Neither
@@ -1057,8 +1058,33 @@ field it is not. Both are fixed by keying **one arm per wire kind**, which makes
 the §7.3 check decide in the match itself — before any counter is armed and before
 any bound is applied, the order CORELIB_PLAN §4.8 requires.
 
+**And it must cost nothing to come back from.** A skipped subtree is the one
+place where wire depth is unbounded by the schema: `MAX_DEPTH` is 255
+(CORELIB_PLAN §4.9/§6.2) and an unknown sequence — which forward compatibility
+*requires* a decoder to accept — may nest arbitrarily inside a known one. A
+backend whose scope stack is fixed-capacity and sized from the **schema** (the
+reachable frame count) therefore had a bound that the **wire** could exceed:
+`rust` `no_std` stacked every opened sequence into a `heapless::Vec<_Loc, N>` and
+dropped the push's `Result`, so past `N` the push did nothing, the matching pop
+restored the *wrong* scope, and a field written after the unwind bound nowhere —
+accepted, and silently missing a field (generator#283 / Crucible F-0055).
+
+The rule that removes the mismatch: **only live scopes are stacked.** Every scope
+inside a dead subtree is dead, so the stack was recording nothing but the level to
+return to; a `u16` counter (`dead`) records that for any depth, and what stays on
+the stack is one entry per live scope entered — a chain the frame count bounds.
+
+No other backend had the mismatch, for three different reasons: `c`/`cpp-c-cpp`
+never push for a skipped subtree at all (an unknown id matches no descriptor
+field, so no object decoder is taken and the istream skips the subtree itself),
+`zig` sizes its stack by *wire* depth (`[256]_Loc`), and `java`/`csharp` grow
+theirs. The generalization for any new flat-visitor backend: if the scope stack
+is bounded by the schema, skipped levels must not be stacked — and a bounded push
+must never have its overflow discarded.
+
 The lesson generalizes: a skip is only correct if it is *scoped* (children go with
-it) and *inert* (it arms nothing that a later field will read).
+it), *inert* (it arms nothing that a later field will read), and *free to unwind*
+(it consumes no schema-sized resource).
 
 #### The one mismatch structural skip cannot catch: an array at a scalar id
 

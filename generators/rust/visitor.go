@@ -536,8 +536,22 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	}
 	f.line("    use sofab::{IStream, Visitor, Id, Unsigned, Signed%s};", arrayKind)
 	f.blank()
-	// Bounded decode stack for the no_std profile: nesting depth never exceeds the
-	// number of reachable frames, so that is a safe fixed capacity (min 4).
+	// Bounded decode stack for the no_std profile. Only LIVE scopes are stacked --
+	// a sequence opened inside a skipped subtree is depth-counted in `dead` instead
+	// (see sequence_begin) -- so a chain of live scopes, one entry per reachable
+	// frame, is what has to fit. Without that, the stack was sized from the SCHEMA
+	// while its depth came from the WIRE (up to MAX_DEPTH == 255, §4.9/§6.2, since
+	// an unknown sequence may nest arbitrarily), and the surplus pushes were
+	// dropped: the matching pops then restored the wrong scope and a field written
+	// after the unwind bound nowhere (generator#283 / Crucible F-0055). The min-4
+	// floor is slack: a message with no sequence of its own needs exactly one entry
+	// (the root, held while its skipped subtree is open).
+	//
+	// One path can still push repeatedly without descending: an over-index wrapper
+	// element (overIndexGuard) returns with cur left on the array frame so its own
+	// sequence_end pops the entry back off. It has set self.inv by then, so such a
+	// message is InvalidMsg whatever the stack does -- and an overflow there is
+	// reported (err) rather than silently dropped.
 	stackCap := len(fs)
 	if stackCap < 4 {
 		stackCap = 4
@@ -561,12 +575,12 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	for _, ix := range ixVars {
 		askipInit += ", " + ix + ": 0"
 	}
-	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false%s%s };", limInit, askipInit)
+	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0, acc: Vec::new(), err: false, inv: false%s%s };", limInit, askipInit)
 	if g.noStd {
 		if needAcc {
-			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, acc: %s, err: false, inv: false%s };", accNew, askipInit)
+			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, dead: 0, acc: %s, err: false, inv: false%s };", accNew, askipInit)
 		} else {
-			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, err: false, inv: false%s };", askipInit)
+			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, dead: 0, err: false, inv: false%s };", askipInit)
 		}
 	}
 	// Infallible, best-effort decode: kept for back-compat. It discards feed's
@@ -747,12 +761,14 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// across feed chunks (generator#81); omitted when the message has neither.
 		f.line("    stack: heapless::Vec<_Loc, %d>,", stackCap)
 		f.line("    cur: _Loc,")
+		f.line("    dead: u16, // depth of the skipped subtree cur sits in (see sequence_begin)")
 		if needAcc {
 			f.line("    acc: %s,", accType)
 		}
 	} else {
 		f.line("    stack: Vec<_Loc>,")
 		f.line("    cur: _Loc,")
+		f.line("    dead: u16, // depth of the skipped subtree cur sits in (see sequence_begin)")
 		f.line("    acc: Vec<u8>,")
 	}
 	// Sticky decode-failure flag: a no_std fixed-capacity fill that overflows
@@ -1185,10 +1201,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// field 3 (generator#268), and a sequence opened at a string-array element
 		// position bound its string as that element (generator#272).
 		//
-		// Dead needs no depth counter: every sequence_begin pushes and every
-		// sequence_end pops, and a nested sequence inside a dead subtree matches no
-		// arm either, so it stays Dead and the stack alone restores the live scope
-		// at the matching end.
+		// A sequence opened while cur is already Dead is DEPTH-COUNTED, not stacked:
+		// every scope inside a skipped subtree is Dead, so the stack would only
+		// record which level to return to -- and `dead` records that in two bytes,
+		// whatever the wire nests. That is what keeps the stack bounded by the
+		// number of reachable frames rather than by MAX_DEPTH (255): the no_std
+		// stack is a fixed-capacity heapless::Vec, and stacking dead levels let a
+		// legal message overrun it, after which the surplus pops restored the WRONG
+		// scope and a field written after the unwind bound nowhere -- accepted, and
+		// silently missing a field (generator#283 / Crucible F-0055).
 		// `id` is only read by the arms; without any, name it _id so the generated
 		// crate stays warning-clean.
 		idParam := "id"
@@ -1196,7 +1217,20 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			idParam = "_id"
 		}
 		f.line("    fn sequence_begin(&mut self, %s: Id) {", idParam)
-		f.line("        %s", g.pushStmt("self.stack", "self.cur"))
+		f.line("        // Inside a skipped subtree: count the level and stay Dead.")
+		f.line("        if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }")
+		if g.noStd {
+			// The stack is sized for a chain of live scopes and dead levels are
+			// counted rather than stacked, so a well-formed message cannot get here
+			// (an over-index element chain can, and has already set inv). Either
+			// way the push returns a Result, and DROPPING it is exactly what turned
+			// an overrun into a silent wrong value. Report it instead: sticky err
+			// surfaces as Error::BufferFull, and the level is entered as a skipped
+			// subtree so a scope that was never stacked can never be popped into.
+			f.line("        if self.stack.push(self.cur).is_err() { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }")
+		} else {
+			f.line("        %s", g.pushStmt("self.stack", "self.cur"))
+		}
 		if len(arms) == 0 {
 			// The message declares no sequence at all, so every sequence that arrives
 			// is unknown. A match with only a wildcard would be a Clippy
@@ -1212,6 +1246,8 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		}
 		f.line("    }")
 		f.line("    fn sequence_end(&mut self) {")
+		f.line("        // Closing a level of a skipped subtree: nothing was stacked for it.")
+		f.line("        if self.dead > 0 { self.dead -= 1; return; }")
 		// Nothing to reconcile here: the wrapper array's decoded length is *highest
 		// present id + 1* (MESSAGE_SPEC §5.1) and every element that carries it has
 		// already been placed. A declared `count: N` is a capacity, so there is no
@@ -1502,7 +1538,8 @@ func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, a
 	if g.noStd {
 		out = append(out,
 			vField{"stack", fmt.Sprintf("heapless::Vec<_Loc, %d>", stackCap), "heapless::Vec::new()", false},
-			vField{"cur", "_Loc", "_Loc::Root", true})
+			vField{"cur", "_Loc", "_Loc::Root", true},
+			vField{"dead", "u16", "0", true})
 		if needAcc {
 			out = append(out, vField{"acc", accType, accNew, false})
 		}
@@ -1510,6 +1547,7 @@ func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, a
 		out = append(out,
 			vField{"stack", "Vec<_Loc>", "Vec::new()", false},
 			vField{"cur", "_Loc", "_Loc::Root", true},
+			vField{"dead", "u16", "0", true},
 			vField{"acc", "Vec<u8>", "Vec::new()", false})
 	}
 	out = append(out,

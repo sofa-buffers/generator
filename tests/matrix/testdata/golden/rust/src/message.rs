@@ -71,7 +71,7 @@ mod scalars_dec {
     pub fn decode(data: &[u8]) -> Scalars {
         let mut m = Scalars::default();
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, askip: 0 };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0, acc: Vec::new(), err: false, inv: false, askip: 0 };
             let mut is = IStream::new();
             let _ = is.feed(data, &mut v);
         }
@@ -84,7 +84,7 @@ mod scalars_dec {
         let invalid;
         let fed;
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, askip: 0 };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0, acc: Vec::new(), err: false, inv: false, askip: 0 };
             let mut is = IStream::new();
             fed = is.feed(data, &mut v);
             overflow = v.err;
@@ -120,6 +120,7 @@ mod scalars_dec {
         is: IStream,
         stack: Vec<_Loc>,
         cur: _Loc,
+        dead: u16,
         acc: Vec<u8>,
         err: bool,
         inv: bool,
@@ -128,7 +129,7 @@ mod scalars_dec {
 
     impl Decoder {
         pub fn new() -> Self {
-            Self { m: Scalars::default(), is: IStream::new(), stack: Vec::new(), cur: _Loc::Root, acc: Vec::new(), err: false, inv: false, askip: 0 }
+            Self { m: Scalars::default(), is: IStream::new(), stack: Vec::new(), cur: _Loc::Root, dead: 0, acc: Vec::new(), err: false, inv: false, askip: 0 }
         }
 
         /// Feed the next chunk. `Ok(())` if it ended on a field boundary,
@@ -136,12 +137,13 @@ mod scalars_dec {
         /// answers whether the MESSAGE is done, only whether these bytes were.
         pub fn feed(&mut self, chunk: &[u8]) -> Result<(), sofab::Error> {
             let fed = {
-                let mut v = V { m: &mut self.m, stack: core::mem::take(&mut self.stack), cur: self.cur, acc: core::mem::take(&mut self.acc), err: self.err, inv: self.inv, askip: self.askip };
+                let mut v = V { m: &mut self.m, stack: core::mem::take(&mut self.stack), cur: self.cur, dead: self.dead, acc: core::mem::take(&mut self.acc), err: self.err, inv: self.inv, askip: self.askip };
                 let r = self.is.feed(chunk, &mut v);
                 // `..` covers `m`, ending its borrow before the write-back.
-                let V { stack, cur, acc, err, inv, askip, .. } = v;
+                let V { stack, cur, dead, acc, err, inv, askip, .. } = v;
                 self.stack = stack;
                 self.cur = cur;
+                self.dead = dead;
                 self.acc = acc;
                 self.err = err;
                 self.inv = inv;
@@ -183,6 +185,7 @@ struct V<'a> {
     m: &'a mut Scalars,
     stack: Vec<_Loc>,
     cur: _Loc,
+    dead: u16, // depth of the skipped subtree cur sits in (see sequence_begin)
     acc: Vec<u8>,
     err: bool,
     inv: bool,
@@ -237,10 +240,14 @@ impl<'a> Visitor for V<'a> {
         }
     }
     fn sequence_begin(&mut self, _id: Id) {
+        // Inside a skipped subtree: count the level and stay Dead.
+        if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }
         self.stack.push(self.cur);
         self.cur = _Loc::Dead;
     }
     fn sequence_end(&mut self) {
+        // Closing a level of a skipped subtree: nothing was stacked for it.
+        if self.dead > 0 { self.dead -= 1; return; }
         self.cur = self.stack.pop().unwrap_or(_Loc::Root);
     }
 }

@@ -459,6 +459,7 @@ declare here was entered and its children bound into the enclosing scope:
 
 ```rust
 fn sequence_begin(&mut self, id: Id) {
+    if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }
     self.stack.push(self.cur);
     self.cur = match (self.cur, id) {
         (_Loc::Root, 10) => _Loc::Root_known,
@@ -467,9 +468,11 @@ fn sequence_begin(&mut self, id: Id) {
 }
 ```
 
-`Dead` matches no callback arm, so the whole subtree is discarded. It needs no
-depth counter: a nested sequence inside a dead subtree matches no arm either, so
-it stays `Dead`, and the stack restores the live scope at the matching end.
+`Dead` matches no callback arm, so the whole subtree is discarded. A sequence
+opened *inside* a dead subtree matches no arm either, so it would stay `Dead`
+regardless — which is why it is **depth-counted rather than stacked** (see
+[§4.9: only live scopes are stacked](#49-only-live-scopes-are-stacked-issue-283)
+below).
 
 This is emitted **unconditionally** now, even for a message with no sequence of
 its own — corelib-rs's `Visitor` default is a no-op, so a missing override let an
@@ -491,3 +494,66 @@ concatenated instead of overwriting (§7.4 last-wins) and the capacity check on 
 same line — written for an empty destination — misfired into `Error::BufferFull`
 on any repeat at any size. Chunk reassembly happens upstream in `acc`, so every
 arm receives one complete value and appending is never correct.
+
+## §4.9: only live scopes are stacked (issue #283)
+
+The scope stack is a `heapless::Vec<_Loc, N>` on `no_std`, sized from the
+**schema**: `N` = the number of reachable frames (min 4). Nesting depth, however,
+is a property of the **wire** — `MAX_DEPTH` is 255 (CORELIB_PLAN §4.9/§6.2), and
+an unknown sequence, which a decoder must accept and skip for forward
+compatibility, may nest arbitrarily inside a known one. Those two bounds are
+unrelated, so a legal message could overrun the capacity.
+
+`heapless`'s `push` reports that with a `Result`, which the emitted code dropped
+(`let _ = …`). Past the capacity the push did nothing, the matching `pop` restored
+the *wrong* scope, and a field written after the unwind bound nowhere: the message
+decoded **accepted, minus that field** — a wrong value, not an error (Crucible
+F-0055; `rust-std` was unaffected because its stack grows). It survived every
+depth vector because nesting *only* unknown sequences is self-correcting — every
+scope involved is `Dead` and the surplus pops land on `unwrap_or(_Loc::Root)`,
+which is the right answer when the base scope is the root. The corruption needs a
+**real scope underneath** the overflow.
+
+The fix removes the mismatch instead of widening the buffer to 255 entries, which
+a footprint profile should not pay for: a sequence opened while `cur` is already
+`Dead` is **counted, not stacked**.
+
+```rust
+fn sequence_begin(&mut self, id: Id) {
+    if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }
+    …
+}
+fn sequence_end(&mut self) {
+    if self.dead > 0 { self.dead -= 1; return; }
+    self.cur = self.stack.pop().unwrap_or(_Loc::Root);
+}
+```
+
+Every scope inside a skipped subtree is `Dead`, so the stack was only recording
+which level to come back to — and one `u16` records that for any depth. What
+remains on the stack is one entry per *live* scope entered, and a chain of live
+scopes cannot be longer than the frame count, so the one place where wire depth
+escapes the schema no longer touches the capacity. `dead` is part of the
+persistent state: a skipped subtree can straddle a chunk boundary in the
+incremental decoder.
+
+One path still pushes without descending: an over-index wrapper element
+(`id >= count`) returns with `cur` left on the array frame, so that its own
+`sequence_end` pops the entry back off. Nesting those repeatedly can still reach
+the capacity — but the guard has set `self.inv` by then, so the message is
+`InvalidMsg` whatever the stack does, and the overflow is now *reported* rather
+than dropped.
+
+Both profiles emit it — the counter is what makes the capacity argument sound on
+`no_std`, and on `std` it keeps the two decoders' scope handling identical while
+saving the pushes. The `no_std` push additionally *reports* an overflow now
+(`self.err = true` → `Error::BufferFull`) and enters the level as a skipped
+subtree, so a scope that was never stacked can never be popped back into.
+Discarding that `Result` is exactly what turned a capacity overrun into a silently
+wrong value; the machinery to surface it was already there.
+
+Cost, measured (`tests/bench/results.txt`): `.text` +96 B on thumbv6m (+1.0%) and
+decode +108 Ir/op (+0.4%) for `rust-rs-no-std`, +112 B / +111 Ir for its
+`allow_dynamic` twin, +136 Ir (+0.6%) for `rust-rs`; encode is untouched. Sizing
+the stack to 255 entries instead would have cost ~250 B of RAM on the profile that
+has the least of it.
