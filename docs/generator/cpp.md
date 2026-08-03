@@ -479,6 +479,14 @@ initializers or assignment), not with positional aggregate initialization.
 Row `cpp-cpp` (corelib `cpp`) and `cpp-c-cpp` (corelib `c-cpp`) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with
 the **toggle** method. Tracked: Ir/op for both; `cpp-c-cpp` also `.text`/`.data`/`.bss` on ARMv6-M and ARMv7-M+fp.dp.
 
+`cpp-c-cpp-dyn` is the same row with `allow_dynamic: true`, and the two are meant to
+be read as a pair — `allow_dynamic` only does anything on `c-cpp`, since `corelib:
+cpp` is heap-backed either way. Switching it on moves variable-length fields off
+inline, schema-bound storage and onto the heap, which is not a saving: the inline
+build never calls `operator new`, so the dynamic one drags in newlib's malloc and
+`.text` goes 6589 → 14287 on ARMv6-M while the objects get smaller. Neither number
+captures the heap the dynamic build then needs at runtime.
+
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
 

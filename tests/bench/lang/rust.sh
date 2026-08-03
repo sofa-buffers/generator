@@ -122,6 +122,49 @@ pub extern "C" fn reset() -> ! {
 }
 EOF
 
+    # allow_dynamic puts the variable-length fields in alloc::String/alloc::Vec, so
+    # the crate pulls in `extern crate alloc` — and a bare-metal target ships no
+    # allocator, so without one supplied here the build simply fails to link. It is
+    # appended ONLY when the generated crate actually needs it: declaring a
+    # #[global_allocator] unconditionally would link `alloc` into the inline build
+    # too and move a row that did not change.
+    #
+    # A bump allocator, and deliberately the most trivial one: never freeing makes
+    # its .text a FLOOR, not an estimate. The dynamic row therefore reads "the
+    # generated code plus the cheapest allocator that could possibly work" — a real
+    # firmware allocator costs more, never less. The arena is at a fixed address
+    # rather than a static array so an arbitrary heap size cannot land in .bss and
+    # masquerade as a measurement; only the 4-byte bump cursor does.
+    if grep -rqs "extern crate alloc" "$gen/src" 2>/dev/null; then
+        cat >> "$crate/src/lib.rs" <<'EOF'
+
+extern crate alloc;
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+
+const ARENA: usize = 0x2000_4000;
+
+struct Bump(UnsafeCell<usize>);
+unsafe impl Sync for Bump {}
+
+unsafe impl GlobalAlloc for Bump {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let cur = self.0.get();
+        let p = (ARENA + *cur + l.align() - 1) & !(l.align() - 1);
+        *cur = p - ARENA + l.size();
+        p as *mut u8
+    }
+    unsafe fn dealloc(&self, _: *mut u8, _: Layout) {}
+}
+
+// No #[alloc_error_handler]: it is still unstable, and since Rust 1.68 a no_std
+// crate gets a default one that panics — which the panic handler above already
+// turns into the same infinite loop.
+#[global_allocator]
+static HEAP: Bump = Bump(UnsafeCell::new(0));
+EOF
+    fi
+
     cat > "$crate/link.x" <<'EOF'
 MEMORY { FLASH (rx): ORIGIN = 0, LENGTH = 256K  RAM (rwx): ORIGIN = 0x20000000, LENGTH = 64K }
 ENTRY(reset)

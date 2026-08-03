@@ -2076,6 +2076,31 @@ so `ir_toggle` refuses zero. And two rep points cannot distinguish a real slope 
 JIT tier transition, so `ir_subtract` takes three and refuses unless the slopes agree
 to 1%.
 
+**A row is a `(config, corelib)` pair, so every axis that changes generated code
+needs its own row.** Three are covered: the corelib choice (`cpp-cpp`/`cpp-c-cpp`,
+`rust-rs`/`rust-rs-no-std`), the TypeScript `int64` mode (`ts-bigint`/`ts-long`), and
+`allow_dynamic` (`cpp-c-cpp-dyn`, `rust-rs-no-std-dyn`). The last pairs only with the
+footprint rows because that is the only place it does anything — it chooses *where*
+variable-length fields live, and `std` Rust and `corelib: cpp` are heap-backed
+regardless. Read those as pairs: turning it on trades static bytes for an allocator,
+which on `c-cpp` drags in newlib's malloc (`.text` 6589 → 14287) and on bare-metal
+Rust needs one supplied by the footprint driver at all. What no static-section
+measurement can show is the heap the dynamic build then needs at runtime.
+Uncovered axes are named in `tests/bench/README.md`: the corelib build switches
+(`SOFAB_DISABLE_*`, cargo features, `sofab_no_strict_utf8`) — which is the footprint
+story itself — and the corelib runtime engines.
+
+**What ran is recorded, not assumed.** The header carries the corelib SHAs and the
+`## toolchain` table the compiler versions, because each moves numbers with the
+generator unchanged. `sofab-engine` is the same idea one level up: corelib-py picks
+between its pure-Python classes and its Cython accelerator at *import* time, silently,
+and the two are ~1.5–3× apart — so the engine that measured is written into the table
+rather than assumed. It reads `pure` today (the recipe builds no extension), which is
+why an accelerator perf release moved the row by zero instructions. Deliberately
+recorded and not pinned: pinning would make a `maxspeed` row permanently blind to the
+engine that ships, whereas recording makes the switch visible in the diff the day the
+extension is built. See `tests/bench/README.md`.
+
 **Not measured / known gaps** (properties of the targets, not the harness): the C++
 `footprint` profile cannot build freestanding (the generated header pulls in
 `<string>`/`<vector>`), and AVR cannot host any fp64 schema. Both are recorded in

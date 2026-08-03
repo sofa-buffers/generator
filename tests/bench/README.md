@@ -150,6 +150,51 @@ arbitrary — see the header comment in each file. In particular:
   only `encodeTo`/`try_decode` — the convenience `encode()` returns `std::vector`
   and would drag the allocator into every number.
 
+## Configuration axes, and which ones have rows
+
+A row is a `(generator config, corelib)` pair, so anything that changes either can
+change the numbers — and only what has a row gets measured. The axes that exist:
+
+| Axis | Where | Covered by |
+|---|---|---|
+| corelib choice | `cpp`: `cpp` \| `c-cpp`; `rust`: `rs` \| `rs-no-std` | `cpp-cpp` / `cpp-c-cpp`, `rust-rs` / `rust-rs-no-std` |
+| `allow_dynamic` | `cpp` (only on `c-cpp`), `rust` (only on `no_std`) | `cpp-c-cpp-dyn`, `rust-rs-no-std-dyn` |
+| `int64` mode | `typescript`: `bigint` \| `long` | `ts-bigint`, `ts-long` |
+| corelib build switches | `SOFAB_DISABLE_*` (c-cpp), cargo features (rs-no-std), `sofab_no_strict_utf8` (go) | **nothing** — every row builds the defaults |
+| corelib runtime engine | py `_speedups`, ts `setKernel` | **nothing** — see the python section below |
+
+The bottom two rows of that table are the honest gaps. The build switches are the
+footprint story itself — dropping wire types is how a `c-cpp` or `rs-no-std` build
+gets small — and no row exercises them, so the file shows the all-features size only.
+The engines are worse for python, where which one runs is decided silently by the
+environment.
+
+### The `-dyn` rows: read the pair, not the row
+
+`allow_dynamic` decides **where** variable-length fields live: inline, sized from the
+schema bound (the default), or in a heap container holding what the message actually
+carries. It does nothing on `std` Rust or on `corelib: cpp` — those are heap-backed
+either way — so it only pairs with the two footprint rows.
+
+The pair is the measurement; neither number alone is a verdict. Turning it on trades
+static bytes for an allocator, and on the two targets that goes in opposite
+directions:
+
+* **cpp-c-cpp** `.text` 6589 → 14287 on ARMv6-m. The inline build never calls
+  `operator new`, so switching drags in newlib's malloc — more than doubling `.text`
+  while the objects get smaller.
+* **rust-rs-no-std** `.text` 9145 → 10649, `.bss` 0 → 4. Bare metal ships no
+  allocator at all, so the footprint driver supplies the most trivial bump allocator
+  that can work (`lang/rust.sh`, appended only when the generated crate pulls in
+  `extern crate alloc`). Never freeing makes its `.text` a **floor**: a real firmware
+  allocator costs more, never less. The arena sits at a fixed address rather than in a
+  static array, so an arbitrary heap size cannot land in `.bss` and pose as a
+  measurement — the 4 bytes are the bump cursor.
+
+What neither number can show is the heap those builds now need at runtime.
+`.text`/`.data`/`.bss` is a static-section measurement; a dynamic build that looks
+cheap in `.bss` still needs RAM the inline build had already accounted for.
+
 ## Known gaps
 
 These are properties of the generator/targets, not of this harness. The bench
@@ -337,6 +382,7 @@ Three things have to hold, and each one broke in practice before it worked:
    measured loop and every measured op runs at steady cost. Being identical in both
    runs, it cancels. (`corelib-java/.../Callgrind.java` does the same, and says why.)
    Python needs none: CPython has no tiers, and it measures affine to 0.0004%.
+   Python has a different problem instead — **two engines**, see below.
 2. **Runtime pinning** (`lang/<x>.sh`), adopted from each corelib's script: one JIT
    tier, no GC, no per-run-seeded hashing.
 3. **Rep counts at the corelib's scale** — `10000 110000` for java/csharp, per
@@ -355,6 +401,30 @@ Three things have to hold, and each one broke in practice before it worked:
    three-point path, reproducibly. Fix: precompile TS→JS with `tsc` once and run
    plain `node dist/harness.js`. A forking wrapper has no place in an
    instruction-exact measurement; see `lang/typescript.sh`.
+
+### The python row has two engines, and measures the slower one
+
+corelib-py ships the pure-Python classes *and* a Cython accelerator
+(`sofab._speedups`, built by its `setup.py`). `sofab/__init__.py` imports the
+accelerator whenever it is importable and falls back to pure Python otherwise — an
+`ImportError` caught internally, with nothing in the process announcing which one
+won. `lang/python.sh` puts the corelib's **source tree** on `PYTHONPATH` and builds
+no extension, so the row measures pure Python. It always has.
+
+The cost of that being invisible: corelib-py landed *"restore the accelerator's hot
+paths (encode 3.0x, decode 1.5x)"* and this row did not move by one instruction,
+because it cannot see that code. `python` is a `maxspeed` row, so the number is not
+describing the profile it claims.
+
+The engine is therefore **recorded, not pinned** — `format.py` asks the interpreter
+under the recipe's own `PYTHONPATH` and writes the answer to the `## toolchain`
+table as `sofab-engine` (`pure` / `native`). Pinning `SOFAB_PUREPYTHON=1` would have
+made the blindness permanent; recording it means that when the extension does get
+built, the engine switch lands in the diff next to the numbers it moved, exactly as
+a compiler version bump does. **To measure what ships**, install Cython and build
+the extension (`pip install -e <corelib-py>`) before running the row. The
+devcontainer has no pip, so this has never been done — the committed python numbers
+are the fallback engine's.
 
 ## Traps
 

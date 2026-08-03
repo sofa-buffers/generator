@@ -19,6 +19,7 @@ Rows measured this run come from --measured; any row not measured (a partial
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -55,10 +56,10 @@ HOST_TOOLCHAINS = [("valgrind", ["valgrind", "--version"])]
 # Two tables: Ir is one number per row (measured on the host), footprint is one per
 # (row, arch). Keeping them separate beats a wide table full of "-".
 IR_COLS = ["row", "profile", "method", "encode_ir/op", "decode_ir/op"]
-IR_WIDTHS = [17, 11, 10, 14, 13]
+IR_WIDTHS = [19, 11, 10, 14, 13]
 
 SZ_COLS = ["row", "profile", "arch", "text", "data", "bss"]
-SZ_WIDTHS = [17, 11, 16, 8, 7, 6]
+SZ_WIDTHS = [19, 11, 16, 8, 7, 6]
 
 # Three columns on purpose: parse_previous() reads any non-# line by field count, so
 # the rows list is comma-joined WITHOUT spaces to keep this table at exactly three
@@ -78,6 +79,34 @@ def tool_version(argv):
     # `rustc --version` -> "rustc 1.97.1 (8bab26f4f 2026-07-14)"; keep the number.
     m = re.search(r"\d+\.\d+(\.\d+)?", text)
     return m.group(0) if m else text.splitlines()[0]
+
+
+def python_engine(corelib_dir):
+    """Which corelib-py engine is importable — the thing that decides the row.
+
+    corelib-py picks at import time: the compiled Cython accelerator
+    (``sofab._speedups``) when it is present, else the pure-Python classes, and the
+    choice is an ImportError swallowed inside ``sofab/__init__.py``. Nothing in the
+    process says which one ran, and the gap between them is not subtle — the corelib
+    landed "restore the accelerator's hot paths (encode 3.0x, decode 1.5x)" without
+    the row moving one instruction, because the bench had never built the extension.
+    A row whose engine is invisible cannot be diffed, so record it like a compiler
+    version: ask the same interpreter, under the same PYTHONPATH the recipe uses.
+    """
+    env = {**os.environ, "PYTHONPATH": str(Path(corelib_dir) / "src")}
+    try:
+        out = subprocess.run(
+            ["python3", "-c", "import sofab; print(sofab.IMPL)"],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    impl = out.stdout.strip()
+    # "python" is the fallback engine, not a version of anything — name it so a
+    # reader does not take it for the interpreter line directly above.
+    return {"python": "pure", "native": "native"}.get(impl, impl or None)
 
 
 def git_sha(path):
@@ -238,12 +267,27 @@ def main():
         # absence rather than dropping the line.
         toolchain_rows.append((lbl, tool_version(argv) or "(not found)", where))
 
+    corelib_dirs = {}
     if args.corelibs and Path(args.corelibs).exists():
+        for line in Path(args.corelibs).read_text().splitlines():
+            if line.strip():
+                repo, d = line.split("\t")
+                corelib_dirs[repo] = d
+
+    # The python row's engine belongs in this table for the same reason the
+    # compilers do: it decides the number, and it can change without the generator
+    # or the corelib SHA changing. Only when that row was measured — the label must
+    # not appear for a --rows run that never touched python.
+    py_rows = sorted(r["id"] for r in spec["rows"] if r["lang"] == "python")
+    if py_rows and "corelib-py" in corelib_dirs and any(r in irs for r in py_rows):
+        engine = python_engine(corelib_dirs["corelib-py"])
+        if engine:
+            toolchain_rows.append(("sofab-engine", engine, ",".join(py_rows)))
+            toolchain_rows.sort(key=lambda t: t[0])
+
+    if corelib_dirs:
         shas = []
-        for line in sorted(set(Path(args.corelibs).read_text().splitlines())):
-            if not line.strip():
-                continue
-            repo, d = line.split("\t")
+        for repo, d in sorted(corelib_dirs.items()):
             sha = git_sha(d)
             shas.append(f"{repo.replace('corelib-', '')} {sha or '(unknown)'}")
         if shas:
