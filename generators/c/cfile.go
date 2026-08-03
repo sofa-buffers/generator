@@ -36,6 +36,10 @@ func (f *cfile) banner(tool, license, file, msg string) {
 }
 
 // doc writes a Doxygen /*! ... */ one-liner (or multi-line) doc comment.
+//
+// Callers pass PLAIN TEXT: the " * " continuation marker is added here, per
+// line. A caller that prefixes its own lines gets " *  * " in the output, so
+// a paragraph break is just "\n", never " *\n".
 func (f *cfile) doc(format string, args ...any) {
 	text := fmt.Sprintf(format, args...)
 	// Neutralise a comment terminator so doc text containing "*/" cannot close
@@ -48,6 +52,11 @@ func (f *cfile) doc(format string, args ...any) {
 	}
 	f.line("/*!")
 	for _, l := range lines {
+		if l == "" {
+			// No trailing space on a paragraph break, matching banner().
+			f.line(" *")
+			continue
+		}
 		f.line(" * %s", l)
 	}
 	f.line(" */")
