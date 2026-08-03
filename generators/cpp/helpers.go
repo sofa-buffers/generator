@@ -657,6 +657,59 @@ func cppIdent(name string) string {
 // configured max_dyn_array_count policy cap (LimitExceeded). Both are omitted
 // when absent, so a plain bounded array reads `is.readArray(x, 4)` and an
 // unbounded one with no cap configured reads `is.readArray(x)`.
+// cppElemBound renders the readArray() element-width argument for a NUMERIC
+// array element, or "" where no bound applies (generator#279 / Crucible F-0052).
+//
+// MESSAGE_SPEC §1/§7.1 makes the declared element width a validity bound, and
+// corelib-cpp enforces it -- but only when the argument is armed. Left at its
+// default the unbounded decode runs and an over-width element is masked to the
+// width and kept: 5208 into a `u8` array came back as 88. The scalar position was
+// already correct (generated code checks that one inline, generator#266); this is
+// the array half, and it lives in the corelib because readArray converts the
+// elements itself.
+//
+// ElemBound::of<E>() is the corelib's own helper and is documented as safe to
+// hand in unconditionally: it comes back UNARMED for a 64-bit element, whose
+// range is the accumulator's own, so a u64/i64 array pays nothing.
+//
+// Floating-point elements are excluded, and not merely as an optimization.
+// ElemBound::of<float>() would cast std::numeric_limits<float>::max() to int64_t
+// inside a constexpr function -- out of range, so a hard compile error rather
+// than a wrong bound. The corelib ignores the argument for a non-integral element
+// anyway (its bounded path sits behind `if constexpr (std::is_integral_v<Elem>)`),
+// so there is nothing to express here.
+func (g *gen) cppElemBound(elem ir.Kind, ref *ir.TypeRef) string {
+	switch elem {
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+		return fmt.Sprintf("sofab::ElemBound::of<%s>()", numCppType(elem))
+	case ir.KindBitfield:
+		if ref != nil && ref.Target != nil {
+			return fmt.Sprintf("sofab::ElemBound::of<%s>()", bitfieldBacking(ref.Target))
+		}
+	}
+	return ""
+}
+
+// cppArrayArgs renders the trailing readArray() arguments WITH the element-width
+// bound. The bound is the fourth parameter, so the schema count and the policy cap
+// have to be spelled out even where they are the defaults -- which is why this
+// cannot simply append to cppArrayBounds.
+func (g *gen) cppArrayArgs(count int64, hasCount bool, elemBound string) string {
+	if elemBound == "" {
+		return g.cppArrayBounds(count, hasCount)
+	}
+	schema := int64(-1)
+	if hasCount {
+		schema = count
+	}
+	dyn := "-1"
+	if !hasCount && g.limArrHas {
+		dyn = "SOFAB_MAX_DYN_ARRAY_COUNT"
+	}
+	return fmt.Sprintf(", %d, %s, %s", schema, dyn, elemBound)
+}
+
 func (g *gen) cppArrayBounds(count int64, hasCount bool) string {
 	schema := int64(-1)
 	if hasCount {

@@ -936,15 +936,23 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
   unaffected: `read()` derives its expected wire type from signedness alone, so
   `u64` and `u8` frame identically and a contradicting tag still stores nothing.
 
-**One gap remains, and it is not generator-fixable: `cpp` array elements.**
+**`cpp` array elements are covered by arming the corelib, not by inlining.**
 `IStream::readArray` converts elements *inside* corelib-cpp
-(`sp[i] = static_cast<Elem>(raw)`), so a narrow array element is still masked and
-the raw value never reaches generated code. Routing arrays through a wide
-temporary would defeat the bulk/zero-copy path the maxspeed profile exists for,
-so closing it needs a corelib-cpp field or hook — structurally the same situation
-as the `corelib-c-cpp#90` maxlen gap above. Scalar fields and struct/union
-members on `cpp` are covered, as are array elements on every other backend
-(they convert in generated code, where the raw value is visible).
+(`sp[i] = static_cast<Elem>(raw)`), so the raw value never reaches generated code
+and the scalar temporary does not carry over; routing arrays through a wide
+temporary would defeat the bulk/zero-copy path the maxspeed profile exists for.
+corelib-cpp therefore takes the bound as an argument and the generator hands it
+in (`ElemBound::of<E>()`), so the check runs at the point of conversion. Left at
+its default the argument is unarmed and the unbounded decode runs — the defect
+this closed. Floating-point elements are excluded by construction: instantiating
+the helper for a `float` would cast `numeric_limits<float>::max()` to `int64_t`
+in a constexpr context, and the corelib ignores the argument for a non-integral
+element in any case.
+
+This is the shape worth reaching for whenever a bound cannot be observed from
+generated code: hand the schema fact to the corelib rather than re-deriving the
+wire in the backend. It is what `c` and `c-cpp` have always done through their
+descriptors, and why those two were conformant from the start.
 
 Reproducers (Crucible F-0033, codegen defect G-0026, generator#266): `00 ff 7f`
 is id 0 / `u8` / value 16383 and must be `INVALID`, as must 256 into a `u8` and
