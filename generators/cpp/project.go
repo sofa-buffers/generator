@@ -105,18 +105,32 @@ func (g *gen) makefile(s *ir.Schema) string {
 SOFAB_CPP_DIR ?= /opt/corelib-cpp
 SOFAB_C_DIR   ?= /opt/corelib-c-cpp
 CXX ?= g++
-# The C++ standard is kept separate from CXXFLAGS so it is always applied even if
-# a caller overrides CXXFLAGS. corelib-cpp requires C++20 (concepts, std::span).
+CC  ?= gcc
+# The language standards are kept separate from C/CXXFLAGS so they are always
+# applied even if a caller overrides those: C99 for the vendored JSON reader,
+# C++20 for the harness (corelib-cpp requires concepts, std::span).
+CSTD   ?= -std=c99
 CXXSTD ?= -std=c++20
+CFLAGS   ?= -O2
 CXXFLAGS ?= -O2 -Wall
 INCLUDES := -I. -I$(SOFAB_CPP_DIR)/include -I$(SOFAB_C_DIR)/test/shared
 
-harness/harness: harness/main.cpp $(SOFAB_C_DIR)/test/shared/sofab_test_json.c
-	$(CXX) $(CXXSTD) $(CXXFLAGS) $(INCLUDES) harness/main.cpp -x c $(SOFAB_C_DIR)/test/shared/sofab_test_json.c -o $@
+.PHONY: all
+all: harness/harness
+
+# The JSON reader is C and gets its own object rather than riding along in the
+# $(CXX) command as -x c: one command applies $(CXXSTD) to it too, which gcc
+# only warns about but clang REJECTS ("invalid argument '-std=c++20' not allowed
+# with 'C'") -- so CXX=clang++ could not build this project at all.
+sofab_test_json.o: $(SOFAB_C_DIR)/test/shared/sofab_test_json.c
+	$(CC) $(CSTD) $(CFLAGS) -I$(SOFAB_C_DIR)/test/shared -c $< -o $@
+
+harness/harness: harness/main.cpp sofab_test_json.o
+	$(CXX) $(CXXSTD) $(CXXFLAGS) $(INCLUDES) harness/main.cpp sofab_test_json.o -o $@
 
 .PHONY: clean
 clean:
-	rm -f harness/harness
+	rm -f harness/harness sofab_test_json.o
 `
 }
 
