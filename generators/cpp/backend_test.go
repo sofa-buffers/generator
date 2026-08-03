@@ -288,7 +288,7 @@ func TestCppFixedContainers(t *testing.T) {
 		"sofab::InlineVector<sofab::FixedBytes<8>, 3> blobs = {};",                     // blob sequence -> inline, EMPTY (count is a capacity)
 		"sofab::InlineVector<sofab::FixedString<16>, 5> strs = {};",                    // string sequence -> inline, EMPTY (count is a capacity)
 		"sofab::InlineVector<MPtsElem",                                                 // struct sequence -> inline (prefix)
-		"if (!bl.empty()) {",                                                          // blob, no declared default -> empty()
+		"if (!bl.empty()) {",                                                           // blob, no declared default -> empty()
 		"is.readString(s, _size, 8);",                                                  // FixedString decode, bound carried into the corelib read
 		"is.readBlob(bl, _size, 16);",                                                  // FixedBytes decode, likewise (issue #95)
 		"static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>>",     // blob-seq collector
