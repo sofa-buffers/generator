@@ -203,9 +203,40 @@ so a half-read field would be returned as a value"
         "every truncation was Incomplete -- a cut on a field boundary should decode"
     );
 
+    // ---- 4. a skipped subtree survives a chunk boundary (generator#283) ---
+
+    // The scope tracker carries a depth counter for sequences opened inside a
+    // skipped subtree (they are counted, not stacked, so the stack stays bounded
+    // by the schema's frame count). Like `stack`/`cur`/`acc` it is persistent
+    // state, so a chunk boundary may fall anywhere inside the unwind -- and if it
+    // were not carried across feeds, the pops would resume against the wrong
+    // depth and the field written AFTER the unwind would bind nowhere.
+    //
+    // Wire: open somestruct (id 20), nest 40 unknown sequences (id 60) and close
+    // them all, then -- back at somestruct scope -- nestedint = 42, then close.
+    let mut deep: Vec<u8> = vec![0xa6, 0x01];
+    deep.extend(std::iter::repeat([0xe6, 0x03]).take(40).flatten());
+    deep.extend(std::iter::repeat(0x07u8).take(40));
+    deep.extend([0x00, 0x2a, 0x07]);
+    for size in [1usize, 2, 3, 5, 16, 64] {
+        let mut dec = Myfirstmessage::decoder();
+        for chunk in deep.chunks(size) {
+            match dec.feed(chunk) {
+                Ok(()) | Err(sofab::Error::Incomplete) => continue,
+                Err(e) => panic!("deep-nest chunk size {size}: feed failed: {e:?}"),
+            }
+        }
+        let got = dec.finish().expect("deep-nest finish failed");
+        assert!(
+            got.somestruct.nestedint == 42,
+            "chunk size {size}: the field after a 40-deep unknown-sequence unwind was lost"
+        );
+    }
+
     println!(
         "streaming: encode byte-identical through a 7-byte buffer; decode value-identical \
-at 7 chunk sizes; of {} truncations {incompletes} were rejected as Incomplete and \
+at 7 chunk sizes; a 40-deep skipped subtree unwinds correctly at 6 chunk sizes; of {} \
+truncations {incompletes} were rejected as Incomplete and \
 {completions} decoded cleanly on a field boundary",
         one_shot.len() - 1
     );

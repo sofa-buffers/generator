@@ -1499,8 +1499,9 @@ messages:
 //
 // Both are one missing default: an undeclared (scope, id) must move to a dead
 // scope that matches no arm, so the whole subtree — children included — is
-// discarded. The stack alone restores the live scope at the matching end, so no
-// depth counter is needed.
+// discarded. The live scope is restored at the matching end by the stack, or by
+// the `dead` depth counter for the levels inside the skipped subtree
+// (generator#283).
 func TestRustUnknownSequenceIsSkippedWhole(t *testing.T) {
 	const src = `
 version: 1
@@ -1548,11 +1549,14 @@ messages:
 		// Emitted even though nothing here is a sequence, and `id` is named _id so
 		// the generated crate stays warning-clean with no arms to read it.
 		want := "    fn sequence_begin(&mut self, _id: Id) {\n" +
+			"        // Inside a skipped subtree: count the level and stay Dead.\n" +
+			"        if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }\n" +
 			"        self.stack.push(self.cur);\n" +
 			"        self.cur = _Loc::Dead;\n" +
 			"    }"
 		if cfg["corelib"] == "rs-no-std" {
-			want = strings.Replace(want, "self.stack.push(self.cur);", "let _ = self.stack.push(self.cur);", 1)
+			want = strings.Replace(want, "        self.stack.push(self.cur);\n",
+				"        if self.stack.push(self.cur).is_err() { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }\n", 1)
 		}
 		if !strings.Contains(got, want) {
 			t.Errorf("(%v) a scalar-only message must still override sequence_begin to skip:\n%s", cfg, got)
@@ -1561,5 +1565,61 @@ messages:
 		if strings.Contains(got, "match (self.cur, id) {\n            _ => _Loc::Dead,") {
 			t.Errorf("(%v) with no arms, emit the assignment rather than a single-binding match:\n%s", cfg, got)
 		}
+	}
+}
+
+// generator#283 (Crucible F-0055): the visitor's scope stack held one entry per
+// OPENED sequence, so its depth was a property of the WIRE (up to MAX_DEPTH ==
+// 255, §4.9/§6.2) while its no_std capacity was sized from the SCHEMA (the
+// reachable frame count). A legal message that nested deeper overran it, the
+// no_std push dropped the surplus silently, and the matching pops then restored
+// the wrong scope — a field written after the unwind bound nowhere, and the
+// message decoded ACCEPTED but missing that field.
+//
+// The fix is that only real scopes are stacked: a sequence opened while `cur` is
+// already Dead is depth-counted instead, because every scope inside a skipped
+// subtree is Dead and the stack would record nothing but the level to come back
+// to. That makes the frame count a true bound on the stack, whatever the wire
+// nests, on both profiles.
+func TestRustSkippedSubtreeDepthIsCountedNotStacked(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  probe:
+    payload:
+      known: { id: 10, type: struct, fields: { k: { id: 0, type: u32 } } }
+`
+	for _, cfg := range []map[string]any{{"corelib": "rs"}, {"corelib": "rs-no-std"}} {
+		got := moduleFromYAML(t, src, cfg)
+		if !strings.Contains(got, "    dead: u16,") {
+			t.Errorf("(%v) the visitor needs a skipped-subtree depth counter:\n%s", cfg, got)
+		}
+		// It has to survive between feed calls: an unknown subtree can straddle a
+		// chunk boundary in the incremental decoder.
+		if !strings.Contains(got, "self.dead = dead;") {
+			t.Errorf("(%v) `dead` must be part of the Decoder's persistent state:\n%s", cfg, got)
+		}
+		// Nothing is pushed for a level inside a skipped subtree...
+		if !strings.Contains(got, "        if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }") {
+			t.Errorf("(%v) a sequence opened inside a skipped subtree must be counted, not stacked:\n%s", cfg, got)
+		}
+		// ... so nothing may be popped for it either.
+		if !strings.Contains(got, "    fn sequence_end(&mut self) {\n"+
+			"        // Closing a level of a skipped subtree: nothing was stacked for it.\n"+
+			"        if self.dead > 0 { self.dead -= 1; return; }\n"+
+			"        self.cur = self.stack.pop().unwrap_or(_Loc::Root);") {
+			t.Errorf("(%v) sequence_end must unwind the counted levels before popping:\n%s", cfg, got)
+		}
+	}
+	// The overflow that used to be silent is now reportable: no_std's push returns
+	// a Result, and dropping it is what turned a capacity overrun into a wrong
+	// value. (It is unreachable with the counter in place — this pins that the
+	// belt-and-braces path stays.)
+	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs-no-std"})
+	if !strings.Contains(got, "if self.stack.push(self.cur).is_err() { self.err = true;") {
+		t.Errorf("a no_std scope-stack overflow must set the sticky err flag, not be discarded:\n%s", got)
+	}
+	if strings.Contains(got, "let _ = self.stack.push(self.cur);") {
+		t.Errorf("the scope-stack push must not discard its Result (#283):\n%s", got)
 	}
 }

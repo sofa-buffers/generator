@@ -131,6 +131,33 @@ run_variant() {
     (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/control.bin" >/dev/null) || { echo "FAIL: [$label] control (count == 4) must decode"; exit 1; }
     echo "==> [$label] over-count reject OK"
 
+    # Deep unknown nesting must not displace the live scope (generator#283 /
+    # Crucible F-0055). The visitor tracks the current scope on a stack whose
+    # no_std capacity is sized from the SCHEMA (one entry per reachable frame),
+    # while nesting depth is a property of the WIRE: MAX_DEPTH is 255 (§4.9/§6.2),
+    # and an unknown sequence -- which a decoder must accept and skip -- may nest
+    # arbitrarily inside it. Stacking those skipped levels overran the capacity,
+    # the surplus pushes were dropped, and the matching pops then restored the
+    # WRONG scope: a field written after the unwind bound nowhere and the message
+    # decoded fine, minus that field.
+    #
+    # Wire: open somestruct (id 20 -> a6 01), open 40 unknown sequences (id 60 ->
+    # e6 03) and close them all (07), then -- back at somestruct scope -- a nested
+    # struct (id 2 -> 16) carrying deepint = -7 (id 0 signed -> 01, zigzag 0d) and
+    # nestedint = 42 (id 0 unsigned -> 00 2a), then close. Both fields must arrive:
+    # what the skipped subtree did to the stack has to leave no trace.
+    echo "==> [$label] deep unknown nesting must not lose the field after it (generator#283)"
+    { printf '\246\001'
+      i=0; while [ $i -lt 40 ]; do printf '\346\003'; i=$((i+1)); done
+      i=0; while [ $i -lt 40 ]; do printf '\007'; i=$((i+1)); done
+      printf '\026\001\015\007\000\052\007'
+    } > "$WORK/deepnest.bin"
+    OUT=$(cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/deepnest.bin") \
+        || { echo "FAIL: [$label] 40 nested unknown sequences are legal (< MAX_DEPTH) and must decode"; exit 1; }
+    echo "$OUT" | grep -q '"nestedint":42' || { echo "FAIL: [$label] field after a deep unknown-sequence unwind was lost (#283); got: $OUT"; exit 1; }
+    echo "$OUT" | grep -q '"deepint":-7' || { echo "FAIL: [$label] nested struct after a deep unknown-sequence unwind was lost (#283); got: $OUT"; exit 1; }
+    echo "==> [$label] deep unknown nesting OK"
+
     # Fixlen-array element subtype decides BEFORE the schema count bound
     # (CORELIB_PLAN S4.8, generator#259 / Crucible F-0042). somefloatarray declares
     # fp32 with count: 3 at id 17 -> array-fixlen header 8d 01 (17<<3 | 5). A fixlen
