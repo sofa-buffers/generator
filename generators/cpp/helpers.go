@@ -92,22 +92,25 @@ func (g *gen) cppType(f *ir.Field) string {
 	case ir.KindBool:
 		return "bool"
 	case ir.KindString:
-		// Fixed profile: a bounded string becomes sofab::FixedString<N> (heap-free
-		// inline storage; the corelib-c-cpp wrapper fills it via the same
-		// read_string_noterm path as std::string). Under allow_dynamic the same
-		// bounded field lives in a std::string instead, sized to what the message
-		// carries; the maxlen then rides into the decode path as an explicit
-		// reject rather than as the container's capacity.
-		if g.fixed && !g.allowDynamic && f.HasMaxlen {
+		// Static storage: a bounded string becomes sofab::FixedString<N>, heap-free
+		// inline storage. Under allow_dynamic the same bounded field lives in a
+		// std::string instead, sized to what the message carries; the maxlen then
+		// rides into the decode path as an explicit reject rather than as the
+		// container's capacity.
+		//
+		// An UNBOUNDED string has no N to size an inline buffer with, so it keeps
+		// std::string whatever the switch says. On c-cpp that case cannot arise
+		// (checkBounded); on cpp it is the per-field fallback that lets static
+		// storage be turned on without touching the schema.
+		if g.fixed && f.HasMaxlen {
 			return fmt.Sprintf("sofab::FixedString<%d>", f.Maxlen)
 		}
 		return "std::string"
 	case ir.KindBlob:
-		// Fixed profile: a bounded blob becomes fixed-capacity inline storage
-		// (no heap). The read(void*,size_t) blob overload already takes a raw
-		// pointer, so decode needs no corelib change. allow_dynamic puts the same
-		// bounded blob in a std::vector, as for strings above.
-		if g.fixed && !g.allowDynamic && f.HasMaxlen {
+		// Static storage: a bounded blob becomes fixed-capacity inline storage (no
+		// heap); allow_dynamic puts the same bounded blob in a std::vector, and an
+		// unbounded one stays there regardless — as for strings above.
+		if g.fixed && f.HasMaxlen {
 			return fmt.Sprintf("sofab::FixedBytes<%d>", f.Maxlen)
 		}
 		return "std::vector<std::uint8_t>"
@@ -226,14 +229,18 @@ func isNativeArrayElem(k ir.Kind) bool {
 // so [1, 2] on a `count: 4` field would encode as four elements on one profile
 // and two on another — the same schema, two different wire images. So the only
 // question left is WHERE the elements live, which is the heap-free decision and
-// nothing else: inline storage on `c-cpp` without allow_dynamic, the heap
-// everywhere else. std::array<T, N> is not an answer to either question and is
-// no longer used for an array member.
-func (g *gen) dynNativeArray(elem ir.Kind) bool {
+// nothing else: inline storage under static storage on either corelib, the heap
+// under allow_dynamic. std::array<T, N> is not an answer to either question and
+// is no longer used for an array member.
+//
+// A count-less array has no N to size inline storage with, so it stays on the
+// heap whatever the switch says. That case cannot reach a c-cpp build
+// (checkBounded rejects it); on cpp it is the per-field fallback.
+func (g *gen) dynNativeArray(elem ir.Kind, count int64) bool {
 	if !isNativeArrayElem(elem) {
 		return false
 	}
-	return !(g.fixed && !g.allowDynamic)
+	return !(g.fixed && count > 0)
 }
 
 // cppArrayContainer is the C++ member type for an array with the given element.
@@ -248,12 +255,12 @@ func (g *gen) dynNativeArray(elem ir.Kind) bool {
 func (g *gen) cppArrayContainer(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64) string {
 	et := g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax)
 	if isNativeArrayElem(elem) {
-		if g.dynNativeArray(elem) {
+		if g.dynNativeArray(elem, count) {
 			return "std::vector<" + et + ">"
 		}
 		return fmt.Sprintf("sofab::InlineVector<%s, %d>", et, count)
 	}
-	if g.fixed && !g.allowDynamic && count > 0 {
+	if g.fixed && count > 0 {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
 			if elemMaxHas {
@@ -275,12 +282,12 @@ func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, e
 		// Same rule as a scalar string field: inline storage by default, a
 		// std::string under allow_dynamic, with the element maxlen still declared
 		// and still enforced — on the decode path rather than as a capacity.
-		if g.fixed && !g.allowDynamic && elemMaxHas {
+		if g.fixed && elemMaxHas {
 			return fmt.Sprintf("sofab::FixedString<%d>", elemMax)
 		}
 		return "std::string"
 	case ir.KindBlob:
-		if g.fixed && !g.allowDynamic && elemMaxHas {
+		if g.fixed && elemMaxHas {
 			return fmt.Sprintf("sofab::FixedBytes<%d>", elemMax)
 		}
 		return "std::vector<std::uint8_t>"
@@ -296,7 +303,11 @@ func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, e
 		// reinterpret_cast. One element type for both c-cpp storage modes keeps
 		// the two legs' generated API identical, which is the profile promise.
 		// corelib-cpp decodes synchronously through a temporary, so it keeps bool.
-		if g.fixed {
+		//
+		// This is a RUNTIME property, not a storage one: it follows the corelib,
+		// not allow_dynamic. corelib-cpp keeps `bool` in both storage modes, so
+		// InlineVector<bool, N> is a fine destination there.
+		if g.clib {
 			return "std::uint8_t"
 		}
 		return "bool"

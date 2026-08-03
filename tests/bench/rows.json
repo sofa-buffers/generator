@@ -137,6 +137,22 @@
       "archs": []
     },
     {
+      "//": "The maxspeed twin of the allow_dynamic pair. On corelib-cpp the switch is an",
+      "// ": "OPTIMISATION rather than a profile requirement: bounded fields go inline,",
+      "//  ": "unbounded ones keep their dynamic container, so this row runs the SAME schema",
+      "//   ": "as cpp-cpp above and must produce the same wire. Read it as a pair with",
+      "//    ": "cpp-cpp: the gain is the eliminated heap-container work and it is paid for in",
+      "//     ": "sizeof, which text/data/bss cannot see on a hosted row.",
+      "id": "cpp-cpp-static",
+      "lang": "cpp",
+      "corelib": "corelib-cpp",
+      "corelib_env": "SOFAB_CPP_DIR",
+      "profile": "maxspeed",
+      "method": "toggle",
+      "config": "targets: { cpp: { allow_dynamic: false } }",
+      "archs": []
+    },
+    {
       "id": "rust-rs",
       "lang": "rust",
       "corelib": "corelib-rs",

@@ -8,25 +8,57 @@ documented once in the [generic config](README.md).
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets. This also picks the container representation: `cpp` = dynamic (`std::vector`/`std::string`), `c-cpp` = fixed-capacity/heap-free (see below). |
-| `allow_dynamic` | bool | `false` | `corelib: c-cpp` only. Store bounded fields in `std::string`/`std::vector` instead of inline containers, for a target with a heap. Bounds stay mandatory either way. |
+| `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets — the runtime only. |
+| `allow_dynamic` | bool | **depends on `corelib`**: `true` for `cpp`, `false` for `c-cpp` | Storage for schema-bounded fields. `true` = `std::string`/`std::vector`; `false` = heap-free `FixedString<N>`/`FixedBytes<N>`/`InlineVector<T,N>`. Works on **both** corelibs. Never changes the wire or the API. |
 | `namespace` | string | `message` | C++ namespace wrapping the generated types. Also settable in `generic`. |
 
 ### What the two profile keys combine into
 
-`corelib` picks the runtime; `allow_dynamic` picks the storage inside the
-embedded profile. The three usable combinations:
+The two keys are **orthogonal**: `corelib` picks the runtime, `allow_dynamic`
+picks the storage, and every combination is usable.
 
-| `corelib` | `allow_dynamic` | Storage | Bounds | Heap |
+| `corelib` | `allow_dynamic` | Storage | Unbounded field | Heap |
 |---|---|---|---|---|
-| `cpp` (default) | *ignored* | `std::string` / `std::vector` | optional; `max_dyn_*` caps what the schema leaves open | yes |
-| `c-cpp` | `false` (default) | `FixedString<N>` / `FixedBytes<N>` / `InlineVector<T,N>` | **mandatory** | none on the message path |
-| `c-cpp` | `true` | `std::string` / `std::vector` | **mandatory** | yes |
+| `cpp` | `true` (default here) | `std::string` / `std::vector` | fine; `max_dyn_*` caps what the schema leaves open | yes |
+| `cpp` | `false` | `FixedString<N>` / `FixedBytes<N>` / `InlineVector<T,N>` **where the schema bounds the field** | keeps its dynamic container | only for the fields that stayed dynamic |
+| `c-cpp` | `false` (default here) | `FixedString<N>` / `FixedBytes<N>` / `InlineVector<T,N>` | **rejected at generate time** | none on the message path |
+| `c-cpp` | `true` | `std::string` / `std::vector` | **rejected at generate time** | yes |
 
-The two `c-cpp` rows accept exactly the same schemas and produce the same
-`_maxSize`, so the switch is a per-device decision and never a schema change.
-What differs is where a field's bytes live, and therefore what a message costs to
-hold and to move.
+`allow_dynamic` defaults differently per corelib because the two start from
+opposite ends: an embedded target has no heap to spare, a server target would
+rather allocate what a message carries than its declared worst case.
+
+**Where the two corelibs genuinely differ is the unbounded field, and that
+follows from the profile rather than from the switch.** `c-cpp` has no fallback:
+`maxlen`/`count` are mandatory in *both* its storage modes, so one schema stays
+valid for every `c-cpp` device. `cpp` applies static storage **per field**,
+wherever a bound exists, and leaves the rest dynamic — so `allow_dynamic: false`
+never fails a build and never forces a schema migration. A schema simply gets
+faster where it is already bounded.
+
+A declared bound is honoured **whatever its size**. There is deliberately no
+threshold above which a large `count` silently falls back to the heap: the schema
+states the intent, and a hidden byte budget would make the member type
+unpredictable from the schema.
+
+The `c-cpp` rows accept exactly the same schemas and produce the same `_maxSize`,
+so the switch is a per-device decision and never a schema change. What differs is
+where a field's bytes live, and therefore what a message costs to hold and to
+move.
+
+**Cost, measured** (`examples/messages/realworld/vehicle_telemetry.yaml`,
+callgrind toggle, `-O3 -g -DNDEBUG`, wire byte-identical in both modes):
+
+| `corelib: cpp` | encode Ir/op | decode Ir/op | `sizeof` |
+|---|--:|--:|--:|
+| `allow_dynamic: true` | 13672 | 31043 | 672 B |
+| `allow_dynamic: false` | 12943 (−5.3 %) | **22014 (−29.1 %)** | 1360 B |
+
+The gain is the eliminated heap-container work and is therefore schema-shaped:
+count the arrays, blobs, and strings with `maxlen >= 16` (below that,
+`std::string`'s small-string optimisation already keeps it off the heap). A
+scalar-heavy message with one short bounded string measures under 5 %. The price
+is `sizeof`, which grows with the declared bounds rather than with the payload.
 
 Encode output is byte-identical too, and so is what a decode reconstructs — for
 every field kind, with no exception. That holds because **every array member
@@ -257,9 +289,10 @@ than silently lowering to a zero-length `std::array<T, 0>` (generator#104). For
 genuinely unbounded fields, use `corelib: cpp`.
 
 **Storage mode (`allow_dynamic`).** With every field bounded, the switch chooses
-where those fields live:
+where those fields live. The same mapping applies on `corelib: cpp`, where it is
+the other way round by default and only reaches the fields the schema bounds:
 
-| schema | default (inline) | `allow_dynamic: true` |
+| schema | `allow_dynamic: false` (inline) | `allow_dynamic: true` |
 |---|---|---|
 | `string, maxlen 8` | `sofab::FixedString<8>` | `std::string` |
 | `blob, maxlen 8` | `sofab::FixedBytes<8>` | `std::vector<std::uint8_t>` |
@@ -367,7 +400,7 @@ What follows from that, in C++:
 ### Every profile agrees, because every array member has a length
 
 A `count: N` array of **native scalars** used to be stored in `std::array<T, N>`
-on the default `cpp` profile and on `c-cpp` with `allow_dynamic: false`. That
+on the `cpp` profile and on `c-cpp` with `allow_dynamic: false`. That
 container has no logical length — its value is always N elements — so those two
 profiles could not express a shorter array at all, and the *same schema* then had
 two different wire images and two different decode results. That broke the
@@ -375,19 +408,19 @@ byte-identity promise this document makes at the top and the one `checkBounded`
 enforces ("the storage switch never changes the wire").
 
 Every array member is length-carrying now, so for a `count: 4` `u32` array all
-three profiles agree, in both directions:
+four profiles agree, in both directions:
 
-| value | wire (all three profiles) | decodes back to |
+| value | wire (all four profiles) | decodes back to |
 |---|---|---|
 | `[1, 2, 0, 0]` | `7b 04 01 02 00 00` | `[1, 2, 0, 0]` |
 | `[1, 2]` | `7b 02 01 02` | `[1, 2]` |
 | `[]` | `7b 00` | `[]` |
 | equal to the declared default | field omitted | the declared default |
 
-What makes it true: `std::vector<T>` on `corelib: cpp` and on `c-cpp` with
-`allow_dynamic: true`; `sofab::InlineVector<T, N>` on `c-cpp` with
-`allow_dynamic: false` — inline slots plus a `len_`, so the heap-free profile
-stays heap-free while still expressing 0..N. `InlineVector` needed one addition
+What makes it true: `std::vector<T>` under `allow_dynamic: true` on either
+corelib; `sofab::InlineVector<T, N>` under `allow_dynamic: false` on either —
+inline slots plus a `len_`, so a heap-free build stays heap-free while still
+expressing 0..N. `InlineVector` needed one addition
 for this, a `resize()`, so that `IStreamImpl::readArray` recognises it as a
 *resizable* destination and sizes it to the wire count; before that it fell to
 readArray's fixed-extent branch, which set the length to 0 and dropped the array.
