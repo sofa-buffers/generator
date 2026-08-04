@@ -1187,12 +1187,30 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	f.line("    /// is copied. Only a payload genuinely SPLIT across chunks is assembled")
 	f.line("    /// here, because there is no contiguous slice to borrow once the first")
 	f.line("    /// chunk is gone. That copy lives in `alloc`, like array storage.")
+	f.line("    ///")
+	f.line("    /// A completed payload is handed back as its OWN allocation rather than as")
+	f.line("    /// a view into `acc`. A destination KEEPS the slice it is given -- wrapper")
+	f.line("    /// array elements outlive the callback -- while `acc` is scratch that the")
+	f.line("    /// next split payload clears, appends to, and may reallocate. A view into")
+	f.line("    /// it would alias every element stored earlier onto the newest one, and a")
+	f.line("    /// growing buffer would rebase them onto the old block: a stale length")
+	f.line("    /// past the live bytes, and a freed read under an allocator that releases.")
 	f.line("    fn _reassemble(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
 	f.line("        if (offset == 0 and chunk.len >= total) return chunk; // whole payload, borrow it")
 	f.line("        if (offset == 0) self.acc.clearRetainingCapacity();")
 	f.line("        self.acc.appendSlice(self.alloc, chunk) catch { self.inv = true; return null; };")
 	f.line("        if (self.acc.items.len < total) return null; // more chunks to come")
-	f.line("        return self.acc.items;")
+	// generator#293 (Crucible F-0058 / codegen defect G-0036): `acc` is ONE buffer
+	// per visitor, so handing `acc.items` to the store made every split payload
+	// overwrite the elements assembled before it, and growth reallocated the
+	// buffer out from under them. Only the split path is affected -- the borrow
+	// above returns disjoint regions of the caller's chunk and stays zero-copy.
+	//
+	// The copy is taken only once the payload is known complete, and `acc` still
+	// grows strictly with the bytes that actually arrived -- neither side sizes
+	// anything from the untrusted `total` up front, so a large declared length in
+	// a short message cannot make either allocate ahead of it.
+	f.line("        return self.alloc.dupe(u8, self.acc.items[0..total]) catch { self.inv = true; return null; };")
 	f.line("    }")
 
 	idParam := "_"
