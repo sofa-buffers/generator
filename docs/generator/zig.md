@@ -71,7 +71,7 @@ and is never padded out to `N`, so a fresh count:N array is the *empty* array
 
 Per message:
 
-- `marshal(self, os: *sofab.OStream) sofab.Error!void` — sparse-canonical
+- `serialize(self, os: *sofab.OStream) sofab.Error!void` — sparse-canonical
   field writes into any caller-configured `OStream` (fixed buffer, or a flush
   sink for streaming).
 
@@ -79,7 +79,7 @@ Per message:
   which holds the header back until a child field actually appears — so the
   `≠ default` test of MESSAGE_SPEC §2 applies to a sequence-typed field for
   free, with no whole-object comparison and no buffering: "the nested
-  `marshal` wrote no child" *is* "the value equals its declared default".
+  `serialize` wrote no child" *is* "the value equals its declared default".
   Which **closer** follows is decided per position — statically for a *field*,
   and from the index in the **value** for an *element*:
 
@@ -119,7 +119,7 @@ Per message:
   Every generated `struct`/`union` carries `pub fn isDefault()`: the explicit
   form of the "no child was written" test the lazy framing encodes implicitly for
   a *field*. Its per-field terms are generated from the very expressions
-  `marshal` writes each field under, so the predicate and the writer cannot drift
+  `serialize` writes each field under, so the predicate and the writer cannot drift
   apart — one that disagreed would omit a field that is on the wire, or keep one
   that is not. An array field's own omit test is now simply emptiness: the writer
   emits a child for every element it holds, so "no child is written" is exactly

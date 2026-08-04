@@ -493,7 +493,7 @@ func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field)
 	g.emitIsDefault(f, fields)
 
 	// _marshal
-	f.line("    def _marshal(self, e: Encoder) -> None:")
+	f.line("    def serialize(self, e: Encoder) -> None:")
 	if len(fields) == 0 {
 		f.line("        pass")
 	}
@@ -503,7 +503,7 @@ func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field)
 	f.blank()
 
 	// _unmarshal (pull-parser)
-	f.line("    def _unmarshal(self, d: Decoder) -> None:")
+	f.line("    def deserialize(self, d: Decoder) -> None:")
 	f.line("        while True:")
 	f.line("            fld = d.next()")
 	f.line("            if fld is None or fld.type == WireType.SEQUENCE_END:")
@@ -629,7 +629,7 @@ func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 		// declared default", evaluated per field and recursively. An all-default
 		// nested object is therefore dropped, not emitted as an empty wrapper.
 		f.line("        e.write_sequence_begin_lazy(%d)", fld.ID)
-		f.line("        %s._marshal(e)", acc)
+		f.line("        %s.serialize(e)", acc)
 		f.line("        e.write_sequence_end()")
 		return
 	case ir.KindArray:
@@ -776,7 +776,7 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
 		f.line("%s    e.write_sequence_begin_lazy(%s)", ind, iv)
-		f.line("%s    %s._marshal(e)", ind, ev)
+		f.line("%s    %s.serialize(e)", ind, ev)
 		emitSeqEnd(f, ind+"    ", lastElemExpr(iv, val))
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindArray:
@@ -877,7 +877,7 @@ func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 			f.line(`                    raise SofaDecodeError("%s: blob byte length above schema maxlen %d")`, fld.Name, fld.Maxlen)
 		}
 	case ir.KindStruct, ir.KindUnion:
-		f.line("                %s._unmarshal(d)", acc)
+		f.line("                %s.deserialize(d)", acc)
 	case ir.KindArray:
 		g.emitUnmarshalArray(f, fld, acc)
 	}
@@ -1029,7 +1029,7 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target, loc string, elem ir.Kind, r
 			// element id >= N, which also bounds this gap-fill.
 			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
 			f.line("%s        %s.append(%s())", ind, target, g.typeName(ref.Key))
-			f.line("%s    %s[%s.id]._unmarshal(d)", ind, target, ef)
+			f.line("%s    %s[%s.id].deserialize(d)", ind, target, ef)
 		case ir.KindArray:
 			// A ROW is keyed by its element id exactly like every other element kind
 			// (§5.1), so it is PLACED at target[id] after gap-filling with empty rows

@@ -378,11 +378,29 @@ a reimplementation should emit code that honors all of them:
   in the *user's* namespace, so the entry points are fixed and only the casing
   adapts: `encode()` / `decode(bytes)` / `try_decode(bytes)` for the one-shot
   convenience, `serialize(ostream)` / `deserialize(istream, …)` for the streaming
-  pair the corelib drives, `decoder()` for the streaming reader. No second spelling
-  for either — no `serialize_to`, `to_bytes`, `from_bytes`, `decode_from`,
-  `decode_into`, `marshal`/`unmarshal`. **Not yet uniform:** the backends predate
-  this rule (TypeScript still emits `decodeFrom`/`decodeInto`; several ports lack
-  `try_decode`), so aligning them is an open, breaking API pass.
+  pair the corelib drives, `encode_to(ostream)` for the streaming encode a caller
+  drives, and `decoder()` → `feed(chunk)` / `finish()` for the streaming reader.
+  No second spelling for either — no `serialize_to`, `to_bytes`, `from_bytes`,
+  `decode_from`, `decode_into`, `marshal`/`unmarshal`. The `marshal`/`unmarshal`
+  spelling is **gone family-wide** (generator#239 API pass); what is *still* not
+  uniform is narrower and listed per backend in §10: TypeScript keeps
+  `decodeFrom`/`decodeInto`, and `try_decode` is absent from C, Go, Python,
+  TypeScript and Zig.
+  - **`serialize` vs `encode_to`.** They are not two spellings of one thing.
+    `serialize` writes *this object's fields and nothing else*, so a nested
+    message can be written into a frame its parent already opened; it is the
+    primitive the corelib and the parent both call. `encode_to` is the entry
+    point for a caller who owns the stream: it serialises **and flushes the
+    tail** the last write left in the buffer. Calling only `serialize` on a
+    top-level message and forgetting the flush truncates the output, which is
+    the whole reason the second name exists.
+  - **Where `feed()` is absent, the corelib is why.** A generated `feed(chunk)`
+    is a handle on a *resumable* corelib decoder; it cannot be synthesised over
+    one that is not. Go and Python stream **pull**-shaped (the caller supplies a
+    reader, the corelib pulls), so they expose that shape instead —
+    `EncodeTo(io.Writer)` / `deserialize(Decoder(reader))` — and gain `feed()`
+    only once their corelibs carry a resumable decoder. TypeScript has a
+    resumable `IStream`, but no generated visitor to drive it (§9.3 family 6).
 - **Decode by `switch` on field id**, not an if-chain — compilers build a jump
   table; unknown ids fall through to the corelib's skip path, giving
   forward/backward compatibility for free.
@@ -509,8 +527,12 @@ compatibility). Full framing details: the wire-format docs above.
 ### 9.2 Encode API (OStream)
 
 Encoding is **streaming**: an `OStream` writes into a caller buffer and invokes a
-flush sink when full (so a message can exceed RAM). The generated `encode`
-serialises each field in schema/id order via these operations (names per
+flush sink when full (so a message can exceed RAM). That property is only worth
+anything if generated code *exposes* it, which is what `encode_to(ostream)` is
+for — `encode()` is the same path with a buffer sized to hold the whole message
+(`MAX_SIZE`, or the configured `max_message_size` ceiling when a field is
+unbounded), so it is the convenience, not the capability. The generated
+`serialize` writes each field in schema/id order via these operations (names per
 corelib; canonical set):
 
 `write_unsigned(id, v)` · `write_signed(id, v)` · `write_boolean(id, v)` ·
@@ -1644,13 +1666,13 @@ above was found by that check on its first run.
 | **C** | `corelib-c-cpp` | descriptor-table callback | `object.h` struct + static descriptor; `symbol_prefix`; auto capability + API-version guards; analytic `MAX_SIZE`; project mode also emits `Makefile` + `CMakeLists.txt`, `run.sh`, and a devcontainer. |
 | **C++** | `corelib-cpp` (default) / `corelib-c-cpp` (`corelib: c-cpp`) | child-visitor / flat-visitor wrapper | header-only `OStreamMessage`+`IStreamMessage`; `c-cpp` decode pre-sizes varlen fields + links the C sources. |
 | **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. |
-| **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; `Decode` via zero-copy `sofab.AcceptBytes`; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
-| **Python** | `corelib-py` | pull-parser | dataclasses + `_marshal`/`_unmarshal`. |
-| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `marshal`; per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`; a `number` is a 64-bit double, so an fp32 NaN routes through the corelib raw channel (`readFp32Raw`/`writeFixlen(fp32)` for a scalar, `readFp32ArrayRaw`/`writeFp32ArrayRaw` for an array, each with a `Uint8Array \| null` companion slot captured only for a NaN) to preserve a signaling NaN bit-for-bit (§4.6, #235); `recode` harness mode (wire → object → wire) exercises it. |
-| **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Marshal`; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
-| **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `marshal`; ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
-| **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `marshal`; zero-copy decode (strings/blobs borrow the input buffer, arrays from a caller allocator); fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
-| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `marshal`; `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); JSON harness carries u64 as a string. |
+| **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; exported `Serialize(*sofab.Encoder)` + `EncodeTo(io.Writer)` — the encoder drains into the writer as it fills, so a message never exists as one contiguous `[]byte`; **no `feed()`** — corelib-go streams pull-shaped (`Decoder.Next` over an `io.Reader`), so a push feed needs a resumable decoder there first; `Decode` via zero-copy `sofab.AcceptBytes`; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
+| **Python** | `corelib-py` | pull-parser | dataclasses + `serialize`/`deserialize` (public since generator#239; `deserialize(Decoder(reader))` IS the chunk-capable path — the corelib pulls from any reader). |
+| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `serialize`; **no `feed()`** — the corelib's `IStream` is resumable but no visitor is generated to drive it, so chunked decode is unreachable here (own follow-up); per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`; a `number` is a 64-bit double, so an fp32 NaN routes through the corelib raw channel (`readFp32Raw`/`writeFixlen(fp32)` for a scalar, `readFp32ArrayRaw`/`writeFp32ArrayRaw` for an array, each with a `Uint8Array \| null` companion slot captured only for a NaN) to preserve a signaling NaN bit-for-bit (§4.6, #235); `recode` harness mode (wire → object → wire) exercises it. |
+| **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Serialize`/`EncodeTo`; nested `Msg.Decoder` (constructed with `new`, not a `Decoder()` factory — C# puts nested types and members in one declaration space) → `Feed`/`Finish` for chunked decode; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
+| **Java** | `corelib-java` (Maven) | flat-visitor location-stack | classes + `serialize`/`encodeTo`; nested `Msg.Decoder` via `decoder()` → `feed`/`finish` for chunked decode (`finish` throws `IllegalStateException`, not `SofabException`: `SofabError` has no INCOMPLETE, and an incomplete message is not a malformed one); ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
+| **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `serialize`; `decoder(out, alloc)` → `feed`/`finish` (the destination is the CALLER's: Zig moves structs by value, so a decoder owning its message would dangle its own visitor pointer); zero-copy decode (strings/blobs borrow the input buffer, arrays from a caller allocator) — and the borrow survives `feed` only while a payload arrives whole in one chunk; a payload SPLIT across chunks is reassembled into `alloc` because there is no contiguous slice left to borrow; fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
+| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); JSON harness carries u64 as a string. |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 
 **Common type mapping:** enum → smallest *signed* backing; bitfield → smallest

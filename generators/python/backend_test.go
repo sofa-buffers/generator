@@ -66,8 +66,8 @@ func TestPythonStructural(t *testing.T) {
 		"from sofab import Encoder, Decoder, SofaDecodeError, WireType",
 		"@dataclass",
 		"class Myfirstmessage:",
-		"def _marshal(self, e: Encoder)",
-		"def _unmarshal(self, d: Decoder)",
+		"def serialize(self, e: Encoder)",
+		"def deserialize(self, d: Decoder)",
 		"class MyfirstmessageSomeenum(IntEnum):",
 		"def to_jsonable(self)",
 		"e.write_sequence_begin_lazy(", // every sequence opens lazily (MESSAGE_SPEC S2)
@@ -111,8 +111,8 @@ messages:
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	for _, want := range []string{
 		// struct FIELD and union FIELD: lazy open, dropping close.
-		"        e.write_sequence_begin_lazy(0)\n        self.st._marshal(e)\n        e.write_sequence_end()\n",
-		"        e.write_sequence_begin_lazy(1)\n        self.un._marshal(e)\n        e.write_sequence_end()\n",
+		"        e.write_sequence_begin_lazy(0)\n        self.st.serialize(e)\n        e.write_sequence_end()\n",
+		"        e.write_sequence_begin_lazy(1)\n        self.un.serialize(e)\n        e.write_sequence_end()\n",
 		// string/blob wrapper FIELD: the leaf elements are omitted when default,
 		// and the wrapper itself closes with the dropping end at field level.
 		// These two arrays are DYNAMIC, so they are not narrowed and their LAST
@@ -126,7 +126,7 @@ messages:
 		// element's index in the value; the wrapper FIELD around it still closes
 		// unconditionally with the dropping end.
 		"        e.write_sequence_begin_lazy(4)\n        for _i0, _e0 in enumerate(self.objs):\n" +
-			"            e.write_sequence_begin_lazy(_i0)\n            _e0._marshal(e)\n" +
+			"            e.write_sequence_begin_lazy(_i0)\n            _e0.serialize(e)\n" +
 			"            if _i0 == len(self.objs) - 1:\n                e.write_sequence_end_keep()\n" +
 			"            else:\n                e.write_sequence_end()\n        e.write_sequence_end()\n",
 		// array-of-array: the nested ROW is an ELEMENT, as is each struct element
@@ -134,7 +134,7 @@ messages:
 		// decided statically.
 		"        e.write_sequence_begin_lazy(5)\n        for _i0, _e0 in enumerate(self.deep):\n" +
 			"            e.write_sequence_begin_lazy(_i0)\n            for _i1, _e1 in enumerate(_e0):\n" +
-			"                e.write_sequence_begin_lazy(_i1)\n                _e1._marshal(e)\n" +
+			"                e.write_sequence_begin_lazy(_i1)\n                _e1.serialize(e)\n" +
 			"                if _i1 == len(_e0) - 1:\n                    e.write_sequence_end_keep()\n" +
 			"                else:\n                    e.write_sequence_end()\n" +
 			"            if _i0 == len(self.deep) - 1:\n                e.write_sequence_end_keep()\n" +
@@ -187,7 +187,7 @@ messages:
 	for _, want := range []string{
 		"MAX_DYN_ARRAY_COUNT = 100000", // raised to the schema count of barr
 		"MAX_DYN_STRING_LEN = 4096",
-		"o._unmarshal(Decoder(io.BytesIO(data), max_array_count=MAX_DYN_ARRAY_COUNT, max_string_len=MAX_DYN_STRING_LEN))",
+		"o.deserialize(Decoder(io.BytesIO(data), max_array_count=MAX_DYN_ARRAY_COUNT, max_string_len=MAX_DYN_STRING_LEN))",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q", want)
@@ -202,7 +202,7 @@ messages:
 	if strings.Contains(plain, "MAX_DYN") || strings.Contains(plain, "max_array_count") {
 		t.Error("unset limits must emit no limit plumbing")
 	}
-	if !strings.Contains(plain, "o._unmarshal(Decoder(io.BytesIO(data)))") {
+	if !strings.Contains(plain, "o.deserialize(Decoder(io.BytesIO(data)))") {
 		t.Error("unset limits must leave the plain Decoder call unchanged")
 	}
 }
@@ -854,7 +854,7 @@ messages:
 		// struct elements: place, not append -- and the gap-fill that precedes it
 		"                    while len(self.objs) <= _ef0.id:\n" +
 			"                        self.objs.append(VecObjsElem())\n" +
-			"                    self.objs[_ef0.id]._unmarshal(d)\n",
+			"                    self.objs[_ef0.id].deserialize(d)\n",
 		// leaf elements, unchanged: they always got this right
 		"                    while len(self.strs) <= _ef0.id:\n" +
 			"                        self.strs.append(\"\")\n",

@@ -48,7 +48,7 @@ class Scalars {
   double f64 = -2.5;
   bool flag = true;
 
-  void marshal(sofab.Encoder e) {
+  void serialize(sofab.Encoder e) {
     if (u8min != 0) { e.writeUnsigned(0, u8min); }
     if (u8max != 255) { e.writeUnsigned(1, u8max); }
     if (u64max != -1) { e.writeUnsigned(2, u64max); }
@@ -86,7 +86,7 @@ class Scalars {
   }
 
   /// Whether every field equals its declared default, compared per field and
-  /// recursively -- i.e. whether [marshal] would write no child at all.
+  /// recursively -- i.e. whether [serialize] would write no child at all.
   bool get _isDefault {
     if (!(u8min == 0)) return false;
     if (!(u8max == 255)) return false;
@@ -103,7 +103,17 @@ class Scalars {
   /// unbounded ones).
   static const int maxSize = 49;
   /// Serializes this message to a fresh byte buffer.
-  Uint8List encode() => sofab.Encoder.encodeToBytes(marshal);
+  Uint8List encode() => sofab.Encoder.encodeToBytes(serialize);
+
+  /// Encodes into an [sofab.Encoder] the caller owns, then flushes the tail.
+  ///
+  /// The encoder's buffer may be smaller than the message: it is drained
+  /// through the flush callback as it fills, so what bounds memory is the
+  /// buffer, not the message.
+  void encodeTo(sofab.Encoder e) {
+    serialize(e);
+    e.flush();
+  }
 
   /// Status-surfacing one-shot decode: fills [out] and
   /// returns the terminal decode outcome. `invalid` covers both malformed
@@ -136,6 +146,63 @@ class Scalars {
     _decodeInto(data, m);
     return m;
   }
+
+  /// An incremental decoder filling [out]: hold it and feed chunks as they
+  /// arrive, instead of buffering the whole message first.
+  ///
+  /// [out] is [reset] first, for the reason [tryDecode] resets: an absent
+  /// field fires no callback, so a value left over from an earlier decode
+  /// would survive.
+  static ScalarsDecoder decoder(Scalars out) {
+    out.reset();
+    return ScalarsDecoder._(out);
+  }
+}
+
+/// Incremental decoder for [Scalars]: hold one and feed the message as
+/// bytes arrive, instead of buffering it whole first.
+///
+/// The wire format has no end marker at the top level -- a message ends
+/// where its bytes end -- so a feed cannot report that the MESSAGE is
+/// complete, only that the bytes handed in ended on a field boundary
+/// (`complete`) or mid-field (`incomplete`). Neither is a failure
+/// mid-stream; the caller's own framing decides when the input is over, and
+/// [finish] then gives the verdict for the message as a whole.
+///
+/// Nothing is borrowed from the chunks you feed: the corelib copies each
+/// string/blob payload into storage of its own before it reaches the
+/// destination, so a chunk may be reused as soon as [feed] returns.
+class ScalarsDecoder {
+  ScalarsDecoder._(this._out) : _e = _Dec() {
+    _d = sofab.Decoder(_ScalarsVisitor(_out, _e));
+  }
+
+  final Scalars _out;
+  final _Dec _e;
+  late final sofab.Decoder _d;
+  sofab.DecodeStatus _st = sofab.DecodeStatus.complete;
+
+  /// Feeds the next chunk, of any size. `complete` means the bytes ended on
+  /// a field boundary, `incomplete` mid-field -- neither answers whether the
+  /// MESSAGE is done. `invalid` is terminal.
+  sofab.DecodeStatus feed(List<int> chunk) {
+    _st = _d.feed(chunk);
+    return status;
+  }
+
+  /// The outcome for everything fed so far, without feeding more.
+  sofab.DecodeStatus get status =>
+      _e.inv ? sofab.DecodeStatus.invalid : _st;
+
+  /// The destination, holding whatever has been decoded so far.
+  Scalars get message => _out;
+
+  /// Takes the decoded message once the caller's framing says the input is
+  /// over. Returns null if the stream ended mid-field or was rejected, so a
+  /// half-filled value is never mistaken for a whole one; read [status] for
+  /// which it was, or [message] to get it anyway.
+  Scalars? finish() =>
+      status == sofab.DecodeStatus.complete ? _out : null;
 }
 
 class _ScalarsVisitor extends _Visitor {

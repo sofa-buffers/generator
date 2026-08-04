@@ -1,5 +1,5 @@
 // Package java is the Java throughput backend (PLAN §6.4): classes with
-// marshal over OStream and a flat-visitor decode (Visitor) against corelib-java.
+// serialize over OStream and a flat-visitor decode (Visitor) against corelib-java.
 // The Visitor is flat (sequenceBegin/end, no child visitors), so decode is a
 // (location, id) state machine with a location stack — same as Rust/C#. Java has
 // no unsigned ints, so all integers map to long (u64 handled via
@@ -48,7 +48,7 @@ type gen struct {
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
 	sizeErr error
-	// tmpN names the narrowed-wrapper-array locals (`_t0`, `_t1`, ...) a marshal
+	// tmpN names the narrowed-wrapper-array locals (`_t0`, `_t1`, ...) a serialize
 	// body declares. It is reset per emitted method so the names stay short and
 	// stable, and it counts per method rather than per nesting depth because two
 	// array FIELDS of one class share a scope and would otherwise collide.
@@ -201,7 +201,7 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		}
 		f.line("    public %s %s%s;", g.javaType(fld), javaIdent(fld.Name), g.javaInit(fld))
 	}
-	// Hoist each native array's omit-compare default into a static: marshal only
+	// Hoist each native array's omit-compare default into a static: serialize only
 	// ever reads it (Arrays.equals / List.equals), so one shared instance suffices
 	// and encode stops allocating a fresh `new T[n]` literal on every call (issue
 	// #146). The mutable per-object initializer above stays a fresh allocation;
@@ -213,9 +213,9 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 	}
 	f.blank()
 
-	// marshal
+	// serialize
 	g.tmpN = 0
-	f.line("    public void marshal(OStream os) throws IOException {")
+	f.line("    public void serialize(OStream os) throws IOException {")
 	for _, fld := range fields {
 		g.emitMarshal(f, fld)
 	}
@@ -235,19 +235,35 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		} else {
 			f.line("    public static final int MAX_SIZE = %d;", ms.Size)
 		}
-		f.line("    // Per-thread scratch buffer: encode() marshals into it and returns an")
+		f.line("    // Per-thread scratch buffer: encode() serialises into it and returns an")
 		f.line("    // exact-size copy, so the worst-case buffer is not re-allocated (and")
 		f.line("    // zeroed) on every call. Do not call encode() reentrantly from a")
-		f.line("    // marshal() override on the same thread.")
+		f.line("    // serialize() override on the same thread.")
 		f.line("    private static final ThreadLocal<byte[]> ENC_BUF =")
 		f.line("        ThreadLocal.withInitial(() -> new byte[MAX_SIZE]);")
 		f.line("    public byte[] encode() {")
 		f.line("        try {")
 		f.line("            byte[] buf = ENC_BUF.get();")
 		f.line("            OStream os = new OStream(buf);")
-		f.line("            marshal(os);")
+		f.line("            serialize(os);")
 		f.line("            return Arrays.copyOf(buf, os.bytesUsed());")
 		f.line("        } catch (IOException e) { throw new RuntimeException(e); }")
+		f.line("    }")
+		// Streaming encode. `serialize` writes the fields and nothing else, so a
+		// nested message can be written into an open frame; this is the entry
+		// point for a caller who owns the stream, and it flushes the tail the
+		// last write left in the buffer. With a FlushSink on `os` the buffer may
+		// be smaller than the message.
+		f.line("    /**")
+		f.line("     * Encode into a stream the caller owns, then flush the tail.")
+		f.line("     *")
+		f.line("     * <p>With a {@code FlushSink} on {@code os} the buffer may be smaller")
+		f.line("     * than the message: it is drained as it fills, so what bounds memory is")
+		f.line("     * the buffer, not the message.")
+		f.line("     */")
+		f.line("    public void encodeTo(OStream os) throws IOException {")
+		f.line("        serialize(os);")
+		f.line("        os.flush();")
 		f.line("    }")
 		// Best-effort decode: kept for back-compat. feed() suspends without
 		// throwing on a truncated message, so this cannot tell COMPLETE from
@@ -276,6 +292,19 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		f.line("        is.feed(data, new %sVisitor(out));", name)
 		f.line("        return is.status();")
 		f.line("    }")
+		// Streaming decode (PLAN §5.6). The corelib's IStream is resumable, so
+		// the only thing missing was a public handle on it: `decoder()` binds a
+		// fresh destination and hands back an object whose feed() takes chunks
+		// of any size. Mirrors the Rust backend's decoder()/feed()/finish().
+		f.line("    /**")
+		f.line("     * An incremental decoder for this message: hold it and feed chunks as")
+		f.line("     * they arrive, instead of buffering the whole message first.")
+		f.line("     */")
+		f.line("    public static Decoder decoder() {")
+		f.line("        return new Decoder();")
+		f.line("    }")
+		f.blank()
+		g.emitDecoder(f, name)
 	}
 	f.line("}")
 	f.blank()
@@ -285,8 +314,78 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 	}
 }
 
+// emitDecoder writes the public incremental decoder: a handle on the corelib's
+// resumable IStream plus the destination it fills. The corelib already suspends
+// and resumes at any byte boundary (a field split across chunks is buffered in
+// the IStream), so this class carries no parse state of its own -- it exists to
+// make that reachable from outside the generated package, which a
+// package-private Visitor was not (PLAN §5.6).
+func (g *gen) emitDecoder(f *jfile, name string) {
+	f.line("    /**")
+	f.line("     * Incremental decoder for {@link %s}: hold one and feed the message as", name)
+	f.line("     * bytes arrive.")
+	f.line("     *")
+	f.line("     * <p>The wire format has no end marker at the top level -- a message ends")
+	f.line("     * where its bytes end -- so a feed cannot report that the MESSAGE is")
+	f.line("     * complete, only that the bytes handed in ended on a field boundary")
+	f.line("     * ({@code COMPLETE}) or mid-field ({@code INCOMPLETE}). Neither is a")
+	f.line("     * failure mid-stream; the caller's own framing decides when the input is")
+	f.line("     * over, and {@link #finish()} then gives the verdict for the message as")
+	f.line("     * a whole.")
+	f.line("     */")
+	f.line("    public static final class Decoder {")
+	f.line("        private final %s m = new %s();", name, name)
+	f.line("        private final IStream is = new IStream();")
+	f.line("        private final %sVisitor v = new %sVisitor(m);", name, name)
+	f.blank()
+	f.line("        /**")
+	f.line("         * Feed the next chunk, of any size. Returns {@code COMPLETE} if it")
+	f.line("         * ended on a field boundary, {@code INCOMPLETE} if it ended mid-field")
+	f.line("         * -- see the class docs: neither answers whether the MESSAGE is done.")
+	f.line("         *")
+	f.line("         * @throws SofabException the bytes are malformed (INVALID); terminal.")
+	f.line("         */")
+	f.line("        public DecodeStatus feed(byte[] chunk) throws SofabException {")
+	f.line("            is.feed(chunk, v);")
+	f.line("            return is.status();")
+	f.line("        }")
+	f.blank()
+	f.line("        /** As {@link #feed(byte[])}, over a slice of {@code chunk}. */")
+	f.line("        public DecodeStatus feed(byte[] chunk, int off, int len) throws SofabException {")
+	f.line("            is.feed(chunk, off, len, v);")
+	f.line("            return is.status();")
+	f.line("        }")
+	f.blank()
+	f.line("        /** The outcome for everything fed so far, without feeding more. */")
+	f.line("        public DecodeStatus status() { return is.status(); }")
+	f.blank()
+	f.line("        /** The destination, holding whatever has been decoded so far. */")
+	f.line("        public %s message() { return m; }", name)
+	f.blank()
+	f.line("        /**")
+	f.line("         * Take the decoded message once the caller's framing says the input is")
+	f.line("         * over. Rejects a stream that ended mid-field rather than returning a")
+	f.line("         * half-filled value; use {@link #message()} to read it anyway.")
+	f.line("         *")
+	f.line("         * <p>This is an {@code IllegalStateException} and not a")
+	f.line("         * {@code SofabException} on purpose: an incomplete message is not a")
+	f.line("         * malformed one. Nothing is wrong with the bytes -- the caller")
+	f.line("         * declared end-of-input at a point they did not agree with.")
+	f.line("         *")
+	f.line("         * @throws IllegalStateException the message ended inside a field or an open sequence.")
+	f.line("         */")
+	f.line("        public %s finish() {", name)
+	f.line("            if (is.status() != DecodeStatus.COMPLETE) {")
+	f.line("                throw new IllegalStateException(")
+	f.line("                    \"%s: stream ended mid-field (\" + is.status() + \")\");", name)
+	f.line("            }")
+	f.line("            return m;")
+	f.line("        }")
+	f.line("    }")
+}
+
 // emitIsDefault writes `isDefault()`: the object's all-default predicate, and the
-// exact negation of what marshal writes -- the object is default iff marshal would
+// exact negation of what serialize writes -- the object is default iff serialize would
 // emit no child at all, evaluated per field and recursively, never as a byte image
 // (MESSAGE_SPEC §2).
 //
@@ -298,7 +397,7 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 // Package-private on purpose: it is an encoder-internal predicate, never part of
 // the public message API.
 func (g *gen) emitIsDefault(f *jfile, fields []*ir.Field) {
-	f.line("    /** True when every field still equals its declared default, compared per field and recursively -- i.e. marshal would write nothing at all. */")
+	f.line("    /** True when every field still equals its declared default, compared per field and recursively -- i.e. serialize would write nothing at all. */")
 	f.line("    boolean isDefault() {")
 	for _, fld := range fields {
 		f.line("        if (%s) return false;", g.fieldWritesExpr(fld))
@@ -307,7 +406,7 @@ func (g *gen) emitIsDefault(f *jfile, fields []*ir.Field) {
 	f.line("    }")
 }
 
-// fieldWritesExpr is the boolean expression "marshal would put this field on the
+// fieldWritesExpr is the boolean expression "serialize would put this field on the
 // wire", i.e. literally emitMarshal's write guard for the same field. isDefault is
 // built from it rather than from a hand-written "equals its default" twin so that
 // the two cannot state different truth tables: the object is default exactly when
@@ -322,7 +421,7 @@ func (g *gen) fieldWritesExpr(fld *ir.Field) string {
 		}
 		return fmt.Sprintf("!java.util.Arrays.equals(%s, %s)", acc, g.javaDefaultValue(fld))
 	case ir.KindStruct, ir.KindUnion:
-		// Lazily framed, so the frame survives iff the nested marshal wrote a child
+		// Lazily framed, so the frame survives iff the nested serialize wrote a child
 		// -- exactly "the nested object is not default". A null field marshals as a
 		// fresh instance, whose fields are their declared defaults by construction,
 		// so a null is never written.
@@ -468,12 +567,12 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
 		// field is no exception, so the frame is opened LAZILY -- the corelib holds
-		// the header back until a child field actually appears. The nested marshal
+		// the header back until a child field actually appears. The nested serialize
 		// omits every child that equals its default, so "no child was written" IS
 		// "the object equals its declared default", evaluated per field and
 		// recursively, with no byte image ever compared. An all-default nested
 		// object is therefore dropped, not emitted as an empty wrapper.
-		f.line("        os.writeSequenceBeginLazy(%d); (%s == null ? new %s() : %s).marshal(os); os.writeSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key), acc)
+		f.line("        os.writeSequenceBeginLazy(%d); (%s == null ? new %s() : %s).serialize(os); os.writeSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key), acc)
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
@@ -551,7 +650,7 @@ func (g *gen) javaArrayCompareDefault(fld *ir.Field) (string, bool) {
 	return "", false
 }
 
-// elemListExpr is the list a WRAPPER array's marshal loop runs over, and the very
+// elemListExpr is the list a WRAPPER array's serialize loop runs over, and the very
 // same expression its all-default predicate tests: the value as written, with only
 // a null absorbed to the empty list.
 //
@@ -602,7 +701,7 @@ func seqEndStmt(keepIf string) string {
 	return fmt.Sprintf("if (%s) os.writeSequenceEndKeep(); else os.writeSequenceEnd();", keepIf)
 }
 
-// elemLoopList declares the local the marshal element loop runs over and returns
+// elemLoopList declares the local the serialize element loop runs over and returns
 // its name. The local exists for two reasons: Java re-evaluates a for-condition on
 // every iteration (Go's `range` evaluates its operand once), and the last-element
 // test must measure the very list the loop indexes.
@@ -672,14 +771,14 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
 		// one rule for both kinds -- and the lazily-held frame is where it is
-		// applied. The nested marshal writes no child exactly when the element equals
+		// applied. The nested serialize writes no child exactly when the element equals
 		// its declared default, so the CLOSER alone decides: the dropping one in the
 		// interior, where an all-default element vanishes into an id gap; the keeping
 		// one at the last index, where it survives as an empty frame because that
 		// presence is what fixes the array's length.
 		lv := g.elemLoopList(f, ind, val, elem, ref, items)
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { os.writeSequenceBeginLazy(%s); (%s.get(%s) == null ? new %s() : %s.get(%s)).marshal(os); %s }", ind, iv, iv, lv, iv, iv, lv, iv, g.typeName(ref.Key), lv, iv, seqEndStmt(lastElemExpr(iv, lv)))
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { os.writeSequenceBeginLazy(%s); (%s.get(%s) == null ? new %s() : %s.get(%s)).serialize(os); %s }", ind, iv, iv, lv, iv, iv, lv, iv, g.typeName(ref.Key), lv, iv, seqEndStmt(lastElemExpr(iv, lv)))
 		f.line("%s%s", ind, seqEndStmt(keepIf))
 	case ir.KindArray:
 		lv := g.elemLoopList(f, ind, val, elem, ref, items)

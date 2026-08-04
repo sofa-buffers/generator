@@ -133,7 +133,7 @@ What that looks like from C#:
   `default`, and a declared default shorter than `N` is materialized exactly as
   written (never tail-padded to `N`). Native arrays keep their `T[]` /
   `List<T>` initializer; a wrapper array is `new()`.
-- `Marshal` writes **every** element the value holds. `new uint[]{1, 2, 0, 0}` and
+- `Serialize` writes **every** element the value holds. `new uint[]{1, 2, 0, 0}` and
   `new uint[]{1, 2}` are different values with different bytes.
 - Decode yields exactly the elements the wire carried. A primitive `count: N`
   array allocates `new T[count]` — the `#100` schema-capacity guard already
@@ -182,7 +182,7 @@ over-index guard rejects `id >= N` first, which also bounds the gap-fill against
 over-index amplification DoS — including on the row collectors, which had no bound
 of their own while they appended.
 
-`IsDefault()` — every class carries it — is the exact negation of what `Marshal`
+`IsDefault()` — every class carries it — is the exact negation of what `Serialize`
 writes, evaluated per field and recursively: the explicit form of the "not one child
 was written" test the lazy framing performs. Because the last element is always
 written, a wrapper array is default exactly when it is **empty**, so the writer and

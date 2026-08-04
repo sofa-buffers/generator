@@ -314,7 +314,7 @@ func TestCsStructural(t *testing.T) {
 		"using sofab;",
 		"namespace Sofabuffers;",
 		"public sealed class Myfirstmessage {",
-		"public void Marshal(OStream os)",
+		"public void Serialize(OStream os)",
 		"public byte[] Encode()",
 		"public static Myfirstmessage Decode(byte[] data)",
 		"public static DecodeStatus TryDecode(byte[] data, out Myfirstmessage msg)", // status-surfacing decode (#105)
@@ -367,7 +367,7 @@ messages:
 		// Deprecated field: doc note + native [Obsolete] attribute.
 		"/// Old identifier retained for backward compatibility.\n    /// Deprecated.\n    /// </summary>\n    [Obsolete]\n    public uint legacyId;",
 		// Internal access to the deprecated field is CS0618-suppressed.
-		"    public void Marshal(OStream os) {\n#pragma warning disable 618 // internal access to a member marked [Obsolete]",
+		"    public void Serialize(OStream os) {\n#pragma warning disable 618 // internal access to a member marked [Obsolete]",
 		"#pragma warning restore 618\n    }",
 		"#pragma warning disable 618 // internal access to a member marked [Obsolete]\ninternal sealed class TelemetryVisitor : IVisitor {",
 		// Enum constant descriptions.
@@ -607,9 +607,9 @@ messages:
 		// SEQUENCE elements: the same rule, applied to the lazily-held frame. The
 		// dropping closer in the interior (an all-default element writes no child, so
 		// the frame vanishes and leaves an id gap), the keeping one at the last index.
-		"os.WriteSequenceBeginLazy(_i0); (this.fixedobj[_i0] ?? new VecFixedobjElem()).Marshal(os);\n" +
+		"os.WriteSequenceBeginLazy(_i0); (this.fixedobj[_i0] ?? new VecFixedobjElem()).Serialize(os);\n" +
 			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();",
-		"os.WriteSequenceBeginLazy(_i0); (this.dynobj[_i0] ?? new VecDynobjElem()).Marshal(os);\n" +
+		"os.WriteSequenceBeginLazy(_i0); (this.dynobj[_i0] ?? new VecDynobjElem()).Serialize(os);\n" +
 			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();",
 
 		// A NATIVE nested row has no frame of its own, so the rule lands on the write.
@@ -688,11 +688,11 @@ messages:
 	m := buildModule(t, []byte(src), "m.yaml", map[string]any{})
 	for _, want := range []string{
 		// FIELD: a struct field may vanish whole when every child is at its default.
-		"os.WriteSequenceBeginLazy(0); (this.nested ?? new MNested()).Marshal(os); os.WriteSequenceEnd();",
+		"os.WriteSequenceBeginLazy(0); (this.nested ?? new MNested()).Serialize(os); os.WriteSequenceEnd();",
 		// FIELD: the wrapper of a struct-element array, closed by the dropping end.
 		"        os.WriteSequenceBeginLazy(1);\n" +
 			"        for (int _i0 = 0, _n0 = this.structs.Count; _i0 < _n0; _i0++) {\n" +
-			"            os.WriteSequenceBeginLazy(_i0); (this.structs[_i0] ?? new MStructsElem()).Marshal(os);\n" +
+			"            os.WriteSequenceBeginLazy(_i0); (this.structs[_i0] ?? new MStructsElem()).Serialize(os);\n" +
 			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();\n" +
 			"        }\n" +
 			"        os.WriteSequenceEnd();",

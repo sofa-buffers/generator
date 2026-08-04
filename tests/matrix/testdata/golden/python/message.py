@@ -35,7 +35,7 @@ class Scalars:
             return False
         return True
 
-    def _marshal(self, e: Encoder) -> None:
+    def serialize(self, e: Encoder) -> None:
         if self.u8min != 0:
             e.write_unsigned(0, int(self.u8min))
         if self.u8max != 255:
@@ -53,7 +53,7 @@ class Scalars:
         if self.flag != True:
             e.write_bool(7, self.flag)
 
-    def _unmarshal(self, d: Decoder) -> None:
+    def deserialize(self, d: Decoder) -> None:
         while True:
             fld = d.next()
             if fld is None or fld.type == WireType.SEQUENCE_END:
@@ -142,12 +142,12 @@ class Scalars:
 
     def encode(self) -> bytes:
         e = Encoder()
-        self._marshal(e)
+        self.serialize(e)
         return e.getvalue()
 
     @classmethod
     def decode(cls, data: bytes) -> "Scalars":
         o = cls()
-        o._unmarshal(Decoder(io.BytesIO(data)))
+        o.deserialize(Decoder(io.BytesIO(data)))
         return o
 

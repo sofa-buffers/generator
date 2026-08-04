@@ -20,6 +20,36 @@ targets:
     go_version: "1.22"
 ```
 
+## Streaming encode — `EncodeTo(io.Writer)`
+
+`corelib-go`'s `Encoder` targets an `io.Writer` and drains its internal buffer
+into it as that fills, so a message never has to exist as one contiguous
+`[]byte`. That was true all along and unreachable all along: the generated
+writer was an **unexported** `marshal`, so no caller outside the generated
+package could supply a writer. It is now exported as `Serialize`, with
+`EncodeTo` as the entry point that adds the flush:
+
+```go
+func (m *Msg) Serialize(e *sofab.Encoder)      // fields only; a nested message
+                                               // goes into a frame already open
+func (m *Msg) EncodeTo(w io.Writer) error      // serialise + flush the tail
+func (m *Msg) Encode() ([]byte, error)         // EncodeTo into a bytes.Buffer
+```
+
+`Encode` is `EncodeTo` with a `bytes.Buffer`, so the two cannot drift.
+
+**Decode has no `feed()`, and that is a corelib property, not an oversight.**
+`corelib-go` streams **pull**-shaped: `Decoder.Next` walks an `io.Reader` field
+by field, never materialising the message. That is real, memory-bounded
+streaming — but it is not a resumable push decoder, and one cannot be
+synthesised over it without inverting control. The generated `Decode<Msg>` uses
+the zero-copy `AcceptBytes` cursor, which needs the whole message contiguous. A
+`feed(chunk)` here waits on a resumable decoder in `corelib-go`.
+
+Note for issue #239: `Serialize` is now an exported member of every generated
+message type, so it joins the reserved-name set a schema field must not collide
+with.
+
 ## Receiver-side decode limits
 
 The `max_dyn_*` caps are [generic options](README.md); what is specific to this

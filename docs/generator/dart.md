@@ -52,7 +52,7 @@ enum values (which a plain Dart `enum` cannot express) and 64-bit bitfields work
 
 Per message:
 
-- `void marshal(sofab.Encoder e)` — sparse-canonical field writes into any
+- `void serialize(sofab.Encoder e)` — sparse-canonical field writes into any
   caller-configured `Encoder` (fixed buffer, or a flush sink for streaming).
 - `Uint8List encode()` — one-shot convenience over `Encoder.encodeToBytes`.
 - `static DecodeStatus tryDecode(Uint8List data, <Message> out)` — the
@@ -79,7 +79,7 @@ The consequences you can observe from Dart:
   declares a `default`, and a declared default shorter than `N` is materialized
   exactly as written (never tail-padded to `N`). `reset()` restores the same
   thing. This holds for native and wrapper element kinds alike.
-- `marshal` writes **every** element the list holds. `<int>[1, 2, 0, 0]` and
+- `serialize` writes **every** element the list holds. `<int>[1, 2, 0, 0]` and
   `<int>[1, 2]` are different values with different bytes.
 - Decode yields exactly the elements the wire carried: `length` after a round
   trip equals `length` before it, for both the compact scalar form and the
@@ -99,9 +99,9 @@ values that encode and decode distinctly.
 ### Encode model — lazy sequence framing (MESSAGE_SPEC §2)
 
 The `≠ default` omit test is per field and a **sequence-typed field is no
-exception**, so `marshal` never opens a frame eagerly: every sequence is opened
+exception**, so `serialize` never opens a frame eagerly: every sequence is opened
 with `Encoder.beginSequenceLazy(id)`, which holds the header back until a child
-field is actually written. Because the nested `marshal` already omits each child
+field is actually written. Because the nested `serialize` already omits each child
 equal to its default, "no child was written" *is* "the value equals its declared
 default", evaluated per field and recursively — no buffering and no runtime
 whole-object compare.
@@ -122,7 +122,7 @@ An **element** is the one place the choice is positional, decided from the index
 in the *value* at run time — the schema cannot answer it:
 
 ```dart
-e.beginSequenceLazy(_i0); objs[_i0].marshal(e);
+e.beginSequenceLazy(_i0); objs[_i0].serialize(e);
 if (_i0 == objs.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }
 ```
 
@@ -328,7 +328,7 @@ the generated code uses that path:
 - **Scalar** — each `fp32` field gets a private companion `int? _<name>Fp32Bits`.
   `onFp32Bits` captures the exact 32 wire bits there (and widens a display
   `double` for element access); `onFp32` clears it (a later non-NaN occurrence,
-  §7.4, wins). `marshal` re-emits `writeFp32Bits` when the value is a NaN **and**
+  §7.4, wins). `serialize` re-emits `writeFp32Bits` when the value is a NaN **and**
   bits were captured, else `writeFp32` — the `!= default` omit test is unchanged
   (a NaN never equals the default).
 - **Array** — elements bind through `_f32copy`, a **raw byte copy** into a fresh
@@ -485,7 +485,7 @@ class Probe {
   double f32 = 0.0;
   int? f32Fp32Bits;          // public: consumers read it, and callers may set it
   ...
-  void marshal(sofab.Encoder e) {
+  void serialize(sofab.Encoder e) {
     if (f32 != 0.0) {
       if (f32.isNaN && f32Fp32Bits != null) { e.writeFp32Bits(0, f32Fp32Bits!); }
       else { e.writeFp32(0, f32); }

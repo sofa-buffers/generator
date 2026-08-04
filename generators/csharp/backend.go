@@ -1,5 +1,5 @@
 // Package csharp is the C#/.NET throughput backend (PLAN §6.4): classes with
-// Marshal over OStream and a flat-visitor decode (IVisitor) against corelib-cs.
+// Serialize over OStream and a flat-visitor decode (IVisitor) against corelib-cs.
 // The corelib's IVisitor is flat (SequenceBegin/End, no child visitors), so
 // decode is a (location, id) state machine with a location stack — mirroring the
 // Rust backend.
@@ -153,7 +153,7 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		}
 		f.line("    public %s %s%s;", g.csType(fld), csIdent(fld.Name), g.csInit(fld))
 	}
-	// Hoist each native array's omit-compare default into a static: Marshal only
+	// Hoist each native array's omit-compare default into a static: Serialize only
 	// ever reads it, so one shared instance suffices and encode stops allocating
 	// a fresh literal (a `count: N` field's default is N elements long — for a
 	// large N that per-call allocation would dominate). The mutable per-object
@@ -165,10 +165,10 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	}
 	f.blank()
 
-	// Marshal. Generated marshal legitimately reads fields marked [Obsolete];
+	// Serialize. Generated marshal legitimately reads fields marked [Obsolete];
 	// silence the CS0618 deprecation warning around that internal access.
 	dep := hasDeprecatedDirect(fields)
-	f.line("    public void Marshal(OStream os) {")
+	f.line("    public void Serialize(OStream os) {")
 	if dep {
 		f.line("#pragma warning disable 618 // internal access to a member marked [Obsolete]")
 	}
@@ -192,18 +192,33 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		} else {
 			f.line("    public const int MaxSize = %d;", ms.Size)
 		}
-		f.line("    // Per-thread scratch buffer: Encode() marshals into it and returns an")
+		f.line("    // Per-thread scratch buffer: Encode() serialises into it and returns an")
 		f.line("    // exact-size copy, so the worst-case buffer is not re-allocated (and")
 		f.line("    // zeroed) on every call. Do not call Encode() reentrantly from a")
-		f.line("    // Marshal() override on the same thread.")
+		f.line("    // Serialize() override on the same thread.")
 		f.line("    [ThreadStatic] private static byte[] _encScratch;")
 		f.line("    public byte[] Encode() {")
 		f.line("        var buf = _encScratch ??= new byte[MaxSize];")
 		f.line("        var os = new OStream(buf);")
-		f.line("        Marshal(os);")
+		f.line("        Serialize(os);")
 		f.line("        var outp = new byte[os.BytesUsed];")
 		f.line("        Array.Copy(buf, outp, os.BytesUsed);")
 		f.line("        return outp;")
+		f.line("    }")
+		// Streaming encode. Serialize writes the fields and nothing else, so a
+		// nested message can be written into an open frame; this is the entry
+		// point for a caller who owns the stream, and it flushes the tail the
+		// last write left in the buffer. With a FlushSink on `os` the buffer may
+		// be smaller than the message.
+		f.line("    /// <summary>")
+		f.line("    /// Encode into a stream the caller owns, then flush the tail.")
+		f.line("    /// With a <c>FlushSink</c> on <paramref name=\"os\"/> the buffer may be")
+		f.line("    /// smaller than the message: it is drained as it fills, so what bounds")
+		f.line("    /// memory is the buffer, not the message.")
+		f.line("    /// </summary>")
+		f.line("    public void EncodeTo(OStream os) {")
+		f.line("        Serialize(os);")
+		f.line("        os.Flush();")
 		f.line("    }")
 		// Best-effort decode: kept for back-compat. It discards Feed's
 		// DecodeStatus, so a truncated message is indistinguishable from a
@@ -225,6 +240,11 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		f.line("        msg = new %s();", name)
 		f.line("        return new IStream().Feed(data, 0, data.Length, new %sVisitor(msg));", name)
 		f.line("    }")
+		// Streaming decode (PLAN §5.6). The corelib's IStream is resumable, so
+		// the only thing missing was a public handle on it: Decoder() binds a
+		// fresh destination and hands back an object whose Feed takes chunks of
+		// any size. Nested, matching the Java backend's Msg.Decoder.
+		g.emitDecoder(f, name)
 	}
 	f.line("}")
 	f.blank()
@@ -245,8 +265,77 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	}
 }
 
+// emitDecoder writes the public incremental decoder: a handle on the corelib's
+// resumable IStream plus the destination it fills. The corelib already suspends
+// and resumes at any byte boundary, so this type carries no parse state of its
+// own -- it exists to make that reachable from outside the assembly, which an
+// `internal` IVisitor was not (PLAN §5.6).
+//
+// Nested and constructed with `new Msg.Decoder()` rather than reached through a
+// static Decoder() factory as in Java: C# puts nested types and members in ONE
+// declaration space, so a method and a nested class cannot share the name. The
+// constructor is the factory.
+func (g *gen) emitDecoder(f *cfile, name string) {
+	f.line("    /// <summary>")
+	f.line("    /// Incremental decoder for <see cref=\"%s\"/>: hold one and feed the", name)
+	f.line("    /// message as bytes arrive, instead of buffering it whole first.")
+	f.line("    /// </summary>")
+	f.line("    /// <remarks>")
+	f.line("    /// The wire format has no end marker at the top level -- a message ends")
+	f.line("    /// where its bytes end -- so a feed cannot report that the MESSAGE is")
+	f.line("    /// complete, only that the bytes handed in ended on a field boundary")
+	f.line("    /// (<c>Complete</c>) or mid-field (<c>Incomplete</c>). Neither is a")
+	f.line("    /// failure mid-stream; the caller's own framing decides when the input")
+	f.line("    /// is over, and <c>Finish</c> then gives the verdict for the message as")
+	f.line("    /// a whole.")
+	f.line("    /// </remarks>")
+	f.line("    public sealed class Decoder {")
+	f.line("        private readonly %s _m = new %s();", name, name)
+	f.line("        private readonly IStream _is = new IStream();")
+	f.line("        private readonly %sVisitor _v;", name)
+	f.blank()
+	f.line("        public Decoder() { _v = new %sVisitor(_m); }", name)
+	f.blank()
+	f.line("        /// <summary>")
+	f.line("        /// Feed the next chunk, of any size. Returns <c>Complete</c> if it")
+	f.line("        /// ended on a field boundary, <c>Incomplete</c> if it ended mid-field")
+	f.line("        /// -- neither answers whether the MESSAGE is done.")
+	f.line("        /// </summary>")
+	f.line("        public DecodeStatus Feed(byte[] chunk) => _is.Feed(chunk, 0, chunk.Length, _v);")
+	f.blank()
+	f.line("        /// <summary>As <c>Feed</c>, over a slice of <paramref name=\"chunk\"/>.</summary>")
+	f.line("        public DecodeStatus Feed(byte[] chunk, int off, int len) => _is.Feed(chunk, off, len, _v);")
+	f.blank()
+	f.line("        /// <summary>The outcome for everything fed so far.</summary>")
+	f.line("        public DecodeStatus Status => _is.Status;")
+	f.blank()
+	f.line("        /// <summary>The destination, holding whatever has been decoded so far.</summary>")
+	f.line("        public %s Message => _m;", name)
+	f.blank()
+	f.line("        /// <summary>")
+	f.line("        /// Take the decoded message once the caller's framing says the input")
+	f.line("        /// is over. Rejects a stream that ended mid-field rather than")
+	f.line("        /// returning a half-filled value; read <c>Message</c> to get it")
+	f.line("        /// anyway.")
+	f.line("        /// </summary>")
+	f.line("        /// <remarks>")
+	f.line("        /// This is an <c>InvalidOperationException</c> and not a")
+	f.line("        /// <c>SofabException</c> on purpose: an incomplete message is not a")
+	f.line("        /// malformed one. Nothing is wrong with the bytes -- the caller")
+	f.line("        /// declared end-of-input at a point they did not agree with.")
+	f.line("        /// </remarks>")
+	f.line("        public %s Finish() {", name)
+	f.line("            if (_is.Status != DecodeStatus.Complete) {")
+	f.line("                throw new InvalidOperationException(")
+	f.line("                    $\"%s: stream ended mid-field ({_is.Status})\");", name)
+	f.line("            }")
+	f.line("            return _m;")
+	f.line("        }")
+	f.line("    }")
+}
+
 // emitIsDefault emits the class's all-default predicate. It is the exact negation
-// of what Marshal writes: the object is default iff Marshal would emit no child at
+// of what Serialize writes: the object is default iff Serialize would emit no child at
 // all, evaluated per field and recursively (MESSAGE_SPEC §2). It is the explicit
 // form of the predicate lazy framing applies implicitly ("not one child was
 // written"), generated from the very same per-field expressions the writer uses so
@@ -280,7 +369,7 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 		}
 		return fmt.Sprintf("System.Linq.Enumerable.SequenceEqual(%s ?? Array.Empty<byte>(), %s)", acc, g.csDefaultValue(fld))
 	case ir.KindStruct, ir.KindUnion:
-		// Lazily framed: the frame survives iff the nested Marshal wrote a child,
+		// Lazily framed: the frame survives iff the nested Serialize wrote a child,
 		// which is exactly "the nested object is not default".
 		return fmt.Sprintf("(%s ?? new %s()).IsDefault()", acc, g.typeName(fld.Ref.Key))
 	case ir.KindArray:
@@ -313,7 +402,7 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 }
 
 // hasDeprecatedDirect reports whether any direct field of a class is deprecated,
-// so its Marshal reads a member marked [Obsolete] and needs the CS0618 guard.
+// so its Serialize reads a member marked [Obsolete] and needs the CS0618 guard.
 func hasDeprecatedDirect(fields []*ir.Field) bool {
 	for _, fld := range fields {
 		if fld.Deprecated {
@@ -370,12 +459,12 @@ func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
 		// FIELD is no exception, so the frame is opened LAZILY -- the corelib holds
-		// the header back until a child field appears. The nested Marshal omits every
+		// the header back until a child field appears. The nested Serialize omits every
 		// child that equals its default, so "no child was written" IS "the object
 		// equals its declared default", evaluated per field and recursively. The
 		// dropping closer therefore makes an all-default nested object vanish instead
 		// of reaching the wire as an empty wrapper frame.
-		f.line("        os.WriteSequenceBeginLazy(%d); (%s ?? new %s()).Marshal(os); os.WriteSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key))
+		f.line("        os.WriteSequenceBeginLazy(%d); (%s ?? new %s()).Serialize(os); os.WriteSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key))
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, fld, acc)
@@ -508,7 +597,7 @@ func emitSeqEnd(f *cfile, ind, keepIf string) {
 func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, isPrim bool, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
 	// `nv` is declared in the for-statement's own scope, so two array fields in one
-	// Marshal never collide and the length is evaluated exactly once per field.
+	// Serialize never collide and the length is evaluated exactly once per field.
 	nv := fmt.Sprintf("_n%d", depth)
 	loop := fmt.Sprintf("for (int %s = 0, %s = %s.Count; %s < %s; %s++)", iv, nv, val, iv, nv, iv)
 	last := lastElemExpr(iv, nv)
@@ -550,14 +639,14 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
 		// one rule for both kinds -- and the lazily-held frame is where it is applied.
-		// The nested Marshal writes no child exactly when the element equals its
+		// The nested Serialize writes no child exactly when the element equals its
 		// declared default, so the CLOSER alone decides: the dropping one in the
 		// interior, where an all-default element vanishes into an id gap; the keeping
 		// one at the last index, where it survives as an empty frame because that
 		// presence is what fixes the array's length.
 		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%s%s {", ind, loop)
-		f.line("%s    os.WriteSequenceBeginLazy(%s); (%s[%s] ?? new %s()).Marshal(os);", ind, iv, val, iv, g.typeName(ref.Key))
+		f.line("%s    os.WriteSequenceBeginLazy(%s); (%s[%s] ?? new %s()).Serialize(os);", ind, iv, val, iv, g.typeName(ref.Key))
 		emitSeqEnd(f, ind+"    ", last)
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)

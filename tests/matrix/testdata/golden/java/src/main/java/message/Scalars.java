@@ -14,7 +14,7 @@ public class Scalars {
     public double f64 = -2.5;
     public boolean flag = true;
 
-    public void marshal(OStream os) throws IOException {
+    public void serialize(OStream os) throws IOException {
         if (this.u8min != 0L) { os.writeUnsigned(0, this.u8min); }
         if (this.u8max != 255L) { os.writeUnsigned(1, this.u8max); }
         if (this.u64max != Long.parseUnsignedLong("18446744073709551615")) { os.writeUnsigned(2, this.u64max); }
@@ -24,7 +24,7 @@ public class Scalars {
         if (this.f64 != -2.5) { os.writeFp64(6, this.f64); }
         if (this.flag != true) { os.writeBoolean(7, this.flag); }
     }
-    /** True when every field still equals its declared default, compared per field and recursively -- i.e. marshal would write nothing at all. */
+    /** True when every field still equals its declared default, compared per field and recursively -- i.e. serialize would write nothing at all. */
     boolean isDefault() {
         if (this.u8min != 0L) return false;
         if (this.u8max != 255L) return false;
@@ -48,19 +48,30 @@ public class Scalars {
         this.flag = true;
     }
     public static final int MAX_SIZE = 49;
-    // Per-thread scratch buffer: encode() marshals into it and returns an
+    // Per-thread scratch buffer: encode() serialises into it and returns an
     // exact-size copy, so the worst-case buffer is not re-allocated (and
     // zeroed) on every call. Do not call encode() reentrantly from a
-    // marshal() override on the same thread.
+    // serialize() override on the same thread.
     private static final ThreadLocal<byte[]> ENC_BUF =
         ThreadLocal.withInitial(() -> new byte[MAX_SIZE]);
     public byte[] encode() {
         try {
             byte[] buf = ENC_BUF.get();
             OStream os = new OStream(buf);
-            marshal(os);
+            serialize(os);
             return Arrays.copyOf(buf, os.bytesUsed());
         } catch (IOException e) { throw new RuntimeException(e); }
+    }
+    /**
+     * Encode into a stream the caller owns, then flush the tail.
+     *
+     * <p>With a {@code FlushSink} on {@code os} the buffer may be smaller
+     * than the message: it is drained as it fills, so what bounds memory is
+     * the buffer, not the message.
+     */
+    public void encodeTo(OStream os) throws IOException {
+        serialize(os);
+        os.flush();
     }
     public static Scalars decode(byte[] data) {
         Scalars m = new Scalars();
@@ -73,6 +84,75 @@ public class Scalars {
         IStream is = new IStream();
         is.feed(data, new ScalarsVisitor(out));
         return is.status();
+    }
+    /**
+     * An incremental decoder for this message: hold it and feed chunks as
+     * they arrive, instead of buffering the whole message first.
+     */
+    public static Decoder decoder() {
+        return new Decoder();
+    }
+
+    /**
+     * Incremental decoder for {@link Scalars}: hold one and feed the message as
+     * bytes arrive.
+     *
+     * <p>The wire format has no end marker at the top level -- a message ends
+     * where its bytes end -- so a feed cannot report that the MESSAGE is
+     * complete, only that the bytes handed in ended on a field boundary
+     * ({@code COMPLETE}) or mid-field ({@code INCOMPLETE}). Neither is a
+     * failure mid-stream; the caller's own framing decides when the input is
+     * over, and {@link #finish()} then gives the verdict for the message as
+     * a whole.
+     */
+    public static final class Decoder {
+        private final Scalars m = new Scalars();
+        private final IStream is = new IStream();
+        private final ScalarsVisitor v = new ScalarsVisitor(m);
+
+        /**
+         * Feed the next chunk, of any size. Returns {@code COMPLETE} if it
+         * ended on a field boundary, {@code INCOMPLETE} if it ended mid-field
+         * -- see the class docs: neither answers whether the MESSAGE is done.
+         *
+         * @throws SofabException the bytes are malformed (INVALID); terminal.
+         */
+        public DecodeStatus feed(byte[] chunk) throws SofabException {
+            is.feed(chunk, v);
+            return is.status();
+        }
+
+        /** As {@link #feed(byte[])}, over a slice of {@code chunk}. */
+        public DecodeStatus feed(byte[] chunk, int off, int len) throws SofabException {
+            is.feed(chunk, off, len, v);
+            return is.status();
+        }
+
+        /** The outcome for everything fed so far, without feeding more. */
+        public DecodeStatus status() { return is.status(); }
+
+        /** The destination, holding whatever has been decoded so far. */
+        public Scalars message() { return m; }
+
+        /**
+         * Take the decoded message once the caller's framing says the input is
+         * over. Rejects a stream that ended mid-field rather than returning a
+         * half-filled value; use {@link #message()} to read it anyway.
+         *
+         * <p>This is an {@code IllegalStateException} and not a
+         * {@code SofabException} on purpose: an incomplete message is not a
+         * malformed one. Nothing is wrong with the bytes -- the caller
+         * declared end-of-input at a point they did not agree with.
+         *
+         * @throws IllegalStateException the message ended inside a field or an open sequence.
+         */
+        public Scalars finish() {
+            if (is.status() != DecodeStatus.COMPLETE) {
+                throw new IllegalStateException(
+                    "Scalars: stream ended mid-field (" + is.status() + ")");
+            }
+            return m;
+        }
     }
 }
 
