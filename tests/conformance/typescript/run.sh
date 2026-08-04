@@ -408,6 +408,20 @@ mk_stream_check "$WORK/corpus/nested_rows" \
     'const _m = NestedRows.fromJSON(JSON.parse(process.argv[2])); check("nested_rows", _m, NestedRows.decode, () => new NestedRowsDecoder());'
 ( cd "$WORK/corpus/nested_rows" && npx tsx stream_check.ts "$NR" )
 
+# The two paths must also REJECT alike. Values only cover messages that decode;
+# a rejection additionally has an exception TYPE, and the paths reach it through
+# different code -- the cursor decodes strings inside the corelib, the visitor
+# transcodes in generated code. Only the cursor converted the fatal TextDecoder's
+# TypeError, so feed() threw a raw TypeError past any `instanceof SofabError`
+# guard (generator#297, Crucible F-0060 / codegen defect G-0037).
+#   5a  somestring (id 11) << 3 | 2 (FIXLEN)
+#   12  fixlen word: string subtype, length 2
+#   ff ff  two bytes that are not valid UTF-8
+mk_stream_check "$WORK/ex" \
+    'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
+    'checkReject("invalid utf-8", new Uint8Array([0x5a, 0x12, 0xff, 0xff]), Myfirstmessage.decode, () => new MyfirstmessageDecoder());'
+( cd "$WORK/ex" && npx tsx stream_check.ts )
+
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
 # declared width is INVALID: it MUST NOT be masked to the width, and MUST NOT be

@@ -31,6 +31,37 @@ A key whose kind has no unbounded field in the schema is inert and emits nothing
 with no keys set the output is byte-identical to previous releases. The
 plumbing is independent of the `int64` mode.
 
+### Two decoders, and the contract they share
+
+The backend emits **two** decode paths per type, and they are not interchangeable
+implementations of one thing:
+
+- `Msg.decode(bytes)` runs the monomorphic `Cursor` over a contiguous buffer.
+  This is the fast path and the default.
+- `new MsgDecoder()` → `feed(chunk)` / `finish()` drives a generated `Visitor`
+  over the corelib's resumable `IStream`, for callers who receive the message in
+  pieces. The cursor cannot be fed in chunks, which is why a second decoder
+  exists at all.
+
+Both must reach the **same verdict on the same bytes**, and that covers how a
+message is rejected, not only what a decoded one contains. Every §7 verdict now
+exists twice, so the risk is drift — and it is real: the cursor decodes strings
+inside the corelib (`Cursor.readString`), while the visitor transcodes in
+generated code, so for a while one library reported invalid UTF-8 as
+`SofabError(InvalidMsg)` through `decode()` and as a bare platform `TypeError`
+through `feed()` (generator#297). A `TypeError` walks straight past a caller's
+`catch (e) { if (e instanceof SofabError) … }`, which for a decoder fed
+untrusted bytes is the difference between a rejected message and an unhandled
+exception.
+
+Two things hold the paths together, and a new verdict should use both:
+
+- emit it from the **same helper** the cursor path uses, so a rule change lands
+  in both;
+- gate it in `tests/conformance/typescript/stream_check.ts`, which feeds the same
+  bytes through both paths at six chunk sizes (one byte included) and requires
+  identical values *and* identical `SofabError` codes on rejection.
+
 ### `int64` — 64-bit field representation
 
 `bigint` (default) · `long` · `number` — à la protobufjs's `int64` option.
