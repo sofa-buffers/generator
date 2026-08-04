@@ -580,7 +580,7 @@ func nativeArrayElem(k ir.Kind) bool {
 // default (and may thus be omitted). It is emitted only when some field actually
 // has such a value default (see usesArrEq); empty defaults use a `.length !== 0`
 // guard instead, which needs no helper and no per-encode comparison allocation.
-const arrEqHelper = `// arrEq is an element-wise equality check used by the sparse-canonical marshal to
+const arrEqHelper = `// arrEq is an element-wise equality check used by the sparse-canonical serialize to
 // decide whether a leaf blob or native scalar array equals its default (and may
 // thus be omitted). Works for Uint8Array and number/bigint/boolean arrays.
 function arrEq(a: ArrayLike<unknown>, b: ArrayLike<unknown>): boolean {

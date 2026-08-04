@@ -260,9 +260,9 @@ func TestTSMaxlenReject(t *testing.T) {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, Cursor, WireType, FixlenSubtype, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard (corelib-ts#58); SofabError: over-count reject (generator#100)
+		`import { OStream, Cursor, WireType, FixlenSubtype, SofabError, SofabErrorCode, Visitor, IStream, DecodeStatus, ArrayKind } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard (corelib-ts#58); SofabError: over-count reject (generator#100)
 		"export class Myfirstmessage {",
-		"marshal(os: OStream): void {",
+		"serialize(os: OStream): void {",
 		"static decode(bytes: Uint8Array): Myfirstmessage {",
 		"return Myfirstmessage.decodeFrom(new Cursor(bytes));",
 		"static decodeFrom(c: Cursor): Myfirstmessage {",
@@ -278,14 +278,14 @@ func TestTSStructural(t *testing.T) {
 		"o.someu64 = c.readUnsigned() as bigint; break;", // u64 -> bigint, number-first
 		// MESSAGE_SPEC §2: a struct/union FIELD opens lazily and closes with the
 		// dropping end, so an all-default nested object is omitted, not framed empty.
-		"    os.writeSequenceBeginLazy(20);\n    this.somestruct.marshal(os);\n    os.writeSequenceEnd();\n",
-		"    os.writeSequenceBeginLazy(21);\n    this.someunion.marshal(os);\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(20);\n    this.somestruct.serialize(os);\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(21);\n    this.someunion.serialize(os);\n    os.writeSequenceEnd();\n",
 		// A wrapper-array FIELD is a sequence too: lazy + dropping end at depth 0,
 		// while each ELEMENT chooses its closer POSITIONALLY (§2) — the keeping one
 		// at the last index, whose presence carries the array's length (§5.1), the
 		// dropping one in the interior, where an all-default element leaves an id gap.
-		"    os.writeSequenceBeginLazy(23);\n    this.somestructarray.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
-		"    os.writeSequenceBeginLazy(25);\n    this.someunionarray.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(23);\n    this.somestructarray.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.serialize(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(25);\n    this.someunionarray.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.serialize(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
 		// A leaf string/blob wrapper array is a FIELD as well.
 		"    os.writeSequenceBeginLazy(18);\n",
 		"    os.writeSequenceBeginLazy(19);\n",
@@ -295,17 +295,46 @@ func TestTSStructural(t *testing.T) {
 			t.Errorf("message.ts missing %q", want)
 		}
 	}
-	// The megamorphic push/visitor decode is gone: no _visitor()/ChunkAcc, no
-	// per-field visitor callbacks, no `decode`/`Visitor` import.
+	// The megamorphic push/visitor ONE-SHOT decode is gone. What that ruling
+	// protected is the hot path: decode() must reach fields through the
+	// monomorphic Cursor, never through a visitor whose call sites go
+	// megamorphic across differently-shaped nested types.
+	//
+	// A visitor as such is no longer forbidden — the streaming decoder needs one,
+	// and corelib-ts's IStream cannot be driven any other way — but it is a
+	// SEPARATE surface reached only through decoder()/feed(). The assertions
+	// below pin that split: the old shapes stay gone, and the cursor path stays
+	// the one decode() uses.
 	for _, gone := range []string{
-		"_visitor()", "ChunkAcc", "type Visitor", "sequenceBegin(",
+		"_visitor()", "ChunkAcc", "type Visitor",
 		"stringListVisitor", "unsigned(id: number, value: bigint)",
 		// The eager begin no longer exists in corelib-ts: every sequence is opened
 		// with writeSequenceBeginLazy (MESSAGE_SPEC §2).
 		"os.writeSequenceBegin(",
 	} {
 		if strings.Contains(mod, gone) {
-			t.Errorf("message.ts should no longer emit %q (push/visitor decode removed)", gone)
+			t.Errorf("message.ts should no longer emit %q (push/visitor one-shot decode removed)", gone)
+		}
+	}
+	// decode() still goes through the Cursor, not the visitor.
+	for _, want := range []string{
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    return Myfirstmessage.decodeFrom(new Cursor(bytes));",
+		"  static decodeInto(c: Cursor, o: Myfirstmessage): Myfirstmessage {\n    while (c.readHeader()) {",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("the one-shot decode must stay on the Cursor; missing %q", want)
+		}
+	}
+	// The streaming decoder is the separate surface, and it is the only place a
+	// visitor appears.
+	for _, want := range []string{
+		"export class MyfirstmessageDecoder {",
+		"  feed(chunk: Uint8Array): DecodeStatus {",
+		"class _MyfirstmessageVis implements Visitor {",
+		"const _DEAD: Visitor = { sequenceBegin(): Visitor { return _DEAD; } };",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing streaming decode surface %q", want)
 		}
 	}
 	// Fast-encode marshal tidy-up: a leaf string list uses an indexed for (no
@@ -341,12 +370,12 @@ func TestTSLazySequenceFraming(t *testing.T) {
 	// FIELDs: struct field, leaf-string wrapper array, blob wrapper array, and the
 	// composite/nested-array wrappers — all closed with the dropping end.
 	for _, want := range []string{
-		"    os.writeSequenceBeginLazy(0);\n    this.s.marshal(os);\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(0);\n    this.s.serialize(os);\n    os.writeSequenceEnd();\n",
 		// The leaf runs are walked whole — nothing is narrowed away — and the last
 		// element escapes the omit test (§2, see TestTSArrayElementSparsityIsPositional).
 		"    os.writeSequenceBeginLazy(2);\n    for (let _i0 = 0, _a0 = this.strs; _i0 < _a0.length; _i0++) {",
 		"    os.writeSequenceBeginLazy(4);\n    for (let _i0 = 0, _a0 = this.blobs; _i0 < _a0.length; _i0++) {",
-		"    os.writeSequenceBeginLazy(1);\n    this.ss.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(1);\n    this.ss.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.serialize(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
 		// The nested row is an ELEMENT of `rows`, so its own wrapper takes the
 		// positional closer too; the outer `rows` wrapper is a FIELD and may vanish.
 		"    os.writeSequenceBeginLazy(3);\n    this.rows.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      for (let _i1 = 0, _a1 = _e0; _i1 < _a1.length; _i1++) {\n        if (_a1[_i1]! !== \"\" || _i1 === _a1.length - 1) {\n          os.writeString(_i1, _a1[_i1]!);\n        }\n      }\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
@@ -413,7 +442,7 @@ func genTSWith(t *testing.T, src string, cfg map[string]any) string {
 func TestTSInt64Long(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "long"})
 	for _, want := range []string{
-		`import { OStream, Cursor, WireType, Long, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`,
+		`import { OStream, Cursor, WireType, Long, SofabError, SofabErrorCode, Visitor, IStream, DecodeStatus, ArrayKind } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once. `count: 8` is a
 		// CAPACITY, not a length (§3), so a fresh us is the EMPTY array — not 8
 		// Long zeros.
@@ -872,7 +901,7 @@ func TestTSInt64Default(t *testing.T) {
 	for _, cfg := range []map[string]any{{}, {"int64": "bigint"}} {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
-			`import { OStream, Cursor, WireType, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";`,
+			`import { OStream, Cursor, WireType, SofabError, SofabErrorCode, Visitor, IStream, DecodeStatus, ArrayKind } from "@sofa-buffers/corelib";`,
 			// count: 8 is a CAPACITY, so a fresh array is empty (§3, af536c4).
 			"us: bigint[] = [];",
 			// ...and the value goes out whole, the wire count being its length.
@@ -981,8 +1010,8 @@ messages:
 		// last index (its presence fixes the length), drop it in the interior (an
 		// all-default element vanishes into an id gap). Counted and dynamic alike —
 		// `count: 5` buys the fixed array no exemption.
-		"    os.writeSequenceBeginLazy(0);\n    this.fixed.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
-		"    os.writeSequenceBeginLazy(1);\n    this.dynamic.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.marshal(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(0);\n    this.fixed.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.serialize(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
+		"    os.writeSequenceBeginLazy(1);\n    this.dynamic.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.serialize(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
 		// A leaf element gets the same rule as an unconditional `|| last` disjunct,
 		// walking the value whole — nothing is narrowed away first.
 		"    for (let _i0 = 0, _a0 = this.fstrs; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]! !== \"\" || _i0 === _a0.length - 1) {\n        os.writeString(_i0, _a0[_i0]!);\n      }\n    }\n",
