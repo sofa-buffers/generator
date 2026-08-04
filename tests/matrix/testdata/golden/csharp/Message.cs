@@ -38,7 +38,7 @@ public sealed class Scalars {
         return true;
     }
     public const int MaxSize = 49;
-    // Per-thread scratch buffer: Encode() marshals into it and returns an
+    // Per-thread scratch buffer: Encode() serialises into it and returns an
     // exact-size copy, so the worst-case buffer is not re-allocated (and
     // zeroed) on every call. Do not call Encode() reentrantly from a
     // Serialize() override on the same thread.

@@ -171,7 +171,7 @@ This split also stops a skipped `fp64` header from sizing a declared `float[]`,
 but it is not the whole of finding F-0039 — that finding's primary face is a
 non-fixlen `ARRAY_SIGNED` header at a `u8[]` slot, a different codegen path.
 
-## §2: sequence framing — which closer `marshal` emits
+## §2: sequence framing — which closer `serialize` emits
 
 MESSAGE_SPEC **§2** omits a sequence-typed **field** whose value equals its
 declared default instead of framing it empty, while a wrapper-array **element**
@@ -179,7 +179,7 @@ keeps its frame: element presence is what carries a dynamic array's length
 (*highest present id + 1*, §5.1), so dropping an all-default element would change
 the decoded length, not merely the bytes.
 
-The generated `marshal` opens **every** sequence with `os.writeSequenceBeginLazy(id)`,
+The generated `serialize` opens **every** sequence with `os.writeSequenceBeginLazy(id)`,
 which holds the header back until a child field is actually written. Since the
 per-field sparse rule already omits every child equal to its default, "not one
 child was written" *is* "the object equals its declared default", evaluated per
@@ -200,7 +200,7 @@ the id gap open; the **trailing** run does not — see the next section.
 
 The predicate behind the lazy framing is also emitted explicitly, as a
 package-private `isDefault()` on every generated `struct`/`union` class. Each of
-its arms is literally the corresponding `marshal` write guard, so the two cannot
+its arms is literally the corresponding `serialize` write guard, so the two cannot
 state different truth tables. It exists because a wrapper-array **element** has to
 be judged *before* its frame is opened, which the implicit "no child was written"
 test cannot answer in time.
@@ -231,7 +231,7 @@ the gap-fill.
 
 Encode is the mirror. A `count: N` wrapper array's canonical wire stops at **M**,
 one past its last non-default element — explicitly *"even for sequence-form
-elements"* (§3/§5.1) — so `marshal` narrows the container to M **before** the
+elements"* (§3/§5.1) — so `serialize` narrows the container to M **before** the
 element loop, via the `Sbuf.trimTail*` helpers (a `subList` view, so no
 allocation). Only the trailing run goes; interior all-default elements keep their
 frame. `M == 0` writes no child at all, so the lazily-opened wrapper is dropped by
@@ -262,12 +262,12 @@ always been materialized this way, from their padded default literal; without th
 same treatment the same schema disagreed with itself — an absent `count: 3`
 string array decoded at length 0 while one element on the wire, or an explicitly
 empty wrapper, decoded at 3. A **dynamic** array has no `N` and still starts
-empty. Materializing the elements does not put the field on the wire: `marshal`
+empty. Materializing the elements does not put the field on the wire: `serialize`
 narrows to `M == 0` and the lazily-opened wrapper is dropped, so an untouched
 message still encodes to zero bytes.
 
 The narrowing expression is generated once (`elemTrimExpr`) and used by both the
-marshal loop and `isDefault`. If the predicate narrowed a field the writer did not
+serialize loop and `isDefault`. If the predicate narrowed a field the writer did not
 (or the reverse), the result would be a field omitted though it is on the wire, or
 kept though it is not.
 
@@ -302,7 +302,7 @@ maxlen: 8 } }`, before → after):
 
 Both halves move together. `elemTrimExpr`'s leaf trim becomes `count: N`-only at
 the same time, because `isDefault` is generated from it: left trimming, the
-predicate would call a dynamic `[""]` all-default and omit a field the marshal
+predicate would call a dynamic `[""]` all-default and omit a field the serialize
 loop now writes.
 
 ## `reset()` — the decode side of §2
@@ -337,9 +337,27 @@ is the entire point of accepting a destination:
 | `struct` / `union` | `reset()` recursively, never a new object |
 
 It is **public** for the same reason corelib-cpp exposes `IStreamImpl::reset()`:
-a caller who drives the `Visitor` directly — feeding chunks itself, with no
-`tryDecode` to hook — needs the same ability to re-arm a destination between
-messages.
+a caller who feeds chunks himself, with no `tryDecode` to hook, needs the same
+ability to re-arm a destination between messages.
+
+That caller is `Myfirstmessage.Decoder` (generator#239). Until it existed the
+paragraph above described something unreachable: the generated `<Msg>Visitor` is
+package-private, so "drives the `Visitor` directly" was only possible from inside
+the generated package. `decoder()` now hands out a public handle on the corelib's
+resumable `IStream`, and the Visitor stays package-private because the decoder
+wraps it:
+
+```java
+Myfirstmessage.Decoder d = Myfirstmessage.decoder();
+for (byte[] chunk : chunks) d.feed(chunk);   // any chunk size, down to 1 byte
+Myfirstmessage m = d.finish();               // rejects a stream that ended mid-field
+```
+
+`finish()` throws `IllegalStateException`, not `SofabException`: `SofabError` has
+no `INCOMPLETE` (only `ARGUMENT` / `BUFFER_FULL` / `INVALID_MSG` /
+`LIMIT_EXCEEDED`), and reporting a truncated message as `INVALID_MSG` would
+collapse two outcomes §7 keeps apart — an incomplete message is not a malformed
+one. `status()` and `message()` give the same verdict without an exception.
 
 The §7.4 clear in the visitor is unchanged and still required: it covers a
 *re-opened* wrapper within one message, which must replace the array whole.

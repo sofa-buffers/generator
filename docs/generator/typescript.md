@@ -55,7 +55,7 @@ set u64(vals: readonly (Long | bigint | number)[]) { this._u64 = vals.map(Long.f
 ```
 
 Assignment stays ergonomic (`msg.u64 = [1n, 2n]` or plain numbers) and converts
-**once**, off the per-encode path; marshal/decode read and write the backing
+**once**, off the per-encode path; serialize/decode read and write the backing
 field directly via the corelib's `write*ArrayLong`/`read*ArrayLong`, so no
 `bigint` is created on the hot path. Caveats:
 
@@ -82,7 +82,7 @@ Measured on the full-scale arena message (best-of-3, corelib-ts #19/#20):
 
 ## Encode: sequence framing
 
-`marshal(os)` opens **every** nested sequence with the corelib's
+`serialize(os)` opens **every** nested sequence with the corelib's
 `os.writeSequenceBeginLazy(id)`, which holds the header back until a child field
 is actually written. The closer alone then decides whether a contentless sequence
 survives:
@@ -95,7 +95,7 @@ survives:
 
 The first two rows are decided at generation time from the position in the schema.
 The third cannot be: it depends on the position in the **value**, so it is the one
-run-time predicate the generated marshal carries.
+run-time predicate the generated serialize carries.
 
 This is MESSAGE_SPEC §2 / CORELIB_PLAN §6. The visible consequence: a message
 whose every field equals its default now encodes to **zero bytes**, and a nested
@@ -159,7 +159,7 @@ condition and emits the two-armed closer when it is non-empty:
 ```ts
 this.objs.forEach((_e0, _i0, _a0) => {
   os.writeSequenceBeginLazy(_i0);
-  _e0.marshal(os);
+  _e0.serialize(os);
   if (_i0 === _a0.length - 1) {   // lastElemExpr
     os.writeSequenceEndKeep();    // last: the empty frame survives
   } else {
@@ -169,7 +169,7 @@ this.objs.forEach((_e0, _i0, _a0) => {
 os.writeSequenceEnd();            // the FIELD wrapper still drops unconditionally
 ```
 
-The nested `marshal` writes no child exactly when the element equals its declared
+The nested `serialize` writes no child exactly when the element equals its declared
 default, so the closer alone decides. A leaf element expresses the same rule as an
 unconditional `|| _i0 === _a0.length - 1` disjunct next to its omit test
 (`lastElemExpr`), and a **native** nested row — which has no frame of its own —
@@ -202,7 +202,7 @@ against corelib-ts through a built project:
 
 Every generated class still carries `isDefault(): boolean` — the explicit form of
 the "not one child was written" test the lazy framing applies implicitly, generated
-from the very same per-field expressions `marshal` uses so the two cannot drift
+from the very same per-field expressions `serialize` uses so the two cannot drift
 apart. For an array field the predicate is now simply `.length === 0`: the writer
 emits a child for **every** element the value holds, so "no child is written" is
 exactly "the array is empty".

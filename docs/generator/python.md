@@ -9,6 +9,24 @@ documented once in the [generic config](README.md).
 The Python target takes no options of its own — everything is set in the
 [generic config](README.md).
 
+## `serialize` / `deserialize` are public — and are the streaming pair
+
+Both used to be underscore-private (`_marshal` / `_unmarshal`), which understated
+what they are: Python's only chunk-capable paths, in both directions.
+
+```python
+msg.serialize(Encoder.over_buffer(buf, 0, flush=sink))  # buffer < message
+msg.deserialize(Decoder(reader))                        # pulls in chunk_size bites
+```
+
+`encode()` / `decode()` are the one-shot conveniences layered on them.
+
+The `unmarshal` spelling is gone family-wide (ARCHITECTURE §8), but the
+capability deliberately is not: `deserialize` is **pull**-shaped streaming — the
+caller supplies any object with `read(n)` and the corelib pulls, refilling in
+`chunk_size` bites. It is not a push `feed(chunk)`, and `corelib-py` has no
+resumable decoder to build one on, so this is the shape Python offers.
+
 ## Receiver-side decode limits
 
 The `max_dyn_*` caps are [generic options](README.md); what is specific to this
@@ -88,7 +106,7 @@ name: `SofaDecodeError` (over-count / over-index / over-maxlen rejects) and
 emitted per schema, so a module never carries a dead name. Each gate
 (`schemaHas*` in `backend.go`) is therefore a *mirror of an emitter* and must be
 kept in lockstep with it — including where that emitter fires. Python has none of the compile-time help a typed language gives here: a
-missing name is a `NameError` raised from `_unmarshal`, i.e. at decode time, on
+missing name is a `NameError` raised from `deserialize`, i.e. at decode time, on
 an otherwise importable module.
 
 The trap this walked into once (generator#246): a §7.3 guard is emitted at **two**

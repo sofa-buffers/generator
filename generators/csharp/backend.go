@@ -192,7 +192,7 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		} else {
 			f.line("    public const int MaxSize = %d;", ms.Size)
 		}
-		f.line("    // Per-thread scratch buffer: Encode() marshals into it and returns an")
+		f.line("    // Per-thread scratch buffer: Encode() serialises into it and returns an")
 		f.line("    // exact-size copy, so the worst-case buffer is not re-allocated (and")
 		f.line("    // zeroed) on every call. Do not call Encode() reentrantly from a")
 		f.line("    // Serialize() override on the same thread.")

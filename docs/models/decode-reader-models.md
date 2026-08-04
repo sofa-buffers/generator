@@ -133,7 +133,7 @@ d.fixlen_len()          # peek a string/blob byte length (bound seam)
 
 **Generated decode (Python) — the bound is a compare on `fld.count`:**
 ```python
-def _unmarshal(self, d: Decoder) -> None:
+def _unserialize(self, d: Decoder) -> None:
     while True:
         fld = d.next()
         if fld is None or fld.type == WireType.SEQUENCE_END:
