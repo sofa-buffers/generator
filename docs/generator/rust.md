@@ -10,7 +10,7 @@ documented once in the [generic config](README.md).
 |--------|------|---------|--------|
 | `corelib` | `rs` \| `rs-no-std` | `rs` | Which Rust corelib the generated crate targets (see below). |
 | `no_std` | bool | `true` when `corelib: rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate (see below). Set `false` to emit an ordinary `std` crate against the no-std corelib. Ignored for `corelib: rs`. |
-| `allow_dynamic` | bool | `false` | `corelib: rs-no-std` only. Store bounded fields in `alloc::String`/`alloc::Vec` instead of heapless containers, for a target with an allocator. Bounds stay mandatory either way. |
+| `allow_dynamic` | bool | *corelib* | Storage for schema-bounded fields: `true` = `String`/`Vec`, `false` = fixed-capacity `heapless` sized from the bound. Defaults to `false` for `corelib: rs-no-std`, `true` for `corelib: rs`. Wire-identical either way. See [Storage mode](#storage-mode-allow_dynamic). |
 
 ### `max_dyn_*` — receiver-side decode limits
 
@@ -116,21 +116,41 @@ schema stays valid for every `no_std` target. For genuinely unbounded fields, us
 
 ### Storage mode (`allow_dynamic`)
 
-With every field bounded, the switch chooses where those fields live:
+The switch chooses where a schema-**bounded** field's bytes live. It is available
+against **both** corelibs; only the default differs, for the same reason it
+differs in C++ — a firmware target has no heap to spare, a server target would
+rather hold what a message carries than its declared worst case.
 
-| schema | default (heapless) | `allow_dynamic: true` |
+| schema | `allow_dynamic: false` | `allow_dynamic: true` |
 |---|---|---|
-| `string, maxlen 8` | `heapless::String<8>` | `alloc::string::String` |
-| `blob, maxlen 8` | `heapless::Vec<u8, 8>` | `alloc::vec::Vec<u8>` |
-| `array u32, count 4` | `heapless::Vec<u32, 4>` | `alloc::vec::Vec<u32>` |
-| `array string, count 2, maxlen 4` | `heapless::Vec<heapless::String<4>, 2>` | `alloc::vec::Vec<alloc::string::String>` |
+| `string, maxlen 8` | `heapless::String<8>` | `String` (`alloc::string::String` under `no_std`) |
+| `blob, maxlen 8` | `heapless::Vec<u8, 8>` | `Vec<u8>` |
+| `array u32, count 4` | `heapless::Vec<u32, 4>` | `Vec<u32>` |
+| `array string, count 2, maxlen 4` | `heapless::Vec<heapless::String<4>, 2>` | `Vec<String>` |
 
-Heapless is the default and the one that guarantees no allocation at all: the
-worst case is the struct's size, known at compile time. The alloc mode suits a
-target that has an allocator — a field then holds what the message actually
-carries rather than its declared worst case, which matters once a bound is large
-enough that the inline struct no longer fits comfortably on a stack. It pulls
-`extern crate alloc`.
+Default: **`false`** for `corelib: rs-no-std`, **`true`** for `corelib: rs`.
+
+Static storage guarantees no allocation at all for the fields it covers: the
+worst case is the struct's size, known at compile time. Dynamic storage suits a
+target with an allocator — a field then holds what the message actually carries,
+which matters once a bound is large enough that the inline struct no longer fits
+comfortably on a stack.
+
+**On `corelib: rs` it applies per field, wherever a bound exists.** An unbounded
+field simply keeps its `String`/`Vec`; it is never a generate-time error. So the
+switch can be turned on against an existing schema without changing it, and a
+message can mix both containers. Selecting it adds a `heapless` dependency to the
+generated crate — a default `corelib: rs` crate depends on the corelib and serde
+alone.
+
+Under `no_std` the rule is stricter, and not because of this switch: every field
+must be bounded in both modes (see above), so `allow_dynamic: true` there means
+`alloc::String`/`alloc::Vec` and pulls `extern crate alloc`.
+
+Nothing else changes with it. `no_std`-ness is a separate axis: static storage on
+`corelib: rs` still derives serde unconditionally, still keeps the decoder's own
+stack and reassembly buffer on the heap, and still produces an ordinary std
+crate. Storage is about message fields.
 
 The bounds do not weaken. What was the container's capacity becomes an explicit
 check on the decode path: a declared length above a `maxlen`, or a wire count
@@ -281,9 +301,16 @@ padding.
 Row `rust-rs` (corelib `rs`) and `rust-rs-no-std` (corelib `rs-no-std`) in [`tests/bench/`](../../tests/bench/) (ARCHITECTURE §15), measured with
 the **toggle** method. Tracked: Ir/op for both; `rust-rs-no-std` also `.text`/`.data`/`.bss` on thumbv6m.
 
-`rust-rs-no-std-dyn` is the same row with `allow_dynamic: true`, read as a pair with
-it. There is no `rust-rs-dyn`: on `std` the containers are `String`/`Vec` either way,
-so the flag is inert. Under `no_std` it swaps `heapless` storage sized from the schema
+Each has an `allow_dynamic` twin, and a twin is only readable as a **pair** — the
+flag has no absolute number, only a difference against the row it toggles.
+
+`rust-rs-static` is `rust-rs` with `allow_dynamic: false`: bounded fields become
+`heapless::String<N>` / `heapless::Vec<T, N>`, so the decode path fills them in
+place instead of allocating per field. The trade is `sizeof` — a message holds
+its declared worst case — which is why this is a row and not a default.
+
+`rust-rs-no-std-dyn` is `rust-rs-no-std` with `allow_dynamic: true`. Under `no_std`
+the flag swaps `heapless` storage sized from the schema
 bound for `alloc::String`/`alloc::Vec` — the crate then pulls in `extern crate alloc`,
 and a bare-metal target ships no allocator, so the footprint driver appends the most
 trivial bump allocator that can work (`tests/bench/lang/rust.sh`, only when the

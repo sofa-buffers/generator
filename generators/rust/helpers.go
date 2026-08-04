@@ -110,7 +110,7 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindString:
 		lit, hasLit := f.Default.(string)
-		if g.noStd {
+		if g.noStd || g.staticStore {
 			return g.rustStrNew(f.HasMaxlen, lit, hasLit)
 		}
 		if hasLit {
@@ -151,15 +151,15 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 		if isNativeArrayElem(f.Elem) {
 			if parts, ok := g.rustNativeArrayParts(f); ok {
 				switch {
-				case !g.noStd:
-					return "vec![" + parts + "]"
-				case g.allowDynamic || !f.HasCount:
-					// alloc storage: an array literal converts straight into it.
-					return "[" + parts + "].to_vec()"
-				default:
+				case g.staticStore && f.HasCount:
 					// heapless::Vec<T, N>: fill by extend_from_slice, the same
 					// heap-free builder shape rustBlobNew uses.
 					return fmt.Sprintf("{ let mut _v = %s; let _ = _v.extend_from_slice(&[%s]); _v }", g.rustSeqNew(f.HasCount), parts)
+				case !g.noStd:
+					return "vec![" + parts + "]"
+				default:
+					// alloc storage: an array literal converts straight into it.
+					return "[" + parts + "].to_vec()"
 				}
 			}
 		}
@@ -223,33 +223,33 @@ func byteSliceLit(raw []byte) string {
 // a bounded string is a heapless::String<N> filled by push_str (heap-free); an
 // unbounded one falls back to alloc::String.
 func (g *gen) rustStrNew(hasMax bool, lit string, hasLit bool) string {
-	if hasMax && !(g.noStd && g.allowDynamic) {
+	if g.staticStore && hasMax {
 		if hasLit {
 			return fmt.Sprintf("{ let mut _s = heapless::String::new(); let _ = _s.push_str(%q); _s }", lit)
 		}
 		return "heapless::String::new()"
 	}
 	if hasLit {
-		return fmt.Sprintf("alloc::string::String::from(%q)", lit)
+		return fmt.Sprintf("%s::from(%q)", g.dynStr(), lit)
 	}
-	return "alloc::string::String::new()"
+	return g.dynStr() + "::new()"
 }
 
 // rustBlobNew builds a blob field's Default expression per profile (sliceLit is a
 // `[..]` byte-array literal, used only when hasLit). std uses vec!; no_std bounded
 // builds a heapless::Vec by extend_from_slice; unbounded falls back to alloc::Vec.
 func (g *gen) rustBlobNew(hasMax bool, sliceLit string, hasLit bool) string {
+	if g.staticStore && hasMax {
+		if hasLit {
+			return fmt.Sprintf("{ let mut _v = heapless::Vec::new(); let _ = _v.extend_from_slice(&%s); _v }", sliceLit)
+		}
+		return "heapless::Vec::new()"
+	}
 	if !g.noStd {
 		if hasLit {
 			return "vec!" + sliceLit
 		}
 		return "Vec::new()"
-	}
-	if hasMax && !g.allowDynamic {
-		if hasLit {
-			return fmt.Sprintf("{ let mut _v = heapless::Vec::new(); let _ = _v.extend_from_slice(&%s); _v }", sliceLit)
-		}
-		return "heapless::Vec::new()"
 	}
 	if hasLit {
 		return sliceLit + ".to_vec()"
@@ -261,12 +261,10 @@ func (g *gen) rustBlobNew(hasMax bool, sliceLit string, hasLit bool) string {
 // per profile.
 func (g *gen) rustSeqNew(hasCount bool) string {
 	switch {
+	case g.staticStore && hasCount:
+		return "heapless::Vec::new()"
 	case !g.noStd:
 		return "Vec::new()"
-	case g.allowDynamic:
-		return "alloc::vec::Vec::new()"
-	case hasCount:
-		return "heapless::Vec::new()"
 	default:
 		return "alloc::vec::Vec::new()"
 	}
@@ -280,7 +278,9 @@ func (g *gen) rustSeqNew(hasCount bool) string {
 func (g *gen) rustLeafNe(acc string, f *ir.Field) string {
 	if f.Kind == ir.KindString {
 		lit, _ := f.Default.(string)
-		if g.noStd {
+		// heapless::String and alloc::String both compare through as_str(); only a
+		// std String is directly PartialEq<&str> here.
+		if g.noStd || (g.staticStore && f.HasMaxlen) {
 			return fmt.Sprintf("%s.as_str() != %q", acc, lit)
 		}
 		return fmt.Sprintf("%s != %q", acc, lit)
@@ -363,46 +363,42 @@ func (g *gen) typeName(key string) string {
 // the bytes live, and therefore what a message costs to hold and to move: with a
 // large declared bound the inline object is the worst case whether the message
 // uses it or not.
-func (g *gen) rustStr(hasMax bool, max int64) string {
-	switch {
-	case !g.noStd, g.allowDynamic:
-		if g.noStd {
-			return "alloc::string::String"
-		}
-		return "String"
-	case hasMax:
-		return fmt.Sprintf("heapless::String<%d>", max)
-	default:
+// dynStr / dynVec name the DYNAMIC container for the environment. This is the
+// noStd axis and nothing else: alloc:: paths where there is no std prelude,
+// plain String/Vec where there is.
+func (g *gen) dynStr() string {
+	if g.noStd {
 		return "alloc::string::String"
 	}
+	return "String"
+}
+
+func (g *gen) dynVec(elem string) string {
+	if g.noStd {
+		return "alloc::vec::Vec<" + elem + ">"
+	}
+	return "Vec<" + elem + ">"
+}
+
+func (g *gen) rustStr(hasMax bool, max int64) string {
+	if g.staticStore && hasMax {
+		return fmt.Sprintf("heapless::String<%d>", max)
+	}
+	return g.dynStr()
 }
 
 func (g *gen) rustBlob(hasMax bool, max int64) string {
-	switch {
-	case !g.noStd, g.allowDynamic:
-		if g.noStd {
-			return "alloc::vec::Vec<u8>"
-		}
-		return "Vec<u8>"
-	case hasMax:
+	if g.staticStore && hasMax {
 		return fmt.Sprintf("heapless::Vec<u8, %d>", max)
-	default:
-		return "alloc::vec::Vec<u8>"
 	}
+	return g.dynVec("u8")
 }
 
 func (g *gen) rustSeq(elem string, hasCount bool, count int64) string {
-	switch {
-	case !g.noStd, g.allowDynamic:
-		if g.noStd {
-			return "alloc::vec::Vec<" + elem + ">"
-		}
-		return "Vec<" + elem + ">"
-	case hasCount:
+	if g.staticStore && hasCount {
 		return fmt.Sprintf("heapless::Vec<%s, %d>", elem, count)
-	default:
-		return "alloc::vec::Vec<" + elem + ">"
 	}
+	return g.dynVec(elem)
 }
 
 func (g *gen) rustType(f *ir.Field) string {

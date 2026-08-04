@@ -35,13 +35,19 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	// The no_std/heap-free profile is the point of corelib-rs-no-std, so it is on by
 	// default there (opt out with no_std: false); it is never on for the std corelib.
 	noStd := corelib == "rs-no-std" && cfgBoolDefault(cfg, "no_std", true)
+	// Storage for schema-bounded fields, and the default differs by corelib for the
+	// same reason it does in C++ (target_cpp.allow_dynamic): a firmware target has
+	// no heap to spare, a server target would rather hold what a message carries
+	// than its declared worst case.
+	allowDynamic := cfgBoolDefault(cfg, "allow_dynamic", corelib != "rs-no-std")
 	g := &gen{
 		schema:       s,
 		banner:       cfgString(cfg, "tool_banner", "sofabgen"),
 		license:      generator.LicenseID(cfg),
 		corelib:      corelib,
 		noStd:        noStd,
-		allowDynamic: cfgBool(cfg, "allow_dynamic"),
+		allowDynamic: allowDynamic,
+		staticStore:  !allowDynamic,
 		size:         generator.NewSizePolicy(cfg),
 	}
 	// Receiver-side decode limits (generator#102) apply only to the std
@@ -83,10 +89,26 @@ type gen struct {
 	// feature. When false the crate is ordinary std (String/Vec/serde), even against
 	// the no-std corelib (a std consumer can still link it).
 	noStd bool
-	// allowDynamic keeps an alloc::String/alloc::Vec heap fallback for genuinely
-	// unbounded fields (no maxlen/count) instead of failing generation — the Rust
-	// analog of the C++ c-cpp allow_dynamic. Bounded fields still go heapless.
+	// allowDynamic selects DYNAMIC storage for schema-bounded fields. Default true
+	// against corelib-rs, false against corelib-rs-no-std — the same corelib-keyed
+	// default target_cpp.allow_dynamic carries.
+	//
+	// Under no_std it additionally keeps an alloc::String/alloc::Vec fallback for
+	// genuinely unbounded fields instead of failing generation.
 	allowDynamic bool
+	// staticStore is the inverse, named for what it selects: a field WITH a schema
+	// bound is lowered to fixed-capacity heapless storage sized from that bound.
+	//
+	// It is deliberately NOT the same axis as noStd, though the two coincide in the
+	// firmware profile. noStd is about the ENVIRONMENT — #![no_std], alloc:: paths,
+	// feature-gated serde, a heap-free decode stack. staticStore is about where a
+	// MESSAGE FIELD's bytes live, and is available on std as well.
+	//
+	// It applies PER FIELD, wherever a bound exists: an unbounded field keeps its
+	// dynamic container rather than being a generate-time error, so the switch can
+	// be turned on against corelib-rs without touching a schema. (The firmware
+	// profile is stricter for its own reason: checkBounded requires the bound.)
+	staticStore bool
 	// limits are the receiver-side decode limits (generator#102); resolved only
 	// for the std corelib-rs (empty — all inert — under corelib-rs-no-std).
 	limits limitSet
@@ -145,6 +167,16 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 
 // std reports whether the std corelib-rs is selected (vs corelib-rs-no-std).
 func (g *gen) std() bool { return g.corelib != "rs-no-std" }
+
+// fixedFields reports whether a MESSAGE container may be fixed-capacity, so a
+// push/extend can fail and its Result must be consumed rather than assumed away.
+//
+// True whenever static storage is selected, and under no_std regardless: there
+// the containers are heapless or alloc, and the Result-consuming form is correct
+// for both. It is correct for a plain Vec too (push returns unit, which `let _ =`
+// accepts), which is what lets ONE emitted form serve a message that mixes
+// fixed-capacity bounded fields with dynamic unbounded ones.
+func (g *gen) fixedFields() bool { return g.noStd || g.staticStore }
 
 // usesAlloc reports whether the crate needs `extern crate alloc`: true when the
 // no_std profile was asked for alloc storage (allow_dynamic) and the schema has
@@ -641,17 +673,10 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 		f.line("%slet _ = os.write_array_signed(%s, &%s);", ind, idExpr, val)
 	case ir.KindBool:
 		// bool is not an array element type; lower to a 0/1 unsigned array. The
-		// temporary matches the profile's own container so no_std stays heap-free:
-		// a heapless::Vec of the declared capacity by default, alloc under
-		// allow_dynamic, std Vec otherwise.
-		typ := "Vec<u8>"
-		switch {
-		case !g.noStd:
-		case !g.allowDynamic && hasCount:
-			typ = fmt.Sprintf("heapless::Vec<u8, %d>", count)
-		default:
-			typ = "alloc::vec::Vec<u8>"
-		}
+		// temporary matches the field's own container, so a heap-free profile stays
+		// heap-free: a heapless::Vec of the declared capacity under static storage,
+		// otherwise the environment's dynamic container.
+		typ := g.rustSeq("u8", hasCount, count)
 		f.line("%s{ let %s: %s = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, typ, val, idExpr, tv)
 	case ir.KindFP32:
 		f.line("%slet _ = os.write_array_fp32(%s, &%s);", ind, idExpr, val)

@@ -90,9 +90,12 @@ run_variant() {
     # Streaming behaviour (PR #242): the generator tests only assert that the
     # streaming API appears in the output. This runs it, and pins the property
     # that matters -- streaming must be indistinguishable from the one-shot path.
-    # The shared check assigns String/Vec directly, which heapless cannot take —
-    # the static leg is driven by streaming_check_nostd.rs further down instead.
-    if [ "$label" != "no-std-static" ]; then
+    # The shared check assigns String/Vec directly, which heapless cannot take, so
+    # it skips every leg whose fields are fixed-capacity: no-std-static is driven
+    # by streaming_check_nostd.rs further down instead, and rs-static has no
+    # streaming leg of its own -- streaming is covered by the three legs that do
+    # run it, and is orthogonal to which container a field lives in.
+    case "$label" in *-static) ;; *)
     echo "==> [$label] streaming: serialize through a sink, feed the decoder in chunks"
     rm -rf "$WORK/stream-$label"
     rust_build "$EXAMPLE" "$WORK/stream-$label"
@@ -108,8 +111,7 @@ run_variant() {
         no-std-*) ( cd "$WORK/stream-$label" && cargo run -q --features std ) ;;
         *)        ( cd "$WORK/stream-$label" && cargo run -q ) ;;
     esac
-
-    fi
+    ;; esac
 
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(cd "$WORK/ex-$label" && printf '%s' "$IN" | cargo run -q -- encode myfirstmessage | cargo run -q -- decode myfirstmessage)
@@ -571,6 +573,18 @@ echo "==> [rs] decode limits OK"
 # that has an allocator. This leg exercises the alloc mode; the heapless default
 # is proven below. The corpus spans the feature-subset matrix under the same
 # config.
+# Static storage on the STD corelib (allow_dynamic: false against corelib-rs):
+# schema-bounded fields become heapless containers in an otherwise ordinary std
+# crate. The whole matrix runs again under it, because the property that matters
+# is that storage is invisible on the wire -- same schema, same bytes, same
+# shared vectors, only where the bytes live differs.
+#
+# Deliberately fed the UNMODIFIED example, whose `somemap` carries no count: on
+# this profile an unbounded field simply keeps its Vec instead of being a
+# generate-time error, which is the difference from the no_std legs below and the
+# reason the switch can be turned on without touching a schema.
+run_variant rs-static "corelib: rs, allow_dynamic: false" "$STD"
+
 run_variant no-std-dynamic "corelib: rs-no-std, allow_dynamic: true" "$NOSTD"
 
 # The pure heapless profile through the same matrix. It is the DEFAULT for

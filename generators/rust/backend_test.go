@@ -1623,3 +1623,87 @@ messages:
 		t.Errorf("the scope-stack push must not discard its Result (#283):\n%s", got)
 	}
 }
+
+// TestRustStaticStorageOnStd: allow_dynamic: false against corelib-rs lowers
+// schema-bounded fields to fixed-capacity heapless storage WITHOUT turning the
+// crate into a no_std one, and without requiring the schema to bound everything.
+//
+// That last part is the whole difference from the no_std profile, and the reason
+// the switch is adoptable: it applies PER FIELD wherever a bound exists, so a
+// schema with one deliberately unbounded field still generates. no_std rejects
+// the same schema at generate time (asserted in TestRustStructural), because a
+// firmware target cannot fall back to a heap it does not have.
+func TestRustStaticStorageOnStd(t *testing.T) {
+	// The UNMODIFIED example: `somemap` carries no count on purpose.
+	m := exampleModule(t, map[string]any{"allow_dynamic": false})
+
+	for _, want := range []string{
+		// Bounded fields take their bound as capacity.
+		"pub somestring: heapless::String<50>,",
+		"pub someblob: heapless::Vec<u8, 16>,",
+		"pub someuintarray: heapless::Vec<u32, 4>,",
+		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",
+		// Still a std crate: serde derived unconditionally, decoder scratch on the
+		// heap. staticStore governs message fields, not the environment.
+		"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]",
+		"stack: Vec<_Loc>,",
+		// A fixed-capacity destination is filled in place and its overflow is
+		// reported, rather than being moved into as an owned String.
+		"self.err = true;",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("std static-storage message.rs missing %q", want)
+		}
+	}
+	// The unbounded field keeps a dynamic container instead of failing generation.
+	if !strings.Contains(m, "pub somemap: Vec<") {
+		t.Error("an unbounded field must stay in Vec under static storage on std (per-field, not all-or-nothing)")
+	}
+	for _, notWant := range []string{
+		"#![no_std]",
+		"alloc::string::String",
+		"#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]",
+	} {
+		if strings.Contains(m, notWant) {
+			t.Errorf("static storage on std must not make the crate no_std; found %q", notWant)
+		}
+	}
+
+	// Same schema, same generator, dynamic storage: the DEFAULT against corelib-rs
+	// is unchanged, so turning the switch on is opt-in and turning it off restores
+	// byte-identical output.
+	d := exampleModule(t, map[string]any{})
+	if !strings.Contains(d, "pub somestring: String,") || strings.Contains(d, "heapless::") {
+		t.Error("the corelib-rs default must stay String/Vec with no heapless anywhere")
+	}
+	if d == m {
+		t.Error("allow_dynamic: false must actually change the emitted storage")
+	}
+}
+
+// TestRustStaticStorageCargoDep: heapless reaches the generated std crate only
+// when static storage is selected. A project that never asked for inline storage
+// should not gain a third-party container dependency.
+func TestRustStaticStorageCargoDep(t *testing.T) {
+	cargo := func(cfg map[string]any) string {
+		t.Helper()
+		cfg["emit"] = "project"
+		files, err := (&Backend{}).Generate(exampleSchema(t), cfg)
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		for _, f := range files {
+			if f.Path == "Cargo.toml" {
+				return string(f.Content)
+			}
+		}
+		t.Fatal("no Cargo.toml")
+		return ""
+	}
+	if c := cargo(map[string]any{"allow_dynamic": false}); !strings.Contains(c, "heapless") {
+		t.Error("static storage on std must declare the heapless dependency")
+	}
+	if c := cargo(map[string]any{}); strings.Contains(c, "heapless") {
+		t.Error("the corelib-rs default must not pull in heapless")
+	}
+}
