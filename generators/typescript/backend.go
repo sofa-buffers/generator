@@ -7,8 +7,8 @@
 package typescript
 
 import (
-	"slices"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"

@@ -121,7 +121,6 @@ func (g *gen) emitStreamVisitor(f *tsfile, typeName string, fields []*ir.Field) 
 	f.blank()
 }
 
-
 // streamStorage is the destination expression for a field, from OUTSIDE the
 // message class.
 //
@@ -303,7 +302,10 @@ func (g *gen) emitStreamPayload(f *tsfile, cb string, fields []*ir.Field) {
 // than INCOMPLETE when the message is truncated inside it (§5.2/§7, F-0032), and
 // it costs nothing — the corelib hands the declared count in.
 func (g *gen) emitStreamArray(f *tsfile, fields []*ir.Field) {
-	type arm struct{ id int64; body string }
+	type arm struct {
+		id   int64
+		body string
+	}
 	var begin, end []string
 	uns, sig, f32, f64 := []string{}, []string{}, []string{}, []string{}
 
