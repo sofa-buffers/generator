@@ -580,6 +580,12 @@ func (g *gen) emitStreamCollectors(f *tsfile, use streamUse) {
 		f.line("  }")
 		f.line("  arrayUnsigned(id: number, i: number, v: number | bigint): void { this.row(id)[i] = this.conv(v); }")
 		f.line("  arraySigned(id: number, i: number, v: number | bigint): void { this.row(id)[i] = this.conv(v); }")
+		// A float row arrives on its own callbacks, not on arrayUnsigned/Signed.
+		// Leaving these out does not fail to compile and does not throw -- the row
+		// simply never lands, which is why the cursor-vs-feed differential test
+		// exists rather than a typecheck.
+		f.line("  arrayFp32(id: number, i: number, v: number): void { this.row(id)[i] = this.conv(v); }")
+		f.line("  arrayFp64(id: number, i: number, v: number): void { this.row(id)[i] = this.conv(v); }")
 		f.line("  sequenceBegin(): Visitor { return _DEAD; }")
 		f.line("}")
 		f.blank()
