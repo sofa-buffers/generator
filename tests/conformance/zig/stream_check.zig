@@ -84,6 +84,25 @@ fn checkAllChunkSizes(
     std.debug.print("==> {s}: chunk-invariant at all {d} chunk sizes\n", .{ label, wire.len });
 }
 
+/// Same sweep for four SCALAR string fields (ids 0..3).
+///
+/// The carry-buffer aliasing is a property of how payloads are DELIVERED, not of
+/// wrapper arrays, so a plain scalar field is exposed to it identically -- this
+/// vector fails at chunk size 6 without the fix. It is checked separately because
+/// the reported reproducer was an array, and fixing only the array store would
+/// leave this silently broken.
+fn checkScalarsAllChunkSizes(alloc: std.mem.Allocator, wire: []const u8) !void {
+    const want = [_][]const u8{ "one", "two", "three", "four" };
+    var n: usize = 1;
+    while (n <= wire.len) : (n += 1) {
+        const m = try decodeChunked(alloc, wire, n);
+        expectElems(&.{ m.a, m.b, m.c, m.d }, &want, "scalar string fields a..d", n);
+    }
+    const whole = try Probe.decode(alloc, wire);
+    expectElems(&.{ whole.a, whole.b, whole.c, whole.d }, &want, "scalar string fields a..d", wire.len);
+    std.debug.print("==> scalar string fields a..d: chunk-invariant at all {d} chunk sizes\n", .{wire.len});
+}
+
 pub fn main() !void {
     // An arena is the allocator the generated decoder documents ("storage comes
     // from `alloc` -- an arena frees everything at once"): nothing in the
@@ -162,6 +181,32 @@ pub fn main() !void {
         &.{ &big, "cd" },
     );
 
+    // FOUR elements, which is what it takes to catch a payload completing inside
+    // the corelib's carry buffer (generator#295). corelib-zig stitches an item
+    // straddling a feed boundary into a fixed, reused carry buffer and parses out
+    // of it, so the delivered slice points into the DECODER, not into any chunk
+    // the caller passed -- and the next stitched item overwrites it.
+    //
+    // It needs two carry-completed payloads with a live one in between, so the
+    // two- and three-element vectors above are all correct at every chunk size.
+    // Here element 1 and element 3 landed at the same carry address, and only at
+    // chunk size 4: element 1 read "fou". A sweep over ALL sizes is what makes
+    // that reachable without knowing the size in advance.
+    try checkAllChunkSizes(
+        alloc,
+        "string_array [\"one\",\"two\",\"three\",\"four\"] (carry-backed delivery)",
+        &.{
+            0xc6, 0x0c,
+            0x02, 0x1a, 'o', 'n',  'e',
+            0x0a, 0x1a, 't', 'w',  'o',
+            0x12, 0x2a, 't', 'h',  'r', 'e', 'e',
+            0x1a, 0x22, 'f', 'o',  'u', 'r',
+            0x07,
+        },
+        "string_array",
+        &.{ "one", "two", "three", "four" },
+    );
+
     // Control that pins the mechanism as ALIASING rather than a blanket bug in
     // the split path: with only ONE reassembled payload there is no second user
     // of the buffer, and the value was correct even before the fix. If this row
@@ -173,6 +218,13 @@ pub fn main() !void {
         "string_array",
         &.{"ab"},
     );
+
+    try checkScalarsAllChunkSizes(alloc, &.{
+        0x02, 0x1a, 'o', 'n', 'e',
+        0x0a, 0x1a, 't', 'w', 'o',
+        0x12, 0x2a, 't', 'h', 'r', 'e', 'e',
+        0x1a, 0x22, 'f', 'o', 'u', 'r',
+    });
 
     std.debug.print("==> chunked decode is chunk-invariant\n", .{});
 }

@@ -737,10 +737,17 @@ func (g *gen) emitStreamDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("    /// mid-stream; the caller's own framing decides when the input is over,")
 	f.line("    /// and `finish` then gives the verdict for the message as a whole.")
 	f.line("    ///")
-	f.line("    /// BORROWING: a string or blob that arrives whole inside one chunk is")
-	f.line("    /// borrowed from that chunk, exactly as decode() borrows from its buffer")
-	f.line("    /// -- so a fed chunk must outlive the message. A payload SPLIT across")
-	f.line("    /// chunks has no such slice to borrow and is copied into `alloc`.")
+	f.line("    /// STORAGE: unlike decode(), this path COPIES every string and blob into")
+	f.line("    /// `alloc` -- a fed chunk does not have to outlive the message, and the")
+	f.line("    /// decoded value never points into a buffer the caller may reuse.")
+	f.line("    ///")
+	f.line("    /// Borrowing is not available here, and not merely declined: a payload")
+	f.line("    /// stitched across a chunk boundary is completed inside the corelib's own")
+	f.line("    /// reusable carry buffer, and the delivered slice then points THERE, not")
+	f.line("    /// into any chunk the caller passed. Nothing in the callback distinguishes")
+	f.line("    /// that slice from one in the caller's buffer, and the next stitched item")
+	f.line("    /// overwrites it. decode() is unaffected -- it hands the corelib one whole")
+	f.line("    /// buffer, which is never stitched, so it keeps borrowing.")
 	f.line("    pub const Decoder = struct {")
 	f.line("        is: sofab.IStream = sofab.IStream.init(),")
 	f.line("        v: _dec_%s,", name)
@@ -773,6 +780,9 @@ func (g *gen) emitStreamDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("    /// An incremental decoder filling `out`: hold it and feed chunks as they")
 	f.line("    /// arrive, instead of buffering the whole message first.")
 	f.line("    pub fn decoder(out: *%s, alloc: std.mem.Allocator) Decoder {", name)
-	f.line("        return .{ .v = .{ .m = out, .alloc = alloc } };")
+	// `.own = true` is what separates this path from decode(): every payload is
+	// copied, because a slice the corelib delivers may point into its carry
+	// buffer rather than into the caller's chunk (generator#295).
+	f.line("        return .{ .v = .{ .m = out, .alloc = alloc, .own = true } };")
 	f.line("    }")
 }

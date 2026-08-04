@@ -372,6 +372,10 @@ messages:
     payload:
       string_array: { id: 200, type: array, items: { type: string, count: 8, maxlen: 64 } }
       blob_array: { id: 201, type: array, items: { type: blob, count: 8, maxlen: 64 } }
+      a: { id: 0, type: string, maxlen: 64 }
+      b: { id: 1, type: string, maxlen: 64 }
+      c: { id: 2, type: string, maxlen: 64 }
+      d: { id: 3, type: string, maxlen: 64 }
 YAML
 zig_build "$WORK/probe.yaml" "$WORK/probe"
 cp "$ROOT/tests/conformance/zig/stream_check.zig" "$WORK/probe/src/main.zig"
