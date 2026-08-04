@@ -79,6 +79,11 @@ func TestZigStructural(t *testing.T) {
 		"sofab.arrays.putChecked(&self.m.someuintarray.items, &self.ai,",                     // capacity-checked indexed store (generator#100)
 		"if (v.inv) return error.InvalidMessage;",                                            // over-count array rejected as INVALID (generator#100)
 		"const chunk = self._reassemble(total, offset, _chunk) orelse return;",               // one contiguous payload, whatever the chunking
+		// A reassembled payload leaves as its OWN allocation. `acc` is scratch the
+		// next split payload clears and may reallocate, and destinations keep the
+		// slice they are handed, so returning a view into it aliased earlier
+		// wrapper-array elements onto the newest (generator#293 / F-0058).
+		"return self.alloc.dupe(u8, self.acc.items[0..total]) catch { self.inv = true; return null; };",
 		"if (total > 50) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.somestring = chunk; } },", // bounded string: over-maxlen -> INVALID (§7.1); strict UTF-8 -> INVALID (issue #85); else zero-copy
 		"/// Unsigned 8-bit integer", // descriptions as doc comments
 	} {
@@ -99,6 +104,11 @@ func TestZigStructural(t *testing.T) {
 	// The eager begin is gone from the corelib; no call site may still use it.
 	if strings.Contains(m, "os.writeSequenceBegin(") {
 		t.Error("eager writeSequenceBegin must not be emitted any more")
+	}
+	// The shared scratch buffer must never reach a destination directly: that is
+	// the exact shape of generator#293, and it reads as a harmless one-liner.
+	if strings.Contains(m, "return self.acc.items;") {
+		t.Error("_reassemble must hand out a copy, not a view into the shared acc buffer (generator#293)")
 	}
 	// No heap containers in the message type: storage is fixed arrays + slices.
 	// The check is on the MESSAGE STRUCT, not the file: two pieces of codec

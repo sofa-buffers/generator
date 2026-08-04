@@ -350,6 +350,35 @@ grep -q "IncompleteMessage" "$WORK/trunc.err" || { echo "FAIL: truncation must s
 printf '' | "$WORK/ex/zig-out/bin/harness" decode myfirstmessage >/dev/null || { echo "FAIL: empty input (COMPLETE) must decode to defaults"; exit 1; }
 echo "==> tri-state OK"
 
+# Chunk invariance of the incremental decoder (generator#293, Crucible F-0058 /
+# codegen defect G-0036). Decoding must not depend on how the input is split:
+# the same bytes must give the same values fed whole or one byte at a time.
+#
+# Nothing else in this file reaches that property — every check above hands the
+# harness a complete message on stdin, and a payload that arrives whole is never
+# reassembled. The defect this pins lived entirely in the reassembly path: one
+# shared accumulator on the visitor, handed to the store as a view, so a second
+# split payload overwrote the element assembled before it and growth rebased it
+# onto the freed block.
+#
+# stream_check.zig replaces the generated JSON harness as src/main.zig, so it
+# builds against the same generated code and the same corelib as everything else
+# here, and asserts the values directly rather than through JSON.
+echo "==> chunked decode is chunk-invariant (generator#293)"
+cat > "$WORK/probe.yaml" <<'YAML'
+version: 1
+messages:
+  probe:
+    payload:
+      string_array: { id: 200, type: array, items: { type: string, count: 8, maxlen: 64 } }
+      blob_array: { id: 201, type: array, items: { type: blob, count: 8, maxlen: 64 } }
+YAML
+zig_build "$WORK/probe.yaml" "$WORK/probe"
+cp "$ROOT/tests/conformance/zig/stream_check.zig" "$WORK/probe/src/main.zig"
+( cd "$WORK/probe" && zig build --release=fast --cache-dir .zig-cache --global-cache-dir "$WORK/zig-global-cache" )
+"$WORK/probe/zig-out/bin/harness" || { echo "FAIL: chunked decode is not chunk-invariant"; exit 1; }
+echo "==> chunk invariance OK"
+
 # Receiver-side decode limits (generator#102): a count-less u64 array with
 # max_dyn_array_count: 4 baked into the generated module (id 0 -> header 0x03 =
 # 0<<3 | unsigned-array). A wire count of 5 MUST fail decode with the corelib's

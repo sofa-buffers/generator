@@ -148,8 +148,35 @@ Per message:
   (generator#120). The corelib leaves the end-of-input verdict to the caller;
   a one-shot decode over a whole buffer is at end-of-input by definition, so
   a trailing `.incomplete` is a truncated message, never silently accepted.
-  Streaming callers that want to keep feeding chunks drive `sofab.IStream`
-  directly.
+- `decoder(out, alloc) Decoder` — incremental decode for callers that receive
+  the message in pieces: `feed(chunk) DecodeError!Status` per chunk, then
+  `finish() DecodeError!void` to declare end-of-input. `feed` reports whether
+  the bytes *so far* ended on a field boundary (`.complete`) or mid-field
+  (`.incomplete`); neither is a verdict on the message, because the wire format
+  has no top-level end marker — the caller's framing decides when the input is
+  over and `finish` then rejects a stream that ended mid-field.
+
+  **Decoding is independent of how the input is split.** The same bytes decode
+  to the same values in one chunk or one byte at a time, which is the property
+  `tests/conformance/zig/stream_check.zig` gates at every chunk size. What it
+  costs is a copy on exactly one path:
+
+  - a payload arriving **whole inside one chunk** is borrowed from it, just as
+    `decode()` borrows from its buffer — so a fed chunk must outlive the
+    message. This is the common case and stays zero-copy;
+  - a payload genuinely **split across chunks** has no contiguous slice to
+    borrow, so it is assembled in a scratch buffer on the visitor and handed to
+    the destination as **its own allocation** from `alloc`.
+
+  That last copy is not optional. The scratch buffer is one per visitor and is
+  reused by the next split payload, while destinations *keep* the slice they
+  are given — wrapper-array elements outlive the callback that stored them.
+  Handing out a view into the scratch buffer instead aliased every element
+  assembled earlier onto the newest one, and growth reallocated the buffer out
+  from under them, leaving a stale length that reads past the live bytes
+  (generator#293). The buffer still grows only with bytes that actually
+  arrived, so the untrusted declared length cannot make a short message
+  allocate ahead of it.
 
 The decoder is the same flat-visitor `(location, id)` state machine as the
 Rust backend, monomorphized by the corelib's comptime duck typing (no

@@ -223,12 +223,20 @@ const _dec_Scalars = struct {
     /// is copied. Only a payload genuinely SPLIT across chunks is assembled
     /// here, because there is no contiguous slice to borrow once the first
     /// chunk is gone. That copy lives in `alloc`, like array storage.
+    ///
+    /// A completed payload is handed back as its OWN allocation rather than as
+    /// a view into `acc`. A destination KEEPS the slice it is given -- wrapper
+    /// array elements outlive the callback -- while `acc` is scratch that the
+    /// next split payload clears, appends to, and may reallocate. A view into
+    /// it would alias every element stored earlier onto the newest one, and a
+    /// growing buffer would rebase them onto the old block: a stale length
+    /// past the live bytes, and a freed read under an allocator that releases.
     fn _reassemble(self: *_dec_Scalars, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {
         if (offset == 0 and chunk.len >= total) return chunk; // whole payload, borrow it
         if (offset == 0) self.acc.clearRetainingCapacity();
         self.acc.appendSlice(self.alloc, chunk) catch { self.inv = true; return null; };
         if (self.acc.items.len < total) return null; // more chunks to come
-        return self.acc.items;
+        return self.alloc.dupe(u8, self.acc.items[0..total]) catch { self.inv = true; return null; };
     }
 
     pub fn sequenceBegin(self: *_dec_Scalars, _: sofab.Id) void {

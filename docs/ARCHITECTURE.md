@@ -568,7 +568,21 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    callbacks take a **single-shot fast path** — when the whole payload arrives in
    one chunk (`offset == 0 && chunk_len >= total`) they build the value straight
    from the contiguous slice, keeping the byte accumulator only for split
-   payloads. Fixed-count native arrays decode into a fixed/primitive member
+   payloads. **That accumulator is scratch, and what reaches a destination must
+   be storage of its own.** It is one buffer per visitor, reused by the next
+   split payload, while destinations keep what they are handed — wrapper-array
+   elements outlive the callback that stored them. On a target where the
+   destination holds a *view* rather than a copy (Zig `[]const u8`, a Rust
+   `&[u8]`), handing out the accumulator therefore aliases every payload
+   assembled earlier onto the newest, and growth reallocates the buffer out from
+   under them, leaving a length that reads past the live bytes and — under an
+   allocator that releases — a freed read. Copy out at completion; the borrow of
+   a *whole-in-one-chunk* payload is unaffected, since those are disjoint regions
+   of the caller's own buffer. Only Zig was ever exposed here (generator#293,
+   Crucible F-0058 / codegen defect G-0036); a target whose string type owns its
+   bytes copies at the store anyway.
+
+   Fixed-count native arrays decode into a fixed/primitive member
    (Rust `[T; N]`, Java `long[]/float[]/double[]`, C++ `std::array<T, N>`)
    filled by index, not a grown heap collection; a **count-less** native array
    on a heap target is dynamic instead (C++ `corelib: cpp` gives `std::vector<T>`,
