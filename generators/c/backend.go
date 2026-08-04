@@ -755,20 +755,20 @@ func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string, root *objectPl
 	h.line("extern const sofab_object_descr_t %s;", root.descr)
 	h.blank()
 	h.doc("Encode msg into a stream the caller owns. With a flush callback on that\n" +
-		" *  stream the message may exceed its buffer: the buffer is drained as it\n" +
-		" *  fills, so what bounds memory is the buffer, not the message. The caller\n" +
-		" *  flushes the tail with sofab_ostream_flush().")
+		"stream the message may exceed its buffer: the buffer is drained as it\n" +
+		"fills, so what bounds memory is the buffer, not the message. The caller\n" +
+		"flushes the tail with sofab_ostream_flush().")
 	h.line("sofab_ret_t %s_encode_to(sofab_ostream_t *os, const %s *msg);", pfx, msgType)
 	h.blank()
 	h.doc("Incremental decoder: hold one and feed the message as bytes arrive,\n" +
-		" *  instead of buffering it whole first.\n" +
-		" *\n" +
-		" *  The wire format has no end marker at the top level -- a message ends\n" +
-		" *  where its bytes end -- so a feed cannot report that the MESSAGE is\n" +
-		" *  complete, only that the bytes handed in ended on a field boundary\n" +
-		" *  (SOFAB_RET_OK) or mid-field (SOFAB_RET_INCOMPLETE). Neither is a failure\n" +
-		" *  mid-stream; the caller's own framing decides when the input is over, and\n" +
-		" *  the last verdict says whether it ended half-read.")
+		"instead of buffering it whole first.\n" +
+		"\n" +
+		"The wire format has no end marker at the top level -- a message ends\n" +
+		"where its bytes end -- so a feed cannot report that the MESSAGE is\n" +
+		"complete, only that the bytes handed in ended on a field boundary\n" +
+		"(SOFAB_RET_OK) or mid-field (SOFAB_RET_INCOMPLETE). Neither is a failure\n" +
+		"mid-stream; the caller's own framing decides when the input is over, and\n" +
+		"the last verdict says whether it ended half-read.")
 	h.line("typedef struct {")
 	h.line("    sofab_istream_t is;")
 	h.line("    sofab_object_decoder_t dec[%d];", g.maxDepth(m.Fields)+1)

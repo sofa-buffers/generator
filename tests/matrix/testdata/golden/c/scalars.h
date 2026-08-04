@@ -60,22 +60,22 @@ extern const sofab_object_descr_t _message_descr_message_Scalars;
 
 /*!
  * Encode msg into a stream the caller owns. With a flush callback on that
- *  *  stream the message may exceed its buffer: the buffer is drained as it
- *  *  fills, so what bounds memory is the buffer, not the message. The caller
- *  *  flushes the tail with sofab_ostream_flush().
+ * stream the message may exceed its buffer: the buffer is drained as it
+ * fills, so what bounds memory is the buffer, not the message. The caller
+ * flushes the tail with sofab_ostream_flush().
  */
 sofab_ret_t message_scalars_encode_to(sofab_ostream_t *os, const message_Scalars_t *msg);
 
 /*!
  * Incremental decoder: hold one and feed the message as bytes arrive,
- *  *  instead of buffering it whole first.
- *  *
- *  *  The wire format has no end marker at the top level -- a message ends
- *  *  where its bytes end -- so a feed cannot report that the MESSAGE is
- *  *  complete, only that the bytes handed in ended on a field boundary
- *  *  (SOFAB_RET_OK) or mid-field (SOFAB_RET_INCOMPLETE). Neither is a failure
- *  *  mid-stream; the caller's own framing decides when the input is over, and
- *  *  the last verdict says whether it ended half-read.
+ * instead of buffering it whole first.
+ *
+ * The wire format has no end marker at the top level -- a message ends
+ * where its bytes end -- so a feed cannot report that the MESSAGE is
+ * complete, only that the bytes handed in ended on a field boundary
+ * (SOFAB_RET_OK) or mid-field (SOFAB_RET_INCOMPLETE). Neither is a failure
+ * mid-stream; the caller's own framing decides when the input is over, and
+ * the last verdict says whether it ended half-read.
  */
 typedef struct {
     sofab_istream_t is;
