@@ -121,7 +121,7 @@ func fp32RawDoc(f *ir.Field) string {
 			"NaN, so that a signaling NaN re-encodes bit-for-bit: a JS number is a 64-bit\n" +
 			"double and cannot carry an fp32 NaN's payload bits.\n" +
 			"\n" +
-			"Not part of the value. marshal ignores these bytes unless `" + f.Name + "` is still a\n" +
+			"Not part of the value. serialize ignores these bytes unless `" + f.Name + "` is still a\n" +
 			"NaN, so assigning `" + f.Name + "` by hand always wins, and they never reach\n" +
 			"toJSON()/fromJSON()."
 	}
@@ -129,7 +129,7 @@ func fp32RawDoc(f *ir.Field) string {
 		"NaN, so that a signaling NaN element re-encodes bit-for-bit: a JS number is a\n" +
 		"64-bit double and cannot carry an fp32 NaN's payload bits.\n" +
 		"\n" +
-		"Not part of the value. marshal renders every element from `" + f.Name + "` and takes\n" +
+		"Not part of the value. serialize renders every element from `" + f.Name + "` and takes\n" +
 		"these bytes only for an element that is still the NaN it decoded as, so assigning\n" +
 		"an element by hand always wins, and they never reach toJSON()/fromJSON()."
 }

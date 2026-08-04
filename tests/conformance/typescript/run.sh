@@ -387,6 +387,27 @@ NROUT=$(cd "$WORK/corpus/nested_rows" && printf '%s' "$NR" | npx tsx harness.ts 
 [ "$NROUT" = "$NR" ] || { echo "FAIL: nested wrapper row round-trip drift"; echo "  in : $NR"; echo "  out: $NROUT"; exit 1; }
 echo "==> nested wrapper rows OK"
 
+# The two decoders must not drift. decode() runs the monomorphic Cursor over a
+# contiguous buffer; decoder()/feed() drives a visitor over the resumable
+# IStream. Two decoders per type means every S7 verdict exists twice, so this
+# feeds the SAME bytes through both -- at six chunk sizes, one byte at a time
+# included -- and requires deeply equal values. Run over the shared example (every
+# field shape) and over nested_rows (the wrapper-row collectors, depth 3).
+echo "==> streaming: decode() and feed() must agree"
+mk_stream_check() { # mk_stream_check <projdir> <import-line> <body>
+    sed -e "s|//SOFAB_IMPORT|$2|" -e "s|//SOFAB_BODY|$3|" \
+        "$ROOT/tests/conformance/typescript/stream_check.ts" > "$1/stream_check.ts"
+}
+mk_stream_check "$WORK/ex" \
+    'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
+    'const _m = Myfirstmessage.fromJSON(JSON.parse(process.argv[2])); check("example", _m, Myfirstmessage.decode, () => new MyfirstmessageDecoder());'
+( cd "$WORK/ex" && npx tsx stream_check.ts "$IN" )
+
+mk_stream_check "$WORK/corpus/nested_rows" \
+    'import { NestedRows, NestedRowsDecoder } from "./message.js";' \
+    'const _m = NestedRows.fromJSON(JSON.parse(process.argv[2])); check("nested_rows", _m, NestedRows.decode, () => new NestedRowsDecoder());'
+( cd "$WORK/corpus/nested_rows" && npx tsx stream_check.ts "$NR" )
+
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
 # declared width is INVALID: it MUST NOT be masked to the width, and MUST NOT be

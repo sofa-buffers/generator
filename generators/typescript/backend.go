@@ -1,5 +1,5 @@
 // Package typescript is the TypeScript throughput backend (PLAN §6.4): it emits
-// one class per object with marshal(OStream) and a visitor-based decode against
+// one class per object with serialize(OStream) and a visitor-based decode against
 // corelib-ts (@sofa-buffers/corelib). 64-bit fields use bigint by default; the
 // `int64` config key (bigint | long | number) can back 64-bit arrays with
 // corelib Long[] and map 64-bit scalars to number for a bigint-free hot path
@@ -8,6 +8,7 @@ package typescript
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -138,6 +139,16 @@ func (g *gen) module(s *ir.Schema) []byte {
 		// throw SofabError.
 		imports = append(imports, "SofabError", "SofabErrorCode")
 	}
+	if decodesAnyField(s) {
+		// The streaming decoder (streamdecode.go): a push Visitor over the
+		// corelib's resumable IStream. SofabError/SofabErrorCode come with it too
+		// -- finish() reports a truncated stream -- so make sure they are present
+		// even for a schema whose cursor path needed no reject.
+		imports = append(imports, "Visitor", "IStream", "DecodeStatus", "ArrayKind")
+		if !slices.Contains(imports, "SofabError") {
+			imports = append(imports, "SofabError", "SofabErrorCode")
+		}
+	}
 	f.line("import { %s } from %q;", strings.Join(imports, ", "), corelibPkg)
 	f.blank()
 	if g.limits.any() {
@@ -196,6 +207,24 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	for _, m := range s.Messages {
 		g.emitClass(f, exported(m.Name), m.Summary, m.Fields)
+	}
+
+	// The streaming decode surface, after the classes it fills: the shared skip
+	// visitor and payload accumulator, the wrapper-sequence collectors, one
+	// visitor per object type, and a public Decoder per message.
+	if decodesAnyField(s) {
+		g.emitStreamPrelude(f, s)
+		g.emitStreamCollectors(f, g.scanStreamUse(s))
+		for _, key := range s.NamedOrder {
+			nt := s.Named[key]
+			if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+				g.emitStreamVisitor(f, g.typeName(key), nt.Fields)
+			}
+		}
+		for _, m := range s.Messages {
+			g.emitStreamVisitor(f, exported(m.Name), m.Fields)
+			g.emitStreamDecoderClass(f, exported(m.Name))
+		}
 	}
 	return f.bytes()
 }
@@ -292,7 +321,7 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 	f.blank()
 
 	// marshal
-	f.line("  marshal(os: OStream): void {")
+	f.line("  serialize(os: OStream): void {")
 	for _, fld := range fields {
 		g.emitMarshal(f, fld)
 	}
@@ -354,7 +383,7 @@ func (g *gen) longConvert(val string, elem ir.Kind, items *ir.ArrayElem, depth i
 // with emitMarshal: a predicate that disagrees with the writer either omits a
 // field that is on the wire or keeps one that is not.
 func (g *gen) emitIsDefault(f *tsfile, fields []*ir.Field) {
-	f.line("  // True iff marshal would write no child at all, i.e. this object equals its")
+	f.line("  // True iff serialize would write no child at all, i.e. this object equals its")
 	f.line("  // declared default -- compared per field and recursively, never as a byte image.")
 	f.line("  isDefault(): boolean {")
 	for _, fld := range fields {
@@ -471,7 +500,7 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 		// dropping end therefore omits an all-default nested object instead of
 		// emitting it as an empty wrapper.
 		f.line("    os.writeSequenceBeginLazy(%d);", fld.ID)
-		f.line("    %s.marshal(os);", acc)
+		f.line("    %s.serialize(os);", acc)
 		f.line("    os.writeSequenceEnd();")
 		return
 	case ir.KindArray:
@@ -663,7 +692,7 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%s%s.forEach((%s, %s, %s) => {", ind, val, ev, iv, av)
 		f.line("%s  os.writeSequenceBeginLazy(%s);", ind, iv)
-		f.line("%s  %s.marshal(os);", ind, ev)
+		f.line("%s  %s.serialize(os);", ind, ev)
 		emitSeqEnd(f, ind+"  ", lastElemExpr(iv, av))
 		f.line("%s});", ind)
 		emitSeqEnd(f, ind, keepIf)
