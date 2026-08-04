@@ -367,6 +367,11 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	// streaming payload that happens to arrive whole in one chunk, which is what
 	// keeps the zero-copy borrow the common case rather than the exception.
 	f.line("    acc: std.ArrayList(u8) = .empty, // only a payload split across feed chunks lands here")
+	// Set by decoder(), left false by decode(). See _reassemble: on the streaming
+	// path a delivered slice may live in the corelib's reusable carry buffer
+	// rather than in the caller's chunk, and nothing in the callback tells the
+	// two apart -- so that path owns every payload instead of borrowing.
+	f.line("    own: bool = false, // copy every payload instead of borrowing (streaming path)")
 	// Sticky malformed-message flag: a fixed native array received more
 	// elements than its schema count (generator#100); decode() then rejects
 	// with error.InvalidMessage. Always present so decode() can check it.
@@ -1181,12 +1186,18 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	f.line("    /// Give the string/blob callbacks ONE contiguous payload, whatever the")
 	f.line("    /// feed chunking was. Returns null while the payload is still incomplete.")
 	f.line("    ///")
-	f.line("    /// A payload that arrives whole in one chunk -- always so on the")
-	f.line("    /// contiguous decode() path, and the common case when streaming -- is")
-	f.line("    /// returned as-is: the destination borrows the caller's bytes and nothing")
-	f.line("    /// is copied. Only a payload genuinely SPLIT across chunks is assembled")
-	f.line("    /// here, because there is no contiguous slice to borrow once the first")
-	f.line("    /// chunk is gone. That copy lives in `alloc`, like array storage.")
+	f.line("    /// On the contiguous decode() path a payload always arrives whole and is")
+	f.line("    /// returned as-is: the destination borrows the caller's buffer and nothing")
+	f.line("    /// is copied. That buffer is the one the caller handed to decode(), so the")
+	f.line("    /// borrow is sound for exactly as long as the documented contract says.")
+	f.line("    ///")
+	f.line("    /// The streaming path (`own`) borrows NOTHING, whether or not the payload")
+	f.line("    /// arrived whole. A payload stitched across a chunk boundary is completed")
+	f.line("    /// inside the corelib's fixed, REUSED carry buffer, and the slice handed")
+	f.line("    /// over then points into the decoder itself -- indistinguishable in the")
+	f.line("    /// callback from a slice into the caller's chunk, and overwritten by the")
+	f.line("    /// next stitched item. Borrowing on that path aliased earlier fields and")
+	f.line("    /// elements onto later ones at particular chunk sizes.")
 	f.line("    ///")
 	f.line("    /// A completed payload is handed back as its OWN allocation rather than as")
 	f.line("    /// a view into `acc`. A destination KEEPS the slice it is given -- wrapper")
@@ -1196,10 +1207,22 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	f.line("    /// growing buffer would rebase them onto the old block: a stale length")
 	f.line("    /// past the live bytes, and a freed read under an allocator that releases.")
 	f.line("    fn _reassemble(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
-	f.line("        if (offset == 0 and chunk.len >= total) return chunk; // whole payload, borrow it")
+	f.line("        if (offset == 0 and chunk.len >= total) {")
+	f.line("            if (!self.own) return chunk; // contiguous decode: borrow the caller's buffer")
+	f.line("            return self.alloc.dupe(u8, chunk[0..total]) catch { self.inv = true; return null; };")
+	f.line("        }")
 	f.line("        if (offset == 0) self.acc.clearRetainingCapacity();")
 	f.line("        self.acc.appendSlice(self.alloc, chunk) catch { self.inv = true; return null; };")
 	f.line("        if (self.acc.items.len < total) return null; // more chunks to come")
+	// generator#295: the branch above used to borrow on BOTH paths. corelib-zig
+	// stitches an item that straddles a feed boundary into a fixed `carry` buffer
+	// and parses out of it, so a payload completing inside that stitch is handed
+	// over as a slice into the IStream -- which the next stitched item overwrites.
+	// Measured with pointer instrumentation: at chunk size 4 two of four elements
+	// were delivered from the carry buffer at the SAME address. Copying on the
+	// streaming path is what makes the destination independent of both the carry
+	// buffer and the caller's chunk lifetime.
+	//
 	// generator#293 (Crucible F-0058 / codegen defect G-0036): `acc` is ONE buffer
 	// per visitor, so handing `acc.items` to the store made every split payload
 	// overwrite the elements assembled before it, and growth reallocated the

@@ -95,10 +95,17 @@ pub const Scalars = struct {
     /// mid-stream; the caller's own framing decides when the input is over,
     /// and `finish` then gives the verdict for the message as a whole.
     ///
-    /// BORROWING: a string or blob that arrives whole inside one chunk is
-    /// borrowed from that chunk, exactly as decode() borrows from its buffer
-    /// -- so a fed chunk must outlive the message. A payload SPLIT across
-    /// chunks has no such slice to borrow and is copied into `alloc`.
+    /// STORAGE: unlike decode(), this path COPIES every string and blob into
+    /// `alloc` -- a fed chunk does not have to outlive the message, and the
+    /// decoded value never points into a buffer the caller may reuse.
+    ///
+    /// Borrowing is not available here, and not merely declined: a payload
+    /// stitched across a chunk boundary is completed inside the corelib's own
+    /// reusable carry buffer, and the delivered slice then points THERE, not
+    /// into any chunk the caller passed. Nothing in the callback distinguishes
+    /// that slice from one in the caller's buffer, and the next stitched item
+    /// overwrites it. decode() is unaffected -- it hands the corelib one whole
+    /// buffer, which is never stitched, so it keeps borrowing.
     pub const Decoder = struct {
         is: sofab.IStream = sofab.IStream.init(),
         v: _dec_Scalars,
@@ -128,7 +135,7 @@ pub const Scalars = struct {
     /// An incremental decoder filling `out`: hold it and feed chunks as they
     /// arrive, instead of buffering the whole message first.
     pub fn decoder(out: *Scalars, alloc: std.mem.Allocator) Decoder {
-        return .{ .v = .{ .m = out, .alloc = alloc } };
+        return .{ .v = .{ .m = out, .alloc = alloc, .own = true } };
     }
 };
 
@@ -141,6 +148,7 @@ const _dec_Scalars = struct {
     sp: usize = 0,
     cur: _Loc = .root,
     acc: std.ArrayList(u8) = .empty, // only a payload split across feed chunks lands here
+    own: bool = false, // copy every payload instead of borrowing (streaming path)
     inv: bool = false, // a scalar array over its schema count, or a wrapper element id >= count -> INVALID
     askip: usize = 0, // elements left to discard from a wire-type-contradictory array
 
@@ -217,12 +225,18 @@ const _dec_Scalars = struct {
     /// Give the string/blob callbacks ONE contiguous payload, whatever the
     /// feed chunking was. Returns null while the payload is still incomplete.
     ///
-    /// A payload that arrives whole in one chunk -- always so on the
-    /// contiguous decode() path, and the common case when streaming -- is
-    /// returned as-is: the destination borrows the caller's bytes and nothing
-    /// is copied. Only a payload genuinely SPLIT across chunks is assembled
-    /// here, because there is no contiguous slice to borrow once the first
-    /// chunk is gone. That copy lives in `alloc`, like array storage.
+    /// On the contiguous decode() path a payload always arrives whole and is
+    /// returned as-is: the destination borrows the caller's buffer and nothing
+    /// is copied. That buffer is the one the caller handed to decode(), so the
+    /// borrow is sound for exactly as long as the documented contract says.
+    ///
+    /// The streaming path (`own`) borrows NOTHING, whether or not the payload
+    /// arrived whole. A payload stitched across a chunk boundary is completed
+    /// inside the corelib's fixed, REUSED carry buffer, and the slice handed
+    /// over then points into the decoder itself -- indistinguishable in the
+    /// callback from a slice into the caller's chunk, and overwritten by the
+    /// next stitched item. Borrowing on that path aliased earlier fields and
+    /// elements onto later ones at particular chunk sizes.
     ///
     /// A completed payload is handed back as its OWN allocation rather than as
     /// a view into `acc`. A destination KEEPS the slice it is given -- wrapper
@@ -232,7 +246,10 @@ const _dec_Scalars = struct {
     /// growing buffer would rebase them onto the old block: a stale length
     /// past the live bytes, and a freed read under an allocator that releases.
     fn _reassemble(self: *_dec_Scalars, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {
-        if (offset == 0 and chunk.len >= total) return chunk; // whole payload, borrow it
+        if (offset == 0 and chunk.len >= total) {
+            if (!self.own) return chunk; // contiguous decode: borrow the caller's buffer
+            return self.alloc.dupe(u8, chunk[0..total]) catch { self.inv = true; return null; };
+        }
         if (offset == 0) self.acc.clearRetainingCapacity();
         self.acc.appendSlice(self.alloc, chunk) catch { self.inv = true; return null; };
         if (self.acc.items.len < total) return null; // more chunks to come

@@ -84,6 +84,11 @@ func TestZigStructural(t *testing.T) {
 		// slice they are handed, so returning a view into it aliased earlier
 		// wrapper-array elements onto the newest (generator#293 / F-0058).
 		"return self.alloc.dupe(u8, self.acc.items[0..total]) catch { self.inv = true; return null; };",
+		// The borrow is available to decode() only. On the streaming path a
+		// delivered slice may point into the corelib's reused carry buffer, which
+		// the next stitched item overwrites (generator#295).
+		"if (!self.own) return chunk; // contiguous decode: borrow the caller's buffer",
+		"return .{ .v = .{ .m = out, .alloc = alloc, .own = true } };",
 		"if (total > 50) { self.inv = true; } else { if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { self.m.somestring = chunk; } },", // bounded string: over-maxlen -> INVALID (§7.1); strict UTF-8 -> INVALID (issue #85); else zero-copy
 		"/// Unsigned 8-bit integer", // descriptions as doc comments
 	} {

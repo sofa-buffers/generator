@@ -158,25 +158,33 @@ Per message:
 
   **Decoding is independent of how the input is split.** The same bytes decode
   to the same values in one chunk or one byte at a time, which is the property
-  `tests/conformance/zig/stream_check.zig` gates at every chunk size. What it
-  costs is a copy on exactly one path:
+  `tests/conformance/zig/stream_check.zig` gates at every chunk size.
 
-  - a payload arriving **whole inside one chunk** is borrowed from it, just as
-    `decode()` borrows from its buffer — so a fed chunk must outlive the
-    message. This is the common case and stays zero-copy;
-  - a payload genuinely **split across chunks** has no contiguous slice to
-    borrow, so it is assembled in a scratch buffer on the visitor and handed to
-    the destination as **its own allocation** from `alloc`.
+  **This path copies every string and blob into `alloc`** — it borrows nothing,
+  so a fed chunk need not outlive the message. That is the one behavioural
+  difference from `decode()`, and it is forced rather than chosen:
 
-  That last copy is not optional. The scratch buffer is one per visitor and is
-  reused by the next split payload, while destinations *keep* the slice they
-  are given — wrapper-array elements outlive the callback that stored them.
-  Handing out a view into the scratch buffer instead aliased every element
-  assembled earlier onto the newest one, and growth reallocated the buffer out
-  from under them, leaving a stale length that reads past the live bytes
-  (generator#293). The buffer still grows only with bytes that actually
-  arrived, so the untrusted declared length cannot make a short message
-  allocate ahead of it.
+  - a payload **split across chunks** has no contiguous slice to borrow at all,
+    so it is assembled in a scratch buffer on the visitor. The scratch buffer is
+    one per visitor and is reused by the next split payload, while destinations
+    *keep* what they are handed — so the assembled payload has to leave as its
+    own allocation. Handing out a view aliased earlier elements onto the newest
+    and, once the buffer grew, rebased them onto the old block (generator#293);
+  - a payload arriving **whole in one delivery** cannot be borrowed either,
+    because it may not be in the caller's memory. corelib-zig stitches an item
+    that straddles a feed boundary into a fixed, reused `carry` buffer and
+    parses out of it, so a payload completing inside that stitch is delivered as
+    a slice into *the decoder*. Nothing in the callback distinguishes it from a
+    slice into the caller's chunk, and the next stitched item overwrites it
+    (generator#295).
+
+  Neither buffer is sized from the untrusted declared length: the scratch buffer
+  grows only with bytes that actually arrived, so a large `total` in a short
+  message cannot make it allocate ahead of the payload.
+
+  `decode()` is unaffected and keeps borrowing. It hands the corelib one whole
+  buffer, which is never stitched, so every payload it delivers lies in the
+  caller's own memory.
 
 The decoder is the same flat-visitor `(location, id)` state machine as the
 Rust backend, monomorphized by the corelib's comptime duck typing (no
