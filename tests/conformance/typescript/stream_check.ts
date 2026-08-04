@@ -21,7 +21,7 @@
 // depth 3) are covered too — those need a different collector per row kind and
 // recurse, which a scalar-only message never exercises.
 
-import { OStream, DecodeStatus } from "@sofa-buffers/corelib";
+import { OStream, DecodeStatus, SofabError } from "@sofa-buffers/corelib";
 //SOFAB_IMPORT
 
 // Canonical form for comparison: bigint and Uint8Array have no JSON encoding of
@@ -89,6 +89,55 @@ function check<T extends { serialize(os: OStream): void }>(
   }
 
   console.log(`   [${label}] ${wire.length} bytes, cursor === feed at 6 chunk sizes (1 byte included), truncation rejected`);
+}
+
+/**
+ * A REJECTED message: both paths must refuse the same bytes the same WAY.
+ *
+ * The value checks above only compare messages that decode. A rejection has a
+ * second observable besides "it threw" — the exception type — and the two paths
+ * reach it through different code: the cursor decodes strings inside the corelib
+ * (Cursor.readString), the visitor transcodes in generated code. When only one
+ * of them converted the fatal TextDecoder's TypeError, feed() threw a raw
+ * TypeError that walked straight past a `catch (e) { e instanceof SofabError }`
+ * — a rejected message and an unhandled exception look very different to a
+ * caller feeding untrusted bytes (generator#297).
+ *
+ * Taken over raw wire bytes rather than an encoded message, because the point is
+ * input this library would never produce.
+ */
+function checkReject(label: string, wire: Uint8Array,
+                     oneShot: (b: Uint8Array) => unknown,
+                     mk: () => { feed(c: Uint8Array): DecodeStatus; finish(): unknown }): void {
+  const grab = (fn: () => unknown): Error => {
+    try { fn(); } catch (e) { return e as Error; }
+    console.error(`FAIL ${label}: expected a rejection, got none`);
+    process.exit(1);
+  };
+
+  const viaCursor = grab(() => oneShot(wire));
+  if (!(viaCursor instanceof SofabError)) {
+    console.error(`FAIL ${label}: decode() threw ${viaCursor.constructor.name}, not SofabError`);
+    process.exit(1);
+  }
+  checks++;
+
+  for (const size of [1, 2, 3, 7, 16, wire.length]) {
+    const viaFeed = grab(() => feedInChunks(mk, wire, size));
+    if (!(viaFeed instanceof SofabError)) {
+      console.error(`FAIL ${label}: feed() at chunk size ${size} threw ${viaFeed.constructor.name}, not SofabError`);
+      console.error(`  decode() threw SofabError(${viaCursor.code}): ${viaCursor.message}`);
+      console.error(`  feed()   threw ${viaFeed.constructor.name}: ${viaFeed.message}`);
+      process.exit(1);
+    }
+    if (viaFeed.code !== viaCursor.code) {
+      console.error(`FAIL ${label}: chunk size ${size} rejects with code ${viaFeed.code}, decode() with ${viaCursor.code}`);
+      process.exit(1);
+    }
+    checks++;
+  }
+
+  console.log(`   [${label}] rejected as SofabError(${viaCursor.code}) by decode() and by feed() at 6 chunk sizes`);
 }
 
 //SOFAB_BODY

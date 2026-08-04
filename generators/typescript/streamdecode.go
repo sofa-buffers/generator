@@ -67,6 +67,35 @@ func (g *gen) emitStreamPrelude(f *tsfile, s *ir.Schema) {
 	// the corelib.
 	f.line("const _dec = new TextDecoder(\"utf-8\", { fatal: true });")
 	f.blank()
+	// `fatal: true` throws a plain TypeError from the platform, which is NOT the
+	// documented failure of this API: a consumer of a decoder fed untrusted bytes
+	// catches SofabError, and a TypeError walks straight past that catch as an
+	// unhandled exception. The cursor path never had this problem -- it decodes
+	// inside the corelib, where Cursor.readString does the same conversion -- so
+	// the two entry points reported identical malformed bytes as different
+	// exception types (generator#297, Crucible F-0060 / codegen defect G-0037).
+	//
+	// One helper rather than a try/catch at each call site: there are two, and the
+	// next store site added would have to remember. corelib-ts keeps its own fatal
+	// decoder and `invalidMsgError` private, so the conversion cannot yet be
+	// shared with it; if it ever exports one, this collapses into calling it.
+	f.line("/**")
+	f.line(" * Transcode a payload, reporting malformed UTF-8 the way the rest of the")
+	f.line(" * API reports malformed input.")
+	f.line(" *")
+	f.line(" * The fatal TextDecoder signals invalid bytes with a TypeError. Malformed")
+	f.line(" * bytes are an invalid message, so this leaves as SofabError like every")
+	f.line(" * other verdict -- never as a platform exception that escapes a")
+	f.line(" * `catch (e) { if (e instanceof SofabError) ... }`.")
+	f.line(" */")
+	f.line("function _str(bytes: Uint8Array): string {")
+	f.line("  try {")
+	f.line("    return _dec.decode(bytes);")
+	f.line("  } catch {")
+	f.line("    throw new SofabError(SofabErrorCode.InvalidMsg, \"invalid UTF-8 in string\");")
+	f.line("  }")
+	f.line("}")
+	f.blank()
 	f.line("/**")
 	f.line(" * Reassembles a string/blob payload split across feed chunks.")
 	f.line(" *")
@@ -274,7 +303,7 @@ func (g *gen) emitStreamPayload(f *tsfile, cb string, fields []*ir.Field) {
 		}
 		var store string
 		if want == ir.KindString {
-			store = fmt.Sprintf("%s = _dec.decode(_p);", acc)
+			store = fmt.Sprintf("%s = _str(_p);", acc)
 		} else {
 			store = fmt.Sprintf("%s = _p.slice();", acc)
 		}
@@ -520,7 +549,7 @@ func (g *gen) emitStreamCollectors(f *tsfile, use streamUse) {
 		f.line("    const p = this.a.take(total, offset, chunk);")
 		f.line("    if (p === null) return;")
 		f.line("    while (this.out.length <= id) this.out.push(\"\");")
-		f.line("    this.out[id] = _dec.decode(p);")
+		f.line("    this.out[id] = _str(p);")
 		f.line("  }")
 		f.line("  sequenceBegin(): Visitor { return _DEAD; }")
 		f.line("}")

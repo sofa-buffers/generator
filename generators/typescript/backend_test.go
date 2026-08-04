@@ -332,10 +332,22 @@ func TestTSStructural(t *testing.T) {
 		"  feed(chunk: Uint8Array): DecodeStatus {",
 		"class _MyfirstmessageVis implements Visitor {",
 		"const _DEAD: Visitor = { sequenceBegin(): Visitor { return _DEAD; } };",
+		// Malformed UTF-8 leaves as SofabError on this path too. The fatal
+		// TextDecoder raises a platform TypeError, which walks past a caller's
+		// `instanceof SofabError` guard — the cursor path converts it inside the
+		// corelib, so an unconverted visitor made one library report the same
+		// bytes two ways (generator#297).
+		"throw new SofabError(SofabErrorCode.InvalidMsg, \"invalid UTF-8 in string\");",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing streaming decode surface %q", want)
 		}
+	}
+	// Every transcode goes through the converting helper. The raw decoder is
+	// reachable from exactly ONE place — inside _str — so a store site cannot
+	// call it bare, which is how generator#297 happened and reads as harmless.
+	if n := strings.Count(mod, "_dec.decode("); n != 1 {
+		t.Errorf("_dec.decode() must appear once, inside _str(); found %d bare or extra call sites (generator#297)", n)
 	}
 	// Fast-encode marshal tidy-up: a leaf string list uses an indexed for (no
 	// per-encode closure) rather than .forEach.
