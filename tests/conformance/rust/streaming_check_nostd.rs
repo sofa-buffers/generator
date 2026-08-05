@@ -1,17 +1,28 @@
-// Streaming check for the PURE heapless no_std profile (allow_dynamic: false).
+// Streaming check for FIXED-CAPACITY field storage — `allow_dynamic: false`, on
+// either corelib.
 //
-// The main streaming_check.rs runs against the alloc leg. This one exists
-// because the heapless profile has a different `acc` — the buffer that
+// The main streaming_check.rs runs against the legs whose fields are `String` /
+// `Vec`; it assigns those types directly, which heapless cannot take. This one
+// exists because fixed storage has a different `acc` — the buffer that
 // reassembles a string/blob payload split across feed chunks is a
 // `heapless::Vec` with fixed capacity here, not a growable `Vec`. That is a
 // distinct code path with a distinct failure mode (a push past capacity sets the
 // sticky `err` flag instead of allocating), and compiling it is not the same as
 // running it.
 //
-// The property is the same one the alloc leg asserts: streaming must be
+// WHICH LEGS: `no-std-static` (corelib rs-no-std, the default storage there) and
+// `rs-static` (corelib **rs** with allow_dynamic: false). The second is the point
+// of generator#306 — `allow_dynamic` chooses the CONTAINER and is independent of
+// the corelib, so the std corelib has a heapless-storage configuration too, and
+// it had no streaming leg anywhere in CI.
+//
+// The property is the same one the dynamic legs assert: streaming must be
 // indistinguishable from the one-shot path.
+//
+// The `use` line is supplied by run.sh — a std project is a binary crate that
+// includes `message.rs` as a module, a no_std project is a library.
 
-use sofabuffers_generated::*;
+//SOFAB_IMPORT
 
 fn main() {
     // A string long enough that it cannot land inside a single chunk at any of
