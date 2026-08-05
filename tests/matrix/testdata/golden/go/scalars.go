@@ -164,9 +164,31 @@ func (m *Scalars) EncodeTo(w io.Writer) error {
 // DecodeScalars parses bytes into a new message (with defaults pre-applied).
 // Decode runs the corelib's zero-copy AcceptBytes cursor over the buffer,
 // dispatching each field to the message's sofab.Visitor implementation.
+//
+// Use this when the message is already in memory. DecodeScalarsFrom is the
+// streaming twin for a message that is not.
 func DecodeScalars(data []byte) (*Scalars, error) {
 	m := NewScalars()
 	if err := sofab.AcceptBytes(data, m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// DecodeScalarsFrom parses a message straight out of r (with defaults pre-applied).
+//
+// The wire image is never held whole in memory: each field is read and
+// dispatched as r delivers it, so what bounds memory is the largest single
+// field, not the message. DecodeScalars is the in-memory path for bytes you
+// already hold; this is the one to reach for over a network connection, a
+// file, or any producer that outruns the memory you want to spend.
+//
+// The verdict is identical either way -- the same visitor sees the same
+// events in the same order -- so a message that is INVALID whole is INVALID
+// streamed, at every chunk boundary.
+func DecodeScalarsFrom(r io.Reader) (*Scalars, error) {
+	m := NewScalars()
+	if err := sofab.NewDecoder(r).AcceptStream(m); err != nil {
 		return nil, err
 	}
 	return m, nil

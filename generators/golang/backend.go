@@ -488,9 +488,13 @@ func (g *gen) emitBitfield(f *gofile, nt *ir.NamedType) {
 
 // emitObject emits a struct + marshal + a sofab.Visitor decode implementation
 // for an id scope. Decode is push/visitor: the struct embeds _visitorBase (no-op
-// defaults) and overrides the callbacks its fields need, so DecodeX runs the
-// corelib's zero-copy AcceptBytes cursor over the buffer instead of pulling each
-// varint byte through a bufio.Reader.
+// defaults) and overrides the callbacks its fields need.
+//
+// One visitor, two entry points. DecodeX runs the corelib's zero-copy
+// AcceptBytes cursor over a buffer the caller already holds; DecodeXFrom runs
+// AcceptStream, which pulls through a bufio.Reader so nothing larger than a
+// single field is ever resident (§5.6). They are event-equivalent, so what is
+// emitted here serves both and neither can tell which is driving it.
 func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 	f.imp(corelibImport)
 	f.line("// %s is a generated SofaBuffers object.", typeName)
@@ -970,6 +974,9 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			}
 		case ir.KindBlob:
 			// v aliases the decode buffer (AcceptBytes) — copy what we keep.
+			// The copy stays even though AcceptStream hands over freshly read
+			// buffers that need none: one visitor serves both entry points, and
+			// it cannot tell which one is driving it.
 			blob = append(blob, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+acc+" = append([]byte(nil), v...)"))
 			if fld.HasMaxlen {
 				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard(fixSubBlob, fld.Maxlen)))
@@ -1302,9 +1309,43 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("// Decode%s parses bytes into a new message (with defaults pre-applied).", typeName)
 	f.line("// Decode runs the corelib's zero-copy AcceptBytes cursor over the buffer,")
 	f.line("// dispatching each field to the message's sofab.Visitor implementation.")
+	f.line("//")
+	f.line("// Use this when the message is already in memory. Decode%sFrom is the", typeName)
+	f.line("// streaming twin for a message that is not.")
 	f.line("func Decode%s(data []byte) (*%s, error) {", typeName, typeName)
 	f.line("\tm := New%s()", typeName)
 	f.line("\tif err := sofab.AcceptBytes(data, m%s); err != nil {", g.acceptOpts())
+	f.line("\t\treturn nil, err")
+	f.line("\t}")
+	f.line("\treturn m, nil")
+	f.line("}")
+	f.blank()
+	// Streaming decode -- the twin of EncodeTo above, and what makes this target
+	// meet CORELIB_PLAN §5.6 (generator#312). AcceptBytes needs the whole wire
+	// image in one contiguous buffer BY CONSTRUCTION, and Decoder.Accept only
+	// moves that requirement inside the corelib (it slurps the reader first), so
+	// neither is bounded by anything but the message. AcceptStream drives the
+	// pull primitives directly and dispatches each field as the reader delivers
+	// it, so peak memory is the largest single field (corelib-go#71/#72).
+	//
+	// The VISITOR is unchanged: AcceptStream is event-equivalent to AcceptBytes
+	// -- same callbacks, same HeaderVisitor hooks, same INVALID/INCOMPLETE
+	// verdicts -- so only the entry point that feeds it differs. That is why this
+	// is an addition and not a replacement.
+	f.line("// Decode%sFrom parses a message straight out of r (with defaults pre-applied).", typeName)
+	f.line("//")
+	f.line("// The wire image is never held whole in memory: each field is read and")
+	f.line("// dispatched as r delivers it, so what bounds memory is the largest single")
+	f.line("// field, not the message. Decode%s is the in-memory path for bytes you", typeName)
+	f.line("// already hold; this is the one to reach for over a network connection, a")
+	f.line("// file, or any producer that outruns the memory you want to spend.")
+	f.line("//")
+	f.line("// The verdict is identical either way -- the same visitor sees the same")
+	f.line("// events in the same order -- so a message that is INVALID whole is INVALID")
+	f.line("// streamed, at every chunk boundary.")
+	f.line("func Decode%sFrom(r io.Reader) (*%s, error) {", typeName, typeName)
+	f.line("\tm := New%s()", typeName)
+	f.line("\tif err := sofab.NewDecoder(r%s).AcceptStream(m); err != nil {", g.acceptOpts())
 	f.line("\t\treturn nil, err")
 	f.line("\t}")
 	f.line("\treturn m, nil")

@@ -40,6 +40,32 @@ echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 roun
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
 
+# Streaming decode: the same bytes through the io.Reader-driven entry point
+# (CORELIB_PLAN S5.6, generator#312 / corelib-go#71+#72). DecodeXFrom drives
+# corelib-go's AcceptStream, which dispatches each field as the reader delivers
+# it instead of requiring the whole wire image resident the way AcceptBytes does
+# by construction.
+#
+# The harness feeds it ONE BYTE PER Read. That is the point of the check: a
+# reader handing the message over in a single Read would exercise the new
+# signature without ever making the decoder suspend and resume, which is the
+# half that can actually be wrong. Every byte position becomes a boundary.
+#
+# The assertion is EQUIVALENCE, not "it decodes": byte-identical JSON to the
+# in-memory path. A streaming decode that quietly dropped a field would still
+# exit 0.
+echo "==> streaming decode must equal the in-memory decode (generator#312)"
+printf '%s' "$IN" | (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness encode myfirstmessage) > "$WORK/rt.bin"
+WHOLE=$(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/rt.bin")
+DRIP=$(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness streamdecode myfirstmessage < "$WORK/rt.bin")
+[ "$WHOLE" = "$DRIP" ] || {
+    echo "FAIL: streamdecode differs from decode"
+    echo "  decode:       $WHOLE"
+    echo "  streamdecode: $DRIP"
+    exit 1
+}
+echo "==> streaming decode OK"
+
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
 # INVALID per MESSAGE_SPEC 3+7 (decode exits non-zero); exactly 4 still decode.
@@ -401,6 +427,49 @@ OUT=$(printf '\020\377\377\377\377\377\377\377\377\377\001' | width_decode) \
     || { echo "FAIL: a u64 field must accept the full 64-bit range"; exit 1; }
 echo "$OUT" | grep -q '"c":18446744073709551615' || { echo "FAIL: u64 max must survive; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK"
+
+# The verdict must not depend on the chunking either (CORELIB_PLAN S6.4 / S7.2
+# item 4: a chunk boundary MUST NOT affect the outcome). Every malformed fixture
+# built above is replayed through the byte-at-a-time reader and must land on the
+# SAME side as the in-memory decode -- with the well-formed controls alongside,
+# so this cannot pass by rejecting everything.
+#
+# Written as a table rather than as one assertion per file: the interesting
+# property is that decode and streamdecode never disagree, and that is a claim
+# about the whole set.
+echo "==> a chunk boundary must not change the verdict (generator#312)"
+CHECKED=0
+ACCEPTED=0
+REJECTED=0
+for f in overcount control fp64_at_fp32 fp32_overcount skipped_bad_utf8 declared_bad_utf8 \
+         overcount_trunc incount_trunc overindex overindex_control overindex_trunc \
+         inindex_trunc overmaxlen overmaxlen_control rt; do
+    # A missing fixture is a FAILURE, not a skip. Silently continuing would turn
+    # a renamed .bin into a green run that checked nothing -- the exact shape
+    # that makes a conformance suite lie.
+    [ -f "$WORK/$f.bin" ] || { echo "FAIL: fixture $f.bin missing (renamed?)"; exit 1; }
+    CHECKED=$((CHECKED + 1))
+    if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/$f.bin" >/dev/null 2>&1); then
+        W=accept
+    else
+        W=reject
+    fi
+    if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness streamdecode myfirstmessage < "$WORK/$f.bin" >/dev/null 2>&1); then
+        D=accept
+    else
+        D=reject
+    fi
+    [ "$W" = "$D" ] || { echo "FAIL: $f.bin -> decode=$W streamdecode=$D"; exit 1; }
+    if [ "$W" = accept ]; then ACCEPTED=$((ACCEPTED + 1)); else REJECTED=$((REJECTED + 1)); fi
+done
+[ "$CHECKED" -eq 15 ] || { echo "FAIL: expected 15 fixtures, checked $CHECKED"; exit 1; }
+# Both outcomes must appear. A streaming path that accepted everything, or one
+# that rejected everything, agrees with itself perfectly -- the table is only
+# evidence if it straddles the boundary.
+[ "$ACCEPTED" -gt 0 ] && [ "$REJECTED" -gt 0 ] || {
+    echo "FAIL: table is one-sided ($ACCEPTED accept / $REJECTED reject)"; exit 1
+}
+echo "==> chunk-invariant verdicts OK ($CHECKED fixtures: $ACCEPTED accept, $REJECTED reject)"
 
 echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_GO_CORELIB="$CORELIB" go test ./generators/golang/ -run "Conformance|Wire" -count=1 )

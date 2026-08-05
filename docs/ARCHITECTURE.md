@@ -398,9 +398,14 @@ a reimplementation should emit code that honors all of them:
     is a handle on a *resumable* corelib decoder; it cannot be synthesised over
     one that is not. Go and Python stream **pull**-shaped (the caller supplies a
     reader, the corelib pulls), so they expose that shape instead —
-    `EncodeTo(io.Writer)` / `deserialize(Decoder(reader))` — and gain `feed()`
-    only once their corelibs carry a resumable decoder. TypeScript has a
-    resumable `IStream`, but no generated visitor to drive it (§9.3 family 6).
+    `EncodeTo(io.Writer)` + `Decode<Msg>From(io.Reader)` /
+    `deserialize(Decoder(reader))` — and gain `feed()` only once their corelibs
+    carry a resumable decoder. **The absence of `feed()` is not an excuse for an
+    unbounded decode**: §5.6 asks for the memory bound, not for a particular
+    shape, and a reader-driven entry point delivers it. Go had the encode half
+    only until generator#312 added `Decode<Msg>From` over corelib-go's
+    `AcceptStream`. TypeScript has a resumable `IStream`, but no generated
+    visitor to drive it (§9.3 family 6).
 - **Decode by `switch` on field id**, not an if-chain — compilers build a jump
   table; unknown ids fall through to the corelib's skip path, giving
   forward/backward compatibility for free.
@@ -678,9 +683,16 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    itself, or a small collector for a wrapper-sequence array
    (string/blob/struct/union/matrix elements). A no-op base supplies defaults so
    each type overrides only the callbacks it uses. **Go** — the generated struct
-   *is* the `sofab.Visitor` (a no-op `_visitorBase` embedded in every object);
-   `sofab.AcceptBytes(buf, m)`; the corelib still exposes the pull `Decoder`
-   (family 3) for streaming callers. **Dart** — a separate `_<Msg>Visitor` class
+   *is* the `sofab.Visitor` (a no-op `_visitorBase` embedded in every object),
+   driven by **either** entry point: `sofab.AcceptBytes(buf, m)` for bytes the
+   caller holds, or `sofab.NewDecoder(r).AcceptStream(m)` for an `io.Reader`,
+   which dispatches each field as the reader delivers it so peak memory is the
+   largest single field rather than the wire image (§5.6, generator#312). The
+   two are **event-equivalent** — same callbacks, same `HeaderVisitor` hooks,
+   same verdicts at every byte boundary — which is why one emitted visitor
+   serves both and neither can tell which is driving it. The corelib still
+   exposes the pull `Decoder` (family 3) for callers who want the fields
+   themselves. **Dart** — a separate `_<Msg>Visitor` class
    holds a reference to the object and a shared decode context;
    `sofab.Decoder.decode(data, visitor)`. Because Dart's corelib delivers a native
    array whole through a distinct `on*Array` callback (like Go, unlike the
@@ -1803,7 +1815,7 @@ above was found by that check on its first run.
 | **C** | `corelib-c-cpp` | descriptor-table callback | `object.h` struct + static descriptor; `symbol_prefix`; auto capability + API-version guards; analytic `MAX_SIZE`; project mode also emits `Makefile` + `CMakeLists.txt`, `run.sh`, and a devcontainer. |
 | **C++** | `corelib-cpp` (default) / `corelib-c-cpp` (`corelib: c-cpp`) | child-visitor / flat-visitor wrapper | header-only `OStreamMessage`+`IStreamMessage`; `c-cpp` decode pre-sizes varlen fields + links the C sources. |
 | **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. Field storage is a SEPARATE axis from the environment: `allow_dynamic` selects `String`/`Vec` or fixed-capacity `heapless` on **either** corelib, so a std crate can hold its bounded fields inline while keeping serde, the heap decode stack and the ordinary std prelude. |
-| **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; exported `Serialize(*sofab.Encoder)` + `EncodeTo(io.Writer)` — the encoder drains into the writer as it fills, so a message never exists as one contiguous `[]byte`; **no `feed()`** — corelib-go streams pull-shaped (`Decoder.Next` over an `io.Reader`), so a push feed needs a resumable decoder there first; `Decode` via zero-copy `sofab.AcceptBytes`; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
+| **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; exported `Serialize(*sofab.Encoder)` + `EncodeTo(io.Writer)` — the encoder drains into the writer as it fills, so a message never exists as one contiguous `[]byte`; **no `feed()`** — corelib-go streams pull-shaped (`Decoder.Next` over an `io.Reader`), so a push feed needs a resumable decoder there first; `Decode<Msg>` via zero-copy `sofab.AcceptBytes` for bytes in hand, `Decode<Msg>From(io.Reader)` via `AcceptStream` for a byte stream (memory bounded by the largest single field, §5.6); `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
 | **Python** | `corelib-py` | pull-parser | dataclasses + `serialize`/`deserialize` (public since generator#239; `deserialize(Decoder(reader))` IS the chunk-capable path — the corelib pulls from any reader). |
 | **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `serialize`; `decoder()` → `feed`/`finish` for chunked decode, driving a SECOND, generated visitor over the corelib's resumable `IStream` (the cursor cannot be fed in pieces) — the two paths are held together by a differential test over values AND rejections, since a verdict reached in generated code rather than in the corelib can drift, as an unconverted `TextDecoder` TypeError did (generator#297); per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`; a `number` is a 64-bit double, so an fp32 NaN routes through the corelib raw channel (`readFp32Raw`/`writeFixlen(fp32)` for a scalar, `readFp32ArrayRaw`/`writeFp32ArrayRaw` for an array, each with a `Uint8Array \| null` companion slot captured only for a NaN) to preserve a signaling NaN bit-for-bit (§4.6, #235); `recode` harness mode (wire → object → wire) exercises it. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Serialize`/`EncodeTo`; nested `Msg.Decoder` (constructed with `new`, not a `Decoder()` factory — C# puts nested types and members in one declaration space) → `Feed`/`Finish` for chunked decode; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
