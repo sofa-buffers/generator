@@ -400,6 +400,32 @@ func widthScan(arr, name string, elem ir.Kind) string {
 	return fmt.Sprintf("for (const _e of %s) if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s element: value outside declared width %s\"); ", arr, cond, name, elem)
 }
 
+// elemArgs renders the extra corelib arguments that bound each element to its
+// declared width — `, max` for unsigned, `, min, max` for signed — or "" for the
+// kinds whose range is not narrower than what the reader returns.
+//
+// Same reasoning as the `cnt` argument above, one level down: the whole-array
+// scan at the call site (widthScan) only fires once EVERY element has arrived, so
+// a message truncated right after an out-of-range element loses the verdict to
+// the reader's own INCOMPLETE. Handing the bound to the reader is what latches it
+// at the element that carries the value (§5.2 anti-folding, generator#267).
+//
+// `cnt` is "" for an unbounded array, and a positional argument cannot be
+// skipped, so the count slot is filled with `undefined` when a bound follows it.
+func elemArgs(elem ir.Kind, cnt string) string {
+	lo, hi, ok := ir.NarrowRange(elem)
+	if !ok {
+		return cnt
+	}
+	if cnt == "" {
+		cnt = "undefined"
+	}
+	if lo < 0 {
+		return fmt.Sprintf("%s, %d, %d", cnt, lo, hi)
+	}
+	return fmt.Sprintf("%s, %d", cnt, hi)
+}
+
 func (g *gen) nativeArrayRead(elem ir.Kind, ref *ir.TypeRef, cnt string) string {
 	switch elem {
 	case ir.KindU64:
@@ -413,7 +439,7 @@ func (g *gen) nativeArrayRead(elem ir.Kind, ref *ir.TypeRef, cnt string) string 
 		}
 		return "c.readSignedArray(" + cnt + ") as bigint[]"
 	case ir.KindI8, ir.KindI16, ir.KindI32:
-		return "c.readSignedArray(" + cnt + ") as number[]"
+		return "c.readSignedArray(" + elemArgs(elem, cnt) + ") as number[]"
 	case ir.KindFP32:
 		return "c.readFp32Array(" + cnt + ")"
 	case ir.KindFP64:
@@ -423,7 +449,7 @@ func (g *gen) nativeArrayRead(elem ir.Kind, ref *ir.TypeRef, cnt string) string 
 	case ir.KindEnum:
 		return "(c.readSignedArray(" + cnt + ") as number[]).map((_e) => _e as " + g.typeName(ref.Key) + ")"
 	default: // u8/u16/u32, bitfield
-		return "c.readUnsignedArray(" + cnt + ") as number[]"
+		return "c.readUnsignedArray(" + elemArgs(elem, cnt) + ") as number[]"
 	}
 }
 
