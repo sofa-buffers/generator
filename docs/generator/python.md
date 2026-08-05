@@ -184,9 +184,28 @@ if self.a_u8 > 255:
 self.d_u64 = d.unsigned()          # u64: nothing narrower to bound
 ```
 
-The read-then-check order mirrors the existing `blob` maxlen arm rather than
-reading into a temporary: the guard reads better beside the store, and a raised
-decode never returns the object it was filling.
+The read-then-check order works here rather than reading into a temporary: the
+guard reads better beside the store, and a raised decode never returns the object
+it was filling. It is safe **only because a scalar integer arrives whole** — the
+value and the bytes that carry it are the same word, so there is no truncation
+that lands between them.
+
+A `maxlen` is different, and reads the other way round. `string` and `blob` both
+peek the parsed wire length **before** the payload is read:
+
+```python
+if d.fixlen_len() > 4:          # non-consuming peek
+    raise SofaDecodeError("b: blob byte length above schema maxlen 4")
+self.b = d.bytes()
+```
+
+§5.2 makes INVALID dominate INCOMPLETE, so a message truncated right after the
+length word — where the violation is already fully established — must still be
+INVALID. Reading first and measuring the decoded bytes afterwards never reaches
+the check on such a message and reported INCOMPLETE instead. The string arm had
+always peeked; the blob arm was reading first, and now does the same
+(generator#267/#277). Bounded string/blob **elements** of a wrapper array peek
+the same way.
 
 A native array arrives whole, so one `any(...)` scan over the elements decides
 it — a single out-of-range element makes the message INVALID.
