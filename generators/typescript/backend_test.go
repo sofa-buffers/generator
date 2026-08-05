@@ -233,6 +233,20 @@ func TestTSMaxlenReject(t *testing.T) {
 	if !strings.Contains(mod, "SofabError, SofabErrorCode") {
 		t.Errorf("message.ts must import SofabError/SofabErrorCode for the maxlen guard:\n%s", mod[:min(len(mod), 200)])
 	}
+	// (a2) The maxlen verdict is taken at the LENGTH WORD, via fixlenBegin — and it
+	// tests the announced SUBTYPE. In the payload callback it could not fire at all
+	// for a message ending right after an over-maxlen word, so the same bytes were
+	// INVALID one-shot and INCOMPLETE chunked (generator#300). Asserting the exact
+	// arms, because a bare "has a fixlenBegin" also matches the wrapper-element
+	// collectors and would not notice the message-level one going missing.
+	for _, want := range []string{
+		"case 0: if (sub === FixlenSubtype.String && total > 8) throw new SofabError(SofabErrorCode.InvalidMsg, \"s: string byte length above schema maxlen 8\"); break;",
+		"case 1: if (sub === FixlenSubtype.Blob && total > 8) throw new SofabError(SofabErrorCode.InvalidMsg, \"b: blob byte length above schema maxlen 8\"); break;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts must take the maxlen verdict at the length word: missing %q", want)
+		}
+	}
 	for _, want := range []string{
 		// (b) Scalar string + blob reject on an over-length byte check.
 		`case 0: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } const _s = c.readString(8); if (_utf8Len(_s) > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); o.s = _s; break; }`,
@@ -356,6 +370,15 @@ func TestTSStructural(t *testing.T) {
 	// how generator#300 happened, and it reads as a deliberate "not needed".
 	if strings.Contains(mod, "arrayBegin(id: number, _kind: ArrayKind") {
 		t.Error("the streaming arrayBegin must test the announced element kind, not ignore it (generator#300)")
+	}
+	// The maxlen verdict must be taken at the LENGTH WORD, via fixlenBegin. In the
+	// payload callback it cannot fire at all for a message that ends right after an
+	// over-maxlen word, so the same bytes were INVALID one-shot and INCOMPLETE
+	// chunked (generator#300). Like arrayBegin, it has to test the announced
+	// subtype rather than trust the id: a string arriving at a blob field's id is a
+	// §7.3 mismatch to skip, not something to bound.
+	if strings.Contains(mod, "fixlenBegin(id: number, _sub:") {
+		t.Error("fixlenBegin must test the announced subtype, not ignore it (generator#300)")
 	}
 	if n := strings.Count(mod, "_dec.decode("); n != 1 {
 		t.Errorf("_dec.decode() must appear once, inside _str(); found %d bare or extra call sites (generator#297)", n)

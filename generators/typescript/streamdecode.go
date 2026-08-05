@@ -141,6 +141,7 @@ func (g *gen) emitStreamVisitor(f *tsfile, typeName string, fields []*ir.Field) 
 	g.emitStreamScalarCb(f, "unsigned", fields, unsignedKinds)
 	g.emitStreamScalarCb(f, "signed", fields, signedKinds)
 	g.emitStreamFp(f, fields)
+	g.emitStreamFixlenBegin(f, fields)
 	g.emitStreamPayload(f, "string", fields)
 	g.emitStreamPayload(f, "blob", fields)
 	g.emitStreamArray(f, fields)
@@ -276,6 +277,52 @@ func (g *gen) emitStreamFp(f *tsfile, fields []*ir.Field) {
 		f.line("    }")
 		f.line("  }")
 	}
+}
+
+// emitStreamFixlenBegin writes the fixlenBegin callback: the maxlen verdict, taken
+// at the LENGTH WORD.
+//
+// It cannot live in the string/blob payload callback, which is where it used to
+// be: those fire only once payload bytes arrive, so a message that ends right
+// after an over-maxlen length word never reached the check and degraded to
+// INCOMPLETE -- while the same bytes through Cursor.readString are INVALID (§5.2
+// gives INVALID precedence over INCOMPLETE, generator#300). fixlenBegin is the
+// string/blob counterpart of arrayBegin and fires at the word, so the two decode
+// paths now agree.
+//
+// The announced SUBTYPE is tested, not ignored. A `string` arriving at a `blob`
+// field's id is a §7.3 wire-type mismatch and must be skipped, not bounded by the
+// declared field's maxlen -- the same trap the array path fell into by ignoring
+// its kind parameter (generator#300, first half).
+func (g *gen) emitStreamFixlenBegin(f *tsfile, fields []*ir.Field) {
+	var arms []string
+	for _, x := range fields {
+		if !x.HasMaxlen {
+			continue
+		}
+		var sub, kind string
+		switch x.Kind {
+		case ir.KindString:
+			sub, kind = "FixlenSubtype.String", "string"
+		case ir.KindBlob:
+			sub, kind = "FixlenSubtype.Blob", "blob"
+		default:
+			continue
+		}
+		arms = append(arms, fmt.Sprintf("      case %d: if (sub === %s && total > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: %s byte length above schema maxlen %d\"); break;",
+			x.ID, sub, x.Maxlen, x.Name, kind, x.Maxlen))
+	}
+	if len(arms) == 0 {
+		return
+	}
+	f.line("  fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {")
+	f.line("    switch (id) {")
+	for _, a := range arms {
+		f.line("%s", a)
+	}
+	f.line("      default: break;")
+	f.line("    }")
+	f.line("  }")
 }
 
 // emitStreamPayload writes the string/blob callback.
@@ -562,6 +609,16 @@ func (g *gen) emitStreamCollectors(f *tsfile, use streamUse) {
 		f.line("class _StrSeq implements Visitor {")
 		f.line("  constructor(readonly out: string[], readonly a: _Acc,")
 		f.line("              readonly cap: number, readonly emax: number, readonly nm: string) {}")
+		// Both verdicts are taken at the element's LENGTH WORD, via fixlenBegin --
+		// the over-index one against the element id, the maxlen one against the
+		// declared total. In the payload callback they could not fire at all for an
+		// element whose message ends right after that word, so the same bytes were
+		// INVALID one-shot and INCOMPLETE chunked (generator#300).
+		f.line("  fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {")
+		f.line("    if (sub !== FixlenSubtype.String) return;")
+		f.line("    if (this.cap >= 0 && id >= this.cap) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm}: array index above schema capacity ${this.cap}`);")
+		f.line("    if (this.emax >= 0 && total > this.emax) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm} element: string byte length above schema maxlen ${this.emax}`);")
+		f.line("  }")
 		f.line("  string(id: number, total: number, offset: number, chunk: Uint8Array): void {")
 		f.line("    if (this.cap >= 0 && id >= this.cap) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm}: array index above schema capacity ${this.cap}`);")
 		f.line("    if (this.emax >= 0 && total > this.emax) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm} element: string byte length above schema maxlen ${this.emax}`);")
@@ -579,6 +636,16 @@ func (g *gen) emitStreamCollectors(f *tsfile, use streamUse) {
 		f.line("class _BlobSeq implements Visitor {")
 		f.line("  constructor(readonly out: Uint8Array[], readonly a: _Acc,")
 		f.line("              readonly cap: number, readonly emax: number, readonly nm: string) {}")
+		// Both verdicts are taken at the element's LENGTH WORD, via fixlenBegin --
+		// the over-index one against the element id, the maxlen one against the
+		// declared total. In the payload callback they could not fire at all for an
+		// element whose message ends right after that word, so the same bytes were
+		// INVALID one-shot and INCOMPLETE chunked (generator#300).
+		f.line("  fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {")
+		f.line("    if (sub !== FixlenSubtype.Blob) return;")
+		f.line("    if (this.cap >= 0 && id >= this.cap) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm}: array index above schema capacity ${this.cap}`);")
+		f.line("    if (this.emax >= 0 && total > this.emax) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm} element: blob byte length above schema maxlen ${this.emax}`);")
+		f.line("  }")
 		f.line("  blob(id: number, total: number, offset: number, chunk: Uint8Array): void {")
 		f.line("    if (this.cap >= 0 && id >= this.cap) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm}: array index above schema capacity ${this.cap}`);")
 		f.line("    if (this.emax >= 0 && total > this.emax) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm} element: blob byte length above schema maxlen ${this.emax}`);")
