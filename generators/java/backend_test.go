@@ -2,6 +2,7 @@ package java
 
 import (
 	"os"
+	"sort"
 	"strings"
 	"testing"
 
@@ -57,7 +58,6 @@ func TestJavaStructural(t *testing.T) {
 		"class MyfirstmessageVisitor implements Visitor {",
 		"public void sequenceBegin(int id)", // flat-visitor nesting
 		"public long someu64 = Long.parseUnsignedLong(\"18446744073709551615\");",
-		"class MyfirstmessageSomestructNestedstruct {",                                                // nested types in file
 		"public long[] someuintarray = new long[]{0L, 1L, 1000L, 4294967295L};",                       // primitive array (was List<Long>)
 		"public float[] somefloatarray = new float[]{0.0f, -1.5f, 3.25f};",                            // primitive fp array
 		"public long[] someenumarray = new long[]{2L, 1L, 0L};",                                       // declared default, NOT padded to count (count is a capacity)
@@ -74,6 +74,11 @@ func TestJavaStructural(t *testing.T) {
 		if !strings.Contains(m, want) {
 			t.Errorf("Myfirstmessage.java missing %q", want)
 		}
+	}
+	// The nested types are their own public classes in their own files now
+	// (generator#305), so the message file must NOT declare them.
+	if strings.Contains(m, "class MyfirstmessageSomestructNestedstruct {") {
+		t.Error("a schema type must not be declared inside the message's file")
 	}
 }
 
@@ -751,7 +756,11 @@ messages:
       bools: { id: 5, type: array, items: { type: boolean, count: 2 }, default: [true, false] }
       st:   { id: 6, type: struct, fields: { inner: { id: 0, type: array, items: { type: string, maxlen: 8 } } } }
 `
-	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+	files := genJavaFromYAML(t, src, map[string]any{})
+	m := files["src/main/java/message/M.java"]
+	// The nested struct is its own public class in its own file (generator#305),
+	// so its half of the reset contract is asserted there.
+	st := files["src/main/java/message/MSt.java"]
 	for _, want := range []string{
 		// Public, so a caller driving the Visitor by hand can re-arm too.
 		"    public void reset() {",
@@ -767,7 +776,6 @@ messages:
 		"        this.bools = Sbuf.resetList(this.bools);\n        this.bools.addAll(_arrdef_bools);",
 		// A nested object recurses instead of being re-allocated.
 		"        if (this.st == null) this.st = new MSt(); else this.st.reset();",
-		"        this.inner = Sbuf.resetList(this.inner);",
 		// The reuse entry point re-arms before feeding.
 		"    public static DecodeStatus tryDecode(byte[] data, M out) throws SofabException {\n        out.reset();",
 	} {
@@ -775,9 +783,23 @@ messages:
 			t.Errorf("M.java missing %q", want)
 		}
 	}
-	// Every emitted class (M plus its one struct) carries a reset().
-	if got := strings.Count(m, "public void reset() {"); got != 2 {
-		t.Errorf("expected one reset() per class (2), got %d", got)
+	// The struct's own reset(), in the struct's own file: it empties its
+	// container in place, exactly as the message does.
+	for _, want := range []string{
+		"public class MSt {",
+		"    public void reset() {",
+		"        this.inner = Sbuf.resetList(this.inner);",
+	} {
+		if !strings.Contains(st, want) {
+			t.Errorf("MSt.java missing %q", want)
+		}
+	}
+	// One reset() per class, and one class per file.
+	if got := strings.Count(m, "public void reset() {"); got != 1 {
+		t.Errorf("expected one reset() in M.java, got %d", got)
+	}
+	if got := strings.Count(st, "public void reset() {"); got != 1 {
+		t.Errorf("expected one reset() in MSt.java, got %d", got)
 	}
 	// decode(byte[]) builds a fresh instance, so it must not pay for a reset.
 	if strings.Contains(m, "M m = new M();\n        m.reset();") {
@@ -1209,5 +1231,75 @@ messages:
 	// scope of #272), which used to fall straight through the outer switch.
 	if strings.Count(got, "cur = _DEAD; break;") < 2 {
 		t.Errorf("every scope must skip an undeclared sequence id (#272):\n%s", got)
+	}
+}
+
+// TestJavaNamedTypesArePublicAndOwnTheirFile pins generator#305.
+//
+// Java allows one public top-level class per file and the message owns that
+// slot, so a schema struct emitted INTO the message's file could only be
+// package-private — which made the message's own public field unusable: a
+// caller outside the generated package could neither touch `msg.inner.x` nor
+// name the type. Every other target exports these types.
+//
+// The same emission had a harder failure behind it: a type reached from two
+// messages was written into both files, i.e. declared twice in one package,
+// which javac rejects as a duplicate class. So the schema below shares one
+// struct between two messages, and the type must appear exactly once.
+func TestJavaNamedTypesArePublicAndOwnTheirFile(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  struct:
+    Point:
+      x: { id: 0, type: i32 }
+messages:
+  first:
+    payload:
+      p: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Point' } }
+  second:
+    payload:
+      q: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Point' } }
+`
+	files := genJavaFromYAML(t, src, map[string]any{"package": "com.example.two"})
+
+	const dir = "src/main/java/com/example/two/"
+	pointFile, ok := files[dir+"StructPoint.java"]
+	if !ok {
+		var have []string
+		for p := range files {
+			have = append(have, p)
+		}
+		sort.Strings(have)
+		t.Fatalf("the shared struct has no file of its own; emitted: %v", have)
+	}
+
+	if !strings.Contains(pointFile, "public class StructPoint {") {
+		t.Error("a schema struct must be public — a caller outside the package has to name it")
+	}
+	if !strings.Contains(pointFile, "package com.example.two;") {
+		t.Error("the type's file is missing the package declaration")
+	}
+
+	// Declared once, in its own file and nowhere else: two declarations in one
+	// package do not compile.
+	for path, body := range files {
+		if path == dir+"StructPoint.java" {
+			continue
+		}
+		if strings.Contains(body, "class StructPoint") {
+			t.Errorf("%s also declares StructPoint — duplicate class in one package", path)
+		}
+	}
+
+	// The generated plumbing stays package-private: it is not schema surface.
+	msg := files[dir+"First.java"]
+	if !strings.Contains(msg, "class FirstVisitor implements Visitor {") ||
+		strings.Contains(msg, "public class FirstVisitor") {
+		t.Error("the decode visitor must stay package-private")
+	}
+	if sbuf := files[dir+"Sbuf.java"]; !strings.Contains(sbuf, "final class Sbuf {") ||
+		strings.Contains(sbuf, "public final class Sbuf") {
+		t.Error("Sbuf must stay package-private")
 	}
 }
