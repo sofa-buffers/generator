@@ -614,6 +614,21 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    view. The cost is one copy per streamed payload, in exchange for a destination
    whose lifetime is independent of both the carry buffer and the fed chunk.
 
+   **That independence is now the spec's rule, not just this design's
+   (documentation#37 → documentation#38).** CORELIB_PLAN §6 states it normatively:
+   a fed chunk is borrowed **only for the duration of the `feed` call** — once
+   `feed` returns the caller may reuse, overwrite or free that memory, and the
+   decoded message MUST NOT be affected. The one-shot `decode(buffer)` is exempt
+   in the obvious way, since the caller supplies the whole buffer and keeps it
+   alive across the call, which is exactly the split `own` already draws. §7.2
+   item 4 adds the oracle that makes it checkable: scrub every chunk after `feed`
+   returns and assert the decoded message is unchanged. Run against generated Zig
+   at family tip — the only target that stores views — a `nested.str = "hello"`
+   message fed out of a buffer the harness overwrites with `0xa5` immediately
+   after each `feed` decodes to `"hello"` at chunk sizes 1, 2, 3, 5 and 16. **A
+   new view-storing backend inherits this obligation**: borrow on the contiguous
+   path, copy on the resumable one.
+
    Fixed-count native arrays decode into a fixed/primitive member
    (Rust `[T; N]`, Java `long[]/float[]/double[]`, C++ `std::array<T, N>`)
    filled by index, not a grown heap collection; a **count-less** native array
@@ -1581,6 +1596,34 @@ surrogates `U+D800`–`U+DFFF`, and code points above `U+10FFFF`; permits embedd
 sequence split at a chunk boundary stays `INCOMPLETE`, only a truncated-at-end or
 malformed payload is `INVALID` (§5.2 anti-folding). This is tracked family-wide as
 **issue #85**; conformance and the differential fuzzer run with the check ON.
+
+**That timing is now normative, and the exception that allowed the other reading
+is gone (documentation#33 → documentation#40).** CORELIB_PLAN §6.4 used to say a
+decoder **MAY** report `INVALID` mid-payload for a byte that can never appear —
+the one place §5.2's INVALID-dominates-INCOMPLETE precedence was allowed to pull a
+verdict forward. It now says the opposite: a decoder **MUST NOT** report `INVALID`
+before the declared length is reached; that input is `INCOMPLETE` until the payload
+ends, and `INVALID` once it does. The reason is that this check is not a property
+of the wire — `SOFAB_STRICT_UTF8` has a normative OFF mode, and validation runs
+only where a string is *materialized* — so letting its timing decide the verdict
+would make two conformant decoders disagree on accept-vs-reject.
+
+**Nothing changes in the generator, and this is measured rather than assumed.**
+Every backend's validation already sits behind reassembly: the check runs on the
+value the accumulator returns, and the accumulator returns nothing while the
+payload is short. Zig was the one implementation the finding named, so it is the
+one worth pinning — generated `decode()` *and* the streaming `Decoder`, against
+corelib-zig `main` with strict UTF-8 on:
+
+```
+mid-payload 0xa2, payload declares 2 bytes, 1 arrives
+  whole -> INCOMPLETE      chunk 1/2/3/5/8 -> INCOMPLETE
+control: the SAME byte in a payload that COMPLETES
+  whole -> INVALID         chunk 1/3       -> INVALID
+```
+
+The control is what makes the first line mean something: without it, "INCOMPLETE
+everywhere" is equally consistent with validation being compiled off.
 
 ### 9.4 Capability / value-width model
 
