@@ -14,39 +14,41 @@
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
-# corelib:   c-cpp 6ee3fef | cpp 2466869 | cs 17f4277 | dart 1b83161 | go 762464f | java fedb0b7 | py bd5cb37 | rs 5255a0c | rs-no-std 5126032 | ts b9b3e4a | zig 29ca282
+# corelib:   c-cpp f0df7a3 | cpp 4639de8 | cs 17f4277 | dart 1b83161 | go 2984421 | java fedb0b7 | py 12571f0 | rs 5255a0c | rs-no-std 5126032 | ts 56f289e | zig 29ca282
 #
 ## instruction cost
 row                profile    method    encode_ir/op  decode_ir/op
 c                  footprint  toggle    24480         50612
 cpp-c-cpp          footprint  toggle    32630         37673
 cpp-c-cpp-dyn      footprint  toggle    32869         47318
-cpp-cpp            maxspeed   toggle    13672         31043
+cpp-cpp            maxspeed   toggle    13672         31271
+cpp-cpp-static     maxspeed   toggle    12967         22243
 csharp             maxspeed   subtract  30830         67221
 dart               maxspeed   subtract  30427         48945
-go                 maxspeed   toggle    19378         37354
+go                 maxspeed   toggle    19378         36999
 java               maxspeed   subtract  18265         34070
 python             maxspeed   subtract  900876        2180471
-python-native      maxspeed   subtract  125818        457812
-rust-rs            maxspeed   toggle    8873          21158
-rust-rs-no-std     footprint  toggle    10189         29609
+python-native      maxspeed   subtract  125818        459492
+rust-rs            maxspeed   toggle    8873          21294
+rust-rs-no-std     footprint  toggle    10189         29717
 rust-rs-no-std-dyn footprint  toggle    10142         37828
-ts-bigint          maxspeed   subtract  592261        837789
-ts-long            maxspeed   subtract  592258        837793
-zig                maxspeed   toggle    10698         19965
+rust-rs-static     maxspeed   toggle    8812          14929
+ts-bigint          maxspeed   subtract  592261        851238
+ts-long            maxspeed   subtract  592258        851237
+zig                maxspeed   toggle    10740         20356
 
 ## toolchain
 tool                      version       rows
 arm-none-eabi-gcc         14.2.1        c,cpp-c-cpp,cpp-c-cpp-dyn
 dotnet                    10.0.302      csharp
-g++                       15.2.0        cpp-c-cpp,cpp-c-cpp-dyn,cpp-cpp
+g++                       15.2.0        cpp-c-cpp,cpp-c-cpp-dyn,cpp-cpp,cpp-cpp-static
 gcc                       15.2.0        c
 go                        1.24.4        go
 javac                     25.0.3        java
 node                      24.18.0       ts-bigint,ts-long
 python3                   3.14.4        python,python-native
 riscv64-unknown-elf-gcc   14.2.0        c
-rustc                     1.97.1        rust-rs,rust-rs-no-std,rust-rs-no-std-dyn
+rustc                     1.97.1        rust-rs,rust-rs-no-std,rust-rs-no-std-dyn,rust-rs-static
 sofab-engine              pure          python
 sofab-engine              native        python-native
 valgrind                  3.26.0        all
@@ -57,9 +59,9 @@ row                profile    arch            text    data   bss
 c                  footprint  ARMv6-m         1720    0      0
 c                  footprint  ARMv7-m+fp.dp   1708    0      0
 c                  footprint  RV32IMC         1790    0      0
-cpp-c-cpp          footprint  ARMv6-m         6589    0      192
-cpp-c-cpp          footprint  ARMv7-m+fp.dp   6361    0      192
-cpp-c-cpp-dyn      footprint  ARMv6-m         14287   0      208
-cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   13051   0      208
-rust-rs-no-std     footprint  thumbv6m        9145    0      0
-rust-rs-no-std-dyn footprint  thumbv6m        10649   0      4
+cpp-c-cpp          footprint  ARMv6-m         6438    0      192
+cpp-c-cpp          footprint  ARMv7-m+fp.dp   6130    0      192
+cpp-c-cpp-dyn      footprint  ARMv6-m         14187   0      208
+cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   12949   0      208
+rust-rs-no-std     footprint  thumbv6m        9241    0      0
+rust-rs-no-std-dyn footprint  thumbv6m        10761   0      4
