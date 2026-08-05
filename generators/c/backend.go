@@ -119,6 +119,7 @@ type member struct {
 	decl       string // e.g. "uint16_t u16;"
 	align      int    // storage alignment in bytes, for widest-first member ordering
 	doc        string // field description (+unit), single-lined; "" => no member comment
+	note       string // schema-bound note (generator#308); "" => the field has no bound
 	deprecated bool   // field carries deprecated:true — emit the native attribute + doc note
 }
 
@@ -139,6 +140,30 @@ func memberDoc(f *ir.Field) string {
 	// Neutralise a comment terminator so a description containing "*/" cannot
 	// close the trailing /**< ... */ member comment early.
 	return strings.ReplaceAll(d, "*/", "* /")
+}
+
+// memberNote is the field's schema-bound note, wired to how the C target
+// actually stores the field (generator#308). C is the target where this matters
+// most: a bounded array and a bounded blob keep their LENGTH in a separate
+// member, so a caller that fills the storage and forgets the length encodes an
+// empty field — no crash, no warning, and valid bytes on the wire.
+func memberNote(f *ir.Field) string {
+	name := cIdent(f.Name)
+	switch {
+	case f.Kind == ir.KindString:
+		// char[maxlen+1], NUL-terminated: the capacity IS the type and there is
+		// no companion to forget.
+		return generator.BoundNote(f, generator.StorageFixed)
+	case f.Kind == ir.KindBlob:
+		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: name + "_len"}.Note(f)
+	case f.Kind == ir.KindArray && isHolderElem(f.Elem):
+		// A wrapper array lowers to a holder struct, so its length lives inside
+		// the member rather than beside it.
+		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: name + ".len"}.Note(f)
+	case f.Kind == ir.KindArray:
+		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: name + "_len"}.Note(f)
+	}
+	return ""
 }
 
 type fieldEntry struct {
@@ -242,7 +267,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f), deprecated: f.Deprecated})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f), note: memberNote(f), deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
@@ -255,7 +280,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f), deprecated: f.Deprecated})
+			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f), note: memberNote(f), deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
@@ -264,7 +289,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 			if err != nil {
 				return err
 			}
-			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), deprecated: f.Deprecated})
+			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: memberNote(f), deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 			// A compact array's declared default is an array of its OWN length, not
 			// one padded out to the capacity (§2/§3/§6): `default: [1,2,3]` on a
@@ -517,9 +542,22 @@ func (g *gen) emitStruct(h *cfile, p *objectPlan) {
 				doc = "@deprecated"
 			}
 		}
-		if doc != "" {
+		// A field with a schema bound takes the leading block form: the note does
+		// not fit a trailing /**< ... */, and it documents the length member the
+		// declaration line declares alongside the storage.
+		switch {
+		case m.note != "":
+			h.line("    /**")
+			if doc != "" {
+				h.line("     * %s", doc)
+				h.line("     *")
+			}
+			h.line("     * %s", m.note)
+			h.line("     */")
+			h.line("    %s", decl)
+		case doc != "":
 			h.line("    %s  /**< %s */", decl, doc)
-		} else {
+		default:
 			h.line("    %s", decl)
 		}
 	}

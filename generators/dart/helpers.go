@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
@@ -133,7 +134,7 @@ func exported(name string) string {
 // fieldDoc builds the dartdoc text for a field: its Description, with a
 // " (unit: <Unit>)" suffix when a Unit is set, and a "Deprecated." note when the
 // field is deprecated (the @Deprecated annotation is emitted separately).
-func fieldDoc(f *ir.Field) string {
+func fieldDoc(f *ir.Field, note string) string {
 	var doc string
 	switch {
 	case f.Description != "" && f.Unit != "":
@@ -143,6 +144,7 @@ func fieldDoc(f *ir.Field) string {
 	case f.Unit != "":
 		doc = "(unit: " + f.Unit + ")"
 	}
+	doc = generator.AppendDoc(doc, note)
 	if f.Deprecated {
 		if doc != "" {
 			doc += "\n"

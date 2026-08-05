@@ -657,6 +657,7 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		if fld.Deprecated {
 			attr = "[[deprecated]] "
 		}
+		typ := g.cppType(fld)
 		doc := fieldDoc(fld)
 		if fld.Deprecated {
 			if doc != "" {
@@ -665,10 +666,22 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 				doc = "@deprecated"
 			}
 		}
-		if doc != "" {
-			f.line("    %s%s %s = %s;  ///< %s", attr, g.cppType(fld), cppIdent(fld.Name), g.cppDefault(fld), doc)
-		} else {
-			f.line("    %s%s %s = %s;", attr, g.cppType(fld), cppIdent(fld.Name), g.cppDefault(fld))
+		// The schema bound goes in the field's own doc (generator#308). It does
+		// not fit the trailing ///< form, so a field that has one takes the
+		// leading-block form instead; an unbounded field keeps the trailing
+		// comment it always had.
+		note := generator.BoundNote(fld, cppStorage(typ))
+		switch {
+		case note != "":
+			if doc != "" {
+				f.line("    /// %s", doc)
+			}
+			f.line("    /// %s", note)
+			f.line("    %s%s %s = %s;", attr, typ, cppIdent(fld.Name), g.cppDefault(fld))
+		case doc != "":
+			f.line("    %s%s %s = %s;  ///< %s", attr, typ, cppIdent(fld.Name), g.cppDefault(fld), doc)
+		default:
+			f.line("    %s%s %s = %s;", attr, typ, cppIdent(fld.Name), g.cppDefault(fld))
 		}
 	}
 	if isMessage {
@@ -956,6 +969,17 @@ func emitStructDoc(f *hfile, summary string) {
 // fieldDoc builds the trailing member-doc text from a field's Description and
 // Unit. Multi-line descriptions collapse to one line (joined with spaces) since
 // a trailing ///< comment cannot span lines. Returns "" when both are empty.
+// cppStorage reads the storage mode back off the member type the backend just
+// chose, rather than re-deriving it: allow_dynamic applies PER FIELD (a bounded
+// field goes inline, an unbounded one stays on the heap even under static
+// storage), and the two decisions cannot then drift apart.
+func cppStorage(cppType string) generator.FieldStorage {
+	if strings.HasPrefix(cppType, "sofab::Fixed") || strings.HasPrefix(cppType, "sofab::InlineVector") {
+		return generator.StorageFixed
+	}
+	return generator.StorageDynamic
+}
+
 func fieldDoc(fld *ir.Field) string {
 	desc := strings.Join(strings.Split(fld.Description, "\n"), " ")
 	switch {

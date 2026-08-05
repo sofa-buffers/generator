@@ -1,0 +1,40 @@
+# A field per bound shape, for the schema-bound doc note (generator#308): the
+# bound is enforced everywhere and, before the note, stated nowhere the caller
+# was looking. Every field carries a bound except `free`, which is here to prove
+# a field WITHOUT one is documented exactly as it always was.
+version: 1
+messages:
+  bounded:
+    summary: One field per bound shape.
+    payload:
+      label:
+        id: 0
+        type: string
+        maxlen: 8
+        description: A bounded string.
+      payload:
+        id: 1
+        type: blob
+        maxlen: 16
+        description: A bounded blob.
+      fixed:
+        id: 2
+        type: array
+        items: { type: u32, count: 3 }
+        description: A count-bounded array.
+      seeded:
+        id: 3
+        type: array
+        items: { type: u32, count: 4 }
+        default: [10, 20]
+        description: A count-bounded array with a declared default.
+      tags:
+        id: 4
+        type: array
+        items: { type: string, count: 2, maxlen: 5 }
+        description: A wrapper array with an element bound.
+      free:
+        id: 5
+        type: array
+        items: { type: u32 }
+        description: An unbounded array.

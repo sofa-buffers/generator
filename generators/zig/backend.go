@@ -128,7 +128,17 @@ func (f *zfile) emitDoc(indent, text string) {
 // fieldDoc builds a field's doc-comment text from its Description and Unit.
 // A deprecated field gets a trailing "Deprecated." note (Zig has no native
 // deprecation attribute, so the doc line is the only marker).
-func fieldDoc(fld *ir.Field) string {
+// zigStorage reads the storage back off the member type: a count-bounded native
+// array lowers to FixedArray(T, N) (the capacity is in the type), while strings,
+// blobs and wrapper arrays stay slices (it is not).
+func zigStorage(zigType string) generator.FieldStorage {
+	if strings.HasPrefix(zigType, "FixedArray(") {
+		return generator.StorageFixed
+	}
+	return generator.StorageDynamic
+}
+
+func fieldDoc(fld *ir.Field, note string) string {
 	var doc string
 	switch {
 	case fld.Description != "" && fld.Unit != "":
@@ -138,6 +148,7 @@ func fieldDoc(fld *ir.Field) string {
 	case fld.Unit != "":
 		doc = "(unit: " + fld.Unit + ")"
 	}
+	doc = generator.AppendDoc(doc, note)
 	if fld.Deprecated {
 		if doc != "" {
 			doc += "\n"
@@ -253,8 +264,9 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 	// them, and sparse-canonical decode (MESSAGE_SPEC S2) reconstructs an
 	// omitted field simply by leaving the default in place.
 	for _, fld := range fields {
-		f.emitDoc("    ", fieldDoc(fld))
-		f.line("    %s: %s = %s,", zigIdent(fld.Name), g.zigType(fld), g.zigFieldDefault(fld))
+		typ := g.zigType(fld)
+		f.emitDoc("    ", fieldDoc(fld, generator.BoundNote(fld, zigStorage(typ))))
+		f.line("    %s: %s = %s,", zigIdent(fld.Name), typ, g.zigFieldDefault(fld))
 	}
 	f.blank()
 	if isMessage {

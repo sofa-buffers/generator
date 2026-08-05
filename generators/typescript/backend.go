@@ -305,7 +305,7 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 			g.emitLongAccessor(f, fld)
 			continue
 		}
-		f.emitDoc("  ", fieldDoc(fld))
+		f.emitDoc("  ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
 		f.line("  %s: %s = %s;", fld.Name, g.tsType(fld), g.tsDefault(fld))
 		if fp32RawCompanion(fld) {
 			// The value slot above is the field's API; this is its wire companion
@@ -348,7 +348,7 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 func (g *gen) emitLongAccessor(f *tsfile, fld *ir.Field) {
 	t := g.tsType(fld)
 	f.line("  private _%s: %s = %s;", fld.Name, t, g.tsDefault(fld))
-	f.emitDoc("  ", fieldDoc(fld))
+	f.emitDoc("  ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
 	f.line("  get %s(): %s { return this._%s; }", fld.Name, t, fld.Name)
 	f.line("  set %s(vals: %s) { this._%s = %s; }", fld.Name, g.longSetterParam(fld), fld.Name, g.longConvert("vals", fld.Elem, fld.ElemItems, 0))
 }

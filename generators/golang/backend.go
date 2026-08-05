@@ -455,6 +455,19 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 	for _, fld := range ir.SortedForLayout(fields) {
 		tag := fmt.Sprintf("`json:%q`", fld.Name)
 		name := goFieldName(fld.Name)
+		note := generator.BoundNote(fld, generator.StorageDynamic)
+		if note != "" && !fld.Deprecated {
+			// A schema bound does not fit the trailing comment, so the field takes
+			// the leading doc-block form (generator#308) -- the same shape a
+			// deprecated field already uses.
+			if doc := fieldDocText(fld); doc != "" {
+				f.line("\t// %s %s", name, doc)
+				f.line("\t//")
+			}
+			f.line("\t// %s", note)
+			f.line("\t%s %s %s", name, g.goType(fld), tag)
+			continue
+		}
 		if fld.Deprecated {
 			// Go has no deprecation attribute; the godoc convention is the marker.
 			// A "Deprecated:" paragraph must stand on its own line, so a deprecated
@@ -462,6 +475,10 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 			// the trailing description comment used elsewhere.
 			if doc := fieldDocText(fld); doc != "" {
 				f.line("\t// %s %s", name, doc)
+				f.line("\t//")
+			}
+			if note != "" {
+				f.line("\t// %s", note)
 				f.line("\t//")
 			}
 			f.line("\t// Deprecated: retained for backward compatibility only; do not use in new code.")
