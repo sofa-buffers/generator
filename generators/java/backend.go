@@ -26,6 +26,17 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	dir := "src/main/java/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
 	var files []generator.File
 	files = append(files, generator.File{Path: dir + "Sbuf.java", Content: g.sbufSupport()})
+	// Every named struct/union gets its OWN file, so it can be public: Java
+	// allows one public top-level class per file, and the message owns that slot
+	// in <Message>.java (generator#305). Emitting them per message would also
+	// declare a shared type twice, which does not compile at all.
+	for _, key := range g.namedTypes() {
+		nt := s.Named[key]
+		files = append(files, generator.File{
+			Path:    dir + g.typeName(key) + ".java",
+			Content: g.namedTypeFile(key, nt),
+		})
+	}
 	for _, m := range s.Messages {
 		files = append(files, generator.File{Path: dir + exported(m.Name) + ".java", Content: g.messageFile(m)})
 	}
@@ -168,8 +179,52 @@ func fieldDoc(fld *ir.Field, note string) string {
 	return d
 }
 
-// messageFile emits <Message>.java: the public message class plus its reachable
-// named-type classes (package-private) and the decode visitor.
+// namedTypes lists every struct/union the schema's messages reach, deduplicated
+// and in a stable order: each message's reachable set in message order, which
+// keeps a type ahead of whatever refers to it.
+//
+// Deduplication is the point. A type reached from two messages is ONE class in
+// the package; emitting it into each message's file declared it twice and the
+// package did not compile.
+func (g *gen) namedTypes() []string {
+	var order []string
+	seen := map[string]bool{}
+	for _, m := range g.schema.Messages {
+		for _, key := range g.reachable(m) {
+			nt := g.schema.Named[key]
+			if nt.Category != ir.CatStruct && nt.Category != ir.CatUnion {
+				continue // enum/bitfield lower to a raw integer: no class to emit
+			}
+			if !seen[key] {
+				seen[key] = true
+				order = append(order, key)
+			}
+		}
+	}
+	return order
+}
+
+// namedTypeFile emits <Type>.java: one public class for a schema struct/union.
+//
+// It is public because a caller outside the generated package has to be able to
+// touch it — a message's struct-typed field is a public member, and a type the
+// caller may not name makes that member unusable (generator#305). Every other
+// target exports these types; Java could not, only because they shared the
+// message's file.
+func (g *gen) namedTypeFile(key string, nt *ir.NamedType) []byte {
+	f := &jfile{}
+	g.header(f)
+	f.line("package %s;", g.pkg)
+	f.line("import org.sofabuffers.sofab.*;")
+	f.line("import java.io.IOException;")
+	f.line("import java.util.*;")
+	f.blank()
+	g.emitClass(f, g.typeName(key), nt.Fields, nt.Summary, false, true)
+	return f.bytes()
+}
+
+// messageFile emits <Message>.java: the public message class and the decode
+// visitor that fills it. The named types it refers to are their own files.
 func (g *gen) messageFile(m *ir.Message) []byte {
 	f := &jfile{}
 	g.header(f)
@@ -179,13 +234,6 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("import java.util.*;")
 	f.blank()
 
-	order := g.reachable(m)
-	for _, key := range order {
-		nt := g.schema.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitClass(f, g.typeName(key), nt.Fields, nt.Summary, false, false)
-		}
-	}
 	g.emitClass(f, exported(m.Name), m.Fields, m.Summary, true, true)
 	return f.bytes()
 }

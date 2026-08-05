@@ -27,6 +27,31 @@ targets:
     package: com.myproj.messages
 ```
 
+## Emitted files — one public class each
+
+Java allows one public top-level class per file, so every generated type gets
+its own:
+
+```
+src/main/java/<pkg>/
+    <Message>.java   public class <Message>  + the package-private <Message>Visitor
+    <Type>.java      public class <Type>     one per schema struct/union
+    Sbuf.java        package-private shared helpers
+```
+
+The schema types are **public**, like every other target's (`pub struct` in Rust,
+`export class` in TypeScript, an exported Go struct). They used to sit inside the
+message's file, which forced them package-private and made a message's
+struct-typed field unusable from anywhere else — `probe.inner.x` did not compile
+outside the generated package, and the type could not even be named (#305).
+
+A type reached from two messages is emitted **once**. Per-message emission also
+declared it twice in one package, which javac rejects outright (`duplicate
+class`), so a schema with a shared `$defs` struct did not build at all.
+
+`Sbuf` and `<Message>Visitor` stay package-private on purpose: they are
+generated plumbing, not schema surface.
+
 ## Arrays — `count` is a capacity
 
 An array field maps to a `long[]`/`float[]`/`double[]` (numeric, enum, bitfield,
