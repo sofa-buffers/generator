@@ -163,6 +163,22 @@
       "archs": []
     },
     {
+      "//": "The static-storage half of the maxspeed pair -- read with rust-rs above,",
+      "// ": "exactly as cpp-c-cpp-dyn is read with cpp-c-cpp. Bounded fields become",
+      "//  ": "heapless::String<N> / heapless::Vec<T, N> instead of String / Vec, so the",
+      "//   ": "decode path fills them in place rather than allocating per field. The",
+      "//    ": "trade is sizeof: a message holds its declared worst case. Same schema,",
+      "//     ": "same wire bytes; this pair is the only way to see what that costs or buys.",
+      "id": "rust-rs-static",
+      "lang": "rust",
+      "corelib": "corelib-rs",
+      "corelib_env": "SOFAB_RS_STD_CORELIB",
+      "profile": "maxspeed",
+      "method": "toggle",
+      "config": "generic: { emit: project }\ntargets: { rust: { corelib: rs, allow_dynamic: false } }",
+      "archs": []
+    },
+    {
       "id": "zig",
       "lang": "zig",
       "corelib": "corelib-zig",

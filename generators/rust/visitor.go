@@ -920,7 +920,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		if g.limits.stringHas {
 			g.emitLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN")
 		}
-		if g.noStd {
+		if g.fixedFields() {
 			// Accumulate across chunks so a streaming (multi-feed) string is
 			// reconstructed like the std profile (generator#81), bounded by `acc`'s
 			// capacity. The single-shot fast path (whole payload in one chunk) reads
@@ -995,7 +995,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		if g.limits.blobHas {
 			g.emitLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN")
 		}
-		if g.noStd {
+		if g.fixedFields() {
 			// Accumulate across chunks like the string visitor / std profile
 			// (generator#81); single-shot fast path reads the slice directly.
 			f.line("        if offset == 0 { self.acc.clear(); }")
@@ -1474,7 +1474,7 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 // limit-rejected header leaves behind -- is a no-op instead of a panic on
 // untrusted input.
 func (g *gen) rowStore(fr frame, val string) string {
-	return fmt.Sprintf("if let Some(_r) = %s.get_mut(self.%s) { %s }", fr.path, fr.ixVar, g.pushStmt("_r", val))
+	return fmt.Sprintf("if let Some(_r) = %s.get_mut(self.%s) { %s }", fr.path, fr.ixVar, g.pushFieldStmt("_r", val))
 }
 
 // pushExpr / pushStmt handle the heapless-vs-heap container push: under
@@ -1482,14 +1482,28 @@ func (g *gen) rowStore(fr frame, val string) string {
 // uses a bare Vec push. A grown-into row is `Default::default()` on both, which
 // is the empty container whichever one the profile chose.
 func (g *gen) pushExpr(target, val string) string {
-	if g.noStd {
+	if g.fixedFields() {
 		return fmt.Sprintf("{ let _ = %s.push(%s); }", target, val)
 	}
 	return fmt.Sprintf("%s.push(%s)", target, val)
 }
 
+// pushStmt is the DECODER's own stack push, which follows the environment: a
+// bounded heapless stack under no_std, a heap Vec otherwise. Static field
+// storage does not change it -- staticStore is about message fields, and the
+// decoder's scratch is free to stay on the heap where there is one.
 func (g *gen) pushStmt(target, val string) string {
 	if g.noStd {
+		return fmt.Sprintf("let _ = %s.push(%s);", target, val)
+	}
+	return fmt.Sprintf("%s.push(%s);", target, val)
+}
+
+// pushFieldStmt is the same for a MESSAGE container, which follows the storage
+// axis instead. The Result-consuming form is also correct for a Vec (push
+// returns unit), so one form serves the mixed case a per-field bound produces.
+func (g *gen) pushFieldStmt(target, val string) string {
+	if g.fixedFields() {
 		return fmt.Sprintf("let _ = %s.push(%s);", target, val)
 	}
 	return fmt.Sprintf("%s.push(%s);", target, val)
@@ -1503,7 +1517,7 @@ func (g *gen) pushStmt(target, val string) string {
 // allow_dynamic): push may be a no-op when full, so the loop breaks when the length
 // stops growing to avoid spinning on an out-of-capacity id; get_mut then no-ops.
 func (g *gen) seqElemGrow(path string) string {
-	if g.noStd {
+	if g.fixedFields() {
 		return fmt.Sprintf("while %s.len() <= id as usize { let _n = %s.len(); let _ = %s.push(Default::default()); if %s.len() == _n { break; } }", path, path, path, path)
 	}
 	return fmt.Sprintf("while %s.len() <= id as usize { %s.push(Default::default()); }", path, path)

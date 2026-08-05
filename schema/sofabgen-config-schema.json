@@ -171,8 +171,7 @@
       "properties": {
         "allow_dynamic": {
           "type": "boolean",
-          "default": false,
-          "description": "rust no_std only. Store bounded fields in alloc::String/alloc::Vec instead of fixed-capacity heapless containers, for a target that has an allocator: a field then holds what a message actually carries rather than its declared worst case. Bounds stay mandatory in both modes (an unbounded field is a generate-time error either way) and are enforced on the decode path, so the same schema and the same wire bytes serve both. The Rust analog of the c-cpp allow_dynamic."
+          "description": "Storage for schema-bounded fields. true = String / Vec, holding what a message actually carries; false = fixed-capacity heapless::String<N> / heapless::Vec<T, N> sized from the schema bound. The wire is identical either way -- this is a storage decision, never a format or API one. DEFAULT DEPENDS ON corelib: false for rs-no-std (a firmware target has no heap to spare), true for rs (a server target would rather allocate what it carries than its declared worst case). Unbounded fields differ by profile, not by this switch: rs-no-std rejects them at generate time in both modes (maxlen/count are mandatory), while rs simply leaves them in String/Vec -- so static storage can be turned on there without changing the schema, and applies per field wherever a bound exists. Selecting it on rs adds a heapless dependency to the generated crate. The Rust analog of the C++ allow_dynamic."
         },
         "corelib": {
           "type": "string",

@@ -329,7 +329,7 @@ override.
 | `module_path`, `go_version` | go | `go.mod` fields. |
 | `symbol_prefix` | c | Prefix on generated C symbols. |
 | `allow_dynamic` | cpp (both corelibs) | Storage for **bounded** fields: `true` = `std::string`/`std::vector`, `false` = inline `FixedString`/`FixedBytes`/`InlineVector`. Defaults `true` on `corelib: cpp`, `false` on `c-cpp`. On `c-cpp` bounds stay mandatory in both modes; on `cpp` an unbounded field simply keeps its dynamic container, so the switch applies per field and never fails a build (§9.3). |
-| `allow_dynamic` | rust (`rs-no-std`) | Stores bounded fields in `alloc::String`/`alloc::Vec` instead of heapless containers, for a target with an allocator; bounds stay mandatory and become decode-path checks (§9.3). |
+| `allow_dynamic` | rust (both corelibs) | Storage for **bounded** fields: `true` = `String`/`Vec`, `false` = fixed-capacity `heapless::String<N>`/`heapless::Vec<T, N>`. Defaults `true` on `corelib: rs`, `false` on `rs-no-std` — the same corelib-keyed default the C++ switch carries. On `rs-no-std` bounds stay mandatory in both modes and become decode-path checks; on `rs` an unbounded field simply keeps its dynamic container, so the switch applies per field and never fails a build (§9.3). Selecting it on `rs` adds a `heapless` dependency to the generated crate. |
 | `format` | docs (`html`) | Documentation output format of the non-code `docs` target; `html` is currently the only one. |
 | `no_std` | rust | With `corelib: rs-no-std`, emit the `#![no_std]` crate profile (default `true`). |
 | `max_message_size` | c, cpp, rust, java, csharp, zig, dart | Ceiling on a message's encoded size (default 4096). Fills in for a message the schema cannot bound (emitted as `MAX_SIZE_LIMIT`); when set explicitly it is also a budget a computed worst case may not exceed (§9.6). |
@@ -1692,7 +1692,7 @@ above was found by that check on its first run.
 |---|---|---|---|
 | **C** | `corelib-c-cpp` | descriptor-table callback | `object.h` struct + static descriptor; `symbol_prefix`; auto capability + API-version guards; analytic `MAX_SIZE`; project mode also emits `Makefile` + `CMakeLists.txt`, `run.sh`, and a devcontainer. |
 | **C++** | `corelib-cpp` (default) / `corelib-c-cpp` (`corelib: c-cpp`) | child-visitor / flat-visitor wrapper | header-only `OStreamMessage`+`IStreamMessage`; `c-cpp` decode pre-sizes varlen fields + links the C sources. |
-| **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. |
+| **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. Field storage is a SEPARATE axis from the environment: `allow_dynamic` selects `String`/`Vec` or fixed-capacity `heapless` on **either** corelib, so a std crate can hold its bounded fields inline while keeping serde, the heap decode stack and the ordinary std prelude. |
 | **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; exported `Serialize(*sofab.Encoder)` + `EncodeTo(io.Writer)` — the encoder drains into the writer as it fills, so a message never exists as one contiguous `[]byte`; **no `feed()`** — corelib-go streams pull-shaped (`Decoder.Next` over an `io.Reader`), so a push feed needs a resumable decoder there first; `Decode` via zero-copy `sofab.AcceptBytes`; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
 | **Python** | `corelib-py` | pull-parser | dataclasses + `serialize`/`deserialize` (public since generator#239; `deserialize(Decoder(reader))` IS the chunk-capable path — the corelib pulls from any reader). |
 | **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `serialize`; `decoder()` → `feed`/`finish` for chunked decode, driving a SECOND, generated visitor over the corelib's resumable `IStream` (the cursor cannot be fed in pieces) — the two paths are held together by a differential test over values AND rejections, since a verdict reached in generated code rather than in the corelib can drift, as an unconverted `TextDecoder` TypeError did (generator#297); per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`; a `number` is a 64-bit double, so an fp32 NaN routes through the corelib raw channel (`readFp32Raw`/`writeFixlen(fp32)` for a scalar, `readFp32ArrayRaw`/`writeFp32ArrayRaw` for an array, each with a `Uint8Array \| null` companion slot captured only for a NaN) to preserve a signaling NaN bit-for-bit (§4.6, #235); `recode` harness mode (wire → object → wire) exercises it. |
@@ -2162,12 +2162,18 @@ to 1%.
 **A row is a `(config, corelib)` pair, so every axis that changes generated code
 needs its own row.** Three are covered: the corelib choice (`cpp-cpp`/`cpp-c-cpp`,
 `rust-rs`/`rust-rs-no-std`), the TypeScript `int64` mode (`ts-bigint`/`ts-long`), and
-`allow_dynamic` (`cpp-c-cpp-dyn`, `rust-rs-no-std-dyn`). The last pairs only with the
-footprint rows because that is the only place it does anything — it chooses *where*
-variable-length fields live, and `std` Rust and `corelib: cpp` are heap-backed
-regardless. Read those as pairs: turning it on trades static bytes for an allocator,
-which on `c-cpp` drags in newlib's malloc (`.text` 6589 → 14287) and on bare-metal
-Rust needs one supplied by the footprint driver at all. What no static-section
+`allow_dynamic` (`cpp-c-cpp-dyn`, `rust-rs-no-std-dyn`, `cpp-cpp-static`,
+`rust-rs-static`). The last axis now spans BOTH profiles: it chooses *where* a
+bounded field's bytes live, and that is a question on a server as much as on a
+microcontroller — the maxspeed rows toggle it the other way (static ON against a
+heap-backed default), which is why they are named `-static` rather than `-dyn`.
+Read every one of them as a pair; the flag has no absolute number, only a
+difference against the row it toggles. On the footprint side turning it on trades
+static bytes for an allocator, which on `c-cpp` drags in newlib's malloc (`.text`
+6589 → 14287) and on bare-metal Rust needs one supplied by the footprint driver at
+all. On the maxspeed side the trade runs the other way — fewer per-field
+allocations on the decode path, paid for in `sizeof`, since a message then holds
+its declared worst case. What no static-section
 measurement can show is the heap the dynamic build then needs at runtime.
 A fourth is the corelib's own engine where it has one: `python` / `python-native`
 (below). Uncovered axes are named in `tests/bench/README.md`: the corelib build
