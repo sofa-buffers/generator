@@ -83,9 +83,9 @@ func TestBoundNote(t *testing.T) {
 func TestBoundNoteEmpty(t *testing.T) {
 	for _, f := range []*ir.Field{
 		{Name: "count", Kind: ir.KindU32},
-		{Name: "free", Kind: ir.KindArray, Elem: ir.KindU32},              // no count
-		{Name: "note", Kind: ir.KindString},                               // no maxlen
-		{Name: "blob", Kind: ir.KindBlob},                                 // no maxlen
+		{Name: "free", Kind: ir.KindArray, Elem: ir.KindU32},             // no count
+		{Name: "note", Kind: ir.KindString},                              // no maxlen
+		{Name: "blob", Kind: ir.KindBlob},                                // no maxlen
 		{Name: "inner", Kind: ir.KindStruct, Ref: &ir.TypeRef{Key: "x"}}, // composite
 	} {
 		for _, s := range []FieldStorage{StorageDynamic, StorageFixed, StorageCompanion} {
