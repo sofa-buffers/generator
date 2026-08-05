@@ -9,7 +9,7 @@ documented once in the [generic config](README.md).
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
 | `corelib` | `rs` \| `rs-no-std` | `rs` | Which Rust corelib the generated crate targets (see below). |
-| `no_std` | bool | `true` when `corelib: rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate (see below). Set `false` to emit an ordinary `std` crate against the no-std corelib. Ignored for `corelib: rs`. |
+| `no_std` | bool | `true` when `corelib: rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate (see below). Set `false` for an ordinary `std` crate against the no-std corelib — which also changes the crate's **shape**, its `encode()` return type and how `serde` is gated ([below](#no_std-false--the-no-std-corelib-from-a-std-crate)). Ignored for `corelib: rs`. |
 | `allow_dynamic` | bool | *corelib* | Storage for schema-bounded fields: `true` = `String`/`Vec`, `false` = fixed-capacity `heapless` sized from the bound. Defaults to `false` for `corelib: rs-no-std`, `true` for `corelib: rs`. Wire-identical either way. See [Storage mode](#storage-mode-allow_dynamic). |
 
 ### `max_dyn_*` — receiver-side decode limits
@@ -106,6 +106,43 @@ The crate is a **lib + bin**: the `src/lib.rs` lib is the firmware artifact and
 the `src/main.rs` bin is a `std` JSON test harness gated on the `std` feature (a
 binary cannot be `#![no_std]` on a hosted target). Build the genuinely heap-free
 crate with `cargo build --lib --no-default-features`.
+
+### `no_std: false` — the no-std corelib from a `std` crate
+
+The opt-out is for the **host side of a firmware link**: a desktop tool that has
+to speak to a device wants the same schema-sized containers — so a value it can
+hold is a value the device can hold — but not the `#![no_std]` environment those
+containers usually come with. It changes three things, and field storage is not
+one of them:
+
+| | `no_std: true` (default) | `no_std: false` |
+|---|---|---|
+| crate shape (`emit: project`) | **lib + bin** — `src/lib.rs` (+ `src/message.rs`), `src/main.rs` behind `required-features = ["std"]` | **bin only** — `src/main.rs` + `src/message.rs`, *no* `src/lib.rs` |
+| `encode()` returns | `heapless::Vec<u8, MAX_SIZE>` | `Vec<u8>` |
+| `serde` | behind the `serde` cargo feature | derived unconditionally |
+| field storage | `heapless`, sized from the schema | **unchanged** — `heapless`, sized from the schema |
+
+Storage is [`allow_dynamic`](#storage-mode-allow_dynamic)'s axis, not this one:
+turning `no_std` off leaves `heapless::String<8>` a `heapless::String<8>`.
+
+The crate shape is the one that reaches a call site. The `#![no_std]` rows are
+libraries, so a consumer writes
+
+```rust
+use sofabuffers_generated::Probe;
+```
+
+while a `no_std: false` crate is a binary — the same shape `corelib: rs` emits —
+so the type is reached as a module of your own program:
+
+```rust
+mod message;
+use message::Probe;
+```
+
+The streaming API is identical either way: `serialize` into an `OStream` with a
+flush sink, `decoder()` → `feed`/`finish`. A host tool and the firmware it talks
+to can share that code verbatim.
 
 **Unbounded fields.** A string/blob without `maxlen`, or an array without
 `count`, cannot be sized, so on the `no_std` path such a field fails generation
