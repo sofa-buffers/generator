@@ -90,20 +90,44 @@ run_variant() {
     # Streaming behaviour (PR #242): the generator tests only assert that the
     # streaming API appears in the output. This runs it, and pins the property
     # that matters -- streaming must be indistinguishable from the one-shot path.
-    # The shared check assigns String/Vec directly, which heapless cannot take, so
-    # it skips every leg whose fields are fixed-capacity: no-std-static is driven
-    # by streaming_check_nostd.rs further down instead, and rs-static has no
-    # streaming leg of its own -- streaming is covered by the three legs that do
-    # run it, and is orthogonal to which container a field lives in.
-    case "$label" in *-static) ;; *)
-    echo "==> [$label] streaming: serialize through a sink, feed the decoder in chunks"
+    #
+    # TWO INDEPENDENT AXES, and conflating them is what left a hole (generator#306):
+    #
+    #   which CHECK  follows the field STORAGE. streaming_check.rs assigns
+    #                String/Vec directly, which heapless cannot take, so
+    #                fixed-capacity storage runs streaming_check_nostd.rs instead.
+    #   which SHAPE  follows the CORELIB. A no_std project is a lib crate
+    #                (`use sofabuffers_generated::*`), a std one is a bin crate
+    #                that includes message.rs as a module.
+    #
+    # `allow_dynamic: false` sets the first and says nothing about the second, so
+    # `rs-static` -- std corelib, heapless fields -- is a real fourth combination.
+    # It used to fall into a blanket `*-static` skip whose stated reason was that
+    # streaming is "orthogonal to which container a field lives in". Probably true,
+    # but that is the same reasoning that hid corelib-ts#91, where a representation
+    # switch routed encode through a different corelib method whose fixed-buffer
+    # path was missing. Cheap to just run it.
+    #
+    # no-std-static is the one label still skipped here: it has a dedicated leg
+    # further down, against the crate built for the no_std lib checks.
+    # Each check file is written against ONE definition -- streaming_check.rs
+    # against the example (Myfirstmessage), streaming_check_nostd.rs against
+    # conf.yaml (Vecs/Vecsa, whose maxlen/count give the heapless types their
+    # capacities). So the schema travels with the check, not with the leg.
+    case "$label" in
+        no-std-static) STREAM_CHECK="" ;;
+        *-static)      STREAM_CHECK=streaming_check_nostd.rs; STREAM_DEF="$WORK/conf.yaml" ;;
+        *)             STREAM_CHECK=streaming_check.rs;       STREAM_DEF="$EXAMPLE" ;;
+    esac
+    if [ -n "$STREAM_CHECK" ]; then
+    echo "==> [$label] streaming: serialize through a sink, feed the decoder in chunks ($STREAM_CHECK)"
     rm -rf "$WORK/stream-$label"
-    rust_build "$EXAMPLE" "$WORK/stream-$label"
+    rust_build "$STREAM_DEF" "$WORK/stream-$label"
     case "$label" in
         no-std-*) printf 'use sofabuffers_generated::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
         *)        printf 'mod message;\nuse message::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
     esac
-    sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/streaming_check.rs" \
+    sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/$STREAM_CHECK" \
         >> "$WORK/stream-$label/src/main.rs"
     case "$label" in
         # The lib is #![no_std] without this; the binary above needs it linked
@@ -111,7 +135,7 @@ run_variant() {
         no-std-*) ( cd "$WORK/stream-$label" && cargo run -q --features std ) ;;
         *)        ( cd "$WORK/stream-$label" && cargo run -q ) ;;
     esac
-    ;; esac
+    fi
 
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(cd "$WORK/ex-$label" && printf '%s' "$IN" | cargo run -q -- encode myfirstmessage | cargo run -q -- decode myfirstmessage)
@@ -650,7 +674,12 @@ mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"
 echo "==> guard fired as expected"
 
 echo "==> [no-std-static] streaming behaviour"
-cp "$ROOT/tests/conformance/rust/streaming_check_nostd.rs" "$WORK/no-std-static/src/main.rs"
+# Same check file rs-static runs above, with the lib-crate import: the file is
+# shared across storage-equal/shape-different legs, so it carries //SOFAB_IMPORT
+# rather than a hardcoded `use`.
+printf 'use sofabuffers_generated::*;\n' > "$WORK/no-std-static/src/main.rs"
+sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/streaming_check_nostd.rs" \
+    >> "$WORK/no-std-static/src/main.rs"
 ( cd "$WORK/no-std-static" && cargo run -q --features std )
 
 # An unbounded field is rejected under no_std in BOTH storage modes: allow_dynamic

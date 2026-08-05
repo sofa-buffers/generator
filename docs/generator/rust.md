@@ -196,6 +196,25 @@ above a `count`, sets the sticky `inv` flag and the decode reports
 allocates what the bound exists to prevent. Encode output is identical in both
 modes.
 
+**Four configurations, four streaming legs.** The two axes multiply, and
+conformance runs all of them: `rs` and `no-std-dynamic` (dynamic storage) drive
+`streaming_check.rs`, `rs-static` and `no-std-static` (fixed storage) drive
+`streaming_check_nostd.rs`. The second file exists because the shared one assigns
+`String`/`Vec` directly, which `heapless` cannot take — and because fixed storage
+has a genuinely different reassembly buffer: the `acc` that carries a payload
+across feed chunks is a `heapless::Vec` whose overflow sets the sticky `err` flag
+instead of allocating.
+
+`rs-static` used to fall into a blanket `*-static` skip, so **the std corelib's
+fixed-storage configuration had no streaming leg anywhere in CI** — the leg built,
+round-tripped JSON and ran the MAX_SIZE fill check, but `serialize` + `feed` were
+only ever asserted to *appear* in the output by unit tests (generator#306). The
+skip's reasoning was that streaming is orthogonal to which container a field lives
+in. It is, here. But that is the same argument that hid corelib-ts#91, where a
+representation switch routed encode through a different corelib method whose
+fixed-buffer path was missing, and streaming broke for one representation of the
+same schema with nothing to notice.
+
 ```yaml
 targets:
   rust:
