@@ -58,6 +58,14 @@ build "$ROOT/examples/messages/example.yaml" "$WORK/ex"
 build "$WORK/conf.yaml" "$WORK/conf"
 H="$WORK/ex/harness"
 
+# NOTE: the trydecode captures below take line 1 with `sed -n 1p`, never `head -n1`.
+# trydecode prints the status on line 1 and the decoded JSON on line 2; `head`
+# closes the pipe after line 1, so the harness's second writeln dies of SIGPIPE and
+# Dart dumps an unhandled-exception stack trace into the log of a run that PASSES
+# (the assertion itself is unaffected -- the pipeline's exit status is head's). A
+# stack trace in a green log is exactly what makes a real failure invisible later.
+# `sed -n 1p` reads to EOF, so the writer never sees a closed pipe.
+
 echo "==> JSON encode -> decode round-trip"
 IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someu64":"18446744073709551615","somestringarray":["a","b","c"]}'
 OUT=$(printf '%s' "$IN" | "$H" encode myfirstmessage | "$H" decode myfirstmessage)
@@ -128,11 +136,11 @@ echo "==> skipped-string UTF-8 OK"
 # in onUnsignedArray never runs on a truncated array, so this pins the header hook.
 # Wire: 7b (id 15 unsigned-array) 06 (count 6) 01 02 (2 of 6 elements) <EOF>.
 echo "==> over-count + truncation must be INVALID, not INCOMPLETE (generator#216)"
-ST=$(printf '\173\006\001\002' | "$H" trydecode myfirstmessage | head -n1)
+ST=$(printf '\173\006\001\002' | "$H" trydecode myfirstmessage | sed -n 1p)
 [ "$ST" = "INVALID" ] || { echo "FAIL: over-count(6>4)+truncated -> $ST (want INVALID)"; exit 1; }
 # Precision control: an IN-BOUND count (4 == bound) genuinely truncated (2 of 4
 # then EOF) is a clean truncation and MUST stay INCOMPLETE.
-ST=$(printf '\173\004\001\002' | "$H" trydecode myfirstmessage | head -n1)
+ST=$(printf '\173\004\001\002' | "$H" trydecode myfirstmessage | sed -n 1p)
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(4==4)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
 echo "==> over-count/truncation ordering OK"
 
@@ -154,12 +162,12 @@ fi
 # Wire: 96 01 (seq start id 18) 2a (element id 5, fixlen) 0a (len 1, string) <EOF>
 echo "==> over-index + truncation must be INVALID, not INCOMPLETE (generator#267)"
 printf '\226\001\052\012' > "$WORK/overindex_trunc.bin"
-ST=$("$H" trydecode myfirstmessage < "$WORK/overindex_trunc.bin" | head -n1)
+ST=$("$H" trydecode myfirstmessage < "$WORK/overindex_trunc.bin" | sed -n 1p)
 [ "$ST" = "INVALID" ] || { echo "FAIL: over-index(5>=5)+truncated -> $ST (want INVALID)"; exit 1; }
 # Precision control: an IN-RANGE element id cut at the same offset is a clean
 # truncation and MUST stay INCOMPLETE.
 printf '\226\001\042\012' > "$WORK/inindex_trunc.bin"
-ST=$("$H" trydecode myfirstmessage < "$WORK/inindex_trunc.bin" | head -n1)
+ST=$("$H" trydecode myfirstmessage < "$WORK/inindex_trunc.bin" | sed -n 1p)
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-range(4<5)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
 echo "==> over-index reject OK"
 
@@ -182,11 +190,11 @@ echo "==> over-maxlen reject OK"
 # payload take), so tryDecode MUST report INVALID.
 # Wire: 62 (blob id 12) 8b 01 (fixlen word: len 17, blob subtype) 01 (1 of 17) <EOF>.
 echo "==> over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#216)"
-ST=$(printf '\142\213\001\001' | "$H" trydecode myfirstmessage | head -n1)
+ST=$(printf '\142\213\001\001' | "$H" trydecode myfirstmessage | sed -n 1p)
 [ "$ST" = "INVALID" ] || { echo "FAIL: over-maxlen(17>16)+truncated -> $ST (want INVALID)"; exit 1; }
 # Precision control: an IN-BOUND length (16 == maxlen) genuinely truncated (1 of 16
 # payload bytes then EOF) is a clean truncation and MUST stay INCOMPLETE.
-ST=$(printf '\142\203\001\001' | "$H" trydecode myfirstmessage | head -n1)
+ST=$(printf '\142\203\001\001' | "$H" trydecode myfirstmessage | sed -n 1p)
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(16==16)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
 echo "==> over-maxlen/truncation ordering OK"
 
@@ -301,9 +309,9 @@ printf '\032\043\001\002\003\004' | "$FH" decode probe >/dev/null \
 if printf '\032\053\001\002\003\004\005' | "$FH" decode probe >/dev/null 2>&1; then
     echo "FAIL: 5-byte blob (> maxlen 4) must be INVALID"; exit 1
 fi
-ST=$(printf '\032\053\001' | "$FH" trydecode probe | head -n1)
+ST=$(printf '\032\053\001' | "$FH" trydecode probe | sed -n 1p)
 [ "$ST" = "INVALID" ] || { echo "FAIL: over-maxlen(5>4)+truncated -> $ST (want INVALID)"; exit 1; }
-ST=$(printf '\032\043\001' | "$FH" trydecode probe | head -n1)
+ST=$(printf '\032\043\001' | "$FH" trydecode probe | sed -n 1p)
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(4==4)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
 echo "==> bounded-field subtype gate OK"
 
@@ -376,9 +384,9 @@ recode_exact "array 3xNaN"    vecf32a '\005\003\040\001\000\200\177\001\000\300\
 echo "==> fp32 sNaN round-trip OK"
 
 echo "==> §7 decode status through the generated API"
-ST=$(printf '\200' | "$WORK/conf/harness" trydecode vecu | head -n1)   # lone 0x80: dangling varint
+ST=$(printf '\200' | "$WORK/conf/harness" trydecode vecu | sed -n 1p)   # lone 0x80: dangling varint
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: lone 0x80 -> $ST (want INCOMPLETE)"; exit 1; }
-ST=$(printf '' | "$WORK/conf/harness" trydecode vecu | head -n1)       # empty message: valid
+ST=$(printf '' | "$WORK/conf/harness" trydecode vecu | sed -n 1p)       # empty message: valid
 [ "$ST" = "COMPLETE" ] || { echo "FAIL: empty message -> $ST (want COMPLETE)"; exit 1; }
 echo "==> tryDecode status OK (0x80 INCOMPLETE, empty COMPLETE)"
 
