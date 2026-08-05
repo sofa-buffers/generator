@@ -250,7 +250,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 	emitDoc(f, "", summary)
 	f.line("class %s {", name)
 	for _, fld := range fields {
-		emitDoc(f, "  ", fieldDoc(fld))
+		emitDoc(f, "  ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
 		if fld.Deprecated {
 			f.line("  @Deprecated('retained for backward compatibility only')")
 		}

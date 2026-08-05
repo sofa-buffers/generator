@@ -32,6 +32,11 @@ type section struct {
 	// section, so every field table shares the same column grid — mixed
 	// layouts would make the reader's eye re-find the columns per table.
 	HasUnit bool
+	// HasBound is set when any field in this section carries a schema bound, so
+	// the table gets the legend that says what the bound MEANS (generator#308):
+	// `T[N]` reads as "N elements" and is not — it is a capacity over a
+	// container that starts empty.
+	HasBound bool
 
 	Fields []*fieldRow
 	Consts []*constRow
@@ -143,8 +148,24 @@ func (g *gen) fillFields(s *section, fields []*ir.Field) {
 		if f.Unit != "" {
 			s.HasUnit = true
 		}
+		if hasBound(f) {
+			s.HasBound = true
+		}
 		s.Fields = append(s.Fields, row)
 	}
+}
+
+// hasBound reports whether a field carries a schema bound the type column
+// renders — `T[N]` for an array count, `(maxlen N)` for a string/blob or a
+// string/blob array element.
+func hasBound(f *ir.Field) bool {
+	switch f.Kind {
+	case ir.KindArray:
+		return f.HasCount || f.ElemMaxHas
+	case ir.KindString, ir.KindBlob:
+		return f.HasMaxlen
+	}
+	return false
 }
 
 // typeHTML renders a field's type, linking composite elements to their named
@@ -429,5 +450,6 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
 {{$hasUnit := .HasUnit}}{{range .Fields}}<tr><td class="num">{{.ID}}</td><td><code>{{.Name}}</code>{{if .Deprecated}}<span class="badge dep">deprecated</span>{{end}}</td><td class="type">{{.Type}}</td><td>{{if .Default}}<code>{{.Default}}</code>{{else}}<span class="none">&ndash;</span>{{end}}</td>{{if $hasUnit}}<td>{{if .Unit}}{{.Unit}}{{else}}<span class="none">&ndash;</span>{{end}}</td>{{end}}<td class="desc">{{if .Description}}{{.Description}}{{else}}<span class="none">&ndash;</span>{{end}}</td></tr>
 {{end}}</tbody>
 </table></div>
-{{else}}<p class="note">(no fields)</p>
+{{if .HasBound}}<p class="note">In the Type column, <code>[N]</code> is a <strong>capacity</strong>, not a length: the array holds at most N elements and starts at its declared default (empty when it has none), and the wire carries the length actually set. <code>maxlen N</code> bounds a string or blob in bytes. Exceeding either is rejected as INVALID &mdash; never truncated.</p>
+{{end}}{{else}}<p class="note">(no fields)</p>
 {{end}}{{end}}`))

@@ -468,7 +468,24 @@ a reimplementation should emit code that honors all of them:
     `(default: true|false)` note from the flag's `default`) → a doc comment on each
     generated constant. C and Java lower enum/bitfield fields to a raw integer and
     emit no named constants, so there is no symbol to document — they carry only the
-    field-level metadata above.
+    field-level metadata above;
+  - field **bounds** — an array's `count`, a string/blob's `maxlen`, and an array
+    element's `maxlen` → a `Schema bound: …` line on the **field's own** doc. The
+    bound is enforced in every target and used to be stated only in internal decode
+    plumbing (the array collector, the visitor's cap parameter), which is not where
+    a caller assigning to the field is looking; `count: N` then reads as "N
+    elements" rather than as a capacity over a container that starts empty. The
+    text is rendered by one shared helper (`internal/generator.BoundDoc`) and says
+    the two things the type cannot: where the LENGTH starts, and that exceeding the
+    bound is a rejection (`INVALID`) rather than a truncation. It is phrased per
+    **storage**, which is a per-field property, not a per-target one:
+    *dynamic* (the bound is nowhere in the type), *fixed* (a capacity-carrying
+    container states it, the length still does not), and *companion* (C: the length
+    is a second member, so the note names it — the one shape where forgetting it
+    encodes a silently empty field). A field with no bound gets no note, so an
+    unbounded schema's output is unchanged. The `docs` target renders the bound in
+    its Type column (`u32[3]`, `string (maxlen 8)`) and puts the same statement in
+    a legend under the field table instead.
 
   The doc syntaxes are language-idiomatic: Doxygen `/*! */` + trailing `/**<` (C),
   Doxygen + `///<` (C++), rustdoc `///` (Rust), godoc `//` (Go), class docstring +
@@ -482,7 +499,9 @@ a reimplementation should emit code that honors all of them:
   generator-authored comment text is ASCII. `TestDescriptionsBecomeDocComments`
   (driven by the UTF-8 `testdata/descriptions.yaml`) verifies every backend emits
   the description/summary/unit text on a comment line with UTF-8 preserved and a
-  deprecation marker for the deprecated field; each backend's own unit test covers
+  deprecation marker for the deprecated field; `TestBoundsReachTheFieldDoc`
+  (`testdata/bounds.yaml`) does the same for the bound note, and additionally
+  pins that an unbounded field receives none; each backend's own unit test covers
   its enum-constant, flag, and native-annotation rendering (the `docs` target
   renders the same metadata as HTML-escaped page *content* instead, with `unit` and
   `deprecated` as their own column/badge; there only UTF-8 fidelity is checked).

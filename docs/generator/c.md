@@ -82,6 +82,24 @@ So every array form is emitted in its **length-carrying** variant: a companion
 member whose width the descriptor records, placed where that descriptor can find
 it (see [two different anchors](#where-the-length-lives-two-different-anchors)).
 
+That companion is also the one thing about this target a caller can silently get
+wrong — filling `fixed[0..1]` and leaving `fixed_len` at 0 encodes an **empty**
+array, with no crash and no warning — so the generated struct says so at the
+member itself (ARCHITECTURE §8, generator#308):
+
+```c
+    /**
+     * Calibration constants, in ascending channel order (counts).
+     *
+     * Schema bound: count 3 is a capacity; fixed_len carries the length -- elements set without it encode an EMPTY array. Over 3 is INVALID.
+     */
+    uint32_t fixed_len; uint32_t fixed[3];
+```
+
+A bounded `blob` carries the same note against its own `<name>_len`; a wrapper
+array's note names the holder's `<name>.len`; a `string` needs none, because
+`char[maxlen + 1]` is NUL-terminated and has no separate length to forget.
+
 **Compact (numeric/enum/boolean/bitfield) arrays** — `SOFAB_OBJECT_FIELD_ARRAY_SIZED`:
 
 ```c

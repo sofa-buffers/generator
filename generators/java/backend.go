@@ -145,7 +145,7 @@ func (f *jfile) javadoc(indent, text string) {
 // fieldDoc is the Javadoc body for a field: its description, with a unit suffix
 // appended (or used alone), plus a Javadoc @deprecated tag on a trailing line
 // when the field is deprecated. Empty when the field carries none of these.
-func fieldDoc(fld *ir.Field) string {
+func fieldDoc(fld *ir.Field, note string) string {
 	d := fld.Description
 	if fld.Unit != "" {
 		if d == "" {
@@ -154,6 +154,9 @@ func fieldDoc(fld *ir.Field) string {
 			d += " (unit: " + fld.Unit + ")"
 		}
 	}
+	// The schema bound belongs with the description, ahead of the @deprecated
+	// tag: Javadoc block tags have to come last (generator#308).
+	d = generator.AppendDoc(d, note)
 	if fld.Deprecated {
 		const tag = "@deprecated This field is deprecated and may be removed in a future version."
 		if d == "" {
@@ -195,7 +198,7 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 	f.javadoc("", summary)
 	f.line("%sclass %s {", vis, name)
 	for _, fld := range fields {
-		f.javadoc("    ", fieldDoc(fld))
+		f.javadoc("    ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
 		if fld.Deprecated {
 			f.line("    @Deprecated")
 		}

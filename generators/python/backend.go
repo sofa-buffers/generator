@@ -464,6 +464,9 @@ func pyFieldDocLines(fld *ir.Field) []string {
 			lines[len(lines)-1] = fmt.Sprintf("%s (unit: %s)", lines[len(lines)-1], fld.Unit)
 		}
 	}
+	if note := generator.BoundNote(fld, generator.StorageDynamic); note != "" {
+		lines = append(lines, note)
+	}
 	if fld.Deprecated {
 		lines = append(lines,
 			".. deprecated::",

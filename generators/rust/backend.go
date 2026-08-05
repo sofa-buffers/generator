@@ -345,7 +345,27 @@ func (f *rfile) emitDoc(indent, text string) {
 // deprecated field gets a trailing `**Deprecated.**` note (on its own line);
 // the `#[deprecated]` attribute emitted alongside is what rustdoc renders as
 // the deprecation banner, but the prose note keeps the reason legible in source.
-func fieldDoc(fld *ir.Field) string {
+// storage reports how this backend lowered fld, for the schema-bound doc note
+// (generator#308). It is per FIELD, not per crate: under static storage a
+// bounded field is heapless while an unbounded one stays String/Vec.
+func (g *gen) storage(fld *ir.Field) generator.FieldStorage {
+	if !g.staticStore && !g.noStd {
+		return generator.StorageDynamic
+	}
+	switch fld.Kind {
+	case ir.KindString, ir.KindBlob:
+		if fld.HasMaxlen && !(g.noStd && g.allowDynamic) {
+			return generator.StorageFixed
+		}
+	case ir.KindArray:
+		if fld.HasCount && !(g.noStd && g.allowDynamic) {
+			return generator.StorageFixed
+		}
+	}
+	return generator.StorageDynamic
+}
+
+func fieldDoc(fld *ir.Field, note string) string {
 	var doc string
 	switch {
 	case fld.Description != "" && fld.Unit != "":
@@ -355,6 +375,9 @@ func fieldDoc(fld *ir.Field) string {
 	case fld.Unit != "":
 		doc = "(unit: " + fld.Unit + ")"
 	}
+	// The schema bound belongs with the description, ahead of the deprecation
+	// paragraph: it says what the field IS, not what its future is.
+	doc = generator.AppendDoc(doc, note)
 	if fld.Deprecated {
 		if doc != "" {
 			doc += "\n\n**Deprecated.**"
@@ -398,7 +421,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	for _, fld := range fields {
 		// rustdoc attaches to the item that follows, so the doc must precede
 		// any #[serde(rename = ...)] attribute and the field itself.
-		f.emitDoc("    ", fieldDoc(fld))
+		f.emitDoc("    ", fieldDoc(fld, generator.BoundNote(fld, g.storage(fld))))
 		if fld.Deprecated {
 			f.line("    #[deprecated]")
 		}

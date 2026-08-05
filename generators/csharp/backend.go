@@ -147,7 +147,7 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	emitDoc(f, "", summary)
 	f.line("public sealed class %s {", name)
 	for _, fld := range fields {
-		emitDoc(f, "    ", fieldDoc(fld))
+		emitDoc(f, "    ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
 		if fld.Deprecated {
 			f.line("    [Obsolete]")
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
@@ -21,7 +22,7 @@ func xmlEscape(s string) string {
 // fieldDoc builds the doc text for a field from its Description and Unit:
 // Description, with " (unit: <Unit>)" appended when a Unit is set; if only a
 // Unit is present the doc is "(unit: <Unit>)". Empty when both are empty.
-func fieldDoc(f *ir.Field) string {
+func fieldDoc(f *ir.Field, note string) string {
 	var doc string
 	switch {
 	case f.Description != "" && f.Unit != "":
@@ -31,6 +32,7 @@ func fieldDoc(f *ir.Field) string {
 	case f.Unit != "":
 		doc = "(unit: " + f.Unit + ")"
 	}
+	doc = generator.AppendDoc(doc, note)
 	// A deprecated field carries the [Obsolete] attribute for tooling; the doc
 	// generator (XML-doc) has no @deprecated tag, so keep a human "Deprecated."
 	// note on its own doc line.

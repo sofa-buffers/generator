@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
@@ -368,7 +369,7 @@ func (f *tsfile) emitDoc(indent, text string) {
 // `@deprecated` JSDoc tag on its own line so the doc tool flags callers (tsc
 // does not error on the generated code's own internal use, so no local
 // suppression is needed). Empty when there is nothing to document.
-func fieldDoc(fld *ir.Field) string {
+func fieldDoc(fld *ir.Field, note string) string {
 	var doc string
 	switch {
 	case fld.Description != "" && fld.Unit != "":
@@ -378,6 +379,7 @@ func fieldDoc(fld *ir.Field) string {
 	case fld.Unit != "":
 		doc = "(unit: " + fld.Unit + ")"
 	}
+	doc = generator.AppendDoc(doc, note)
 	if fld.Deprecated {
 		if doc != "" {
 			doc += "\n"
