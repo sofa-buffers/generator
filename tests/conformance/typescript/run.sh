@@ -422,6 +422,20 @@ mk_stream_check "$WORK/ex" \
     'checkReject("invalid utf-8", new Uint8Array([0x5a, 0x12, 0xff, 0xff]), Myfirstmessage.decode, () => new MyfirstmessageDecoder());'
 ( cd "$WORK/ex" && npx tsx stream_check.ts )
 
+# ...and on the same VERDICT, not just the same exception type. An array header
+# whose element kind contradicts the declared field is skipped whole (S7.3), so
+# its count is NOT this field's count and must never be measured against this
+# field's capacity. The visitor bounded it by id alone, which turned a skippable
+# contradiction into INVALID -- visible only when the header arrives without the
+# elements behind it, i.e. only when chunked (generator#300, Crucible F-0061 /
+# codegen defect G-0038).
+#   7c  someuintarray (id 15, count 4) carrying the SIGNED-array wire type
+#   7f  count 127, then EOF -> a truncated skip -> INCOMPLETE on both paths
+mk_stream_check "$WORK/ex" \
+    'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
+    'checkReject("contradictory array kind", new Uint8Array([0x7c, 0x7f]), Myfirstmessage.decode, () => new MyfirstmessageDecoder());'
+( cd "$WORK/ex" && npx tsx stream_check.ts )
+
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
 # declared width is INVALID: it MUST NOT be masked to the width, and MUST NOT be

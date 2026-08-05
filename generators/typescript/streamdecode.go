@@ -344,9 +344,28 @@ func (g *gen) emitStreamArray(f *tsfile, fields []*ir.Field) {
 		}
 		acc := g.streamStorage(x)
 		cap := capOf(x.HasCount, x.Count)
-		// arrayBegin: reject an over-count array at the count word, then replace
-		// the destination whole (a re-opened array id replaces, S7.4).
+		// arrayBegin: check the announced element KIND first, then reject an
+		// over-count array at the count word, then replace the destination whole
+		// (a re-opened array id replaces, S7.4).
+		//
+		// The kind test has to come first, and both of the things after it depend
+		// on that. The corelib routes an array header by ID alone, so this arm also
+		// receives a header whose element kind CONTRADICTS the declared one -- and
+		// such a field is skipped whole (S7.3), which means:
+		//
+		//   * its count must not be measured against this field's capacity. It is
+		//     not this field's count. Bounding it turned a skippable contradiction
+		//     into INVALID, and when the message was also truncated inside that
+		//     array the verdict flipped from INCOMPLETE to INVALID -- observable
+		//     only when chunked, because only then does the header arrive without
+		//     the elements behind it;
+		//   * the destination must not be cleared. A correctly-typed earlier
+		//     occurrence survives a mis-typed later one (S7.4).
+		//
+		// The cursor path has always had this order (`if (c.wire !== ...) skip`),
+		// which is precisely why the two decoders disagreed.
 		b := fmt.Sprintf("      case %d: ", x.ID)
+		b += fmt.Sprintf("if (kind !== ArrayKind.%s) break; ", tsArrayKind(x.Elem))
 		if cap >= 0 {
 			b += fmt.Sprintf("if (count > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); ", cap, x.Name, cap)
 		}
@@ -395,7 +414,7 @@ func (g *gen) emitStreamArray(f *tsfile, fields []*ir.Field) {
 		f.line("    }")
 		f.line("  }")
 	}
-	emit("arrayBegin(id: number, _kind: ArrayKind, count: number): void", begin)
+	emit("arrayBegin(id: number, kind: ArrayKind, count: number): void", begin)
 	emit("arrayUnsigned(id: number, i: number, v: number | bigint): void", uns)
 	emit("arraySigned(id: number, i: number, v: number | bigint): void", sig)
 	emit("arrayFp32(id: number, i: number, v: number): void", f32)
@@ -761,4 +780,25 @@ func (g *gen) emitStreamDecoderClass(f *tsfile, name string) {
 // takes them as its only argument, so the separator is dropped.
 func (g *gen) streamLimitsArg() string {
 	return strings.TrimPrefix(g.cursorLimits(), ", ")
+}
+
+// tsArrayKind names the corelib ArrayKind a declared native array element is
+// delivered as. It mirrors how the corelib classifies an array header, so the
+// streaming visitor can tell "this header is for my field" from "this header
+// contradicts my field and must be skipped" (MESSAGE_SPEC S7.3).
+//
+// For a fixlen array the kind names the ELEMENT SUBTYPE, not merely "fixlen":
+// an fp64 header at a declared fp32 array is a contradiction like any other, so
+// the two must not collapse to one case.
+func tsArrayKind(elem ir.Kind) string {
+	switch elem {
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+		return "Signed"
+	case ir.KindFP32:
+		return "Fp32"
+	case ir.KindFP64:
+		return "Fp64"
+	}
+	// u*, enum, bool and bitfield all travel as unsigned elements.
+	return "Unsigned"
 }

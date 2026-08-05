@@ -338,6 +338,12 @@ func TestTSStructural(t *testing.T) {
 		// corelib, so an unconverted visitor made one library report the same
 		// bytes two ways (generator#297).
 		"throw new SofabError(SofabErrorCode.InvalidMsg, \"invalid UTF-8 in string\");",
+		// An array header is routed by id alone, so the arm also receives one whose
+		// element kind CONTRADICTS the declared field. Such a field is skipped whole
+		// (S7.3): its count is not this field's count, so the kind test has to come
+		// before the capacity bound -- and before the destination is cleared
+		// (generator#300).
+		"case 15: if (kind !== ArrayKind.Unsigned) break; if (count > 4) throw new SofabError(SofabErrorCode.InvalidMsg, \"someuintarray: array count above schema capacity 4\");",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing streaming decode surface %q", want)
@@ -346,6 +352,11 @@ func TestTSStructural(t *testing.T) {
 	// Every transcode goes through the converting helper. The raw decoder is
 	// reachable from exactly ONE place — inside _str — so a store site cannot
 	// call it bare, which is how generator#297 happened and reads as harmless.
+	// The header hook must not ignore the announced kind: an `_kind` parameter is
+	// how generator#300 happened, and it reads as a deliberate "not needed".
+	if strings.Contains(mod, "arrayBegin(id: number, _kind: ArrayKind") {
+		t.Error("the streaming arrayBegin must test the announced element kind, not ignore it (generator#300)")
+	}
 	if n := strings.Count(mod, "_dec.decode("); n != 1 {
 		t.Errorf("_dec.decode() must appear once, inside _str(); found %d bare or extra call sites (generator#297)", n)
 	}
