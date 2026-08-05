@@ -147,6 +147,20 @@ if "$H" decode myfirstmessage < "$WORK/overindex.bin" >/dev/null 2>&1; then
     echo "FAIL: over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
 fi
 "$H" decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
+# ... and the same violation with the message cut RIGHT AFTER the word that
+# carries it (generator#267 / Crucible F-0043). S5.2 makes INVALID dominate
+# INCOMPLETE: the element id 5 is fully established by the element header, so the
+# verdict must be latched there rather than once payload bytes arrive.
+# Wire: 96 01 (seq start id 18) 2a (element id 5, fixlen) 0a (len 1, string) <EOF>
+echo "==> over-index + truncation must be INVALID, not INCOMPLETE (generator#267)"
+printf '\226\001\052\012' > "$WORK/overindex_trunc.bin"
+ST=$("$H" trydecode myfirstmessage < "$WORK/overindex_trunc.bin" | head -n1)
+[ "$ST" = "INVALID" ] || { echo "FAIL: over-index(5>=5)+truncated -> $ST (want INVALID)"; exit 1; }
+# Precision control: an IN-RANGE element id cut at the same offset is a clean
+# truncation and MUST stay INCOMPLETE.
+printf '\226\001\042\012' > "$WORK/inindex_trunc.bin"
+ST=$("$H" trydecode myfirstmessage < "$WORK/inindex_trunc.bin" | head -n1)
+[ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-range(4<5)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
 echo "==> over-index reject OK"
 
 # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12) declares

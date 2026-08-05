@@ -120,6 +120,22 @@ if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overma
     echo "FAIL: over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
 fi
 (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
+# ... and the same violation with the message cut RIGHT AFTER the length word
+# (generator#267 / Crucible F-0043). 17 > maxlen 16 is fully established by that
+# word, and S5.2 makes INVALID dominate INCOMPLETE, so the bound must be measured
+# against the peeked wire length BEFORE the payload is read -- reading first and
+# measuring the decoded bytes never reaches the check on such a message.
+# Wire: 62 (blob id 12) 8b 01 (len 17, subtype blob) <EOF>
+echo "==> over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#267)"
+printf '\142\213\001' > "$WORK/overmaxlen_trunc.bin"
+ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overmaxlen_trunc.bin" 2>&1 >/dev/null || true )
+echo "$ERR" | grep -q 'SofaDecodeError' \
+    || { echo "FAIL: over-maxlen(17>16)+truncated must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
+# Precision control: an in-bound length cut at the same offset stays INCOMPLETE.
+printf '\142\203\001' > "$WORK/inmaxlen_trunc.bin"
+ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/inmaxlen_trunc.bin" 2>&1 >/dev/null || true )
+echo "$ERR" | grep -q 'SofaIncompleteError' \
+    || { echo "FAIL: in-bound(16==16)+truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
 echo "==> over-maxlen reject OK"
 
 # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose header

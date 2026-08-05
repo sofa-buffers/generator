@@ -45,6 +45,35 @@ type _strSeq struct {
 	emax int
 }
 
+// The element's schema bounds are decided at the LENGTH WORD, before a byte of
+// payload is taken. S5.2 makes INVALID dominate INCOMPLETE, so a message
+// truncated right after the word carrying the violating number must still be
+// INVALID -- deciding it in String(), which never runs for such a message,
+// reported INCOMPLETE instead.
+//
+// Both bounds sit inside the declared-subtype test: FixlenHeader fires for ANY
+// fixlen subtype at this id, and an element whose subtype contradicts the
+// declaration was never this array's value (S7.3), so neither its id nor its
+// length may be measured against this array's bounds.
+//
+// ArrayBegin comes along because sofab.HeaderVisitor declares both and the cursor
+// reaches them through ONE type assertion -- implementing only one leaves the
+// assertion failing and silently disables the other hook.
+func (s *_strSeq) ArrayBegin(sofab.ID, sofab.ArrayKind, int) error { return nil }
+
+func (s *_strSeq) FixlenHeader(id sofab.ID, subtype, length int) error {
+	if subtype != 2 {
+		return nil
+	}
+	if s.cap >= 0 && int(id) >= s.cap {
+		return sofab.ErrInvalidMsg
+	}
+	if s.emax >= 0 && length > s.emax {
+		return sofab.ErrInvalidMsg
+	}
+	return nil
+}
+
 func (s *_strSeq) String(id sofab.ID, v string) error {
 	if s.cap >= 0 && int(id) >= s.cap {
 		return sofab.ErrInvalidMsg
@@ -70,6 +99,23 @@ type _bytesSeq struct {
 	out  *[][]byte
 	cap  int
 	emax int
+}
+
+// The blob twin of the string collector above: bounds latched at the length word,
+// gated on the declared subtype, with ArrayBegin alongside for the one assertion.
+func (s *_bytesSeq) ArrayBegin(sofab.ID, sofab.ArrayKind, int) error { return nil }
+
+func (s *_bytesSeq) FixlenHeader(id sofab.ID, subtype, length int) error {
+	if subtype != 3 {
+		return nil
+	}
+	if s.cap >= 0 && int(id) >= s.cap {
+		return sofab.ErrInvalidMsg
+	}
+	if s.emax >= 0 && length > s.emax {
+		return sofab.ErrInvalidMsg
+	}
+	return nil
 }
 
 func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
