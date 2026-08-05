@@ -880,3 +880,51 @@ messages:
 		t.Errorf("a 64-bit destination must not be width-guarded:\n%s", got)
 	}
 }
+
+// CORELIB_PLAN §5.6 asks generated code to process a message in small chunks,
+// not only whole-buffer-at-once. `AcceptBytes` cannot: it takes a `[]byte` and
+// therefore requires the whole wire image resident by construction, and
+// `Decoder.Accept` only moves that requirement inside the corelib (it slurps the
+// reader before dispatching). `AcceptStream` is the reader-driven entry point
+// that actually bounds memory by the largest single field (corelib-go#71/#72,
+// generator#312).
+//
+// The assertion is on the emitted CALL, not on the presence of a `From` helper:
+// a streaming-shaped signature over `Decoder.Accept` would satisfy "takes an
+// io.Reader" while still slurping, which is exactly the state this replaces.
+func TestGoStreamingDecodeUsesAcceptStream(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      a: { id: 0, type: u64 }
+      s: { id: 1, type: string }
+`)
+	msg := genGo(t, s, map[string]any{})["vec.go"]
+
+	if !strings.Contains(msg, "func DecodeVecFrom(r io.Reader) (*Vec, error)") {
+		t.Error("missing the io.Reader-driven decode entry point")
+	}
+	if !strings.Contains(msg, "sofab.NewDecoder(r).AcceptStream(m)") {
+		t.Error("streaming decode must go through AcceptStream")
+	}
+	// The slurping entry points must not be what the reader path is built on.
+	if strings.Contains(msg, "NewDecoder(r).Accept(m)") {
+		t.Error("Decoder.Accept slurps the reader — it does not bound memory")
+	}
+	// ...and the in-memory path is unchanged: this is an addition.
+	if !strings.Contains(msg, "sofab.AcceptBytes(data, m)") {
+		t.Error("the []byte path must stay AcceptBytes")
+	}
+
+	// Receiver-side decode limits (generator#102) bind BOTH entry points. They
+	// reach AcceptBytes as trailing arguments and NewDecoder as its options, so
+	// the same renderer serves both only because the two signatures happen to be
+	// variadic in the same position — worth pinning, since a limit enforced on
+	// one path and not the other is a silent asymmetry.
+	lim := genGo(t, s, map[string]any{"max_dyn_string_len": 4096})["vec.go"]
+	if !strings.Contains(lim, "sofab.NewDecoder(r, sofab.WithMaxStringLen(MaxDynStringLen)).AcceptStream(m)") {
+		t.Error("streaming decode must carry the active decode limits")
+	}
+}

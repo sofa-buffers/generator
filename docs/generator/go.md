@@ -20,7 +20,7 @@ targets:
     go_version: "1.22"
 ```
 
-## Streaming encode — `EncodeTo(io.Writer)`
+## Streaming — `EncodeTo(io.Writer)` and `Decode<Msg>From(io.Reader)`
 
 `corelib-go`'s `Encoder` targets an `io.Writer` and drains its internal buffer
 into it as that fills, so a message never has to exist as one contiguous
@@ -38,17 +38,38 @@ func (m *Msg) Encode() ([]byte, error)         // EncodeTo into a bytes.Buffer
 
 `Encode` is `EncodeTo` with a `bytes.Buffer`, so the two cannot drift.
 
-**Decode has no `feed()`, and that is a corelib property, not an oversight.**
-`corelib-go` streams **pull**-shaped: `Decoder.Next` walks an `io.Reader` field
-by field, never materialising the message. That is real, memory-bounded
-streaming — but it is not a resumable push decoder, and one cannot be
-synthesised over it without inverting control. The generated `Decode<Msg>` uses
-the zero-copy `AcceptBytes` cursor, which needs the whole message contiguous. A
-`feed(chunk)` here waits on a resumable decoder in `corelib-go`.
+Decode is symmetric now, through a second entry point rather than a `feed()`:
+
+```go
+func Decode<Msg>(data []byte) (*Msg, error)      // AcceptBytes over a buffer you hold
+func Decode<Msg>From(r io.Reader) (*Msg, error)  // AcceptStream, reader-driven
+```
+
+`AcceptBytes` takes a `[]byte`, so it requires the whole wire image resident **by
+construction** — and `Decoder.Accept` is no better, because it slurps the reader
+into one contiguous buffer before dispatching. `AcceptStream` (corelib-go#71/#72)
+drives the pull primitives directly and dispatches each field as the reader
+delivers it, so peak memory is the largest single field rather than the message.
+That is what CORELIB_PLAN §5.6 asks for, and generator#312 is where it landed.
+
+**Both entry points share one visitor.** `AcceptStream` is event-equivalent to
+`AcceptBytes` — same callbacks, same `HeaderVisitor` hooks, same
+INVALID/INCOMPLETE verdicts at every byte boundary — so the generated `Msg` is
+unchanged and only the thing feeding it differs. One consequence worth knowing:
+the blob arm still copies (`append([]byte(nil), v...)`), which `AcceptStream`
+does not need since it hands over freshly read buffers. The visitor cannot tell
+which entry point is driving it, so the copy stays.
+
+**Go has no `feed(chunk)`, and that is still a corelib property.** `corelib-go`
+streams **pull**-shaped; a resumable push decoder cannot be synthesised over that
+without inverting control. `Decode<Msg>From` gives the memory bound §5.6 is
+about without needing one — the caller hands over a reader instead of pushing
+chunks.
 
 Note for issue #239: `Serialize` is now an exported member of every generated
 message type, so it joins the reserved-name set a schema field must not collide
-with.
+with. `Decode<Msg>From` is a package-level function keyed on the message name,
+so it collides only where `Decode<Msg>` already would.
 
 ## Receiver-side decode limits
 
