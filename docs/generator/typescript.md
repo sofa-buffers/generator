@@ -364,7 +364,50 @@ case 0: { const _v = Number(c.readUnsigned());
 case 3: o.d_u64 = c.readUnsigned() as bigint; break;   // u64: nothing to bound
 ```
 
-The read lands in a temporary so the check can precede the store. Native arrays
-read into `_a` and then scan it once — a single out-of-range element makes the
-message INVALID. `u64`/`i64` keep their bare read in both int64 modes (bigint and
-Long): their range is the reader's own.
+The read lands in a temporary so the check can precede the store. `u64`/`i64`
+keep their bare read in both int64 modes (bigint and Long): their range is the
+reader's own.
+
+### The bound goes into the reader, not into a scan after it (issue #267)
+
+A native array first read into `_a` and then scanned once was the right verdict at
+the wrong time. **A scan over the assembled array cannot fire for an array that
+never assembles**: truncate the message right after an out-of-range element and
+`readSignedArray` raises INCOMPLETE first, so the verdict is lost — while §5.2
+makes INVALID dominate INCOMPLETE precisely because the violation is *already
+established* by the bytes seen.
+
+The bound therefore travels with the read, alongside the schema count that is
+already passed there for the same reason — `readUnsignedArray(count, max)` and
+`readSignedArray(count, min, max)` (corelib-ts#90):
+
+```ts
+c.readUnsignedArray(5, 255) as number[]          // u8[5]
+c.readSignedArray(undefined, -128, 127) as number[]   // dynamic i8[]
+```
+
+A **dynamic** array keeps `undefined` in the count slot and still carries the
+width bound: width is a property of the element *type*, not of the array
+*length*. The post-read scan **stays** — unreachable now, but it is the only thing
+still bounding elements for a consumer building against an older corelib whose
+reader ignores the new arguments, and it costs one pass over an array already in
+hand.
+
+The scalar `string`/`blob` `maxlen` had the same shape on the **streaming**
+visitor, where the check lived in the payload callback and a message ending right
+after an over-`maxlen` length word degraded to INCOMPLETE. Arrays already had
+`arrayBegin` at the count word for exactly this; strings and blobs had no
+counterpart until corelib-ts#89 added `Visitor.fixlenBegin(id, subtype, total)`:
+
+```ts
+fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {
+  switch (id) {
+    case 2: if (sub === FixlenSubtype.String && total > 32) throw …; break;
+    case 3: if (sub === FixlenSubtype.Blob   && total > 4)  throw …; break;
+```
+
+**Testing the announced subtype is not optional.** One callback serves both
+kinds, so ignoring `sub` would measure a blob field's `maxlen` against a string
+arriving at that id — a §7.3 mismatch to *skip*, not to bound. The wrapper-element
+collectors get the same treatment: their over-index *and* `maxlen` checks sat in
+the payload callback too (generator#303, closing #300).

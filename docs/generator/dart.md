@@ -270,7 +270,13 @@ header cannot disturb it.
 
 Wrapper-sequence arrays (`string`/`blob`/`struct`/`union`/nested-array elements)
 fire no array header at all — they descend through `onSequenceStart` and are
-bounded at the collector's `cap` instead.
+bounded at the collector's `cap` instead. The collector still needs the *fixlen*
+header for the same reason the message does: `_StrSeq`/`_BlobSeq` override
+`onFixlenHeader`, so an over-index element (`id ≥ cap`) or an over-`maxlen`
+element sets `e.inv` at the length word rather than once the payload arrives, and
+`tryDecode` reads that sticky flag before returning the incomplete status
+(generator#267/#277). The guards sit inside the declared-subtype test, exactly as
+the message-level ones above. The payload-side checks stay as defense.
 
 ### Reusing a destination
 

@@ -864,6 +864,54 @@ Whether the fix is generator-only splits by the corelib's decode model:
 
   With C++ landed, **generator#216 is closed for every backend.**
 
+**The same rule, in the positions #216 did not reach (generator#267).** #216 moved
+the guard to the deciding word for a message's own **counted native array**. Three
+neighbouring positions kept the late shape, and each is the identical defect —
+a bound established by a word, checked after the bytes that word describes:
+
+- **Wrapper-array elements.** The element collectors (`_strSeq`/`_bytesSeq` in go,
+  `_StrSeq`/`_BlobSeq` in dart) carried the over-index *and* element-`maxlen`
+  checks in the payload callback, not in the header hook their enclosing message
+  already implemented. Both corelibs offered the hook; only the scalar fields used
+  it. Fixed by emitting `FixlenHeader`/`onFixlenHeader` on the collectors too
+  (generator#277). Go needs `ArrayBegin` **alongside** `FixlenHeader` here for the
+  all-or-nothing reason recorded under §7.3 below.
+- **A scalar `blob`'s `maxlen` in python.** The string arm already peeked
+  `d.fixlen_len()` before the read; the blob arm did not (generator#277).
+- **An array element's declared width in typescript.** A `u8[]`/`i16[]` element
+  outside its type's range was found by a scan over the *assembled* array, which
+  cannot fire for an array that never assembles. The bound now goes **into the
+  reader** — `readUnsignedArray(count, max)` / `readSignedArray(count, min, max)`,
+  corelib-ts#90 — alongside the schema count that is already passed there for
+  exactly this reason. The post-read scan stays as defense for a consumer building
+  against an older corelib (generator#304). A **dynamic** array keeps `undefined`
+  in the count slot and still carries the width bound: width is a property of the
+  element *type*, not of the array *length*.
+
+TypeScript additionally had no counterpart to `arrayBegin` for a **scalar**
+string/blob, so its streaming visitor's `maxlen` check had nowhere earlier to live
+than the payload callback. corelib-ts#89 added `Visitor.fixlenBegin(id, subtype,
+total)` and the generator emits into it, **testing the announced subtype** — one
+callback serves both kinds, so ignoring the subtype would measure a blob field's
+`maxlen` against a string arriving at that id, a §7.3 skip rather than a bound
+(generator#303, closing #300).
+
+**Where the family stands, and why it is not a codegen gap.** `rust`,
+`rust-no-std`, `java`, `csharp` and `zig` all announce an array at its count word
+(`array_begin`/`arrayBegin`) and all five backends emit against it, so the
+**count** position is latched. The **fixlen** position is not, and cannot be from
+the generator: none of those five corelibs has a fixlen-header hook of any kind,
+and their only callback carrying `total` sits inside the payload loop. Measured
+against corelib-rs `main` with a recording visitor — a `write_str` message
+truncated to end exactly at its length word (`1a 52`, tag + length word, nothing
+more) produces **no visitor event at all**, whole or fed one byte at a time, while
+the untruncated message reports `(id 3, total 10, offset 0, len 10)`.
+`deliver_payload` guards the callback with `if avail > 0`; java/csharp/zig/rs-no-std
+have the identical shape. So this is the **whole-unit corelib** category above,
+needing the same small additive hook go/dart/py/ts already have: corelib-rs#47,
+corelib-rs-no-std#68, corelib-java#62, corelib-cs#53, corelib-zig#37. Tracked in
+generator#267 until they land.
+
 #### Decode verdict: over-index wrapper-array elements are INVALID (all targets)
 
 The **sequence-form analogue** of the over-count scalar rule (generator#142).

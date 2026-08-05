@@ -137,9 +137,25 @@ arrays are keyed as `ArraySigned`, boolean and bitfield arrays as
 `ArrayUnsigned`, matching the wire type each rides.
 
 The same gating shape applies to `FixlenHeader`, where the `maxlen` compare sits
-behind the declared fixlen `subtype` (generator#224). Wrapper-sequence arrays
-(string/blob/struct/union/nested elements) have no header hook at all — they
-descend through `BeginSequence` and carry their bound as the collector's `cap`.
+behind the declared fixlen `subtype` (generator#224).
+
+A wrapper-sequence array (string/blob/struct/union/nested elements) descends
+through `BeginSequence`, so the bound reaches its **collector** rather than the
+message — but the collector needs the header hook for the same reason the message
+does. `_strSeq`/`_bytesSeq` therefore implement `FixlenHeader` themselves, and an
+over-index element (`id ≥ count`) or an over-`maxlen` element is rejected at the
+word that carries it instead of once the payload arrives (generator#267/#277).
+The `cap` the collector already held is what the guard compares against; the
+payload-side check stays as defense.
+
+`sofab.HeaderVisitor` is **all-or-nothing**: it declares `ArrayBegin` *and*
+`FixlenHeader`, and the cursor reaches both through a single `v.(HeaderVisitor)`
+type assertion. A collector that implements only the one it needs leaves that
+assertion failing and silently disables the other, so the two are always emitted
+together — the one with no arms is an empty switch. corelib-go fires both hooks
+identically on `Accept` and on the reader-driven `AcceptStream` (corelib-go#71/#72
+pins the equivalence), so these verdicts carry over unchanged when generated
+decode moves to the streaming entry point (generator#312).
 
 ## Struct field order (widest-first)
 
