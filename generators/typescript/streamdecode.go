@@ -137,6 +137,20 @@ func (g *gen) emitStreamVisitor(f *tsfile, typeName string, fields []*ir.Field) 
 	if anyFp32Raw(fields) {
 		f.line("  readonly fp32Raw = true;")
 	}
+	// Scratch for an fp32 ARRAY's raw companion. The cursor path keeps the whole
+	// payload in one slice (readFp32ArrayRaw) and nulls the companion when no
+	// element was a NaN; the visitor sees elements one at a time, so it assembles
+	// the same buffer across arrayBegin -> arrayFp32 -> arrayEnd. It has to be the
+	// WHOLE payload, not just the NaN slots: a bit-exact consumer reads the
+	// companion for every element once it exists (that is what the fp32 leaf of
+	// Crucible's materialized walk does), so a partially filled buffer would
+	// report zeros as values.
+	for _, x := range fields {
+		if x.Kind == ir.KindArray && x.Elem == ir.KindFP32 && fp32RawCompanion(x) {
+			f.line("  private %s: Uint8Array | null = null;", fp32RawScratch(x))
+			f.line("  private %s = false;", fp32RawSeen(x))
+		}
+	}
 
 	g.emitStreamScalarCb(f, "unsigned", fields, unsignedKinds)
 	g.emitStreamScalarCb(f, "signed", fields, signedKinds)
@@ -184,6 +198,12 @@ func signedKinds(x *ir.Field) bool {
 	}
 	return false
 }
+
+// fp32RawScratch / fp32RawSeen name the visitor-private slots that assemble an
+// fp32 array's raw companion. Private, and prefixed, so they cannot collide with
+// a schema field name (a schema name may not begin with `_`).
+func fp32RawScratch(f *ir.Field) string { return "_raw" + exported(f.Name) }
+func fp32RawSeen(f *ir.Field) string    { return "_rawNaN" + exported(f.Name) }
 
 func anyFp32Raw(fields []*ir.Field) bool {
 	for _, x := range fields {
@@ -416,8 +436,26 @@ func (g *gen) emitStreamArray(f *tsfile, fields []*ir.Field) {
 		if cap >= 0 {
 			b += fmt.Sprintf("if (count > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); ", cap, x.Name, cap)
 		}
-		b += fmt.Sprintf("%s = []; break;", acc)
+		b += fmt.Sprintf("%s = []; ", acc)
+		// A re-opened array id REPLACES (§7.4), so the companion is reset here
+		// too -- otherwise a second occurrence would inherit the first's raw
+		// bytes. Sized from the announced count, which the guard above has
+		// already bounded, so an over-count header cannot size this.
+		if x.Elem == ir.KindFP32 && fp32RawCompanion(x) {
+			b += fmt.Sprintf("%s = null; this.%s = new Uint8Array(count * 4); this.%s = false; ",
+				g.fp32RawStorage("this.o", x), fp32RawScratch(x), fp32RawSeen(x))
+		}
+		b += "break;"
 		begin = append(begin, b)
+
+		// arrayEnd decides the companion, exactly as the cursor path does after
+		// its whole-array read: keep the payload when SOME element was a NaN,
+		// null otherwise. Emitted only for an fp32 array -- every other element
+		// kind round-trips through its own type without loss.
+		if x.Elem == ir.KindFP32 && fp32RawCompanion(x) {
+			end = append(end, fmt.Sprintf("      case %d: %s = this.%s ? this.%s : null; this.%s = null; break;",
+				x.ID, g.fp32RawStorage("this.o", x), fp32RawSeen(x), fp32RawScratch(x), fp32RawScratch(x)))
+		}
 
 		// element store, by the wire kind the corelib will deliver
 		conv, dst := g.streamElemConv(x)
@@ -428,6 +466,14 @@ func (g *gen) emitStreamArray(f *tsfile, fields []*ir.Field) {
 		if ec := widthCond("_e", x.Elem); ec != "" {
 			line = fmt.Sprintf("      case %d: { const _e = Number(v); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s[i] = %s; break; }",
 				x.ID, ec, x.Name, x.Elem, acc, conv)
+		} else if x.Elem == ir.KindFP32 && fp32RawCompanion(x) {
+			// §6.5: a JS number is a 64-bit double, and widening an fp32 SIGNALING
+			// NaN into one sets the quiet bit -- so `v` alone cannot round-trip the
+			// element. Keep the 4 wire bytes; `raw` is why the class declares
+			// fp32Raw. Bounds-checked because the buffer is sized from the
+			// ANNOUNCED count and `i` comes from the same wire.
+			line = fmt.Sprintf("      case %d: { %s[i] = %s; const _r = this.%s; if (raw !== undefined && _r !== null && (i + 1) * 4 <= _r.length) _r.set(raw, i * 4); if (Number.isNaN(v)) this.%s = true; break; }",
+				x.ID, acc, conv, fp32RawScratch(x), fp32RawSeen(x))
 		} else {
 			line = fmt.Sprintf("      case %d: %s[i] = %s; break;", x.ID, acc, conv)
 		}
@@ -445,8 +491,8 @@ func (g *gen) emitStreamArray(f *tsfile, fields []*ir.Field) {
 		// No fill-to-count on arrayEnd. A declared `count: N` is a CAPACITY, not a
 		// length (MESSAGE_SPEC S3): the wire count IS the array's length, and the
 		// cursor path likewise assigns what it read. Padding here would make the
-		// two decoders disagree on every short array.
-		_ = end
+		// two decoders disagree on every short array. The only thing arrayEnd
+		// does is close out the fp32 raw companion (above).
 	}
 	emit := func(sig string, arms []string) {
 		if len(arms) == 0 {
@@ -464,8 +510,9 @@ func (g *gen) emitStreamArray(f *tsfile, fields []*ir.Field) {
 	emit("arrayBegin(id: number, kind: ArrayKind, count: number): void", begin)
 	emit("arrayUnsigned(id: number, i: number, v: number | bigint): void", uns)
 	emit("arraySigned(id: number, i: number, v: number | bigint): void", sig)
-	emit("arrayFp32(id: number, i: number, v: number): void", f32)
+	emit("arrayFp32(id: number, i: number, v: number, raw?: Uint8Array): void", f32)
 	emit("arrayFp64(id: number, i: number, v: number): void", f64)
+	emit("arrayEnd(id: number): void", end)
 }
 
 // streamElemConv gives the element store expression and which element callback

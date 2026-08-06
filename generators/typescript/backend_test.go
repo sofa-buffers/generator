@@ -1626,3 +1626,59 @@ messages:
 		}
 	}
 }
+
+// An fp32 ARRAY's raw-bits companion has to be assembled on the visitor path too
+// (generator#300 / #235). A JS number is a 64-bit double and widening an fp32
+// SIGNALING NaN into one sets the quiet bit, so the value alone cannot round-trip
+// the element -- the cursor path keeps the whole payload via readFp32ArrayRaw,
+// and before this the visitor kept nothing at all: it took `arrayFp32(id, i, v)`
+// without the `raw` parameter its own class enables with `fp32Raw = true`.
+//
+// Measured with Crucible's chunk-invariance oracle over the checked-in corpora:
+// 60 mismatches across corpus/structured + corpus/regression went to 0, all of
+// them fp32 NaN bit patterns quieted by the chunked path.
+//
+// The buffer is the WHOLE payload, not just the NaN slots. A bit-exact consumer
+// reads the companion for every element once it exists (Crucible's materialized
+// walk does exactly that), so a partially filled buffer reports zeros as values.
+func TestTypescriptStreamFp32ArrayKeepsRawBits(t *testing.T) {
+	out := genTSWith(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      a: { id: 0, type: array, items: { type: fp32, count: 4 } }
+      b: { id: 1, type: array, items: { type: fp64, count: 4 } }
+`, map[string]any{})
+
+	// The callback must ACCEPT the raw view -- without the parameter the corelib's
+	// 4th argument is silently dropped and everything below is unreachable.
+	if !strings.Contains(out, "arrayFp32(id: number, i: number, v: number, raw?: Uint8Array): void") {
+		t.Error("arrayFp32 must take the raw view")
+	}
+	// ...store it at the element's own offset...
+	if !strings.Contains(out, "_r.set(raw, i * 4)") {
+		t.Error("the element's wire bytes must land at i*4 in the companion")
+	}
+	// ...and the companion must be decided at arrayEnd, kept only when some
+	// element was a NaN -- which is what the cursor path does after its read.
+	if !strings.Contains(out, "arrayEnd(id: number): void") {
+		t.Error("missing arrayEnd, where the companion is decided")
+	}
+	if !strings.Contains(out, "this.o.aFp32Raw = this._rawNaNA ? this._rawA : null;") {
+		t.Error("arrayEnd must keep the payload only when an element was NaN")
+	}
+	// A re-opened array id REPLACES (§7.4), so arrayBegin resets the companion;
+	// otherwise a second occurrence inherits the first's bytes.
+	if !strings.Contains(out, "this.o.aFp32Raw = null; this._rawA = new Uint8Array(count * 4);") {
+		t.Error("arrayBegin must reset the companion and size the scratch from the count")
+	}
+	// fp64 needs none of this -- a double holds all 64 bits verbatim -- so it must
+	// not grow a companion, a scratch slot, or an arrayEnd arm.
+	if strings.Contains(out, "_rawB") || strings.Contains(out, "bFp32Raw") {
+		t.Error("an fp64 array must not get an fp32 raw companion")
+	}
+	if strings.Contains(out, "case 1: this.o.bFp32Raw") {
+		t.Error("fp64 must not appear in arrayEnd")
+	}
+}
