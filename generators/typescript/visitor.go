@@ -546,7 +546,15 @@ func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *i
 		// length, counted by the allocation-free _utf8Len rather than re-encoding the
 		// decoded string via TextEncoder in the hot loop (issue #153).
 		if maxHas {
-			return guard + "const _id = c.id; while (" + arr + `.length <= _id) ` + arr + `.push(""); const _s = c.readString(); ` +
+			// The bound goes INTO the reader, as it already does for a scalar
+			// string. readString() reads the payload first, so a message truncated
+			// inside an over-maxlen element raises INCOMPLETE and the check below
+			// never runs -- while §5.2 makes INVALID dominate, the violation being
+			// established by the length word alone. The post-read check stays: it is
+			// the only bound left for a consumer on a corelib whose reader ignores
+			// the argument, and it costs one length compare on a decoded string.
+			return guard + "const _id = c.id; while (" + arr + `.length <= _id) ` + arr + `.push(""); ` +
+				fmt.Sprintf("const _s = c.readString(%d); ", maxVal) +
 				fmt.Sprintf(`if (_utf8Len(_s) > %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s element: string byte length above schema maxlen %d"); `, maxVal, arr, maxVal) +
 				arr + "[_id] = _s;"
 		}
@@ -556,7 +564,10 @@ func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *i
 		// reject, never truncate (MESSAGE_SPEC §7.1). readBlob's Uint8Array .length
 		// is the exact wire byte length.
 		if maxHas {
-			return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); const _b = c.readBlob(); " +
+			// Same as the string element above: the bound travels with the read so
+			// it is decided at the length word, not after the payload.
+			return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); " +
+				fmt.Sprintf("const _b = c.readBlob(%d); ", maxVal) +
 				fmt.Sprintf(`if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s element: blob byte length above schema maxlen %d"); `, maxVal, arr, maxVal) +
 				arr + "[_id] = _b;"
 		}
