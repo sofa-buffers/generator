@@ -393,6 +393,17 @@ still bounding elements for a consumer building against an older corelib whose
 reader ignores the new arguments, and it costs one pass over an array already in
 hand.
 
+Passing the bound was necessary but not sufficient, and the gap is worth
+recording because it is invisible from this side. `Cursor.arrayCount` rejected a
+count larger than the bytes remaining as INCOMPLETE — an allocation guard
+(corelib-ts#38) that decided the outcome from the count word *before* the element
+loop, so the bound the generator had just handed over was never reached. It is
+now a cap on the **allocation** rather than a rejection (corelib-ts#99). Nothing
+changed in generated code; the fix was entirely below it. Over 10 442 truncations
+× 6 chunk sizes it took the driver's chunk-invariance mismatches from **100 to
+8**, which is the whole `whole=INCOMPLETE / chunked=INVALID` direction of #300 —
+so on that class the *contiguous* path was the wrong one, not the chunked one.
+
 The scalar `string`/`blob` `maxlen` had the same shape on the **streaming**
 visitor, where the check lived in the payload callback and a message ending right
 after an over-`maxlen` length word degraded to INCOMPLETE. Arrays already had

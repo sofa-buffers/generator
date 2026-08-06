@@ -278,6 +278,42 @@ element sets `e.inv` at the length word rather than once the payload arrives, an
 (generator#267/#277). The guards sit inside the declared-subtype test, exactly as
 the message-level ones above. The payload-side checks stay as defense.
 
+#### An array element's declared width (`onArrayElemBound`, issue #267)
+
+One position deeper, the same shape again. `onUnsignedArray`/`onSignedArray`
+hand over the whole list, so the emitted `for (final _v in values)` scan is exact
+for an array that **arrives** and never runs for one that does not — while §7.1
+makes an out-of-width element invalid and §5.2 makes that outrank the truncation
+behind it. So the bound goes to the decoder, which is the only party that sees
+the element in time:
+
+```dart
+@override
+sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind) {
+  switch (id) {
+    case 16:
+      if (kind == sofab.ArrayKind.signed) {
+        return const sofab.ElemRange(-2147483648, 2147483647);
+      }
+      return null;
+  }
+  return null;
+}
+```
+
+Asked **once per array field**, at the count word, never per element — the range
+is resolved there and the decoder applies it as the elements go past. `const`, so
+answering costs no allocation. Gated on `kind` for the reason `onArrayBegin` is
+(§7.3), and emitted for every narrowed integer element, a **dynamic** array
+included: width is a property of the element *type*, not of the array *length*.
+`u64`/`i64`, enums, bitfields and `bool` return nothing — their range is already
+the callback parameter's.
+
+Unlike Go's, this needs no separate-interface dance: `MessageVisitor` is a class
+of virtual no-ops, so a new callback with a `null` default is additive by
+construction. The list scan stays as defense for a consumer built against a
+corelib that does not fire it.
+
 ### Reusing a destination
 
 `tryDecode(data, out)` lets the caller supply the destination, so the same object

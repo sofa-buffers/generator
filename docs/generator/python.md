@@ -207,5 +207,34 @@ always peeked; the blob arm was reading first, and now does the same
 (generator#267/#277). Bounded string/blob **elements** of a wrapper array peek
 the same way.
 
-A native array arrives whole, so one `any(...)` scan over the elements decides
-it — a single out-of-range element makes the message INVALID.
+A native array's **elements** are the same story one position deeper. The reader
+returns the whole list, so an `any(...)` scan over it is exact for an array that
+*arrives* — and never runs for one that does not, which is the case §5.2 is
+about. So the width travels **with the read**, where the schema count and a
+blob's `maxlen` already go:
+
+```python
+self.arr_u8 = d.read_unsigned_array(255)
+if any(_v > 255 for _v in self.arr_u8):
+    raise SofaDecodeError("arr_u8 element: value outside declared width u8")
+self.arr_i16 = d.read_signed_array(-32768, 32767)
+self.arr_u64 = d.read_unsigned_array()   # u64: nothing narrower to bound
+```
+
+A **dynamic** array passes the bound too: width is a property of the element
+*type*, not of the array *length*. Enum and bitfield elements pass nothing — the
+corelib already returns their full range.
+
+The scan **stays** alongside it (generator#267). The two answer different
+questions: the reader's bound is what makes a *truncated* array INVALID, and the
+scan is what still bounds the elements if a consumer builds against a corelib
+whose readers ignore the arguments. It costs one pass over a list already in hand.
+
+corelib-py applies the bound at different points in its two engines, and the
+difference is deliberate rather than an inconsistency: the Cython engine checks
+**at the element**, before the value is boxed, because two typed compares in C
+are free; the pure engine checks **at the truncation**, turning the
+`SofaIncompleteError` it was about to raise into a `SofaDecodeError` when an
+element already decoded breaches the bound, so its Python decode loop pays
+nothing per element. Same verdicts either way — which is what the shared vectors
+pin, and what the conformance suite's reproducer-plus-control pair asserts.

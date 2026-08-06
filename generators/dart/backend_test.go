@@ -360,6 +360,43 @@ func TestDartHeaderVisitorReject(t *testing.T) {
 	}
 }
 
+// TestDartArrayElemBound covers generator#267's element position: an array
+// element outside its DECLARED WIDTH is INVALID (§7.1) and, established by its
+// own bytes, dominates a truncation behind it (§5.2). The `for (final _v in
+// values)` scan decides an array that arrives and never runs for one that does
+// not, so the bound also goes to the corelib as onArrayElemBound, which applies
+// it while the elements go past.
+func TestDartArrayElemBound(t *testing.T) {
+	out := genFor(t, exampleDef, map[string]any{})
+	for _, want := range []string{
+		"sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind) {",
+		// Gated on the declared element kind, like every other header-time bound
+		// (§7.3): the hook is asked per field id, and an array whose wire kind
+		// contradicts the declaration is skipped, never measured against this
+		// field's width.
+		"if (kind == sofab.ArrayKind.unsigned) {\n          return const sofab.ElemRange(0, 4294967295);\n        }",
+		"if (kind == sofab.ArrayKind.signed) {\n          return const sofab.ElemRange(-2147483648, 2147483647);\n        }",
+		// `const`, so answering costs no allocation.
+		"return const sofab.ElemRange(",
+		"return null;",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated module missing element bound %q", want)
+		}
+	}
+	// The scan over the assembled list stays: it still bounds the elements
+	// against a corelib that does not know the callback, over a list in hand.
+	if !strings.Contains(out, "for (final _v in values)") {
+		t.Errorf("the assembled-list width scan must stay")
+	}
+	// A message with no narrowed array element must not override it at all —
+	// scalars.yaml has no arrays.
+	plain := genFor(t, "../../tests/matrix/corpus/defs/scalars.yaml", map[string]any{})
+	if strings.Contains(plain, "onArrayElemBound(") {
+		t.Errorf("a message with no narrowed array element must not override onArrayElemBound")
+	}
+}
+
 func TestDecodeLimitsPlumbing(t *testing.T) {
 	// An unbounded string + a configured cap wires a DecoderLimits (no_maxlen.yaml
 	// has an unbounded string `s` and blob `b`).

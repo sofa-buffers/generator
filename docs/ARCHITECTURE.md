@@ -967,6 +967,80 @@ The payload-side guards stay in every backend. They are unreachable for a messag
 that reaches the header hook, and they are the only thing still bounding a
 consumer built against a corelib predating it.
 
+**One position deeper: an array ELEMENT's declared width, in the four pull
+corelibs.** With the fixlen positions closed, one row of Crucible F-0043 stayed
+red — `width_elem_trunc.bin` (`a6 06 0c 05 b0 51`): `arrays.i8` declares five
+elements, the first carries **5208**, and the message ends there. The element is
+*fully on the wire*; only later elements are missing. `rust`, `java`, `csharp`,
+`zig`, `c` and `cpp` reported INVALID, and `go`, `dart`, both python engines and
+`typescript` reported INCOMPLETE.
+
+The camps split exactly along the **decode model**, and this is the third time
+that line has decided a #267 position. The push/visitor corelibs deliver an
+element at a time, so generated code sees the offending value before anything
+else happens. The four **pull** corelibs materialise the whole array and hand it
+over in one callback, so the emitted `for _, x := range v` / `for (final _v in
+values)` / `any(... for _v in ...)` scan is *exact for an array that arrives* and
+**never runs for one that does not** — and §5.2 requires the verdict to be
+INVALID precisely for the array that does not arrive. As with the fixlen header,
+the decoder is the only party that sees the element in time and the schema the
+only party that knows the bound, so the bound has to travel into the decoder:
+
+- **typescript** already did (`readUnsignedArray(count, max)`, generator#304), but
+  `Cursor.arrayCount` rejected a count larger than the bytes remaining as
+  INCOMPLETE *before* the element loop — an allocation guard (corelib-ts#38)
+  deciding the verdict from the count word alone. It is now a cap on the
+  **allocation** (`min(count, bytes remaining)`) instead of a rejection, which is
+  all it was ever for; the elements decide (corelib-ts#99). `skipArrayCount` had
+  reached the same conclusion one path over and said so in its doc comment.
+- **go** gains `ElemBoundVisitor.ArrayElemBound(id, kind) (min, max, ok)` — a
+  **separate** optional interface, not a third method on `HeaderVisitor`, for the
+  all-or-nothing reason recorded below: a new method there would silently switch
+  `ArrayBegin`/`FixlenHeader` off for every visitor generated before it existed.
+- **dart** gains `MessageVisitor.onArrayElemBound(id, kind) -> ElemRange?`, a
+  virtual with a `null` default, so it is additive by construction.
+- **python** takes it as reader arguments, where the schema count and a blob's
+  `maxlen` already go: `read_unsigned_array(elem_max)` /
+  `read_signed_array(elem_min, elem_max)`.
+
+`kind` is what the **wire** declares and the bound applies only in the arm
+matching the declared element type — the §7.3 rule `ArrayBegin` already carries,
+one level down.
+
+**Where each corelib applies it is a cost decision, and they differ on purpose.**
+The bound only changes an outcome where the whole-array callback does not fire,
+so three of the four apply it on the failure path and leave their element loops a
+pure decode: go walks the prefix already filled (in `scanTruncatedArray` when the
+count exceeds the bytes left, and in `fillUnsigned`/`fillSigned` when the count
+fits but the elements do not — **both** branches, which is why the conformance
+vector deliberately cuts at the second), dart walks the decoded prefix when the
+contiguous array fails, and python-pure turns its `SofaIncompleteError` into a
+`SofaDecodeError` at that point. The two that can afford exactness check at the
+element: corelib-ts inside `readUnsignedArray`, and python's Cython engine with
+two typed compares before the value is boxed. Dart's *streaming* path also checks
+at the element, because its state machine already decodes one at a time. The
+verdicts are identical, which is what the shared vectors and the chunk-invariance
+axis pin.
+
+Measured after: `width_elem_trunc` is unanimous across the family, its control
+(`ctl_width_elem_inrange_trunc`, an in-range element cut at the same offset)
+stays unanimously INCOMPLETE, and TypeScript's chunk-invariance mismatches over
+10 442 truncations × 6 chunk sizes went **100 → 8** — the whole
+`whole=INCOMPLETE / chunked=INVALID` direction of generator#300, gone. go, dart
+and both python engines measure 0 on the same axis.
+
+**What is still open, and why it is not fixed here.** One F-0043 row remains: an
+over-index wrapper element truncated *inside* its `fixlen_word`
+(`overindex_trunc_in_fixlen_word.bin`, `c6 0c 2a c2`). TypeScript rejects it —
+its cursor reads the subtype from the low three bits of the word's **first**
+byte, so the element has passed the §7.3 type test and its id is over `count`
+before the length is known — and the other fourteen drivers report INCOMPLETE.
+Whether the earliest-decidable reading is the required one is a **spec** question
+(documentation#43), and closing it TypeScript's way needs a corelib callback that
+fires on the subtype rather than on the completed word (corelib-ts#97). It is the
+same defect as generator#300's direction B, seen through the other decode
+surface, and it stays with #267 until the spec settles.
+
 #### Decode verdict: over-index wrapper-array elements are INVALID (all targets)
 
 The **sequence-form analogue** of the over-count scalar rule (generator#142).

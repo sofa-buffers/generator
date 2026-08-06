@@ -36,6 +36,14 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// must never be measured against this field's bound (generator#224 for
 	// onFixlenHeader, generator#259 / F-0042 for onArrayBegin).
 	var arrBegin, fixHdr []string
+	// onArrayElemBound (corelib-dart): the declared width of a native integer
+	// array's ELEMENTS, handed to the decoder so it can apply the bound while the
+	// elements go past. arrayWidthGuard below scans the assembled list, which is
+	// exact for an array that arrives — and never runs for one that does not, so
+	// a message cut short after an out-of-width element reported INCOMPLETE where
+	// §5.2 requires INVALID (generator#267, Crucible F-0043 width_elem_trunc).
+	// Same shape as the header hooks one level down.
+	var elemBound []string
 
 	arm := func(id int64, body string) string {
 		return fmt.Sprintf("      case %d:\n        %s\n        return;", id, body)
@@ -89,7 +97,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 		case ir.KindStruct, ir.KindUnion:
 			seq = append(seq, seqArm(fld.ID, fmt.Sprintf("return %s(%s, e);", visitorName(g.typeName(fld.Ref.Key)), acc)))
 		case ir.KindArray:
-			g.emitArrayDecode(fld, acc, arm, seqArm, &uArr, &sArr, &f32Arr, &f64Arr, &seq, &arrBegin)
+			g.emitArrayDecode(fld, acc, arm, seqArm, &uArr, &sArr, &f32Arr, &f64Arr, &seq, &arrBegin, &elemBound)
 		}
 	}
 
@@ -119,6 +127,10 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// none does not override them and the corelib's max-speed path is unchanged.
 	emitSwitch(f, "void onArrayBegin(int id, sofab.ArrayKind kind, int count)", arrBegin)
 	emitSwitch(f, "void onFixlenHeader(int id, int subtype, int length)", fixHdr)
+	// The element bound is asked once per array, at the count word, and applied
+	// by the decoder per element — the position arrayWidthGuard cannot reach for
+	// an array that never completes (generator#267).
+	emitSwitchRet(f, "sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind)", elemBound, "return null;")
 	// onSequenceStart is ALWAYS overridden: the base returns `this` (descend),
 	// which would misread an unknown nested sequence as this object's fields.
 	// Returning null skips any unhandled sequence (forward-compat + §7.3).
@@ -230,7 +242,38 @@ func arrayWidthGuard(elem ir.Kind) string {
 	return fmt.Sprintf("for (final _v in values) { if (%s) { e.inv = true; return; } }\n        ", cond)
 }
 
-func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string) string, seqArm func(int64, string) string, uArr, sArr, f32Arr, f64Arr, seq, arrBegin *[]string) {
+// elemBoundArm is the onArrayElemBound arm body declaring the range an element
+// of this array may take (MESSAGE_SPEC §7.1) — "" for u64/i64 and for
+// enum/bitfield/bool elements, whose range is the callback parameter's own.
+//
+// Emitted exactly where arrayWidthGuard is: the two are one bound at two times.
+// The guard scans the assembled list, which decides an array that ARRIVES; this
+// is what the decoder applies to one that does not, where the whole-array
+// callback never fires and the guard therefore never runs (generator#267).
+//
+// Gated on `kind` for the reason arrayCountHdrGuard is: the hook is asked per
+// field id, and an array whose wire element kind contradicts the declared one is
+// skipped under §7.3 — its elements were never this field's value.
+//
+// `const` so the range is a compile-time constant and the answer costs no
+// allocation, as corelib-dart's doc asks.
+func elemBoundArm(kind string, elem ir.Kind) string {
+	lo, hi, ok := ir.NarrowRange(elem)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("if (kind == sofab.ArrayKind.%s) {\n          return const sofab.ElemRange(%d, %d);\n        }", kind, lo, hi)
+}
+
+func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string) string, seqArm func(int64, string) string, uArr, sArr, f32Arr, f64Arr, seq, arrBegin, elemBound *[]string) {
+	if nativeArrayElem(fld.Elem) {
+		// Its own arm shape: the method answers with a value, so an arm that
+		// declares no range for the kind that arrived falls through to `return
+		// null` rather than to the bare `return;` the void callbacks use.
+		if b := elemBoundArm(wireArrayKind(fld.Elem), fld.Elem); b != "" {
+			*elemBound = append(*elemBound, fmt.Sprintf("      case %d:\n        %s\n        return null;", fld.ID, b))
+		}
+	}
 	guard := ""
 	if fld.HasCount {
 		// A wire element count above the schema `count` is INVALID (MESSAGE_SPEC
@@ -315,6 +358,13 @@ func emaxOf(has bool, max int64) int64 {
 // emitSwitch emits a callback override with an id switch, or nothing when the
 // object has no field for it (the base no-op then applies).
 func emitSwitch(f *dfile, sig string, arms []string) {
+	emitSwitchRet(f, sig, arms, "")
+}
+
+// emitSwitchRet is emitSwitch for a callback that answers with a value: `tail`
+// is what an id with no arm falls through to. "" for the void callbacks, whose
+// arms return on their own.
+func emitSwitchRet(f *dfile, sig string, arms []string, tail string) {
 	if len(arms) == 0 {
 		return
 	}
@@ -325,6 +375,9 @@ func emitSwitch(f *dfile, sig string, arms []string) {
 		f.line("%s", a)
 	}
 	f.line("    }")
+	if tail != "" {
+		f.line("    %s", tail)
+	}
 	f.line("  }")
 }
 

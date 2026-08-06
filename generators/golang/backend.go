@@ -895,6 +895,15 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	// element/byte has arrived, so a truncated over-count/over-maxlen field never
 	// reaches them — the header hook is what makes the over-bound win the tie.
 	var arrBegin, fixHdr []string
+	// ElemBoundVisitor: the declared width of a native integer array's ELEMENTS,
+	// handed to the decoder so it can apply the bound while the elements go past.
+	// The arrayWidthGuard below scans the assembled slice, which is exact for an
+	// array that arrives — and never runs for one that does not, so a message cut
+	// short after an out-of-width element reported INCOMPLETE where §5.2 requires
+	// INVALID (generator#267 residue, Crucible F-0043 width_elem_trunc). Same
+	// shape as the header hooks one level down: only the decoder sees the element
+	// in time, only the schema knows the bound.
+	var elemBound []string
 
 	arm := func(id int64, body string) string { return fmt.Sprintf("case %d:\n%s", id, body) }
 	// maxlenGuard rejects a scalar string/blob whose wire byte length exceeds the
@@ -1006,8 +1015,14 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			switch {
 			case isUnsignedNativeArray(fld.Elem):
 				uArr = append(uArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem)+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
+				if b := elemBoundArm(goArrayWireKind(fld.Elem), fld.Elem); b != "" {
+					elemBound = append(elemBound, arm(fld.ID, b))
+				}
 			case isSignedNativeArray(fld.Elem):
 				sArr = append(sArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem)+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
+				if b := elemBoundArm(goArrayWireKind(fld.Elem), fld.Elem); b != "" {
+					elemBound = append(elemBound, arm(fld.ID, b))
+				}
 			case fld.Elem == ir.KindFP32:
 				f32Arr = append(f32Arr, arm(fld.ID, guard+acc+" = v"))
 			case fld.Elem == ir.KindFP64:
@@ -1052,6 +1067,17 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 		emitIDSwitchAlways(f, recv, "FixlenHeader(id sofab.ID, subtype int, length int) error", fixHdr)
 	}
 
+	// Optional ElemBoundVisitor extension (corelib sofab.ElemBoundVisitor), a
+	// SEPARATE interface from HeaderVisitor and so emitted on its own condition:
+	// a type may declare an element width without declaring any count/maxlen, and
+	// a type that declares a bound the corelib version in use does not know about
+	// simply has a method nobody calls.
+	if len(elemBound) > 0 {
+		emitIDSwitchRet(f, recv,
+			"ArrayElemBound(id sofab.ID, kind sofab.ArrayKind) (int64, int64, bool)",
+			elemBound, "return 0, 0, false")
+	}
+
 	if len(seq) > 0 {
 		f.line("%sBeginSequence(id sofab.ID) (sofab.Visitor, error) {", recv)
 		f.line("\tswitch id {")
@@ -1079,13 +1105,20 @@ func emitIDSwitch(f *gofile, recv, sig string, arms []string) {
 // method is emitted even with no arms. Used for the HeaderVisitor pair, where the
 // method set — not the arms — is what makes the interface assertion succeed.
 func emitIDSwitchAlways(f *gofile, recv, sig string, arms []string) {
+	emitIDSwitchRet(f, recv, sig, arms, "return nil")
+}
+
+// emitIDSwitchRet is emitIDSwitchAlways for a callback whose fall-through is not
+// `return nil` — ArrayElemBound answers with a triple, and "this id declares no
+// bound" is one of its values rather than the absence of an error.
+func emitIDSwitchRet(f *gofile, recv, sig string, arms []string, fallthru string) {
 	f.line("%s%s {", recv, sig)
 	f.line("\tswitch id {")
 	for _, a := range arms {
 		f.line("\t%s", a)
 	}
 	f.line("\t}")
-	f.line("\treturn nil")
+	f.line("\t%s", fallthru)
 	f.line("}")
 	f.blank()
 }
@@ -1170,6 +1203,28 @@ func capOf(hasCount bool, count int64) int64 {
 // INCOMPLETE — no bound can be judged yet — which is the intended verdict.
 func overcountHdrGuard(kind string, n int64) string {
 	return fmt.Sprintf("if kind == sofab.%s && count > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", kind, n)
+}
+
+// elemBoundArm is the ArrayElemBound arm body declaring the range an element of
+// this array may take (MESSAGE_SPEC §7.1) — "" for u64/i64 and for enum/bitfield/
+// bool elements, whose range is the visitor parameter's own and needs no bound.
+//
+// Emitted exactly where arrayWidthGuard is: the two are the same bound at two
+// times. The guard scans the assembled slice, which decides an array that
+// ARRIVES; this one is what the decoder applies to an array that does not, where
+// the whole-slice callback never fires and the guard therefore never runs
+// (generator#267).
+//
+// Gated on `kind` for the reason overcountHdrGuard is: the hook is asked per
+// field id, and an array whose wire element kind contradicts the declared one is
+// skipped under §7.3 — its elements were never this field's value, so this
+// field's width must not be measured against them.
+func elemBoundArm(kind string, elem ir.Kind) string {
+	lo, hi, ok := ir.NarrowRange(elem)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("if kind == sofab.%s {\n\t\t\treturn %d, %d, true\n\t\t}", kind, lo, hi)
 }
 
 // goArrayWireKind is the sofab.ArrayKind constant naming the wire element kind an

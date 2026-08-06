@@ -825,9 +825,36 @@ func emitWidthGuard(f *pyfile, ind, acc, name string, k ir.Kind) {
 	f.line(`%s    raise SofaDecodeError("%s: value outside declared width %s")`, ind, name, k)
 }
 
-// emitArrayWidthGuard is the same §7.1 bound for a native array's ELEMENTS. The
-// corelib returns the whole array as a list of unbounded ints, so one scan over
-// it decides the array — one out-of-range element makes the message INVALID.
+// elemBoundArgs renders the declared element width as the read call's argument
+// list — `255` for an unsigned array, `-128, 127` for a signed one — or "" for
+// u64/i64, whose range is the value domain the corelib already returns.
+//
+// The bound travels WITH the read for the same reason the schema count and a
+// blob's maxlen already do: a scan over the returned list decides an array that
+// arrives, and never runs for one that does not, so a message cut short after an
+// out-of-width element reported INCOMPLETE where §5.2 requires INVALID
+// (generator#267, Crucible F-0043 width_elem_trunc). corelib-py takes the bound
+// on both engines: the native one checks at the element, the pure one at the
+// truncation, which is the same verdict either way.
+func elemBoundArgs(elem ir.Kind) string {
+	lo, hi, ok := ir.NarrowRange(elem)
+	if !ok {
+		return ""
+	}
+	if lo < 0 {
+		return fmt.Sprintf("%d, %d", lo, hi)
+	}
+	return fmt.Sprintf("%d", hi)
+}
+
+// emitArrayWidthGuard is the same §7.1 bound for a native array's ELEMENTS,
+// applied to the assembled list.
+//
+// It stays alongside elemBoundArgs rather than being replaced by it. The two
+// answer different questions: the reader's bound is what makes a TRUNCATED array
+// INVALID, and this scan is what still bounds the elements if a consumer builds
+// against a corelib whose readers ignore the arguments. It costs one pass over a
+// list already in hand.
 func emitArrayWidthGuard(f *pyfile, ind, target, loc string, elem ir.Kind) {
 	lo, hi, ok := ir.NarrowRange(elem)
 	if !ok {
@@ -957,14 +984,18 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target, loc string, elem ir.Kind, r
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		emitCountGuard(f, ind, loc, cap, depth)
-		f.line("%s%s = d.read_unsigned_array()", ind, target)
-		if elem != ir.KindBitfield {
+		if elem == ir.KindBitfield {
+			f.line("%s%s = d.read_unsigned_array()", ind, target)
+		} else {
+			f.line("%s%s = d.read_unsigned_array(%s)", ind, target, elemBoundArgs(elem))
 			emitArrayWidthGuard(f, ind, target, loc, elem)
 		}
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		emitCountGuard(f, ind, loc, cap, depth)
-		f.line("%s%s = d.read_signed_array()", ind, target)
-		if elem != ir.KindEnum {
+		if elem == ir.KindEnum {
+			f.line("%s%s = d.read_signed_array()", ind, target)
+		} else {
+			f.line("%s%s = d.read_signed_array(%s)", ind, target, elemBoundArgs(elem))
 			emitArrayWidthGuard(f, ind, target, loc, elem)
 		}
 	case ir.KindBool:

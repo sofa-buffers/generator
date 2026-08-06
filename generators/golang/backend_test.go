@@ -239,6 +239,76 @@ func TestGoHeaderVisitorReject(t *testing.T) {
 	}
 }
 
+// TestGoArrayElemBound covers generator#267's element position: an array element
+// outside its DECLARED WIDTH is INVALID (§7.1) and, being established by its own
+// bytes, dominates a truncation behind it (§5.2). The `for _, _x := range v` scan
+// in the *Array arms decides an array that arrives and never runs for one that
+// does not, so the bound also goes to the corelib as sofab.ElemBoundVisitor,
+// which applies it while the elements go past.
+func TestGoArrayElemBound(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      ua: { id: 0, type: array, items: { type: u8,  count: 4 } }\n" +
+		"      sa: { id: 1, type: array, items: { type: i16, count: 4 } }\n" +
+		"      wa: { id: 2, type: array, items: { type: u64, count: 4 } }\n" + // no narrower range
+		"      da: { id: 3, type: array, items: { type: u32 } }\n" + // dynamic, still narrowed
+		"      fa: { id: 4, type: array, items: { type: fp32, count: 4 } }\n" + // no width bound
+		"      wr: { id: 5, type: array, items: { type: string, count: 4 } }\n" // wrapper array
+	msg := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})["m.go"]
+	for _, want := range []string{
+		"func (m *M) ArrayElemBound(id sofab.ID, kind sofab.ArrayKind) (int64, int64, bool) {",
+		// Gated on the wire kind an array of the DECLARED element type maps to,
+		// for the reason ArrayBegin is: the hook is asked per field id, and an
+		// array whose kind contradicts the declaration is a §7.3 skip whose
+		// elements were never this field's value.
+		"if kind == sofab.ArrayUnsigned {\n\t\t\treturn 0, 255, true\n\t\t}",
+		"if kind == sofab.ArraySigned {\n\t\t\treturn -32768, 32767, true\n\t\t}",
+		// The width is a property of the element TYPE, not of the array length,
+		// so a count-less array carries it too.
+		"return 0, 4294967295, true",
+		"return 0, 0, false",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("m.go missing element bound %q:\n%s", want, msg)
+		}
+	}
+	// The scan over the assembled slice stays: it is what still bounds the
+	// elements against a corelib that does not know the extension, and it costs
+	// one pass over a slice already in hand.
+	if !strings.Contains(msg, "for _, _x := range v {") {
+		t.Errorf("m.go: the assembled-slice width scan must stay:\n%s", msg)
+	}
+	// u64 (id 2), fp32 (id 4) and the wrapper array (id 5) declare no element
+	// width — the first because its range IS the callback parameter's, the others
+	// because they are not integer elements at all. Read the ArrayElemBound body
+	// alone: those ids DO carry arms in the neighbouring ArrayBegin switch.
+	body := msg[strings.Index(msg, "func (m *M) ArrayElemBound("):]
+	body = body[:strings.Index(body, "\n}\n")]
+	for _, notWant := range []string{"case 2:", "case 4:", "case 5:"} {
+		if strings.Contains(body, notWant) {
+			t.Errorf("m.go: unexpected element bound %q:\n%s", notWant, body)
+		}
+	}
+	// A type with no narrowed array element must not implement the interface at
+	// all, so the corelib's assertion stays a miss.
+	plain := genGo(t, schemaFromYAMLString(t,
+		"version: 1\nmessages:\n  P:\n    payload:\n      a: { id: 0, type: array, items: { type: u64, count: 4 } }\n"),
+		map[string]any{"package": "p"})["p.go"]
+	if strings.Contains(plain, "ArrayElemBound(id sofab.ID") {
+		t.Errorf("p.go: a type with no narrowed element must not implement ElemBoundVisitor:\n%s", plain)
+	}
+	// ElemBoundVisitor is its OWN interface, so a schema that declares an element
+	// width but no count/maxlen gets it without HeaderVisitor coming along.
+	only := genGo(t, schemaFromYAMLString(t,
+		"version: 1\nmessages:\n  R:\n    payload:\n      a: { id: 0, type: array, items: { type: u8 } }\n"),
+		map[string]any{"package": "r"})["r.go"]
+	if !strings.Contains(only, "func (m *R) ArrayElemBound(") {
+		t.Errorf("r.go: an element width alone must still be declared:\n%s", only)
+	}
+	if strings.Contains(only, "func (m *R) ArrayBegin(") {
+		t.Errorf("r.go: an element width alone must not drag in HeaderVisitor:\n%s", only)
+	}
+}
+
 // TestGoFixlenArrayKindPerSubtype pins generator#259 / Crucible F-0042: a fixlen
 // array's element SUBTYPE decides whether the header is the declared field's
 // value at all, so the schema count bound may only be applied to a header whose
