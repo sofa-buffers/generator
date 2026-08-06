@@ -534,7 +534,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if emitArrayBegin {
 		arrayKind = ", ArrayKind"
 	}
-	f.line("    use sofab::{IStream, Visitor, Id, Unsigned, Signed%s};", arrayKind)
+	// FixlenType only for the fixlen_begin override, on the same on-demand rule --
+	// a message with no bounded string/blob names neither type.
+	fixlenType := ""
+	if len(g.fixlenBeginArms(fs, ir.KindString)) > 0 || len(g.fixlenBeginArms(fs, ir.KindBlob)) > 0 {
+		fixlenType = ", FixlenType"
+	}
+	f.line("    use sofab::{IStream, Visitor, Id, Unsigned, Signed%s%s};", arrayKind, fixlenType)
 	f.blank()
 	// Bounded decode stack for the no_std profile. Only LIVE scopes are stacked --
 	// a sequence opened inside a skipped subtree is depth-counted in `dead` instead
@@ -911,6 +917,8 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if use.fp64 {
 		g.emitFloatVisit(f, fs, ir.KindFP64, "fp64", "f64", arrSkip)
 	}
+
+	g.emitFixlenBegin(f, fs, use)
 
 	if use.str {
 		// string: scalar strings + string-array elements
@@ -1338,6 +1346,87 @@ func (g *gen) emitLimitGuard(f *rfile, fs []frame, kind ir.Kind, constName strin
 	}
 	f.line("            _ => {}")
 	f.line("        }")
+}
+
+// emitFixlenBegin latches every schema bound a fixlen field's LENGTH WORD already
+// decides, at that word (CORELIB_PLAN §5.2, generator#267).
+//
+// The bounds themselves are not new -- a scalar/element `maxlen` and a wrapper
+// element's `id >= count` were both already rejected. They were rejected in the
+// PAYLOAD callback, which only fires once payload bytes arrive. So a message
+// truncated immediately after the length word never reached them and reported
+// INCOMPLETE, while the same bytes read whole are INVALID. §5.2 makes INVALID
+// dominate INCOMPLETE precisely because the violation is already established by
+// the bytes seen; corelib-rs#47 / corelib-rs-no-std#68 added the hook that makes
+// the verdict available there.
+//
+// Everything sits inside the DECLARED-subtype match. The hook fires for whatever
+// fixlen subtype arrived at a field id -- the corelib resolves what arrived but
+// cannot know what was declared -- so a contradicting subtype must not be
+// measured against this field's bound; that is a §7.3 skip. Same rule as #224 /
+// #259, applied one position over.
+//
+// The payload-side guards STAY. They are unreachable for a message that gets this
+// far, and they are the only thing still bounding a consumer built against a
+// corelib whose hook predates this.
+func (g *gen) emitFixlenBegin(f *rfile, fs []frame, use visitorUse) {
+	str := g.fixlenBeginArms(fs, ir.KindString)
+	blob := g.fixlenBeginArms(fs, ir.KindBlob)
+	if len(str) == 0 && len(blob) == 0 {
+		return
+	}
+	f.line("    fn fixlen_begin(&mut self, id: Id, subtype: FixlenType, total: usize) {")
+	f.line("        // Every bound below is fully established by the LENGTH WORD, so it is")
+	f.line("        // decided here rather than once payload bytes arrive: S5.2 makes INVALID")
+	f.line("        // dominate INCOMPLETE, so truncating right after this word must not")
+	f.line("        // downgrade the verdict. The subtype match is S7.3 -- a contradicting")
+	f.line("        // fixlen kind at this id is a SKIPPED field, not this field's length.")
+	f.line("        match subtype {")
+	for _, a := range []struct {
+		variant string
+		arms    []string
+	}{{"Str", str}, {"Blob", blob}} {
+		if len(a.arms) == 0 {
+			continue
+		}
+		f.line("            FixlenType::%s => match (self.cur, id) {", a.variant)
+		for _, arm := range a.arms {
+			f.line("%s", arm)
+		}
+		f.line("                _ => {}")
+		f.line("            },")
+	}
+	f.line("            _ => {}")
+	f.line("        }")
+	f.line("    }")
+	_ = use
+}
+
+// fixlenBeginArms builds the (location, id) arms for one fixlen subtype: a
+// wrapper element carries its array's over-index bound AND its element maxlen,
+// a scalar field carries its own maxlen. The over-index reject comes first --
+// an element that is not this array's element at all must not have its length
+// measured against the array's element bound.
+func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind) []string {
+	var arms []string
+	for _, fr := range fs {
+		if fr.kind == fkSeqArr && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0) {
+			body := ""
+			if fr.cap >= 0 {
+				body += fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", fr.cap)
+			}
+			if fr.emax >= 0 {
+				body += fmt.Sprintf("if total > %d { self.inv = true; return; } ", fr.emax)
+			}
+			arms = append(arms, fmt.Sprintf("                (_Loc::%s, _) => { %s},", fr.loc, body))
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == kind && fld.HasMaxlen {
+				arms = append(arms, fmt.Sprintf("                (_Loc::%s, %d) => if total > %d { self.inv = true; return; },", fr.loc, fld.ID, fld.Maxlen))
+			}
+		}
+	}
+	return arms
 }
 
 // emitMaxlenGuard emits the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top

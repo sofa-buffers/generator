@@ -1303,3 +1303,52 @@ messages:
 		t.Error("Sbuf must stay package-private")
 	}
 }
+
+// A schema bound that the fixlen LENGTH WORD already decides must be latched at
+// that word, not once payload bytes arrive (CORELIB_PLAN §5.2, generator#267).
+// The guards lived in the PAYLOAD callback, which never fires for a message
+// truncated immediately after the length word -- so that reported INCOMPLETE
+// where the same bytes read whole are INVALID.
+//
+// Pinned here: the hook exists, both bounds are inside it, and every guard sits
+// behind the DECLARED-subtype test (a contradicting subtype is a §7.3 skip, not
+// this field's length).
+func TestJavaFixlenBeginLatchesBoundsAtTheLengthWord(t *testing.T) {
+	files := genJavaFromYAML(t, `version: 1
+messages:
+  m:
+    payload:
+      s:  { id: 0, type: string, maxlen: 8 }
+      b:  { id: 1, type: blob, maxlen: 4 }
+      sa: { id: 2, type: array, items: { type: string, count: 3, maxlen: 6 } }
+`, map[string]any{})
+	var m string
+	for path, src := range files {
+		if strings.HasSuffix(path, "M.java") {
+			m = src
+		}
+	}
+	if m == "" {
+		t.Fatal("no M.java")
+	}
+
+	if !strings.Contains(m, "public void fixlenBegin(int id, FixlenType subtype, int total)") {
+		t.Fatal("no fixlenBegin override")
+	}
+	if !strings.Contains(m, "if (subtype == FixlenType.STRING) {") ||
+		!strings.Contains(m, "case 0: if (total > 8)") {
+		t.Error("a scalar string maxlen must be latched under FixlenType.STRING")
+	}
+	if !strings.Contains(m, "if (subtype == FixlenType.BLOB) {") ||
+		!strings.Contains(m, "case 1: if (total > 4)") {
+		t.Error("a scalar blob maxlen must be latched under FixlenType.BLOB")
+	}
+	// Over-index first, then the element maxlen.
+	if !strings.Contains(m, "if (id >= 3) throw") || !strings.Contains(m, "if (total > 6) throw") {
+		t.Error("a wrapper element must latch over-index and element maxlen")
+	}
+	// The payload-side guard stays as defense for an older corelib.
+	if strings.Count(m, "total > 8") < 2 {
+		t.Error("the payload-side maxlen guard must remain")
+	}
+}

@@ -188,6 +188,49 @@ was written" test the lazy framing performs. Because the last element is always
 written, a wrapper array is default exactly when it is **empty**, so the writer and
 the predicate cannot drift apart.
 
+
+## Schema bounds are latched at the word that carries them
+
+A `maxlen` or a wrapper element's `id >= count` is fully established by the
+fixlen **length word** — the number that violates the bound is already on the
+wire, and no later byte can make it legal. CORELIB_PLAN §5.2 makes INVALID
+dominate INCOMPLETE for exactly that reason, so the verdict has to be taken
+there.
+
+It used to be taken in the **payload** callback, which only fires once payload
+bytes arrive. Truncate a message immediately after the length word and the guard
+never ran: the decode reported INCOMPLETE, while the same bytes read whole are
+INVALID. The untruncated controls were unanimous across the family — the
+disagreement was only about *when*, which is observable solely under truncation.
+
+`IVisitor.FixlenBegin(int id, FixlenType subtype, int total)` (corelib-cs#53) is
+where both bounds now sit, keyed by the same `(cur, id)` tuple the payload guard
+uses:
+
+```csharp
+public void FixlenBegin(int id, FixlenType subtype, int total) {
+    if (subtype == FixlenType.String) {
+        switch ((cur, id)) {
+        case (Root, 0): if (total > 8) throw …; break;
+        case (Root_sa, _): if (id >= 3) throw …; if (total > 6) throw …; break;
+```
+
+Over-index comes **before** the element `maxlen`: an element that is not this
+array's element at all must not have its length measured against the element
+bound. Every guard sits inside the declared-subtype test — the hook fires for
+whatever fixlen subtype arrived at a field id, and a contradicting one is a §7.3
+skip, not this field's length.
+
+The payload-side guards **stay**. They are unreachable for a message that reaches
+the header hook, and they are the only thing still bounding a consumer built
+against a corelib predating it.
+
+**The verdict arrives on a different channel from INCOMPLETE, and that is the
+contract, not an accident.** `TryDecode` returns COMPLETE/INCOMPLETE; malformed
+input **throws** out of `Feed`. A conformance check on this ordering therefore
+asserts the over-bound message *throws* and the in-bound control *returns*
+INCOMPLETE.
+
 ## §7.1: the declared integer width is a validity bound (issue #266)
 
 A `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination rejects a value outside its
