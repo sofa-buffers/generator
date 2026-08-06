@@ -39,6 +39,45 @@ schema `maxlen` sets `inv` at the length header, on **both** profiles — on
 `no_std` the guard fires ahead of the heapless `BufferFull` path, so an
 over-`maxlen` value is `InvalidMsg`, not a capacity error.
 
+
+## Schema bounds are latched at the word that carries them
+
+A `maxlen` or a wrapper element's `id >= count` is fully established by the
+fixlen **length word** — the number that violates the bound is already on the
+wire, and no later byte can make it legal. CORELIB_PLAN §5.2 makes INVALID
+dominate INCOMPLETE for exactly that reason, so the verdict has to be taken
+there.
+
+It used to be taken in the **payload** callback, which only fires once payload
+bytes arrive. Truncate a message immediately after the length word and the guard
+never ran: the decode reported INCOMPLETE, while the same bytes read whole are
+INVALID. The untruncated controls were unanimous across the family — the
+disagreement was only about *when*, which is observable solely under truncation.
+
+`Visitor::fixlen_begin(id, subtype, total)` (corelib-rs#47 /
+corelib-rs-no-std#68) is where both bounds now sit:
+
+```rust
+fn fixlen_begin(&mut self, id: Id, subtype: FixlenType, total: usize) {
+    match subtype {
+        FixlenType::Str => match (self.cur, id) {
+            (_Loc::Root, 0) => if total > 8 { self.inv = true; return; },
+            (_Loc::Root_sa, _) => { if id as usize >= 3 { … } if total > 6 { … } },
+```
+
+Over-index comes **before** the element `maxlen`: an element that is not this
+array's element at all must not have its length measured against the element
+bound. Everything sits inside the declared-subtype match — the hook fires for
+whatever fixlen subtype arrived at a field id, and a contradicting one is a §7.3
+skip, not this field's length.
+
+`FixlenType` is imported on demand into the decoder module, on the same rule as
+`ArrayKind`: a message with no bounded string/blob names neither type.
+
+The payload-side guards **stay**. They are unreachable for a message that reaches
+the header hook, and they are the only thing still bounding a consumer built
+against a corelib predating it.
+
 **std profile only.** The limits apply to `corelib: rs` (std). Under
 `corelib: rs-no-std` the keys are inert: heapless storage is statically
 schema-bounded already (an unbounded field is either rejected at generation

@@ -293,6 +293,36 @@ run_variant() {
     (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overmaxlen_control.bin" >/dev/null) || { echo "FAIL: [$label] control (16 == maxlen) must decode"; exit 1; }
     echo "==> [$label] over-maxlen reject OK"
 
+    # ...and the same violation with the message cut RIGHT AFTER the word that
+    # carries it (S5.2, generator#267). The over-maxlen is fully established by the
+    # fixlen length word: 17 > maxlen 16 is decided by bytes already on the wire,
+    # so running out of input cannot downgrade the verdict to INCOMPLETE.
+    #
+    # Before the fixlen_begin hook existed in corelib-rs the guard lived in the
+    # PAYLOAD callback, which never fires for a message that ends here -- so this
+    # reported Incomplete. The precision control below is what makes this an
+    # ORDERING assertion rather than a blanket reject.
+    #
+    #   62      blob, field id 12 ((12<<3)|2)
+    #   8b 01   fixlen word: byte length 17, blob subtype -> ((17<<3)|3)
+    #   <EOF>   not one payload byte
+    echo "==> [$label] over-maxlen + truncation must be INVALID, not INCOMPLETE"
+    printf '\142\213\001' > "$WORK/overmaxlen_trunc.bin"
+    printf '\142\203\001' > "$WORK/inmaxlen_trunc.bin"
+    ERR=$( (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/overmaxlen_trunc.bin" 2>&1 >/dev/null) || true )
+    case "$ERR" in
+        *InvalidMsg*) ;;
+        *) echo "FAIL: [$label] over-maxlen(17>16)+truncated -> $ERR (want InvalidMsg)"; exit 1 ;;
+    esac
+    # Precision control: an IN-BOUND length (16 == maxlen) cut at the same offset is
+    # a clean truncation and MUST stay Incomplete.
+    ERR=$( (cd "$WORK/ex-$label" && cargo run -q -- decode myfirstmessage < "$WORK/inmaxlen_trunc.bin" 2>&1 >/dev/null) || true )
+    case "$ERR" in
+        *Incomplete*) ;;
+        *) echo "FAIL: [$label] in-bound(16==16)+truncated -> $ERR (want Incomplete)"; exit 1 ;;
+    esac
+    echo "==> [$label] maxlen/truncation ordering OK"
+
     # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose
     # header wire type is not the one its declared type maps to -- for fixlen,
     # including the subtype -- is SKIPPED, exactly like an unknown id. someu8

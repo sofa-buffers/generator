@@ -923,21 +923,49 @@ callback serves both kinds, so ignoring the subtype would measure a blob field's
 `maxlen` against a string arriving at that id, a §7.3 skip rather than a bound
 (generator#303, closing #300).
 
-**Where the family stands, and why it is not a codegen gap.** `rust`,
-`rust-no-std`, `java`, `csharp` and `zig` all announce an array at its count word
-(`array_begin`/`arrayBegin`) and all five backends emit against it, so the
-**count** position is latched. The **fixlen** position is not, and cannot be from
-the generator: none of those five corelibs has a fixlen-header hook of any kind,
-and their only callback carrying `total` sits inside the payload loop. Measured
-against corelib-rs `main` with a recording visitor — a `write_str` message
-truncated to end exactly at its length word (`1a 52`, tag + length word, nothing
-more) produces **no visitor event at all**, whole or fed one byte at a time, while
-the untruncated message reports `(id 3, total 10, offset 0, len 10)`.
-`deliver_payload` guards the callback with `if avail > 0`; java/csharp/zig/rs-no-std
-have the identical shape. So this is the **whole-unit corelib** category above,
-needing the same small additive hook go/dart/py/ts already have: corelib-rs#47,
-corelib-rs-no-std#68, corelib-java#62, corelib-cs#53, corelib-zig#37. Tracked in
-generator#267 until they land.
+**The remaining five were a corelib gap first, and that is worth keeping on the
+record because it decided the sequencing.** `rust`, `rust-no-std`, `java`, `csharp`
+and `zig` all announce an array at its count word (`array_begin`/`arrayBegin`) and
+all five backends emitted against it, so the **count** position was already
+latched. The **fixlen** position could not be, from the generator: none of those
+five corelibs had a fixlen-header hook, and their only callback carrying `total`
+sat inside the payload loop. Measured against corelib-rs with a recording visitor
+— a `write_str` message truncated to end exactly at its length word (`1a 52`, tag
++ length word, nothing more) produced **no visitor event at all**, whole or fed
+one byte at a time, while the untruncated message reported `(id 3, total 10,
+offset 0, len 10)`. `deliver_payload` guarded the callback with `if avail > 0`;
+java/csharp/zig/rs-no-std had the identical shape. That put them in the
+**whole-unit corelib** category above, needing the same small additive hook
+go/dart/py/ts already had.
+
+**All five hooks landed** (corelib-rs#47, corelib-rs-no-std#68, corelib-java#62,
+corelib-cs#53, corelib-zig#37), with one signature across the family:
+`fixlen_begin(id, subtype, total)` — fired after the length word is read and
+validated, before any payload byte, `total == 0` included. The generator emits
+into all five, latching **both** bounds a fixlen header decides: a scalar's
+`maxlen`, and for a wrapper element its array's `id >= count` **before** the
+element `maxlen` — an element that is not this array's element at all must not
+have its length measured against the element bound.
+
+Two per-target details are load-bearing rather than incidental:
+
+- **Zig's hook is the only fallible one in the family.** It returns
+  `sofab.Error!void`, so the reject is `return error.InvalidMessage` rather than
+  a sticky `inv` flag. Zig also rejects an unused function parameter, and not
+  every schema reads both: an array with a `count` but no element `maxlen` reads
+  `id` and never `total`, so each parameter is named only when some arm below
+  actually reads it — the rule `emitPayloadVisit` already followed for its own
+  `total`.
+- **Java and C# surface INVALID as a throw, not as a returned status.** Their
+  generated `tryDecode`/`TryDecode` return COMPLETE/INCOMPLETE and malformed input
+  raises; the conformance legs therefore assert the two verdicts on *different
+  channels* — the over-bound message must throw, the in-bound control must return
+  INCOMPLETE. Reading that as a single status word is what a first attempt at
+  those legs got wrong.
+
+The payload-side guards stay in every backend. They are unreachable for a message
+that reaches the header hook, and they are the only thing still bounding a
+consumer built against a corelib predating it.
 
 #### Decode verdict: over-index wrapper-array elements are INVALID (all targets)
 

@@ -1707,3 +1707,57 @@ func TestRustStaticStorageCargoDep(t *testing.T) {
 		t.Error("the corelib-rs default must not pull in heapless")
 	}
 }
+
+// A schema bound that the fixlen LENGTH WORD already decides must be latched at
+// that word, not once payload bytes arrive (CORELIB_PLAN §5.2, generator#267).
+//
+// The bounds are not new -- a scalar/element `maxlen` and a wrapper element's
+// `id >= count` were both already rejected -- but they lived in the PAYLOAD
+// callback, which never fires for a message truncated immediately after the
+// length word. That reported INCOMPLETE where the same bytes read whole are
+// INVALID, and §5.2 makes INVALID dominate precisely because the violation is
+// already established by the bytes seen.
+//
+// The assertions below pin the three things that make this correct rather than
+// merely present: the hook exists, both bounds are inside it, and every guard
+// sits behind the DECLARED-subtype test -- the hook fires for whatever subtype
+// arrived at a field id, and a contradicting one is a §7.3 skip, not this
+// field's length.
+func TestRustFixlenBeginLatchesBoundsAtTheLengthWord(t *testing.T) {
+	m := moduleFromYAML(t, `version: 1
+messages:
+  m:
+    payload:
+      s:  { id: 0, type: string, maxlen: 8 }
+      b:  { id: 1, type: blob, maxlen: 4 }
+      sa: { id: 2, type: array, items: { type: string, count: 3, maxlen: 6 } }
+`, map[string]any{})
+
+	if !strings.Contains(m, "fn fixlen_begin(&mut self, id: Id, subtype: FixlenType, total: usize)") {
+		t.Fatal("no fixlen_begin override")
+	}
+	// FixlenType is imported on demand -- naming it without the import does not compile.
+	if !strings.Contains(m, ", FixlenType};") {
+		t.Error("FixlenType must be imported where fixlen_begin names it")
+	}
+	// Scalar maxlen, keyed by (scope, field id), under the declared subtype.
+	if !strings.Contains(m, "FixlenType::Str => match (self.cur, id) {") ||
+		!strings.Contains(m, "(_Loc::Root, 0) => if total > 8 { self.inv = true; return; },") {
+		t.Error("a scalar string maxlen must be latched under FixlenType::Str")
+	}
+	if !strings.Contains(m, "FixlenType::Blob => match (self.cur, id) {") ||
+		!strings.Contains(m, "(_Loc::Root, 1) => if total > 4 { self.inv = true; return; },") {
+		t.Error("a scalar blob maxlen must be latched under FixlenType::Blob")
+	}
+	// A wrapper element carries BOTH bounds, over-index first: an element that is
+	// not this array's element at all must not be measured against its bound.
+	if !strings.Contains(m, "(_Loc::Root_sa, _) => { if id as usize >= 3 { self.inv = true; return; } if total > 6 { self.inv = true; return; } },") {
+		t.Error("a wrapper element must latch over-index then element maxlen")
+	}
+	// The payload-side guards STAY: unreachable now, but the only thing still
+	// bounding a consumer built against a corelib without the hook.
+	if !strings.Contains(m, "fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {") ||
+		strings.Count(m, "total > 8") < 2 {
+		t.Error("the payload-side maxlen guard must remain as defense")
+	}
+}

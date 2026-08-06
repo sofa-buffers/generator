@@ -987,3 +987,40 @@ messages:
 		}
 	}
 }
+
+// A schema bound that the fixlen LENGTH WORD already decides must be latched at
+// that word, not once payload bytes arrive (CORELIB_PLAN §5.2, generator#267).
+// The guards lived in the PAYLOAD callback, which never fires for a message
+// truncated immediately after the length word -- so that reported INCOMPLETE
+// where the same bytes read whole are INVALID.
+func TestCsharpFixlenBeginLatchesBoundsAtTheLengthWord(t *testing.T) {
+	m := buildModule(t, []byte(`version: 1
+messages:
+  m:
+    payload:
+      s:  { id: 0, type: string, maxlen: 8 }
+      b:  { id: 1, type: blob, maxlen: 4 }
+      sa: { id: 2, type: array, items: { type: string, count: 3, maxlen: 6 } }
+`), "b.yaml", map[string]any{})
+
+	if !strings.Contains(m, "public void FixlenBegin(int id, FixlenType subtype, int total)") {
+		t.Fatal("no FixlenBegin implementation")
+	}
+	if !strings.Contains(m, "if (subtype == FixlenType.String) {") ||
+		!strings.Contains(m, "case (Root, 0): if (total > 8) throw") {
+		t.Error("a scalar string maxlen must be latched under FixlenType.String")
+	}
+	if !strings.Contains(m, "if (subtype == FixlenType.Blob) {") ||
+		!strings.Contains(m, "case (Root, 1): if (total > 4) throw") {
+		t.Error("a scalar blob maxlen must be latched under FixlenType.Blob")
+	}
+	// Over-index first, then the element maxlen -- an element that is not this
+	// array's element must not be measured against its bound.
+	if !strings.Contains(m, "case (Root_sa, _): if (id >= 3) throw") ||
+		!strings.Contains(m, "if (total > 6) throw") {
+		t.Error("a wrapper element must latch over-index then element maxlen")
+	}
+	if strings.Count(m, "total > 8") < 2 {
+		t.Error("the payload-side maxlen guard must remain as defense")
+	}
+}

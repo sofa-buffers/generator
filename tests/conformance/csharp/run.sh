@@ -117,6 +117,36 @@ fi
 $H decode myfirstmessage < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
 echo "==> over-maxlen reject OK"
 
+# ...and the same violation with the message cut RIGHT AFTER the word that
+# carries it (MESSAGE_SPEC S5.2, generator#267). The over-maxlen is fully
+# established by the fixlen length word -- 17 > maxlen 16 is decided by bytes
+# already on the wire -- so running out of input cannot downgrade the verdict.
+#
+# The guard used to live in the PAYLOAD callback, which never fires for a message
+# that ends here, so this reported INCOMPLETE. The corelib hook announcing a
+# fixlen field at its length word is what makes the verdict available in time.
+#
+#   62      blob, field id 12 ((12<<3)|2)
+#   8b 01   fixlen word: byte length 17, blob subtype -> ((17<<3)|3)
+#   <EOF>   not one payload byte
+echo "==> over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#267)"
+printf '\142\213\001' > "$WORK/overmaxlen_trunc.bin"
+printf '\142\203\001' > "$WORK/inmaxlen_trunc.bin"
+# The two verdicts arrive on DIFFERENT channels here, which is this backend's
+# documented contract rather than an accident: tryDecode returns
+# COMPLETE/INCOMPLETE and malformed input THROWS. So the assertion is that the
+# over-bound message throws (INVALID) while the in-bound one returns INCOMPLETE
+# -- and the second half is what makes this an ordering check rather than a
+# blanket reject.
+if $H trydecode myfirstmessage < "$WORK/overmaxlen_trunc.bin" >/dev/null 2>"$WORK/omt.err"; then
+    echo "FAIL: over-maxlen(17>16)+truncated must be INVALID, not a returned status"; exit 1
+fi
+grep -q "INVALID_MSG\|InvalidMessage" "$WORK/omt.err" || {
+    echo "FAIL: over-maxlen(17>16)+truncated must report INVALID; got:"; cat "$WORK/omt.err"; exit 1; }
+ST=$($H trydecode myfirstmessage < "$WORK/inmaxlen_trunc.bin" | sed -n 1p)
+[ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(16==16)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
+echo "==> maxlen/truncation ordering OK"
+
 # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose header
 # wire type is not the one its declared type maps to -- for fixlen, including the
 # subtype -- is SKIPPED, exactly like an unknown id. someu8 (id 0) is declared u8

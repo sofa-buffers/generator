@@ -1298,3 +1298,52 @@ messages:
 		t.Errorf("sequenceEnd must accompany it, or the stack never unwinds:\n%s", m)
 	}
 }
+
+// A schema bound that the fixlen LENGTH WORD already decides must be latched at
+// that word, not once payload bytes arrive (CORELIB_PLAN §5.2, generator#267).
+// The guards lived in the PAYLOAD callback, which never fires for a message
+// truncated immediately after the length word -- so that reported INCOMPLETE
+// where the same bytes read whole are INVALID.
+func TestZigFixlenBeginLatchesBoundsAtTheLengthWord(t *testing.T) {
+	sch := buildSchema(t, `version: 1
+messages:
+  m:
+    payload:
+      s:  { id: 0, type: string, maxlen: 8 }
+      b:  { id: 1, type: blob, maxlen: 4 }
+      sa: { id: 2, type: array, items: { type: string, count: 3, maxlen: 6 } }
+`)
+	files, err := (&Backend{}).Generate(sch, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var m string
+	for _, f := range files {
+		if strings.HasSuffix(f.Path, "message.zig") {
+			m = string(f.Content)
+		}
+	}
+	if m == "" {
+		t.Fatal("no message.zig")
+	}
+
+	// Zig's hook is the only one in the family that RETURNS an error rather than
+	// setting a sticky flag, so the reject is `return sofab.Error.InvalidMessage`.
+	if !strings.Contains(m, "pub fn fixlenBegin(self: *_dec_M, id: sofab.Id, subtype: sofab.FixlenType, total: usize) sofab.Error!void {") {
+		t.Fatal("no fixlenBegin, or the wrong signature (it must be fallible)")
+	}
+	if !strings.Contains(m, ".string => switch (self.cur) {") ||
+		!strings.Contains(m, "0 => if (total > 8) return sofab.Error.InvalidMessage,") {
+		t.Error("a scalar string maxlen must be latched under .string")
+	}
+	if !strings.Contains(m, ".blob => switch (self.cur) {") ||
+		!strings.Contains(m, "1 => if (total > 4) return sofab.Error.InvalidMessage,") {
+		t.Error("a scalar blob maxlen must be latched under .blob")
+	}
+	if !strings.Contains(m, ".root_sa => { if (id >= 3) return sofab.Error.InvalidMessage; if (total > 6) return sofab.Error.InvalidMessage; },") {
+		t.Error("a wrapper element must latch over-index then element maxlen")
+	}
+	if strings.Count(m, "total > 8") < 2 {
+		t.Error("the payload-side maxlen guard must remain as defense")
+	}
+}

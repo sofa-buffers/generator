@@ -435,6 +435,9 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	if use.fp64 {
 		g.emitFloatVisit(f, fs, name, ir.KindFP64, "fp64", "f64")
 	}
+	// Every schema bound the LENGTH WORD already decides, latched at that word.
+	g.emitFixlenBegin(f, fs, name)
+
 	if use.str {
 		g.emitPayloadVisit(f, fs, name, ir.KindString, "string")
 	}
@@ -803,6 +806,112 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 	f.line("            else => {},")
 	f.line("        }")
 	f.line("    }")
+}
+
+// emitFixlenBegin latches every schema bound a fixlen field's LENGTH WORD already
+// decides, at that word (CORELIB_PLAN §5.2, generator#267).
+//
+// The bounds are not new -- a scalar/element `maxlen` and a wrapper element's
+// `id >= count` were both already rejected -- but in the payload callback, which
+// only fires once payload bytes arrive. A message truncated immediately after the
+// length word never reached them and reported INCOMPLETE, while the same bytes
+// read whole are INVALID; §5.2 makes INVALID dominate INCOMPLETE because the
+// violation is already established by the bytes seen. corelib-zig#37 added the
+// hook.
+//
+// Zig's hook is the only one in the family that RETURNS AN ERROR rather than
+// setting a sticky flag, so the reject is `return error.InvalidMessage` here
+// instead of `self.inv = true`. Both surface as INVALID; the corelib fails the
+// field on a raised error, which is exactly the latch this needs.
+//
+// Everything sits inside the DECLARED-subtype switch: the hook fires for whatever
+// subtype arrived at a field id, and a contradicting one is a §7.3 skip rather
+// than this field's length (#224/#259, one position over).
+//
+// The payload-side guards stay -- unreachable for a message that gets this far,
+// and the only thing still bounding a consumer built against an older corelib.
+func (g *gen) emitFixlenBegin(f *zfile, fs []frame, name string) {
+	str := fixlenBeginArms(fs, ir.KindString)
+	blob := fixlenBeginArms(fs, ir.KindBlob)
+	if len(str) == 0 && len(blob) == 0 {
+		return
+	}
+	// Zig rejects an unused function parameter, and not every schema uses both:
+	// an array with a `count` but no element `maxlen` reads `id` and never
+	// `total`. Name each parameter only when some arm below actually reads it --
+	// the same rule emitPayloadVisit follows for its own `total`.
+	idP, totalP := "_", "_"
+	for _, a := range append(append([]string{}, str...), blob...) {
+		if strings.Contains(a, "id ") || strings.Contains(a, "(id)") {
+			idP = "id"
+		}
+		if strings.Contains(a, "total ") {
+			totalP = "total"
+		}
+	}
+	f.blank()
+	f.line("    /// Latch a schema bound at the fixlen LENGTH WORD, before any payload byte.")
+	f.line("    /// S5.2 makes INVALID dominate INCOMPLETE, so truncating right after this")
+	f.line("    /// word must not downgrade the verdict. The subtype switch is S7.3 -- a")
+	f.line("    /// contradicting fixlen kind at this id is a SKIPPED field, not this")
+	f.line("    /// field's length.")
+	f.line("    pub fn fixlenBegin(self: *_dec_%s, %s: sofab.Id, subtype: sofab.FixlenType, %s: usize) sofab.Error!void {", name, idP, totalP)
+	f.line("        switch (subtype) {")
+	for _, a := range []struct {
+		variant string
+		arms    []string
+	}{{"string", str}, {"blob", blob}} {
+		if len(a.arms) == 0 {
+			continue
+		}
+		f.line("            .%s => switch (self.cur) {", a.variant)
+		for _, arm := range a.arms {
+			f.line("%s", arm)
+		}
+		f.line("                else => {},")
+		f.line("            },")
+	}
+	f.line("            else => {},")
+	f.line("        }")
+	f.line("    }")
+}
+
+// fixlenBeginArms builds the per-scope arms for one fixlen subtype. A wrapper
+// element carries its array's over-index bound AND its element maxlen, in that
+// order: an element that is not this array's element at all must not have its
+// length measured against the element bound. A scalar field carries its own
+// maxlen, keyed by field id inside its scope.
+func fixlenBeginArms(fs []frame, kind ir.Kind) []string {
+	var arms []string
+	for _, fr := range fs {
+		if fr.kind == fkSeqArr && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0) {
+			body := ""
+			if fr.cap >= 0 {
+				body += fmt.Sprintf("if (id >= %d) return sofab.Error.InvalidMessage; ", fr.cap)
+			}
+			if fr.emax >= 0 {
+				body += fmt.Sprintf("if (total > %d) return sofab.Error.InvalidMessage; ", fr.emax)
+			}
+			arms = append(arms, fmt.Sprintf("                .%s => { %s},", fr.loc, body))
+			continue
+		}
+		if fr.kind != fkStruct {
+			continue
+		}
+		var inner []string
+		for _, fld := range fr.fields {
+			if fld.Kind == kind && fld.HasMaxlen {
+				inner = append(inner, fmt.Sprintf("%d => if (total > %d) return sofab.Error.InvalidMessage,", fld.ID, fld.Maxlen))
+			}
+		}
+		if len(inner) > 0 {
+			arm := fmt.Sprintf("                .%s => switch (id) { ", fr.loc)
+			arm += strings.Join(inner, " ")
+			arm += " else => {}, },"
+			arms = append(arms, arm)
+		}
+	}
+	return arms
 }
 
 // emitPayloadVisit emits the string or blob callback. The generated decode()

@@ -274,6 +274,8 @@ func (g *gen) stringDestLabels(fs []frame) []string {
 // only to drop it would validate a payload nobody reads, which is what
 // CORELIB_PLAN §6.4 forbids (generator#257).
 func (g *gen) emitStringCb(f *cfile, fs []frame, limStr bool) {
+	g.emitFixlenBegin(f, fs)
+
 	f.line("    public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
 	defer f.line("    }")
 
@@ -352,6 +354,87 @@ func (g *gen) emitDestGuard(f *cfile, labels []string) {
 	f.line("                break;")
 	f.line("            default: return;")
 	f.line("        }")
+}
+
+// emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
+// of the String/Blob callback, the bounded-field twin of emitLenGuard: every
+// field of that kind with a schema `maxlen` (scalar fields and wrapper-sequence
+// elements alike) gets a (loc, id) arm that throws InvalidMessage when the wire
+// `total` exceeds its own maxlen — checked at the length header before any bytes
+// accumulate (single-shot and chunked paths alike), never truncated. Unbounded
+// fields get no arm: the generator#102 configured limit governs them. Each
+// bounded field carries a distinct maxlen, so the arms compare per-arm rather
+// / emitFixlenBegin latches every schema bound a fixlen field's LENGTH WORD already
+// decides, at that word (CORELIB_PLAN §5.2, generator#267).
+//
+// The bounds are not new -- a scalar/element `maxlen` and a wrapper element's
+// `id >= count` were both already rejected -- but in the PAYLOAD callback, which
+// only fires once payload bytes arrive. A message truncated immediately after the
+// length word never reached them and reported INCOMPLETE, while the same bytes
+// read whole are INVALID; §5.2 makes INVALID dominate INCOMPLETE because the
+// violation is already established by the bytes seen. corelib-cs#53 added the
+// hook.
+//
+// Every guard sits inside the DECLARED-subtype test: the hook fires for whatever
+// subtype arrived at a field id, and a contradicting one is a §7.3 skip rather
+// than this field's length (#224/#259, one position over).
+//
+// The payload-side guards stay -- unreachable for a message that gets this far,
+// and the only thing still bounding a consumer built against an older corelib.
+func (g *gen) emitFixlenBegin(f *cfile, fs []frame) {
+	str := g.fixlenBeginArms(fs, ir.KindString, "string length")
+	blob := g.fixlenBeginArms(fs, ir.KindBlob, "blob length")
+	if len(str) == 0 && len(blob) == 0 {
+		return
+	}
+	f.line("    public void FixlenBegin(int id, FixlenType subtype, int total) {")
+	f.line("        // Decided at the LENGTH WORD, not once payload bytes arrive: S5.2 makes")
+	f.line("        // INVALID dominate INCOMPLETE, so truncating right after this word must")
+	f.line("        // not downgrade the verdict. The subtype test is S7.3 -- a contradicting")
+	f.line("        // fixlen kind at this id is a SKIPPED field, not this field's length.")
+	for _, a := range []struct {
+		variant string
+		arms    []string
+	}{{"String", str}, {"Blob", blob}} {
+		if len(a.arms) == 0 {
+			continue
+		}
+		f.line("        if (subtype == FixlenType.%s) {", a.variant)
+		f.line("            switch ((cur, id)) {")
+		for _, arm := range a.arms {
+			f.line("%s", arm)
+		}
+		f.line("            }")
+		f.line("        }")
+	}
+	f.line("    }")
+	f.blank()
+}
+
+// fixlenBeginArms builds the (scope, id) arms for one fixlen subtype. A wrapper
+// element carries its array's over-index bound AND its element maxlen, in that
+// order: an element that is not this array's element at all must not have its
+// length measured against the element bound.
+func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, what string) []string {
+	var arms []string
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == kind && (fr.cap >= 0 || fr.emax >= 0) {
+				body := g.overIndexGuard(fr.cap, fr.loc)
+				if fr.emax >= 0 {
+					body += fmt.Sprintf("if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s element: %s above schema maxlen %d\"); ", fr.emax, fr.loc, what, fr.emax)
+				}
+				arms = append(arms, fmt.Sprintf("            case (%s, _): %sbreak;", fr.loc, body))
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == kind && fld.HasMaxlen {
+				arms = append(arms, fmt.Sprintf("            case (%s, %d): if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s: %s above schema maxlen %d\"); break;", fr.loc, fld.ID, fld.Maxlen, fld.Name, what, fld.Maxlen))
+			}
+		}
+	}
+	return arms
 }
 
 // emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top

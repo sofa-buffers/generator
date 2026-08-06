@@ -358,6 +358,49 @@ Integer arrays are untouched by all of this — there is no second word on the
 `.unsigned`/`.signed` path, so the count header already carries everything the arm
 needs and the two kinds stay a single prong.
 
+
+## Schema bounds are latched at the word that carries them
+
+A `maxlen` or a wrapper element's `id >= count` is fully established by the
+fixlen **length word** — the number that violates the bound is already on the
+wire, and no later byte can make it legal. CORELIB_PLAN §5.2 makes INVALID
+dominate INCOMPLETE for exactly that reason, so the verdict has to be taken
+there.
+
+It used to be taken in the **payload** callback, which only fires once payload
+bytes arrive. Truncate a message immediately after the length word and the guard
+never ran: the decode reported INCOMPLETE, while the same bytes read whole are
+INVALID. The untruncated controls were unanimous across the family — the
+disagreement was only about *when*, which is observable solely under truncation.
+
+`fixlenBegin` (corelib-zig#37) is where both bounds now sit — and it is the only
+hook in the family that **returns an error** rather than setting a sticky flag:
+
+```zig
+pub fn fixlenBegin(self: *_dec_M, id: sofab.Id, subtype: sofab.FixlenType, total: usize) sofab.Error!void {
+    switch (subtype) {
+        .string => switch (self.cur) {
+            .root => switch (id) { 0 => if (total > 8) return sofab.Error.InvalidMessage, else => {}, },
+            .root_sa => { if (id >= 3) return sofab.Error.InvalidMessage; if (total > 6) return sofab.Error.InvalidMessage; },
+```
+
+Over-index comes **before** the element `maxlen`: an element that is not this
+array's element at all must not have its length measured against the element
+bound. Every guard sits inside the declared-subtype test — the hook fires for
+whatever fixlen subtype arrived at a field id, and a contradicting one is a §7.3
+skip, not this field's length.
+
+The payload-side guards **stay**. They are unreachable for a message that reaches
+the header hook, and they are the only thing still bounding a consumer built
+against a corelib predating it.
+
+**Zig rejects an unused function parameter, and not every schema reads both.** An
+array with a `count` but no element `maxlen` reads `id` and never `total`, so each
+parameter is named only when some arm actually reads it and is `_` otherwise —
+the same rule the payload callback already follows for its own `total`. A schema
+with no bounded string/blob emits no `fixlenBegin` at all, and the `@hasDecl`
+dispatch in the corelib then costs nothing.
+
 ## §7.1: the declared integer width is a validity bound (issue #266)
 
 This is the backend where the defect was written down as intent. `storeCast`

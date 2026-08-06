@@ -160,6 +160,34 @@ fi
 grep -q "IncompleteMessage" "$WORK/ict.err" || { echo "FAIL: in-bound(4==4)+truncated must be IncompleteMessage; got:"; cat "$WORK/ict.err"; exit 1; }
 echo "==> over-count/truncation ordering OK"
 
+# ...and the same violation with the message cut RIGHT AFTER the word that
+# carries it (MESSAGE_SPEC S5.2, generator#267). The over-maxlen is fully
+# established by the fixlen length word -- 17 > maxlen 16 is decided by bytes
+# already on the wire -- so running out of input cannot downgrade the verdict.
+#
+# The guard used to live in the PAYLOAD callback, which never fires for a message
+# that ends here, so this reported INCOMPLETE. The corelib hook that announces a
+# fixlen field at its length word is what makes the verdict available in time.
+#
+#   62      blob, field id 12 ((12<<3)|2)
+#   8b 01   fixlen word: byte length 17, blob subtype -> ((17<<3)|3)
+#   <EOF>   not one payload byte
+echo "==> over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#267)"
+printf '\142\213\001' > "$WORK/overmaxlen_trunc.bin"
+printf '\142\203\001' > "$WORK/inmaxlen_trunc.bin"
+if "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/overmaxlen_trunc.bin" >/dev/null 2>"$WORK/omt.err"; then
+    echo "FAIL: over-maxlen(17>16)+truncated must reject"; exit 1
+fi
+grep -q "InvalidMessage" "$WORK/omt.err" || { echo "FAIL: over-maxlen(17>16)+truncated must be InvalidMessage; got:"; cat "$WORK/omt.err"; exit 1; }
+# Precision control: an IN-BOUND length (16 == maxlen) cut at the same offset is a
+# clean truncation and MUST stay IncompleteMessage. Without it this is a blanket
+# reject rather than an ordering assertion.
+if "$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/inmaxlen_trunc.bin" >/dev/null 2>"$WORK/imt.err"; then
+    echo "FAIL: in-bound(16==16)+truncated must reject"; exit 1
+fi
+grep -q "IncompleteMessage" "$WORK/imt.err" || { echo "FAIL: in-bound(16==16)+truncated must be IncompleteMessage; got:"; cat "$WORK/imt.err"; exit 1; }
+echo "==> maxlen/truncation ordering OK"
+
 # Over-index wrapper array (generator#142): somestringarray declares count: 5
 # (id 18). A string element with a wire index >= 5 is INVALID for every target
 # (MESSAGE_SPEC S5.1/S7), never grown-into -- which also bounds an over-index

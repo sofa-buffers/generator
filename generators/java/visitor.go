@@ -448,6 +448,90 @@ func (g *gen) emitDestGuard(f *jfile, fs []frame, dests []destFrame) {
 	f.line("        }")
 }
 
+// emitFixlenBegin latches every schema bound a fixlen field's LENGTH WORD already
+// decides, at that word (CORELIB_PLAN §5.2, generator#267).
+//
+// The bounds are not new -- a scalar/element `maxlen` and a wrapper element's
+// `id >= count` were both already rejected -- but they were rejected in the
+// PAYLOAD callback, which only fires once payload bytes arrive. A message
+// truncated immediately after the length word therefore never reached them and
+// reported INCOMPLETE, while the same bytes read whole are INVALID. §5.2 makes
+// INVALID dominate INCOMPLETE precisely because the violation is already
+// established by the bytes seen; corelib-java#62 added the hook.
+//
+// Every guard sits inside the DECLARED-subtype test. The hook fires for whatever
+// fixlen subtype arrived at a field id -- the corelib resolves what arrived but
+// cannot know what was declared -- so a contradicting subtype is a §7.3 skip and
+// must not be measured against this field's bound (#224/#259, one position over).
+//
+// The payload-side guards stay: unreachable for a message that gets this far, and
+// the only thing still bounding a consumer built against an older corelib.
+func (g *gen) emitFixlenBegin(f *jfile, fs []frame) {
+	str := g.fixlenBeginArms(fs, ir.KindString, "string length")
+	blob := g.fixlenBeginArms(fs, ir.KindBlob, "blob length")
+	if len(str) == 0 && len(blob) == 0 {
+		return
+	}
+	f.line("    @Override")
+	f.line("    public void fixlenBegin(int id, FixlenType subtype, int total) {")
+	f.line("        // Decided at the LENGTH WORD, not once payload bytes arrive: S5.2 makes")
+	f.line("        // INVALID dominate INCOMPLETE, so truncating right after this word must")
+	f.line("        // not downgrade the verdict. The subtype test is S7.3 -- a contradicting")
+	f.line("        // fixlen kind at this id is a SKIPPED field, not this field's length.")
+	for _, a := range []struct {
+		variant string
+		arms    []string
+	}{{"STRING", str}, {"BLOB", blob}} {
+		if len(a.arms) == 0 {
+			continue
+		}
+		f.line("        if (subtype == FixlenType.%s) {", a.variant)
+		f.line("            switch (cur) {")
+		for _, arm := range a.arms {
+			f.line("%s", arm)
+		}
+		f.line("            default: break;")
+		f.line("            }")
+		f.line("        }")
+	}
+	f.line("    }")
+}
+
+// fixlenBeginArms builds the per-scope arms for one fixlen subtype: a wrapper
+// element carries its array's over-index bound AND its element maxlen, a scalar
+// field carries its own maxlen. Over-index first -- an element that is not this
+// array's element at all must not have its length measured against the element
+// bound.
+func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, noun string) []string {
+	var arms []string
+	for _, fr := range fs {
+		if fr.kind == fkSeqLeaf && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0) {
+			body := overIndexGuard(fr.cap, fr.loc)
+			if fr.emax >= 0 {
+				body += fmt.Sprintf("if (total > %d) %s ", fr.emax, maxlenThrow(locName(fr.loc)+" element", noun, fr.emax))
+			}
+			arms = append(arms, fmt.Sprintf("            case %d: %sbreak;", fr.idx, body))
+			continue
+		}
+		if fr.kind != fkNormal {
+			continue
+		}
+		var inner []string
+		for _, fld := range fr.fields {
+			if fld.Kind == kind && fld.HasMaxlen {
+				inner = append(inner, fmt.Sprintf("case %d: if (total > %d) %s break;", fld.ID, fld.Maxlen, maxlenThrow(fld.Name, noun, fld.Maxlen)))
+			}
+		}
+		if len(inner) > 0 {
+			arm := fmt.Sprintf("            case %d: switch (id) { ", fr.idx)
+			arm += strings.Join(inner, " ")
+			arm += " default: break; } break;"
+			arms = append(arms, arm)
+		}
+	}
+	return arms
+}
+
 // emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
 // of the string()/blob() callback, the bounded-field twin of emitLenLimitGuard:
 // every field of this kind that declares a schema `maxlen` (scalar fields and
@@ -732,6 +816,10 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        if (Utf8.valid(b, off, off + len)) return new String(b, off, len, java.nio.charset.StandardCharsets.UTF_8);")
 	f.line("        throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"string: invalid UTF-8\"));")
 	f.line("    }")
+
+	// Every schema bound the LENGTH WORD already decides, latched at that word
+	// rather than once payload bytes arrive.
+	g.emitFixlenBegin(f, fs)
 
 	// string. Single-shot: when the whole payload arrives in one chunk, decode
 	// straight from the input slice, skipping the (synchronized) ByteArrayOutputStream.
