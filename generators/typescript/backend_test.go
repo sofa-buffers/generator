@@ -253,8 +253,12 @@ func TestTSMaxlenReject(t *testing.T) {
 		// (b) Scalar string + blob reject on an over-length byte check.
 		`case 0: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } const _s = c.readString(8); if (_utf8Len(_s) > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); o.s = _s; break; }`,
 		`case 1: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Blob) { c.skip(c.wire); break; } const _b = c.readBlob(8); if (_b.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8"); o.b = _b; break; }`,
-		// (c) A bounded wrapper-string element rejects on its element maxlen.
-		`const _s = c.readString(); if (_utf8Len(_s) > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 5"); arr[_id] = _s;`,
+		// (c) A bounded wrapper-string element rejects on its element maxlen, and
+		// carries that bound INTO the reader so the verdict is taken at the length
+		// word rather than after the payload -- the scalar arms above have always
+		// done this, and the element arm not doing it was generator#300's larger
+		// half. The post-read check stays as defense (see the dedicated test).
+		`const _s = c.readString(5); if (_utf8Len(_s) > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 5"); arr[_id] = _s;`,
 		// (e) The allocation-free byte-length helper is emitted once for the bounded
 		// strings above, replacing the per-decode TextEncoder allocation (issue #153).
 		"function _utf8Len(s: string): number {",
@@ -290,7 +294,7 @@ func TestTSStructural(t *testing.T) {
 		// field id continues that scope instead of replacing it (MESSAGE_SPEC §7.4,
 		// generator#175).
 		"MyfirstmessageSomestruct.decodeInto(c, o.somestruct); break;",
-		`while (c.readHeader()) { if ((c.wire as WireType) !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); continue; } if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); const _s = c.readString(); if (_utf8Len(_s) > 16) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 16"); arr[_id] = _s; }`, // wrapper-element §7.3 wire guard (#189) + id-aware string-list, over-index + over-maxlen rejected (S2/S5.1/S7/S7.1, #142)
+		`while (c.readHeader()) { if ((c.wire as WireType) !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); continue; } if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); const _s = c.readString(16); if (_utf8Len(_s) > 16) throw new SofabError(SofabErrorCode.InvalidMsg, "arr element: string byte length above schema maxlen 16"); arr[_id] = _s; }`, // wrapper-element §7.3 wire guard (#189) + id-aware string-list, over-index + over-maxlen rejected (S2/S5.1/S7/S7.1, #142)
 		"o.someu64 = c.readUnsigned() as bigint; break;", // u64 -> bigint, number-first
 		// MESSAGE_SPEC §2: a struct/union FIELD opens lazily and closes with the
 		// dropping end, so an all-default nested object is omitted, not framed empty.
@@ -1680,5 +1684,47 @@ messages:
 	}
 	if strings.Contains(out, "case 1: this.o.bFp32Raw") {
 		t.Error("fp64 must not appear in arrayEnd")
+	}
+}
+
+// A bounded wrapper-array ELEMENT must carry its maxlen into the reader, exactly
+// as a scalar string/blob already did (generator#300 / #267).
+//
+// readString()/readBlob() read the payload before returning, so a post-read
+// length check cannot fire for an element that never fully arrives: the reader
+// raises INCOMPLETE first and the verdict is lost, while §5.2 makes INVALID
+// dominate because the violation is established by the length word alone.
+//
+// Measured with Crucible's chunk-invariance oracle over 5637 truncations of the
+// checked-in corpora (every proper prefix -- a whole-message INCOMPLETE is by
+// definition a truncation, which is the shape this defect needs): 3290 mismatches
+// went to 122, and every one of the 3168 that disappeared was a string-array
+// element over its maxlen.
+func TestTypescriptWrapperElementMaxlenGoesIntoTheReader(t *testing.T) {
+	out := genTSWith(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      sa: { id: 0, type: array, items: { type: string, count: 4, maxlen: 6 } }
+      ba: { id: 1, type: array, items: { type: blob, count: 4, maxlen: 5 } }
+      s:  { id: 2, type: string, maxlen: 8 }
+`, map[string]any{})
+
+	// The element reads must carry the bound...
+	if !strings.Contains(out, "const _s = c.readString(6); ") {
+		t.Error("a bounded string element must pass its maxlen into readString")
+	}
+	if !strings.Contains(out, "const _b = c.readBlob(5); ") {
+		t.Error("a bounded blob element must pass its maxlen into readBlob")
+	}
+	// ...and the scalar arm, which already did, must be unchanged.
+	if !strings.Contains(out, "c.readString(8)") {
+		t.Error("the scalar string bound must still be passed")
+	}
+	// The post-read checks stay: the only bound left for a consumer on a corelib
+	// whose reader ignores the argument.
+	if !strings.Contains(out, "if (_utf8Len(_s) > 6)") || !strings.Contains(out, "if (_b.length > 5)") {
+		t.Error("the post-read element checks must remain as defense")
 	}
 }
