@@ -316,6 +316,51 @@ messages:
 	}
 }
 
+// TestPythonArrayElemBound covers generator#267's element position: an array
+// element outside its DECLARED WIDTH is INVALID (§7.1) and, established by its
+// own bytes, dominates a truncation behind it (§5.2). The `any(... for _v in ...)`
+// scan decides an array that arrives and never runs for one that does not, so the
+// bound also travels WITH the read — the same place the schema count and a blob's
+// maxlen already go.
+func TestPythonArrayElemBound(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      ua:  { id: 0, type: array, items: { type: u8,  count: 4 } }
+      sa:  { id: 1, type: array, items: { type: i16, count: 4 } }
+      wa:  { id: 2, type: array, items: { type: u64, count: 4 } }
+      da:  { id: 3, type: array, items: { type: u32 } }
+      fa:  { id: 4, type: array, items: { type: fp32, count: 4 } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+
+	for _, want := range []string{
+		"self.ua = d.read_unsigned_array(255)",
+		"self.sa = d.read_signed_array(-32768, 32767)",
+		// The width is a property of the element TYPE, not of the array length,
+		// so a count-less array carries it too.
+		"self.da = d.read_unsigned_array(4294967295)",
+		// The scan stays: it is what still bounds the elements against a corelib
+		// whose readers ignore the arguments, over a list already in hand.
+		`if any(_v > 255 for _v in self.ua):`,
+		`if any(_v < -32768 or _v > 32767 for _v in self.sa):`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing element bound %q:\n%s", want, mod)
+		}
+	}
+	// u64 spans the value domain the reader already returns, so it passes no
+	// bound — and an fp32 array has no width bound to pass at all.
+	if !strings.Contains(mod, "self.wa = d.read_unsigned_array()") {
+		t.Errorf("a u64 array must pass no element bound:\n%s", mod)
+	}
+	if strings.Contains(mod, "read_float32_array(") && !strings.Contains(mod, "read_float32_array()") {
+		t.Errorf("an fp32 array must pass no element bound:\n%s", mod)
+	}
+}
+
 func TestPythonMetadataDocs(t *testing.T) {
 	const src = `
 version: 1
@@ -864,7 +909,7 @@ messages:
 			"                        self.strs.append(\"\")\n",
 		// native matrix rows: read the row, check the elements against the declared
 		// u32 width (§7.1), then place it at its id
-		"                    _e0 = d.read_unsigned_array()\n" +
+		"                    _e0 = d.read_unsigned_array(4294967295)\n" +
 			"                    if any(_v > 4294967295 for _v in _e0):\n" +
 			"                        raise SofaDecodeError(\"mat row element: value outside declared width u32\")\n" +
 			"                    while len(self.mat) <= _ef0.id:\n" +
@@ -1101,7 +1146,7 @@ messages:
 	// INVALID must dominate INCOMPLETE (§5.2): the guard precedes the read that
 	// would otherwise raise SofaIncompleteError on a truncated tail.
 	guard := strings.Index(mod, "if _ef0.count > 3:")
-	read := strings.Index(mod, "_e0 = d.read_unsigned_array()")
+	read := strings.Index(mod, "_e0 = d.read_unsigned_array(4294967295)")
 	if guard < 0 || read < 0 || guard > read {
 		t.Errorf("the row count guard must precede the row read (guard=%d read=%d)", guard, read)
 	}

@@ -181,6 +181,27 @@ echo "$ERR" | grep -q 'incomplete message' \
     || { echo "FAIL: in-range(4<5)+truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
 echo "==> over-index reject OK"
 
+# The same ordering one level down, at the ELEMENT (generator#267 residue,
+# Crucible F-0043 width_elem_trunc). someuintarray (id 15) declares u32 elements;
+# an element carrying 2^32 is outside that width, which S7.1 makes INVALID, and it
+# is established by its own bytes -- so S5.2 keeps the verdict INVALID however
+# little of the array follows. The `for _, _x := range v` scan cannot fire for an
+# array that never assembles, so the bound is also declared to the corelib as
+# sofab.ElemBoundVisitor, which applies it while the elements go past.
+# Wire: 7b (id 15 unsigned-array) 04 (count 4) 80 80 80 80 10 (2^32) <EOF>.
+echo "==> over-width element + truncation must be INVALID (generator#267)"
+printf '\173\004\200\200\200\200\020' > "$WORK/overwidth_trunc.bin"
+ERR=$( (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/overwidth_trunc.bin" 2>&1 >/dev/null) || true )
+echo "$ERR" | grep -q 'invalid message' \
+    || { echo "FAIL: over-width element + truncated must be INVALID; got: $ERR"; exit 1; }
+# Precision control: an IN-RANGE element cut at the same offset decides nothing,
+# so the truncation IS the verdict.
+printf '\173\004\001' > "$WORK/inwidth_trunc.bin"
+ERR=$( (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/inwidth_trunc.bin" 2>&1 >/dev/null) || true )
+echo "$ERR" | grep -q 'incomplete message' \
+    || { echo "FAIL: in-range element + truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
+echo "==> element-width/truncation ordering OK"
+
 # Over-maxlen scalar blob (generator Option B / MESSAGE_SPEC S7.1): someblob (id 12)
 # declares maxlen: 16. A wire byte length above the schema maxlen is malformed input,
 # INVALID for every target, never truncated. Wire:

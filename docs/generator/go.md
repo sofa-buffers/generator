@@ -178,6 +178,50 @@ identically on `Accept` and on the reader-driven `AcceptStream` (corelib-go#71/#
 pins the equivalence), so these verdicts carry over unchanged when generated
 decode moves to the streaming entry point (generator#312).
 
+### An array element's declared width (`ArrayElemBound`, generator#267)
+
+One position deeper, and the same shape a third time. `UnsignedArray`/
+`SignedArray` hand over the whole slice, so the emitted
+
+```go
+for _, _x := range v {
+    if _x < -128 || _x > 127 { return sofab.ErrInvalidMsg }
+}
+```
+
+is exact for an array that **arrives** and never runs for one that does not —
+while §7.1 makes an out-of-width element invalid and §5.2 makes that INVALID
+outrank the truncation behind it. So the bound goes to the decoder:
+
+```go
+func (m *M) ArrayElemBound(id sofab.ID, kind sofab.ArrayKind) (int64, int64, bool) {
+	switch id {
+	case 1:
+		if kind == sofab.ArraySigned {
+			return -128, 127, true
+		}
+	}
+	return 0, 0, false
+}
+```
+
+Gated on `kind` for the reason `ArrayBegin` is (§7.3), and emitted for every
+narrowed integer element — a **dynamic** array carries it too, since width is a
+property of the element *type*, not of the array *length*. `u64`/`i64`, enums,
+bitfields and `bool` declare nothing: their range is already the callback
+parameter's.
+
+`sofab.ElemBoundVisitor` is a **separate** interface, not a third method on
+`HeaderVisitor`, precisely because of the all-or-nothing rule above — adding one
+there would leave the assertion failing for every visitor generated before it
+existed, silently disabling the header rejects. So it is emitted on its own
+condition: a type may declare an element width without declaring any
+count/`maxlen`, and gets `ArrayElemBound` without `ArrayBegin` coming along.
+
+The post-read scan **stays**, unreachable but load-bearing for a consumer built
+against a corelib that does not know the interface — the same reasoning as the
+payload-side `maxlen` guards above.
+
 ## Struct field order (widest-first)
 
 Generated struct fields are declared **widest-first** (8→4→2→1-byte alignment;

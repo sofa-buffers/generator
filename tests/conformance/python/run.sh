@@ -138,6 +138,27 @@ echo "$ERR" | grep -q 'SofaIncompleteError' \
     || { echo "FAIL: in-bound(16==16)+truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
 echo "==> over-maxlen reject OK"
 
+# The same ordering one level down, at the ELEMENT (generator#267 residue,
+# Crucible F-0043 width_elem_trunc). someuintarray (id 15) declares u32 elements;
+# an element carrying 2^32 is outside that width, which S7.1 makes INVALID, and it
+# is established by its own bytes -- so S5.2 keeps the verdict INVALID however
+# little of the array follows. The any() scan cannot fire for an array that never
+# assembles, so the bound travels WITH the read (d.read_unsigned_array(4294967295))
+# and the corelib applies it to the elements it does decode.
+# Wire: 7b (id 15 unsigned-array) 04 (count 4) 80 80 80 80 10 (2^32) <EOF>.
+echo "==> over-width element + truncation must be INVALID (generator#267)"
+printf '\173\004\200\200\200\200\020' > "$WORK/overwidth_trunc.bin"
+ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overwidth_trunc.bin" 2>&1 >/dev/null || true )
+echo "$ERR" | grep -q 'SofaDecodeError' \
+    || { echo "FAIL: over-width element + truncated must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
+# Precision control: an IN-RANGE element cut at the same offset decides nothing,
+# so the truncation IS the verdict.
+printf '\173\004\001' > "$WORK/inwidth_trunc.bin"
+ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/inwidth_trunc.bin" 2>&1 >/dev/null || true )
+echo "$ERR" | grep -q 'SofaIncompleteError' \
+    || { echo "FAIL: in-range element + truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
+echo "==> element-width/truncation ordering OK"
+
 # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose header
 # wire type is not the one its declared type maps to -- for fixlen, including the
 # subtype -- is SKIPPED, exactly like an unknown id. someu8 (id 0) is declared u8

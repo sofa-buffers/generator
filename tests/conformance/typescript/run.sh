@@ -99,6 +99,25 @@ ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/incou
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(4==4)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
 echo "==> over-count/truncation ordering OK"
 
+# The same ordering one level down, at the ELEMENT (generator#267 residue,
+# Crucible F-0043 width_elem_trunc). someuintarray declares u32 elements; an
+# element carrying 2^32 is outside that width, which S7.1 makes INVALID, and it
+# is established by its own bytes -- so S5.2 keeps the verdict INVALID however
+# little of the array follows. The bound is passed INTO readUnsignedArray so it
+# is applied at that element; a scan over the returned array cannot fire for one
+# that never assembles.
+# Wire: 7b (id 15 unsigned-array) 04 (count 4) 80 80 80 80 10 (2^32) <EOF>.
+echo "==> over-width element + truncation must be INVALID (generator#267)"
+printf '\173\004\200\200\200\200\020' > "$WORK/overwidth_trunc.bin"
+ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/overwidth_trunc.bin" | head -n1 )
+[ "$ST" = "INVALID" ] || { echo "FAIL: over-width element + truncated -> $ST (want INVALID)"; exit 1; }
+# Precision control: an IN-RANGE element cut at the same offset decides nothing,
+# so the truncation IS the verdict.
+printf '\173\004\001' > "$WORK/inwidth_trunc.bin"
+ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/inwidth_trunc.bin" | head -n1 )
+[ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-range element + truncated -> $ST (want INCOMPLETE)"; exit 1; }
+echo "==> element-width/truncation ordering OK"
+
 # Over-index wrapper array (generator#142): somestringarray declares count: 5
 # (id 18). A string element with a wire index >= 5 is INVALID for every target
 # (MESSAGE_SPEC S5.1/S7), never grown-into -- which also bounds an over-index

@@ -171,6 +171,25 @@ ST=$("$H" trydecode myfirstmessage < "$WORK/inindex_trunc.bin" | sed -n 1p)
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-range(4<5)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
 echo "==> over-index reject OK"
 
+# The same ordering one level down, at the ELEMENT (generator#267 residue,
+# Crucible F-0043 width_elem_trunc). someuintarray (id 15) declares u32 elements;
+# an element carrying 2^32 is outside that width, which S7.1 makes INVALID, and it
+# is established by its own bytes -- so S5.2 keeps the verdict INVALID however
+# little of the array follows. The `for (final _v in values)` scan cannot fire for
+# an array that never assembles, so the bound is also declared to the corelib as
+# onArrayElemBound, which applies it while the elements go past.
+# Wire: 7b (id 15 unsigned-array) 04 (count 4) 80 80 80 80 10 (2^32) <EOF>.
+echo "==> over-width element + truncation must be INVALID (generator#267)"
+printf '\173\004\200\200\200\200\020' > "$WORK/overwidth_trunc.bin"
+ST=$("$H" trydecode myfirstmessage < "$WORK/overwidth_trunc.bin" | sed -n 1p)
+[ "$ST" = "INVALID" ] || { echo "FAIL: over-width element + truncated -> $ST (want INVALID)"; exit 1; }
+# Precision control: an IN-RANGE element cut at the same offset decides nothing,
+# so the truncation IS the verdict.
+printf '\173\004\001' > "$WORK/inwidth_trunc.bin"
+ST=$("$H" trydecode myfirstmessage < "$WORK/inwidth_trunc.bin" | sed -n 1p)
+[ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-range element + truncated -> $ST (want INCOMPLETE)"; exit 1; }
+echo "==> element-width/truncation ordering OK"
+
 # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12) declares
 # maxlen: 16. A 17-byte blob -> INVALID, never truncated. Wire: 62 8b 01 + 17 bytes;
 # control is 16 bytes.
