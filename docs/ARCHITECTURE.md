@@ -427,6 +427,43 @@ a reimplementation should emit code that honors all of them:
 - **Pick the narrowest correct type** — map each integer to its exact width;
   enum → smallest *signed* backing, bitfield → smallest *unsigned* backing; avoid
   widening on the hot path (§11 natural-width writes).
+- **Heap-free field storage is its own axis — offer it wherever the language can
+  express it.** A schema bound (`maxlen`, `count`) is a *compile-time* size, so a
+  target whose language can hold a bounded field inline — a fixed-capacity
+  container, an inline array, a stack buffer — exposes that as an `allow_dynamic`
+  switch instead of hard-wiring one representation. Four rules keep the axis
+  honest, all of them already visible in the C++ and Rust backends:
+  1. **It is orthogonal to the corelib/environment.** It selects storage, never
+     wire format and never API: encode output is byte-identical in both modes and
+     the corelib's typed reads take either destination. So the switch belongs on
+     the **maxspeed** corelib as much as on the footprint one — a `corelib: rs`
+     crate can hold its bounded fields in `heapless` while keeping serde, the heap
+     decode stack and the ordinary std prelude (§10, Rust row).
+  2. **The default is corelib-keyed, not global** — `false` where the profile is
+     `footprint` (no heap to spare), `true` where it is `maxspeed` (allocate what
+     the message carries, not its declared worst case).
+  3. **It applies per field.** A bounded field goes inline, an unbounded one keeps
+     its dynamic container, so enabling it never fails a build on a target that
+     permits unbounded fields, and never demands a schema change (§9.3). Where the
+     *profile* additionally makes bounds mandatory (`c-cpp`, `rs-no-std`) that is
+     the profile's rule, not this switch's — it holds in both modes.
+  4. **The container's capacity is not an enforcement path.** Exceeding a declared
+     bound is a reject (`INVALID`, §7.1) in both modes; a fixed container must not
+     silently truncate or drop where the dynamic one rejects.
+  Where the language cannot express it the axis simply does not exist: Java, C#,
+  Go, Dart, Python and TypeScript hold objects on the heap, and the reachable win
+  there is buffer *reuse* rather than inline storage (Java's
+  `ThreadLocal byte[MAX_SIZE]`). Where a target is statically bounded by
+  construction it is not a switch but the only mode — C rejects unbounded fields
+  outright and has no dynamic fallback to select (`generators/c/bounded.go`).
+  Both of those are legitimate answers; what is not legitimate is leaving the
+  question unstated, so `docs/generator/<lang>.md` says which case the target is.
+  And the claim is **measured, not asserted**: a target carrying the switch
+  carries a `tests/bench/rows.json` row for *each* side of it (§15) — `cpp` and
+  `rust` each have four. Zig is the open case (generator#323): its `count: N`
+  native arrays already lower to a stack `FixedArray(T, N)`, but bounded
+  strings/blobs are still `[]const u8` views, so a schema whose every field is
+  bounded still needs an allocator to decode.
 - **Validate cheaply or not at all on the hot path** — bounds checks (`maxlen`,
   array `count`) are debug-only assertions, so release builds pay nothing.
   (There is no config knob for this today; a `validation` key existed in the
@@ -2259,10 +2296,15 @@ removed from the config schema — embedded C++ shipped as the `cpp` target's
 2. Register the backend at `init()` and blank-import it from `cmd/sofabgen`.
 3. Add the per-target config keys to `schema/sofabgen-config-schema.json` and a
    `docs/generator/<lang>.md`.
-4. Add a project/harness template, corpus coverage, and a `tests/conformance/<lang>/run.sh`
+4. **Decide the storage axis explicitly.** If the language can hold a
+   schema-bounded field inline (fixed-capacity container, inline array, stack
+   buffer), expose it as `allow_dynamic` with a corelib-keyed default and a bench
+   row per side (§8, §15); if it cannot, or if the target is statically bounded by
+   construction, say which in `docs/generator/<lang>.md`. Do not leave it unstated.
+5. Add a project/harness template, corpus coverage, and a `tests/conformance/<lang>/run.sh`
    (generate → build → round-trip → byte-exact vectors) plus a gated unit test.
-5. Add a `lang-<x>` CI job running the harness.
-6. Add the `bench` verb to the project harness and a row to `tests/bench/rows.json`
+6. Add a `lang-<x>` CI job running the harness.
+7. Add the `bench` verb to the project harness and a row to `tests/bench/rows.json`
    + a `tests/bench/lang/<x>.sh` recipe, then regenerate `tests/bench/results.txt`
    (§15).
 
