@@ -55,12 +55,15 @@ struct Scalars : sofab::Message {
 
     /**
      * @brief Encode this message into a new byte vector.
-     * @return The encoded bytes (empty if the message encodes to nothing).
+     * @return The encoded bytes. Empty if the message encodes to nothing,
+     *         and also empty if the encode was refused -- use encodeTo() when
+     *         the two need telling apart.
      */
     std::vector<std::uint8_t> encode() const {
         std::vector<std::uint8_t> out(_maxSize);
         sofab::OStreamView os{out.data(), out.size()};
         serialize(os);
+        if (!os.ok()) { return {}; }
         out.resize(os.bytesUsed());
         return out;
     }
