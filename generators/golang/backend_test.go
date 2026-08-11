@@ -831,7 +831,7 @@ messages:
 		// native matrix rows: same, through the shared _placeRow
 		"func _placeRow[T any](out *[][]T, cap int, id sofab.ID, row []T) error {",
 		"\tfor len(*out) <= int(id) {\n\t\t*out = append(*out, nil)\n\t}\n\t(*out)[id] = row",
-		"func (s *_uMatSeq[T]) UnsignedArray(id sofab.ID, v []uint64) error {\n\treturn _placeRow(s.out, s.cap, id, sofab.NarrowUnsigned[T](v))",
+		"func (s *_uMatSeq[T]) UnsignedArray(id sofab.ID, v []uint64) error {\n\tif s.hi != 0 {",
 		// wrapper rows: same again
 		"func (s *_seqSeq[T]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {",
 		"\tfor len(*s.out) <= int(id) {\n\t\t*s.out = append(*s.out, nil)\n\t}\n\treturn s.mk(&(*s.out)[id]), nil",
@@ -857,7 +857,7 @@ messages:
 		}
 	}
 	// Every collector carries the outer array's count bound, matrices included.
-	for _, want := range []string{"cap: 4", "&_uMatSeq[uint32]{out: &m.Mat, cap: 2}", "&_seqSeq[string]{out: &m.Rows, cap: 2,"} {
+	for _, want := range []string{"cap: 4", "&_uMatSeq[uint32]{out: &m.Mat, cap: 2, hi: 4294967295}", "&_seqSeq[string]{out: &m.Rows, cap: 2,"} {
 		if !strings.Contains(files["vec.go"], want) {
 			t.Errorf("vec.go must pass the schema count as the collector cap, missing %q:\n%s", want, files["vec.go"])
 		}
@@ -1085,6 +1085,34 @@ messages:
 		}
 		if strings.Contains(src, "bytes.Buffer") {
 			t.Errorf("%s still buffers the whole message a second time", label)
+		}
+	}
+}
+
+// TestGoNestedRowElemWidth is generator#330: a NESTED native row
+// (array<array<u8>>) got no element-width guard at all, so an over-width element
+// was silently masked by sofab.NarrowUnsigned — a conversion, not a check, as its
+// own corelib doc says. MESSAGE_SPEC §7.1 makes that INVALID, never a truncation.
+//
+// Unlike #267 this is an ABSENT bound rather than a late one, so it shows on a
+// COMPLETE message: no truncation is needed to reach it, which is why the
+// differential corpus never caught it.
+func TestGoNestedRowElemWidth(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      urows: { id: 1, type: array, items: { type: array, count: 2, items: { type: u8,  count: 3 } } }\n" +
+		"      srows: { id: 2, type: array, items: { type: array, count: 2, items: { type: i16, count: 3 } } }\n" +
+		"      wide:  { id: 3, type: array, items: { type: array, count: 2, items: { type: u64, count: 3 } } }\n"
+	msg := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})["m.go"]
+	// The bound travels with the collector, so the scan can run before Narrow* masks.
+	for _, want := range []string{
+		"&_uMatSeq[uint8]{out: &m.Urows, cap: 2, hi: 255}",
+		"&_sMatSeq[int16]{out: &m.Srows, cap: 2, lo: -32768, hi: 32767}",
+		// u64 spans the callback parameter's own range: nothing can fall outside,
+		// so the zero bound switches the scan off rather than emitting a dead one.
+		"&_uMatSeq[uint64]{out: &m.Wide, cap: 2, hi: 0}",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("missing %q in:\n%s", want, msg)
 		}
 	}
 }

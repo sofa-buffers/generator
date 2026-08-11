@@ -326,13 +326,27 @@ func _placeRow[T any](out *[][]T, cap int, id sofab.ID, row []T) error {
 
 // _uMatSeq / _sMatSeq / _f32MatSeq / _f64MatSeq / _boolMatSeq collect the rows of
 // a matrix (array whose elements are native arrays); each row arrives widened.
+// hi/lo are the width the schema declares for a row's elements. The conversion
+// below only masks, so an element outside that width has to be rejected here or
+// it would be stored as a different value than the wire carried.
+//
+// A zero bound means the element type spans the whole range this callback can
+// deliver, so nothing can fall outside it and the scan is skipped.
 type _uMatSeq[T ~uint8 | ~uint16 | ~uint32 | ~uint64] struct {
 	_visitorBase
 	out *[][]T
 	cap int
+	hi  uint64
 }
 
 func (s *_uMatSeq[T]) UnsignedArray(id sofab.ID, v []uint64) error {
+	if s.hi != 0 {
+		for _, _x := range v {
+			if _x > s.hi {
+				return sofab.ErrInvalidMsg
+			}
+		}
+	}
 	return _placeRow(s.out, s.cap, id, sofab.NarrowUnsigned[T](v))
 }
 
@@ -340,9 +354,18 @@ type _sMatSeq[T ~int8 | ~int16 | ~int32 | ~int64] struct {
 	_visitorBase
 	out *[][]T
 	cap int
+	lo  int64
+	hi  int64
 }
 
 func (s *_sMatSeq[T]) SignedArray(id sofab.ID, v []int64) error {
+	if s.lo != 0 {
+		for _, _x := range v {
+			if _x < s.lo || _x > s.hi {
+				return sofab.ErrInvalidMsg
+			}
+		}
+	}
 	return _placeRow(s.out, s.cap, id, sofab.NarrowSigned[T](v))
 }
 
@@ -1305,15 +1328,21 @@ func emaxOf(hasMax bool, max int64) int64 {
 // arrays ([][]elem): rows arrive via the widened *Array callbacks, keyed by the
 // row's element id. cap is the OUTER array's count bound, which bounds that id.
 func (g *gen) matrixCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, cap int64) string {
+	// The row element's declared width travels with the collector, so the scan
+	// runs before sofab.Narrow* masks anything (generator#330). NarrowRange
+	// answers false for u64/i64 and for enum/bitfield -- all four span the callback
+	// parameter's own range, so the zero bound switches the scan off rather than
+	// emitting one that can never fire.
+	lo, hi, _ := ir.NarrowRange(elem)
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		return fmt.Sprintf("&_uMatSeq[%s]{out: %s, cap: %d}", goNumType(elem), ptr, cap)
+		return fmt.Sprintf("&_uMatSeq[%s]{out: %s, cap: %d, hi: %d}", goNumType(elem), ptr, cap, uint64(hi))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		return fmt.Sprintf("&_sMatSeq[%s]{out: %s, cap: %d}", goNumType(elem), ptr, cap)
+		return fmt.Sprintf("&_sMatSeq[%s]{out: %s, cap: %d, lo: %d, hi: %d}", goNumType(elem), ptr, cap, lo, hi)
 	case ir.KindBitfield:
-		return fmt.Sprintf("&_uMatSeq[%s]{out: %s, cap: %d}", g.typeName(ref.Key), ptr, cap)
+		return fmt.Sprintf("&_uMatSeq[%s]{out: %s, cap: %d, hi: 0}", g.typeName(ref.Key), ptr, cap)
 	case ir.KindEnum:
-		return fmt.Sprintf("&_sMatSeq[%s]{out: %s, cap: %d}", g.typeName(ref.Key), ptr, cap)
+		return fmt.Sprintf("&_sMatSeq[%s]{out: %s, cap: %d, lo: 0, hi: 0}", g.typeName(ref.Key), ptr, cap)
 	case ir.KindFP32:
 		return fmt.Sprintf("&_f32MatSeq{out: %s, cap: %d}", ptr, cap)
 	case ir.KindFP64:

@@ -616,6 +616,10 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 		// native-row collector: bounded placement, not an append
 		"  void _row(int id, Int64List v) {\n" +
 			"    if (cap >= 0 && id >= cap) { e.inv = true; return; }\n" +
+			// the row element's declared width, checked before the row is stored
+			// (generator#330) -- lo == hi means the element spans the callback
+			// parameter's own range and there is nothing to check
+			"    if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { e.inv = true; return; } } }\n" +
 			"    while (out.length <= id) { out.add(<int>[]); }\n" +
 			"    out[id] = List<int>.from(v);\n" +
 			"  }",
@@ -629,7 +633,7 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 		"_ObjSeq<VecDynamicElem>(o.dynamic_, -1, e,",
 		"_StrSeq(o.fstrs, 3, 8, e)",
 		"_BlobSeq(o.fblobs, 4, 8, e)",
-		"_IntMat(o.rows, 3, false, e)",
+		"_IntMat(o.rows, 3, false, 0, 4294967295, e)",
 		"_SeqSeq<String>(o.srows, 3, e, (p) => _StrSeq(p, -1, 4, e))",
 		// M elements arrived, M is the length: the count word is bounded, nothing
 		// is filled in behind it.
@@ -1086,5 +1090,38 @@ func TestDartStructsGetNoEncodeEntryPoint(t *testing.T) {
 	}
 	if !strings.Contains(mod[strings.Index(mod, "class M {"):], "Uint8List encode()") {
 		t.Errorf("the message must carry one:\n%s", mod)
+	}
+}
+
+// TestDartNestedRowElemWidth is generator#330: a NESTED native row
+// (array<array<u8>>) got no element-width guard at all — the row was stored with
+// `List<int>.from(values)` and an over-width element went in unchecked.
+// MESSAGE_SPEC §7.1 makes that INVALID, never a silent store.
+//
+// Unlike #267 this is an ABSENT bound rather than a late one, so it shows on a
+// COMPLETE message — which is why the differential corpus never reached it.
+func TestDartNestedRowElemWidth(t *testing.T) {
+	got := genFor(t, writeDef(t, `
+version: 1
+messages:
+  M:
+    payload:
+      urows: { id: 1, type: array, items: { type: array, count: 2, items: { type: u8,  count: 3 } } }
+      srows: { id: 2, type: array, items: { type: array, count: 2, items: { type: i16, count: 3 } } }
+      wide:  { id: 3, type: array, items: { type: array, count: 2, items: { type: u64, count: 3 } } }
+`), map[string]any{})
+	for _, want := range []string{
+		// The scan itself, in the one place a row lands.
+		"if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { e.inv = true; return; } } }",
+		// The bound travels with the collector, per row element kind.
+		"_IntMat(o.urows, 2, false, 0, 255, e)",
+		"_IntMat(o.srows, 2, true, -32768, 32767, e)",
+		// u64 spans the callback parameter's own range, so lo == hi switches the
+		// scan off rather than emitting a bound that can never fire.
+		"_IntMat(o.wide, 2, false, 0, 0, e)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
 	}
 }

@@ -329,7 +329,8 @@ func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.Arr
 			case items.Elem == ir.KindFP32 || items.Elem == ir.KindFP64:
 				return fmt.Sprintf("_DblMat(%s, %d, %v, e)", out, cap, items.Elem == ir.KindFP64)
 			default:
-				return fmt.Sprintf("_IntMat(%s, %d, %v, e)", out, cap, signedArrayElem(items.Elem))
+				_lo, _hi, _ := ir.NarrowRange(items.Elem)
+				return fmt.Sprintf("_IntMat(%s, %d, %v, %d, %d, e)", out, cap, signedArrayElem(items.Elem), _lo, _hi)
 			}
 		}
 		// Array of wrapper arrays: each element opens a sequence collected into the
@@ -714,13 +715,21 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 	// the gap-fill.
 	if n.intMat {
 		f.line("class _IntMat extends %s {", visitorBase)
-		f.line("  _IntMat(this.out, this.cap, this.signed, this.e);")
+		f.line("  _IntMat(this.out, this.cap, this.signed, this.lo, this.hi, this.e);")
 		f.line("  final List<List<int>> out;")
 		f.line("  final int cap;")
 		f.line("  final bool signed;")
+		// The row element's DECLARED width. Without it an over-width element was
+		// stored as-is, which MESSAGE_SPEC 7.1 forbids -- it is INVALID, never a
+		// silent store. lo == hi means "no bound": u64/i64 and enum/bitfield span
+		// the callback parameter's own range, exactly as the flat guard omits
+		// itself there (generator#330).
+		f.line("  final int lo;")
+		f.line("  final int hi;")
 		f.line("  final _Dec e;")
 		f.line("  void _row(int id, Int64List v) {")
 		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
+		f.line("    if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { e.inv = true; return; } } }")
 		f.line("    while (out.length <= id) { out.add(<int>[]); }")
 		f.line("    out[id] = List<int>.from(v);")
 		f.line("  }")
