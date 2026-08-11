@@ -123,7 +123,10 @@ corelib-ts's no-argument `new OStream()` is exactly the shape this replaces. It
 is deprecated there as an alias for `growingOStream()`, which allocates a slab
 and doubles it as the message grows — the corelib owning the storage — and
 `os.bytes()` then hands back a *view* into that slab. Nothing this backend emits
-constructs it, and `tests/conformance/typescript/run.sh` fails if it reappears.
+constructs it: `TestTSCallerOwnsTheEncodeBuffer` generates a whole project and
+fails if the string reappears in *any* emitted file, harness and bench recipe
+included — the conformance run cannot catch that one, because a growing stream
+still produces the same bytes and would sail through every byte-exact leg.
 
 **Bounded** — every field carries a `count`/`maxlen`, so the schema has a worst
 case and one exactly-sized buffer holds any conformant value:
@@ -449,6 +452,12 @@ the **subtract** method. Tracked: Ir/op.
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+The measured encode body is now `obj.encode()`, so it counts the buffer
+allocation and the copy of the finished message — the work every caller pays.
+The former body folded `os.bytes().length`, a *view* into a corelib-grown slab,
+and paid for neither, so the encode figures currently in `results.txt` are not
+comparable across that change; the next full run resets them.
 
 ## §7.1: the declared integer width is a validity bound (issue #266)
 

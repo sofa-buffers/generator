@@ -1912,17 +1912,16 @@ produce two different generated shapes, and conflating them is a truncation bug:
 - **bounded** — one exactly-sized buffer holds the whole message, handed to the
   corelib's buffer constructor (Rust `OStream::new`, Java `new OStream(buf)`, Go
   `sofab.NewEncoderBuffer`, Python `Encoder.over_buffer(buf, 0)`, TypeScript
-  `new OStream(buf)`). A value the
-  caller filled past its own declared bound does not fit, and is **reported**
-  (buffer-full) rather than emitted short — §5.1 forbids returning partial output
-  as if it were complete.
+  `new OStream(buf)`). A value the caller filled past its own declared bound
+  does not fit, and is **reported** (buffer-full) rather than emitted short —
+  §5.1 forbids returning partial output as if it were complete.
 - **unbounded** — `MAX_SIZE` is an imposed ceiling, so it must not size a buffer:
   a message above it is legal and would be silently refused. The shape is a fixed
   caller scratch plus a flush sink draining into caller-owned storage (Rust
   `OStream::with_flush`, Go `sofab.NewEncoderSink`, Python
   `Encoder.over_buffer(scratch, 0, sink)`, TypeScript
-  `new OStream(scratch, 0, sink)`), which bounds memory by the scratch
-  instead of by the message.
+  `new OStream(scratch, 0, sink)`), which bounds memory by the scratch instead
+  of by the message.
 
 A streaming entry point (`EncodeTo(writer)` and peers) is the sink shape for both
 cases, the writer being the drain. Where the drain only *copies* what it is handed
