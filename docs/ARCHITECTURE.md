@@ -1927,6 +1927,17 @@ cases, the writer being the drain. Where the drain only *copies* what it is hand
 — `io.Writer.Write` may not retain it — the sink returns without handing a
 replacement buffer back, which §5.1 spells out as the take-vs-copy distinction.
 
+One capability is worth naming because moving a target onto caller-owned buffers
+can cost it: §5.1's optional **pass-through of a divisible run**, where a payload
+at least as long as the buffer is handed to the sink directly instead of being
+copied through. It is opt-in *at installation* ("the caller has granted it"), so
+a corelib whose caller-owned constructor takes no permission parameter cannot
+offer it to generated code at all — corelib-py is in that position today, which
+costs a large single field a copy it used to avoid on the library-allocated path.
+§5.1 permits a port to always copy, so this is a corelib capability gap and never
+a conformance one; a target noticing it should report it rather than keep the
+library-allocated shape.
+
 **The other direction: a decoded field owns its bytes.** The same rule read on the
 decode side settles what a generated destination may store. A corelib that hands a
 `string`/`blob` payload over as a *view* into the input buffer is doing its job —

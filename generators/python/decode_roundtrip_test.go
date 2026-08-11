@@ -69,6 +69,25 @@ print("%s ok" % sofab.IMPL)
 	if err := os.WriteFile(filepath.Join(dir, "driver.py"), []byte(driver), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Which engine the default (no-override) run resolves to. corelib-py falls
+	// back to the pure implementation when the compiled extension was never
+	// built, and that fallback is silent, so the expectation is probed rather
+	// than assumed: asserting "native" outright would fail on a machine without
+	// a compiler, and asserting a bare "ok" would let a fallback masquerade as
+	// native coverage.
+	probe := exec.Command(py, "-c", "import sofab; print(sofab.IMPL)")
+	probe.Env = append(os.Environ(),
+		"PYTHONPATH="+filepath.Join(corelib, "src"), "SOFAB_PUREPYTHON=")
+	implOut, err := probe.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probing sofab.IMPL: %v\n%s", err, implOut)
+	}
+	defaultImpl := strings.TrimSpace(string(implOut))
+	if defaultImpl != "native" {
+		t.Logf("note: the compiled extension is absent (default engine %q), "+
+			"so both legs cover the pure engine only", defaultImpl)
+	}
+
 	for _, pure := range []string{"", "1"} {
 		cmd := exec.Command(py, filepath.Join(dir, "driver.py"))
 		cmd.Dir = dir
@@ -79,14 +98,15 @@ print("%s ok" % sofab.IMPL)
 		if err != nil {
 			t.Fatalf("SOFAB_PUREPYTHON=%q: %v\n%s", pure, err, out)
 		}
-		// The engine the run actually used is printed, so a native build that
-		// silently fell back cannot pass as coverage of the pure one.
-		want := "ok"
+		// The driver prints the engine it actually ran on, and the match is
+		// EXACT: a run that silently fell back to the pure engine reports
+		// "python ok", which must not satisfy the native leg.
+		want := defaultImpl + " ok"
 		if pure == "1" {
 			want = "python ok"
 		}
-		if !strings.Contains(string(out), want) {
-			t.Fatalf("SOFAB_PUREPYTHON=%q: expected %q in the driver output:\n%s", pure, want, out)
+		if strings.TrimSpace(string(out)) != want {
+			t.Fatalf("SOFAB_PUREPYTHON=%q: expected exactly %q from the driver:\n%s", pure, want, out)
 		}
 		t.Logf("SOFAB_PUREPYTHON=%q: %s", pure, strings.TrimSpace(string(out)))
 	}

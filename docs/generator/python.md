@@ -54,6 +54,12 @@ return b"".join(out)
 snapshot and returns without installing a buffer — so the encoder keeps the
 scratch and resumes at 0, with no take-and-replace handover.
 
+`MIN_OUTPUT_BUFFER` binds only a buffer installed **with** a flush sink, so it
+constrains the 512-byte scratch (trivially) and never the bounded arm. That is
+what lets the bounded buffer be sized *exactly*, down to the degenerate case: a
+class with no fields has `MAX_SIZE = 0` and encodes through a zero-byte
+`bytearray`.
+
 Three consequences worth knowing before you rely on them:
 
 - **A value filled past its own schema bound is refused, not truncated.** It no
@@ -63,17 +69,30 @@ Three consequences worth knowing before you rely on them:
   surfaces there rather than being latched into `e.error` and discarded. Such a
   message used to be encoded and handed back — bytes every conformant receiver
   rejects as INVALID anyway (MESSAGE_SPEC §7.1).
-- **The bounded arm allocates the schema's worst case, not the value's.**
-  `array<u64, count: 10000>` means a 200 KB `bytearray` per `encode()` call even
-  for a ten-element value. Worth weighing before declaring an aspirational
-  bound; the way out is `serialize()` with an encoder you construct yourself —
-  `Encoder.over_buffer(buf, 0, flush=sink)` streams through a buffer of any size.
-  There is deliberately no cached or module-level scratch: `serialize()` of a
-  nested type can re-enter `encode()` on the same thread, and a shared buffer
-  would corrupt the outer message.
+- **The bounded arm allocates the schema's worst case, not the value's.** An
+  array of 10 000 `u64` bounds each element at its 10-byte varint maximum, so
+  the class gets `MAX_SIZE = 100003` and every `encode()` call allocates that
+  much even for a ten-element value. Worth weighing before declaring an
+  aspirational bound; the way out is `serialize()` with an encoder you construct
+  yourself — `Encoder.over_buffer(buf, 0, flush=sink)` streams through a buffer
+  of any size. There is deliberately no cached or module-level scratch:
+  `serialize()` of a nested type can re-enter `encode()` on the same thread, and
+  a shared buffer would corrupt the outer message.
 - **`MAX_SIZE` is a class attribute**, so a schema field literally named
   `MAX_SIZE` (or `MAX_SIZE_LIMIT`) collides with it — `pyIdent` only mangles
   Python keywords. Java and C# carry the same exposure.
+
+One throughput note, so the trade is on the record rather than a surprise in a
+profile: corelib-py's *in-memory* encoder (the one `Encoder()` built) has a fast
+path that hands a run at least as long as its buffer straight to the result
+without copying it through — §5.1's optional **pass-through of a divisible run**.
+A caller-owned encoder never takes it, so a large blob or string is now copied
+through the buffer in bites. §5.1 makes pass-through opt-in *at installation*
+("the caller has granted it") and `Encoder.over_buffer` exposes no permission
+parameter, so generated code cannot grant it today; §5.1 also lets a port always
+copy and stay conformant, so this is a corelib capability gap, not a
+non-conformance. Small messages are unaffected; a large single field is where it
+shows.
 
 Both engines are covered: the pure-Python and native `_speedups` accelerators
 carry independent `over_buffer`/`_put`/`_drain` implementations, and the native
