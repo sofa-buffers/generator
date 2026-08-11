@@ -194,13 +194,27 @@ func _placeRow[T any](out *[][]T, cap int, id sofab.ID, row []T) error {
 
 // _uMatSeq / _sMatSeq / _f32MatSeq / _f64MatSeq / _boolMatSeq collect the rows of
 // a matrix (array whose elements are native arrays); each row arrives widened.
+// hi/lo are the width the schema declares for a row's elements. The conversion
+// below only masks, so an element outside that width has to be rejected here or
+// it would be stored as a different value than the wire carried.
+//
+// A zero bound means the element type spans the whole range this callback can
+// deliver, so nothing can fall outside it and the scan is skipped.
 type _uMatSeq[T ~uint8 | ~uint16 | ~uint32 | ~uint64] struct {
 	_visitorBase
 	out *[][]T
 	cap int
+	hi  uint64
 }
 
 func (s *_uMatSeq[T]) UnsignedArray(id sofab.ID, v []uint64) error {
+	if s.hi != 0 {
+		for _, _x := range v {
+			if _x > s.hi {
+				return sofab.ErrInvalidMsg
+			}
+		}
+	}
 	return _placeRow(s.out, s.cap, id, sofab.NarrowUnsigned[T](v))
 }
 
@@ -208,9 +222,18 @@ type _sMatSeq[T ~int8 | ~int16 | ~int32 | ~int64] struct {
 	_visitorBase
 	out *[][]T
 	cap int
+	lo  int64
+	hi  int64
 }
 
 func (s *_sMatSeq[T]) SignedArray(id sofab.ID, v []int64) error {
+	if s.lo != 0 {
+		for _, _x := range v {
+			if _x < s.lo || _x > s.hi {
+				return sofab.ErrInvalidMsg
+			}
+		}
+	}
 	return _placeRow(s.out, s.cap, id, sofab.NarrowSigned[T](v))
 }
 
