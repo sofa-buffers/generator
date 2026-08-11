@@ -69,6 +69,29 @@ export class Scalars {
     }
   }
 
+  // Worst-case encoded size, derived from the schema: no value of this class
+  // can encode to more, which is what lets encode() size one exact buffer.
+  static readonly MAX_SIZE = 49;
+
+  /**
+   * Encode into a buffer this call allocates and owns.
+   *
+   * The buffer is exactly `MAX_SIZE` bytes, the schema's worst case, so every
+   * value the schema permits fits. A value filled PAST a declared count/maxlen
+   * does not: it throws `SofabError` (BUFFER_FULL) rather than coming back
+   * short, because partial output must never pass for a whole message.
+   */
+  encode(): Uint8Array {
+    const _buf = new Uint8Array(Scalars.MAX_SIZE);
+    // No flush sink, so nothing can be split and no minimum buffer size applies:
+    // a field-less message encodes through a 0-byte buffer.
+    const _os = new OStream(_buf);
+    this.serialize(_os);
+    // A copy, not _os.bytes(): that is a view into this call's scratch, and the
+    // returned message has to outlive it.
+    return _buf.slice(0, _os.bytesUsed);
+  }
+
   // True iff serialize would write no child at all, i.e. this object equals its
   // declared default -- compared per field and recursively, never as a byte image.
   isDefault(): boolean {

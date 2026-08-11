@@ -8,6 +8,8 @@ set -eu
 
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
+# Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_TS_CORELIB:-}}"
@@ -67,6 +69,52 @@ OUT=$(cd "$WORK/ex" && printf '%s' "$IN" | npx tsx harness.ts encode myfirstmess
 echo "$OUT" | grep -q '"someu64":"18446744073709551615"' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
+
+# The two encode-buffer arms (CORELIB_PLAN §5.1). The caller owns the output
+# buffer: generated code allocates it and the corelib neither grows nor
+# reallocates it. Which shape applies is a property of the SCHEMA, and
+# example.yaml is unbounded — every leg above already drives the scratch+sink arm
+# — so without this schema the BOUNDED arm is never executed at all.
+#
+# The fill message pins the size from both sides: filling every field to its
+# declared bound must encode to exactly MAX_SIZE bytes, so the buffer can be
+# neither short (a legal message would not fit) nor slack (RAM paid for nothing).
+echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
+gen "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
+ln -s "$WORK/ex/node_modules" "$WORK/fill/node_modules"
+( cd "$WORK/fill" && npx tsc --noEmit )
+grep -q 'static readonly MAX_SIZE = 234;' "$WORK/fill/message.ts" \
+    || { echo "FAIL: bounded message must emit a derived MAX_SIZE, not a ceiling"; exit 1; }
+# JSON.parse is the harness's front door and a JS number is a double, so an
+# integer above 2^53 in the shared fill input would arrive ROUNDED — u64 max
+# reads back as 2^64, which the encoder rightly refuses as out of range. Quote
+# those so the generated fromJSON takes its bigint path, the same spelling the
+# example round-trip above already uses for u64. Nothing else about the input
+# changes, so every field is still filled to its declared bound.
+quote_big_ints() {
+    python3 -c 'import re,sys; sys.stdout.write(re.sub(r"-?\d+(?![\d.eE\"])", lambda m: "\"%s\"" % m.group(0) if abs(int(m.group(0))) > 2**53 else m.group(0), sys.stdin.read()))'
+}
+fill_encode() { quote_big_ints | ( cd "$WORK/fill" && npx tsx harness.ts encode fill ); }
+check_maxsize_fill typescript fill_encode
+
+# ...and the other side of owning the buffer: a value the caller filled PAST its
+# own schema bound does not fit, and §5.1 forbids returning partial output as if
+# it were complete. So the encode must FAIL and write nothing — the corelib-grown
+# stream used to silently emit an over-bound message every receiver then rejects
+# as INVALID. This is also the only encode-side bound the TS backend has: it
+# emits no maxlen/count validation of its own.
+echo "==> an over-filled bounded value must be refused, not truncated (§5.1)"
+OVERFILL="$WORK/overfill.json"
+sed 's/"f_str": *"[^"]*"/"f_str": "'"$(printf 'x%.0s' $(seq 1 400))"'"/' \
+    "$ROOT/tests/conformance/lib/maxsize_fill.json" > "$OVERFILL"
+grep -q 'xxxxxxxxxx' "$OVERFILL" || { echo "FAIL: could not build the over-filled input (f_str renamed?)"; exit 1; }
+if fill_encode < "$OVERFILL" > "$WORK/overfill.bin" 2>/dev/null; then
+    echo "FAIL: a string 400 bytes into a maxlen-9 field must be reported, not encoded"; exit 1
+fi
+[ ! -s "$WORK/overfill.bin" ] || {
+    echo "FAIL: a refused encode emitted $(wc -c < "$WORK/overfill.bin") bytes of partial output"; exit 1
+}
+echo "==> encode-buffer ownership OK"
 
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
