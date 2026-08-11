@@ -130,14 +130,20 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// A wire blob longer than its schema maxlen is malformed: reject, never
 		// truncate (MESSAGE_SPEC §7.1). readBlob returns a Uint8Array view whose
 		// .length is the exact wire byte length. An unbounded blob keeps the bare read.
+		//
+		// The view is COPIED into the destination: readBlob hands back a window into
+		// the input buffer, and a decoded field owns its bytes, so the message
+		// outlives the buffer it was decoded from (CORELIB_PLAN §5.1 read on the
+		// decode side). The maxlen guard runs on the view, before the copy, so
+		// nothing over-bound is ever duplicated.
 		if x.HasMaxlen {
 			// See the string case: the maxlen is passed to readBlob so an over-maxlen
 			// blob is INVALID at the length word, dominating a truncated payload
 			// (generator#216 / §5.2); the _b.length guard stays as defense.
-			f.line("      case %d: { %sconst _b = c.readBlob(%d); if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: blob byte length above schema maxlen %d\"); %s = _b; break; }",
+			f.line("      case %d: { %sconst _b = c.readBlob(%d); if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: blob byte length above schema maxlen %d\"); %s = _b.slice(); break; }",
 				x.ID, guard, x.Maxlen, x.Maxlen, x.Name, x.Maxlen, acc)
 		} else {
-			f.line("      case %d: %s%s = c.readBlob(); break;", x.ID, guard, acc)
+			f.line("      case %d: %s%s = c.readBlob().slice(); break;", x.ID, guard, acc)
 		}
 	case ir.KindStruct, ir.KindUnion:
 		// Decode INTO the existing member, never replace it: a field id repeating
@@ -464,7 +470,11 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 	case ir.KindString:
 		return "c.readString()"
 	case ir.KindBlob:
-		return "c.readBlob()"
+		// Copied, like every other blob destination: the read is a window into the
+		// input buffer and a decoded field owns its bytes. seqCollectBody handles a
+		// blob element itself today, so this arm is not reached — which is exactly
+		// why it must not be the one place the rule is missing.
+		return "c.readBlob().slice()"
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(ref.Key) + ".decodeFrom(c)"
 	case ir.KindArray:
@@ -563,15 +573,19 @@ func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *i
 		// A bounded blob element that overruns its schema maxlen is malformed:
 		// reject, never truncate (MESSAGE_SPEC §7.1). readBlob's Uint8Array .length
 		// is the exact wire byte length.
+		//
+		// The element is COPIED for the same reason the scalar blob field is: the
+		// read hands back a window into the input buffer, and a decoded field owns
+		// its bytes. The maxlen guard still runs on the view, before the copy.
 		if maxHas {
 			// Same as the string element above: the bound travels with the read so
 			// it is decided at the length word, not after the payload.
 			return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); " +
 				fmt.Sprintf("const _b = c.readBlob(%d); ", maxVal) +
 				fmt.Sprintf(`if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s element: blob byte length above schema maxlen %d"); `, maxVal, arr, maxVal) +
-				arr + "[_id] = _b;"
+				arr + "[_id] = _b.slice();"
 		}
-		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); " + arr + "[_id] = c.readBlob();"
+		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new Uint8Array()); " + arr + "[_id] = c.readBlob().slice();"
 	case ir.KindStruct, ir.KindUnion:
 		// The element id IS the array index (§5.1), exactly as for the string/blob
 		// leaf paths above, so the element is PLACED at arr[id] after gap-filling

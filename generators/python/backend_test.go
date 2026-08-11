@@ -1254,3 +1254,98 @@ messages:
 		}
 	}
 }
+
+// TestPythonCallerOwnedEncodeBuffer: CORELIB_PLAN §5.1 makes every output buffer
+// the CALLER's — a corelib allocates nothing and grows nothing — and generated
+// code is the caller, so it allocates and hands the storage in. Which shape that
+// takes is decided by the SCHEMA, so both arms are pinned here.
+//
+// A BOUNDED message has a worst case, so one exactly-sized buffer with no sink
+// is enough and MAX_SIZE is the schema's own number.
+func TestPythonCallerOwnedEncodeBufferBounded(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  B:
+    payload:
+      a: { id: 0, type: array, items: { type: u32, count: 4 } }
+`
+	got := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		"    MAX_SIZE = 22",
+		"        buf = bytearray(B.MAX_SIZE)",
+		"        e = Encoder.over_buffer(buf, 0)",
+		"        return bytes(memoryview(buf)[: e.bytes_used()])",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bounded encode must own its buffer, missing %q:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{
+		"Encoder()",      // the corelib installing its own scratch
+		"e.getvalue()",   // and handing back storage it grew
+		"MAX_SIZE_LIMIT", // a derived size is not an imposed ceiling
+		"out.append",     // no sink: the one buffer holds the message
+	} {
+		if strings.Contains(got, bad) {
+			t.Errorf("bounded encode must not contain %q:\n%s", bad, got)
+		}
+	}
+	// The constant must stay a plain class attribute: annotating it would make
+	// @dataclass treat it as a field, putting it in __init__ and on the wire.
+	if strings.Contains(got, "MAX_SIZE:") {
+		t.Error("MAX_SIZE must be unannotated, or @dataclass turns it into a field")
+	}
+}
+
+// The unbounded arm: no worst case exists, so max_message_size is a CEILING and
+// must not size the buffer — a message larger than it is legitimate. The shape is
+// a fixed scratch drained into caller-owned storage instead.
+func TestPythonCallerOwnedEncodeBufferUnbounded(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  U:
+    payload:
+      a: { id: 0, type: array, items: { type: u32 } }
+`
+	got := string(genPy(t, schema(t, src), map[string]any{"max_message_size": 512})["message.py"])
+	for _, want := range []string{
+		"    MAX_SIZE_LIMIT = 512",
+		"    MAX_SIZE = MAX_SIZE_LIMIT",
+		"        out: list[bytes] = []",
+		"        scratch = bytearray(512)",
+		"        e = Encoder.over_buffer(scratch, 0, out.append)",
+		"        e.flush()",
+		`        return b"".join(out)`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("unbounded encode must stream into caller storage, missing %q:\n%s", want, got)
+		}
+	}
+	// The ceiling must never become a buffer size: that would refuse a larger
+	// message the caller legitimately built.
+	if strings.Contains(got, "bytearray(U.MAX_SIZE)") {
+		t.Errorf("an imposed ceiling must not size the encode buffer:\n%s", got)
+	}
+	if strings.Contains(got, "Encoder()") || strings.Contains(got, "getvalue()") {
+		t.Errorf("the corelib must not be left owning the buffer:\n%s", got)
+	}
+}
+
+// A schema whose worst case outgrows an EXPLICITLY configured max_message_size
+// cannot fit the transport it was configured for, and that is a generate-time
+// error rather than a runtime surprise (the same third leg as
+// tests/matrix TestMaxMessageSizeCeiling, here for this backend's plumbing).
+func TestPythonMaxMessageSizeCeilingRefusesOversizedSchema(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  B:
+    payload:
+      a: { id: 0, type: array, items: { type: u32, count: 4 } }
+`
+	if _, err := (&Backend{}).Generate(schema(t, src), map[string]any{"max_message_size": 8}); err == nil {
+		t.Error("a worst case above the configured max_message_size must fail generation")
+	}
+}

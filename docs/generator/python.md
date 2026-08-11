@@ -6,8 +6,110 @@ documented once in the [generic config](README.md).
 
 ## Options
 
-The Python target takes no options of its own — everything is set in the
-[generic config](README.md).
+| key | type | default | meaning |
+|---|---|---|---|
+| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size. Only reaches generated Python for a message the schema cannot bound, where it is emitted as `MAX_SIZE_LIMIT`; set explicitly it is also a budget a computed worst case may not exceed. Full semantics in the [generic config](README.md) and ARCHITECTURE §9.6. |
+
+## The caller owns the encode buffer
+
+CORELIB_PLAN §5.1: a corelib never allocates or grows an output buffer — the
+caller does, and generated code **is** that caller. So `encode()` allocates the
+storage and hands it to the encoder. Which shape that takes is decided by the
+**schema**, not by the value, and every class carries the number it is sized
+from:
+
+```python
+@dataclass
+class Reading:
+    ...
+    MAX_SIZE = 49                      # derived: no value can encode to more
+```
+
+**Bounded** — every field carries a `count`/`maxlen`, so one exactly-sized
+buffer holds any conformant value and no flush sink is needed:
+
+```python
+buf = bytearray(Reading.MAX_SIZE)
+e = Encoder.over_buffer(buf, 0)
+self.serialize(e)
+return bytes(memoryview(buf)[: e.bytes_used()])
+```
+
+**Unbounded** — one field has no bound, so there is no worst case. `MAX_SIZE`
+is then the configured *ceiling* (emitted as `MAX_SIZE_LIMIT`, with `MAX_SIZE`
+aliasing it) and must **not** size a buffer: a larger message is legitimate and
+would be silently refused. A fixed 512-byte scratch is drained into caller-owned
+storage instead, so the memory an encode holds is the scratch, not the message:
+
+```python
+out: list[bytes] = []
+scratch = bytearray(512)
+e = Encoder.over_buffer(scratch, 0, out.append)
+self.serialize(e)
+e.flush()
+return b"".join(out)
+```
+
+`list.append` is a **copying** sink in §5.1's terms — it is handed a fresh
+snapshot and returns without installing a buffer — so the encoder keeps the
+scratch and resumes at 0, with no take-and-replace handover.
+
+`MIN_OUTPUT_BUFFER` binds only a buffer installed **with** a flush sink, so it
+constrains the 512-byte scratch (trivially) and never the bounded arm. That is
+what lets the bounded buffer be sized *exactly*, down to the degenerate case: a
+class with no fields has `MAX_SIZE = 0` and encodes through a zero-byte
+`bytearray`.
+
+Three consequences worth knowing before you rely on them:
+
+- **A value filled past its own schema bound is refused, not truncated.** It no
+  longer fits the exactly-sized buffer, and `SofaBufferError` propagates out of
+  `encode()` with nothing returned. `encode()` has no error channel other than
+  the exception, and `sticky` is deliberately left off so the first failure
+  surfaces there rather than being latched into `e.error` and discarded. Such a
+  message used to be encoded and handed back — bytes every conformant receiver
+  rejects as INVALID anyway (MESSAGE_SPEC §7.1).
+- **The bounded arm allocates the schema's worst case, not the value's.** An
+  array of 10 000 `u64` bounds each element at its 10-byte varint maximum, so
+  the class gets `MAX_SIZE = 100003` and every `encode()` call allocates that
+  much even for a ten-element value. Worth weighing before declaring an
+  aspirational bound; the way out is `serialize()` with an encoder you construct
+  yourself — `Encoder.over_buffer(buf, 0, flush=sink)` streams through a buffer
+  of any size. There is deliberately no cached or module-level scratch:
+  `serialize()` of a nested type can re-enter `encode()` on the same thread, and
+  a shared buffer would corrupt the outer message.
+- **`MAX_SIZE` is a class attribute**, so a schema field literally named
+  `MAX_SIZE` (or `MAX_SIZE_LIMIT`) collides with it — `pyIdent` only mangles
+  Python keywords. Java and C# carry the same exposure.
+
+One throughput note, so the trade is on the record rather than a surprise in a
+profile: corelib-py's *in-memory* encoder (the one `Encoder()` built) has a fast
+path that hands a run at least as long as its buffer straight to the result
+without copying it through — §5.1's optional **pass-through of a divisible run**.
+A caller-owned encoder never takes it, so a large blob or string is now copied
+through the buffer in bites. §5.1 makes pass-through opt-in *at installation*
+("the caller has granted it") and `Encoder.over_buffer` exposes no permission
+parameter, so generated code cannot grant it today; §5.1 also lets a port always
+copy and stay conformant, so this is a corelib capability gap, not a
+non-conformance. Small messages are unaffected; a large single field is where it
+shows.
+
+Both engines are covered: the pure-Python and native `_speedups` accelerators
+carry independent `over_buffer`/`_put`/`_drain` implementations, and the native
+one types its buffer parameter `bytearray`, so `tests/conformance/python/run.sh`
+runs each encode-buffer leg twice.
+
+## A decoded message owns its bytes
+
+`decode()` returns a message that outlives the buffer it was decoded from: every
+destination holds a `str`/`bytes` the corelib built, never a window into the
+input, so the input may be reused or mutated the moment `decode()` returns.
+
+Today that is *inherited* rather than arranged — CPython's `str`/`bytes` are
+immutable and `io.BytesIO` copies its argument — but it is a guarantee, not an
+accident of the implementation, so it is pinned by a test that scribbles over the
+input buffer after decoding and re-encodes. A borrowing mode is deliberately not
+offered and not configurable (ARCHITECTURE §9.6).
 
 ## `serialize` / `deserialize` are public — and are the streaming pair
 

@@ -27,10 +27,15 @@ const corelibPkg = "@sofa-buffers/corelib"
 // Generate emits a single message.ts module; project mode adds a harness +
 // package.json + tsconfig.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), i64rep: cfgInt64Mode(cfg), limits: resolveLimits(s, cfg)}
+	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), i64rep: cfgInt64Mode(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
 	files := []generator.File{{Path: "message.ts", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
+	}
+	// After emission, not before: the size policy is applied per message while the
+	// module is built, so a violation only exists once g.module has run.
+	if g.sizeErr != nil {
+		return nil, g.sizeErr
 	}
 	return files, nil
 }
@@ -41,6 +46,22 @@ type gen struct {
 	license string    // SPDX id, "" to omit the header line
 	i64rep  int64Mode // 64-bit representation (config key `int64`)
 	limits  limitSet  // receiver-side decode limits (generator#102)
+	// size is the max_message_size policy; sizeErr carries a violation out of
+	// the emit path, which has no error channel of its own.
+	size    generator.SizePolicy
+	sizeErr error
+}
+
+// messageSize resolves a message's worst-case encoded size via the shared walk
+// (ir.MaxWireSize), falling back to the configured max_message_size ceiling when
+// a field is unbounded. The emit path has no error channel, so a violation of an
+// explicitly configured ceiling is recorded here and surfaced by Generate.
+func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize {
+	ms, err := g.size.Resolve(name, fields)
+	if err != nil && g.sizeErr == nil {
+		g.sizeErr = err
+	}
+	return ms
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102),
@@ -202,11 +223,14 @@ func (g *gen) module(s *ir.Schema) []byte {
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitClass(f, g.typeName(key), nt.Summary, nt.Fields)
+			// A struct/union serializes a headerless field RUN, not a message, so it
+			// gets no MAX_SIZE and no encode(): bytes handed back from one would not
+			// be a message any decoder could read on its own.
+			g.emitClass(f, g.typeName(key), nt.Summary, nt.Fields, false)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitClass(f, exported(m.Name), m.Summary, m.Fields)
+		g.emitClass(f, exported(m.Name), m.Summary, m.Fields, true)
 	}
 
 	// The streaming decode surface, after the classes it fills: the shared skip
@@ -297,7 +321,13 @@ func (g *gen) emitBitfield(f *tsfile, nt *ir.NamedType) {
 	f.blank()
 }
 
-func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
+// tsScratchSize is the fixed output buffer the unbounded encode arm writes
+// through. It is not a limit on the message: the buffer is drained into the
+// caller's storage every time it fills, so it only trades sink calls against
+// resident bytes. Matches the Go, Rust and Python backends.
+const tsScratchSize = 512
+
+func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field, isMessage bool) {
 	f.emitDoc("", summary)
 	f.line("export class %s {", name)
 	for _, fld := range fields {
@@ -328,6 +358,10 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 	f.line("  }")
 	f.blank()
 
+	if isMessage {
+		g.emitEncode(f, name, fields)
+	}
+
 	// all-default predicate (the explicit form of marshal's lazy framing)
 	g.emitIsDefault(f, fields)
 
@@ -337,6 +371,80 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field) {
 	// decode (monomorphic pull cursor)
 	g.emitDecode(f, name, fields)
 	f.line("}")
+	f.blank()
+}
+
+// emitEncode emits a message's worst-case size constant and the convenience
+// encode entry point (CORELIB_PLAN §6.1.1) built on it.
+//
+// The output buffer belongs to the CALLER (§5.1): corelib-ts writes into storage
+// it is handed and neither allocates nor grows one of its own, so the allocation
+// is made here — generated code IS that caller. Which shape it takes is a
+// property of the SCHEMA, not of the value, which is why there are two arms;
+// sizing a buffer from the ceiling in the unbounded case would refuse a larger
+// message the caller legitimately built.
+//
+// `new OStream()` — the no-argument form — is deliberately not used anywhere:
+// corelib-ts deprecates it as an alias for growingOStream(), which allocates a
+// slab and doubles it as the message grows, i.e. the corelib owning the storage.
+func (g *gen) emitEncode(f *tsfile, name string, fields []*ir.Field) {
+	ms := g.messageSize(name, fields)
+	if ms.Bounded {
+		f.line("  // Worst-case encoded size, derived from the schema: no value of this class")
+		f.line("  // can encode to more, which is what lets encode() size one exact buffer.")
+		f.line("  static readonly MAX_SIZE = %d;", ms.Size)
+		f.blank()
+		f.line("  /**")
+		f.line("   * Encode into a buffer this call allocates and owns.")
+		f.line("   *")
+		f.line("   * The buffer is exactly `MAX_SIZE` bytes, the schema's worst case, so every")
+		f.line("   * value the schema permits fits. A value filled PAST a declared count/maxlen")
+		f.line("   * does not: it throws `SofabError` (BUFFER_FULL) rather than coming back")
+		f.line("   * short, because partial output must never pass for a whole message.")
+		f.line("   */")
+		f.line("  encode(): Uint8Array {")
+		f.line("    const _buf = new Uint8Array(%s.MAX_SIZE);", name)
+		f.line("    // No flush sink, so nothing can be split and no minimum buffer size applies:")
+		f.line("    // a field-less message encodes through a 0-byte buffer.")
+		f.line("    const _os = new OStream(_buf);")
+		f.line("    this.serialize(_os);")
+		f.line("    // A copy, not _os.bytes(): that is a view into this call's scratch, and the")
+		f.line("    // returned message has to outlive it.")
+		f.line("    return _buf.slice(0, _os.bytesUsed);")
+		f.line("  }")
+		f.blank()
+		return
+	}
+	f.line("  // Configured ceiling (max_message_size), NOT a size this class cannot exceed:")
+	f.line("  // a field of it is unbounded, so the schema supplies no worst case and encode()")
+	f.line("  // must not size a buffer from this number.")
+	f.line("  static readonly MAX_SIZE_LIMIT = %d;", ms.Size)
+	f.line("  static readonly MAX_SIZE = %s.MAX_SIZE_LIMIT;", name)
+	f.blank()
+	f.line("  /**")
+	f.line("   * Encode into storage this call allocates and owns.")
+	f.line("   *")
+	f.line("   * A field of this class is unbounded, so there is no worst-case size to hand")
+	f.line("   * the encoder. It writes through a fixed %d-byte scratch buffer that is copied", tsScratchSize)
+	f.line("   * out each time it fills: the message may be any size, and `MAX_SIZE` never")
+	f.line("   * bounds it.")
+	f.line("   */")
+	f.line("  encode(): Uint8Array {")
+	f.line("    const _out: Uint8Array[] = [];")
+	f.line("    let _n = 0;")
+	f.line("    // A COPYING sink: it takes a snapshot and returns without installing a")
+	f.line("    // replacement buffer, so the encoder keeps the scratch and resumes at 0.")
+	f.line("    const _os = new OStream(new Uint8Array(%d), 0, (_c) => { const _k = _c.slice(); _out.push(_k); _n += _k.length; });", tsScratchSize)
+	f.line("    this.serialize(_os);")
+	f.line("    _os.flush();")
+	f.line("    // One drain is the common case (a message below the scratch size), and that")
+	f.line("    // chunk is already an owned copy, so joining it with itself would copy twice.")
+	f.line("    if (_out.length === 1) return _out[0]!;")
+	f.line("    const _all = new Uint8Array(_n);")
+	f.line("    let _p = 0;")
+	f.line("    for (const _c of _out) { _all.set(_c, _p); _p += _c.length; }")
+	f.line("    return _all;")
+	f.line("  }")
 	f.blank()
 }
 

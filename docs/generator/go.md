@@ -11,6 +11,7 @@ documented once in the [generic config](README.md).
 | `package` | string | `message` | The `package <name>` clause of the generated `.go` files. |
 | `module_path` | string | `example.com/generated` | The module path written to the generated `go.mod` (project mode). |
 | `go_version` | string | `1.21` | The `go <version>` directive written to the generated `go.mod` (project mode). |
+| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size — see the [shared config reference](README.md) for both of its roles. Go emits it as `<Msg>MaxSizeLimit` for a message the schema cannot bound; a bounded message keeps its computed `<Msg>MaxSize`. |
 
 ```yaml
 targets:
@@ -20,25 +21,70 @@ targets:
     go_version: "1.22"
 ```
 
-## Streaming — `EncodeTo(io.Writer)` and `Decode<Msg>From(io.Reader)`
+## Buffer ownership — generated code allocates, the corelib never does
 
-`corelib-go`'s `Encoder` targets an `io.Writer` and drains its internal buffer
-into it as that fills, so a message never has to exist as one contiguous
-`[]byte`. That was true all along and unreachable all along: the generated
-writer was an **unexported** `marshal`, so no caller outside the generated
-package could supply a writer. It is now exported as `Serialize`, with
-`EncodeTo` as the entry point that adds the flush:
+A corelib owns no storage and grows none (CORELIB_PLAN §5.1): the buffer an
+encode writes into is the caller's, and generated code **is** a caller — which
+is why `Encode` allocates and `sofab.NewEncoder` (the compatibility constructor
+that allocates a window of its own and reallocates it as the message grows) does
+not appear in generated code at all.
+
+The buffer's size has to come from somewhere, and the schema decides which of two
+shapes applies:
+
+- **Bounded** — every field carries a `count`/`maxlen`, so the message has a
+  worst case. It is emitted as `const <Msg>MaxSize` (the shared walk in
+  `internal/ir/wiresize.go`, the same number every target emits) and `Encode`
+  hands the corelib exactly that many bytes via `sofab.NewEncoderBuffer`. There
+  is no sink, so `MinOutputBuffer` does not apply and a three-byte message uses a
+  three-byte buffer.
+- **Unbounded** — some field has no bound, so no worst case exists and
+  `<Msg>MaxSizeLimit` is the configured `max_message_size` **ceiling**, not a
+  size the message cannot exceed. Sizing the buffer from it would refuse a larger
+  message the caller legitimately built, so `Encode` writes through a fixed
+  512-byte scratch and appends each flush into the result
+  (`sofab.NewEncoderSink`). The ceiling never bounds a value.
+
+Both constructors are fallible and both errors reach the caller. So does the one
+new behaviour: on a bounded message, a value filled **past its own schema bound**
+no longer fits the exactly-sized buffer and comes back as `sofab.ErrBufferFull`
+with no bytes written. That message was previously encoded and emitted — bytes
+every conformant receiver rejects as `INVALID` anyway (MESSAGE_SPEC §7.1) — and
+§5.1 forbids returning partial output as if it were complete.
+
+The bounded arm returns a slice of its worst-case buffer rather than an exact
+copy, so a short message retains that array until it is dropped: one allocation
+per encode instead of two. There is no cached or pooled buffer — a package-level
+scratch would make `Encode` non-reentrant from a `Serialize` on the same
+goroutine, which is worse than the allocation for the concurrency Go callers
+expect.
+
+The size of that allocation is the schema's, not the value's: a message declaring
+`array<u64, count: 10000>` has `MaxSize = 200007` and `Encode` allocates all of it
+per call even to emit ten bytes. That is the declared bound being taken
+seriously — the same buffer a `c`/`rust no_std` target would reserve statically —
+so a schema whose bounds are aspirational rather than real is worth tightening.
+A caller that wants the message-sized allocation instead can drive `EncodeTo`
+with its own `bytes.Buffer`, or `Serialize` with an encoder it constructed itself.
+
+## Streaming — `EncodeTo(io.Writer)` and `Decode<Msg>From(io.Reader)`
 
 ```go
 func (m *Msg) Serialize(e *sofab.Encoder)      // fields only; a nested message
                                                // goes into a frame already open
 func (m *Msg) EncodeTo(w io.Writer) error      // serialise + flush the tail
-func (m *Msg) Encode() ([]byte, error)         // EncodeTo into a bytes.Buffer
+func (m *Msg) Encode() ([]byte, error)         // into a buffer this call owns
 ```
 
-`Encode` is `EncodeTo` with a `bytes.Buffer`, so the two cannot drift.
+`Serialize` is the streaming writer, exported so a caller outside the generated
+package can supply the stream; `EncodeTo` is the entry point that adds the flush.
+It uses the same 512-byte caller-owned scratch as the unbounded `Encode`, with
+`w` as the drain, so a message never has to exist as one contiguous `[]byte`:
+what bounds memory is the scratch, not the message. `io.Writer.Write` may not
+retain what it is handed, which makes `w` a *copying* sink in §5.1's terms — it
+returns without taking the buffer, so no `SetBuffer` handover is needed.
 
-Decode is symmetric now, through a second entry point rather than a `feed()`:
+Decode is symmetric, through a second entry point rather than a `feed()`:
 
 ```go
 func Decode<Msg>(data []byte) (*Msg, error)      // AcceptBytes over a buffer you hold
@@ -58,7 +104,19 @@ INVALID/INCOMPLETE verdicts at every byte boundary — so the generated `Msg` is
 unchanged and only the thing feeding it differs. One consequence worth knowing:
 the blob arm still copies (`append([]byte(nil), v...)`), which `AcceptStream`
 does not need since it hands over freshly read buffers. The visitor cannot tell
-which entry point is driving it, so the copy stays.
+which entry point is driving it — and the ownership rule below requires the copy
+on the `AcceptBytes` path anyway — so the copy stays.
+
+**A decoded message owns its bytes.** `AcceptBytes` hands a payload over as a
+window into the buffer you passed in, but every generated destination copies —
+the blob arm explicitly, a `string` through Go's copying `[]byte`→`string`
+conversion, and a native array by taking the fresh slice the cursor built. So the
+message outlives `data`, and `data` may be reused or overwritten the moment
+`Decode<Msg>` returns. This is deliberate rather than incidental: a borrowing
+destination would be faster and is not offered, because a message whose lifetime
+is silently tied to a decode buffer is the wrong default. It is pinned by a test
+that scribbles over the input buffer after decoding and re-encodes
+(`TestDecodedMessageOwnsItsBytes`).
 
 **Go has no `feed(chunk)`, and that is still a corelib property.** `corelib-go`
 streams **pull**-shaped; a resumable push decoder cannot be synthesised over that
@@ -69,7 +127,9 @@ chunks.
 Note for issue #239: `Serialize` is now an exported member of every generated
 message type, so it joins the reserved-name set a schema field must not collide
 with. `Decode<Msg>From` is a package-level function keyed on the message name,
-so it collides only where `Decode<Msg>` already would.
+so it collides only where `Decode<Msg>` already would. `<Msg>MaxSize` (and
+`<Msg>MaxSizeLimit`) are package-level constants keyed the same way, so two
+messages named `foo` and `fooMaxSize` in one schema would collide there.
 
 ## Receiver-side decode limits
 

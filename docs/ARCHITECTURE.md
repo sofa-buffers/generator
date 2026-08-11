@@ -332,7 +332,7 @@ override.
 | `allow_dynamic` | rust (both corelibs) | Storage for **bounded** fields: `true` = `String`/`Vec`, `false` = fixed-capacity `heapless::String<N>`/`heapless::Vec<T, N>`. Defaults `true` on `corelib: rs`, `false` on `rs-no-std` — the same corelib-keyed default the C++ switch carries. On `rs-no-std` bounds stay mandatory in both modes and become decode-path checks; on `rs` an unbounded field simply keeps its dynamic container, so the switch applies per field and never fails a build (§9.3). Selecting it on `rs` adds a `heapless` dependency to the generated crate. |
 | `format` | docs (`html`) | Documentation output format of the non-code `docs` target; `html` is currently the only one. |
 | `no_std` | rust | With `corelib: rs-no-std`, emit the `#![no_std]` crate profile (default `true`). |
-| `max_message_size` | c, cpp, rust, java, csharp, zig, dart | Ceiling on a message's encoded size (default 4096). Fills in for a message the schema cannot bound (emitted as `MAX_SIZE_LIMIT`); when set explicitly it is also a budget a computed worst case may not exceed (§9.6). |
+| `max_message_size` | c, cpp, rust, go, java, csharp, zig, dart, python, typescript | Ceiling on a message's encoded size (default 4096). Fills in for a message the schema cannot bound (emitted as `MAX_SIZE_LIMIT`); when set explicitly it is also a budget a computed worst case may not exceed (§9.6). |
 | `emit` | all | `sources` vs `project`. |
 | `license` (generic) | all | SPDX header id; default **none** (§11). |
 | `tool_banner` (generic) | all | Tool name stamped in every generated file header (default `sofabgen`). |
@@ -727,7 +727,11 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    largest single field rather than the wire image (§5.6, generator#312). The
    two are **event-equivalent** — same callbacks, same `HeaderVisitor` hooks,
    same verdicts at every byte boundary — which is why one emitted visitor
-   serves both and neither can tell which is driving it. The corelib still
+   serves both and neither can tell which is driving it. The Go cursor being
+   zero-copy is a property of the *callback argument*, not of the destination:
+   a `String`/`Bytes` payload arrives as a window into the caller's buffer, and
+   the generated Go destination **copies** it, so a decoded message owns its
+   bytes and outlives the buffer it was decoded from (§9.6). The corelib still
    exposes the pull `Decoder` (family 3) for callers who want the fields
    themselves. **Dart** — a separate `_<Msg>Visitor` class
    holds a reference to the object and a shared decode context;
@@ -1936,9 +1940,63 @@ The explicit-limit check is the more useful half: a message that cannot fit the
 target transport is caught while generating, not on the device. The default
 (4096) never triggers it — it only fills the unbounded case.
 
+**Why the number matters: the corelib never allocates.** CORELIB_PLAN §5.1 makes
+every output buffer the **caller's**, and a corelib neither allocates nor grows
+one. Generated code is that caller, so the allocation belongs in generated code —
+and it needs a size, which is what `MAX_SIZE` supplies. The two cases therefore
+produce two different generated shapes, and conflating them is a truncation bug:
+
+- **bounded** — one exactly-sized buffer holds the whole message, handed to the
+  corelib's buffer constructor (Rust `OStream::new`, Java `new OStream(buf)`, Go
+  `sofab.NewEncoderBuffer`, Python `Encoder.over_buffer(buf, 0)`, TypeScript
+  `new OStream(buf)`, Dart `Encoder.overBuffer(buf)`). A value the caller filled
+  past its own declared bound
+  does not fit, and is **reported** (buffer-full) rather than emitted short —
+  §5.1 forbids returning partial output as if it were complete.
+- **unbounded** — `MAX_SIZE` is an imposed ceiling, so it must not size a buffer:
+  a message above it is legal and would be silently refused. The shape is a fixed
+  caller scratch plus a flush sink draining into caller-owned storage (Rust
+  `OStream::with_flush`, Go `sofab.NewEncoderSink`, Python
+  `Encoder.over_buffer(scratch, 0, sink)`, TypeScript
+  `new OStream(scratch, 0, sink)`, Dart `Encoder(sink, buffer: scratch)`), which
+  bounds memory by the scratch instead of by the message.
+
+A streaming entry point (`EncodeTo(writer)` and peers) is the sink shape for both
+cases, the writer being the drain. Where the drain only *copies* what it is handed
+— `io.Writer.Write` may not retain it — the sink returns without handing a
+replacement buffer back, which §5.1 spells out as the take-vs-copy distinction.
+
+One capability is worth naming because moving a target onto caller-owned buffers
+can cost it: §5.1's optional **pass-through of a divisible run**, where a payload
+at least as long as the buffer is handed to the sink directly instead of being
+copied through. It is opt-in *at installation* ("the caller has granted it"), so
+a corelib whose caller-owned constructor takes no permission parameter cannot
+offer it to generated code at all — corelib-py, corelib-ts and corelib-dart are
+in that position today, which costs a large single field a copy it used to avoid
+on the library-allocated path.
+§5.1 permits a port to always copy, so this is a corelib capability gap and never
+a conformance one; a target noticing it should report it rather than keep the
+library-allocated shape.
+
+**The other direction: a decoded field owns its bytes.** The same rule read on the
+decode side settles what a generated destination may store. A corelib that hands a
+`string`/`blob` payload over as a *view* into the input buffer is doing its job —
+it allocated nothing — but a destination that keeps that view makes the message's
+lifetime the buffer's, silently. So a generated destination **copies** into
+storage the message owns, on every target whose corelib offers a borrowing read
+(Go's `AcceptBytes` cursor is the clearest case). Faster borrowing modes are
+deliberately not offered and not configurable: the complexity of a second lifetime
+regime is not worth what it buys. One target still diverges: Zig's `decode()`
+borrows strings/blobs out of the input buffer into a message the *caller* declared
+(§10), so there the lifetime is at least visible in the caller's own code rather
+than hidden — and its streaming path copies regardless, because a payload stitched
+across a chunk boundary completes inside corelib memory. Bringing it in line is a
+separate change to that backend.
+
 **Verification.** `tests/matrix/maxsize_test.go` requires every target to emit
 the *same* number and to match `ir.MaxWireSize` — the guard none of the seven
-copies ever had. `tests/conformance/c/maxsize_fill.{yaml,c}` closes the loop
+copies ever had. `tests/conformance/c/maxsize_fill.{yaml,c}` (and the shared
+`tests/conformance/lib/maxsize_fill.sh` its peers reuse) closes the loop
 against reality: a message with one field per wire shape, every bound exhausted
 and every varint at its widest, must encode to **exactly** `MAX_SIZE`. Too small
 means a legal message does not fit its own buffer; too large means every
@@ -1954,13 +2012,13 @@ above was found by that check on its first run.
 | **C** | `corelib-c-cpp` | descriptor-table callback | `object.h` struct + static descriptor; `symbol_prefix`; auto capability + API-version guards; analytic `MAX_SIZE`; project mode also emits `Makefile` + `CMakeLists.txt`, `run.sh`, and a devcontainer. |
 | **C++** | `corelib-cpp` (default) / `corelib-c-cpp` (`corelib: c-cpp`) | child-visitor / flat-visitor wrapper | header-only `OStreamMessage`+`IStreamMessage`; `c-cpp` decode pre-sizes varlen fields + links the C sources. |
 | **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. Field storage is a SEPARATE axis from the environment: `allow_dynamic` selects `String`/`Vec` or fixed-capacity `heapless` on **either** corelib, so a std crate can hold its bounded fields inline while keeping serde, the heap decode stack and the ordinary std prelude. |
-| **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; exported `Serialize(*sofab.Encoder)` + `EncodeTo(io.Writer)` — the encoder drains into the writer as it fills, so a message never exists as one contiguous `[]byte`; **no `feed()`** — corelib-go streams pull-shaped (`Decoder.Next` over an `io.Reader`), so a push feed needs a resumable decoder there first; `Decode<Msg>` via zero-copy `sofab.AcceptBytes` for bytes in hand, `Decode<Msg>From(io.Reader)` via `AcceptStream` for a byte stream (memory bounded by the largest single field, §5.6); `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
-| **Python** | `corelib-py` | pull-parser | dataclasses + `serialize`/`deserialize` (public since generator#239; `deserialize(Decoder(reader))` IS the chunk-capable path — the corelib pulls from any reader). |
-| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `serialize`; `decoder()` → `feed`/`finish` for chunked decode, driving a SECOND, generated visitor over the corelib's resumable `IStream` (the cursor cannot be fed in pieces) — the two paths are held together by a differential test over values AND rejections, since a verdict reached in generated code rather than in the corelib can drift, as an unconverted `TextDecoder` TypeError did (generator#297); per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`; a `number` is a 64-bit double, so an fp32 NaN routes through the corelib raw channel (`readFp32Raw`/`writeFixlen(fp32)` for a scalar, `readFp32ArrayRaw`/`writeFp32ArrayRaw` for an array, each with a `Uint8Array \| null` companion slot captured only for a NaN) to preserve a signaling NaN bit-for-bit (§4.6, #235); `recode` harness mode (wire → object → wire) exercises it. |
+| **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; exported `Serialize(*sofab.Encoder)` + `EncodeTo(io.Writer)` — generated code owns every encode buffer (§5.1): `Encode` allocates one exactly-sized `<Msg>MaxSize` buffer (`NewEncoderBuffer`) for a bounded schema and drains a fixed 512-byte scratch into a caller `[]byte` (`NewEncoderSink`) for an unbounded one, and `EncodeTo` drains that same scratch into the writer, so a message never exists as one contiguous `[]byte`; **no `feed()`** — corelib-go streams pull-shaped (`Decoder.Next` over an `io.Reader`), so a push feed needs a resumable decoder there first; `Decode<Msg>` via `sofab.AcceptBytes` for bytes in hand (the cursor is zero-copy, but every generated destination COPIES, so a decoded message owns its bytes and outlives the input buffer), `Decode<Msg>From(io.Reader)` via `AcceptStream` for a byte stream (memory bounded by the largest single field, §5.6); `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
+| **Python** | `corelib-py` | pull-parser | dataclasses + `serialize`/`deserialize` (public since generator#239; `deserialize(Decoder(reader))` IS the chunk-capable path — the corelib pulls from any reader); generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `MAX_SIZE` `bytearray` (`Encoder.over_buffer(buf, 0)`) for a bounded schema and drains a fixed 512-byte scratch into a caller list (`Encoder.over_buffer(scratch, 0, out.append)`) for an unbounded one, so `Encoder()`/`getvalue()` — the corelib installing and growing its own storage — is gone from generated code; every decoded field COPIES, so a decoded message outlives the input buffer. |
+| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `serialize(os)` plus `encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `MAX_SIZE` `Uint8Array` (`new OStream(buf)`) for a bounded schema and drains a fixed 512-byte scratch into a caller list (`new OStream(scratch, 0, sink)`) for an unbounded one; the corelib's no-argument `new OStream()` (an alias for the growing accumulator) is emitted nowhere; `decoder()` → `feed`/`finish` for chunked decode, driving a SECOND, generated visitor over the corelib's resumable `IStream` (the cursor cannot be fed in pieces) — the two paths are held together by a differential test over values AND rejections, since a verdict reached in generated code rather than in the corelib can drift, as an unconverted `TextDecoder` TypeError did (generator#297); per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`; a `number` is a 64-bit double, so an fp32 NaN routes through the corelib raw channel (`readFp32Raw`/`writeFixlen(fp32)` for a scalar, `readFp32ArrayRaw`/`writeFp32ArrayRaw` for an array, each with a `Uint8Array \| null` companion slot captured only for a NaN) to preserve a signaling NaN bit-for-bit (§4.6, #235); `recode` harness mode (wire → object → wire) exercises it; the cursor is zero-copy, but every generated destination COPIES (`readBlob().slice()`), so a decoded message owns its bytes and outlives the input buffer. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Serialize`/`EncodeTo`; nested `Msg.Decoder` (constructed with `new`, not a `Decoder()` factory — C# puts nested types and members in one declaration space) → `Feed`/`Finish` for chunked decode; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | one public class per file (`<Message>.java`, one `<Type>.java` per struct/union, shared `Sbuf.java`) — schema types are public like every other target's, and a type reached from two messages is emitted once (#305); classes + `serialize`/`encodeTo`; nested `Msg.Decoder` via `decoder()` → `feed`/`finish` for chunked decode (`finish` throws `IllegalStateException`, not `SofabException`: `SofabError` has no INCOMPLETE, and an incomplete message is not a malformed one); ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
 | **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `serialize`; `decoder(out, alloc)` → `feed`/`finish` (the destination is the CALLER's: Zig moves structs by value, so a decoder owning its message would dangle its own visitor pointer); zero-copy `decode()` (strings/blobs borrow the input buffer, arrays from a caller allocator) — but the STREAMING path borrows nothing: `feed` copies every string/blob into `alloc`, because a payload stitched across a chunk boundary completes inside the corelib's reused carry buffer and is delivered as a slice into the decoder itself, indistinguishable in the callback from one into the caller's chunk (generator#295); fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
-| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); JSON harness carries u64 as a string. |
+| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`/`encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `maxSize` `Uint8List` (`Encoder.overBuffer(buf)`, returning the `written` view over it) for a bounded schema and drains a fixed 512-byte scratch into a caller `BytesBuilder(copy: true)` (`Encoder(sink, buffer: scratch)`) for an unbounded one; the corelib's `Encoder.encodeToBytes` — the one place that package allocates output storage — is emitted nowhere; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); the corelib hands a string/blob over as a view into the decode buffer on the ONE-SHOT path (it allocates the container itself for an array on either path, and reassembles a split payload while streaming), but every generated destination COPIES (`Uint8List.fromList`, `utf8.decode`), so a decoded message owns its bytes and outlives the input buffer regardless of which side allocated; JSON harness carries u64 as a string. |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 
 **Common type mapping:** enum → smallest *signed* backing; bitfield → smallest

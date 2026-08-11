@@ -16,6 +16,11 @@ class Scalars:
     f64: float = -2.5
     flag: bool = True
 
+    # Worst-case encoded size, derived from the schema: no value of this
+    # class can encode to more, which is why encode() can size one exact
+    # buffer from it.
+    MAX_SIZE = 49
+
     def _is_default(self) -> bool:
         if not (self.u8min == 0):
             return False
@@ -141,12 +146,28 @@ class Scalars:
         return o
 
     def encode(self) -> bytes:
-        e = Encoder()
+        """Encode into a buffer this call allocates and owns.
+
+        The buffer is exactly ``MAX_SIZE`` bytes -- the schema's worst case --
+        so any conformant value fits. A value filled past a declared
+        count/maxlen raises :class:`sofab.SofaBufferError` instead of being
+        truncated, and nothing is returned.
+        """
+        buf = bytearray(Scalars.MAX_SIZE)
+        e = Encoder.over_buffer(buf, 0)
         self.serialize(e)
-        return e.getvalue()
+        # Through a memoryview: slicing the bytearray itself would copy the
+        # prefix once more before bytes() copies it again.
+        return bytes(memoryview(buf)[: e.bytes_used()])
 
     @classmethod
     def decode(cls, data: bytes) -> "Scalars":
+        """Decode a message that OWNS its bytes.
+
+        Every destination holds a copy -- ``str``/``bytes`` values the corelib
+        built, never a window into ``data`` -- so the message outlives the
+        input and ``data`` may be reused or mutated the moment this returns.
+        """
         o = cls()
         o.deserialize(Decoder(io.BytesIO(data)))
         return o

@@ -8,6 +8,8 @@ set -eu
 
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
+# Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_PY_CORELIB:-}}"
@@ -39,6 +41,50 @@ OUT=$(cd "$WORK/proj" && printf '%s' "$IN" | python3 harness.py encode myfirstme
 echo "$OUT" | grep -q '"someu64": 18446744073709551615' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint": -99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
+
+# The two encode-buffer arms (CORELIB_PLAN §5.1). The caller owns the output
+# buffer: generated code allocates it and the corelib neither grows nor
+# reallocates it. Which shape applies is a property of the SCHEMA, and
+# example.yaml is unbounded — it exercises the scratch+sink arm above — so
+# without this schema the BOUNDED arm is never executed at all.
+#
+# The fill message pins the size from both sides: filling every field to its
+# declared bound must encode to exactly MAX_SIZE bytes, so the buffer can be
+# neither short (a legal message would not fit) nor slack (RAM paid for nothing).
+#
+# Both engines run every leg. corelib-py's pure-Python and native accelerators
+# carry independent over_buffer/_put/_drain implementations, so a leg that only
+# runs the default engine proves nothing about the other — and the native
+# over_buffer is typed `bytearray`, a mismatch the pure one would accept.
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill" )
+OVERFILL="$WORK/overfill.json"
+sed 's/"f_str": *"[^"]*"/"f_str": "'"$(printf 'x%.0s' $(seq 1 400))"'"/' \
+    "$ROOT/tests/conformance/lib/maxsize_fill.json" > "$OVERFILL"
+grep -q 'xxxxxxxxxx' "$OVERFILL" || { echo "FAIL: could not build the over-filled input (f_str renamed?)"; exit 1; }
+
+for ENGINE in native pure; do
+    if [ "$ENGINE" = pure ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    # A fallback to the pure engine where the native one was expected would make
+    # the second pass a duplicate of the first, silently.
+    IMPL=$(python3 -c 'import sofab; print(sofab.IMPL)')
+    echo "==> bounded encode buffer is exactly MAX_SIZE, engine=$IMPL (ARCHITECTURE §9.6)"
+    check_maxsize_fill "python/$IMPL" python3 "$WORK/fill/harness.py" encode fill
+
+    # ...and the other side of owning the buffer: a value the caller filled PAST
+    # its own schema bound does not fit, and §5.1 forbids returning partial output
+    # as if it were complete. So the encode must FAIL and write nothing — the old
+    # corelib-grown buffer silently emitted an over-bound message that every
+    # receiver would then reject as INVALID.
+    echo "==> an over-filled bounded value must be refused, not truncated (§5.1)"
+    if python3 "$WORK/fill/harness.py" encode fill < "$OVERFILL" > "$WORK/overfill.bin" 2>/dev/null; then
+        echo "FAIL: [$IMPL] a string 400 bytes into a maxlen-9 field must be reported, not encoded"; exit 1
+    fi
+    [ ! -s "$WORK/overfill.bin" ] || {
+        echo "FAIL: [$IMPL] a refused encode emitted $(wc -c < "$WORK/overfill.bin") bytes of partial output"; exit 1
+    }
+    echo "   [$IMPL] over-fill refusal OK"
+done
+unset SOFAB_PUREPYTHON || true
 
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be

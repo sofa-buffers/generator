@@ -16,12 +16,18 @@
 //      any parse state the visitor fails to carry between calls shows up,
 //   3. a truncated stream is rejected rather than returned half-filled.
 //
+// It also pins the ownership rule the two decoders can silently disagree on:
+// a decoded message must own its bytes (CORELIB_PLAN §5.1 read on the decode
+// side), so overwriting the input buffer afterwards may not change it. The
+// streaming path always copied; the cursor path handed blob destinations a view
+// into the buffer, and no value comparison between the two could see it.
+//
 // Run against the shared example so every field shape is covered, and against
 // nested_rows so the wrapper-row collectors (array<array<string|blob|struct>>,
 // depth 3) are covered too — those need a different collector per row kind and
 // recurse, which a scalar-only message never exercises.
 
-import { OStream, DecodeStatus, SofabError } from "@sofa-buffers/corelib";
+import { DecodeStatus, SofabError } from "@sofa-buffers/corelib";
 //SOFAB_IMPORT
 
 // Canonical form for comparison: bigint and Uint8Array have no JSON encoding of
@@ -32,11 +38,8 @@ function norm(x: unknown): string {
     v instanceof Uint8Array ? Array.from(v) : v);
 }
 
-function encode(m: { serialize(os: OStream): void }): Uint8Array {
-  const os = new OStream();
-  m.serialize(os);
-  return os.bytes();
-}
+/** The generated entry point, which allocates and owns its buffer (§5.1). */
+type Encodable = { encode(): Uint8Array };
 
 /**
  * Feed `wire` through a fresh decoder in fixed-size chunks and return the
@@ -54,14 +57,38 @@ function feedInChunks<T>(mk: () => { feed(c: Uint8Array): DecodeStatus; finish()
 let checks = 0;
 
 /** One subject: a populated message, its one-shot decode, and its chunked ones. */
-function check<T extends { serialize(os: OStream): void }>(
+function check<T extends Encodable>(
   label: string,
   m: T,
   oneShot: (b: Uint8Array) => T,
   mk: () => { feed(c: Uint8Array): DecodeStatus; finish(): T },
 ): void {
-  const wire = encode(m);
+  const wire = m.encode();
   const want = norm(oneShot(wire));
+
+  // A decoded message OWNS its bytes (CORELIB_PLAN §5.1 read on the decode side):
+  // the cursor hands blob payloads over as views into the input buffer, and a
+  // destination that kept one would make the message's lifetime the buffer's.
+  // Scribbling over a throwaway copy of the wire after decoding is what shows the
+  // difference — comparing VALUES between the two decoders cannot, because the
+  // streaming path has always copied and the two would simply agree while both
+  // reading freed memory.
+  const scratch = wire.slice();
+  const owned = oneShot(scratch);
+  const before = norm(owned);
+  const reencodedBefore = norm(owned.encode());
+  scratch.fill(0xff);
+  if (norm(owned) !== before) {
+    console.error(`FAIL ${label}: the decoded message aliases its input buffer`);
+    console.error(`  before: ${before}`);
+    console.error(`  after : ${norm(owned)}`);
+    process.exit(1);
+  }
+  if (norm(owned.encode()) !== reencodedBefore) {
+    console.error(`FAIL ${label}: re-encoding changed once the input buffer was overwritten`);
+    process.exit(1);
+  }
+  checks++;
 
   // (1) + (2): every chunk size must agree with the cursor path.
   for (const size of [1, 2, 3, 7, 16, wire.length]) {
@@ -88,7 +115,7 @@ function check<T extends { serialize(os: OStream): void }>(
     checks++;
   }
 
-  console.log(`   [${label}] ${wire.length} bytes, cursor === feed at 6 chunk sizes (1 byte included), truncation rejected`);
+  console.log(`   [${label}] ${wire.length} bytes, cursor === feed at 6 chunk sizes (1 byte included), truncation rejected, decode owns its bytes`);
 }
 
 /**

@@ -27,6 +27,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
 		license: generator.LicenseID(cfg),
 		limits:  resolveLimits(s, cfg),
+		size:    generator.NewSizePolicy(cfg),
 	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	// In a project the package gets its own directory so the harness can import
@@ -48,6 +49,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if project {
 		files = append(files, g.projectFiles(s, cfg)...)
 	}
+	if g.sizeErr != nil {
+		return nil, g.sizeErr
+	}
 	return files, nil
 }
 
@@ -57,6 +61,22 @@ type gen struct {
 	banner  string
 	license string // SPDX id, "" to omit the header line
 	limits  limitSet
+	// size is the max_message_size policy; sizeErr carries a violation out of
+	// the emit path, which has no error channel of its own.
+	size    generator.SizePolicy
+	sizeErr error
+}
+
+// messageSize resolves a message's worst-case encoded size via the shared walk
+// (ir.MaxWireSize), falling back to the configured max_message_size ceiling when
+// a field is unbounded. The emit path has no error channel, so a violation of an
+// explicitly configured ceiling is recorded here and surfaced by Generate.
+func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize {
+	ms, err := g.size.Resolve(name, fields)
+	if err != nil && g.sizeErr == nil {
+		g.sizeErr = err
+	}
+	return ms
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102),
@@ -1316,7 +1336,6 @@ func isSignedNativeArray(k ir.Kind) bool {
 func (g *gen) messageFile(m *ir.Message) []byte {
 	f := newGoFile(g.pkg)
 	f.imp(corelibImport)
-	f.imp("bytes")
 	f.imp("io")
 
 	typeName := exported(m.Name)
@@ -1334,36 +1353,110 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("}")
 	f.blank()
 
-	// public Encode/Decode wrappers
-	f.line("// Encode serializes the message to bytes.")
-	f.line("func (m *%s) Encode() ([]byte, error) {", typeName)
-	f.line("\tvar buf bytes.Buffer")
-	f.line("\te := sofab.NewEncoder(&buf)")
-	f.line("\tm.Serialize(e)")
-	f.line("\tif err := e.Flush(); err != nil {")
-	f.line("\t\treturn nil, err")
-	f.line("\t}")
-	f.line("\treturn buf.Bytes(), nil")
-	f.line("}")
+	// Worst-case encoded size. It is what sizes the buffer Encode hands the
+	// encoder: the corelib owns no storage and never grows any (CORELIB_PLAN
+	// §5.1), so the size has to come from the schema, here.
+	ms := g.messageSize(m.Name, m.Fields)
+	if ms.Bounded {
+		f.line("// %sMaxSize is this message's worst-case encoded size, derived from the", typeName)
+		f.line("// schema: no value of it can encode to more.")
+		f.line("const %sMaxSize = %d", typeName, ms.Size)
+	} else {
+		f.line("// %sMaxSizeLimit is the configured ceiling (max_message_size): an", typeName)
+		f.line("// unbounded field means this size is imposed, not derived from the schema,")
+		f.line("// so it is NOT a size this message cannot exceed.")
+		f.line("const (")
+		f.line("\t%sMaxSizeLimit = %d", typeName, ms.Size)
+		f.line("\t%sMaxSize      = %sMaxSizeLimit", typeName, typeName)
+		f.line(")")
+	}
 	f.blank()
-	// Streaming encode. corelib-go's Encoder targets an io.Writer and drains its
-	// internal buffer into it as that fills, so the message never has to exist
-	// as one contiguous []byte -- what bounds memory is the writer, not the
-	// message. Encode() above is this with a bytes.Buffer.
+
+	// public Encode/Decode wrappers
+	if ms.Bounded {
+		// One exactly-sized buffer, allocated HERE: the corelib is handed storage
+		// it neither owns nor may grow, so the allocation belongs to the caller,
+		// and generated code is a caller. MaxSize comes from the schema, so it
+		// always holds a schema-conformant value -- a field the caller filled past
+		// its own declared bound does not fit and is reported as ErrBufferFull,
+		// never emitted short (§5.1: partial output is never returned as complete).
+		f.line("// Encode serializes the message into a buffer this call allocates and owns.")
+		f.line("//")
+		f.line("// The buffer is exactly %sMaxSize bytes -- the schema's worst case -- so a", typeName)
+		f.line("// conformant value always fits. A value filled past a declared count/maxlen")
+		f.line("// does not, and is reported rather than truncated.")
+		f.line("func (m *%s) Encode() ([]byte, error) {", typeName)
+		f.line("\tbuf := make([]byte, %sMaxSize)", typeName)
+		f.line("\te, err := sofab.NewEncoderBuffer(buf, 0)")
+		f.line("\tif err != nil {")
+		f.line("\t\treturn nil, err")
+		f.line("\t}")
+		f.line("\tm.Serialize(e)")
+		f.line("\tif err := e.Flush(); err != nil {")
+		f.line("\t\treturn nil, err")
+		f.line("\t}")
+		f.line("\treturn e.Bytes(), nil")
+		f.line("}")
+	} else {
+		// An unbounded field has no worst case, so MaxSize here is a configured
+		// ceiling rather than a size the message cannot exceed. Sizing the buffer
+		// from it would silently refuse a larger message the caller legitimately
+		// built, so the shape is a fixed scratch drained into caller-owned storage:
+		// the corelib still never allocates, and the ceiling never bounds a value.
+		f.line("// Encode serializes the message into storage this call allocates and owns.")
+		f.line("//")
+		f.line("// A field of this message is unbounded, so there is no worst-case size to")
+		f.line("// hand the encoder. It writes into a fixed scratch buffer instead, which is")
+		f.line("// appended to the result each time it fills: the message may be any size,")
+		f.line("// and %sMaxSize never bounds it.", typeName)
+		f.line("func (m *%s) Encode() ([]byte, error) {", typeName)
+		f.line("\tvar out []byte")
+		f.line("\tvar scratch [512]byte")
+		f.line("\te, err := sofab.NewEncoderSink(scratch[:], 0, func(_ *sofab.Encoder, b []byte) error {")
+		f.line("\t\tout = append(out, b...)")
+		f.line("\t\treturn nil")
+		f.line("\t})")
+		f.line("\tif err != nil {")
+		f.line("\t\treturn nil, err")
+		f.line("\t}")
+		f.line("\tm.Serialize(e)")
+		f.line("\tif err := e.Flush(); err != nil {")
+		f.line("\t\treturn nil, err")
+		f.line("\t}")
+		f.line("\treturn out, nil")
+		f.line("}")
+	}
+	f.blank()
+	// Streaming encode, one shape for both arms: the writer IS the drain, so the
+	// message never has to exist as one contiguous []byte -- what bounds memory is
+	// the scratch buffer, not the message. The scratch is the caller's (this
+	// function's) storage; io.Writer.Write may not retain what it is handed, which
+	// makes w a copying sink, so it hands no buffer back.
 	f.line("// EncodeTo serializes the message straight into w.")
 	f.line("//")
-	f.line("// The encoder drains into w as its internal buffer fills, so the message is")
-	f.line("// never held whole in memory: what bounds memory is w, not the message.")
-	f.line("// Encode is this with a bytes.Buffer.")
+	f.line("// The message is never held whole in memory: it is written through a small")
+	f.line("// scratch buffer this call owns, drained into w each time it fills, so what")
+	f.line("// bounds memory is that buffer rather than the message.")
 	f.line("func (m *%s) EncodeTo(w io.Writer) error {", typeName)
-	f.line("\te := sofab.NewEncoder(w)")
+	f.line("\tvar scratch [512]byte")
+	f.line("\te, err := sofab.NewEncoderSink(scratch[:], 0, func(_ *sofab.Encoder, b []byte) error {")
+	f.line("\t\t_, werr := w.Write(b)")
+	f.line("\t\treturn werr")
+	f.line("\t})")
+	f.line("\tif err != nil {")
+	f.line("\t\treturn err")
+	f.line("\t}")
 	f.line("\tm.Serialize(e)")
 	f.line("\treturn e.Flush()")
 	f.line("}")
 	f.blank()
 	f.line("// Decode%s parses bytes into a new message (with defaults pre-applied).", typeName)
-	f.line("// Decode runs the corelib's zero-copy AcceptBytes cursor over the buffer,")
-	f.line("// dispatching each field to the message's sofab.Visitor implementation.")
+	f.line("// Decode runs the corelib's AcceptBytes cursor over the buffer, dispatching")
+	f.line("// each field to the message's sofab.Visitor implementation.")
+	f.line("//")
+	f.line("// The cursor hands a payload over as a window into data, but the decoded")
+	f.line("// message OWNS its bytes: every destination copies. The message therefore")
+	f.line("// outlives data, and data may be reused or mutated the moment this returns.")
 	f.line("//")
 	f.line("// Use this when the message is already in memory. Decode%sFrom is the", typeName)
 	f.line("// streaming twin for a message that is not.")

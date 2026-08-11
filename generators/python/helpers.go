@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
@@ -242,7 +243,13 @@ func intListLit(b []byte) string {
 
 // ---- JSON helpers (canonical: blob as list[int], to match the C harness) ----
 
-func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field) {
+// pyScratchSize is the fixed output buffer the unbounded encode arm writes
+// through. It is not a limit on the message: the buffer is drained into the
+// caller's storage every time it fills, so it only trades sink calls against
+// resident bytes. Matches the Go and Rust backends.
+const pyScratchSize = 512
+
+func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.MessageSize) {
 	// to_jsonable
 	f.line("    def to_jsonable(self) -> dict:")
 	f.line("        return {")
@@ -262,13 +269,65 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field) {
 	f.line("        return o")
 	f.blank()
 	// encode / decode
-	f.line("    def encode(self) -> bytes:")
-	f.line("        e = Encoder()")
-	f.line("        self.serialize(e)")
-	f.line("        return e.getvalue()")
+	//
+	// The encode buffer belongs to the CALLER (CORELIB_PLAN §5.1): the corelib
+	// writes into storage it is handed and never grows or reallocates it, so the
+	// allocation is made here. Which shape that takes is a property of the
+	// SCHEMA, not of the value, hence the two arms.
+	if ms.Bounded {
+		// One exactly-sized buffer, no sink: MAX_SIZE comes from the schema, so
+		// every schema-conformant value fits. A value the caller filled past its
+		// own declared count/maxlen does not, and SofaBufferError propagates out of
+		// serialize rather than a short message being handed back as if it were
+		// whole (§5.1 forbids returning partial output as complete).
+		f.line("    def encode(self) -> bytes:")
+		f.line(`        """Encode into a buffer this call allocates and owns.`)
+		f.line("")
+		f.line("        The buffer is exactly ``MAX_SIZE`` bytes -- the schema's worst case --")
+		f.line("        so any conformant value fits. A value filled past a declared")
+		f.line("        count/maxlen raises :class:`sofab.SofaBufferError` instead of being")
+		f.line("        truncated, and nothing is returned.")
+		f.line(`        """`)
+		f.line("        buf = bytearray(%s.MAX_SIZE)", name)
+		f.line("        e = Encoder.over_buffer(buf, 0)")
+		f.line("        self.serialize(e)")
+		f.line("        # Through a memoryview: slicing the bytearray itself would copy the")
+		f.line("        # prefix once more before bytes() copies it again.")
+		f.line("        return bytes(memoryview(buf)[: e.bytes_used()])")
+	} else {
+		// An unbounded field has no worst case, so MAX_SIZE here is a configured
+		// ceiling rather than a size the message cannot reach. Sizing a buffer from
+		// it would silently refuse a larger message the caller legitimately built,
+		// so the shape is a fixed scratch drained into caller-owned storage: the
+		// corelib still allocates nothing, and the ceiling never bounds a value.
+		//
+		// list.append is a COPYING sink in §5.1's terms -- it is handed a fresh
+		// snapshot and returns without installing a buffer -- so the encoder keeps
+		// the scratch and resumes at 0, with no take-and-replace handover.
+		f.line("    def encode(self) -> bytes:")
+		f.line(`        """Encode into storage this call allocates and owns.`)
+		f.line("")
+		f.line("        A field of this class is unbounded, so there is no worst-case size to")
+		f.line("        hand the encoder. It writes through a fixed %d-byte scratch buffer", pyScratchSize)
+		f.line("        that is copied out each time it fills: the message may be any size,")
+		f.line("        and ``MAX_SIZE`` never bounds it.")
+		f.line(`        """`)
+		f.line("        out: list[bytes] = []")
+		f.line("        scratch = bytearray(%d)", pyScratchSize)
+		f.line("        e = Encoder.over_buffer(scratch, 0, out.append)")
+		f.line("        self.serialize(e)")
+		f.line("        e.flush()")
+		f.line("        return b\"\".join(out)")
+	}
 	f.blank()
 	f.line("    @classmethod")
 	f.line("    def decode(cls, data: bytes) -> %q:", name)
+	f.line(`        """Decode a message that OWNS its bytes.`)
+	f.line("")
+	f.line("        Every destination holds a copy -- ``str``/``bytes`` values the corelib")
+	f.line("        built, never a window into ``data`` -- so the message outlives the")
+	f.line("        input and ``data`` may be reused or mutated the moment this returns.")
+	f.line(`        """`)
 	f.line("        o = cls()")
 	f.line("        o.deserialize(Decoder(io.BytesIO(data)%s))", g.decoderArgs())
 	f.line("        return o")

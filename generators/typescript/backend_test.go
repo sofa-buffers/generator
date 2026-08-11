@@ -252,7 +252,10 @@ func TestTSMaxlenReject(t *testing.T) {
 	for _, want := range []string{
 		// (b) Scalar string + blob reject on an over-length byte check.
 		`case 0: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } const _s = c.readString(8); if (_utf8Len(_s) > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); o.s = _s; break; }`,
-		`case 1: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Blob) { c.skip(c.wire); break; } const _b = c.readBlob(8); if (_b.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8"); o.b = _b; break; }`,
+		// The blob destination COPIES the reader's view (see
+		// TestTSDecodedBlobOwnsItsBytes): the guard still runs on the view, so
+		// nothing over-bound is duplicated first.
+		`case 1: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Blob) { c.skip(c.wire); break; } const _b = c.readBlob(8); if (_b.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8"); o.b = _b.slice(); break; }`,
 		// (c) A bounded wrapper-string element rejects on its element maxlen, and
 		// carries that bound INTO the reader so the verdict is taken at the length
 		// word rather than after the payload -- the scalar arms above have always
@@ -1726,5 +1729,117 @@ messages:
 	// whose reader ignores the argument.
 	if !strings.Contains(out, "if (_utf8Len(_s) > 6)") || !strings.Contains(out, "if (_b.length > 5)") {
 		t.Error("the post-read element checks must remain as defense")
+	}
+}
+
+// TestTSCallerOwnsTheEncodeBuffer: the output buffer belongs to the caller, and
+// generated code IS that caller — it allocates the storage and hands it to the
+// corelib, which allocates and grows nothing (CORELIB_PLAN §5.1).
+//
+// corelib-ts's no-argument `new OStream()` is the shape that breaks this: it is
+// deprecated as an alias for growingOStream(), which allocates a slab and doubles
+// it as the message grows. Nothing this backend emits may use it.
+//
+// Which of the two conformant shapes applies is a property of the SCHEMA, so both
+// arms are asserted from the same test: a fully bounded message gets one
+// exactly-sized buffer, and an unbounded one gets a fixed scratch draining into a
+// caller-owned list — sizing a buffer from the CEILING would silently refuse a
+// larger message the caller legitimately built.
+func TestTSCallerOwnsTheEncodeBuffer(t *testing.T) {
+	bounded := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
+		"      a: { id: 0, type: u32 }\n"+
+		"      s: { id: 1, type: string, maxlen: 4 }\n", map[string]any{})
+	for _, want := range []string{
+		"  static readonly MAX_SIZE = 12;",
+		"    const _buf = new Uint8Array(M.MAX_SIZE);",
+		"    const _os = new OStream(_buf);",
+		"    return _buf.slice(0, _os.bytesUsed);",
+	} {
+		if !strings.Contains(bounded, want) {
+			t.Errorf("a bounded message must encode through one exactly-sized caller buffer: missing %q\n%s", want, bounded)
+		}
+	}
+	// The derived size must not be dressed up as a ceiling: MAX_SIZE_LIMIT is how a
+	// reader tells an IMPOSED number from one the schema supplies.
+	if strings.Contains(bounded, "MAX_SIZE_LIMIT") {
+		t.Errorf("a bounded message must emit the derived MAX_SIZE alone, not a ceiling:\n%s", bounded)
+	}
+
+	unbounded := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
+		"      s: { id: 0, type: string }\n", map[string]any{"max_message_size": 2048})
+	for _, want := range []string{
+		"  static readonly MAX_SIZE_LIMIT = 2048;",
+		"  static readonly MAX_SIZE = M.MAX_SIZE_LIMIT;",
+		"    const _os = new OStream(new Uint8Array(512), 0, (_c) => { const _k = _c.slice(); _out.push(_k); _n += _k.length; });",
+		"    _os.flush();",
+	} {
+		if !strings.Contains(unbounded, want) {
+			t.Errorf("an unbounded message must drain a fixed scratch into caller storage: missing %q\n%s", want, unbounded)
+		}
+	}
+	// The ceiling may never size the buffer: a message above it is legal.
+	if strings.Contains(unbounded, "new Uint8Array(M.MAX_SIZE)") || strings.Contains(unbounded, "new Uint8Array(2048)") {
+		t.Errorf("the configured ceiling must not size an encode buffer:\n%s", unbounded)
+	}
+
+	// The corelib-allocating form must appear nowhere, in any emitted file.
+	files, err := (&Backend{}).Generate(schema(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
+		"      s: { id: 0, type: string }\n"), map[string]any{"emit": "project"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, f := range files {
+		if strings.Contains(string(f.Content), "new OStream()") {
+			t.Errorf("%s constructs the corelib-allocating OStream():\n%s", f.Path, f.Content)
+		}
+	}
+}
+
+// TestTSStructsGetNoEncodeEntryPoint: a struct/union serializes a headerless
+// field RUN, not a message. Bytes handed back from an encode() on one would not
+// be a message any decoder could read on its own, so only a message gets the
+// entry point and the size constant that sizes its buffer.
+func TestTSStructsGetNoEncodeEntryPoint(t *testing.T) {
+	mod := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
+		"      p: { id: 0, type: struct, fields: { x: { id: 0, type: i32 } } }\n", map[string]any{})
+	cls := mod[strings.Index(mod, "export class MP {"):strings.Index(mod, "export class M {")]
+	if strings.Contains(cls, "encode(): Uint8Array") || strings.Contains(cls, "MAX_SIZE") {
+		t.Errorf("a struct must not carry a message encode entry point:\n%s", cls)
+	}
+	if !strings.Contains(mod, "export class M {") || !strings.Contains(mod[strings.Index(mod, "export class M {"):], "encode(): Uint8Array") {
+		t.Errorf("the message must carry one:\n%s", mod)
+	}
+}
+
+// TestTSDecodedBlobOwnsItsBytes: the same ownership rule read on the decode side.
+// corelib-ts's Cursor.readBlob returns a Uint8Array VIEW into the input buffer —
+// correct of the corelib, which allocated nothing — but a destination that keeps
+// that view makes the message's lifetime the buffer's, silently. Every blob
+// destination therefore copies, at both positions and bounded or not.
+//
+// The two decoders disagreed on this: the streaming visitor has always copied
+// (`_p.slice()`), while the cursor path aliased, and the differential test
+// compares VALUES, which are equal either way until the buffer is reused.
+func TestTSDecodedBlobOwnsItsBytes(t *testing.T) {
+	mod := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
+		"      bb: { id: 0, type: blob, maxlen: 8 }\n"+
+		"      bu: { id: 1, type: blob }\n"+
+		"      ab: { id: 2, type: array, items: { type: blob, count: 3, maxlen: 4 } }\n"+
+		"      au: { id: 3, type: array, items: { type: blob } }\n", map[string]any{})
+	for _, want := range []string{
+		`o.bb = _b.slice();`,               // bounded scalar
+		`o.bu = c.readBlob().slice();`,     // unbounded scalar
+		`arr[_id] = _b.slice();`,           // bounded wrapper element
+		`arr[_id] = c.readBlob().slice();`, // unbounded wrapper element
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("a decoded blob destination must own its bytes: missing %q\n%s", want, mod)
+		}
+	}
+	// ...and nothing may still assign the raw view.
+	for _, bad := range []string{"o.bb = _b;", "o.bu = c.readBlob();", "arr[_id] = _b;", "arr[_id] = c.readBlob();"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("a decoded blob destination still aliases the input buffer: %q", bad)
+		}
 	}
 }

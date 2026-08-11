@@ -19,6 +19,16 @@
 // after the corelib returns — the Rust/Zig "generated guard, sticky flag" model.
 // The receiver-side decode limits (#102) are enforced by the corelib itself,
 // passed in as a `DecoderLimits` (the Go/Python/TS family).
+//
+// Every encode buffer is allocated by the code emitted here, never by the
+// corelib (CORELIB_PLAN §5.1): generated code is the layer that knows the
+// schema, so it is the layer that sizes the storage. A fully bounded message
+// gets one exactly-sized `Uint8List(maxSize)` through `Encoder.overBuffer`; an
+// unbounded one drains a fixed scratch into a caller-owned `BytesBuilder`,
+// because the configured ceiling is not a worst case and a buffer sized from it
+// would refuse a larger message the caller legitimately built. Symmetrically on
+// decode, every destination COPIES what the corelib hands it, so a decoded
+// message owns its bytes and outlives the buffer it came from.
 package dart
 
 import (
@@ -280,19 +290,72 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 
 	if isMessage {
 		f.blank()
-		f.line("  /// Worst-case serialized size (schema-bounded fields; a cap for")
-		f.line("  /// unbounded ones).")
 		ms := g.messageSize(name, fields)
 		if !ms.Bounded {
-			f.line("  // Configured ceiling (max_message_size): an unbounded field means this")
-			f.line("  // size is imposed, not derived from the schema.")
+			f.line("  /// Configured ceiling (max_message_size), NOT a size this message cannot")
+			f.line("  /// exceed: a field of it is unbounded, so the schema supplies no worst")
+			f.line("  /// case and [encode] must not size a buffer from this number.")
 			f.line("  static const int maxSizeLimit = %d;", ms.Size)
 			f.line("  static const int maxSize = maxSizeLimit;")
 		} else {
+			f.line("  /// Worst-case serialized size, derived from the schema: no value of this")
+			f.line("  /// message can encode to more, which is why [encode] can size one exact")
+			f.line("  /// buffer from it.")
 			f.line("  static const int maxSize = %d;", ms.Size)
 		}
-		f.line("  /// Serializes this message to a fresh byte buffer.")
-		f.line("  Uint8List encode() => sofab.Encoder.encodeToBytes(serialize);")
+		// The encode buffer belongs to the CALLER (CORELIB_PLAN §5.1): the corelib
+		// writes into storage it is handed and never allocates, grows or replaces
+		// it, so the allocation is made HERE. Which shape that takes is a property
+		// of the SCHEMA, not of the value, hence the two arms below.
+		if ms.Bounded {
+			// One exactly-sized buffer, no sink. maxSize comes from the schema, so
+			// every schema-conformant value fits; a value the caller filled past its
+			// own declared count/maxlen does not, and the corelib's bufferFull
+			// exception propagates instead of a short message being handed back as if
+			// it were whole (§5.1 forbids returning partial output as complete).
+			//
+			// No sink means MIN_OUTPUT_BUFFER does not apply, so a field-less message
+			// legitimately encodes through a 0-byte buffer.
+			f.line("  /// Serializes this message into a buffer this call allocates and owns.")
+			f.line("  ///")
+			f.line("  /// The buffer is exactly [maxSize] bytes -- the schema's worst case -- so any")
+			f.line("  /// conformant value fits. A value filled past a declared count/maxlen does")
+			f.line("  /// not, and throws [sofab.SofabException] (`bufferFull`) rather than being")
+			f.line("  /// handed back truncated.")
+			f.line("  Uint8List encode() {")
+			f.line("    final buf = Uint8List(maxSize);")
+			f.line("    final e = sofab.Encoder.overBuffer(buf);")
+			f.line("    serialize(e);")
+			f.line("    e.flush();")
+			f.line("    return e.written;")
+			f.line("  }")
+		} else {
+			// An unbounded field has no worst case, so maxSizeLimit is a configured
+			// CEILING rather than a size the message cannot reach. Sizing a buffer
+			// from it would silently refuse a larger message the caller legitimately
+			// built, so the shape is a fixed scratch drained into caller-owned
+			// storage: the corelib still allocates nothing, and the ceiling never
+			// bounds a value.
+			//
+			// BytesBuilder(copy: true) is the COPYING sink of §5.1 — the callback is
+			// handed a view the encoder reuses the moment it returns, and it installs
+			// no replacement, so the encoder keeps the scratch and resumes at 0.
+			f.line("  /// Serializes this message into storage this call allocates and owns.")
+			f.line("  ///")
+			f.line("  /// A field of this message is unbounded, so there is no worst-case size to")
+			f.line("  /// hand the encoder: it writes through a fixed %d-byte scratch buffer that", dartScratchSize)
+			f.line("  /// is copied out each time it fills. The message may be any size, and")
+			f.line("  /// [maxSizeLimit] never bounds it.")
+			f.line("  Uint8List encode() {")
+			f.line("    final out = BytesBuilder(copy: true);")
+			f.line("    // copy: true because the sink is handed a VIEW the encoder overwrites")
+			f.line("    // the moment the callback returns.")
+			f.line("    final e = sofab.Encoder(out.add, buffer: Uint8List(%d));", dartScratchSize)
+			f.line("    serialize(e);")
+			f.line("    e.flush();")
+			f.line("    return out.toBytes();")
+			f.line("  }")
+		}
 		f.blank()
 		// Streaming encode. [serialize] writes the fields and nothing else, so a
 		// nested message can be written into an open frame; this is the entry
@@ -364,6 +427,12 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 
 	g.emitVisitor(f, name, fields)
 }
+
+// dartScratchSize is the fixed output buffer the unbounded encode arm writes
+// through. It is not a limit on the message: the buffer is drained into the
+// caller's storage every time it fills, so it only trades sink calls against
+// resident bytes. Matches the Rust, Go, Python and TypeScript backends.
+const dartScratchSize = 512
 
 func visitorName(typeName string) string { return "_" + typeName + "Visitor" }
 

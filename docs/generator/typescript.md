@@ -10,6 +10,7 @@ documented once in the [generic config](README.md).
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
 | `int64` | `bigint` \| `long` \| `number` | `bigint` | Representation of 64-bit integer fields in the generated TS API (see below). All modes are wire-identical. |
+| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size. It reaches generated TypeScript only for a message the schema cannot bound, where it is emitted as `MAX_SIZE_LIMIT`; set explicitly it is also a budget a computed worst case may not exceed. Full semantics in the [generic config](README.md) and ARCHITECTURE §9.6. |
 
 ### `max_dyn_*` — receiver-side decode limits
 
@@ -110,6 +111,109 @@ Measured on the full-scale arena message (best-of-3, corelib-ts #19/#20):
 | `bigint` | 25.5 | 0.66 | 39.2 | 0.90 |
 | `long` | 38.0 | 0.95 | 47.3 | 1.17 |
 | `number` | 40.2 | 1.04 | 50.8 | 1.18 |
+
+## The caller owns the encode buffer
+
+CORELIB_PLAN §5.1: a corelib never allocates or grows an output buffer — the
+caller does, and generated code **is** that caller. So every message class
+carries an `encode(): Uint8Array` that allocates the storage and hands it to the
+corelib's `OStream`, together with the number it is sized from.
+
+corelib-ts's no-argument `new OStream()` is exactly the shape this replaces. It
+is deprecated there as an alias for `growingOStream()`, which allocates a slab
+and doubles it as the message grows — the corelib owning the storage — and
+`os.bytes()` then hands back a *view* into that slab. Nothing this backend emits
+constructs it: `TestTSCallerOwnsTheEncodeBuffer` generates a whole project and
+fails if the string reappears in *any* emitted file, harness and bench recipe
+included — the conformance run cannot catch that one, because a growing stream
+still produces the same bytes and would sail through every byte-exact leg.
+
+**Bounded** — every field carries a `count`/`maxlen`, so the schema has a worst
+case and one exactly-sized buffer holds any conformant value:
+
+```ts
+static readonly MAX_SIZE = 49;          // derived: no value can encode to more
+
+encode(): Uint8Array {
+  const _buf = new Uint8Array(Reading.MAX_SIZE);
+  const _os = new OStream(_buf);        // no sink, no owner: nothing can grow
+  this.serialize(_os);
+  return _buf.slice(0, _os.bytesUsed);  // a copy: the result must own its bytes
+}
+```
+
+No flush sink means `MIN_OUTPUT_BUFFER` does not apply (corelib-ts imposes the
+floor only when one is installed), so a field-less message legitimately encodes
+through a 0-byte buffer, and `reserveBulk` still takes the bulk string/array fast
+paths because room at the cursor counts on any buffer.
+
+**Unbounded** — one field has no bound, so there is no worst case. `MAX_SIZE` is
+then the configured *ceiling* (emitted as `MAX_SIZE_LIMIT`, with `MAX_SIZE`
+aliasing it) and must **not** size a buffer: a larger message is legitimate and
+would be silently refused. A fixed 512-byte scratch drains into caller-owned
+storage instead, so what an encode holds resident is the scratch, not the
+message:
+
+```ts
+const _out: Uint8Array[] = [];
+const _os = new OStream(new Uint8Array(512), 0, (_c) => { _out.push(_c.slice()); … });
+this.serialize(_os);
+_os.flush();
+// … concatenate _out (a single drain is returned as-is)
+```
+
+The sink **copies** and returns without calling `setBuffer`, which is §5.1's
+copy-and-continue case: the encoder keeps the scratch and resumes at offset 0,
+with no take-and-replace handover.
+
+Four consequences worth knowing before you rely on them:
+
+- **A value filled past its own schema bound is refused, not truncated.** It no
+  longer fits the exactly-sized buffer, and `SofabError(BUFFER_FULL)` propagates
+  out of `encode()` with nothing returned. Such a message used to be encoded and
+  handed back — bytes every conformant receiver rejects as INVALID anyway
+  (MESSAGE_SPEC §7.1) — and §5.1 forbids returning partial output as if it were
+  complete. This is the *only* encode-side bound the TypeScript backend has: it
+  emits no `maxlen`/`count` validation of its own.
+- **`encode()` reports through the exception channel.** It returns
+  `Uint8Array` with no error return, which is deliberate and not a swallowed
+  error: `decode()` already throws `SofabError`, so this adds no new *kind* of
+  failure path, and both the constructor's argument check and the writer's
+  buffer-full throw propagate out untouched. The TypeScript profile is
+  `maxspeed`, which permits exceptions.
+- **The bounded arm allocates the schema's worst case, not the value's.**
+  `array<u64, count: 10000>` means a 90 KB `Uint8Array` per `encode()` call even
+  for a ten-element value. Worth weighing before declaring an aspirational bound.
+  There are two escape hatches, both already public: `serialize(os)` with an
+  `OStream` you construct yourself over a buffer of your choosing, and the same
+  with a flush sink so the message streams out instead of being assembled. There
+  is deliberately no cached or module-level scratch — a nested type's
+  `serialize` can re-enter `encode()`, and a shared buffer would corrupt the
+  outer message.
+- **`MAX_SIZE` is a static class member**, so a schema field literally named
+  `MAX_SIZE` (or `MAX_SIZE_LIMIT`, or `encode`) collides with it. Java, C# and
+  Python carry the same exposure.
+
+## A decoded message owns its bytes
+
+`decode()` returns a message that outlives the buffer it was decoded from: the
+input may be reused or mutated the moment it returns.
+
+That needed fixing on the cursor path. `Cursor.readBlob` returns a **zero-copy
+`Uint8Array` view** into the source buffer — correct of the corelib, which
+allocated nothing — and the generated destination kept it, so overwriting the
+input buffer changed a decoded message in place. Every blob destination now
+copies (`.slice()`), at the scalar and the wrapper-element position, bounded or
+not; the `maxlen` guard still runs on the view, before the copy, so nothing
+over-bound is duplicated first. Strings were never affected (`readString`
+transcodes into a JS string) and the fp32 raw companions already copied.
+
+The two decoders disagreed on this until now — the streaming visitor has always
+copied — and the differential test could not see it, because it compares
+*values*, which are equal either way until the buffer is reused. It now scribbles
+over the input buffer after decoding and re-encodes, so the rule is pinned by
+behaviour. A borrowing mode is deliberately not offered and not configurable
+(ARCHITECTURE §9.6).
 
 ## Encode: sequence framing
 
@@ -348,6 +452,12 @@ the **subtract** method. Tracked: Ir/op.
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+The measured encode body is now `obj.encode()`, so it counts the buffer
+allocation and the copy of the finished message — the work every caller pays.
+The former body folded `os.bytes().length`, a *view* into a corelib-grown slab,
+and paid for neither, so the encode figures currently in `results.txt` are not
+comparable across that change; the next full run resets them.
 
 ## §7.1: the declared integer width is a validity bound (issue #266)
 

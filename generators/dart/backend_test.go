@@ -56,7 +56,9 @@ func TestModuleShape(t *testing.T) {
 		"import 'package:sofabuffers/sofabuffers.dart' as sofab;",
 		"class Myfirstmessage {",
 		"void serialize(sofab.Encoder e) {",
-		"Uint8List encode() => sofab.Encoder.encodeToBytes(serialize);",
+		// example.yaml has an unbounded field, so encode() takes the scratch+sink
+		// arm (TestDartCallerOwnsTheEncodeBuffer covers both).
+		"final e = sofab.Encoder(out.add, buffer: Uint8List(512));",
 		"static sofab.DecodeStatus tryDecode(Uint8List data, Myfirstmessage out) {",
 		"static Myfirstmessage decode(Uint8List data) {",
 		"abstract class _Visitor extends sofab.MessageVisitor {",
@@ -1001,5 +1003,88 @@ messages:
 		if !strings.Contains(got, want) {
 			t.Errorf("the raw-bits channel must keep working, missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestDartCallerOwnsTheEncodeBuffer: the output buffer belongs to the caller, and
+// generated code IS that caller — it allocates the storage and hands it to the
+// corelib, which allocates and grows nothing (CORELIB_PLAN §5.1).
+//
+// corelib-dart's `Encoder.encodeToBytes` is the shape that breaks this: it builds
+// its own `Uint8List(bufferSize)` and its own BytesBuilder inside the package.
+// Nothing this backend emits may use it, in any file.
+//
+// Which of the two conformant shapes applies is a property of the SCHEMA, so both
+// arms are asserted here: a fully bounded message gets one exactly-sized buffer,
+// an unbounded one a fixed scratch draining into caller-owned storage — sizing a
+// buffer from the configured CEILING would silently refuse a larger message the
+// caller legitimately built.
+func TestDartCallerOwnsTheEncodeBuffer(t *testing.T) {
+	bounded := genFor(t, writeDef(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
+		"      a: { id: 0, type: u32 }\n"+
+		"      s: { id: 1, type: string, maxlen: 4 }\n"), map[string]any{})
+	for _, want := range []string{
+		"  static const int maxSize = 12;",
+		"    final buf = Uint8List(maxSize);",
+		"    final e = sofab.Encoder.overBuffer(buf);",
+		"    return e.written;",
+	} {
+		if !strings.Contains(bounded, want) {
+			t.Errorf("a bounded message must encode through one exactly-sized caller buffer: missing %q\n%s", want, bounded)
+		}
+	}
+	// The derived size must not be dressed up as a ceiling: maxSizeLimit is how a
+	// reader tells an IMPOSED number from one the schema supplies.
+	if strings.Contains(bounded, "maxSizeLimit") {
+		t.Errorf("a bounded message must emit the derived maxSize alone, not a ceiling:\n%s", bounded)
+	}
+	if strings.Contains(bounded, "BytesBuilder") {
+		t.Errorf("a bounded message needs no drain sink at all:\n%s", bounded)
+	}
+
+	unbounded := genFor(t, writeDef(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
+		"      s: { id: 0, type: string }\n"), map[string]any{"max_message_size": 2048})
+	for _, want := range []string{
+		"  static const int maxSizeLimit = 2048;",
+		"  static const int maxSize = maxSizeLimit;",
+		"    final out = BytesBuilder(copy: true);",
+		"    final e = sofab.Encoder(out.add, buffer: Uint8List(512));",
+		"    e.flush();",
+		"    return out.toBytes();",
+	} {
+		if !strings.Contains(unbounded, want) {
+			t.Errorf("an unbounded message must drain a fixed scratch into caller storage: missing %q\n%s", want, unbounded)
+		}
+	}
+	// The ceiling may never size the buffer: a message above it is legal.
+	if strings.Contains(unbounded, "Uint8List(maxSize)") || strings.Contains(unbounded, "Uint8List(2048)") {
+		t.Errorf("the configured ceiling must not size an encode buffer:\n%s", unbounded)
+	}
+	if strings.Contains(unbounded, "overBuffer") {
+		t.Errorf("an unbounded message must not encode through a sink-less buffer:\n%s", unbounded)
+	}
+
+	// The corelib-allocating helper must appear nowhere — module, harness or
+	// bench. Each of those encodes through the generated encode(), which is what
+	// makes one assertion over the whole project enough.
+	project := genFor(t, exampleDef, map[string]any{"emit": "project"})
+	if strings.Contains(project, "encodeToBytes") {
+		t.Errorf("an emitted file calls the corelib-allocating encodeToBytes:\n%s", project)
+	}
+}
+
+// TestDartStructsGetNoEncodeEntryPoint: a struct/union serializes a headerless
+// field RUN, not a message. Bytes handed back from an encode() on one would not be
+// a message any decoder could read on its own, so only a message gets the entry
+// point and the size constant that sizes its buffer.
+func TestDartStructsGetNoEncodeEntryPoint(t *testing.T) {
+	mod := genFor(t, writeDef(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
+		"      p: { id: 0, type: struct, fields: { x: { id: 0, type: i32 } } }\n"), map[string]any{})
+	cls := mod[strings.Index(mod, "class MP {"):strings.Index(mod, "class M {")]
+	if strings.Contains(cls, "Uint8List encode()") || strings.Contains(cls, "maxSize") {
+		t.Errorf("a struct must not carry a message encode entry point:\n%s", cls)
+	}
+	if !strings.Contains(mod[strings.Index(mod, "class M {"):], "Uint8List encode()") {
+		t.Errorf("the message must carry one:\n%s", mod)
 	}
 }

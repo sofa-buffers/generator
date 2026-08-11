@@ -27,11 +27,15 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
 		license: generator.LicenseID(cfg),
 		limits:  resolveLimits(s, cfg),
+		size:    generator.NewSizePolicy(cfg),
 	}
 	module := g.module(s)
 	files := []generator.File{{Path: "message.py", Content: module}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
+	}
+	if g.sizeErr != nil {
+		return nil, g.sizeErr
 	}
 	return files, nil
 }
@@ -41,6 +45,22 @@ type gen struct {
 	banner  string
 	license string // SPDX id, "" to omit the header line
 	limits  limitSet
+	// size is the max_message_size policy; sizeErr carries a violation out of
+	// the emit path, which has no error channel of its own.
+	size    generator.SizePolicy
+	sizeErr error
+}
+
+// messageSize resolves a class's worst-case encoded size via the shared walk
+// (ir.MaxWireSize), falling back to the configured max_message_size ceiling when
+// a field is unbounded. The emit path has no error channel, so a violation of an
+// explicitly configured ceiling is recorded here and surfaced by Generate.
+func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize {
+	ms, err := g.size.Resolve(name, fields)
+	if err != nil && g.sizeErr == nil {
+		g.sizeErr = err
+	}
+	return ms
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102),
@@ -493,6 +513,27 @@ func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field)
 	}
 	f.blank()
 
+	// Worst-case encoded size. It is what sizes the buffer encode() hands the
+	// encoder: the corelib is given storage and never grows or reallocates it
+	// (CORELIB_PLAN §5.1), so the number has to come from the schema, here.
+	//
+	// Deliberately unannotated: an annotated class attribute in a @dataclass
+	// becomes a FIELD, which would put MAX_SIZE on the wire and in __init__.
+	ms := g.messageSize(name, fields)
+	if ms.Bounded {
+		f.line("    # Worst-case encoded size, derived from the schema: no value of this")
+		f.line("    # class can encode to more, which is why encode() can size one exact")
+		f.line("    # buffer from it.")
+		f.line("    MAX_SIZE = %d", ms.Size)
+	} else {
+		f.line("    # Configured ceiling (max_message_size), NOT a size this class cannot")
+		f.line("    # exceed: a field of it is unbounded, so the schema supplies no worst")
+		f.line("    # case and encode() must not size a buffer from this number.")
+		f.line("    MAX_SIZE_LIMIT = %d", ms.Size)
+		f.line("    MAX_SIZE = MAX_SIZE_LIMIT")
+	}
+	f.blank()
+
 	g.emitIsDefault(f, fields)
 
 	// _marshal
@@ -539,7 +580,7 @@ func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field)
 	f.blank()
 
 	// JSON helpers + encode/decode
-	g.emitJSON(f, name, fields)
+	g.emitJSON(f, name, fields, ms)
 }
 
 // emitIsDefault emits the object's all-default predicate. It is the exact

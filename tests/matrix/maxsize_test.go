@@ -22,7 +22,10 @@ var maxSizePattern = regexp.MustCompile(
 		`|(?:MAX_SIZE: usize = (\d+))` + // Rust:   pub const MAX_SIZE: usize = 49
 		`|(?:MAX_SIZE: usize = (\d+))` + // Zig:    pub const MAX_SIZE: usize = 49
 		`|(?:MaxSize = (\d+))` + // C#:     public const int MaxSize = 49
+		//                                Go:     const ScalarsMaxSize = 49
 		`|(?:MAX_SIZE = (\d+))` + // Java:   public static final int MAX_SIZE = 49
+		//                                Python: MAX_SIZE = 49
+		//                                TypeScript: static readonly MAX_SIZE = 49
 		`|(?:maxSize = (\d+))`, // Dart:   static const int maxSize = 49
 )
 

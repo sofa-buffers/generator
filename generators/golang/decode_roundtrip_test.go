@@ -95,4 +95,49 @@ func TestExampleRoundTrip(t *testing.T) {
 		t.Fatalf("decoded fields wrong: %#v", got)
 	}
 }
+
+// A decoded message OWNS its bytes: the corelib's cursor hands a payload over as
+// a window into the input buffer, so every destination that keeps one has to
+// copy. Nothing here asserts what the destination LOOKS like -- it overwrites
+// the whole input buffer after the decode and re-encodes, which fails for any
+// field that turned out to be a view.
+//
+// It is deliberately not a check on today's corelib: the native-array arms own
+// their slices only because the cursor allocates one per field, which no
+// generated code controls. Should that ever become a reused scratch, this test
+// is what notices.
+func TestDecodedMessageOwnsItsBytes(t *testing.T) {
+	m := msg.NewMyfirstmessage()
+	m.Somestring = "héllo wörld"
+	m.Someblob = []byte{1, 2, 3, 4, 5}
+	m.Someuintarray = []uint32{9, 8, 7, 6}
+	m.Someintarray = []int32{-1, -2, -3, -4, -5}
+	m.Somefloatarray = []float32{1.5, -2.5, 3.5}
+	m.Somestringarray = []string{"a", "bb", "ccc"}
+	m.Someblobarray = [][]byte{{9}, {8, 7}}
+	m.Somematrix = [][]uint32{{1, 2, 3, 4}, {5, 6}}
+
+	enc, err := m.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte(nil), enc...)
+
+	got, err := msg.DecodeMyfirstmessage(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Scribble over the buffer the decode was handed. A conforming message does
+	// not notice.
+	for i := range enc {
+		enc[i] = 0xAA
+	}
+	again, err := got.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(want, again) {
+		t.Fatalf("a decoded field aliased the input buffer:\n want %x\n got  %x", want, again)
+	}
+}
 `

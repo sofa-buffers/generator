@@ -210,6 +210,9 @@
         "emit": {
           "$ref": "#/$defs/emit"
         },
+        "max_message_size": {
+          "$ref": "#/$defs/max_message_size"
+        },
         "package": {
           "type": "string",
           "description": "The `package <name>` clause of the generated .go files (default: message)."
@@ -248,6 +251,9 @@
         },
         "max_dyn_blob_len": {
           "$ref": "#/$defs/max_dyn_blob_len"
+        },
+        "max_message_size": {
+          "$ref": "#/$defs/max_message_size"
         }
       }
     },
@@ -326,6 +332,9 @@
         },
         "max_dyn_blob_len": {
           "$ref": "#/$defs/max_dyn_blob_len"
+        },
+        "max_message_size": {
+          "$ref": "#/$defs/max_message_size"
         }
       }
     },

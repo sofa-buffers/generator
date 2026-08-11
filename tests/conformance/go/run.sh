@@ -8,6 +8,8 @@ set -eu
 
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
+# Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_GO_CORELIB:-}}"
@@ -491,6 +493,38 @@ done
     echo "FAIL: table is one-sided ($ACCEPTED accept / $REJECTED reject)"; exit 1
 }
 echo "==> chunk-invariant verdicts OK ($CHECKED fixtures: $ACCEPTED accept, $REJECTED reject)"
+
+# The BOUNDED encode arm (CORELIB_PLAN §5.1). A schema whose every field carries
+# a count/maxlen has a worst case, so Encode allocates exactly MaxSize bytes and
+# hands them to the corelib, which never grows or reallocates them. example.yaml
+# is unbounded (it exercises the scratch+sink arm), so without this schema the
+# bounded arm is never executed at all.
+#
+# The fill message pins the size from both sides: filling every field to its
+# declared bound must encode to exactly MAX_SIZE bytes, so the buffer can be
+# neither short (a legal message would not fit) nor slack (RAM paid for nothing).
+echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/fill/go.mod"
+( cd "$WORK/fill" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build -o harness_bin ./harness )
+check_maxsize_fill go "$WORK/fill/harness_bin" encode fill
+
+# ...and the other side of owning the buffer: a value the caller filled PAST its
+# own schema bound does not fit, and §5.1 forbids returning partial output as if
+# it were complete. So the encode must FAIL and write nothing — the old
+# corelib-grown buffer silently emitted an over-bound message that every receiver
+# would then reject as INVALID.
+echo "==> an over-filled bounded value must be refused, not truncated (§5.1)"
+sed 's/"f_str": *"[^"]*"/"f_str": "'"$(printf 'x%.0s' $(seq 1 400))"'"/' \
+    "$ROOT/tests/conformance/lib/maxsize_fill.json" > "$WORK/overfill.json"
+grep -q 'xxxxxxxxxx' "$WORK/overfill.json" || { echo "FAIL: could not build the over-filled input (f_str renamed?)"; exit 1; }
+if "$WORK/fill/harness_bin" encode fill < "$WORK/overfill.json" > "$WORK/overfill.bin" 2>/dev/null; then
+    echo "FAIL: a string 400 bytes into a maxlen-9 field must be reported, not encoded"; exit 1
+fi
+[ ! -s "$WORK/overfill.bin" ] || {
+    echo "FAIL: a refused encode emitted $(wc -c < "$WORK/overfill.bin") bytes of partial output"; exit 1
+}
+echo "==> over-fill refusal OK"
 
 echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_GO_CORELIB="$CORELIB" go test ./generators/golang/ -run "Conformance|Wire" -count=1 )
