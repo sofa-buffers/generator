@@ -24,6 +24,7 @@ var maxSizePattern = regexp.MustCompile(
 		`|(?:MaxSize = (\d+))` + // C#:     public const int MaxSize = 49
 		//                                Go:     const ScalarsMaxSize = 49
 		`|(?:MAX_SIZE = (\d+))` + // Java:   public static final int MAX_SIZE = 49
+		//                                Python: MAX_SIZE = 49
 		`|(?:maxSize = (\d+))`, // Dart:   static const int maxSize = 49
 )
 

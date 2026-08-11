@@ -251,6 +251,9 @@
         },
         "max_dyn_blob_len": {
           "$ref": "#/$defs/max_dyn_blob_len"
+        },
+        "max_message_size": {
+          "$ref": "#/$defs/max_message_size"
         }
       }
     },
