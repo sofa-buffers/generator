@@ -709,22 +709,58 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 
 	// per-message encode()/decode() (members so multiple messages don't clash).
 	if isMessage {
-		// encode(): one allocation, no copy. The vector is created at the
-		// schema's worst case, serialized into directly, then shrunk to what was
-		// actually written — resize() downwards never reallocates, so the bytes
-		// stay put and the vector is returned by move. Staging in an
-		// OStreamInline<_maxSize> first would put the worst case on the stack as
-		// well and then copy it across.
+		// Recomputed here rather than threaded down from the constants block
+		// above: messageSize only records the FIRST size violation, so asking
+		// twice costs a walk and changes nothing.
+		ms := g.messageSize(name, fields)
+		// encode() splits on whether the worst case is DERIVED or IMPOSED, the
+		// distinction internal/generator/maxsize.go draws and the one Rust's
+		// backend already branches on (generator#322).
+		//
+		// Bounded: _maxSize comes from the schema and the message cannot exceed
+		// it, so one allocation at that size holds it. resize() downwards never
+		// reallocates, so the bytes stay put and the vector is returned by move.
+		// Staging in an OStreamInline<_maxSize> first would put the worst case on
+		// the stack as well and then copy it across.
+		//
+		// Unbounded: _maxSize aliases the CONFIGURED ceiling, which a legitimately
+		// built message may exceed. Sizing the buffer from it and writing without
+		// a sink returned silently truncated bytes -- the writes reported failure
+		// and encode() never looked. A scratch buffer with a flush callback
+		// appending into the result removes the cap instead of checking it: the
+		// ceiling never binds an encode at all, which is what Rust's unbounded arm
+		// does.
 		f.line("    /**")
 		f.line("     * @brief Encode this message into a new byte vector.")
-		f.line("     * @return The encoded bytes (empty if the message encodes to nothing).")
+		f.line("     * @return The encoded bytes. Empty if the message encodes to nothing,")
+		f.line("     *         and also empty if the encode was refused -- use encodeTo() when")
+		f.line("     *         the two need telling apart.")
 		f.line("     */")
 		f.line("    std::vector<std::uint8_t> encode() const {")
-		f.line("        std::vector<std::uint8_t> out(_maxSize);")
-		f.line("        sofab::OStreamView os{out.data(), out.size()};")
-		f.line("        serialize(os);")
-		f.line("        out.resize(os.bytesUsed());")
-		f.line("        return out;")
+		if ms.Bounded {
+			f.line("        std::vector<std::uint8_t> out(_maxSize);")
+			f.line("        sofab::OStreamView os{out.data(), out.size()};")
+			f.line("        serialize(os);")
+			// The buffer is the schema's worst case, so a refusal here is an
+			// argument error (an id past ID_MAX, a value past FIXLEN_MAX), never a
+			// capacity one. Checked rather than assumed: returning what was written
+			// as if it were the message is what §5.1 forbids.
+			f.line("        if (!os.ok()) { return {}; }")
+			f.line("        out.resize(os.bytesUsed());")
+			f.line("        return out;")
+		} else {
+			f.line("        std::vector<std::uint8_t> out;")
+			f.line("        std::uint8_t scratch[512];")
+			f.line("        sofab::OStreamView os{")
+			f.line("            [&out](std::span<const std::uint8_t> chunk) {")
+			f.line("                out.insert(out.end(), chunk.begin(), chunk.end());")
+			f.line("            },")
+			f.line("            scratch, sizeof(scratch)};")
+			f.line("        serialize(os);")
+			f.line("        os.flush();")
+			f.line("        if (!os.ok()) { return {}; }")
+			f.line("        return out;")
+		}
 		f.line("    }")
 		// encodeTo(): the same, into storage the caller already has — no
 		// allocation at all. Returns 0 if the message does not fit in cap, in

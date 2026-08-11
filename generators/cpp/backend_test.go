@@ -2184,3 +2184,51 @@ func TestCppStaticStorageFallsBackPerField(t *testing.T) {
 		}
 	}
 }
+
+// TestCppEncodeRespectsTheCeilingDistinction is generator#322: encode() sized its
+// buffer from _maxSize and never read os.ok(). For a BOUNDED schema that is
+// harmless — the size is derived and cannot be exceeded — but for an UNBOUNDED
+// one _maxSize aliases the CONFIGURED ceiling, and a larger message came back
+// silently truncated, indistinguishable from a successful encode.
+//
+// The two arms differ the way Rust's backend already differs: bounded keeps the
+// exact buffer and checks the verdict; unbounded drains a scratch through a flush
+// callback, so the ceiling never binds an encode at all.
+func TestCppEncodeRespectsTheCeilingDistinction(t *testing.T) {
+	bounded := headerFromYAML(t, "version: 1\nmessages:\n  B:\n    payload:\n"+
+		"      s: { id: 1, type: string, maxlen: 16 }\n", "b.hpp")
+	for _, want := range []string{
+		"std::vector<std::uint8_t> out(_maxSize);",
+		"sofab::OStreamView os{out.data(), out.size()};",
+		// the check that was missing: returning what was written as if it were the
+		// message is what the buffer-ownership contract forbids
+		"if (!os.ok()) { return {}; }",
+	} {
+		if !strings.Contains(bounded, want) {
+			t.Errorf("bounded encode missing %q:\n%s", want, bounded)
+		}
+	}
+	if strings.Contains(bounded, "scratch") {
+		t.Errorf("bounded encode must not drain through a scratch — the size is derived:\n%s", bounded)
+	}
+
+	unbounded := headerFromYAML(t, "version: 1\nmessages:\n  U:\n    payload:\n"+
+		"      s: { id: 1, type: string }\n", "u.hpp")
+	for _, want := range []string{
+		// the ceiling is still declared, and still must not size the buffer
+		"static constexpr std::size_t _maxSizeLimit =",
+		"std::vector<std::uint8_t> out;",
+		"std::uint8_t scratch[512];",
+		"out.insert(out.end(), chunk.begin(), chunk.end());",
+		"os.flush();",
+		"if (!os.ok()) { return {}; }",
+	} {
+		if !strings.Contains(unbounded, want) {
+			t.Errorf("unbounded encode missing %q:\n%s", want, unbounded)
+		}
+	}
+	// The defect itself: an unbounded message must never be capped at the ceiling.
+	if strings.Contains(unbounded, "std::vector<std::uint8_t> out(_maxSize);") {
+		t.Errorf("unbounded encode still sizes its buffer from the configured ceiling:\n%s", unbounded)
+	}
+}
