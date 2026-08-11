@@ -482,21 +482,42 @@ Four consequences worth knowing before you rely on them:
 from: the input may be reused or mutated the moment they return. The streaming
 `decoder()` is the same — a fed chunk may be refilled as soon as `feed` returns.
 
-corelib-dart does hand views over: a decoded `string` arrives as raw wire bytes
-pointing into the decode buffer, and a `blob` as a `Uint8List` view of it. That is
-correct of the corelib, which allocated nothing. Owning the bytes is therefore the
-generated destination's job, and every one of them copies — `utf8.decode(bytes)`
-builds a fresh `String`, `Uint8List.fromList(value)` a fresh blob, and the array
-collectors (`_StrSeq`, `_BlobSeq`, `_IntMat`, `_DblMat`, `_BoolMat`) do the same
-per element. The `maxlen`/`count` guards run on the view, **before** the copy, so
-nothing over-bound is duplicated first.
+corelib-dart does hand views over, but only for a `string`/`blob` on the
+**one-shot** path: `_ContiguousDecoder._fixlen` delivers them as
+`Uint8List.view(_buf.buffer, …)` straight into the decode buffer. That is correct of the corelib, which allocated
+nothing. Owning the bytes is therefore the generated destination's job, and every
+one of them copies — `utf8.decode(bytes)` builds a fresh `String`,
+`Uint8List.fromList(value)` a fresh blob, and the array collectors (`_StrSeq`,
+`_BlobSeq`, `_IntMat`, `_DblMat`, `_BoolMat`) do the same per element. The
+`maxlen`/`count` guards run on the view, **before** the copy, so nothing
+over-bound is duplicated first.
+
+The other decode paths cannot alias today, because the corelib allocates the
+container itself. That is a corelib-side allocation this backend cannot suppress
+(there is no caller-owned decode-storage API in corelib-dart), so treat it as a
+fact about today's corelib rather than a guarantee to lean on:
+
+| decoded as | one-shot | streaming (`feed`) |
+|---|---|---|
+| `string`, `blob` | **view into the input buffer** | corelib `Uint8List(length)` — a split payload is reassembled in corelib storage |
+| integer array | corelib `Int64List(count)` | corelib `Int64List(count)` |
+| fp array | corelib `Float32List`/`Float64List(count)` | corelib `Float32List`/`Float64List(count)` |
+
+So the generated copy is *load-bearing* for a one-shot string/blob and
+*defence-in-depth* everywhere else, where it doubles as the conversion into the
+field's declared type (`List<int>`, `Float32List`). Keep it on both: which side
+allocates is the corelib's choice to change, and the destination must own its
+bytes either way.
 
 The property held from the start but was asserted nowhere, so
 `tests/conformance/dart/ownership_check.dart` now pins it by behaviour rather than
 by shape: it decodes, overwrites the whole input buffer (and, for the streaming
-leg, each chunk's scratch right after feeding it), and re-encodes — which fails
-for any field that turned out to be a view. A borrowing mode is deliberately not
-offered and not configurable (ARCHITECTURE §9.6).
+leg, each chunk's scratch right after feeding it), and re-encodes. **Read its
+reach off the table above**: mutating a generated destination to keep the
+corelib's value instead of copying it fails the check for a one-shot
+string/blob, and passes for the array fields, whose copies the check cannot
+currently pin because there is no view to expose. A borrowing mode is
+deliberately not offered and not configurable (ARCHITECTURE §9.6).
 
 ## Reserved-word and type-name field names
 

@@ -2,12 +2,21 @@
 // to the decode side): no destination may keep a window into the buffer the
 // bytes came from, or the message's lifetime would be silently tied to it.
 //
-// corelib-dart hands the visitor VIEWS -- onStringBytes and onBlob point straight
-// into the decode buffer, and the streaming decoder points into the fed chunk --
-// so this property lives entirely in the generated destinations, which copy.
-// Nothing here asserts what a destination looks like: it overwrites the input
-// after decoding and re-encodes, which fails for any field that turned out to be
-// a view.
+// corelib-dart hands the visitor a VIEW for a string/blob on the one-shot path
+// (`Uint8List.view(_buf.buffer, ...)`), so this property lives entirely in the
+// generated destinations, which copy. Nothing here asserts what a destination
+// looks like: it overwrites the input after decoding and re-encodes, which fails
+// for any field that turned out to be a view.
+//
+// KNOWN REACH -- do not read a pass as covering every field. The corelib
+// allocates the container itself for an integer array (`Int64List(count)`) and
+// an fp array (`Float32List`/`Float64List(count)`) on BOTH paths, and
+// reassembles a split string/blob into its own `Uint8List(length)` while
+// streaming. Only a one-shot string/blob is a view, so only those legs can fail
+// here: dropping the copy in an array destination passes this check (verified by
+// mutating the generated code). The array copies are still required -- which side
+// allocates is the corelib's choice to change -- they are just pinned by
+// inspection rather than by this test.
 //
 // Run inside a generated project (`dart run bin/ownership_check.dart`); exits
 // non-zero with a diff on failure.
