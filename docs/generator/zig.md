@@ -239,6 +239,15 @@ path, so a string/blob without `maxlen` or an array without `count` is fine —
 bounded native arrays still lower to inline `FixedArray(T, N)` stack storage and
 skip the allocator entirely.
 
+**There is no `allow_dynamic` here yet, and that is a gap rather than a
+decision** (generator#323). Zig can express heap-free storage for a bounded
+field, so by the storage-axis rule (ARCHITECTURE §8) this target should offer the
+switch the C++ and Rust backends carry. Today only `count: N` *native* arrays are
+inline; a bounded `string`/`blob` is still a `[]const u8` view, so a schema whose
+every field is bounded nevertheless needs an allocator to decode — and on the
+streaming path every payload is copied into it anyway (`decoder`, above), so what
+the switch would remove is the allocation, not the copy.
+
 Two receiver-side protections cover those unbounded fields on decode:
 
 - **`max_dyn_*` decode limits** (generator#102, opt-in, see the options
