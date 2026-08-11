@@ -998,3 +998,93 @@ messages:
 		t.Error("streaming decode must carry the active decode limits")
 	}
 }
+
+// The encode entry points must hand the corelib storage the CALLER owns
+// (CORELIB_PLAN §5.1): a corelib allocates nothing and grows nothing, so the
+// buffer is generated code's to size and to allocate. The two arms differ
+// because the schema does:
+//
+//   - bounded — every field carries a count/maxlen, so the worst case is known
+//     and one exactly-sized buffer always holds the message: NewEncoderBuffer,
+//     no sink, no minimum.
+//   - unbounded — no worst case exists, and the configured max_message_size
+//     ceiling is a policy number, not a size the message cannot exceed. Sizing
+//     the buffer from it would refuse a larger message the caller legitimately
+//     built, so a fixed scratch drains into caller-owned storage instead.
+func TestGoEncodeUsesCallerOwnedBuffers(t *testing.T) {
+	bounded := genGo(t, schemaFromYAMLString(t, `
+version: 1
+messages:
+  b:
+    payload:
+      a: { id: 0, type: u32 }
+      s: { id: 1, type: string, maxlen: 8 }
+`), map[string]any{})["b.go"]
+	for _, want := range []string{
+		"const BMaxSize = ",
+		"buf := make([]byte, BMaxSize)",
+		"e, err := sofab.NewEncoderBuffer(buf, 0)",
+		"return e.Bytes(), nil",
+	} {
+		if !strings.Contains(bounded, want) {
+			t.Errorf("bounded encode missing %q:\n%s", want, bounded)
+		}
+	}
+	// A derived worst case is emitted as MAX_SIZE alone — a MAX_SIZE_LIMIT here
+	// would tell the reader the number is imposed when it is not.
+	if strings.Contains(bounded, "BMaxSizeLimit") {
+		t.Error("a schema-derived worst case must not be spelled as a configured ceiling")
+	}
+
+	unbounded := genGo(t, schemaFromYAMLString(t, `
+version: 1
+messages:
+  u:
+    payload:
+      s: { id: 0, type: string }
+`), map[string]any{})["u.go"]
+	for _, want := range []string{
+		"UMaxSizeLimit = 4096",
+		"UMaxSize      = UMaxSizeLimit",
+		"var scratch [512]byte",
+		"e, err := sofab.NewEncoderSink(scratch[:], 0, func(_ *sofab.Encoder, b []byte) error {",
+		"out = append(out, b...)",
+	} {
+		if !strings.Contains(unbounded, want) {
+			t.Errorf("unbounded encode missing %q:\n%s", want, unbounded)
+		}
+	}
+	// The ceiling must never size the buffer: that is the truncation this arm
+	// exists to avoid.
+	if strings.Contains(unbounded, "make([]byte, UMaxSize)") {
+		t.Error("the configured ceiling must not size an encode buffer")
+	}
+	// An explicitly configured ceiling a bounded schema cannot fit is a config
+	// error, surfaced by Generate rather than emitted as a too-small buffer.
+	if _, err := (&Backend{}).Generate(schemaFromYAMLString(t, `
+version: 1
+messages:
+  big:
+    payload:
+      a: { id: 0, type: array, items: { type: u64, count: 1000 } }
+`), map[string]any{"max_message_size": 16}); err == nil {
+		t.Error("a worst case above an explicit max_message_size must be reported")
+	}
+
+	// EncodeTo is the same caller-owned shape for both arms: io.Writer.Write may
+	// not retain what it is handed, so w is a copying sink and returns without
+	// taking the buffer.
+	for label, src := range map[string]string{"bounded": bounded, "unbounded": unbounded} {
+		if !strings.Contains(src, "_, werr := w.Write(b)") {
+			t.Errorf("%s EncodeTo must drain the caller's scratch into w:\n%s", label, src)
+		}
+		// The compatibility constructor allocates a window of its own and grows
+		// it — a negative assertion, so it cannot creep back in either arm.
+		if strings.Contains(src, "sofab.NewEncoder(") {
+			t.Errorf("%s still uses the corelib-allocating NewEncoder", label)
+		}
+		if strings.Contains(src, "bytes.Buffer") {
+			t.Errorf("%s still buffers the whole message a second time", label)
+		}
+	}
+}

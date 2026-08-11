@@ -210,6 +210,9 @@
         "emit": {
           "$ref": "#/$defs/emit"
         },
+        "max_message_size": {
+          "$ref": "#/$defs/max_message_size"
+        },
         "package": {
           "type": "string",
           "description": "The `package <name>` clause of the generated .go files (default: message)."

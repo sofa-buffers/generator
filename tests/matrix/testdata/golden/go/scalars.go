@@ -3,7 +3,6 @@
 package message
 
 import (
-	"bytes"
 	"github.com/sofa-buffers/corelib-go"
 	"io"
 )
@@ -139,31 +138,53 @@ func NewScalars() *Scalars {
 	return m
 }
 
-// Encode serializes the message to bytes.
+// ScalarsMaxSize is this message's worst-case encoded size, derived from the
+// schema: no value of it can encode to more.
+const ScalarsMaxSize = 49
+
+// Encode serializes the message into a buffer this call allocates and owns.
+//
+// The buffer is exactly ScalarsMaxSize bytes -- the schema's worst case -- so a
+// conformant value always fits. A value filled past a declared count/maxlen
+// does not, and is reported rather than truncated.
 func (m *Scalars) Encode() ([]byte, error) {
-	var buf bytes.Buffer
-	e := sofab.NewEncoder(&buf)
+	buf := make([]byte, ScalarsMaxSize)
+	e, err := sofab.NewEncoderBuffer(buf, 0)
+	if err != nil {
+		return nil, err
+	}
 	m.Serialize(e)
 	if err := e.Flush(); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	return e.Bytes(), nil
 }
 
 // EncodeTo serializes the message straight into w.
 //
-// The encoder drains into w as its internal buffer fills, so the message is
-// never held whole in memory: what bounds memory is w, not the message.
-// Encode is this with a bytes.Buffer.
+// The message is never held whole in memory: it is written through a small
+// scratch buffer this call owns, drained into w each time it fills, so what
+// bounds memory is that buffer rather than the message.
 func (m *Scalars) EncodeTo(w io.Writer) error {
-	e := sofab.NewEncoder(w)
+	var scratch [512]byte
+	e, err := sofab.NewEncoderSink(scratch[:], 0, func(_ *sofab.Encoder, b []byte) error {
+		_, werr := w.Write(b)
+		return werr
+	})
+	if err != nil {
+		return err
+	}
 	m.Serialize(e)
 	return e.Flush()
 }
 
 // DecodeScalars parses bytes into a new message (with defaults pre-applied).
-// Decode runs the corelib's zero-copy AcceptBytes cursor over the buffer,
-// dispatching each field to the message's sofab.Visitor implementation.
+// Decode runs the corelib's AcceptBytes cursor over the buffer, dispatching
+// each field to the message's sofab.Visitor implementation.
+//
+// The cursor hands a payload over as a window into data, but the decoded
+// message OWNS its bytes: every destination copies. The message therefore
+// outlives data, and data may be reused or mutated the moment this returns.
 //
 // Use this when the message is already in memory. DecodeScalarsFrom is the
 // streaming twin for a message that is not.
