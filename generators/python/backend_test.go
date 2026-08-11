@@ -185,7 +185,11 @@ messages:
 		"max_dyn_blob_len":    2048, // no unbounded blob in the schema -> inert
 	})["message.py"])
 	for _, want := range []string{
-		"MAX_DYN_ARRAY_COUNT = 100000", // raised to the schema count of barr
+		// AS CONFIGURED. It used to be raised to barr's schema count (100000) so a
+		// schema-bounded field larger than the cap stayed decodable; generated code
+		// now declares those fields with d.schema_bounded() instead, so the cap can
+		// stay tight around what the schema left open (generator#325).
+		"MAX_DYN_ARRAY_COUNT = 65536",
 		"MAX_DYN_STRING_LEN = 4096",
 		"o.deserialize(Decoder(io.BytesIO(data), max_array_count=MAX_DYN_ARRAY_COUNT, max_string_len=MAX_DYN_STRING_LEN))",
 	} {
@@ -1347,5 +1351,58 @@ messages:
 `
 	if _, err := (&Backend{}).Generate(schema(t, src), map[string]any{"max_message_size": 8}); err == nil {
 		t.Error("a worst case above the configured max_message_size must fail generation")
+	}
+}
+
+// TestPythonSchemaBoundedFieldsOptOutOfTheCap is generator#325: corelib-py
+// applies its receiver caps per Decoder, so they also bound the fields whose
+// schema declares a count:/maxlen: — which CORELIB_PLAN §6.2.1 forbids, since
+// there the schema bound governs and its violation is INVALID, not
+// LimitExceeded. The generator used to keep such messages decodable by raising
+// the cap to the largest schema bound, which loosened it for the UNBOUNDED
+// fields too — the protection §6.2.1 wants kept tight.
+//
+// d.schema_bounded() declares the field next() most recently returned, so the
+// cap skips it. It is a no-op where no cap has spoken, hence emitted
+// unconditionally on every field the schema bounds.
+func TestPythonSchemaBoundedFieldsOptOutOfTheCap(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      s:   { id: 1, type: string, maxlen: 8 }
+      b:   { id: 2, type: blob, maxlen: 8 }
+      arr: { id: 3, type: array, items: { type: u32, count: 4 } }
+      sa:  { id: 4, type: array, items: { type: string, count: 3, maxlen: 6 } }
+      dyn: { id: 5, type: string }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{
+		"max_dyn_string_len":  4,
+		"max_dyn_array_count": 2,
+	})["message.py"])
+
+	// Declared ahead of every schema-bound guard, and ahead of the read on the
+	// blob-element arm, which measures the materialized bytes instead of peeking.
+	for _, want := range []string{
+		"                d.schema_bounded()\n                if d.fixlen_len() > 8:",
+		"d.schema_bounded()\n                if fld.count > 4:",
+		"d.schema_bounded()\n                    if _ef0.id >= 3:",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q", want)
+		}
+	}
+	// One per bounded position: s, b, arr, sa's index and sa's element maxlen.
+	if got := strings.Count(mod, "d.schema_bounded()"); got != 5 {
+		t.Errorf("expected 5 declarations (s, b, arr, sa index, sa element), got %d", got)
+	}
+	// The cap stays at the configured number rather than being raised to 8.
+	if !strings.Contains(mod, "MAX_DYN_STRING_LEN = 4") {
+		t.Error("the configured cap must be emitted as configured, not raised to the largest schema maxlen")
+	}
+	// An UNBOUNDED field must keep the cap: no declaration on dyn's read.
+	if strings.Contains(mod, "d.schema_bounded()\n                self.dyn") {
+		t.Error("an unbounded field must stay capped — no declaration before its read")
 	}
 }

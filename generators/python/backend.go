@@ -64,12 +64,19 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102),
-// resolved against the schema: each active entry is the configured cap raised
-// to the largest schema bound of its kind, so a schema-bounded field larger
-// than the cap stays governed by its schema bound alone (corelib-py enforces
-// these globally per Decoder). An entry is active only when its key is
+// resolved against the schema. An entry is active only when its key is
 // configured AND the schema actually has an unbounded field of that kind --
 // otherwise the option would be inert and no plumbing is emitted.
+//
+// The configured value is emitted AS CONFIGURED. It used to be raised to the
+// largest schema bound of its kind, because corelib-py applies its caps per
+// Decoder and would otherwise reject a schema-bounded field larger than the cap
+// -- which §6.2.1 forbids, since there the schema bound governs. That raise kept
+// such messages decodable by loosening the cap for the UNBOUNDED fields too,
+// which is exactly the protection §6.2.1 wants kept tight. Generated code now
+// declares each bounded field with d.schema_bounded() instead, so the cap binds
+// only what the schema left open and can stay at the number the deployment
+// chose (generator#325).
 type limitSet struct {
 	arrayCount, stringLen, blobLen int64
 	arrayHas, stringHas, blobHas   bool
@@ -87,13 +94,13 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	b := ir.Bounds(all)
 	var l limitSet
 	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
-		l.arrayCount, l.arrayHas = max(v, b.MaxCount), true
+		l.arrayCount, l.arrayHas = v, true
 	}
 	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
-		l.stringLen, l.stringHas = max(v, b.MaxStringLen), true
+		l.stringLen, l.stringHas = v, true
 	}
 	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
-		l.blobLen, l.blobHas = max(v, b.MaxBlobLen), true
+		l.blobLen, l.blobHas = v, true
 	}
 	return l
 }
@@ -935,6 +942,7 @@ func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 		// (d.fixlen_len(), a non-consuming peek), checked before the string is
 		// materialized — never re-encode the decoded str to measure it.
 		if fld.HasMaxlen {
+			f.line("                d.schema_bounded()")
 			f.line("                if d.fixlen_len() > %d:", fld.Maxlen)
 			f.line(`                    raise SofaDecodeError("%s: string byte length above schema maxlen %d")`, fld.Name, fld.Maxlen)
 		}
@@ -952,6 +960,7 @@ func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
 		// INVALID. Reading first and measuring the decoded bytes afterwards never
 		// reaches the check on such a message and reported INCOMPLETE instead.
 		if fld.HasMaxlen {
+			f.line("                d.schema_bounded()")
 			f.line("                if d.fixlen_len() > %d:", fld.Maxlen)
 			f.line(`                    raise SofaDecodeError("%s: blob byte length above schema maxlen %d")`, fld.Name, fld.Maxlen)
 		}
@@ -1011,6 +1020,7 @@ func emitCountGuard(f *pyfile, ind, loc string, cap int64, depth int) {
 	if cap < 0 {
 		return
 	}
+	f.line("%sd.schema_bounded()", ind)
 	f.line("%sif %s.count > %d:", ind, arrayFieldVar(depth), cap)
 	f.line(`%s    raise SofaDecodeError("%s: array count above schema capacity %d")`, ind, loc, cap)
 }
@@ -1067,6 +1077,7 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target, loc string, elem ir.Kind, r
 		// §5.1/§7 — issue #142), rejected before the list grows, which also bounds
 		// an over-index heap-amplification fill. A dynamic array keeps every index.
 		if cap >= 0 {
+			f.line("%s    d.schema_bounded()", ind)
 			f.line("%s    if %s.id >= %d:", ind, ef, cap)
 			f.line(`%s        raise SofaDecodeError("%s: array index above schema capacity %d")`, ind, target, cap)
 		}
@@ -1084,6 +1095,7 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target, loc string, elem ir.Kind, r
 			// against the wire byte length (non-consuming peek) before the element is
 			// materialized — never re-encode the decoded str to measure it.
 			if elemMaxHas {
+				f.line("%s    d.schema_bounded()", ind)
 				f.line(`%s    if d.fixlen_len() > %d:`, ind, elemMax)
 				f.line(`%s        raise SofaDecodeError("%s: string element byte length above schema maxlen %d")`, ind, target, elemMax)
 			}
@@ -1094,6 +1106,13 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target, loc string, elem ir.Kind, r
 			// with the element default b"" (MESSAGE_SPEC S2).
 			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
 			f.line(`%s        %s.append(b"")`, ind, target)
+			// Declared BEFORE the read: this arm measures the materialized bytes
+			// rather than peeking the length word, so a receiver cap would reject
+			// during d.bytes() -- one call before the schema bound below could
+			// speak (§6.2.1: on a bounded field the schema governs).
+			if elemMaxHas {
+				f.line("%s    d.schema_bounded()", ind)
+			}
 			f.line("%s    %s[%s.id] = d.bytes()", ind, target, ef)
 			// A bounded blob element whose byte length exceeds the element maxlen
 			// is malformed — reject, never truncate (MESSAGE_SPEC §7.1).
