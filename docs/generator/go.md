@@ -59,6 +59,14 @@ scratch would make `Encode` non-reentrant from a `Serialize` on the same
 goroutine, which is worse than the allocation for the concurrency Go callers
 expect.
 
+The size of that allocation is the schema's, not the value's: a message declaring
+`array<u64, count: 10000>` has `MaxSize = 200007` and `Encode` allocates all of it
+per call even to emit ten bytes. That is the declared bound being taken
+seriously — the same buffer a `c`/`rust no_std` target would reserve statically —
+so a schema whose bounds are aspirational rather than real is worth tightening.
+A caller that wants the message-sized allocation instead can drive `EncodeTo`
+with its own `bytes.Buffer`, or `Serialize` with an encoder it constructed itself.
+
 ## Streaming — `EncodeTo(io.Writer)` and `Decode<Msg>From(io.Reader)`
 
 ```go

@@ -690,7 +690,11 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    largest single field rather than the wire image (§5.6, generator#312). The
    two are **event-equivalent** — same callbacks, same `HeaderVisitor` hooks,
    same verdicts at every byte boundary — which is why one emitted visitor
-   serves both and neither can tell which is driving it. The corelib still
+   serves both and neither can tell which is driving it. The Go cursor being
+   zero-copy is a property of the *callback argument*, not of the destination:
+   a `String`/`Bytes` payload arrives as a window into the caller's buffer, and
+   the generated Go destination **copies** it, so a decoded message owns its
+   bytes and outlives the buffer it was decoded from (§9.6). The corelib still
    exposes the pull `Decoder` (family 3) for callers who want the fields
    themselves. **Dart** — a separate `_<Msg>Visitor` class
    holds a reference to the object and a shared decode context;
@@ -1920,6 +1924,21 @@ A streaming entry point (`EncodeTo(writer)` and peers) is the sink shape for bot
 cases, the writer being the drain. Where the drain only *copies* what it is handed
 — `io.Writer.Write` may not retain it — the sink returns without handing a
 replacement buffer back, which §5.1 spells out as the take-vs-copy distinction.
+
+**The other direction: a decoded field owns its bytes.** The same rule read on the
+decode side settles what a generated destination may store. A corelib that hands a
+`string`/`blob` payload over as a *view* into the input buffer is doing its job —
+it allocated nothing — but a destination that keeps that view makes the message's
+lifetime the buffer's, silently. So a generated destination **copies** into
+storage the message owns, on every target whose corelib offers a borrowing read
+(Go's `AcceptBytes` cursor is the clearest case). Faster borrowing modes are
+deliberately not offered and not configurable: the complexity of a second lifetime
+regime is not worth what it buys. One target still diverges: Zig's `decode()`
+borrows strings/blobs out of the input buffer into a message the *caller* declared
+(§10), so there the lifetime is at least visible in the caller's own code rather
+than hidden — and its streaming path copies regardless, because a payload stitched
+across a chunk boundary completes inside corelib memory. Bringing it in line is a
+separate change to that backend.
 
 **Verification.** `tests/matrix/maxsize_test.go` requires every target to emit
 the *same* number and to match `ir.MaxWireSize` — the guard none of the seven
