@@ -1912,7 +1912,8 @@ produce two different generated shapes, and conflating them is a truncation bug:
 - **bounded** — one exactly-sized buffer holds the whole message, handed to the
   corelib's buffer constructor (Rust `OStream::new`, Java `new OStream(buf)`, Go
   `sofab.NewEncoderBuffer`, Python `Encoder.over_buffer(buf, 0)`, TypeScript
-  `new OStream(buf)`). A value the caller filled past its own declared bound
+  `new OStream(buf)`, Dart `Encoder.overBuffer(buf)`). A value the caller filled
+  past its own declared bound
   does not fit, and is **reported** (buffer-full) rather than emitted short —
   §5.1 forbids returning partial output as if it were complete.
 - **unbounded** — `MAX_SIZE` is an imposed ceiling, so it must not size a buffer:
@@ -1920,8 +1921,8 @@ produce two different generated shapes, and conflating them is a truncation bug:
   caller scratch plus a flush sink draining into caller-owned storage (Rust
   `OStream::with_flush`, Go `sofab.NewEncoderSink`, Python
   `Encoder.over_buffer(scratch, 0, sink)`, TypeScript
-  `new OStream(scratch, 0, sink)`), which bounds memory by the scratch instead
-  of by the message.
+  `new OStream(scratch, 0, sink)`, Dart `Encoder(sink, buffer: scratch)`), which
+  bounds memory by the scratch instead of by the message.
 
 A streaming entry point (`EncodeTo(writer)` and peers) is the sink shape for both
 cases, the writer being the drain. Where the drain only *copies* what it is handed
@@ -1933,9 +1934,9 @@ can cost it: §5.1's optional **pass-through of a divisible run**, where a paylo
 at least as long as the buffer is handed to the sink directly instead of being
 copied through. It is opt-in *at installation* ("the caller has granted it"), so
 a corelib whose caller-owned constructor takes no permission parameter cannot
-offer it to generated code at all — corelib-py and corelib-ts are in that
-position today, which costs a large single field a copy it used to avoid on the
-library-allocated path.
+offer it to generated code at all — corelib-py, corelib-ts and corelib-dart are
+in that position today, which costs a large single field a copy it used to avoid
+on the library-allocated path.
 §5.1 permits a port to always copy, so this is a corelib capability gap and never
 a conformance one; a target noticing it should report it rather than keep the
 library-allocated shape.
@@ -1980,7 +1981,7 @@ above was found by that check on its first run.
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Serialize`/`EncodeTo`; nested `Msg.Decoder` (constructed with `new`, not a `Decoder()` factory — C# puts nested types and members in one declaration space) → `Feed`/`Finish` for chunked decode; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | one public class per file (`<Message>.java`, one `<Type>.java` per struct/union, shared `Sbuf.java`) — schema types are public like every other target's, and a type reached from two messages is emitted once (#305); classes + `serialize`/`encodeTo`; nested `Msg.Decoder` via `decoder()` → `feed`/`finish` for chunked decode (`finish` throws `IllegalStateException`, not `SofabException`: `SofabError` has no INCOMPLETE, and an incomplete message is not a malformed one); ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
 | **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `serialize`; `decoder(out, alloc)` → `feed`/`finish` (the destination is the CALLER's: Zig moves structs by value, so a decoder owning its message would dangle its own visitor pointer); zero-copy `decode()` (strings/blobs borrow the input buffer, arrays from a caller allocator) — but the STREAMING path borrows nothing: `feed` copies every string/blob into `alloc`, because a payload stitched across a chunk boundary completes inside the corelib's reused carry buffer and is delivered as a slice into the decoder itself, indistinguishable in the callback from one into the caller's chunk (generator#295); fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
-| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); JSON harness carries u64 as a string. |
+| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`/`encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `maxSize` `Uint8List` (`Encoder.overBuffer(buf)`, returning the `written` view over it) for a bounded schema and drains a fixed 512-byte scratch into a caller `BytesBuilder(copy: true)` (`Encoder(sink, buffer: scratch)`) for an unbounded one; the corelib's `Encoder.encodeToBytes` — the one place that package allocates output storage — is emitted nowhere; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); the corelib hands strings/blobs over as views into the decode buffer, but every generated destination COPIES (`Uint8List.fromList`, `utf8.decode`), so a decoded message owns its bytes and outlives the input buffer; JSON harness carries u64 as a string. |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 
 **Common type mapping:** enum → smallest *signed* backing; bitfield → smallest

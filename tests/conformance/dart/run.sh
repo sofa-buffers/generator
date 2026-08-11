@@ -8,6 +8,8 @@ set -eu
 
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
+# Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_DART_CORELIB:-}}"
@@ -72,6 +74,64 @@ OUT=$(printf '%s' "$IN" | "$H" encode myfirstmessage | "$H" decode myfirstmessag
 echo "$OUT" | grep -q '"someu64":"18446744073709551615"' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
+
+# The two encode-buffer arms (CORELIB_PLAN §5.1). The caller owns the output
+# buffer: generated code allocates it and the corelib neither grows nor
+# reallocates it. Which shape applies is a property of the SCHEMA -- example.yaml
+# is unbounded (maxSizeLimit 4096), so every leg driving `$H` exercises the
+# scratch+sink arm, while conf.yaml's messages are all bounded and the
+# shared-vector run below goes through the exactly-sized one.
+#
+# The fill message pins the size from both sides: filling every field to its
+# declared bound must encode to exactly MAX_SIZE bytes, so the buffer can be
+# neither short (a legal message would not fit) nor slack (RAM paid for nothing).
+echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
+build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
+grep -q 'static const int maxSize = 234;' "$WORK/fill/lib/message.dart" \
+    || { echo "FAIL: bounded message must emit a derived maxSize, not a ceiling"; exit 1; }
+# jsonDecode is the harness's front door and a Dart `int` is SIGNED 64-bit: it
+# reads 18446744073709551615 as a double, which the u64 arm then clamps to
+# 2^63-1 -- four bytes short of the filled message. Quote those so the arm takes
+# its BigInt.parse path, the spelling the u64 round-trip leg above already uses.
+# Only POSITIVE integers above 2^53: the i64 arm is `(x as num).toInt()` and
+# would throw on a quoted value, and i64 min survives the double round-trip
+# exactly. Nothing else about the input changes, so every field is still filled
+# to its declared bound.
+quote_big_ints() {
+    python3 -c 'import re,sys; sys.stdout.write(re.sub(r"(?<![-\d.])\d+(?![\d.eE\"])", lambda m: "\"%s\"" % m.group(0) if int(m.group(0)) > 2**53 else m.group(0), sys.stdin.read()))'
+}
+fill_encode() { quote_big_ints | "$WORK/fill/harness" encode fill; }
+check_maxsize_fill dart fill_encode
+
+# ...and the other side of owning the buffer: a value the caller filled PAST its
+# own schema bound does not fit, and §5.1 forbids returning partial output as if
+# it were complete. So the encode must FAIL and write nothing -- Encoder.
+# encodeToBytes used to grow past the bound and hand back a message every
+# conformant receiver then rejects as INVALID (MESSAGE_SPEC §7.1). This is also
+# the only encode-side bound this backend has: it emits no maxlen/count
+# validation of its own.
+echo "==> an over-filled bounded value must be refused, not truncated (§5.1)"
+OVERFILL="$WORK/overfill.json"
+sed 's/"f_str": *"[^"]*"/"f_str": "'"$(printf 'x%.0s' $(seq 1 400))"'"/' \
+    "$ROOT/tests/conformance/lib/maxsize_fill.json" > "$OVERFILL"
+grep -q 'xxxxxxxxxx' "$OVERFILL" || { echo "FAIL: could not build the over-filled input (f_str renamed?)"; exit 1; }
+if fill_encode < "$OVERFILL" > "$WORK/overfill.bin" 2>/dev/null; then
+    echo "FAIL: a string 400 bytes into a maxlen-9 field must be reported, not encoded"; exit 1
+fi
+[ ! -s "$WORK/overfill.bin" ] || {
+    echo "FAIL: a refused encode emitted $(wc -c < "$WORK/overfill.bin") bytes of partial output"; exit 1
+}
+echo "==> encode-buffer ownership OK"
+
+# The decode side of the same ownership rule: a decoded message must OWN its
+# bytes. corelib-dart hands the visitor views into the decode buffer (and into
+# the fed chunk when streaming), so this property lives in the generated
+# destinations -- it holds today, but held unasserted until here.
+echo "==> a decoded message owns its bytes (must outlive its input buffer)"
+cp "$ROOT/tests/conformance/dart/ownership_check.dart" "$WORK/ex/bin/ownership_check.dart"
+( cd "$WORK/ex" && dart run bin/ownership_check.dart ) \
+    || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
+echo "==> decode ownership OK"
 
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b). 5 wire elements MUST be INVALID (MESSAGE_SPEC 3+7);

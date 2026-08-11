@@ -6,8 +6,12 @@ documented once in the [generic config](README.md).
 
 ## Options
 
-The Dart target takes no options of its own — everything is set in the
-[generic config](README.md).
+| Option | Type | Default | Effect |
+|--------|------|---------|--------|
+| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size. It reaches generated Dart only for a message the schema cannot bound, where it is emitted as `maxSizeLimit`; set explicitly it is also a budget a computed worst case may not exceed. Full semantics in the [generic config](README.md) and ARCHITECTURE §9.6. |
+
+Apart from that the Dart target takes no options of its own — everything else is
+set in the [generic config](README.md).
 
 The Dart target has a single corelib — [`corelib-dart`], the **max-speed**
 (throughput) port — so there is no `corelib` selector. `sources` emits a single
@@ -54,7 +58,9 @@ Per message:
 
 - `void serialize(sofab.Encoder e)` — sparse-canonical field writes into any
   caller-configured `Encoder` (fixed buffer, or a flush sink for streaming).
-- `Uint8List encode()` — one-shot convenience over `Encoder.encodeToBytes`.
+- `Uint8List encode()` — the one-shot entry point. It **allocates the output
+  storage itself** and hands it to the corelib; see
+  [The caller owns the encode buffer](#the-caller-owns-the-encode-buffer).
 - `static DecodeStatus tryDecode(Uint8List data, <Message> out)` — the
   status-surfacing one-shot decode (MESSAGE_SPEC S7): fills `out` and returns the
   terminal outcome. `invalid` covers both malformed bytes and a schema-bound
@@ -384,6 +390,114 @@ a payload/quiet, and a negative NaN — scalar and array — byte-for-byte in
 `tests/conformance/dart/run.sh`. fp32 only: an fp64 NaN already survives a
 `double`. Verified cross-language by Crucible finding F-0031.
 
+## The caller owns the encode buffer
+
+CORELIB_PLAN §5.1: a corelib never allocates or grows an output buffer — the
+caller does, and generated code **is** that caller. `encode()` therefore
+allocates the storage and hands it to the corelib's `Encoder`, together with the
+number it is sized from.
+
+corelib-dart's `Encoder.encodeToBytes` is exactly the shape this replaces: it
+builds its own `Uint8List(bufferSize)` and its own `BytesBuilder` inside the
+package — its doc comment calls it "the ONE place the package allocates output
+storage". Nothing this backend emits calls it any more, in the library, the
+harness or the bench body: `TestDartCallerOwnsTheEncodeBuffer` generates a whole
+project and fails if the name reappears in *any* emitted file — the conformance
+run cannot catch that one, because the helper produces exactly the same bytes and
+would sail through every byte-exact leg.
+
+**Bounded** — every field carries a `count`/`maxlen`, so the schema has a worst
+case and one exactly-sized buffer holds any conformant value:
+
+```dart
+static const int maxSize = 49;        // derived: no value can encode to more
+
+Uint8List encode() {
+  final buf = Uint8List(maxSize);
+  final e = sofab.Encoder.overBuffer(buf);   // no sink: nothing can be drained
+  serialize(e);
+  e.flush();
+  return e.written;
+}
+```
+
+No flush sink means `MIN_OUTPUT_BUFFER` does not apply (corelib-dart imposes the
+floor only when one is installed), so a field-less message legitimately encodes
+through a 0-byte buffer.
+
+**Unbounded** — one field has no bound, so there is no worst case. `maxSize` is
+then the configured *ceiling* (emitted as `maxSizeLimit`, with `maxSize` aliasing
+it) and must **not** size a buffer: a larger message is legitimate and would be
+silently refused. A fixed 512-byte scratch drains into caller-owned storage
+instead, so what an encode holds resident is the scratch, not the message:
+
+```dart
+Uint8List encode() {
+  final out = BytesBuilder(copy: true);
+  final e = sofab.Encoder(out.add, buffer: Uint8List(512));
+  serialize(e);
+  e.flush();
+  return out.toBytes();
+}
+```
+
+`copy: true` is not decoration: the sink is handed a **view** the encoder
+overwrites the moment the callback returns. Copying and returning without
+installing a replacement is §5.1's copy-and-continue case — the encoder keeps the
+scratch and resumes at offset 0, with no take-and-replace handover.
+
+Four consequences worth knowing before you rely on them:
+
+- **A value filled past its own schema bound is refused, not truncated.** It no
+  longer fits the exactly-sized buffer, and `SofabException(SofabError.bufferFull)`
+  propagates out of `encode()` with nothing returned. Such a message used to be
+  encoded and handed back — bytes every conformant receiver rejects as INVALID
+  anyway (MESSAGE_SPEC §7.1) — and §5.1 forbids returning partial output as if it
+  were complete. This is the *only* encode-side bound the Dart backend has: it
+  emits no `maxlen`/`count` validation of its own, and a Dart `List` is not
+  capacity-limited at run time.
+- **`encode()` reports through the exception channel.** It returns `Uint8List`
+  with no error return, which is deliberate and not a swallowed error:
+  `serialize` already throws for an out-of-range field id, for `MAX_DEPTH` and
+  for an unpaired surrogate in a string, so this adds no new *kind* of failure
+  path, and the Dart profile is `maxspeed`. The exception-free promise this
+  backend does make is about **decode** (`finish()` returns `null` rather than
+  throwing) and is untouched.
+- **The bounded arm allocates the schema's worst case, not the value's,** and
+  returns `e.written` — a view over that buffer, whose `.buffer` is `maxSize`
+  bytes even when the message is shorter (`BytesBuilder.toBytes()` used to hand
+  back an exactly-sized list). `array<u64, count: 10000>` means a 90 KB
+  `Uint8List` per `encode()` call even for a ten-element value. Worth weighing
+  before declaring an aspirational bound; the escape hatch is `encodeTo(e)` with
+  an `Encoder` you construct over a buffer — or a sink — of your choosing. There
+  is deliberately no cached or module-level scratch: a nested type's `serialize`
+  can re-enter `encode()`, and a shared buffer would corrupt the outer message.
+- **`maxSize` is a static class member**, so a schema field literally named
+  `maxSize` (or `maxSizeLimit`, or `encode`) collides with it. Java, C#, Python
+  and TypeScript carry the same exposure.
+
+## A decoded message owns its bytes
+
+`decode()`/`tryDecode()` return a message that outlives the buffer it was decoded
+from: the input may be reused or mutated the moment they return. The streaming
+`decoder()` is the same — a fed chunk may be refilled as soon as `feed` returns.
+
+corelib-dart does hand views over: a decoded `string` arrives as raw wire bytes
+pointing into the decode buffer, and a `blob` as a `Uint8List` view of it. That is
+correct of the corelib, which allocated nothing. Owning the bytes is therefore the
+generated destination's job, and every one of them copies — `utf8.decode(bytes)`
+builds a fresh `String`, `Uint8List.fromList(value)` a fresh blob, and the array
+collectors (`_StrSeq`, `_BlobSeq`, `_IntMat`, `_DblMat`, `_BoolMat`) do the same
+per element. The `maxlen`/`count` guards run on the view, **before** the copy, so
+nothing over-bound is duplicated first.
+
+The property held from the start but was asserted nowhere, so
+`tests/conformance/dart/ownership_check.dart` now pins it by behaviour rather than
+by shape: it decodes, overwrites the whole input buffer (and, for the streaming
+leg, each chunk's scratch right after feeding it), and re-encodes — which fails
+for any field that turned out to be a view. A borrowing mode is deliberately not
+offered and not configurable (ARCHITECTURE §9.6).
+
 ## Reserved-word and type-name field names
 
 A schema field whose name is a Dart reserved word (`class`, `for`, `return`, …)
@@ -400,6 +514,14 @@ symbol to toggle on). Tracked: Ir/op.
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+The measured encode body is `obj.encode()`, whose *inside* changed with the
+caller-owned buffer: the workload (`vehicle_telemetry`) is fully bounded, so it
+now allocates one 971-byte `Uint8List` and returns a view over it, where it used
+to fill a 4096-byte corelib scratch through a `BytesBuilder` and copy the result
+out with `toBytes()`. The encode figures currently in `results.txt` therefore
+predate the change and are not comparable across it; the next full run resets
+them.
 
 ## Strict UTF-8 — validated at the destination (issues #85, #257)
 

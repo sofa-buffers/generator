@@ -99,11 +99,23 @@ class Scalars {
     return true;
   }
 
-  /// Worst-case serialized size (schema-bounded fields; a cap for
-  /// unbounded ones).
+  /// Worst-case serialized size, derived from the schema: no value of this
+  /// message can encode to more, which is why [encode] can size one exact
+  /// buffer from it.
   static const int maxSize = 49;
-  /// Serializes this message to a fresh byte buffer.
-  Uint8List encode() => sofab.Encoder.encodeToBytes(serialize);
+  /// Serializes this message into a buffer this call allocates and owns.
+  ///
+  /// The buffer is exactly [maxSize] bytes -- the schema's worst case -- so any
+  /// conformant value fits. A value filled past a declared count/maxlen does
+  /// not, and throws [sofab.SofabException] (`bufferFull`) rather than being
+  /// handed back truncated.
+  Uint8List encode() {
+    final buf = Uint8List(maxSize);
+    final e = sofab.Encoder.overBuffer(buf);
+    serialize(e);
+    e.flush();
+    return e.written;
+  }
 
   /// Encodes into an [sofab.Encoder] the caller owns, then flushes the tail.
   ///
