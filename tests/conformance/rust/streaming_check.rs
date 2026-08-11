@@ -129,9 +129,13 @@ fn main() {
     let mut streamed: Vec<u8> = Vec::new();
     {
         let mut scratch = [0u8; 7];
+        // with_flush reports its capacity precondition as a status in BOTH Rust
+        // corelibs -- this check runs against either, and the two ports share the
+        // spelling precisely so one source can. 7 bytes clears MIN_OUTPUT_BUFFER.
         let mut os = sofab::OStream::with_flush(&mut scratch, 0, |d: &[u8]| {
             streamed.extend_from_slice(d)
-        });
+        })
+        .expect("7 bytes is above MIN_OUTPUT_BUFFER");
         m.serialize(&mut os);
         os.flush();
     }
