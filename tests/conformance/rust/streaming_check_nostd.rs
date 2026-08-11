@@ -46,9 +46,13 @@ fn main() {
     let mut streamed: std::vec::Vec<u8> = std::vec::Vec::new();
     {
         let mut scratch = [0u8; 7];
+        // Status, not panic, in both Rust corelibs -- see streaming_check.rs. This
+        // file runs on the fixed-capacity storage legs, which pair with either
+        // corelib, so it needs the same shape. 7 bytes clears MIN_OUTPUT_BUFFER.
         let mut os = sofab::OStream::with_flush(&mut scratch, 0, |d: &[u8]| {
             streamed.extend_from_slice(d)
-        });
+        })
+        .expect("7 bytes is above MIN_OUTPUT_BUFFER");
         m.serialize(&mut os);
         os.flush();
     }

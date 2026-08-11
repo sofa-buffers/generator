@@ -512,9 +512,17 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 			f.line("        let mut out: Vec<u8> = Vec::new();")
 			f.line("        {")
 			f.line("            let mut scratch = [0u8; 512];")
-			f.line("            let mut os = OStream::with_flush(&mut scratch, 0, |_d: &[u8]| out.extend_from_slice(_d));")
-			f.line("            self.serialize(&mut os);")
-			f.line("            os.flush();")
+			// with_flush reports the MIN_OUTPUT_BUFFER precondition as a status in
+			// both Rust corelibs -- corelib-rs-no-std cannot panic at all (no
+			// core::panicking; a panic is a hard fault on bare metal), and corelib-rs
+			// matches it so one spelling serves both. The Err arm is unreachable
+			// here: the scratch is a fixed 512 bytes, far above any MIN_OUTPUT_BUFFER
+			// (<= 20 by §5.1), and the offset is 0. It is still matched rather than
+			// unwrapped, so this stays panic-free for the no_std profile too.
+			f.line("            if let Ok(mut os) = OStream::with_flush(&mut scratch, 0, |_d: &[u8]| out.extend_from_slice(_d)) {")
+			f.line("                self.serialize(&mut os);")
+			f.line("                os.flush();")
+			f.line("            }")
 			f.line("        }")
 			f.line("        out")
 			f.line("    }")
