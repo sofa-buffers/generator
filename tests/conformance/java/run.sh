@@ -401,6 +401,24 @@ for v in w_u8_16383 w_u8_256 w_u16_70000; do
 done
 OUT=$($H decode myfirstmessage < "$WORK/w_u8_255_ctl.bin") || { echo "FAIL: in-range control 255 must decode"; exit 1; }
 echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
-echo "==> declared-width reject OK"
+
+# The same bound on an ARRAY ELEMENT. Worth its own vector because the element
+# check does not have to live where the scalar one does: this backend hands a
+# schema-bounded array's destination to the corelib whole and checks the declared
+# width as one pass afterwards, so an element bound could be dropped without the
+# scalar vectors above noticing. someuintarray is id 15, u32[4]; the header is
+# (15 << 3) | ARRAY_UNSIGNED(3) = 0x7B, then the element count, then the elements.
+#   7b 02 01 80 80 80 80 10 = [1, 4294967296] -- one past the width
+#   7b 02 01 ff ff ff ff 0f = [1, 4294967295] -- the in-range control
+printf '\173\002\001\200\200\200\200\020' > "$WORK/w_arr_u32_over.bin"
+printf '\173\002\001\377\377\377\377\017' > "$WORK/w_arr_u32_ctl.bin"
+if $H decode myfirstmessage < "$WORK/w_arr_u32_over.bin" >/dev/null 2>&1; then
+    echo "FAIL: an over-width ARRAY ELEMENT must be INVALID (S7.1) -- neither masked nor kept"; exit 1
+fi
+OUT=$($H decode myfirstmessage < "$WORK/w_arr_u32_ctl.bin") \
+    || { echo "FAIL: in-range array control must decode"; exit 1; }
+echo "$OUT" | tr -d ' ' | grep -q '"someuintarray":\[1,4294967295\]' \
+    || { echo "FAIL: control must keep the array exactly; got: $OUT"; exit 1; }
+echo "==> declared-width reject OK (scalar and array element)"
 
 echo "PASS"
