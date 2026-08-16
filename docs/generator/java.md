@@ -143,14 +143,15 @@ that id — but not the array kinds: it streams an array's elements through the
 array header at a scalar-declared id of the same shape would be stored element by
 element.
 
-The generated visitor therefore carries a skip counter. `arrayBegin` arms
-`askip = count`, then disarms (and arms the mirror fill counter `afill`) only at a
-`(scope, id)` pair that really declares a native array **of the announced kind**;
-the shared callbacks discard while armed. It self-terminates on the announced count
-(no array-end callback needed), survives a chunk boundary (the counter lives in the
-visitor), leaves legitimate arrays untouched, and still decodes a real scalar
-arriving at that id after the array. There is one arm per wire array kind, and the
-element types partition across them exactly as the encoder maps them (#254):
+The generated visitor therefore carries a skip counter, and **skipping is the
+default**. `arrayBegin` arms `askip = count` up front; only a `(scope, id)` arm
+for an id that really declares a native array **of the announced kind** disarms it
+and arms the mirror fill counter `afill`. The shared callbacks discard while
+armed. It self-terminates on the announced count (no array-end callback needed),
+survives a chunk boundary (the counter lives in the visitor), leaves legitimate
+arrays untouched, and still decodes a real scalar arriving at that id after the
+array. Each arm carries its own `if (kind != ArrayKind.X) break;`, and the element
+types map to kinds exactly as the encoder does (#254):
 
 | declared element | wire array kind | elements arrive in |
 |---|---|---|
@@ -170,6 +171,27 @@ The order is normative: the bound applies only to a field that survives §7.3, s
 over-count *mis-typed* array is skipped rather than rejected as a false
 `INVALID_MSG`.
 
+### Where an array element is stored
+
+`arrayBegin` resolves the destination once — kind test, schema-`count` bound,
+disarm/arm, reset the container — and parks *which* destination in `atgt`. The
+element callbacks then start with
+
+```java
+if (afill != 0) { afill--; switch (atgt) { … } return; }
+```
+
+so an element is stored against the already-resolved target instead of being
+routed through the scope switch and an id switch again, once per element. Only a
+fill `arrayBegin` armed can be open when a callback runs — the decoder delivers
+exactly `count` elements before the array ends, and nothing else in between — so
+`afill != 0` is the whole test, and the array ids leave the scalar switches
+entirely. The `askip` discard guard follows it: an armed skip and an armed fill
+are mutually exclusive, since `arrayBegin` sets exactly one of them.
+
+This is a codegen shape, not a rule: the §7.3 arming, the bound, the width check
+per element and the growth ceiling are all unchanged and all still there.
+
 ### The fixlen arm is keyed by subtype (issue #259)
 
 A fixlen array header carries a **second** word after the count — the
@@ -182,14 +204,13 @@ against its schema `count`. corelib-java announces the array from the
 member in favour of `FP32` and `FP64` (ordinals are normative family-wide:
 `UNSIGNED = 0`, `SIGNED = 1`, `FP32 = 2`, `FP64 = 3`).
 
-The generated visitor mirrors that split: `arrayBegin` emits **two** fixlen arms,
-and a declared `fp32[N]` field id is listed only under `FP32` while a declared
-`fp64[N]` is listed only under `FP64`. An `fp64` header arriving at an `fp32[N]`
-slot therefore never reaches that field's arm — the discard counter stays armed
-and drops exactly `count` elements, and the declared `float[]` is not sized,
-cleared or allocated. Previously both subtypes shared one arm, so the fp64 header
-*did* size the declared `float[]` before the mismatch was noticed downstream in
-`fp64()`.
+The generated visitor mirrors that split: a declared `fp32[N]` field's arm tests
+for `FP32` and a declared `fp64[N]`'s tests for `FP64`. An `fp64` header arriving
+at an `fp32[N]` slot therefore leaves that arm before anything happens — the
+discard counter stays armed and drops exactly `count` elements, and the declared
+`float[]` is not sized, cleared or allocated. Previously both subtypes shared one
+arm, so the fp64 header *did* size the declared `float[]` before the mismatch was
+noticed downstream in `fp64()`.
 
 The schema-`count` bound stays **inside** the matched arm, behind
 `if (kind != ArrayKind.FP32) break;`, for the same reason it sits behind the
