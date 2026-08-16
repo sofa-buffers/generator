@@ -56,7 +56,12 @@ generated plumbing, not schema surface.
 
 An array field maps to a `long[]`/`float[]`/`double[]` (numeric, enum, bitfield,
 fp) or to a `List<...>` (boolean, and every wrapper-sequence element kind), and
-the array's length is the length of that container. A schema `count: N` is a
+the array's length is the length of that container. The primitive mapping reaches
+one level in: a nested array of primitives is `List<long[]>`, **not**
+`List<List<Long>>` — the outer level is a wrapper sequence (its element ids are
+the row indices) but a row is a primitive array like any other. Only a `bool` row
+stays `List<Boolean>`, having no primitive `OStream` overload to be written
+through. A schema `count: N` is a
 **capacity**, not a length: it never reaches the wire, it bounds the array (an
 element count or element id past `N` fails the decode as `INVALID_MSG`), and it
 lets fixed-storage targets pre-size — but it never adds elements.

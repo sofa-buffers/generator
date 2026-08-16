@@ -470,7 +470,7 @@ func (g *gen) fieldWritesExpr(fld *ir.Field) string {
 		if def := g.javaDefaultValue(fld); def == "new byte[0]" || def == "Sbuf.EMPTY_BYTES" {
 			return fmt.Sprintf("%s == null || %s.length != 0", acc, acc)
 		}
-		return fmt.Sprintf("!java.util.Arrays.equals(%s, %s)", acc, g.javaDefaultValue(fld))
+		return fmt.Sprintf("!java.util.Arrays.equals(%s, %s)", acc, javaArrDefName(fld))
 	case ir.KindStruct, ir.KindUnion:
 		// Lazily framed, so the frame survives iff the nested serialize wrote a child
 		// -- exactly "the nested object is not default". A null field marshals as a
@@ -613,7 +613,7 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 			f.line("        if (%s == null || %s.length != 0) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, acc, fld.ID, acc, acc)
 			return
 		}
-		f.line("        if (!Arrays.equals(%s, %s)) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, g.javaDefaultValue(fld), fld.ID, acc, acc)
+		f.line("        if (!Arrays.equals(%s, %s)) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, javaArrDefName(fld), fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
@@ -683,12 +683,25 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 // default (issue #146).
 func javaArrDefName(fld *ir.Field) string { return "_arrdef_" + fld.Name }
 
-// javaArrayCompareDefault is the literal a native array field's value is compared
-// against for whole-field omission, and ("", false) when the field has no
-// materialized default (a dynamic array with no schema default, or a
-// wrapper-sequence array, which is never whole-omitted). It is exactly the field
-// initializer, so an untouched field always compares equal and is omitted.
+// javaArrayCompareDefault is the literal a field's value is compared against for
+// whole-field omission, and ("", false) when the field has no materialized default
+// (a dynamic array with no schema default, or a wrapper-sequence array, which is
+// never whole-omitted). It is exactly the field initializer, so an untouched field
+// always compares equal and is omitted.
+//
+// A `blob` with a non-empty default is included for the same reason a native array
+// is: its guard is an Arrays.equals against a literal, and the literal is a fresh
+// `new byte[]{...}` unless it is hoisted -- one allocation per serialize() call, on
+// a comparison that only ever READS it.
 func (g *gen) javaArrayCompareDefault(fld *ir.Field) (string, bool) {
+	if fld.Kind == ir.KindBlob {
+		def := g.javaDefaultValue(fld)
+		if def == "new byte[0]" || def == "Sbuf.EMPTY_BYTES" {
+			// The empty default degenerates to a length check; nothing to hoist.
+			return "", false
+		}
+		return def, true
+	}
 	if fld.Kind != ir.KindArray {
 		return "", false
 	}
@@ -837,7 +850,16 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) {", ind, iv, iv, lv, iv)
 		f.line("%s    %s %s = %s.get(%s);", ind, g.javaArrayElemType(elem, ref, items), ev, lv, iv)
-		if nativeArrayElem(items.Elem) {
+		if primitiveArrayElem(items.Elem) {
+			// A primitive row IS the OStream overload's argument: it goes to the wire
+			// unboxed, with no Sbuf.to*Array temporary. Otherwise as the boxed native
+			// row below -- a single count-prefixed value with no frame of its own, so
+			// the interior/last rule lands on the WRITE rather than on a closer.
+			f.line("%s    if (%s == null) %s = %s;", ind, ev, ev, emptyPrimConst(items.Elem))
+			f.line("%s    if (%s.length != 0 || %s) {", ind, ev, lastElemExpr(iv, lv))
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, true, "")
+			f.line("%s    }", ind)
+		} else if nativeArrayElem(items.Elem) {
 			// A native row is a single count-prefixed value with no frame of its own,
 			// so the rule lands on the WRITE rather than on a closer: an interior row
 			// equal to the element default (the empty row) is not written at all, and

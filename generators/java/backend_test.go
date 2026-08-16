@@ -565,8 +565,10 @@ messages:
 
 	// A native ROW of a matrix carries no frame of its own, so the §2 element rule
 	// lands on the write: an interior row equal to the element default (the empty
-	// row) is not written at all, and the last row always is.
-	if !strings.Contains(m, "if (!_e0.isEmpty() || _i0 == _t1.size() - 1) {") {
+	// row) is not written at all, and the last row always is. A primitive row is a
+	// primitive array, so "empty" is a length test and the row goes to the wire
+	// unboxed.
+	if !strings.Contains(m, "if (_e0.length != 0 || _i0 == _t1.size() - 1) {") {
 		t.Errorf("a native matrix row must take the interior/last write guard:\n%s", m)
 	}
 
@@ -868,9 +870,10 @@ func TestJavaWrapperArrayInteriorSparseLastAlwaysWritten(t *testing.T) {
 		`String _e0 = _t2.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t2.size() - 1) os.writeString(_i0, _e0);`,
 		`String _e0 = _t3.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t3.size() - 1) os.writeString(_i0, _e0);`,
 		`byte[] _e0 = _t4.get(_i0); if (_e0 == null) _e0 = Sbuf.EMPTY_BYTES; if (_e0.length != 0 || _i0 == _t4.size() - 1) os.writeBlob(_i0, _e0);`,
-		// A NATIVE row has no frame of its own, so the rule lands on the write.
-		"if (!_e0.isEmpty() || _i0 == _t5.size() - 1) {",
-		"os.writeArrayUnsigned(_i0, Sbuf.toLongArray(_e0));",
+		// A NATIVE row has no frame of its own, so the rule lands on the write; a
+		// primitive one is a long[], written with no box/unbox temporary.
+		"if (_e0.length != 0 || _i0 == _t5.size() - 1) {",
+		"os.writeArrayUnsigned(_i0, _e0);",
 		// A WRAPPER row has one, so it takes the closer -- like the struct element.
 		"if (_i0 == _t6.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
 	} {
@@ -968,9 +971,10 @@ func TestJavaMatrixRowsArePlacedByID(t *testing.T) {
 		// native rows: placed in arrayBegin, bounded by the OUTER array's count --
 		// behind the §7.3 kind test, so a mis-typed row is skipped, never placed
 		// and never bound-checked (generator#254).
-		`case 8: if (kind != ArrayKind.UNSIGNED) break; if (id >= 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_mat element: array index above schema capacity 4")); Sbuf.placeRow(m.mat, id); _ex_Root_mat = id; break;`,
-		// and the elements land in the row that id named
-		"m.mat.get(_ex_Root_mat).add(value); break;",
+		`case 8: if (kind != ArrayKind.UNSIGNED) break; if (id >= 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_mat element: array index above schema capacity 4")); _arowLong = Sbuf.placeRowLong(m.mat, id, Math.min(count, ARRAY_INIT_CAP)); _ex_Root_mat = id; break;`,
+		// and the elements land in the row that id named -- through the cursor
+		// arrayBegin parked, written back to that index only when growth moved it
+		"if (ai >= _arowLong.length) { _arowLong = ensureCap(_arowLong, ai, acap); m.mat.set(_ex_Root_mat, _arowLong); } _arowLong[ai++] = value; break;",
 		// wrapper rows: placed in sequenceBegin, same shape
 		`case 9: if (id >= 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_smat element: array index above schema capacity 4")); Sbuf.placeRow(m.smat, id); _ex_Root_smat = id; cur = 10; break;`,
 		"while (m.smat.get(_ex_Root_smat).size() <= id) m.smat.get(_ex_Root_smat).add(\"\");",
@@ -993,13 +997,16 @@ func TestJavaMatrixRowsArePlacedByID(t *testing.T) {
 		}
 	}
 
-	// The helper itself: grow with empty rows, then REPLACE at the id (an array
-	// wrapper is the array's value, §7.4).
+	// The helper itself: grow with empty rows, then reset the row AT the id to the
+	// empty array -- an array wrapper is the array's value (§7.4), so a second
+	// occurrence replaces rather than appends. Emptying an already-present row in
+	// place is that same replacement without the allocation.
 	sbuf := genJavaFromYAML(t, wrapperArraySrc, map[string]any{})["src/main/java/message/Sbuf.java"]
 	for _, want := range []string{
 		"static <T> void placeRow(List<List<T>> l, int id) {",
-		"while (l.size() <= id) l.add(new java.util.ArrayList<>());",
-		"l.set(id, new java.util.ArrayList<>());",
+		"while (l.size() < id) l.add(new java.util.ArrayList<>());",
+		"if (l.size() == id) { l.add(new java.util.ArrayList<>()); return; }",
+		"if (row == null) l.set(id, new java.util.ArrayList<>()); else row.clear();",
 	} {
 		if !strings.Contains(sbuf, want) {
 			t.Errorf("Sbuf.java missing %q:\n%s", want, sbuf)

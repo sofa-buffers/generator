@@ -214,9 +214,19 @@ func (g *gen) javaType(f *ir.Field) string {
 	return "Object"
 }
 
-// javaArrayElemType is the boxed element type stored in an array's List<...>.
+// javaArrayElemType is the element type stored in an array's List<...>.
 // Integers/enum/bitfield box to Long, boolean to Boolean, fp to Float/Double;
-// struct/union use the class type; nested arrays recurse into List<...>.
+// struct/union use the class type; nested arrays recurse.
+//
+// A nested array whose OWN elements are primitive is a primitive array, not a
+// List: `array<array<u16>>` is `List<long[]>`, not `List<List<Long>>`. This is
+// the same rule primitiveArrayElem applies to a top-level array field, applied
+// one level in -- and for the same reason, which is that the boxed form is the
+// hot allocator. A row of N integers costs N Long objects on decode plus a
+// Sbuf.toLongArray temporary on encode; measured on vehicle_telemetry (four
+// 8-element rows) that pair is ~9 % of decode and ~8 % of encode. A boolean row
+// stays List<Boolean>: it has no primitive OStream overload, so it would have to
+// be converted for the write either way.
 func (g *gen) javaArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
 	switch elem {
 	case ir.KindString:
@@ -232,6 +242,9 @@ func (g *gen) javaArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(ref.Key)
 	case ir.KindArray:
+		if primitiveArrayElem(items.Elem) {
+			return primArrayBase(items.Elem) + "[]"
+		}
 		return "List<" + g.javaArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
 	default: // integers, enum, bitfield
 		return "Long"
@@ -440,9 +453,43 @@ final class Sbuf {
     // into, because an array wrapper IS the array's value (S7.4). The caller's
     // over-index guard bounds the id against the outer array's schema capacity
     // before this grows anything.
+    //
+    // "Replaced" is a statement about the VALUE, not the object: an already-present
+    // row is emptied in place (the same rule resetList follows for a reused decode
+    // destination) instead of being swapped for a fresh ArrayList. Decoding N rows
+    // used to allocate 2N lists -- one to grow into the slot, one to overwrite it --
+    // where N+0 will do. A caller holding a reference to a row across a decode into
+    // the same destination sees it emptied; a decode destination is not shared.
     static <T> void placeRow(List<List<T>> l, int id) {
-        while (l.size() <= id) l.add(new java.util.ArrayList<>());
-        l.set(id, new java.util.ArrayList<>());
+        while (l.size() < id) l.add(new java.util.ArrayList<>());
+        if (l.size() == id) { l.add(new java.util.ArrayList<>()); return; }
+        List<T> row = l.get(id);
+        if (row == null) l.set(id, new java.util.ArrayList<>()); else row.clear();
+    }
+
+    // placeRowLong/Float/Double are placeRow for a PRIMITIVE row (List<long[]> and
+    // friends): same id-keyed placement and same gap fill with the empty row, but
+    // the new row is handed back so the caller can fill it by index instead of
+    // reading it out of the list per element. The length n is the caller's capped
+    // reservation, never the wire count -- an untrusted count must not be able to
+    // force an up-front allocation -- and the fill grows it as elements arrive.
+    static long[] placeRowLong(List<long[]> l, int id, int n) {
+        long[] row = new long[n];
+        while (l.size() < id) l.add(EMPTY_LONGS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static float[] placeRowFloat(List<float[]> l, int id, int n) {
+        float[] row = new float[n];
+        while (l.size() < id) l.add(EMPTY_FLOATS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static double[] placeRowDouble(List<double[]> l, int id, int n) {
+        double[] row = new double[n];
+        while (l.size() < id) l.add(EMPTY_DOUBLES);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
     }
 
     // resetList empties a list IN PLACE, keeping its capacity, and materializes one

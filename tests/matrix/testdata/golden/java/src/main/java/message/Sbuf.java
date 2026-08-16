@@ -25,9 +25,43 @@ final class Sbuf {
     // into, because an array wrapper IS the array's value (S7.4). The caller's
     // over-index guard bounds the id against the outer array's schema capacity
     // before this grows anything.
+    //
+    // "Replaced" is a statement about the VALUE, not the object: an already-present
+    // row is emptied in place (the same rule resetList follows for a reused decode
+    // destination) instead of being swapped for a fresh ArrayList. Decoding N rows
+    // used to allocate 2N lists -- one to grow into the slot, one to overwrite it --
+    // where N+0 will do. A caller holding a reference to a row across a decode into
+    // the same destination sees it emptied; a decode destination is not shared.
     static <T> void placeRow(List<List<T>> l, int id) {
-        while (l.size() <= id) l.add(new java.util.ArrayList<>());
-        l.set(id, new java.util.ArrayList<>());
+        while (l.size() < id) l.add(new java.util.ArrayList<>());
+        if (l.size() == id) { l.add(new java.util.ArrayList<>()); return; }
+        List<T> row = l.get(id);
+        if (row == null) l.set(id, new java.util.ArrayList<>()); else row.clear();
+    }
+
+    // placeRowLong/Float/Double are placeRow for a PRIMITIVE row (List<long[]> and
+    // friends): same id-keyed placement and same gap fill with the empty row, but
+    // the new row is handed back so the caller can fill it by index instead of
+    // reading it out of the list per element. The length n is the caller's capped
+    // reservation, never the wire count -- an untrusted count must not be able to
+    // force an up-front allocation -- and the fill grows it as elements arrive.
+    static long[] placeRowLong(List<long[]> l, int id, int n) {
+        long[] row = new long[n];
+        while (l.size() < id) l.add(EMPTY_LONGS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static float[] placeRowFloat(List<float[]> l, int id, int n) {
+        float[] row = new float[n];
+        while (l.size() < id) l.add(EMPTY_FLOATS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static double[] placeRowDouble(List<double[]> l, int id, int n) {
+        double[] row = new double[n];
+        while (l.size() < id) l.add(EMPTY_DOUBLES);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
     }
 
     // resetList empties a list IN PLACE, keeping its capacity, and materializes one

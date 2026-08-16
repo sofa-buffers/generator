@@ -305,7 +305,9 @@ func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeR
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%s    to(%s, b);", ind, el)
 	case ir.KindArray:
-		g.jsonToArray(f, ind+"    ", el, items.Elem, items.ElemRef, items.ElemItems, depth+1, false)
+		// A primitive inner row is a primitive array (List<long[]>), so it indexes
+		// like one -- same rule javaArrayElemType applies to the storage type.
+		g.jsonToArray(f, ind+"    ", el, items.Elem, items.ElemRef, items.ElemItems, depth+1, primitiveArrayElem(items.Elem))
 	default: // i*, enum, bitfield, boolean, fp
 		f.line("%s    b.append(%s);", ind, el)
 	}
@@ -384,6 +386,14 @@ func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref
 		f.line("%s    %s %s = new %s(); from(%s.getAsJsonObject(), %s); %s.add(%s);", ind, g.typeName(ref.Key), v, g.typeName(ref.Key), ev, v, target, v)
 	case ir.KindArray:
 		v := fmt.Sprintf("_v%d", depth)
+		if primitiveArrayElem(items.Elem) {
+			// A primitive inner row is a primitive array; the prim branch above
+			// allocates it to the JSON array's length, so it only needs declaring.
+			f.line("%s    %s[] %s;", ind, primArrayBase(items.Elem), v)
+			g.jsonFromArray(f, ind+"    ", v, ev+".getAsJsonArray()", items.Elem, items.ElemRef, items.ElemItems, depth+1, true)
+			f.line("%s    %s.add(%s);", ind, target, v)
+			break
+		}
 		vt := "List<" + g.javaArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
 		f.line("%s    %s %s = new ArrayList<>();", ind, vt, v)
 		g.jsonFromArray(f, ind+"    ", v, ev+".getAsJsonArray()", items.Elem, items.ElemRef, items.ElemItems, depth+1, false)

@@ -722,6 +722,12 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			f.line("    private int %s = 0;  // index of the element being decoded in %s (S5.1: the element id IS the index)", elemIdxVar(fr.loc), fr.loc)
 		}
 	}
+	// The primitive matrix row being filled, parked by arrayBegin. Only one native
+	// array fill is ever open at a time (arrays do not nest on the wire), so one
+	// cursor per element base serves every matrix in the message.
+	for _, base := range primRowBasesUsed(fs) {
+		f.line("    private %s[] %s = %s;  // primitive matrix row currently being filled", base, rowCursor(base), emptyPrimFor(base))
+	}
 	f.line("    private java.io.ByteArrayOutputStream acc; // lazy: only split string/blob payloads need it")
 	if limArr || limStr || limBlob {
 		// Emitted only for the limits that are configured AND have at least one
@@ -897,6 +903,16 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// Appending ignored the id, which an interior gap (an omitted all-default
 			// row, §2) turns into a one-off shift of every later row. The outer
 			// array's count bounds the id, which also bounds the gap fill.
+			if primitiveArrayElem(fr.innerElem) {
+				// A primitive row is placed as a right-sized (capped) array and parked
+				// in its cursor, so the element fill neither re-reads it out of the
+				// List nor boxes a value into one.
+				base := primArrayBase(fr.innerElem)
+				f.line("        case %d: %s%s%s%s = Sbuf.placeRow%s(%s, id, Math.min(count, ARRAY_INIT_CAP)); %s = id; break;",
+					fr.idx, kindGuard, guard, overIndexGuard(fr.cap, fr.loc),
+					rowCursor(base), exported(base), fr.listExpr, elemIdxVar(fr.loc))
+				continue
+			}
 			f.line("        case %d: %s%s%sSbuf.placeRow(%s, id); %s = id; break;", fr.idx, kindGuard, guard, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc))
 			continue
 		}
@@ -1029,6 +1045,14 @@ func primArrayBasesUsed(fs []frame) []string {
 	var out []string
 	for _, order := range []string{"long", "float", "double"} {
 		for _, fr := range fs {
+			// A native-matrix ROW is a primitive array too (List<long[]>), grown by
+			// the same ensureCap and indexed by the same ai/acap as a top-level one.
+			if fr.kind == fkNativeMat && primitiveArrayElem(fr.innerElem) &&
+				primArrayBase(fr.innerElem) == order && !seen[order] {
+				seen[order] = true
+				out = append(out, order)
+				continue
+			}
 			if fr.kind != fkNormal {
 				continue
 			}
@@ -1041,6 +1065,42 @@ func primArrayBasesUsed(fs []frame) []string {
 		}
 	}
 	return out
+}
+
+// primRowBasesUsed is primArrayBasesUsed restricted to native-matrix ROWS: the
+// bases needing a `_arow<B>` cursor field and a Sbuf.placeRow<B> factory.
+func primRowBasesUsed(fs []frame) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, order := range []string{"long", "float", "double"} {
+		for _, fr := range fs {
+			if fr.kind == fkNativeMat && primitiveArrayElem(fr.innerElem) &&
+				primArrayBase(fr.innerElem) == order && !seen[order] {
+				seen[order] = true
+				out = append(out, order)
+			}
+		}
+	}
+	return out
+}
+
+// rowCursor is the visitor field holding the primitive matrix row currently being
+// filled. The row also lives in the message's List<T[]> at its element index, but
+// reading it back through List.get on every element -- and storing the grown array
+// back through List.set -- is per-element work for a reference that changes at most
+// log2(count) times. arrayBegin parks it here; only a growth writes it back.
+func rowCursor(base string) string { return "_arow" + strings.ToUpper(base[:1]) + base[1:] }
+
+// emptyPrimFor is the shared zero-length constant for a primitive base.
+func emptyPrimFor(base string) string {
+	switch base {
+	case "float":
+		return "Sbuf.EMPTY_FLOATS"
+	case "double":
+		return "Sbuf.EMPTY_DOUBLES"
+	default:
+		return "Sbuf.EMPTY_LONGS"
+	}
 }
 
 // emitScalarCb writes a callback that routes (cur,id) to a field assignment or a
@@ -1062,10 +1122,20 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 				// The row arrayBegin PLACED at the element id, not the last-appended
 				// one: an interior id gap must leave an empty row, not shift the
 				// values into the wrong row.
-				row := fr.listExpr + ".get(" + elemIdxVar(fr.loc) + ")"
 				// Gated like the fkNormal fills (generator#188): a matrix inner row
 				// is armed by its own arrayBegin; a bare scalar in the matrix scope
 				// (afill == 0) is skipped.
+				if primitiveArrayElem(fr.innerElem) {
+					// Same shape as the top-level primitive fill: grow by index, and
+					// write the array reference back into the List only when growth
+					// actually replaced it.
+					cur := rowCursor(primArrayBase(fr.innerElem))
+					f.line("        case %d: if (afill == 0) break; afill--; %sif (ai >= %s.length) { %s = ensureCap(%s, ai, acap); %s.set(%s, %s); } %s[ai++] = value; break;",
+						fr.idx, widthThrow(fr.innerElem, fr.loc+" element"),
+						cur, cur, cur, fr.listExpr, elemIdxVar(fr.loc), cur, cur)
+					continue
+				}
+				row := fr.listExpr + ".get(" + elemIdxVar(fr.loc) + ")"
 				f.line("        case %d: if (afill == 0) break; afill--; %s%s.add(%s); break;", fr.idx, widthThrow(fr.innerElem, fr.loc+" element"), row, matConv(fr.innerElem))
 			}
 			continue
@@ -1097,7 +1167,16 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 				// The width guard follows the fill guard, never precedes it: an
 				// over-width scalar at an array id with no arrayBegin in front of it
 				// is a §7.3 skip, not an INVALID.
-				stmt = fillGuard + widthThrow(fld.Elem, fld.Name+" element") + target + " = ensureCap(" + target + ", ai, acap); " + target + "[ai++] = value"
+				//
+				// The growth call is behind its own `ai >= length` test rather than
+				// assigning ensureCap's result unconditionally. ensureCap already
+				// returns the same array when nothing grows, but ASSIGNING it is a
+				// reference store into the message object -- a putfield plus the
+				// GC's card-marking write barrier -- on every element of every
+				// array, for a pointer that changes at most log2(count) times.
+				stmt = fillGuard + widthThrow(fld.Elem, fld.Name+" element") +
+					"if (ai >= " + target + ".length) " + target + " = ensureCap(" + target + ", ai, acap); " +
+					target + "[ai++] = value"
 			default:
 				stmt = widthThrow(fld.Kind, fld.Name) + target + " " + act
 			}
