@@ -192,6 +192,30 @@ are mutually exclusive, since `arrayBegin` sets exactly one of them.
 This is a codegen shape, not a rule: the §7.3 arming, the bound, the width check
 per element and the growth ceiling are all unchanged and all still there.
 
+For an integer array the schema bounds with a `count: N`, the destination is
+already exactly `count` long by the time the elements arrive, so it can skip the
+element callbacks altogether. `arrayBegin` parks it in `abulk`, corelib-java's
+`Visitor.arrayBulk(id, kind, count)` hands it over, the decoder fills it directly
+(ZigZag already applied for a signed array), and `arrayBulkEnd(id, n)` clears the
+fill counter and runs the declared-width check as one pass over what was written.
+
+The offer is made **only** for a schema-bounded array: `count` is the wire's
+claim, and an unbounded array must not be allocated against it (#96) — it keeps
+the capped reservation and the grow-as-you-go element fill. Boolean arrays (a
+`List`), fp arrays (not `long`-backed) and matrix rows (whose cap bounds the row's
+*id*, not its element count) keep the element path too.
+
+The two methods are emitted **without `@Override`** on purpose. `Visitor` declares
+both with a default, so a corelib that has them calls into the fast path while one
+that predates them simply never does — and the generated code still compiles
+against it, because the per-element arms fill the very same array. `@Override`
+would turn an optimisation into a hard corelib requirement.
+
+The width check moving from per-element to per-array is a change in *when*, not in
+*what*: an out-of-range element is still `INVALID_MSG` (§7.1) and INVALID is still
+terminal, so no caller reads a value the check rejects — `decode` throws, and for
+`tryDecode` returning `INVALID` the destination's contents are not defined.
+
 ### The fixlen arm is keyed by subtype (issue #259)
 
 A fixlen array header carries a **second** word after the count — the

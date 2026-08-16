@@ -708,6 +708,13 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	if hasFill(fs) {
 		f.line("    private int atgt = 0;               // which destination the armed fill writes into")
 	}
+	// The destination handed to the corelib's bulk offer, and which field it is.
+	// Set by the same arrayBegin arm that arms the fill, so the offer itself is a
+	// field read rather than a third dispatch over (scope, id).
+	if hasBulk(fs) {
+		f.line("    private long[] abulk;               // destination offered to Visitor.arrayBulk, null when not offered")
+		f.line("    private int abtgt = 0;              // which field abulk belongs to")
+	}
 	if hasPrim {
 		// The wire-supplied element count is UNTRUSTED: a malformed message can
 		// claim ~2^31 elements, so we never allocate `new T[count]` up front (that
@@ -909,6 +916,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        // runs is a declared array at a matching kind, and disarms this.")
 	f.line("        askip = count;")
 	f.line("        afill = 0;")
+	if hasBulk(fs) {
+		f.line("        abulk = null;      // no bulk destination unless an arm below offers one")
+	}
 	f.line("        switch (cur) {")
 	for i := range fs {
 		fr := &fs[i]
@@ -990,7 +1000,14 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// filled exactly like a count-less one.
 			target := fr.path + "." + javaIdent(fld.Name)
 			arm := kindGuard + guard + armFill(fs, fr, fld)
-			if primitiveArrayElem(fld.Elem) {
+			if code, ok := bulkTargets(fs)[fr][fld.ID]; ok {
+				// Bulk-capable: the destination is exactly `count` long (the guard
+				// above proved it), so it can be handed to the decoder whole. The
+				// element arm above stays as the fallback for a decoder that
+				// declines the offer -- it fills the very same array by index.
+				arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sabtgt = %d; abulk = %s = new %s[count]",
+					arm, code, target, primArrayBase(fld.Elem))))
+			} else if primitiveArrayElem(fld.Elem) {
 				arms = append(arms, jcase(fld.ID, arm+target+" = new "+primArrayBase(fld.Elem)+"["+reserveExpr(cap)+"]"))
 			} else { // boolean List
 				arms = append(arms, jcase(fld.ID, arm+target+".clear()"))
@@ -1002,6 +1019,8 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	}
 	f.line("        }")
 	f.line("    }")
+
+	g.emitBulkCbs(f, fs)
 
 	// sequenceBegin / sequenceEnd
 	f.line("    public void sequenceBegin(int id) {")
@@ -1121,6 +1140,68 @@ func primRowBasesUsed(fs []frame) []string {
 	return out
 }
 
+// emitBulkCbs writes the two halves of the corelib's bulk-array offer
+// (CORELIB_PLAN: Visitor.arrayBulk / arrayBulkEnd), the fast path for an integer
+// array whose length the schema already bounds.
+//
+// arrayBegin has resolved and sized the destination, so the offer is a field read
+// -- not a third walk over (scope, id) -- and the decoder then writes the elements
+// straight into the field's own array with no callback at all. What the element
+// arms did per element and this does per ARRAY: the fill counter is cleared (no
+// element callback ran to count it down) and the declared-width check runs as one
+// pass over the filled range.
+//
+// The width check moving after the fill is a change in WHEN, not in what: an
+// out-of-range element is still INVALID (§7.1) and INVALID is still terminal, so
+// no caller sees a value the check rejects -- decode throws, and tryDecode reports
+// INVALID, for which the destination's contents are not defined.
+func (g *gen) emitBulkCbs(f *jfile, fs []frame) {
+	tgts := bulkTargets(fs)
+	if len(tgts) == 0 {
+		return
+	}
+	// Deliberately NOT @Override. Visitor declares both with a default, so a
+	// corelib that has them calls these and takes the fast path, while one that
+	// predates them simply never does -- and the generated code still compiles
+	// against it, with the per-element arms above filling the very same array.
+	// @Override would make the newer corelib a hard requirement for code that
+	// works either way.
+	f.line("    public long[] arrayBulk(int id, ArrayKind kind, int count) {")
+	f.line("        // Offered iff arrayBegin sized a schema-bounded destination just now.")
+	f.line("        return abulk;")
+	f.line("    }")
+	f.line("    public void arrayBulkEnd(int id, int n) {")
+	f.line("        afill = 0;   // the elements never went through the element callbacks")
+	var arms []string
+	for i := range fs {
+		fr := &fs[i]
+		ids, ok := tgts[fr]
+		if !ok {
+			continue
+		}
+		for _, fld := range fr.fields {
+			code, ok := ids[fld.ID]
+			if !ok {
+				continue
+			}
+			w := widthThrow(fld.Elem, fld.Name+" element")
+			if w == "" {
+				continue // u64/i64: every long is in range, nothing to check
+			}
+			arms = append(arms, fmt.Sprintf("        case %d: for (int _k = 0; _k < n; _k++) { long value = abulk[_k]; %s} break;", code, w))
+		}
+	}
+	if len(arms) > 0 {
+		f.line("        switch (abtgt) {")
+		for _, a := range arms {
+			f.line("%s", a)
+		}
+		f.line("        }")
+	}
+	f.line("        abulk = null;")
+	f.line("    }")
+}
+
 // fillTargetsFor lists, in frame order, every destination an armed native-array
 // fill can write into whose elements arrive through callback cb, numbering them
 // densely from 1. arrayBegin parks a target's number in `atgt`; the callback
@@ -1158,6 +1239,47 @@ func fillTargetsFor(fs []frame, cb string) map[*frame]map[int64]int {
 	}
 	return out
 }
+
+// bulkTargets lists, in frame order, every array field the corelib's bulk offer
+// (Visitor.arrayBulk) can be taken for, numbered densely from 1.
+//
+// Exactly the long-backed integer arrays with a schema `count`: the bulk offer
+// hands the decoder the destination up front, so the destination has to be
+// `count` long already, and only a SCHEMA-BOUNDED count may be allocated against
+// (#96 -- the wire's count is untrusted). That leaves out the unbounded arrays
+// (reserved capped, grown by the fill), boolean arrays (a List), fp arrays (not
+// long-backed, and the offer is integer-only) and matrix rows (their cap bounds
+// the row's ID, not its element count).
+func bulkTargets(fs []frame) map[*frame]map[int64]int {
+	out := map[*frame]map[int64]int{}
+	n := 0
+	for i := range fs {
+		fr := &fs[i]
+		if fr.kind != fkNormal {
+			continue
+		}
+		for _, fld := range fr.fields {
+			if !bulkCapable(fld) {
+				continue
+			}
+			n++
+			if out[fr] == nil {
+				out[fr] = map[int64]int{}
+			}
+			out[fr][fld.ID] = n
+		}
+	}
+	return out
+}
+
+// bulkCapable reports whether a field is one of those arrays.
+func bulkCapable(fld *ir.Field) bool {
+	return fld.Kind == ir.KindArray && fld.HasCount &&
+		primitiveArrayElem(fld.Elem) && primArrayBase(fld.Elem) == "long"
+}
+
+// hasBulk reports whether the message has any bulk-capable array.
+func hasBulk(fs []frame) bool { return len(bulkTargets(fs)) > 0 }
 
 // hasFill reports whether the message declares any native array at all, i.e.
 // whether an armed fill can ever be open.
