@@ -304,6 +304,11 @@ func widthThrow(k ir.Kind, name string) string {
 	if !ok {
 		return ""
 	}
+	// Spelled as the pair of comparisons the declared width IS, not as the
+	// equivalent one-operation forms ((value & ~255L) != 0 for an unsigned width,
+	// (byte) value != value for a signed one). Those were tried: worth 42 Ir on
+	// the arena's fifty elements and −40 on vehicle_telemetry, i.e. nothing, and
+	// generated code is read by people who have the schema and nothing else.
 	cond := fmt.Sprintf("value < 0 || value > %dL", hi)
 	if lo < 0 {
 		cond = fmt.Sprintf("value < %dL || value > %dL", lo, hi)
@@ -1218,7 +1223,7 @@ func (g *gen) emitBulkCbs(f *jfile, fs []frame) {
 			// the field, reading the scratch the decoder just filled.
 			target := fr.path + "." + javaIdent(fld.Name)
 			arms = append(arms, fmt.Sprintf(
-				"        case %d: { %s[] _d = %s; for (int _k = 0; _k < n; _k++) { long value = abuf[_k]; %s_d[_k] = %svalue; } } break;",
+				"        case %d: { %s[] _d = %s; long[] _s = abuf; for (int _k = 0; _k < n; _k++) { long value = _s[_k]; %s_d[_k] = %svalue; } } break;",
 				code, primArrayBase(fld.Elem), target, w, primArrayCast(fld.Elem)))
 		}
 	}

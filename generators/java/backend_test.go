@@ -58,13 +58,13 @@ func TestJavaStructural(t *testing.T) {
 		"class MyfirstmessageVisitor implements Visitor {",
 		"public void sequenceBegin(int id)", // flat-visitor nesting
 		"public long someu64 = Long.parseUnsignedLong(\"18446744073709551615\");",
-		"public int[] someuintarray = new int[]{0, 1, 1000, -1};",                       // primitive array (was List<Long>)
-		"public float[] somefloatarray = new float[]{0.0f, -1.5f, 3.25f};",                            // primitive fp array
-		"public long[] someenumarray = new long[]{2L, 1L, 0L};",                                       // declared default, NOT padded to count (count is a capacity)
-		"os.writeArrayUnsigned(15, this.someuintarray);",                                              // direct write, no Sbuf box, no trim: the wire count IS the length
-		"private static final int[] _arrdef_someuintarray = new int[]{0, 1, 1000, -1};", // omit-default hoisted to a static (#146)
-		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",                  // guard reads the static -- no per-encode new long[] (#146)
-		"m.someuintarray = ensureCap(m.someuintarray, ai, acap); m.someuintarray[ai++] = (int) value;",      // grow-on-demand indexed decode (#96)
+		"public int[] someuintarray = new int[]{0, 1, 1000, -1};",                                      // primitive array (was List<Long>)
+		"public float[] somefloatarray = new float[]{0.0f, -1.5f, 3.25f};",                             // primitive fp array
+		"public long[] someenumarray = new long[]{2L, 1L, 0L};",                                        // declared default, NOT padded to count (count is a capacity)
+		"os.writeArrayUnsigned(15, this.someuintarray);",                                               // direct write, no Sbuf box, no trim: the wire count IS the length
+		"private static final int[] _arrdef_someuintarray = new int[]{0, 1, 1000, -1};",                // omit-default hoisted to a static (#146)
+		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",                   // guard reads the static -- no per-encode new long[] (#146)
+		"m.someuintarray = ensureCap(m.someuintarray, ai, acap); m.someuintarray[ai++] = (int) value;", // grow-on-demand indexed decode (#96)
 		"case 15: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"someuintarray: array count above schema capacity 4\")); askip = 0; afill = count; atgt = 1; abtgt = 1; if (abuf == null) abuf = new long[ABUF_LEN]; abulk = abuf; m.someuintarray = new int[count]; break;", // mis-typed header skipped before the bound (#254); over-count rejected (#100); the M that arrived is the whole value
 		"private static long[] ensureCap(long[] a, int i, int cap) {",   // lazy-growth helper
 		"private static float[] ensureCap(float[] a, int i, int cap) {", // fp32 overload
