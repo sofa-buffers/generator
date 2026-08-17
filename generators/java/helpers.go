@@ -3,6 +3,7 @@ package java
 import (
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -151,22 +152,99 @@ func primitiveArrayElem(k ir.Kind) bool {
 }
 
 // primArrayBase is the Java primitive element type backing a primitive array:
-// long for every integer width (the corelib widens to 64-bit), float/double for
-// the fp kinds.
+// the narrowest one that holds the declared width's BITS, float/double for the fp
+// kinds, and long for the kinds with no declared narrow width (u64/i64, and enum
+// and bitfield, whose width is the named type's business).
+//
+// A SCALAR field still maps to `long` — Java has no unsigned types, and widening
+// one value costs nothing. An ARRAY is the case where it costs: at 8 bytes an
+// element a u8[1000] is eight kilobytes of which seven are sign bits. The corelib
+// has taken `byte[]`/`short[]`/`int[]`/`long[]` on writeArrayUnsigned and
+// writeArraySigned from the start, zero-extending each element on the way out
+// (`elem & 0xFF`, `& 0xFFFF`, `& 0xFFFFFFFF`); this is the mapping those overloads
+// were written for.
+//
+// For a SIGNED width the narrowing is exact — an i8 is a Java byte. For an
+// UNSIGNED one the Java primitive holds the declared width's RAW BITS, so a
+// `u8` element of 200 reads back as -56 and the value is recovered with
+// Byte.toUnsignedInt / Short.toUnsignedInt / Integer.toUnsignedLong. That is the
+// same bargain protobuf-java strikes for `uint32`, and the only alternative that
+// stays value-preserving is to widen every unsigned array one step (u8 -> short,
+// u32 -> long), which gives up most of what the change is for.
 func primArrayBase(k ir.Kind) string {
 	switch k {
 	case ir.KindFP32:
 		return "float"
 	case ir.KindFP64:
 		return "double"
-	default:
+	case ir.KindU8, ir.KindI8:
+		return "byte"
+	case ir.KindU16, ir.KindI16:
+		return "short"
+	case ir.KindU32, ir.KindI32:
+		return "int"
+	default: // u64, i64, enum, bitfield
 		return "long"
 	}
 }
 
+// emptyPrimFor is the shared zero-length constant for a primitive element base.
+// One instance per base, referenced by every field initializer, reset() and gap
+// fill: an empty array has no state, so materializing one per field is pure waste.
+func emptyPrimFor(base string) string {
+	switch base {
+	case "float":
+		return "Sbuf.EMPTY_FLOATS"
+	case "double":
+		return "Sbuf.EMPTY_DOUBLES"
+	case "byte":
+		return "Sbuf.EMPTY_BYTES"
+	case "short":
+		return "Sbuf.EMPTY_SHORTS"
+	case "int":
+		return "Sbuf.EMPTY_INTS"
+	default:
+		return "Sbuf.EMPTY_LONGS"
+	}
+}
+
+// primArrayCast is the cast a decoded `long` needs before it is stored into a
+// primitive array of `k`, empty when the element base is already long. The §7.1
+// width guard runs FIRST and rejects anything the cast would lose, so the cast
+// only ever drops bits that were already proven to be sign extension (signed) or
+// zero (unsigned).
+func primArrayCast(k ir.Kind) string {
+	switch primArrayBase(k) {
+	case "byte":
+		return "(byte) "
+	case "short":
+		return "(short) "
+	case "int":
+		return "(int) "
+	}
+	return ""
+}
+
+// primArrayWiden turns a stored primitive array element back into the VALUE it
+// stands for: a no-op for a signed width (the narrowing was exact) and a mask for
+// an unsigned one (the storage holds raw bits). Used wherever an element leaves
+// the field as a number rather than as wire bytes -- the JSON writer.
+func primArrayWiden(k ir.Kind, expr string) string {
+	switch k {
+	case ir.KindU8:
+		return "(" + expr + " & 0xFFL)"
+	case ir.KindU16:
+		return "(" + expr + " & 0xFFFFL)"
+	case ir.KindU32:
+		return "(" + expr + " & 0xFFFFFFFFL)"
+	}
+	return expr
+}
+
 // javaPrimArrayLiteral renders a primitive array field's schema default as a
-// `new long[]{...}` / `new float[]{...}` / `new double[]{...}` literal, exactly
-// as the schema wrote it. ("", false) when there is no default.
+// `new byte[]{...}` / `new int[]{...}` / `new double[]{...}` literal (whichever
+// primArrayBase gives the element), exactly as the schema wrote it.
+// ("", false) when there is no default.
 //
 // A declared `count: N` contributes nothing: `count` is a CAPACITY, not a length
 // (MESSAGE_SPEC §3), so a short default is NOT tail-padded to N and a count:N
@@ -182,9 +260,45 @@ func (g *gen) javaPrimArrayLiteral(f *ir.Field) (string, bool) {
 	base := primArrayBase(f.Elem)
 	parts := make([]string, 0, len(vals))
 	for _, v := range vals {
-		parts = append(parts, g.javaArrayElemLit(f.Elem, v))
+		parts = append(parts, javaPrimElemLit(f.Elem, v))
 	}
 	return fmt.Sprintf("new %s[]{%s}", base, strings.Join(parts, ", ")), true
+}
+
+// javaPrimElemLit renders one element of such a literal: an fp value as written, a
+// long-backed integer as a Java long literal, and a NARROWED integer as the
+// declared width's bits in the narrower type. The schema states the value; what
+// goes in the array is its representation, which for an unsigned width is the low
+// bits (a u8 default of 200 is written `(byte) -56`, and reads back as 200 through
+// Byte.toUnsignedInt) -- so the literal is emitted already reduced rather than as
+// a cast expression a reader would have to evaluate.
+func javaPrimElemLit(elem ir.Kind, v any) string {
+	switch primArrayBase(elem) {
+	case "float":
+		return floatLit(v) + "f"
+	case "double":
+		return floatLit(v)
+	case "long":
+		if elem == ir.KindU64 {
+			return fmt.Sprintf("Long.parseUnsignedLong(%q)", scalarLit(v))
+		}
+		return scalarLit(v) + "L"
+	}
+	// A narrowed width: reduce the schema's value to the bits the field holds.
+	n, err := strconv.ParseInt(scalarLit(v), 10, 64)
+	if err != nil {
+		// Not an integer literal the schema validator would have accepted; leave it
+		// to the compiler to complain rather than emitting something invented.
+		return scalarLit(v)
+	}
+	switch primArrayBase(elem) {
+	case "byte":
+		return fmt.Sprintf("(byte) %d", int8(n))
+	case "short":
+		return fmt.Sprintf("(short) %d", int16(n))
+	default:
+		return fmt.Sprintf("%d", int32(n))
+	}
 }
 
 // javaType: all integers map to long (Java has no unsigned); native numeric/fp
@@ -214,9 +328,19 @@ func (g *gen) javaType(f *ir.Field) string {
 	return "Object"
 }
 
-// javaArrayElemType is the boxed element type stored in an array's List<...>.
+// javaArrayElemType is the element type stored in an array's List<...>.
 // Integers/enum/bitfield box to Long, boolean to Boolean, fp to Float/Double;
-// struct/union use the class type; nested arrays recurse into List<...>.
+// struct/union use the class type; nested arrays recurse.
+//
+// A nested array whose OWN elements are primitive is a primitive array, not a
+// List: `array<array<u16>>` is `List<long[]>`, not `List<List<Long>>`. This is
+// the same rule primitiveArrayElem applies to a top-level array field, applied
+// one level in -- and for the same reason, which is that the boxed form is the
+// hot allocator. A row of N integers costs N Long objects on decode plus a
+// Sbuf.toLongArray temporary on encode; measured on vehicle_telemetry (four
+// 8-element rows) that pair is ~9 % of decode and ~8 % of encode. A boolean row
+// stays List<Boolean>: it has no primitive OStream overload, so it would have to
+// be converted for the write either way.
 func (g *gen) javaArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
 	switch elem {
 	case ir.KindString:
@@ -232,6 +356,9 @@ func (g *gen) javaArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(ref.Key)
 	case ir.KindArray:
+		if primitiveArrayElem(items.Elem) {
+			return primArrayBase(items.Elem) + "[]"
+		}
 		return "List<" + g.javaArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
 	default: // integers, enum, bitfield
 		return "Long"
@@ -251,14 +378,7 @@ func (g *gen) javaInit(f *ir.Field) string {
 			if lit, ok := g.javaPrimArrayLiteral(f); ok {
 				return " = " + lit
 			}
-			switch primArrayBase(f.Elem) {
-			case "float":
-				return " = Sbuf.EMPTY_FLOATS"
-			case "double":
-				return " = Sbuf.EMPTY_DOUBLES"
-			default:
-				return " = Sbuf.EMPTY_LONGS"
-			}
+			return " = " + emptyPrimFor(primArrayBase(f.Elem))
 		}
 		if nativeArrayElem(f.Elem) { // boolean array (stays boxed List<Boolean>)
 			if lit, ok := g.javaNativeArrayLiteral(f); ok {
@@ -420,15 +540,18 @@ import java.util.List;
 final class Sbuf {
     // Shared zero-length defaults: field initializers reference these instead of
     // allocating a fresh empty array per instance (decode replaces them anyway).
+    static final byte[] EMPTY_BYTES = {};
+    static final short[] EMPTY_SHORTS = {};
+    static final int[] EMPTY_INTS = {};
     static final long[] EMPTY_LONGS = {};
     static final float[] EMPTY_FLOATS = {};
     static final double[] EMPTY_DOUBLES = {};
-    static final byte[] EMPTY_BYTES = {};
 
-    static long[] toLongArray(List<Long> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
+    // The one boxed->primitive conversion left. Every other native array -- top
+    // level or a matrix row -- is already a primitive array of its declared width
+    // and goes to the OStream overload unconverted; a boolean array is the one
+    // that still has to be built, having no primitive overload of its own.
     static long[] boolToLongArray(List<Boolean> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i) ? 1 : 0; return a; }
-    static float[] toFloatArray(List<Float> l) { float[] a = new float[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
-    static double[] toDoubleArray(List<Double> l) { double[] a = new double[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
 
     // placeRow stores a FRESH empty row of a matrix (an array whose elements are
     // themselves arrays) at the index its element id names, growing the outer list
@@ -440,9 +563,61 @@ final class Sbuf {
     // into, because an array wrapper IS the array's value (S7.4). The caller's
     // over-index guard bounds the id against the outer array's schema capacity
     // before this grows anything.
+    //
+    // "Replaced" is a statement about the VALUE, not the object: an already-present
+    // row is emptied in place (the same rule resetList follows for a reused decode
+    // destination) instead of being swapped for a fresh ArrayList. Decoding N rows
+    // used to allocate 2N lists -- one to grow into the slot, one to overwrite it --
+    // where N+0 will do. A caller holding a reference to a row across a decode into
+    // the same destination sees it emptied; a decode destination is not shared.
     static <T> void placeRow(List<List<T>> l, int id) {
-        while (l.size() <= id) l.add(new java.util.ArrayList<>());
-        l.set(id, new java.util.ArrayList<>());
+        while (l.size() < id) l.add(new java.util.ArrayList<>());
+        if (l.size() == id) { l.add(new java.util.ArrayList<>()); return; }
+        List<T> row = l.get(id);
+        if (row == null) l.set(id, new java.util.ArrayList<>()); else row.clear();
+    }
+
+    // placeRow<Base> is placeRow for a PRIMITIVE row (List<byte[]>, List<int[]> and
+    // friends): same id-keyed placement and same gap fill with the empty row, but
+    // the new row is handed back so the caller can fill it by index instead of
+    // reading it out of the list per element. The length n is the caller's capped
+    // reservation, never the wire count -- an untrusted count must not be able to
+    // force an up-front allocation -- and the fill grows it as elements arrive.
+    static byte[] placeRowByte(List<byte[]> l, int id, int n) {
+        byte[] row = new byte[n];
+        while (l.size() < id) l.add(EMPTY_BYTES);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static short[] placeRowShort(List<short[]> l, int id, int n) {
+        short[] row = new short[n];
+        while (l.size() < id) l.add(EMPTY_SHORTS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static int[] placeRowInt(List<int[]> l, int id, int n) {
+        int[] row = new int[n];
+        while (l.size() < id) l.add(EMPTY_INTS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static long[] placeRowLong(List<long[]> l, int id, int n) {
+        long[] row = new long[n];
+        while (l.size() < id) l.add(EMPTY_LONGS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static float[] placeRowFloat(List<float[]> l, int id, int n) {
+        float[] row = new float[n];
+        while (l.size() < id) l.add(EMPTY_FLOATS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static double[] placeRowDouble(List<double[]> l, int id, int n) {
+        double[] row = new double[n];
+        while (l.size() < id) l.add(EMPTY_DOUBLES);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
     }
 
     // resetList empties a list IN PLACE, keeping its capacity, and materializes one

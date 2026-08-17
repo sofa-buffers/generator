@@ -236,32 +236,12 @@ class ScalarsVisitor implements Visitor {
     }
     public void arrayBegin(int id, ArrayKind kind, int count) {
         ai = 0;
-        // A native array delivered at an id that does not declare one
-        // of the SAME array kind is a wire-type contradiction -- arm a discard
-        // counter so the element callbacks drop exactly `count` elements. Every id
-        // that really declares an array of that element kind disarms it below.
-        askip = 0;
+        // An array delivered at an id that does not declare one of the SAME
+        // array kind is a wire-type contradiction: drop exactly `count` elements
+        // and leave the declared field untouched (S7.3). Every arm below that
+        // runs is a declared array at a matching kind, and disarms this.
+        askip = count;
         afill = 0;
-        if (kind == ArrayKind.UNSIGNED) {
-            askip = count;
-            switch (cur) {
-            }
-        }
-        else if (kind == ArrayKind.SIGNED) {
-            askip = count;
-            switch (cur) {
-            }
-        }
-        else if (kind == ArrayKind.FP32) {
-            askip = count;
-            switch (cur) {
-            }
-        }
-        else if (kind == ArrayKind.FP64) {
-            askip = count;
-            switch (cur) {
-            }
-        }
         switch (cur) {
         }
     }

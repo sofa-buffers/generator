@@ -304,6 +304,11 @@ func widthThrow(k ir.Kind, name string) string {
 	if !ok {
 		return ""
 	}
+	// Spelled as the pair of comparisons the declared width IS, not as the
+	// equivalent one-operation forms ((value & ~255L) != 0 for an unsigned width,
+	// (byte) value != value for a signed one). Those were tried: worth 42 Ir on
+	// the arena's fifty elements and −40 on vehicle_telemetry, i.e. nothing, and
+	// generated code is read by people who have the schema and nothing else.
 	cond := fmt.Sprintf("value < 0 || value > %dL", hi)
 	if lo < 0 {
 		cond = fmt.Sprintf("value < %dL || value > %dL", lo, hi)
@@ -702,6 +707,18 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	// positive and decrements it, so a real array (armed by its own arrayBegin)
 	// fills normally while a bare scalar (afill == 0) falls through and is skipped.
 	f.line("    private int afill = 0;              // elements still expected by an armed native-array fill (S7.3)")
+	// The armed fill's destination, resolved once per array by arrayBegin instead
+	// of once per element by the (scope, id) switches. Emitted only when the
+	// message has a native array at all.
+	if hasFill(fs) {
+		f.line("    private int atgt = 0;               // which destination the armed fill writes into")
+	}
+	// The destination handed to the corelib's bulk offer, and which field it is.
+	// Set by the same arrayBegin arm that arms the fill, so the offer itself is a
+	// field read rather than a third dispatch over (scope, id).
+	if hasBulk(fs) {
+		f.line("    private Object abulk;               // destination offered to Visitor.arrayBulk, null when not offered")
+	}
 	if hasPrim {
 		// The wire-supplied element count is UNTRUSTED: a malformed message can
 		// claim ~2^31 elements, so we never allocate `new T[count]` up front (that
@@ -721,6 +738,12 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		case fkSeqObj, fkSeqMat, fkNativeMat:
 			f.line("    private int %s = 0;  // index of the element being decoded in %s (S5.1: the element id IS the index)", elemIdxVar(fr.loc), fr.loc)
 		}
+	}
+	// The primitive matrix row being filled, parked by arrayBegin. Only one native
+	// array fill is ever open at a time (arrays do not nest on the wire), so one
+	// cursor per element base serves every matrix in the message.
+	for _, base := range primRowBasesUsed(fs) {
+		f.line("    private %s[] %s = %s;  // primitive matrix row currently being filled", base, rowCursor(base), emptyPrimFor(base))
 	}
 	f.line("    private java.io.ByteArrayOutputStream acc; // lazy: only split string/blob payloads need it")
 	if limArr || limStr || limBlob {
@@ -866,18 +889,43 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        }")
 	f.line("    }")
 
-	// arrayBegin: a primitive array reserves a small backing store (capped, NOT
-	// `new T[count]` — count is untrusted, see #96) and is grown/filled by index
-	// (ai reset below); a boolean array clears its List; a native-matrix row is
-	// placed at the index its element id names.
+	// arrayBegin: one dispatch, not two.
+	//
+	// It used to run the §7.3 skip/fill arming and the destination reset as two
+	// separate (cur, id) walks, the first behind a four-way `kind ==` chain. Both
+	// are keyed on the same (scope, id, kind) triple, so they are one switch: each
+	// arm tests its own field's array kind, rejects an over-capacity count, disarms
+	// the skip, arms the fill, parks the fill target and resets the destination.
+	// Measured on the arena message (ten arrays per decode) the two-pass shape was
+	// 9.7 % of decode — more than the element callbacks that follow it.
+	//
+	// SKIPPING IS THE DEFAULT (MESSAGE_SPEC §7.3). `askip = count` up front is what
+	// an id this scope does not declare, or declares with a different array kind,
+	// falls through to: its elements are dropped one by one and a real scalar at
+	// that id still decodes afterwards. Every arm that runs disarms it. This is
+	// exactly what the old first pass computed, since ArrayKind has no fifth value.
+	//
+	// A primitive array reserves a small backing store (capped, NOT `new T[count]`
+	// — count is untrusted, see #96) and is grown/filled by index (ai reset here);
+	// a boolean array clears its List; a native-matrix row is placed at the index
+	// its element id names.
 	f.line("    public void arrayBegin(int id, ArrayKind kind, int count) {")
 	f.line("        ai = 0;")
 	if hasPrim {
 		f.line("        acap = count;")
 	}
-	g.emitArraySkipArm(f, fs)
+	f.line("        // An array delivered at an id that does not declare one of the SAME")
+	f.line("        // array kind is a wire-type contradiction: drop exactly `count` elements")
+	f.line("        // and leave the declared field untouched (S7.3). Every arm below that")
+	f.line("        // runs is a declared array at a matching kind, and disarms this.")
+	f.line("        askip = count;")
+	f.line("        afill = 0;")
+	if hasBulk(fs) {
+		f.line("        abulk = null;      // no bulk destination unless an arm below offers one")
+	}
 	f.line("        switch (cur) {")
-	for _, fr := range fs {
+	for i := range fs {
+		fr := &fs[i]
 		if fr.kind == fkNativeMat {
 			// A native-matrix row is itself a native array: an inner array the
 			// schema left unbounded is governed by the configured cap too
@@ -887,17 +935,30 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 				guard = limitThrowGuard("count > MAX_DYN_ARRAY_COUNT", locName(fr.loc), "array count above configured limit", g.limits.arrayCount) + " "
 			}
 			// A row whose header carries a different array kind than the inner
-			// element declares is skipped whole (§7.3, generator#254): its elements
-			// are already discarded by the skip counter above, and the row itself
-			// must not be materialized either. Checked FIRST, so a bound below can
-			// only ever reject a row that survives the kind test.
+			// element declares is skipped whole (§7.3, generator#254). Checked
+			// FIRST, so a bound below can only ever reject a row that survives the
+			// kind test.
 			kindGuard := arrayKindGuard(fr.innerElem)
+			arm := kindGuard + guard + overIndexGuard(fr.cap, fr.loc) + armFill(fs, fr, nil)
 			// The row's element id IS its index in the outer array (§5.1), so it is
 			// PLACED there after gap-filling with empty rows -- never appended.
 			// Appending ignored the id, which an interior gap (an omitted all-default
 			// row, §2) turns into a one-off shift of every later row. The outer
 			// array's count bounds the id, which also bounds the gap fill.
-			f.line("        case %d: %s%s%sSbuf.placeRow(%s, id); %s = id; break;", fr.idx, kindGuard, guard, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc))
+			if primitiveArrayElem(fr.innerElem) {
+				// A primitive row is placed as a right-sized (capped) array and parked
+				// in its cursor, so the element fill neither re-reads it out of the
+				// List nor boxes a value into one.
+				base := primArrayBase(fr.innerElem)
+				// Capped, never `new T[count]`: fr.cap bounds the row's ID against the
+				// OUTER array's capacity, and nothing here has bounded the row's own
+				// element count -- so the reservation stays untrusted-count-safe (#96)
+				// and the fill grows it.
+				f.line("        case %d: %s%s = Sbuf.placeRow%s(%s, id, Math.min(count, ARRAY_INIT_CAP)); %s = id; break;",
+					fr.idx, arm, rowCursor(base), exported(base), fr.listExpr, elemIdxVar(fr.loc))
+				continue
+			}
+			f.line("        case %d: %sSbuf.placeRow(%s, id); %s = id; break;", fr.idx, arm, fr.listExpr, elemIdxVar(fr.loc))
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -905,16 +966,19 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		}
 		var arms []string
 		for _, fld := range fr.fields {
+			if fld.Kind != ir.KindArray || !nativeArrayElem(fld.Elem) {
+				continue
+			}
 			// §7.3 comes FIRST (generator#254): a header whose array kind is not the
 			// one this field's declared element type maps to must be skipped exactly
-			// like an unknown id -- its elements are dropped by the skip counter
-			// above, and the declared field must not be touched at all, which
-			// includes not being RESIZED from the skipped header's count. Ordering
-			// matters as much as the test: the schema bound below applies only to a
-			// field that survives this check, so an over-count MIS-TYPED array is
-			// skipped, not a false INVALID. Since the fixlen kinds are per subtype
-			// (generator#259 / Crucible F-0042), that now covers an fp64 header at a
-			// declared fp32[N] too: it is skipped, never bounded and never sized.
+			// like an unknown id -- the declared field must not be touched at all,
+			// which includes not being RESIZED from the skipped header's count.
+			// Ordering matters as much as the test: the schema bound below applies
+			// only to a field that survives this check, so an over-count MIS-TYPED
+			// array is skipped, not a false INVALID. Since the fixlen kinds are per
+			// subtype (generator#259 / Crucible F-0042), that now covers an fp64
+			// header at a declared fp32[N] too: it is skipped, never bounded and
+			// never sized.
 			kindGuard := arrayKindGuard(fld.Elem)
 			// A wire element count above the schema `count` capacity is INVALID
 			// per MESSAGE_SPEC §3+§7 — reject up front, never clamp or keep-all
@@ -924,7 +988,9 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// configured max_dyn_array_count when set (generator#102): exceeding
 			// it is LIMIT_EXCEEDED — a receiver policy error, not INVALID_MSG.
 			guard := ""
+			cap := int64(-1)
 			if fld.HasCount {
+				cap = fld.Count
 				guard = fmt.Sprintf("if (count > %d) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"%s: array count above schema capacity %d\")); ",
 					fld.Count, fld.Name, fld.Count)
 			} else if limArr {
@@ -937,10 +1003,20 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// there is nothing to materialize at [M, N) and a count:N array is
 			// filled exactly like a count-less one.
 			target := fr.path + "." + javaIdent(fld.Name)
-			if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) {
-				arms = append(arms, jcase(fld.ID, kindGuard+guard+target+" = new "+primArrayBase(fld.Elem)+"[Math.min(count, ARRAY_INIT_CAP)]"))
-			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) { // boolean List
-				arms = append(arms, jcase(fld.ID, kindGuard+guard+target+".clear()"))
+			arm := kindGuard + guard + armFill(fs, fr, fld)
+			if bulkCapable(fld) {
+				// Bulk-capable: the destination is exactly `count` long (the guard
+				// above proved it). A long-backed field IS the destination; a
+				// narrowed one is filled through the scratch and reduced into the
+				// field by arrayBulkEnd. Either way the field is allocated here, so
+				// the per-element arm above still works as the fallback for a
+				// decoder that declines the offer.
+				arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sabulk = %s = new %s[count]",
+					arm, target, primArrayBase(fld.Elem))))
+			} else if primitiveArrayElem(fld.Elem) {
+				arms = append(arms, jcase(fld.ID, arm+target+" = new "+primArrayBase(fld.Elem)+"["+reserveExpr(cap)+"]"))
+			} else { // boolean List
+				arms = append(arms, jcase(fld.ID, arm+target+".clear()"))
 			}
 		}
 		if len(arms) > 0 {
@@ -949,6 +1025,8 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	}
 	f.line("        }")
 	f.line("    }")
+
+	g.emitBulkCbs(f, fs)
 
 	// sequenceBegin / sequenceEnd
 	f.line("    public void sequenceBegin(int id) {")
@@ -1027,8 +1105,16 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 func primArrayBasesUsed(fs []frame) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, order := range []string{"long", "float", "double"} {
+	for _, order := range primBaseOrder {
 		for _, fr := range fs {
+			// A native-matrix ROW is a primitive array too (List<long[]>), grown by
+			// the same ensureCap and indexed by the same ai/acap as a top-level one.
+			if fr.kind == fkNativeMat && primitiveArrayElem(fr.innerElem) &&
+				primArrayBase(fr.innerElem) == order && !seen[order] {
+				seen[order] = true
+				out = append(out, order)
+				continue
+			}
 			if fr.kind != fkNormal {
 				continue
 			}
@@ -1043,33 +1129,206 @@ func primArrayBasesUsed(fs []frame) []string {
 	return out
 }
 
+// primBaseOrder is every Java primitive an array field can be backed by, in a
+// fixed order so the emitted ensureCap overloads and row cursors come out stable.
+var primBaseOrder = []string{"byte", "short", "int", "long", "float", "double"}
+
+// primRowBasesUsed is primArrayBasesUsed restricted to native-matrix ROWS: the
+// bases needing a `_arow<B>` cursor field and a Sbuf.placeRow<B> factory.
+func primRowBasesUsed(fs []frame) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, order := range primBaseOrder {
+		for _, fr := range fs {
+			if fr.kind == fkNativeMat && primitiveArrayElem(fr.innerElem) &&
+				primArrayBase(fr.innerElem) == order && !seen[order] {
+				seen[order] = true
+				out = append(out, order)
+			}
+		}
+	}
+	return out
+}
+
+// emitBulkCbs writes the two halves of the corelib's bulk-array offer
+// (Visitor.arrayBulk / arrayBulkEnd), the fast path for an integer array whose
+// length the schema already bounds.
+//
+// arrayBegin has resolved and sized the destination, so the offer is a field read
+// -- not a third walk over (scope, id) -- and the decoder then writes the elements
+// straight into the field's own array. The array's WIDTH is what tells the decoder
+// the declared width: handing back a byte[] says "u8/i8 elements", and a value
+// that does not fit is INVALID (§7.1) rather than truncated, checked in the same
+// pass that decodes. So all arrayBulkEnd has left to do is clear the fill counter,
+// which no element callback was there to count down.
+func (g *gen) emitBulkCbs(f *jfile, fs []frame) {
+	if !hasBulk(fs) {
+		return
+	}
+	// Deliberately NOT @Override. Visitor declares both with a default, so a
+	// corelib that has them calls these and takes the fast path, while one that
+	// predates them simply never does -- and the generated code still compiles
+	// against it, with the per-element arms above filling the very same array.
+	// @Override would make the newer corelib a hard requirement for code that
+	// works either way.
+	f.line("    public Object arrayBulk(int id, ArrayKind kind, int count) {")
+	f.line("        // Offered iff arrayBegin sized a schema-bounded destination just now.")
+	f.line("        // Its element width IS the declared width, so the decoder checks and")
+	f.line("        // narrows in the pass that decodes.")
+	f.line("        return abulk;")
+	f.line("    }")
+	f.line("    public void arrayBulkEnd(int id, int n) {")
+	f.line("        afill = 0;   // the elements never went through the element callbacks")
+	f.line("        abulk = null;")
+	f.line("    }")
+}
+
+// fillTargetsFor lists, in frame order, every destination an armed native-array
+// fill can write into whose elements arrive through callback cb, numbering them
+// densely from 1. arrayBegin parks a target's number in `atgt`; the callback
+// switches on it.
+//
+// The numbering is PER CALLBACK, and may repeat across callbacks, because only
+// one native-array fill is ever open at a time and its element kind decides which
+// callback delivers it: while an UNSIGNED array is armed, signed()/fp32()/fp64()
+// cannot be called at all. Dense numbers keep each callback's switch a
+// tableswitch.
+func fillTargetsFor(fs []frame, cb string) map[*frame]map[int64]int {
+	out := map[*frame]map[int64]int{}
+	n := 0
+	for i := range fs {
+		fr := &fs[i]
+		switch fr.kind {
+		case fkNativeMat:
+			// A matrix row has no id switch of its own: the whole frame is one target.
+			if nativeElemCb(fr.innerElem) == cb {
+				n++
+				out[fr] = map[int64]int{-1: n}
+			}
+		case fkNormal:
+			for _, fld := range fr.fields {
+				if fld.Kind != ir.KindArray || !nativeArrayElem(fld.Elem) || nativeElemCb(fld.Elem) != cb {
+					continue
+				}
+				n++
+				if out[fr] == nil {
+					out[fr] = map[int64]int{}
+				}
+				out[fr][fld.ID] = n
+			}
+		}
+	}
+	return out
+}
+
+// hasBulk reports whether the message has any array the corelib's bulk offer can
+// be taken for.
+//
+// Exactly the integer arrays with a schema `count`: the offer needs a destination
+// sized to `count` up front, and only a SCHEMA-BOUNDED count may be allocated
+// against (#96 -- the wire's count is untrusted). That leaves out the unbounded
+// arrays (reserved capped, grown by the fill), boolean arrays (a List), fp arrays
+// (the offer is integer-only) and matrix rows (their cap bounds the row's ID, not
+// its element count).
+func hasBulk(fs []frame) bool {
+	for i := range fs {
+		fr := &fs[i]
+		if fr.kind != fkNormal {
+			continue
+		}
+		for _, fld := range fr.fields {
+			if bulkCapable(fld) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bulkCapable reports whether a field is one of those arrays.
+func bulkCapable(fld *ir.Field) bool {
+	if fld.Kind != ir.KindArray || !fld.HasCount || !primitiveArrayElem(fld.Elem) {
+		return false
+	}
+	switch primArrayBase(fld.Elem) {
+	case "byte", "short", "int", "long":
+		return true
+	}
+	return false // fp: the decoder's fixlen element loop, not the integer one
+}
+
+// hasFill reports whether the message declares any native array at all, i.e.
+// whether an armed fill can ever be open.
+func hasFill(fs []frame) bool {
+	for _, cb := range []string{"unsigned", "signed", "fp32", "fp64"} {
+		if len(fillTargetsFor(fs, cb)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// armFill is the arrayBegin statement that hands a declared native array over to
+// the element callbacks: disarm the §7.3 skip, arm the fill for exactly the
+// announced count, and park which destination the elements belong to.
+func armFill(fs []frame, fr *frame, fld *ir.Field) string {
+	cb, key := "", int64(-1)
+	if fld == nil {
+		cb = nativeElemCb(fr.innerElem)
+	} else {
+		cb, key = nativeElemCb(fld.Elem), fld.ID
+	}
+	return fmt.Sprintf("askip = 0; afill = count; atgt = %d; ", fillTargetsFor(fs, cb)[fr][key])
+}
+
+// reserveExpr is the backing-store length arrayBegin reserves for an array whose
+// schema capacity is cap (-1 == unbounded). The wire count is UNTRUSTED, so the
+// reservation is capped at ARRAY_INIT_CAP and the fill grows from there (#96) --
+// except when the schema capacity is already at or below that cap, where the
+// count guard above has just proved count <= cap <= ARRAY_INIT_CAP and the
+// Math.min can only return count.
+func reserveExpr(cap int64) string {
+	if cap >= 0 && cap <= arrayInitCap {
+		return "count"
+	}
+	return "Math.min(count, ARRAY_INIT_CAP)"
+}
+
+// arrayInitCap is the generated ARRAY_INIT_CAP: the bounded eager reservation a
+// decode makes for an array before any element has arrived.
+const arrayInitCap = 16
+
+// rowCursor is the visitor field holding the primitive matrix row currently being
+// filled. The row also lives in the message's List<T[]> at its element index, but
+// reading it back through List.get on every element -- and storing the grown array
+// back through List.set -- is per-element work for a reference that changes at most
+// log2(count) times. arrayBegin parks it here; only a growth writes it back.
+func rowCursor(base string) string { return "_arow" + strings.ToUpper(base[:1]) + base[1:] }
+
 // emitScalarCb writes a callback that routes (cur,id) to a field assignment or a
 // list .add. action() returns "= value" / "add" / "addBool" / "setBool" /
 // "index" / "= value != 0".
-// Native-matrix frames whose inner element matches this callback append the
-// decoded value to the current row (no id switch: rows arrive index-ordered).
+//
+// An ARRAY ELEMENT does not go through that (cur,id) routing at all. Its
+// destination was already resolved by the arrayBegin that armed the fill, so the
+// element arms hang off `atgt` — one dense switch — ahead of the scalar routing,
+// which the array ids then leave entirely. Before, every element of every array
+// re-derived its destination through a switch on the scope and a second switch on
+// the id, and the scalar switches carried the array ids as well; on the arena
+// message (fifty array elements per decode) unsigned()+signed() were 14 % of
+// decode. Only a fill that arrayBegin armed can be open when a callback runs, so
+// `afill != 0` is the whole test.
 func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*ir.Field) (string, bool)) {
 	f.line("    public void %s(int id, %s value) {", cb, vtype)
 	// The §7.3 discard guard heads every callback an array shares with a lone
 	// scalar: unsigned/signed for integer arrays, fp32/fp64 for fp arrays (#193).
-	if cb == "unsigned" || cb == "signed" || cb == "fp32" || cb == "fp64" {
+	isElemCb := cb == "unsigned" || cb == "signed" || cb == "fp32" || cb == "fp64"
+	if isElemCb {
+		g.emitArrayFillArm(f, fs, cb)
 		g.emitArraySkipGuard(f)
 	}
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
-		if fr.kind == fkNativeMat {
-			if nativeElemCb(fr.innerElem) == cb {
-				// The row arrayBegin PLACED at the element id, not the last-appended
-				// one: an interior id gap must leave an empty row, not shift the
-				// values into the wrong row.
-				row := fr.listExpr + ".get(" + elemIdxVar(fr.loc) + ")"
-				// Gated like the fkNormal fills (generator#188): a matrix inner row
-				// is armed by its own arrayBegin; a bare scalar in the matrix scope
-				// (afill == 0) is skipped.
-				f.line("        case %d: if (afill == 0) break; afill--; %s%s.add(%s); break;", fr.idx, widthThrow(fr.innerElem, fr.loc+" element"), row, matConv(fr.innerElem))
-			}
-			continue
-		}
 		if fr.kind != fkNormal {
 			continue
 		}
@@ -1079,29 +1338,12 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 			if !ok {
 				continue
 			}
-			target := fr.path + "." + javaIdent(fld.Name)
-			// A fill arm runs only while arrayBegin has this native array armed
-			// (generator#188): a bare scalar at an array id arrives with afill == 0
-			// and is skipped like an unknown id (S7.3). The scalar arms (default)
-			// are never gated — a scalar at a scalar id is exactly right.
-			const fillGuard = "if (afill == 0) break; afill--; "
-			var stmt string
-			switch act {
-			case "add":
-				stmt = fillGuard + widthThrow(fld.Elem, fld.Name+" element") + target + ".add(value)"
-			case "addBool":
-				stmt = fillGuard + target + ".add(value != 0)"
-			case "index":
-				// Grow the backing array on demand (never trust the wire count), up
-				// to the announced count, so a valid array ends exactly M long.
-				// The width guard follows the fill guard, never precedes it: an
-				// over-width scalar at an array id with no arrayBegin in front of it
-				// is a §7.3 skip, not an INVALID.
-				stmt = fillGuard + widthThrow(fld.Elem, fld.Name+" element") + target + " = ensureCap(" + target + ", ai, acap); " + target + "[ai++] = value"
-			default:
-				stmt = widthThrow(fld.Kind, fld.Name) + target + " " + act
+			// Array fills live in the atgt arm above, not here.
+			if fld.Kind == ir.KindArray {
+				continue
 			}
-			arms = append(arms, jcase(fld.ID, stmt))
+			target := fr.path + "." + javaIdent(fld.Name)
+			arms = append(arms, jcase(fld.ID, widthThrow(fld.Kind, fld.Name)+target+" "+act))
 		}
 		if len(arms) > 0 {
 			g.frameSwitch(f, fr.idx, arms)
@@ -1109,6 +1351,91 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 	}
 	f.line("        }")
 	f.line("    }")
+}
+
+// emitArrayFillArm writes the armed-fill prologue of an element callback: while
+// arrayBegin has a native array armed, every value is an element of THAT array,
+// so it is stored against the target arrayBegin parked rather than routed by
+// (scope, id) again.
+//
+// The width guard sits inside the arm, never in front of it: an over-width scalar
+// arriving at an array id with no arrayBegin in front of it is a §7.3 skip, not an
+// INVALID, and it never reaches this arm because afill is zero.
+func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
+	tgts := fillTargetsFor(fs, cb)
+	if len(tgts) == 0 {
+		return
+	}
+	// Emit in frame order so the switch labels come out dense and sorted.
+	type arm struct {
+		code int
+		stmt string
+	}
+	var arms []arm
+	for i := range fs {
+		fr := &fs[i]
+		ids, ok := tgts[fr]
+		if !ok {
+			continue
+		}
+		if fr.kind == fkNativeMat {
+			if primitiveArrayElem(fr.innerElem) {
+				// Fill the row through the cursor arrayBegin parked, and write the
+				// reference back into the List only when growth actually replaced it.
+				cur := rowCursor(primArrayBase(fr.innerElem))
+				arms = append(arms, arm{ids[-1], fmt.Sprintf(
+					"%sif (ai >= %s.length) { %s = ensureCap(%s, ai, acap); %s.set(%s, %s); } %s[ai++] = %svalue",
+					widthThrow(fr.innerElem, fr.loc+" element"), cur, cur, cur, fr.listExpr, elemIdxVar(fr.loc), cur, cur,
+					primArrayCast(fr.innerElem))})
+				continue
+			}
+			// A boxed row (boolean): the row arrayBegin PLACED at the element id, not
+			// the last-appended one -- an interior id gap must leave an empty row, not
+			// shift the values into the wrong row.
+			row := fr.listExpr + ".get(" + elemIdxVar(fr.loc) + ")"
+			arms = append(arms, arm{ids[-1], fmt.Sprintf("%s%s.add(%s)",
+				widthThrow(fr.innerElem, fr.loc+" element"), row, matConv(fr.innerElem))})
+			continue
+		}
+		for _, fld := range fr.fields {
+			code, ok := ids[fld.ID]
+			if !ok {
+				continue
+			}
+			target := fr.path + "." + javaIdent(fld.Name)
+			if fld.Elem == ir.KindBool {
+				// A boolean array stays a List<Boolean>, cleared at arrayBegin and
+				// grown by the M elements the wire carries -- M IS the length, with
+				// or without a declared count (MESSAGE_SPEC §3).
+				arms = append(arms, arm{code, target + ".add(value != 0)"})
+				continue
+			}
+			// Grow the backing array on demand (never trust the wire count), up to
+			// the announced count, so a valid array ends exactly M long.
+			//
+			// The growth call is behind its own `ai >= length` test rather than
+			// assigning ensureCap's result unconditionally. ensureCap already returns
+			// the same array when nothing grows, but ASSIGNING it is a reference store
+			// into the message object -- a putfield plus the GC's card-marking write
+			// barrier -- on every element of every array, for a pointer that changes
+			// at most log2(count) times.
+			arms = append(arms, arm{code, widthThrow(fld.Elem, fld.Name+" element") +
+				"if (ai >= " + target + ".length) " + target + " = ensureCap(" + target + ", ai, acap); " +
+				target + "[ai++] = " + primArrayCast(fld.Elem) + "value"})
+		}
+	}
+	f.line("        // An element of the array arrayBegin armed: its destination is already")
+	f.line("        // resolved, so it is stored against that target rather than routed by")
+	f.line("        // (scope, id) again. Self-terminating on the announced count.")
+	f.line("        if (afill != 0) {")
+	f.line("            afill--;")
+	f.line("            switch (atgt) {")
+	for _, a := range arms {
+		f.line("            case %d: %s; return;", a.code, a.stmt)
+	}
+	f.line("            }")
+	f.line("            return;")
+	f.line("        }")
 }
 
 // frameSwitch emits `case <idx>: switch(id){ <arms> } break;`.

@@ -625,7 +625,39 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    `fp32/fp64(id,v)`, `string(id, total, offset, chunk)` and `blob(...)`
    (delivered in chunks; `total` is the full length), `array_begin(id, kind,
    count)` then element callbacks, `sequence_begin(id)`, `sequence_end()`. This
-   is the **reusable template for any new flat-visitor corelib**. String/blob
+   is the **reusable template for any new flat-visitor corelib**.
+
+   **Optional bulk element hand-off (Java, `Visitor.arrayBulk`/`arrayBulkEnd`).**
+   A flat visitor pays its per-callback routing *per element*, which for a short
+   integer array is the whole cost of decoding it. corelib-java therefore offers
+   the destination once per array instead: right after `arrayBegin`, `arrayBulk(id,
+   kind, count)` may return a `byte[]`, `short[]`, `int[]` or `long[]` of at least
+   `count`, the decoder writes the elements straight into it (ZigZag already
+   applied for a signed array) with no element callback at all, and
+   `arrayBulkEnd(id, n)` closes the fill. Returning `null` — the default — decodes
+   exactly as before, which is what makes it additive: generated code emits both
+   the offer and the per-element arms, without `@Override`, so it compiles and runs
+   against a corelib that predates the methods. Both write paths honour it, so a
+   chunk boundary anywhere inside the array is invisible. **`count` is untrusted**
+   (the wire's claim, bounded only by the format ceiling), so the offer is made
+   only for arrays the schema already bounds with a `count: N`; an unbounded one
+   keeps the capped-reservation, grow-as-you-go fill (#96).
+
+   **The destination's width is a bound**, which is why the return type is
+   `Object` rather than four overloads: handing back a narrower array than
+   `long[]` says the elements are declared that wide, so a value that does not fit
+   fails the decode with `INVALID_MSG` — zero-extended for an `UNSIGNED` array,
+   sign-extended for a `SIGNED` one — and the decoder never truncates silently.
+   That is what lets the §7.1 width check and the narrowing happen in the pass
+   that decodes instead of a second one afterwards; four overloads would cost four
+   virtual calls per array to find the one that is not null, which is more than
+   the pass they save. It is also the one place a corelib judges a value against
+   something the *consumer* supplied rather than against the format — a deliberate
+   exception, paid for by the pass it removes, and the generated code keeps its
+   own per-element guard for the path where the offer is declined. The same
+   reasoning would port to any flat-visitor corelib; the others have not taken it.
+
+   String/blob
    callbacks take a **single-shot fast path** — when the whole payload arrives in
    one chunk (`offset == 0 && chunk_len >= total`) they build the value straight
    from the contiguous slice, keeping the byte accumulator only for split

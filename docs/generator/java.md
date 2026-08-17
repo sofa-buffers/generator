@@ -54,9 +54,39 @@ generated plumbing, not schema surface.
 
 ## Arrays — `count` is a capacity
 
-An array field maps to a `long[]`/`float[]`/`double[]` (numeric, enum, bitfield,
-fp) or to a `List<...>` (boolean, and every wrapper-sequence element kind), and
-the array's length is the length of that container. A schema `count: N` is a
+An array field maps to a **primitive array of its declared width** (numeric, fp)
+or to a `List<...>` (boolean, and every wrapper-sequence element kind), and the
+array's length is the length of that container:
+
+| element | field | bytes/element |
+|---|---|---|
+| `u8`, `i8` | `byte[]` | 1 |
+| `u16`, `i16` | `short[]` | 2 |
+| `u32`, `i32` | `int[]` | 4 |
+| `u64`, `i64`, `enum`, `bitfield` | `long[]` | 8 |
+| `fp32` / `fp64` | `float[]` / `double[]` | 4 / 8 |
+| `boolean` | `List<Boolean>` | — |
+
+A **scalar** field still maps to `long` — Java has no unsigned types and widening
+one value costs nothing. An array is where it costs: at 8 bytes an element a
+`u8[1000]` is eight kilobytes of which seven are sign bits.
+
+> **An unsigned array element holds the declared width's RAW BITS.** `byte`,
+> `short` and `int` are signed in Java, so a `u8` element of 200 reads back as
+> `-56` and a `u32` element of 4294967295 as `-1`. Recover the value with
+> `Byte.toUnsignedInt(a[i])`, `Short.toUnsignedInt(a[i])`,
+> `Integer.toUnsignedLong(a[i])`. Signed widths narrow exactly and need nothing —
+> an `i8` element *is* a Java `byte`. This is the same bargain protobuf-java
+> strikes for `uint32`, and it is what corelib-java's
+> `writeArrayUnsigned(byte[]/short[]/int[])` overloads have always zero-extended
+> for. Encode, decode, JSON and the wire all carry the VALUE; only the field's
+> Java type is narrow.
+
+The primitive mapping reaches one level in: a nested array of primitives is
+`List<int[]>`, **not** `List<List<Long>>` — the outer level is a wrapper sequence
+(its element ids are the row indices) but a row is a primitive array like any
+other. Only a `bool` row stays `List<Boolean>`, having no primitive `OStream`
+overload to be written through. A schema `count: N` is a
 **capacity**, not a length: it never reaches the wire, it bounds the array (an
 element count or element id past `N` fails the decode as `INVALID_MSG`), and it
 lets fixed-storage targets pre-size — but it never adds elements.
@@ -66,13 +96,13 @@ What you can observe from Java:
 - `new <Msg>()` leaves a `count: N` array **empty** unless the schema declares a
   `default`, and a declared default shorter than `N` is materialized exactly as
   written (never tail-padded to `N`). `reset()` re-arms to the same value.
-- Encode writes **every** element the container holds. `new long[]{1, 2, 0, 0}`
-  and `new long[]{1, 2}` are different values with different bytes.
+- Encode writes **every** element the container holds. `new int[]{1, 2, 0, 0}`
+  and `new int[]{1, 2}` are different values with different bytes.
 - Decode yields exactly the elements the wire carried: `length` / `size()` after a
   round trip equals what went in, for the compact scalar form and the wrapper form
   alike. `sequenceEnd()` fills nothing back in.
 - A field is omitted only when it **equals its default** — for an array with no
-  declared default, only when it is empty. An all-zero `new long[]{0, 0, 0, 0}` is
+  declared default, only when it is empty. An all-zero `new int[]{0, 0, 0, 0}` is
   a four-element value and stays on the wire.
 
 Inside a wrapper-sequence array (string/blob/struct/union/nested-array elements)
@@ -138,14 +168,15 @@ that id — but not the array kinds: it streams an array's elements through the
 array header at a scalar-declared id of the same shape would be stored element by
 element.
 
-The generated visitor therefore carries a skip counter. `arrayBegin` arms
-`askip = count`, then disarms (and arms the mirror fill counter `afill`) only at a
-`(scope, id)` pair that really declares a native array **of the announced kind**;
-the shared callbacks discard while armed. It self-terminates on the announced count
-(no array-end callback needed), survives a chunk boundary (the counter lives in the
-visitor), leaves legitimate arrays untouched, and still decodes a real scalar
-arriving at that id after the array. There is one arm per wire array kind, and the
-element types partition across them exactly as the encoder maps them (#254):
+The generated visitor therefore carries a skip counter, and **skipping is the
+default**. `arrayBegin` arms `askip = count` up front; only a `(scope, id)` arm
+for an id that really declares a native array **of the announced kind** disarms it
+and arms the mirror fill counter `afill`. The shared callbacks discard while
+armed. It self-terminates on the announced count (no array-end callback needed),
+survives a chunk boundary (the counter lives in the visitor), leaves legitimate
+arrays untouched, and still decodes a real scalar arriving at that id after the
+array. Each arm carries its own `if (kind != ArrayKind.X) break;`, and the element
+types map to kinds exactly as the encoder does (#254):
 
 | declared element | wire array kind | elements arrive in |
 |---|---|---|
@@ -165,6 +196,55 @@ The order is normative: the bound applies only to a field that survives §7.3, s
 over-count *mis-typed* array is skipped rather than rejected as a false
 `INVALID_MSG`.
 
+### Where an array element is stored
+
+`arrayBegin` resolves the destination once — kind test, schema-`count` bound,
+disarm/arm, reset the container — and parks *which* destination in `atgt`. The
+element callbacks then start with
+
+```java
+if (afill != 0) { afill--; switch (atgt) { … } return; }
+```
+
+so an element is stored against the already-resolved target instead of being
+routed through the scope switch and an id switch again, once per element. Only a
+fill `arrayBegin` armed can be open when a callback runs — the decoder delivers
+exactly `count` elements before the array ends, and nothing else in between — so
+`afill != 0` is the whole test, and the array ids leave the scalar switches
+entirely. The `askip` discard guard follows it: an armed skip and an armed fill
+are mutually exclusive, since `arrayBegin` sets exactly one of them.
+
+This is a codegen shape, not a rule: the §7.3 arming, the bound, the width check
+per element and the growth ceiling are all unchanged and all still there.
+
+For an integer array the schema bounds with a `count: N`, the destination is
+already exactly `count` long by the time the elements arrive, so it can skip the
+element callbacks altogether. `arrayBegin` parks it in `abulk`, corelib-java's
+`Visitor.arrayBulk(id, kind, count)` hands it over, and the decoder fills it
+directly (ZigZag already applied for a signed array). Its **element width is what
+tells the decoder the declared width**: a `byte[]` says `u8`/`i8`, so a value that
+does not fit is `INVALID_MSG` rather than truncated, checked in the same pass that
+decodes. `arrayBulkEnd(id, n)` then only has to clear the fill counter.
+
+The offer is made **only** for a schema-bounded array: `count` is the wire's
+claim, and an unbounded array must not be allocated against it (#96) — it keeps
+the capped reservation and the grow-as-you-go element fill. Boolean arrays (a
+`List`), fp arrays (not `long`-backed) and matrix rows (whose cap bounds the row's
+*id*, not its element count) keep the element path too.
+
+The two methods are emitted **without `@Override`** on purpose. `Visitor` declares
+both with a default, so a corelib that has them calls into the fast path while one
+that predates them simply never does — and the generated code still compiles
+against it, because the per-element arms fill the very same array. `@Override`
+would turn an optimisation into a hard corelib requirement.
+
+On that path the width check is the corelib's, so its message names the
+destination rather than the field (`array element wider than its destination`
+instead of `u8 element: value outside declared width u8`). The verdict is the
+same and still terminal; only the diagnostic is coarser. The per-element arms keep
+the field-named message for every array the offer is not made for, and for a
+corelib that predates the offer.
+
 ### The fixlen arm is keyed by subtype (issue #259)
 
 A fixlen array header carries a **second** word after the count — the
@@ -177,14 +257,13 @@ against its schema `count`. corelib-java announces the array from the
 member in favour of `FP32` and `FP64` (ordinals are normative family-wide:
 `UNSIGNED = 0`, `SIGNED = 1`, `FP32 = 2`, `FP64 = 3`).
 
-The generated visitor mirrors that split: `arrayBegin` emits **two** fixlen arms,
-and a declared `fp32[N]` field id is listed only under `FP32` while a declared
-`fp64[N]` is listed only under `FP64`. An `fp64` header arriving at an `fp32[N]`
-slot therefore never reaches that field's arm — the discard counter stays armed
-and drops exactly `count` elements, and the declared `float[]` is not sized,
-cleared or allocated. Previously both subtypes shared one arm, so the fp64 header
-*did* size the declared `float[]` before the mismatch was noticed downstream in
-`fp64()`.
+The generated visitor mirrors that split: a declared `fp32[N]` field's arm tests
+for `FP32` and a declared `fp64[N]`'s tests for `FP64`. An `fp64` header arriving
+at an `fp32[N]` slot therefore leaves that arm before anything happens — the
+discard counter stays armed and drops exactly `count` elements, and the declared
+`float[]` is not sized, cleared or allocated. Previously both subtypes shared one
+arm, so the fp64 header *did* size the declared `float[]` before the mismatch was
+noticed downstream in `fp64()`.
 
 The schema-`count` bound stays **inside** the matched arm, behind
 `if (kind != ArrayKind.FP32) break;`, for the same reason it sits behind the

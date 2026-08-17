@@ -293,6 +293,10 @@ func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeR
 	if prim {
 		el = fmt.Sprintf("%s[%s]", val, iv)
 		bound = val + ".length"
+		// A narrowed UNSIGNED element is stored as raw bits, so JSON -- which
+		// carries the VALUE -- has to widen it back. Signed widths narrowed
+		// exactly and need nothing; so does a long-backed one.
+		el = primArrayWiden(elem, el)
 	}
 	f.line("%s{ b.append('['); for (int %s = 0; %s < %s; %s++) { if (%s>0) b.append(',');", ind, iv, iv, bound, iv, iv)
 	switch elem {
@@ -305,7 +309,9 @@ func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeR
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%s    to(%s, b);", ind, el)
 	case ir.KindArray:
-		g.jsonToArray(f, ind+"    ", el, items.Elem, items.ElemRef, items.ElemItems, depth+1, false)
+		// A primitive inner row is a primitive array (List<long[]>), so it indexes
+		// like one -- same rule javaArrayElemType applies to the storage type.
+		g.jsonToArray(f, ind+"    ", el, items.Elem, items.ElemRef, items.ElemItems, depth+1, primitiveArrayElem(items.Elem))
 	default: // i*, enum, bitfield, boolean, fp
 		f.line("%s    b.append(%s);", ind, el)
 	}
@@ -361,7 +367,9 @@ func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref
 			getter = fmt.Sprintf("%s.get(%s).getAsLong()", av, kv)
 		}
 		f.line("%sJsonArray %s = %s; %s = new %s[%s.size()];", ind, av, src, target, primArrayBase(elem), av)
-		f.line("%sfor (int %s = 0; %s < %s.length; %s++) %s[%s] = %s;", ind, kv, kv, target, kv, target, kv, getter)
+		// The cast is the same narrowing the decoder does: JSON states the value,
+		// the field holds the declared width's bits.
+		f.line("%sfor (int %s = 0; %s < %s.length; %s++) %s[%s] = %s%s;", ind, kv, kv, target, kv, target, kv, primArrayCast(elem), getter)
 		return
 	}
 	ev := fmt.Sprintf("_e%d", depth)
@@ -384,6 +392,14 @@ func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref
 		f.line("%s    %s %s = new %s(); from(%s.getAsJsonObject(), %s); %s.add(%s);", ind, g.typeName(ref.Key), v, g.typeName(ref.Key), ev, v, target, v)
 	case ir.KindArray:
 		v := fmt.Sprintf("_v%d", depth)
+		if primitiveArrayElem(items.Elem) {
+			// A primitive inner row is a primitive array; the prim branch above
+			// allocates it to the JSON array's length, so it only needs declaring.
+			f.line("%s    %s[] %s;", ind, primArrayBase(items.Elem), v)
+			g.jsonFromArray(f, ind+"    ", v, ev+".getAsJsonArray()", items.Elem, items.ElemRef, items.ElemItems, depth+1, true)
+			f.line("%s    %s.add(%s);", ind, target, v)
+			break
+		}
 		vt := "List<" + g.javaArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
 		f.line("%s    %s %s = new ArrayList<>();", ind, vt, v)
 		g.jsonFromArray(f, ind+"    ", v, ev+".getAsJsonArray()", items.Elem, items.ElemRef, items.ElemItems, depth+1, false)

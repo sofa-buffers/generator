@@ -5,15 +5,18 @@ import java.util.List;
 final class Sbuf {
     // Shared zero-length defaults: field initializers reference these instead of
     // allocating a fresh empty array per instance (decode replaces them anyway).
+    static final byte[] EMPTY_BYTES = {};
+    static final short[] EMPTY_SHORTS = {};
+    static final int[] EMPTY_INTS = {};
     static final long[] EMPTY_LONGS = {};
     static final float[] EMPTY_FLOATS = {};
     static final double[] EMPTY_DOUBLES = {};
-    static final byte[] EMPTY_BYTES = {};
 
-    static long[] toLongArray(List<Long> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
+    // The one boxed->primitive conversion left. Every other native array -- top
+    // level or a matrix row -- is already a primitive array of its declared width
+    // and goes to the OStream overload unconverted; a boolean array is the one
+    // that still has to be built, having no primitive overload of its own.
     static long[] boolToLongArray(List<Boolean> l) { long[] a = new long[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i) ? 1 : 0; return a; }
-    static float[] toFloatArray(List<Float> l) { float[] a = new float[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
-    static double[] toDoubleArray(List<Double> l) { double[] a = new double[l.size()]; for (int i = 0; i < a.length; i++) a[i] = l.get(i); return a; }
 
     // placeRow stores a FRESH empty row of a matrix (an array whose elements are
     // themselves arrays) at the index its element id names, growing the outer list
@@ -25,9 +28,61 @@ final class Sbuf {
     // into, because an array wrapper IS the array's value (S7.4). The caller's
     // over-index guard bounds the id against the outer array's schema capacity
     // before this grows anything.
+    //
+    // "Replaced" is a statement about the VALUE, not the object: an already-present
+    // row is emptied in place (the same rule resetList follows for a reused decode
+    // destination) instead of being swapped for a fresh ArrayList. Decoding N rows
+    // used to allocate 2N lists -- one to grow into the slot, one to overwrite it --
+    // where N+0 will do. A caller holding a reference to a row across a decode into
+    // the same destination sees it emptied; a decode destination is not shared.
     static <T> void placeRow(List<List<T>> l, int id) {
-        while (l.size() <= id) l.add(new java.util.ArrayList<>());
-        l.set(id, new java.util.ArrayList<>());
+        while (l.size() < id) l.add(new java.util.ArrayList<>());
+        if (l.size() == id) { l.add(new java.util.ArrayList<>()); return; }
+        List<T> row = l.get(id);
+        if (row == null) l.set(id, new java.util.ArrayList<>()); else row.clear();
+    }
+
+    // placeRow<Base> is placeRow for a PRIMITIVE row (List<byte[]>, List<int[]> and
+    // friends): same id-keyed placement and same gap fill with the empty row, but
+    // the new row is handed back so the caller can fill it by index instead of
+    // reading it out of the list per element. The length n is the caller's capped
+    // reservation, never the wire count -- an untrusted count must not be able to
+    // force an up-front allocation -- and the fill grows it as elements arrive.
+    static byte[] placeRowByte(List<byte[]> l, int id, int n) {
+        byte[] row = new byte[n];
+        while (l.size() < id) l.add(EMPTY_BYTES);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static short[] placeRowShort(List<short[]> l, int id, int n) {
+        short[] row = new short[n];
+        while (l.size() < id) l.add(EMPTY_SHORTS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static int[] placeRowInt(List<int[]> l, int id, int n) {
+        int[] row = new int[n];
+        while (l.size() < id) l.add(EMPTY_INTS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static long[] placeRowLong(List<long[]> l, int id, int n) {
+        long[] row = new long[n];
+        while (l.size() < id) l.add(EMPTY_LONGS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static float[] placeRowFloat(List<float[]> l, int id, int n) {
+        float[] row = new float[n];
+        while (l.size() < id) l.add(EMPTY_FLOATS);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
+    }
+    static double[] placeRowDouble(List<double[]> l, int id, int n) {
+        double[] row = new double[n];
+        while (l.size() < id) l.add(EMPTY_DOUBLES);
+        if (l.size() == id) l.add(row); else l.set(id, row);
+        return row;
     }
 
     // resetList empties a list IN PLACE, keeping its capacity, and materializes one

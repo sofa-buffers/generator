@@ -58,14 +58,14 @@ func TestJavaStructural(t *testing.T) {
 		"class MyfirstmessageVisitor implements Visitor {",
 		"public void sequenceBegin(int id)", // flat-visitor nesting
 		"public long someu64 = Long.parseUnsignedLong(\"18446744073709551615\");",
-		"public long[] someuintarray = new long[]{0L, 1L, 1000L, 4294967295L};",                       // primitive array (was List<Long>)
-		"public float[] somefloatarray = new float[]{0.0f, -1.5f, 3.25f};",                            // primitive fp array
-		"public long[] someenumarray = new long[]{2L, 1L, 0L};",                                       // declared default, NOT padded to count (count is a capacity)
-		"os.writeArrayUnsigned(15, this.someuintarray);",                                              // direct write, no Sbuf box, no trim: the wire count IS the length
-		"private static final long[] _arrdef_someuintarray = new long[]{0L, 1L, 1000L, 4294967295L};", // omit-default hoisted to a static (#146)
-		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",                  // guard reads the static -- no per-encode new long[] (#146)
-		"m.someuintarray = ensureCap(m.someuintarray, ai, acap); m.someuintarray[ai++] = value;",      // grow-on-demand indexed decode (#96)
-		"case 15: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"someuintarray: array count above schema capacity 4\")); m.someuintarray = new long[Math.min(count, ARRAY_INIT_CAP)]; break;", // mis-typed header skipped before the bound (#254); over-count rejected (#100); the M that arrived is the whole value
+		"public int[] someuintarray = new int[]{0, 1, 1000, -1};",                                      // primitive array (was List<Long>)
+		"public float[] somefloatarray = new float[]{0.0f, -1.5f, 3.25f};",                             // primitive fp array
+		"public long[] someenumarray = new long[]{2L, 1L, 0L};",                                        // declared default, NOT padded to count (count is a capacity)
+		"os.writeArrayUnsigned(15, this.someuintarray);",                                               // direct write, no Sbuf box, no trim: the wire count IS the length
+		"private static final int[] _arrdef_someuintarray = new int[]{0, 1, 1000, -1};",                // omit-default hoisted to a static (#146)
+		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",                   // guard reads the static -- no per-encode new long[] (#146)
+		"m.someuintarray = ensureCap(m.someuintarray, ai, acap); m.someuintarray[ai++] = (int) value;", // grow-on-demand indexed decode (#96)
+		"case 15: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"someuintarray: array count above schema capacity 4\")); askip = 0; afill = count; atgt = 1; abulk = m.someuintarray = new int[count]; break;", // mis-typed header skipped before the bound (#254); over-count rejected (#100); the M that arrived is the whole value
 		"private static long[] ensureCap(long[] a, int i, int cap) {",   // lazy-growth helper
 		"private static float[] ensureCap(float[] a, int i, int cap) {", // fp32 overload
 		"if (offset == 0 && chunkLength >= total) {",                    // string/blob single-shot
@@ -216,10 +216,10 @@ messages:
 		"static final long MAX_DYN_ARRAY_COUNT = 4L;",
 		"static final long MAX_DYN_STRING_LEN = 4096L;",
 		// Unbounded array: count checked against the cap before the (lazy) reservation.
-		`case 1: if (kind != ArrayKind.UNSIGNED) break; if (count > MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "arr: array count above configured limit 4")); m.arr = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
+		`case 1: if (kind != ArrayKind.UNSIGNED) break; if (count > MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "arr: array count above configured limit 4")); askip = 0; afill = count; atgt = 1; m.arr = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
 		// Bounded array: only the generator#100 schema guard, never the cap. Both
 		// bounds sit BEHIND the §7.3 kind test (generator#254).
-		`case 2: if (kind != ArrayKind.SIGNED) break; if (count > 6) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "barr: array count above schema capacity 6")); m.barr = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
+		`case 2: if (kind != ArrayKind.SIGNED) break; if (count > 6) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "barr: array count above schema capacity 6")); askip = 0; afill = count; atgt = 1; abulk = m.barr = new int[count]; break;`,
 		// Unbounded string: total checked at the top of string(), before accumulation.
 		"if (total > MAX_DYN_STRING_LEN) {",
 		`case 0: throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "s: string length above configured limit 4096"));`,
@@ -296,34 +296,42 @@ func TestJavaArrayAtScalarIdSkipped(t *testing.T) {
 		// The counters themselves (askip: generator#183; afill: generator#188).
 		"private int askip = 0;",
 		"private int afill = 0;",
-		// Armed at the top of arrayBegin, one arm per wire array kind (#254).
-		"        askip = 0;\n        afill = 0;\n        if (kind == ArrayKind.UNSIGNED) {\n            askip = count;\n            switch (cur) {",
-		"        else if (kind == ArrayKind.SIGNED) {\n            askip = count;\n            switch (cur) {",
-		// Each declared array disarms the skip AND arms the fill under ITS OWN kind:
-		// the u32 array (id 2) under UNSIGNED, the i32 array (id 3) under SIGNED,
-		// the fp32 array (id 4) under FP32.
-		"                case 2: askip = 0; afill = count; break;",
-		"                case 3: askip = 0; afill = count; break;",
-		"        else if (kind == ArrayKind.FP32) {\n            askip = count;\n            switch (cur) {",
-		"                case 4: askip = 0; afill = count; break;",
-		// The FP64 arm exists too and arms the counter unconditionally: this schema
-		// declares no fp64 array, so an fp64 header at ANY id discards its elements.
-		"        else if (kind == ArrayKind.FP64) {\n            askip = count;\n            switch (cur) {",
-		// Discarded at the top of every callback an array shares with a scalar.
-		"    public void unsigned(int id, long value) {\n        // Drop an element of an array",
-		"    public void signed(int id, long value) {\n        // Drop an element of an array",
-		"    public void fp32(int id, float value) {\n        // Drop an element of an array",
+		// SKIPPING IS THE DEFAULT: arrayBegin arms the counter for every array it
+		// is handed, and only a declared array at a matching kind disarms it. (It
+		// used to be armed by a four-way `kind ==` chain ahead of a second, separate
+		// (cur, id) walk; one switch does both.)
+		"        askip = count;\n        afill = 0;\n        abulk = null;",
+		// Each declared array disarms the skip AND arms the fill behind ITS OWN
+		// kind test: the u32 array (id 2) under UNSIGNED, the i32 array (id 3)
+		// under SIGNED, the fp32 array (id 4) under FP32. A header of any other
+		// kind at that id falls out of the arm before the disarm.
+		"case 2: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw",
+		"case 2: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"ua: array count above schema capacity 4\")); askip = 0; afill = count;",
+		"case 3: if (kind != ArrayKind.SIGNED) break; if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"ia: array count above schema capacity 4\")); askip = 0; afill = count;",
+		"case 4: if (kind != ArrayKind.FP32) break; if (count > 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"fa: array count above schema capacity 3\")); askip = 0; afill = count;",
+		// Discarded at the top of every callback an array shares with a scalar,
+		// behind the armed-fill arm (an armed fill and an armed skip are mutually
+		// exclusive: arrayBegin sets exactly one).
+		"    public void unsigned(int id, long value) {\n        // An element of the array arrayBegin armed",
+		"    public void signed(int id, long value) {\n        // An element of the array arrayBegin armed",
+		"    public void fp32(int id, float value) {\n        // An element of the array arrayBegin armed",
 		"    public void fp64(int id, double value) {\n        // Drop an element of an array",
 		"        if (askip > 0) { askip--; return; }",
-		// The mirror guard (generator#188) fronts every native-array fill arm.
-		"if (afill == 0) break; afill--; ",
+		// The mirror guard (generator#188): a fill runs only while armed, and the
+		// element count is what terminates it.
+		"        if (afill != 0) {\n            afill--;\n            switch (atgt) {",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing §7.3 array-skip guard %q", want)
 		}
 	}
-	// The fp32 array is armed in the FP32 branch, never grouped with the integer
-	// arms — id 4 must not appear alongside ids 2/3 under UNSIGNED/SIGNED.
+	// This schema declares no fp64 array, so fp64() has no armed-fill arm at all
+	// and an fp64 header at ANY id discards its elements.
+	if strings.Contains(m, "    public void fp64(int id, double value) {\n        if (afill != 0)") {
+		t.Error("fp64 has no declared array here; it must have no armed-fill arm")
+	}
+	// The fp32 array is armed behind an FP32 test, never grouped with the integer
+	// arms — id 4 must not disarm under UNSIGNED/SIGNED.
 	if strings.Contains(m, "case 2: case 3: case 4: askip = 0") {
 		t.Error("an fp32 array must be armed under FP32, not the integer arm")
 	}
@@ -375,23 +383,23 @@ messages:
 `
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
 	for _, want := range []string{
-		// The kind test fronts the allocation AND precedes the schema bound.
-		`case 0: if (kind != ArrayKind.UNSIGNED) break; if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ua: array count above schema capacity 5")); m.ua = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
-		`case 1: if (kind != ArrayKind.SIGNED) break; if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ia: array count above schema capacity 5")); m.ia = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
-		`case 2: if (kind != ArrayKind.FP32) break; if (count > 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "fa: array count above schema capacity 3")); m.fa = new float[Math.min(count, ARRAY_INIT_CAP)]; break;`,
+		// The kind test fronts the disarm AND the allocation, and precedes the
+		// schema bound. A bounded array reserves exactly `count` (the bound above
+		// has just proved count <= N <= ARRAY_INIT_CAP); an unbounded one still
+		// reserves the capped amount and grows, since its count is untrusted.
+		`case 0: if (kind != ArrayKind.UNSIGNED) break; if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ua: array count above schema capacity 5")); askip = 0; afill = count; atgt = 1; abulk = m.ua = new byte[count]; break;`,
+		`case 1: if (kind != ArrayKind.SIGNED) break; if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ia: array count above schema capacity 5")); askip = 0; afill = count; atgt = 1; abulk = m.ia = new byte[count]; break;`,
+		`case 2: if (kind != ArrayKind.FP32) break; if (count > 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "fa: array count above schema capacity 3")); askip = 0; afill = count; atgt = 1; m.fa = new float[count]; break;`,
 		// A boolean array is a List: clearing it is decoding into it too, so the
 		// kind test fronts the clear as well. boolean maps to the UNSIGNED kind.
-		`case 3: if (kind != ArrayKind.UNSIGNED) break; if (count > 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ba: array count above schema capacity 2")); m.ba.clear(); break;`,
+		`case 3: if (kind != ArrayKind.UNSIGNED) break; if (count > 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ba: array count above schema capacity 2")); askip = 0; afill = count; atgt = 2; m.ba.clear(); break;`,
 		// enum elements ride the SIGNED wire type.
-		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ea: array count above schema capacity 2")); m.ea = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
-		// A count-less array has no schema bound, but still gets the kind test.
-		`case 5: if (kind != ArrayKind.UNSIGNED) break; m.da = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
-		// The skip counter is armed per kind: each id disarms under its own kind only.
-		"        if (kind == ArrayKind.UNSIGNED) {\n            askip = count;",
-		"        else if (kind == ArrayKind.SIGNED) {\n            askip = count;",
-		"                case 0: case 3: case 5: askip = 0; afill = count; break;",
-		"                case 1: case 4: askip = 0; afill = count; break;",
-		"                case 2: askip = 0; afill = count; break;",
+		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ea: array count above schema capacity 2")); askip = 0; afill = count; atgt = 2; abulk = m.ea = new long[count]; break;`,
+		// A count-less array has no schema bound, but still gets the kind test --
+		// and keeps the capped reservation, because nothing has bounded its count.
+		`case 5: if (kind != ArrayKind.UNSIGNED) break; askip = 0; afill = count; atgt = 3; m.da = new short[Math.min(count, ARRAY_INIT_CAP)]; break;`,
+		// Skipping is the default; only the arms above disarm it.
+		"        askip = count;\n        afill = 0;\n        abulk = null;",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing §7.3 mis-typed-array guard %q", want)
@@ -427,11 +435,10 @@ func TestJavaFixlenArrayKindPerSubtype(t *testing.T) {
 	for _, want := range []string{
 		// One arm per subtype, each arming the discard counter for every id that
 		// does not declare an array of exactly that subtype.
-		"        else if (kind == ArrayKind.FP32) {\n            askip = count;\n            switch (cur) {",
-		"        else if (kind == ArrayKind.FP64) {\n            askip = count;\n            switch (cur) {",
+		"        askip = count;\n        afill = 0;\n        abulk = null;",
 		// The kind test fronts the allocation and the schema bound sits behind it.
-		`case 0: if (kind != ArrayKind.FP32) break; if (count > 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "fa: array count above schema capacity 3")); m.fa = new float[Math.min(count, ARRAY_INIT_CAP)]; break;`,
-		`case 1: if (kind != ArrayKind.FP64) break; if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "da: array count above schema capacity 4")); m.da = new double[Math.min(count, ARRAY_INIT_CAP)]; break;`,
+		`case 0: if (kind != ArrayKind.FP32) break; if (count > 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "fa: array count above schema capacity 3")); askip = 0; afill = count; atgt = 1; m.fa = new float[count]; break;`,
+		`case 1: if (kind != ArrayKind.FP64) break; if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "da: array count above schema capacity 4")); askip = 0; afill = count; atgt = 1; m.da = new double[count]; break;`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing fixlen subtype arm %q", want)
@@ -525,9 +532,9 @@ messages:
 		"os.writeArrayUnsigned(6, this.fbf);", // bitfield -> unsigned
 		// --- decode: a count:N array is filled exactly like a count-less one, from
 		// the M elements that arrived; the schema count only bounds M.
-		"m.fu = new long[Math.min(count, ARRAY_INIT_CAP)]",
-		"m.ff32 = new float[Math.min(count, ARRAY_INIT_CAP)]",
-		"m.ff64 = new double[Math.min(count, ARRAY_INIT_CAP)]",
+		"abulk = m.fu = new int[count]",
+		"m.ff32 = new float[count]",
+		"m.ff64 = new double[count]",
 		"m.fb.clear()",
 		"m.fb.add(value != 0);",
 		// --- the over-count guard (#100) still rejects M > N.
@@ -555,7 +562,7 @@ messages:
 		"os.writeArrayUnsigned(7, this.du);",
 		"os.writeArrayFp32(8, this.df32);",
 		"os.writeArrayUnsigned(9, Sbuf.boolToLongArray(this.db));",
-		"m.du = new long[Math.min(count, ARRAY_INIT_CAP)]",
+		"m.du = new int[Math.min(count, ARRAY_INIT_CAP)]",
 		"m.db.clear()",
 	} {
 		if !strings.Contains(m, want) {
@@ -565,8 +572,10 @@ messages:
 
 	// A native ROW of a matrix carries no frame of its own, so the §2 element rule
 	// lands on the write: an interior row equal to the element default (the empty
-	// row) is not written at all, and the last row always is.
-	if !strings.Contains(m, "if (!_e0.isEmpty() || _i0 == _t1.size() - 1) {") {
+	// row) is not written at all, and the last row always is. A primitive row is a
+	// primitive array, so "empty" is a length test and the row goes to the wire
+	// unboxed.
+	if !strings.Contains(m, "if (_e0.length != 0 || _i0 == _t1.size() - 1) {") {
 		t.Errorf("a native matrix row must take the interior/last write guard:\n%s", m)
 	}
 
@@ -619,28 +628,28 @@ messages:
 
 	for _, want := range []string{
 		// --- count:N, no schema default: the empty array, exactly like a dynamic one.
-		"public long[] fu = Sbuf.EMPTY_LONGS;",
+		"public int[] fu = Sbuf.EMPTY_INTS;",
 		"public float[] ff32 = Sbuf.EMPTY_FLOATS;",
 		"public double[] ff64 = Sbuf.EMPTY_DOUBLES;",
 		"public List<Boolean> fb = new ArrayList<>();",
 		"public long[] fe = Sbuf.EMPTY_LONGS;",  // enum -> long[]
 		"public long[] fbf = Sbuf.EMPTY_LONGS;", // bitfield -> long[]
 		// --- count:N with a short schema default: as written, no tail padding.
-		"public long[] pu = new long[]{1L, 2L};",
+		"public int[] pu = new int[]{1, 2};",
 		"public List<Boolean> pb = new ArrayList<>(List.of(true, true));",
 		"public float[] pf32 = new float[]{1.5f};",
 		// --- count:N wrapper arrays start empty too.
 		"public List<String> fstr = new ArrayList<>();",
 		"public List<MFobjElem> fobj = new ArrayList<>();",
 		// --- dynamic: unchanged.
-		"public long[] du = Sbuf.EMPTY_LONGS;",
+		"public int[] du = Sbuf.EMPTY_INTS;",
 		"public List<Boolean> db = new ArrayList<>();",
 		// --- with no declared default the omit guard is plain emptiness, so an
 		// all-zero N-element value is NOT default and stays on the wire.
 		"if (this.fu != null && this.fu.length != 0) {",
 		"if (this.fb != null && !this.fb.isEmpty()) {",
 		// --- a declared default is still hoisted to a static and compared whole (#146).
-		"private static final long[] _arrdef_pu = new long[]{1L, 2L};",
+		"private static final int[] _arrdef_pu = new int[]{1, 2};",
 		"if (!java.util.Arrays.equals(this.pu, _arrdef_pu)) {",
 	} {
 		if !strings.Contains(m, want) {
@@ -769,7 +778,7 @@ messages:
 		`        this.name = "dflt";`,
 		// Containers are emptied in place — the point of taking a destination.
 		"        this.strs = Sbuf.resetList(this.strs);",
-		"        this.dyn = Sbuf.EMPTY_LONGS;",
+		"        this.dyn = Sbuf.EMPTY_INTS;",
 		// A fixed-count array is refilled from the shared default without allocating.
 		"        if (this.fixd != null && this.fixd.length == _arrdef_fixd.length) System.arraycopy(_arrdef_fixd, 0, this.fixd, 0, _arrdef_fixd.length);",
 		"        else this.fixd = _arrdef_fixd.clone();",
@@ -868,9 +877,10 @@ func TestJavaWrapperArrayInteriorSparseLastAlwaysWritten(t *testing.T) {
 		`String _e0 = _t2.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t2.size() - 1) os.writeString(_i0, _e0);`,
 		`String _e0 = _t3.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t3.size() - 1) os.writeString(_i0, _e0);`,
 		`byte[] _e0 = _t4.get(_i0); if (_e0 == null) _e0 = Sbuf.EMPTY_BYTES; if (_e0.length != 0 || _i0 == _t4.size() - 1) os.writeBlob(_i0, _e0);`,
-		// A NATIVE row has no frame of its own, so the rule lands on the write.
-		"if (!_e0.isEmpty() || _i0 == _t5.size() - 1) {",
-		"os.writeArrayUnsigned(_i0, Sbuf.toLongArray(_e0));",
+		// A NATIVE row has no frame of its own, so the rule lands on the write; a
+		// primitive one is a long[], written with no box/unbox temporary.
+		"if (_e0.length != 0 || _i0 == _t5.size() - 1) {",
+		"os.writeArrayUnsigned(_i0, _e0);",
 		// A WRAPPER row has one, so it takes the closer -- like the struct element.
 		"if (_i0 == _t6.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
 	} {
@@ -968,9 +978,10 @@ func TestJavaMatrixRowsArePlacedByID(t *testing.T) {
 		// native rows: placed in arrayBegin, bounded by the OUTER array's count --
 		// behind the §7.3 kind test, so a mis-typed row is skipped, never placed
 		// and never bound-checked (generator#254).
-		`case 8: if (kind != ArrayKind.UNSIGNED) break; if (id >= 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_mat element: array index above schema capacity 4")); Sbuf.placeRow(m.mat, id); _ex_Root_mat = id; break;`,
-		// and the elements land in the row that id named
-		"m.mat.get(_ex_Root_mat).add(value); break;",
+		`case 8: if (kind != ArrayKind.UNSIGNED) break; if (id >= 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_mat element: array index above schema capacity 4")); askip = 0; afill = count; atgt = 1; _arowInt = Sbuf.placeRowInt(m.mat, id, Math.min(count, ARRAY_INIT_CAP)); _ex_Root_mat = id; break;`,
+		// and the elements land in the row that id named -- through the cursor
+		// arrayBegin parked, written back to that index only when growth moved it
+		"if (ai >= _arowInt.length) { _arowInt = ensureCap(_arowInt, ai, acap); m.mat.set(_ex_Root_mat, _arowInt); } _arowInt[ai++] = (int) value; return;",
 		// wrapper rows: placed in sequenceBegin, same shape
 		`case 9: if (id >= 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "Root_smat element: array index above schema capacity 4")); Sbuf.placeRow(m.smat, id); _ex_Root_smat = id; cur = 10; break;`,
 		"while (m.smat.get(_ex_Root_smat).size() <= id) m.smat.get(_ex_Root_smat).add(\"\");",
@@ -993,13 +1004,16 @@ func TestJavaMatrixRowsArePlacedByID(t *testing.T) {
 		}
 	}
 
-	// The helper itself: grow with empty rows, then REPLACE at the id (an array
-	// wrapper is the array's value, §7.4).
+	// The helper itself: grow with empty rows, then reset the row AT the id to the
+	// empty array -- an array wrapper is the array's value (§7.4), so a second
+	// occurrence replaces rather than appends. Emptying an already-present row in
+	// place is that same replacement without the allocation.
 	sbuf := genJavaFromYAML(t, wrapperArraySrc, map[string]any{})["src/main/java/message/Sbuf.java"]
 	for _, want := range []string{
 		"static <T> void placeRow(List<List<T>> l, int id) {",
-		"while (l.size() <= id) l.add(new java.util.ArrayList<>());",
-		"l.set(id, new java.util.ArrayList<>());",
+		"while (l.size() < id) l.add(new java.util.ArrayList<>());",
+		"if (l.size() == id) { l.add(new java.util.ArrayList<>()); return; }",
+		"if (row == null) l.set(id, new java.util.ArrayList<>()); else row.clear();",
 	} {
 		if !strings.Contains(sbuf, want) {
 			t.Errorf("Sbuf.java missing %q:\n%s", want, sbuf)
@@ -1028,12 +1042,12 @@ messages:
 	for _, want := range []string{
 		// Construction: empty, exactly like the count-less array next to them.
 		"public List<String> strs = new ArrayList<>();",
-		"public long[] nums = Sbuf.EMPTY_LONGS;",
+		"public int[] nums = Sbuf.EMPTY_INTS;",
 		"public List<byte[]> blobs = new ArrayList<>();",
 		"public List<MObjsElem> objs = new ArrayList<>();",
 		"public List<String> dyn = new ArrayList<>();",
 		// reset() re-arms to the same value, in place, and adds nothing.
-		"        this.strs = Sbuf.resetList(this.strs);\n        this.nums = Sbuf.EMPTY_LONGS;",
+		"        this.strs = Sbuf.resetList(this.strs);\n        this.nums = Sbuf.EMPTY_INTS;",
 		"        this.objs = Sbuf.resetList(this.objs);\n        this.dyn = Sbuf.resetList(this.dyn);",
 	} {
 		if !strings.Contains(m, want) {
@@ -1183,7 +1197,7 @@ messages:
 		`case 6: if (value < -2147483648L || value > 2147483647L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "g_i32: value outside declared width i32")); m.g_i32 = value; break;`,
 		// An array element carries the same bound, guarded AFTER the fill guard so a
 		// §7.3-skipped bare scalar at the array id is not turned into an INVALID.
-		`case 8: if (afill == 0) break; afill--; if (value < 0 || value > 255L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "arr_u8 element: value outside declared width u8"));`,
+		`case 1: if (value < 0 || value > 255L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "arr_u8 element: value outside declared width u8"));`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("W.java missing width guard %q:\n%s", want, got)
