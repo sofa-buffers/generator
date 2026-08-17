@@ -198,7 +198,6 @@ type helperUse struct {
 	overIdxArr  bool // count-bearing wrapper array -> import SofabError for the over-index reject (generator#142)
 	maxlenField bool // bounded string/blob (scalar or wrapper element) -> import SofabError for the over-maxlen reject (MESSAGE_SPEC §7.1)
 	narrowInt   bool // narrow integer destination (scalar or native array element) -> import SofabError for the over-width reject (MESSAGE_SPEC §7.1, generator#266)
-	strMaxlen   bool // bounded string (scalar or wrapper element) -> emit the allocation-free _utf8Len helper for its decode-side maxlen check (blobs measure .length directly)
 	fp32Raw     bool // fp32 scalar field -> emit _fp32FromRaw (the §4.6 bit-exact scalar channel, generator#235)
 	fp32ArrRaw  bool // native fp32 array field -> emit _fp32ArrayRaw (its array half)
 }
@@ -243,19 +242,6 @@ func arrayHasNarrowInt(elem ir.Kind, items *ir.ArrayElem) bool {
 	return false
 }
 
-// arrayHasBoundedString is arrayHasBoundedStrBlob restricted to string elements:
-// only a bounded *string* element needs the allocation-free _utf8Len helper on
-// decode (a bounded blob element measures its wire byte length via .length).
-func arrayHasBoundedString(elem ir.Kind, items *ir.ArrayElem, elemMaxHas bool) bool {
-	if elem == ir.KindString && elemMaxHas {
-		return true
-	}
-	if elem == ir.KindArray && items != nil {
-		return arrayHasBoundedString(items.Elem, items.ElemItems, items.ElemMaxHas)
-	}
-	return false
-}
-
 // scanHelpers walks every emitted class's fields and reports which helpers the
 // module needs. A Long-backed array with a value default needs longArrEq (Long
 // identity !== fails element-wise compare); other defaulted leaf arrays/blobs
@@ -292,14 +278,6 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 			if fld.Kind == ir.KindArray && arrayHasNarrowInt(fld.Elem, fld.ElemItems) {
 				use.narrowInt = true
 			}
-			// A bounded string (scalar or wrapper element) decodes its maxlen check
-			// via the allocation-free _utf8Len helper (issue #153).
-			if fld.Kind == ir.KindString && fld.HasMaxlen {
-				use.strMaxlen = true
-			}
-			if fld.Kind == ir.KindArray && arrayHasBoundedString(fld.Elem, fld.ElemItems, fld.ElemMaxHas) {
-				use.strMaxlen = true
-			}
 			// The fp32 raw-bits channel (§4.6): the scalar half widens the wire bytes
 			// through _fp32FromRaw, the array half re-renders them through
 			// _fp32ArrayRaw. Each helper is emitted only where its position occurs.
@@ -307,6 +285,10 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 				use.fp32Raw = true
 			}
 			if fld.Kind == ir.KindArray && fld.Elem == ir.KindFP32 {
+				// The array half re-renders through _fp32ArrayRaw on encode and widens
+				// each element through the scalar helper _fp32FromRaw on decode, so an
+				// fp32 ARRAY needs both halves even when the schema has no fp32 scalar.
+				use.fp32Raw = true
 				use.fp32ArrRaw = true
 			}
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {

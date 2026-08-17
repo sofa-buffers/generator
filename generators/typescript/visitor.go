@@ -69,8 +69,16 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	guard := fmt.Sprintf("if (%s) { c.skip(c.wire); break; } ", g.tsWireGuardCond(x))
 	switch x.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindBitfield:
+		// No Number() around the read when a width guard follows it. The reader is
+		// number-first: it returns a `bigint` only for a value past 2^53-1, which is
+		// far outside every width guarded here, so the guard rejects any bigint
+		// before the store — and a value that PASSES the guard is therefore already
+		// a number. (The comparison itself is exact either way: JS compares a bigint
+		// against a number by value, not by coercion.) The cast is a type assertion
+		// only; it emits nothing. An unguarded destination keeps the conversion,
+		// since nothing there proves the narrowing.
 		if cond := widthCond("_v", x.Kind); cond != "" {
-			f.line("      case %d: { %sconst _v = Number(c.readUnsigned()); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v; break; }", x.ID, guard, cond, x.Name, x.Kind, acc)
+			f.line("      case %d: { %sconst _v = c.readUnsigned(); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v as number; break; }", x.ID, guard, cond, x.Name, x.Kind, acc)
 		} else {
 			f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
 		}
@@ -83,7 +91,9 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	case ir.KindBool:
 		f.line("      case %d: %s%s = Boolean(c.readUnsigned()); break;", x.ID, guard, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32:
-		f.line("      case %d: { %sconst _v = Number(c.readSigned()); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v; break; }", x.ID, guard, widthCond("_v", x.Kind), x.Name, x.Kind, acc)
+		// See the unsigned case: the width guard in front of the store makes the
+		// Number() conversion dead work on every decode.
+		f.line("      case %d: { %sconst _v = c.readSigned(); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v as number; break; }", x.ID, guard, widthCond("_v", x.Kind), x.Name, x.Kind, acc)
 	case ir.KindI64:
 		if g.numberScalars() {
 			f.line("      case %d: %s%s = Number(c.readSigned()); break;", x.ID, guard, acc)
@@ -111,18 +121,21 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	case ir.KindString:
 		// A wire string longer than its schema maxlen is malformed input: reject the
 		// whole message rather than silently truncate (MESSAGE_SPEC §7.1). "Length"
-		// is the UTF-8 BYTE length; the cursor hands back only the decoded string, so
-		// count its bytes with the allocation-free _utf8Len (issue #153) rather than
-		// re-encoding via TextEncoder in the hot loop. An unbounded string keeps the
-		// bare read.
+		// is the UTF-8 BYTE length, and on the wire that is exactly the fixlen length
+		// word — so the bound goes INTO readString and is decided there, at the
+		// header, before the payload is taken. That ordering is also what makes
+		// INVALID dominate a message truncated inside an over-maxlen string
+		// (generator#216 / F-0032, §5.2).
+		//
+		// No second check at the call site. A `_utf8Len(_s) > N` re-scan used to
+		// follow as defense in depth, but it can only fire once the whole payload has
+		// arrived and been decoded — strictly later, and strictly weaker, than the
+		// reader's own verdict, which the conformance suite exercises directly
+		// (tests/conformance/typescript/run.sh: over-maxlen, and over-maxlen +
+		// truncation). It re-walks every decoded string on the hot path for that:
+		// measured at 3.5k Ir/op, 7% of this schema's whole decode (issue #339).
 		if x.HasMaxlen {
-			// The schema maxlen is passed to readString so an over-maxlen string is
-			// rejected as INVALID at the length word — before the payload take() can
-			// report it truncated — so INVALID dominates a subsequent truncation
-			// (generator#216 / F-0032, §5.2). The whole-string _utf8Len guard stays as
-			// defense; it runs too late to beat truncation on its own.
-			f.line("      case %d: { %sconst _s = c.readString(%d); if (_utf8Len(_s) > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: string byte length above schema maxlen %d\"); %s = _s; break; }",
-				x.ID, guard, x.Maxlen, x.Maxlen, x.Name, x.Maxlen, acc)
+			f.line("      case %d: %s%s = c.readString(%d); break;", x.ID, guard, acc, x.Maxlen)
 		} else {
 			f.line("      case %d: %s%s = c.readString(); break;", x.ID, guard, acc)
 		}
@@ -165,24 +178,32 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			return
 		}
 		if nativeArrayElem(x.Elem) {
-			// A wire element count above the schema `count` capacity is INVALID
-			// per MESSAGE_SPEC §3+§7 — reject the whole message, never keep-all
-			// (generator#100). Count-less (dynamic) arrays have no bound.
+			// Both schema bounds this array carries — the `count` capacity
+			// (MESSAGE_SPEC §3+§7, generator#100) and each element's declared width
+			// (§7.1, generator#266) — are handed to the corelib reader, which decides
+			// them at the count word and at the element that carries the value
+			// respectively (see `cnt` / elemArgs below). Nothing is re-checked here.
+			//
+			// The two whole-array re-scans that used to follow — `_a.length > N` and a
+			// `for (const _e of _a)` width walk — could only fire once EVERY element
+			// had arrived, so both were strictly later and strictly weaker than the
+			// reader's verdict they duplicated, and neither could beat a truncation
+			// the reader already beats. The width walk alone cost 1.1k Ir/op on the
+			// arena's eight-array message; on the hot path that is what
+			// defense-in-depth was buying (issue #339). The conformance suite
+			// exercises both rejects through the reader
+			// (tests/conformance/typescript/run.sh: over-count, over-count +
+			// truncation, over-width element + truncation).
 			//
 			// The wire count M IS the array's length (§3): the M elements that
 			// arrived are the whole value, so they are taken as they come. A
 			// declared `count: N` is a CAPACITY and bounds M; it never adds
 			// elements, so there is nothing to fill in at [M, N).
+			cnt := ""
 			if x.HasCount {
-				f.line("      case %d: { %sconst _a = %s; if (_a.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\"); %s%s = _a; break; }",
-					x.ID, guard, g.nativeArrayRead(x.Elem, x.ElemRef, fmt.Sprintf("%d", x.Count)), x.Count, x.Name, x.Count, widthScan("_a", x.Name, x.Elem), acc)
-				return
+				cnt = fmt.Sprintf("%d", x.Count)
 			}
-			if scan := widthScan("_a", x.Name, x.Elem); scan != "" {
-				f.line("      case %d: { %sconst _a = %s; %s%s = _a; break; }", x.ID, guard, g.nativeArrayRead(x.Elem, x.ElemRef, ""), scan, acc)
-				return
-			}
-			f.line("      case %d: %s%s = %s; break;", x.ID, guard, acc, g.nativeArrayRead(x.Elem, x.ElemRef, ""))
+			f.line("      case %d: %s%s = %s; break;", x.ID, guard, acc, g.nativeArrayRead(x.Elem, x.ElemRef, cnt))
 			return
 		}
 		// Composite array: a wrapper sequence whose elements arrive one per
@@ -202,10 +223,12 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 // (generator#235). It is the fp32-array twin of the scalar case in
 // emitDecodeCase, and keeps every property of the plain reader it replaces:
 //
-//   - the schema `count` still goes into the reader call, so an over-count array
-//     is INVALID at the count word, before a truncated payload could report
-//     INCOMPLETE (generator#216 / §5.2); the whole-array `_n > N` reject then
-//     stays as the defense it has always been (generator#100);
+//   - the schema `count` goes into the reader call, so an over-count array is
+//     INVALID at the count word, before a truncated payload could report
+//     INCOMPLETE (generator#216 / §5.2). That is the whole bound: the
+//     whole-array `_n > N` reject that used to follow it duplicated a verdict the
+//     reader had already reached and only fired later (issue #339, same reasoning
+//     as the native-array case in emitDecodeCase);
 //   - the wire count M IS the array's length (§3), so the M elements that arrived
 //     are the whole value — nothing is padded to N;
 //   - the payload is copied, not aliased (readFp32ArrayRaw returns a view into
@@ -221,13 +244,14 @@ func (g *gen) emitFp32ArrayDecodeCase(f *tsfile, x *ir.Field, guard, acc string)
 	f.line("        %s", strings.TrimSpace(guard))
 	f.line("        const _p = c.readFp32ArrayRaw(%s);", cnt)
 	f.line("        const _n = _p.length >> 2;")
-	if x.HasCount {
-		f.line("        if (_n > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: array count above schema capacity %d\");", x.Count, x.Name, x.Count)
-	}
-	f.line("        const _dv = new DataView(_p.buffer, _p.byteOffset, _p.byteLength);")
+	// Elements widen through the shared 4-byte scratch (_fp32FromRaw), not through
+	// a `new DataView(_p.buffer, …)` built per field read. Constructing a DataView
+	// is a heavyweight allocation — corelib-ts measures ~115 ns and caches one per
+	// decoder for exactly this reason — and this one was paid on every decode of
+	// every fp32 array, to read as few as a handful of elements (issue #339).
 	f.line("        const _a = new Array<number>(_n);")
 	f.line("        let _nan = false;")
-	f.line("        for (let _i = 0; _i < _n; _i++) { const _v = _dv.getFloat32(_i * 4, true); if (Number.isNaN(_v)) _nan = true; _a[_i] = _v; }")
+	f.line("        for (let _i = 0; _i < _n; _i++) { const _v = _fp32FromRaw(_p, _i * 4); if (Number.isNaN(_v)) _nan = true; _a[_i] = _v; }")
 	f.line("        %s = _a;", acc)
 	f.line("        %s = _nan ? _p.slice() : null;", g.fp32RawStorage("o", x))
 	f.line("        break;")
@@ -396,25 +420,16 @@ func widthCond(v string, k ir.Kind) string {
 	return fmt.Sprintf("%s > %d", v, hi)
 }
 
-// widthScan renders the element scan for a native array of narrow-integer
-// elements: one out-of-range element makes the whole message INVALID.
-func widthScan(arr, name string, elem ir.Kind) string {
-	cond := widthCond("_e", elem)
-	if cond == "" {
-		return ""
-	}
-	return fmt.Sprintf("for (const _e of %s) if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s element: value outside declared width %s\"); ", arr, cond, name, elem)
-}
-
 // elemArgs renders the extra corelib arguments that bound each element to its
 // declared width — `, max` for unsigned, `, min, max` for signed — or "" for the
 // kinds whose range is not narrower than what the reader returns.
 //
-// Same reasoning as the `cnt` argument above, one level down: the whole-array
-// scan at the call site (widthScan) only fires once EVERY element has arrived, so
-// a message truncated right after an out-of-range element loses the verdict to
-// the reader's own INCOMPLETE. Handing the bound to the reader is what latches it
-// at the element that carries the value (§5.2 anti-folding, generator#267).
+// Same reasoning as the `cnt` argument above, one level down, and the reason the
+// element bound lives here and nowhere else: a whole-array scan at the call site
+// can only fire once EVERY element has arrived, so a message truncated right
+// after an out-of-range element loses the verdict to the reader's own INCOMPLETE.
+// Handing the bound to the reader is what latches it at the element that carries
+// the value (§5.2 anti-folding, generator#267).
 //
 // `cnt` is "" for an unbounded array, and a positional argument cannot be
 // skipped, so the count slot is filled with `undefined` when a bound follows it.
@@ -553,20 +568,16 @@ func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *i
 	case ir.KindString:
 		// A bounded string element that overruns its schema maxlen is malformed:
 		// reject, never truncate (MESSAGE_SPEC §7.1). "Length" is the UTF-8 byte
-		// length, counted by the allocation-free _utf8Len rather than re-encoding the
-		// decoded string via TextEncoder in the hot loop (issue #153).
+		// length, which on the wire is exactly the element's fixlen length word — so
+		// the bound goes INTO the reader, as it already does for a scalar string, and
+		// is decided at that word, before the payload is taken. No `_utf8Len` re-scan
+		// follows: it fires only once the whole payload has arrived and been decoded,
+		// which is strictly later and strictly weaker than the reader's own verdict,
+		// and it re-walks every decoded element on the hot path (issue #339; see the
+		// scalar-string case for the measurement).
 		if maxHas {
-			// The bound goes INTO the reader, as it already does for a scalar
-			// string. readString() reads the payload first, so a message truncated
-			// inside an over-maxlen element raises INCOMPLETE and the check below
-			// never runs -- while §5.2 makes INVALID dominate, the violation being
-			// established by the length word alone. The post-read check stays: it is
-			// the only bound left for a consumer on a corelib whose reader ignores
-			// the argument, and it costs one length compare on a decoded string.
 			return guard + "const _id = c.id; while (" + arr + `.length <= _id) ` + arr + `.push(""); ` +
-				fmt.Sprintf("const _s = c.readString(%d); ", maxVal) +
-				fmt.Sprintf(`if (_utf8Len(_s) > %d) throw new SofabError(SofabErrorCode.InvalidMsg, "%s element: string byte length above schema maxlen %d"); `, maxVal, arr, maxVal) +
-				arr + "[_id] = _s;"
+				fmt.Sprintf("%s[_id] = c.readString(%d);", arr, maxVal)
 		}
 		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + `.push(""); ` + arr + "[_id] = c.readString();"
 	case ir.KindBlob:
@@ -640,28 +651,6 @@ function arrEq(a: ArrayLike<unknown>, b: ArrayLike<unknown>): boolean {
   return true;
 }`
 
-// utf8LenHelper counts a string's UTF-8 byte length without allocating — no
-// TextEncoder, no throwaway Uint8Array — for the decode-side maxlen check on a
-// bounded string field (MESSAGE_SPEC §7.1, issue #153). It is byte-for-byte
-// identical to `new TextEncoder().encode(s).length`: an unpaired surrogate counts
-// as the 3-byte U+FFFD replacement, matching what the corelib's TextDecoder
-// produced, so validation semantics are unchanged. Emitted only when some bounded
-// string field decodes (blob maxlen checks read the wire Uint8Array .length).
-const utf8LenHelper = `// _utf8Len returns the UTF-8 byte length of s without allocating (mirrors what the
-// encode path already does). Used to bound a decoded string against its schema
-// maxlen on the hot decode path.
-function _utf8Len(s: string): number {
-  let n = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c < 0x80) n += 1;
-    else if (c < 0x800) n += 2;
-    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { n += 4; i++; }
-    else n += 3;
-  }
-  return n;
-}`
-
 // fp32RawHelper is the scalar half of the fp32 raw-bits channel (MESSAGE_SPEC
 // §4.6, generator#235). A JS number is a 64-bit double, and widening an fp32
 // SIGNALING NaN into one quiets it (0x7F800001 -> 0x7FC00001), so the number
@@ -693,24 +682,37 @@ function _fp32FromRaw(raw: Uint8Array, off: number): number {
 // changed since -- and any element whose captured bytes are not themselves a NaN
 // -- re-renders from its number, so a hand-set value is never overwritten by a
 // stale capture. Emitted only when the schema has a native fp32 array field.
-const fp32ArrayRawHelper = `// _fp32ArrayRaw renders an fp32 array's wire payload (count * 4 little-endian
+const fp32ArrayRawHelper = `// _fp32RawFrom narrows v to fp32 and writes its four little-endian wire bytes to
+// out[off], through the same shared scratch word _fp32FromRaw reads back.
+function _fp32RawFrom(out: Uint8Array, off: number, v: number): void {
+  _fp32View.setFloat32(0, v, true);
+  out[off] = _fp32Bytes[0]!;
+  out[off + 1] = _fp32Bytes[1]!;
+  out[off + 2] = _fp32Bytes[2]!;
+  out[off + 3] = _fp32Bytes[3]!;
+}
+
+// _fp32ArrayRaw renders an fp32 array's wire payload (count * 4 little-endian
 // bytes) from vals, keeping the captured wire bits of every element that is
 // STILL the NaN it decoded as. An element the caller has changed since
 // re-renders from its number, so a hand-set value never loses to a stale
 // capture: only the bits a JS number cannot carry come from ` + "`raw`" + `.
+//
+// Both directions go through the module-level 4-byte scratch (_fp32FromRaw /
+// _fp32RawFrom) rather than a DataView built over the payload: this runs on
+// every encode of an fp32 array that decoded with a NaN, and the two DataViews
+// it used to construct per call are a heavyweight allocation apiece.
 function _fp32ArrayRaw(vals: readonly number[], raw: Uint8Array): Uint8Array {
   const out = new Uint8Array(vals.length * 4);
-  const odv = new DataView(out.buffer);
-  const rdv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   for (let i = 0, o = 0; i < vals.length; i++, o += 4) {
     const v = vals[i]!;
-    if (Number.isNaN(v) && o + 4 <= raw.length && Number.isNaN(rdv.getFloat32(o, true))) {
+    if (Number.isNaN(v) && o + 4 <= raw.length && Number.isNaN(_fp32FromRaw(raw, o))) {
       out[o] = raw[o]!;
       out[o + 1] = raw[o + 1]!;
       out[o + 2] = raw[o + 2]!;
       out[o + 3] = raw[o + 3]!;
     } else {
-      odv.setFloat32(o, v, true);
+      _fp32RawFrom(out, o, v);
     }
   }
   return out;
