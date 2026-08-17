@@ -220,9 +220,11 @@ per element and the growth ceiling are all unchanged and all still there.
 For an integer array the schema bounds with a `count: N`, the destination is
 already exactly `count` long by the time the elements arrive, so it can skip the
 element callbacks altogether. `arrayBegin` parks it in `abulk`, corelib-java's
-`Visitor.arrayBulk(id, kind, count)` hands it over, the decoder fills it directly
-(ZigZag already applied for a signed array), and `arrayBulkEnd(id, n)` clears the
-fill counter and runs the declared-width check as one pass over what was written.
+`Visitor.arrayBulk(id, kind, count)` hands it over, and the decoder fills it
+directly (ZigZag already applied for a signed array). Its **element width is what
+tells the decoder the declared width**: a `byte[]` says `u8`/`i8`, so a value that
+does not fit is `INVALID_MSG` rather than truncated, checked in the same pass that
+decodes. `arrayBulkEnd(id, n)` then only has to clear the fill counter.
 
 The offer is made **only** for a schema-bounded array: `count` is the wire's
 claim, and an unbounded array must not be allocated against it (#96) — it keeps
@@ -236,10 +238,12 @@ that predates them simply never does — and the generated code still compiles
 against it, because the per-element arms fill the very same array. `@Override`
 would turn an optimisation into a hard corelib requirement.
 
-The width check moving from per-element to per-array is a change in *when*, not in
-*what*: an out-of-range element is still `INVALID_MSG` (§7.1) and INVALID is still
-terminal, so no caller reads a value the check rejects — `decode` throws, and for
-`tryDecode` returning `INVALID` the destination's contents are not defined.
+On that path the width check is the corelib's, so its message names the
+destination rather than the field (`array element wider than its destination`
+instead of `u8 element: value outside declared width u8`). The verdict is the
+same and still terminal; only the diagnostic is coarser. The per-element arms keep
+the field-named message for every array the offer is not made for, and for a
+corelib that predates the offer.
 
 ### The fixlen arm is keyed by subtype (issue #259)
 

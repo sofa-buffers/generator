@@ -717,18 +717,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	// Set by the same arrayBegin arm that arms the fill, so the offer itself is a
 	// field read rather than a third dispatch over (scope, id).
 	if hasBulk(fs) {
-		f.line("    private long[] abulk;               // destination offered to Visitor.arrayBulk, null when not offered")
-		f.line("    private int abtgt = 0;              // which field abulk belongs to")
-		if n := bulkScratchLen(fs); n > 0 {
-			// The decoder decodes into long[]; a narrowed field cannot BE that
-			// destination, so it is filled through this buffer and reduced in
-			// arrayBulkEnd. One buffer for the whole message -- only one array fill
-			// is ever open -- sized to the largest capacity that uses it, and
-			// materialized on first use so a message that never meets one of these
-			// arrays never allocates it.
-			f.line("    private long[] abuf;                // scratch the narrowed bulk fills run through")
-			f.line("    private static final int ABUF_LEN = %d;", n)
-		}
+		f.line("    private Object abulk;               // destination offered to Visitor.arrayBulk, null when not offered")
 	}
 	if hasPrim {
 		// The wire-supplied element count is UNTRUSTED: a malformed message can
@@ -1015,20 +1004,15 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// filled exactly like a count-less one.
 			target := fr.path + "." + javaIdent(fld.Name)
 			arm := kindGuard + guard + armFill(fs, fr, fld)
-			if code, ok := bulkTargets(fs)[fr][fld.ID]; ok {
+			if bulkCapable(fld) {
 				// Bulk-capable: the destination is exactly `count` long (the guard
 				// above proved it). A long-backed field IS the destination; a
 				// narrowed one is filled through the scratch and reduced into the
 				// field by arrayBulkEnd. Either way the field is allocated here, so
 				// the per-element arm above still works as the fallback for a
 				// decoder that declines the offer.
-				alloc := fmt.Sprintf("%s = new %s[count]", target, primArrayBase(fld.Elem))
-				if bulkNarrowed(fld) {
-					alloc = "if (abuf == null) abuf = new long[ABUF_LEN]; abulk = abuf; " + alloc
-				} else {
-					alloc = "abulk = " + alloc
-				}
-				arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sabtgt = %d; %s", arm, code, alloc)))
+				arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sabulk = %s = new %s[count]",
+					arm, target, primArrayBase(fld.Elem))))
 			} else if primitiveArrayElem(fld.Elem) {
 				arms = append(arms, jcase(fld.ID, arm+target+" = new "+primArrayBase(fld.Elem)+"["+reserveExpr(cap)+"]"))
 			} else { // boolean List
@@ -1167,23 +1151,18 @@ func primRowBasesUsed(fs []frame) []string {
 }
 
 // emitBulkCbs writes the two halves of the corelib's bulk-array offer
-// (CORELIB_PLAN: Visitor.arrayBulk / arrayBulkEnd), the fast path for an integer
-// array whose length the schema already bounds.
+// (Visitor.arrayBulk / arrayBulkEnd), the fast path for an integer array whose
+// length the schema already bounds.
 //
 // arrayBegin has resolved and sized the destination, so the offer is a field read
 // -- not a third walk over (scope, id) -- and the decoder then writes the elements
-// straight into the field's own array with no callback at all. What the element
-// arms did per element and this does per ARRAY: the fill counter is cleared (no
-// element callback ran to count it down) and the declared-width check runs as one
-// pass over the filled range.
-//
-// The width check moving after the fill is a change in WHEN, not in what: an
-// out-of-range element is still INVALID (§7.1) and INVALID is still terminal, so
-// no caller sees a value the check rejects -- decode throws, and tryDecode reports
-// INVALID, for which the destination's contents are not defined.
+// straight into the field's own array. The array's WIDTH is what tells the decoder
+// the declared width: handing back a byte[] says "u8/i8 elements", and a value
+// that does not fit is INVALID (§7.1) rather than truncated, checked in the same
+// pass that decodes. So all arrayBulkEnd has left to do is clear the fill counter,
+// which no element callback was there to count down.
 func (g *gen) emitBulkCbs(f *jfile, fs []frame) {
-	tgts := bulkTargets(fs)
-	if len(tgts) == 0 {
+	if !hasBulk(fs) {
 		return
 	}
 	// Deliberately NOT @Override. Visitor declares both with a default, so a
@@ -1192,48 +1171,14 @@ func (g *gen) emitBulkCbs(f *jfile, fs []frame) {
 	// against it, with the per-element arms above filling the very same array.
 	// @Override would make the newer corelib a hard requirement for code that
 	// works either way.
-	f.line("    public long[] arrayBulk(int id, ArrayKind kind, int count) {")
+	f.line("    public Object arrayBulk(int id, ArrayKind kind, int count) {")
 	f.line("        // Offered iff arrayBegin sized a schema-bounded destination just now.")
+	f.line("        // Its element width IS the declared width, so the decoder checks and")
+	f.line("        // narrows in the pass that decodes.")
 	f.line("        return abulk;")
 	f.line("    }")
 	f.line("    public void arrayBulkEnd(int id, int n) {")
 	f.line("        afill = 0;   // the elements never went through the element callbacks")
-	var arms []string
-	for i := range fs {
-		fr := &fs[i]
-		ids, ok := tgts[fr]
-		if !ok {
-			continue
-		}
-		for _, fld := range fr.fields {
-			code, ok := ids[fld.ID]
-			if !ok {
-				continue
-			}
-			w := widthThrow(fld.Elem, fld.Name+" element")
-			if !bulkNarrowed(fld) {
-				if w == "" {
-					continue // u64/i64 straight into the field: nothing left to do
-				}
-				arms = append(arms, fmt.Sprintf(
-					"        case %d: for (int _k = 0; _k < n; _k++) { long value = abulk[_k]; %s} break;", code, w))
-				continue
-			}
-			// Narrowed: one pass that checks the declared width and reduces into
-			// the field, reading the scratch the decoder just filled.
-			target := fr.path + "." + javaIdent(fld.Name)
-			arms = append(arms, fmt.Sprintf(
-				"        case %d: { %s[] _d = %s; long[] _s = abuf; for (int _k = 0; _k < n; _k++) { long value = _s[_k]; %s_d[_k] = %svalue; } } break;",
-				code, primArrayBase(fld.Elem), target, w, primArrayCast(fld.Elem)))
-		}
-	}
-	if len(arms) > 0 {
-		f.line("        switch (abtgt) {")
-		for _, a := range arms {
-			f.line("%s", a)
-		}
-		f.line("        }")
-	}
 	f.line("        abulk = null;")
 	f.line("    }")
 }
@@ -1276,8 +1221,8 @@ func fillTargetsFor(fs []frame, cb string) map[*frame]map[int64]int {
 	return out
 }
 
-// bulkTargets lists, in frame order, every array field the corelib's bulk offer
-// (Visitor.arrayBulk) can be taken for, numbered densely from 1.
+// hasBulk reports whether the message has any array the corelib's bulk offer can
+// be taken for.
 //
 // Exactly the integer arrays with a schema `count`: the offer needs a destination
 // sized to `count` up front, and only a SCHEMA-BOUNDED count may be allocated
@@ -1285,32 +1230,19 @@ func fillTargetsFor(fs []frame, cb string) map[*frame]map[int64]int {
 // arrays (reserved capped, grown by the fill), boolean arrays (a List), fp arrays
 // (the offer is integer-only) and matrix rows (their cap bounds the row's ID, not
 // its element count).
-//
-// The offer itself is always a `long[]`, because that is what the decoder decodes
-// into. For a u64/i64 array that IS the field. For a narrowed one the field is a
-// byte[]/short[]/int[], so the offer is a shared scratch and arrayBulkEnd does the
-// §7.1 width check and the narrowing in one pass -- still one branch per element
-// instead of a callback, a scope switch and an id switch.
-func bulkTargets(fs []frame) map[*frame]map[int64]int {
-	out := map[*frame]map[int64]int{}
-	n := 0
+func hasBulk(fs []frame) bool {
 	for i := range fs {
 		fr := &fs[i]
 		if fr.kind != fkNormal {
 			continue
 		}
 		for _, fld := range fr.fields {
-			if !bulkCapable(fld) {
-				continue
+			if bulkCapable(fld) {
+				return true
 			}
-			n++
-			if out[fr] == nil {
-				out[fr] = map[int64]int{}
-			}
-			out[fr][fld.ID] = n
 		}
 	}
-	return out
+	return false
 }
 
 // bulkCapable reports whether a field is one of those arrays.
@@ -1324,32 +1256,6 @@ func bulkCapable(fld *ir.Field) bool {
 	}
 	return false // fp: the decoder's fixlen element loop, not the integer one
 }
-
-// bulkNarrowed reports whether a bulk target's field is narrower than the long[]
-// the decoder fills, i.e. whether the offer is a scratch rather than the field.
-func bulkNarrowed(fld *ir.Field) bool { return primArrayBase(fld.Elem) != "long" }
-
-// bulkScratchLen is the length of the shared long[] the narrowed bulk targets are
-// filled through: the largest schema capacity among them, so one buffer serves
-// every such array in the message and only one is ever in flight.
-func bulkScratchLen(fs []frame) int64 {
-	var max int64
-	for i := range fs {
-		fr := &fs[i]
-		if fr.kind != fkNormal {
-			continue
-		}
-		for _, fld := range fr.fields {
-			if bulkCapable(fld) && bulkNarrowed(fld) && fld.Count > max {
-				max = fld.Count
-			}
-		}
-	}
-	return max
-}
-
-// hasBulk reports whether the message has any bulk-capable array.
-func hasBulk(fs []frame) bool { return len(bulkTargets(fs)) > 0 }
 
 // hasFill reports whether the message declares any native array at all, i.e.
 // whether an armed fill can ever be open.

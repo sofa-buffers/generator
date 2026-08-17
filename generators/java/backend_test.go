@@ -65,7 +65,7 @@ func TestJavaStructural(t *testing.T) {
 		"private static final int[] _arrdef_someuintarray = new int[]{0, 1, 1000, -1};",                // omit-default hoisted to a static (#146)
 		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",                   // guard reads the static -- no per-encode new long[] (#146)
 		"m.someuintarray = ensureCap(m.someuintarray, ai, acap); m.someuintarray[ai++] = (int) value;", // grow-on-demand indexed decode (#96)
-		"case 15: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"someuintarray: array count above schema capacity 4\")); askip = 0; afill = count; atgt = 1; abtgt = 1; if (abuf == null) abuf = new long[ABUF_LEN]; abulk = abuf; m.someuintarray = new int[count]; break;", // mis-typed header skipped before the bound (#254); over-count rejected (#100); the M that arrived is the whole value
+		"case 15: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"someuintarray: array count above schema capacity 4\")); askip = 0; afill = count; atgt = 1; abulk = m.someuintarray = new int[count]; break;", // mis-typed header skipped before the bound (#254); over-count rejected (#100); the M that arrived is the whole value
 		"private static long[] ensureCap(long[] a, int i, int cap) {",   // lazy-growth helper
 		"private static float[] ensureCap(float[] a, int i, int cap) {", // fp32 overload
 		"if (offset == 0 && chunkLength >= total) {",                    // string/blob single-shot
@@ -219,7 +219,7 @@ messages:
 		`case 1: if (kind != ArrayKind.UNSIGNED) break; if (count > MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "arr: array count above configured limit 4")); askip = 0; afill = count; atgt = 1; m.arr = new long[Math.min(count, ARRAY_INIT_CAP)]; break;`,
 		// Bounded array: only the generator#100 schema guard, never the cap. Both
 		// bounds sit BEHIND the §7.3 kind test (generator#254).
-		`case 2: if (kind != ArrayKind.SIGNED) break; if (count > 6) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "barr: array count above schema capacity 6")); askip = 0; afill = count; atgt = 1; abtgt = 1; if (abuf == null) abuf = new long[ABUF_LEN]; abulk = abuf; m.barr = new int[count]; break;`,
+		`case 2: if (kind != ArrayKind.SIGNED) break; if (count > 6) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "barr: array count above schema capacity 6")); askip = 0; afill = count; atgt = 1; abulk = m.barr = new int[count]; break;`,
 		// Unbounded string: total checked at the top of string(), before accumulation.
 		"if (total > MAX_DYN_STRING_LEN) {",
 		`case 0: throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "s: string length above configured limit 4096"));`,
@@ -387,14 +387,14 @@ messages:
 		// schema bound. A bounded array reserves exactly `count` (the bound above
 		// has just proved count <= N <= ARRAY_INIT_CAP); an unbounded one still
 		// reserves the capped amount and grows, since its count is untrusted.
-		`case 0: if (kind != ArrayKind.UNSIGNED) break; if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ua: array count above schema capacity 5")); askip = 0; afill = count; atgt = 1; abtgt = 1; if (abuf == null) abuf = new long[ABUF_LEN]; abulk = abuf; m.ua = new byte[count]; break;`,
-		`case 1: if (kind != ArrayKind.SIGNED) break; if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ia: array count above schema capacity 5")); askip = 0; afill = count; atgt = 1; abtgt = 2; if (abuf == null) abuf = new long[ABUF_LEN]; abulk = abuf; m.ia = new byte[count]; break;`,
+		`case 0: if (kind != ArrayKind.UNSIGNED) break; if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ua: array count above schema capacity 5")); askip = 0; afill = count; atgt = 1; abulk = m.ua = new byte[count]; break;`,
+		`case 1: if (kind != ArrayKind.SIGNED) break; if (count > 5) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ia: array count above schema capacity 5")); askip = 0; afill = count; atgt = 1; abulk = m.ia = new byte[count]; break;`,
 		`case 2: if (kind != ArrayKind.FP32) break; if (count > 3) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "fa: array count above schema capacity 3")); askip = 0; afill = count; atgt = 1; m.fa = new float[count]; break;`,
 		// A boolean array is a List: clearing it is decoding into it too, so the
 		// kind test fronts the clear as well. boolean maps to the UNSIGNED kind.
 		`case 3: if (kind != ArrayKind.UNSIGNED) break; if (count > 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ba: array count above schema capacity 2")); askip = 0; afill = count; atgt = 2; m.ba.clear(); break;`,
 		// enum elements ride the SIGNED wire type.
-		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ea: array count above schema capacity 2")); askip = 0; afill = count; atgt = 2; abtgt = 3; abulk = m.ea = new long[count]; break;`,
+		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "ea: array count above schema capacity 2")); askip = 0; afill = count; atgt = 2; abulk = m.ea = new long[count]; break;`,
 		// A count-less array has no schema bound, but still gets the kind test --
 		// and keeps the capped reservation, because nothing has bounded its count.
 		`case 5: if (kind != ArrayKind.UNSIGNED) break; askip = 0; afill = count; atgt = 3; m.da = new short[Math.min(count, ARRAY_INIT_CAP)]; break;`,
@@ -532,7 +532,7 @@ messages:
 		"os.writeArrayUnsigned(6, this.fbf);", // bitfield -> unsigned
 		// --- decode: a count:N array is filled exactly like a count-less one, from
 		// the M elements that arrived; the schema count only bounds M.
-		"if (abuf == null) abuf = new long[ABUF_LEN]; abulk = abuf; m.fu = new int[count]",
+		"abulk = m.fu = new int[count]",
 		"m.ff32 = new float[count]",
 		"m.ff64 = new double[count]",
 		"m.fb.clear()",
