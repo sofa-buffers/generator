@@ -54,14 +54,39 @@ generated plumbing, not schema surface.
 
 ## Arrays — `count` is a capacity
 
-An array field maps to a `long[]`/`float[]`/`double[]` (numeric, enum, bitfield,
-fp) or to a `List<...>` (boolean, and every wrapper-sequence element kind), and
-the array's length is the length of that container. The primitive mapping reaches
-one level in: a nested array of primitives is `List<long[]>`, **not**
-`List<List<Long>>` — the outer level is a wrapper sequence (its element ids are
-the row indices) but a row is a primitive array like any other. Only a `bool` row
-stays `List<Boolean>`, having no primitive `OStream` overload to be written
-through. A schema `count: N` is a
+An array field maps to a **primitive array of its declared width** (numeric, fp)
+or to a `List<...>` (boolean, and every wrapper-sequence element kind), and the
+array's length is the length of that container:
+
+| element | field | bytes/element |
+|---|---|---|
+| `u8`, `i8` | `byte[]` | 1 |
+| `u16`, `i16` | `short[]` | 2 |
+| `u32`, `i32` | `int[]` | 4 |
+| `u64`, `i64`, `enum`, `bitfield` | `long[]` | 8 |
+| `fp32` / `fp64` | `float[]` / `double[]` | 4 / 8 |
+| `boolean` | `List<Boolean>` | — |
+
+A **scalar** field still maps to `long` — Java has no unsigned types and widening
+one value costs nothing. An array is where it costs: at 8 bytes an element a
+`u8[1000]` is eight kilobytes of which seven are sign bits.
+
+> **An unsigned array element holds the declared width's RAW BITS.** `byte`,
+> `short` and `int` are signed in Java, so a `u8` element of 200 reads back as
+> `-56` and a `u32` element of 4294967295 as `-1`. Recover the value with
+> `Byte.toUnsignedInt(a[i])`, `Short.toUnsignedInt(a[i])`,
+> `Integer.toUnsignedLong(a[i])`. Signed widths narrow exactly and need nothing —
+> an `i8` element *is* a Java `byte`. This is the same bargain protobuf-java
+> strikes for `uint32`, and it is what corelib-java's
+> `writeArrayUnsigned(byte[]/short[]/int[])` overloads have always zero-extended
+> for. Encode, decode, JSON and the wire all carry the VALUE; only the field's
+> Java type is narrow.
+
+The primitive mapping reaches one level in: a nested array of primitives is
+`List<int[]>`, **not** `List<List<Long>>` — the outer level is a wrapper sequence
+(its element ids are the row indices) but a row is a primitive array like any
+other. Only a `bool` row stays `List<Boolean>`, having no primitive `OStream`
+overload to be written through. A schema `count: N` is a
 **capacity**, not a length: it never reaches the wire, it bounds the array (an
 element count or element id past `N` fails the decode as `INVALID_MSG`), and it
 lets fixed-storage targets pre-size — but it never adds elements.
@@ -71,13 +96,13 @@ What you can observe from Java:
 - `new <Msg>()` leaves a `count: N` array **empty** unless the schema declares a
   `default`, and a declared default shorter than `N` is materialized exactly as
   written (never tail-padded to `N`). `reset()` re-arms to the same value.
-- Encode writes **every** element the container holds. `new long[]{1, 2, 0, 0}`
-  and `new long[]{1, 2}` are different values with different bytes.
+- Encode writes **every** element the container holds. `new int[]{1, 2, 0, 0}`
+  and `new int[]{1, 2}` are different values with different bytes.
 - Decode yields exactly the elements the wire carried: `length` / `size()` after a
   round trip equals what went in, for the compact scalar form and the wrapper form
   alike. `sequenceEnd()` fills nothing back in.
 - A field is omitted only when it **equals its default** — for an array with no
-  declared default, only when it is empty. An all-zero `new long[]{0, 0, 0, 0}` is
+  declared default, only when it is empty. An all-zero `new int[]{0, 0, 0, 0}` is
   a four-element value and stays on the wire.
 
 Inside a wrapper-sequence array (string/blob/struct/union/nested-array elements)

@@ -578,16 +578,7 @@ func (g *gen) emitResetField(f *jfile, fld *ir.Field) {
 
 // emptyPrimConst is the shared zero-length primitive-array constant backing a
 // dynamic (count-less, default-less) array field — the same value javaInit gives it.
-func emptyPrimConst(elem ir.Kind) string {
-	switch primArrayBase(elem) {
-	case "float":
-		return "Sbuf.EMPTY_FLOATS"
-	case "double":
-		return "Sbuf.EMPTY_DOUBLES"
-	default:
-		return "Sbuf.EMPTY_LONGS"
-	}
-}
+func emptyPrimConst(elem ir.Kind) string { return emptyPrimFor(primArrayBase(elem)) }
 
 func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 	acc := "this." + javaIdent(fld.Name)

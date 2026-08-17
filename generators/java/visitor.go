@@ -714,6 +714,16 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	if hasBulk(fs) {
 		f.line("    private long[] abulk;               // destination offered to Visitor.arrayBulk, null when not offered")
 		f.line("    private int abtgt = 0;              // which field abulk belongs to")
+		if n := bulkScratchLen(fs); n > 0 {
+			// The decoder decodes into long[]; a narrowed field cannot BE that
+			// destination, so it is filled through this buffer and reduced in
+			// arrayBulkEnd. One buffer for the whole message -- only one array fill
+			// is ever open -- sized to the largest capacity that uses it, and
+			// materialized on first use so a message that never meets one of these
+			// arrays never allocates it.
+			f.line("    private long[] abuf;                // scratch the narrowed bulk fills run through")
+			f.line("    private static final int ABUF_LEN = %d;", n)
+		}
 	}
 	if hasPrim {
 		// The wire-supplied element count is UNTRUSTED: a malformed message can
@@ -1002,11 +1012,18 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			arm := kindGuard + guard + armFill(fs, fr, fld)
 			if code, ok := bulkTargets(fs)[fr][fld.ID]; ok {
 				// Bulk-capable: the destination is exactly `count` long (the guard
-				// above proved it), so it can be handed to the decoder whole. The
-				// element arm above stays as the fallback for a decoder that
-				// declines the offer -- it fills the very same array by index.
-				arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sabtgt = %d; abulk = %s = new %s[count]",
-					arm, code, target, primArrayBase(fld.Elem))))
+				// above proved it). A long-backed field IS the destination; a
+				// narrowed one is filled through the scratch and reduced into the
+				// field by arrayBulkEnd. Either way the field is allocated here, so
+				// the per-element arm above still works as the fallback for a
+				// decoder that declines the offer.
+				alloc := fmt.Sprintf("%s = new %s[count]", target, primArrayBase(fld.Elem))
+				if bulkNarrowed(fld) {
+					alloc = "if (abuf == null) abuf = new long[ABUF_LEN]; abulk = abuf; " + alloc
+				} else {
+					alloc = "abulk = " + alloc
+				}
+				arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sabtgt = %d; %s", arm, code, alloc)))
 			} else if primitiveArrayElem(fld.Elem) {
 				arms = append(arms, jcase(fld.ID, arm+target+" = new "+primArrayBase(fld.Elem)+"["+reserveExpr(cap)+"]"))
 			} else { // boolean List
@@ -1099,7 +1116,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 func primArrayBasesUsed(fs []frame) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, order := range []string{"long", "float", "double"} {
+	for _, order := range primBaseOrder {
 		for _, fr := range fs {
 			// A native-matrix ROW is a primitive array too (List<long[]>), grown by
 			// the same ensureCap and indexed by the same ai/acap as a top-level one.
@@ -1123,12 +1140,16 @@ func primArrayBasesUsed(fs []frame) []string {
 	return out
 }
 
+// primBaseOrder is every Java primitive an array field can be backed by, in a
+// fixed order so the emitted ensureCap overloads and row cursors come out stable.
+var primBaseOrder = []string{"byte", "short", "int", "long", "float", "double"}
+
 // primRowBasesUsed is primArrayBasesUsed restricted to native-matrix ROWS: the
 // bases needing a `_arow<B>` cursor field and a Sbuf.placeRow<B> factory.
 func primRowBasesUsed(fs []frame) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, order := range []string{"long", "float", "double"} {
+	for _, order := range primBaseOrder {
 		for _, fr := range fs {
 			if fr.kind == fkNativeMat && primitiveArrayElem(fr.innerElem) &&
 				primArrayBase(fr.innerElem) == order && !seen[order] {
@@ -1185,10 +1206,20 @@ func (g *gen) emitBulkCbs(f *jfile, fs []frame) {
 				continue
 			}
 			w := widthThrow(fld.Elem, fld.Name+" element")
-			if w == "" {
-				continue // u64/i64: every long is in range, nothing to check
+			if !bulkNarrowed(fld) {
+				if w == "" {
+					continue // u64/i64 straight into the field: nothing left to do
+				}
+				arms = append(arms, fmt.Sprintf(
+					"        case %d: for (int _k = 0; _k < n; _k++) { long value = abulk[_k]; %s} break;", code, w))
+				continue
 			}
-			arms = append(arms, fmt.Sprintf("        case %d: for (int _k = 0; _k < n; _k++) { long value = abulk[_k]; %s} break;", code, w))
+			// Narrowed: one pass that checks the declared width and reduces into
+			// the field, reading the scratch the decoder just filled.
+			target := fr.path + "." + javaIdent(fld.Name)
+			arms = append(arms, fmt.Sprintf(
+				"        case %d: { %s[] _d = %s; for (int _k = 0; _k < n; _k++) { long value = abuf[_k]; %s_d[_k] = %svalue; } } break;",
+				code, primArrayBase(fld.Elem), target, w, primArrayCast(fld.Elem)))
 		}
 	}
 	if len(arms) > 0 {
@@ -1243,13 +1274,18 @@ func fillTargetsFor(fs []frame, cb string) map[*frame]map[int64]int {
 // bulkTargets lists, in frame order, every array field the corelib's bulk offer
 // (Visitor.arrayBulk) can be taken for, numbered densely from 1.
 //
-// Exactly the long-backed integer arrays with a schema `count`: the bulk offer
-// hands the decoder the destination up front, so the destination has to be
-// `count` long already, and only a SCHEMA-BOUNDED count may be allocated against
-// (#96 -- the wire's count is untrusted). That leaves out the unbounded arrays
-// (reserved capped, grown by the fill), boolean arrays (a List), fp arrays (not
-// long-backed, and the offer is integer-only) and matrix rows (their cap bounds
-// the row's ID, not its element count).
+// Exactly the integer arrays with a schema `count`: the offer needs a destination
+// sized to `count` up front, and only a SCHEMA-BOUNDED count may be allocated
+// against (#96 -- the wire's count is untrusted). That leaves out the unbounded
+// arrays (reserved capped, grown by the fill), boolean arrays (a List), fp arrays
+// (the offer is integer-only) and matrix rows (their cap bounds the row's ID, not
+// its element count).
+//
+// The offer itself is always a `long[]`, because that is what the decoder decodes
+// into. For a u64/i64 array that IS the field. For a narrowed one the field is a
+// byte[]/short[]/int[], so the offer is a shared scratch and arrayBulkEnd does the
+// §7.1 width check and the narrowing in one pass -- still one branch per element
+// instead of a callback, a scope switch and an id switch.
 func bulkTargets(fs []frame) map[*frame]map[int64]int {
 	out := map[*frame]map[int64]int{}
 	n := 0
@@ -1274,8 +1310,37 @@ func bulkTargets(fs []frame) map[*frame]map[int64]int {
 
 // bulkCapable reports whether a field is one of those arrays.
 func bulkCapable(fld *ir.Field) bool {
-	return fld.Kind == ir.KindArray && fld.HasCount &&
-		primitiveArrayElem(fld.Elem) && primArrayBase(fld.Elem) == "long"
+	if fld.Kind != ir.KindArray || !fld.HasCount || !primitiveArrayElem(fld.Elem) {
+		return false
+	}
+	switch primArrayBase(fld.Elem) {
+	case "byte", "short", "int", "long":
+		return true
+	}
+	return false // fp: the decoder's fixlen element loop, not the integer one
+}
+
+// bulkNarrowed reports whether a bulk target's field is narrower than the long[]
+// the decoder fills, i.e. whether the offer is a scratch rather than the field.
+func bulkNarrowed(fld *ir.Field) bool { return primArrayBase(fld.Elem) != "long" }
+
+// bulkScratchLen is the length of the shared long[] the narrowed bulk targets are
+// filled through: the largest schema capacity among them, so one buffer serves
+// every such array in the message and only one is ever in flight.
+func bulkScratchLen(fs []frame) int64 {
+	var max int64
+	for i := range fs {
+		fr := &fs[i]
+		if fr.kind != fkNormal {
+			continue
+		}
+		for _, fld := range fr.fields {
+			if bulkCapable(fld) && bulkNarrowed(fld) && fld.Count > max {
+				max = fld.Count
+			}
+		}
+	}
+	return max
 }
 
 // hasBulk reports whether the message has any bulk-capable array.
@@ -1328,18 +1393,6 @@ const arrayInitCap = 16
 // back through List.set -- is per-element work for a reference that changes at most
 // log2(count) times. arrayBegin parks it here; only a growth writes it back.
 func rowCursor(base string) string { return "_arow" + strings.ToUpper(base[:1]) + base[1:] }
-
-// emptyPrimFor is the shared zero-length constant for a primitive base.
-func emptyPrimFor(base string) string {
-	switch base {
-	case "float":
-		return "Sbuf.EMPTY_FLOATS"
-	case "double":
-		return "Sbuf.EMPTY_DOUBLES"
-	default:
-		return "Sbuf.EMPTY_LONGS"
-	}
-}
 
 // emitScalarCb writes a callback that routes (cur,id) to a field assignment or a
 // list .add. action() returns "= value" / "add" / "addBool" / "setBool" /
@@ -1420,8 +1473,9 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 				// reference back into the List only when growth actually replaced it.
 				cur := rowCursor(primArrayBase(fr.innerElem))
 				arms = append(arms, arm{ids[-1], fmt.Sprintf(
-					"%sif (ai >= %s.length) { %s = ensureCap(%s, ai, acap); %s.set(%s, %s); } %s[ai++] = value",
-					widthThrow(fr.innerElem, fr.loc+" element"), cur, cur, cur, fr.listExpr, elemIdxVar(fr.loc), cur, cur)})
+					"%sif (ai >= %s.length) { %s = ensureCap(%s, ai, acap); %s.set(%s, %s); } %s[ai++] = %svalue",
+					widthThrow(fr.innerElem, fr.loc+" element"), cur, cur, cur, fr.listExpr, elemIdxVar(fr.loc), cur, cur,
+					primArrayCast(fr.innerElem))})
 				continue
 			}
 			// A boxed row (boolean): the row arrayBegin PLACED at the element id, not
@@ -1456,7 +1510,7 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 			// at most log2(count) times.
 			arms = append(arms, arm{code, widthThrow(fld.Elem, fld.Name+" element") +
 				"if (ai >= " + target + ".length) " + target + " = ensureCap(" + target + ", ai, acap); " +
-				target + "[ai++] = value"})
+				target + "[ai++] = " + primArrayCast(fld.Elem) + "value"})
 		}
 	}
 	f.line("        // An element of the array arrayBegin armed: its destination is already")
