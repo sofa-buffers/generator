@@ -426,6 +426,51 @@ cmp -s "$WORK/i64_safe_bigint.bin" "$WORK/i64_safe_number.bin" || { echo "FAIL: 
 DEC_A=$( cd "$WORK/i64-bigint" && npx tsx harness.ts decode m64 < "$WORK/i64_full_bigint.bin" )
 DEC_B=$( cd "$WORK/i64-long"   && npx tsx harness.ts decode m64 < "$WORK/i64_full_bigint.bin" )
 [ "$DEC_A" = "$DEC_B" ] || { echo "FAIL: int64: long decode drift"; exit 1; }
+# ...and the DECLARED type must be the type the field actually holds. The cursor
+# readers are number-first (a `number` up to 2^53-1, a `bigint` only past it), so
+# a bare `as bigint` cast on the pull path produced a `bigint`-typed field holding
+# a `number`, and a `bigint[]`-typed array holding a MIX of both — while the
+# streaming visitor and fromJSON, reaching the same fields, converted properly.
+# Nothing above catches that: every check here goes through the wire or through
+# toJSON, and `String(1n) === String(1)`. So assert the runtime type directly, on
+# BOTH decode surfaces, or the two paths can disagree again (generator#340).
+echo "==> int64: bigint — decoded 64-bit fields must really be bigint"
+cat > "$WORK/i64-bigint/typecheck64.ts" <<'TS'
+import { M64, M64Decoder } from "./message.js";
+import { readFileSync } from "node:fs";
+const wire = new Uint8Array(readFileSync(process.argv[2]!));
+const bad: string[] = [];
+const want = (label: string, v: unknown) => {
+  if (typeof v !== "bigint") bad.push(`${label}: ${typeof v}`);
+};
+// Surface 1: the one-shot pull decoder.
+const m = M64.decode(wire);
+want("u", m.u);
+want("i", m.i);
+m.us.forEach((v, k) => want(`us[${k}]`, v));
+m.is.forEach((v, k) => want(`is[${k}]`, v));
+// Surface 2: the streaming decoder, fed as one chunk. Same bytes, same fields —
+// it must land on the same runtime type, not merely the same JSON.
+const d = new M64Decoder();
+d.feed(wire);
+const t = d.finish();
+want("stream u", t.u);
+want("stream i", t.i);
+t.us.forEach((v, k) => want(`stream us[${k}]`, v));
+t.is.forEach((v, k) => want(`stream is[${k}]`, v));
+if (bad.length) {
+  process.stderr.write(`declared bigint, decoded as: ${bad.join(", ")}\n`);
+  process.exit(1);
+}
+TS
+# BOTH payloads: the full-range one catches the array elements (its scalars are
+# past 2^53 and come back bigint even from a broken build), the safe-integer one
+# catches the SCALAR position, which only misbehaves for a value the reader can
+# return as a number. Either alone leaves half the defect uncovered.
+for bin in "$WORK/i64_full_bigint.bin" "$WORK/i64_safe_bigint.bin"; do
+    ( cd "$WORK/i64-bigint" && npx tsx typecheck64.ts "$bin" ) \
+        || { echo "FAIL: int64: bigint decoded a non-bigint into a bigint field ($bin)"; exit 1; }
+done
 echo "==> int64 modes OK (bigint == long == number on the wire)"
 
 echo "==> corpus + realworld: every definition typechecks"

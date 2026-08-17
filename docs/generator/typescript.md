@@ -596,18 +596,67 @@ against protobufjs's 60 590 — from 0.84× to 1.07× on messages/second, and fr
 0.76× to 0.94× on MB/s (the MB/s column is measured on each side's own wire, so
 SofaBuffers' 12%-smaller message counts against it there).
 
+### A `bigint` field must hold a `bigint` (issue #340)
+
+The cursor readers are **number-first**: `readUnsigned` returns a `number` for
+anything up to 2^53-1 and a `bigint` only past that. The pull path used to bridge
+that with a bare cast — `c.readUnsigned() as bigint`,
+`c.readUnsignedArray(n) as bigint[]` — which converts nothing, so the declared
+type was false:
+
+```ts
+const m = Example.decode(wire);
+typeof m.u64          // "number"  — declared bigint
+m.u64 + 1n            // TypeError: Cannot mix BigInt and other types
+m.arrays.u64          // [0, 4611686018427387904n, …] — number AND bigint, same array
+```
+
+The array case is the worse of the two: the element type depends on the element's
+*value*, so one array holds both, which is a lie a consumer trips over
+(`arr.map((v) => v * 2n)`) **and** a mixed-type array that defeats the engine's
+element-kind specialisation — the cast was not even buying speed.
+
+What settles the intended semantics is that the *other two* paths into the same
+field were already right: the streaming visitor stores `BigInt(v)` and `fromJSON`
+maps `BigInt(...)`. So the same field had a different runtime type depending on
+which decode API the caller used, and the pull path was the odd one out. It now
+converts like the others:
+
+```ts
+o.u64 = BigInt(c.readUnsigned());
+o.u64 = c.readUnsignedArray(5).map((_e) => BigInt(_e));
+```
+
+`int64: long` / `number` are unaffected on the array side (they hand back uniform
+`Long` objects); their scalars are `bigint` and get the same conversion.
+
+**This costs, and the cost is the type.** A real `bigint[]` needs one `bigint`
+allocation per element — that is what the cast was avoiding by not producing one.
+Round trip on `FullScaleExample`: `bigint` 56 627 → 59 747 Ir/op (+5.5%), `long`
+56 400 → 57 391 (+1.8%, its two 64-bit scalars only), `number` unchanged. All
+three still clear protobufjs's 60 590, and a caller who wants the last of it has
+`int64: long`, which is now both correct and faster.
+
+Nothing above the runtime type changes: the wire is byte-identical and every
+existing conformance check passed before the fix, because they all compare wire
+bytes or `toJSON()` output and `String(1n) === String(1)`. That is exactly why
+`tests/conformance/typescript/run.sh` now asserts `typeof` directly, on **both**
+decode surfaces and against **both** the full-range and the safe-integer payload
+— the full-range one catches the array elements, the safe-integer one catches the
+scalar (a scalar past 2^53 came back `bigint` even from the broken build).
+
 ### All three `int64` modes, and both runtimes
 
 The `int64` axis (`bigint` | `long` | `number`, §Options) changes the 64-bit hot
 path, so the work above was re-measured across all three rather than only the
 arena's `long`. It holds uniformly, and every mode now clears protobufjs:
 
-| round trip, Ir/op | before | after |
-| - | - | - |
-| `bigint` (default) | 72 974 | **56 627** |
-| `long` (arena) | 73 124 | **56 400** |
-| `number` | 73 164 | **56 360** |
-| *protobufjs* | | *60 590* |
+| round trip, Ir/op | before | after | after + #340 fix |
+| - | - | - | - |
+| `bigint` (default) | 72 974 | 56 627 | **59 747** |
+| `long` (arena) | 73 124 | 56 400 | **57 391** |
+| `number` | 73 164 | 56 360 | **56 360** |
+| *protobufjs* | | | *60 590* |
 
 On **Node/V8** the three modes land within 0.5% of each other — the axis is
 nearly free here, contrary to what the option's description implies. That

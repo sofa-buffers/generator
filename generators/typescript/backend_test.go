@@ -294,7 +294,7 @@ func TestTSStructural(t *testing.T) {
 		// generator#175).
 		"MyfirstmessageSomestruct.decodeInto(c, o.somestruct); break;",
 		`while (c.readHeader()) { if ((c.wire as WireType) !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); continue; } if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(16); }`, // wrapper-element §7.3 wire guard (#189) + id-aware string-list, over-index + over-maxlen rejected (S2/S5.1/S7/S7.1, #142)
-		"o.someu64 = c.readUnsigned() as bigint; break;", // u64 -> bigint, number-first
+		"o.someu64 = BigInt(c.readUnsigned()); break;", // u64 -> bigint, number-first
 		// MESSAGE_SPEC §2: a struct/union FIELD opens lazily and closes with the
 		// dropping end, so an all-default nested object is omitted, not framed empty.
 		"    os.writeSequenceBeginLazy(20);\n    this.somestruct.serialize(os);\n    os.writeSequenceEnd();\n",
@@ -528,7 +528,7 @@ func TestTSInt64Long(t *testing.T) {
 		// Scalars stay bigint in long mode (no scalar Long codec in corelib yet).
 		"u: bigint = 0n;",
 		"i: bigint = -7n;",
-		"case 4: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.u = c.readUnsigned() as bigint; break;",
+		"case 4: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.u = BigInt(c.readUnsigned()); break;",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("int64: long message.ts missing %q", want)
@@ -961,7 +961,7 @@ func TestTSInt64Default(t *testing.T) {
 			"us: bigint[] = [];",
 			// ...and the value goes out whole, the wire count being its length.
 			"os.writeUnsignedArray(0, this.us);",
-			`case 0: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.us = c.readUnsignedArray(8) as bigint[]; break;`,
+			`case 0: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.us = c.readUnsignedArray(8).map((_e) => BigInt(_e)); break;`,
 			"u: bigint = 0n;",
 		} {
 			if !strings.Contains(mod, want) {
@@ -1631,7 +1631,7 @@ messages:
 	}
 	// 64-bit destinations keep the bare read (bigint-backed under the default
 	// int64 mode): their range is the reader's own, so there is nothing to bound.
-	for _, want := range []string{"o.d_u64 = c.readUnsigned() as bigint; break;", "o.h_i64 = c.readSigned() as bigint; break;"} {
+	for _, want := range []string{"o.d_u64 = BigInt(c.readUnsigned()); break;", "o.h_i64 = BigInt(c.readSigned()); break;"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.ts: a 64-bit destination must read unguarded (%q):\n%s", want, got)
 		}

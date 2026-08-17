@@ -50,9 +50,10 @@ func (g *gen) emitDecode(f *tsfile, name string, fields []*ir.Field) {
 // read a single value (number-first for u64/i64); nested messages recurse into
 // decodeFrom; native scalar arrays read the whole array in one call; composite
 // (string/blob/message/nested-array) arrays loop readHeader over their wrapper
-// sequence. The `as number[]`/`as bigint[]` casts bridge the reader's
-// number-first (number|bigint)[] to the field's declared element type; the
-// runtime values are byte-for-byte what the old visitor produced.
+// sequence. An `as number[]` cast bridges the reader's number-first
+// `(number | bigint)[]` to a narrow element type, where the declared width has
+// already proved every element is a number; a `bigint` destination CONVERTS
+// instead of casting — see nativeArrayRead and the 64-bit scalar arms.
 func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	// A Long-backed array decodes into the private backing field directly: the
 	// readers produce canonical Long[], so the setter's fromValue pass (and its
@@ -83,10 +84,23 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
 		}
 	case ir.KindU64:
+		// A `bigint` destination CONVERTS; it does not cast. The reader is
+		// number-first — `readUnsigned` returns a `number` for anything up to
+		// 2^53-1 and a `bigint` only past that — so `as bigint` was a type
+		// assertion over a value that is a `number` for every realistic 64-bit
+		// field, and the declared type was simply false: `msg.u64 + 1n` threw
+		// TypeError on a freshly decoded message (issue #340).
+		//
+		// The two other paths into this same field were already right — the
+		// streaming visitor stores `BigInt(v)` and `fromJSON` maps `BigInt(...)` —
+		// so the pull path was the odd one out, and the same field had a different
+		// runtime type depending on which decode API the caller used. This makes
+		// the three agree. `BigInt` of a `bigint` is that same value, so the
+		// conversion only allocates where the cast was lying.
 		if g.numberScalars() {
 			f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
 		} else {
-			f.line("      case %d: %s%s = c.readUnsigned() as bigint; break;", x.ID, guard, acc)
+			f.line("      case %d: %s%s = BigInt(c.readUnsigned()); break;", x.ID, guard, acc)
 		}
 	case ir.KindBool:
 		f.line("      case %d: %s%s = Boolean(c.readUnsigned()); break;", x.ID, guard, acc)
@@ -95,10 +109,11 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// Number() conversion dead work on every decode.
 		f.line("      case %d: { %sconst _v = c.readSigned(); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v as number; break; }", x.ID, guard, widthCond("_v", x.Kind), x.Name, x.Kind, acc)
 	case ir.KindI64:
+		// See KindU64: convert, do not cast (issue #340).
 		if g.numberScalars() {
 			f.line("      case %d: %s%s = Number(c.readSigned()); break;", x.ID, guard, acc)
 		} else {
-			f.line("      case %d: %s%s = c.readSigned() as bigint; break;", x.ID, guard, acc)
+			f.line("      case %d: %s%s = BigInt(c.readSigned()); break;", x.ID, guard, acc)
 		}
 	case ir.KindEnum:
 		f.line("      case %d: %s%s = Number(c.readSigned()) as %s; break;", x.ID, guard, acc, g.typeName(x.Ref.Key))
@@ -391,7 +406,7 @@ func (g *gen) tsElemWireGuardCond(elem ir.Kind, ref *ir.TypeRef, items *ir.Array
 }
 
 // nativeArrayRead returns the expression reading a whole native scalar array off
-// the cursor. u/i integer arrays read as number[] (u64/i64 as bigint[]); fp
+// the cursor. u/i integer arrays read as number[] (u64/i64 convert to bigint[]); fp
 // arrays have their own readers; bool arrays map to booleans and enum arrays cast
 // each element to the enum type — the two conversions the number-first readers do
 // not do inline (and that the reference decode patch's simpler schema never hit).
@@ -449,16 +464,25 @@ func elemArgs(elem ir.Kind, cnt string) string {
 
 func (g *gen) nativeArrayRead(elem ir.Kind, ref *ir.TypeRef, cnt string) string {
 	switch elem {
+	// Under `int64: bigint` a 64-bit array CONVERTS element by element; it does
+	// not cast. The reader is number-first per element, so `as bigint[]` produced
+	// a `bigint[]` that actually held a MIX of `number` and `bigint` — a small
+	// element came back a number, a large one a bigint, in the same array. That
+	// is a lie about the declared type (`arr.map((v) => v * 2n)` throws on the
+	// small elements), and a mixed-type array also defeats the engine's
+	// element-kind specialisation, so the cast was not even buying speed
+	// (issue #340). The `map` mirrors the bool and enum arms below, and the
+	// Long-backed modes are unaffected: they hand back uniform Long objects.
 	case ir.KindU64:
 		if g.longArrays() {
 			return "c.readUnsignedArrayLong(" + cnt + ")"
 		}
-		return "c.readUnsignedArray(" + cnt + ") as bigint[]"
+		return "c.readUnsignedArray(" + cnt + ").map((_e) => BigInt(_e))"
 	case ir.KindI64:
 		if g.longArrays() {
 			return "c.readSignedArrayLong(" + cnt + ")"
 		}
-		return "c.readSignedArray(" + cnt + ") as bigint[]"
+		return "c.readSignedArray(" + cnt + ").map((_e) => BigInt(_e))"
 	case ir.KindI8, ir.KindI16, ir.KindI32:
 		return "c.readSignedArray(" + elemArgs(elem, cnt) + ") as number[]"
 	case ir.KindFP32:
