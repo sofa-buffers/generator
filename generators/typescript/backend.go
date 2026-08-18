@@ -28,6 +28,15 @@ const corelibPkg = "@sofa-buffers/corelib"
 // package.json + tsconfig.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), i64rep: cfgInt64Mode(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
+	// The push decoder's Long channel, decided once for the whole module: a nested
+	// scope is driven on the ROOT visitor's channel whatever its own flag says
+	// (corelib-ts#146), and a struct's visitor class is shared by every message
+	// that embeds it — so this cannot be a per-message choice. See streamLongs for
+	// the trade, and longsThreshold for where the line sits and why.
+	if g.longScalars() {
+		big, narrow := intPositions(s)
+		g.longs = big > 0 && narrow <= longsThreshold*big
+	}
 	files := []generator.File{{Path: "message.ts", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -45,6 +54,9 @@ type gen struct {
 	banner  string
 	license string    // SPDX id, "" to omit the header line
 	i64rep  int64Mode // 64-bit representation (config key `int64`)
+	// longs: the generated visitors take corelib-ts's opt-in Long channel on the
+	// push decoders. Schema-wide, decided in Generate — see streamLongs.
+	longs bool
 	limits  limitSet  // receiver-side decode limits (generator#102)
 	// size is the max_message_size policy; sizeErr carries a violation out of
 	// the emit path, which has no error channel of its own.
@@ -158,6 +170,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	if use.long {
 		imports = append(imports, "Long")
+	}
+	if g.streamLongs() {
+		// The opt-in Long channel's visitor shape (corelib-ts#146): Visitor<Long>
+		// plus `longs: true`. Named only when the generated visitors take it.
+		imports = append(imports, "LongVisitor")
 	}
 	if use.countedArr || use.overIdxArr || use.maxlenField || use.narrowInt {
 		// The over-count scalar-array reject (generator#100), the over-index

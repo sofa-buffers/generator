@@ -493,7 +493,7 @@ func genTSWith(t *testing.T, src string, cfg map[string]any) string {
 func TestTSInt64Long(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "long"})
 	for _, want := range []string{
-		`import { OStream, Cursor, WireType, Long, SofabError, SofabErrorCode, Visitor, IStream, DecodeStatus, ArrayKind } from "@sofa-buffers/corelib";`,
+		`import { OStream, Cursor, WireType, Long, LongVisitor, SofabError, SofabErrorCode, Visitor, IStream, DecodeStatus, ArrayKind } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once. `count: 8` is a
 		// CAPACITY, not a length (§3), so a fresh us is the EMPTY array — not 8
 		// Long zeros.
@@ -544,10 +544,18 @@ func TestTSInt64Long(t *testing.T) {
 		// so no bigint is materialised on the hot path in either direction.
 		"case 4: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o._u = c.readUnsignedLong(); break;",
 		"case 5: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o._i = c.readSignedLong(); break;",
-		// The streaming visitor's hooks stay number-first, so its arm stores through
-		// the SETTER and the field is a Long there too — one runtime type per field,
-		// whichever decode API filled it (#335).
+		// This schema is all-64-bit, so it also takes corelib-ts's opt-in Long
+		// channel on the push decoders (#344): the visitor declares the flag, its
+		// integer hooks are typed Long, and a 64-bit arm stores the value with no
+		// conversion at all — one runtime type per field on either decode API
+		// (#335), now reached without paying for it on either.
+		"class _MVis implements LongVisitor {",
+		"readonly longs: true = true;",
+		"unsigned(id: number, v: Long): void {",
+		"signed(id: number, v: Long): void {",
+		"arrayUnsigned(id: number, i: number, v: Long): void {",
 		"case 4: this.o.u = v; break;",
+		"const _DEAD: LongVisitor = { longs: true, sequenceBegin(): LongVisitor { return _DEAD; } };",
 		// JSON keeps the decimal-string form, with the schema's signedness.
 		`"u": this._u.toString(false),`,
 		`"i": this._i.toString(true),`,
@@ -570,6 +578,114 @@ func TestTSInt64Long(t *testing.T) {
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("int64: long message.ts should not emit %q", gone)
+		}
+	}
+}
+
+// The Long channel is a TRADE, so the backend takes it only where the schema says
+// it pays: every integer value on the push path becomes a Long, which a 64-bit
+// destination wants and a narrow one does not (generator#344, corelib-ts#146).
+// Measured break-even and the threshold: see longsThreshold.
+func TestTSLongsChannelOnlyWhenItPays(t *testing.T) {
+	// Narrow-heavy: four 64-bit positions would have to carry nine narrow ones.
+	narrow := `
+version: 1
+messages:
+  m:
+    payload:
+      u:  { id: 0, type: u64 }
+      a:  { id: 1, type: array, items: { type: u64, count: 4 } }
+      n0: { id: 2, type: u8 }
+      n1: { id: 3, type: u16 }
+      n2: { id: 4, type: u32 }
+      n3: { id: 5, type: i8 }
+      n4: { id: 6, type: i16 }
+      n5: { id: 7, type: i32 }
+      n6: { id: 8, type: boolean }
+      n7: { id: 9, type: u8 }
+      n8: { id: 10, type: u16 }
+`
+	mod := genTSWith(t, narrow, map[string]any{"int64": "long"})
+	for _, gone := range []string{"longs: true", "LongVisitor", "function _u(", "function _i("} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("narrow-heavy schema should stay off the Long channel, but emits %q", gone)
+		}
+	}
+	// ...and the number-first arms are the ones a module off the channel has
+	// always had, unchanged.
+	for _, want := range []string{
+		"unsigned(id: number, v: number | bigint): void {",
+		"case 0: this.o.u = v; break;",
+		"case 2: { const _v = Number(v); if (_v > 255) throw",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("off the Long channel, message.ts missing %q", want)
+		}
+	}
+
+	// The same schema with the narrow fields removed is over the line, and the
+	// narrow one that remains narrows back through the emitted helper — with the
+	// declared-width reject untouched, which is the whole risk of the channel.
+	pays := `
+version: 1
+messages:
+  m:
+    payload:
+      u:  { id: 0, type: u64 }
+      a:  { id: 1, type: array, items: { type: u64, count: 4 } }
+      n0: { id: 2, type: u8 }
+      n1: { id: 3, type: i8 }
+      n2: { id: 4, type: boolean }
+`
+	mod = genTSWith(t, pays, map[string]any{"int64": "long"})
+	for _, want := range []string{
+		"readonly longs: true = true;",
+		"function _u(v: Long): number {",
+		"function _i(v: Long): number {",
+		"case 0: this.o.u = v; break;",
+		`case 2: { const _v = _u(v); if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "n0: value outside declared width u8"); this.o.n0 = _v; break; }`,
+		`case 3: { const _v = _i(v); if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "n1: value outside declared width i8"); this.o.n1 = _v; break; }`,
+		// Boolean(Long) is TRUE for the 64-bit zero — the conversion has to read
+		// the halves.
+		"case 4: this.o.n2 = (v.low | v.high) !== 0; break;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("on the Long channel, message.ts missing %q", want)
+		}
+	}
+	if strings.Contains(mod, "Boolean(v)") {
+		t.Error("on the Long channel, Boolean(v) is true for the 64-bit zero")
+	}
+	// The accessor setters still convert (that is their job); what must be gone is
+	// the conversion in a VISITOR arm — the value arrives as the Long already.
+	if strings.Contains(mod, "= Long.fromValue(v); break;") {
+		t.Error("on the Long channel, a hook value needs no conversion in the visitor arm")
+	}
+}
+
+// The chunked decode surface needs its own bench workload: `decode_*` is the
+// whole-buffer pull cursor, so a change confined to the push path — the Long
+// channel is exactly one — does not show up there at all (generator#344).
+func TestTSBenchStreamWorkload(t *testing.T) {
+	files, err := (&Backend{}).Generate(schema(t, int64Def), map[string]any{"int64": "long", "emit": "project"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var harness string
+	for _, f := range files {
+		if f.Path == "harness.ts" {
+			harness = string(f.Content)
+		}
+	}
+	if harness == "" {
+		t.Fatal("no harness.ts")
+	}
+	for _, want := range []string{
+		`if (w === "stream_m") {`,
+		"const _d = new M.MDecoder(); _d.feed(wire);",
+	} {
+		if !strings.Contains(harness, want) {
+			t.Errorf("harness.ts missing %q", want)
 		}
 	}
 }

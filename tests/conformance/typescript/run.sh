@@ -47,6 +47,14 @@ YAML
 # generated with the default (bigint) and the mode comparison is vacuous.
 gen() { ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang typescript --in "$1" --out "$2" ); }
 
+# Instantiate the differential decode harness into a generated project. Defined
+# here rather than beside its first heavy use: the int64 legs above the streaming
+# section reach for it too.
+mk_stream_check() { # mk_stream_check <projdir> <import-line> <body>
+    sed -e "s|//SOFAB_IMPORT|$2|" -e "s|//SOFAB_BODY|$3|" \
+        "$ROOT/tests/conformance/typescript/stream_check.ts" > "$1/stream_check.ts"
+}
+
 echo "==> generating example + conformance projects"
 gen "$ROOT/examples/messages/example.yaml" "$WORK/ex"
 gen "$WORK/conf.yaml" "$WORK/conf"
@@ -405,6 +413,14 @@ messages:
       # through a nested class's own serialize/decodeFrom, and (under the Long
       # modes) through that class's private backing field.
       n:  { id: 5, type: struct, fields: { nu: { id: 0, type: u64 }, ni: { id: 1, type: i64, default: -7 } } }
+      # Two NARROW destinations in an otherwise 64-bit message. Under `int64: long`
+      # this schema is over the line for corelib-ts's opt-in Long channel
+      # (generator#344), where every integer — these two included — arrives as a
+      # Long and has to be narrowed back. Their declared-width verdict is the thing
+      # that can break there, so the leg below feeds them values that only the
+      # HIGH half carries.
+      w:  { id: 6, type: u8 }
+      sw: { id: 7, type: i8 }
 YAML
 for mode in bigint long number; do
     cat > "$WORK/cfg_$mode.yaml" <<YAML
@@ -553,6 +569,36 @@ for bin in "$WORK/i64_full_bigint.bin" "$WORK/i64_safe_bigint.bin"; do
     ( cd "$WORK/i64-long" && npx tsx typecheck64.ts "$bin" ) \
         || { echo "FAIL: int64: long decoded a non-Long into a Long field ($bin)"; exit 1; }
 done
+# The Long channel's one real risk (generator#344, corelib-ts#146). With
+# `Visitor.longs` the corelib delivers EVERY integer as a Long — the flag is read
+# once from the root and is not per field — so a narrow destination narrows back
+# in generated code. Take the low half alone and a value of 2^32 lands in a u8 as
+# ZERO: not merely a wrong number, but an INVALID message (§7.1) silently
+# accepted. The emitted _u/_i helpers therefore fall back to the full value
+# whenever the high half is not the low one's sign extension, and this is what
+# proves it — on BOTH decode surfaces, at six chunk sizes, through the same
+# differential harness the other reject legs use.
+echo "==> int64: long — the Long channel must not mask an over-width value"
+mk_stream_check "$WORK/i64-long" \
+    'import { M64, M64Decoder } from "./message.js";' \
+    'checkReject("u8 <- 2^32 (high half only)", new Uint8Array([0x30, 0x80, 0x80, 0x80, 0x80, 0x10]), M64.decode, () => new M64Decoder());'
+( cd "$WORK/i64-long" && npx tsx stream_check.ts )
+mk_stream_check "$WORK/i64-long" \
+    'import { M64, M64Decoder } from "./message.js";' \
+    'checkReject("u8 <- 256", new Uint8Array([0x30, 0x80, 0x02]), M64.decode, () => new M64Decoder());'
+( cd "$WORK/i64-long" && npx tsx stream_check.ts )
+mk_stream_check "$WORK/i64-long" \
+    'import { M64, M64Decoder } from "./message.js";' \
+    'checkReject("i8 <- -2^32 (sign extension only)", new Uint8Array([0x39, 0xff, 0xff, 0xff, 0xff, 0x1f]), M64.decode, () => new M64Decoder());'
+( cd "$WORK/i64-long" && npx tsx stream_check.ts )
+# ...and the in-range control still decodes to the exact value, so the reject is
+# a bound and not a blanket.
+printf '\060\377\001' > "$WORK/w_long_u8_255.bin"
+OUT=$( (cd "$WORK/i64-long" && npx tsx harness.ts decode m64) < "$WORK/w_long_u8_255.bin" ) \
+    || { echo "FAIL: in-range control 255 must decode on the Long channel"; exit 1; }
+echo "$OUT" | tr -d " " | grep -q '"w":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
+echo "==> Long-channel narrowing OK (over-width rejected, in-range exact)"
+
 echo "==> int64 modes OK (bigint == long == number on the wire)"
 
 echo "==> corpus + realworld: every definition typechecks"
@@ -610,10 +656,6 @@ echo "==> nested wrapper rows OK"
 # included -- and requires deeply equal values. Run over the shared example (every
 # field shape) and over nested_rows (the wrapper-row collectors, depth 3).
 echo "==> streaming: decode() and feed() must agree"
-mk_stream_check() { # mk_stream_check <projdir> <import-line> <body>
-    sed -e "s|//SOFAB_IMPORT|$2|" -e "s|//SOFAB_BODY|$3|" \
-        "$ROOT/tests/conformance/typescript/stream_check.ts" > "$1/stream_check.ts"
-}
 mk_stream_check "$WORK/ex" \
     'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
     'const _m = Myfirstmessage.fromJSON(JSON.parse(process.argv[2])); check("example", _m, Myfirstmessage.decode, () => new MyfirstmessageDecoder());'

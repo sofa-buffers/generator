@@ -111,6 +111,61 @@ direction. Caveats:
   common) zero, `Long.fromValue(<lit>n)` otherwise. `Long.ZERO` is shared and
   immutable — a zero default costs no `bigint` arithmetic per constructed object.
 
+#### The push decoder's Long channel
+
+The two decode surfaces reach a 64-bit field by different routes. The pull cursor
+takes the corelib's `read{Unsigned,Signed}Long` and is done. The push visitor's
+hooks are **number-first** by default, so the generated arm converts —
+`Long.fromValue(v)`, which for anything a `number` can hold goes through
+`BigInt(...)`, i.e. a bigint allocated per value on the one path these modes
+exist to keep bigint-free.
+
+corelib-ts's opt-in `Visitor.longs` channel removes that: with the flag, the four
+integer hooks deliver a `Long` on both `decode()` and `IStream`. This backend
+takes it — `readonly longs: true = true` on every generated visitor — but **only
+where the schema says it pays**, because the flag is read once from the root and
+covers every integer field and element in the message:
+
+- a 64-bit position saves its whole conversion;
+- a **narrow** position pays for it, since the corelib now allocates a `Long`
+  where a plain `number` used to arrive. It narrows back through two emitted
+  helpers, `_u` / `_i`, which return exactly what `Number(v)` returned on the
+  number-first channel — so no declared-width verdict depends on the channel.
+
+Measured on chunked decode of one message (Ir/op, subtract method under
+Callgrind, baseline-tier node as in `tests/bench`; the two projects differ in
+nothing but the flag):
+
+| 64-bit positions | narrow positions | Long channel |
+|--:|--:|--:|
+| 4 | 0 | **−29.6%** |
+| 4 | 4 | **−20.3%** |
+| 4 | 8 | **−15.8%** |
+| 4 | 14 (`vehicle_telemetry`) | +1.5% |
+
+Hence the rule: take the channel when a schema carries at most `longsThreshold`
+(= 2) narrow integer positions per 64-bit one. It is deliberately conservative —
+an array position counts once here whatever its runtime length, because a static
+count cannot know that length and a declared `count` is a capacity, not a
+promise.
+
+Three things the channel would break if it were applied naively, all pinned by
+`tests/conformance/typescript/run.sh`:
+
+- **`Boolean(v)` is wrong.** A `Long` is an object, so `Boolean(Long)` is `true`
+  for the 64-bit zero. The conversion reads the halves.
+- **`v.low` alone is wrong for a narrow destination.** A `u8` fed 2^32 would take
+  the low half and store **zero** — an INVALID message (§7.1) silently accepted,
+  not merely a wrong number. `_u`/`_i` fall back to the full value whenever the
+  high half is not the low one's sign extension; the conformance leg feeds
+  exactly that wire (and its signed twin, −2^32 into an `i8`) through both
+  surfaces at six chunk sizes.
+- **A native matrix row's converter is called from the fp hooks too**, which stay
+  `number` on both channels, so it narrows with a `typeof` rather than a cast.
+
+The `int64` axis alone decides this: `bigint` and `number` scalars would have to
+convert either way, so both stay on the number-first channel.
+
 Scalars became `Long` in [#339](https://github.com/sofa-buffers/generator/issues/339),
 once corelib-ts grew the scalar codecs
 ([corelib-ts#143](https://github.com/sofa-buffers/corelib-ts/issues/143)); before
@@ -476,6 +531,12 @@ the **subtract** method. Tracked: Ir/op.
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
 
+The emitted harness also carries a **`stream_<msg>`** workload — the chunked
+decode surface, which `decode_*` (the whole-buffer pull cursor) does not touch at
+all, so a change confined to the push path is invisible without it. No
+`results.txt` row uses it yet; it is what the Long-channel numbers above were
+measured with.
+
 Long scalars (#339) moved the `ts-long` row's **encode** by −0.67% (603 385 →
 599 322 Ir/op, `--rows ts-bigint,ts-long` against corelib-ts's scalar-`Long`
 branch): the two 64-bit scalars of `vehicle_telemetry` no longer split a `bigint`
@@ -665,7 +726,10 @@ o.u64 = c.readUnsignedArray(5).map((_e) => BigInt(_e));
 `int64: long` / `number` are unaffected on the array side (they hand back uniform
 `Long` objects). Their scalars took the same conversion at the time; `long` has
 since moved its scalars onto `Long` as well (#339), which removes the conversion
-rather than paying it, and `number` converts with `Number()`.
+rather than paying it, and `number` converts with `Number()`. On the push path
+the same field may now come off the Long channel instead (#344, above) — a
+different route to the identical runtime type, which is the invariant that
+matters.
 
 **This costs, and the cost is the type.** A real `bigint[]` needs one `bigint`
 allocation per element — that is what the cast was avoiding by not producing one.
