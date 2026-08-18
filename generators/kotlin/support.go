@@ -8,13 +8,19 @@ import (
 // sbufSupport emits Sbuf.kt: the small schema-driven support the generated
 // message classes share.
 //
-// It is generated code rather than corelib API on purpose (ARCHITECTURE §8):
-// everything here implements a rule the SCHEMA decides and the corelib cannot
-// see -- placing a wrapper element at the index its id names, growing a native
-// array against a declared capacity rather than an untrusted wire count,
-// reassembling a payload that straddled a chunk. None of it touches wire bytes;
-// it only calls or feeds the corelib's typed API. It is emitted once per package
-// and stays deliberately small: this is not a second runtime.
+// It is generated code TODAY, and should not stay that way. Everything here is
+// static under ARCHITECTURE §8: placing a wrapper element at the index its id
+// names, growing a native array against a declared capacity rather than an
+// untrusted wire count, reassembling a payload that straddled a chunk -- each
+// has the same shape for every schema, and takes its schema dependence (the
+// capacity, the index, the length) as an argument. That is the test §8 applies,
+// and it puts all of this in corelib-kotlin-mp; see generator#345 for the move
+// and the names it lands under.
+//
+// Until then it only calls or feeds the corelib's typed API and never touches
+// wire bytes, and it is emitted once per package. Note what it does NOT do: the
+// three loops below run over every primitive base type regardless of what the
+// schema uses, so a schema with one u32 array still gets all 36 members.
 func (g *gen) sbufSupport() []byte {
 	f := &kfile{}
 	g.header(f)
