@@ -51,8 +51,15 @@ callgrind toggle, `-O3 -g -DNDEBUG`, wire byte-identical in both modes):
 
 | `corelib: cpp` | encode Ir/op | decode Ir/op | `sizeof` |
 |---|--:|--:|--:|
-| `allow_dynamic: true` | 13672 | 31043 | 672 B |
-| `allow_dynamic: false` | 12943 (−5.3 %) | **22014 (−29.1 %)** | 1360 B |
+| `allow_dynamic: true` | 13471 | 30569 | 720 B |
+| `allow_dynamic: false` | 13124 (−2.6 %) | **24271 (−20.6 %)** | 1424 B |
+
+The Ir columns are the `cpp-cpp` and `cpp-cpp-static` rows of
+`tests/bench/results.txt`, so they move with it; `sizeof` is measured separately
+(it is not a bench metric). Both were re-taken when the schema gained its two
+64-bit arrays (generator#336), which is also why they are lower than the figures
+this table carried before: the added fields are arrays, so they enlarge the
+message on both sides and dilute the ratio the table is about.
 
 The gain is the eliminated heap-container work and is therefore schema-shaped:
 count the arrays, blobs, and strings with `maxlen >= 16` (below that,
@@ -428,7 +435,10 @@ readArray's fixed-extent branch, which set the length to 0 and dropped the array
 **Cost.** On the `maxspeed` profile this replaces an inline `std::array` member
 with a heap `std::vector`, and that is not free: on the
 `examples/messages/realworld/vehicle_telemetry.yaml` bench row (`cpp-cpp`) it is
-**+5.5% encode and +21.7% decode** Ir/op. It is paid because there is no
+**+5.5% encode and +21.7% decode** Ir/op. (That delta is the before/after of the
+change itself, taken on the schema as it stood then — before generator#336 added
+the two 64-bit arrays — so it is a record of what the change cost, not a figure
+the current rows reproduce.) It is paid because there is no
 alternative that keeps the wire honest: `sofab::InlineVector` lives in
 corelib-c-cpp only, corelib-cpp ships no length-carrying inline container, and
 generated headers deliberately define no containers of their own. The heap-free
