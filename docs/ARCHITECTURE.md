@@ -1778,12 +1778,12 @@ the generator carries responsibility:
   is lossy) — invalid bytes throw the same `INVALID_MSG` channel as the over-count
   guards. No config key is threaded into generated code.
 - **Codegen-materialized byte-container target (Zig)** — the borrowed `[]const u8`
-  slice is zero-copy, so the corelib exposes a `utf8_valid(bytes)` primitive and the
-  generator emits an **unconditional** call at the materialization site (`!sofab
-  .utf8_valid(chunk) → self.inv`); the `SOFAB_STRICT_UTF8` gate lives inside the
-  primitive (folds to `true` when compiled off), so generated code is identical
-  across build configs and flipping the flag never regenerates it. `blob` elements
-  are stored verbatim — the wrap is emitted only for `string`.
+  slice is zero-copy, so the corelib exposes a `utf8Valid(bytes)` primitive and the
+  generator emits an **unconditional** call at the materialization site
+  (`!sofab.utf8Valid(chunk) → self.inv`); the `SOFAB_STRICT_UTF8` gate lives
+  inside the primitive (folds to `true` when compiled off), so generated code is
+  identical across build configs and flipping the flag never regenerates it.
+  `blob` elements are stored verbatim — the wrap is emitted only for `string`.
 - **Corelib-materialized targets (c, cpp, py, ts)** build the string inside the
   corelib, so the check is corelib-internal; the generator emits no UTF-8 code for
   them. (`go` and `dart` were in this group until the skip-placement work moved
