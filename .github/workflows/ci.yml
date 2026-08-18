@@ -246,7 +246,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - uses: ./.github/actions/corelib-refs
       - name: Kotlin backend — generate, build, round-trip, conformance
         run: ./tests/conformance/kotlin/run.sh
