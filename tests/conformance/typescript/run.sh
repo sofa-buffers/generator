@@ -421,6 +421,10 @@ messages:
       # HIGH half carries.
       w:  { id: 6, type: u8 }
       sw: { id: 7, type: i8 }
+      # A native matrix of 64-bit rows — the _MatSeq collector, whose element
+      # converter is shared with the fp32/fp64 hooks and therefore narrows
+      # differently from every other arm on the Long channel (generator#344).
+      rows: { id: 8, type: array, items: { type: array, count: 3, items: { type: u64, count: 3 } } }
 YAML
 for mode in bigint long number; do
     cat > "$WORK/cfg_$mode.yaml" <<YAML
@@ -435,12 +439,12 @@ done
 enc64() { ( cd "$WORK/i64-$1" && printf '%s' "$2" | npx tsx harness.ts encode m64 ); }
 # Full 64-bit range (scalars beyond 2^53): bigint vs long. ud == its schema
 # default exercises the longArrEq omission guard.
-I64FULL='{"us":["1","18446744073709551615","4294967296"],"is":["-1","-9223372036854775808","9223372036854775807"],"ud":["1","18446744073709551615"],"u":"18446744073709551615","i":"-9223372036854775808","n":{"nu":"18446744073709551615","ni":"-9223372036854775808"}}'
+I64FULL='{"us":["1","18446744073709551615","4294967296"],"is":["-1","-9223372036854775808","9223372036854775807"],"ud":["1","18446744073709551615"],"u":"18446744073709551615","i":"-9223372036854775808","n":{"nu":"18446744073709551615","ni":"-9223372036854775808"},"rows":[["1","18446744073709551615"],["0","4294967296"]]}'
 enc64 bigint "$I64FULL" > "$WORK/i64_full_bigint.bin"
 enc64 long   "$I64FULL" > "$WORK/i64_full_long.bin"
 cmp -s "$WORK/i64_full_bigint.bin" "$WORK/i64_full_long.bin" || { echo "FAIL: int64: long wire drift"; exit 1; }
 # Safe-integer scalars (fit 2^53): bigint vs number.
-I64SAFE='{"us":["1","18446744073709551615"],"is":["-9223372036854775808"],"ud":["5","6"],"u":"9007199254740991","i":"-9007199254740991","n":{"nu":"42","ni":"-42"}}'
+I64SAFE='{"us":["1","18446744073709551615"],"is":["-9223372036854775808"],"ud":["5","6"],"u":"9007199254740991","i":"-9007199254740991","n":{"nu":"42","ni":"-42"},"rows":[["7","8"],["9"]]}'
 enc64 bigint "$I64SAFE" > "$WORK/i64_safe_bigint.bin"
 enc64 number "$I64SAFE" > "$WORK/i64_safe_number.bin"
 cmp -s "$WORK/i64_safe_bigint.bin" "$WORK/i64_safe_number.bin" || { echo "FAIL: int64: number wire drift"; exit 1; }
@@ -481,6 +485,7 @@ want("n.nu", m.n.nu);
 want("n.ni", m.n.ni);
 m.us.forEach((v, k) => want(`us[${k}]`, v));
 m.is.forEach((v, k) => want(`is[${k}]`, v));
+m.rows.forEach((r, j) => r.forEach((v, k) => want(`rows[${j}][${k}]`, v)));
 // Surface 2: the streaming decoder, fed as one chunk. Same bytes, same fields —
 // it must land on the same runtime type, not merely the same JSON.
 const d = new M64Decoder();
@@ -492,6 +497,7 @@ want("stream n.nu", t.n.nu);
 want("stream n.ni", t.n.ni);
 t.us.forEach((v, k) => want(`stream us[${k}]`, v));
 t.is.forEach((v, k) => want(`stream is[${k}]`, v));
+t.rows.forEach((r, j) => r.forEach((v, k) => want(`stream rows[${j}][${k}]`, v)));
 if (bad.length) {
   process.stderr.write(`declared bigint, decoded as: ${bad.join(", ")}\n`);
   process.exit(1);
@@ -532,6 +538,9 @@ want("n.nu", m.n.nu);
 want("n.ni", m.n.ni);
 m.us.forEach((v, k) => want(`us[${k}]`, v));
 m.is.forEach((v, k) => want(`is[${k}]`, v));
+// A native matrix row goes through the _MatSeq collector, the one converter the
+// fp hooks share — so it narrows differently on the Long channel (#344).
+m.rows.forEach((r, j) => r.forEach((v, k) => want(`rows[${j}][${k}]`, v)));
 // Surface 2: the streaming decoder. Its visitor hooks are number-first, so the
 // generated arm converts through the field's setter — same field, same runtime
 // type, whichever decode API produced it (the invariant of generator#335).
@@ -544,6 +553,7 @@ want("stream n.nu", t.n.nu);
 want("stream n.ni", t.n.ni);
 t.us.forEach((v, k) => want(`stream us[${k}]`, v));
 t.is.forEach((v, k) => want(`stream is[${k}]`, v));
+t.rows.forEach((r, j) => r.forEach((v, k) => want(`stream rows[${j}][${k}]`, v)));
 // A default-valued field is a Long as well: the declared default is materialised
 // at construction, and an absent field decodes back to it.
 want("fresh u", new M64().u);
