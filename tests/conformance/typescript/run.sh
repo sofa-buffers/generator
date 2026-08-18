@@ -676,6 +676,21 @@ mk_stream_check "$WORK/corpus/nested_rows" \
     'const _m = NestedRows.fromJSON(JSON.parse(process.argv[2])); check("nested_rows", _m, NestedRows.decode, () => new NestedRowsDecoder());'
 ( cd "$WORK/corpus/nested_rows" && npx tsx stream_check.ts "$NR" )
 
+# ...and a NESTED row's element width is a validity bound too (S7.1), on both
+# paths. The differential above only carries in-range values, which is how
+# generator#352 stayed invisible: the pull path passed the bound into
+# readUnsignedArray while the push collector stored whatever arrived, so these
+# bytes were INVALID through decode() and COMPLETE through feed(), leaving a
+# number[][] holding a value one past its declared u32.
+#   26              numrows (id 4), sequence start
+#   03 01           row 0: id 0, wire ArrayUnsigned, count 1
+#   80 80 80 80 10  element 0 = 2^32 -- one past u32
+#   07              sequence end
+mk_stream_check "$WORK/corpus/nested_rows" \
+    'import { NestedRows, NestedRowsDecoder } from "./message.js";' \
+    'checkReject("nested row element over u32", new Uint8Array([0x26, 0x03, 0x01, 0x80, 0x80, 0x80, 0x80, 0x10, 0x07]), NestedRows.decode, () => new NestedRowsDecoder());'
+( cd "$WORK/corpus/nested_rows" && npx tsx stream_check.ts )
+
 # The two paths must also REJECT alike. Values only cover messages that decode;
 # a rejection additionally has an exception TYPE, and the paths reach it through
 # different code -- the cursor decodes strings inside the corelib, the visitor
