@@ -36,7 +36,6 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	}
 	dir := "src/main/kotlin/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
 	var files []generator.File
-	files = append(files, generator.File{Path: dir + "Sbuf.kt", Content: g.sbufSupport()})
 	// Every named type gets its OWN file. Kotlin would allow several public
 	// declarations per file, but a type reached from two messages must be
 	// emitted ONCE or the package does not compile, and one-file-per-type is the
@@ -57,7 +56,18 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if g.sizeErr != nil {
 		return nil, g.sizeErr
 	}
-	return files, nil
+	// Sbuf.kt is built LAST and prepended: it emits only the members the rest of
+	// this package actually names, so it has to see them first. Prepending keeps
+	// it at the head of the file list, where a reader expects the shared support.
+	var refs strings.Builder
+	for _, f := range files {
+		refs.Write(f.Content)
+	}
+	sbuf := g.sbufSupport(refs.String())
+	if sbuf == nil {
+		return files, nil
+	}
+	return append([]generator.File{{Path: dir + "Sbuf.kt", Content: sbuf}}, files...), nil
 }
 
 type gen struct {

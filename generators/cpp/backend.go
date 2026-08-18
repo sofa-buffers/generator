@@ -297,10 +297,45 @@ func (g *gen) header(m *ir.Message) []byte {
 // string/blob/struct/union/nested-array array, which lowers to a sequence whose
 // child ids are the element indexes. Only such a header needs the sofabgen::
 // helper block; a schema of scalars and native arrays never names it.
+// usesWrapperSeq reports whether an array with this element kind is READ through
+// sofabgen::WrapperSeq, which is the only thing the helper block is for.
+//
+// It is not "every non-native element": a `string` or `blob` element is collected
+// by the corelib's own sofab::StringSeq / sofab::BlobSeq (and their Fixed twins on
+// the C wrapper), and a row that is ITSELF a wrapper sequence gets a local
+// collector emitted beside it by deserializeRowSeq. Both were counted before, so
+// a schema whose only wrapper arrays are strings and blobs -- the common case --
+// carried 66 lines of template that nothing instantiated.
+//
+// What is left is exactly the two paths that reach deserializeSeqInto:
+//
+//   - a struct/union element, placed at the index its id names;
+//   - a row of native scalars, i.e. a matrix, where WrapperSeq places the row and
+//     hands it to is.read()'s span overload.
+//
+// The recursion matters for the second kind: array<array<struct>> emits a local
+// row collector, and INSIDE it the struct elements go to deserializeSeqInto after
+// all -- so a nested row still needs the block, one level down.
+func usesWrapperSeq(elem ir.Kind, items *ir.ArrayElem) bool {
+	switch elem {
+	case ir.KindStruct, ir.KindUnion:
+		return true
+	case ir.KindArray:
+		if items == nil {
+			return false
+		}
+		if isNativeArrayElem(items.Elem) {
+			return true
+		}
+		return usesWrapperSeq(items.Elem, items.ElemItems)
+	}
+	return false
+}
+
 func (g *gen) needsSeqHelpers(m *ir.Message) bool {
 	has := func(fields []*ir.Field) bool {
 		for _, fld := range fields {
-			if fld.Kind == ir.KindArray && !isNativeArrayElem(fld.Elem) {
+			if fld.Kind == ir.KindArray && usesWrapperSeq(fld.Elem, fld.ElemItems) {
 				return true
 			}
 		}
