@@ -56,8 +56,8 @@ type gen struct {
 	i64rep  int64Mode // 64-bit representation (config key `int64`)
 	// longs: the generated visitors take corelib-ts's opt-in Long channel on the
 	// push decoders. Schema-wide, decided in Generate — see streamLongs.
-	longs bool
-	limits  limitSet  // receiver-side decode limits (generator#102)
+	longs  bool
+	limits limitSet // receiver-side decode limits (generator#102)
 	// size is the max_message_size policy; sizeErr carries a violation out of
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
