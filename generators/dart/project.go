@@ -192,7 +192,7 @@ func (g *gen) arrayElemToJSON(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem
 func (g *gen) jsonFrom(fld *ir.Field, jx string) string {
 	switch fld.Kind {
 	case ir.KindU64:
-		return u64FromJSON(jx)
+		return u64FromJSON(jx, false)
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum, ir.KindBitfield:
 		return fmt.Sprintf("(%s as num).toInt()", jx)
 	case ir.KindFP32, ir.KindFP64:
@@ -214,8 +214,9 @@ func (g *gen) jsonFrom(fld *ir.Field, jx string) string {
 
 func (g *gen) arrayElemFromJSON(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, jx string) string {
 	switch elem {
+	// jx is the comprehension's own local (`_x` / `_y`), which promotes.
 	case ir.KindU64:
-		return u64FromJSON(jx)
+		return u64FromJSON(jx, true)
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum, ir.KindBitfield:
 		return fmt.Sprintf("(%s as num).toInt()", jx)
 	case ir.KindFP32, ir.KindFP64:
@@ -241,7 +242,11 @@ func u64ToJSON(acc string) string {
 	return fmt.Sprintf("BigInt.from(%s).toUnsigned(64).toString()", acc)
 }
 
-func u64FromJSON(jx string) string {
+// promotable says whether `jx` is an expression Dart's flow analysis narrows
+// inside the `is String` arm below. A local variable is (the `_x` of an array
+// comprehension); a map index expression like `j['odometer_m']` is not, because
+// a second read could return something else.
+func u64FromJSON(jx string, promotable bool) string {
 	// toSigned(64) yields a BigInt that fits Dart's signed 64-bit int exactly, so
 	// toInt() is lossless (unlike a plain toInt() which clamps).
 	//
@@ -252,7 +257,18 @@ func u64FromJSON(jx string) string {
 	// other backend's harness reads them that way. Insisting on the string made
 	// the dart row of tests/bench unmeasurable: the shared payload writes
 	// "seconds": 1752739200 and the cast threw before a single op was timed.
-	return fmt.Sprintf("(%s is String ? BigInt.parse(%s as String) : BigInt.from((%s as num).toInt())).toSigned(64).toInt()", jx, jx, jx)
+	//
+	// The `as String` is emitted only where the accessor does NOT promote. Where
+	// it does, the cast is not merely redundant: `dart analyze --fatal-warnings`
+	// -- which is this backend's whole build gate (see tests/conformance/dart) --
+	// rejects it as `unnecessary_cast`, so a schema with a u64 ARRAY failed to
+	// build. Nothing exercised that until the bench schema gained one
+	// (generator#336); a u64 scalar takes the non-promoting arm and was fine.
+	parse := fmt.Sprintf("BigInt.parse(%s as String)", jx)
+	if promotable {
+		parse = fmt.Sprintf("BigInt.parse(%s)", jx)
+	}
+	return fmt.Sprintf("(%s is String ? %s : BigInt.from((%s as num).toInt())).toSigned(64).toInt()", jx, parse, jx)
 }
 
 // emitBench emits the `bench <workload> <reps>` entry point (tests/bench,

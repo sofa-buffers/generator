@@ -1125,3 +1125,51 @@ messages:
 		}
 	}
 }
+
+// TestDartU64JSONCastOnlyWhereItDoesNotPromote: the harness parses a u64 from
+// either a JSON string (the canonical carrier -- a u64 above 2^53 has no exact
+// JSON-number form) or a bare number, and the `is String` test decides which. In
+// the true arm the accessor is a String, so whether an `as String` belongs there
+// is not a style question: Dart's flow analysis PROMOTES a local variable, and
+// `dart analyze --fatal-warnings` -- this backend's entire build gate -- then
+// rejects the cast as `unnecessary_cast`. A map index expression like
+// `j['x']` does not promote (a second read could return something else), so
+// there the cast is required.
+//
+// Both shapes therefore have to be emitted, and both have to be tested: a u64
+// SCALAR takes the non-promoting arm and always worked, while a u64 ARRAY reads
+// through the comprehension's own local and did not build at all. Nothing in the
+// corpus had a 64-bit array until the bench schema gained one (generator#336),
+// which is how a backend whose gate is "it analyzes cleanly" shipped a schema
+// shape that could not analyze.
+func TestDartU64JSONCastOnlyWhereItDoesNotPromote(t *testing.T) {
+	got := genFor(t, writeDef(t, `
+version: 1
+messages:
+  M:
+    payload:
+      scalar: { id: 0, type: u64 }
+      arr:    { id: 1, type: array, items: { type: u64, count: 4 } }
+      rows:   { id: 2, type: array, items: { type: array, count: 2, items: { type: u64, count: 3 } } }
+`), map[string]any{"emit": "project"})
+
+	// The scalar reads a map index: no promotion, so the cast stays.
+	if !strings.Contains(got, "j['scalar'] is String ? BigInt.parse(j['scalar'] as String)") {
+		t.Errorf("a u64 scalar must keep `as String` (a map index does not promote):\n%s", got)
+	}
+	// Array elements read the comprehension local: promoted, so no cast.
+	for _, want := range []string{
+		"for (final _x in (j['arr'] as List)) (_x is String ? BigInt.parse(_x) :",
+		"for (final _x in (j['rows'] as List)) <int>[for (final _y in (_x as List)) (_y is String ? BigInt.parse(_y) :",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a u64 array element must NOT cast a promoted local (unnecessary_cast is fatal here); missing %q in:\n%s", want, got)
+		}
+	}
+	// The shape the analyzer rejects, in either nesting.
+	for _, gone := range []string{"BigInt.parse(_x as String)", "BigInt.parse(_y as String)"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("emitted %q, which `dart analyze --fatal-warnings` rejects as unnecessary_cast:\n%s", gone, got)
+		}
+	}
+}
