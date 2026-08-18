@@ -14,28 +14,28 @@
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
-# corelib:   c-cpp f0df7a3 | cpp 4639de8 | cs 17f4277 | dart 1b83161 | go 2984421 | java fedb0b7 | py 12571f0 | rs 5255a0c | rs-no-std 5126032 | ts 56f289e | zig 29ca282
+# corelib:   c-cpp e93e4cd | cpp 4dc7d85 | cs bc56317 | dart 8617f7a | go eff4c9c | java 54215f4 | py ed7b3ea | rs a70386d | rs-no-std 8a96d7a | ts 1eb151d | zig 6e08a48
 #
 ## instruction cost
 row                profile    method    encode_ir/op  decode_ir/op
-c                  footprint  toggle    24480         50612
+c                  footprint  toggle    25157         50612
 cpp-c-cpp          footprint  toggle    32630         37673
 cpp-c-cpp-dyn      footprint  toggle    32869         47318
-cpp-cpp            maxspeed   toggle    13672         31271
-cpp-cpp-static     maxspeed   toggle    12967         22243
-csharp             maxspeed   subtract  30830         67221
-dart               maxspeed   subtract  30427         48945
-go                 maxspeed   toggle    19378         36999
-java               maxspeed   subtract  18265         34070
-python             maxspeed   subtract  900876        2180471
-python-native      maxspeed   subtract  125818        459492
-rust-rs            maxspeed   toggle    8873          21294
-rust-rs-no-std     footprint  toggle    10189         29717
-rust-rs-no-std-dyn footprint  toggle    10142         37828
-rust-rs-static     maxspeed   toggle    8812          14929
-ts-bigint          maxspeed   subtract  592261        851238
-ts-long            maxspeed   subtract  592258        851237
-zig                maxspeed   toggle    10740         20356
+cpp-cpp            maxspeed   toggle    12995         30280
+cpp-cpp-static     maxspeed   toggle    12660         23332
+csharp             maxspeed   subtract  29771         67867
+dart               maxspeed   subtract  24730         50948
+go                 maxspeed   toggle    17778         38958
+java               maxspeed   subtract  16409         30305
+python             maxspeed   subtract  1058320       2227882
+python-native      maxspeed   subtract  125086        465811
+rust-rs            maxspeed   toggle    8574          21468
+rust-rs-no-std     footprint  toggle    7758          28174
+rust-rs-no-std-dyn footprint  toggle    7915          36339
+rust-rs-static     maxspeed   toggle    8546          15080
+ts-bigint          maxspeed   subtract  584797        653119
+ts-long            maxspeed   subtract  584807        653118
+zig                maxspeed   toggle    9589          20020
 
 ## toolchain
 tool                      version       rows
@@ -63,5 +63,5 @@ cpp-c-cpp          footprint  ARMv6-m         6438    0      192
 cpp-c-cpp          footprint  ARMv7-m+fp.dp   6130    0      192
 cpp-c-cpp-dyn      footprint  ARMv6-m         14187   0      208
 cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   12949   0      208
-rust-rs-no-std     footprint  thumbv6m        9241    0      0
-rust-rs-no-std-dyn footprint  thumbv6m        10761   0      4
+rust-rs-no-std     footprint  thumbv6m        9341    0      0
+rust-rs-no-std-dyn footprint  thumbv6m        10845   0      4
