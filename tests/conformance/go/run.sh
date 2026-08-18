@@ -110,7 +110,7 @@ echo "==> fixlen-array subtype ordering OK"
 # into a declared destination -- never on a payload the decoder jumps over. The
 # corelib's visitor path deliberately does not validate (its cursor cannot tell a
 # bound field from a skipped one), so the generated destination arms do, via
-# sofab.Utf8Valid.
+# sofab.UTF8Valid.
 #
 #   id 99 is undeclared: 9a 06 (99<<3|2, fixlen) 0a (fixlen word: len 1, subtype
 #   string) 8a (a lone continuation byte, invalid UTF-8). The field is skipped,

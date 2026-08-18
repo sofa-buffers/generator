@@ -216,7 +216,7 @@ func (s *_strSeq) String(id sofab.ID, v string) error {
 	// The element is being materialized, so this is where its UTF-8 is checked.
 	// A payload the decoder skips never reaches a collector at all, which is
 	// exactly the point: validation follows the destination, not the wire.
-	if !sofab.Utf8Valid([]byte(v)) {
+	if !sofab.UTF8Valid([]byte(v)) {
 		return sofab.ErrInvalidMsg
 	}
 	for len(*s.out) <= int(id) {
@@ -996,10 +996,10 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	// the decoder is skipping (CORELIB_PLAN §6.4, generator#257). The corelib's
 	// visitor path deliberately does not validate — the cursor cannot tell a field
 	// this visitor binds from one it skips — so the check is ours to make here.
-	// sofab.Utf8Valid carries its own compile-time gate, so it is called
+	// sofab.UTF8Valid carries its own compile-time gate, so it is called
 	// unconditionally and generated code never depends on the corelib's build
 	// configuration.
-	utf8Guard := "if !sofab.Utf8Valid([]byte(v)) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t"
+	utf8Guard := "if !sofab.UTF8Valid([]byte(v)) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t"
 	for _, fld := range fields {
 		acc := "m." + goFieldName(fld.Name)
 		switch fld.Kind {

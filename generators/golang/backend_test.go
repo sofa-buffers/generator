@@ -142,7 +142,7 @@ func TestGoMaxlenReject(t *testing.T) {
 	// The unbounded string carries no maxlen guard -- but it does carry the UTF-8
 	// check, which is not a bound: it fires wherever a string is MATERIALIZED
 	// (generator#257), bounded or not.
-	if !strings.Contains(msg, "case 2:\n\t\tif !sofab.Utf8Valid([]byte(v)) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.U = v") {
+	if !strings.Contains(msg, "case 2:\n\t\tif !sofab.UTF8Valid([]byte(v)) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.U = v") {
 		t.Errorf("m.go: unbounded string (id 2) must store without a maxlen guard:\n%s", msg)
 	}
 	// The wrapper-element guard lives in the shared prelude.
@@ -870,7 +870,7 @@ messages:
 //
 // corelib-go used to validate inside the cursor, which cannot tell a field this
 // visitor binds from one it skips, so an unknown id carrying invalid UTF-8 failed
-// the whole decode. The corelib dropped that check and exports `sofab.Utf8Valid`
+// the whole decode. The corelib dropped that check and exports `sofab.UTF8Valid`
 // instead; the generated destination arms are now what validate. A skipped field
 // reaches no arm, so it is never inspected — which is the whole point.
 func TestGoSkippedStringIsNotValidated(t *testing.T) {
@@ -889,21 +889,21 @@ func TestGoSkippedStringIsNotValidated(t *testing.T) {
 	for _, f := range files {
 		all += f
 	}
-	if got := strings.Count(all, "if !sofab.Utf8Valid([]byte(v)) {"); got != 4 {
+	if got := strings.Count(all, "if !sofab.UTF8Valid([]byte(v)) {"); got != 4 {
 		t.Errorf("want a UTF-8 check at each string destination + the collector, got %d:\n%s", got, all)
 	}
 	// It sits behind the maxlen guard, which decides on the wire length alone.
-	if !strings.Contains(msg, "if len(v) > 8 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tif !sofab.Utf8Valid([]byte(v)) {") {
+	if !strings.Contains(msg, "if len(v) > 8 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tif !sofab.UTF8Valid([]byte(v)) {") {
 		t.Errorf("the maxlen reject must stay ahead of the UTF-8 check:\n%s", msg)
 	}
 	// The wrapper-array element path validates in the shared collector.
 	prelude := files["sofab_visitor.go"]
-	if !strings.Contains(prelude, "if !sofab.Utf8Valid([]byte(v)) {") {
+	if !strings.Contains(prelude, "if !sofab.UTF8Valid([]byte(v)) {") {
 		t.Errorf("_strSeq must validate the element it materializes:\n%s", prelude)
 	}
 	// A blob carries no encoding, so its arms must not grow a check.
 	if strings.Contains(msg, "Bytes(id sofab.ID, v []byte) error") &&
-		strings.Contains(msg, "Utf8Valid(v)") {
+		strings.Contains(msg, "UTF8Valid(v)") {
 		t.Errorf("blob must never be UTF-8-validated:\n%s", msg)
 	}
 }

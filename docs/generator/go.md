@@ -315,7 +315,7 @@ needs, this is the row to distrust first. See `emitBench` in `project.go`.
 corelib-go's visitor path deliberately does **not** UTF-8-validate: its cursor
 cannot tell a field this visitor binds from one it is skipping, and a skipped
 payload must never be inspected (CORELIB_PLAN §6.4). So the check belongs to the
-destination, and generated code makes it — `sofab.Utf8Valid(bytes)` in every arm
+destination, and generated code makes it — `sofab.UTF8Valid(bytes)` in every arm
 that stores a `string`: the scalar fields, and the `_strSeq` collector for a
 wrapper-array element. A skipped field reaches no arm, so it is never inspected,
 which is the whole point.

@@ -1821,7 +1821,7 @@ visitor a *finished* language string, so the check sat inside the corelib and th
 generator had no seam to guard. Each corelib gave up that check and exposed what
 the destination needs instead, and each backend picked it up:
 
-- **go** — `sofab.Utf8Valid(bytes) bool`, called in every arm that stores a
+- **go** — `sofab.UTF8Valid(bytes) bool`, called in every arm that stores a
   string: the scalar fields and the `_strSeq` wrapper-element collector. The
   primitive carries its own compile-time gate, so generated code calls it
   unconditionally and never depends on the corelib's build configuration.
