@@ -4,6 +4,9 @@ ARG GO_VERSION=1.24.4
 # Keep in lockstep with the mlugg/setup-zig version pinned by the lang-zig job
 # in .github/workflows/ci.yml and the zig bench row in .github/workflows/bench.yml.
 ARG ZIG_VERSION=0.16.0
+# Must be at least the Kotlin that built corelib-kotlin-mp: an older compiler
+# refuses its jar on a metadata check. Only _review/check.sh uses it.
+ARG KOTLINC_VERSION=2.4.10
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV GOPATH=/root/go
@@ -115,6 +118,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/lib/jvm/java-21-openjdk-* /usr/lib/jvm/kotlin-jdk
 ENV SOFAB_KOTLIN_JDK=/usr/lib/jvm/kotlin-jdk
+
+# The Kotlin COMPILER, for _review/check.sh only.
+#
+# Nothing the project ships needs it: the conformance harness and the bench row
+# build through the corelib's own Gradle wrapper, which brings its own compiler.
+# _review/check.sh calls every target's compiler directly instead (that is what
+# keeps it a ~6-minute script rather than eleven project builds), so the Kotlin
+# row needs a kotlinc on disk.
+#
+# The version is COUPLED to the corelib: a compiler older than the Kotlin that
+# built corelib-kotlin-mp refuses its jar outright ("incompatible version of
+# Kotlin", a metadata check, not a type error). Bump this when the corelib bumps
+# Kotlin; _review/check.sh reports it as `kotlinc` rather than as a type error.
+RUN curl -fsSL -o /tmp/kotlinc.zip \
+        "https://github.com/JetBrains/kotlin/releases/download/v${KOTLINC_VERSION}/kotlin-compiler-${KOTLINC_VERSION}.zip" \
+    && unzip -q /tmp/kotlinc.zip -d /opt \
+    && rm /tmp/kotlinc.zip
+ENV PATH=/opt/kotlinc/bin:$PATH
 
 # Rust via rustup (not apt cargo/rustc). The conformance harnesses only need
 # host cargo/rustc, but the footprint bench (tests/bench/lang/rust.sh) links the
