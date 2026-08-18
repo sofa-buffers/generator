@@ -1998,3 +1998,44 @@ func TestTSDecodedBlobOwnsItsBytes(t *testing.T) {
 		}
 	}
 }
+
+// MESSAGE_SPEC §7.1 one level down: a NESTED row's element carries the same
+// declared width as a flat array's, and the same verdict is owed for it.
+//
+// #330 closed this for go and dart and recorded TypeScript as already guarding
+// — true of the pull path, which hands the bound to `readUnsignedArray`, and
+// false of the push path, where `_MatSeq` stored whatever arrived. The two
+// surfaces of one generated module therefore disagreed: `array<array<u32>>`
+// carrying 2^32 was INVALID through `Cursor` and COMPLETE through the visitor,
+// which left a `number[][]` holding a value one past its declared type.
+func TestTSNestedRowElementWidthIsGuarded(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      urows: { id: 0, type: array, items: { type: array, count: 2, items: { type: u8, count: 3 } } }
+      irows: { id: 1, type: array, items: { type: array, count: 2, items: { type: i8, count: 3 } } }
+      wrows: { id: 2, type: array, items: { type: array, count: 2, items: { type: u64, count: 3 } } }
+`
+	got := genTSWith(t, src, map[string]any{})
+	for _, want := range []string{
+		// push: the guard travels in the collector's own conversion, so it fires
+		// on the element that carries the value rather than on the finished row.
+		`(v) => { const _e = Number(v); if (_e > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "urows element: value outside declared width u8"); return _e; }`,
+		`(v) => { const _e = Number(v); if (_e < -128 || _e > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "irows element: value outside declared width i8"); return _e; }`,
+		// pull: unchanged, and asserted alongside so the two surfaces stay pinned
+		// to one verdict rather than drifting apart again.
+		`c.readUnsignedArray(3, 255) as number[]`,
+		`c.readSignedArray(3, -128, 127) as number[]`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.ts missing nested-row width guard %q:\n%s", want, got)
+		}
+	}
+	// u64 has nothing narrower than the wire to check, so the conversion stays a
+	// plain expression — a guard here would be dead code on every element.
+	if !strings.Contains(got, `"wrows", (v) => BigInt(v))`) {
+		t.Errorf("a u64 row must keep the bare conversion:\n%s", got)
+	}
+}

@@ -216,12 +216,34 @@ func (g *gen) longFrom(v string) string {
 	return "Long.fromValue(" + v + ")"
 }
 
-// matConv is a native matrix row's element conversion (the `conv` a _MatSeq
-// holds). Its parameter is a UNION — the same lambda is called from the integer
-// hooks and from the fp32/fp64 ones, which stay `number` on both channels — so
-// on the Long channel it narrows with a `typeof` rather than a cast: an fp row
-// arriving at an integer row's id must not reach a Long helper. Rare shape
-// (array<array<int>>), so the branch costs nothing that matters.
+// matConvArrow renders the `conv` lambda a _MatSeq holds: the element
+// conversion, plus the element's declared-width check when its kind has one.
+//
+// The check has to sit here rather than at the call site for the same reason it
+// sits in the flat array's per-element arm (§7.1, generator#321): a row arrives
+// element by element, and a scan of the finished row cannot reject an element a
+// truncation may prevent from ever completing the row. The nested twin of that
+// arm was missed when #330 closed the gap for go and dart — TypeScript was
+// recorded as already guarding, which was true of the pull path only, so the
+// same bytes were INVALID through Cursor and COMPLETE through the visitor.
+func (g *gen) matConvArrow(elem ir.Kind, ref *ir.TypeRef, name string) string {
+	conv := g.matConv(elem, ref)
+	cond := widthCond("_e", elem)
+	if cond == "" {
+		return fmt.Sprintf("(v) => %s", conv)
+	}
+	// `conv` already yields the number this kind decodes to on either channel,
+	// so the guard reads it back rather than re-deriving it.
+	return fmt.Sprintf("(v) => { const _e = %s; if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, %q); return _e; }",
+		conv, cond, fmt.Sprintf("%s element: value outside declared width %s", name, elem))
+}
+
+// matConv is a native matrix row's element conversion. Its parameter is a UNION
+// — the same lambda is called from the integer hooks and from the fp32/fp64
+// ones, which stay `number` on both channels — so on the Long channel it
+// narrows with a `typeof` rather than a cast: an fp row arriving at an integer
+// row's id must not reach a Long helper. Rare shape (array<array<int>>), so the
+// branch costs nothing that matters.
 func (g *gen) matConv(elem ir.Kind, ref *ir.TypeRef) string {
 	if !g.streamLongs() {
 		switch {
@@ -764,7 +786,7 @@ func (g *gen) streamSeqExpr(acc string, elem ir.Kind, ref *ir.TypeRef, items *ir
 		}
 		rowCap := capOf(items.HasCount, items.Count)
 		if nativeArrayElem(items.Elem) {
-			return fmt.Sprintf("new _MatSeq(%s, %d, %d, %q, (v) => %s)", acc, cap, rowCap, name, g.matConv(items.Elem, items.ElemRef))
+			return fmt.Sprintf("new _MatSeq(%s, %d, %d, %q, %s)", acc, cap, rowCap, name, g.matConvArrow(items.Elem, items.ElemRef, name))
 		}
 		// A row of wrappers: descend one level and build the row's own collector.
 		rowMax := int64(-1)
