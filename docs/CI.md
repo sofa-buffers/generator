@@ -59,6 +59,7 @@ One `KEY=branch` per line. The variable name is derived from the repository name
 | `corelib-c-cpp` | `SOFAB_CORELIB_C_CPP_REF` |
 | `corelib-rs-no-std` | `SOFAB_CORELIB_RS_NO_STD_REF` |
 | `corelib-go` | `SOFAB_CORELIB_GO_REF` |
+| `corelib-kotlin-mp` | `SOFAB_CORELIB_KOTLIN_MP_REF` |
 
 The same variables work locally:
 

@@ -233,6 +233,19 @@
       "archs": []
     },
     {
+      "id": "kotlin",
+      "lang": "kotlin",
+      "corelib": "corelib-kotlin-mp",
+      "corelib_env": "SOFAB_KOTLIN_CORELIB",
+      "profile": "maxspeed",
+      "method": "subtract",
+      "//": "Same shape as the java row -- JVM bytecode, JIT'd hot path, so the",
+      "//reps": "delta has to out-weigh tier noise. Validated affine at these counts.",
+      "reps": "10000 110000",
+      "config": "generic: { emit: project }",
+      "archs": []
+    },
+    {
       "id": "python",
       "lang": "python",
       "corelib": "corelib-py",

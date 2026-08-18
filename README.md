@@ -21,7 +21,7 @@ wire codec with a uniform streaming API — is owned by the corelibs, not the
 generated code.
 
 The generator (`sofabgen`) emits typed code for **C, Go, Python, TypeScript,
-C++, Rust, C#, Java, Zig, and Dart**. Every backend is built against its real corelib,
+C++, Rust, C#, Java, Kotlin, Zig, and Dart**. Every backend is built against its real corelib,
 JSON round-trips every field kind, and is byte-exact against the shared wire
 vectors — so code generated for one language interoperates with any other.
 
@@ -35,7 +35,7 @@ go build -o sofabgen ./cmd/sofabgen
 ./sofabgen --lang go --in examples/messages/example.yaml --out out/go
 
 # Generate for every language.
-for lang in c cpp go python typescript rust csharp java zig dart; do
+for lang in c cpp go python typescript rust csharp java kotlin zig dart; do
   ./sofabgen --lang "$lang" --in examples/messages/example.yaml --out "out/$lang"
 done
 
@@ -122,6 +122,7 @@ The generator emits code against one corelib per language:
 | Go | `corelib-go` | Max speed |
 | Python | `corelib-py` | Max speed |
 | Java | `corelib-java` | Max speed |
+| Kotlin (Multiplatform) | `corelib-kotlin-mp` | Max speed; one source set for JVM, JS and native |
 | C# / .NET | `corelib-cs` | Max speed |
 | TypeScript | `corelib-ts` | Max speed |
 | Zig | `corelib-zig` | Max speed, zero-copy decode |
@@ -140,7 +141,7 @@ tables, cross-linked named types — see
 The CLI is deliberately tiny — everything configurable lives in a config file:
 
 ```sh
-sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|zig|dart|docs> \
+sofabgen --config <file> --lang <c|cpp|rust|go|python|java|kotlin|csharp|typescript|zig|dart|docs> \
         [--in <dir>] [--out <dir>]
 ```
 
@@ -156,7 +157,7 @@ sofabgen --config <file> --lang <c|cpp|rust|go|python|java|csharp|typescript|zig
 ```
 .
 ├── cmd/sofabgen/        # the `sofabgen` CLI entry point
-├── generators/        # one backend per target (c, cpp, rust, golang, python, java, csharp, typescript, zig, dart, docs)
+├── generators/        # one backend per target (c, cpp, rust, golang, python, java, kotlin, csharp, typescript, zig, dart, docs)
 ├── internal/          # parser, validator, IR, analysis, generation pipeline
 ├── schema/            # the message-definition JSON Schema (draft-07)
 ├── examples/          # example definitions (config/ + messages/)
@@ -176,8 +177,8 @@ ids, `$ref`-able `$defs`, and the custom keywords `uniqueIds` and
 ## Development
 
 A `.devcontainer` (Ubuntu 26.04 + Go, plus the toolchains the per-language
-conformance harnesses shell out to: C/C++, Zig, Rust, Java/Maven, .NET, Python,
-Node) is provided. To use it locally, copy the secrets template first (the real
+conformance harnesses shell out to: C/C++, Zig, Rust, Java/Maven, Kotlin/Gradle,
+.NET, Python, Node) is provided. To use it locally, copy the secrets template first (the real
 `.env` is gitignored):
 
 ```sh

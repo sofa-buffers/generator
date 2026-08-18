@@ -266,6 +266,15 @@ rustup component add llvm-tools-preview      # llvm-size, rust-lld
 `libstdc++-arm-none-eabi-newlib` is easy to miss and its absence looks like "C++
 cannot cross-compile" rather than a missing package.
 
+The `kotlin` row needs a JDK the Kotlin Gradle plugin supports (17..24) — Gradle
+itself comes from the corelib's own wrapper, so nothing else is required. The
+devcontainer's default JDK is deliberately past that window, so it installs a
+second one and exports `SOFAB_KOTLIN_JDK`; set it yourself anywhere else.
+It is per-row rather than a plain `JAVA_HOME` export on purpose: pointing the whole
+run at another JVM would move the `java` and `csharp` rows for a reason no generator
+change caused, and `lib/format.py` resolves the same knob into the `## toolchain`
+table so a row measured on a second runtime says so (`kotlin-jdk`).
+
 The devcontainer already carries all of it. Watch `PATH`: with `/root/.cargo/bin`
 missing, `cargo` resolves to apt's instead of rustup's, and the two rustc versions
 move the Rust rows ~8%. The `thumbv6m` footprint fails loudly in that case; the two
@@ -366,8 +375,8 @@ filled on first touch. The warmup duplicates the body rather than calling `run_<
 collect the warmup too. c, cpp, rust and zig have no lazily-initialized runtime
 metadata and need none of this.
 
-**`subtract`** (java, python, ts, csharp) — no native symbol exists (the hot code is
-JIT'd or interpreted), so run at two rep counts and subtract:
+**`subtract`** (java, kotlin, python, ts, csharp) — no native symbol exists (the hot
+code is JIT'd or interpreted), so run at two rep counts and subtract:
 
 ```
 Ir/op = ( Ir(R2) - Ir(R1) ) / ( R2 - R1 )
@@ -380,7 +389,7 @@ number would be almost entirely interpreter startup.
 
 Three things have to hold, and each one broke in practice before it worked:
 
-1. **A fixed warmup** on the JIT rows (java, csharp, ts), independent of `reps`, in
+1. **A fixed warmup** on the JIT rows (java, kotlin, csharp, ts), independent of `reps`, in
    the generated harness — so the hot methods reach their final tier *before* the
    measured loop and every measured op runs at steady cost. Being identical in both
    runs, it cancels. (`corelib-java/.../Callgrind.java` does the same, and says why.)
@@ -388,7 +397,7 @@ Three things have to hold, and each one broke in practice before it worked:
    Python has a different problem instead — **two engines**, see below.
 2. **Runtime pinning** (`lang/<x>.sh`), adopted from each corelib's script: one JIT
    tier, no GC, no per-run-seeded hashing.
-3. **Rep counts at the corelib's scale** — `10000 110000` for java/csharp, per
+3. **Rep counts at the corelib's scale** — `10000 110000` for java/kotlin/csharp, per
    `REPS_CHEAP` in every corelib `bench/run_callgrind.sh` (python and ts, being
    cheaper per op, use a smaller delta — the counts are per-row in `rows.json`).
    **This matters more than it looks.** The delta carries the signal and fixed noise

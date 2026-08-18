@@ -14,7 +14,8 @@
 >   code targets).
 > - **Config format** — `schema/sofabgen-config-schema.json` and `docs/generator/`.
 >
-> Status: all 10 language backends (C, C++, Rust, Go, Python, TypeScript, C#, Java, Zig, Dart)
+> Status: all 11 language backends (C, C++, Rust, Go, Python, TypeScript, C#, Java,
+> Kotlin, Zig, Dart)
 > plus the non-code `docs` target (self-contained HTML reference page) are
 > implemented and CI-green. Keep this file current — it is updated before
 > every push to `main`.
@@ -99,7 +100,7 @@ never code-generated. All problems are reported at once.
 | Flag | Meaning |
 |---|---|
 | `--config <file>` | Config file (carries all options; §7). |
-| `--lang <target>` | Target backend (`c`, `cpp`, `rust`, `go`, `python`, `java`, `csharp`, `typescript`, `zig`, `dart`, `docs`). |
+| `--lang <target>` | Target backend (`c`, `cpp`, `rust`, `go`, `python`, `java`, `kotlin`, `csharp`, `typescript`, `zig`, `dart`, `docs`). |
 | `--in <file\|dir>` | Definition input (overrides `generic.input_dir`). |
 | `--out <dir>` | Output folder (overrides `generic.output_dir`). |
 | `--print-defaults` | Print the effective resolved config for `--lang` and exit. |
@@ -325,14 +326,14 @@ override.
 |---|---|---|
 | `corelib` | `cpp` (`cpp`\|`c-cpp`), `rust` (`rs`\|`rs-no-std`) | Selects which corelib the code targets (§9/§10). |
 | `namespace` | cpp, csharp (also generic) | Wrapping namespace. |
-| `package` | go, java | Package name. |
+| `package` | go, java, kotlin | Package name. |
 | `module_path`, `go_version` | go | `go.mod` fields. |
 | `symbol_prefix` | c | Prefix on generated C symbols. |
 | `allow_dynamic` | cpp (both corelibs) | Storage for **bounded** fields: `true` = `std::string`/`std::vector`, `false` = inline `FixedString`/`FixedBytes`/`InlineVector`. Defaults `true` on `corelib: cpp`, `false` on `c-cpp`. On `c-cpp` bounds stay mandatory in both modes; on `cpp` an unbounded field simply keeps its dynamic container, so the switch applies per field and never fails a build (§9.3). |
 | `allow_dynamic` | rust (both corelibs) | Storage for **bounded** fields: `true` = `String`/`Vec`, `false` = fixed-capacity `heapless::String<N>`/`heapless::Vec<T, N>`. Defaults `true` on `corelib: rs`, `false` on `rs-no-std` — the same corelib-keyed default the C++ switch carries. On `rs-no-std` bounds stay mandatory in both modes and become decode-path checks; on `rs` an unbounded field simply keeps its dynamic container, so the switch applies per field and never fails a build (§9.3). Selecting it on `rs` adds a `heapless` dependency to the generated crate. |
 | `format` | docs (`html`) | Documentation output format of the non-code `docs` target; `html` is currently the only one. |
 | `no_std` | rust | With `corelib: rs-no-std`, emit the `#![no_std]` crate profile (default `true`). |
-| `max_message_size` | c, cpp, rust, go, java, csharp, zig, dart, python, typescript | Ceiling on a message's encoded size (default 4096). Fills in for a message the schema cannot bound (emitted as `MAX_SIZE_LIMIT`); when set explicitly it is also a budget a computed worst case may not exceed (§9.6). |
+| `max_message_size` | c, cpp, rust, go, java, kotlin, csharp, zig, dart, python, typescript | Ceiling on a message's encoded size (default 4096). Fills in for a message the schema cannot bound (emitted as `MAX_SIZE_LIMIT`); when set explicitly it is also a budget a computed worst case may not exceed (§9.6). |
 | `emit` | all | `sources` vs `project`. |
 | `license` (generic) | all | SPDX header id; default **none** (§11). |
 | `tool_banner` (generic) | all | Tool name stamped in every generated file header (default `sofabgen`). |
@@ -469,10 +470,11 @@ a reimplementation should emit code that honors all of them:
      bound is a reject (`INVALID`, §7.1) in both modes; a fixed container must not
      silently truncate or drop where the dynamic one rejects.
   Where the language cannot express it the axis simply does not exist: Java, C#,
-  Go, Dart, Python and TypeScript hold objects on the heap, and the reachable win
-  there is buffer *reuse* rather than inline storage (Java's
-  `ThreadLocal byte[MAX_SIZE]`). Where a target is statically bounded by
-  construction it is not a switch but the only mode — C rejects unbounded fields
+  Go, Dart, Python, TypeScript and Kotlin hold objects on the heap, and the
+  reachable wins there are buffer *reuse* rather than inline storage (Java's
+  `ThreadLocal byte[MAX_SIZE]`) and holding each value at its *declared* width
+  rather than a widened one, which C# and Kotlin both do (§10). Where a target
+  is statically bounded by construction it is not a switch but the only mode — C rejects unbounded fields
   outright and has no dynamic fallback to select (`generators/c/bounded.go`).
   Both of those are legitimate answers; what is not legitimate is leaving the
   question unstated, so `docs/generator/<lang>.md` says which case the target is.
@@ -489,15 +491,19 @@ a reimplementation should emit code that honors all of them:
 - **Escape reserved-word field names.** A schema field name may collide with a
   target-language keyword (`where`, `class`, `int`, …); the backend must make it a
   valid identifier — *escape* where the language allows (Rust `r#name`, C#
-  `@name`), *mangle* otherwise (C/C++/Java/Python trailing `_`), or be keyword-safe
-  by construction (Go exports/capitalises; TS allows keyword member names). A few
+  `@name`, Kotlin `` `name` ``), *mangle* otherwise (C/C++/Java/Python trailing
+  `_`), or be keyword-safe by construction (Go exports/capitalises; TS allows
+  keyword member names). A few
   words can't be escaped at all (Rust `self`/`Self`/`crate`/`super`) and must be
   mangled. The **wire is unaffected** (keyed by id) and the **JSON name stays the
   original** — keep the raw name for JSON keys, and add a rename when the
   identifier was mangled (escapes like `r#`/`@` are serializer-transparent). The
   `keywords.yaml` corpus compiles a keyword-heavy schema in every backend to guard
   this (and any new backend). Per-backend helpers: `cIdent`/`cppIdent`/`csIdent`/
-  `javaIdent`/`pyIdent`/`rustIdent`.
+  `javaIdent`/`ktIdent`/`pyIdent`/`rustIdent`. Kotlin carries a second rule beside
+  the escape, and it generalises: a name colliding with a **generated member**
+  (`encode`, `reset`, …) is *mangled*, because an escape answers the grammar and
+  not another declaration.
 - **Emit pure ASCII *that the generator authors*.** Every byte a backend writes
   on its own — banners, separators, Makefiles, READMEs, scaffolding — must be ASCII
   (`< 0x80`): use ASCII punctuation (`-`, not the em-dash `—`). `TestGeneratedOutputIsASCII`
@@ -636,7 +642,7 @@ width-reduced corelib builds compile — §11).
 Decoding has **six families**; a backend picks the one its corelib exposes. All
 route by `(scope, id)` and are forward-compatible (skip unknown ids).
 
-1. **Flat visitor + location-stack** (Rust, C#, Java, and the C++ `c-cpp`
+1. **Flat visitor + location-stack** (Rust, C#, Java, Kotlin, and the C++ `c-cpp`
    wrapper). The corelib drives a `Visitor` with flat callbacks; the generated
    visitor is a `(location, id)` state machine with a stack pushed/popped on
    sequence begin/end. Callbacks: `unsigned(id,v)`, `signed(id,v)`,
@@ -645,7 +651,7 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    count)` then element callbacks, `sequence_begin(id)`, `sequence_end()`. This
    is the **reusable template for any new flat-visitor corelib**.
 
-   **Optional bulk element hand-off (Java, `Visitor.arrayBulk`/`arrayBulkEnd`).**
+   **Optional bulk element hand-off (Java and Kotlin, `Visitor.arrayBulk`/`arrayBulkEnd`).**
    A flat visitor pays its per-callback routing *per element*, which for a short
    integer array is the whole cost of decoding it. corelib-java therefore offers
    the destination once per array instead: right after `arrayBegin`, `arrayBulk(id,
@@ -673,7 +679,11 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    something the *consumer* supplied rather than against the format — a deliberate
    exception, paid for by the pass it removes, and the generated code keeps its
    own per-element guard for the path where the offer is declined. The same
-   reasoning would port to any flat-visitor corelib; the others have not taken it.
+   reasoning ports to any flat-visitor corelib; corelib-kotlin-mp is the second to
+   take it, and there the hand-off costs nothing at all to arrange: Kotlin's
+   unsigned arrays are inline classes over their signed peers, so the `asByteArray()`
+   view a `UByteArray` field offers IS that field's backing array and there is no
+   second pass to copy anything back. The remaining corelibs have not taken it.
 
    String/blob
    callbacks take a **single-shot fast path** — when the whole payload arrives in
@@ -845,11 +855,11 @@ three-valued outcome — COMPLETE / INCOMPLETE / INVALID — and the generated
 one-shot decode must not hide it. For corelibs that surface INCOMPLETE as an
 error/exception (Go, Rust, C++, C, Python, TS) the fallible decode entry
 point (`try_decode`, Go's `(msg, error)`, thrown exceptions) already propagates
-all three. The **status-returning** corelibs (C#, Java, Zig, Dart) treat INCOMPLETE
-as a non-error status (C#/Java: `DecodeStatus` from `Feed`/`status()`; Zig:
-`Status` from `feed(chunk)`; Dart: `DecodeStatus` from `Decoder.decode`/`feed`)
-and leave the end-of-input verdict to the caller, so their backends must surface
-it explicitly:
+all three. The **status-returning** corelibs (C#, Java, Kotlin, Zig, Dart) treat
+INCOMPLETE as a non-error status (C#/Java/Kotlin: `DecodeStatus` from
+`Feed`/`status()`/`status`; Zig: `Status` from `feed(chunk)`; Dart: `DecodeStatus`
+from `Decoder.decode`/`feed`) and leave the end-of-input verdict to the caller, so
+their backends must surface it explicitly:
 
 - C#/Java emit an additional status-surfacing entry point next to the
   back-compat best-effort `Decode`/`decode`: C# `static DecodeStatus
@@ -878,6 +888,18 @@ it explicitly:
   vectors; its `decode` mode sets a non-zero process exit on any non-`complete`
   status (Dart ignores an `int` returned from `main`, so the harness calls
   `exit()`).
+- Kotlin has no back-compat surface either, and its corelib *does* throw for
+  INVALID, so the split runs the other way from Dart's: `tryDecode(data, out)`
+  returns COMPLETE/INCOMPLETE and malformed input raises (the C#/Java shape),
+  while the one-shot `decode(bytes)` is **strict about both** non-COMPLETE
+  outcomes — it raises `IllegalStateException` on a terminal INCOMPLETE, a
+  deliberately different exception type from the corelib's `SofabException`,
+  because an incomplete message is not a malformed one. That is the zig ruling
+  reached through an exception language: a one-shot whole-buffer decode IS at
+  end-of-input, so handing back a half-filled object would hide exactly the
+  verdict §7 says generated code must not hide. `Decoder.finish()` draws the same
+  line for the streaming path. The conformance harness pins all three channels —
+  the two `trydecode` statuses, and a truncated `decode` that must not succeed.
 
 #### Decode verdict: over-count scalar arrays are INVALID (all families)
 
@@ -904,7 +926,10 @@ arrays have no N and keep every element. Who enforces it differs by family
   `error.InvalidMessage`).
 - **Generated guard, error return / throw** — Go (`len(v) > N` in the array
   callback returns `sofab.ErrInvalidMsg` through `AcceptBytes`), Java
-  (`arrayBegin` throws `SofabException(INVALID_MSG)` wrapped unchecked), C#
+  (`arrayBegin` throws `SofabException(INVALID_MSG)` wrapped unchecked), Kotlin
+  (the same guard, thrown *un*wrapped — Kotlin has no checked exceptions, so the
+  corelib's own `SofabException` leaves a Visitor callback directly and the
+  category reaching the caller is the one the format defines), C#
   (`ArrayBegin` throws `SofabException(InvalidMessage)` — the guard also bounds
   the eager `new T[count]` allocation), Python (`raise SofaDecodeError` after
   the whole-array read), TypeScript (`throw SofabError(InvalidMsg)` after the
@@ -1160,10 +1185,10 @@ metadata; §7.3 subordinates the *schema* bound only.
 
 Who enforces it splits exactly like the scalar case:
 
-- **Heap families reject** — the 10 heap backends (`go`, `rust` std, `cpp`
-  `corelib-cpp`, both Python, `java`, `typescript`, `csharp`, `zig`, `dart`) emit a
-  per-element `id >= N` guard using the same INVALID channel as the scalar
-  over-count guard (`is.invalidate()` / sticky `inv` / `ErrInvalidMsg` /
+- **Heap families reject** — the heap backends (`go`, `rust` std, `cpp`
+  `corelib-cpp`, both Python, `java`, `kotlin`, `typescript`, `csharp`, `zig`,
+  `dart`) emit a per-element `id >= N` guard using the same INVALID channel as
+  the scalar over-count guard (`is.invalidate()` / sticky `inv` / `ErrInvalidMsg` /
   thrown `SofabException`/`SofabError` / `SofaDecodeError` / Dart's sticky
   `_inv`). A dynamic wrapper
   array (no `count`) has no `N` and keeps every delivered index — its length is
@@ -1214,7 +1239,7 @@ exceeds `L` is malformed input and **MUST** be reported as `INVALID` on *every*
 target, **never silently truncated to `L`** — "two conformant implementations
 MUST agree on which messages are valid," regardless of allocation strategy.
 
-- **Heap families reject** — the 10 heap backends now emit a per-field guard at
+- **Heap families reject** — the heap backends now emit a per-field guard at
   the length header (`wire byte length > L → INVALID`) for every bounded
   string/blob, scalar field *and* wrapper-array element, using the same INVALID
   channel as the over-count/over-index guards (Dart computes the exact UTF-8 byte
@@ -1275,6 +1300,12 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
 - **Enums and bitfields are out of scope.** Their backing width is a property of
   the named type, not of the field, and an out-of-range *enum* value is a
   different question (unknown-variant handling) from an over-width integer.
+  Kotlin is the one target where the enum question answers itself and so is
+  covered: it stores an enum as an `Int`, which IS the signed 32-bit range
+  MESSAGE_SPEC §1 binds an enum to, so the bound and the storage are the same
+  fact and letting an out-of-range value through would be the silent truncation
+  §7.1 rules out. Its bitfield is a `ULong`, i.e. the whole unsigned domain, so
+  there is nothing to guard.
 - **`cpp` needed a different shape from the rest.** corelib-cpp's typed `read()`
   ends in `value = static_cast<T>(raw)` — the mask itself, applied where
   generated code cannot see the raw value. A narrow destination therefore reads
@@ -1378,8 +1409,8 @@ default arm — an id the schema does not declare here left `cur` on the enclosi
 scope, so the skipped sequence's *children* bound into it. A child id 3 inside an
 unknown sequence set the root's own field 3; a sequence opened at a string-array
 element position bound its string as that element. The fix is one shared shape: a
-**dead scope** (`_Loc::Dead` in rust, `.dead` in zig, `_DEAD` in java/csharp) that
-no callback arm matches, so the whole subtree is discarded — a nested sequence
+**dead scope** (`_Loc::Dead` in rust, `.dead` in zig, `_DEAD` in java/csharp,
+`DEAD` in kotlin) that no callback arm matches, so the whole subtree is discarded — a nested sequence
 inside a dead subtree matches no arm either, so it stays dead, and the live scope
 is restored at the matching end. Dart reaches the same result one level up: its
 collectors inherit a shared base whose `onSequenceStart` returns `null` instead
@@ -1421,9 +1452,9 @@ the stack is one entry per live scope entered — a chain the frame count bounds
 No other backend had the mismatch, for three different reasons: `c`/`cpp-c-cpp`
 never push for a skipped subtree at all (an unknown id matches no descriptor
 field, so no object decoder is taken and the istream skips the subtree itself),
-`zig` sizes its stack by *wire* depth (`[256]_Loc`), and `java`/`csharp` grow
-theirs. The generalization for any new flat-visitor backend: if the scope stack
-is bounded by the schema, skipped levels must not be stacked — and a bounded push
+`zig` sizes its stack by *wire* depth (`[256]_Loc`), and `java`/`csharp`/`kotlin`
+grow theirs. The generalization for any new flat-visitor backend: if the scope
+stack is bounded by the schema, skipped levels must not be stacked — and a bounded push
 must never have its overflow discarded.
 
 The lesson generalizes: a skip is only correct if it is *scoped* (children go with
@@ -1432,9 +1463,9 @@ it), *inert* (it arms nothing that a later field will read), and *free to unwind
 
 #### The one mismatch structural skip cannot catch: an array at a scalar id
 
-For `rs`, `rs-no-std`, `cs`, `java` and `zig` the structural skip has a blind
-spot (generator#183, Crucible F-0021). Those corelibs stream an integer array's
-elements **one by one through the very `unsigned(id, v)` / `signed(id, v)`
+For `rs`, `rs-no-std`, `cs`, `java`, `kotlin` and `zig` the structural skip has a
+blind spot (generator#183, Crucible F-0021). Those corelibs stream an integer
+array's elements **one by one through the very `unsigned(id, v)` / `signed(id, v)`
 callbacks a lone scalar uses**, announcing `arrayBegin(id, kind, count)` first as
 context. This is a deliberate zero-extra-allocation streaming design —
 `corelib-rs-no-std` and `corelib-zig` depend on it for heap-free decode — but it
@@ -1521,7 +1552,7 @@ that is a property of the corelib, not of the backend. Three models exist:
 
 | model | corelibs | who checks | §7.3 status |
 |---|---|---|---|
-| **corelib dispatches by type** — the corelib resolves wire type *and* fixlen subtype, then calls a distinctly-typed callback | go, dart, rs, rs-no-std, cs, java, zig | nobody, *except* for an integer array at a scalar id: the five that stream array elements through the scalar callbacks need the generated `askip` guard (generator#183). `go` and `dart` are exempt even there — their corelibs deliver a native array *whole* through a distinct `on*Array` callback, so an array at a scalar id skips structurally too | structural ✅ (+ `askip` on rs/rs-no-std/cs/java/zig) |
+| **corelib dispatches by type** — the corelib resolves wire type *and* fixlen subtype, then calls a distinctly-typed callback | go, dart, rs, rs-no-std, cs, java, kotlin, zig | nobody, *except* for an integer array at a scalar id: the six that stream array elements through the scalar callbacks need the generated `askip` guard (generator#183). `go` and `dart` are exempt even there — their corelibs deliver a native array *whole* through a distinct `on*Array` callback, so an array at a scalar id skips structurally too | structural ✅ (+ `askip` on rs/rs-no-std/cs/java/kotlin/zig) |
 | **descriptor / object API** — the generator hands the schema to the corelib as a table | c (`c-cpp` object API) | corelib, against the descriptor (mask `0x3F` = wire type + subtype) | ✅ |
 | **generated code pulls by id** — the corelib delivers `(id, …)` and generated code chooses the reader | python, typescript | **generated code**, so the corelib must expose the delivered type at the decision point | ✅ all |
 | **corelib decides inside the typed read** (the seam) — generated code names the type it wants and the corelib compares before it acts | cpp, cpp-over-`c-cpp` | corelib, in `read`/`readString`/`readBlob`/`readArray`/`readSequence` | ✅ |
@@ -1555,8 +1586,8 @@ dispatches by resolved type to distinct callbacks, including a distinct `on*Arra
 for native arrays, so no generated guard is needed; §9.3 family 2). The two combinations that previously failed — TypeScript on the subtype
 vector, and `cpp`/`c-cpp` on *any* contradictory wire type — are covered by the
 corelib accessors above and the generator guards keyed off them; the conformance
-harnesses assert all four on every target, no longer gated. The five backends
-carrying the `askip` guard (`rust`, `rust`/`no_std`, `csharp`, `java`, `zig`)
+harnesses assert all four on every target, no longer gated. The backends carrying
+the `askip` guard (`rust`, `rust`/`no_std`, `csharp`, `java`, `kotlin`, `zig`)
 additionally assert the array-at-a-scalar-id pair — an unsigned array at a `u8`
 id and a signed array at an `i8` id, each with a correctly-typed control that
 pins the counter's self-termination.
@@ -1692,8 +1723,8 @@ behind the type decision, though by different means:
   variant.
 - **typescript** collects into a fresh local and only publishes it (`o.f = arr`)
   after the loop, so a skipped occurrence never touches the member.
-- **go, rust, zig, cs, java** put the reset *inside* the sequence-begin callback,
-  which the corelib only invokes for an actual sequence header — so the
+- **go, rust, zig, cs, java, kotlin** put the reset *inside* the sequence-begin
+  callback, which the corelib only invokes for an actual sequence header — so the
   wire-type dispatch shields it structurally.
 - **c** resets in `object.c`'s `FIELDTYPE_SEQUENCE` case, which sits after the
   descriptor wire-type check.
@@ -1712,13 +1743,15 @@ string is read into a destination) — see *Placement* below, which is where the
 codegen half of that rule lives. Where the string is materialized decides where
 the generator carries responsibility:
 
-- **Codegen-materialized Unicode targets (Rust, Java, C#) are always strict** — a
-  Unicode string type cannot hold non-UTF-8 bytes, so its only non-mutating option
+- **Codegen-materialized Unicode targets (Rust, Java, C#, Kotlin) are always
+  strict** — a Unicode string type cannot hold non-UTF-8 bytes, so its only non-mutating option
   is the strict constructor and the option is a documented no-op (always ON). The
   generator emits the strict path directly: Rust `core::str::from_utf8` (Err → the
   sticky `inv` flag → `InvalidMsg`; the two Rust profiles now agree, **subsuming
   #80**), Java an allocation-free `Utf8.valid` scan followed by the JVM-intrinsic
-  `new String(…, UTF_8)` (the platform constructor alone is lossy), C# a
+  `new String(…, UTF_8)` (the platform constructor alone is lossy), Kotlin the same
+  pair against the corelib's `Utf8.valid` scanner and `ByteArray.decodeToString`
+  (whose default settings substitute `U+FFFD`, which §8 forbids in every mode), C# a
   `UTF8Encoding(throwOnInvalidBytes: true)` (`Encoding.UTF8.GetString`
   is lossy) — invalid bytes throw the same `INVALID_MSG` channel as the over-count
   guards. No config key is threaded into generated code.
@@ -1749,8 +1782,8 @@ also lets a skipped payload's bytes enter the shared chunk accumulator where a
 later declared field would inherit them. The schema-`maxlen` and receiver-limit
 pre-checks are themselves destination-scoped, so they sit behind the guard and
 §5.2's INVALID-over-INCOMPLETE ordering is unaffected. Zig had this order from the
-start; **rust, rust-no-std, java and csharp were fixed to match** (Crucible F-0038,
-codegen defect G-0024). `blob` needs no such guard — it carries no encoding, so
+start (as does kotlin, which was written to it); **rust, rust-no-std, java and
+csharp were fixed to match** (Crucible F-0038, codegen defect G-0024). `blob` needs no such guard — it carries no encoding, so
 there is nothing to validate on the way past.
 
 The degenerate case is part of the rule: a message that declares **no string at
@@ -1759,7 +1792,7 @@ still routes string fields at unknown ids to it), and every string reaching it i
 skipped by definition — so its **body is empty**, not guarded. Decoding one only
 to drop it is the same §6.4 violation with every string skipped instead of some.
 Rust gets this for free (the callback is emitted only when the schema uses
-strings); java and csharp emit the empty body explicitly.
+strings); java, csharp and kotlin emit the empty body explicitly.
 
 **go and dart moved too, as a two-half change.** Both corelibs used to hand the
 visitor a *finished* language string, so the check sat inside the corelib and the
@@ -1790,9 +1823,9 @@ undeclared string reaching the top-level visitor of a string-free message was
 rejected instead of skipped. The rule for any push backend is therefore that the
 skip is emitted for **every** visitor scope, not only the ones with somewhere to
 put a string — dart carries it on a shared `_Visitor` base every generated visitor
-extends, java/csharp emit the callback unconditionally with a resolve-then-leave
-prologue (#258). Where a backend can make the property structural rather than
-per-emission-site, it should: that is what stops the next collector class from
+extends, java/csharp/kotlin emit the callback unconditionally with a
+resolve-then-leave prologue (#258). Where a backend can make the property
+structural rather than per-emission-site, it should: that is what stops the next collector class from
 silently re-inheriting the default.
 
 The validator is a real UTF-8 validator (rejects overlong forms incl. `C0 80`,
@@ -1909,8 +1942,8 @@ code as named constants. The rules, normative for every backend:
     delivered bytes; an index-only amplifier against a dynamic wrapper array is a
     known residual, tracked separately from #142.
 
-Enforcement by family: **generated visitor guards** (Rust std, Java, C#, Zig,
-pure C++ — the corelib callback exposes `count`/`total` pre-allocation; the
+Enforcement by family: **generated visitor guards** (Rust std, Java, Kotlin, C#,
+Zig, pure C++ — the corelib callback exposes `count`/`total` pre-allocation; the
 corelibs contribute only the error category); **passed into the corelib
 decoder** (Go `sofab.WithMax*` options, Python `Decoder(max_*=...)` kwargs,
 TypeScript `Cursor(buf, DecodeLimits)`, Dart `sofab.DecoderLimits` — the corelib
@@ -1928,8 +1961,8 @@ traffic. **Statically bounded profiles** (C, C++ `corelib: c-cpp`,
 Rust `no_std`) are capacity-bound by construction — the keys are inert.
 
 Independent of the option (bugfix class), no generated decoder may allocate
-eagerly from an untrusted wire count: C# and Zig count-less array arms reserve
-bounded and grow with delivered elements (the Java #96/#98 pattern).
+eagerly from an untrusted wire count: C#, Zig and Kotlin count-less array arms
+reserve bounded and grow with delivered elements (the Java #96/#98 pattern).
 
 ### 9.6 Worst-case message size (one walk, all backends)
 
@@ -1999,17 +2032,17 @@ produce two different generated shapes, and conflating them is a truncation bug:
 - **bounded** — one exactly-sized buffer holds the whole message, handed to the
   corelib's buffer constructor (Rust `OStream::new`, Java `new OStream(buf)`, Go
   `sofab.NewEncoderBuffer`, Python `Encoder.over_buffer(buf, 0)`, TypeScript
-  `new OStream(buf)`, Dart `Encoder.overBuffer(buf)`). A value the caller filled
-  past its own declared bound
-  does not fit, and is **reported** (buffer-full) rather than emitted short —
+  `new OStream(buf)`, Dart `Encoder.overBuffer(buf)`, Kotlin `OStream(buf)`).
+  A value the caller filled past its own declared bound does not fit, and is **reported** (buffer-full) rather than emitted short —
   §5.1 forbids returning partial output as if it were complete.
 - **unbounded** — `MAX_SIZE` is an imposed ceiling, so it must not size a buffer:
   a message above it is legal and would be silently refused. The shape is a fixed
   caller scratch plus a flush sink draining into caller-owned storage (Rust
   `OStream::with_flush`, Go `sofab.NewEncoderSink`, Python
   `Encoder.over_buffer(scratch, 0, sink)`, TypeScript
-  `new OStream(scratch, 0, sink)`, Dart `Encoder(sink, buffer: scratch)`), which
-  bounds memory by the scratch instead of by the message.
+  `new OStream(scratch, 0, sink)`, Dart `Encoder(sink, buffer: scratch)`, Kotlin
+  `OStream(scratch, 0, FlushSink { … })`), which bounds memory by the scratch
+  instead of by the message.
 
 A streaming entry point (`EncodeTo(writer)` and peers) is the sink shape for both
 cases, the writer being the drain. Where the drain only *copies* what it is handed
@@ -2067,6 +2100,7 @@ above was found by that check on its first run.
 | **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `serialize(os)` plus `encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `MAX_SIZE` `Uint8Array` (`new OStream(buf)`) for a bounded schema and drains a fixed 512-byte scratch into a caller list (`new OStream(scratch, 0, sink)`) for an unbounded one; the corelib's no-argument `new OStream()` (an alias for the growing accumulator) is emitted nowhere; `decoder()` → `feed`/`finish` for chunked decode, driving a SECOND, generated visitor over the corelib's resumable `IStream` (the cursor cannot be fed in pieces) — the two paths are held together by a differential test over values AND rejections, since a verdict reached in generated code rather than in the corelib can drift, as an unconverted `TextDecoder` TypeError did (generator#297); per-type `decodeFrom(Cursor)` (monomorphic, inlinable); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors (and scalars with `number`) for a bigint-free, wire-identical hot path; alloc-free `writeString`; a `number` is a 64-bit double, so an fp32 NaN routes through the corelib raw channel (`readFp32Raw`/`writeFixlen(fp32)` for a scalar, `readFp32ArrayRaw`/`writeFp32ArrayRaw` for an array, each with a `Uint8Array \| null` companion slot captured only for a NaN) to preserve a signaling NaN bit-for-bit (§4.6, #235); `recode` harness mode (wire → object → wire) exercises it; the cursor is zero-copy, but every generated destination COPIES (`readBlob().slice()`), so a decoded message owns its bytes and outlives the input buffer. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Serialize`/`EncodeTo`; nested `Msg.Decoder` (constructed with `new`, not a `Decoder()` factory — C# puts nested types and members in one declaration space) → `Feed`/`Finish` for chunked decode; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | one public class per file (`<Message>.java`, one `<Type>.java` per struct/union, shared `Sbuf.java`) — schema types are public like every other target's, and a type reached from two messages is emitted once (#305); classes + `serialize`/`encodeTo`; nested `Msg.Decoder` via `decoder()` → `feed`/`finish` for chunked decode (`finish` throws `IllegalStateException`, not `SofabException`: `SofabError` has no INCOMPLETE, and an incomplete message is not a malformed one); ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
+| **Kotlin** | `corelib-kotlin-mp` (Gradle/Maven Central) | flat-visitor location-stack | Kotlin Multiplatform: the emitted message sources are plain `commonMain` (stdlib + `sofab`, no JVM API), so one source set compiles for the JVM, Node/browser and native, and only the `emit: project` scaffolding is JVM-specific. One file per declaration (`<Message>.kt` + the internal `<Message>Visitor`, one `<Type>.kt` per struct/union, shared `Sbuf.kt`); classes + `serialize`/`encodeTo`/`encode()`; nested `Msg.Decoder` via `decoder()` -> `feed`/`finish`. Integers map to their EXACT declared width, unsigned included (`u8` is a `UByte`, `u8[]` a `UByteArray`) -- the C# position, not Java's widen-to-`long`, since Java's reason for widening does not apply. What is Kotlin-specific is that this costs nothing at the corelib boundary: the unsigned arrays are inline classes over their signed peers, so `asIntArray()` is a reinterpretation and the field's own backing array reaches `writeArrayUnsigned`, while the `arrayBulk` offer hands that same view over as the destination, whose element width IS the declared width (§7.1 checked in the pass that decodes). `enum` -> `Int` and `bitfield` -> `ULong`, the widths that cannot lose a legal value, with the declared members emitted as documented named constants in an `object` beside the field -- so per-constant metadata is rendered where C and Java have no symbol for it. `boolean[]` is a `BooleanArray` (no native array boxes). Keyword field names are BACKTICK-escaped, never mangled; a name colliding with a generated member is mangled instead. `tryDecode(data, out)` returns the §7 `DecodeStatus` and `decode(bytes)` is STRICT about both non-COMPLETE outcomes (`IllegalStateException` on a terminal INCOMPLETE, deliberately not `SofabException`). Guards throw the corelib's `SofabException` unwrapped -- Kotlin has no checked exceptions. Hand-written JSON harness (exact u64 from the literal text). |
 | **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `serialize`; `decoder(out, alloc)` → `feed`/`finish` (the destination is the CALLER's: Zig moves structs by value, so a decoder owning its message would dangle its own visitor pointer); zero-copy `decode()` (strings/blobs borrow the input buffer, arrays from a caller allocator) — but the STREAMING path borrows nothing: `feed` copies every string/blob into `alloc`, because a payload stitched across a chunk boundary completes inside the corelib's reused carry buffer and is delivered as a slice into the decoder itself, indistinguishable in the callback from one into the caller's chunk (generator#295); fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
 | **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`/`encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `maxSize` `Uint8List` (`Encoder.overBuffer(buf)`, returning the `written` view over it) for a bounded schema and drains a fixed 512-byte scratch into a caller `BytesBuilder(copy: true)` (`Encoder(sink, buffer: scratch)`) for an unbounded one; the corelib's `Encoder.encodeToBytes` — the one place that package allocates output storage — is emitted nowhere; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); the corelib hands a string/blob over as a view into the decode buffer on the ONE-SHOT path (it allocates the container itself for an array on either path, and reassembles a split payload while streaming), but every generated destination COPIES (`Uint8List.fromList`, `utf8.decode`), so a decoded message owns its bytes and outlives the input buffer regardless of which side allocated; JSON harness carries u64 as a string. |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
@@ -2083,12 +2117,17 @@ note) on each generated constant. The `deprecated` flag additionally emits the
 language's native deprecation marker: `[[deprecated]]` (C++),
 `__attribute__((deprecated))` (C), `@Deprecated`+`@deprecated` (Java),
 `[Obsolete]` (C#), `#[deprecated]` (Rust), `@deprecated` TSDoc (TS), the godoc
-`Deprecated:` paragraph (Go), a Sphinx `.. deprecated::` directive (Python), and a
-`/// Deprecated.` note (Zig). Because the generated encode/decode still touches a
-deprecated field, C/C++/C#/Rust locally suppress the resulting self-use warning so
-generated code stays warning-clean. **C and Java lower enum/bitfield fields to a
-raw integer** and emit no named constants, so they carry only the field-level
-metadata above. The `docs` target renders the same metadata as HTML page content
+`Deprecated:` paragraph (Go), a Sphinx `.. deprecated::` directive (Python), a
+`/// Deprecated.` note (Zig), and `@Deprecated("…")` (Kotlin). Because the
+generated encode/decode still touches a deprecated field, C/C++/C#/Rust/Kotlin locally suppress the resulting self-use
+warning so generated code stays warning-clean. **C and Java lower enum/bitfield
+fields to a raw integer** and emit no named constants, so they carry only the
+field-level metadata above. **Kotlin lowers them to a raw integer too and still
+carries the constants**: the field stays an `Int`/`ULong` so an undeclared wire
+value survives a decode, while the declared members are emitted as documented
+`const val`s in an `object` beside it — a closed `enum class` could not represent
+the first and would have been the only reason to give up the second. The `docs`
+target renders the same metadata as HTML page content
 (dedicated Unit column, `deprecated` badge). Both corelib variants of C++
 (`cpp`/`c-cpp`) and Rust (`rs`/`rs-no-std`) render metadata identically.
 
@@ -2516,7 +2555,7 @@ Both mirror the corelibs' own `bench/run_callgrind.sh`, which every corelib ship
   — toggling keys on entering the symbol whoever the caller is. One op suffices:
   AOT, so no tiers to climb, and each warmed cost is a global first-touch cache.
   c/cpp/rust/zig have no lazy runtime metadata and need none.
-* **`subtract`** (java, python, ts, csharp) — no native symbol (JIT'd/interpreted),
+* **`subtract`** (java, kotlin, python, ts, csharp) — no native symbol (JIT'd/interpreted),
   so run at two rep counts and subtract: `Ir/op = (Ir(R2) − Ir(R1)) / (R2 − R1)`,
   cancelling startup, class loading and JIT compilation exactly. Needs a fixed
   warmup in the harness plus per-runtime pinning (EpsilonGC, `-XX:-TieredCompilation`,

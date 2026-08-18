@@ -31,6 +31,9 @@
         "java": {
           "$ref": "#/$defs/target_java"
         },
+        "kotlin": {
+          "$ref": "#/$defs/target_kotlin"
+        },
         "csharp": {
           "$ref": "#/$defs/target_csharp"
         },
@@ -279,6 +282,31 @@
         "package": {
           "type": "string",
           "description": "The `package <name>;` declaration of the generated classes, and the Maven source-directory layout in project mode (default: message)."
+        }
+      }
+    },
+    "target_kotlin": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "emit": {
+          "$ref": "#/$defs/emit"
+        },
+        "max_dyn_array_count": {
+          "$ref": "#/$defs/max_dyn_array_count"
+        },
+        "max_dyn_blob_len": {
+          "$ref": "#/$defs/max_dyn_blob_len"
+        },
+        "max_dyn_string_len": {
+          "$ref": "#/$defs/max_dyn_string_len"
+        },
+        "max_message_size": {
+          "$ref": "#/$defs/max_message_size"
+        },
+        "package": {
+          "type": "string",
+          "description": "The `package <name>` declaration of the generated Kotlin files, and the source-directory layout in project mode (default: message)."
         }
       }
     },
