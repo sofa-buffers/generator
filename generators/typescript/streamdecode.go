@@ -229,6 +229,14 @@ func (g *gen) emitStreamScalarCb(f *tsfile, cb string, fields []*ir.Field, in ki
 		case ir.KindU64, ir.KindI64:
 			if g.numberScalars() {
 				arms = append(arms, fmt.Sprintf("      case %d: %s = Number(v); break;", x.ID, acc))
+			} else if g.longScalars() {
+				// The visitor hooks stay number-first (corelib-ts#143 left them so), so
+				// the conversion happens on this side — as it already does for 64-bit
+				// ARRAY elements. It is the field's SETTER that runs it (this arm
+				// stores through the public name), converting exactly once, which is
+				// what keeps the field a Long whichever decode API filled it: the
+				// runtime-type invariant #335 established.
+				arms = append(arms, fmt.Sprintf("      case %d: %s = v; break;", x.ID, acc))
 			} else {
 				arms = append(arms, fmt.Sprintf("      case %d: %s = BigInt(v); break;", x.ID, acc))
 			}

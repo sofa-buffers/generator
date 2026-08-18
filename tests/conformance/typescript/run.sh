@@ -399,6 +399,12 @@ messages:
       ud: { id: 2, type: array, items: { type: u64, count: 2 }, default: [1, "18446744073709551615"] }
       u:  { id: 3, type: u64 }
       i:  { id: 4, type: i64 }
+      # A 64-bit pair one level down. Every other 64-bit field in the corpus sits
+      # at message level, so without this nothing exercises the representation in
+      # a NESTED position — where the field is emitted by the same code but reached
+      # through a nested class's own serialize/decodeFrom, and (under the Long
+      # modes) through that class's private backing field.
+      n:  { id: 5, type: struct, fields: { nu: { id: 0, type: u64 }, ni: { id: 1, type: i64, default: -7 } } }
 YAML
 for mode in bigint long number; do
     cat > "$WORK/cfg_$mode.yaml" <<YAML
@@ -413,19 +419,27 @@ done
 enc64() { ( cd "$WORK/i64-$1" && printf '%s' "$2" | npx tsx harness.ts encode m64 ); }
 # Full 64-bit range (scalars beyond 2^53): bigint vs long. ud == its schema
 # default exercises the longArrEq omission guard.
-I64FULL='{"us":["1","18446744073709551615","4294967296"],"is":["-1","-9223372036854775808","9223372036854775807"],"ud":["1","18446744073709551615"],"u":"18446744073709551615","i":"-9223372036854775808"}'
+I64FULL='{"us":["1","18446744073709551615","4294967296"],"is":["-1","-9223372036854775808","9223372036854775807"],"ud":["1","18446744073709551615"],"u":"18446744073709551615","i":"-9223372036854775808","n":{"nu":"18446744073709551615","ni":"-9223372036854775808"}}'
 enc64 bigint "$I64FULL" > "$WORK/i64_full_bigint.bin"
 enc64 long   "$I64FULL" > "$WORK/i64_full_long.bin"
 cmp -s "$WORK/i64_full_bigint.bin" "$WORK/i64_full_long.bin" || { echo "FAIL: int64: long wire drift"; exit 1; }
 # Safe-integer scalars (fit 2^53): bigint vs number.
-I64SAFE='{"us":["1","18446744073709551615"],"is":["-9223372036854775808"],"ud":["5","6"],"u":"9007199254740991","i":"-9007199254740991"}'
+I64SAFE='{"us":["1","18446744073709551615"],"is":["-9223372036854775808"],"ud":["5","6"],"u":"9007199254740991","i":"-9007199254740991","n":{"nu":"42","ni":"-42"}}'
 enc64 bigint "$I64SAFE" > "$WORK/i64_safe_bigint.bin"
 enc64 number "$I64SAFE" > "$WORK/i64_safe_number.bin"
 cmp -s "$WORK/i64_safe_bigint.bin" "$WORK/i64_safe_number.bin" || { echo "FAIL: int64: number wire drift"; exit 1; }
+# ...and long mode on the same safe payload: its scalars are Long-backed too
+# (generator#339), so they encode through writeUnsignedLong/writeSignedLong —
+# a separate corelib codec from the bigint writers, and it must emit the same
+# bytes for a small value as it does for a full-range one.
+enc64 long "$I64SAFE" > "$WORK/i64_safe_long.bin"
+cmp -s "$WORK/i64_safe_bigint.bin" "$WORK/i64_safe_long.bin" || { echo "FAIL: int64: long wire drift (safe-integer scalars)"; exit 1; }
 # Decode parity: long mode reproduces the bigint mode's JSON from the same bytes.
-DEC_A=$( cd "$WORK/i64-bigint" && npx tsx harness.ts decode m64 < "$WORK/i64_full_bigint.bin" )
-DEC_B=$( cd "$WORK/i64-long"   && npx tsx harness.ts decode m64 < "$WORK/i64_full_bigint.bin" )
-[ "$DEC_A" = "$DEC_B" ] || { echo "FAIL: int64: long decode drift"; exit 1; }
+for bin in "$WORK/i64_full_bigint.bin" "$WORK/i64_safe_bigint.bin"; do
+    DEC_A=$( cd "$WORK/i64-bigint" && npx tsx harness.ts decode m64 < "$bin" )
+    DEC_B=$( cd "$WORK/i64-long"   && npx tsx harness.ts decode m64 < "$bin" )
+    [ "$DEC_A" = "$DEC_B" ] || { echo "FAIL: int64: long decode drift ($bin)"; exit 1; }
+done
 # ...and the DECLARED type must be the type the field actually holds. The cursor
 # readers are number-first (a `number` up to 2^53-1, a `bigint` only past it), so
 # a bare `as bigint` cast on the pull path produced a `bigint`-typed field holding
@@ -447,6 +461,8 @@ const want = (label: string, v: unknown) => {
 const m = M64.decode(wire);
 want("u", m.u);
 want("i", m.i);
+want("n.nu", m.n.nu);
+want("n.ni", m.n.ni);
 m.us.forEach((v, k) => want(`us[${k}]`, v));
 m.is.forEach((v, k) => want(`is[${k}]`, v));
 // Surface 2: the streaming decoder, fed as one chunk. Same bytes, same fields —
@@ -456,6 +472,8 @@ d.feed(wire);
 const t = d.finish();
 want("stream u", t.u);
 want("stream i", t.i);
+want("stream n.nu", t.n.nu);
+want("stream n.ni", t.n.ni);
 t.us.forEach((v, k) => want(`stream us[${k}]`, v));
 t.is.forEach((v, k) => want(`stream is[${k}]`, v));
 if (bad.length) {
@@ -470,6 +488,70 @@ TS
 for bin in "$WORK/i64_full_bigint.bin" "$WORK/i64_safe_bigint.bin"; do
     ( cd "$WORK/i64-bigint" && npx tsx typecheck64.ts "$bin" ) \
         || { echo "FAIL: int64: bigint decoded a non-bigint into a bigint field ($bin)"; exit 1; }
+done
+# The same assertion for long mode, where the answer is `Long` in EVERY 64-bit
+# position — scalars included since generator#339. This is the mode's whole
+# point: the cursor's scalar readers are number-first, so without the dedicated
+# readUnsignedLong/readSignedLong (corelib-ts#143) a `Long`-declared scalar would
+# hold a `number` for any value below 2^53 and a `bigint` above it. toJSON hides
+# that completely — `Long.toString()`, `String(1n)` and `String(1)` all print
+# "1" — so the type is asserted directly, on both decode surfaces.
+echo "==> int64: long — decoded 64-bit fields must really be Long"
+cat > "$WORK/i64-long/typecheck64.ts" <<'TS'
+import { Long } from "@sofa-buffers/corelib";
+import { M64, M64Decoder } from "./message.js";
+import { readFileSync } from "node:fs";
+const wire = new Uint8Array(readFileSync(process.argv[2]!));
+const bad: string[] = [];
+const want = (label: string, v: unknown) => {
+  if (!(v instanceof Long)) bad.push(`${label}: ${typeof v}`);
+};
+// Surface 1: the one-shot pull decoder (c.readUnsignedLong / readSignedLong).
+const m = M64.decode(wire);
+want("u", m.u);
+want("i", m.i);
+// One level down: same emission, reached through the nested class's own
+// serialize/decodeFrom and its own private backing field.
+want("n.nu", m.n.nu);
+want("n.ni", m.n.ni);
+m.us.forEach((v, k) => want(`us[${k}]`, v));
+m.is.forEach((v, k) => want(`is[${k}]`, v));
+// Surface 2: the streaming decoder. Its visitor hooks are number-first, so the
+// generated arm converts through the field's setter — same field, same runtime
+// type, whichever decode API produced it (the invariant of generator#335).
+const d = new M64Decoder();
+d.feed(wire);
+const t = d.finish();
+want("stream u", t.u);
+want("stream i", t.i);
+want("stream n.nu", t.n.nu);
+want("stream n.ni", t.n.ni);
+t.us.forEach((v, k) => want(`stream us[${k}]`, v));
+t.is.forEach((v, k) => want(`stream is[${k}]`, v));
+// A default-valued field is a Long as well: the declared default is materialised
+// at construction, and an absent field decodes back to it.
+want("fresh u", new M64().u);
+// And the accessor pair takes what its type says it takes, converting once.
+const w = new M64();
+w.u = 7;
+want("set number", w.u);
+w.u = 7n;
+want("set bigint", w.u);
+w.u = Long.fromValue(7n);
+want("set Long", w.u);
+if (String(w.u.toBigInt()) !== "7") bad.push(`setter value: ${w.u.toBigInt()}`);
+if (bad.length) {
+  process.stderr.write(`declared Long, decoded as: ${bad.join(", ")}\n`);
+  process.exit(1);
+}
+TS
+# BOTH payloads, for the reason spelled out above: the safe-integer one is the
+# one a number-first reader answers with a `number`, so it is what actually
+# proves the scalar position — the full-range one would come back a `bigint`
+# from a broken build and still not be a Long.
+for bin in "$WORK/i64_full_bigint.bin" "$WORK/i64_safe_bigint.bin"; do
+    ( cd "$WORK/i64-long" && npx tsx typecheck64.ts "$bin" ) \
+        || { echo "FAIL: int64: long decoded a non-Long into a Long field ($bin)"; exit 1; }
 done
 echo "==> int64 modes OK (bigint == long == number on the wire)"
 
@@ -486,6 +568,28 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     ( cd "$WORK/corpus/$name" && npx tsc --noEmit )
 done
 echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+
+# ...and the same definitions again under `int64: long`, for every one that has a
+# 64-bit field. The loop above generates in the DEFAULT mode, so nothing here used
+# to typecheck the Long-backed shapes in a nested position — a struct or union
+# member, a wrapper row — even though the mode changes every 64-bit position in
+# the tree (#339 made that the scalars too). The mode touches nothing else, so
+# definitions without a u64/i64 are skipped rather than compiled twice.
+echo "==> corpus: 64-bit definitions typecheck under int64: long"
+cat > "$WORK/cfg_corpus_long.yaml" <<'YAML'
+generic: { emit: project }
+targets: { typescript: { int64: long } }
+YAML
+n64=0
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+    grep -Eq '\b(u64|i64)\b' "$def" || continue
+    name=$(basename "$def" .yaml)
+    gen "$def" "$WORK/corpus-long/$name" "$WORK/cfg_corpus_long.yaml"
+    ln -s "$WORK/ex/node_modules" "$WORK/corpus-long/$name/node_modules"
+    ( cd "$WORK/corpus-long/$name" && npx tsc --noEmit )
+    n64=$((n64 + 1))
+done
+echo "==> int64: long corpus typechecks ($n64 definitions with a 64-bit field)"
 
 # Nested WRAPPER rows round-trip, not only typecheck. Typechecking alone would
 # accept a collector that compiles but drops rows, so the shape that used to fail

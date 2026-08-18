@@ -459,16 +459,24 @@ func (g *gen) emitEncode(f *tsfile, name string, fields []*ir.Field) {
 	f.blank()
 }
 
-// emitLongAccessor declares a Long-backed 64-bit array: a private Long[]
-// backing field the hot paths read/write directly, plus a get/set accessor
-// pair keeping the public surface ergonomic — assignment accepts Long | bigint
-// | number elements and converts ONCE, off the per-encode path. In-place
-// mutation (msg.x.push(v)) operates on the Long[] itself, so v must be a Long.
+// emitLongAccessor declares a Long-backed 64-bit field — an array (Long[]) or,
+// under int64: long, a scalar (Long): a private backing field the hot paths
+// read/write directly, plus a get/set accessor pair keeping the public surface
+// ergonomic — assignment accepts Long | bigint | number and converts ONCE, off
+// the per-encode path. In-place mutation of an array (msg.x.push(v)) operates on
+// the Long[] itself, so v must be a Long.
 func (g *gen) emitLongAccessor(f *tsfile, fld *ir.Field) {
 	t := g.tsType(fld)
 	f.line("  private _%s: %s = %s;", fld.Name, t, g.tsDefault(fld))
 	f.emitDoc("  ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
 	f.line("  get %s(): %s { return this._%s; }", fld.Name, t, fld.Name)
+	if isBig(fld.Kind) {
+		// Scalar: the same shape one level down from the array setter. Long.fromValue
+		// returns a Long argument as-is, so assigning a Long costs nothing and
+		// assigning a bigint/number converts exactly once, here.
+		f.line("  set %s(v: Long | bigint | number) { this._%s = Long.fromValue(v); }", fld.Name, fld.Name)
+		return
+	}
 	f.line("  set %s(vals: %s) { this._%s = %s; }", fld.Name, g.longSetterParam(fld), fld.Name, g.longConvert("vals", fld.Elem, fld.ElemItems, 0))
 }
 
@@ -518,6 +526,12 @@ func (g *gen) emitIsDefault(f *tsfile, fields []*ir.Field) {
 func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 	acc := g.storage("this", fld)
 	switch fld.Kind {
+	case ir.KindU64, ir.KindI64:
+		// A Long is an object: `===` would compare identity, so the test is the
+		// (low, high) pair, exactly as longArrEq does per element.
+		if g.longScalars() {
+			return g.longScalarIsDefault(acc, fld)
+		}
 	case ir.KindBlob:
 		if blobHasNonEmptyDefault(fld) {
 			return fmt.Sprintf("arrEq(%s, %s)", acc, g.tsDefault(fld))
@@ -565,10 +579,25 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 	}
 	var write string
 	switch fld.Kind {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindBitfield:
 		write = fmt.Sprintf("os.writeUnsigned(%d, %s);", fld.ID, acc)
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindEnum:
 		write = fmt.Sprintf("os.writeSigned(%d, %s);", fld.ID, acc)
+	case ir.KindU64:
+		// Under int64: long the value IS a Long, so it goes out through the
+		// corelib's bigint-free scalar writer — identical wire, and neither side
+		// ever materialises a bigint (corelib-ts#143).
+		if g.longScalars() {
+			write = fmt.Sprintf("os.writeUnsignedLong(%d, %s);", fld.ID, acc)
+		} else {
+			write = fmt.Sprintf("os.writeUnsigned(%d, %s);", fld.ID, acc)
+		}
+	case ir.KindI64:
+		if g.longScalars() {
+			write = fmt.Sprintf("os.writeSignedLong(%d, %s);", fld.ID, acc)
+		} else {
+			write = fmt.Sprintf("os.writeSigned(%d, %s);", fld.ID, acc)
+		}
 	case ir.KindBool:
 		write = fmt.Sprintf("os.writeBoolean(%d, %s);", fld.ID, acc)
 	case ir.KindFP32:
@@ -629,6 +658,15 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default (materialized at construction).
+	if g.longScalars() && isBig(fld.Kind) {
+		// A Long-backed scalar compares by its halves, not by `!==` (object
+		// identity). Same predicate as isDefault's — one helper, so the writer and
+		// the predicate cannot drift apart.
+		f.line("    if (!(%s)) {", g.longScalarIsDefault(acc, fld))
+		f.line("      %s", write)
+		f.line("    }")
+		return
+	}
 	f.line("    if (%s !== %s) {", acc, g.tsDefault(fld))
 	f.line("      %s", write)
 	f.line("    }")

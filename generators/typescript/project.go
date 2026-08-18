@@ -93,7 +93,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// loop, so anything heavier would be counted as decode cost.
 		f.line("    const body = w === \"encode_%s\"", low)
 		f.line("      ? () => { sink ^= obj.encode().length; }")
-		f.line("      : () => { sink ^= Number(M.%s.decode(wire).%s); };", mt, benchSinkField(m))
+		f.line("      : () => { sink ^= %s; };", g.benchSinkExpr(mt, m))
 		f.line("    // Fixed warmup, independent of `reps`, so it cancels in the subtraction")
 		f.line("    // (corelib-java/.../Callgrind.java does the same). Without it V8 tiers up")
 		f.line("    // DURING the measured loop and Ir stops being affine in reps -- the two")
@@ -158,6 +158,22 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.blank()
 	f.line("main().then((c) => process.exit(c));")
 	return f.bytes()
+}
+
+// benchSinkExpr is the fold of one decoded field into the bench sink, keeping the
+// decode from being elided. `Number()` is right for a narrow int and for the
+// bigint/number int64 modes, but a Long-backed 64-bit scalar is an OBJECT —
+// Number(Long) is NaN, which folds to a sink of 0 and quietly stops proving
+// anything. Its low half is the cheap read there, and just as unelidable.
+func (g *gen) benchSinkExpr(mt string, m *ir.Message) string {
+	fld := benchSinkField(m)
+	acc := fmt.Sprintf("M.%s.decode(wire).%s", mt, fld)
+	for _, x := range m.Fields {
+		if x.Name == fld && g.longScalars() && isBig(x.Kind) {
+			return acc + ".low"
+		}
+	}
+	return "Number(" + acc + ")"
 }
 
 // benchSinkField names one cheap integer scalar of m, folded in the bench loop so
