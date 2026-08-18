@@ -116,3 +116,14 @@ messages:
           oneof:
             electric:   { id: 0, type: fp32, unit: kWh, description: "Remaining battery energy" }
             combustion: { id: 1, type: fp32, unit: L,   description: "Remaining fuel volume" }
+
+      # Arrays of 64-bit integers. The widest element a native array carries, and
+      # the one several targets represent differently from the narrow widths:
+      # TypeScript backs it with corelib `Long[]` under `int64: long`/`number`,
+      # Java with `long[]`. A 64-bit SCALAR reaches none of that -- the
+      # representation choice is an array-only axis -- so `odometer_m` and
+      # `trip_energy_wh` above leave it untested (generator#336). No `unit` here:
+      # the schema does not allow one on an array field, so it goes in the name,
+      # as it does for `tire_kpa`.
+      can_rx_counts:  { id: 32, type: array, items: { type: u64, count: 4 }, description: "Frames received per CAN bus since power-on" }
+      axle_energy_wh: { id: 33, type: array, items: { type: i64, count: 2 }, description: "Signed net energy per drive axle (Wh); negative while regenerating" }

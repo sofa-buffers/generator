@@ -49,7 +49,12 @@ sofabgen --lang go --in examples/messages/realworld/vehicle_telemetry.yaml --out
   - **Arrays of every element kind** — scalar (`tire_kpa`, with an array
     `default`), string (`warnings`), blob (`ecu_sigs`), struct (`recent_codes`),
     enum (`gear_history`), boolean (`doors_open`), bitfield (`wheel_faults`),
-    union (`energy_sources`) and array-of-array (`cell_mv`, a matrix).
+    union (`energy_sources`) and array-of-array (`cell_mv`, a matrix) —
+    including the **64-bit** element widths (`can_rx_counts`, `axle_energy_wh`),
+    which several targets represent differently from the narrow ones and which a
+    64-bit *scalar* does not reach: TypeScript backs a 64-bit array with corelib
+    `Long[]` under `int64: long`, Java with `long[]`, while the scalar stays a
+    `bigint` either way (generator#336).
   - **All per-field metadata** — `unit`, `description`, `decimals` (a precision
     hint on `GeoPoint` and `battery_temp_c`), `deprecated`, `maxlen`, `count`,
     and `default`s of every flavour (scalar, string, blob, float, `i64`-as-string
