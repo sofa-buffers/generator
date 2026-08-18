@@ -409,6 +409,24 @@ a reimplementation should emit code that honors all of them:
 - **Decode by `switch` on field id**, not an if-chain — compilers build a jump
   table; unknown ids fall through to the corelib's skip path, giving
   forward/backward compatibility for free.
+- **A schema bound is checked in exactly one place: wherever it is decided
+  earliest.** For every bound the corelib reader accepts as an argument — an
+  array `count`, an element's declared width, a string/blob `maxlen` — that place
+  is *inside the reader*, at the count or length word, before the payload. The
+  reason is a verdict, not a saving: §5.2 makes INVALID dominate INCOMPLETE, and
+  a check the generated code runs after the read cannot fire for a value the read
+  never finished assembling, so it loses the verdict on exactly the truncated
+  input the bound exists to reject (generator#216, #267).
+  A second copy of that check at the call site is therefore **not** defense in
+  depth — it is strictly later and strictly weaker than the one that already
+  decided, and it is not free: re-walking every decoded string and every decoded
+  array was 10% of the TypeScript decode (generator#339). Keep a call-site check
+  only where the corelib has no argument to take the bound (the streaming visitor
+  surfaces, where `arrayBegin` / `fixlenBegin` carry it instead) or where it is
+  O(1) on a value already in hand (a blob's `.length`). What guards against a
+  corelib that stops honouring an argument is the conformance suite, which
+  exercises each reject and its truncated twin — not a duplicate branch on the
+  hot path.
 - **Resolve everything at generation time.** Field ids, type mappings, enum
   backing widths, array element kinds/counts, `maxlen` — all known statically, so
   bake them in as constants/literals; nothing is computed at runtime.

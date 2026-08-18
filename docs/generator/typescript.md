@@ -467,16 +467,24 @@ and count rejects. A decoded integer lives in a JS `number`, so nothing masked i
 here; the defect was that an out-of-range value was **kept**.
 
 ```ts
-case 0: { const _v = Number(c.readUnsigned());
+case 0: { const _v = c.readUnsigned();
           if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg,
             "a_u8: value outside declared width u8");
-          o.a_u8 = _v; break; }
+          o.a_u8 = _v as number; break; }
 case 3: o.d_u64 = c.readUnsigned() as bigint; break;   // u64: nothing to bound
 ```
 
 The read lands in a temporary so the check can precede the store. `u64`/`i64`
 keep their bare read in both int64 modes (bigint and Long): their range is the
 reader's own.
+
+There is no `Number()` around a *guarded* read. The reader is number-first: it
+returns a `bigint` only past 2^53-1, which is far outside every width guarded
+here, so the guard rejects any `bigint` before the store — and a value that
+passes it is therefore already a `number` (JS compares a `bigint` against a
+`number` by value, so the guard itself is exact either way). `_v as number` is a
+type assertion and emits nothing. An **unguarded** destination keeps the
+conversion, since nothing there proves the narrowing.
 
 ### The bound goes into the reader, not into a scan after it (issue #267)
 
@@ -498,10 +506,26 @@ c.readSignedArray(undefined, -128, 127) as number[]   // dynamic i8[]
 
 A **dynamic** array keeps `undefined` in the count slot and still carries the
 width bound: width is a property of the element *type*, not of the array
-*length*. The post-read scan **stays** — unreachable now, but it is the only thing
-still bounding elements for a consumer building against an older corelib whose
-reader ignores the new arguments, and it costs one pass over an array already in
-hand.
+*length*.
+
+The post-read scan that used to follow the read is **gone** (issue #339). It was
+kept as defense in depth for a consumer on an older corelib whose reader ignored
+the new arguments — but "one pass over an array already in hand" is not free on a
+decode hot path, and the same reasoning that moved the bound into the reader
+condemns the copy left behind it: a scan over the assembled array is strictly
+later and strictly weaker than the verdict it duplicates, and it cannot reach the
+truncation case the reader-side bound exists for. The same applies to the
+whole-array `_a.length > N` count re-check, the whole-string `_utf8Len(_s) > N`
+maxlen re-scan (whose helper is now gone entirely), and the fp32 array's
+`_n > N`. Measured on the arena's `FullScaleExample`, dropping all four took
+decode from 48 201 to 43 578 Ir/op — 10% of the whole decode spent re-deciding
+settled questions. `tests/conformance/typescript/run.sh` exercises every one of
+those rejects through the reader (over-count, over-count + truncation,
+over-width element + truncation, over-maxlen, over-maxlen + truncation), so a
+corelib that stopped honouring an argument fails there rather than silently.
+
+A bounded **blob** keeps its `_b.length > N` check: reading `.length` on a view
+the reader already produced is O(1), so there is nothing to reclaim.
 
 Passing the bound was necessary but not sufficient, and the gap is worth
 recording because it is invisible from this side. `Cursor.arrayCount` rejected a
@@ -532,3 +556,127 @@ kinds, so ignoring `sub` would measure a blob field's `maxlen` against a string
 arriving at that id — a §7.3 mismatch to *skip*, not to bound. The wrapper-element
 collectors get the same treatment: their over-index *and* `maxlen` checks sat in
 the payload callback too (generator#303, closing #300).
+
+## The decode hot path (issue #339)
+
+The arena (`sofa-buffers/arena`, `typescript` row) measured this target at
+**0.76× protobufjs on MB/s** while every other maxspeed target beat its baseline.
+Attributing that with Callgrind — Ir/op under full TurboFan, subtracted between
+two rep counts, one payload group emptied at a time — put the whole gap on
+**decode**:
+
+| Ir/op, `FullScaleExample` | sofab | protobufjs |
+| - | - | - |
+| encode | 22 644 | 27 630 |
+| decode | 48 201 | 29 235 |
+
+Encode was already 18% ahead. So the question was never "is TypeScript slow", it
+was "what does decode do that encode does not", and the answer turned out to be
+two things the encoder had already fixed for itself years earlier — an
+un-inlinable varint routine, and a per-string `TextEncoder`/`TextDecoder` round
+trip. Both fixes live in corelib-ts (`perf/decode-hot-path`); the generator's own
+share is above:
+
+- the four whole-value re-scans, §7.1 above — **−4 623 Ir/op**;
+- the `Number()` around a guarded narrow read, §7.1 above;
+- the fp32 array's per-read `new DataView(_p.buffer, …)`, replaced by the shared
+  4-byte scratch `_fp32FromRaw` already emitted for the scalar position. The
+  encode half (`_fp32ArrayRaw`) likewise builds its bytes through
+  `_fp32RawFrom` instead of constructing two DataViews per call;
+- the `DecodeLimits` literal, hoisted to one frozen module-level `_LIMITS`.
+  `max_dyn_array_count` / `max_dyn_string_len` / `max_dyn_blob_len` resolve to
+  compile-time constants, so a fresh `{ maxArrayCount: … }` at every
+  `decode(bytes)` call site was an allocation with a constant value on the decode
+  path — paid by every schema that configures a cap at all, and by the streaming
+  `IStream` too. A schema with no cap configured is unaffected: `cursorLimits()`
+  still renders nothing.
+
+Together with the corelib change the round trip goes **73 121 → 56 398 Ir/op**
+against protobufjs's 60 590 — from 0.84× to 1.07× on messages/second, and from
+0.76× to 0.94× on MB/s (the MB/s column is measured on each side's own wire, so
+SofaBuffers' 12%-smaller message counts against it there).
+
+### A `bigint` field must hold a `bigint` (issue #340)
+
+The cursor readers are **number-first**: `readUnsigned` returns a `number` for
+anything up to 2^53-1 and a `bigint` only past that. The pull path used to bridge
+that with a bare cast — `c.readUnsigned() as bigint`,
+`c.readUnsignedArray(n) as bigint[]` — which converts nothing, so the declared
+type was false:
+
+```ts
+const m = Example.decode(wire);
+typeof m.u64          // "number"  — declared bigint
+m.u64 + 1n            // TypeError: Cannot mix BigInt and other types
+m.arrays.u64          // [0, 4611686018427387904n, …] — number AND bigint, same array
+```
+
+The array case is the worse of the two: the element type depends on the element's
+*value*, so one array holds both, which is a lie a consumer trips over
+(`arr.map((v) => v * 2n)`) **and** a mixed-type array that defeats the engine's
+element-kind specialisation — the cast was not even buying speed.
+
+What settles the intended semantics is that the *other two* paths into the same
+field were already right: the streaming visitor stores `BigInt(v)` and `fromJSON`
+maps `BigInt(...)`. So the same field had a different runtime type depending on
+which decode API the caller used, and the pull path was the odd one out. It now
+converts like the others:
+
+```ts
+o.u64 = BigInt(c.readUnsigned());
+o.u64 = c.readUnsignedArray(5).map((_e) => BigInt(_e));
+```
+
+`int64: long` / `number` are unaffected on the array side (they hand back uniform
+`Long` objects); their scalars are `bigint` and get the same conversion.
+
+**This costs, and the cost is the type.** A real `bigint[]` needs one `bigint`
+allocation per element — that is what the cast was avoiding by not producing one.
+Round trip on `FullScaleExample`: `bigint` 56 627 → 59 747 Ir/op (+5.5%), `long`
+56 400 → 57 391 (+1.8%, its two 64-bit scalars only), `number` unchanged. All
+three still clear protobufjs's 60 590, and a caller who wants the last of it has
+`int64: long`, which is now both correct and faster.
+
+Nothing above the runtime type changes: the wire is byte-identical and every
+existing conformance check passed before the fix, because they all compare wire
+bytes or `toJSON()` output and `String(1n) === String(1)`. That is exactly why
+`tests/conformance/typescript/run.sh` now asserts `typeof` directly, on **both**
+decode surfaces and against **both** the full-range and the safe-integer payload
+— the full-range one catches the array elements, the safe-integer one catches the
+scalar (a scalar past 2^53 came back `bigint` even from the broken build).
+
+### All three `int64` modes, and both runtimes
+
+The `int64` axis (`bigint` | `long` | `number`, §Options) changes the 64-bit hot
+path, so the work above was re-measured across all three rather than only the
+arena's `long`. It holds uniformly, and every mode now clears protobufjs:
+
+| round trip, Ir/op | before | after | after + #340 fix |
+| - | - | - | - |
+| `bigint` (default) | 72 974 | 56 627 | **59 747** |
+| `long` (arena) | 73 124 | 56 400 | **57 391** |
+| `number` | 73 164 | 56 360 | **56 360** |
+| *protobufjs* | | | *60 590* |
+
+On **Node/V8** the three modes land within 0.5% of each other — the axis is
+nearly free here, contrary to what the option's description implies. That
+description is about **JavaScriptCore**, and there it holds: on Bun, best-of-5
+over four interleaved rounds, `long` runs the round trip in 0.606 s against
+`bigint`'s 0.854 s. Bun is also where this change pays most, because an
+un-inlinable varint routine and a per-string payload view cost JSC far more than
+V8:
+
+| Bun / JavaScriptCore | msg/s | MB/s |
+| - | - | - |
+| protobufjs | 100 494 | 49.6 |
+| sofab before (`long`) | 79 376 | 34.4 |
+| sofab after (`long`) | **164 966** | **71.6** |
+
+**Method note, because it decided two of these calls.** Measure at the tier the
+consumer runs. `tests/bench` pins V8 to the baseline JIT (`--max-opt=1`) to make
+Ir affine in reps, and at that tier the same ranking does not hold: the ASCII
+string fast path measures *slower* there and faster under TurboFan, and the
+protobufjs decode gap reads 27% instead of 65%. And measure the round trip, not
+decode alone: a decoder that appends with `+=` builds a rope, which looks 40%
+cheaper until the encoder's UTF-8 pass flattens it — decode-only said that design
+won by 1 700 Ir/op, the round trip said it lost by 4 500.

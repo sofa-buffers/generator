@@ -107,6 +107,12 @@ func (g *gen) cursorLimits() string {
 	if !g.limits.any() {
 		return ""
 	}
+	return ", _LIMITS"
+}
+
+// limitFields renders the configured caps as DecodeLimits object fields, for the
+// single module-level `_LIMITS` the decode entry points share.
+func (g *gen) limitFields() []string {
 	var parts []string
 	if g.limits.arrayHas {
 		parts = append(parts, "maxArrayCount: MAX_DYN_ARRAY_COUNT")
@@ -117,7 +123,7 @@ func (g *gen) cursorLimits() string {
 	if g.limits.blobHas {
 		parts = append(parts, "maxBlobLen: MAX_DYN_BLOB_LEN")
 	}
-	return ", { " + strings.Join(parts, ", ") + " }"
+	return parts
 }
 
 type tsfile struct{ b strings.Builder }
@@ -189,6 +195,15 @@ func (g *gen) module(s *ir.Schema) []byte {
 			f.line("export const MAX_DYN_BLOB_LEN = %d;", g.limits.blobLen)
 		}
 		f.blank()
+		// One frozen object, not a literal per decode. The caps are compile-time
+		// constants, so a fresh `{ maxArrayCount: … }` at every `decode(bytes)`
+		// call site is an allocation with a constant value — on a decode hot path,
+		// and paid by every schema that configures a cap at all.
+		f.line("// The DecodeLimits every static decode() hands its Cursor. Module-level and")
+		f.line("// frozen: the caps above are constants, so this is built once rather than")
+		f.line("// re-allocated on every decode.")
+		f.line("const _LIMITS = Object.freeze({ %s });", strings.Join(g.limitFields(), ", "))
+		f.blank()
 	}
 	if use.arrEq {
 		f.line("%s", arrEqHelper)
@@ -196,10 +211,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	if use.longArrEq {
 		f.line("%s", longArrEqHelper)
-		f.blank()
-	}
-	if use.strMaxlen {
-		f.line("%s", utf8LenHelper)
 		f.blank()
 	}
 	if use.fp32Raw {
