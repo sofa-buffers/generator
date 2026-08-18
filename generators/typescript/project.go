@@ -104,6 +104,26 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("    process.stderr.write(`wire_hex=${Buffer.from(wire).toString(\"hex\")}\\n`);")
 		f.line("    return 0;")
 		f.line("  }")
+		// The CHUNKED decode surface, which neither workload above touches: `decode`
+		// is the whole-buffer pull cursor, and the two paths are different code
+		// reaching the same fields (the differential test in
+		// tests/conformance/typescript/run.sh exists for exactly that reason). A
+		// change that only moves on the push path — corelib-ts's opt-in Long channel
+		// is one — is invisible in `decode_*`.
+		//
+		// Fed WHOLE, one chunk: the point is the visitor's per-value cost, not the
+		// resumption machinery, and a fixed chunking would measure the split as much
+		// as the decode.
+		f.line("  if (w === \"stream_%s\") {", low)
+		f.line("    const obj = M.%s.fromJSON(JSON.parse(input.toString(\"utf8\")));", mt)
+		f.line("    const wire = obj.encode(); // setup: the decode input")
+		f.line("    let sink = 0;")
+		f.line("    const body = () => { const _d = new M.%sDecoder(); _d.feed(wire); sink ^= %s; };", mt, g.benchSinkOn("_d.finish()", m))
+		f.line("    for (let i = 0; i < BENCH_WARMUP; i++) body();")
+		f.line("    for (let i = 0; i < reps; i++) body();")
+		f.line("    process.stderr.write(`sink=${sink} bytes=${wire.length}\\n`);")
+		f.line("    return 0;")
+		f.line("  }")
 	}
 	f.line("  process.stderr.write(`unknown workload: ${w}\\n`);")
 	f.line("  return 2;")
@@ -166,8 +186,14 @@ func (g *gen) harness(s *ir.Schema) []byte {
 // Number(Long) is NaN, which folds to a sink of 0 and quietly stops proving
 // anything. Its low half is the cheap read there, and just as unelidable.
 func (g *gen) benchSinkExpr(mt string, m *ir.Message) string {
+	return g.benchSinkOn(fmt.Sprintf("M.%s.decode(wire)", mt), m)
+}
+
+// benchSinkOn is that fold over an arbitrary decoded-object expression, so the
+// pull and the chunked workloads share one definition of "cheap unelidable read".
+func (g *gen) benchSinkOn(obj string, m *ir.Message) string {
 	fld := benchSinkField(m)
-	acc := fmt.Sprintf("M.%s.decode(wire).%s", mt, fld)
+	acc := obj + "." + fld
 	for _, x := range m.Fields {
 		if x.Name == fld && g.longScalars() && isBig(x.Kind) {
 			return acc + ".low"
