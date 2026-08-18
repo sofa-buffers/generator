@@ -2232,3 +2232,47 @@ func TestCppEncodeRespectsTheCeilingDistinction(t *testing.T) {
 		t.Errorf("unbounded encode still sizes its buffer from the configured ceiling:\n%s", unbounded)
 	}
 }
+
+// TestCppSeqHelpersOnlyWhenInstantiated: the sofabgen::WrapperSeq block is emitted
+// only for a schema that actually reads through it.
+//
+// The gate used to fire for every non-native array element, which counted the two
+// element kinds that never reach it: a `string` or `blob` element is collected by
+// the corelib's own sofab::StringSeq / sofab::BlobSeq, and a row that is itself a
+// wrapper sequence gets a local collector from deserializeRowSeq. A schema whose
+// only wrapper arrays are strings and blobs -- the common shape -- therefore
+// carried ~66 lines of template that nothing instantiated (generator#345).
+func TestCppSeqHelpersOnlyWhenInstantiated(t *testing.T) {
+	const guard = "#define SOFABGEN_WRAPPER_SEQ_HELPERS"
+
+	for _, tc := range []struct {
+		name  string
+		field string
+		want  bool
+	}{
+		{"string elements go to sofab::StringSeq",
+			"a: { id: 0, type: array, items: { type: string, count: 2, maxlen: 4 } }", false},
+		{"blob elements go to sofab::BlobSeq",
+			"a: { id: 0, type: array, items: { type: blob, count: 2, maxlen: 4 } }", false},
+		{"native scalars need no collector at all",
+			"a: { id: 0, type: array, items: { type: u32, count: 3 } }", false},
+		{"struct elements are placed by WrapperSeq",
+			"a: { id: 0, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }", true},
+		{"a matrix row is placed by WrapperSeq",
+			"a: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }", true},
+		{"a row of strings gets its own local collector",
+			"a: { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } }", false},
+		{"but a row of structs reaches WrapperSeq one level down",
+			"a: { id: 0, type: array, items: { type: array, count: 2, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } } }", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := headerFromYAML(t, "version: 1\nmessages:\n  M:\n    payload:\n      "+tc.field+"\n", "m.hpp")
+			if got := strings.Contains(h, guard); got != tc.want {
+				t.Errorf("helper block emitted = %v, want %v\n%s", got, tc.want, h)
+			}
+			if !tc.want && strings.Contains(h, "sofabgen::WrapperSeq") {
+				t.Errorf("no block, but an instantiation survived\n%s", h)
+			}
+		})
+	}
+}
