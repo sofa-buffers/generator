@@ -434,15 +434,34 @@ a reimplementation should emit code that honors all of them:
 - **No reflection / no runtime schema** — all dispatch is concrete generated
   code. (The sole exception is C, which *deliberately* uses a static descriptor
   table for footprint.)
-- **Generated support code is allowed where the *schema* is what decides.** The
-  firm boundary is about the wire format, not about who owns every line: a
-  backend may emit small schema-driven helpers (Go's collector prelude
-  `sofab_visitor.go`, C++'s macro-guarded `namespace sofabgen` block, the
-  per-language sized-array descriptors of §11) when the rule they
-  implement depends on a schema `count` the corelib cannot see (CORELIB_PLAN §7).
-  Such a helper still only *calls* the corelib's typed API — it never touches
-  bytes. Emit it once per package/translation unit and guard it against
-  double-inclusion; do not grow it into a second runtime.
+- **Static helpers belong in the corelib; generated code stays thin.** A corelib
+  knows no schema — only what a call hands it, and it has no compile-time
+  reference to any message. That is precisely why a *static* helper belongs
+  there: one whose code has the **same shape for every schema**, with its schema
+  dependence carried entirely by arguments and type parameters. A `count`,
+  `maxlen`, element width or capacity is then a runtime value like any other.
+  `sofab::StringSeq` / `sofab::MessageSeq` and `sofab.arrays.*` are the shape to
+  copy — one collector in the corelib, the bounds passed per field; and
+  `corelib-go/arrays.go` states the same test in its own file comment.
+  The generator emits only what has a **different shape per schema** — the field
+  arms, the id routing, the per-field guards, the declared types, the
+  sized-array descriptors of §11 — and what **names a generated symbol** (Go's
+  `_isDefaulter` requires the generated `isDefault()`, so it stays). Reaching a
+  generated type through a *type parameter* is not naming it.
+  *Thin* means lines of logic, not lines of comment: a helper's rationale moves
+  with it and is then written once in the corelib instead of re-emitted into
+  every user's source tree.
+  Three things override this, each **measured, never asserted** (§15): a move
+  that costs `.text`/`.data` on a footprint target (`c`, `rs-no-std`, `c-cpp`); a
+  move that costs instructions/op on a maxspeed target (the corelib boundary can
+  defeat inlining); and output-buffer **allocation**, which CORELIB_PLAN §5.1
+  assigns to the generated layer — the corelib may offer the mechanism, never the
+  policy (`growingOStream` and `Encoder.encodeToBytes` allocate inside their
+  corelibs and are therefore off-limits to generated code).
+  A helper that moves makes generated code require a corelib version. Emit the
+  floor the way the `c` and `cpp` backends already do (`SOFAB_API_VERSION` /
+  `static_assert(sofab::API_VERSION …)`); a backend that does not check it yet
+  must start. Tracked as generator#345.
 - **Pick the narrowest correct type** — map each integer to its exact width;
   enum → smallest *signed* backing, bitfield → smallest *unsigned* backing; avoid
   widening on the hot path (§11 natural-width writes).
