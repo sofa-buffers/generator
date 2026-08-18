@@ -37,6 +37,7 @@ tests/
 │   ├── go/       { run.sh }
 │   ├── python/   { run.sh }
 │   ├── java/     { run.sh, check_vectors.py }
+│   ├── kotlin/   { run.sh, check_vectors.py }
 │   ├── csharp/   { run.sh, check_vectors.py }
 │   ├── rust/     { run.sh, check_vectors.py }
 │   ├── typescript/ { run.sh, check_vectors.py }
@@ -45,7 +46,7 @@ tests/
 ├── bench/                  # Tier 3 — Ir/op + footprint of the generated code (ARCHITECTURE §15)
 │   ├── run.sh              #   regenerates results.txt; --rows <ids> to iterate on one row
 │   ├── results.txt         #   COMMITTED — the artifact; `git diff` it
-│   ├── rows.json           #   the 12 (language x corelib) rows + their arches/reps
+│   ├── rows.json           #   the (language x corelib x config) rows + their arches/reps
 │   ├── payload/            #   the saturated JSON payload every row encodes
 │   ├── lang/<lang>.sh      #   per-language build + measure recipes
 │   ├── lib/                #   callgrind.sh (toggle/subtract + validity gates), size.sh, format.py
@@ -88,6 +89,12 @@ the corelib** into a temp dir; to test against a local checkout, pass its path a
 | `go` | corelib-go | `$1` / `SOFAB_GO_CORELIB` | |
 | `python` | corelib-py | `$1` / `SOFAB_PY_CORELIB` | |
 | `java` | corelib-java | `$1` / `SOFAB_JAVA_CORELIB` | `check_vectors.py` |
+| `kotlin` | corelib-kotlin-mp | `$1` / `SOFAB_KOTLIN_CORELIB` | `check_vectors.py` |
+
+> `kotlin` additionally needs a JDK the Kotlin Gradle plugin supports (17..24),
+> which is **not** the devcontainer's default — it exports `SOFAB_KOTLIN_JDK` at
+> the second one it installs, and the harness reads that before `JAVA_HOME`.
+> Gradle comes from the corelib's own wrapper.
 | `csharp` | corelib-cs | `$1` / `SOFAB_CS_CORELIB` | `check_vectors.py` |
 | `typescript` | corelib-ts | `$1` / `SOFAB_TS_CORELIB` | `check_vectors.py` |
 | `zig` | corelib-zig | `$1` / `SOFAB_ZIG_CORELIB` | `check_vectors.py` |
@@ -116,7 +123,7 @@ git diff tests/bench/results.txt     # <- the result
 ```
 
 Two metrics: **Ir/op** (instructions retired under Callgrind — machine-independent,
-which is what makes it committable) for all 12 (language × corelib) rows, and
+which is what makes it committable) for every (language × corelib × config) row, and
 **`.text`/`.data`/`.bss`** for the three `footprint` rows, cross-compiled to the
 embedded targets those profiles actually ship to (ARMv6-M, ARMv7-M+fp.dp, RV32IMC,
 thumbv6m).

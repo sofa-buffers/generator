@@ -230,6 +230,35 @@ jobs:
           name: generated-java
           path: generated
 
+  # Language milestone: Kotlin (corelib-kotlin-mp, the Kotlin Multiplatform
+  # port). Publishes the corelib to the local Maven repo, generates a Gradle
+  # project, builds it, round-trips JSON, and checks byte-exact output against
+  # the shared vectors. Gradle comes from the corelib's own wrapper, so only a
+  # JDK is provisioned here. run.sh clones corelib-kotlin-mp.
+  lang-kotlin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: ./.github/actions/corelib-refs
+      - name: Kotlin backend — generate, build, round-trip, conformance
+        run: ./tests/conformance/kotlin/run.sh
+      - name: Generate sources (artifact)
+        if: always()
+        run: ./tests/gen-artifacts.sh kotlin generated
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: generated-kotlin
+          path: generated
+
   # Language milestone: Zig (corelib-zig, the max-speed port). Generates a Zig
   # package, builds it with zig build --release=fast, round-trips JSON, and
   # checks byte-exact output against the shared vectors. run.sh clones

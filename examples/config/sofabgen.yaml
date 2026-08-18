@@ -26,6 +26,8 @@ targets:
   python: {}
   java:
     package: com.myproj.messages
+  kotlin:
+    package: com.myproj.messages
   csharp:
     namespace: MyProj.Messages
   typescript:

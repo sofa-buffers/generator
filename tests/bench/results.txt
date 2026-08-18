@@ -14,7 +14,7 @@
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
-# corelib:   c-cpp e93e4cd | cpp 4dc7d85 | cs bc56317 | dart 8617f7a | go eff4c9c | java 54215f4 | py 219bf32 | rs a70386d | rs-no-std 8a96d7a | ts 1eb151d | zig 6e08a48
+# corelib:   c-cpp e93e4cd | cpp 4dc7d85 | cs bc56317 | dart 8617f7a | go eff4c9c | java 54215f4 | kotlin-mp 892af53 | py 219bf32 | rs a70386d | rs-no-std 8a96d7a | ts 1eb151d | zig 6e08a48
 #
 ## instruction cost
 row                profile    method    encode_ir/op  decode_ir/op
@@ -27,8 +27,9 @@ csharp             maxspeed   subtract  30586         70025
 dart               maxspeed   subtract  25885         53810
 go                 maxspeed   toggle    20220         40352
 java               maxspeed   subtract  17161         32131
+kotlin             maxspeed   subtract  17203         32655
 python             maxspeed   subtract  1101160       2315322
-python-native      maxspeed   subtract  128150        486315
+python-native      maxspeed   subtract  128150        483692
 rust-rs            maxspeed   toggle    9137          22717
 rust-rs-no-std     footprint  toggle    8078          29571
 rust-rs-no-std-dyn footprint  toggle    8224          38276
@@ -46,6 +47,7 @@ g++                       15.2.0        cpp-c-cpp,cpp-c-cpp-dyn,cpp-cpp,cpp-cpp-
 gcc                       15.2.0        c
 go                        1.24.4        go
 javac                     25.0.3        java
+kotlin-jdk                21.0.12       kotlin
 node                      24.18.0       ts-bigint,ts-long,ts-number
 python3                   3.14.4        python,python-native
 riscv64-unknown-elf-gcc   14.2.0        c

@@ -96,6 +96,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 ENV JAVA_HOME=/usr/lib/jvm/default-java
 
+# A SECOND JDK, for Kotlin only. The Kotlin Gradle plugin refuses to run on a JDK
+# newer than it knows, and `default-jdk` on this base is well past that window --
+# so the Kotlin conformance harness and bench row need one that is inside it.
+#
+# It is deliberately NOT JAVA_HOME. Pointing the whole image at another JVM would
+# rebuild the java and csharp bench rows on a different runtime and move their
+# Ir/op for a reason no generator change caused; both the harness
+# (tests/conformance/kotlin/run.sh) and the recipe (tests/bench/lang/kotlin.sh)
+# read SOFAB_KOTLIN_JDK instead, and tests/bench/lib/format.py records which JVM
+# the kotlin row actually used. apt's alternatives keep the newer JDK as the
+# default `java`/`javac`, so nothing else on PATH changes.
+#
+# The symlink exists because the install path carries the architecture
+# (java-21-openjdk-amd64 / -arm64) and the env var must not.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-21-jdk-headless \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/lib/jvm/java-21-openjdk-* /usr/lib/jvm/kotlin-jdk
+ENV SOFAB_KOTLIN_JDK=/usr/lib/jvm/kotlin-jdk
+
 # Rust via rustup (not apt cargo/rustc). The conformance harnesses only need
 # host cargo/rustc, but the footprint bench (tests/bench/lang/rust.sh) links the
 # generated crate for thumbv6m-none-eabi and sizes it with llvm-size, which

@@ -39,6 +39,16 @@ LANG_TOOLCHAINS = {
     "typescript": [("node", ["node", "--version"])],
     "python":     [("python3", ["python3", "--version"])],
     "java":       [("javac", ["javac", "-version"])],
+    # The Kotlin plugin refuses to run on a JDK newer than it knows, so this row
+    # may be measured on a DIFFERENT JVM than the java row -- see
+    # tests/bench/lang/kotlin.sh. Resolving the same knob the recipe does is what
+    # keeps the record true: a row measured on another runtime with the table
+    # showing the box default would be a second measuring device with nothing in
+    # the file to show for it.
+    "kotlin":     [("kotlin-jdk", ["sh", "-c",
+                    'J="${SOFAB_KOTLIN_JDK:-${JAVA_HOME:-}}"; '
+                    'if [ -x "$J/bin/java" ]; then exec "$J/bin/java" -version 2>&1; '
+                    'else exec java -version 2>&1; fi'])],
     "csharp":     [("dotnet", ["dotnet", "--version"])],
 }
 
