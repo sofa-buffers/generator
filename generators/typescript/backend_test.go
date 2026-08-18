@@ -525,10 +525,33 @@ func TestTSInt64Long(t *testing.T) {
 		`"is": this._is.map((_x0) => _x0.toString(true)),`,
 		// fromJSON keeps the bigint parse and lets the setter convert once.
 		`if ("us" in d) o.us = (d["us"] as (string | number)[]).map((_x0) => BigInt(_x0));`,
-		// Scalars stay bigint in long mode (no scalar Long codec in corelib yet).
-		"u: bigint = 0n;",
-		"i: bigint = -7n;",
-		"case 4: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.u = BigInt(c.readUnsigned()); break;",
+		// Scalars are Long-backed too (generator#339, corelib-ts#143): the same
+		// private-field-plus-accessor shape as the arrays, one level down. The
+		// zero default is the shared immutable Long.ZERO, never Long.fromValue(0n).
+		"private _u: Long = Long.ZERO;",
+		"get u(): Long { return this._u; }",
+		"set u(v: Long | bigint | number) { this._u = Long.fromValue(v); }",
+		"private _i: Long = Long.fromValue(-7n);",
+		// The omit test is a (low, high) compare against halves computed at
+		// generation time — `===` on a Long would compare object identity, and
+		// nothing is allocated per call. -7 is 0xFFFFFFFF_FFFFFFF9.
+		"if (!(this._u.low === 0 && this._u.high === 0)) {",
+		"os.writeUnsignedLong(4, this._u);",
+		"if (!(this._i.low === 4294967289 && this._i.high === 4294967295)) {",
+		"os.writeSignedLong(5, this._i);",
+		"if (!(this._i.low === 4294967289 && this._i.high === 4294967295)) return false;",
+		// Decode bypasses the accessor and takes the corelib's scalar Long readers,
+		// so no bigint is materialised on the hot path in either direction.
+		"case 4: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o._u = c.readUnsignedLong(); break;",
+		"case 5: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o._i = c.readSignedLong(); break;",
+		// The streaming visitor's hooks stay number-first, so its arm stores through
+		// the SETTER and the field is a Long there too — one runtime type per field,
+		// whichever decode API filled it (#335).
+		"case 4: this.o.u = v; break;",
+		// JSON keeps the decimal-string form, with the schema's signedness.
+		`"u": this._u.toString(false),`,
+		`"i": this._i.toString(true),`,
+		`if ("u" in d) o.u = Long.fromValue(BigInt(d["u"] as string | number));`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("int64: long message.ts missing %q", want)
@@ -539,6 +562,11 @@ func TestTSInt64Long(t *testing.T) {
 		// The trim/pad pair belonged to the superseded fixed-length reading of
 		// `count` and is gone with it (MESSAGE_SPEC af536c4).
 		"_trimTailLong", "_trimTail", "_padTo",
+		// No bigint scalar survives anywhere in this mode: not as a declared type,
+		// not as a default, not on either decode path (generator#339).
+		"u: bigint", "i: bigint", "= 0n;", "= -7n;",
+		"BigInt(c.readUnsigned())", "BigInt(c.readSigned())",
+		"os.writeUnsigned(4,", "os.writeSigned(5,",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("int64: long message.ts should not emit %q", gone)

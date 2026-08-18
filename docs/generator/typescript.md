@@ -74,22 +74,28 @@ the TS codec, especially on JavaScriptCore (Bun), which optimizes `bigint`
 | Mode | u64/i64 arrays | u64/i64 scalars |
 |---|---|---|
 | `bigint` | `bigint[]` | `bigint` |
-| `long` | `Long[]` behind a get/set accessor pair | `bigint` |
+| `long` | `Long[]` behind a get/set accessor pair | `Long` behind a get/set accessor pair |
 | `number` | `Long[]` behind a get/set accessor pair | `number` |
 
-**`long`** backs each 64-bit array with a private `Long[]` field (corelib's
-`Long` is a `(low, high)` 32-bit word pair) plus an accessor pair:
+**`long`** backs every 64-bit position — arrays and scalars alike — with a
+private `Long` / `Long[]` field (corelib's `Long` is a `(low, high)` 32-bit word
+pair) plus an accessor pair:
 
 ```ts
 private _u64: Long[] = [];
 get u64(): Long[] { return this._u64; }
 set u64(vals: readonly (Long | bigint | number)[]) { this._u64 = vals.map(Long.fromValue); }
+
+private _big: Long = Long.ZERO;
+get big(): Long { return this._big; }
+set big(v: Long | bigint | number) { this._big = Long.fromValue(v); }
 ```
 
-Assignment stays ergonomic (`msg.u64 = [1n, 2n]` or plain numbers) and converts
+Assignment stays ergonomic (`msg.u64 = [1n, 2n]`, `msg.big = 7`) and converts
 **once**, off the per-encode path; serialize/decode read and write the backing
-field directly via the corelib's `write*ArrayLong`/`read*ArrayLong`, so no
-`bigint` is created on the hot path. Caveats:
+field directly via the corelib's `write*ArrayLong`/`read*ArrayLong` and
+`write*Long`/`read*Long`, so no `bigint` is created on the hot path in either
+direction. Caveats:
 
 - The setter maps `Long.fromValue` over its input — even an all-`Long` input is
   re-wrapped in a fresh array. Assign whole arrays, or push `Long`s in place
@@ -97,14 +103,31 @@ field directly via the corelib's `write*ArrayLong`/`read*ArrayLong`, so no
   `Long[]` itself.
 - `toJSON()` still prints decimal strings (`Long.toString(signed)`), and
   `fromJSON()` still parses via `BigInt` (off the hot path, through the setter).
+- A scalar's omission test is a `(low, high)` compare against halves computed at
+  generation time (`this._big.low === 0 && this._big.high === 0`), because `===`
+  on a `Long` would compare object identity. Nothing is allocated per call, and
+  `serialize` and `isDefault()` share the one helper so they cannot disagree.
+- A default is materialised at construction: `Long.ZERO` for the (overwhelmingly
+  common) zero, `Long.fromValue(<lit>n)` otherwise. `Long.ZERO` is shared and
+  immutable — a zero default costs no `bigint` arithmetic per constructed object.
 
-**`number`** additionally maps 64-bit *scalars* to plain `number`, using the
-corelib writers' existing number fast path. Only choose it when every 64-bit
-scalar value is guaranteed to fit the ±2^53 safe-integer range — values beyond
-that silently lose precision. (Full-range scalars as `Long` need scalar `Long`
-codecs in corelib-ts first; until then they stay `bigint` under `long`.)
+Scalars became `Long` in [#339](https://github.com/sofa-buffers/generator/issues/339),
+once corelib-ts grew the scalar codecs
+([corelib-ts#143](https://github.com/sofa-buffers/corelib-ts/issues/143)); before
+that they stayed `bigint` under `long` for want of them. That gap was the whole
+distance between `long` and an exact representational match for the arena's
+opponent: protobufjs 8.7.1 with `long@5.3.2` returns a long.js `Long` for **every**
+64-bit field, scalars and small values included
+(`protobufjs/src/reader.js`: `var fn = util.Long ? "toLong" : "toNumber";`).
 
-Measured on the full-scale arena message (best-of-3, corelib-ts #19/#20):
+**`number`** instead maps 64-bit *scalars* to plain `number`, using the corelib
+writers' existing number fast path. Only choose it when every 64-bit scalar value
+is guaranteed to fit the ±2^53 safe-integer range — values beyond that silently
+lose precision. It is not a cheaper `long`: a plain `number` is cheaper than the
+arena baseline's `Long`, so it does not match the opponent either.
+
+Measured on the full-scale arena message (best-of-3, corelib-ts #19/#20 — i.e.
+with `long`'s scalars still on `bigint`, before #339):
 
 | Mode | Bun/JSC MB/s | vs protobufjs | Node/V8 MB/s | vs protobufjs |
 |---|--:|--:|--:|--:|
@@ -453,6 +476,18 @@ the **subtract** method. Tracked: Ir/op.
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
 
+Long scalars (#339) moved the `ts-long` row's **encode** by −0.67% (603 385 →
+599 322 Ir/op, `--rows ts-bigint,ts-long` against corelib-ts's scalar-`Long`
+branch): the two 64-bit scalars of `vehicle_telemetry` no longer split a `bigint`
+through the encoder's scratch. Decode stayed inside the file's 0.3% hold gate on
+this schema — the saving there is two `BigInt` materialisations against a 678 k
+Ir/op message dominated by arrays and strings, and it is the arena's much smaller
+`FullScaleExample` where those two scalars are worth ≈1.8% of a round trip (#335,
+#339). `results.txt` itself is unchanged in this commit: a `--rows` run drops the
+other corelibs' SHAs from the header, and the ts SHA to record does not exist on
+`corelib-ts` `main` until its scalar-codec PR lands. Refresh it from a **full**
+run once it has.
+
 The measured encode body is now `obj.encode()`, so it counts the buffer
 allocation and the copy of the finished message — the work every caller pays.
 The former body folded `os.bytes().length`, a *view* into a corelib-grown slab,
@@ -628,7 +663,9 @@ o.u64 = c.readUnsignedArray(5).map((_e) => BigInt(_e));
 ```
 
 `int64: long` / `number` are unaffected on the array side (they hand back uniform
-`Long` objects); their scalars are `bigint` and get the same conversion.
+`Long` objects). Their scalars took the same conversion at the time; `long` has
+since moved its scalars onto `Long` as well (#339), which removes the conversion
+rather than paying it, and `number` converts with `Number()`.
 
 **This costs, and the cost is the type.** A real `bigint[]` needs one `bigint`
 allocation per element — that is what the cast was avoiding by not producing one.
@@ -643,7 +680,9 @@ bytes or `toJSON()` output and `String(1n) === String(1)`. That is exactly why
 `tests/conformance/typescript/run.sh` now asserts `typeof` directly, on **both**
 decode surfaces and against **both** the full-range and the safe-integer payload
 — the full-range one catches the array elements, the safe-integer one catches the
-scalar (a scalar past 2^53 came back `bigint` even from the broken build).
+scalar (a scalar past 2^53 came back `bigint` even from the broken build). The
+`long` mode has the same assertion in `instanceof Long` form (#339), for the same
+reason and against the same two payloads.
 
 ### All three `int64` modes, and both runtimes
 

@@ -3,6 +3,7 @@ package typescript
 import (
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -42,9 +43,9 @@ type int64Mode int
 const (
 	// int64Bigint is the default: bigint scalars, bigint[] arrays.
 	int64Bigint int64Mode = iota
-	// int64Long backs u64[]/i64[] with corelib Long[] behind a get/set accessor
-	// pair (assignment accepts Long | bigint | number and converts once, off the
-	// per-encode path); scalars stay bigint (corelib has no scalar Long codec).
+	// int64Long backs every u64/i64 position — scalars and arrays alike — with
+	// corelib Long behind a get/set accessor pair (assignment accepts
+	// Long | bigint | number and converts once, off the per-encode path).
 	int64Long
 	// int64Number is int64Long plus u64/i64 scalars as number — the caller
 	// guarantees scalar values fit the +/-2^53 safe-integer range.
@@ -64,6 +65,12 @@ func cfgInt64Mode(cfg map[string]any) int64Mode {
 // longArrays reports whether 64-bit integer arrays are Long-backed.
 func (g *gen) longArrays() bool { return g.i64rep != int64Bigint }
 
+// longScalars reports whether 64-bit integer SCALARS are Long-backed. Only
+// `int64: long` does that: `number` deliberately keeps its scalars on the
+// corelib writers' number fast path (the caller having guaranteed the range),
+// and `bigint` is the default full-range representation.
+func (g *gen) longScalars() bool { return g.i64rep == int64Long }
+
 // numberScalars reports whether 64-bit integer scalars are plain numbers.
 func (g *gen) numberScalars() bool { return g.i64rep == int64Number }
 
@@ -81,9 +88,13 @@ func longElem(elem ir.Kind, items *ir.ArrayElem) bool {
 	}
 }
 
-// longBacked reports whether a field is stored as a private Long[] backing
-// field behind a get/set accessor pair (a 64-bit array under int64: long/number).
+// longBacked reports whether a field is stored as a private Long / Long[]
+// backing field behind a get/set accessor pair: a 64-bit array under
+// int64: long/number, or a 64-bit SCALAR under int64: long.
 func (g *gen) longBacked(f *ir.Field) bool {
+	if isBig(f.Kind) {
+		return g.longScalars()
+	}
 	return g.longArrays() && f.Kind == ir.KindArray && longElem(f.Elem, f.ElemItems)
 }
 
@@ -395,6 +406,9 @@ func (g *gen) tsType(f *ir.Field) string {
 		if g.numberScalars() {
 			return "number"
 		}
+		if g.longScalars() {
+			return "Long"
+		}
 		return "bigint"
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindBitfield, ir.KindFP32, ir.KindFP64:
 		return "number"
@@ -444,6 +458,15 @@ func (g *gen) tsDefault(f *ir.Field) string {
 				return scalarLit(f.Default)
 			}
 			return "0"
+		}
+		if g.longScalars() {
+			// The zero default is the overwhelmingly common case, and Long is
+			// immutable: hand out the shared Long.ZERO rather than running
+			// Long.fromValue(0n)'s bigint arithmetic once per constructed object.
+			if f.Default == nil || scalarLit(f.Default) == "0" {
+				return "Long.ZERO"
+			}
+			return "Long.fromValue(" + scalarLit(f.Default) + "n)"
 		}
 		if f.Default != nil {
 			return scalarLit(f.Default) + "n"
@@ -583,6 +606,49 @@ func (g *gen) bitfieldDefault(f *ir.Field) uint64 {
 	return bits
 }
 
+// longScalarIsDefault is the "this 64-bit scalar equals its default" test for a
+// Long-backed scalar: a (low, high) word-pair compare, as longArrEq performs per
+// element on the array side. `===` cannot serve — a Long is an object, so it
+// compares identity — and the halves are computed HERE, at generation time, so
+// the test allocates nothing per call (the array side's longArrEq(acc, [...])
+// builds its default array per evaluation; a scalar need not).
+//
+// A default the literal parser cannot place in the 64-bit domain falls back to
+// materialising it, which is correct and merely slower — and unreachable for
+// anything validate() lets through.
+func (g *gen) longScalarIsDefault(acc string, f *ir.Field) string {
+	lo, hi, ok := longHalves(f)
+	if !ok {
+		return fmt.Sprintf("%s.toBigInt(%t) === %sn", acc, f.Kind == ir.KindI64, scalarLit(f.Default))
+	}
+	return fmt.Sprintf("%s.low === %d && %s.high === %d", acc, lo, acc, hi)
+}
+
+// longHalves renders a 64-bit scalar's declared default as the two unsigned
+// 32-bit halves of its two's-complement bit pattern — the shape a Long holds it
+// in. No default is the 64-bit zero (Long.ZERO).
+func longHalves(f *ir.Field) (uint32, uint32, bool) {
+	if f.Default == nil {
+		return 0, 0, true
+	}
+	lit := scalarLit(f.Default)
+	var bits uint64
+	if f.Kind == ir.KindI64 {
+		v, err := strconv.ParseInt(lit, 10, 64)
+		if err != nil {
+			return 0, 0, false
+		}
+		bits = uint64(v) // two's complement, the bit pattern a Long stores
+	} else {
+		v, err := strconv.ParseUint(lit, 10, 64)
+		if err != nil {
+			return 0, 0, false
+		}
+		bits = v
+	}
+	return uint32(bits), uint32(bits >> 32), true
+}
+
 func asInt(v any) (int64, bool) {
 	switch x := v.(type) {
 	case int:
@@ -635,6 +701,11 @@ func (g *gen) toJSONExpr(f *ir.Field) string {
 	acc := g.storage("this", f)
 	switch f.Kind {
 	case ir.KindU64, ir.KindI64:
+		if g.longScalars() {
+			// A Long is a raw (low, high) bit pair; only the schema kind says how to
+			// print it, so the signedness goes in — as on the array side.
+			return fmt.Sprintf("%s.toString(%t)", acc, f.Kind == ir.KindI64)
+		}
 		return acc + ".toString()"
 	case ir.KindBlob:
 		return "Array.from(" + acc + ")"
@@ -678,6 +749,13 @@ func (g *gen) fromJSONStmt(f *ir.Field) string {
 	case ir.KindU64, ir.KindI64:
 		if g.numberScalars() {
 			return fmt.Sprintf("%s = Number(%s as string | number)", acc, src)
+		}
+		if g.longScalars() {
+			// Through the SETTER (acc is the public name), which converts once —
+			// fromJSON is off the hot path, so it goes the ergonomic way, as the
+			// array side does. BigInt first: the canonical JSON form of a 64-bit
+			// field is a decimal string, and Long.fromValue takes no string.
+			return fmt.Sprintf("%s = Long.fromValue(BigInt(%s as string | number))", acc, src)
 		}
 		return fmt.Sprintf("%s = BigInt(%s as string | number)", acc, src)
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindBitfield, ir.KindFP32, ir.KindFP64:

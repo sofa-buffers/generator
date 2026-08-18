@@ -99,6 +99,13 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// conversion only allocates where the cast was lying.
 		if g.numberScalars() {
 			f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
+		} else if g.longScalars() {
+			// The corelib's scalar Long reader (corelib-ts#143): the halves come
+			// straight off the varint reader, so no bigint is materialised and no
+			// representation is decided per value — the field is a Long whatever
+			// arrived. `acc` is the private backing field, so the setter's
+			// Long.fromValue is off the hot path too.
+			f.line("      case %d: %s%s = c.readUnsignedLong(); break;", x.ID, guard, acc)
 		} else {
 			f.line("      case %d: %s%s = BigInt(c.readUnsigned()); break;", x.ID, guard, acc)
 		}
@@ -112,6 +119,8 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// See KindU64: convert, do not cast (issue #340).
 		if g.numberScalars() {
 			f.line("      case %d: %s%s = Number(c.readSigned()); break;", x.ID, guard, acc)
+		} else if g.longScalars() {
+			f.line("      case %d: %s%s = c.readSignedLong(); break;", x.ID, guard, acc)
 		} else {
 			f.line("      case %d: %s%s = BigInt(c.readSigned()); break;", x.ID, guard, acc)
 		}

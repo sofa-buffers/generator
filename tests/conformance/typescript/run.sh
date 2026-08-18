@@ -422,10 +422,18 @@ I64SAFE='{"us":["1","18446744073709551615"],"is":["-9223372036854775808"],"ud":[
 enc64 bigint "$I64SAFE" > "$WORK/i64_safe_bigint.bin"
 enc64 number "$I64SAFE" > "$WORK/i64_safe_number.bin"
 cmp -s "$WORK/i64_safe_bigint.bin" "$WORK/i64_safe_number.bin" || { echo "FAIL: int64: number wire drift"; exit 1; }
+# ...and long mode on the same safe payload: its scalars are Long-backed too
+# (generator#339), so they encode through writeUnsignedLong/writeSignedLong —
+# a separate corelib codec from the bigint writers, and it must emit the same
+# bytes for a small value as it does for a full-range one.
+enc64 long "$I64SAFE" > "$WORK/i64_safe_long.bin"
+cmp -s "$WORK/i64_safe_bigint.bin" "$WORK/i64_safe_long.bin" || { echo "FAIL: int64: long wire drift (safe-integer scalars)"; exit 1; }
 # Decode parity: long mode reproduces the bigint mode's JSON from the same bytes.
-DEC_A=$( cd "$WORK/i64-bigint" && npx tsx harness.ts decode m64 < "$WORK/i64_full_bigint.bin" )
-DEC_B=$( cd "$WORK/i64-long"   && npx tsx harness.ts decode m64 < "$WORK/i64_full_bigint.bin" )
-[ "$DEC_A" = "$DEC_B" ] || { echo "FAIL: int64: long decode drift"; exit 1; }
+for bin in "$WORK/i64_full_bigint.bin" "$WORK/i64_safe_bigint.bin"; do
+    DEC_A=$( cd "$WORK/i64-bigint" && npx tsx harness.ts decode m64 < "$bin" )
+    DEC_B=$( cd "$WORK/i64-long"   && npx tsx harness.ts decode m64 < "$bin" )
+    [ "$DEC_A" = "$DEC_B" ] || { echo "FAIL: int64: long decode drift ($bin)"; exit 1; }
+done
 # ...and the DECLARED type must be the type the field actually holds. The cursor
 # readers are number-first (a `number` up to 2^53-1, a `bigint` only past it), so
 # a bare `as bigint` cast on the pull path produced a `bigint`-typed field holding
@@ -470,6 +478,64 @@ TS
 for bin in "$WORK/i64_full_bigint.bin" "$WORK/i64_safe_bigint.bin"; do
     ( cd "$WORK/i64-bigint" && npx tsx typecheck64.ts "$bin" ) \
         || { echo "FAIL: int64: bigint decoded a non-bigint into a bigint field ($bin)"; exit 1; }
+done
+# The same assertion for long mode, where the answer is `Long` in EVERY 64-bit
+# position — scalars included since generator#339. This is the mode's whole
+# point: the cursor's scalar readers are number-first, so without the dedicated
+# readUnsignedLong/readSignedLong (corelib-ts#143) a `Long`-declared scalar would
+# hold a `number` for any value below 2^53 and a `bigint` above it. toJSON hides
+# that completely — `Long.toString()`, `String(1n)` and `String(1)` all print
+# "1" — so the type is asserted directly, on both decode surfaces.
+echo "==> int64: long — decoded 64-bit fields must really be Long"
+cat > "$WORK/i64-long/typecheck64.ts" <<'TS'
+import { Long } from "@sofa-buffers/corelib";
+import { M64, M64Decoder } from "./message.js";
+import { readFileSync } from "node:fs";
+const wire = new Uint8Array(readFileSync(process.argv[2]!));
+const bad: string[] = [];
+const want = (label: string, v: unknown) => {
+  if (!(v instanceof Long)) bad.push(`${label}: ${typeof v}`);
+};
+// Surface 1: the one-shot pull decoder (c.readUnsignedLong / readSignedLong).
+const m = M64.decode(wire);
+want("u", m.u);
+want("i", m.i);
+m.us.forEach((v, k) => want(`us[${k}]`, v));
+m.is.forEach((v, k) => want(`is[${k}]`, v));
+// Surface 2: the streaming decoder. Its visitor hooks are number-first, so the
+// generated arm converts through the field's setter — same field, same runtime
+// type, whichever decode API produced it (the invariant of generator#335).
+const d = new M64Decoder();
+d.feed(wire);
+const t = d.finish();
+want("stream u", t.u);
+want("stream i", t.i);
+t.us.forEach((v, k) => want(`stream us[${k}]`, v));
+t.is.forEach((v, k) => want(`stream is[${k}]`, v));
+// A default-valued field is a Long as well: the declared default is materialised
+// at construction, and an absent field decodes back to it.
+want("fresh u", new M64().u);
+// And the accessor pair takes what its type says it takes, converting once.
+const w = new M64();
+w.u = 7;
+want("set number", w.u);
+w.u = 7n;
+want("set bigint", w.u);
+w.u = Long.fromValue(7n);
+want("set Long", w.u);
+if (String(w.u.toBigInt()) !== "7") bad.push(`setter value: ${w.u.toBigInt()}`);
+if (bad.length) {
+  process.stderr.write(`declared Long, decoded as: ${bad.join(", ")}\n`);
+  process.exit(1);
+}
+TS
+# BOTH payloads, for the reason spelled out above: the safe-integer one is the
+# one a number-first reader answers with a `number`, so it is what actually
+# proves the scalar position — the full-range one would come back a `bigint`
+# from a broken build and still not be a Long.
+for bin in "$WORK/i64_full_bigint.bin" "$WORK/i64_safe_bigint.bin"; do
+    ( cd "$WORK/i64-long" && npx tsx typecheck64.ts "$bin" ) \
+        || { echo "FAIL: int64: long decoded a non-Long into a Long field ($bin)"; exit 1; }
 done
 echo "==> int64 modes OK (bigint == long == number on the wire)"
 
