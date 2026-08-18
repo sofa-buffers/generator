@@ -937,3 +937,65 @@ func TestKotlinMaxMessageSizeBudget(t *testing.T) {
 		t.Error("a worst case above the configured max_message_size must fail generation")
 	}
 }
+
+// TestKotlinSbufCarriesOnlyWhatIsCalled: Sbuf.kt emits a member only where the
+// rest of the package names it.
+//
+// sbufSupport used to roll all three helper families over every primitive base
+// type unconditionally -- 36 members, whatever the schema held. On the review
+// corpus's example schema exactly four were reached, so ~90% of the file was
+// dead code in every generated package (generator#345). The file is now built
+// last, from the emitted sources, so the set cannot drift from the call sites.
+func TestKotlinSbufCarriesOnlyWhatIsCalled(t *testing.T) {
+	sbuf := func(t *testing.T, payload string) string {
+		t.Helper()
+		files := genFromYAML(t, "version: 1\nmessages:\n  M:\n    payload:\n"+payload,
+			map[string]any{"package": "m"})
+		return files["src/main/kotlin/m/Sbuf.kt"]
+	}
+
+	t.Run("an unbounded u32 array takes ensureCapUInt and nothing else", func(t *testing.T) {
+		s := sbuf(t, "      a: { id: 0, type: array, items: { type: u32 } }\n")
+		for _, want := range []string{"internal val EMPTY_UINT", "internal fun ensureCapUInt"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("Sbuf.kt missing %q\n%s", want, s)
+			}
+		}
+		for _, unwanted := range []string{
+			"ensureCapDouble", "ensureCapBoolean", "ensureCapUByte", // other widths
+			"placeRow",  // no matrix in this schema
+			"boolBytes", // no boolean array
+			"EMPTY_FLOAT", "EMPTY_LONG",
+		} {
+			if strings.Contains(s, unwanted) {
+				t.Errorf("Sbuf.kt carries %q, which nothing calls\n%s", unwanted, s)
+			}
+		}
+	})
+
+	t.Run("a matrix pulls in placeRow and the EMPTY_ its gap fill needs", func(t *testing.T) {
+		s := sbuf(t, "      a: { id: 0, type: array, items: { type: array, count: 2, items: { type: i32, count: 3 } } }\n")
+		for _, want := range []string{"internal fun placeRowInt", "internal val EMPTY_INT"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("Sbuf.kt missing %q\n%s", want, s)
+			}
+		}
+	})
+
+	t.Run("a boolean array pulls in boolsBytes", func(t *testing.T) {
+		s := sbuf(t, "      a: { id: 0, type: array, items: { type: boolean } }\n")
+		if !strings.Contains(s, "internal fun boolBytes") {
+			t.Errorf("Sbuf.kt missing boolBytes\n%s", s)
+		}
+	})
+
+	t.Run("what survives still compiles as one object", func(t *testing.T) {
+		s := sbuf(t, "      a: { id: 0, type: u32 }\n")
+		if strings.Count(s, "{") != strings.Count(s, "}") {
+			t.Errorf("unbalanced braces in a minimal Sbuf.kt\n%s", s)
+		}
+		if strings.Contains(s, "/**\n    /**") {
+			t.Errorf("an orphaned doc block survived a skipped section\n%s", s)
+		}
+	})
+}
