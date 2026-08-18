@@ -458,10 +458,13 @@ a reimplementation should emit code that honors all of them:
   assigns to the generated layer — the corelib may offer the mechanism, never the
   policy (`growingOStream` and `Encoder.encodeToBytes` allocate inside their
   corelibs and are therefore off-limits to generated code).
-  A helper that moves makes generated code require a corelib version. Emit the
-  floor the way the `c` and `cpp` backends already do (`SOFAB_API_VERSION` /
-  `static_assert(sofab::API_VERSION …)`); a backend that does not check it yet
-  must start. Tracked as generator#345.
+  A helper that moves makes generated code require a corelib new enough to have
+  it, and while SofaBuffers is `0.x` that needs no machinery: `API_VERSION` marks
+  the *wire/API contract*, is 1 in every corelib, and is bumped only for a
+  breaking contract change — so it cannot express "new enough to have
+  `StringSeq`", and a floor built on it would never fire. An out-of-date corelib
+  fails at compile time on the missing symbol, which is immediate and precise
+  enough. Tracked as generator#345.
 - **Pick the narrowest correct type** — map each integer to its exact width;
   enum → smallest *signed* backing, bitfield → smallest *unsigned* backing; avoid
   widening on the hot path (§11 natural-width writes).
