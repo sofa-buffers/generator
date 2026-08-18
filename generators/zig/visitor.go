@@ -938,7 +938,7 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	totalUsed := false
 	// Strict UTF-8 (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4): a `string` payload is
 	// UTF-8. Zig's string is a borrowed byte slice (byte-container), so the corelib
-	// exposes `utf8_valid(bytes)` and generated code emits an UNCONDITIONAL call to
+	// exposes `utf8Valid(bytes)` and generated code emits an UNCONDITIONAL call to
 	// it at the materialization site — the SOFAB_STRICT_UTF8 gate lives inside the
 	// primitive (folds to true when compiled off), so this code is identical across
 	// build configs. Invalid UTF-8 is the INVALID outcome (self.inv). `blob` is
@@ -948,7 +948,7 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 		if kind != ir.KindString {
 			return store
 		}
-		return "if (!sofab.utf8_valid(chunk)) { self.inv = true; } else { " + store + " }"
+		return "if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { " + store + " }"
 	}
 	for _, fr := range fs {
 		if fr.kind == fkSeqArr && fr.elemKind == kind {
