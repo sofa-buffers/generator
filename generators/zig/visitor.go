@@ -20,7 +20,7 @@ const (
 
 // frame is one sequence container reachable from a message. loc is the _Loc
 // variant; path is the Zig lvalue expression (e.g. "self.m.somestruct.deep" or
-// "_at(self.m.points, self.ei_root_points).tags").
+// "sofab.arrays.at(self.m.points, self.ei_root_points).tags").
 type frame struct {
 	loc      string
 	path     string
@@ -36,7 +36,7 @@ type frame struct {
 	// currently decoding into (fkStructArr/fkArrArr/fkNestedNative). The element
 	// id IS the array index (MESSAGE_SPEC §5.1), so sequenceBegin (arrayBegin for
 	// a native row) places at that index and the child stores address it through
-	// _at(path, self.<idx>) — never through the last appended element.
+	// sofab.arrays.at(path, self.<idx>) — never through the last appended element.
 	idx string
 
 	// Schema-unbounded element markers, for the receiver-side decode limits
@@ -113,7 +113,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 				loc: loc, path: path, kind: fkStructArr, elemLoc: el, idx: idx,
 				elemType: g.typeName(ref.Key), elemFill: ".{}", cap: cap,
 			})
-			walkFields(el, "_at("+path+", self."+idx+")", ref.Target.Fields)
+			walkFields(el, "sofab.arrays.at("+path+", self."+idx+")", ref.Target.Fields)
 		case ir.KindArray:
 			// The element is an inner array (items). A native inner array is
 			// handled by a single wrapper frame (arrayBegin places a fresh inner
@@ -134,7 +134,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 					loc: loc, path: path, kind: fkArrArr, elemLoc: el, idx: idx,
 					elemType: "[]const " + inner, elemFill: "&.{}", cap: cap,
 				})
-				addArray(el, "_at("+path+", self."+idx+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
+				addArray(el, "sofab.arrays.at("+path+", self."+idx+").*", items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
@@ -408,7 +408,7 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	// One element-index register per struct/nested-array wrapper frame: the
 	// element id IS the array index (MESSAGE_SPEC §5.1), so sequenceBegin records
 	// the id it placed at and the child stores address that element through
-	// _at(path, self.<idx>). Nesting needs no stack — a frame's register is only
+	// sofab.arrays.at(path, self.<idx>). Nesting needs no stack — a frame's register is only
 	// read while that frame's element scope is open.
 	for _, fr := range fs {
 		if fr.idx != "" {
@@ -522,7 +522,7 @@ func (g *gen) nestedNativeArm(fr frame, signed bool) string {
 	// the index arrayBegin recorded, not at the end of the outer slice, and that
 	// index is only addressable if the row's allocation succeeded. The §7.1 width
 	// guard sits inside the fill guard for the same reason it does in putCall.
-	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; %sif (self.%s < %s.len) sofab.arrays.putGrowing(_at(%s, self.%s), self.alloc, &self.ai, self.an, %s); } }", widthGuard(fr.elemKind), fr.idx, fr.path, fr.path, fr.idx, cast)
+	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; %sif (self.%s < %s.len) sofab.arrays.putGrowing(sofab.arrays.at(%s, self.%s), self.alloc, &self.ai, self.an, %s); } }", widthGuard(fr.elemKind), fr.idx, fr.path, fr.path, fr.idx, cast)
 }
 
 // emitArraySkipArm arms the §7.3 discard counter in arrayBegin (generator#183,
@@ -760,7 +760,7 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 	idUsed := false
 	for _, fr := range fs {
 		if fr.kind == fkNestedNative && fr.elemKind == kind {
-			body := fmt.Sprintf("if (self.%s < %s.len) sofab.arrays.putGrowing(_at(%s, self.%s), self.alloc, &self.ai, self.an, value)", fr.idx, fr.path, fr.path, fr.idx)
+			body := fmt.Sprintf("if (self.%s < %s.len) sofab.arrays.putGrowing(sofab.arrays.at(%s, self.%s), self.alloc, &self.ai, self.an, value)", fr.idx, fr.path, fr.path, fr.idx)
 			all = append(all, frameArms{fr: fr, body: body})
 			continue
 		}
@@ -1138,7 +1138,7 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 			// `count` bounds the id (an id >= N is INVALID, §5.1/§7), which also
 			// bounds the id-keyed gap-fill against an over-index amplification.
 			inner := strings.TrimPrefix(fr.elemType, "[]const ")
-			body := fmt.Sprintf("{ self.%s = id; if (sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, &.{})) { _at(%s, id).* = _allocN(%s, self.alloc, count); } }",
+			body := fmt.Sprintf("{ self.%s = id; if (sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, &.{})) { sofab.arrays.at(%s, id).* = _allocN(%s, self.alloc, count); } }",
 				fr.idx, fr.elemType, fr.path, fr.path, inner)
 			if fr.cap >= 0 {
 				body = fmt.Sprintf("if (id >= %d) { self.inv = true; } else %s", fr.cap, body)

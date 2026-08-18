@@ -290,24 +290,6 @@ const _EncodeSink = struct {
     }
 };
 
-/// Mutable pointer to element `i` of a decode-allocated wrapper array.
-///
-/// The element id IS the array index (S5.1), so sequenceBegin
-/// grows the destination to id + 1 -- default-filling the gaps left by omitted
-/// elements -- records the id, and every child store then lands HERE, at that
-/// index. Appending instead would shorten the array by the size of any interior
-/// id gap, and would decode a REOPENED element id as a second element instead of
-/// merging into the first (S7.4). It is the object-element twin of what
-/// sofab.arrays.setElem does for a string/blob element.
-///
-/// Gaps are ordinary here: an interior element equal to the element default is
-/// omitted by a conformant encoder (S2), and only the LAST element is guaranteed
-/// present -- which is what makes the decoded length, highest present id + 1,
-/// exact.
-fn _at(s: anytype, i: usize) *std.meta.Elem(@TypeOf(s)) {
-    return @constCast(&s[i]);
-}
-
 /// Storage for a `count: N` native array: N elements of inline capacity plus
 /// the length.
 ///
