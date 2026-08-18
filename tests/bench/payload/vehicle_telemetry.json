@@ -60,5 +60,7 @@
   "gear_history": [0, 1, 2, 3, 4, 3, 2, 1],
   "doors_open": [true, true, true, true],
   "wheel_faults": [31, 30, 29, 28],
-  "energy_sources": [{ "electric": 42.5 }, { "combustion": 31.25 }]
+  "energy_sources": [{ "electric": 42.5 }, { "combustion": 31.25 }],
+  "can_rx_counts": [4812993771, 3901447215, 118342004, 27551],
+  "axle_energy_wh": [148230, -96117]
 }

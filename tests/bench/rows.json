@@ -292,6 +292,24 @@
       "reps": "500 3000",
       "config": "generic: { emit: project }\ntargets: { typescript: { int64: long } }",
       "archs": []
+    },
+    {
+      "//": "The third int64 mode. `long` and `number` both back 64-bit ARRAYS with",
+      "// ": "corelib Long[]; `number` additionally maps 64-bit SCALARS to number, so",
+      "//  ": "the two differ only where a schema has 64-bit scalars -- which this one",
+      "//   ": "does (odometer_m, trip_energy_wh). All three rows generate distinct code",
+      "//    ": "only since the schema gained can_rx_counts/axle_energy_wh: before that,",
+      "//     ": "bigint and long were byte-identical here and one row measured the other",
+      "//      ": "(generator#336, guarded by tests/matrix/bench_rows_test.go).",
+      "id": "ts-number",
+      "lang": "typescript",
+      "corelib": "corelib-ts",
+      "corelib_env": "SOFAB_TS_CORELIB",
+      "profile": "maxspeed",
+      "method": "subtract",
+      "reps": "500 3000",
+      "config": "generic: { emit: project }\ntargets: { typescript: { int64: number } }",
+      "archs": []
     }
   ]
 }

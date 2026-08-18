@@ -538,7 +538,7 @@ Change codegen here, then `./tests/bench/run.sh` and read the diff in
 
 The measured encode body is `obj.encode()`, whose *inside* changed with the
 caller-owned buffer: the workload (`vehicle_telemetry`) is fully bounded, so it
-now allocates one 971-byte `Uint8List` and returns a view over it, where it used
+now allocates one `MAX_SIZE`-byte `Uint8List` (1037 for this schema) and returns a view over it, where it used
 to fill a 4096-byte corelib scratch through a `BytesBuilder` and copy the result
 out with `toBytes()`. The encode figures currently in `results.txt` therefore
 predate the change and are not comparable across it; the next full run resets
