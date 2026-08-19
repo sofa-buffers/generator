@@ -31,8 +31,13 @@ src/main/kotlin/<pkg>/
     <Message>.kt   public class <Message>  + the internal <Message>Visitor
     <Type>.kt      public class <Type>     one per schema struct/union
                    public object <Type>    one per schema enum/bitfield (named constants)
-    Sbuf.kt        internal shared support
 ```
+
+There is no shared support file. Element placement, array growth, payload
+reassembly and UTF-8 materialisation are static under ARCHITECTURE §8 — the same
+shape for every schema, with the capacity, the index and the length carried as
+arguments — so they are the corelib's `Seq`, `PayloadAcc` and `Utf8`, and
+generated code calls them (generator#345).
 
 `<Type>` is the canonical IR name: a `$defs` type keeps its category prefix
 (`#/$defs/enum/Mode` → `EnumMode`, `#/$defs/struct/Point` → `StructPoint`) and an
@@ -44,8 +49,8 @@ A type reached from two messages is emitted **once**: Kotlin would allow several
 public declarations per file, but two declarations of one type in a package do
 not compile, and one-file-per-type is the simplest spelling of that rule.
 
-`Sbuf` and `<Message>Visitor` are `internal` on purpose — generated plumbing, not
-schema surface.
+`<Message>Visitor` is `internal` on purpose — generated plumbing, not schema
+surface.
 
 ## The public API
 
@@ -200,7 +205,7 @@ struct/union/nested element — because its presence is what carries the length
 values that encode and decode distinctly.
 
 Because an interior gap is ordinary, every element is **placed at its element id**
-on decode — matrix rows included (`Sbuf.placeRow*`) — never appended. Appending
+on decode — matrix rows included (`Seq.reserveRow*`) — never appended. Appending
 would shorten the array by any interior gap *and* turn a re-opened element id into
 a second element instead of merging into the first (§7.4), which placement gives
 for free.
@@ -256,10 +261,10 @@ A Kotlin `String` is a Unicode type, so this target is **always strict**
 (MESSAGE_SPEC §8): the corelib's `SOFAB_STRICT_UTF8` switch is a documented no-op
 here and no config key is threaded into generated code. `ByteArray.decodeToString()`
 with its default settings substitutes `U+FFFD`, which §8 forbids in every mode, so
-the visitor validates the raw bytes with the corelib's allocation-free
-`Utf8.valid(...)` scanner first and converts only what passes. Invalid bytes
-become `SofabException(INVALID_MSG)` — the same channel as the schema-bound
-guards. Encode-side strictness is the corelib's (`OStream.writeString` refuses an
+the corelib's `Utf8.decode(...)` validates the raw bytes first and converts only
+what passes — which is what `PayloadAcc.string(...)` hands back on the chunk that
+completes the payload. Invalid bytes become `SofabException(INVALID_MSG)` — the
+same channel as the schema-bound guards. Encode-side strictness is the corelib's (`OStream.writeString` refuses an
 unpaired surrogate before writing a byte).
 
 **Only a materialized string is validated.** The corelib delivers every
@@ -509,7 +514,7 @@ That is checked rather than asserted, twice and at two different depths. A
 hermetic unit test sweeps the whole corpus for any JVM-only reference
 (`java.`/`javax.`/`kotlin.jvm`/`ThreadLocal`/`StandardCharsets`/…), which is the
 realistic way to break it — each of those has a common-Kotlin answer here
-(`Sbuf.Acc` for the chunk accumulator, `Utf8.valid` + `decodeToString` for the
+(the corelib's `PayloadAcc` for the chunk accumulator, its `Utf8.decode` for the
 strict decode, a per-call buffer instead of a thread-local scratch), and the guard
 is what keeps them. The conformance harness then type-checks the same sources as
 `commonMain` with the real compiler (`compileCommonMainKotlinMetadata`), which

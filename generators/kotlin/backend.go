@@ -56,18 +56,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if g.sizeErr != nil {
 		return nil, g.sizeErr
 	}
-	// Sbuf.kt is built LAST and prepended: it emits only the members the rest of
-	// this package actually names, so it has to see them first. Prepending keeps
-	// it at the head of the file list, where a reader expects the shared support.
-	var refs strings.Builder
-	for _, f := range files {
-		refs.Write(f.Content)
-	}
-	sbuf := g.sbufSupport(refs.String())
-	if sbuf == nil {
-		return files, nil
-	}
-	return append([]generator.File{{Path: dir + "Sbuf.kt", Content: sbuf}}, files...), nil
+	return files, nil
 }
 
 type gen struct {
@@ -408,8 +397,8 @@ func (g *gen) emitMessageAPI(f *kfile, name string, fields []*ir.Field) {
 		f.line("     * is bounded by the scratch and not by the message.")
 		f.line("     */")
 		f.line("    public fun encode(): ByteArray {")
-		f.line("        val out = Sbuf.Acc()")
-		f.line("        val os = OStream(ByteArray(ENC_SCRATCH), 0, FlushSink { data, off, len -> out.write(data, off, len) })")
+		f.line("        val out = PayloadAcc()")
+		f.line("        val os = OStream(ByteArray(ENC_SCRATCH), 0, out)")
 		f.line("        serialize(os)")
 		f.line("        os.flush()")
 		f.line("        return out.toByteArray()")
