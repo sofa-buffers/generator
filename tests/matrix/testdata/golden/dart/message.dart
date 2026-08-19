@@ -11,27 +11,6 @@ class _Dec {
   bool inv = false;
 }
 
-// The base every generated visitor extends. It exists to turn the corelib's
-// VALIDATING onStringBytes default into a no-op skip: whether a string may be
-// inspected at all is a schema question, so an id this scope does not declare
-// must return without validating and without flagging INVALID -- its bytes are
-// jumped over, never inspected. A scope with string destinations overrides this
-// and falls through to the same no-op for every id it does not match.
-abstract class _Visitor extends sofab.MessageVisitor {
-  @override
-  void onStringBytes(int id, Uint8List bytes) {}
-  // Same reasoning, one wire type over: the corelib's onSequenceStart default
-  // returns `this`, i.e. DESCEND, which is right for a hand-written visitor and
-  // wrong here -- the schema decides whether a sequence at this position is one
-  // we bind. Returning null skips the sub-sequence WHOLE, children included. A
-  // scope that declares sequences overrides this and falls through to the same
-  // null for every id it does not match; a leaf element collector declares
-  // none, so it inherits the skip and a sequence arriving at an element
-  // position cannot bind its child as that element.
-  @override
-  sofab.MessageVisitor? onSequenceStart(int id) => null;
-}
-
 // Widen the 32 raw wire bits of an fp32 NaN to a display double for element
 // access; the exact bits are kept alongside for a bit-for-bit re-encode.
 double _f32FromBits(int bits) =>
@@ -217,7 +196,7 @@ class ScalarsDecoder {
       status == sofab.DecodeStatus.complete ? _out : null;
 }
 
-class _ScalarsVisitor extends _Visitor {
+class _ScalarsVisitor extends sofab.VisitorBase {
   _ScalarsVisitor(this.o, this.e);
   final Scalars o;
   final _Dec e;

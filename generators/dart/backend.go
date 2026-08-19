@@ -147,15 +147,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
 	f.line("// ignore_for_file: unused_field, unused_element, deprecated_member_use_from_same_package")
-	// dart:convert is for utf8.decode in the string destinations: the corelib
-	// hands the visitor RAW wire bytes (onStringBytes) so the destination can be
-	// resolved before anything is validated or transcoded, and transcoding is
-	// therefore ours. Emitted only when the module actually decodes a string --
-	// `dart analyze` treats an unused import as a warning, and the corpus sweep
-	// builds definitions that have no string at all.
-	if g.computeNeeds(s).str {
-		f.line("import 'dart:convert';")
-	}
 	f.line("import 'dart:typed_data';")
 	f.line("import 'package:sofabuffers/sofabuffers.dart' as sofab;")
 	f.blank()
@@ -548,7 +539,7 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 	switch fld.Kind {
 	case ir.KindBlob:
 		if def, ok := g.blobDefaultLit(fld); ok {
-			return fmt.Sprintf("_bytesEq(%s, %s)", acc, def)
+			return fmt.Sprintf("sofab.elementsEqual(%s, %s)", acc, def)
 		}
 		return fmt.Sprintf("%s.isEmpty", acc)
 	case ir.KindStruct, ir.KindUnion:
@@ -578,7 +569,7 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 			val = fmt.Sprintf("[for (final _b in %s) _b ? 1 : 0]", acc)
 		}
 		if def, ok := g.arrayDefaultLit(fld); ok {
-			return fmt.Sprintf("_listEq(%s, %s)", val, def)
+			return fmt.Sprintf("sofab.elementsEqual(%s, %s)", val, def)
 		}
 		return fmt.Sprintf("%s.isEmpty", acc)
 	}
@@ -616,7 +607,7 @@ func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 	case ir.KindBlob:
 		// A blob is a leaf: omit when equal to its default (empty if none).
 		if def, ok := g.blobDefaultLit(fld); ok {
-			f.line("    if (!_bytesEq(%s, %s)) { e.writeBlob(%d, %s); }", acc, def, fld.ID, acc)
+			f.line("    if (!sofab.elementsEqual(%s, %s)) { e.writeBlob(%d, %s); }", acc, def, fld.ID, acc)
 		} else {
 			f.line("    if (%s.isNotEmpty) { e.writeBlob(%d, %s); }", acc, fld.ID, acc)
 		}
@@ -668,7 +659,7 @@ func (g *gen) emitMarshalArray(f *dfile, fld *ir.Field, acc string) {
 			val = fmt.Sprintf("[for (final _b in %s) _b ? 1 : 0]", acc)
 		}
 		if def, ok := g.arrayDefaultLit(fld); ok {
-			f.line("    if (!_listEq(%s, %s)) { %s }", val, def, g.writeArrayStmt(fld, val))
+			f.line("    if (!sofab.elementsEqual(%s, %s)) { %s }", val, def, g.writeArrayStmt(fld, val))
 		} else {
 			f.line("    if (%s.isNotEmpty) { %s }", acc, g.writeArrayStmt(fld, val))
 		}

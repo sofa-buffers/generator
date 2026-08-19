@@ -390,6 +390,30 @@ a payload/quiet, and a negative NaN — scalar and array — byte-for-byte in
 `tests/conformance/dart/run.sh`. fp32 only: an fp64 NaN already survives a
 `double`. Verified cross-language by Crucible finding F-0031.
 
+## The schema-free half of the prelude is the corelib's (issue #345)
+
+Every module used to open with ~50 lines that had no schema in them, and
+corelib-dart#65 took them. Generated code calls them where it used to declare
+them; nothing is emitted twice.
+
+| was emitted | is called now |
+|---|---|
+| `abstract class _Visitor` | `sofab.VisitorBase` |
+| `_listEq<T>` / `_bytesEq` | `sofab.elementsEqual<T>` |
+| `sofab.utf8Valid(bytes)` + `utf8.decode(bytes)` | `sofab.decodeUtf8Strict(bytes)` — one pass, `null` for malformed |
+| `_u8len` | `sofab.utf8Length` (no call site left; dropped) |
+
+`_u8len` is the odd one: the maxlen guards moved to the raw wire length with
+issue #257, which left the helper emitted and never called. It is simply gone.
+
+What stays emitted is what has a *different shape per schema*: `_Dec`, the
+`_f32FromBits`/`_f32copy` fp32 raw-bit helpers, and the wrapper-array collectors
+(`_StrSeq`, `_BlobSeq`, `_ObjSeq`, `_IntMat`, `_DblMat`, `_BoolMat`, `_SeqSeq`).
+The collectors are schema-free in shape too, but they report a rejected element
+through the generated `_Dec` flag they take in their constructor; hosting them
+needs the corelib's own INVALID channel (`MessageVisitor.invalidate()`,
+corelib-dart#66) to be adopted first — corelib-dart#63 tracks that half.
+
 ## The caller owns the encode buffer
 
 CORELIB_PLAN §5.1: a corelib never allocates or grows an output buffer — the
@@ -486,7 +510,7 @@ corelib-dart does hand views over, but only for a `string`/`blob` on the
 **one-shot** path: `_ContiguousDecoder._fixlen` delivers them as
 `Uint8List.view(_buf.buffer, …)` straight into the decode buffer. That is correct of the corelib, which allocated
 nothing. Owning the bytes is therefore the generated destination's job, and every
-one of them copies — `utf8.decode(bytes)` builds a fresh `String`,
+one of them copies — `sofab.decodeUtf8Strict(bytes)` builds a fresh `String`,
 `Uint8List.fromList(value)` a fresh blob, and the array collectors (`_StrSeq`,
 `_BlobSeq`, `_IntMat`, `_DblMat`, `_BoolMat`) do the same per element. The
 `maxlen`/`count` guards run on the view, **before** the copy, so nothing
@@ -554,20 +578,20 @@ decoder was *skipping* got validated too, which CORELIB_PLAN §6.4 forbids.
 
 `MessageVisitor.onStringBytes(int id, Uint8List bytes)` now delivers the **raw wire
 bytes**, and the generated visitor overrides that instead of `onString`. Each arm
-resolves its destination first, then calls `sofab.utf8Valid(bytes)` and
-`utf8.decode(bytes)`. A skipped field reaches no arm and is never inspected. Invalid
-bytes at a materialized position set the sticky `e.inv`, the same channel as the
-schema-bound rejects; `blob` is never validated.
+resolves its destination first, then calls `sofab.decodeUtf8Strict(bytes)`, which
+validates and materializes in one pass and answers `null` for anything malformed.
+A skipped field reaches no arm and is never inspected. Invalid bytes at a
+materialized position set the sticky `e.inv`, the same channel as the schema-bound
+rejects; `blob` is never validated.
 
 Two consequences worth knowing:
 
 - A schema `maxlen` is a **byte** bound, and the raw bytes *are* the wire length,
   so the guard reads `bytes.length` instead of re-encoding the decoded string.
-- The generated module imports `dart:convert` **only when it decodes a string**.
-  `dart analyze` reports an unused import, and the corpus sweep builds definitions
-  that have no string at all.
+- Each arm is **braced**: Dart switch cases share one scope, so two string fields
+  in the same visitor would otherwise redeclare the local the decode lands in.
 
-### Every visitor extends `_Visitor` (issue #265)
+### Every visitor extends `sofab.VisitorBase` (issue #265)
 
 Overriding `onStringBytes` in the scopes that *have* a string field is only half
 the property. `sofab.MessageVisitor`'s **default** for that method validates the
@@ -579,11 +603,11 @@ visitor of a string-free message was rejected instead of skipped. Three bytes
 (`4a 0a 8a` — unknown id 9, a lone continuation byte) were enough, and dart was
 alone against twelve implementations that accept them.
 
-The prelude therefore emits one base, and **every** generated visitor extends it —
-the per-type visitors and all wrapper-array collectors alike:
+There is therefore one base, and **every** generated visitor extends it — the
+per-type visitors and all wrapper-array collectors alike:
 
 ```dart
-abstract class _Visitor extends sofab.MessageVisitor {
+abstract class VisitorBase extends MessageVisitor {
   @override
   void onStringBytes(int id, Uint8List bytes) {}
 }
@@ -593,8 +617,12 @@ A scope that declares strings overrides it again with its id switch and falls ou
 of that switch — into this same no-op — for every id it does not match. Putting
 the no-op on a shared base rather than at each emission site is deliberate: it
 makes the property hold by construction, including for collectors added later,
-which is exactly what the per-site shape failed to do. Schema names cannot begin
-with `_`, so the name cannot collide with a generated type.
+which is exactly what the per-site shape failed to do.
+
+The base was emitted into every module until corelib-dart#65; it is
+`sofab.VisitorBase` now, and generated code extends that. Nothing in it has a
+schema — which id is declared is a question the *subclass* answers — so
+ARCHITECTURE §8 puts it in the corelib (generator#345).
 
 ## §7.1: the declared integer width is a validity bound (issue #266)
 
@@ -631,15 +659,15 @@ sequence of their own and so never overrode it at all, inheriting
 arriving at an element position therefore descended into the collector itself and
 its child string bound as that element.
 
-The fix sits on the shared `_Visitor` base, beside the `onStringBytes` no-op that
-is there for exactly the same reason:
+The fix sits on the shared `sofab.VisitorBase`, beside the `onStringBytes` no-op
+that is there for exactly the same reason:
 
 ```dart
-abstract class _Visitor extends sofab.MessageVisitor {
+abstract class VisitorBase extends MessageVisitor {
   @override
   void onStringBytes(int id, Uint8List bytes) {}
   @override
-  sofab.MessageVisitor? onSequenceStart(int id) => null;
+  MessageVisitor? onSequenceStart(int id) => null;
 }
 ```
 
