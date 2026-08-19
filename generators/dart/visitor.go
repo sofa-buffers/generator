@@ -299,7 +299,7 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 		// Bit-exact copy into a fresh Float32List of the WIRE count: a per-element
 		// widen through a double would quiet a signaling/payload NaN (MESSAGE_SPEC
 		// S4.6). writeFp32Array re-emits a Float32List raw.
-		*f32Arr = append(*f32Arr, arm(fld.ID, fmt.Sprintf("%s%s = _f32copy(values, values.length);", guard, acc)))
+		*f32Arr = append(*f32Arr, arm(fld.ID, fmt.Sprintf("%s%s = sofab.copyFp32(values, values.length);", guard, acc)))
 	case fld.Elem == ir.KindFP64:
 		*f64Arr = append(*f64Arr, arm(fld.ID, guard+acc+" = List<double>.from(values);"))
 	default: // wrapper-sequence array (string/blob/struct/union/nested)
@@ -315,31 +315,31 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64) string {
 	switch elem {
 	case ir.KindString:
-		return fmt.Sprintf("_StrSeq(%s, %d, %d)", out, cap, emax)
+		return fmt.Sprintf("sofab.StringSeq(%s, %d, %d)", out, cap, emax)
 	case ir.KindBlob:
-		return fmt.Sprintf("_BlobSeq(%s, %d, %d)", out, cap, emax)
+		return fmt.Sprintf("sofab.BlobSeq(%s, %d, %d)", out, cap, emax)
 	case ir.KindStruct, ir.KindUnion:
 		t := g.typeName(ref.Key)
-		return fmt.Sprintf("_ObjSeq<%s>(%s, %d, () => %s(), (x) => %s(x))", t, out, cap, t, visitorName(t))
+		return fmt.Sprintf("sofab.MessageSeq<%s>(%s, %d, () => %s(), (x) => %s(x))", t, out, cap, t, visitorName(t))
 	case ir.KindArray:
 		// The row collectors take the OUTER array's cap: a row's element id is its
 		// index in this array (§5.1), so cap is what bounds it.
 		if nativeArrayElem(items.Elem) {
 			switch {
 			case items.Elem == ir.KindBool:
-				return fmt.Sprintf("_BoolMat(%s, %d)", out, cap)
+				return fmt.Sprintf("sofab.BoolMatrixSeq(%s, %d)", out, cap)
 			case items.Elem == ir.KindFP32 || items.Elem == ir.KindFP64:
-				return fmt.Sprintf("_DblMat(%s, %d, %v)", out, cap, items.Elem == ir.KindFP64)
+				return fmt.Sprintf("sofab.DoubleMatrixSeq(%s, %d, %v)", out, cap, items.Elem == ir.KindFP64)
 			default:
 				_lo, _hi, _ := ir.NarrowRange(items.Elem)
-				return fmt.Sprintf("_IntMat(%s, %d, %v, %d, %d)", out, cap, signedArrayElem(items.Elem), _lo, _hi)
+				return fmt.Sprintf("sofab.IntMatrixSeq(%s, %d, %v, %d, %d)", out, cap, signedArrayElem(items.Elem), _lo, _hi)
 			}
 		}
 		// Array of wrapper arrays: each element opens a sequence collected into the
 		// inner list its element id names, by a recursively-built collector.
 		innerT := g.dartArrayElemType(items.Elem, items.ElemRef, items.ElemItems)
 		inner := g.collector("p", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), emaxOf(items.ElemMaxHas, items.ElemMax))
-		return fmt.Sprintf("_SeqSeq<%s>(%s, %d, (p) => %s)", innerT, out, cap, inner)
+		return fmt.Sprintf("sofab.NestedSeq<%s>(%s, %d, (p) => %s)", innerT, out, cap, inner)
 	}
 	return "null"
 }
@@ -389,10 +389,8 @@ func emitSwitchRet(f *dfile, sig string, arms []string, tail string) {
 // needs records which prelude helpers and collector classes a schema actually
 // uses, so only those are emitted (clean output; nothing unused).
 type needs struct {
-	dec                             bool
-	f32copy, f32bits                bool
-	strSeq, blobSeq, objSeq         bool
-	intMat, dblMat, boolMat, seqSeq bool
+	dec     bool
+	f32bits bool
 }
 
 func (g *gen) computeNeeds(s *ir.Schema) needs {
@@ -411,11 +409,6 @@ func (g *gen) computeNeeds(s *ir.Schema) needs {
 	for _, m := range s.Messages {
 		scan(m.Fields)
 	}
-	// _DblMat's onFp32Array branch calls _f32copy even for an fp64-only matrix (the
-	// call must resolve), so a native-array matrix always needs it emitted.
-	if n.dblMat {
-		n.f32copy = true
-	}
 	return n
 }
 
@@ -425,39 +418,24 @@ func (g *gen) scanField(fld *ir.Field, n *needs) {
 		n.f32bits = true
 	case ir.KindArray:
 		if nativeArrayElem(fld.Elem) {
-			if fld.Elem == ir.KindFP32 {
-				// fp32 arrays bind through _f32copy (bit-exact).
-				n.f32copy = true
-			}
 			return
 		}
 		g.scanArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems, n)
 	}
 }
 
+// scanArrayElem descends a wrapper array's element type. It records nothing any
+// more -- which collector each level needs is the corelib's business since
+// corelib-dart#74 -- but the walk stays: an element that is itself an array can
+// bottom out at an fp32 scalar, and that still decides `f32bits`.
 func (g *gen) scanArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, n *needs) {
-	switch elem {
-	case ir.KindString:
-		n.strSeq = true
-	case ir.KindBlob:
-		n.blobSeq = true
-	case ir.KindStruct, ir.KindUnion:
-		n.objSeq = true
-	case ir.KindArray:
-		if nativeArrayElem(items.Elem) {
-			switch {
-			case items.Elem == ir.KindBool:
-				n.boolMat = true
-			case items.Elem == ir.KindFP32 || items.Elem == ir.KindFP64:
-				n.dblMat = true
-			default:
-				n.intMat = true
-			}
-			return
-		}
-		n.seqSeq = true
-		g.scanArrayElem(items.Elem, items.ElemRef, items.ElemItems, n)
+	if elem != ir.KindArray {
+		return
 	}
+	if nativeArrayElem(items.Elem) {
+		return
+	}
+	g.scanArrayElem(items.Elem, items.ElemRef, items.ElemItems, n)
 }
 
 // visitorBase is what every generated visitor extends. The corelib hosts it
@@ -480,205 +458,6 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		f.line("// access; the exact bits are kept alongside for a bit-for-bit re-encode.")
 		f.line("double _f32FromBits(int bits) =>")
 		f.line("    (ByteData(4)..setUint32(0, bits, Endian.little)).getFloat32(0, Endian.little);")
-		f.blank()
-	}
-	if n.f32copy {
-		f.line("// Bit-exact fp32 array copy into a fresh Float32List of length [n] (>= the")
-		f.line("// source length). A raw byte copy preserves a signaling/payload NaN that a")
-		f.line("// per-element widen through a Dart double would quiet; writeFp32Array")
-		f.line("// re-emits a Float32List's bytes verbatim.")
-		f.line("Float32List _f32copy(Float32List v, int n) {")
-		f.line("  final out = Float32List(n < v.length ? v.length : n);")
-		f.line("  Uint8List.sublistView(out).setRange(0, v.length * 4, Uint8List.sublistView(v));")
-		f.line("  return out;")
-		f.line("}")
-		f.blank()
-	}
-	g.emitCollectors(f, n)
-}
-
-// emitCollectors emits the wrapper-sequence collector visitors the schema uses.
-// Each is keyed by the 0-based element index id: an element is PLACED at
-// out[id] after gap-filling with element defaults, never appended, because an
-// INTERIOR element equal to the element default is omitted on the wire and
-// leaves an id GAP (MESSAGE_SPEC §2). The array's LAST element is always on the
-// wire, so the decoded length -- highest present id + 1 -- is exact, and nothing
-// is filled in afterwards.
-//
-// cap is the schema count N, or -1 for a count-less array. N is a CAPACITY, not
-// a length (§3): it never reaches the wire and never adds elements the wire did
-// not carry. All it does here is bound the array -- an element id >= N is a
-// schema-bound violation (INVALID, never grown-into) -- rejected before the list
-// grows, which also bounds the id-keyed gap-fill against an over-index
-// amplification DoS. emax (element maxlen, or -1) rejects an over-length
-// string/blob element the same way.
-func (g *gen) emitCollectors(f *dfile, n needs) {
-	if n.strSeq {
-		f.line("class _StrSeq extends %s {", visitorBase)
-		f.line("  _StrSeq(this.out, this.cap, this.emax);")
-		f.line("  final List<String> out;")
-		f.line("  final int cap;")
-		f.line("  final int emax;")
-		// The element's schema bounds are decided at the LENGTH WORD, before a byte
-		// of payload is buffered. MESSAGE_SPEC S5.2 makes INVALID dominate
-		// INCOMPLETE, so a message truncated right after the word that carries the
-		// violating number must still be INVALID -- deciding it in onStringBytes,
-		// which never fires for such a message, reported INCOMPLETE instead
-		// (generator#267 / Crucible F-0043).
-		//
-		// Both bounds sit inside the declared-subtype test for the same reason the
-		// scalar header guard does: onFixlenHeader fires for ANY fixlen subtype at
-		// this id, and an element whose subtype contradicts the declaration was
-		// never this array's value (S7.3) -- so neither its id nor its length may be
-		// measured against this array's bounds.
-		f.line("  @override")
-		f.line("  void onFixlenHeader(int id, int subtype, int length) {")
-		f.line("    if (subtype != sofab.FixlenType.string) return;")
-		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
-		f.line("    if (emax >= 0 && length > emax) { invalidate(); return; }")
-		f.line("  }")
-		f.line("  @override")
-		f.line("  void onStringBytes(int id, Uint8List bytes) {")
-		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
-		f.line("    if (emax >= 0 && bytes.length > emax) { invalidate(); return; }")
-		f.line("    // The element is being materialized, so this is where its UTF-8 is")
-		f.line("    // checked. A skipped payload never reaches a collector at all.")
-		f.line("    final s = sofab.decodeUtf8Strict(bytes);")
-		f.line("    if (s == null) { invalidate(); return; }")
-		f.line("    while (out.length <= id) { out.add(''); }")
-		f.line("    out[id] = s;")
-		f.line("  }")
-		f.line("}")
-		f.blank()
-	}
-	if n.blobSeq {
-		f.line("class _BlobSeq extends %s {", visitorBase)
-		f.line("  _BlobSeq(this.out, this.cap, this.emax);")
-		f.line("  final List<Uint8List> out;")
-		f.line("  final int cap;")
-		f.line("  final int emax;")
-		// The blob twin of the string collector above: bounds latched at the length
-		// word (generator#267), gated on the declared subtype (S7.3).
-		f.line("  @override")
-		f.line("  void onFixlenHeader(int id, int subtype, int length) {")
-		f.line("    if (subtype != sofab.FixlenType.blob) return;")
-		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
-		f.line("    if (emax >= 0 && length > emax) { invalidate(); return; }")
-		f.line("  }")
-		f.line("  @override")
-		f.line("  void onBlob(int id, Uint8List value) {")
-		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
-		f.line("    if (emax >= 0 && value.length > emax) { invalidate(); return; }")
-		f.line("    while (out.length <= id) { out.add(Uint8List(0)); }")
-		f.line("    out[id] = Uint8List.fromList(value);")
-		f.line("  }")
-		f.line("}")
-		f.blank()
-	}
-	if n.objSeq {
-		// The element id IS the array index (§5.1), so an element is PLACED at
-		// out[id] after gap-filling with default elements -- never appended.
-		// Appending would shorten the array by the size of any interior id gap --
-		// and an omitted all-default interior element is exactly such a gap -- and
-		// would decode a REOPENED id as a second element instead of merging into the
-		// first (§7.4, which placement gives for free).
-		f.line("class _ObjSeq<T> extends %s {", visitorBase)
-		f.line("  _ObjSeq(this.out, this.cap, this.make, this.vis);")
-		f.line("  final List<T> out;")
-		f.line("  final int cap;")
-		f.line("  final T Function() make;")
-		f.line("  final sofab.MessageVisitor Function(T) vis;")
-		f.line("  @override")
-		f.line("  sofab.MessageVisitor? onSequenceStart(int id) {")
-		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return null; }")
-		f.line("    while (out.length <= id) { out.add(make()); }")
-		f.line("    return vis(out[id]);")
-		f.line("  }")
-		f.line("}")
-		f.blank()
-	}
-	// The matrix / nested-row collectors below place a row at the index its element
-	// id names, exactly like the leaf and object collectors above: an interior row
-	// equal to the element default (the empty row) is omitted by a conformant
-	// encoder (§2), and appending would shift every later row down by one. cap is
-	// the OUTER array's schema count, which bounds that id (§5.1/§7) and with it
-	// the gap-fill.
-	if n.intMat {
-		f.line("class _IntMat extends %s {", visitorBase)
-		f.line("  _IntMat(this.out, this.cap, this.signed, this.lo, this.hi);")
-		f.line("  final List<List<int>> out;")
-		f.line("  final int cap;")
-		f.line("  final bool signed;")
-		// The row element's DECLARED width. Without it an over-width element was
-		// stored as-is, which MESSAGE_SPEC 7.1 forbids -- it is INVALID, never a
-		// silent store. lo == hi means "no bound": u64/i64 and enum/bitfield span
-		// the callback parameter's own range, exactly as the flat guard omits
-		// itself there (generator#330).
-		f.line("  final int lo;")
-		f.line("  final int hi;")
-		f.line("  void _row(int id, Int64List v) {")
-		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
-		f.line("    if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { invalidate(); return; } } }")
-		f.line("    while (out.length <= id) { out.add(<int>[]); }")
-		f.line("    out[id] = List<int>.from(v);")
-		f.line("  }")
-		f.line("  @override")
-		f.line("  void onUnsignedArray(int id, Int64List values) { if (!signed) _row(id, values); }")
-		f.line("  @override")
-		f.line("  void onSignedArray(int id, Int64List values) { if (signed) _row(id, values); }")
-		f.line("}")
-		f.blank()
-	}
-	if n.dblMat {
-		f.line("class _DblMat extends %s {", visitorBase)
-		f.line("  _DblMat(this.out, this.cap, this.f64);")
-		f.line("  final List<List<double>> out;")
-		f.line("  final int cap;")
-		f.line("  final bool f64;")
-		f.line("  @override")
-		f.line("  void onFp32Array(int id, Float32List values) {")
-		f.line("    if (f64) return;")
-		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
-		f.line("    while (out.length <= id) { out.add(<double>[]); }")
-		f.line("    out[id] = _f32copy(values, values.length); // bit-exact: keep an fp32 NaN's bits")
-		f.line("  }")
-		f.line("  @override")
-		f.line("  void onFp64Array(int id, Float64List values) {")
-		f.line("    if (!f64) return;")
-		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
-		f.line("    while (out.length <= id) { out.add(<double>[]); }")
-		f.line("    out[id] = List<double>.from(values);")
-		f.line("  }")
-		f.line("}")
-		f.blank()
-	}
-	if n.boolMat {
-		f.line("class _BoolMat extends %s {", visitorBase)
-		f.line("  _BoolMat(this.out, this.cap);")
-		f.line("  final List<List<bool>> out;")
-		f.line("  final int cap;")
-		f.line("  @override")
-		f.line("  void onUnsignedArray(int id, Int64List values) {")
-		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
-		f.line("    while (out.length <= id) { out.add(<bool>[]); }")
-		f.line("    out[id] = [for (final v in values) v != 0];")
-		f.line("  }")
-		f.line("}")
-		f.blank()
-	}
-	if n.seqSeq {
-		f.line("class _SeqSeq<T> extends %s {", visitorBase)
-		f.line("  _SeqSeq(this.out, this.cap, this.make);")
-		f.line("  final List<List<T>> out;")
-		f.line("  final int cap;")
-		f.line("  final sofab.MessageVisitor Function(List<T>) make;")
-		f.line("  @override")
-		f.line("  sofab.MessageVisitor? onSequenceStart(int id) {")
-		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return null; }")
-		f.line("    while (out.length <= id) { out.add(<T>[]); }")
-		f.line("    return make(out[id]);")
-		f.line("  }")
-		f.line("}")
 		f.blank()
 	}
 }
