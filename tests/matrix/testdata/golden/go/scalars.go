@@ -9,7 +9,7 @@ import (
 
 // Scalars is a generated SofaBuffers object.
 type Scalars struct {
-	_visitorBase
+	sofab.VisitorBase
 	U64max uint64  `json:"u64max"`
 	I64min int64   `json:"i64min"`
 	F64    float64 `json:"f64"`

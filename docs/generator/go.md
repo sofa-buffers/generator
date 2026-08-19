@@ -173,6 +173,33 @@ struct/union/nested element — because its presence is what carries the length.
 So `[]string{"a", ""}`, `[]string{"a"}` and `[]string{}` are three distinct values
 that encode and decode distinctly.
 
+## The collectors are the corelib's (generator#345)
+
+Rebuilding a slice from a wrapper sequence — place the element at the id, fill
+the gap an omitted interior element left, refuse an id past the declared capacity
+— is the same code for every schema; only the bounds differ, and a bound is an
+argument. So it is corelib-go's, not the generator's (ARCHITECTURE §8):
+
+| bound to | corelib type | fields the generator fills in |
+| --- | --- | --- |
+| `array<string>` | `sofab.StringSeq` | `Out`, `Cap`, `ElemMax` |
+| `array<blob>` | `sofab.BlobSeq` | `Out`, `Cap`, `ElemMax` |
+| `array<struct/union>` | `sofab.MessageSeq[T, *T]` | `Out`, `Cap` |
+| `array<array<wrapper>>` | `sofab.NestedSeq[T]` | `Out`, `Cap`, `Make` |
+| `array<array<u*>>` / `<i*>` | `sofab.UnsignedMatrixSeq[T]` / `SignedMatrixSeq[T]` | `Out`, `Cap`, `Hi` (and `Lo`) |
+| `array<array<fp32/fp64/bool>>` | `sofab.Float32MatrixSeq` / `Float64MatrixSeq` / `BoolMatrixSeq` | `Out`, `Cap` |
+
+`Cap` is the schema `count`, `ElemMax` the element `maxlen` and `Lo`/`Hi` the
+declared element width, each `-1` (or `0` for a width spanning the callback
+parameter's own range) when the schema declares none. Every generated object
+embeds `sofab.VisitorBase` for the callbacks its fields do not bind, and a
+`BeginSequence` arm is one line handing back the collector its field is bound to.
+
+What is left in the once-per-package `sofab_visitor.go` is `_isDefaulter` alone:
+it names the generated `isDefault()`, which is a generated symbol, so §8 keeps it
+here. Switching over dropped 282 lines from every emitted package and needs
+corelib-go ≥ the release carrying corelib-go#119.
+
 ## The `count` bound is keyed on the wire array kind
 
 A bounded native array (unsigned/signed/fp32/fp64 elements) gets an arm in the
@@ -223,11 +250,11 @@ behind the declared fixlen `subtype` (generator#224).
 A wrapper-sequence array (string/blob/struct/union/nested elements) descends
 through `BeginSequence`, so the bound reaches its **collector** rather than the
 message — but the collector needs the header hook for the same reason the message
-does. `_strSeq`/`_bytesSeq` therefore implement `FixlenHeader` themselves, and an
-over-index element (`id ≥ count`) or an over-`maxlen` element is rejected at the
-word that carries it instead of once the payload arrives (generator#267/#277).
-The `cap` the collector already held is what the guard compares against; the
-payload-side check stays as defense.
+does. `sofab.StringSeq`/`sofab.BlobSeq` therefore implement `FixlenHeader`
+themselves, and an over-index element (`id ≥ count`) or an over-`maxlen` element
+is rejected at the word that carries it instead of once the payload arrives
+(generator#267/#277). The `Cap`/`ElemMax` the generator handed the collector is
+what the guard compares against; the payload-side check stays as defense.
 
 `sofab.HeaderVisitor` is **all-or-nothing**: it declares `ArrayBegin` *and*
 `FixlenHeader`, and the cursor reaches both through a single `v.(HeaderVisitor)`
@@ -316,9 +343,11 @@ corelib-go's visitor path deliberately does **not** UTF-8-validate: its cursor
 cannot tell a field this visitor binds from one it is skipping, and a skipped
 payload must never be inspected (CORELIB_PLAN §6.4). So the check belongs to the
 destination, and generated code makes it — `sofab.UTF8Valid(bytes)` in every arm
-that stores a `string`: the scalar fields, and the `_strSeq` collector for a
-wrapper-array element. A skipped field reaches no arm, so it is never inspected,
-which is the whole point.
+that stores a `string`. A wrapper-array element is materialized by
+`sofab.StringSeq`, which validates it there instead; embedding
+`sofab.StringCheck`, that collector also sees the decode's own `WithStrictUTF8`
+policy and not just the build tag. A skipped field reaches no arm and no
+collector, so it is never inspected, which is the whole point.
 
 The primitive carries its own **compile-time** gate (a footprint build folds it to
 a constant `true`), so generated code calls it unconditionally and never has to be

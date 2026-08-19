@@ -92,24 +92,19 @@ func TestGoOverIndexWrapperArray(t *testing.T) {
 	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
 	msg := files["m.go"]
 	for _, want := range []string{
-		"&_strSeq{out: &m.Bs, cap: 4, emax: 16}",   // bounded string -> cap 4, maxlen 16
-		"&_bytesSeq{out: &m.Bb, cap: 3, emax: 16}", // bounded blob   -> cap 3, maxlen 16
-		"cap: 2}", // bounded struct -> _objSeq cap 2
-		"&_strSeq{out: &m.Ds, cap: -1, emax: -1}", // dynamic string -> unbounded, no maxlen
+		"&sofab.StringSeq{Out: &m.Bs, Cap: 4, ElemMax: 16}", // bounded string -> Cap 4, maxlen 16
+		"&sofab.BlobSeq{Out: &m.Bb, Cap: 3, ElemMax: 16}",   // bounded blob   -> Cap 3, maxlen 16
+		"Cap: 2}", // bounded struct -> sofab.MessageSeq Cap 2
+		"&sofab.StringSeq{Out: &m.Ds, Cap: -1, ElemMax: -1}", // dynamic string -> unbounded, no maxlen
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("m.go missing %q:\n%s", want, msg)
 		}
 	}
-	// The guards live in the shared prelude.
-	prelude := files["sofab_visitor.go"]
-	for _, want := range []string{
-		"if s.cap >= 0 && int(id) >= s.cap {",
-		"return sofab.ErrInvalidMsg",
-	} {
-		if !strings.Contains(prelude, want) {
-			t.Errorf("sofab_visitor.go missing over-index guard %q", want)
-		}
+	// The guard itself is the corelib collector's, so the generator emits none of
+	// it -- only the bound that parameterizes it, asserted above.
+	if strings.Contains(files["sofab_visitor.go"], "int(id) >=") {
+		t.Errorf("the over-index guard must be corelib-go's, not emitted:\n%s", files["sofab_visitor.go"])
 	}
 }
 
@@ -126,9 +121,9 @@ func TestGoMaxlenReject(t *testing.T) {
 	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
 	msg := files["m.go"]
 	for _, want := range []string{
-		"if len(v) > 8 {",                        // scalar string + blob guard
-		"return sofab.ErrInvalidMsg",             // both scalar and wrapper reject with this
-		"&_strSeq{out: &m.Ws, cap: -1, emax: 5}", // wrapper element maxlen threaded as emax
+		"if len(v) > 8 {",                                   // scalar string + blob guard
+		"return sofab.ErrInvalidMsg",                        // both scalar and wrapper reject with this
+		"&sofab.StringSeq{Out: &m.Ws, Cap: -1, ElemMax: 5}", // wrapper element maxlen threaded as ElemMax
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("m.go missing %q:\n%s", want, msg)
@@ -145,15 +140,10 @@ func TestGoMaxlenReject(t *testing.T) {
 	if !strings.Contains(msg, "case 2:\n\t\tif !sofab.UTF8Valid([]byte(v)) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.U = v") {
 		t.Errorf("m.go: unbounded string (id 2) must store without a maxlen guard:\n%s", msg)
 	}
-	// The wrapper-element guard lives in the shared prelude.
-	prelude := files["sofab_visitor.go"]
-	for _, want := range []string{
-		"emax int",
-		"if s.emax >= 0 && len(v) > s.emax {",
-	} {
-		if !strings.Contains(prelude, want) {
-			t.Errorf("sofab_visitor.go missing wrapper maxlen guard %q", want)
-		}
+	// The wrapper-element guard is sofab.StringSeq's own; the generator hands it
+	// the bound and emits no comparison of its own.
+	if strings.Contains(files["sofab_visitor.go"], "len(v) >") {
+		t.Errorf("the wrapper maxlen guard must be corelib-go's, not emitted:\n%s", files["sofab_visitor.go"])
 	}
 }
 
@@ -382,7 +372,7 @@ func TestGoStructuralInvariants(t *testing.T) {
 	for _, want := range []string{
 		"package messages",
 		"func (m *Myfirstmessage) Serialize(e *sofab.Encoder)",
-		"_visitorBase", // struct embeds the no-op base
+		"sofab.VisitorBase", // struct embeds the corelib no-op base
 		"func (m *Myfirstmessage) Unsigned(id sofab.ID, v uint64) error", // visitor decode
 		"func (m *Myfirstmessage) BeginSequence(id sofab.ID) (sofab.Visitor, error)",
 		"func NewMyfirstmessage() *Myfirstmessage",
@@ -409,15 +399,19 @@ func TestGoStructuralInvariants(t *testing.T) {
 	if strings.Contains(strings.ReplaceAll(msg, "e.WriteSequenceBeginLazy(", ""), "e.WriteSequenceBegin(") {
 		t.Errorf("myfirstmessage.go must open every sequence with WriteSequenceBeginLazy:\n%s", msg)
 	}
-	// The decode prelude (embedded no-op base + collectors) is emitted once.
+	// The no-op base and the collectors are corelib-go's (generator#345), so the
+	// prelude holds only what names a GENERATED symbol.
 	prelude := files["sofab_visitor.go"]
-	for _, want := range []string{
-		"type _visitorBase struct{}",
-		"type _strSeq struct {",
-	} {
-		if !strings.Contains(prelude, want) {
-			t.Errorf("sofab_visitor.go missing %q", want)
+	if !strings.Contains(prelude, "type _isDefaulter interface{ isDefault() bool }") {
+		t.Errorf("sofab_visitor.go missing the isDefault contract:\n%s", prelude)
+	}
+	for _, banned := range []string{"_visitorBase", "_strSeq", "_bytesSeq", "_objSeq", "_seqSeq", "MatSeq", "_placeRow"} {
+		if strings.Contains(prelude, banned) {
+			t.Errorf("sofab_visitor.go must no longer emit %q:\n%s", banned, prelude)
 		}
+	}
+	if !strings.Contains(msg, "sofab.VisitorBase") {
+		t.Errorf("the object must embed the corelib no-op base:\n%s", firstLines(msg, 20))
 	}
 	types := files["types.go"]
 	if !strings.Contains(types, "type MyfirstmessageSomeenum int8") {
@@ -752,7 +746,7 @@ messages:
 		t.Errorf("a count:N native array with no default must stay empty:\n%s", got)
 	}
 	// The bound itself is untouched -- that is all `count` still does.
-	if !strings.Contains(got, "cap: 5") || !strings.Contains(got, "if len(v) > 4 {") {
+	if !strings.Contains(got, "Cap: 5") || !strings.Contains(got, "if len(v) > 4 {") {
 		t.Errorf("the count bound must still be enforced:\n%s", got)
 	}
 }
@@ -823,43 +817,32 @@ messages:
       rows: { id: 2, type: array, items: { type: array, count: 2, items: { type: string, maxlen: 4 } } }
 `)
 	files := genGo(t, s, map[string]any{"package": "messages"})
-	prelude := files["sofab_visitor.go"]
 
+	// The placement itself is corelib-go's (sofab.MessageSeq / sofab.PlaceRow /
+	// sofab.NestedSeq): identical for every schema, so the generator only names
+	// the collector and hands it the bounds that differ.
 	for _, want := range []string{
-		// struct elements: place, not append -- and the gap-fill that precedes it
-		"\tfor len(*s.out) <= int(id) {\n\t\t*s.out = append(*s.out, zero)\n\t}\n\treturn PT(&(*s.out)[id]), nil",
-		// native matrix rows: same, through the shared _placeRow
-		"func _placeRow[T any](out *[][]T, cap int, id sofab.ID, row []T) error {",
-		"\tfor len(*out) <= int(id) {\n\t\t*out = append(*out, nil)\n\t}\n\t(*out)[id] = row",
-		"func (s *_uMatSeq[T]) UnsignedArray(id sofab.ID, v []uint64) error {\n\tif s.hi != 0 {",
-		// wrapper rows: same again
-		"func (s *_seqSeq[T]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {",
-		"\tfor len(*s.out) <= int(id) {\n\t\t*s.out = append(*s.out, nil)\n\t}\n\treturn s.mk(&(*s.out)[id]), nil",
-		// the over-index guard bounds every id-keyed fill
-		"if s.cap >= 0 && int(id) >= s.cap {",
-		"\tif cap >= 0 && int(id) >= cap {\n\t\treturn sofab.ErrInvalidMsg\n\t}",
+		"&sofab.MessageSeq[VecObjsElem, *VecObjsElem]{Out: &m.Objs, Cap: 4}",
+		"&sofab.UnsignedMatrixSeq[uint32]{Out: &m.Mat, Cap: 2, Hi: 4294967295}",
+		"&sofab.NestedSeq[string]{Out: &m.Rows, Cap: 2,",
+		"&sofab.StringSeq{Out: p, Cap: -1, ElemMax: 4}",
 	} {
-		if !strings.Contains(prelude, want) {
-			t.Errorf("sofab_visitor.go missing %q:\n%s", want, prelude)
-		}
-	}
-	// The defects this replaced: appending ignored the id entirely.
-	for _, banned := range []string{
-		"*s.out = append(*s.out, zero)\n\treturn PT(&(*s.out)[len(*s.out)-1]), nil",
-		"*s.out = append(*s.out, sofab.NarrowUnsigned[T](v))",
-		"return s.mk(&(*s.out)[len(*s.out)-1]), nil",
-		// ...and the refill that made the superseded trailing elision lossless.
-		"EndSequence() error { return _fillTo",
-		"func (s *_objSeq[T, PT]) EndSequence() error {",
-	} {
-		if strings.Contains(prelude, banned) {
-			t.Errorf("sofab_visitor.go must no longer contain %q:\n%s", banned, prelude)
-		}
-	}
-	// Every collector carries the outer array's count bound, matrices included.
-	for _, want := range []string{"cap: 4", "&_uMatSeq[uint32]{out: &m.Mat, cap: 2, hi: 4294967295}", "&_seqSeq[string]{out: &m.Rows, cap: 2,"} {
 		if !strings.Contains(files["vec.go"], want) {
-			t.Errorf("vec.go must pass the schema count as the collector cap, missing %q:\n%s", want, files["vec.go"])
+			t.Errorf("vec.go must bind the corelib collector, missing %q:\n%s", want, files["vec.go"])
+		}
+	}
+	// And emits none of the machinery itself -- neither the collectors nor the
+	// append-instead-of-place defect they replaced.
+	all := ""
+	for _, f := range files {
+		all += f
+	}
+	for _, banned := range []string{
+		"_objSeq", "_seqSeq", "_placeRow", "_uMatSeq", "_visitorBase{}, nil",
+		"append(*s.out",
+	} {
+		if strings.Contains(all, banned) {
+			t.Errorf("generated output must no longer contain %q:\n%s", banned, all)
 		}
 	}
 }
@@ -889,17 +872,19 @@ func TestGoSkippedStringIsNotValidated(t *testing.T) {
 	for _, f := range files {
 		all += f
 	}
-	if got := strings.Count(all, "if !sofab.UTF8Valid([]byte(v)) {"); got != 4 {
-		t.Errorf("want a UTF-8 check at each string destination + the collector, got %d:\n%s", got, all)
+	if got := strings.Count(all, "if !sofab.UTF8Valid([]byte(v)) {"); got != 3 {
+		t.Errorf("want a UTF-8 check at each string destination, got %d:\n%s", got, all)
 	}
 	// It sits behind the maxlen guard, which decides on the wire length alone.
 	if !strings.Contains(msg, "if len(v) > 8 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tif !sofab.UTF8Valid([]byte(v)) {") {
 		t.Errorf("the maxlen reject must stay ahead of the UTF-8 check:\n%s", msg)
 	}
-	// The wrapper-array element path validates in the shared collector.
-	prelude := files["sofab_visitor.go"]
-	if !strings.Contains(prelude, "if !sofab.UTF8Valid([]byte(v)) {") {
-		t.Errorf("_strSeq must validate the element it materializes:\n%s", prelude)
+	// The wrapper-array element is materialized by sofab.StringSeq, which
+	// validates it there (and, embedding sofab.StringCheck, sees the decode's own
+	// WithStrictUTF8 policy rather than only the build tag). Binding the collector
+	// is all the generator has to emit for it.
+	if !strings.Contains(msg, "&sofab.StringSeq{Out: &m.Sa, Cap: 4, ElemMax: -1}") {
+		t.Errorf("the string array must bind the validating collector:\n%s", msg)
 	}
 	// A blob carries no encoding, so its arms must not grow a check.
 	if strings.Contains(msg, "Bytes(id sofab.ID, v []byte) error") &&
@@ -1105,11 +1090,11 @@ func TestGoNestedRowElemWidth(t *testing.T) {
 	msg := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})["m.go"]
 	// The bound travels with the collector, so the scan can run before Narrow* masks.
 	for _, want := range []string{
-		"&_uMatSeq[uint8]{out: &m.Urows, cap: 2, hi: 255}",
-		"&_sMatSeq[int16]{out: &m.Srows, cap: 2, lo: -32768, hi: 32767}",
+		"&sofab.UnsignedMatrixSeq[uint8]{Out: &m.Urows, Cap: 2, Hi: 255}",
+		"&sofab.SignedMatrixSeq[int16]{Out: &m.Srows, Cap: 2, Lo: -32768, Hi: 32767}",
 		// u64 spans the callback parameter's own range: nothing can fall outside,
 		// so the zero bound switches the scan off rather than emitting a dead one.
-		"&_uMatSeq[uint64]{out: &m.Wide, cap: 2, hi: 0}",
+		"&sofab.UnsignedMatrixSeq[uint64]{Out: &m.Wide, Cap: 2, Hi: 0}",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("missing %q in:\n%s", want, msg)
