@@ -56,13 +56,13 @@ pub const Scalars = struct {
 
     /// Encode into a fresh buffer allocated from `alloc`.
     pub fn encode(self: *const Scalars, alloc: std.mem.Allocator) (sofab.Error || std.mem.Allocator.Error)![]u8 {
-        var sink: _EncodeSink = .{ .alloc = alloc };
+        var sink: sofab.CollectingSink = .{ .alloc = alloc };
+        defer sink.deinit();
         var scratch: [512]u8 = undefined;
-        var os = sofab.OStream.initFlush(&scratch, 0, &sink, _EncodeSink.push);
+        var os = sofab.OStream.initFlush(&scratch, 0, &sink, sofab.CollectingSink.push);
         try self.serialize(&os);
         _ = os.flush();
-        if (sink.failed) return error.OutOfMemory;
-        return sink.list.toOwnedSlice(alloc);
+        return sink.toOwnedSlice();
     }
 
     /// Decode a complete message. Zero-copy: the result borrows string and
@@ -147,7 +147,7 @@ const _dec_Scalars = struct {
     stack: [256]_Loc = undefined,
     sp: usize = 0,
     cur: _Loc = .root,
-    acc: std.ArrayList(u8) = .empty, // only a payload split across feed chunks lands here
+    acc: sofab.PayloadAcc = .{}, // only a payload split across feed chunks lands here
     own: bool = false, // copy every payload instead of borrowing (streaming path)
     inv: bool = false, // a scalar array over its schema count, or a wrapper element id >= count -> INVALID
     askip: usize = 0, // elements left to discard from a wire-type-contradictory array
@@ -238,22 +238,14 @@ const _dec_Scalars = struct {
     /// next stitched item. Borrowing on that path aliased earlier fields and
     /// elements onto later ones at particular chunk sizes.
     ///
-    /// A completed payload is handed back as its OWN allocation rather than as
-    /// a view into `acc`. A destination KEEPS the slice it is given -- wrapper
-    /// array elements outlive the callback -- while `acc` is scratch that the
-    /// next split payload clears, appends to, and may reallocate. A view into
-    /// it would alias every element stored earlier onto the newest one, and a
-    /// growing buffer would rebase them onto the old block: a stale length
-    /// past the live bytes, and a freed read under an allocator that releases.
+    /// A split payload is stitched by sofab.PayloadAcc, which hands it back
+    /// as its own allocation -- a destination KEEPS the slice it is given.
     fn _reassemble(self: *_dec_Scalars, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {
         if (offset == 0 and chunk.len >= total) {
             if (!self.own) return chunk; // contiguous decode: borrow the caller's buffer
             return self.alloc.dupe(u8, chunk[0..total]) catch { self.inv = true; return null; };
         }
-        if (offset == 0) self.acc.clearRetainingCapacity();
-        self.acc.appendSlice(self.alloc, chunk) catch { self.inv = true; return null; };
-        if (self.acc.items.len < total) return null; // more chunks to come
-        return self.alloc.dupe(u8, self.acc.items[0..total]) catch { self.inv = true; return null; };
+        return self.acc.push(self.alloc, total, offset, chunk) catch { self.inv = true; return null; };
     }
 
     pub fn sequenceBegin(self: *_dec_Scalars, _: sofab.Id) void {
@@ -273,67 +265,3 @@ const _dec_Scalars = struct {
         }
     }
 };
-
-// --- shared encode/decode support -------------------------------------------
-
-/// Flush sink behind encode(): drains the OStream scratch buffer into a
-/// growable byte list.
-const _EncodeSink = struct {
-    alloc: std.mem.Allocator,
-    list: std.ArrayList(u8) = .empty,
-    failed: bool = false,
-    fn push(ctx: ?*anyopaque, data: []const u8) void {
-        const self: *_EncodeSink = @ptrCast(@alignCast(ctx.?));
-        self.list.appendSlice(self.alloc, data) catch {
-            self.failed = true;
-        };
-    }
-};
-
-/// Storage for a `count: N` native array: N elements of inline capacity plus
-/// the length.
-///
-/// `count` is a CAPACITY, never a length (S3): the field carries
-/// 0..N elements and the wire count M IS the length, so a bare `[N]T` -- which
-/// can only ever BE N long -- cannot represent the value. This can, without
-/// giving up the inline storage that keeps a bounded array allocation-free on
-/// both encode and decode.
-///
-/// The value is `items[0..len]`; `items[len..]` is spare capacity and never
-/// reaches the wire. `.{}` is the EMPTY array -- which is what a fresh count:N
-/// array is: N is a bound, not a content.
-pub fn FixedArray(comptime T: type, comptime N: usize) type {
-    return struct {
-        const Self = @This();
-
-        /// The schema `count`: the most elements this field may carry.
-        pub const capacity: usize = N;
-
-        items: [N]T = std.mem.zeroes([N]T),
-        len: usize = 0,
-
-        /// The array's value: exactly the elements the wire carries.
-        pub fn slice(self: *const Self) []const T {
-            return self.items[0..self.len];
-        }
-
-        /// Replace the value with `vals`, truncated to the capacity N.
-        pub fn set(self: *Self, vals: []const T) void {
-            const n = @min(vals.len, N);
-            @memcpy(self.items[0..n], vals[0..n]);
-            self.len = n;
-        }
-
-        /// A value holding `vals` (truncated to N) -- the literal form.
-        pub fn init(vals: []const T) Self {
-            var s: Self = .{};
-            s.set(vals);
-            return s;
-        }
-    };
-}
-
-/// Native-array destination of exactly the announced wire count.
-fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {
-    return sofab.arrays.allocN(T, a, n);
-}

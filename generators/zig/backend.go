@@ -111,8 +111,15 @@ func (f *zfile) line(format string, args ...any) {
 	fmt.Fprintf(&f.b, format, args...)
 	f.b.WriteByte('\n')
 }
-func (f *zfile) blank()        { f.b.WriteByte('\n') }
-func (f *zfile) bytes() []byte { return []byte(f.b.String()) }
+func (f *zfile) blank() { f.b.WriteByte('\n') }
+
+// bytes closes the file on exactly one newline. Sections separate themselves
+// with a trailing blank line, so whichever happens to come last would otherwise
+// leave a blank line at EOF -- which `zig fmt` removes, and a `zig fmt --check`
+// in a user's own tree then fails on.
+func (f *zfile) bytes() []byte {
+	return []byte(strings.TrimRight(f.b.String(), "\n") + "\n")
+}
 
 // emitDoc writes a Zig doc comment (`///`, one line per line of text) at the
 // given indent. Empty text emits nothing, so it never leaves a dangling `///`.
@@ -129,10 +136,10 @@ func (f *zfile) emitDoc(indent, text string) {
 // A deprecated field gets a trailing "Deprecated." note (Zig has no native
 // deprecation attribute, so the doc line is the only marker).
 // zigStorage reads the storage back off the member type: a count-bounded native
-// array lowers to FixedArray(T, N) (the capacity is in the type), while strings,
-// blobs and wrapper arrays stay slices (it is not).
+// array lowers to sofab.FixedArray(T, N) (the capacity is in the type), while
+// strings, blobs and wrapper arrays stay slices (it is not).
 func zigStorage(zigType string) generator.FieldStorage {
-	if strings.HasPrefix(zigType, "FixedArray(") {
+	if strings.HasPrefix(zigType, "sofab.FixedArray(") {
 		return generator.StorageFixed
 	}
 	return generator.StorageDynamic
@@ -220,7 +227,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 	for _, m := range s.Messages {
 		g.emitDecoder(f, exported(m.Name), m.Fields)
 	}
-	g.emitSupport(f, g.dynAllocUse(s))
 	return f.bytes()
 }
 
@@ -304,13 +310,13 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 		f.blank()
 		f.line("    /// Encode into a fresh buffer allocated from `alloc`.")
 		f.line("    pub fn encode(self: *const %s, alloc: std.mem.Allocator) (sofab.Error || std.mem.Allocator.Error)![]u8 {", name)
-		f.line("        var sink: _EncodeSink = .{ .alloc = alloc };")
+		f.line("        var sink: sofab.CollectingSink = .{ .alloc = alloc };")
+		f.line("        defer sink.deinit();")
 		f.line("        var scratch: [512]u8 = undefined;")
-		f.line("        var os = sofab.OStream.initFlush(&scratch, 0, &sink, _EncodeSink.push);")
+		f.line("        var os = sofab.OStream.initFlush(&scratch, 0, &sink, sofab.CollectingSink.push);")
 		f.line("        try self.serialize(&os);")
 		f.line("        _ = os.flush();")
-		f.line("        if (sink.failed) return error.OutOfMemory;")
-		f.line("        return sink.list.toOwnedSlice(alloc);")
+		f.line("        return sink.toOwnedSlice();")
 		f.line("    }")
 		f.blank()
 		f.line("    /// Decode a complete message. Zero-copy: the result borrows string and")
@@ -397,8 +403,12 @@ func (g *gen) arrayNeExpr(fld *ir.Field, acc string) string {
 			elem := g.zigArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems)
 			return fmt.Sprintf("!std.mem.eql(%s, %s, &.{ %s })", elem, g.arrayValExpr(fld, acc), parts)
 		}
-		// `.len` is the array's length under either storage: the slice's own for a
-		// dynamic array, FixedArray's for a count:N one.
+		// A count:N field keeps its length behind an accessor -- the inline
+		// capacity past it is not part of the value; a dynamic one is a slice and
+		// carries its own `.len`.
+		if _, _, ok := g.fixedNativeArray(fld); ok {
+			return fmt.Sprintf("%s.len() != 0", acc)
+		}
 		return fmt.Sprintf("%s.len != 0", acc)
 	}
 	// Wrapper array: the writer emits a child for every element it holds, because
@@ -408,7 +418,7 @@ func (g *gen) arrayNeExpr(fld *ir.Field, acc string) string {
 }
 
 // arrayValExpr is the array field's VALUE as a slice expression. A dynamic array
-// is already one; a count:N native array is inline FixedArray(T, N) storage,
+// is already one; a count:N native array is inline sofab.FixedArray(T, N) storage,
 // whose value is its first `.len` elements -- `count` is a capacity, so the
 // spare tail is not part of the value and never reaches the wire (§3).
 func (g *gen) arrayValExpr(fld *ir.Field, acc string) string {
@@ -619,93 +629,6 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 		}
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
-	}
-}
-
-// emitSupport writes the module-level helpers shared by every message: the
-// encode flush sink and the small generic decode stores. Zig analyzes private
-// declarations lazily, so helpers a given schema never references cost
-// nothing.
-//
-// dynAlloc selects the initial-allocation strategy for a slice-backed native
-// array. The wire count is untrusted, so when any message decodes one the eager
-// allocation is capped here and grown as elements actually arrive
-// (sofab.arrays.putGrowing); otherwise the exact count is allocated up front.
-func (g *gen) emitSupport(f *zfile, dynAlloc bool) {
-	f.line("// --- shared encode/decode support -------------------------------------------")
-	f.blank()
-	f.line("/// Flush sink behind encode(): drains the OStream scratch buffer into a")
-	f.line("/// growable byte list.")
-	f.line("const _EncodeSink = struct {")
-	f.line("    alloc: std.mem.Allocator,")
-	f.line("    list: std.ArrayList(u8) = .empty,")
-	f.line("    failed: bool = false,")
-	f.line("    fn push(ctx: ?*anyopaque, data: []const u8) void {")
-	f.line("        const self: *_EncodeSink = @ptrCast(@alignCast(ctx.?));")
-	f.line("        self.list.appendSlice(self.alloc, data) catch {")
-	f.line("            self.failed = true;")
-	f.line("        };")
-	f.line("    }")
-	f.line("};")
-	f.blank()
-	f.line("/// Storage for a `count: N` native array: N elements of inline capacity plus")
-	f.line("/// the length.")
-	f.line("///")
-	f.line("/// `count` is a CAPACITY, never a length (S3): the field carries")
-	f.line("/// 0..N elements and the wire count M IS the length, so a bare `[N]T` -- which")
-	f.line("/// can only ever BE N long -- cannot represent the value. This can, without")
-	f.line("/// giving up the inline storage that keeps a bounded array allocation-free on")
-	f.line("/// both encode and decode.")
-	f.line("///")
-	f.line("/// The value is `items[0..len]`; `items[len..]` is spare capacity and never")
-	f.line("/// reaches the wire. `.{}` is the EMPTY array -- which is what a fresh count:N")
-	f.line("/// array is: N is a bound, not a content.")
-	f.line("pub fn FixedArray(comptime T: type, comptime N: usize) type {")
-	f.line("    return struct {")
-	f.line("        const Self = @This();")
-	f.blank()
-	f.line("        /// The schema `count`: the most elements this field may carry.")
-	f.line("        pub const capacity: usize = N;")
-	f.blank()
-	f.line("        items: [N]T = std.mem.zeroes([N]T),")
-	f.line("        len: usize = 0,")
-	f.blank()
-	f.line("        /// The array's value: exactly the elements the wire carries.")
-	f.line("        pub fn slice(self: *const Self) []const T {")
-	f.line("            return self.items[0..self.len];")
-	f.line("        }")
-	f.blank()
-	f.line("        /// Replace the value with `vals`, truncated to the capacity N.")
-	f.line("        pub fn set(self: *Self, vals: []const T) void {")
-	f.line("            const n = @min(vals.len, N);")
-	f.line("            @memcpy(self.items[0..n], vals[0..n]);")
-	f.line("            self.len = n;")
-	f.line("        }")
-	f.blank()
-	f.line("        /// A value holding `vals` (truncated to N) -- the literal form.")
-	f.line("        pub fn init(vals: []const T) Self {")
-	f.line("            var s: Self = .{};")
-	f.line("            s.set(vals);")
-	f.line("            return s;")
-	f.line("        }")
-	f.line("    };")
-	f.line("}")
-	if dynAlloc {
-		f.blank()
-		f.line("/// Initial storage for a native array announcing n wire elements. The count")
-		f.line("/// is untrusted until the elements actually arrive, so the eager allocation")
-		f.line("/// is capped here and sofab.arrays.putGrowing extends it on demand -- a")
-		f.line("/// lying count cannot force a huge allocation. On allocation failure the")
-		f.line("/// array decodes as empty.")
-		f.line("fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {")
-		f.line("    return sofab.arrays.allocN(T, a, @min(n, 1024));")
-		f.line("}")
-	} else {
-		f.blank()
-		f.line("/// Native-array destination of exactly the announced wire count.")
-		f.line("fn _allocN(comptime T: type, a: std.mem.Allocator, n: usize) []const T {")
-		f.line("    return sofab.arrays.allocN(T, a, n);")
-		f.line("}")
 	}
 }
 
