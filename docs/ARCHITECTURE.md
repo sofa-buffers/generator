@@ -802,7 +802,8 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    itself, or a small collector for a wrapper-sequence array
    (string/blob/struct/union/matrix elements). A no-op base supplies defaults so
    each type overrides only the callbacks it uses. **Go** — the generated struct
-   *is* the `sofab.Visitor` (a no-op `_visitorBase` embedded in every object),
+   *is* the `sofab.Visitor` (the corelib's no-op `sofab.VisitorBase`, embedded in
+   every object),
    driven by **either** entry point: `sofab.AcceptBytes(buf, m)` for bytes the
    caller holds, or `sofab.NewDecoder(r).AcceptStream(m)` for an `io.Reader`,
    which dispatches each field as the reader delivers it so peak memory is the
@@ -1035,7 +1036,8 @@ neighbouring positions kept the late shape, and each is the identical defect —
 a bound established by a word, checked after the bytes that word describes:
 
 - **Wrapper-array elements.** The element collectors (`_strSeq`/`_bytesSeq` in go,
-  `_StrSeq`/`_BlobSeq` in dart) carried the over-index *and* element-`maxlen`
+  since moved to corelib-go as `sofab.StringSeq`/`sofab.BlobSeq`; `_StrSeq`/
+  `_BlobSeq` in dart) carried the over-index *and* element-`maxlen`
   checks in the payload callback, not in the header hook their enclosing message
   already implemented. Both corelibs offered the hook; only the scalar fields used
   it. Fixed by emitting `FixlenHeader`/`onFixlenHeader` on the collectors too
@@ -1822,9 +1824,11 @@ generator had no seam to guard. Each corelib gave up that check and exposed what
 the destination needs instead, and each backend picked it up:
 
 - **go** — `sofab.UTF8Valid(bytes) bool`, called in every arm that stores a
-  string: the scalar fields and the `_strSeq` wrapper-element collector. The
-  primitive carries its own compile-time gate, so generated code calls it
-  unconditionally and never depends on the corelib's build configuration.
+  string: the scalar fields. A wrapper-array element is materialized by the
+  collector, which is corelib-go's `sofab.StringSeq` since generator#345 and
+  validates it there. The primitive carries its own compile-time gate, so
+  generated code calls it unconditionally and never depends on the corelib's
+  build configuration.
 - **dart** — `MessageVisitor.onStringBytes(id, bytes)` delivers the **raw wire
   bytes**. The generated visitor overrides that instead of `onString`, so the arm
   resolves the destination first and only then calls `utf8Valid` + `utf8.decode`.
