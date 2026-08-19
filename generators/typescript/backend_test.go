@@ -355,7 +355,10 @@ func TestTSStructural(t *testing.T) {
 		"export class MyfirstmessageDecoder {",
 		"  feed(chunk: Uint8Array): DecodeStatus {",
 		"class _MyfirstmessageVis implements Visitor {",
-		"const _DEAD: Visitor = { sequenceBegin(): Visitor { return _DEAD; } };",
+		// An id the schema does not declare is DECLINED, not routed to a dummy:
+		// corelib-ts#154 reads null as "skip this subtree".
+		"  sequenceBegin(id: number): Visitor | null {",
+		"    return null;",
 		// Malformed UTF-8 leaves as SofabError on this path too, because the store
 		// site transcodes through the corelib's decodeUtf8 rather than a fatal
 		// TextDecoder of its own: that one raises a platform TypeError, which walks
@@ -554,7 +557,8 @@ func TestTSInt64Long(t *testing.T) {
 		"signed(id: number, v: Long): void {",
 		"arrayUnsigned(id: number, i: number, v: Long): void {",
 		"case 4: this.o.u = v; break;",
-		"const _DEAD: LongVisitor = { longs: true, sequenceBegin(): LongVisitor { return _DEAD; } };",
+		"  sequenceBegin(id: number): AnyVisitor | null {",
+		"    return null;",
 		// JSON keeps the decimal-string form, with the schema's signedness.
 		`"u": this._u.toString(false),`,
 		`"i": this._i.toString(true),`,

@@ -52,14 +52,6 @@ func streamVisitorName(typeName string) string { return "_" + typeName + "Vis" }
 // accumulator and the UTF-8 transcode come from the corelib (PayloadAcc,
 // decodeUtf8).
 func (g *gen) emitStreamPrelude(f *tsfile, s *ir.Schema) {
-	f.line("/**")
-	f.line(" * The skip visitor. corelib-ts resolves a nested scope as")
-	f.line(" * `parent.sequenceBegin?.(id) ?? parent`, so returning nothing keeps the")
-	f.line(" * PARENT visitor and an unknown subtree's children would bind into the")
-	f.line(" * enclosing scope. Returning this instead makes the whole subtree")
-	f.line(" * evaporate: it implements no field callback, and its own sequenceBegin")
-	f.line(" * returns itself, so nesting cannot escape it.")
-	f.line(" */")
 	if g.streamLongs() {
 		f.line("/*")
 		f.line(" * Every visitor in this module is on corelib-ts's opt-in Long channel")
@@ -73,8 +65,6 @@ func (g *gen) emitStreamPrelude(f *tsfile, s *ir.Schema) {
 		f.line(" * back, through _u / _i below.")
 		f.line(" */")
 	}
-	f.line("const _DEAD: %s = { %ssequenceBegin(): %s { return _DEAD; } };", g.visType(), g.longsFlagLit(), g.visType())
-	f.blank()
 	if g.streamLongs() {
 		f.line("/** A Long from the `longs` channel, narrowed for an unsigned destination. */")
 		f.line("function _u(v: Long): number {")
@@ -678,7 +668,7 @@ func (g *gen) streamElemConv(x *ir.Field) (string, string) {
 // scope merges into what an earlier opening set (S7.4). A wrapper-sequence array
 // gets a fresh collector that clears its destination first, so a re-opened
 // wrapper replaces the array whole. Every id the schema does not declare returns
-// _DEAD, which discards the subtree with its children.
+// null, which SKIPS it: nothing inside is delivered and nothing is built for it.
 func (g *gen) emitStreamSequence(f *tsfile, fields []*ir.Field) {
 	var arms []string
 	for _, x := range fields {
@@ -693,7 +683,9 @@ func (g *gen) emitStreamSequence(f *tsfile, fields []*ir.Field) {
 			}
 		}
 	}
-	f.line("  sequenceBegin(id: number): %s {", g.childVis())
+	// `| null` because the fall-through declines the scope: the corelib reads
+	// null as "skip" and anything else as the child to route into.
+	f.line("  sequenceBegin(id: number): %s | null {", g.childVis())
 	if len(arms) > 0 {
 		f.line("    switch (id) {")
 		for _, a := range arms {
@@ -702,7 +694,12 @@ func (g *gen) emitStreamSequence(f *tsfile, fields []*ir.Field) {
 		f.line("      default: break;")
 		f.line("    }")
 	}
-	f.line("    return _DEAD;")
+	// null = skip this subtree (corelib-ts#154): nothing inside is delivered,
+	// a scope opened within it is not offered either, and the receiver caps
+	// stand down there. Returning a dummy visitor instead -- what this emitted
+	// before that landed -- kept the decoder building payload views and looking
+	// up callbacks for a scope nobody was reading.
+	f.line("    return null;")
 	f.line("  }")
 }
 
@@ -817,7 +814,7 @@ func (g *gen) emitStreamCollectors(f *tsfile, use streamUse) {
 		// exists rather than a typecheck.
 		f.line("  arrayFp32(id: number, i: number, v: number): void { this.row(id)[i] = this.conv(v); }")
 		f.line("  arrayFp64(id: number, i: number, v: number): void { this.row(id)[i] = this.conv(v); }")
-		f.line("  sequenceBegin(): %s { return _DEAD; }", g.visType())
+		f.line("  sequenceBegin(): null { return null; }")
 		f.line("}")
 		f.blank()
 	}
@@ -1022,7 +1019,7 @@ func (g *gen) emitLongsFlag(f *tsfile) {
 	}
 }
 
-// longsFlagLit is the same flag as an object-literal member, for _DEAD.
+// longsFlagLit is the same flag as an object-literal member.
 func (g *gen) longsFlagLit() string {
 	if g.streamLongs() {
 		return "longs: true, "
