@@ -160,16 +160,6 @@ export class Scalars {
   }
 }
 
-/**
- * The skip visitor. corelib-ts resolves a nested scope as
- * `parent.sequenceBegin?.(id) ?? parent`, so returning nothing keeps the
- * PARENT visitor and an unknown subtree's children would bind into the
- * enclosing scope. Returning this instead makes the whole subtree
- * evaporate: it implements no field callback, and its own sequenceBegin
- * returns itself, so nesting cannot escape it.
- */
-const _DEAD: Visitor = { sequenceBegin(): Visitor { return _DEAD; } };
-
 /** Streaming decode visitor for {@link Scalars}. */
 class _ScalarsVis implements Visitor {
   constructor(readonly o: Scalars, readonly a: PayloadAcc) {}
@@ -202,8 +192,8 @@ class _ScalarsVis implements Visitor {
       default: break;
     }
   }
-  sequenceBegin(id: number): Visitor {
-    return _DEAD;
+  sequenceBegin(id: number): Visitor | null {
+    return null;
   }
 }
 
