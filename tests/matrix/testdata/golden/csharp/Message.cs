@@ -138,7 +138,7 @@ internal sealed class ScalarsVisitor : IVisitor {
     private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)
     private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)
     private int sp = 0;
-    private List<byte> acc;            // lazy: only split string/blob payloads need it
+    private readonly PayloadAcc pay = new PayloadAcc(); // reassembles a string/blob payload split across feeds
     public ScalarsVisitor(Scalars msg) { m = msg; }
     private const int Root = 0;
 
@@ -170,27 +170,13 @@ internal sealed class ScalarsVisitor : IVisitor {
             case (Root, 6): m.f64 = value; break;
         }
     }
-    private static readonly System.Text.UTF8Encoding _strictUtf8 = new System.Text.UTF8Encoding(false, true);
-    private static string _Utf8(byte[] b, int off, int len) {
-        try { return _strictUtf8.GetString(b, off, len); }
-        catch (System.Text.DecoderFallbackException) { throw new SofabException(SofabError.InvalidMessage, "string: invalid UTF-8"); }
-    }
     public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
         // No field of this message is a string, so every string payload the
         // decoder delivers is skipped whole -- its bytes are never inspected.
     }
     public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
-        byte[] _b;
-        if (offset == 0 && chunkLength >= total) {
-            _b = new byte[total];
-            System.Array.Copy(data, chunkOffset, _b, 0, total);
-        } else {
-            acc ??= new List<byte>();
-            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);
-            if (acc.Count < total) return;
-            _b = acc.ToArray();
-            acc.Clear();
-        }
+        byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength);
+        if (_b == null) return;   // payload incomplete: more chunks to come
         switch ((cur, id)) {
         }
     }

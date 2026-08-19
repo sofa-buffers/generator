@@ -37,24 +37,50 @@ Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `string` is a Unicode type, so it is **always strict** (MESSAGE_SPEC §8 /
 CORELIB_PLAN §6.4) — no config key in generated code. The default
 `Encoding.UTF8.GetString` is **lossy** (replacement-fallback → `U+FFFD`), which §8
-forbids in every mode, so the visitor decodes through a generated `_Utf8(...)` helper
-backed by `new System.Text.UTF8Encoding(false, /*throwOnInvalidBytes*/ true)`; a
-`DecoderFallbackException` becomes `SofabException(SofabError.InvalidMessage)` — the
-same channel as the over-count guards. The check runs once the full `total` bytes
-are present. Encode-side strictness is corelib-side (`OStream.WriteString`).
+forbids in every mode, so the verdict comes from `sofab.Utf8.Decode(...)`, which
+validates before it materializes and reports a malformed range as
+`SofabException(SofabError.InvalidMessage)` — the same channel as the over-count
+guards. `sofab.PayloadAcc.String(...)` is what calls it, once the full `total`
+bytes are present. Both are the corelib's (see [support layer](#support-layer));
+encode-side strictness is corelib-side too (`OStream.WriteString`).
 
 **Only a materialized string is validated (issue #257).** corelib-cs delivers every
 fixlen-string field to `String(...)` — an unknown id and a §7.3 wire-type
 contradiction included — so the callback opens with a `switch ((cur, id))` over the
-string destinations whose `default` `return`s. `_Utf8(...)` and `acc` therefore run
-only for a payload this scope actually reads, which is what CORELIB_PLAN §6.4
-requires, and a skipped payload can never leave bytes in `acc` for a later declared
-field to inherit. The `maxlen` and `max_dyn_string_len` pre-checks sit behind the
+string destinations whose `default` `return`s. The accumulator — where the
+buffering and the UTF-8 verdict both happen — is therefore reached only for a
+payload this scope actually reads, which is what CORELIB_PLAN §6.4 requires, and a
+skipped payload can never leave bytes in it for a later declared field to
+inherit. The `maxlen` and `max_dyn_string_len` pre-checks sit behind the
 guard: they are destination-scoped themselves, so §5.2's INVALID-over-INCOMPLETE
 ordering is unchanged. `Blob(...)` has no such guard — bytes carry no encoding.
 A schema that declares no string at all gets an **empty** `String(...)` body —
 every string reaching it is skipped by definition, and decoding one only to drop
 it is the same violation.
+
+## Support layer
+
+Four decode-side helpers the visitor used to carry itself now come from the
+corelib (ARCHITECTURE §8, generator#345, corelib-cs#92) — each has the same shape
+for every schema, with its schema dependence entirely in its arguments and type
+parameters, so the generated file calls them instead of redefining them:
+
+| generated code calls | what it replaced |
+|---|---|
+| `sofab.Utf8.Decode(data, off, len)` | the emitted `_strictUtf8` codec and its `_Utf8(...)` wrapper |
+| `sofab.PayloadAcc.String / .Blob` | a `List<byte> acc` field plus a byte-at-a-time reassembly loop inlined into both callbacks |
+| `sofab.Seq.EnsureCap<T>(a, i, cap)` | the emitted generic array-growth helper |
+| `sofab.Seq.ArrayInitCap` | `private const int ArrayInitCap = 16` |
+
+A generated file is 14–33 lines shorter for it, and the rationale for each — why
+validation must precede conversion, why an untrusted count is a growth ceiling and
+never a first allocation, why a payload is validated at completion and not per
+chunk — is written once in the corelib instead of being re-emitted into every
+user's source tree. This needs a corelib at or past corelib-cs#92; an older one
+fails at compile time on the missing symbol.
+
+The encode scratch buffer and its sink stay generated: CORELIB_PLAN §5.1 assigns
+output-buffer allocation to the generated layer.
 
 ## §7.3: a mis-typed array header (issues #183, #193, #254, #259)
 

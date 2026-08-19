@@ -126,7 +126,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 
 // hasDynPrimArray reports whether any object-scope field is a primitive (T[])
 // array without a schema count: its wire count is untrusted AND unbounded, so
-// the visitor needs the lazy-growth machinery (ArrayInitCap/acap/EnsureCap)
+// the visitor needs the lazy-growth machinery (Seq.ArrayInitCap/acap/Seq.EnsureCap)
 // instead of an eager new T[count] (cf. generator#96/#100/#102).
 func hasDynPrimArray(fs []frame) bool {
 	for _, fr := range fs {
@@ -167,14 +167,14 @@ func widthThrow(k ir.Kind, name string) string {
 // ArrayBegin — M IS the array's length (MESSAGE_SPEC §3) and the generator#100
 // guard already rejected M > N — so the elements land in place with nothing to
 // fill in behind them. A count-less array starts small and grows on demand via
-// EnsureCap, so an untrusted wire count never allocates.
+// Seq.EnsureCap, so an untrusted wire count never allocates.
 //
 // `guard` is the element's §7.1 width rejection (widthThrow), placed AFTER
 // fillGuard and never before it: an over-width scalar at an array id with no
 // ArrayBegin in front of it is a §7.3 skip, not an INVALID.
 func primFill(target string, fld *ir.Field, guard, rhs string) string {
 	if !fld.HasCount {
-		return fillGuard + guard + fmt.Sprintf("%s = EnsureCap(%s, ai, acap); %s[ai++] = %s;", target, target, target, rhs)
+		return fillGuard + guard + fmt.Sprintf("%s = Seq.EnsureCap(%s, ai, acap); %s[ai++] = %s;", target, target, target, rhs)
 	}
 	return fillGuard + guard + fmt.Sprintf("%s[ai++] = %s;", target, rhs)
 }
@@ -295,16 +295,11 @@ func (g *gen) emitStringCb(f *cfile, fs []frame, limStr bool) {
 		// header, before the fast path decodes or the accumulator grows.
 		g.emitLenGuard(f, fs, ir.KindString, "MaxDynStringLen", "string length", g.limits.stringLen)
 	}
-	f.line("        string _s;")
-	f.line("        if (offset == 0 && chunkLength >= total) {")
-	f.line("            _s = _Utf8(data, chunkOffset, total);")
-	f.line("        } else {")
-	f.line("            acc ??= new List<byte>();")
-	f.line("            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
-	f.line("            if (acc.Count < total) return;")
-	f.line("            _s = _Utf8(acc.ToArray(), 0, total);")
-	f.line("            acc.Clear();")
-	f.line("        }")
+	// PayloadAcc.String reassembles a split payload and validates the UTF-8 once,
+	// on the complete value -- a multi-byte sequence split across a feed is a
+	// well-formed prefix, not a defect (CORELIB_PLAN §6.4).
+	f.line("        string _s = pay.String(total, offset, data, chunkOffset, chunkLength);")
+	f.line("        if (_s == null) return;   // payload incomplete: more chunks to come")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {
@@ -334,10 +329,10 @@ func (g *gen) emitStringCb(f *cfile, fs []frame, limStr bool) {
 // string, falls through; anything else returns right here.
 //
 // Returning here is what makes the skip a true skip: an unknown id, or a §7.3
-// wire-type contradiction routed down the same path, never reaches _Utf8() and
-// never enters the shared `acc` (so a later declared field cannot inherit its
-// bytes). Without it a lone continuation byte at an undeclared id turned an
-// otherwise valid message into InvalidMessage.
+// wire-type contradiction routed down the same path, never reaches Utf8.Decode()
+// and never enters the shared PayloadAcc (so a later declared field cannot
+// inherit its bytes). Without it a lone continuation byte at an undeclared id
+// turned an otherwise valid message into InvalidMessage.
 //
 // Placed ahead of the maxlen/limit guards, which are already destination-scoped
 // and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is
@@ -611,17 +606,15 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// while it is positive, so an unarmed bare scalar (afill == 0) is skipped.
 	f.line("    private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)")
 	if dynPrim {
-		// The wire-supplied element count of a count-less array is untrusted:
-		// never allocate `new T[count]` up front (an out-of-memory DoS, cf.
-		// generator#96/#100). Reserve a small backing array and grow it as
-		// elements actually arrive, capped at the wire count so an honest
-		// array still ends exactly right-sized.
-		f.line("    private const int ArrayInitCap = 16; // bounded eager reservation for count-less arrays; grow lazily")
+		// The wire-supplied element count of a count-less array is untrusted, so
+		// the destination is reserved small and grown against elements that
+		// actually arrive (Seq.ArrayInitCap / Seq.EnsureCap, cf. generator#96/#100).
+		// The ceiling is per-array state and stays here.
 		f.line("    private int acap = 0;              // wire count = growth ceiling for the count-less array being filled")
 	}
 	f.line("    private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)")
 	f.line("    private int sp = 0;")
-	f.line("    private List<byte> acc;            // lazy: only split string/blob payloads need it")
+	f.line("    private readonly PayloadAcc pay = new PayloadAcc(); // reassembles a string/blob payload split across feeds")
 	f.line("    public %sVisitor(%s msg) { m = msg; }", name, name)
 	for i, fr := range fs {
 		f.line("    private const int %s = %d;", fr.loc, i)
@@ -715,18 +708,6 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	g.emitFloatVisit(f, fs, ir.KindFP32, "Fp32", "float")
 	g.emitFloatVisit(f, fs, ir.KindFP64, "Fp64", "double")
 
-	// Strict UTF-8 decode (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4): a `string` is
-	// UTF-8 and C#'s string is a Unicode type, so it is always strict. The default
-	// `Encoding.UTF8` is LOSSY (replacement-fallback → U+FFFD), which §8 forbids in
-	// every mode; a throwOnInvalidBytes encoding rejects invalid bytes as the
-	// INVALID decode outcome. Validity is a property of the complete payload, so
-	// the check runs once the full `total` bytes are present.
-	f.line("    private static readonly System.Text.UTF8Encoding _strictUtf8 = new System.Text.UTF8Encoding(false, true);")
-	f.line("    private static string _Utf8(byte[] b, int off, int len) {")
-	f.line("        try { return _strictUtf8.GetString(b, off, len); }")
-	f.line("        catch (System.Text.DecoderFallbackException) { throw new SofabException(SofabError.InvalidMessage, \"string: invalid UTF-8\"); }")
-	f.line("    }")
-
 	g.emitStringCb(f, fs, limStr)
 
 	// Blob. Single-shot on the whole-in-one-chunk fast path (see String).
@@ -740,17 +721,8 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		// header, before the fast path allocates or the accumulator grows.
 		g.emitLenGuard(f, fs, ir.KindBlob, "MaxDynBlobLen", "blob length", g.limits.blobLen)
 	}
-	f.line("        byte[] _b;")
-	f.line("        if (offset == 0 && chunkLength >= total) {")
-	f.line("            _b = new byte[total];")
-	f.line("            System.Array.Copy(data, chunkOffset, _b, 0, total);")
-	f.line("        } else {")
-	f.line("            acc ??= new List<byte>();")
-	f.line("            for (int _i = 0; _i < chunkLength; _i++) acc.Add(data[chunkOffset + _i]);")
-	f.line("            if (acc.Count < total) return;")
-	f.line("            _b = acc.ToArray();")
-	f.line("            acc.Clear();")
-	f.line("        }")
+	f.line("        byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength);")
+	f.line("        if (_b == null) return;   // payload incomplete: more chunks to come")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {
@@ -834,7 +806,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				// lazily from a small reservation (cf. #96).
 				alloc := "new %s[count]"
 				if !fld.HasCount {
-					alloc = "new %s[Math.Min(count, ArrayInitCap)]"
+					alloc = "new %s[Math.Min(count, Seq.ArrayInitCap)]"
 				}
 				f.line("            case (%s, %d): %s%s%s.%s = "+alloc+"; break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name), g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
@@ -900,22 +872,6 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// CAPACITY (MESSAGE_SPEC §3), so a wrapper array's decoded length is exactly
 	// highest present id + 1 -- the last element is never elided, so that is exact.
 	f.line("    public void SequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }")
-	if dynPrim {
-		// Lazy-growth helper: enlarge the backing array to hold index `i`,
-		// doubling but never past `cap` (the wire count), so growth tracks
-		// elements actually delivered and an honest array ends exactly
-		// right-sized while an untrusted count allocates nothing up front.
-		f.line("    // Grow a to hold index i: double, never past cap (the wire count), so")
-		f.line("    // growth tracks elements actually delivered (untrusted count).")
-		f.line("    private static T[] EnsureCap<T>(T[] a, int i, int cap) {")
-		f.line("        if (i < a.Length) return a;")
-		f.line("        long n = (long)a.Length * 2;")
-		f.line("        if (n < i + 1) n = i + 1;")
-		f.line("        if (n > cap) n = cap;")
-		f.line("        System.Array.Resize(ref a, (int)n);")
-		f.line("        return a;")
-		f.line("    }")
-	}
 	f.line("}")
 	f.blank()
 }
