@@ -27,9 +27,8 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// (generator#216 / F-0032, MESSAGE_SPEC §5.2). The whole-value guards below
 	// (onUnsignedArray/onString len checks) fire only once every element/byte has
 	// arrived, so a truncated over-bound field never reaches them — the header hook
-	// is what makes the over-bound win the tie. invalidate() latches the verdict
-	// inside the corelib, which then stops and reports INVALID itself, so the
-	// truncation behind an over-bound header can no longer be reached at all.
+	// is what makes the over-bound win the tie. tryDecode already reads the sticky
+	// invalidate() latches the verdict inside the corelib, which stops there.
 	//
 	// Both hooks fire for ANY wire kind/subtype landing on a field id — the corelib
 	// resolves what arrived but cannot know what was DECLARED — so both arms gate
@@ -77,8 +76,11 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 			// skipped payload must never be inspected. So the destination is
 			// resolved first -- by reaching this arm at all -- and only then are the
 			// bytes checked and transcoded (CORELIB_PLAN §6.4, generator#257).
-			body := "if (!sofab.utf8Valid(bytes)) { invalidate(); return; }\n        " +
-				acc + " = utf8.decode(bytes);"
+			// Braced because Dart switch cases share one scope: two string fields
+			// in the same visitor would otherwise redeclare `s`.
+			body := "{\n          final s = sofab.decodeUtf8Strict(bytes);\n          " +
+				"if (s == null) { invalidate(); return; }\n          " +
+				acc + " = s;\n        }"
 			if fld.HasMaxlen {
 				// A wire byte length above the schema maxlen is malformed input
 				// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate. The raw
@@ -113,9 +115,9 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	emitSwitch(f, "void onFp32Bits(int id, int bits)", f32bits)
 	emitSwitch(f, "void onFp64(int id, double value)", f64)
 	// A scope with no string destination emits NOTHING here and inherits the
-	// no-op on _Visitor, which is what makes an undeclared string a skip rather
-	// than a validated payload (generator#265). It must never fall through to
-	// sofab.MessageVisitor's validating default -- see emitVisitorBase.
+	// no-op on sofab.VisitorBase, which is what makes an undeclared string a skip
+	// rather than a validated payload (generator#265). It must never fall through
+	// to sofab.MessageVisitor's validating default.
 	emitSwitch(f, "void onStringBytes(int id, Uint8List bytes)", str)
 	emitSwitch(f, "void onBlob(int id, Uint8List value)", blob)
 	emitSwitch(f, "void onUnsignedArray(int id, Int64List values)", uArr)
@@ -208,7 +210,7 @@ func arrayCountHdrGuard(kind string, n int64) string {
 // (documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination carrying a
 // value outside its declared range is malformed input, INVALID — never masked to
 // the width, never kept. "" for u64/i64. It rejects through the same
-// MessageVisitor.invalidate() channel as the maxlen and count guards.
+// maxlen and count rejects set.
 //
 // The `value < 0` term is not redundant on the unsigned side: Dart's int is a
 // 64-bit SIGNED integer with no unsigned counterpart, so an unsigned wire value
@@ -387,15 +389,9 @@ func emitSwitchRet(f *dfile, sig string, arms []string, tail string) {
 // needs records which prelude helpers and collector classes a schema actually
 // uses, so only those are emitted (clean output; nothing unused).
 type needs struct {
-	dec                     bool
-	bytesEq, listEq, u8len  bool
-	f32copy, f32bits        bool
-	strSeq, blobSeq, objSeq bool
-	// str: the module decodes a `string` somewhere -- a scalar field or a
-	// wrapper-array element. It gates the `dart:convert` import, because the
-	// string destinations are what call utf8.decode; a schema with no string at
-	// all would otherwise carry an unused import, which `dart analyze` flags.
-	str                             bool
+	dec                             bool
+	f32copy, f32bits                bool
+	strSeq, blobSeq, objSeq         bool
 	intMat, dblMat, boolMat, seqSeq bool
 }
 
@@ -415,11 +411,6 @@ func (g *gen) computeNeeds(s *ir.Schema) needs {
 	for _, m := range s.Messages {
 		scan(m.Fields)
 	}
-	// _StrSeq references _u8len unconditionally (the emax guard is runtime-gated
-	// but the call must still resolve), so a string wrapper array needs it emitted.
-	if n.strSeq {
-		n.u8len = true
-	}
 	// _DblMat's onFp32Array branch calls _f32copy even for an fp64-only matrix (the
 	// call must resolve), so a native-array matrix always needs it emitted.
 	if n.dblMat {
@@ -432,38 +423,22 @@ func (g *gen) scanField(fld *ir.Field, n *needs) {
 	switch fld.Kind {
 	case ir.KindFP32:
 		n.f32bits = true
-	case ir.KindBlob:
-		if _, ok := g.blobDefaultLit(fld); ok {
-			n.bytesEq = true
-		}
-	case ir.KindString:
-		n.str = true
-		if fld.HasMaxlen {
-			n.u8len = true
-		}
 	case ir.KindArray:
 		if nativeArrayElem(fld.Elem) {
-			if _, ok := fld.Default.([]any); ok {
-				n.listEq = true
-			}
 			if fld.Elem == ir.KindFP32 {
 				// fp32 arrays bind through _f32copy (bit-exact).
 				n.f32copy = true
 			}
 			return
 		}
-		g.scanArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, n)
+		g.scanArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems, n)
 	}
 }
 
-func (g *gen) scanArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, n *needs) {
+func (g *gen) scanArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, n *needs) {
 	switch elem {
 	case ir.KindString:
 		n.strSeq = true
-		n.str = true
-		if elemMaxHas {
-			n.u8len = true
-		}
 	case ir.KindBlob:
 		n.blobSeq = true
 	case ir.KindStruct, ir.KindUnion:
@@ -481,56 +456,17 @@ func (g *gen) scanArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, 
 			return
 		}
 		n.seqSeq = true
-		g.scanArrayElem(items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, n)
+		g.scanArrayElem(items.Elem, items.ElemRef, items.ElemItems, n)
 	}
 }
 
-// visitorBase is the name every generated visitor extends instead of
-// sofab.MessageVisitor. Schema names cannot begin with `_`, so it cannot collide
-// with a generated type.
-const visitorBase = "_Visitor"
-
-// emitVisitorBase writes that base. Its whole job is to neutralize ONE corelib
-// default: sofab.MessageVisitor.onStringBytes validates the payload as UTF-8 and
-// flags the decode INVALID when it is not. That is the correct default for a
-// HAND-WRITTEN visitor -- it has no schema, so every string it is handed is one
-// it wanted -- but it is wrong for generated code, where the id decides. A
-// string at an id this scope does not declare is a SKIP: its bytes are jumped
-// over and never inspected (CORELIB_PLAN §6.4, which MESSAGE_SPEC §7.3 extends
-// to a wire type contradicting the schema), so the corelib doc for that method
-// requires a generated consumer to resolve the destination first and return
-// without validating when there is none.
-//
-// A scope that declares string fields overrides this again with its own switch
-// and falls out of it -- into this same no-op -- for every unmatched id. A scope
-// with NO string field emitted no override at all before generator#265, and so
-// inherited the validating default: an undeclared string reaching e.g. the
-// top-level visitor of a string-free message was rejected instead of skipped.
-// Putting the no-op on a shared base rather than at each class keeps that true
-// for every visitor by construction, including collectors added later.
-func emitVisitorBase(f *dfile) {
-	f.line("// The base every generated visitor extends. It exists to turn the corelib's")
-	f.line("// VALIDATING onStringBytes default into a no-op skip: whether a string may be")
-	f.line("// inspected at all is a schema question, so an id this scope does not declare")
-	f.line("// must return without validating and without flagging INVALID -- its bytes are")
-	f.line("// jumped over, never inspected. A scope with string destinations overrides this")
-	f.line("// and falls through to the same no-op for every id it does not match.")
-	f.line("abstract class %s extends sofab.MessageVisitor {", visitorBase)
-	f.line("  @override")
-	f.line("  void onStringBytes(int id, Uint8List bytes) {}")
-	f.line("  // Same reasoning, one wire type over: the corelib's onSequenceStart default")
-	f.line("  // returns `this`, i.e. DESCEND, which is right for a hand-written visitor and")
-	f.line("  // wrong here -- the schema decides whether a sequence at this position is one")
-	f.line("  // we bind. Returning null skips the sub-sequence WHOLE, children included. A")
-	f.line("  // scope that declares sequences overrides this and falls through to the same")
-	f.line("  // null for every id it does not match; a leaf element collector declares")
-	f.line("  // none, so it inherits the skip and a sequence arriving at an element")
-	f.line("  // position cannot bind its child as that element.")
-	f.line("  @override")
-	f.line("  sofab.MessageVisitor? onSequenceStart(int id) => null;")
-	f.line("}")
-	f.blank()
-}
+// visitorBase is what every generated visitor extends. The corelib hosts it
+// (corelib-dart#65): the class flips two sofab.MessageVisitor defaults that are
+// right for a hand-written visitor and wrong for a schema-bound one -- an id
+// this scope does not declare is skipped, not inspected, and a sub-sequence it
+// does not bind is skipped whole. Neither decision has a schema in it, so the
+// base is written once there rather than emitted into every module.
+const visitorBase = "sofab.VisitorBase"
 
 func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 	n := g.computeNeeds(s)
@@ -538,42 +474,6 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		return
 	}
 	if n.dec {
-		emitVisitorBase(f)
-	}
-	if n.bytesEq {
-		f.line("bool _bytesEq(Uint8List a, Uint8List b) {")
-		f.line("  if (a.length != b.length) return false;")
-		f.line("  for (var i = 0; i < a.length; i++) { if (a[i] != b[i]) return false; }")
-		f.line("  return true;")
-		f.line("}")
-		f.blank()
-	}
-	if n.listEq {
-		f.line("bool _listEq<T>(List<T> a, List<T> b) {")
-		f.line("  if (a.length != b.length) return false;")
-		f.line("  for (var i = 0; i < a.length; i++) { if (a[i] != b[i]) return false; }")
-		f.line("  return true;")
-		f.line("}")
-		f.blank()
-	}
-	if n.u8len {
-		f.line("// Exact UTF-8 byte length of [s] without allocating a transcode buffer.")
-		f.line("int _u8len(String s) {")
-		f.line("  var n = 0;")
-		f.line("  for (final r in s.runes) {")
-		f.line("    if (r < 0x80) {")
-		f.line("      n += 1;")
-		f.line("    } else if (r < 0x800) {")
-		f.line("      n += 2;")
-		f.line("    } else if (r < 0x10000) {")
-		f.line("      n += 3;")
-		f.line("    } else {")
-		f.line("      n += 4;")
-		f.line("    }")
-		f.line("  }")
-		f.line("  return n;")
-		f.line("}")
-		f.blank()
 	}
 	if n.f32bits {
 		f.line("// Widen the 32 raw wire bits of an fp32 NaN to a display double for element")
@@ -643,9 +543,10 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("    if (emax >= 0 && bytes.length > emax) { invalidate(); return; }")
 		f.line("    // The element is being materialized, so this is where its UTF-8 is")
 		f.line("    // checked. A skipped payload never reaches a collector at all.")
-		f.line("    if (!sofab.utf8Valid(bytes)) { invalidate(); return; }")
+		f.line("    final s = sofab.decodeUtf8Strict(bytes);")
+		f.line("    if (s == null) { invalidate(); return; }")
 		f.line("    while (out.length <= id) { out.add(''); }")
-		f.line("    out[id] = utf8.decode(bytes);")
+		f.line("    out[id] = s;")
 		f.line("  }")
 		f.line("}")
 		f.blank()

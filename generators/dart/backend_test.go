@@ -61,8 +61,7 @@ func TestModuleShape(t *testing.T) {
 		"final e = sofab.Encoder(out.add, buffer: Uint8List(512));",
 		"static sofab.DecodeStatus tryDecode(Uint8List data, Myfirstmessage out) {",
 		"static Myfirstmessage decode(Uint8List data) {",
-		"abstract class _Visitor extends sofab.MessageVisitor {",
-		"class _MyfirstmessageVisitor extends _Visitor {",
+		"class _MyfirstmessageVisitor extends sofab.VisitorBase {",
 		"static const int maxSize =",
 	} {
 		if !strings.Contains(out, want) {
@@ -499,10 +498,10 @@ func TestDartCountIsACapacityNotALength(t *testing.T) {
 		// The field omit test: emptiness, or an exact compare against the declared
 		// default -- neither side padded to N.
 		"    if (fnums.isNotEmpty) { e.writeUnsignedArray(4, fnums); }",
-		"    if (!_listEq(withdef, <int>[1, 2])) { e.writeUnsignedArray(5, withdef); }",
+		"    if (!sofab.elementsEqual(withdef, <int>[1, 2])) { e.writeUnsignedArray(5, withdef); }",
 		// ...and _isDefault is the exact negation of it.
 		"    if (!(fnums.isEmpty)) return false;",
-		"    if (!(_listEq(withdef, <int>[1, 2]))) return false;",
+		"    if (!(sofab.elementsEqual(withdef, <int>[1, 2]))) return false;",
 		// A wrapper array writes a child for every element it holds (the last one
 		// unconditionally), so "no child written" IS "empty" -- for count:N and
 		// count-less alike, no narrowing on either side.
@@ -607,9 +606,10 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 		// transcoded, so a skipped string is never inspected (generator#257).
 		"    if (cap >= 0 && id >= cap) { invalidate(); return; }\n" +
 			"    if (emax >= 0 && bytes.length > emax) { invalidate(); return; }\n",
-		"    if (!sofab.utf8Valid(bytes)) { invalidate(); return; }\n" +
+		"    final s = sofab.decodeUtf8Strict(bytes);\n" +
+			"    if (s == null) { invalidate(); return; }\n" +
 			"    while (out.length <= id) { out.add(''); }\n" +
-			"    out[id] = utf8.decode(bytes);",
+			"    out[id] = s;",
 		"    if (cap >= 0 && id >= cap) { invalidate(); return null; }\n" +
 			"    while (out.length <= id) { out.add(make()); }\n" +
 			"    return vis(out[id]);",
@@ -770,12 +770,14 @@ func TestDartSkippedStringIsNotValidated(t *testing.T) {
 	if strings.Contains(out, "void onString(int id, String value)") {
 		t.Errorf("onString must no longer be overridden — it cannot resolve a destination first:\n%s", out)
 	}
-	// Validate then transcode, inside the arm.
+	// One strict corelib decode, inside the arm: valid bytes in, String out, null
+	// for anything malformed. The arm is braced because Dart switch cases share
+	// one scope.
 	for _, want := range []string{
-		"if (!sofab.utf8Valid(bytes)) { invalidate(); return; }",
-		"o.s = utf8.decode(bytes);",
-		"o.u = utf8.decode(bytes);",
-		"import 'dart:convert';", // needed for the decode, emitted because a string exists
+		"final s = sofab.decodeUtf8Strict(bytes);",
+		"if (s == null) { invalidate(); return; }",
+		"o.s = s;",
+		"o.u = s;",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
@@ -818,31 +820,29 @@ func TestDartStringFreeScopeSkipsStrings(t *testing.T) {
 		"      m:  { id: 5, type: array, items: { type: array, count: 2, items: { type: u32, count: 2 } } }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
 
-	// The base exists and its onStringBytes returns without touching the bytes.
-	if !strings.Contains(out, "abstract class _Visitor extends sofab.MessageVisitor {\n  @override\n  void onStringBytes(int id, Uint8List bytes) {}\n") {
-		t.Errorf("the shared visitor base must neutralize the validating onStringBytes default:\n%s", out)
+	// The base is corelib-dart's sofab.VisitorBase (corelib-dart#65), so a copy of
+	// it may no longer be emitted.
+	if strings.Contains(out, "abstract class _Visitor") {
+		t.Errorf("the visitor base belongs to the corelib and must not be emitted:\n%s", out)
 	}
-	// The same base also neutralizes the DESCENDING onSequenceStart default, so a
-	// leaf element collector skips a sequence instead of binding its child
-	// (generator#272) -- see TestDartMistypedSequenceElementIsSkipped.
-	if !strings.Contains(out, "  sofab.MessageVisitor? onSequenceStart(int id) => null;\n}") {
-		t.Errorf("the shared visitor base must also neutralize the descending onSequenceStart default:\n%s", out)
-	}
-	// Every generated visitor routes through it. Extending the corelib class
-	// directly is the defect: that is what re-inherits the validating default.
+	// Every generated visitor routes through it. Extending sofab.MessageVisitor
+	// directly is the defect: that is what re-inherits the validating onStringBytes
+	// default, and the DESCENDING onSequenceStart default one wire type over --
+	// which is what would let a sequence at a leaf element position bind its child
+	// as that element (generator#272, TestDartMistypedSequenceElementIsSkipped).
 	for _, decl := range []string{
-		"class _MVisitor extends _Visitor {",
-		"class _MNVisitor extends _Visitor {",
-		"class _BlobSeq extends _Visitor {",
-		"class _ObjSeq<T> extends _Visitor {",
-		"class _IntMat extends _Visitor {",
+		"class _MVisitor extends sofab.VisitorBase {",
+		"class _MNVisitor extends sofab.VisitorBase {",
+		"class _BlobSeq extends sofab.VisitorBase {",
+		"class _ObjSeq<T> extends sofab.VisitorBase {",
+		"class _IntMat extends sofab.VisitorBase {",
 	} {
 		if !strings.Contains(out, decl) {
-			t.Errorf("missing %q — every visitor must extend the base:\n%s", decl, out)
+			t.Errorf("missing %q — every visitor must extend the corelib base:\n%s", decl, out)
 		}
 	}
-	if n := strings.Count(out, "extends sofab.MessageVisitor {"); n != 1 {
-		t.Errorf("only the base may extend sofab.MessageVisitor directly, found %d:\n%s", n, out)
+	if strings.Contains(out, "extends sofab.MessageVisitor") {
+		t.Errorf("no generated visitor may extend sofab.MessageVisitor directly:\n%s", out)
 	}
 	// A string-free module still must not validate, transcode or import for one.
 	if strings.Contains(out, "utf8Valid") || strings.Contains(out, "utf8.decode") {
@@ -857,7 +857,7 @@ func TestDartStringScopeFallsThroughToSkip(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s: { id: 0, type: string, maxlen: 8 }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
-	if !strings.Contains(out, "class _MVisitor extends _Visitor {") {
+	if !strings.Contains(out, "class _MVisitor extends sofab.VisitorBase {") {
 		t.Errorf("a string-declaring visitor must extend the base too:\n%s", out)
 	}
 	i := strings.Index(out, "void onStringBytes(int id, Uint8List bytes) {\n    switch (id) {")
@@ -869,16 +869,23 @@ func TestDartStringScopeFallsThroughToSkip(t *testing.T) {
 	}
 }
 
-// A schema with no string at all must not carry the `dart:convert` import:
-// `dart analyze` reports an unused import, and the corpus sweep builds exactly
-// such definitions.
-func TestDartNoConvertImportWithoutStrings(t *testing.T) {
-	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
-		"      a: { id: 0, type: u32 }\n" +
-		"      b: { id: 1, type: blob, maxlen: 8 }\n"
-	out := genFor(t, writeDef(t, src), map[string]any{})
-	if strings.Contains(out, "import 'dart:convert';") {
-		t.Errorf("a string-free schema must not import dart:convert:\n%s", out)
+// No generated module carries the `dart:convert` import any more: the only thing
+// that ever needed it was `utf8.decode` in the string destinations, and those
+// call sofab.decodeUtf8Strict now. An import nothing uses is a `dart analyze`
+// warning, so the string-carrying schema is checked here beside the one without.
+func TestDartNoConvertImport(t *testing.T) {
+	for _, src := range []string{
+		"version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      a: { id: 0, type: u32 }\n" +
+			"      b: { id: 1, type: blob, maxlen: 8 }\n",
+		"version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      s:  { id: 0, type: string, maxlen: 8 }\n" +
+			"      sa: { id: 1, type: array, items: { type: string, count: 4 } }\n",
+	} {
+		out := genFor(t, writeDef(t, src), map[string]any{})
+		if strings.Contains(out, "import 'dart:convert';") {
+			t.Errorf("no generated module may import dart:convert:\n%s", out)
+		}
 	}
 }
 
@@ -932,8 +939,9 @@ messages:
 // default, which returns `this`. A sequence at an element position therefore
 // descended into the collector itself and its child string bound as that element.
 //
-// The fix sits on the shared base beside the onStringBytes no-op, so every
-// collector inherits the skip by construction — including ones added later.
+// The fix sits on the shared base beside the onStringBytes no-op — corelib-dart's
+// sofab.VisitorBase since corelib-dart#65 — so every collector inherits the skip
+// by construction, including ones added later.
 func TestDartMistypedSequenceElementIsSkipped(t *testing.T) {
 	got := genFor(t, writeDef(t, `
 version: 1
@@ -944,8 +952,8 @@ messages:
       blob_array:   { id: 201, type: array, items: { type: blob,   count: 5, maxlen: 64 } }
       obj_array:    { id: 202, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
 `), map[string]any{})
-	if !strings.Contains(got, "sofab.MessageVisitor? onSequenceStart(int id) => null;") {
-		t.Errorf("the shared base must skip an undeclared sequence:\n%s", got)
+	if strings.Contains(got, "extends sofab.MessageVisitor") {
+		t.Errorf("every visitor must inherit the base's sequence skip, never MessageVisitor's descent:\n%s", got)
 	}
 	// The leaf collectors must NOT override it back to a descent ...
 	for _, cls := range []string{"class _StrSeq", "class _BlobSeq"} {
