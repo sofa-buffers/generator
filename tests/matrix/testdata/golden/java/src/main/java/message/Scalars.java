@@ -48,18 +48,11 @@ public class Scalars {
         this.flag = true;
     }
     public static final int MAX_SIZE = 49;
-    // Per-thread scratch buffer: encode() serialises into it and returns an
-    // exact-size copy, so the worst-case buffer is not re-allocated (and
-    // zeroed) on every call. Do not call encode() reentrantly from a
-    // serialize() override on the same thread.
-    private static final ThreadLocal<byte[]> ENC_BUF =
-        ThreadLocal.withInitial(() -> new byte[MAX_SIZE]);
     public byte[] encode() {
         try {
-            byte[] buf = ENC_BUF.get();
-            OStream os = new OStream(buf);
+            OStream os = OStream.overScratch(MAX_SIZE);
             serialize(os);
-            return Arrays.copyOf(buf, os.bytesUsed());
+            return os.copyOfBytesUsed();
         } catch (IOException e) { throw new RuntimeException(e); }
     }
     /**
@@ -165,7 +158,7 @@ class ScalarsVisitor implements Visitor {
     private int afill = 0;              // elements still expected by an armed native-array fill (S7.3)
     private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)
     private int sp = 0;
-    private java.io.ByteArrayOutputStream acc; // lazy: only split string/blob payloads need it
+    private final PayloadAcc acc = new PayloadAcc();
     ScalarsVisitor(Scalars msg) { m = msg; }
 
     public void unsigned(int id, long value) {
@@ -174,8 +167,8 @@ class ScalarsVisitor implements Visitor {
         if (askip > 0) { askip--; return; }
         switch (cur) {
         case 0: switch (id) {
-            case 0: if (value < 0 || value > 255L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "u8min: value outside declared width u8")); m.u8min = value; break;
-            case 1: if (value < 0 || value > 255L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "u8max: value outside declared width u8")); m.u8max = value; break;
+            case 0: if (value < 0 || value > 255L) throw Sofab.invalid("u8min: value outside declared width u8"); m.u8min = value; break;
+            case 1: if (value < 0 || value > 255L) throw Sofab.invalid("u8max: value outside declared width u8"); m.u8max = value; break;
             case 2: m.u64max = value; break;
             case 7: m.flag = value != 0; break;
         } break;
@@ -187,7 +180,7 @@ class ScalarsVisitor implements Visitor {
         if (askip > 0) { askip--; return; }
         switch (cur) {
         case 0: switch (id) {
-            case 3: if (value < -128L || value > 127L) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "i8min: value outside declared width i8")); m.i8min = value; break;
+            case 3: if (value < -128L || value > 127L) throw Sofab.invalid("i8min: value outside declared width i8"); m.i8min = value; break;
             case 4: m.i64min = value; break;
         } break;
         }
@@ -212,25 +205,13 @@ class ScalarsVisitor implements Visitor {
         } break;
         }
     }
-    private static String _utf8(byte[] b, int off, int len) {
-        if (Utf8.valid(b, off, off + len)) return new String(b, off, len, java.nio.charset.StandardCharsets.UTF_8);
-        throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, "string: invalid UTF-8"));
-    }
     public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
         // No field of this message is a string, so every string payload the
         // decoder delivers is skipped whole -- its bytes are never inspected.
     }
     public void blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
-        byte[] _b;
-        if (offset == 0 && chunkLength >= total) {
-            _b = java.util.Arrays.copyOfRange(data, chunkOffset, chunkOffset + total);
-        } else {
-            if (acc == null) acc = new java.io.ByteArrayOutputStream();
-            acc.write(data, chunkOffset, chunkLength);
-            if (acc.size() < total) return;
-            _b = acc.toByteArray();
-            acc.reset();
-        }
+        byte[] _b = acc.blob(total, offset, data, chunkOffset, chunkLength);
+        if (_b == null) return;
         switch (cur) {
         }
     }

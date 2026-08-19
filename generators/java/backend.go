@@ -25,7 +25,6 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	g := &gen{schema: s, pkg: cfgString(cfg, "package", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
 	dir := "src/main/java/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
 	var files []generator.File
-	files = append(files, generator.File{Path: dir + "Sbuf.java", Content: g.sbufSupport()})
 	// Every named struct/union gets its OWN file, so it can be public: Java
 	// allows one public top-level class per file, and the message owns that slot
 	// in <Message>.java (generator#305). Emitting them per message would also
@@ -286,18 +285,16 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		} else {
 			f.line("    public static final int MAX_SIZE = %d;", ms.Size)
 		}
-		f.line("    // Per-thread scratch buffer: encode() serialises into it and returns an")
-		f.line("    // exact-size copy, so the worst-case buffer is not re-allocated (and")
-		f.line("    // zeroed) on every call. Do not call encode() reentrantly from a")
-		f.line("    // serialize() override on the same thread.")
-		f.line("    private static final ThreadLocal<byte[]> ENC_BUF =")
-		f.line("        ThreadLocal.withInitial(() -> new byte[MAX_SIZE]);")
+		// CORELIB_PLAN §5.1 leaves the buffer SIZE to the generated layer, which is
+		// the only side that knows MAX_SIZE; the reuse mechanism behind it is the
+		// corelib's OStream.overScratch. Do not call encode() reentrantly from a
+		// serialize() override on the same thread -- the inner call would write over
+		// the outer one's bytes.
 		f.line("    public byte[] encode() {")
 		f.line("        try {")
-		f.line("            byte[] buf = ENC_BUF.get();")
-		f.line("            OStream os = new OStream(buf);")
+		f.line("            OStream os = OStream.overScratch(MAX_SIZE);")
 		f.line("            serialize(os);")
-		f.line("            return Arrays.copyOf(buf, os.bytesUsed());")
+		f.line("            return os.copyOfBytesUsed();")
 		f.line("        } catch (IOException e) { throw new RuntimeException(e); }")
 		f.line("    }")
 		// Streaming encode. `serialize` writes the fields and nothing else, so a
@@ -467,7 +464,7 @@ func (g *gen) fieldWritesExpr(fld *ir.Field) string {
 	switch fld.Kind {
 	case ir.KindBlob:
 		// emitMarshal's two blob guards, verbatim.
-		if def := g.javaDefaultValue(fld); def == "new byte[0]" || def == "Sbuf.EMPTY_BYTES" {
+		if def := g.javaDefaultValue(fld); def == "new byte[0]" || def == "Seq.EMPTY_BYTES" {
 			return fmt.Sprintf("%s == null || %s.length != 0", acc, acc)
 		}
 		return fmt.Sprintf("!java.util.Arrays.equals(%s, %s)", acc, javaArrDefName(fld))
@@ -564,7 +561,7 @@ func (g *gen) emitResetField(f *jfile, fld *ir.Field) {
 		// every wrapper sequence (whose declared per-element default is not
 		// materialized, so the element defaults ARE its default — the same rule the
 		// dropping closer relies on).
-		f.line("        %s = Sbuf.resetList(%s);", acc, acc)
+		f.line("        %s = Seq.reset(%s);", acc, acc)
 		if nativeArrayElem(fld.Elem) {
 			if _, ok := g.javaNativeArrayLiteral(fld); ok {
 				f.line("        %s.addAll(%s);", acc, javaArrDefName(fld))
@@ -600,7 +597,7 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 		// A blob is a leaf: omit when equal to its default (empty when none).
 		// With an empty default the content compare degenerates to a length
 		// check, sparing an Arrays.equals against a fresh byte[0] per call.
-		if def := g.javaDefaultValue(fld); def == "new byte[0]" || def == "Sbuf.EMPTY_BYTES" {
+		if def := g.javaDefaultValue(fld); def == "new byte[0]" || def == "Seq.EMPTY_BYTES" {
 			f.line("        if (%s == null || %s.length != 0) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, acc, fld.ID, acc, acc)
 			return
 		}
@@ -639,13 +636,13 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 	if primitiveArrayElem(fld.Elem) {
 		// Primitive array (long[]/float[]/double[]): omit when equal to its default
 		// (Arrays.equals), else when empty; write straight to the OStream primitive
-		// overload with no Sbuf box/unbox temporary.
+		// overload with no box/unbox temporary.
 		if _, ok := g.javaPrimArrayLiteral(fld); ok {
 			f.line("        if (!java.util.Arrays.equals(%s, %s)) {", acc, javaArrDefName(fld))
 		} else {
 			f.line("        if (%s != null && %s.length != 0) {", acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, "")
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 		f.line("        }")
 		return
 	}
@@ -655,7 +652,7 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("        if (%s != null && !%s.isEmpty()) {", acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, "")
+		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 		f.line("        }")
 		return
 	}
@@ -667,7 +664,7 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 	// `if (value != default) { ... os.writeSequenceEndKeep(); }` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, "")
+	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 }
 
 // javaArrDefName is the static field holding a native array field's omit-compare
@@ -687,7 +684,7 @@ func javaArrDefName(fld *ir.Field) string { return "_arrdef_" + fld.Name }
 func (g *gen) javaArrayCompareDefault(fld *ir.Field) (string, bool) {
 	if fld.Kind == ir.KindBlob {
 		def := g.javaDefaultValue(fld)
-		if def == "new byte[0]" || def == "Sbuf.EMPTY_BYTES" {
+		if def == "new byte[0]" || def == "Seq.EMPTY_BYTES" {
 			// The empty default degenerates to a length check; nothing to hoist.
 			return "", false
 		}
@@ -716,7 +713,7 @@ func (g *gen) javaArrayCompareDefault(fld *ir.Field) (string, bool) {
 // capacity and can never restore an elided tail. What the interior may drop is
 // decided per element inside the loop (see lastElemExpr), never over the whole
 // array.
-func elemListExpr(val string) string { return "Sbuf.orEmpty(" + val + ")" }
+func elemListExpr(val string) string { return "Seq.orEmpty(" + val + ")" }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position iv
 // over the list lv.
@@ -772,11 +769,11 @@ func (g *gen) elemLoopList(f *jfile, ind, val string, elem ir.Kind, ref *ir.Type
 // unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
 // whose child ids are the 0-based index (per MESSAGE_SPEC). Recurses for nested
 // arrays, depth-suffixing loop vars to avoid collisions.
-// prim is true only for a direct primitive array field (`val` is a
-// long[]/float[]/double[]); it writes straight to the OStream overload. When
-// false, `val` is a boxed List and is unboxed via a Sbuf.to*Array temporary —
-// the case for boolean arrays and for a nested array's inner rows (which stay
-// List<...>).
+// Every numeric/fp element kind lowers to a PRIMITIVE array (primitiveArrayElem),
+// so `val` at those arms is already the `byte[]`/`int[]`/`float[]` the OStream
+// overload takes and nothing is boxed on the way out. `bool` is the one native
+// element with no primitive overload of its own, and it is converted in its own
+// arm.
 //
 // Every element the value holds is written -- no trailing run is elided, of either
 // element kind, because the wire count IS the array's length (MESSAGE_SPEC §3) and
@@ -785,25 +782,19 @@ func (g *gen) elemLoopList(f *jfile, ind, val string, elem ir.Kind, ref *ir.Type
 //
 // keepIf is the closer this call's own wrapper takes (see seqEndStmt); the native
 // element kinds open no sequence and ignore it.
-func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, prim bool, keepIf string) {
+func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
-	longs := "Sbuf.toLongArray(" + val + ")"
-	floats := "Sbuf.toFloatArray(" + val + ")"
-	doubles := "Sbuf.toDoubleArray(" + val + ")"
-	if prim {
-		longs, floats, doubles = val, val, val
-	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, longs)
+		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, val)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		f.line("%sos.writeArraySigned(%s, %s);", ind, idExpr, longs)
+		f.line("%sos.writeArraySigned(%s, %s);", ind, idExpr, val)
 	case ir.KindBool:
-		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, "Sbuf.boolToLongArray("+val+")")
+		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, "Seq.boolsToLongs("+val+")")
 	case ir.KindFP32:
-		f.line("%sos.writeArrayFp32(%s, %s);", ind, idExpr, floats)
+		f.line("%sos.writeArrayFp32(%s, %s);", ind, idExpr, val)
 	case ir.KindFP64:
-		f.line("%sos.writeArrayFp64(%s, %s);", ind, idExpr, doubles)
+		f.line("%sos.writeArrayFp64(%s, %s);", ind, idExpr, val)
 	case ir.KindString:
 		// A string element is a leaf: in the array's INTERIOR it is omitted when it
 		// equals the element default (empty), leaving an id gap the decoder restores
@@ -821,7 +812,7 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 		ev := fmt.Sprintf("_e%d", depth)
 		lv := g.elemLoopList(f, ind, val, elem, ref, items)
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s == null) %s = Sbuf.EMPTY_BYTES; if (%s.length != 0 || %s) os.writeBlob(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, ev, lastElemExpr(iv, lv), iv, ev)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s == null) %s = Seq.EMPTY_BYTES; if (%s.length != 0 || %s) os.writeBlob(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, ev, lastElemExpr(iv, lv), iv, ev)
 		f.line("%s%s", ind, seqEndStmt(keepIf))
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -843,12 +834,12 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 		f.line("%s    %s %s = %s.get(%s);", ind, g.javaArrayElemType(elem, ref, items), ev, lv, iv)
 		if primitiveArrayElem(items.Elem) {
 			// A primitive row IS the OStream overload's argument: it goes to the wire
-			// unboxed, with no Sbuf.to*Array temporary. Otherwise as the boxed native
+			// unboxed, with no conversion temporary. Otherwise as the boxed native
 			// row below -- a single count-prefixed value with no frame of its own, so
 			// the interior/last rule lands on the WRITE rather than on a closer.
 			f.line("%s    if (%s == null) %s = %s;", ind, ev, ev, emptyPrimConst(items.Elem))
 			f.line("%s    if (%s.length != 0 || %s) {", ind, ev, lastElemExpr(iv, lv))
-			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, true, "")
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
 			f.line("%s    }", ind)
 		} else if nativeArrayElem(items.Elem) {
 			// A native row is a single count-prefixed value with no frame of its own,
@@ -856,13 +847,13 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s    if (!%s.isEmpty() || %s) {", ind, ev, lastElemExpr(iv, lv))
-			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, false, "")
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct element
 			// above.
-			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, false, lastElemExpr(iv, lv))
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, lv))
 		}
 		f.line("%s}", ind)
 		f.line("%s%s", ind, seqEndStmt(keepIf))

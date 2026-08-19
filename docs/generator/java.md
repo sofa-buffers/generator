@@ -36,7 +36,6 @@ its own:
 src/main/java/<pkg>/
     <Message>.java   public class <Message>  + the package-private <Message>Visitor
     <Type>.java      public class <Type>     one per schema struct/union
-    Sbuf.java        package-private shared helpers
 ```
 
 The schema types are **public**, like every other target's (`pub struct` in Rust,
@@ -49,8 +48,34 @@ A type reached from two messages is emitted **once**. Per-message emission also
 declared it twice in one package, which javac rejects outright (`duplicate
 class`), so a schema with a shared `$defs` struct did not build at all.
 
-`Sbuf` and `<Message>Visitor` stay package-private on purpose: they are
-generated plumbing, not schema surface.
+`<Message>Visitor` stays package-private on purpose: it is generated plumbing,
+not schema surface.
+
+### The support layer is the corelib's (generator#345)
+
+There is no third file. What used to be an emitted `Sbuf.java` — the shared empty
+arrays, the element-placement and array-growth helpers, the boolean conversion, the
+chunk accumulator, the UTF-8 materializer, the encode scratch buffer and the
+`INVALID_MSG` wrapper — is `org.sofabuffers.sofab` API as of corelib-java#97, and
+generated code calls it:
+
+| generated code calls | for |
+|---|---|
+| `Seq.EMPTY_*` | the shared zero-length array of each primitive base |
+| `Seq.reserveRow`, `Seq.reserveRow<Base>s` | placing a matrix row at the index its element id names |
+| `Seq.ensureCap` | growing a primitive array against elements that actually arrived |
+| `Seq.reset`, `Seq.orEmpty`, `Seq.boolsToLongs` | re-arming a destination, reading a wrapper array, the one boxed→primitive encode conversion |
+| `Seq.ARRAY_INIT_CAP` | the bounded eager reservation an untrusted count may not exceed |
+| `PayloadAcc.string` / `.blob` | reassembling a split payload, and validating it once complete |
+| `Sofab.invalid(detail)` | every `INVALID_MSG` rejection — it *returns* the exception, so the call reads `throw Sofab.invalid(...)` |
+| `OStream.overScratch(MAX_SIZE)` + `copyOfBytesUsed()` | the one-shot `encode()` buffer |
+
+None of it has a shape that depends on the schema: a `count`, a `maxlen`, an
+element width or a capacity is an argument. What stays emitted is what differs per
+schema — the field arms, the id routing, the per-field guards, the declared types.
+`MAX_SIZE` is the one number that does not move: CORELIB_PLAN §5.1 assigns the
+output buffer's **size** to the generated layer, which is the only side that knows
+it, and `overScratch` supplies only the reuse mechanism behind it.
 
 ## Arrays — `count` is a capacity
 
@@ -114,7 +139,7 @@ struct/union/nested element — because its presence is what carries the length.
 encode and decode distinctly.
 
 Because an interior gap is now ordinary, every element kind is **placed at its
-element id** on decode, matrix rows included (`Sbuf.placeRow`), never appended.
+element id** on decode, matrix rows included (`Seq.reserveRow`), never appended.
 
 ## Receiver-side decode limits
 
@@ -136,22 +161,23 @@ Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `String` is a Unicode type, so it is **always strict** (MESSAGE_SPEC §8 /
 CORELIB_PLAN §6.4) — no config key in generated code. The platform
 `new String(bytes, UTF_8)` is **lossy** (substitutes `U+FFFD`), which §8 forbids in
-every mode, so the visitor decodes through a generated `_utf8(...)` helper: an
-allocation-free `Utf8.valid(...)` well-formedness scan, then the JVM-intrinsic
-`new String(b, off, len, UTF_8)` (which never substitutes on already-valid input).
-Invalid bytes become `SofabException(INVALID_MSG)` — the same channel as the
-over-count guards. (This replaced a REPORTing `CharsetDecoder`, which allocated a
-decoder + `CharBuffer` per call; the scan-then-intrinsic pair measured ~43 % faster
-on the arena strings at zero per-string allocation.) The check runs once the full `total` bytes
-are present. Encode-side strictness is corelib-side (`OStream.writeString`).
+every mode, so the visitor materializes a payload through `PayloadAcc.string(...)`,
+which validates the reassembled bytes with the allocation-free `Utf8.valid(...)`
+scan and only then hands them to the JVM-intrinsic `new String(b, off, len, UTF_8)`
+(which never substitutes on already-valid input). Invalid bytes become
+`SofabException(INVALID_MSG)` — the same channel as the over-count guards. The
+check runs once the full `total` bytes are present, never per chunk, which is what
+lets a multi-byte character straddle a chunk boundary. Both the validator and the
+accumulator are corelib-java's, as is encode-side strictness
+(`OStream.writeString`).
 
 **Only a materialized string is validated (issue #257).** corelib-java delivers
 every fixlen-string field to `string(...)` — an unknown id and a §7.3 wire-type
 contradiction included — so the callback opens with a `switch (cur)` over the string
-destinations whose every non-matching path `return`s. `_utf8(...)` and `acc`
-therefore run only for a payload this scope actually reads, which is what
-CORELIB_PLAN §6.4 requires, and a skipped payload can never leave bytes in `acc` for
-a later declared field to inherit. The `maxlen` and `max_dyn_string_len` pre-checks
+destinations whose every non-matching path `return`s. The accumulator therefore
+runs only for a payload this scope actually reads, which is what CORELIB_PLAN §6.4
+requires, and a skipped payload can never leave bytes in it for a later declared
+field to inherit. The `maxlen` and `max_dyn_string_len` pre-checks
 sit behind the guard: they are destination-scoped themselves, so §5.2's
 INVALID-over-INCOMPLETE ordering is unchanged. `blob(...)` has no such guard — bytes
 carry no encoding. A schema that declares no string at all gets an **empty**
@@ -336,7 +362,7 @@ the gap-fill.
 Encode is the mirror. A `count: N` wrapper array's canonical wire stops at **M**,
 one past its last non-default element — explicitly *"even for sequence-form
 elements"* (§3/§5.1) — so `serialize` narrows the container to M **before** the
-element loop, via the `Sbuf.trimTail*` helpers (a `subList` view, so no
+element loop, via the `trimTail*` helpers (a `subList` view, so no
 allocation). Only the trailing run goes; interior all-default elements keep their
 frame. `M == 0` writes no child at all, so the lazily-opened wrapper is dropped by
 the field-level closer and the field is omitted entirely (§2).
@@ -345,9 +371,9 @@ Two invariants hold this together:
 
 - **A dynamic (count-less) array is never narrowed.** It has no `N` to refill
   from, so a trailing default element is significant and keeps its frame. That
-  makes `Sbuf.trimTailStrings`/`trimTailBlobs` a `count: N`-only path; the
-  dynamic side goes through `Sbuf.orEmpty`, which is the identity minus the null
-  the trims used to absorb.
+  makes `trimTailStrings`/`trimTailBlobs` a `count: N`-only path; the dynamic
+  side goes through `Seq.orEmpty`, which is the identity minus the null the trims
+  used to absorb.
 - **Decode default-fills a `count: N` wrapper array back out to `N`** when the
   sequence scope closes (`sequenceEnd`). §5.1 makes the length `N` "for every
   target — a growable-list target MUST default-fill to `N` exactly like a
@@ -435,9 +461,9 @@ is the entire point of accepting a destination:
 | Field | Reset |
 |-------|-------|
 | scalar / `String` / `blob` | assigned the same literal the field initializer uses |
-| `List`-backed array (wrapper, `boolean`) | `Sbuf.resetList` — `clear()`, keeping the backing capacity; a `boolean` array's materialized default is then `addAll`ed back, and a `count: N` wrapper array is refilled to its `N` element defaults by `_seqdef_<name>` so `reset()` lands on the value `new <Msg>()` has |
+| `List`-backed array (wrapper, `boolean`) | `Seq.reset` — `clear()`, keeping the backing capacity; a `boolean` array's materialized default is then `addAll`ed back, and a `count: N` wrapper array is refilled to its `N` element defaults by `_seqdef_<name>` so `reset()` lands on the value `new <Msg>()` has |
 | primitive array with a default (always so for `count: N`) | `System.arraycopy` from the shared `_arrdef_*` static when the length already matches; `clone()` only otherwise |
-| dynamic primitive array | the shared zero-length `Sbuf.EMPTY_*` constant |
+| dynamic primitive array | the shared zero-length `Seq.EMPTY_*` constant |
 | `struct` / `union` | `reset()` recursively, never a new object |
 
 It is **public** for the same reason corelib-cpp exposes `IStreamImpl::reset()`:
