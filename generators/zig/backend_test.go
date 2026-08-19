@@ -66,24 +66,24 @@ func TestZigStructural(t *testing.T) {
 		"const _dec_Myfirstmessage = struct {",                   // flat-visitor decoder
 		"pub fn sequenceBegin(self: *_dec_Myfirstmessage",        // location-stack nesting
 		"pub const MAX_SIZE: usize =",
-		"someu64: u64 = 18446744073709551615,",                                                     // schema default in the declaration
-		"someuintarray: FixedArray(u32, 4) = .{ .items = .{ 0, 1, 1000, 4294967295 }, .len = 4 },", // count:N native array: N of inline capacity plus the length
-		"somefloatarray: FixedArray(f32, 3) =",                                                     // count:N fp array
+		"someu64: u64 = 18446744073709551615,",                                           // schema default in the declaration
+		"someuintarray: sofab.FixedArray(u32, 4) = .init(&.{ 0, 1, 1000, 4294967295 }),", // count:N native array: the corelib storage, value and length together
+		"somefloatarray: sofab.FixedArray(f32, 3) =",                                     // count:N fp array
 		// a 3-element default is 3 long: `count` is a capacity, never padded to (§3)
-		"someboolarray: FixedArray(bool, 8) = .{ .items = .{ true, true, false, false, false, false, false, false }, .len = 3 },",
+		"someboolarray: sofab.FixedArray(bool, 8) = .init(&.{ true, true, false }),",
 		"somestring: []const u8 = \"\",",                                                     // zero-copy string storage
 		"someblob: []const u8 = &.{ 72, 101, 108, 108, 111 },",                               // blob default bytes
 		"somemap: []const MyfirstmessageSomemap",                                             // dynamic composite array -> slice
 		"if (!std.mem.eql(u32, self.someuintarray.slice(), &.{ 0, 1, 1000, 4294967295 })) {", // omit-guard vs default, over the VALUE (items[0..len])
 		"std.mem.sliceAsBytes",                                                               // bool array 0/1 lowering
-		"sofab.arrays.putChecked(&self.m.someuintarray.items, &self.ai,",                     // capacity-checked indexed store (generator#100)
+		"self.m.someuintarray.push(@intCast(value), &self.inv)",                              // capacity-checked store on the corelib storage (generator#100)
 		"if (v.inv) return error.InvalidMessage;",                                            // over-count array rejected as INVALID (generator#100)
 		"const chunk = self._reassemble(total, offset, _chunk) orelse return;",               // one contiguous payload, whatever the chunking
-		// A reassembled payload leaves as its OWN allocation. `acc` is scratch the
-		// next split payload clears and may reallocate, and destinations keep the
-		// slice they are handed, so returning a view into it aliased earlier
-		// wrapper-array elements onto the newest (generator#293 / F-0058).
-		"return self.alloc.dupe(u8, self.acc.items[0..total]) catch { self.inv = true; return null; };",
+		// A split payload is stitched by the corelib accumulator, which hands it
+		// back as its OWN allocation: destinations keep the slice they are given,
+		// and the scratch behind it is reused by the next payload (generator#293 /
+		// F-0058).
+		"return self.acc.push(self.alloc, total, offset, chunk) catch { self.inv = true; return null; };",
 		// The borrow is available to decode() only. On the streaming path a
 		// delivered slice may point into the corelib's reused carry buffer, which
 		// the next stitched item overwrites (generator#295).
@@ -112,13 +112,13 @@ func TestZigStructural(t *testing.T) {
 	}
 	// The shared scratch buffer must never reach a destination directly: that is
 	// the exact shape of generator#293, and it reads as a harmless one-liner.
-	if strings.Contains(m, "return self.acc.items;") {
+	if strings.Contains(m, "return self.acc._buf.items;") {
 		t.Error("_reassemble must hand out a copy, not a view into the shared acc buffer (generator#293)")
 	}
 	// No heap containers in the message type: storage is fixed arrays + slices.
 	// The check is on the MESSAGE STRUCT, not the file: two pieces of codec
 	// machinery legitimately hold a list and are not field storage -- the encode
-	// sink's output buffer (_EncodeSink) and the decoder's chunk-reassembly
+	// sink's output buffer (sofab.CollectingSink) and the decoder's chunk-reassembly
 	// buffer (_dec_*.acc, which only a payload split across feed chunks reaches).
 	if body, ok := structBody(m, "pub const Myfirstmessage = struct {"); !ok {
 		t.Error("message.zig: could not locate the Myfirstmessage struct")
@@ -158,9 +158,9 @@ func structBody(src, header string) (string, bool) {
 // InvalidMessage check). The configured value is emitted as-is (enforcement is
 // per-field, so schema-bounded fields keep only their own #100 guard), an
 // unset key emits nothing, and a key whose kind has no unbounded field is
-// inert. Independently of the config, the dynamic-array decode path must use
-// the hardened capped-eager-allocation _allocN/_put pair (a lying wire count
-// must not force a huge allocation).
+// inert. Independently of the config, the dynamic-array decode path must go
+// through the corelib's capped eager allocation (a lying wire count must not
+// force a huge allocation).
 // buildSchema compiles an inline YAML schema for a focused backend test.
 func buildSchema(t *testing.T, src string) *ir.Schema {
 	t.Helper()
@@ -274,10 +274,10 @@ messages:
 // run stays on the wire for every native element kind, with or without a
 // declared count, and there is no trim helper left in the emitted code.
 //
-// The storage follows: a count:N field is FixedArray(T, N) -- N of inline
+// The storage follows: a count:N field is sofab.FixedArray(T, N) -- N of inline
 // capacity PLUS the length -- because a bare `[N]T` can only ever BE N long and
-// so cannot express M < N. The value it encodes is `.slice()`, its first `.len`
-// elements.
+// so cannot express M < N. The value it encodes is `.slice()`, the elements it
+// actually carries.
 func TestZigNativeArrayCarriesItsLength(t *testing.T) {
 	s := buildSchema(t, `
 version: 1
@@ -305,7 +305,7 @@ messages:
 	// A count:N native array of every kind writes its VALUE whole -- the wire
 	// count IS the length, so no trailing run may be dropped.
 	for _, want := range []string{
-		"fu: FixedArray(u32, 5) = .{},",
+		"fu: sofab.FixedArray(u32, 5) = .{},",
 		"try os.writeArrayUnsigned(1, self.fu.slice());",
 		"try os.writeArraySigned(2, self.fi.slice());",
 		"try os.writeArrayFp32(3, self.ff.slice());",
@@ -348,10 +348,10 @@ messages:
 }
 
 // TestZigCountIsCapacityStorage: `count: N` is a capacity, so a count:N native
-// array is FixedArray(T, N) -- N of inline storage plus the length -- and its
-// declared `default` stands exactly as written, never padded out to N.
+// array is sofab.FixedArray(T, N) -- N of inline storage plus the length -- and
+// its declared `default` stands exactly as written, never padded out to N.
 //
-// Decode follows: the array header resets the length (the wire count IS the
+// Decode follows: the array header clears the value (the wire count IS the
 // length, §3 -- an explicitly empty array decodes to the EMPTY array, not to N
 // element defaults and not to the previous value), and the element stores
 // advance it. The reset is gated on the announced wire kind, so a header whose
@@ -376,28 +376,25 @@ messages:
 	m := string(files[0].Content)
 
 	for _, want := range []string{
-		// The declared default is the VALUE: `.len` is its own element count, and
-		// only the inline storage is N wide. A 3-element default on count:5 is a
-		// 3-element array, not a 5-element one.
-		"d: FixedArray(u32, 5) = .{ .items = .{ 1, 2, 3, 0, 0 }, .len = 3 },",
-		"f: FixedArray(f32, 3) = .{ .items = .{ 1.5, 0.0, 0.0 }, .len = 1 },",
-		"zeros: FixedArray(u32, 5) = .{ .items = .{ 0, 0, 0, 0, 0 }, .len = 2 },",
+		// The declared default is the VALUE, elements and length together, and only
+		// the inline storage behind it is N wide. A 3-element default on count:5 is
+		// a 3-element array, not a 5-element one.
+		"d: sofab.FixedArray(u32, 5) = .init(&.{ 1, 2, 3 }),",
+		"f: sofab.FixedArray(f32, 3) = .init(&.{ 1.5 }),",
+		"zeros: sofab.FixedArray(u32, 5) = .init(&.{ 0, 0 }),",
 		// No default at all: the EMPTY array, which is what a fresh count:N array
 		// now is (it used to be N element defaults).
-		"plain: FixedArray(u32, 5) = .{},",
+		"plain: sofab.FixedArray(u32, 5) = .{},",
 		// The over-count reject stays at the count header (generator#216), now
-		// followed by the length reset and gated on the wire kind.
-		"1 => if (kind == .unsigned) { if (count > 5) { self.inv = true; return; } self.m.d.len = 0; },",
-		"4 => if (kind == .fp32) { if (count > 3) { self.inv = true; return; } self.m.f.len = 0; },",
-		"5 => if (kind == .signed) { if (count > 2) { self.inv = true; return; } self.m.e.len = 0; },",
+		// followed by the clear and gated on the wire kind.
+		"1 => if (kind == .unsigned) { if (count > 5) { self.inv = true; return; } self.m.d.clear(); },",
+		"4 => if (kind == .fp32) { if (count > 3) { self.inv = true; return; } self.m.f.clear(); },",
+		"5 => if (kind == .signed) { if (count > 2) { self.inv = true; return; } self.m.e.clear(); },",
 		// The store advances the length: M elements arrive, M is the length. The
 		// §7.1 width guard for the u32 element sits inside the fill guard and ahead
 		// of the store, and the cast is @intCast because the value provably fits by
 		// then (see TestZigDeclaredWidthIsAValidityBound).
-		"1 => { if (self.afill != 0) { self.afill -= 1; if (value > 4294967295) { self.inv = true; return; } sofab.arrays.putChecked(&self.m.d.items, &self.ai, @intCast(value), &self.inv); self.m.d.len = self.ai; } },",
-		// The storage type itself.
-		"pub fn FixedArray(comptime T: type, comptime N: usize) type {",
-		"        pub fn slice(self: *const Self) []const T {",
+		"1 => { if (self.afill != 0) { self.afill -= 1; if (value > 4294967295) { self.inv = true; return; } self.m.d.push(@intCast(value), &self.inv); } },",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
@@ -454,17 +451,17 @@ messages:
 		"const max_dyn_string_len: usize = 4096;",
 		// Unbounded fields are guarded at the count/length header, before the
 		// field's storage is taken.
-		"1 => if (kind == .unsigned) { if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.arr = _allocN(u64, self.alloc, count); } },",
+		"1 => if (kind == .unsigned) { if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.arr = sofab.arrays.allocCapped(u64, self.alloc, count); } },",
 		"0 => if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.s = chunk; } },",
 		// InvalidMessage (generator#100) takes precedence over LimitExceeded.
 		"if (v.inv) return error.InvalidMessage;",
 		"if (v.lim) return error.LimitExceeded;",
 		// The schema-bounded array keeps its generator#100 guard, now behind the
 		// generator#188 fill guard (a bare scalar at this array id is skipped).
-		"2 => { if (self.afill != 0) { self.afill -= 1; if (value < -2147483648 or value > 2147483647) { self.inv = true; return; } sofab.arrays.putChecked(&self.m.barr.items, &self.ai, @intCast(value), &self.inv); self.m.barr.len = self.ai; } },",
+		"2 => { if (self.afill != 0) { self.afill -= 1; if (value < -2147483648 or value > 2147483647) { self.inv = true; return; } self.m.barr.push(@intCast(value), &self.inv); } },",
 		// Hardened eager allocation: the untrusted wire count is capped here, and
 		// sofab.arrays.putGrowing extends the slice as elements actually arrive.
-		"return sofab.arrays.allocN(T, a, @min(n, 1024));",
+		"self.m.arr = sofab.arrays.allocCapped(u64, self.alloc, count)",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("limits message.zig missing %q", want)
@@ -486,8 +483,8 @@ messages:
 			t.Errorf("unset limits must not emit %q", notWant)
 		}
 	}
-	if !strings.Contains(plain, "@min(n, 1024)") {
-		t.Error("no-config output must keep the hardened capped allocation")
+	if !strings.Contains(plain, "sofab.arrays.allocCapped(") {
+		t.Error("no-config output must keep the capped allocation")
 	}
 }
 
@@ -741,11 +738,11 @@ messages:
 
 	for _, want := range []string{
 		// The bound lives behind the kind test, keyed by the field's OWN subtype.
-		"2 => if (kind == .fp32) { if (count > 5) { self.inv = true; return; } self.m.a32.len = 0; },",
-		"3 => if (kind == .fp64) { if (count > 7) { self.inv = true; return; } self.m.a64.len = 0; },",
+		"2 => if (kind == .fp32) { if (count > 5) { self.inv = true; return; } self.m.a32.clear(); },",
+		"3 => if (kind == .fp64) { if (count > 7) { self.inv = true; return; } self.m.a64.clear(); },",
 		// Integer arrays are untouched by all of this: there is no second word on
 		// that path, so .unsigned/.signed stay one prong.
-		"4 => if (kind == .unsigned) { if (count > 3) { self.inv = true; return; } self.m.au.len = 0; },",
+		"4 => if (kind == .unsigned) { if (count > 3) { self.inv = true; return; } self.m.au.clear(); },",
 		// Three prongs cover all four ArrayKind members, so no else prong (Zig
 		// rejects an unreachable one).
 		"        self.askip = switch (kind) {",
@@ -1046,7 +1043,7 @@ messages:
 	for _, want := range []string{
 		// The row is placed at its element id, after the gap-fill, and the index is
 		// recorded so the element stores address THAT row.
-		".root_mat => if (kind == .unsigned) if (id >= 4) { self.inv = true; } else { self.ei_root_mat = id; if (sofab.arrays.grow([]const u32, self.alloc, &(self.m.mat), @as(usize, id) + 1, &.{})) { sofab.arrays.at(self.m.mat, id).* = _allocN(u32, self.alloc, count); } },",
+		".root_mat => if (kind == .unsigned) if (id >= 4) { self.inv = true; } else { self.ei_root_mat = id; if (sofab.arrays.grow([]const u32, self.alloc, &(self.m.mat), @as(usize, id) + 1, &.{})) { sofab.arrays.at(self.m.mat, id).* = sofab.arrays.allocCapped(u32, self.alloc, count); } },",
 		"self.ei_root_mat < self.m.mat.len) sofab.arrays.putGrowing(sofab.arrays.at(self.m.mat, self.ei_root_mat), self.alloc, &self.ai, self.an,",
 		// The fp row collector is the same shape.
 		"if (self.ei_root_dyn < self.m.dyn.len) sofab.arrays.putGrowing(sofab.arrays.at(self.m.dyn, self.ei_root_dyn), self.alloc, &self.ai, self.an, value)",
@@ -1096,7 +1093,7 @@ messages:
 		"    dstrs: []const []const u8 = &.{},",
 		"    dobjs: []const VecDobjsElem = &.{},",
 		// The native twin agrees: N of inline capacity, length 0.
-		"    nums: FixedArray(u32, 3) = .{},",
+		"    nums: sofab.FixedArray(u32, 3) = .{},",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)

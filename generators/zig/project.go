@@ -395,12 +395,15 @@ func (g *gen) emitFromJSONField(f *zfile, fld *ir.Field) {
 	case ir.KindArray:
 		f.line("    if (%s) |x| switch (x) {", get)
 		f.line("        .array => |a0| {")
-		if _, n, ok := g.fixedNativeArray(fld); ok {
+		if elemType, n, ok := g.fixedNativeArray(fld); ok {
 			// The JSON array's length IS the value's length; `count: N` only bounds
-			// it (MESSAGE_SPEC §3), so the spare capacity past it stays out.
+			// it (MESSAGE_SPEC §3), so the spare capacity past it stays out. The
+			// elements are gathered on the stack first because the storage takes its
+			// value as a slice, length and contents together.
+			f.line("            var t0: [%d]%s = undefined;", n, elemType)
 			f.line("            const n0 = @min(a0.items.len, %d);", n)
-			f.line("            for (a0.items[0..n0], 0..) |it0, k0| %s.items[k0] = %s;", acc, g.fromJSONElemExpr(arrayElemOf(fld), 0))
-			f.line("            %s.len = n0;", acc)
+			f.line("            for (a0.items[0..n0], 0..) |it0, k0| t0[k0] = %s;", g.fromJSONElemExpr(arrayElemOf(fld), 0))
+			f.line("            %s.set(t0[0..n0]);", acc)
 		} else {
 			elemType := g.harnessElemType(arrayElemOf(fld))
 			f.line("            const s0 = alloc.alloc(%s, a0.items.len) catch @panic(\"oom\");", elemType)

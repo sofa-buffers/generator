@@ -503,7 +503,7 @@ a reimplementation should emit code that honors all of them:
   And the claim is **measured, not asserted**: a target carrying the switch
   carries a `tests/bench/rows.json` row for *each* side of it (§15) — `cpp` and
   `rust` each have four. Zig is the open case (generator#323): its `count: N`
-  native arrays already lower to a stack `FixedArray(T, N)`, but bounded
+  native arrays already lower to a stack `sofab.FixedArray(T, N)`, but bounded
   strings/blobs are still `[]const u8` views, so a schema whose every field is
   bounded still needs an allocator to decode.
 - **Validate cheaply or not at all on the hot path** — bounds checks (`maxlen`,
