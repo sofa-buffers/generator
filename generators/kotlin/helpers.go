@@ -206,23 +206,29 @@ func primArrayType(k ir.Kind) string {
 }
 
 // primBaseOrder is every primitive array a field can be backed by, in a fixed
-// order so the emitted support functions and row cursors come out stable.
+// order so the emitted row cursors come out stable.
 var primBaseOrder = []string{
 	"UByteArray", "UShortArray", "UIntArray", "ULongArray",
 	"ByteArray", "ShortArray", "IntArray", "LongArray",
 	"FloatArray", "DoubleArray", "BooleanArray",
 }
 
-// baseSuffix is the disambiguating suffix a per-array-type support function
-// carries. Kotlin's unsigned arrays are inline classes over their signed peers,
-// so `UByteArray` and `ByteArray` share a JVM erasure and two same-named
-// helpers would clash; naming them apart keeps the emitted support readable
-// instead of relying on the compiler's inline-class name mangling.
+// baseSuffix is the disambiguating suffix a per-array-type name carries.
+// Kotlin's unsigned arrays are inline classes over their signed peers, so
+// `UByteArray` and `ByteArray` share a JVM erasure and two same-named members
+// would clash; naming them apart is what lets the corelib's Seq offer one per
+// element type at all, and it keeps the emitted row cursors readable.
 func baseSuffix(arrType string) string { return strings.TrimSuffix(arrType, "Array") }
 
-// emptyArrayExpr is the shared zero-length constant for a primitive array type.
+// seqSuffix is the element-name suffix Seq's per-array-type members carry. The
+// corelib spells them plural -- `reserveRowBytes`, `EMPTY_BYTES` -- because
+// each names a row or an array of that element rather than one of it.
+func seqSuffix(arrType string) string { return baseSuffix(arrType) + "s" }
+
+// emptyArrayExpr is the corelib's shared zero-length constant for a primitive
+// array type.
 func emptyArrayExpr(arrType string) string {
-	return "Sbuf.EMPTY_" + strings.ToUpper(baseSuffix(arrType))
+	return "Seq.EMPTY_" + strings.ToUpper(seqSuffix(arrType))
 }
 
 // nativeArrayElem reports whether an array element is carried by the native
@@ -373,7 +379,7 @@ func arrayWriteCall(elem ir.Kind, idExpr, val string) string {
 		// The one native element with no OStream overload of its own: a boolean
 		// array is a `0`/`1` unsigned array on the wire (MESSAGE_SPEC §3), so it
 		// is materialised as bytes for the write.
-		return fmt.Sprintf("os.writeArrayUnsigned(%s, Sbuf.boolBytes(%s))", idExpr, val)
+		return fmt.Sprintf("os.writeArrayUnsigned(%s, Seq.boolsToBytes(%s))", idExpr, val)
 	}
 	return ""
 }
@@ -412,7 +418,7 @@ func (g *gen) ktDefaultValue(f *ir.Field) string {
 				return "byteArrayOf(" + ktBytes(raw) + ")"
 			}
 		}
-		return "Sbuf.EMPTY_BYTE"
+		return "Seq.EMPTY_BYTES"
 	case ir.KindBool:
 		if b, ok := f.Default.(bool); ok && b {
 			return "true"
@@ -659,7 +665,7 @@ func arrDefName(f *ir.Field) string { return "_arrdef_" + f.Name }
 func (g *gen) arrayCompareDefault(f *ir.Field) (string, bool) {
 	if f.Kind == ir.KindBlob {
 		def := g.ktDefaultValue(f)
-		if def == "Sbuf.EMPTY_BYTE" {
+		if def == "Seq.EMPTY_BYTES" {
 			return "", false
 		}
 		return def, true

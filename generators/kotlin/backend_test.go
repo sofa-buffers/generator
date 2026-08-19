@@ -182,7 +182,7 @@ func TestKotlinUnsignedArraysGoToTheWireUnwidened(t *testing.T) {
 	}
 	// A boolean array is the one native kind with no OStream overload, so it is
 	// the one that has to be materialised for the write.
-	if !strings.Contains(m, "os.writeArrayUnsigned(27, Sbuf.boolBytes(this.someboolarray))") {
+	if !strings.Contains(m, "os.writeArrayUnsigned(27, Seq.boolsToBytes(this.someboolarray))") {
 		t.Error("a BooleanArray must be materialised as 0/1 bytes for the write")
 	}
 }
@@ -491,7 +491,7 @@ func TestKotlinCountIsCapacityNotLength(t *testing.T) {
 	if !strings.Contains(m, "public var a: UIntArray = uintArrayOf(1u, 2u)") {
 		t.Error("a declared default must stand exactly as written, never tail-padded to count")
 	}
-	if !strings.Contains(m, "public var b: UIntArray = Sbuf.EMPTY_UINT") {
+	if !strings.Contains(m, "public var b: UIntArray = Seq.EMPTY_UINTS") {
 		t.Error("a count:N array with no declared default is the EMPTY array")
 	}
 	if !strings.Contains(m, "public var c: MutableList<String> = mutableListOf()") {
@@ -642,21 +642,23 @@ func TestKotlinSkippedStringIsNotValidated(t *testing.T) {
 	m := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
 	body := m[strings.Index(m, "override fun string("):]
 	guard := strings.Index(body, "else -> return")
-	conv := strings.Index(body, "utf8(data, chunkOffset, total)")
+	conv := strings.Index(body, "acc.string(total, offset, data, chunkOffset, chunkLength)")
 	if guard < 0 || conv < 0 || guard > conv {
 		t.Error("the destination guard must precede any conversion or validation")
 	}
-	if !strings.Contains(m, "if (!Utf8.valid(b, off, off + len)) throw SofabException(SofabError.INVALID_MSG, \"string: invalid UTF-8\")") {
-		t.Error("a materialized string must be validated strictly, never replaced")
+	// Validation itself is the corelib's: PayloadAcc.string runs Utf8.decode on
+	// the completed payload, so nothing is emitted here for the check to skip.
+	if strings.Contains(m, "Utf8.valid") {
+		t.Error("the UTF-8 check is the corelib's, not a generated copy")
 	}
 }
 
 // TestKotlinStringFreeSchemaNeverDecodesAString: a message that declares no
 // string still gets the callback -- the interface declares it, and the corelib
 // still routes strings at unknown ids there -- but every string reaching it is
-// skipped by definition, so the body is EMPTY and the validator is not emitted at
-// all. Decoding one only to drop it is the same violation with every string
-// skipped instead of some.
+// skipped by definition, so the body is EMPTY and nothing is ever handed to the
+// accumulator. Decoding one only to drop it is the same violation with every
+// string skipped instead of some.
 func TestKotlinStringFreeSchemaNeverDecodesAString(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n      a: { id: 0, type: u32 }\n"
 	m := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
@@ -664,8 +666,8 @@ func TestKotlinStringFreeSchemaNeverDecodesAString(t *testing.T) {
 		"        // No field of this message is a string") {
 		t.Error("a string-free message must emit the callback with an empty body")
 	}
-	if strings.Contains(m, "Utf8.valid") {
-		t.Error("a string-free message must not emit the UTF-8 validator")
+	if strings.Contains(m, "acc.string(") {
+		t.Error("a string-free message must never reach the accumulator's string path")
 	}
 }
 
@@ -698,7 +700,7 @@ func TestKotlinNativeMatrixRowsArePlacedByID(t *testing.T) {
 	if !strings.Contains(out, "public var m: MutableList<UIntArray> = mutableListOf()") {
 		t.Error("a matrix with native rows is a list of primitive arrays, not of boxed lists")
 	}
-	if !strings.Contains(out, "_arowUInt = Sbuf.placeRowUInt(m.m, id, minOf(count, ARRAY_INIT_CAP))") {
+	if !strings.Contains(out, "_arowUInt = Seq.reserveRowUInts(m.m, id, minOf(count, Seq.ARRAY_INIT_CAP))") {
 		t.Error("a native row must be PLACED at its element id, with a capped reservation")
 	}
 	if !strings.Contains(out, "m.m[_ex_Root_m] = _arowUInt") {
@@ -731,8 +733,8 @@ func TestKotlinBoundedAndUnboundedEncodeShapes(t *testing.T) {
 	for _, want := range []string{
 		"public const val MAX_SIZE_LIMIT = 512",
 		"public const val MAX_SIZE = MAX_SIZE_LIMIT",
-		"val out = Sbuf.Acc()",
-		"OStream(ByteArray(ENC_SCRATCH), 0, FlushSink { data, off, len -> out.write(data, off, len) })",
+		"val out = PayloadAcc()",
+		"OStream(ByteArray(ENC_SCRATCH), 0, out)",
 	} {
 		if !strings.Contains(unbounded, want) {
 			t.Errorf("unbounded encode missing %q", want)
@@ -766,7 +768,7 @@ func TestKotlinBulkOfferOnlyForSchemaBoundedIntegerArrays(t *testing.T) {
 		}
 	}
 	// An unbounded array reserves capped and grows with the elements delivered.
-	if !strings.Contains(m, "m.unbounded = UIntArray(minOf(count, ARRAY_INIT_CAP))") {
+	if !strings.Contains(m, "m.unbounded = UIntArray(minOf(count, Seq.ARRAY_INIT_CAP))") {
 		t.Error("an unbounded array must reserve capped, never from the untrusted wire count")
 	}
 	// A message with no bulk-capable array emits neither hook.
@@ -815,10 +817,10 @@ messages:
 // The realistic way to break that is to reach for a JVM class the way the Java
 // backend legitimately does (`java.io.ByteArrayOutputStream` for the chunk
 // accumulator, `new String(bytes, UTF_8)` for the strict decode, a `ThreadLocal`
-// scratch buffer). Each has a common-Kotlin answer here (`Sbuf.Acc`,
-// `Utf8.valid` + `decodeToString`, a per-call buffer), and this is the guard that
-// keeps them. The conformance harness proves the sources COMPILE; this proves
-// what they compile against, hermetically and for every corpus shape.
+// scratch buffer). Each has a common-Kotlin answer in the corelib's commonMain
+// support layer (`PayloadAcc`, `Utf8.decode`, a per-call buffer), and this is the
+// guard that keeps them. The conformance harness proves the sources COMPILE; this
+// proves what they compile against, hermetically and for every corpus shape.
 //
 // Only `emit: sources` is swept: the project scaffolding is deliberately
 // JVM-specific (a harness needs a `main`, an exit code and a stdin).
@@ -874,7 +876,7 @@ func TestKotlinProjectMode(t *testing.T) {
 	// ONE-BYTE output window (the bytes must stay identical to the one-shot
 	// path's) and a decoder fed one byte at a time.
 	for _, want := range []string{
-		"val os = OStream(ByteArray(1), 0, FlushSink { data, off, len -> acc.write(data, off, len) })",
+		"val os = OStream(ByteArray(1), 0, acc)",
 		"obj.encodeTo(os)",
 		"if (!oneShot.contentEquals(streamed)) {",
 		"for (b in streamed) dec.feed(byteArrayOf(b))",
@@ -938,64 +940,78 @@ func TestKotlinMaxMessageSizeBudget(t *testing.T) {
 	}
 }
 
-// TestKotlinSbufCarriesOnlyWhatIsCalled: Sbuf.kt emits a member only where the
-// rest of the package names it.
-//
-// sbufSupport used to roll all three helper families over every primitive base
-// type unconditionally -- 36 members, whatever the schema held. On the review
-// corpus's example schema exactly four were reached, so ~90% of the file was
-// dead code in every generated package (generator#345). The file is now built
-// last, from the emitted sources, so the set cannot drift from the call sites.
-func TestKotlinSbufCarriesOnlyWhatIsCalled(t *testing.T) {
-	sbuf := func(t *testing.T, payload string) string {
+// TestKotlinSupportIsTheCorelibs: no generated package carries a support file
+// of its own. Placing an element, growing an array, reassembling a payload and
+// validating its UTF-8 all have the same shape for every schema, with the schema
+// dependence carried by the arguments, so ARCHITECTURE §8 puts them in
+// corelib-kotlin-mp; generated code names them and emits nothing
+// (generator#345).
+func TestKotlinSupportIsTheCorelibs(t *testing.T) {
+	gen := func(t *testing.T, payload string) map[string]string {
 		t.Helper()
-		files := genFromYAML(t, "version: 1\nmessages:\n  M:\n    payload:\n"+payload,
+		return genFromYAML(t, "version: 1\nmessages:\n  M:\n    payload:\n"+payload,
 			map[string]any{"package": "m"})
-		return files["src/main/kotlin/m/Sbuf.kt"]
 	}
 
-	t.Run("an unbounded u32 array takes ensureCapUInt and nothing else", func(t *testing.T) {
-		s := sbuf(t, "      a: { id: 0, type: array, items: { type: u32 } }\n")
-		for _, want := range []string{"internal val EMPTY_UINT", "internal fun ensureCapUInt"} {
-			if !strings.Contains(s, want) {
-				t.Errorf("Sbuf.kt missing %q\n%s", want, s)
-			}
-		}
-		for _, unwanted := range []string{
-			"ensureCapDouble", "ensureCapBoolean", "ensureCapUByte", // other widths
-			"placeRow",  // no matrix in this schema
-			"boolBytes", // no boolean array
-			"EMPTY_FLOAT", "EMPTY_LONG",
+	t.Run("no support file is emitted at all", func(t *testing.T) {
+		for _, payload := range []string{
+			"      a: { id: 0, type: u32 }\n",
+			"      a: { id: 0, type: array, items: { type: u32 } }\n",
+			"      a: { id: 0, type: array, items: { type: array, count: 2, items: { type: i32, count: 3 } } }\n",
+			"      a: { id: 0, type: string, maxlen: 8 }\n",
 		} {
-			if strings.Contains(s, unwanted) {
-				t.Errorf("Sbuf.kt carries %q, which nothing calls\n%s", unwanted, s)
+			files := gen(t, payload)
+			if _, ok := files["src/main/kotlin/m/Sbuf.kt"]; ok {
+				t.Errorf("a support file was emitted for %q", payload)
+			}
+			for path, body := range files {
+				if strings.Contains(body, "Sbuf") {
+					t.Errorf("%s still names the retired support object", path)
+				}
 			}
 		}
 	})
 
-	t.Run("a matrix pulls in placeRow and the EMPTY_ its gap fill needs", func(t *testing.T) {
-		s := sbuf(t, "      a: { id: 0, type: array, items: { type: array, count: 2, items: { type: i32, count: 3 } } }\n")
-		for _, want := range []string{"internal fun placeRowInt", "internal val EMPTY_INT"} {
-			if !strings.Contains(s, want) {
-				t.Errorf("Sbuf.kt missing %q\n%s", want, s)
+	t.Run("an unbounded array grows through Seq.ensureCap", func(t *testing.T) {
+		m := gen(t, "      a: { id: 0, type: array, items: { type: u32 } }\n")["src/main/kotlin/m/M.kt"]
+		for _, want := range []string{"Seq.EMPTY_UINTS", "Seq.ensureCap(m.a, ai, acap)", "Seq.ARRAY_INIT_CAP"} {
+			if !strings.Contains(m, want) {
+				t.Errorf("M.kt missing %q", want)
 			}
 		}
 	})
 
-	t.Run("a boolean array pulls in boolsBytes", func(t *testing.T) {
-		s := sbuf(t, "      a: { id: 0, type: array, items: { type: boolean } }\n")
-		if !strings.Contains(s, "internal fun boolBytes") {
-			t.Errorf("Sbuf.kt missing boolBytes\n%s", s)
+	t.Run("a matrix row is reserved through Seq.reserveRow", func(t *testing.T) {
+		m := gen(t, "      a: { id: 0, type: array, items: { type: array, count: 2, items: { type: i32, count: 3 } } }\n")["src/main/kotlin/m/M.kt"]
+		if !strings.Contains(m, "Seq.reserveRowInts(m.a, id,") {
+			t.Error("a native row must be reserved through the corelib's per-element member")
 		}
 	})
 
-	t.Run("what survives still compiles as one object", func(t *testing.T) {
-		s := sbuf(t, "      a: { id: 0, type: u32 }\n")
-		if strings.Count(s, "{") != strings.Count(s, "}") {
-			t.Errorf("unbalanced braces in a minimal Sbuf.kt\n%s", s)
+	t.Run("a boolean array is materialised by Seq.boolsToBytes", func(t *testing.T) {
+		m := gen(t, "      a: { id: 0, type: array, items: { type: boolean } }\n")["src/main/kotlin/m/M.kt"]
+		if !strings.Contains(m, "Seq.boolsToBytes(this.a)") {
+			t.Error("the one native kind with no OStream overload goes through the corelib")
 		}
-		if strings.Contains(s, "/**\n    /**") {
-			t.Errorf("an orphaned doc block survived a skipped section\n%s", s)
+	})
+
+	t.Run("a payload is reassembled and validated by PayloadAcc", func(t *testing.T) {
+		m := gen(t, "      s: { id: 0, type: string, maxlen: 8 }\n      b: { id: 1, type: blob, maxlen: 8 }\n")["src/main/kotlin/m/M.kt"]
+		for _, want := range []string{
+			"private val acc = PayloadAcc()",
+			"val s = acc.string(total, offset, data, chunkOffset, chunkLength) ?: return",
+			"val b = acc.blob(total, offset, data, chunkOffset, chunkLength) ?: return",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("M.kt missing %q", want)
+			}
+		}
+		// The chunk buffer and the UTF-8 check are the corelib's, so neither the
+		// accumulator's internals nor a validator of our own is named here.
+		for _, unwanted := range []string{"acc.buf", "acc.write(", "Utf8.valid", "private fun utf8("} {
+			if strings.Contains(m, unwanted) {
+				t.Errorf("M.kt still carries %q", unwanted)
+			}
 		}
 	})
 }

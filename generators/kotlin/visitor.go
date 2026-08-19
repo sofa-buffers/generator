@@ -269,20 +269,22 @@ func nativeElemCb(k ir.Kind) string {
 // The emitted visitor
 // ---------------------------------------------------------------------------
 
-// arrayInitCap is the generated ARRAY_INIT_CAP: the bounded eager reservation a
-// decode makes for an array before any element has arrived.
+// arrayInitCap mirrors the corelib's Seq.ARRAY_INIT_CAP: the bounded eager
+// reservation a decode makes for an array before any element has arrived. The
+// generator needs the VALUE only to decide whether a schema capacity is already
+// below it; the emitted code names the corelib's constant.
 const arrayInitCap = 16
 
 // reserveExpr is the backing-store length arrayBegin reserves for an array whose
 // schema capacity is cap (-1 == unbounded). The wire count is UNTRUSTED, so the
 // reservation is capped and the fill grows from there -- except when the schema
 // capacity is already at or below that cap, where the count guard has just
-// proved count <= cap <= ARRAY_INIT_CAP.
+// proved count <= cap <= Seq.ARRAY_INIT_CAP.
 func reserveExpr(cap int64) string {
 	if cap >= 0 && cap <= arrayInitCap {
 		return "count"
 	}
-	return "minOf(count, ARRAY_INIT_CAP)"
+	return "minOf(count, Seq.ARRAY_INIT_CAP)"
 }
 
 // rowCursor is the visitor field holding the primitive matrix row currently
@@ -361,7 +363,7 @@ func (g *gen) emitVisitor(f *kfile, name string, fields []*ir.Field) {
 		f.line("    private var %s: %s = %s  // primitive matrix row currently being filled", rowCursor(t), t, emptyArrayExpr(t))
 	}
 	if needsAcc {
-		f.line("    private val acc = Sbuf.Acc()        // reassembly of a string/blob payload split across chunks")
+		f.line("    private val acc = PayloadAcc()      // reassembly of a string/blob payload split across chunks")
 	}
 	if limArr || limStr || limBlob {
 		f.line("    // Receiver-side decode limits, baked from the sofabgen config: caps on")
@@ -374,9 +376,6 @@ func (g *gen) emitVisitor(f *kfile, name string, fields []*ir.Field) {
 	f.blank()
 	f.line("    private companion object {")
 	f.line("        private const val DEAD = -1     // the skipped-subtree scope: no arm below matches it")
-	if hasArray {
-		f.line("        private const val ARRAY_INIT_CAP = %d  // bounded eager reservation; grow lazily", arrayInitCap)
-	}
 	if limArr {
 		f.line("        const val MAX_DYN_ARRAY_COUNT = %dL", g.limits.arrayCount)
 	}
@@ -406,7 +405,6 @@ func (g *gen) emitVisitor(f *kfile, name string, fields []*ir.Field) {
 	g.emitScalarCb(f, fs, "fp32", "Float", func(fld *ir.Field) bool { return fld.Kind == ir.KindFP32 })
 	g.emitScalarCb(f, fs, "fp64", "Double", func(fld *ir.Field) bool { return fld.Kind == ir.KindFP64 })
 
-	g.emitUtf8Helper(f, fs)
 	g.emitFixlenBegin(f, fs)
 	g.emitStringCb(f, fs, limStr)
 	g.emitBlobCb(f, fs, limBlob)
@@ -415,27 +413,6 @@ func (g *gen) emitVisitor(f *kfile, name string, fields []*ir.Field) {
 	g.emitSequenceCbs(f, fs)
 
 	f.line("}")
-	f.blank()
-}
-
-// emitUtf8Helper writes the strict UTF-8 materialisation (MESSAGE_SPEC §8 /
-// CORELIB_PLAN §6.4). A Kotlin `String` is a Unicode type, so the only
-// non-mutating option is a strict conversion and the corelib's
-// SOFAB_STRICT_UTF8 switch is a documented no-op here: `decodeToString` with its
-// default settings SUBSTITUTES U+FFFD, which §8 forbids in every mode, so the
-// bytes are validated first with the corelib's allocation-free scanner and only
-// then converted.
-//
-// Emitted only when the message materialises a string at all -- otherwise
-// nothing would call it.
-func (g *gen) emitUtf8Helper(f *kfile, fs []frame) {
-	if len(kindDests(fs, ir.KindString)) == 0 {
-		return
-	}
-	f.line("    private fun utf8(b: ByteArray, off: Int, len: Int): String {")
-	f.line("        if (!Utf8.valid(b, off, off + len)) %s", invalidThrow("string: invalid UTF-8"))
-	f.line("        return b.decodeToString(off, off + len)")
-	f.line("    }")
 	f.blank()
 }
 
@@ -753,18 +730,10 @@ func (g *gen) emitStringCb(f *kfile, fs []frame, limStr bool) {
 		g.emitLenLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN", "string length", g.limits.stringLen)
 	}
 	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
-	// Single-shot fast path: when the whole payload arrives in one chunk it is
-	// converted straight out of the input slice, keeping the accumulator for
-	// split payloads only.
-	f.line("        val s: String")
-	f.line("        if (offset == 0 && chunkLength >= total) {")
-	f.line("            s = utf8(data, chunkOffset, total)")
-	f.line("        } else {")
-	f.line("            acc.write(data, chunkOffset, chunkLength)")
-	f.line("            if (acc.size < total) return")
-	f.line("            s = utf8(acc.buf, 0, total)")
-	f.line("            acc.reset()")
-	f.line("        }")
+	// The accumulator answers a payload delivered in one chunk straight out of
+	// the input, buffers one delivered in several, and validates the UTF-8 once
+	// the payload is complete -- so nothing is routed until there is a value.
+	f.line("        val s = acc.string(total, offset, data, chunkOffset, chunkLength) ?: return")
 	f.line("        when (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindString {
@@ -808,19 +777,11 @@ func (g *gen) emitBlobCb(f *kfile, fs []frame, limBlob bool) {
 		g.emitLenLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN", "blob length", g.limits.blobLen)
 	}
 	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
-	f.line("        val b: ByteArray")
-	f.line("        if (offset == 0 && chunkLength >= total) {")
-	f.line("            b = data.copyOfRange(chunkOffset, chunkOffset + total)")
-	f.line("        } else {")
-	f.line("            acc.write(data, chunkOffset, chunkLength)")
-	f.line("            if (acc.size < total) return")
-	f.line("            b = acc.buf.copyOf(total)")
-	f.line("            acc.reset()")
-	f.line("        }")
+	f.line("        val b = acc.blob(total, offset, data, chunkOffset, chunkLength) ?: return")
 	f.line("        when (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindBlob {
-			f.line("            %d -> { %swhile (%s.size <= id) %s.add(Sbuf.EMPTY_BYTE); %s[id] = b }",
+			f.line("            %d -> { %swhile (%s.size <= id) %s.add(Seq.EMPTY_BYTES); %s[id] = b }",
 				fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
 			continue
 		}
@@ -893,8 +854,8 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 			// Capped, never the wire count: fr.cap bounds the row's ID against the
 			// OUTER array's capacity, and nothing here has bounded the row's own
 			// element count.
-			f.line("            %d -> if (kind == ArrayKind.%s) { %s%s = Sbuf.placeRow%s(%s, id, minOf(count, ARRAY_INIT_CAP)); %s = id }",
-				fr.idx, arrayWireKind(fr.innerElem), body, rowCursor(arrType), baseSuffix(arrType), fr.listExpr, elemIdxVar(fr.loc))
+			f.line("            %d -> if (kind == ArrayKind.%s) { %s%s = Seq.reserveRow%s(%s, id, minOf(count, Seq.ARRAY_INIT_CAP)); %s = id }",
+				fr.idx, arrayWireKind(fr.innerElem), body, rowCursor(arrType), seqSuffix(arrType), fr.listExpr, elemIdxVar(fr.loc))
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -1070,7 +1031,7 @@ func (g *gen) emitSequenceCbs(f *kfile, fs []frame) {
 			// element id names, for the same reason as the struct element above.
 			// An array wrapper IS the array's value, so a REOPENED row id
 			// replaces the row rather than merging into it (§7.4).
-			f.line("            %d -> { %sSbuf.placeRowList(%s, id); %s = id; cur = %d }",
+			f.line("            %d -> { %sSeq.reserveRowList(%s, id); %s = id; cur = %d }",
 				fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkNormal:
 			var arms []string
@@ -1258,8 +1219,8 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 				guard = widthThrow(fr.innerElem, locName(fr.loc)+" element")
 			}
 			arms = append(arms, arm{ids[-1], fmt.Sprintf(
-				"%sif (ai >= %s.size) { %s = Sbuf.ensureCap%s(%s, ai, acap); %s[%s] = %s }; %s[ai] = %s; ai++",
-				guard, cur, cur, baseSuffix(primArrayType(fr.innerElem)), cur, fr.listExpr, elemIdxVar(fr.loc), cur,
+				"%sif (ai >= %s.size) { %s = Seq.ensureCap(%s, ai, acap); %s[%s] = %s }; %s[ai] = %s; ai++",
+				guard, cur, cur, cur, fr.listExpr, elemIdxVar(fr.loc), cur,
 				cur, elemStore(fr.innerElem, cb))})
 			continue
 		}
@@ -1276,8 +1237,8 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 			// Grow the backing array on demand (never trust the wire count), up
 			// to the announced count, so a valid array ends exactly M long.
 			arms = append(arms, arm{code, fmt.Sprintf(
-				"%sif (ai >= %s.size) %s = Sbuf.ensureCap%s(%s, ai, acap); %s[ai] = %s; ai++",
-				guard, target, target, baseSuffix(primArrayType(fld.Elem)), target, target,
+				"%sif (ai >= %s.size) %s = Seq.ensureCap(%s, ai, acap); %s[ai] = %s; ai++",
+				guard, target, target, target, target,
 				elemStore(fld.Elem, cb))})
 		}
 	}
