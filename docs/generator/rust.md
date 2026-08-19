@@ -239,10 +239,12 @@ modes.
 conformance runs all of them: `rs` and `no-std-dynamic` (dynamic storage) drive
 `streaming_check.rs`, `rs-static` and `no-std-static` (fixed storage) drive
 `streaming_check_nostd.rs`. The second file exists because the shared one assigns
-`String`/`Vec` directly, which `heapless` cannot take — and because fixed storage
-has a genuinely different reassembly buffer: the `acc` that carries a payload
-across feed chunks is a `heapless::Vec` whose overflow sets the sticky `err` flag
-instead of allocating.
+`String`/`Vec` directly, which `heapless` cannot take. Reassembly, on the other
+hand, follows the **corelib** rather than the storage: the `acc` that carries a
+payload across feed chunks is `PayloadAcc` on `rs` and `PayloadAcc<N>` on
+`rs-no-std`, where the storage is finite and an over-long split payload sets the
+sticky `err` flag instead of allocating (see
+[Chunk reassembly](#chunk-reassembly-is-the-corelibs-payloadacc-issue-345)).
 
 `rs-static` used to fall into a blanket `*-static` skip, so **the std corelib's
 fixed-storage configuration had no streaming leg anywhere in CI** — the leg built,
@@ -417,6 +419,39 @@ measurement can see.
 
 Change codegen here, then `./tests/bench/run.sh` and read the diff in
 `tests/bench/results.txt`.
+
+## Chunk reassembly is the corelib's `PayloadAcc` (issue #345)
+
+`Visitor::string` / `Visitor::blob` deliver a payload as `(total, offset, chunk)`,
+so a destination that wants the field as one value has to put it back together.
+That reassembly is the same code for every schema — bytes in, bytes out, no id, no
+bound, no declared type — which is exactly ARCHITECTURE §8's definition of a
+helper the corelib owns. Both Rust corelibs now do
+(`corelib-rs` [#88], `corelib-rs-no-std` [#92]), and the backend calls it:
+
+```rust
+acc: sofab::PayloadAcc,          // corelib: rs
+acc: sofab::PayloadAcc<51>,      // corelib: rs-no-std — storage in the caller
+
+let _p = match self.acc.feed(total, offset, chunk) { Some(_v) => _v, None => return };
+```
+
+The `no_std` twin holds finite storage, so `feed` returns
+`Result<Option<&[u8]>>`: a split payload larger than `N` is `Error::BufferFull`,
+mapped to the sticky `err` flag. `N` is the message's `MAX_SIZE`, which bounds any
+single payload inside it — a `no_std` crate requires a `maxlen` on every
+string/blob in *both* storage modes, so that number always resolves from the
+schema, and the per-field `maxlen` guard rejects an over-long payload before a byte
+reaches the accumulator. The arm is a backstop, not a reachable outcome; it still
+beats what the emitted copy did, which was to wait forever for a completion that
+could not arrive and drop the field in silence.
+
+What stays generated is what has a different shape per schema: the destination
+guard, the `maxlen` and `max_dyn_string_len` pre-checks, the `from_utf8` verdict
+and the per-id placement arms.
+
+[#88]: https://github.com/sofa-buffers/corelib-rs/pull/88
+[#92]: https://github.com/sofa-buffers/corelib-rs-no-std/pull/92
 
 ## Strict UTF-8 (issue #85)
 

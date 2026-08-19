@@ -96,10 +96,11 @@ func TestRustStructural(t *testing.T) {
 		"pub someboolarray: Vec<bool>,",                // bounded bool array
 		"someuintarray: vec![0, 1, 1000, 4294967295],", // default is an N-element array literal
 		"someboolarray: vec![true, true, false],",      // the declared default exactly as written -- `count` never pads it
-		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {",                                                         // omit-guard is a default compare
-		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear() ",                                               // over-count rejects (generator#100/#216), then the wire's M elements are collected
-		"if offset == 0 && chunk.len() >= total {",                                                                              // string/blob single-shot fast path
-		"match core::str::from_utf8(&chunk[..total]) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }", // strict UTF-8: invalid -> INVALID (issue #85, subsumes #80)
+		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {",           // omit-guard is a default compare
+		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear() ", // over-count rejects (generator#100/#216), then the wire's M elements are collected
+		"acc: sofab::PayloadAcc,", // the corelib owns chunk reassembly (generator#345)
+		"let _p = match self.acc.feed(total, offset, chunk) { Some(_v) => _v, None => return };",                   // ...and generated code only calls it
+		"match core::str::from_utf8(_p) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }", // strict UTF-8 on the ASSEMBLED payload: invalid -> INVALID (issue #85, subsumes #80)
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs (rs) missing %q", want)
@@ -108,8 +109,13 @@ func TestRustStructural(t *testing.T) {
 	// String/blob arrays and array-of-array stay heap Vec (not fixed).
 	// Lossy from_utf8_lossy (U+FFFD) is forbidden in every mode (MESSAGE_SPEC §8);
 	// strict from_utf8 -> INVALID makes std and no_std agree (issue #85, subsumes #80).
+	// The hand-rolled accumulator is gone with it: a helper the corelib now owns
+	// must not also be emitted, or the two can drift apart (generator#345).
 	for _, notWant := range []string{
 		"String::from_utf8_lossy",
+		"self.acc.extend_from_slice(chunk)",
+		"if offset == 0 && chunk.len() >= total {",
+		"if offset == 0 { self.acc.clear(); }",
 	} {
 		if strings.Contains(m, notWant) {
 			t.Errorf("message.rs (rs) should not contain %q ", notWant)
@@ -134,19 +140,19 @@ func TestRustStructural(t *testing.T) {
 	// The no_std profile lowers bounded fields to fixed-capacity heapless storage
 	// (serde gated behind a feature), and keeps an alloc fallback for unbounded ones.
 	for _, want := range []string{
-		"#[cfg(feature = \"serde\")]",                                                                       // serde import gated
-		"#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]",                                  // serde derive gated
-		"pub somestring: heapless::String<50>,",                                                             // bounded string -> heapless
-		"pub someblob: heapless::Vec<u8, 16>,",                                                              // bounded blob -> heapless
-		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",                                      // string array -> inline
-		"pub somemap: heapless::Vec<",                                                                       // bounded -> heapless (default no_std storage)
-		"pub fn encode(&self) -> heapless::Vec<u8,",                                                         // heap-free encode
-		"stack: heapless::Vec<_Loc,",                                                                        // bounded decode stack
-		"if self.somestring.as_str() != \"\" {",                                                             // string omit via as_str
-		"let _ = self.acc.extend_from_slice(chunk);",                                                        // accumulates a chunked string/blob (generator#81)
-		"if offset == 0 && chunk.len() >= total {",                                                          // single-shot fast path, now in no_std too
-		"match core::str::from_utf8(&chunk[..total]) { Ok(_v) => _v, Err(_) => { self.inv = true; \"\" } }", // strict UTF-8 -> INVALID, agrees with std (issue #85)
-		"self.err = true;",                                                                                  // fixed-capacity overflow flagged in the fill (generator#82)
+		"#[cfg(feature = \"serde\")]",                                      // serde import gated
+		"#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]", // serde derive gated
+		"pub somestring: heapless::String<50>,",                            // bounded string -> heapless
+		"pub someblob: heapless::Vec<u8, 16>,",                             // bounded blob -> heapless
+		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",     // string array -> inline
+		"pub somemap: heapless::Vec<",                                      // bounded -> heapless (default no_std storage)
+		"pub fn encode(&self) -> heapless::Vec<u8,",                        // heap-free encode
+		"stack: heapless::Vec<_Loc,",                                       // bounded decode stack
+		"if self.somestring.as_str() != \"\" {",                            // string omit via as_str
+		"acc: sofab::PayloadAcc<",                                          // the corelib's accumulator, over storage this crate names (generator#345)
+		"match self.acc.feed(total, offset, chunk) { Ok(Some(_v)) => _v, Ok(None) => return, Err(_) => { self.err = true; return; } };", // ...whose finite storage adds the BufferFull arm
+		"match core::str::from_utf8(_p) { Ok(_v) => _v, Err(_) => { self.inv = true; \"\" } }",                                          // strict UTF-8 -> INVALID, agrees with std (issue #85)
+		"self.err = true;", // fixed-capacity overflow flagged in the fill (generator#82)
 	} {
 		if !strings.Contains(n, want) {
 			t.Errorf("no_std message.rs missing %q", want)
@@ -159,6 +165,9 @@ func TestRustStructural(t *testing.T) {
 		"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]",
 		"String::from_utf8_lossy",
 		"if offset != 0 || chunk.len() < total { return; }",
+		"self.acc.extend_from_slice(chunk)",
+		"if offset == 0 && chunk.len() >= total {",
+		"if offset == 0 { self.acc.clear(); }",
 	} {
 		if strings.Contains(n, notWant) {
 			t.Errorf("no_std message.rs should not contain %q", notWant)

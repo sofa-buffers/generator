@@ -71,7 +71,7 @@ mod scalars_dec {
     pub fn decode(data: &[u8]) -> Scalars {
         let mut m = Scalars::default();
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0, acc: Vec::new(), err: false, inv: false, askip: 0 };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 };
             let mut is = IStream::new();
             let _ = is.feed(data, &mut v);
         }
@@ -84,7 +84,7 @@ mod scalars_dec {
         let invalid;
         let fed;
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0, acc: Vec::new(), err: false, inv: false, askip: 0 };
+            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 };
             let mut is = IStream::new();
             fed = is.feed(data, &mut v);
             overflow = v.err;
@@ -121,7 +121,6 @@ mod scalars_dec {
         stack: Vec<_Loc>,
         cur: _Loc,
         dead: u16,
-        acc: Vec<u8>,
         err: bool,
         inv: bool,
         askip: usize,
@@ -129,7 +128,7 @@ mod scalars_dec {
 
     impl Decoder {
         pub fn new() -> Self {
-            Self { m: Scalars::default(), is: IStream::new(), stack: Vec::new(), cur: _Loc::Root, dead: 0, acc: Vec::new(), err: false, inv: false, askip: 0 }
+            Self { m: Scalars::default(), is: IStream::new(), stack: Vec::new(), cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 }
         }
 
         /// Feed the next chunk. `Ok(())` if it ended on a field boundary,
@@ -137,14 +136,13 @@ mod scalars_dec {
         /// answers whether the MESSAGE is done, only whether these bytes were.
         pub fn feed(&mut self, chunk: &[u8]) -> Result<(), sofab::Error> {
             let fed = {
-                let mut v = V { m: &mut self.m, stack: core::mem::take(&mut self.stack), cur: self.cur, dead: self.dead, acc: core::mem::take(&mut self.acc), err: self.err, inv: self.inv, askip: self.askip };
+                let mut v = V { m: &mut self.m, stack: core::mem::take(&mut self.stack), cur: self.cur, dead: self.dead, err: self.err, inv: self.inv, askip: self.askip };
                 let r = self.is.feed(chunk, &mut v);
                 // `..` covers `m`, ending its borrow before the write-back.
-                let V { stack, cur, dead, acc, err, inv, askip, .. } = v;
+                let V { stack, cur, dead, err, inv, askip, .. } = v;
                 self.stack = stack;
                 self.cur = cur;
                 self.dead = dead;
-                self.acc = acc;
                 self.err = err;
                 self.inv = inv;
                 self.askip = askip;
@@ -186,7 +184,6 @@ struct V<'a> {
     stack: Vec<_Loc>,
     cur: _Loc,
     dead: u16, // depth of the skipped subtree cur sits in (see sequence_begin)
-    acc: Vec<u8>,
     err: bool,
     inv: bool,
     askip: usize, // elements left to discard from a wire-type-contradictory array
