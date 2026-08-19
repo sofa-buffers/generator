@@ -165,7 +165,7 @@ func overIndexGuard(cap int64, name string) string {
 	if cap < 0 {
 		return ""
 	}
-	return fmt.Sprintf("if (id >= %d) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"%s element: array index above schema capacity %d\")); ", cap, name, cap)
+	return fmt.Sprintf("if (id >= %d) throw Sofab.invalid(\"%s element: array index above schema capacity %d\"); ", cap, name, cap)
 }
 
 // locIndex maps a loc name to its index (for sequenceBegin targets).
@@ -215,10 +215,11 @@ func (g *gen) activeLimits(fs []frame) (limArr, limStr, limBlob bool) {
 	return limArr && g.limits.arrayHas, limStr && g.limits.stringHas, limBlob && g.limits.blobHas
 }
 
-// limitThrow renders the generator#102 rejection: same unchecked-wrapper shape
-// as the generator#100 schema guard (a Visitor callback cannot throw the
-// checked SofabException), but with the LIMIT_EXCEEDED category — a receiver
-// policy error, kept distinct from wire malformation.
+// limitThrow renders the generator#102 rejection: the same unchecked wrapper the
+// schema guards reach through Sofab.invalid (a Visitor callback cannot throw the
+// checked SofabException), but spelled out here because its category is
+// LIMIT_EXCEEDED — a receiver policy error, kept distinct from wire malformation,
+// and deliberately not covered by Sofab.invalid.
 func limitThrow(name, noun string, limit int64) string {
 	return fmt.Sprintf("throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, \"%s: %s %d\"));",
 		name, noun, limit)
@@ -277,13 +278,12 @@ func (g *gen) emitLenLimitGuard(f *jfile, fs []frame, kind ir.Kind, constName, n
 
 // maxlenThrow renders the schema-maxlen rejection (MESSAGE_SPEC §7.1): a bounded
 // string/blob whose wire byte length exceeds its declared maxlen is malformed
-// input, so it fails the decode with INVALID_MSG — the same unchecked-wrapper
-// channel java uses for the generator#100/#142 schema guards (a Visitor callback
-// cannot throw the checked SofabException), kept distinct from the generator#102
-// LIMIT_EXCEEDED receiver-policy cap on schema-unbounded fields.
+// input, so it fails the decode with INVALID_MSG — Sofab.invalid, the corelib's
+// unchecked channel for exactly this (a Visitor callback cannot throw the checked
+// SofabException), kept distinct from the generator#102 LIMIT_EXCEEDED
+// receiver-policy cap on schema-unbounded fields.
 func maxlenThrow(name, noun string, max int64) string {
-	return fmt.Sprintf("throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"%s: %s above schema maxlen %d\"));",
-		name, noun, max)
+	return fmt.Sprintf("throw Sofab.invalid(\"%s: %s above schema maxlen %d\");", name, noun, max)
 }
 
 // widthThrow renders the declared-width rejection (MESSAGE_SPEC §7.1,
@@ -313,13 +313,12 @@ func widthThrow(k ir.Kind, name string) string {
 	if lo < 0 {
 		cond = fmt.Sprintf("value < %dL || value > %dL", lo, hi)
 	}
-	return fmt.Sprintf("if (%s) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"%s: value outside declared width %s\")); ",
-		cond, name, k)
+	return fmt.Sprintf("if (%s) throw Sofab.invalid(\"%s: value outside declared width %s\"); ", cond, name, k)
 }
 
-// emitStringCb writes the string() visitor callback. Single-shot: when the whole
-// payload arrives in one chunk, decode straight from the input slice, skipping
-// the (synchronized) ByteArrayOutputStream.
+// emitStringCb writes the string() visitor callback: the destination gate, the
+// schema and receiver bounds, then the corelib accumulator that reassembles a
+// split payload and validates it.
 //
 // A message that declares no string at all still gets the callback — Visitor
 // declares it, and the corelib still delivers string fields to a message that
@@ -343,16 +342,11 @@ func (g *gen) emitStringCb(f *jfile, fs []frame, limStr bool) {
 		g.emitLenLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN", "string length", g.limits.stringLen)
 	}
 	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
-	f.line("        String _s;")
-	f.line("        if (offset == 0 && chunkLength >= total) {")
-	f.line("            _s = _utf8(data, chunkOffset, total);")
-	f.line("        } else {")
-	f.line("            if (acc == null) acc = new java.io.ByteArrayOutputStream();")
-	f.line("            acc.write(data, chunkOffset, chunkLength);")
-	f.line("            if (acc.size() < total) return;")
-	f.line("            _s = _utf8(acc.toByteArray(), 0, total);")
-	f.line("            acc.reset();")
-	f.line("        }")
+	// The accumulator answers a whole-in-one-chunk payload straight out of the
+	// input array and buffers only a split one, and validates UTF-8 once the
+	// payload is complete; null means more chunks are still to come.
+	f.line("        String _s = acc.string(total, offset, data, chunkOffset, chunkLength);")
+	f.line("        if (_s == null) return;")
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindString {
@@ -419,8 +413,8 @@ func kindDests(fs []frame, kind ir.Kind) []destFrame {
 // string, falls through; anything else returns right here.
 //
 // Returning here is what makes the skip a true skip: an unknown id, or a §7.3
-// wire-type contradiction routed down the same path, never reaches _utf8() and
-// never enters the shared `acc` (so a later declared field cannot inherit its
+// wire-type contradiction routed down the same path, is never validated and never
+// enters the shared accumulator (so a later declared field cannot inherit its
 // bytes). Without it a lone continuation byte at an undeclared id turned an
 // otherwise valid message into INVALID_MSG.
 //
@@ -679,8 +673,7 @@ func (g *gen) emitArraySkipGuard(f *jfile) {
 
 func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
-	primBases := primArrayBasesUsed(fs) // "long"/"float"/"double" element bases needing lazy growth
-	hasPrim := len(primBases) > 0
+	hasPrim := len(primArrayBasesUsed(fs)) > 0    // any primitive-array field: needs the ai/acap fill cursor
 	limArr, limStr, limBlob := g.activeLimits(fs) // per-visitor decode limits (generator#102)
 
 	f.line("class %sVisitor implements Visitor {", name)
@@ -722,10 +715,10 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	if hasPrim {
 		// The wire-supplied element count is UNTRUSTED: a malformed message can
 		// claim ~2^31 elements, so we never allocate `new T[count]` up front (that
-		// is an OutOfMemoryError DoS — see generator issue #96). Instead reserve a
-		// small backing array and grow it as elements actually arrive, capped at
-		// `acap` (the declared count) so the array still ends exactly right-sized.
-		f.line("    private static final int ARRAY_INIT_CAP = 16; // bounded eager reservation; grow lazily")
+		// is an OutOfMemoryError DoS — see generator issue #96). Instead reserve
+		// Seq.ARRAY_INIT_CAP elements and let Seq.ensureCap grow the array as they
+		// actually arrive, capped at `acap` (the declared count) so it still ends
+		// exactly right-sized.
 		f.line("    private int acap = 0;               // declared element count = growth ceiling for the array being filled")
 	}
 	f.line("    private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)")
@@ -745,7 +738,10 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	for _, base := range primRowBasesUsed(fs) {
 		f.line("    private %s[] %s = %s;  // primitive matrix row currently being filled", base, rowCursor(base), emptyPrimFor(base))
 	}
-	f.line("    private java.io.ByteArrayOutputStream acc; // lazy: only split string/blob payloads need it")
+	// One accumulator per visitor, as PayloadAcc documents: a payload arriving in
+	// one chunk never touches its buffer, so holding it costs nothing until a
+	// string or blob is actually split.
+	f.line("    private final PayloadAcc acc = new PayloadAcc();")
 	if limArr || limStr || limBlob {
 		// Emitted only for the limits that are configured AND have at least one
 		// schema-unbounded field in this message, so an unset or inert key changes
@@ -820,50 +816,25 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		return "", false
 	})
 
-	// Strict UTF-8 decode (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4): a `string` is
-	// UTF-8 and Java's String is a Unicode type, so it is always strict — the
-	// platform `new String(bytes, UTF_8)` is LOSSY (substitutes U+FFFD), which
-	// §8 forbids in every mode. Validity is a property of the complete payload, so
-	// the check runs once the full `total` bytes are present.
-	//
-	// Rather than a REPORTing CharsetDecoder (which allocates a fresh decoder +
-	// CharBuffer per call — ~52 ns/string, dominated by that setup), validate the
-	// bytes with an allocation-free well-formedness scan and, when they are valid,
-	// hand them to the JVM-intrinsic `new String(b, off, len, UTF_8)` (vectorized,
-	// and with valid input it never substitutes). This mirrors protobuf-java's
-	// hand-rolled Utf8 validator + intrinsic decode and measured ~43 % faster on
-	// the arena strings, at zero per-string allocation. The scan itself is
-	// sofab.Utf8.valid, which accepts exactly well-formed UTF-8 (RFC 3629) — the
-	// same set the fatal decoder rejects.
-	f.line("    private static String _utf8(byte[] b, int off, int len) {")
-	f.line("        if (Utf8.valid(b, off, off + len)) return new String(b, off, len, java.nio.charset.StandardCharsets.UTF_8);")
-	f.line("        throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"string: invalid UTF-8\"));")
-	f.line("    }")
+	// Strict UTF-8 decode (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4) is the corelib's
+	// Utf8.decode, reached through the accumulator: a `string` is UTF-8 and Java's
+	// String is a Unicode type, so the platform `new String(bytes, UTF_8)` -- which
+	// substitutes U+FFFD -- can never be what a payload is materialized with.
 
 	// Every schema bound the LENGTH WORD already decides, latched at that word
 	// rather than once payload bytes arrive.
 	g.emitFixlenBegin(f, fs)
 
-	// string. Single-shot: when the whole payload arrives in one chunk, decode
-	// straight from the input slice, skipping the (synchronized) ByteArrayOutputStream.
 	g.emitStringCb(f, fs, limStr)
 
-	// blob. Single-shot on the whole-in-one-chunk fast path (see string).
+	// blob, through the same accumulator.
 	f.line("    public void blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
 	if limBlob {
 		g.emitLenLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN", "blob length", g.limits.blobLen)
 	}
 	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
-	f.line("        byte[] _b;")
-	f.line("        if (offset == 0 && chunkLength >= total) {")
-	f.line("            _b = java.util.Arrays.copyOfRange(data, chunkOffset, chunkOffset + total);")
-	f.line("        } else {")
-	f.line("            if (acc == null) acc = new java.io.ByteArrayOutputStream();")
-	f.line("            acc.write(data, chunkOffset, chunkLength);")
-	f.line("            if (acc.size() < total) return;")
-	f.line("            _b = acc.toByteArray();")
-	f.line("            acc.reset();")
-	f.line("        }")
+	f.line("        byte[] _b = acc.blob(total, offset, data, chunkOffset, chunkLength);")
+	f.line("        if (_b == null) return;")
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindBlob {
@@ -954,11 +925,11 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 				// OUTER array's capacity, and nothing here has bounded the row's own
 				// element count -- so the reservation stays untrusted-count-safe (#96)
 				// and the fill grows it.
-				f.line("        case %d: %s%s = Sbuf.placeRow%s(%s, id, Math.min(count, ARRAY_INIT_CAP)); %s = id; break;",
-					fr.idx, arm, rowCursor(base), exported(base), fr.listExpr, elemIdxVar(fr.loc))
+				f.line("        case %d: %s%s = Seq.%s(%s, id, Math.min(count, Seq.ARRAY_INIT_CAP)); %s = id; break;",
+					fr.idx, arm, rowCursor(base), reserveRowFn(base), fr.listExpr, elemIdxVar(fr.loc))
 				continue
 			}
-			f.line("        case %d: %sSbuf.placeRow(%s, id); %s = id; break;", fr.idx, arm, fr.listExpr, elemIdxVar(fr.loc))
+			f.line("        case %d: %sSeq.reserveRow(%s, id); %s = id; break;", fr.idx, arm, fr.listExpr, elemIdxVar(fr.loc))
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -991,7 +962,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			cap := int64(-1)
 			if fld.HasCount {
 				cap = fld.Count
-				guard = fmt.Sprintf("if (count > %d) throw new java.io.UncheckedIOException(new SofabException(SofabError.INVALID_MSG, \"%s: array count above schema capacity %d\")); ",
+				guard = fmt.Sprintf("if (count > %d) throw Sofab.invalid(\"%s: array count above schema capacity %d\"); ",
 					fld.Count, fld.Name, fld.Count)
 			} else if limArr {
 				guard = limitThrowGuard("count > MAX_DYN_ARRAY_COUNT", fld.Name, "array count above configured limit", g.limits.arrayCount) + " "
@@ -1054,7 +1025,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// interior gap (an omitted all-default row, §2) then shifts every later
 			// row down by one. An array wrapper IS the array's value, so a REOPENED
 			// row id replaces the row rather than merging into it (§7.4).
-			f.line("        case %d: %sSbuf.placeRow(%s, id); %s = id; cur = %d; break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
+			f.line("        case %d: %sSeq.reserveRow(%s, id); %s = id; cur = %d; break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkNormal:
 			var arms []string
 			for _, fld := range fr.fields {
@@ -1082,33 +1053,20 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	f.line("        }")
 	f.line("    }")
 	g.emitSequenceEnd(f)
-	// Lazy-growth helper(s): enlarge the backing array to hold index `i`, doubling
-	// but never exceeding `cap` (the declared element count) so a valid array ends
-	// exactly right-sized. Growth tracks elements actually delivered, so an
-	// untrusted count cannot force an up-front over-allocation (#96).
-	for _, base := range primBases {
-		f.line("    private static %s[] ensureCap(%s[] a, int i, int cap) {", base, base)
-		f.line("        if (i < a.length) return a;")
-		f.line("        long n = (long) a.length * 2;")
-		f.line("        if (n < i + 1) n = i + 1;")
-		f.line("        if (n > cap) n = cap;")
-		f.line("        return java.util.Arrays.copyOf(a, (int) n);")
-		f.line("    }")
-	}
 	f.line("}")
 	f.blank()
 }
 
 // primArrayBasesUsed returns the distinct Java primitive element bases
 // ("long"/"float"/"double") of the primitive-array fields across all frames, in
-// a stable order, so emitVisitor can emit exactly the ensureCap overloads it needs.
+// a stable order. Non-empty means the visitor fills a primitive array at all.
 func primArrayBasesUsed(fs []frame) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, order := range primBaseOrder {
 		for _, fr := range fs {
 			// A native-matrix ROW is a primitive array too (List<long[]>), grown by
-			// the same ensureCap and indexed by the same ai/acap as a top-level one.
+			// the same Seq.ensureCap and indexed by the same ai/acap as a top-level one.
 			if fr.kind == fkNativeMat && primitiveArrayElem(fr.innerElem) &&
 				primArrayBase(fr.innerElem) == order && !seen[order] {
 				seen[order] = true
@@ -1130,11 +1088,11 @@ func primArrayBasesUsed(fs []frame) []string {
 }
 
 // primBaseOrder is every Java primitive an array field can be backed by, in a
-// fixed order so the emitted ensureCap overloads and row cursors come out stable.
+// fixed order so the emitted row cursors come out stable.
 var primBaseOrder = []string{"byte", "short", "int", "long", "float", "double"}
 
 // primRowBasesUsed is primArrayBasesUsed restricted to native-matrix ROWS: the
-// bases needing a `_arow<B>` cursor field and a Sbuf.placeRow<B> factory.
+// bases needing a `_arow<B>` cursor field and a Seq.reserveRow<B>s factory.
 func primRowBasesUsed(fs []frame) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -1283,19 +1241,21 @@ func armFill(fs []frame, fr *frame, fld *ir.Field) string {
 
 // reserveExpr is the backing-store length arrayBegin reserves for an array whose
 // schema capacity is cap (-1 == unbounded). The wire count is UNTRUSTED, so the
-// reservation is capped at ARRAY_INIT_CAP and the fill grows from there (#96) --
-// except when the schema capacity is already at or below that cap, where the
+// reservation is capped at Seq.ARRAY_INIT_CAP and the fill grows from there (#96)
+// -- except when the schema capacity is already at or below that cap, where the
 // count guard above has just proved count <= cap <= ARRAY_INIT_CAP and the
 // Math.min can only return count.
 func reserveExpr(cap int64) string {
 	if cap >= 0 && cap <= arrayInitCap {
 		return "count"
 	}
-	return "Math.min(count, ARRAY_INIT_CAP)"
+	return "Math.min(count, Seq.ARRAY_INIT_CAP)"
 }
 
-// arrayInitCap is the generated ARRAY_INIT_CAP: the bounded eager reservation a
-// decode makes for an array before any element has arrived.
+// arrayInitCap mirrors the corelib's Seq.ARRAY_INIT_CAP: the bounded eager
+// reservation a decode makes for an array before any element has arrived. Held
+// here only so reserveExpr can fold the Math.min away when the schema capacity is
+// already at or below it; the value that reaches the wire path is the corelib's.
 const arrayInitCap = 16
 
 // rowCursor is the visitor field holding the primitive matrix row currently being
@@ -1304,6 +1264,16 @@ const arrayInitCap = 16
 // back through List.set -- is per-element work for a reference that changes at most
 // log2(count) times. arrayBegin parks it here; only a growth writes it back.
 func rowCursor(base string) string { return "_arow" + strings.ToUpper(base[:1]) + base[1:] }
+
+// reserveRowFn is the corelib factory that places a primitive matrix row of the
+// given element base: Seq.reserveRowBytes, reserveRowShorts and so on. The corelib
+// spells the suffix in the plural, after the element type rather than the array.
+func reserveRowFn(base string) string {
+	if base == "byte" {
+		return "reserveRowBytes"
+	}
+	return "reserveRow" + strings.ToUpper(base[:1]) + base[1:] + "s"
+}
 
 // emitScalarCb writes a callback that routes (cur,id) to a field assignment or a
 // list .add. action() returns "= value" / "add" / "addBool" / "setBool" /
@@ -1384,7 +1354,7 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 				// reference back into the List only when growth actually replaced it.
 				cur := rowCursor(primArrayBase(fr.innerElem))
 				arms = append(arms, arm{ids[-1], fmt.Sprintf(
-					"%sif (ai >= %s.length) { %s = ensureCap(%s, ai, acap); %s.set(%s, %s); } %s[ai++] = %svalue",
+					"%sif (ai >= %s.length) { %s = Seq.ensureCap(%s, ai, acap); %s.set(%s, %s); } %s[ai++] = %svalue",
 					widthThrow(fr.innerElem, fr.loc+" element"), cur, cur, cur, fr.listExpr, elemIdxVar(fr.loc), cur, cur,
 					primArrayCast(fr.innerElem))})
 				continue
@@ -1414,13 +1384,13 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 			// the announced count, so a valid array ends exactly M long.
 			//
 			// The growth call is behind its own `ai >= length` test rather than
-			// assigning ensureCap's result unconditionally. ensureCap already returns
-			// the same array when nothing grows, but ASSIGNING it is a reference store
+			// assigning Seq.ensureCap's result unconditionally. It already returns the
+			// same array when nothing grows, but ASSIGNING it is a reference store
 			// into the message object -- a putfield plus the GC's card-marking write
 			// barrier -- on every element of every array, for a pointer that changes
 			// at most log2(count) times.
 			arms = append(arms, arm{code, widthThrow(fld.Elem, fld.Name+" element") +
-				"if (ai >= " + target + ".length) " + target + " = ensureCap(" + target + ", ai, acap); " +
+				"if (ai >= " + target + ".length) " + target + " = Seq.ensureCap(" + target + ", ai, acap); " +
 				target + "[ai++] = " + primArrayCast(fld.Elem) + "value"})
 		}
 	}
