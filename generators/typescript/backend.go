@@ -154,6 +154,10 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
 	use := g.scanHelpers(s)
+	// Which wrapper-sequence collectors the schema reaches decides both an import
+	// (the corelib's StringSeq / BlobSeq) and an emission (the ones with no corelib
+	// counterpart), so it is scanned once here and handed to both.
+	stream := g.scanStreamUse(s)
 	imports := []string{"OStream", "Cursor"}
 	if decodesAnyField(s) {
 		// The per-field wire-type guard in the pull decoder (issue #160) references
@@ -183,12 +187,35 @@ func (g *gen) module(s *ir.Schema) []byte {
 		// throw SofabError.
 		imports = append(imports, "SofabError", "SofabErrorCode")
 	}
+	if use.elemEq {
+		// The element-wise not-equal-to-default test the sparse-canonical serialize
+		// takes before it writes a leaf array (corelib-ts#151).
+		imports = append(imports, "elementsEqual")
+	}
 	if decodesAnyField(s) {
 		// The streaming decoder (streamdecode.go): a push Visitor over the
-		// corelib's resumable IStream. SofabError/SofabErrorCode come with it too
-		// -- finish() reports a truncated stream -- so make sure they are present
-		// even for a schema whose cursor path needed no reject.
-		imports = append(imports, "Visitor", "IStream", "DecodeStatus", "ArrayKind")
+		// corelib's resumable IStream, driven with the corelib's payload
+		// accumulator. SofabError/SofabErrorCode come with it too -- finish()
+		// reports a truncated stream -- so make sure they are present even for a
+		// schema whose cursor path needed no reject.
+		imports = append(imports, "Visitor", "IStream", "DecodeStatus", "ArrayKind", "PayloadAcc")
+		if g.streamLongs() {
+			// The child a sequenceBegin hands back may be a corelib collector, which
+			// is a plain Visitor whatever channel the root chose -- see childVis.
+			imports = append(imports, "AnyVisitor")
+		}
+		if schemaHasStringField(s) {
+			// A string payload reaches the visitor as raw wire bytes, so the store
+			// site transcodes it with the corelib's strict decoder. A string ARRAY
+			// needs no import of its own: StringSeq decodes its elements itself.
+			imports = append(imports, "decodeUtf8")
+		}
+		if stream.str {
+			imports = append(imports, "StringSeq")
+		}
+		if stream.blob {
+			imports = append(imports, "BlobSeq")
+		}
 		if !slices.Contains(imports, "SofabError") {
 			imports = append(imports, "SofabError", "SofabErrorCode")
 		}
@@ -220,10 +247,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("// frozen: the caps above are constants, so this is built once rather than")
 		f.line("// re-allocated on every decode.")
 		f.line("const _LIMITS = Object.freeze({ %s });", strings.Join(g.limitFields(), ", "))
-		f.blank()
-	}
-	if use.arrEq {
-		f.line("%s", arrEqHelper)
 		f.blank()
 	}
 	if use.longArrEq {
@@ -266,7 +289,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	// visitor per object type, and a public Decoder per message.
 	if decodesAnyField(s) {
 		g.emitStreamPrelude(f, s)
-		g.emitStreamCollectors(f, g.scanStreamUse(s))
+		g.emitStreamCollectors(f, stream)
 		for _, key := range s.NamedOrder {
 			nt := s.Named[key]
 			if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
@@ -551,7 +574,7 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 		}
 	case ir.KindBlob:
 		if blobHasNonEmptyDefault(fld) {
-			return fmt.Sprintf("arrEq(%s, %s)", acc, g.tsDefault(fld))
+			return fmt.Sprintf("elementsEqual(%s, %s)", acc, g.tsDefault(fld))
 		}
 		return fmt.Sprintf("%s.length === 0", acc)
 	case ir.KindStruct, ir.KindUnion:
@@ -574,7 +597,7 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	if nativeArrayElem(fld.Elem) {
 		if def, ok := g.nativeArrayDefault(fld); ok {
-			eq := "arrEq"
+			eq := "elementsEqual"
 			if g.longBacked(fld) {
 				eq = "longArrEq"
 			}
@@ -647,9 +670,9 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 	case ir.KindBlob:
 		// blob is a leaf: omit when equal to its default (empty if none). An empty
 		// default tests emptiness directly (no per-encode `new Uint8Array()` to
-		// compare against); a non-empty default needs an element-wise arrEq.
+		// compare against); a non-empty default needs an element-wise elementsEqual.
 		if blobHasNonEmptyDefault(fld) {
-			f.line("    if (!arrEq(%s, %s)) {", acc, g.tsDefault(fld))
+			f.line("    if (!elementsEqual(%s, %s)) {", acc, g.tsDefault(fld))
 		} else {
 			f.line("    if (%s.length !== 0) {", acc)
 		}
@@ -702,8 +725,8 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 	if nativeArrayElem(fld.Elem) {
 		if def, ok := g.nativeArrayDefault(fld); ok {
 			// Long elements are object identities: compare with the (low, high)
-			// word-pair helper instead of arrEq's element !==.
-			eq := "arrEq"
+			// word-pair helper instead of elementsEqual's element !==.
+			eq := "elementsEqual"
 			if g.longBacked(fld) {
 				eq = "longArrEq"
 			}
