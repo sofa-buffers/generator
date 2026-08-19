@@ -115,8 +115,8 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 }
 
 // hasObject reports whether the schema emits at least one struct/union/message —
-// i.e. at least one sofab.Visitor implementation, so the shared decode prelude
-// (_visitorBase, narrow helpers, sequence collectors) is needed.
+// i.e. at least one sofab.Visitor implementation, so the once-per-package prelude
+// (the isDefault contract, the receiver-side limit constants) is needed.
 func (g *gen) hasObject() bool {
 	if len(g.schema.Messages) > 0 {
 		return true
@@ -130,299 +130,21 @@ func (g *gen) hasObject() bool {
 	return false
 }
 
-// preludeFile is the once-per-package decode support: the no-op _visitorBase that
-// every generated object embeds and the collector visitors that gather the
-// elements of a wrapper-sequence array. These are schema-independent, so the
-// whole set is emitted unconditionally (unused generic types/functions are legal
-// Go) and shared by every message file.
+// preludeFile is the once-per-package decode support. Everything in it that was
+// schema-independent -- the no-op visitor base, the string/blob/object/nested
+// collectors, row placement and the matrix collectors -- is corelib-go's now
+// (sofab.VisitorBase, sofab.StringSeq and siblings, generator#345), so what is
+// left is what names a GENERATED symbol: the isDefault contract, plus the
+// receiver-side limit constants the config bakes in.
 func (g *gen) preludeFile() []byte {
 	f := newGoFile(g.pkg)
-	f.imp(corelibImport)
-	f.line(`// _visitorBase supplies no-op defaults for every sofab.Visitor method, so a
-// generated object overrides only the callbacks its fields actually use.
-type _visitorBase struct{}
-
-func (_visitorBase) Unsigned(sofab.ID, uint64) error               { return nil }
-func (_visitorBase) Signed(sofab.ID, int64) error                  { return nil }
-func (_visitorBase) Float32(sofab.ID, float32) error               { return nil }
-func (_visitorBase) Float64(sofab.ID, float64) error               { return nil }
-func (_visitorBase) String(sofab.ID, string) error                 { return nil }
-func (_visitorBase) Bytes(sofab.ID, []byte) error                  { return nil }
-func (_visitorBase) UnsignedArray(sofab.ID, []uint64) error        { return nil }
-func (_visitorBase) SignedArray(sofab.ID, []int64) error           { return nil }
-func (_visitorBase) Float32Array(sofab.ID, []float32) error        { return nil }
-func (_visitorBase) Float64Array(sofab.ID, []float64) error        { return nil }
-func (_visitorBase) BeginSequence(sofab.ID) (sofab.Visitor, error) { return _visitorBase{}, nil }
-func (_visitorBase) EndSequence() error                            { return nil }
-
-// _strSeq / _bytesSeq collect the elements of a string / blob array. Elements are
-// keyed by index id: an INTERIOR element equal to the element default is omitted
-// on the wire, so we place each value at its id and fill any gap with the element
-// default ("" / nil). The array's LAST element is always on the wire, so the
-// decoded length -- highest present id + 1 -- is exact. Blob copies (the corelib
-// value aliases the decode buffer).
-// cap is the schema count bound N (-1 == dynamic/unbounded). N is a CAPACITY, not
-// a length: it never reaches the wire and never adds elements the wire did not
-// carry. All it does here is bound the array -- an element id >= N is a
-// schema-bound violation (INVALID, never grown-into) -- rejected before the slice
-// grows, which also bounds the id-keyed fill against an over-index amplification
-// DoS.
-// emax is the schema element maxlen bound (-1 == unbounded): an element whose
-// wire byte length exceeds emax is malformed input,
-// rejected as INVALID before the slice grows - never silently truncated.
-type _strSeq struct {
-	_visitorBase
-	out  *[]string
-	cap  int
-	emax int
-}
-
-// The element's schema bounds are decided at the LENGTH WORD, before a byte of
-// payload is taken. S5.2 makes INVALID dominate INCOMPLETE, so a message
-// truncated right after the word carrying the violating number must still be
-// INVALID -- deciding it in String(), which never runs for such a message,
-// reported INCOMPLETE instead.
-//
-// Both bounds sit inside the declared-subtype test: FixlenHeader fires for ANY
-// fixlen subtype at this id, and an element whose subtype contradicts the
-// declaration was never this array's value (S7.3), so neither its id nor its
-// length may be measured against this array's bounds.
-//
-// ArrayBegin comes along because sofab.HeaderVisitor declares both and the cursor
-// reaches them through ONE type assertion -- implementing only one leaves the
-// assertion failing and silently disables the other hook.
-func (s *_strSeq) ArrayBegin(sofab.ID, sofab.ArrayKind, int) error { return nil }
-
-func (s *_strSeq) FixlenHeader(id sofab.ID, subtype, length int) error {
-	if subtype != 2 {
-		return nil
-	}
-	if s.cap >= 0 && int(id) >= s.cap {
-		return sofab.ErrInvalidMsg
-	}
-	if s.emax >= 0 && length > s.emax {
-		return sofab.ErrInvalidMsg
-	}
-	return nil
-}
-
-func (s *_strSeq) String(id sofab.ID, v string) error {
-	if s.cap >= 0 && int(id) >= s.cap {
-		return sofab.ErrInvalidMsg
-	}
-	if s.emax >= 0 && len(v) > s.emax {
-		return sofab.ErrInvalidMsg
-	}
-	// The element is being materialized, so this is where its UTF-8 is checked.
-	// A payload the decoder skips never reaches a collector at all, which is
-	// exactly the point: validation follows the destination, not the wire.
-	if !sofab.UTF8Valid([]byte(v)) {
-		return sofab.ErrInvalidMsg
-	}
-	for len(*s.out) <= int(id) {
-		*s.out = append(*s.out, "")
-	}
-	(*s.out)[id] = v
-	return nil
-}
-
-type _bytesSeq struct {
-	_visitorBase
-	out  *[][]byte
-	cap  int
-	emax int
-}
-
-// The blob twin of the string collector above: bounds latched at the length word,
-// gated on the declared subtype, with ArrayBegin alongside for the one assertion.
-func (s *_bytesSeq) ArrayBegin(sofab.ID, sofab.ArrayKind, int) error { return nil }
-
-func (s *_bytesSeq) FixlenHeader(id sofab.ID, subtype, length int) error {
-	if subtype != 3 {
-		return nil
-	}
-	if s.cap >= 0 && int(id) >= s.cap {
-		return sofab.ErrInvalidMsg
-	}
-	if s.emax >= 0 && length > s.emax {
-		return sofab.ErrInvalidMsg
-	}
-	return nil
-}
-
-func (s *_bytesSeq) Bytes(id sofab.ID, v []byte) error {
-	if s.cap >= 0 && int(id) >= s.cap {
-		return sofab.ErrInvalidMsg
-	}
-	if s.emax >= 0 && len(v) > s.emax {
-		return sofab.ErrInvalidMsg
-	}
-	for len(*s.out) <= int(id) {
-		*s.out = append(*s.out, nil)
-	}
-	(*s.out)[id] = append([]byte(nil), v...)
-	return nil
-}
-
-// _objSeq collects the elements of a struct/union array: each element is a nested
-// sequence decoded into the element the child id names (PT is *T and a Visitor).
-// The element id IS the array index (S5.1), exactly as for the _strSeq/_bytesSeq
-// leaf paths above, so the element is PLACED at out[id] after gap-filling with
-// default elements -- never appended. Appending would shorten the array by the
-// size of any interior id gap -- and an omitted all-default interior element is
-// exactly such a gap -- and would decode a REOPENED id as a second element
-// instead of merging into the first (S7.4). An element id >= cap (schema count N)
-// is rejected as INVALID (S5.1/S7), which also bounds the gap-fill.
-type _objSeq[T any, PT interface {
-	*T
-	sofab.Visitor
-}] struct {
-	_visitorBase
-	out *[]T
-	cap int
-}
-
-func (s *_objSeq[T, PT]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
-	if s.cap >= 0 && int(id) >= s.cap {
-		return nil, sofab.ErrInvalidMsg
-	}
-	var zero T
-	for len(*s.out) <= int(id) {
-		*s.out = append(*s.out, zero)
-	}
-	return PT(&(*s.out)[id]), nil
-}
-
-// _isDefaulter is implemented by every generated struct/union type: isDefault
+	f.line(`// _isDefaulter is implemented by every generated struct/union type: isDefault
 // reports whether the object equals its declared default, compared per child
 // field and recursively (S2) -- never as a byte image. It is the explicit form of
 // the predicate lazy framing applies implicitly ("not one child was written"),
 // generated from the very same per-field expressions the writer uses so the two
 // cannot drift apart.
-type _isDefaulter interface{ isDefault() bool }
-
-// _placeRow stores a decoded row of a matrix (an array whose elements are native
-// arrays) at the index its element id names, growing the outer slice with empty
-// rows so an id GAP decodes as an empty row instead of shifting every later row
-// down by one. Gaps are ordinary here: an interior row equal to the element
-// default (the empty row) is omitted by a conformant encoder (S2), and only the
-// LAST row is guaranteed present -- which is what makes the decoded length,
-// highest present id + 1, exact.
-//
-// cap is the outer array's schema count bound N (-1 == unbounded). N is a
-// capacity: it bounds the array (a row id >= N is INVALID, S5.1/S7) but never
-// adds rows. Rejecting before the grow also bounds the id-keyed fill against an
-// over-index amplification DoS.
-func _placeRow[T any](out *[][]T, cap int, id sofab.ID, row []T) error {
-	if cap >= 0 && int(id) >= cap {
-		return sofab.ErrInvalidMsg
-	}
-	for len(*out) <= int(id) {
-		*out = append(*out, nil)
-	}
-	(*out)[id] = row
-	return nil
-}
-
-// _uMatSeq / _sMatSeq / _f32MatSeq / _f64MatSeq / _boolMatSeq collect the rows of
-// a matrix (array whose elements are native arrays); each row arrives widened.
-// hi/lo are the width the schema declares for a row's elements. The conversion
-// below only masks, so an element outside that width has to be rejected here or
-// it would be stored as a different value than the wire carried.
-//
-// A zero bound means the element type spans the whole range this callback can
-// deliver, so nothing can fall outside it and the scan is skipped.
-type _uMatSeq[T ~uint8 | ~uint16 | ~uint32 | ~uint64] struct {
-	_visitorBase
-	out *[][]T
-	cap int
-	hi  uint64
-}
-
-func (s *_uMatSeq[T]) UnsignedArray(id sofab.ID, v []uint64) error {
-	if s.hi != 0 {
-		for _, _x := range v {
-			if _x > s.hi {
-				return sofab.ErrInvalidMsg
-			}
-		}
-	}
-	return _placeRow(s.out, s.cap, id, sofab.NarrowUnsigned[T](v))
-}
-
-type _sMatSeq[T ~int8 | ~int16 | ~int32 | ~int64] struct {
-	_visitorBase
-	out *[][]T
-	cap int
-	lo  int64
-	hi  int64
-}
-
-func (s *_sMatSeq[T]) SignedArray(id sofab.ID, v []int64) error {
-	if s.lo != 0 {
-		for _, _x := range v {
-			if _x < s.lo || _x > s.hi {
-				return sofab.ErrInvalidMsg
-			}
-		}
-	}
-	return _placeRow(s.out, s.cap, id, sofab.NarrowSigned[T](v))
-}
-
-type _f32MatSeq struct {
-	_visitorBase
-	out *[][]float32
-	cap int
-}
-
-func (s *_f32MatSeq) Float32Array(id sofab.ID, v []float32) error {
-	return _placeRow(s.out, s.cap, id, v)
-}
-
-type _f64MatSeq struct {
-	_visitorBase
-	out *[][]float64
-	cap int
-}
-
-func (s *_f64MatSeq) Float64Array(id sofab.ID, v []float64) error {
-	return _placeRow(s.out, s.cap, id, v)
-}
-
-type _boolMatSeq struct {
-	_visitorBase
-	out *[][]bool
-	cap int
-}
-
-func (s *_boolMatSeq) UnsignedArray(id sofab.ID, v []uint64) error {
-	row := make([]bool, len(v))
-	for i, x := range v {
-		row[i] = x != 0
-	}
-	return _placeRow(s.out, s.cap, id, row)
-}
-
-// _seqSeq collects an array whose elements are themselves wrapper-sequence arrays:
-// each element opens a sequence collected into the inner slice its element id
-// names, by mk. Placed at out[id], never appended, for the same reason as
-// _placeRow above: an omitted all-default interior row leaves an id gap.
-type _seqSeq[T any] struct {
-	_visitorBase
-	out *[][]T
-	cap int
-	mk  func(*[]T) sofab.Visitor
-}
-
-func (s *_seqSeq[T]) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
-	if s.cap >= 0 && int(id) >= s.cap {
-		return nil, sofab.ErrInvalidMsg
-	}
-	for len(*s.out) <= int(id) {
-		*s.out = append(*s.out, nil)
-	}
-	return s.mk(&(*s.out)[id]), nil
-}`)
+type _isDefaulter interface{ isDefault() bool }`)
 	if g.limits.any() {
 		f.blank()
 		f.line("// Receiver-side decode limits, baked from the sofabgen config")
@@ -530,8 +252,8 @@ func (g *gen) emitBitfield(f *gofile, nt *ir.NamedType) {
 }
 
 // emitObject emits a struct + marshal + a sofab.Visitor decode implementation
-// for an id scope. Decode is push/visitor: the struct embeds _visitorBase (no-op
-// defaults) and overrides the callbacks its fields need.
+// for an id scope. Decode is push/visitor: the struct embeds sofab.VisitorBase
+// (no-op defaults) and overrides the callbacks its fields need.
 //
 // One visitor, two entry points. DecodeX runs the corelib's zero-copy
 // AcceptBytes cursor over a buffer the caller already holds; DecodeXFrom runs
@@ -542,7 +264,7 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 	f.imp(corelibImport)
 	f.line("// %s is a generated SofaBuffers object.", typeName)
 	f.line("type %s struct {", typeName)
-	f.line("\t_visitorBase")
+	f.line("\tsofab.VisitorBase")
 	// Declare fields widest-first to minimise struct padding; marshal/decode stay
 	// in schema/id order, so the wire bytes are unchanged.
 	for _, fld := range ir.SortedForLayout(fields) {
@@ -921,7 +643,7 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 // narrow to the declared element width; nested structs/unions and every
 // wrapper-sequence array descend via BeginSequence into a child visitor (a
 // nested object, or a collector from arrayCollector). Unused callbacks fall back
-// to the embedded _visitorBase no-ops.
+// to the embedded sofab.VisitorBase no-ops.
 func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field) {
 	recv := "func (m *" + typeName + ") "
 
@@ -1128,7 +850,7 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			f.line("\t%s", a)
 		}
 		f.line("\t}")
-		f.line("\treturn _visitorBase{}, nil")
+		f.line("\treturn sofab.VisitorBase{}, nil")
 		f.line("}")
 		f.blank()
 	}
@@ -1136,7 +858,7 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 
 // emitIDSwitch emits `func … { switch id { <arms> }; return nil }` for a scalar/
 // native-array callback, or nothing when the type has no field for it (the
-// embedded _visitorBase no-op then applies).
+// embedded sofab.VisitorBase no-op then applies).
 func emitIDSwitch(f *gofile, recv, sig string, arms []string) {
 	if len(arms) == 0 {
 		return
@@ -1194,12 +916,12 @@ func (g *gen) narrowArrayStmt(acc string, elem ir.Kind, ref *ir.TypeRef) string 
 func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64) string {
 	switch elem {
 	case ir.KindString:
-		return fmt.Sprintf("&_strSeq{out: %s, cap: %d, emax: %d}", ptr, cap, emax)
+		return fmt.Sprintf("&sofab.StringSeq{Out: %s, Cap: %d, ElemMax: %d}", ptr, cap, emax)
 	case ir.KindBlob:
-		return fmt.Sprintf("&_bytesSeq{out: %s, cap: %d, emax: %d}", ptr, cap, emax)
+		return fmt.Sprintf("&sofab.BlobSeq{Out: %s, Cap: %d, ElemMax: %d}", ptr, cap, emax)
 	case ir.KindStruct, ir.KindUnion:
 		t := g.typeName(ref.Key)
-		return fmt.Sprintf("&_objSeq[%s, *%s]{out: %s, cap: %d}", t, t, ptr, cap)
+		return fmt.Sprintf("&sofab.MessageSeq[%s, *%s]{Out: %s, Cap: %d}", t, t, ptr, cap)
 	case ir.KindArray:
 		if isNativeArrayElem(items.Elem) {
 			return g.matrixCollector(ptr, items.Elem, items.ElemRef, cap)
@@ -1209,9 +931,9 @@ func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *i
 		// inner collector carries the inner array's own count bound.
 		inner := g.goArrayElem(items.Elem, items.ElemRef, items.ElemItems)
 		mk := g.arrayCollector("p", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), emaxOf(items.ElemMaxHas, items.ElemMax))
-		return fmt.Sprintf("&_seqSeq[%s]{out: %s, cap: %d, mk: func(p *[]%s) sofab.Visitor { return %s }}", inner, ptr, cap, inner, mk)
+		return fmt.Sprintf("&sofab.NestedSeq[%s]{Out: %s, Cap: %d, Make: func(p *[]%s) sofab.Visitor { return %s }}", inner, ptr, cap, inner, mk)
 	}
-	return "_visitorBase{}"
+	return "sofab.VisitorBase{}"
 }
 
 // capOf maps a schema count bound to the collector's cap field: N when the array
@@ -1336,21 +1058,21 @@ func (g *gen) matrixCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, cap int
 	lo, hi, _ := ir.NarrowRange(elem)
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		return fmt.Sprintf("&_uMatSeq[%s]{out: %s, cap: %d, hi: %d}", goNumType(elem), ptr, cap, uint64(hi))
+		return fmt.Sprintf("&sofab.UnsignedMatrixSeq[%s]{Out: %s, Cap: %d, Hi: %d}", goNumType(elem), ptr, cap, uint64(hi))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		return fmt.Sprintf("&_sMatSeq[%s]{out: %s, cap: %d, lo: %d, hi: %d}", goNumType(elem), ptr, cap, lo, hi)
+		return fmt.Sprintf("&sofab.SignedMatrixSeq[%s]{Out: %s, Cap: %d, Lo: %d, Hi: %d}", goNumType(elem), ptr, cap, lo, hi)
 	case ir.KindBitfield:
-		return fmt.Sprintf("&_uMatSeq[%s]{out: %s, cap: %d, hi: 0}", g.typeName(ref.Key), ptr, cap)
+		return fmt.Sprintf("&sofab.UnsignedMatrixSeq[%s]{Out: %s, Cap: %d, Hi: 0}", g.typeName(ref.Key), ptr, cap)
 	case ir.KindEnum:
-		return fmt.Sprintf("&_sMatSeq[%s]{out: %s, cap: %d, lo: 0, hi: 0}", g.typeName(ref.Key), ptr, cap)
+		return fmt.Sprintf("&sofab.SignedMatrixSeq[%s]{Out: %s, Cap: %d, Lo: 0, Hi: 0}", g.typeName(ref.Key), ptr, cap)
 	case ir.KindFP32:
-		return fmt.Sprintf("&_f32MatSeq{out: %s, cap: %d}", ptr, cap)
+		return fmt.Sprintf("&sofab.Float32MatrixSeq{Out: %s, Cap: %d}", ptr, cap)
 	case ir.KindFP64:
-		return fmt.Sprintf("&_f64MatSeq{out: %s, cap: %d}", ptr, cap)
+		return fmt.Sprintf("&sofab.Float64MatrixSeq{Out: %s, Cap: %d}", ptr, cap)
 	case ir.KindBool:
-		return fmt.Sprintf("&_boolMatSeq{out: %s, cap: %d}", ptr, cap)
+		return fmt.Sprintf("&sofab.BoolMatrixSeq{Out: %s, Cap: %d}", ptr, cap)
 	}
-	return "_visitorBase{}"
+	return "sofab.VisitorBase{}"
 }
 
 func isUnsignedNativeArray(k ir.Kind) bool {

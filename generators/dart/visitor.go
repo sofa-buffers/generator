@@ -28,7 +28,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// (onUnsignedArray/onString len checks) fire only once every element/byte has
 	// arrived, so a truncated over-bound field never reaches them — the header hook
 	// is what makes the over-bound win the tie. tryDecode already reads the sticky
-	// e.inv before returning the incomplete status, so the flag alone suffices.
+	// invalidate() latches the verdict inside the corelib, which stops there.
 	//
 	// Both hooks fire for ANY wire kind/subtype landing on a field id — the corelib
 	// resolves what arrived but cannot know what was DECLARED — so both arms gate
@@ -79,13 +79,13 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 			// Braced because Dart switch cases share one scope: two string fields
 			// in the same visitor would otherwise redeclare `s`.
 			body := "{\n          final s = sofab.decodeUtf8Strict(bytes);\n          " +
-				"if (s == null) { e.inv = true; return; }\n          " +
+				"if (s == null) { invalidate(); return; }\n          " +
 				acc + " = s;\n        }"
 			if fld.HasMaxlen {
 				// A wire byte length above the schema maxlen is malformed input
 				// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate. The raw
 				// bytes ARE the wire length, so this needs no re-encode.
-				body = fmt.Sprintf("if (bytes.length > %d) { e.inv = true; return; }\n        %s", fld.Maxlen, body)
+				body = fmt.Sprintf("if (bytes.length > %d) { invalidate(); return; }\n        %s", fld.Maxlen, body)
 				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard("string", fld.Maxlen)))
 			}
 			str = append(str, arm(fld.ID, body))
@@ -93,21 +93,20 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 			// value aliases the decode buffer — copy what we keep.
 			body := acc + " = Uint8List.fromList(value);"
 			if fld.HasMaxlen {
-				body = fmt.Sprintf("if (value.length > %d) { e.inv = true; return; }\n        %s", fld.Maxlen, body)
+				body = fmt.Sprintf("if (value.length > %d) { invalidate(); return; }\n        %s", fld.Maxlen, body)
 				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard("blob", fld.Maxlen)))
 			}
 			blob = append(blob, arm(fld.ID, body))
 		case ir.KindStruct, ir.KindUnion:
-			seq = append(seq, seqArm(fld.ID, fmt.Sprintf("return %s(%s, e);", visitorName(g.typeName(fld.Ref.Key)), acc)))
+			seq = append(seq, seqArm(fld.ID, fmt.Sprintf("return %s(%s);", visitorName(g.typeName(fld.Ref.Key)), acc)))
 		case ir.KindArray:
 			g.emitArrayDecode(fld, acc, arm, seqArm, &uArr, &sArr, &f32Arr, &f64Arr, &seq, &arrBegin, &elemBound)
 		}
 	}
 
 	f.line("class %s extends %s {", visitorName(typeName), visitorBase)
-	f.line("  %s(this.o, this.e);", visitorName(typeName))
+	f.line("  %s(this.o);", visitorName(typeName))
 	f.line("  final %s o;", typeName)
-	f.line("  final _Dec e;")
 	emitSwitch(f, "void onUnsigned(int id, int value)", uns)
 	emitSwitch(f, "void onSigned(int id, int value)", sig)
 	emitSwitch(f, "void onFp32(int id, double value)", f32)
@@ -164,7 +163,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 // The payload callbacks (onString/onBlob) are already subtype-dispatched by the
 // corelib, so only this pre-dispatch hook needs the explicit check.
 func maxlenHdrGuard(sub string, n int64) string {
-	return fmt.Sprintf("if (subtype == sofab.FixlenType.%s && length > %d) e.inv = true;", sub, n)
+	return fmt.Sprintf("if (subtype == sofab.FixlenType.%s && length > %d) invalidate();", sub, n)
 }
 
 // arrayCountHdrGuard is the onArrayBegin arm body rejecting a native array whose
@@ -195,7 +194,7 @@ func maxlenHdrGuard(sub string, n int64) string {
 // earlier occurrence of the same id intact (§7.4). This pre-dispatch hook is the
 // one place the kind has to be tested explicitly.
 func arrayCountHdrGuard(kind string, n int64) string {
-	return fmt.Sprintf("if (kind == sofab.ArrayKind.%s && count > %d) e.inv = true;", kind, n)
+	return fmt.Sprintf("if (kind == sofab.ArrayKind.%s && count > %d) invalidate();", kind, n)
 }
 
 // emitArrayDecode appends the decode arm(s) for an array field to the right
@@ -210,7 +209,7 @@ func arrayCountHdrGuard(kind string, n int64) string {
 // widthGuard renders the §7.1 declared-width rejection for a scalar store
 // (documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination carrying a
 // value outside its declared range is malformed input, INVALID — never masked to
-// the width, never kept. "" for u64/i64. `e.inv` is the same sticky flag the
+// the width, never kept. "" for u64/i64. It rejects through the same
 // maxlen and count rejects set.
 //
 // The `value < 0` term is not redundant on the unsigned side: Dart's int is a
@@ -227,7 +226,7 @@ func widthGuard(k ir.Kind) string {
 	if lo < 0 {
 		cond = fmt.Sprintf("value < %d || value > %d", lo, hi)
 	}
-	return fmt.Sprintf("if (%s) { e.inv = true; return; }\n        ", cond)
+	return fmt.Sprintf("if (%s) { invalidate(); return; }\n        ", cond)
 }
 
 // arrayWidthGuard is the same bound for a native array's ELEMENTS. The corelib
@@ -242,7 +241,7 @@ func arrayWidthGuard(elem ir.Kind) string {
 	if lo < 0 {
 		cond = fmt.Sprintf("_v < %d || _v > %d", lo, hi)
 	}
-	return fmt.Sprintf("for (final _v in values) { if (%s) { e.inv = true; return; } }\n        ", cond)
+	return fmt.Sprintf("for (final _v in values) { if (%s) { invalidate(); return; } }\n        ", cond)
 }
 
 // elemBoundArm is the onArrayElemBound arm body declaring the range an element
@@ -281,7 +280,7 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 	if fld.HasCount {
 		// A wire element count above the schema `count` is INVALID (MESSAGE_SPEC
 		// §3+§7): reject, never clamp (generator#100).
-		guard = fmt.Sprintf("if (values.length > %d) { e.inv = true; return; }\n        ", fld.Count)
+		guard = fmt.Sprintf("if (values.length > %d) { invalidate(); return; }\n        ", fld.Count)
 		// Native arrays fire onArrayBegin at the array header; wrapper-sequence arrays
 		// descend via onSequenceStart (no header hook) and are bounded at the
 		// collector cap instead. So the header reject is only for the native kinds.
@@ -316,31 +315,31 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64) string {
 	switch elem {
 	case ir.KindString:
-		return fmt.Sprintf("_StrSeq(%s, %d, %d, e)", out, cap, emax)
+		return fmt.Sprintf("_StrSeq(%s, %d, %d)", out, cap, emax)
 	case ir.KindBlob:
-		return fmt.Sprintf("_BlobSeq(%s, %d, %d, e)", out, cap, emax)
+		return fmt.Sprintf("_BlobSeq(%s, %d, %d)", out, cap, emax)
 	case ir.KindStruct, ir.KindUnion:
 		t := g.typeName(ref.Key)
-		return fmt.Sprintf("_ObjSeq<%s>(%s, %d, e, () => %s(), (x) => %s(x, e))", t, out, cap, t, visitorName(t))
+		return fmt.Sprintf("_ObjSeq<%s>(%s, %d, () => %s(), (x) => %s(x))", t, out, cap, t, visitorName(t))
 	case ir.KindArray:
 		// The row collectors take the OUTER array's cap: a row's element id is its
 		// index in this array (§5.1), so cap is what bounds it.
 		if nativeArrayElem(items.Elem) {
 			switch {
 			case items.Elem == ir.KindBool:
-				return fmt.Sprintf("_BoolMat(%s, %d, e)", out, cap)
+				return fmt.Sprintf("_BoolMat(%s, %d)", out, cap)
 			case items.Elem == ir.KindFP32 || items.Elem == ir.KindFP64:
-				return fmt.Sprintf("_DblMat(%s, %d, %v, e)", out, cap, items.Elem == ir.KindFP64)
+				return fmt.Sprintf("_DblMat(%s, %d, %v)", out, cap, items.Elem == ir.KindFP64)
 			default:
 				_lo, _hi, _ := ir.NarrowRange(items.Elem)
-				return fmt.Sprintf("_IntMat(%s, %d, %v, %d, %d, e)", out, cap, signedArrayElem(items.Elem), _lo, _hi)
+				return fmt.Sprintf("_IntMat(%s, %d, %v, %d, %d)", out, cap, signedArrayElem(items.Elem), _lo, _hi)
 			}
 		}
 		// Array of wrapper arrays: each element opens a sequence collected into the
 		// inner list its element id names, by a recursively-built collector.
 		innerT := g.dartArrayElemType(items.Elem, items.ElemRef, items.ElemItems)
 		inner := g.collector("p", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), emaxOf(items.ElemMaxHas, items.ElemMax))
-		return fmt.Sprintf("_SeqSeq<%s>(%s, %d, e, (p) => %s)", innerT, out, cap, inner)
+		return fmt.Sprintf("_SeqSeq<%s>(%s, %d, (p) => %s)", innerT, out, cap, inner)
 	}
 	return "null"
 }
@@ -475,14 +474,6 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		return
 	}
 	if n.dec {
-		f.line("// A sticky INVALID flag shared across all visitors of one decode. The corelib")
-		f.line("// visitor callbacks return void, so a schema-bound violation (over-count,")
-		f.line("// over-index, over-maxlen) sets this and the generated decode converts it to a")
-		f.line("// terminal INVALID after the corelib returns.")
-		f.line("class _Dec {")
-		f.line("  bool inv = false;")
-		f.line("}")
-		f.blank()
 	}
 	if n.f32bits {
 		f.line("// Widen the 32 raw wire bits of an fp32 NaN to a display double for element")
@@ -524,11 +515,10 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 func (g *gen) emitCollectors(f *dfile, n needs) {
 	if n.strSeq {
 		f.line("class _StrSeq extends %s {", visitorBase)
-		f.line("  _StrSeq(this.out, this.cap, this.emax, this.e);")
+		f.line("  _StrSeq(this.out, this.cap, this.emax);")
 		f.line("  final List<String> out;")
 		f.line("  final int cap;")
 		f.line("  final int emax;")
-		f.line("  final _Dec e;")
 		// The element's schema bounds are decided at the LENGTH WORD, before a byte
 		// of payload is buffered. MESSAGE_SPEC S5.2 makes INVALID dominate
 		// INCOMPLETE, so a message truncated right after the word that carries the
@@ -544,17 +534,17 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		f.line("  @override")
 		f.line("  void onFixlenHeader(int id, int subtype, int length) {")
 		f.line("    if (subtype != sofab.FixlenType.string) return;")
-		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
-		f.line("    if (emax >= 0 && length > emax) { e.inv = true; return; }")
+		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
+		f.line("    if (emax >= 0 && length > emax) { invalidate(); return; }")
 		f.line("  }")
 		f.line("  @override")
 		f.line("  void onStringBytes(int id, Uint8List bytes) {")
-		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
-		f.line("    if (emax >= 0 && bytes.length > emax) { e.inv = true; return; }")
+		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
+		f.line("    if (emax >= 0 && bytes.length > emax) { invalidate(); return; }")
 		f.line("    // The element is being materialized, so this is where its UTF-8 is")
 		f.line("    // checked. A skipped payload never reaches a collector at all.")
 		f.line("    final s = sofab.decodeUtf8Strict(bytes);")
-		f.line("    if (s == null) { e.inv = true; return; }")
+		f.line("    if (s == null) { invalidate(); return; }")
 		f.line("    while (out.length <= id) { out.add(''); }")
 		f.line("    out[id] = s;")
 		f.line("  }")
@@ -563,23 +553,22 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 	}
 	if n.blobSeq {
 		f.line("class _BlobSeq extends %s {", visitorBase)
-		f.line("  _BlobSeq(this.out, this.cap, this.emax, this.e);")
+		f.line("  _BlobSeq(this.out, this.cap, this.emax);")
 		f.line("  final List<Uint8List> out;")
 		f.line("  final int cap;")
 		f.line("  final int emax;")
-		f.line("  final _Dec e;")
 		// The blob twin of the string collector above: bounds latched at the length
 		// word (generator#267), gated on the declared subtype (S7.3).
 		f.line("  @override")
 		f.line("  void onFixlenHeader(int id, int subtype, int length) {")
 		f.line("    if (subtype != sofab.FixlenType.blob) return;")
-		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
-		f.line("    if (emax >= 0 && length > emax) { e.inv = true; return; }")
+		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
+		f.line("    if (emax >= 0 && length > emax) { invalidate(); return; }")
 		f.line("  }")
 		f.line("  @override")
 		f.line("  void onBlob(int id, Uint8List value) {")
-		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
-		f.line("    if (emax >= 0 && value.length > emax) { e.inv = true; return; }")
+		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
+		f.line("    if (emax >= 0 && value.length > emax) { invalidate(); return; }")
 		f.line("    while (out.length <= id) { out.add(Uint8List(0)); }")
 		f.line("    out[id] = Uint8List.fromList(value);")
 		f.line("  }")
@@ -594,15 +583,14 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		// would decode a REOPENED id as a second element instead of merging into the
 		// first (§7.4, which placement gives for free).
 		f.line("class _ObjSeq<T> extends %s {", visitorBase)
-		f.line("  _ObjSeq(this.out, this.cap, this.e, this.make, this.vis);")
+		f.line("  _ObjSeq(this.out, this.cap, this.make, this.vis);")
 		f.line("  final List<T> out;")
 		f.line("  final int cap;")
-		f.line("  final _Dec e;")
 		f.line("  final T Function() make;")
 		f.line("  final sofab.MessageVisitor Function(T) vis;")
 		f.line("  @override")
 		f.line("  sofab.MessageVisitor? onSequenceStart(int id) {")
-		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return null; }")
+		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return null; }")
 		f.line("    while (out.length <= id) { out.add(make()); }")
 		f.line("    return vis(out[id]);")
 		f.line("  }")
@@ -617,7 +605,7 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 	// the gap-fill.
 	if n.intMat {
 		f.line("class _IntMat extends %s {", visitorBase)
-		f.line("  _IntMat(this.out, this.cap, this.signed, this.lo, this.hi, this.e);")
+		f.line("  _IntMat(this.out, this.cap, this.signed, this.lo, this.hi);")
 		f.line("  final List<List<int>> out;")
 		f.line("  final int cap;")
 		f.line("  final bool signed;")
@@ -628,10 +616,9 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 		// itself there (generator#330).
 		f.line("  final int lo;")
 		f.line("  final int hi;")
-		f.line("  final _Dec e;")
 		f.line("  void _row(int id, Int64List v) {")
-		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
-		f.line("    if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { e.inv = true; return; } } }")
+		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
+		f.line("    if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { invalidate(); return; } } }")
 		f.line("    while (out.length <= id) { out.add(<int>[]); }")
 		f.line("    out[id] = List<int>.from(v);")
 		f.line("  }")
@@ -644,22 +631,21 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 	}
 	if n.dblMat {
 		f.line("class _DblMat extends %s {", visitorBase)
-		f.line("  _DblMat(this.out, this.cap, this.f64, this.e);")
+		f.line("  _DblMat(this.out, this.cap, this.f64);")
 		f.line("  final List<List<double>> out;")
 		f.line("  final int cap;")
 		f.line("  final bool f64;")
-		f.line("  final _Dec e;")
 		f.line("  @override")
 		f.line("  void onFp32Array(int id, Float32List values) {")
 		f.line("    if (f64) return;")
-		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
+		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
 		f.line("    while (out.length <= id) { out.add(<double>[]); }")
 		f.line("    out[id] = _f32copy(values, values.length); // bit-exact: keep an fp32 NaN's bits")
 		f.line("  }")
 		f.line("  @override")
 		f.line("  void onFp64Array(int id, Float64List values) {")
 		f.line("    if (!f64) return;")
-		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
+		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
 		f.line("    while (out.length <= id) { out.add(<double>[]); }")
 		f.line("    out[id] = List<double>.from(values);")
 		f.line("  }")
@@ -668,13 +654,12 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 	}
 	if n.boolMat {
 		f.line("class _BoolMat extends %s {", visitorBase)
-		f.line("  _BoolMat(this.out, this.cap, this.e);")
+		f.line("  _BoolMat(this.out, this.cap);")
 		f.line("  final List<List<bool>> out;")
 		f.line("  final int cap;")
-		f.line("  final _Dec e;")
 		f.line("  @override")
 		f.line("  void onUnsignedArray(int id, Int64List values) {")
-		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return; }")
+		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return; }")
 		f.line("    while (out.length <= id) { out.add(<bool>[]); }")
 		f.line("    out[id] = [for (final v in values) v != 0];")
 		f.line("  }")
@@ -683,14 +668,13 @@ func (g *gen) emitCollectors(f *dfile, n needs) {
 	}
 	if n.seqSeq {
 		f.line("class _SeqSeq<T> extends %s {", visitorBase)
-		f.line("  _SeqSeq(this.out, this.cap, this.e, this.make);")
+		f.line("  _SeqSeq(this.out, this.cap, this.make);")
 		f.line("  final List<List<T>> out;")
 		f.line("  final int cap;")
-		f.line("  final _Dec e;")
 		f.line("  final sofab.MessageVisitor Function(List<T>) make;")
 		f.line("  @override")
 		f.line("  sofab.MessageVisitor? onSequenceStart(int id) {")
-		f.line("    if (cap >= 0 && id >= cap) { e.inv = true; return null; }")
+		f.line("    if (cap >= 0 && id >= cap) { invalidate(); return null; }")
 		f.line("    while (out.length <= id) { out.add(<T>[]); }")
 		f.line("    return make(out[id]);")
 		f.line("  }")

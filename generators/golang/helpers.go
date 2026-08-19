@@ -36,16 +36,18 @@ func cfgLimit(cfg map[string]any, key string) (int64, bool) {
 	return 0, false
 }
 
-// reservedGoMethod are the exported method names every generated object carries
-// (the sofab.Visitor callbacks, plus Encode on messages). A struct field whose
-// exported name matches one would collide with the method (Go forbids a field and
-// method sharing a name), so goFieldName mangles it; the `json` tag keeps the wire
-// name, so encoding/json is unaffected.
+// reservedGoMethod are the exported names every generated object already carries:
+// the sofab.Visitor callbacks, Encode on messages, and VisitorBase -- the name of
+// the embedded sofab.VisitorBase field itself, which a declared field would
+// duplicate rather than shadow. A struct field whose exported name matches one
+// would collide (Go forbids a field and method sharing a name, and two fields
+// sharing one), so goFieldName mangles it; the `json` tag keeps the wire name, so
+// encoding/json is unaffected.
 var reservedGoMethod = map[string]bool{
 	"Unsigned": true, "Signed": true, "Float32": true, "Float64": true,
 	"String": true, "Bytes": true, "UnsignedArray": true, "SignedArray": true,
 	"Float32Array": true, "Float64Array": true, "BeginSequence": true, "EndSequence": true,
-	"Encode": true,
+	"Encode": true, "VisitorBase": true,
 }
 
 // goFieldName is the exported struct-field name for a schema field, mangled with a

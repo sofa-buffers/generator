@@ -210,12 +210,14 @@ callback. Three consequences the generated code relies on:
   over-index → INVALID) but never adds elements, so a decoded array has exactly
   the length the sender gave it.
 
-- **INVALID verdicts ride a sticky flag.** The corelib's visitor callbacks return
-  `void`, so a generated visitor cannot fail the decode mid-stream. The over-count
-  (generator#100), over-index (generator#142) and over-`maxlen` (S7.1) rejects set
-  a sticky `_inv` flag shared across the decode; `tryDecode` converts it to a
-  terminal `DecodeStatus.invalid` after the corelib returns — the Rust/Zig
-  "generated guard, sticky flag" model. The receiver-side `max_dyn_*` limits are
+- **INVALID verdicts ride the corelib's channel.** The visitor callbacks return
+  `void`, so a generated visitor once had nowhere to fail the decode from: the
+  over-count (generator#100), over-index (generator#142) and over-`maxlen` (S7.1)
+  rejects set a sticky flag of their own, which `tryDecode` converted after the
+  corelib returned — the Rust/Zig "generated guard, sticky flag" model. They now
+  call `MessageVisitor.invalidate()` (corelib-dart#64), which latches the verdict
+  where the decode state lives and **stops** the decode instead of letting it
+  parse on behind a settled answer. The receiver-side `max_dyn_*` limits are
   enforced by the corelib itself (a `DecoderLimits`), the Go/Python/TS family.
 
 #### Header hooks, and why each bound sits inside a kind test (issue #259)
@@ -239,10 +241,10 @@ declared kind first:
 void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
   switch (id) {
     case 0:
-      if (kind == sofab.ArrayKind.fp32 && count > 3) e.inv = true;   // fp32[3]
+      if (kind == sofab.ArrayKind.fp32 && count > 3) invalidate();   // fp32[3]
       return;
     case 1:
-      if (kind == sofab.ArrayKind.fp64 && count > 5) e.inv = true;   // fp64[5]
+      if (kind == sofab.ArrayKind.fp64 && count > 5) invalidate();   // fp64[5]
       return;
   }
 }
@@ -279,8 +281,8 @@ fire no array header at all — they descend through `onSequenceStart` and are
 bounded at the collector's `cap` instead. The collector still needs the *fixlen*
 header for the same reason the message does: `_StrSeq`/`_BlobSeq` override
 `onFixlenHeader`, so an over-index element (`id ≥ cap`) or an over-`maxlen`
-element sets `e.inv` at the length word rather than once the payload arrives, and
-`tryDecode` reads that sticky flag before returning the incomplete status
+element calls `invalidate()` at the length word rather than once the payload
+arrives — and the decode ends there, so the truncation behind it is never reached
 (generator#267/#277). The guards sit inside the declared-subtype test, exactly as
 the message-level ones above. The payload-side checks stay as defense.
 
@@ -581,7 +583,7 @@ bytes**, and the generated visitor overrides that instead of `onString`. Each ar
 resolves its destination first, then calls `sofab.decodeUtf8Strict(bytes)`, which
 validates and materializes in one pass and answers `null` for anything malformed.
 A skipped field reaches no arm and is never inspected. Invalid bytes at a
-materialized position set the sticky `e.inv`, the same channel as the schema-bound
+materialized position call `invalidate()`, the same channel as the schema-bound
 rejects; `blob` is never validated.
 
 Two consequences worth knowing:
@@ -627,14 +629,14 @@ ARCHITECTURE §8 puts it in the corelib (generator#345).
 ## §7.1: the declared integer width is a validity bound (issue #266)
 
 A `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination rejects a value outside its
-declared range by setting the sticky `e.inv` — the same INVALID channel as the
+declared range by calling `invalidate()` — the same INVALID channel as the
 maxlen and count rejects. Dart never masked the value (its `int` holds the whole
 64-bit range), so the defect here was that an out-of-range value was simply
 **kept**.
 
 ```dart
 case 0:
-  if (value < 0 || value > 255) { e.inv = true; return; }
+  if (value < 0 || value > 255) { invalidate(); return; }
   o.a_u8 = value;
 case 3:
   o.d_u64 = value;   // u64: nothing narrower to bound

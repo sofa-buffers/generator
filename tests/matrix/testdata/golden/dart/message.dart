@@ -3,14 +3,6 @@
 import 'dart:typed_data';
 import 'package:sofabuffers/sofabuffers.dart' as sofab;
 
-// A sticky INVALID flag shared across all visitors of one decode. The corelib
-// visitor callbacks return void, so a schema-bound violation (over-count,
-// over-index, over-maxlen) sets this and the generated decode converts it to a
-// terminal INVALID after the corelib returns.
-class _Dec {
-  bool inv = false;
-}
-
 // Widen the 32 raw wire bits of an fp32 NaN to a display double for element
 // access; the exact bits are kept alongside for a bit-for-bit re-encode.
 double _f32FromBits(int bits) =>
@@ -124,9 +116,7 @@ class Scalars {
   /// Decodes into a destination the caller guarantees is already at its
   /// defaults, so [decode]'s fresh instance skips the redundant reset.
   static sofab.DecodeStatus _decodeInto(Uint8List data, Scalars out) {
-    final e = _Dec();
-    final st = sofab.Decoder.decode(data, _ScalarsVisitor(out, e));
-    return e.inv ? sofab.DecodeStatus.invalid : st;
+    return sofab.Decoder.decode(data, _ScalarsVisitor(out));
   }
 
   /// Best-effort one-shot decode (the 90 % case): returns the message with
@@ -164,12 +154,11 @@ class Scalars {
 /// string/blob payload into storage of its own before it reaches the
 /// destination, so a chunk may be reused as soon as [feed] returns.
 class ScalarsDecoder {
-  ScalarsDecoder._(this._out) : _e = _Dec() {
-    _d = sofab.Decoder(_ScalarsVisitor(_out, _e));
+  ScalarsDecoder._(this._out) {
+    _d = sofab.Decoder(_ScalarsVisitor(_out));
   }
 
   final Scalars _out;
-  final _Dec _e;
   late final sofab.Decoder _d;
   sofab.DecodeStatus _st = sofab.DecodeStatus.complete;
 
@@ -182,8 +171,7 @@ class ScalarsDecoder {
   }
 
   /// The outcome for everything fed so far, without feeding more.
-  sofab.DecodeStatus get status =>
-      _e.inv ? sofab.DecodeStatus.invalid : _st;
+  sofab.DecodeStatus get status => _st;
 
   /// The destination, holding whatever has been decoded so far.
   Scalars get message => _out;
@@ -197,18 +185,17 @@ class ScalarsDecoder {
 }
 
 class _ScalarsVisitor extends sofab.VisitorBase {
-  _ScalarsVisitor(this.o, this.e);
+  _ScalarsVisitor(this.o);
   final Scalars o;
-  final _Dec e;
   @override
   void onUnsigned(int id, int value) {
     switch (id) {
       case 0:
-        if (value < 0 || value > 255) { e.inv = true; return; }
+        if (value < 0 || value > 255) { invalidate(); return; }
         o.u8min = value;
         return;
       case 1:
-        if (value < 0 || value > 255) { e.inv = true; return; }
+        if (value < 0 || value > 255) { invalidate(); return; }
         o.u8max = value;
         return;
       case 2:
@@ -223,7 +210,7 @@ class _ScalarsVisitor extends sofab.VisitorBase {
   void onSigned(int id, int value) {
     switch (id) {
       case 3:
-        if (value < -128 || value > 127) { e.inv = true; return; }
+        if (value < -128 || value > 127) { invalidate(); return; }
         o.i8min = value;
         return;
       case 4:

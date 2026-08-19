@@ -200,13 +200,13 @@ func bitfieldBacking(nt *ir.NamedType) string {
 
 // fixedNativeArray reports whether an array field is a native-element array
 // with a declared `count: N` -- the case that lowers to the inline
-// FixedArray(T, N) (stack, allocation-free) instead of a heap slice. Returns the
-// element Zig type and N.
+// sofab.FixedArray(T, N) (stack, allocation-free) instead of a heap slice.
+// Returns the element Zig type and N.
 //
 // N is the CAPACITY, not the length (MESSAGE_SPEC §3): the field carries 0..N
-// elements and the wire count M IS the length, so the storage is `[N]T` PLUS a
-// `len` -- a bare `[N]T` can only ever be N long and cannot express M < N. See
-// FixedArray in emitSupport.
+// elements and the wire count M IS the length, which is why the corelib type
+// carries a length alongside its `[N]T` -- a bare `[N]T` can only ever be N long
+// and cannot express M < N.
 func (g *gen) fixedNativeArray(f *ir.Field) (elem string, n int64, ok bool) {
 	if f.Kind != ir.KindArray || !isNativeArrayElem(f.Elem) || !f.HasCount {
 		return "", 0, false
@@ -231,7 +231,7 @@ func (g *gen) zigType(f *ir.Field) string {
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
 		if elem, n, ok := g.fixedNativeArray(f); ok {
-			return fmt.Sprintf("FixedArray(%s, %d)", elem, n)
+			return fmt.Sprintf("sofab.FixedArray(%s, %d)", elem, n)
 		}
 		return "[]const " + g.zigArrayElem(f.Elem, f.ElemRef, f.ElemItems)
 	}
@@ -347,19 +347,17 @@ func zigElemLit(elem ir.Kind, v any) string {
 }
 
 // zigFixedArrayDefault renders the initializer of a `count: N` native array,
-// i.e. of a FixedArray(T, N).
+// i.e. of a sofab.FixedArray(T, N).
 //
-// The VALUE is the declared `default` exactly as written: `.len` is its element
-// count, never N. A declared `count: N` is a capacity, not a length
-// (MESSAGE_SPEC §3), so a short default stands for itself instead of being
-// padded out to N -- with `default: [1, 2]` on `count: 5` the field's value is
-// the 2-element array [1, 2], which is also what its omit test compares against
-// and what an absent field decodes back to.
+// The VALUE is the declared `default` exactly as written, and its length is that
+// default's element count, never N. A declared `count: N` is a capacity, not a
+// length (MESSAGE_SPEC §3), so a short default stands for itself instead of
+// being padded out to N -- with `default: [1, 2]` on `count: 5` the field's
+// value is the 2-element array [1, 2], which is also what its omit test compares
+// against and what an absent field decodes back to.
 //
-// `.items` is the inline storage, so it is always N wide; the slots past `.len`
-// are spare capacity and never reach the wire. With no default the whole thing
-// is `.{}` -- the EMPTY array, zero-length, which is what a fresh count:N array
-// now is.
+// With no default the whole thing is `.{}` -- the EMPTY array, zero-length,
+// which is what a fresh count:N array is.
 func (g *gen) zigFixedArrayDefault(f *ir.Field, n int64) string {
 	vals, ok := f.Default.([]any)
 	if !ok || len(vals) == 0 {
@@ -372,11 +370,7 @@ func (g *gen) zigFixedArrayDefault(f *ir.Field, n int64) string {
 	if int64(len(parts)) > n { // schema-invalid; never widen the storage
 		parts = parts[:n]
 	}
-	length := len(parts)
-	for int64(len(parts)) < n {
-		parts = append(parts, zigElemZero(f.Elem))
-	}
-	return fmt.Sprintf(".{ .items = .{ %s }, .len = %d }", strings.Join(parts, ", "), length)
+	return fmt.Sprintf(".init(&.{ %s })", strings.Join(parts, ", "))
 }
 
 func (g *gen) zigIntDefault(f *ir.Field) string {
@@ -403,17 +397,6 @@ func zigFloat(v any) string {
 		s += ".0"
 	}
 	return s
-}
-
-// zigElemZero is the zero literal of a native array element kind.
-func zigElemZero(k ir.Kind) string {
-	switch k {
-	case ir.KindFP32, ir.KindFP64:
-		return "0.0"
-	case ir.KindBool:
-		return "false"
-	}
-	return "0"
 }
 
 // blobBytes decodes a blob field's base64 schema default; (nil, false) when

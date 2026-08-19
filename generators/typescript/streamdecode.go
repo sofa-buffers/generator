@@ -48,7 +48,9 @@ import (
 func streamVisitorName(typeName string) string { return "_" + typeName + "Vis" }
 
 // emitStreamPrelude writes the once-per-module support the visitors share: the
-// skip visitor and the payload accumulator.
+// skip visitor, and the Long narrowers on the Long channel. The payload
+// accumulator and the UTF-8 transcode come from the corelib (PayloadAcc,
+// decodeUtf8).
 func (g *gen) emitStreamPrelude(f *tsfile, s *ir.Schema) {
 	f.line("/**")
 	f.line(" * The skip visitor. corelib-ts resolves a nested scope as")
@@ -92,68 +94,6 @@ func (g *gen) emitStreamPrelude(f *tsfile, s *ir.Schema) {
 		f.line("}")
 		f.blank()
 	}
-	// The cursor path decodes a string inside the corelib (Cursor.readString); the
-	// visitor is handed raw wire bytes, so it transcodes here. `fatal` makes
-	// invalid UTF-8 throw rather than substitute U+FFFD -- a malformed string is
-	// INVALID, never silently repaired, which is what the cursor path gets from
-	// the corelib.
-	f.line("const _dec = new TextDecoder(\"utf-8\", { fatal: true });")
-	f.blank()
-	// `fatal: true` throws a plain TypeError from the platform, which is NOT the
-	// documented failure of this API: a consumer of a decoder fed untrusted bytes
-	// catches SofabError, and a TypeError walks straight past that catch as an
-	// unhandled exception. The cursor path never had this problem -- it decodes
-	// inside the corelib, where Cursor.readString does the same conversion -- so
-	// the two entry points reported identical malformed bytes as different
-	// exception types (generator#297, Crucible F-0060 / codegen defect G-0037).
-	//
-	// One helper rather than a try/catch at each call site: there are two, and the
-	// next store site added would have to remember. corelib-ts keeps its own fatal
-	// decoder and `invalidMsgError` private, so the conversion cannot yet be
-	// shared with it; if it ever exports one, this collapses into calling it.
-	f.line("/**")
-	f.line(" * Transcode a payload, reporting malformed UTF-8 the way the rest of the")
-	f.line(" * API reports malformed input.")
-	f.line(" *")
-	f.line(" * The fatal TextDecoder signals invalid bytes with a TypeError. Malformed")
-	f.line(" * bytes are an invalid message, so this leaves as SofabError like every")
-	f.line(" * other verdict -- never as a platform exception that escapes a")
-	f.line(" * `catch (e) { if (e instanceof SofabError) ... }`.")
-	f.line(" */")
-	f.line("function _str(bytes: Uint8Array): string {")
-	f.line("  try {")
-	f.line("    return _dec.decode(bytes);")
-	f.line("  } catch {")
-	f.line("    throw new SofabError(SofabErrorCode.InvalidMsg, \"invalid UTF-8 in string\");")
-	f.line("  }")
-	f.line("}")
-	f.blank()
-	f.line("/**")
-	f.line(" * Reassembles a string/blob payload split across feed chunks.")
-	f.line(" *")
-	f.line(" * One payload is in flight at a time across the whole decode, however deep")
-	f.line(" * the nesting, so a single accumulator per decoder is enough and every")
-	f.line(" * visitor shares it. A payload that arrives whole in one chunk -- always so")
-	f.line(" * on the contiguous path, and the common case when streaming -- is handed")
-	f.line(" * straight through without a copy.")
-	f.line(" */")
-	f.line("class _Acc {")
-	f.line("  private buf: Uint8Array | null = null;")
-	f.line("  private len = 0;")
-	f.line("  /** The whole payload, or null while it is still incomplete. */")
-	f.line("  take(total: number, offset: number, chunk: Uint8Array): Uint8Array | null {")
-	f.line("    if (offset === 0 && chunk.length >= total) return chunk;")
-	f.line("    if (offset === 0) { this.buf = new Uint8Array(total); this.len = 0; }")
-	f.line("    const b = this.buf;")
-	f.line("    if (b === null) return null;")
-	f.line("    b.set(chunk, this.len);")
-	f.line("    this.len += chunk.length;")
-	f.line("    if (this.len < total) return null;")
-	f.line("    this.buf = null;")
-	f.line("    return b;")
-	f.line("  }")
-	f.line("}")
-	f.blank()
 }
 
 // visType is the Visitor interface generated visitors implement: corelib-ts's
@@ -162,6 +102,20 @@ func (g *gen) emitStreamPrelude(f *tsfile, s *ir.Schema) {
 func (g *gen) visType() string {
 	if g.streamLongs() {
 		return "LongVisitor"
+	}
+	return "Visitor"
+}
+
+// childVis is the declared return type of a sequenceBegin that can hand back a
+// corelib collector — StringSeq / BlobSeq, which are plain `Visitor`s and carry
+// no `longs` flag. Off the Long channel that is `Visitor`, exactly as before; on
+// it the narrower `LongVisitor` would exclude them while saying nothing extra,
+// since the channel is read once from the ROOT visitor and a child's own flag is
+// never consulted. `AnyVisitor` is corelib-ts's own name for "either shape", and
+// is what its decoders are implemented against.
+func (g *gen) childVis() string {
+	if g.streamLongs() {
+		return "AnyVisitor"
 	}
 	return "Visitor"
 }
@@ -278,7 +232,7 @@ func (g *gen) emitStreamVisitor(f *tsfile, typeName string, fields []*ir.Field) 
 	cls := streamVisitorName(typeName)
 	f.line("/** Streaming decode visitor for {@link %s}. */", typeName)
 	f.line("class %s implements %s {", cls, g.visType())
-	f.line("  constructor(readonly o: %s, readonly a: _Acc) {}", typeName)
+	f.line("  constructor(readonly o: %s, readonly a: PayloadAcc) {}", typeName)
 	if g.streamLongs() {
 		// Declared on EVERY visitor class, not only a message's: which one is the
 		// root depends on who is decoding, and the corelib reads the flag from the
@@ -538,7 +492,7 @@ func (g *gen) emitStreamPayload(f *tsfile, cb string, fields []*ir.Field) {
 		}
 		var store string
 		if want == ir.KindString {
-			store = fmt.Sprintf("%s = _str(_p);", acc)
+			store = fmt.Sprintf("%s = decodeUtf8(_p);", acc)
 		} else {
 			store = fmt.Sprintf("%s = _p.slice();", acc)
 		}
@@ -739,7 +693,7 @@ func (g *gen) emitStreamSequence(f *tsfile, fields []*ir.Field) {
 			}
 		}
 	}
-	f.line("  sequenceBegin(id: number): %s {", g.visType())
+	f.line("  sequenceBegin(id: number): %s {", g.childVis())
 	if len(arms) > 0 {
 		f.line("    switch (id) {")
 		for _, a := range arms {
@@ -773,9 +727,9 @@ func (g *gen) streamCollector(x *ir.Field, acc string) string {
 func (g *gen) streamSeqExpr(acc string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64, name string) string {
 	switch elem {
 	case ir.KindString:
-		return fmt.Sprintf("new _StrSeq(%s, this.a, %d, %d, %q)", acc, cap, emax, name)
+		return fmt.Sprintf("new StringSeq(%s, this.a, %d, %d, %q)", acc, cap, emax, name)
 	case ir.KindBlob:
-		return fmt.Sprintf("new _BlobSeq(%s, this.a, %d, %d, %q)", acc, cap, emax, name)
+		return fmt.Sprintf("new BlobSeq(%s, this.a, %d, %d, %q)", acc, cap, emax, name)
 	case ir.KindStruct, ir.KindUnion:
 		el := g.typeName(ref.Key)
 		return fmt.Sprintf("new _ObjSeq(%s, this.a, %d, %q, () => new %s(), (e) => new %s(e, this.a))",
@@ -802,8 +756,11 @@ func (g *gen) streamSeqExpr(acc string, elem ir.Kind, ref *ir.TypeRef, items *ir
 	return ""
 }
 
-// emitStreamCollectors writes the wrapper-sequence collectors: the visitors a
-// string/blob/object/matrix/row array hands its elements to.
+// emitStreamCollectors writes the wrapper-sequence collectors that have no
+// corelib counterpart: the visitors an object/matrix/row array hands its
+// elements to. A string or blob row is collected by corelib-ts's own StringSeq /
+// BlobSeq (corelib-ts#151), which take the capacity, the element maxlen and the
+// field name as arguments.
 //
 // MESSAGE_SPEC S5.1 makes the element id the array INDEX, so an element is
 // placed at its id rather than appended: an interior element equal to its
@@ -813,62 +770,6 @@ func (g *gen) streamSeqExpr(acc string, elem ir.Kind, ref *ir.TypeRef, items *ir
 // and is rejected before the destination grows -- which also bounds the id-keyed
 // fill against an over-index amplification.
 func (g *gen) emitStreamCollectors(f *tsfile, use streamUse) {
-	if use.str {
-		f.line("/** Collects the elements of a `string` wrapper-sequence array. */")
-		f.line("class _StrSeq implements %s {", g.visType())
-		g.emitLongsFlag(f)
-		f.line("  constructor(readonly out: string[], readonly a: _Acc,")
-		f.line("              readonly cap: number, readonly emax: number, readonly nm: string) {}")
-		// Both verdicts are taken at the element's LENGTH WORD, via fixlenBegin --
-		// the over-index one against the element id, the maxlen one against the
-		// declared total. In the payload callback they could not fire at all for an
-		// element whose message ends right after that word, so the same bytes were
-		// INVALID one-shot and INCOMPLETE chunked (generator#300).
-		f.line("  fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {")
-		f.line("    if (sub !== FixlenSubtype.String) return;")
-		f.line("    if (this.cap >= 0 && id >= this.cap) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm}: array index above schema capacity ${this.cap}`);")
-		f.line("    if (this.emax >= 0 && total > this.emax) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm} element: string byte length above schema maxlen ${this.emax}`);")
-		f.line("  }")
-		f.line("  string(id: number, total: number, offset: number, chunk: Uint8Array): void {")
-		f.line("    if (this.cap >= 0 && id >= this.cap) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm}: array index above schema capacity ${this.cap}`);")
-		f.line("    if (this.emax >= 0 && total > this.emax) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm} element: string byte length above schema maxlen ${this.emax}`);")
-		f.line("    const p = this.a.take(total, offset, chunk);")
-		f.line("    if (p === null) return;")
-		f.line("    while (this.out.length <= id) this.out.push(\"\");")
-		f.line("    this.out[id] = _str(p);")
-		f.line("  }")
-		f.line("  sequenceBegin(): %s { return _DEAD; }", g.visType())
-		f.line("}")
-		f.blank()
-	}
-	if use.blob {
-		f.line("/** Collects the elements of a `blob` wrapper-sequence array. */")
-		f.line("class _BlobSeq implements %s {", g.visType())
-		g.emitLongsFlag(f)
-		f.line("  constructor(readonly out: Uint8Array[], readonly a: _Acc,")
-		f.line("              readonly cap: number, readonly emax: number, readonly nm: string) {}")
-		// Both verdicts are taken at the element's LENGTH WORD, via fixlenBegin --
-		// the over-index one against the element id, the maxlen one against the
-		// declared total. In the payload callback they could not fire at all for an
-		// element whose message ends right after that word, so the same bytes were
-		// INVALID one-shot and INCOMPLETE chunked (generator#300).
-		f.line("  fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {")
-		f.line("    if (sub !== FixlenSubtype.Blob) return;")
-		f.line("    if (this.cap >= 0 && id >= this.cap) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm}: array index above schema capacity ${this.cap}`);")
-		f.line("    if (this.emax >= 0 && total > this.emax) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm} element: blob byte length above schema maxlen ${this.emax}`);")
-		f.line("  }")
-		f.line("  blob(id: number, total: number, offset: number, chunk: Uint8Array): void {")
-		f.line("    if (this.cap >= 0 && id >= this.cap) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm}: array index above schema capacity ${this.cap}`);")
-		f.line("    if (this.emax >= 0 && total > this.emax) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm} element: blob byte length above schema maxlen ${this.emax}`);")
-		f.line("    const p = this.a.take(total, offset, chunk);")
-		f.line("    if (p === null) return;")
-		f.line("    while (this.out.length <= id) this.out.push(new Uint8Array(0));")
-		f.line("    this.out[id] = p.slice();")
-		f.line("  }")
-		f.line("  sequenceBegin(): %s { return _DEAD; }", g.visType())
-		f.line("}")
-		f.blank()
-	}
 	if use.obj {
 		f.line("/**")
 		f.line(" * Collects the elements of a struct/union wrapper-sequence array.")
@@ -879,7 +780,7 @@ func (g *gen) emitStreamCollectors(f *tsfile, use streamUse) {
 		f.line(" */")
 		f.line("class _ObjSeq<T> implements %s {", g.visType())
 		g.emitLongsFlag(f)
-		f.line("  constructor(readonly out: T[], readonly a: _Acc, readonly cap: number,")
+		f.line("  constructor(readonly out: T[], readonly a: PayloadAcc, readonly cap: number,")
 		f.line("              readonly nm: string, readonly make: () => T,")
 		f.line("              readonly vis: (e: T) => %s) {}", g.visType())
 		f.line("  sequenceBegin(id: number): %s {", g.visType())
@@ -933,8 +834,8 @@ func (g *gen) emitStreamCollectors(f *tsfile, use streamUse) {
 		f.line("class _RowSeq<E> implements %s {", g.visType())
 		g.emitLongsFlag(f)
 		f.line("  constructor(readonly out: E[][], readonly cap: number, readonly nm: string,")
-		f.line("              readonly mk: (row: E[]) => %s) {}", g.visType())
-		f.line("  sequenceBegin(id: number): %s {", g.visType())
+		f.line("              readonly mk: (row: E[]) => %s) {}", g.childVis())
+		f.line("  sequenceBegin(id: number): %s {", g.childVis())
 		f.line("    if (this.cap >= 0 && id >= this.cap) throw new SofabError(SofabErrorCode.InvalidMsg, `${this.nm}: array index above schema capacity ${this.cap}`);")
 		f.line("    while (this.out.length <= id) this.out.push([]);")
 		f.line("    this.out[id].length = 0;")
@@ -943,6 +844,32 @@ func (g *gen) emitStreamCollectors(f *tsfile, use streamUse) {
 		f.line("}")
 		f.blank()
 	}
+}
+
+// schemaHasStringField reports whether any emitted class has a scalar `string`
+// field — the one position whose stream store site transcodes a payload itself
+// (a string ARRAY leaves that to the corelib's StringSeq), and thus the only one
+// that names decodeUtf8.
+func schemaHasStringField(s *ir.Schema) bool {
+	has := func(fields []*ir.Field) bool {
+		for _, x := range fields {
+			if x.Kind == ir.KindString {
+				return true
+			}
+		}
+		return false
+	}
+	for _, m := range s.Messages {
+		if has(m.Fields) {
+			return true
+		}
+	}
+	for _, key := range s.NamedOrder {
+		if has(s.Named[key].Fields) {
+			return true
+		}
+	}
+	return false
 }
 
 // streamUse records which collectors a schema actually needs, so a module never
@@ -1013,7 +940,7 @@ func (g *gen) emitStreamDecoderClass(f *tsfile, name string) {
 	f.line(" */")
 	f.line("export class %sDecoder {", name)
 	f.line("  private readonly is = new IStream(%s);", g.streamLimitsArg())
-	f.line("  private readonly acc = new _Acc();")
+	f.line("  private readonly acc = new PayloadAcc();")
 	f.line("  private readonly out: %s;", name)
 	f.line("  private readonly vis: %s;", g.visType())
 	f.blank()

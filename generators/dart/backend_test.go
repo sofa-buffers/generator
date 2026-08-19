@@ -324,12 +324,12 @@ func TestDartHeaderVisitorReject(t *testing.T) {
 		"void onFixlenHeader(int id, int subtype, int length) {",
 		// Gated on the DECLARED element kind, exactly like the maxlen guard below
 		// (§7.3, generator#259) -- see TestDartArrayHeaderBoundIsKeyedByElementKind.
-		"if (kind == sofab.ArrayKind.unsigned && count > 4) e.inv = true;", // someuintarray, count 4
+		"if (kind == sofab.ArrayKind.unsigned && count > 4) invalidate();", // someuintarray, count 4
 		// Each maxlen guard is gated on the DECLARED fixlen subtype: onFixlenHeader
 		// fires for any subtype at a field id, and a contradicting one must be
 		// skipped, not measured against this field's bound (§7.3, generator#224).
-		"if (subtype == sofab.FixlenType.string && length > 50) e.inv = true;", // somestring
-		"if (subtype == sofab.FixlenType.blob && length > 16) e.inv = true;",   // someblob
+		"if (subtype == sofab.FixlenType.string && length > 50) invalidate();", // somestring
+		"if (subtype == sofab.FixlenType.blob && length > 16) invalidate();",   // someblob
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated module missing header-visitor guard %q", want)
@@ -339,12 +339,12 @@ func TestDartHeaderVisitorReject(t *testing.T) {
 	// exactly the generator#224 defect (an fp64 landing on a `maxlen: 4` blob was
 	// rejected as INVALID instead of skipped).
 	for _, notWant := range []string{
-		"if (length > 50) e.inv = true;",
-		"if (length > 16) e.inv = true;",
+		"if (length > 50) invalidate();",
+		"if (length > 16) invalidate();",
 		// ...and the array count bound is the same defect one hook over
 		// (generator#259 / F-0042): an un-gated compare measures a contradicting
 		// array kind against this field's N.
-		"if (count > 4) e.inv = true;",
+		"if (count > 4) invalidate();",
 	} {
 		if strings.Contains(out, notWant) {
 			t.Errorf("header guard %q is not gated on the declared kind/subtype (generator#224, generator#259)", notWant)
@@ -604,41 +604,41 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 		// The string collector takes RAW wire bytes now: the destination (this
 		// collector, at this id) is resolved before the payload is validated or
 		// transcoded, so a skipped string is never inspected (generator#257).
-		"    if (cap >= 0 && id >= cap) { e.inv = true; return; }\n" +
-			"    if (emax >= 0 && bytes.length > emax) { e.inv = true; return; }\n",
+		"    if (cap >= 0 && id >= cap) { invalidate(); return; }\n" +
+			"    if (emax >= 0 && bytes.length > emax) { invalidate(); return; }\n",
 		"    final s = sofab.decodeUtf8Strict(bytes);\n" +
-			"    if (s == null) { e.inv = true; return; }\n" +
+			"    if (s == null) { invalidate(); return; }\n" +
 			"    while (out.length <= id) { out.add(''); }\n" +
 			"    out[id] = s;",
-		"    if (cap >= 0 && id >= cap) { e.inv = true; return null; }\n" +
+		"    if (cap >= 0 && id >= cap) { invalidate(); return null; }\n" +
 			"    while (out.length <= id) { out.add(make()); }\n" +
 			"    return vis(out[id]);",
 		// native-row collector: bounded placement, not an append
 		"  void _row(int id, Int64List v) {\n" +
-			"    if (cap >= 0 && id >= cap) { e.inv = true; return; }\n" +
+			"    if (cap >= 0 && id >= cap) { invalidate(); return; }\n" +
 			// the row element's declared width, checked before the row is stored
 			// (generator#330) -- lo == hi means the element spans the callback
 			// parameter's own range and there is nothing to check
-			"    if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { e.inv = true; return; } } }\n" +
+			"    if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { invalidate(); return; } } }\n" +
 			"    while (out.length <= id) { out.add(<int>[]); }\n" +
 			"    out[id] = List<int>.from(v);\n" +
 			"  }",
 		// wrapper-row collector: same
-		"    if (cap >= 0 && id >= cap) { e.inv = true; return null; }\n" +
+		"    if (cap >= 0 && id >= cap) { invalidate(); return null; }\n" +
 			"    while (out.length <= id) { out.add(<T>[]); }\n" +
 			"    return make(out[id]);",
 		// the schema count reaches every collector as its cap; count-less is -1, and
 		// the ROW collectors take the OUTER array's cap (a row id is its index there)
-		"_ObjSeq<VecFixedElem>(o.fixed, 5, e,",
-		"_ObjSeq<VecDynamicElem>(o.dynamic_, -1, e,",
-		"_StrSeq(o.fstrs, 3, 8, e)",
-		"_BlobSeq(o.fblobs, 4, 8, e)",
-		"_IntMat(o.rows, 3, false, 0, 4294967295, e)",
-		"_SeqSeq<String>(o.srows, 3, e, (p) => _StrSeq(p, -1, 4, e))",
+		"_ObjSeq<VecFixedElem>(o.fixed, 5,",
+		"_ObjSeq<VecDynamicElem>(o.dynamic_, -1,",
+		"_StrSeq(o.fstrs, 3, 8)",
+		"_BlobSeq(o.fblobs, 4, 8)",
+		"_IntMat(o.rows, 3, false, 0, 4294967295)",
+		"_SeqSeq<String>(o.srows, 3, (p) => _StrSeq(p, -1, 4))",
 		// M elements arrived, M is the length: the count word is bounded, nothing
 		// is filled in behind it.
-		("        if (values.length > 4) { e.inv = true; return; }\n" +
-			"        for (final _v in values) { if (_v < 0 || _v > 4294967295) { e.inv = true; return; } }\n" +
+		("        if (values.length > 4) { invalidate(); return; }\n" +
+			"        for (final _v in values) { if (_v < 0 || _v > 4294967295) { invalidate(); return; } }\n" +
 			"        o.fnums = List<int>.from(values);\n        return;"),
 	} {
 		if !strings.Contains(out, want) {
@@ -715,12 +715,12 @@ func TestDartArrayHeaderBoundIsKeyedByElementKind(t *testing.T) {
 		// One arm per field, each testing ONLY its own declared element kind, with
 		// the bound behind that test. A declared fp32 appears under fp32 and a
 		// declared fp64 under fp64 -- never one shared "fixlen" arm.
-		"      case 0:\n        if (kind == sofab.ArrayKind.fp32 && count > 3) e.inv = true;\n        return;",
-		"      case 1:\n        if (kind == sofab.ArrayKind.fp64 && count > 5) e.inv = true;\n        return;",
+		"      case 0:\n        if (kind == sofab.ArrayKind.fp32 && count > 3) invalidate();\n        return;",
+		"      case 1:\n        if (kind == sofab.ArrayKind.fp64 && count > 5) invalidate();\n        return;",
 		// Integer arrays take the same shape -- there is no second wire word on
 		// that path, but the declared kind still gates the bound.
-		"      case 2:\n        if (kind == sofab.ArrayKind.unsigned && count > 7) e.inv = true;\n        return;",
-		"      case 3:\n        if (kind == sofab.ArrayKind.signed && count > 9) e.inv = true;\n        return;",
+		"      case 2:\n        if (kind == sofab.ArrayKind.unsigned && count > 7) invalidate();\n        return;",
+		"      case 3:\n        if (kind == sofab.ArrayKind.signed && count > 9) invalidate();\n        return;",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
@@ -733,8 +733,8 @@ func TestDartArrayHeaderBoundIsKeyedByElementKind(t *testing.T) {
 		// A collapsed fixlen kind cannot separate the two fp slots at all.
 		"sofab.ArrayKind.fixlen",
 		// An un-gated bound rejects a header that §7.3 says to skip.
-		"if (count > 3) e.inv = true;",
-		"if (count > 5) e.inv = true;",
+		"if (count > 3) invalidate();",
+		"if (count > 5) invalidate();",
 		// The fp32 field's N must never be reachable from the fp64 arm (and back).
 		"if (kind == sofab.ArrayKind.fp64 && count > 3)",
 		"if (kind == sofab.ArrayKind.fp32 && count > 5)",
@@ -775,7 +775,7 @@ func TestDartSkippedStringIsNotValidated(t *testing.T) {
 	// one scope.
 	for _, want := range []string{
 		"final s = sofab.decodeUtf8Strict(bytes);",
-		"if (s == null) { e.inv = true; return; }",
+		"if (s == null) { invalidate(); return; }",
 		"o.s = s;",
 		"o.u = s;",
 	} {
@@ -784,7 +784,7 @@ func TestDartSkippedStringIsNotValidated(t *testing.T) {
 		}
 	}
 	// The maxlen bound reads the wire length directly now — no re-encode.
-	if !strings.Contains(out, "if (bytes.length > 8) { e.inv = true; return; }") {
+	if !strings.Contains(out, "if (bytes.length > 8) { invalidate(); return; }") {
 		t.Errorf("the maxlen bound must measure the raw wire bytes:\n%s", out)
 	}
 	// A blob carries no encoding: its arm must not validate.
@@ -911,12 +911,12 @@ messages:
       arr_u8: { id: 8, type: array, items: { type: u8, count: 4 } }
 `), map[string]any{})
 	for _, want := range []string{
-		"case 0:\n        if (value < 0 || value > 255) { e.inv = true; return; }\n        o.a_u8 = value;",
-		"case 2:\n        if (value < 0 || value > 4294967295) { e.inv = true; return; }\n        o.c_u32 = value;",
-		"case 4:\n        if (value < -128 || value > 127) { e.inv = true; return; }\n        o.e_i8 = value;",
-		"case 6:\n        if (value < -2147483648 || value > 2147483647) { e.inv = true; return; }\n        o.g_i32 = value;",
+		"case 0:\n        if (value < 0 || value > 255) { invalidate(); return; }\n        o.a_u8 = value;",
+		"case 2:\n        if (value < 0 || value > 4294967295) { invalidate(); return; }\n        o.c_u32 = value;",
+		"case 4:\n        if (value < -128 || value > 127) { invalidate(); return; }\n        o.e_i8 = value;",
+		"case 6:\n        if (value < -2147483648 || value > 2147483647) { invalidate(); return; }\n        o.g_i32 = value;",
 		// The array arrives whole: one scan over the elements decides it.
-		"for (final _v in values) { if (_v < 0 || _v > 255) { e.inv = true; return; } }",
+		"for (final _v in values) { if (_v < 0 || _v > 255) { invalidate(); return; } }",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.dart missing width guard %q:\n%s", want, got)
@@ -1120,13 +1120,13 @@ messages:
 `), map[string]any{})
 	for _, want := range []string{
 		// The scan itself, in the one place a row lands.
-		"if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { e.inv = true; return; } } }",
+		"if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { invalidate(); return; } } }",
 		// The bound travels with the collector, per row element kind.
-		"_IntMat(o.urows, 2, false, 0, 255, e)",
-		"_IntMat(o.srows, 2, true, -32768, 32767, e)",
+		"_IntMat(o.urows, 2, false, 0, 255)",
+		"_IntMat(o.srows, 2, true, -32768, 32767)",
 		// u64 spans the callback parameter's own range, so lo == hi switches the
 		// scan off rather than emitting a bound that can never fire.
-		"_IntMat(o.wide, 2, false, 0, 0, e)",
+		"_IntMat(o.wide, 2, false, 0, 0)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)

@@ -223,7 +223,7 @@ messages:
 		`case (Root, 3): if (kind != ArrayKind.Unsigned) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ba: array count above schema capacity 2"); m.ba.Clear(); break;`,
 		`case (Root, 4): if (kind != ArrayKind.Signed) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ea: array count above schema capacity 2"); m.ea.Clear(); break;`,
 		// A count-less array has no schema bound, but still gets the kind test.
-		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; m.da = new ushort[Math.Min(count, ArrayInitCap)]; break;`,
+		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; m.da = new ushort[Math.Min(count, Seq.ArrayInitCap)]; break;`,
 		// The skip counter is armed per kind; each id disarms under its own kind only.
 		"            ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 3) => 0,\n                (Root, 5) => 0,\n                _ => count,\n            },",
 		"            ArrayKind.Signed => (cur, id) switch {\n                (Root, 1) => 0,\n                (Root, 4) => 0,\n                _ => count,\n            },",
@@ -275,7 +275,7 @@ messages:
 		`case (Root, 0): if (kind != ArrayKind.Fp32) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "f32: array count above schema capacity 4"); m.f32 = new float[count]; break;`,
 		`case (Root, 1): if (kind != ArrayKind.Fp64) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "f64: array count above schema capacity 2"); m.f64 = new double[count]; break;`,
 		// A count-less fixlen array has no schema bound but still gets the kind test.
-		`case (Root, 2): if (kind != ArrayKind.Fp32) break; m.dyn = new float[Math.Min(count, ArrayInitCap)]; break;`,
+		`case (Root, 2): if (kind != ArrayKind.Fp32) break; m.dyn = new float[Math.Min(count, Seq.ArrayInitCap)]; break;`,
 		// The skip counter: the fp32 ids disarm only under Fp32, the fp64 id only
 		// under Fp64. An fp64 header at id 0 therefore arms `count` discards.
 		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 2) => 0,\n                _ => count,\n            },",
@@ -322,10 +322,12 @@ func TestCsStructural(t *testing.T) {
 		"public void SequenceBegin(int id)", // flat-visitor nesting
 		"public ulong someu64 = 18446744073709551615UL;",
 		"public enum MyfirstmessageSomeenum : sbyte {",
-		"if (offset == 0 && chunkLength >= total) {", // string/blob single-shot fast path
-		"_s = _Utf8(data, chunkOffset, total);",      // strict UTF-8: invalid -> INVALID (issue #85)
-		"new System.Text.UTF8Encoding(false, true)",  // throwOnInvalidBytes, never lossy U+FFFD
-		"System.Array.Copy(data, chunkOffset, _b, 0, total);",
+		// Reassembly of a split payload and the strict UTF-8 verdict are the
+		// corelib's (corelib-cs#92): the value comes back on the chunk that
+		// completes it, invalid UTF-8 as INVALID (issue #85).
+		"private readonly PayloadAcc pay = new PayloadAcc();",
+		"string _s = pay.String(total, offset, data, chunkOffset, chunkLength);",
+		"byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength);",
 		// over-count scalar array rejected as INVALID before the (untrusted-count) allocation (#100)
 		"if (count > 4) throw new SofabException(SofabError.InvalidMessage, \"someuintarray: array count above schema capacity 4\"); ",
 	} {
@@ -403,7 +405,7 @@ func TestCsDeterministic(t *testing.T) {
 // schema-capacity guard, an unset key emits nothing, and a configured key
 // whose kind has no unbounded field is inert. Independently of any config, the
 // count-less primitive-array arm is hardened: a small bounded reservation
-// grown on demand (EnsureCap) instead of an eager `new T[count]` from the
+// grown on demand (Seq.EnsureCap) instead of an eager `new T[count]` from the
 // untrusted wire count.
 func TestCsDecodeLimits(t *testing.T) {
 	const src = `
@@ -425,8 +427,8 @@ messages:
 		"private const long MaxDynStringLen = 4096;",
 		// Unbounded array: LimitExceeded at the count header, then a bounded
 		// initial reservation grown on demand — never `new ulong[count]`.
-		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[Math.Min(count, ArrayInitCap)]; break;",
-		"m.arr = EnsureCap(m.arr, ai, acap); m.arr[ai++] = (ulong)value;",
+		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[Math.Min(count, Seq.ArrayInitCap)]; break;",
+		"m.arr = Seq.EnsureCap(m.arr, ai, acap); m.arr[ai++] = (ulong)value;",
 		// Bounded array: only the #100 schema-capacity guard, and an alloc at the
 		// WIRE count -- `count: N` is a capacity, so M is the length (§3) and the
 		// guard is what still bounds the untrusted count.
@@ -454,9 +456,8 @@ messages:
 		t.Error("unset limits must emit no limit plumbing")
 	}
 	for _, want := range []string{
-		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; m.arr = new ulong[Math.Min(count, ArrayInitCap)]; break;",
-		"m.arr = EnsureCap(m.arr, ai, acap); m.arr[ai++] = (ulong)value;",
-		"private static T[] EnsureCap<T>(T[] a, int i, int cap) {",
+		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; m.arr = new ulong[Math.Min(count, Seq.ArrayInitCap)]; break;",
+		"m.arr = Seq.EnsureCap(m.arr, ai, acap); m.arr[ai++] = (ulong)value;",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("no-config Message.cs missing hardened count-less arm %q", want)
@@ -820,12 +821,12 @@ messages:
 // (CORELIB_PLAN §6.4, generator#257 / Crucible F-0038). corelib-cs hands EVERY
 // fixlen-string field to the generated String() callback, unknown ids and §7.3
 // wire-type contradictions included, so the callback itself is what decides
-// whether a payload is read. It used to call _Utf8() first and switch on
+// whether a payload is read. It used to materialize the payload first and switch on
 // (cur, id) second, so a lone continuation byte at an id the scope does not
 // declare threw InvalidMessage out of an otherwise valid message.
 //
 // The fix is order: resolve the destination first and return when nothing
-// matches, so no byte is decoded or appended to the shared `acc`.
+// matches, so no byte is buffered or handed to the shared PayloadAcc.
 func TestCsSkippedStringIsNotValidated(t *testing.T) {
 	m := buildModule(t, []byte(`
 version: 1
@@ -856,10 +857,10 @@ messages:
 			t.Errorf("String() missing destination arm %q:\n%s", want, fn)
 		}
 	}
-	// The guard precedes the UTF-8 decode and the accumulator alike, so a skipped
-	// payload is neither validated nor able to leave bytes behind for a later
-	// declared field to inherit.
-	for _, after := range []string{"_Utf8(", "acc"} {
+	// The guard precedes the accumulator, which is where the buffering and the
+	// UTF-8 verdict both happen, so a skipped payload is neither validated nor
+	// able to leave bytes behind for a later declared field to inherit.
+	for _, after := range []string{"pay.String("} {
 		if i := strings.Index(fn, after); i < 0 || guardEnd > i {
 			t.Errorf("String(): the destination guard must precede %q:\n%s", after, fn)
 		}
@@ -889,7 +890,7 @@ messages:
       b: { id: 1, type: blob, maxlen: 8 }
 `), "nostr.yaml", map[string]any{})
 	fn := csMethod(t, m, "    public void String(int id,")
-	for _, forbidden := range []string{"_Utf8(", "acc", "switch ((cur, id))", "string _s;"} {
+	for _, forbidden := range []string{"pay.", "switch ((cur, id))", "string _s"} {
 		if strings.Contains(fn, forbidden) {
 			t.Errorf("a string-free schema must not %q in String():\n%s", forbidden, fn)
 		}

@@ -43,7 +43,7 @@ integer, shared with the Rust backend's rules so all ports agree.
 | numeric / bool / fp | `u8`…`u64`, `i8`…`i64`, `bool`, `f32`, `f64` |
 | enum / bitfield | narrowest backing integer (`i8`/`i16`/`i32`, `u8`…`u64`) |
 | string / blob | `[]const u8` |
-| native numeric/enum/bool/bitfield array (`count N`) | `FixedArray(T, N)` — `[N]T` inline capacity **plus** `len` (stack, allocation-free) |
+| native numeric/enum/bool/bitfield array (`count N`) | `sofab.FixedArray(T, N)` — `[N]T` inline capacity **plus** its length (stack, allocation-free) |
 | native array without `count` | `[]const T` |
 | string/blob/struct/union/nested array | `[]const T` (a `count: N` bounds it; it is not materialized) |
 | struct / union | the generated struct type |
@@ -53,19 +53,20 @@ integer, shared with the Rust backend's rules so all ports agree.
 `count: N` is a **capacity**, never a length (MESSAGE_SPEC §3): a field holds
 0..N elements and the wire count `M` **is** the length. A bare `[N]T` can only
 ever *be* `N` long, so it cannot represent that value — this backend's count:N
-native arrays are therefore `FixedArray(T, N)`, a small generated type holding
-`items: [N]T` plus `len: usize`:
+native arrays are therefore `sofab.FixedArray(T, N)`, the corelib type holding
+`N` elements of inline storage plus the length actually carried:
 
 ```zig
-nums: FixedArray(u32, 3) = .{},                                   // no default: the EMPTY array
-seed: FixedArray(u32, 5) = .{ .items = .{ 1, 2, 3, 0, 0 }, .len = 3 }, // default: [1, 2, 3] — 3 long, not 5
+nums: sofab.FixedArray(u32, 3) = .{},                // no default: the EMPTY array
+seed: sofab.FixedArray(u32, 5) = .init(&.{ 1, 2, 3 }), // default: [1, 2, 3] — 3 long, not 5
 ```
 
-The value is `items[0..len]` (`.slice()`); `items[len..]` is spare capacity that
-never reaches the wire. `.init(&.{ 1, 2 })` / `.set(&.{ 1, 2 })` build one. This
-keeps a bounded array **allocation-free on both encode and decode**, which is the
-point of `count` on this max-speed target — turning it into a heap slice would
-make a bounded schema allocate. A declared `default` stands exactly as written
+The value is `.slice()`; the storage past it is spare capacity that never
+reaches the wire. `.init(&.{ 1, 2 })` / `.set(&.{ 1, 2 })` build one, and a
+decoder fills one with `.clear()` / `.push()`. This keeps a bounded array
+**allocation-free on both encode and decode**, which is the point of `count` on
+this max-speed target — turning it into a heap slice would make a bounded schema
+allocate. A declared `default` stands exactly as written
 and is never padded out to `N`, so a fresh count:N array is the *empty* array
 (it used to be `N` element defaults).
 
@@ -236,8 +237,8 @@ whole rather than merging by index (§7.4).
 There is no `no_std`-style sizing gate: `corelib-zig` is the family's
 max-speed port, and the generated code takes an allocator on the decode
 path, so a string/blob without `maxlen` or an array without `count` is fine —
-bounded native arrays still lower to inline `FixedArray(T, N)` stack storage and
-skip the allocator entirely.
+bounded native arrays still lower to inline `sofab.FixedArray(T, N)` stack
+storage and skip the allocator entirely.
 
 **There is no `allow_dynamic` here yet, and that is a gap rather than a
 decision** (generator#323). Zig can express heap-free storage for a bounded

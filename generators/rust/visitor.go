@@ -489,6 +489,27 @@ func (g *gen) emitArrayFillArm(f *rfile, fs []frame, fillArm bool) {
 	f.line("        };")
 }
 
+// emitPayloadFeed hands one string/blob chunk to the corelib's PayloadAcc and
+// binds `name` to the whole payload, returning while bytes are still outstanding.
+// Reassembly itself carries no schema knowledge -- (total, offset, chunk) in,
+// the field's bytes out -- which is why it is the corelib's and not emitted here
+// (ARCHITECTURE §8, generator#345).
+//
+// The no_std accumulator holds finite storage, so it has a third answer: a split
+// payload larger than that storage can never be assembled and is BufferFull, the
+// same verdict a fixed-capacity destination gives when it overflows. The maxlen
+// guard emitted above already keeps every declared field under the bound, so the
+// arm is a backstop rather than a reachable outcome -- and a backstop that
+// rejects, where the previous inline form would have waited for a completion that
+// could not arrive and dropped the field in silence.
+func (g *gen) emitPayloadFeed(f *rfile, name string) {
+	if g.noStd {
+		f.line("        let %s = match self.acc.feed(total, offset, chunk) { Ok(Some(_v)) => _v, Ok(None) => return, Err(_) => { self.err = true; return; } };", name)
+		return
+	}
+	f.line("        let %s = match self.acc.feed(total, offset, chunk) { Some(_v) => _v, None => return };", name)
+}
+
 func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	use := visitorUseOf(fs)
@@ -504,20 +525,21 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// whenever the §7.3 guard needs a place to arm itself.
 	emitArrayBegin := use.scalarArray || arrSkip
 
-	// no_std string/blob accumulation buffer: reconstructs a payload split across
-	// feed chunks (generator#81), matching the std profile's `acc`. Sized to the
-	// message's max encoded size (a safe bound on any single payload); an
-	// alloc-fallback crate uses an unbounded Vec. The std profile always carries
-	// an acc (a heap Vec), so this is only conditional under no_std.
-	needAcc := g.noStd && (use.str || use.blob)
-	accType, accNew := "", ""
-	if needAcc {
-		if g.usesAlloc(g.schema) {
-			accType, accNew = "alloc::vec::Vec<u8>", "alloc::vec::Vec::new()"
-		} else {
-			sz := g.messageSize(name, fields).Size
-			accType, accNew = fmt.Sprintf("heapless::Vec<u8, %d>", sz), "heapless::Vec::new()"
-		}
+	// String/blob chunk reassembly is the corelib's `PayloadAcc` (corelib-rs#88,
+	// corelib-rs-no-std#92): the same handful of lines for every schema, so the
+	// crate holds one instead of inlining it per callback. Carried only when the
+	// message actually has a string or blob field to reassemble.
+	//
+	// The no_std twin keeps its storage in the caller, so its capacity is named
+	// here: the message's max encoded size, which bounds any single payload
+	// inside it. No_std requires a maxlen on every string/blob in BOTH storage
+	// modes, so that bound always resolves from the schema, and the per-field
+	// maxlen guard rejects an over-long payload before a byte ever reaches the
+	// accumulator.
+	needAcc := use.str || use.blob
+	accType, accNew := "sofab::PayloadAcc", "sofab::PayloadAcc::new()"
+	if g.noStd {
+		accType = fmt.Sprintf("sofab::PayloadAcc<%d>", g.messageSize(name, fields).Size)
 	}
 
 	// Wrap the decoder in a private module so _Loc / V don't clash across
@@ -581,13 +603,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	for _, ix := range ixVars {
 		askipInit += ", " + ix + ": 0"
 	}
-	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0, acc: Vec::new(), err: false, inv: false%s%s };", limInit, askipInit)
+	accInit := ""
+	if needAcc {
+		accInit = ", acc: " + accNew
+	}
+	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0%s, err: false, inv: false%s%s };", accInit, limInit, askipInit)
 	if g.noStd {
-		if needAcc {
-			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, dead: 0, acc: %s, err: false, inv: false%s };", accNew, askipInit)
-		} else {
-			vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, dead: 0, err: false, inv: false%s };", askipInit)
-		}
+		vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, dead: 0%s, err: false, inv: false%s };", accInit, askipInit)
 	}
 	// Infallible, best-effort decode: kept for back-compat. It discards feed's
 	// Result and returns whatever was filled, so it can never reject malformed
@@ -763,19 +785,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("struct V<'a> {")
 	f.line("    m: &'a mut %s,", name)
 	if g.noStd {
-		// Heap-free: bounded location stack. `acc` reassembles a string/blob split
-		// across feed chunks (generator#81); omitted when the message has neither.
+		// Heap-free: bounded location stack.
 		f.line("    stack: heapless::Vec<_Loc, %d>,", stackCap)
-		f.line("    cur: _Loc,")
-		f.line("    dead: u16, // depth of the skipped subtree cur sits in (see sequence_begin)")
-		if needAcc {
-			f.line("    acc: %s,", accType)
-		}
 	} else {
 		f.line("    stack: Vec<_Loc>,")
-		f.line("    cur: _Loc,")
-		f.line("    dead: u16, // depth of the skipped subtree cur sits in (see sequence_begin)")
-		f.line("    acc: Vec<u8>,")
+	}
+	f.line("    cur: _Loc,")
+	f.line("    dead: u16, // depth of the skipped subtree cur sits in (see sequence_begin)")
+	if needAcc {
+		f.line("    acc: %s,", accType)
 	}
 	// Sticky decode-failure flag: a no_std fixed-capacity fill that overflows
 	// (heapless String/Vec push past capacity) sets this so try_decode can report
@@ -929,19 +947,16 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			g.emitLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN")
 		}
 		if g.fixedFields() {
-			// Accumulate across chunks so a streaming (multi-feed) string is
-			// reconstructed like the std profile (generator#81), bounded by `acc`'s
-			// capacity. The single-shot fast path (whole payload in one chunk) reads
-			// the slice directly and skips the acc copy. offset==0 starts a fresh
-			// payload; acc is built up only while the payload is still incomplete.
-			f.line("        if offset == 0 { self.acc.clear(); }")
-			f.line("        let _s = if offset == 0 && chunk.len() >= total {")
-			f.line("            match core::str::from_utf8(&chunk[..total]) { Ok(_v) => _v, Err(_) => { self.inv = true; \"\" } }")
-			f.line("        } else {")
-			f.line("            let _ = self.acc.extend_from_slice(chunk);")
-			f.line("            if self.acc.len() < total { return; }")
-			f.line("            match core::str::from_utf8(&self.acc[..total]) { Ok(_v) => _v, Err(_) => { self.inv = true; \"\" } }")
-			f.line("        };")
+			// Same strict rule as the std profile, and stated in the output for the
+			// same reason: it is the decision a reader of the generated crate would
+			// otherwise have to reconstruct.
+			f.line("        // A Rust string type is Unicode, so a string is always strict. Invalid")
+			f.line("        // UTF-8 is the INVALID decode outcome (self.inv -> Error::InvalidMsg),")
+			f.line("        // never a lossy U+FFFD and never empty; the two Rust profiles agree")
+			f.line("        // (subsumes #80). The verdict is passed on the ASSEMBLED payload, which")
+			f.line("        // is why it sits after the feed and not per chunk.")
+			g.emitPayloadFeed(f, "_p")
+			f.line("        let _s = match core::str::from_utf8(_p) { Ok(_v) => _v, Err(_) => { self.inv = true; \"\" } };")
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
@@ -964,21 +979,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        }")
 			f.line("    }")
 		} else {
-			f.line("        // Single-shot: whole payload in one chunk -> build straight from the")
-			f.line("        // slice, skipping the `acc` accumulate + second copy.")
-			f.line("        // A string is UTF-8 and Rust's")
-			f.line("        // String is a Unicode type, so it is always strict. Invalid UTF-8 is")
-			f.line("        // the INVALID decode outcome (self.inv -> Error::InvalidMsg), never a")
-			f.line("        // lossy U+FFFD and never empty; the two Rust profiles agree (subsumes #80).")
-			f.line("        let _s = if offset == 0 && chunk.len() >= total {")
-			f.line("            match core::str::from_utf8(&chunk[..total]) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }")
-			f.line("        } else {")
-			f.line("            self.acc.extend_from_slice(chunk);")
-			f.line("            if self.acc.len() < total { return; }")
-			f.line("            let s = match core::str::from_utf8(&self.acc) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } };")
-			f.line("            self.acc.clear();")
-			f.line("            s")
-			f.line("        };")
+			f.line("        // A Rust string type is Unicode, so a string is always strict. Invalid")
+			f.line("        // UTF-8 is the INVALID decode outcome (self.inv -> Error::InvalidMsg),")
+			f.line("        // never a lossy U+FFFD and never empty; the two Rust profiles agree")
+			f.line("        // (subsumes #80). The verdict is passed on the ASSEMBLED payload, which")
+			f.line("        // is why it sits after the feed and not per chunk.")
+			g.emitPayloadFeed(f, "_p")
+			f.line("        let _s = match core::str::from_utf8(_p) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } };")
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
@@ -1004,16 +1011,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			g.emitLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN")
 		}
 		if g.fixedFields() {
-			// Accumulate across chunks like the string visitor / std profile
-			// (generator#81); single-shot fast path reads the slice directly.
-			f.line("        if offset == 0 { self.acc.clear(); }")
-			f.line("        let _b: &[u8] = if offset == 0 && chunk.len() >= total {")
-			f.line("            &chunk[..total]")
-			f.line("        } else {")
-			f.line("            let _ = self.acc.extend_from_slice(chunk);")
-			f.line("            if self.acc.len() < total { return; }")
-			f.line("            &self.acc[..total]")
-			f.line("        };")
+			g.emitPayloadFeed(f, "_b")
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
@@ -1031,15 +1029,8 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        }")
 			f.line("    }")
 		} else {
-			f.line("        let _b = if offset == 0 && chunk.len() >= total {")
-			f.line("            chunk[..total].to_vec()")
-			f.line("        } else {")
-			f.line("            self.acc.extend_from_slice(chunk);")
-			f.line("            if self.acc.len() < total { return; }")
-			f.line("            let b = self.acc.clone();")
-			f.line("            self.acc.clear();")
-			f.line("            b")
-			f.line("        };")
+			g.emitPayloadFeed(f, "_p")
+			f.line("        let _b = _p.to_vec();")
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
@@ -1639,19 +1630,15 @@ type vField struct {
 func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, arrSkip, scalarArray bool, ixVars []string) []vField {
 	var out []vField
 	if g.noStd {
-		out = append(out,
-			vField{"stack", fmt.Sprintf("heapless::Vec<_Loc, %d>", stackCap), "heapless::Vec::new()", false},
-			vField{"cur", "_Loc", "_Loc::Root", true},
-			vField{"dead", "u16", "0", true})
-		if needAcc {
-			out = append(out, vField{"acc", accType, accNew, false})
-		}
+		out = append(out, vField{"stack", fmt.Sprintf("heapless::Vec<_Loc, %d>", stackCap), "heapless::Vec::new()", false})
 	} else {
-		out = append(out,
-			vField{"stack", "Vec<_Loc>", "Vec::new()", false},
-			vField{"cur", "_Loc", "_Loc::Root", true},
-			vField{"dead", "u16", "0", true},
-			vField{"acc", "Vec<u8>", "Vec::new()", false})
+		out = append(out, vField{"stack", "Vec<_Loc>", "Vec::new()", false})
+	}
+	out = append(out,
+		vField{"cur", "_Loc", "_Loc::Root", true},
+		vField{"dead", "u16", "0", true})
+	if needAcc {
+		out = append(out, vField{"acc", accType, accNew, false})
 	}
 	out = append(out,
 		vField{"err", "bool", "false", true},

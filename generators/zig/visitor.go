@@ -151,7 +151,8 @@ type visitorUse struct {
 	// dynAlloc: the message decodes at least one slice-backed native array (a
 	// count-less direct field or a nested native element array), i.e. it
 	// allocates array storage from an untrusted wire count and needs the
-	// capped _allocN plus putGrowing, and the announced-count register `an`.
+	// capped sofab.arrays.allocCapped plus putGrowing, and the announced-count
+	// register `an` and the fill index `ai`.
 	dynAlloc bool
 }
 
@@ -225,18 +226,6 @@ func (g *gen) dynNativeArray(f *ir.Field) bool {
 	return f.Kind == ir.KindArray && isNativeArrayElem(f.Elem) && !f.HasCount
 }
 
-// dynAllocUse reports whether any message decodes a slice-backed native array
-// (a count-less direct field or a nested native element array) — i.e. whether
-// the capped _allocN is referenced (see emitSupport).
-func (g *gen) dynAllocUse(s *ir.Schema) bool {
-	for _, m := range s.Messages {
-		if visitorUseOf(g.frames(m)).dynAlloc {
-			return true
-		}
-	}
-	return false
-}
-
 // msgLimitGuards reports whether the message's decoder emits at least one
 // decode-limit guard (generator#102) — i.e. whether it needs the sticky `lim`
 // flag and the decode() LimitExceeded check. It mirrors the guard emission
@@ -273,15 +262,16 @@ func (g *gen) msgLimitGuards(fields []*ir.Field) bool {
 }
 
 // putCall renders the element store for a direct native array field: the
-// capacity-checked putChecked into a count:N field's inline items -- an element
+// capacity-checked push into a count:N field's inline storage -- an element
 // past the capacity flags the message INVALID -- or the growing putGrowing
 // for a dynamic (count-less) slice, which keeps every wire element up to the
 // announced count while never trusting that count for the eager allocation.
 //
-// The count:N store also advances the field's `len`. The wire count M IS the
-// array's length (MESSAGE_SPEC §3), so the length follows the elements that
-// actually arrive; `count` bounds them but adds none, and nothing is filled in
-// at [M, N).
+// A count:N field carries its own index, so its store needs none of the
+// visitor's: the wire count M IS the array's length (MESSAGE_SPEC §3), so the
+// length follows the elements that actually arrive, counting up from the
+// `clear` arrayBegin issued. `count` bounds them but adds none, and nothing is
+// filled in at [M, N).
 // `guard` is the element's §7.1 declared-width rejection (widthGuard), placed
 // INSIDE the fill guard: an over-width scalar arriving at this id with no
 // arrayBegin in front of it (afill == 0) is a §7.3 skip and must not be rejected.
@@ -289,7 +279,7 @@ func (g *gen) putCall(fr frame, fld *ir.Field, guard, val string) string {
 	acc := fr.path + "." + zigIdent(fld.Name)
 	var inner string
 	if _, _, ok := g.fixedNativeArray(fld); ok {
-		inner = fmt.Sprintf("sofab.arrays.putChecked(&%s.items, &self.ai, %s, &self.inv); %s.len = self.ai", acc, val, acc)
+		inner = fmt.Sprintf("%s.push(%s, &self.inv)", acc, val)
 	} else {
 		inner = fmt.Sprintf("sofab.arrays.putGrowing(&%s, self.alloc, &self.ai, self.an, %s)", acc, val)
 	}
@@ -366,7 +356,7 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	// Untouched -- and never allocated -- on the contiguous path and on every
 	// streaming payload that happens to arrive whole in one chunk, which is what
 	// keeps the zero-copy borrow the common case rather than the exception.
-	f.line("    acc: std.ArrayList(u8) = .empty, // only a payload split across feed chunks lands here")
+	f.line("    acc: sofab.PayloadAcc = .{}, // only a payload split across feed chunks lands here")
 	// Set by decoder(), left false by decode(). See _reassemble: on the streaming
 	// path a delivered slice may live in the corelib's reusable carry buffer
 	// rather than in the caller's chunk, and nothing in the callback tells the
@@ -381,10 +371,10 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	if g.msgLimitGuards(fields) {
 		f.line("    lim: bool = false, // an unbounded field exceeded a configured decode limit")
 	}
-	if use.scalarArray {
-		f.line("    ai: usize = 0, // index into the native array currently being filled")
-	}
+	// Only a slice-backed array needs the visitor to carry the fill index: a
+	// count:N field keeps its own length, and pushes into it.
 	if use.dynAlloc {
+		f.line("    ai: usize = 0, // index into the native array currently being filled")
 		f.line("    an: usize = 0, // announced wire count of that array (untrusted until its elements arrive)")
 	}
 	// §7.3 array-vs-scalar skip counter (generator#183 for integers, #193 for fp):
@@ -1072,15 +1062,15 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 					// (MESSAGE_SPEC 3+7), and setting the sticky `inv` HERE — before
 					// the elements are read — makes INVALID dominate a truncated tail
 					// (§5.2), since decode() reads `inv` before surfacing `.incomplete`.
-					// The store-side putChecked bound only fires when the N+1th element
+					// The store-side push bound only fires when the N+1th element
 					// actually arrives, which a truncated over-count array never reaches.
 					guard := fmt.Sprintf("if (count > %d) { self.inv = true; return; }", n)
-					// Then the length is reset: the wire count M IS the array's length
+					// Then the value is cleared: the wire count M IS the array's length
 					// (§3), so the value is exactly what this array header delivers --
 					// an explicitly empty one (count 0) decodes to the EMPTY array, not
 					// to the previous value and not to N element defaults. The stores
-					// advance `len` from here (see putCall); the spare capacity past it
-					// is not part of the value, so it needs no clearing.
+					// refill it from here (see putCall); the spare capacity past the
+					// length is not part of the value, so it needs no clearing.
 					//
 					// Gated on the announced wire KIND, so a header whose kind
 					// contradicts the declared element type is skipped like an unknown
@@ -1095,7 +1085,7 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 					// contradiction into INVALID -- §7.3 decides the subtype BEFORE
 					// any schema bound, and only a field that survives that test is
 					// bounded at all.
-					arm := fmt.Sprintf("if (kind == .%s) { %s %s.%s.len = 0; }",
+					arm := fmt.Sprintf("if (kind == .%s) { %s %s.%s.clear(); }",
 						wireArrayKind(fld.Elem), guard, fr.path, zigIdent(fld.Name))
 					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, arm))
 					// The guard reads the wire count; the switch reads id.
@@ -1105,7 +1095,7 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 				if g.dynNativeArray(fld) {
 					idUsed, countUsed = true, true
 					elem := g.zigArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems)
-					body := fmt.Sprintf("%s.%s = _allocN(%s, self.alloc, count)", fr.path, zigIdent(fld.Name), elem)
+					body := fmt.Sprintf("%s.%s = sofab.arrays.allocCapped(%s, self.alloc, count)", fr.path, zigIdent(fld.Name), elem)
 					if g.limits.arrayHas {
 						// A count-less array is always unbounded, so every
 						// direct dynamic native array gets the guard. an = 0
@@ -1138,7 +1128,7 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 			// `count` bounds the id (an id >= N is INVALID, §5.1/§7), which also
 			// bounds the id-keyed gap-fill against an over-index amplification.
 			inner := strings.TrimPrefix(fr.elemType, "[]const ")
-			body := fmt.Sprintf("{ self.%s = id; if (sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, &.{})) { sofab.arrays.at(%s, id).* = _allocN(%s, self.alloc, count); } }",
+			body := fmt.Sprintf("{ self.%s = id; if (sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, &.{})) { sofab.arrays.at(%s, id).* = sofab.arrays.allocCapped(%s, self.alloc, count); } }",
 				fr.idx, fr.elemType, fr.path, fr.path, inner)
 			if fr.cap >= 0 {
 				body = fmt.Sprintf("if (id >= %d) { self.inv = true; } else %s", fr.cap, body)
@@ -1182,7 +1172,7 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 	}
 	f.blank()
 	f.line("    pub fn arrayBegin(self: *_dec_%s, %s: sofab.Id, %s: sofab.ArrayKind, %s: usize) void {", name, idParam, kindParam, countParam)
-	if visitorUseOf(fs).scalarArray {
+	if visitorUseOf(fs).dynAlloc {
 		f.line("        self.ai = 0;")
 	}
 	g.emitArraySkipArm(f, fs, arrSkip)
@@ -1308,21 +1298,13 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	f.line("    /// next stitched item. Borrowing on that path aliased earlier fields and")
 	f.line("    /// elements onto later ones at particular chunk sizes.")
 	f.line("    ///")
-	f.line("    /// A completed payload is handed back as its OWN allocation rather than as")
-	f.line("    /// a view into `acc`. A destination KEEPS the slice it is given -- wrapper")
-	f.line("    /// array elements outlive the callback -- while `acc` is scratch that the")
-	f.line("    /// next split payload clears, appends to, and may reallocate. A view into")
-	f.line("    /// it would alias every element stored earlier onto the newest one, and a")
-	f.line("    /// growing buffer would rebase them onto the old block: a stale length")
-	f.line("    /// past the live bytes, and a freed read under an allocator that releases.")
+	f.line("    /// A split payload is stitched by sofab.PayloadAcc, which hands it back")
+	f.line("    /// as its own allocation -- a destination KEEPS the slice it is given.")
 	f.line("    fn _reassemble(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
 	f.line("        if (offset == 0 and chunk.len >= total) {")
 	f.line("            if (!self.own) return chunk; // contiguous decode: borrow the caller's buffer")
 	f.line("            return self.alloc.dupe(u8, chunk[0..total]) catch { self.inv = true; return null; };")
 	f.line("        }")
-	f.line("        if (offset == 0) self.acc.clearRetainingCapacity();")
-	f.line("        self.acc.appendSlice(self.alloc, chunk) catch { self.inv = true; return null; };")
-	f.line("        if (self.acc.items.len < total) return null; // more chunks to come")
 	// generator#295: the branch above used to borrow on BOTH paths. corelib-zig
 	// stitches an item that straddles a feed boundary into a fixed `carry` buffer
 	// and parses out of it, so a payload completing inside that stitch is handed
@@ -1332,17 +1314,10 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	// streaming path is what makes the destination independent of both the carry
 	// buffer and the caller's chunk lifetime.
 	//
-	// generator#293 (Crucible F-0058 / codegen defect G-0036): `acc` is ONE buffer
-	// per visitor, so handing `acc.items` to the store made every split payload
-	// overwrite the elements assembled before it, and growth reallocated the
-	// buffer out from under them. Only the split path is affected -- the borrow
-	// above returns disjoint regions of the caller's chunk and stays zero-copy.
-	//
-	// The copy is taken only once the payload is known complete, and `acc` still
-	// grows strictly with the bytes that actually arrived -- neither side sizes
-	// anything from the untrusted `total` up front, so a large declared length in
-	// a short message cannot make either allocate ahead of it.
-	f.line("        return self.alloc.dupe(u8, self.acc.items[0..total]) catch { self.inv = true; return null; };")
+	// The split path below owns its result for the same reason, plus the one
+	// PayloadAcc documents (generator#293 / Crucible F-0058): its scratch is
+	// reused by every following payload.
+	f.line("        return self.acc.push(self.alloc, total, offset, chunk) catch { self.inv = true; return null; };")
 	f.line("    }")
 
 	idParam := "_"

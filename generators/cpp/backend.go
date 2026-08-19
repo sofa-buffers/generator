@@ -225,23 +225,18 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.line("#include <span>")
 	f.line("#include <cstring>")
 	f.line("#include <cstddef>")
-	if g.needsSeqHelpers(m) {
-		// <type_traits> backs the sofabgen:: wrapper-sequence helpers below.
-		f.line("#include <type_traits>")
-	}
 	f.line("#include %q", "sofab/sofab.hpp")
 	f.blank()
 	f.line("static_assert(sofab::API_VERSION == 1,")
 	f.line("    \"SofaBuffers: generated against C++ API v1, but the linked corelib differs.\");")
 	f.blank()
-	// Scalar-array and leaf helpers live in the corelib on BOTH C++ paths --
-	// sofab::StringSeq / BlobSeq / trimTail in corelib-cpp, sofab::FixedStringSeq /
-	// FixedBlobSeq / trimTail in corelib-c-cpp. The WRAPPER-ARRAY element helpers
-	// do not: the schema `count` N is what decides placement, refill and the
-	// trailing-run trim, and N is known here (CORELIB_PLAN §7 split), so they are
-	// generated.
+	// Every wrapper-array collector lives in the corelib on BOTH C++ paths --
+	// sofab::StringSeq / BlobSeq / MessageSeq in corelib-cpp, sofab::FixedStringSeq /
+	// FixedBlobSeq / FixedMessageSeq / MessageSeq in corelib-c-cpp. The schema
+	// `count` N rides in as a bound, so nothing about the collector's shape depends
+	// on the schema. What is still generated here is the one view whose element
+	// type IS schema-dependent: sofabgen::RawArray, the enum array's wire view.
 	g.emitRawArrayHelper(f, m)
-	g.emitSeqHelpers(f, m)
 	f.line("namespace %s {", g.ns)
 	f.blank()
 
@@ -291,66 +286,6 @@ func (g *gen) header(m *ir.Message) []byte {
 	g.emitStruct(f, exported(m.Name), m.Summary, m.Fields, true)
 	f.line("} // namespace %s", g.ns)
 	return f.bytes()
-}
-
-// needsSeqHelpers reports whether this header contains a wrapper array -- a
-// string/blob/struct/union/nested-array array, which lowers to a sequence whose
-// child ids are the element indexes. Only such a header needs the sofabgen::
-// helper block; a schema of scalars and native arrays never names it.
-// usesWrapperSeq reports whether an array with this element kind is READ through
-// sofabgen::WrapperSeq, which is the only thing the helper block is for.
-//
-// It is not "every non-native element": a `string` or `blob` element is collected
-// by the corelib's own sofab::StringSeq / sofab::BlobSeq (and their Fixed twins on
-// the C wrapper), and a row that is ITSELF a wrapper sequence gets a local
-// collector emitted beside it by deserializeRowSeq. Both were counted before, so
-// a schema whose only wrapper arrays are strings and blobs -- the common case --
-// carried 66 lines of template that nothing instantiated.
-//
-// What is left is exactly the two paths that reach deserializeSeqInto:
-//
-//   - a struct/union element, placed at the index its id names;
-//   - a row of native scalars, i.e. a matrix, where WrapperSeq places the row and
-//     hands it to is.read()'s span overload.
-//
-// The recursion matters for the second kind: array<array<struct>> emits a local
-// row collector, and INSIDE it the struct elements go to deserializeSeqInto after
-// all -- so a nested row still needs the block, one level down.
-func usesWrapperSeq(elem ir.Kind, items *ir.ArrayElem) bool {
-	switch elem {
-	case ir.KindStruct, ir.KindUnion:
-		return true
-	case ir.KindArray:
-		if items == nil {
-			return false
-		}
-		if isNativeArrayElem(items.Elem) {
-			return true
-		}
-		return usesWrapperSeq(items.Elem, items.ElemItems)
-	}
-	return false
-}
-
-func (g *gen) needsSeqHelpers(m *ir.Message) bool {
-	has := func(fields []*ir.Field) bool {
-		for _, fld := range fields {
-			if fld.Kind == ir.KindArray && usesWrapperSeq(fld.Elem, fld.ElemItems) {
-				return true
-			}
-		}
-		return false
-	}
-	if has(m.Fields) {
-		return true
-	}
-	for _, key := range g.reachable(m) {
-		nt := g.schema.Named[key]
-		if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && has(nt.Fields) {
-			return true
-		}
-	}
-	return false
 }
 
 // needsRawArray reports whether this header decodes an ENUM array through the
@@ -449,92 +384,6 @@ func (g *gen) emitRawArrayHelper(f *hfile, m *ir.Message) {
 	f.blank()
 	f.line("} // namespace sofabgen")
 	f.line("#endif // SOFABGEN_RAW_ARRAY_HELPER")
-	f.blank()
-}
-
-// emitSeqHelpers writes the wrapper-array element collector shared by every
-// generated header.
-//
-// It is generated rather than taken from the corelib because the schema `count`
-// N is what bounds the element index, and only the generator knows N
-// (CORELIB_PLAN §7): corelib-c-cpp's MessageSeq/FixedMessageSeq append in
-// arrival order because the C wrapper never learns the index means anything,
-// which an id GAP -- ordinary since §2 made an interior all-default element
-// sparse -- would turn into every later element shifted down by one.
-//
-// The block is emitted at global scope in its own `sofabgen` namespace and is
-// macro-guarded, since several generated headers -- possibly with different
-// `namespace` settings -- can be included into one translation unit.
-func (g *gen) emitSeqHelpers(f *hfile, m *ir.Message) {
-	if !g.needsSeqHelpers(m) {
-		return
-	}
-	f.line("#ifndef SOFABGEN_WRAPPER_SEQ_HELPERS")
-	f.line("#define SOFABGEN_WRAPPER_SEQ_HELPERS")
-	f.line("/// Wrapper-array element helpers shared by every sofabgen-generated header.")
-	f.line("namespace sofabgen {")
-	f.blank()
-	f.line("/**")
-	f.line(" * @brief Collects an array of strings, blobs, structs, unions or rows, placing")
-	f.line(" *        each element at the index its own id names.")
-	f.line(" *")
-	f.line(" * Such an array travels as a sequence whose child id IS the element's index, so")
-	f.line(" * an element is stored at `dest[id]` -- never appended. The ids may have gaps:")
-	f.line(" * an INTERIOR element equal to the element default is left off the wire, and the")
-	f.line(" * gap it leaves is filled with that default. Appending instead would shorten the")
-	f.line(" * array by the size of every gap, and would turn a repeated element id into a")
-	f.line(" * second element instead of continuing the first one. The array's LAST element")
-	f.line(" * is always on the wire, so the decoded length -- highest present id + 1 -- is")
-	f.line(" * exact.")
-	f.line(" *")
-	f.line(" * The schema `count` N is a CAPACITY, not a length: it bounds the array -- an")
-	f.line(" * index at or past N is rejected as a malformed message, before the container")
-	f.line(" * grows, which also bounds the gap fill against an over-index amplification --")
-	f.line(" * but it never adds an element the wire did not carry.")
-	f.line(" *")
-	f.line(" * @tparam Container Destination container; its `value_type` is the element type.")
-	f.line(" */")
-	f.line("template <typename Container>")
-	f.line("struct WrapperSeq : sofab::IStreamMessage {")
-	f.line("    using Elem = typename Container::value_type;")
-	f.line("    Container *out = nullptr;  ///< Destination, bound by the generated read.")
-	f.line("    long cap = -1;             ///< Schema `count`, or -1 when the array has none.")
-	f.blank()
-	f.line("    /**")
-	f.line("     * @brief Empty the destination before collecting into it.")
-	f.line("     *")
-	f.line("     * The sequence IS the array's value, so a field id occurring twice replaces")
-	f.line("     * the array rather than extending it. This runs only once the field is known")
-	f.line("     * to be a sequence, so an occurrence skipped for a contradicting wire type")
-	f.line("     * cannot wipe a valid earlier one.")
-	f.line("     */")
-	f.line("    void prepare() noexcept { if (out != nullptr) { out->clear(); } }")
-	f.blank()
-	f.line("    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t count) noexcept override {")
-	f.line("        /* The two corelibs put the wire tag enum in different scopes; decltype")
-	f.line("         * names neither. */")
-	f.line("        using Tag = decltype(is.wire());")
-	f.line("        if constexpr (std::is_base_of_v<sofab::IStreamMessage, Elem>) {")
-	f.line("            /* An element whose wire type contradicts the declared one is skipped")
-	f.line("             * exactly like an unknown id -- which means it must leave the")
-	f.line("             * container untouched, so the decision comes before the fill below. */")
-	f.line("            if (is.wire() != Tag::SequenceStart) { return; }")
-	f.line("        }")
-	f.line("        if (cap >= 0 && static_cast<long>(id) >= cap) { is.invalidate(); return; }")
-	f.line("        while (out->size() <= static_cast<std::size_t>(id)) { (void)out->emplace_back(); }")
-	f.line("        Elem &row = (*out)[static_cast<std::size_t>(id)];")
-	f.line("        /* A row that is itself a count-less array is filled only up to its")
-	f.line("         * current size, so size it to the row's element count first. Struct,")
-	f.line("         * union and fixed-length rows have no resize(). */")
-	f.line("        if constexpr (requires { row.resize(count); } && !std::is_base_of_v<sofab::IStreamMessage, Elem>) {")
-	f.line("            row.resize(count);")
-	f.line("        }")
-	f.line("        is.read(row);")
-	f.line("    }")
-	f.line("};")
-	f.blank()
-	f.line("} // namespace sofabgen")
-	f.line("#endif // SOFABGEN_WRAPPER_SEQ_HELPERS")
 	f.blank()
 }
 
@@ -1810,16 +1659,17 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 }
 
 // deserializeSeqInto reads a wrapper sequence of struct/union elements or
-// nested-array rows into target through sofabgen::WrapperSeq, which places each
-// element at its element id (MESSAGE_SPEC §5.1) instead of appending it. The
-// decoded length is highest present id + 1 and nothing is added past it: the
-// schema count N is a capacity that bounds the id, never a length (§3).
+// nested-array rows into target through the corelib's own object collector,
+// which places each element at its element id (MESSAGE_SPEC §5.1) instead of
+// appending it. The decoded length is highest present id + 1 and nothing is
+// added past it: the schema count N is a capacity that bounds the id, never a
+// length (§3).
 //
-// The collector is generated rather than taken from the corelib because
-// corelib-c-cpp's Fixed/MessageSeq APPEND in arrival order -- the C wrapper
-// never learns that the element id means anything -- which an interior id gap,
-// ordinary since §2 made an all-default interior element sparse, would turn into
-// every later element shifted down by one.
+// Both corelibs own that collector now, so nothing is generated for it:
+// sofab::MessageSeq is templated on the destination CONTAINER on either leg, and
+// corelib-c-cpp adds sofab::FixedMessageSeq for the heap-free profile, whose
+// bound IS the inline container's capacity -- the same split the string and blob
+// arms above already take between sofab::StringSeq and sofab::FixedStringSeq.
 //
 // corelib-cpp decodes synchronously, so a plain stack-local collector is fine
 // and read() reports whether the SequenceStart tag matched. The corelib-c-cpp
@@ -1828,19 +1678,25 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 // from the field tag before readSequence, and a fixed count reserves the target
 // up front so a later placement never reallocates a still-bound element.
 func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, cap int64, rv, container string) {
-	seq := fmt.Sprintf("sofabgen::WrapperSeq<%s>", container)
 	if g.clib {
+		if strings.HasPrefix(container, "sofab::InlineVector") {
+			// The inline container's capacity IS the schema `count`, so the
+			// collector reads its own bound off it and takes no cap.
+			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::FixedMessageSeq<%s> %s;", container, rv),
+				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
+			return
+		}
 		reserve := ""
-		if count > 0 && !strings.HasPrefix(container, "sofab::InlineVector") {
+		if count > 0 {
 			// A dynamic destination must not reallocate while an element the
 			// deferred decoder still has to fill is bound into it.
 			reserve = fmt.Sprintf(" %s.reserve(%d);", target, count)
 		}
-		g.emitSeqRead(f, ind, fmt.Sprintf("static %s %s; %s.cap = %d;%s", seq, rv, rv, cap, reserve),
+		g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::MessageSeq<%s> %s; %s.cap = %d;%s", container, rv, rv, cap, reserve),
 			fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		return
 	}
-	g.emitSeqRead(f, ind, fmt.Sprintf("%s %s; %s.out = &%s; %s.cap = %d;", seq, rv, rv, target, rv, cap),
+	g.emitSeqRead(f, ind, fmt.Sprintf("sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d;", container, rv, rv, target, rv, cap),
 		fmt.Sprintf("is.read(%s)", rv))
 }
 
