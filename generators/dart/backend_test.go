@@ -280,9 +280,9 @@ func TestFp32SignalingNaNPreserved(t *testing.T) {
 		"o.somefp32Fp32Bits = null;",
 		"if (somefp32.isNaN && somefp32Fp32Bits != null) { e.writeFp32Bits(8, somefp32Fp32Bits!); }",
 		// Array: a bit-exact Float32List copy, never a widening List<double>.from.
-		"Float32List _f32copy(Float32List v, int n) {",
+		"o.somefloatarray = sofab.copyFp32(values, values.length);",
 		// exactly the wire count: `count: 3` is a capacity and adds no elements (§3)
-		"o.somefloatarray = _f32copy(values, values.length);",
+		"o.somefloatarray = sofab.copyFp32(values, values.length);",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("fp32 sNaN codegen missing %q", want)
@@ -599,42 +599,20 @@ func TestDartArrayElementSparsityIsPositional(t *testing.T) {
 func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 	out := genFor(t, writeDef(t, capDef), map[string]any{})
 
+	// The collector BODIES are corelib code since corelib-dart#74 -- placement by
+	// id, the gap fill, the capacity and maxlen rejects, the element-width bound --
+	// and are tested there, against decoded bytes. What is still this backend's to
+	// get right is the CALL: which collector a field picks, and which bounds reach
+	// it. That is what this asserts.
 	for _, want := range []string{
-		// leaf / object collectors: guard, gap-fill, place
-		// The string collector takes RAW wire bytes now: the destination (this
-		// collector, at this id) is resolved before the payload is validated or
-		// transcoded, so a skipped string is never inspected (generator#257).
-		"    if (cap >= 0 && id >= cap) { invalidate(); return; }\n" +
-			"    if (emax >= 0 && bytes.length > emax) { invalidate(); return; }\n",
-		"    final s = sofab.decodeUtf8Strict(bytes);\n" +
-			"    if (s == null) { invalidate(); return; }\n" +
-			"    while (out.length <= id) { out.add(''); }\n" +
-			"    out[id] = s;",
-		"    if (cap >= 0 && id >= cap) { invalidate(); return null; }\n" +
-			"    while (out.length <= id) { out.add(make()); }\n" +
-			"    return vis(out[id]);",
-		// native-row collector: bounded placement, not an append
-		"  void _row(int id, Int64List v) {\n" +
-			"    if (cap >= 0 && id >= cap) { invalidate(); return; }\n" +
-			// the row element's declared width, checked before the row is stored
-			// (generator#330) -- lo == hi means the element spans the callback
-			// parameter's own range and there is nothing to check
-			"    if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { invalidate(); return; } } }\n" +
-			"    while (out.length <= id) { out.add(<int>[]); }\n" +
-			"    out[id] = List<int>.from(v);\n" +
-			"  }",
-		// wrapper-row collector: same
-		"    if (cap >= 0 && id >= cap) { invalidate(); return null; }\n" +
-			"    while (out.length <= id) { out.add(<T>[]); }\n" +
-			"    return make(out[id]);",
 		// the schema count reaches every collector as its cap; count-less is -1, and
 		// the ROW collectors take the OUTER array's cap (a row id is its index there)
-		"_ObjSeq<VecFixedElem>(o.fixed, 5,",
-		"_ObjSeq<VecDynamicElem>(o.dynamic_, -1,",
-		"_StrSeq(o.fstrs, 3, 8)",
-		"_BlobSeq(o.fblobs, 4, 8)",
-		"_IntMat(o.rows, 3, false, 0, 4294967295)",
-		"_SeqSeq<String>(o.srows, 3, (p) => _StrSeq(p, -1, 4))",
+		"sofab.MessageSeq<VecFixedElem>(o.fixed, 5,",
+		"sofab.MessageSeq<VecDynamicElem>(o.dynamic_, -1,",
+		"sofab.StringSeq(o.fstrs, 3, 8)",
+		"sofab.BlobSeq(o.fblobs, 4, 8)",
+		"sofab.IntMatrixSeq(o.rows, 3, false, 0, 4294967295)",
+		"sofab.NestedSeq<String>(o.srows, 3, (p) => sofab.StringSeq(p, -1, 4))",
 		// M elements arrived, M is the length: the count word is bounded, nothing
 		// is filled in behind it.
 		("        if (values.length > 4) { invalidate(); return; }\n" +
@@ -667,7 +645,7 @@ func TestDartFp32ArrayTakesTheWireLength(t *testing.T) {
 		"      f64s: { id: 1, type: array, items: { type: fp64, count: 3 } }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
 	for _, want := range []string{
-		"o.f32s = _f32copy(values, values.length);",
+		"o.f32s = sofab.copyFp32(values, values.length);",
 		"o.f64s = List<double>.from(values);",
 		"  List<double> f32s = <double>[];",
 		"  List<double> f64s = <double>[];",
@@ -676,7 +654,7 @@ func TestDartFp32ArrayTakesTheWireLength(t *testing.T) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "_f32copy(values, 3)") || strings.Contains(out, "_padTo(") {
+	if strings.Contains(out, "sofab.copyFp32(values, 3)") || strings.Contains(out, "_padTo(") {
 		t.Errorf("an fp32/fp64 count:N array must not be pre-sized to N:\n%s", out)
 	}
 }
@@ -833,9 +811,6 @@ func TestDartStringFreeScopeSkipsStrings(t *testing.T) {
 	for _, decl := range []string{
 		"class _MVisitor extends sofab.VisitorBase {",
 		"class _MNVisitor extends sofab.VisitorBase {",
-		"class _BlobSeq extends sofab.VisitorBase {",
-		"class _ObjSeq<T> extends sofab.VisitorBase {",
-		"class _IntMat extends sofab.VisitorBase {",
 	} {
 		if !strings.Contains(out, decl) {
 			t.Errorf("missing %q — every visitor must extend the corelib base:\n%s", decl, out)
@@ -955,23 +930,18 @@ messages:
 	if strings.Contains(got, "extends sofab.MessageVisitor") {
 		t.Errorf("every visitor must inherit the base's sequence skip, never MessageVisitor's descent:\n%s", got)
 	}
-	// The leaf collectors must NOT override it back to a descent ...
-	for _, cls := range []string{"class _StrSeq", "class _BlobSeq"} {
-		i := strings.Index(got, cls)
-		if i < 0 {
-			t.Fatalf("%s not emitted:\n%s", cls, got)
-		}
-		body := got[i:]
-		if end := strings.Index(body, "\n}"); end > 0 {
-			body = body[:end]
-		}
-		if strings.Contains(body, "onSequenceStart") {
-			t.Errorf("%s must inherit the skipping base, not re-declare a descent:\n%s", cls, body)
+	// The leaf collectors are corelib types since corelib-dart#74, and inherit the
+	// skip there; what this backend owes is handing the scope to one of them
+	// rather than to a visitor of its own that would descend.
+	for _, call := range []string{"sofab.StringSeq(", "sofab.BlobSeq(", "sofab.MessageSeq<"} {
+		if !strings.Contains(got, call) {
+			t.Errorf("the wrapper array must be collected by %s, not by an emitted class:\n%s", call, got)
 		}
 	}
-	// ... while the object collector, whose elements ARE sequences, still descends.
-	if !strings.Contains(got, "return vis(out[id]);") {
-		t.Errorf("a struct-element collector must still descend into its element:\n%s", got)
+	for _, cls := range []string{"class _StrSeq", "class _BlobSeq", "class _ObjSeq"} {
+		if strings.Contains(got, cls) {
+			t.Errorf("%s belongs to the corelib and must not be emitted:\n%s", cls, got)
+		}
 	}
 }
 
@@ -1119,14 +1089,14 @@ messages:
       wide:  { id: 3, type: array, items: { type: array, count: 2, items: { type: u64, count: 3 } } }
 `), map[string]any{})
 	for _, want := range []string{
-		// The scan itself, in the one place a row lands.
-		"if (lo != hi) { for (final _v in v) { if (_v < lo || _v > hi) { invalidate(); return; } } }",
-		// The bound travels with the collector, per row element kind.
-		"_IntMat(o.urows, 2, false, 0, 255)",
-		"_IntMat(o.srows, 2, true, -32768, 32767)",
+		// The scan itself is sofab.IntMatrixSeq's (corelib-dart#74, tested there
+		// against decoded bytes). What this backend decides is the pair of bounds
+		// it hands over, per row element kind.
+		"sofab.IntMatrixSeq(o.urows, 2, false, 0, 255)",
+		"sofab.IntMatrixSeq(o.srows, 2, true, -32768, 32767)",
 		// u64 spans the callback parameter's own range, so lo == hi switches the
 		// scan off rather than emitting a bound that can never fire.
-		"_IntMat(o.wide, 2, false, 0, 0)",
+		"sofab.IntMatrixSeq(o.wide, 2, false, 0, 0)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
