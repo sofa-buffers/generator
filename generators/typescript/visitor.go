@@ -670,20 +670,6 @@ func nativeArrayElem(k ir.Kind) bool {
 	return false
 }
 
-// arrEqHelper is the element-wise equality helper the sparse-canonical marshal
-// uses to decide whether a leaf blob or native scalar array equals a non-empty
-// default (and may thus be omitted). It is emitted only when some field actually
-// has such a value default (see usesArrEq); empty defaults use a `.length !== 0`
-// guard instead, which needs no helper and no per-encode comparison allocation.
-const arrEqHelper = `// arrEq is an element-wise equality check used by the sparse-canonical serialize to
-// decide whether a leaf blob or native scalar array equals its default (and may
-// thus be omitted). Works for Uint8Array and number/bigint/boolean arrays.
-function arrEq(a: ArrayLike<unknown>, b: ArrayLike<unknown>): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}`
-
 // fp32RawHelper is the scalar half of the fp32 raw-bits channel (MESSAGE_SPEC
 // §4.6, generator#235). A JS number is a 64-bit double, and widening an fp32
 // SIGNALING NaN into one quiets it (0x7F800001 -> 0x7FC00001), so the number
@@ -751,11 +737,11 @@ function _fp32ArrayRaw(vals: readonly number[], raw: Uint8Array): Uint8Array {
   return out;
 }`
 
-// longArrEqHelper is the Long[] flavour of arrEq: Long elements are object
+// longArrEqHelper is the Long[] flavour of elementsEqual: Long elements are object
 // identities, so the sparse-omission default compare goes by (low, high) word
 // pairs instead of element !==. Emitted only when some Long-backed 64-bit
 // array carries a non-empty schema default (see scanHelpers).
-const longArrEqHelper = `// longArrEq is arrEq for Long[]: element-wise compare by (low, high) word pair
+const longArrEqHelper = `// longArrEq is elementsEqual for Long[]: element-wise compare by (low, high) word pair
 // (Long objects are identities, so !== would never match a default literal).
 function longArrEq(a: readonly Long[], b: readonly Long[]): boolean {
   if (a.length !== b.length) return false;

@@ -279,7 +279,7 @@ func TestTSMaxlenReject(t *testing.T) {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, Cursor, WireType, FixlenSubtype, SofabError, SofabErrorCode, Visitor, IStream, DecodeStatus, ArrayKind } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard (corelib-ts#58); SofabError: over-count reject (generator#100)
+		`import { OStream, Cursor, WireType, FixlenSubtype, SofabError, SofabErrorCode, elementsEqual, Visitor, IStream, DecodeStatus, ArrayKind, PayloadAcc, decodeUtf8, StringSeq, BlobSeq } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard (corelib-ts#58); SofabError: over-count reject (generator#100); the rest is the generated layer's support, owned by the corelib (corelib-ts#151)
 		"export class Myfirstmessage {",
 		"serialize(os: OStream): void {",
 		"static decode(bytes: Uint8Array): Myfirstmessage {",
@@ -326,6 +326,11 @@ func TestTSStructural(t *testing.T) {
 	// the one decode() uses.
 	for _, gone := range []string{
 		"_visitor()", "ChunkAcc", "type Visitor",
+		// generator#345: the schema-free support the corelib now owns (corelib-ts#151)
+		// must be CALLED, not re-emitted — a leftover copy is dead weight in every
+		// generated package and drifts from the library it duplicates.
+		"class _Acc", "class _StrSeq", "class _BlobSeq",
+		"function arrEq", "new TextDecoder", "function _str(",
 		"stringListVisitor", "unsigned(id: number, value: bigint)",
 		// The eager begin no longer exists in corelib-ts: every sequence is opened
 		// with writeSequenceBeginLazy (MESSAGE_SPEC §2).
@@ -351,12 +356,12 @@ func TestTSStructural(t *testing.T) {
 		"  feed(chunk: Uint8Array): DecodeStatus {",
 		"class _MyfirstmessageVis implements Visitor {",
 		"const _DEAD: Visitor = { sequenceBegin(): Visitor { return _DEAD; } };",
-		// Malformed UTF-8 leaves as SofabError on this path too. The fatal
-		// TextDecoder raises a platform TypeError, which walks past a caller's
-		// `instanceof SofabError` guard — the cursor path converts it inside the
-		// corelib, so an unconverted visitor made one library report the same
-		// bytes two ways (generator#297).
-		"throw new SofabError(SofabErrorCode.InvalidMsg, \"invalid UTF-8 in string\");",
+		// Malformed UTF-8 leaves as SofabError on this path too, because the store
+		// site transcodes through the corelib's decodeUtf8 rather than a fatal
+		// TextDecoder of its own: that one raises a platform TypeError, which walks
+		// past a caller's `instanceof SofabError` guard, so an unconverted visitor
+		// made one library report the same bytes two ways (generator#297).
+		"this.o.somestring = decodeUtf8(_p);",
 		// An array header is routed by id alone, so the arm also receives one whose
 		// element kind CONTRADICTS the declared field. Such a field is skipped whole
 		// (S7.3): its count is not this field's count, so the kind test has to come
@@ -368,9 +373,6 @@ func TestTSStructural(t *testing.T) {
 			t.Errorf("message.ts missing streaming decode surface %q", want)
 		}
 	}
-	// Every transcode goes through the converting helper. The raw decoder is
-	// reachable from exactly ONE place — inside _str — so a store site cannot
-	// call it bare, which is how generator#297 happened and reads as harmless.
 	// The header hook must not ignore the announced kind: an `_kind` parameter is
 	// how generator#300 happened, and it reads as a deliberate "not needed".
 	if strings.Contains(mod, "arrayBegin(id: number, _kind: ArrayKind") {
@@ -384,9 +386,6 @@ func TestTSStructural(t *testing.T) {
 	// §7.3 mismatch to skip, not something to bound.
 	if strings.Contains(mod, "fixlenBegin(id: number, _sub:") {
 		t.Error("fixlenBegin must test the announced subtype, not ignore it (generator#300)")
-	}
-	if n := strings.Count(mod, "_dec.decode("); n != 1 {
-		t.Errorf("_dec.decode() must appear once, inside _str(); found %d bare or extra call sites (generator#297)", n)
 	}
 	// Fast-encode marshal tidy-up: a leaf string list uses an indexed for (no
 	// per-encode closure) rather than .forEach.
@@ -493,7 +492,7 @@ func genTSWith(t *testing.T, src string, cfg map[string]any) string {
 func TestTSInt64Long(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "long"})
 	for _, want := range []string{
-		`import { OStream, Cursor, WireType, Long, LongVisitor, SofabError, SofabErrorCode, Visitor, IStream, DecodeStatus, ArrayKind } from "@sofa-buffers/corelib";`,
+		`import { OStream, Cursor, WireType, Long, LongVisitor, SofabError, SofabErrorCode, Visitor, IStream, DecodeStatus, ArrayKind, PayloadAcc, AnyVisitor } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once. `count: 8` is a
 		// CAPACITY, not a length (§3), so a fresh us is the EMPTY array — not 8
 		// Long zeros.
@@ -893,7 +892,7 @@ func TestTSCountIsACapacityNotADefaultLength(t *testing.T) {
 		// The omit guard reads that same unpadded default; a count:N array with no
 		// default is omitted only when it is EMPTY.
 		"if (this.none.length !== 0) {",
-		"if (!arrEq(this.short, [1, 2])) {",
+		"if (!elementsEqual(this.short, [1, 2])) {",
 		// A count:N WRAPPER array constructs empty for the same reason.
 		`strs: string[] = [];`,
 	} {
@@ -909,7 +908,7 @@ func TestTSCountIsACapacityNotADefaultLength(t *testing.T) {
 		"fu64: bigint[] = [1n, 0n",
 		"fe: EnumMode[] = [(0 as EnumMode)",
 		`strs: string[] = [""`,
-		"if (!arrEq(this.none,",
+		"if (!elementsEqual(this.none,",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("fixed-default message.ts should not emit %q", gone)
@@ -1100,7 +1099,7 @@ func TestTSInt64Default(t *testing.T) {
 	for _, cfg := range []map[string]any{{}, {"int64": "bigint"}} {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
-			`import { OStream, Cursor, WireType, SofabError, SofabErrorCode, Visitor, IStream, DecodeStatus, ArrayKind } from "@sofa-buffers/corelib";`,
+			`import { OStream, Cursor, WireType, SofabError, SofabErrorCode, elementsEqual, Visitor, IStream, DecodeStatus, ArrayKind, PayloadAcc } from "@sofa-buffers/corelib";`,
 			// count: 8 is a CAPACITY, so a fresh array is empty (§3, af536c4).
 			"us: bigint[] = [];",
 			// ...and the value goes out whole, the wire count being its length.
@@ -1397,7 +1396,7 @@ messages:
 		`if (!(this.s === "hi")) return false;`,
 		"if (!(this.b.length === 0)) return false;",
 		"if (!(this.sub.isDefault())) return false;",
-		"if (!(arrEq(this.nat, [1, 2, 3]))) return false;",
+		"if (!(elementsEqual(this.nat, [1, 2, 3]))) return false;",
 		"if (!(this.dynn.length === 0)) return false;",
 	} {
 		if !strings.Contains(mod, want) {

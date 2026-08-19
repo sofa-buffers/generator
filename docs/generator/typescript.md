@@ -47,10 +47,11 @@ implementations of one thing:
 Both must reach the **same verdict on the same bytes**, and that covers how a
 message is rejected, not only what a decoded one contains. Every §7 verdict now
 exists twice, so the risk is drift — and it is real: the cursor decodes strings
-inside the corelib (`Cursor.readString`), while the visitor transcodes in
-generated code, so for a while one library reported invalid UTF-8 as
-`SofabError(InvalidMsg)` through `decode()` and as a bare platform `TypeError`
-through `feed()` (generator#297). A `TypeError` walks straight past a caller's
+inside the corelib (`Cursor.readString`), while the visitor is handed raw wire
+bytes and materialises them itself, so for a while one library reported invalid
+UTF-8 as `SofabError(InvalidMsg)` through `decode()` and as a bare platform
+`TypeError` through `feed()` (generator#297). Both transcodes are the corelib's
+own `decodeUtf8` today (#345), which is the strongest form of that fix. A `TypeError` walks straight past a caller's
 `catch (e) { if (e instanceof SofabError) … }`, which for a decoder fed
 untrusted bytes is the difference between a rejected message and an unhandled
 exception.
@@ -316,11 +317,49 @@ all-default object costs nothing instead of a two-byte empty frame. Decoding is
 unchanged — a decoder still accepts the empty frame and treats it as the omitted
 field.
 
+## The generated layer's support lives in the corelib (issue #345)
+
+Five pieces of this backend's output had the *same shape for every schema*, with
+their schema dependence carried entirely by arguments — which is precisely what
+ARCHITECTURE §8 puts in the corelib. corelib-ts#151 added them to its public API,
+and the backend now calls them instead of re-emitting a copy per package:
+
+| was emitted | now called |
+|---|---|
+| `class _Acc` — join a payload split across fed chunks | `PayloadAcc` |
+| `class _StrSeq` — collect a `string` wrapper array | `StringSeq(out, acc, cap, elemMax, name)` |
+| `class _BlobSeq` — collect a `blob` wrapper array | `BlobSeq(out, acc, cap, elemMax, name)` |
+| `const _dec` + `function _str` — strict transcode of a payload | `decodeUtf8(bytes)` |
+| `function arrEq` — the array half of the ≠-default test | `elementsEqual(a, b)` |
+
+The bounds those collectors enforce are unchanged and still *schema* bounds: the
+`count` capacity and the element `maxlen` travel as constructor arguments, exactly
+as `Cursor` already takes them on the pull path, and the rejection messages are
+byte-identical. `decodeUtf8` is not merely a move — it carries a measured ASCII
+fast path (858 vs 2006 Ir/op on a 13-byte field) the generated `TextDecoder` did
+not have, which is why the corelib exports it rather than keeping it private.
+
+Two things deliberately stay emitted here. `longArrEq` compares `Long` elements by
+`(low, high)` word pair, which is this backend's representation choice, not the
+corelib's; and `_ObjSeq` / `_MatSeq` / `_RowSeq` are typed by the *generated*
+element type and construct it, so they are not schema-free. The encode sink and
+`growingOStream` are off-limits for a different reason: they allocate, and
+CORELIB_PLAN §5.1 gives the buffer to the caller.
+
+One typing consequence, and it is the whole of the change under `int64: long`. A
+corelib collector is a plain `Visitor` — it has no integer hook, so there is
+nothing for the `longs` flag to type — while the generated visitors on the Long
+channel are `LongVisitor`. `sequenceBegin` therefore declares corelib-ts's own
+`AnyVisitor` on that channel (`childVis` in `streamdecode.go`), which both shapes
+satisfy. Nothing about the decode changes: the flag is read **once, from the root
+visitor**, so a child's own flag is never consulted.
+
 ## On-demand corelib imports
 
 The generated `message.ts` imports from `@sofa-buffers/corelib` only the names its
 own body can name — `WireType`, `FixlenSubtype`, `Long`, `SofabError`/
-`SofabErrorCode` are each gated on the schema (`schemaHasFixlenGuard`,
+`SofabErrorCode`, and the generated-layer support above, are each gated on the
+schema (`schemaHasFixlenGuard`, `schemaHasStringField`, `scanStreamUse`,
 `scanHelpers` in `helpers.go`), so no module carries an unused import. Every gate
 is a *mirror of an emitter* and has to stay in lockstep with **where** that
 emitter fires.

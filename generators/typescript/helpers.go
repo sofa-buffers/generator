@@ -269,7 +269,7 @@ func isBig(k ir.Kind) bool { return k == ir.KindU64 || k == ir.KindI64 }
 
 // blobHasNonEmptyDefault reports whether a blob field carries a non-empty schema
 // default (base64 decoding to at least one byte). Only such fields need an
-// element-wise arrEq guard in marshal; an empty default uses `.length !== 0`.
+// element-wise equality guard in marshal; an empty default uses `.length !== 0`.
 func blobHasNonEmptyDefault(f *ir.Field) bool {
 	if f.Kind != ir.KindBlob {
 		return false
@@ -285,7 +285,7 @@ func blobHasNonEmptyDefault(f *ir.Field) bool {
 // helperUse records which module-level helpers/imports the schema's emitted
 // classes actually reference, so unused ones are not emitted.
 type helperUse struct {
-	arrEq       bool // element-wise !== compare: blob or non-Long native array with a value default
+	elemEq      bool // element-wise !== compare: blob or non-Long native array with a value default
 	longArrEq   bool // (low, high) word compare: Long-backed 64-bit array with a value default
 	long        bool // any Long-backed field -> import Long from the corelib
 	countedArr  bool // count-bearing native array -> import SofabError for the over-count reject (generator#100)
@@ -339,13 +339,13 @@ func arrayHasNarrowInt(elem ir.Kind, items *ir.ArrayElem) bool {
 // scanHelpers walks every emitted class's fields and reports which helpers the
 // module needs. A Long-backed array with a value default needs longArrEq (Long
 // identity !== fails element-wise compare); other defaulted leaf arrays/blobs
-// need arrEq as before.
+// take the corelib's elementsEqual.
 func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 	var use helperUse
 	scan := func(fields []*ir.Field) {
 		for _, fld := range fields {
 			if blobHasNonEmptyDefault(fld) {
-				use.arrEq = true
+				use.elemEq = true
 			}
 			if g.longBacked(fld) {
 				use.long = true
@@ -395,7 +395,7 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 					if g.longBacked(fld) {
 						use.longArrEq = true
 					} else {
-						use.arrEq = true
+						use.elemEq = true
 					}
 				}
 			}
