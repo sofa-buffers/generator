@@ -502,8 +502,12 @@ func (g *gen) emitArrayFillArm(f *rfile, fs []frame, fillArm bool) {
 // arm is a backstop rather than a reachable outcome -- and a backstop that
 // rejects, where the previous inline form would have waited for a completion that
 // could not arrive and dropped the field in silence.
+//
+// Keyed on the CORELIB rather than the no_std build flag, for the same reason the
+// accumulator's TYPE is: corelib-rs-no-std returns the Result whichever way the
+// crate is built, so `corelib: rs-no-std` with `no_std: false` needs this arm too.
 func (g *gen) emitPayloadFeed(f *rfile, name string) {
-	if g.noStd {
+	if g.corelib == "rs-no-std" {
 		f.line("        let %s = match self.acc.feed(total, offset, chunk) { Ok(Some(_v)) => _v, Ok(None) => return, Err(_) => { self.err = true; return; } };", name)
 		return
 	}
@@ -530,15 +534,22 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// crate holds one instead of inlining it per callback. Carried only when the
 	// message actually has a string or blob field to reassemble.
 	//
-	// The no_std twin keeps its storage in the caller, so its capacity is named
+	// The no-std twin keeps its storage in the caller, so its capacity is named
 	// here: the message's max encoded size, which bounds any single payload
-	// inside it. No_std requires a maxlen on every string/blob in BOTH storage
-	// modes, so that bound always resolves from the schema, and the per-field
-	// maxlen guard rejects an over-long payload before a byte ever reaches the
-	// accumulator.
+	// inside it. corelib-rs-no-std requires a maxlen on every string/blob in BOTH
+	// storage modes, so that bound always resolves from the schema, and the
+	// per-field maxlen guard rejects an over-long payload before a byte ever
+	// reaches the accumulator.
+	//
+	// Keyed on the CORELIB, not on the no_std build flag: PayloadAcc<N> is what
+	// corelib-rs-no-std declares whichever way the crate is built, so
+	// `corelib: rs-no-std` with `no_std: false` needs the parameter too. Reading
+	// g.noStd here emitted the std spelling for that configuration and did not
+	// compile (caught by the _review corpus, which is the only place that pairs
+	// this corelib with an allocating build).
 	needAcc := use.str || use.blob
 	accType, accNew := "sofab::PayloadAcc", "sofab::PayloadAcc::new()"
-	if g.noStd {
+	if g.corelib == "rs-no-std" {
 		accType = fmt.Sprintf("sofab::PayloadAcc<%d>", g.messageSize(name, fields).Size)
 	}
 
