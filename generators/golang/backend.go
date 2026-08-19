@@ -850,7 +850,12 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			f.line("\t%s", a)
 		}
 		f.line("\t}")
-		f.line("\treturn sofab.VisitorBase{}, nil")
+		// An id this scope does not declare has no destination, so it is DECLINED:
+		// corelib-go#121 made a nil child mean "skip this subtree", which delivers
+		// nothing and builds nothing. Handing back a no-op visitor instead — what
+		// this emitted until that landed — decoded every value and copied every
+		// string out of the buffer before dropping it.
+		f.line("\treturn nil, nil")
 		f.line("}")
 		f.blank()
 	}
@@ -933,7 +938,7 @@ func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *i
 		mk := g.arrayCollector("p", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), emaxOf(items.ElemMaxHas, items.ElemMax))
 		return fmt.Sprintf("&sofab.NestedSeq[%s]{Out: %s, Cap: %d, Make: func(p *[]%s) sofab.Visitor { return %s }}", inner, ptr, cap, inner, mk)
 	}
-	return "sofab.VisitorBase{}"
+	return "nil"
 }
 
 // capOf maps a schema count bound to the collector's cap field: N when the array
@@ -1072,7 +1077,7 @@ func (g *gen) matrixCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, cap int
 	case ir.KindBool:
 		return fmt.Sprintf("&sofab.BoolMatrixSeq{Out: %s, Cap: %d}", ptr, cap)
 	}
-	return "sofab.VisitorBase{}"
+	return "nil"
 }
 
 func isUnsignedNativeArray(k ir.Kind) bool {
