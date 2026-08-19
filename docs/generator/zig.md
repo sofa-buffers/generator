@@ -201,7 +201,7 @@ element kind honours that, not just the `string`/`blob` leaves that go through
 - `struct`/`union` elements and wrapper nested rows: `sequenceBegin` grows the
   destination to `id + 1` — default-filling the id gaps an omitted element
   leaves — records the index in a per-frame `ei_*` register, and descends into
-  `_at(path, ei)`. Appending instead (generator#247) shortened the array by the
+  `sofab.arrays.at(path, ei)`. Appending instead (generator#247) shortened the array by the
   size of any interior id gap and decoded a **reopened** element id as a second
   element rather than merging into the first; placement gives the §7.4
   struct-merge for free.
@@ -209,7 +209,7 @@ element kind honours that, not just the `string`/`blob` leaves that go through
   used to *append* a row per header, ignoring the element id. That was
   unreachable while every row was framed; the §2 interior-sparse rule makes an
   omitted empty row reachable, and an appending collector then shifts every
-  later row down by one. Rows are now placed at `_at(path, id)` too, with the
+  later row down by one. Rows are now placed at `sofab.arrays.at(path, id)` too, with the
   same `ei_*` register carrying the index into the element stores.
 
 The `count: N` over-index reject runs first in every case (an id `≥ N` is

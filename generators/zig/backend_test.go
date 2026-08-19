@@ -1003,7 +1003,7 @@ messages:
 		// placement, not append -- and the gap-fill that precedes it
 		"                if (!sofab.arrays.grow(VecObjsElem, self.alloc, &(self.m.objs), @as(usize, id) + 1, .{})) break :blk .dead;\n                self.ei_root_objs = id;\n                break :blk .root_objs_e;",
 		// the child stores address that element, never the last appended one
-		"_at(self.m.objs, self.ei_root_objs).k = @intCast(value); },",
+		"sofab.arrays.at(self.m.objs, self.ei_root_objs).k = @intCast(value); },",
 		// the cap bound still rejects an out-of-range element id, which also
 		// bounds the gap-fill above
 		"                if (id >= 4) { self.inv = true; break :blk .dead; }",
@@ -1046,10 +1046,10 @@ messages:
 	for _, want := range []string{
 		// The row is placed at its element id, after the gap-fill, and the index is
 		// recorded so the element stores address THAT row.
-		".root_mat => if (kind == .unsigned) if (id >= 4) { self.inv = true; } else { self.ei_root_mat = id; if (sofab.arrays.grow([]const u32, self.alloc, &(self.m.mat), @as(usize, id) + 1, &.{})) { _at(self.m.mat, id).* = _allocN(u32, self.alloc, count); } },",
-		"self.ei_root_mat < self.m.mat.len) sofab.arrays.putGrowing(_at(self.m.mat, self.ei_root_mat), self.alloc, &self.ai, self.an,",
+		".root_mat => if (kind == .unsigned) if (id >= 4) { self.inv = true; } else { self.ei_root_mat = id; if (sofab.arrays.grow([]const u32, self.alloc, &(self.m.mat), @as(usize, id) + 1, &.{})) { sofab.arrays.at(self.m.mat, id).* = _allocN(u32, self.alloc, count); } },",
+		"self.ei_root_mat < self.m.mat.len) sofab.arrays.putGrowing(sofab.arrays.at(self.m.mat, self.ei_root_mat), self.alloc, &self.ai, self.an,",
 		// The fp row collector is the same shape.
-		"if (self.ei_root_dyn < self.m.dyn.len) sofab.arrays.putGrowing(_at(self.m.dyn, self.ei_root_dyn), self.alloc, &self.ai, self.an, value)",
+		"if (self.ei_root_dyn < self.m.dyn.len) sofab.arrays.putGrowing(sofab.arrays.at(self.m.dyn, self.ei_root_dyn), self.alloc, &self.ai, self.an, value)",
 		// The index registers exist, one per collecting frame.
 		"    ei_root_mat: usize = 0,",
 	} {
