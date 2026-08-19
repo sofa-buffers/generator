@@ -100,7 +100,7 @@ It exists because a field whose value equals its default is **absent** from the
 encoded bytes (MESSAGE_SPEC §2), a sequence-typed one included. An absent field
 delivers no `deserialize()` callback, so nothing on the callback side can clear a
 destination that is decoded into twice: the "a later occurrence replaces the array
-whole" clear inside `sofab::StringSeq` / `BlobSeq` / `sofabgen::WrapperSeq` hangs
+whole" clear inside `sofab::StringSeq` / `BlobSeq` / `MessageSeq` hangs
 off the sequence header, which an omitted field never sends. Clearing has to happen where
 absence is still observable — at the start of the decode.
 
@@ -271,11 +271,11 @@ branch, set the logical length to 0 and dropped the array silently.
 reallocates, so a bound-then-filled element is address-stable — strictly safer
 under the corelib-c-cpp deferred decoder than a `std::vector` + `reserve()`.
 The per-element collectors (`sofab::FixedStringSeq` / `FixedBlobSeq` for the
-leaves, `sofabgen::WrapperSeq` for structs, unions and rows) place an element at
+leaves, `sofab::FixedMessageSeq` for structs, unions and rows) place an element at
 its wire index `id` by growing the `InlineVector` up to that slot; because
 `emplace_back()` is a no-op once the vector is full, an untrusted element index
 `id >= N` is **dropped** (the fill loop is guarded by the container capacity, and
-`WrapperSeq` rejects the index outright before the loop) rather than spun on
+`FixedMessageSeq` rejects the index outright before the loop) rather than spun on
 forever — the corelib skips the element's payload since the callback binds no
 destination, mirroring the native-array over-capacity drop (MESSAGE_SPEC §5.1).
 Without the guard a 4-byte message could hang the decoder (issue #126, DoS).
@@ -349,18 +349,19 @@ An array of arrays lowers to a wrapper sequence whose elements are the **rows**
 what the row holds, and there are exactly two cases:
 
 - **A row of native scalars** (`array<array<u32>>`, `array<array<fp32>>`) is a
-  span of trivially-copyable values, so `sofabgen::WrapperSeq` places the row at
-  its element id and hands it to `is.read(row)`.
+  span of trivially-copyable values, so `sofab::MessageSeq` (or its
+  `FixedMessageSeq` twin) places the row at its element id and reads it as an
+  array.
 - **A row of strings, blobs, structs/unions or further arrays** is itself a
   wrapper *sequence*. It is neither a span of scalars nor an `IStreamMessage`, so
-  `is.read(row)` has nothing to do with it — handing the row container to
-  `MessageSeq<T>` fails the corelib's `static_assert("Unsupported span element
-  type in IStream::read()")` and the header does not compile (generator#250).
-  These rows get a small **generated row collector** instead: it places the row
-  at its element id and then reads the row with exactly the emission the first
-  level uses — `sofab::StringSeq` / `BlobSeq` / `sofabgen::WrapperSeq` on the
-  `cpp` leg, `sofab::FixedStringSeq` / `FixedBlobSeq` / `sofabgen::WrapperSeq` on
-  the `c-cpp` leg.
+  the corelib collector has nothing to do with it — handing such an outer
+  container to `sofab::MessageSeq` fails the corelib's
+  `static_assert("Unsupported span element type in IStream::read()")` and the
+  header does not compile (generator#250). These rows get a small **generated row
+  collector** instead: it places the row at its element id and then reads the row
+  with exactly the emission the first level uses — `sofab::StringSeq` / `BlobSeq`
+  / `MessageSeq` on the `cpp` leg, `sofab::FixedStringSeq` / `FixedBlobSeq` /
+  `FixedMessageSeq` on the `c-cpp` leg.
 
 The collector is generated rather than shipped by the corelib because what a row
 costs to read is the *schema's* business (its element bounds and element type),
@@ -451,23 +452,27 @@ An array of strings, blobs, structs, unions or rows travels as a **sequence whos
 child id is the element's index** (MESSAGE_SPEC §5.1), and its decoded length is
 *highest present id + 1*.
 
-The generated header carries a small `namespace sofabgen` block for the element
-collector, emitted once per header behind `#ifndef SOFABGEN_WRAPPER_SEQ_HELPERS`
-at global scope, so several generated headers — even with different `namespace`
-settings — can be included into one translation unit. It is the only thing the
-generator emits outside its configured namespace, and it holds no state.
+Every collector for it lives in the corelib. The generated header names one and
+sets its bound; it emits no collector of its own. The `namespace sofabgen` block
+that used to carry one is gone with it — what remains outside the configured
+namespace is `sofabgen::RawArray`, the enum-array element *view* the `c-cpp` leg
+needs, whose element type is the schema's scoped enum and so cannot be shipped.
 
-**1. An element is placed at its id, never appended.** `sofabgen::WrapperSeq`
+**1. An element is placed at its id, never appended.** `sofab::MessageSeq`
 gap-fills the destination with default elements up to `id` and then decodes into
 `dest[id]`. Appending would shorten the array by the size of every interior id
 gap — and rule 2 makes such gaps ordinary input — and would decode a **reopened**
 element id as a second element instead of continuing the first (§7.4
 struct-merge, which placement gives for free). An element id at or past `count`
 is rejected as `INVALID` **before** the fill, which also bounds it
-(generator#247). The leaf collectors stay in the corelib —
-`sofab::StringSeq`/`BlobSeq` and `FixedStringSeq`/`FixedBlobSeq` always placed;
-this is the object path agreeing with them. The corelib collectors that append
-id-blind (`MessageSeq` / `FixedMessageSeq`) are not used by generated code.
+(generator#247). The object path used to be the exception: both corelibs'
+`MessageSeq` appended id-blind, so the generator emitted a `sofabgen::WrapperSeq`
+of its own beside the corelib's leaf collectors. Both corelibs fixed and
+re-templated theirs on the destination **container** (corelib-cpp#117,
+corelib-c-cpp#139), so the object path now agrees with the leaves by calling the
+same library: `sofab::MessageSeq<Container>` with the schema `count` as `cap`, or
+`sofab::FixedMessageSeq<Container>` on the heap-free `c-cpp` profile, where the
+inline container's capacity **is** that count (generator#345).
 
 **2. The interior is sparse; the last element is always written.** One rule, both
 element kinds, decided from the position in the **value** at run time:
