@@ -121,7 +121,7 @@ function platformPackageJson(t) {
     repository: {
       type: "git",
       url: "git+https://github.com/sofa-buffers/generator.git",
-      directory: "npm",
+      directory: "packaging/npm",
     },
     // Scoped packages default to `restricted`, which requires a paid npm plan
     // and fails any publish (incl. the hand-bootstrapped first version) with
