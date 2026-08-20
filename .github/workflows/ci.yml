@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - name: Build
         run: go build ./...
       - name: Vet
@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - name: Toolchain
         run: gcc --version && make --version | head -1
       - uses: ./.github/actions/corelib-refs
@@ -66,7 +66,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - uses: ./.github/actions/corelib-refs
       - name: Go backend — generate, build, round-trip, conformance
         run: ./tests/conformance/go/run.sh
@@ -87,7 +87,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
@@ -112,7 +112,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -139,7 +139,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - name: Toolchain
         run: g++ --version | head -1
       - uses: ./.github/actions/corelib-refs
@@ -165,7 +165,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/corelib-refs
       - name: Rust backend — generate, build, round-trip, conformance
@@ -188,7 +188,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "9.0.x"
@@ -213,7 +213,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -241,7 +241,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -269,7 +269,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
@@ -294,7 +294,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
@@ -319,7 +319,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - name: Generate docs (artifact)
         run: ./tests/gen-artifacts.sh docs generated
       - uses: actions/upload-artifact@v7
@@ -358,7 +358,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - name: Build static binary
         env:
           CGO_ENABLED: "0"
