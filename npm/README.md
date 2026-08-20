@@ -43,15 +43,15 @@ Or wire it into `package.json` scripts so codegen is reproducible per project:
     "gen": "sofabgen --lang typescript --in messages/ --out src/generated/"
   },
   "devDependencies": {
-    "@sofa-buffers/generator": "^0.19.7"
+    "@sofa-buffers/generator": "^0.22.0"
   }
 }
 ```
 
 Key flags:
 
-- `--lang <target>` — one of `c`, `cpp`, `csharp`, `docs`, `go`, `java`,
-  `python`, `rust`, `typescript`, `zig`.
+- `--lang <target>` — one of `c`, `cpp`, `csharp`, `dart`, `docs`, `go`, `java`,
+  `kotlin`, `python`, `rust`, `typescript`, `zig`.
 - `--in <path>` — a message-definition file, or a directory of them.
 - `--out <dir>` — where the generated code is written.
 - `--version` prints the version; `--help` lists every flag.
@@ -74,10 +74,10 @@ npm install @sofa-buffers/corelib
 ```json
 {
   "dependencies": {
-    "@sofa-buffers/corelib": "^0.8.1"
+    "@sofa-buffers/corelib": "^0.10.0"
   },
   "devDependencies": {
-    "@sofa-buffers/generator": "^0.19.7"
+    "@sofa-buffers/generator": "^0.22.0"
   }
 }
 ```
