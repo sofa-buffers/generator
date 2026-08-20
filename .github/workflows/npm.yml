@@ -5,19 +5,19 @@ name: npm
 # and verifies its sha256), assemble an install tree, and run the CLI through the
 # launcher shim. This exercises the exact production path end to end.
 #
-# The committed npm/package.json version is a placeholder (0.0.0-dev): the release
-# tag is the single source of truth, injected at publish time (see
-# npm/scripts/build-platform-packages.js). So this test resolves a real version
-# from the latest GitHub release rather than from the committed manifest.
+# The committed packaging/npm/package.json version is a placeholder (0.0.0-dev):
+# the release tag is the single source of truth, injected at publish time (see
+# packaging/npm/scripts/build-platform-packages.js). So this test resolves a real
+# version from the latest GitHub release rather than from the committed manifest.
 on:
   push:
     branches: [main]
     paths:
-      - "npm/**"
+      - "packaging/npm/**"
       - ".github/workflows/npm.yml"
   pull_request:
     paths:
-      - "npm/**"
+      - "packaging/npm/**"
       - ".github/workflows/npm.yml"
   workflow_dispatch:
 
@@ -55,7 +55,7 @@ jobs:
           tgt="$plat-$a"
           echo "host target: $tgt"
 
-          cd npm
+          cd packaging/npm
           # The committed version is a placeholder; resolve a real version from the
           # latest published release and test the production path against it.
           rel="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"

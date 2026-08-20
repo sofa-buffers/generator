@@ -4,7 +4,7 @@ Maintainer runbook for the `@sofa-buffers/generator` npm packages. This is **not
 shipped to npm — the published package's `files` is only `bin/sofabgen.js` +
 `README.md`, so this file stays in the repo. End-user docs live in
 [`README.md`](./README.md); the design rationale is in
-[`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) (§Distribution).
+[`../../docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) (§Distribution).
 
 ## Packages
 
@@ -18,14 +18,14 @@ Ten packages are published together:
   `darwin-arm64`, `win32-x64`, `win32-ia32`, `win32-arm64`). Each declares
   matching `os`/`cpu`, ships one binary at `bin/sofabgen[.exe]`, and carries a
   short README pointing at the main package. Built from the release binaries —
-  **never committed** (`npm/packages/` is git-ignored).
+  **never committed** (`packaging/npm/packages/` is git-ignored).
 
 ## Automated publish (the normal path)
 
 Publishing is automated by the `npm-publish` job in
-[`../.github/workflows/release.yml`](../.github/workflows/release.yml). On a `v*`
-tag it builds the platform packages from the just-released binaries
-(`build-platform-packages.js --from ../dist --version <tag>`) and publishes them
+[`../../.github/workflows/release.yml`](../../.github/workflows/release.yml). On a
+`v*` tag it builds the platform packages from the just-released binaries
+(`build-platform-packages.js --from ../../dist --version <tag>`) and publishes them
 via **npm trusted publishing (OIDC, no token)** with automatic
 [provenance](https://docs.npmjs.com/generating-provenance-statements) — platform
 packages first so the main package's optional deps resolve on install.
@@ -47,7 +47,7 @@ never published as-is: the `npm-publish` job injects the tag at publish time
 the tag the binaries came from. A guard in the workflow asserts this equality
 across the main package and all platform packages before publishing.
 
-The `npm` smoke workflow (`../.github/workflows/npm.yml`) doesn't read the
+The `npm` smoke workflow (`../../.github/workflows/npm.yml`) doesn't read the
 placeholder either — it resolves the latest published release and exercises the
 production path against that.
 
@@ -80,9 +80,9 @@ Notes / failure modes:
 ## Manual publish (bootstrap or backfill)
 
 ```sh
-cd npm
+cd packaging/npm
 # Download each binary from the v<version> release, verify its sha256, and write
-# the 9 platform packages into npm/packages/  (or: --from <dir> to copy locally).
+# the 9 platform packages into packages/  (or: --from <dir> to copy locally).
 # --version is REQUIRED: the committed version is a placeholder.
 node scripts/build-platform-packages.js --version v<version>
 # Publish platform packages FIRST, then the main package (so its optional deps resolve).

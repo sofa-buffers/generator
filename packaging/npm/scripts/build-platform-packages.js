@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Build the per-platform optional-dependency packages for @sofa-buffers/generator
-// from the release binaries, into npm/packages/. Run at publish time (e.g. in the
-// release workflow), then `npm publish` each generated package + the main one.
+// from the release binaries, into the package root's packages/. Run at publish
+// time (e.g. in the release workflow), then `npm publish` each generated package
+// + the main one.
 //
 // Usage:
 //   node scripts/build-platform-packages.js              # download binaries from the v<version> release
