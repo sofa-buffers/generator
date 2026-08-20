@@ -2402,6 +2402,10 @@ packaging/npm/           npm distribution: bin/sofabgen.js launcher + per-platfo
                          optional-dependency packages built from the release
                          binaries (scripts/build-platform-packages.js); packages/
                          is git-ignored (built at publish time)
+packaging/pypi/          PyPI distribution: build-wheels.py turns the nine release
+                         binaries into thirteen platform wheels (stdlib only, no
+                         build backend); wheels/ is git-ignored (built at publish
+                         time)
 ```
 
 **Distribution.** The release workflow (`release.yml`, PLAN §1/M8) is the source of
@@ -2451,6 +2455,19 @@ The consumers of the release assets:
   the `npm-publish` guard asserts this before publishing. OIDC cannot *create* a
   package, so each package's first-ever version is bootstrapped once by hand
   (`packaging/npm/PUBLISHING.md`); the workflow publishes all versions after that.
+- **`pip install sofabgen` / `uv tool install sofabgen`** (`packaging/pypi/`) — where
+  npm needs a launcher plus nine optional dependencies, PyPI resolves the host
+  natively through wheel tags: one project name, and `build-wheels.py` turns the nine
+  release binaries into thirteen `py3-none-<platform>` wheels (Linux twice — the same
+  static binary serves glibc and musl, but `manylinux`/`musllinux` are distinct tags).
+  Each wheel holds nothing but the binary, at `sofabgen-<version>.data/scripts/`,
+  which pip unpacks straight onto `PATH`: no shim, no Python code, no entry point.
+  Only wheels are published — a source distribution would make pip on an unsupported
+  platform attempt a build instead of reporting no matching distribution. The wheels
+  are written with stdlib `zipfile` (no build backend), so their RECORD/tags/layout
+  are guarded by unit tests in the `packaging` CI job rather than by a toolchain.
+  The upload job in `release.yml` is not wired yet: the builder lands and is tested
+  first, the trusted-publishing job follows.
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
 nothing; the core depends only on the `generator` *interface*, never on a
