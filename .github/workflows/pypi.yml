@@ -1,0 +1,91 @@
+name: pypi
+
+# Smoke-tests the PyPI distribution on every runner OS: build the host's wheel
+# from the LATEST published release (downloads the binary and verifies its
+# sha256), pip-install it into a fresh venv, and run the CLI that lands on PATH.
+# This exercises the exact production path end to end — including the parts only
+# an install can prove: that pip unpacks the payload into the environment's
+# bin/Scripts and marks it executable.
+#
+# There is no committed version to test against: the release tag is the single
+# source of truth (build-wheels.py requires --version). So this test resolves a
+# real version from the latest GitHub release.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packaging/pypi/**"
+      - ".github/workflows/pypi.yml"
+  pull_request:
+    paths:
+      - "packaging/pypi/**"
+      - ".github/workflows/pypi.yml"
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Build the host wheel, install it, and run the CLI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # The wheel platform tag the runner's pip will accept. glibc on the
+          # Linux runners, so manylinux; the musllinux wheels carry the same
+          # binary and are covered by the unit tests, not by an install here.
+          case "$RUNNER_OS/$RUNNER_ARCH" in
+            Linux/X64)     tag=manylinux_2_17_x86_64 ;;
+            Linux/ARM64)   tag=manylinux_2_17_aarch64 ;;
+            macOS/X64)     tag=macosx_10_9_x86_64 ;;
+            macOS/ARM64)   tag=macosx_11_0_arm64 ;;
+            Windows/X64)   tag=win_amd64 ;;
+            Windows/ARM64) tag=win_arm64 ;;
+            *) echo "unknown runner: $RUNNER_OS/$RUNNER_ARCH"; exit 1 ;;
+          esac
+          echo "host tag: $tag"
+
+          # Resolve a real version from the latest published release and test the
+          # production path against it.
+          rel="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          want="${rel#v}"
+          echo "latest release: $rel (version $want)"
+
+          # Download the matching release binary, verify its checksum, write the wheel.
+          python packaging/pypi/build-wheels.py --version "$rel" --only "$tag"
+
+          # Install it the way a user would: a clean venv, nothing else in it.
+          python -m venv "$RUNNER_TEMP/venv"
+          case "$RUNNER_OS" in
+            Windows) bin="$RUNNER_TEMP/venv/Scripts" ;;
+            *)       bin="$RUNNER_TEMP/venv/bin" ;;
+          esac
+          "$bin/python" -m pip install --quiet --upgrade pip
+          "$bin/python" -m pip install --quiet packaging/pypi/wheels/*.whl
+
+          # The binary must be on the venv's PATH and executable — that is the
+          # whole delivery mechanism, and only an install proves it.
+          got="$("$bin/sofabgen" --version)"
+          echo "installed CLI reported: '$got' (expected '$want')"
+          test "$got" = "$want"
+
+          # A real subcommand must work too, not just --version.
+          "$bin/sofabgen" --lang python --in examples/messages/example.yaml --out "$RUNNER_TEMP/gen"
+          test -s "$RUNNER_TEMP/gen/message.py"
+
+          # And it must uninstall cleanly (pip tracks the script through RECORD).
+          "$bin/python" -m pip uninstall --quiet --yes sofabgen
+          test ! -e "$bin/sofabgen" && test ! -e "$bin/sofabgen.exe" || {
+            echo "::error::sofabgen survived pip uninstall — RECORD does not cover the script" >&2
+            exit 1
+          }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Unit tests for build-wheels.py — run with `python3 -m unittest discover -s packaging/pypi`.
+"""Unit tests for build-wheels.py and check-wheels.py — run with
+`python3 -m unittest discover -s packaging/pypi`.
 
 Stdlib only, like the builder itself. What they are really guarding is the part
 PyPI cannot warn us about in advance: a wheel is accepted on upload but only
@@ -19,9 +20,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-_spec = importlib.util.spec_from_file_location("build_wheels", ROOT / "build-wheels.py")
-bw = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(bw)
+def _load(name, filename):
+    spec = importlib.util.spec_from_file_location(name, ROOT / filename)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+bw = _load("build_wheels", "build-wheels.py")
+cw = _load("check_wheels", "check-wheels.py")
 
 FAKE_BINARY = b"\x7fELF not really, but bytes are bytes\n"
 
@@ -155,6 +162,52 @@ class TestBuild(unittest.TestCase):
     def test_unknown_platform_tag_is_refused(self):
         with self.assertRaises(SystemExit):
             self.build("--only", "manylinux_2_17_s390x")
+
+
+class TestCheck(unittest.TestCase):
+    """The pre-upload guard. It exists because a PyPI version is immutable, so it
+    has to catch what the builder got wrong before the upload, not after."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dist = fake_dist(self.tmp.name)
+        self.out = Path(self.tmp.name) / "wheels"
+        bw.main(["--version", "v1.2.3", "--from", str(self.dist), "--out", str(self.out)])
+
+    def check(self, version="v1.2.3"):
+        return cw.main(["--version", version, "--dir", str(self.out)])
+
+    def test_passes_on_a_complete_build(self):
+        self.assertEqual(self.check(), 0)
+
+    def test_catches_a_missing_wheel(self):
+        (self.out / "sofabgen-1.2.3-py3-none-win_arm64.whl").unlink()
+        self.assertEqual(self.check(), 1)
+
+    def test_catches_a_stray_wheel_from_another_version(self):
+        # Uploading this would publish a version nobody tagged.
+        stray = self.out / "sofabgen-1.2.3-py3-none-manylinux_2_17_s390x.whl"
+        stray.write_bytes((self.out / "sofabgen-1.2.3-py3-none-win32.whl").read_bytes())
+        self.assertEqual(self.check(), 1)
+
+    def test_catches_wheels_built_for_a_different_tag(self):
+        self.assertEqual(self.check("v1.2.4"), 1)
+
+    def test_catches_a_corrupted_member(self):
+        # Rewrite one member so its RECORD hash stops matching — the failure mode
+        # that uploads fine and then refuses to install on every machine.
+        wheel = self.out / "sofabgen-1.2.3-py3-none-win32.whl"
+        with zipfile.ZipFile(wheel) as z:
+            items = [(i, z.read(i.filename)) for i in z.infolist()]
+        with zipfile.ZipFile(wheel, "w") as z:
+            for info, data in items:
+                z.writestr(info, data + b"\n" if info.filename.endswith("WHEEL") else data)
+        self.assertEqual(self.check(), 1)
+
+    def test_refuses_a_tag_with_no_pep440_form(self):
+        with self.assertRaises(SystemExit):
+            self.check("v1.2.3-nightly")
 
 
 if __name__ == "__main__":

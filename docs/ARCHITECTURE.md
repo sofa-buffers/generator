@@ -2391,7 +2391,8 @@ tests/                   conformance/<lang>/run.sh harnesses + matrix/ hermetic 
                          gen-artifacts.sh builds the per-language CI artifact bundle;
                          bench/ Ir/op + footprint of the generated code (§15; committed results.txt)
 .github/workflows/       ci.yml (hermetic + lang-<x> jobs), release.yml (binaries +
-                         npm-publish), action.yml + npm.yml (distribution smoke tests)
+                         npm-publish + pypi-publish), action.yml + npm.yml +
+                         pypi.yml (distribution smoke tests)
 .github/actions/         setup-sofabgen/ composite action (installs the CLI in CI;
                          thin wrapper over install.sh)
 install.sh               one-line installer: OS/arch detect + release download +
@@ -2404,8 +2405,8 @@ packaging/npm/           npm distribution: bin/sofabgen.js launcher + per-platfo
                          is git-ignored (built at publish time)
 packaging/pypi/          PyPI distribution: build-wheels.py turns the nine release
                          binaries into thirteen platform wheels (stdlib only, no
-                         build backend); wheels/ is git-ignored (built at publish
-                         time)
+                         build backend), check-wheels.py is the pre-upload gate;
+                         wheels/ is git-ignored (built at publish time)
 ```
 
 **Distribution.** The release workflow (`release.yml`, PLAN §1/M8) is the source of
@@ -2465,9 +2466,19 @@ The consumers of the release assets:
   Only wheels are published — a source distribution would make pip on an unsupported
   platform attempt a build instead of reporting no matching distribution. The wheels
   are written with stdlib `zipfile` (no build backend), so their RECORD/tags/layout
-  are guarded by unit tests in the `packaging` CI job rather than by a toolchain.
-  The upload job in `release.yml` is not wired yet: the builder lands and is tested
-  first, the trusted-publishing job follows.
+  are guarded by unit tests in the `packaging` CI job rather than by a toolchain, and
+  by `check-wheels.py` as the last gate before an upload (a PyPI version is
+  immutable). The `pypi-publish` job in `release.yml` builds them from the released
+  binaries and uploads via **trusted publishing (OIDC, no token)** with automatic
+  PEP 740 attestations; `pypi.yml` smoke-tests the real install — venv, `PATH`,
+  executable bit — on every runner OS against the latest published release. Two
+  things differ from npm and both are load-bearing: the publisher's **environment**
+  is a matched OIDC claim here (`pypi`, where npm's is blank), and the tag needs a
+  **PEP 440** spelling — npm publishes `v0.21.0-rc1` verbatim, PyPI calls it
+  `0.21.0rc1`, so `build-wheels.py` translates the a/b/rc forms and refuses the rest
+  rather than publishing a version the tag does not name. PyPI OIDC *can* create the
+  project, so there is no hand-bootstrapped first version: an org-level pending
+  publisher covers it (`packaging/pypi/PUBLISHING.md`).
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
 nothing; the core depends only on the `generator` *interface*, never on a
