@@ -80,6 +80,15 @@ npm install --save-dev @sofa-buffers/generator
 npx sofabgen --lang ts --in messages/ --out src/generated/
 ```
 
+From PyPI it is a plain CLI — one wheel per platform, each holding nothing but the
+binary, so `pip` puts `sofabgen` straight on your `PATH` (no Python code, no build
+step; see [`packaging/pypi/`](packaging/pypi/)):
+
+```sh
+uv tool install sofabgen     # or: pipx install sofabgen / pip install sofabgen
+uvx sofabgen --lang python --in messages/ --out src/generated/
+```
+
 Examples:
 - [`examples/messages/example.yaml`](examples/messages/example.yaml) — a showcase exercising every
   field kind.

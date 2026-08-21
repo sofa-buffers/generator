@@ -1,14 +1,16 @@
 name: Release
 
 # ⚠️ DO NOT RENAME THIS FILE (release.yml).
-# Its basename is part of the npm trusted-publishing (OIDC) identity: every
-# @sofa-buffers/generator* package on npmjs.com has a Trusted Publisher pinned to
-# repo sofa-buffers/generator + workflow filename "release.yml". Renaming (or
-# moving) this file changes that OIDC claim, npm stops trusting the publish, and
-# the npm-publish job below fails with E404 — the GitHub release still succeeds,
-# so the break is silent to the binary/go-install path. If a rename is ever truly
-# needed, update the Workflow-filename field on the Trusted Publisher of ALL ten
-# packages (main + 9 platform) on npmjs.com first. See the npm-publish job.
+# Its basename is part of the trusted-publishing (OIDC) identity on BOTH registries:
+# every @sofa-buffers/generator* package on npmjs.com, and the sofabgen project on
+# PyPI, has a Trusted Publisher pinned to repo sofa-buffers/generator + workflow
+# filename "release.yml". Renaming (or moving) this file changes that OIDC claim,
+# the registry stops trusting the publish, and the publish job below fails (npm:
+# E404, PyPI: invalid-publisher) — the GitHub release still succeeds, so the break
+# is silent to the binary/go-install path. If a rename is ever truly needed, update
+# the Workflow-filename field on the Trusted Publisher of ALL ten npm packages
+# (main + 9 platform) on npmjs.com AND of sofabgen on pypi.org first. See the
+# npm-publish and pypi-publish jobs.
 
 # Builds the single, statically-linked, cross-platform sofabgen binaries and
 # attaches them to a GitHub release on a v* tag (PLAN §1, M8).
@@ -187,3 +189,49 @@ jobs:
             npm publish "$d" --access public
           done
           npm publish . --access public
+
+  # Publish the PyPI distribution (the sofabgen project: thirteen platform wheels)
+  # built from the very binaries just released, so `pip install sofabgen` mirrors
+  # the GitHub release.
+  #
+  # Auth is PyPI trusted publishing (OIDC) — no token, no API key. PyPI exchanges
+  # the GitHub Actions id-token for a short-lived upload credential; the project
+  # must have a Trusted Publisher pinned to repo sofa-buffers/generator + workflow
+  # filename "release.yml" + environment "pypi". That environment name is a matched
+  # part of the OIDC identity, so `environment:` below and the publisher's field
+  # must agree exactly — this is where the two registries differ, npm's publisher
+  # deliberately leaves the environment blank. PEP 740 attestations are produced
+  # automatically. Unlike npm, PyPI OIDC CAN create the project: a pending publisher
+  # configured at the ORGANIZATION level (so the org owns the project, not whoever
+  # filed the form) turns into a normal publisher on the first upload, so there is
+  # no manual bootstrap — see packaging/pypi/PUBLISHING.md.
+  pypi-publish:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # OIDC trusted publishing + attestations
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Build the wheels from the released binaries
+        # No build backend and no dependencies: build-wheels.py writes the wheels
+        # with stdlib zipfile. --version is required; it is the release tag.
+        run: python3 packaging/pypi/build-wheels.py --from dist --version "${{ github.ref_name }}"
+      - name: Guard — every wheel must carry the tag version
+        # A wheel's version lives in its filename and its METADATA, and a version is
+        # immutable once uploaded. Assert both against the tag (in its PEP 440
+        # spelling) and assert the set is complete, before anything leaves the runner.
+        run: python3 packaging/pypi/check-wheels.py --version "${{ github.ref_name }}"
+      - name: Publish to PyPI via trusted publishing (OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packaging/pypi/wheels
