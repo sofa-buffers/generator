@@ -41,21 +41,41 @@ YAML
 
 printf 'generic: { emit: project }\n' > "$WORK/cfg.yaml"
 
-# zig_build DEF OUT-DIR [CFG] -- generate a project and build its harness. The
-# relative depth of the corelib symlink depends on the output nesting, so the
-# placeholder is resolved with a computed relative path.
-zig_build() {
+# zig_gen DEF OUT-DIR [CFG] -- generate a project and point it at the corelib.
+# The relative depth of the corelib symlink depends on the output nesting, so
+# the placeholder is resolved with a computed relative path.
+zig_gen() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang zig --in "$1" --out "$2" )
     rel=$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$WORK/corelib-link" "$2")
     sed -i "s#\${SOFAB_ZIG_CORELIB}#$rel#" "$2/build.zig.zon"
-    # Hermetic caches: CI zig setups (mlugg/setup-zig) restore a shared zig
-    # cache across runs, and every generated package carries the same
-    # build.zig.zon name + fingerprint (one package identity) - a restored or
-    # shared cache can then serve a stale harness for an A/B pair that differs
-    # only in generator config (seen on the #102 lim/nolim projects: the
-    # no-limits harness rejected with LimitExceeded). A per-project local
-    # cache and a per-WORK global cache key every build to this run only.
+}
+
+# Hermetic caches (both builders): CI zig setups (mlugg/setup-zig) restore a
+# shared zig cache across runs, and every generated package carries the same
+# build.zig.zon name + fingerprint (one package identity) - a restored or shared
+# cache can then serve a stale harness for an A/B pair that differs only in
+# generator config (seen on the #102 lim/nolim projects: the no-limits harness
+# rejected with LimitExceeded). A per-project local cache and a per-WORK global
+# cache key every build to this run only.
+
+# zig_build DEF OUT-DIR [CFG] -- generate and build a harness that is EXECUTED
+# below. zig is the maxspeed port, so the binaries that actually run are built
+# the way they ship: --release=fast, safety checks off.
+zig_build() {
+    zig_gen "$1" "$2" "${3:-}"
     ( cd "$2" && zig build --release=fast --cache-dir .zig-cache --global-cache-dir "$WORK/zig-global-cache" )
+}
+
+# zig_typecheck DEF OUT-DIR [CFG] -- generate and COMPILE ONLY. The corpus
+# projects assert one thing, "every definition produces code that builds", and
+# their binaries are never run; a Debug build proves exactly that while skipping
+# the LLVM optimisation pipeline (measured ~7x faster per project, and the
+# corpus is 21 of the harness's 28 builds). The peer harnesses draw the same
+# line: rust builds its projects with `cargo build -q` (no --release), cpp
+# checks its compile-only headers with `g++ -fsyntax-only`.
+zig_typecheck() {
+    zig_gen "$1" "$2" "${3:-}"
+    ( cd "$2" && zig build --cache-dir .zig-cache --global-cache-dir "$WORK/zig-global-cache" )
 }
 
 echo "==> generating + building example + conformance projects"
@@ -440,7 +460,7 @@ python3 "$ROOT/tests/conformance/zig/check_vectors.py" "$CORELIB/assets/test_vec
 echo "==> corpus + realworld: every definition builds"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
-    zig_build "$def" "$WORK/corpus/$name"
+    zig_typecheck "$def" "$WORK/corpus/$name"
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
 
