@@ -722,26 +722,53 @@ echo "==> no_std + serde without std compiles"
 
 # The generated crate emits sofab::require!(...) to fail the build when the
 # corelib was compiled without a wire feature the schema needs. A guard that
-# never fires in a test is a guard nobody has verified -- so strip one and
-# require the build to fail. `sequence` is the right lever: nothing implies it,
-# whereas removing `fixlen` proves nothing because `fp64 = ["fixlen"]` pulls it
-# straight back in (which is how this check was wrong on its first attempt).
-echo "==> the capability guard fires when a corelib feature is stripped"
+# never fires in a test is a guard nobody has verified, so every one of the five
+# features corelib-rs-no-std gates gets stripped in turn and the build has to
+# fail with that feature named. This mirrors what tests/conformance/c/run.sh
+# already does for corelib-c-cpp's SOFAB_DISABLE_*_SUPPORT macros, where all five
+# are exercised; before this, rust checked exactly one of them.
+#
+# Each case names the features that REMAIN, rather than the one to delete: the
+# list is order-sensitive to a sed, and `fixlen` cannot be removed on its own
+# because `fp64 = ["fixlen"]` pulls it straight back in (which is how this check
+# was wrong on its first attempt) -- so the fixlen case drops fp64 with it.
+#
+# cargo check, not build: require!() is a compile-time assertion, so type-checking
+# is enough to trip it and there is no reason to pay for codegen five times.
+echo "==> the capability guard fires for every gated corelib wire feature"
 cp "$WORK/no-std-static/Cargo.toml" "$WORK/no-std-static/Cargo.toml.bak"
-sed -i 's/, "sequence"//' "$WORK/no-std-static/Cargo.toml"
-if ( cd "$WORK/no-std-static" && cargo build -q --lib --no-default-features 2>"$WORK/guard.err" ); then
-    echo "FAIL: building without the corelib's \`sequence\` feature must not succeed"
-    mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"
-    exit 1
-fi
-grep -q 'requires the `sequence` feature' "$WORK/guard.err" || {
-    echo "FAIL: build failed, but not with the require!() capability message:"
-    head -20 "$WORK/guard.err"
-    mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"
-    exit 1
+guard_case() {  # missing-feature  "remaining features, comma-separated and quoted"
+    missing=$1; remain=$2
+    cp "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"
+    sed -i "s/features = \[\"array\", \"fixlen\", \"fp64\", \"sequence\", \"value64\"\]/features = [$remain]/" \
+        "$WORK/no-std-static/Cargo.toml"
+    grep -q "features = \[$remain\]" "$WORK/no-std-static/Cargo.toml" || {
+        echo "FAIL: [$missing] could not rewrite the feature list -- the generated form changed"
+        mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"; exit 1
+    }
+    if ( cd "$WORK/no-std-static" && cargo check -q --lib --no-default-features 2>"$WORK/guard.err" ); then
+        echo "FAIL: building without the corelib's \`$missing\` feature must not succeed"
+        mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"; exit 1
+    fi
+    # The corelib does not word every one of these the same way -- `value64` says
+    # "requires the 64-bit value width (the default `value64` feature is disabled)"
+    # where the others say "requires the `array` feature". Both name the feature in
+    # backticks and both carry the sofab: prefix, so match on that pair rather than
+    # on one phrasing.
+    grep -q "sofab:.*\`$missing\`" "$WORK/guard.err" || {
+        echo "FAIL: [$missing] build failed, but not with the require!() capability message:"
+        head -20 "$WORK/guard.err"
+        mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"; exit 1
+    }
+    echo "   [$missing] guard fired"
 }
+guard_case array    '"fixlen", "fp64", "sequence", "value64"'
+guard_case fp64     '"array", "fixlen", "sequence", "value64"'
+guard_case sequence '"array", "fixlen", "fp64", "value64"'
+guard_case value64  '"array", "fixlen", "fp64", "sequence"'
+guard_case fixlen   '"array", "sequence", "value64"'
 mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"
-echo "==> guard fired as expected"
+echo "==> all five capability guards fired as expected"
 
 echo "==> [no-std-static] streaming behaviour"
 # Same check file rs-static runs above, with the lib-crate import: the file is
