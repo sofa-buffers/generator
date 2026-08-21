@@ -105,9 +105,17 @@ bytes**; they differ in `std` usage and feature gating.
   itself has such a field. A schema-derived subset would leave the decoder unable
   to skip those, so it would **reject** a well-formed skippable field with
   `InvalidMsg` (generator#215 / Crucible F-0027). The footprint saving from
-  dropping a wire type is therefore not available to a §7.3-conformant decoder;
-  making `corelib-rs-no-std`'s skip path itself feature-independent is the
-  alternative that would restore it.
+  dropping a wire type is therefore not available to a §7.3-conformant decoder,
+  and that is now settled rather than merely deferred: the feature-independent
+  skip path that would have restored it was built and measured in
+  corelib-rs-no-std#103/#104 and grew the integer-only Cortex-M0 build from 614 B
+  to 986 B (+61 %), so it was rejected. A disabled flag there means the build
+  implements a **subset of the wire format** — a message carrying the construct is
+  INVALID, terminally — and interop narrows to peers that never send it in *any*
+  field, including ids this decoder does not know. Generated code cannot know its
+  peers' schema, so it takes the full set. Hand-written consumers of
+  `corelib-rs-no-std` may still choose the subset; that choice is theirs, not the
+  generator's.
 
 ```yaml
 targets:
