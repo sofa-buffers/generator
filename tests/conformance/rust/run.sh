@@ -25,6 +25,42 @@ STD="${2:-${SOFAB_RS_STD_CORELIB:-}}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# One shared build directory for every crate this run generates. Each crate is
+# tiny; the cost is the dependency graph behind it (the corelib, serde,
+# serde_json), and with a target/ per crate that graph is rebuilt once per
+# project -- roughly a hundred times over a full run. Sharing it compiles the
+# dependencies once (measured: five corpus crates, 48s separate vs 9s shared).
+#
+# Sharing is only safe because crate_bin_name below gives every crate a distinct
+# binary name. Every generated Cargo.toml declares the SAME package name
+# (sofabuffers-generated) and the same [[bin]] name (harness), and rlibs carry a
+# metadata hash while the binary does not -- so a shared target/ collapses all of
+# them onto one target/debug/harness and serves whichever was built last.
+# Measured on the lim/nolim pair (max_dyn_array_count: 4 vs none, decoding a
+# 5-element array): separate target dirs reject/accept correctly, one shared
+# target dir rejects BOTH, and a shared target dir with distinct binary names is
+# correct again. Never share the directory without the rename.
+CARGO_TARGET_DIR="$WORK/target"
+export CARGO_TARGET_DIR
+
+# crate_bin_name OUT-DIR -- give a generated crate an identity unique to its
+# output directory, so a shared target/ cannot serve one crate's artifacts to
+# another. BOTH names have to move: the binary, because target/debug/<name>
+# carries no metadata hash, and the package, because the rlib's hash is derived
+# from it -- with one package name for every crate, a crate that imports the
+# library gets whichever one was compiled last (seen as "cannot find type Vecu"
+# in the no-std legs, where conf-* linked ex-*'s library).
+#
+# Only the [package] and [[bin]] names are touched. The no_std legs emit a lib.rs
+# whose harness says `use sofabuffers_generated::*`, and that keeps working
+# untouched because their template already pins [lib] name explicitly -- the
+# import name is independent of the package name it sits in.
+crate_bin_name() {
+    uniq=$(printf '%s' "${1#$WORK/}" | tr -c 'A-Za-z0-9' '_')
+    sed -i "s/^name = \"sofabuffers-generated\"/name = \"sofabuffers-generated-$uniq\"/" "$1/Cargo.toml"
+    sed -i "s/^name = \"harness\"/name = \"harness_$uniq\"/" "$1/Cargo.toml"
+}
+
 if [ -z "$NOSTD" ]; then
     clone_corelib corelib-rs-no-std "$WORK/nostd"
     NOSTD="$WORK/nostd"
@@ -58,6 +94,7 @@ run_variant() {
     rust_build() {  # def-or-yaml out-dir
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang rust --in "$1" --out "$2" )
         sed -i "s#\${SOFAB_RS_CORELIB}#$corelib#" "$2/Cargo.toml"
+        crate_bin_name "$2"
         ( cd "$2" && cargo build -q )
     }
 
@@ -607,6 +644,7 @@ printf 'version: 1\nmessages:\n  dyn: { payload: { a: { id: 0, type: array, item
 printf 'generic: { emit: project, max_dyn_array_count: 4 }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-lim.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/lim" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/lim/Cargo.toml"
+crate_bin_name "$WORK/lim"
 ( cd "$WORK/lim" && cargo build -q )
 printf '\003\005\001\002\003\004\005' > "$WORK/lim-over.bin"
 printf '\003\004\001\002\003\004' > "$WORK/lim-ok.bin"
@@ -617,6 +655,7 @@ fi
 printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-nolim.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/nolim" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/nolim/Cargo.toml"
+crate_bin_name "$WORK/nolim"
 ( cd "$WORK/nolim" && cargo build -q )
 (cd "$WORK/nolim" && cargo run -q -- decode dyn < "$WORK/lim-over.bin" >/dev/null) || { echo "FAIL: no-limits project must decode oversized input"; exit 1; }
 echo "==> [rs] decode limits OK"
@@ -667,6 +706,7 @@ printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }\n'
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-no-std-static.yaml" --lang rust --in "$WORK/conf.yaml" --out "$WORK/no-std-static" )
 if grep -q 'extern crate alloc' "$WORK/no-std-static/src/lib.rs"; then echo "FAIL: no-std-static crate must not pull alloc"; exit 1; fi
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/no-std-static/Cargo.toml"
+crate_bin_name "$WORK/no-std-static"
 ( cd "$WORK/no-std-static" && cargo build -q --lib --no-default-features )
 echo "==> [no-std-static] lib builds (pure heapless, no alloc)"
 
@@ -738,7 +778,22 @@ printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }\n'
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-tiny.yaml" --lang rust --in "$WORK/tiny.yaml" --out "$WORK/tiny" )
 grep -q 'default-features = false' "$WORK/tiny/Cargo.toml" || { echo "FAIL: varint-only schema should need no sofab features"; exit 1; }
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/tiny/Cargo.toml"
+crate_bin_name "$WORK/tiny"
 ( cd "$WORK/tiny" && cargo build -q )
 echo "==> minimal no-std footprint build OK"
+
+# Every generated crate must have gone through crate_bin_name. One that did not
+# still carries the default identity, and out of the shared target/ it links
+# another crate's artifacts -- which only surfaces as a compile error when the
+# two schemas happen to differ in shape (it showed up as "cannot find type Vecu"
+# while this was being written). Between similar schemas it would be a GREEN run
+# on the wrong binary, so a forgotten call has to fail loudly instead.
+stale=$(grep -rl '^name = "sofabuffers-generated"$' "$WORK" --include=Cargo.toml 2>/dev/null || true)
+if [ -n "$stale" ]; then
+    echo "FAIL: generated crates never got a unique identity (missing crate_bin_name):"
+    echo "$stale"
+    exit 1
+fi
+echo "==> every generated crate has a unique identity"
 
 echo "PASS"
