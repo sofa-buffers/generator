@@ -151,3 +151,10 @@ gh run rerun <run-id> --repo sofa-buffers/generator --failed
   `pip install`s it into a clean venv, runs the CLI it puts on `PATH`, generates
   real code, and uninstalls it again. That is the only place the install semantics
   themselves (executable bit, `bin/` vs `Scripts\`) are actually exercised.
+- `verify-published` workflow — runs after every release, and by hand for any
+  published version (`gh workflow run verify-published.yml -f version=v1.2.3`).
+  Everything above builds the wheel locally from the release assets, which proves
+  the recipe but not the upload: this one starts from `pip install sofabgen==<v>`
+  against PyPI on all three OSes, then checks through the API that **all thirteen**
+  wheels are there with PEP 740 provenance — a host only ever installs its own, so
+  a missing arm64 wheel is invisible to the install test that just passed.

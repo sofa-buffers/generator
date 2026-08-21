@@ -10,7 +10,9 @@ binary and read them back the way pip would.
 """
 
 import base64
+import contextlib
 import hashlib
+import io
 import importlib.util
 import tempfile
 import unittest
@@ -57,6 +59,14 @@ class TestPep440(unittest.TestCase):
         ]:
             with self.subTest(tag=tag):
                 self.assertEqual(bw.pep440(tag), want)
+
+    def test_print_version_hands_the_rule_to_other_callers(self):
+        # The post-publish verification needs the published version of a tag; it
+        # asks for it here instead of reimplementing the translation in YAML.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            bw.main(["--version", "v1.2.3-rc1", "--print-version"])
+        self.assertEqual(out.getvalue().strip(), "1.2.3rc1")
 
     def test_refuses_what_it_cannot_translate_faithfully(self):
         # release.yml's check-version gate is broader than PEP 440; anything it
