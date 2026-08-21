@@ -25,68 +25,101 @@ C++, Rust, C#, Java, Kotlin, Zig, and Dart**. Every backend is built against its
 JSON round-trips every field kind, and is byte-exact against the shared wire
 vectors — so code generated for one language interoperates with any other.
 
-## Quick start
+## Installation
 
-```sh
-# Grab a prebuilt binary from the latest release, or build from source:
-go build -o sofabgen ./cmd/sofabgen
+`sofabgen` is a single static binary with no runtime dependencies. Every channel
+below ships the **same** binary from the same
+[release](https://github.com/sofa-buffers/generator/releases), so they are
+interchangeable — pick whichever fits how you already manage tools.
 
-# Generate typed sources for one language from a definition.
-./sofabgen --lang go --in examples/messages/example.yaml --out out/go
+| Channel | Install | Best for |
+|---|---|---|
+| [Script](#one-line-install) | `curl -fsSL …/install.sh \| sh` | a workstation or a container image |
+| [npm](#npm) | `npm install --save-dev @sofa-buffers/generator` | JS/TS projects, pinned per project |
+| [PyPI](#pypi) | `uv tool install sofabgen` | Python projects, or a standalone CLI |
+| [GitHub Actions](#github-actions) | `uses: …/setup-sofabgen@v0.22.0` | CI |
+| [Go toolchain](#go-toolchain) | `go install …/cmd/sofabgen@latest` | you already build Go |
+| [From source](#from-source) | `go build -o sofabgen ./cmd/sofabgen` | hacking on the generator |
 
-# Generate for every language.
-for lang in c cpp go python typescript rust csharp java kotlin zig dart; do
-  ./sofabgen --lang "$lang" --in examples/messages/example.yaml --out "out/$lang"
-done
-
-# Render the definitions as a self-contained HTML reference page instead:
-./sofabgen --lang docs --in examples/messages/example.yaml --out out/docs
-
-# Scaffold a full buildable project + encode/decode harness:
-#   sofabgen --config myconfig.yaml --lang rust --in examples --out out
-```
+### One-line install
 
 Prebuilt static binaries for Linux, Windows and macOS (x86 and ARM, 32- and
-64-bit) are attached to every
-[release](https://github.com/sofa-buffers/generator/releases). Install the latest
-one — with OS/arch detection and SHA-256 verification — in one line:
+64-bit) are attached to every release. This grabs the latest — with OS/arch
+detection and SHA-256 verification:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sofa-buffers/generator/main/install.sh | sh
 ```
 
-Set `SOFABGEN_VERSION=vX.Y.Z` to pin a release or `SOFABGEN_INSTALL_DIR=<dir>` to
-choose the target directory. Prefer the Go toolchain? `go install
-github.com/sofa-buffers/generator/cmd/sofabgen@latest` (the binary self-reports the
-installed version).
+Set `SOFABGEN_VERSION=vX.Y.Z` to pin a release, or `SOFABGEN_INSTALL_DIR=<dir>` to
+choose where it lands.
 
-In GitHub Actions, use the bundled composite action — it installs the CLI and puts
-it on `PATH` for later steps:
+### npm
 
-```yaml
-- uses: sofa-buffers/generator/.github/actions/setup-sofabgen@v0.19.4
-  with:
-    version: v0.19.4   # optional; defaults to the latest release
-- run: sofabgen --version
-```
-
-For JS/TS projects, install it as a project-local dev dependency from npm — the
-prebuilt binary ships as a per-platform optional dependency (no Go toolchain, no
-`postinstall` download); the package is `@sofa-buffers/generator`, the command is
-`sofabgen` (see [`packaging/npm/`](packaging/npm/)):
+A project-local dev dependency: the prebuilt binary ships as a per-platform
+optional dependency, so there is no Go toolchain and no `postinstall` download,
+and the binary is integrity-hashed in your lockfile. The package is
+`@sofa-buffers/generator`, the command is `sofabgen` (see
+[`packaging/npm/`](packaging/npm/)):
 
 ```sh
 npm install --save-dev @sofa-buffers/generator
-npx sofabgen --lang ts --in messages/ --out src/generated/
+npx sofabgen --lang typescript --in messages/ --out src/generated/
 ```
 
-From PyPI it is a plain CLI — one wheel per platform, each holding nothing but the
-binary, so `pip` puts `sofabgen` straight on your `PATH` (no Python code, no build
-step; see [`packaging/pypi/`](packaging/pypi/)):
+### PyPI
+
+A plain CLI — one wheel per platform, each holding nothing but the binary, so pip
+puts `sofabgen` straight on your `PATH` (no Python code, no build step; see
+[`packaging/pypi/`](packaging/pypi/)):
 
 ```sh
 uv tool install sofabgen     # or: pipx install sofabgen / pip install sofabgen
 uvx sofabgen --lang python --in messages/ --out src/generated/
+```
+
+### GitHub Actions
+
+The bundled composite action installs the CLI and puts it on `PATH` for later
+steps:
+
+```yaml
+- uses: sofa-buffers/generator/.github/actions/setup-sofabgen@v0.22.0
+  with:
+    version: v0.22.0   # optional; defaults to the latest release
+- run: sofabgen --version
+```
+
+### Go toolchain
+
+```sh
+go install github.com/sofa-buffers/generator/cmd/sofabgen@latest
+```
+
+The binary self-reports the installed version.
+
+### From source
+
+```sh
+go build -o sofabgen ./cmd/sofabgen
+```
+
+## Quick start
+
+```sh
+# Generate typed sources for one language from a definition.
+sofabgen --lang go --in examples/messages/example.yaml --out out/go
+
+# Generate for every language.
+for lang in c cpp go python typescript rust csharp java kotlin zig dart; do
+  sofabgen --lang "$lang" --in examples/messages/example.yaml --out "out/$lang"
+done
+
+# Render the definitions as a self-contained HTML reference page instead:
+sofabgen --lang docs --in examples/messages/example.yaml --out out/docs
+
+# Scaffold a full buildable project + encode/decode harness:
+#   sofabgen --config myconfig.yaml --lang rust --in examples --out out
 ```
 
 Examples:
