@@ -235,3 +235,17 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: packaging/pypi/wheels
+
+  # Post-publish verification. Both publish jobs above prove that an upload was
+  # ACCEPTED; neither proves that what the registries then serve is installable.
+  # This installs @sofa-buffers/generator and sofabgen from npmjs.com and PyPI on
+  # all three OSes, uses them, and checks that every platform artifact of the set
+  # actually made it (a host only ever installs its own). Failure here means the
+  # release needs a follow-up — the tag is already public and both registries treat
+  # a version as immutable.
+  verify-published:
+    needs: [npm-publish, pypi-publish]
+    if: startsWith(github.ref, 'refs/tags/')
+    uses: ./.github/workflows/verify-published.yml
+    with:
+      version: ${{ github.ref_name }}

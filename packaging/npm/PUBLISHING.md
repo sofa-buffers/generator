@@ -94,6 +94,23 @@ npm publish . --access public
 (version + every `optionalDependencies` pin) in lockstep; without it the script
 refuses to run.
 
+## Testing
+
+- `npm` workflow (`npm.yml`) — on every change under `packaging/npm/`, builds the
+  host's platform package from the **latest published release** on all three runner
+  OSes, assembles an install tree and runs the CLI through the launcher shim.
+- `verify-published` workflow — runs after every release, and by hand for any
+  published version (`gh workflow run verify-published.yml -f version=v1.2.3`).
+  The smoke test above builds the package locally from the release assets, which
+  proves the recipe but not the upload: this one starts from
+  `npm install @sofa-buffers/generator@<v>` against npmjs.com on all three OSes,
+  asserts that npm resolved **the host's** platform package (the part of this design
+  most likely to break in publishing), generates real code, and runs
+  `npm audit signatures` for registry signatures and provenance. It also checks that
+  all nine platform packages exist at that version and that the launcher pins exactly
+  those nine — a host only ever installs one of them, so a platform package that
+  failed to publish is invisible to every install test.
+
 ## Re-running a failed publish
 
 If only `npm-publish` failed (e.g. a Trusted Publisher was missing), fix the

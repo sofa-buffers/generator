@@ -2391,8 +2391,10 @@ tests/                   conformance/<lang>/run.sh harnesses + matrix/ hermetic 
                          gen-artifacts.sh builds the per-language CI artifact bundle;
                          bench/ Ir/op + footprint of the generated code (§15; committed results.txt)
 .github/workflows/       ci.yml (hermetic + lang-<x> jobs), release.yml (binaries +
-                         npm-publish + pypi-publish), action.yml + npm.yml +
-                         pypi.yml (distribution smoke tests)
+                         npm-publish + pypi-publish + verify-published),
+                         action.yml + npm.yml + pypi.yml (distribution smoke
+                         tests), verify-published.yml (post-publish: install from
+                         the registries and use it)
 .github/actions/         setup-sofabgen/ composite action (installs the CLI in CI;
                          thin wrapper over install.sh)
 install.sh               one-line installer: OS/arch detect + release download +
@@ -2479,6 +2481,16 @@ The consumers of the release assets:
   rather than publishing a version the tag does not name. PyPI OIDC *can* create the
   project, so there is no hand-bootstrapped first version: an org-level pending
   publisher covers it (`packaging/pypi/PUBLISHING.md`).
+
+Both registry channels are verified twice, and the two tests answer different
+questions. The smoke workflows (`npm.yml`, `pypi.yml`) build the artifact locally
+from the release assets and use it — that proves the *recipe*, on every PR that
+touches it. `verify-published.yml` runs after the publish jobs and starts from
+`npm install` / `pip install` against the real registries on all three OSes — that
+proves the *upload*. It also queries both registry APIs for the whole artifact set
+(nine npm platform packages, thirteen wheels, provenance on each), because a host
+only ever installs its own: a platform package or wheel that failed to publish is
+invisible to an install test that just passed on a different platform.
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
 nothing; the core depends only on the `generator` *interface*, never on a

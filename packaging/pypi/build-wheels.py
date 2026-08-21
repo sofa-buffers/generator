@@ -213,9 +213,17 @@ def main(argv=None):
     ap.add_argument("--from", dest="from_dir", metavar="DIR", help="local dir holding the release binaries")
     ap.add_argument("--only", metavar="TAGS", help="comma-separated wheel platform tags to build")
     ap.add_argument("--out", metavar="DIR", help=f"output directory (default: {OUT.name}/)")
+    # The PEP 440 translation is a rule, not a formatting detail — anything that
+    # needs the published version of a tag (the post-publish verification, a
+    # manual `pip install sofabgen==...`) should ask for it here rather than
+    # reimplement it and drift.
+    ap.add_argument("--print-version", action="store_true", help="print the PEP 440 version for --version and exit")
     args = ap.parse_args(argv)
 
     version = pep440(args.version)
+    if args.print_version:
+        print(version)
+        return 0
     outdir = Path(args.out) if args.out else OUT
     description = (ROOT / "README.md").read_text(encoding="utf-8")
     license_text = (ROOT.parent.parent / "LICENSE").read_text(encoding="utf-8")

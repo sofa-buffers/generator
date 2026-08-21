@@ -1,0 +1,204 @@
+name: verify-published
+
+# Post-publish verification: install the packages **from the registries** and use
+# them. The npm/pypi smoke workflows build their artifact locally from the release
+# assets, which proves the recipe — it cannot prove that what npmjs.com and PyPI
+# actually serve is installable and correct. Everything here starts from
+# `npm install` / `pip install`.
+#
+# Called by release.yml once both publish jobs are done, and runnable by hand for
+# any published version (workflow_dispatch), e.g. after a registry incident.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release tag to verify, e.g. v1.2.3"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to verify (default: the latest release)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # `npm install` on every OS: the launcher must resolve the ONE per-platform
+  # optional dependency npm picked for this host and exec its binary. That
+  # resolution is the part most likely to break in publishing (a platform package
+  # missing at this version, or an optionalDependencies pin that does not match),
+  # and it can only fail on the host it belongs to.
+  npm:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Install from npmjs.com and use it
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.version }}"
+          if [ -z "$tag" ]; then
+            tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          fi
+          want="${tag#v}"
+          echo "verifying @sofa-buffers/generator@$want"
+
+          # A publish is not instantly visible through every registry CDN edge.
+          for i in $(seq 1 20); do
+            if npm view "@sofa-buffers/generator@$want" version >/dev/null 2>&1; then break; fi
+            echo "  not visible yet (attempt $i) …"; sleep 15
+          done
+
+          proj="$RUNNER_TEMP/npmproj"
+          mkdir -p "$proj" && cd "$proj"
+          npm init -y >/dev/null
+          npm install --save-dev "@sofa-buffers/generator@$want"
+
+          # The host's platform package must be the one npm installed.
+          case "$RUNNER_OS" in
+            Linux) plat=linux ;; macOS) plat=darwin ;; Windows) plat=win32 ;;
+          esac
+          case "$RUNNER_ARCH" in
+            X64) a=x64 ;; ARM64) a=arm64 ;; X86) a=ia32 ;;
+          esac
+          pkg="node_modules/@sofa-buffers/generator-$plat-$a"
+          test -d "$pkg" || {
+            echo "::error::$pkg was not installed — optional-dependency resolution failed" >&2
+            ls node_modules/@sofa-buffers/ >&2; exit 1
+          }
+          echo "platform package present: $pkg"
+
+          got="$(npx sofabgen --version)"
+          echo "npx sofabgen --version -> '$got' (expected '$want')"
+          test "$got" = "$want"
+
+          # Generate real code with the published CLI.
+          npx sofabgen --lang typescript \
+            --in "$GITHUB_WORKSPACE/examples/messages/example.yaml" --out out
+          test -s out/message.ts
+
+          # Registry signatures + npm provenance for everything we just installed.
+          npm audit signatures
+
+  # `pip install` on every OS: PyPI must serve a wheel whose tag matches the host,
+  # and pip must land the binary on PATH, executable.
+  pypi:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Install from PyPI and use it
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.version }}"
+          if [ -z "$tag" ]; then
+            tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          fi
+          # PyPI spells pre-releases differently from the tag; ask the builder for
+          # the rule rather than restating it here.
+          want="$(python packaging/pypi/build-wheels.py --version "$tag" --print-version)"
+          echo "verifying sofabgen==$want"
+
+          python -m venv "$RUNNER_TEMP/venv"
+          case "$RUNNER_OS" in
+            Windows) bin="$RUNNER_TEMP/venv/Scripts" ;;
+            *)       bin="$RUNNER_TEMP/venv/bin" ;;
+          esac
+          "$bin/python" -m pip install --quiet --upgrade pip
+
+          # Same propagation caveat as npm; --no-cache-dir so a retry cannot be
+          # answered from a local cache.
+          for i in $(seq 1 20); do
+            if "$bin/python" -m pip install --quiet --no-cache-dir "sofabgen==$want"; then break; fi
+            echo "  not installable yet (attempt $i) …"; sleep 15
+          done
+
+          got="$("$bin/sofabgen" --version)"
+          echo "sofabgen --version -> '$got' (expected '$want')"
+          test "$got" = "$want"
+
+          # Generate real code with the published CLI.
+          "$bin/sofabgen" --lang python --in examples/messages/example.yaml --out "$RUNNER_TEMP/gen"
+          test -s "$RUNNER_TEMP/gen/message.py"
+
+  # What the per-host jobs cannot see: whether the OTHER platforms' artifacts were
+  # published at all. A host only ever installs its own, so a missing arm64 wheel or
+  # a platform package that failed to publish would go unnoticed until a user hits
+  # it. Check the full set through the registry APIs, plus the provenance that is
+  # supposed to come with trusted publishing.
+  registries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Every platform artifact is published, and attested
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.version }}"
+          if [ -z "$tag" ]; then
+            tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          fi
+          npm_v="${tag#v}"
+          pypi_v="$(python3 packaging/pypi/build-wheels.py --version "$tag" --print-version)"
+          fail=0
+
+          echo "== npm: all nine platform packages at $npm_v =="
+          for t in linux-x64 linux-ia32 linux-arm64 linux-arm darwin-x64 darwin-arm64 \
+                   win32-x64 win32-ia32 win32-arm64; do
+            if npm view "@sofa-buffers/generator-$t@$npm_v" version >/dev/null 2>&1; then
+              echo "  ok  @sofa-buffers/generator-$t"
+            else
+              echo "::error::@sofa-buffers/generator-$t@$npm_v is not on the registry" >&2
+              fail=1
+            fi
+          done
+
+          echo "== npm: the launcher pins exactly those nine =="
+          pinned="$(npm view "@sofa-buffers/generator@$npm_v" optionalDependencies --json | node -e \
+            'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);
+             console.log(Object.entries(o).map(([k,v])=>k+"@"+v).sort().join("\n"))})')
+          echo "$pinned"
+          test "$(echo "$pinned" | grep -c "@$npm_v\$")" -eq 9 || {
+            echo "::error::the launcher does not pin nine platform packages at $npm_v" >&2; fail=1; }
+
+          echo "== PyPI: all thirteen wheels at $pypi_v, each with attestations =="
+          files="$(curl -fsS "https://pypi.org/pypi/sofabgen/$pypi_v/json" | python3 -c \
+            'import json,sys; print("\n".join(sorted(f["filename"] for f in json.load(sys.stdin)["urls"])))')"
+          n="$(echo "$files" | grep -c '\.whl$')"
+          echo "$files"
+          test "$n" -eq 13 || { echo "::error::expected 13 wheels on PyPI, found $n" >&2; fail=1; }
+          for f in $files; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' \
+              "https://pypi.org/integrity/sofabgen/$pypi_v/$f/provenance")"
+            if [ "$code" != "200" ]; then
+              echo "::error::no PEP 740 provenance for $f (HTTP $code)" >&2; fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          echo "all artifacts published and attested"
