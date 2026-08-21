@@ -2396,7 +2396,9 @@ tests/                   conformance/<lang>/run.sh harnesses + matrix/ hermetic 
                          thin wrapper over install.sh)
 install.sh               one-line installer: OS/arch detect + release download +
                          SHA-256 verify (curl|sh); the action reuses it
-npm/                     npm distribution: bin/sofabgen.js launcher + per-platform
+packaging/               per-package-manager distribution recipes, one directory
+                         per channel, all fed from the same release assets
+packaging/npm/           npm distribution: bin/sofabgen.js launcher + per-platform
                          optional-dependency packages built from the release
                          binaries (scripts/build-platform-packages.js); packages/
                          is git-ignored (built at publish time)
@@ -2415,9 +2417,10 @@ cannot drift:
 - The **Go binary** carries a `main.version = "0.0.0-dev"` placeholder; the build
   step injects the tag via `-ldflags "-X main.version=<tag>"`, so a release binary
   self-reports the exact tag. Non-tag (`workflow_dispatch`) builds keep the placeholder.
-- The **npm package** carries a `0.0.0-dev` placeholder in `npm/package.json`; the
-  `npm-publish` job injects the tag with `build-platform-packages.js --version <tag>`,
-  rewriting the version and every `optionalDependencies` pin in lockstep.
+- The **npm package** carries a `0.0.0-dev` placeholder in
+  `packaging/npm/package.json`; the `npm-publish` job injects the tag with
+  `build-platform-packages.js --version <tag>`, rewriting the version and every
+  `optionalDependencies` pin in lockstep.
 - Two guards back this up: `check-version` fails the release early if the tag is not
   a well-formed `vMAJOR.MINOR.PATCH[-prerelease]`, and after injection the
   `npm-publish` job asserts every package's version equals the tag before publishing.
@@ -2435,7 +2438,7 @@ The consumers of the release assets:
   to `main.version` only when no module version is present — the release workflow
   overrides that fallback with `-ldflags "-X main.version=<tag>"`; a plain local
   `go build` reports the `0.0.0-dev` placeholder.
-- **`npm i -D @sofa-buffers/generator`** (`npm/`) — the per-platform
+- **`npm i -D @sofa-buffers/generator`** (`packaging/npm/`) — the per-platform
   optional-dependency pattern (esbuild/swc model): a tiny launcher package pulls in
   one `@sofa-buffers/generator-<os>-<arch>` (matched by npm via `os`/`cpu`) that
   ships the corresponding release binary. No download, no `postinstall`; the binary
@@ -2447,7 +2450,7 @@ The consumers of the release assets:
   package `version` always equals the release tag because it is injected from it, and
   the `npm-publish` guard asserts this before publishing. OIDC cannot *create* a
   package, so each package's first-ever version is bootstrapped once by hand
-  (`npm/PUBLISHING.md`); the workflow publishes all versions after that.
+  (`packaging/npm/PUBLISHING.md`); the workflow publishes all versions after that.
 
 **Dependency rule (enforced by package boundaries):** `internal/ir` imports
 nothing; the core depends only on the `generator` *interface*, never on a

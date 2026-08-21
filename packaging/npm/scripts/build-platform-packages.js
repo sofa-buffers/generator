@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Build the per-platform optional-dependency packages for @sofa-buffers/generator
-// from the release binaries, into npm/packages/. Run at publish time (e.g. in the
-// release workflow), then `npm publish` each generated package + the main one.
+// from the release binaries, into the package root's packages/. Run at publish
+// time (e.g. in the release workflow), then `npm publish` each generated package
+// + the main one.
 //
 // Usage:
 //   node scripts/build-platform-packages.js              # download binaries from the v<version> release
@@ -120,7 +121,7 @@ function platformPackageJson(t) {
     repository: {
       type: "git",
       url: "git+https://github.com/sofa-buffers/generator.git",
-      directory: "npm",
+      directory: "packaging/npm",
     },
     // Scoped packages default to `restricted`, which requires a paid npm plan
     // and fails any publish (incl. the hand-bootstrapped first version) with

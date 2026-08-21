@@ -22,10 +22,11 @@ permissions:
 
 jobs:
   # Gate: the release tag is the single source of truth for the version (the
-  # committed npm/package.json carries a 0.0.0-dev placeholder; the npm-publish
-  # job injects the tag version at publish time). Fail fast here if the tag is
-  # not a well-formed vMAJOR.MINOR.PATCH[-prerelease] version, before spending
-  # CI on ten cross-builds and a GitHub release. workflow_dispatch (no tag) skips.
+  # committed packaging/npm/package.json carries a 0.0.0-dev placeholder; the
+  # npm-publish job injects the tag version at publish time). Fail fast here if
+  # the tag is not a well-formed vMAJOR.MINOR.PATCH[-prerelease] version, before
+  # spending CI on ten cross-builds and a GitHub release. workflow_dispatch (no
+  # tag) skips.
   check-version:
     runs-on: ubuntu-latest
     steps:
@@ -129,7 +130,8 @@ jobs:
   # of the OIDC identity: renaming this file breaks publishing (see the banner at
   # the top of this file). Provenance is attached automatically. OIDC cannot
   # CREATE a package, so every package's first-ever version is bootstrapped once
-  # by hand (see npm/PUBLISHING.md); this job publishes all subsequent versions.
+  # by hand (see packaging/npm/PUBLISHING.md); this job publishes all subsequent
+  # versions.
   npm-publish:
     needs: release
     runs-on: ubuntu-latest
@@ -150,10 +152,10 @@ jobs:
       - name: Use an npm that supports trusted publishing
         run: npm install -g npm@latest # OIDC trusted publishing needs npm >= 11.5.1
       - name: Build per-platform packages from the released binaries
-        working-directory: npm
-        run: node scripts/build-platform-packages.js --from ../dist --version "${{ github.ref_name }}"
+        working-directory: packaging/npm
+        run: node scripts/build-platform-packages.js --from ../../dist --version "${{ github.ref_name }}"
       - name: Guard — every package version must equal the tag version
-        working-directory: npm
+        working-directory: packaging/npm
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
@@ -176,7 +178,7 @@ jobs:
             exit 1
           fi
       - name: Publish to npm via trusted publishing (OIDC)
-        working-directory: npm
+        working-directory: packaging/npm
         run: |
           set -euo pipefail
           # No token: OIDC exchange happens inside `npm publish`. Platform packages
