@@ -1917,14 +1917,26 @@ only needs to mirror their *names* and gate on the schema's used features:
 > **§7.3 skip caveat (generator#215 / Crucible F-0027).** Point (a) — "gate on
 > the schema's used features" — holds only where a feature gates *field storage /
 > encode*. Where a corelib gates wire-type **parse/skip** behind the same switch
-> (as corelib-rs-no-std does), a **decoder** must provision the full wire-type set
-> regardless of the schema: §7.3 requires skipping any wire type an unknown id may
-> carry (array, fp64, 64-bit value), so a schema-derived subset yields a decoder
-> that *rejects* a well-formed skippable field instead of skipping it. The rust
-> backend therefore emits the full feature set for corelib-rs-no-std. The
-> footprint-preserving alternative is a corelib-side skip path that is
-> feature-independent (read-and-discard any wire construct even when its
-> decode-into-field arm is compiled out).
+> (as corelib-rs-no-std and corelib-c-cpp do), a **decoder** must provision the
+> full wire-type set regardless of the schema: §7.3 requires skipping any wire
+> type an unknown id may carry (array, fp64, 64-bit value), so a schema-derived
+> subset yields a decoder that *rejects* a well-formed skippable field instead of
+> skipping it. The rust backend therefore emits the full feature set for
+> corelib-rs-no-std.
+>
+> The feature-independent skip path this note previously named as the
+> footprint-preserving alternative is **settled and not available**: corelib-rs-no-std
+> built and measured it (corelib-rs-no-std#103/#104) and it grew the integer-only
+> Cortex-M0 build from 614 B to 986 B (+61 %) and `IStream` from 12 B to 28 B — an
+> unconditional parser for every wire type is most of what the flags save, so
+> keeping it defeats their purpose. Both footprint corelibs therefore define a
+> disabled flag as a **subset of the wire format**, not as narrower storage: a
+> message carrying the construct is INVALID, terminally (corelib-c-cpp#145/#146
+> made the verdict sticky, having found that feeding on past a rejection could
+> resynchronize and report OK for a message already refused). Interop narrows to
+> peers that never send the construct in *any* field, including ids the receiver
+> does not know — which is exactly why a **generated** decoder, which cannot know
+> its peers' schema, provisions the full set.
 
 ### 9.5 Decode resource bounds (receiver-side limits)
 
