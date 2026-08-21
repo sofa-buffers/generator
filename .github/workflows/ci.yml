@@ -33,6 +33,19 @@ jobs:
             GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/sofabgen
           done
 
+  # Distribution packaging: the PyPI wheel builder writes wheels by hand (stdlib
+  # zipfile), so its RECORD, tags and script layout are only as correct as these
+  # tests. A wheel is immutable once uploaded — catch it here, not on PyPI.
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Wheel builder unit tests
+        run: python3 -m unittest discover -s packaging/pypi -v
+
   # Language milestone: C (corelib-c-cpp). Generates code, builds it against the
   # real corelib with gcc, round-trips through the harness, and checks byte-exact
   # output against the shared wire vectors. tests/conformance/c/run.sh clones the corelib.
