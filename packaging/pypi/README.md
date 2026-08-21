@@ -60,15 +60,22 @@ bytes itself. The generated code calls into a small per-language **runtime
 library** ("corelib") that owns the wire format. So alongside the generator, your
 project needs the corelib for your target language at runtime.
 
-For the Python target that is **[`corelib-py`](https://github.com/sofa-buffers/corelib-py)**;
-generated modules import from it:
+For the Python target that is
+**[`sofa-buffers-corelib`](https://pypi.org/project/sofa-buffers-corelib/)**
+([source](https://github.com/sofa-buffers/corelib-py)) — installed under that name,
+imported as `sofab`:
+
+```sh
+pip install sofa-buffers-corelib
+```
 
 ```python
 from sofab import Encoder, Decoder
 ```
 
-It is not published on PyPI yet — install it from the repository until it is. For
-any other target language, install that language's corelib in its own ecosystem
+It ships a compiled accelerator in prebuilt wheels, so a normal install gets the
+native engine without a C toolchain (`sofab.IMPL` reports which engine is active).
+For any other target language, install that language's corelib in its own ecosystem
 (npm, Cargo, Go modules, NuGet, Maven, …).
 
 ## How the binary is delivered
@@ -95,6 +102,6 @@ verifiably the one CI built from the tagged source.
 ## Links
 
 - **Source & documentation:** https://github.com/sofa-buffers/generator
-- **Runtime library (Python):** https://github.com/sofa-buffers/corelib-py
+- **Runtime library (Python):** https://pypi.org/project/sofa-buffers-corelib/
 
 MIT licensed.
