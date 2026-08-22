@@ -1960,9 +1960,18 @@ whatever the wire claims (heap-exhaustion DoS; count-prefixed arrays are the
 sharp *amplification* vector: a ~10-byte message claiming `count = 2^31`).
 
 Three **sofabgen config** keys — `max_dyn_array_count`, `max_dyn_string_len`,
-`max_dyn_blob_len` (`generic:`, per-target overridable; **unset = unlimited**,
-today's behavior bit-for-bit) — bake receiver-side caps into the generated
-code as named constants. The rules, normative for every backend:
+`max_dyn_blob_len` (`generic:`, per-target overridable) — bake receiver-side caps
+into the generated code as named constants. **Every target MUST have a finite
+default for all three**; there is no unset state and no unlimited mode. The
+*values* are deliberately left to the target: an element count that is trivial on
+a server is brutal in C, so a sensible cap is a per-language, per-use-case
+judgement and never a family-wide constant.
+
+An unset schema `count`/`maxlen` still means the *message* declares no bound — it
+does not mean the receiver has none. The schema bound and the receiver cap answer
+different questions (validity vs. capacity), and a field with neither is capped by
+the target default rather than by `ARRAY_MAX`. The rules, normative for every
+backend:
 
 - The caps govern **only** fields the schema left unbounded. A schema-bounded
   field is governed by its own bound (#100); a field that legitimately needs
@@ -1973,8 +1982,11 @@ code as named constants. The rules, normative for every backend:
   silent clamping is data corruption).
 - The check runs at the count/length **header**, before any allocation or
   buffering — a claimed oversize fails fast even if the payload never arrives.
-- A corelib never invents its own default cap; absent limits = current
-  behavior. A wrapper-sequence array carries no count *header*, but its elements
+- The corelib reports what arrives — the count at the header, the index of the
+  element in hand — and the generated visitor decides against the cap. Where a
+  corelib takes the caps itself (the enforcement families below), the value still
+  comes from generated code, never from a default the corelib invented.
+  A wrapper-sequence array carries no count *header*, but its elements
   are keyed by an unbounded varint **index** and an id-keyed collector grows the
   container to `id+1` — so a single over-index element **is** an amplification
   vector (a ~9-byte message forcing an arbitrarily large allocation), not the
@@ -1991,12 +2003,13 @@ code as named constants. The rules, normative for every backend:
     capacity and an over-capacity index is dropped (payload skipped, as for a
     native-array over-count, §5.1).
   - **Dynamic (no `count`)** — the array legitimately grows to *highest present
-    id + 1* (§5.1), and the config caps' array-count key targets the count
-    *header* of a native array, not a wrapper index, so a dynamic wrapper array's
-    index growth is **not** currently capped. Its per-element string/blob
-    *length* still is (the `total`-header guard below), so total memory tracks
-    delivered bytes; an index-only amplifier against a dynamic wrapper array is a
-    known residual, tracked separately from #142.
+    id + 1* (§5.1), so the element **index is the array length** and therefore the
+    amplification vector: two elements at id `0` and id `16383` are a 16384-slot
+    container. `max_dyn_array_count` therefore binds the **index** here, not a
+    count header: an element whose `id >= max_dyn_array_count` is `LimitExceeded`,
+    checked **before** the container grows. Capping the index rather than the
+    number of elements delivered is what closes this — a sparse array allocates by
+    its highest id, not by how many elements arrived.
 
 Enforcement by family: **generated visitor guards** (Rust std, Java, Kotlin, C#,
 Zig, pure C++ — the corelib callback exposes `count`/`total` pre-allocation; the
@@ -2016,9 +2029,31 @@ unbounded and uncapped yields no cap at all rather than one that would reject va
 traffic. **Statically bounded profiles** (C, C++ `corelib: c-cpp`,
 Rust `no_std`) are capacity-bound by construction — the keys are inert.
 
-Independent of the option (bugfix class), no generated decoder may allocate
-eagerly from an untrusted wire count: C#, Zig and Kotlin count-less array arms
-reserve bounded and grow with delivered elements (the Java #96/#98 pattern).
+**Allocation shape: check first, then allocate once.** No generated decoder may
+allocate from an untrusted wire count *before* checking it, and an over-cap count
+is `LimitExceeded` — never a clamp to the cap, which is the #100 lesson again.
+What follows the check depends on whether the size is known up front, and only two
+shapes are conformant:
+
+- **A — the size arrives before the payload** (native integer arrays §4.7, fixlen
+  arrays §4.8, and `string`/`blob` lengths). Check the count/length against the
+  schema bound or the cap, then allocate **exactly that count**, once. No growth,
+  no reserve-and-extend: the wire already said how big it is, and the cap already
+  bounded what that may be.
+- **B — the size is only known at the end** (sequence/wrapper arrays, whose length
+  is *highest present id + 1*). There is no count to allocate from and no second
+  pass available in a streaming decode, so the container **grows** as elements
+  arrive. Growth is bounded by construction: the index check above rejects
+  `id >= max_dyn_array_count` before the grow. Grow geometrically to at least
+  `id + 1` rather than exactly `id + 1`, so a sparse array does not cost O(n²)
+  copies.
+
+Growth belongs to **B alone**. Its earlier appearance in the A shape (#96/#98 —
+Java's lazy array growth, merged 2026-07-08) was a heap-exhaustion mitigation
+written the day *before* the config caps of #102 existed, and the caps replaced the
+need for it: once an untrusted count is checked against a finite bound before the
+allocation, allocating it exactly is both safe and cheaper than growing into it.
+Statically bounded profiles are unaffected — they were never growing.
 
 ### 9.6 Worst-case message size (one walk, all backends)
 
