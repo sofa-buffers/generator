@@ -1050,6 +1050,19 @@ a bound established by a word, checked after the bytes that word describes:
   all-or-nothing reason recorded under §7.3 below.
 - **A scalar `blob`'s `maxlen` in python.** The string arm already peeked
   `d.fixlen_len()` before the read; the blob arm did not (generator#277).
+- **A wrapper-array `blob` ELEMENT's `maxlen` in python** — the same arm one
+  position deeper, and the site the bullet above did not carry over. It stayed
+  late for another year of Crucible runs before F-0062 hit it with
+  `ce 0c 22 e3 30`: element index 4 declares 780 bytes against a `maxlen` of 64
+  and the message ends at the `fixlen_word`, so `d.bytes()` reached end-of-input
+  and answered INCOMPLETE where the fourteen other drivers — the `string_array`
+  element **one field earlier in the same generated file** included — answered
+  INVALID. It was the one site of five in that `message.py` not using
+  `fixlen_len()`. The late guard also left the element unbounded in the interval
+  it mattered: the emitted `d.schema_bounded()` turns the receiver-side
+  `max_blob_len` cap off (§6.2.1) on the promise that generated code enforces the
+  schema bound instead, and until #377 nothing did so before the payload wait.
+  Fixed by emitting the string arm's peek verbatim (generator#377).
 - **An array element's declared width in typescript.** A `u8[]`/`i16[]` element
   outside its type's range was found by a scan over the *assembled* array, which
   cannot fire for an array that never assembles. The bound now goes **into the
