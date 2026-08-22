@@ -306,8 +306,18 @@ length word — where the violation is already fully established — must still 
 INVALID. Reading first and measuring the decoded bytes afterwards never reaches
 the check on such a message and reported INCOMPLETE instead. The string arm had
 always peeked; the blob arm was reading first, and now does the same
-(generator#267/#277). Bounded string/blob **elements** of a wrapper array peek
-the same way.
+(generator#267/#277).
+
+Bounded string/blob **elements** of a wrapper array peek the same way — the blob
+element arm only since generator#377. It was the one site of five in a generated
+`message.py` still measuring the materialized bytes, so the identical truncation
+one field over (`string_array`) was INVALID while `blob_array` reported
+INCOMPLETE. The pull decoder makes the gap worse than a late verdict: the guard
+is preceded by `d.schema_bounded()`, which switches the receiver-side
+`max_blob_len` cap off for that element (§6.2.1), so nothing at all stood between
+a sender-declared length — up to the §4.6 ceiling of 2 147 483 647 — and the
+payload the decoder then waited for. Declaring the bound is a promise to enforce
+it, and `fixlen_len()` is where that promise is kept.
 
 A native array's **elements** are the same story one position deeper. The reader
 returns the whole list, so an `any(...)` scan over it is exact for an array that

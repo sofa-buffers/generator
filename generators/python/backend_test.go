@@ -272,6 +272,7 @@ messages:
       b:   { id: 1, type: blob,   maxlen: 8 }
       arr: { id: 2, type: array, items: { type: string, maxlen: 5 } }
       us:  { id: 3, type: string }
+      barr: { id: 4, type: array, items: { type: blob, maxlen: 5 } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
@@ -300,6 +301,12 @@ messages:
 		// (c) bounded wrapper string element (maxlen 5): wire byte length peek.
 		`if d.fixlen_len() > 5:`,
 		`raise SofaDecodeError("self.arr: string element byte length above schema maxlen 5")`,
+		// (c) bounded wrapper BLOB element (maxlen 5): the same peek, ahead of the
+		// payload read, for the same §5.2 reason as the scalar blob above
+		// (generator#377 / F-0062 — the site #267 did not cover).
+		`if d.fixlen_len() > 5:
+                        raise SofaDecodeError("self.barr: blob element byte length above schema maxlen 5")
+                    self.barr[_ef0.id] = d.bytes()`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing maxlen guard %q", want)
@@ -1382,8 +1389,8 @@ messages:
 		"max_dyn_array_count": 2,
 	})["message.py"])
 
-	// Declared ahead of every schema-bound guard, and ahead of the read on the
-	// blob-element arm, which measures the materialized bytes instead of peeking.
+	// Declared ahead of every schema-bound guard — including the length peek that
+	// fronts each bounded string/blob read.
 	for _, want := range []string{
 		"                d.schema_bounded()\n                if d.fixlen_len() > 8:",
 		"d.schema_bounded()\n                if fld.count > 4:",

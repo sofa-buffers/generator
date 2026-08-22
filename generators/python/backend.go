@@ -1106,20 +1106,27 @@ func (g *gen) unmarshalArray(f *pyfile, ind, target, loc string, elem ir.Kind, r
 			// with the element default b"" (MESSAGE_SPEC S2).
 			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
 			f.line(`%s        %s.append(b"")`, ind, target)
-			// Declared BEFORE the read: this arm measures the materialized bytes
-			// rather than peeking the length word, so a receiver cap would reject
-			// during d.bytes() -- one call before the schema bound below could
-			// speak (§6.2.1: on a bounded field the schema governs).
+			// A bounded blob element whose byte length exceeds the element maxlen
+			// is malformed — reject, never truncate (MESSAGE_SPEC §7.1). Bound
+			// against the exact wire byte length the decoder already parsed
+			// (d.fixlen_len(), a non-consuming peek) BEFORE the payload is read,
+			// exactly as the string element arm above does.
+			//
+			// The order is the whole point (generator#377 / Crucible F-0062, the
+			// same class as #267 / F-0043 at a site that fix did not cover): §5.2
+			// makes INVALID dominate INCOMPLETE, so a message truncated right after
+			// the fixlen_word — where the violation is already fully established —
+			// must still be INVALID. Reading first and measuring the decoded bytes
+			// afterwards never reaches the check on such a message and reported
+			// INCOMPLETE instead. d.schema_bounded() also switches the receiver-side
+			// max_blob_len cap off (§6.2.1), so this check is the only thing left
+			// standing between a sender-declared length and the payload wait.
 			if elemMaxHas {
 				f.line("%s    d.schema_bounded()", ind)
-			}
-			f.line("%s    %s[%s.id] = d.bytes()", ind, target, ef)
-			// A bounded blob element whose byte length exceeds the element maxlen
-			// is malformed — reject, never truncate (MESSAGE_SPEC §7.1).
-			if elemMaxHas {
-				f.line("%s    if len(%s[%s.id]) > %d:", ind, target, ef, elemMax)
+				f.line(`%s    if d.fixlen_len() > %d:`, ind, elemMax)
 				f.line(`%s        raise SofaDecodeError("%s: blob element byte length above schema maxlen %d")`, ind, target, elemMax)
 			}
+			f.line("%s    %s[%s.id] = d.bytes()", ind, target, ef)
 		case ir.KindStruct, ir.KindUnion:
 			// A struct/union element is keyed by index id exactly like the string and
 			// blob leaves above (MESSAGE_SPEC §5.1: the element id IS the array
