@@ -72,8 +72,8 @@ func TestPythonStructural(t *testing.T) {
 		"def decoder(cls) -> _StreamDecoder:",
 		"class MyfirstmessageSomeenum(IntEnum):",
 		"def to_jsonable(self)",
-		"e.write_sequence_begin_lazy(",                              // every sequence opens lazily (MESSAGE_SPEC S2)
-		"if fld.type == WireType.ARRAY_UNSIGNED and fld.count > 4:", // over-count scalar array rejected at the count header (generator#100/#216)
+		"e.write_sequence_begin_lazy(",  // every sequence opens lazily (MESSAGE_SPEC S2)
+		"                if count > 4:", // over-count scalar array rejected at the count header (generator#100/#216)
 		`raise SofaDecodeError("someuintarray: array count above schema capacity 4")`,
 	} {
 		if !strings.Contains(mod, want) {
@@ -419,10 +419,18 @@ messages:
 	if !strings.Contains(mod, want) {
 		t.Errorf("the element-width scan must sit in on_unsigned_array, over the assembled list:\n%s", mod)
 	}
-	// The count, unlike the element width, IS on the header — so it stays ahead
-	// of the payload where §5.2 wants it.
-	if !strings.Contains(mod, "if fld.type == WireType.ARRAY_UNSIGNED and fld.count > 4:") {
-		t.Errorf("the array COUNT bound must stay at the header, in on_field:\n%s", mod)
+	// Both the count and the element width are settled in on_array_begin, at the
+	// header, ahead of the first element — the count on its argument, the width
+	// by being handed to the decoder rather than checked here.
+	const hdr = `    def on_array_begin(self, fid: int, wtype: WireType, count: int):`
+	if !strings.Contains(mod, hdr) {
+		t.Errorf("an integer array must be bounded in on_array_begin:\n%s", mod)
+	}
+	if !strings.Contains(mod, "                if count > 4:") {
+		t.Errorf("the array COUNT bound must sit on on_array_begin's count argument:\n%s", mod)
+	}
+	if !strings.Contains(mod, "                return (None, None, 255)") {
+		t.Errorf("the declared element width must be STATED for the decoder to apply:\n%s", mod)
 	}
 }
 
@@ -519,7 +527,7 @@ messages:
 		"if not (len(self.fixedObjs) == 0):",
 		// The bound itself is untouched -- that is all `count` still does. Both
 		// now land at the header, in on_field.
-		"if fld.type == WireType.ARRAY_UNSIGNED and fld.count > 5:",
+		"                if count > 5:",
 		"if fld.id >= 3:",
 	} {
 		if !strings.Contains(mod, want) {
@@ -768,8 +776,11 @@ messages:
 		// them, and the native arrays share ARRAY_FIXLEN the same way.
 		"if fld.subtype == FixlenSubtype.STRING and fld.size > 8:",
 		"if fld.subtype == FixlenSubtype.BLOB and fld.size > 8:",
-		"if fld.type == WireType.ARRAY_UNSIGNED and fld.count > 2:",
-		"if fld.type == WireType.ARRAY_SIGNED and fld.count > 2:",
+		// Integer arrays are bounded in on_array_begin, on the count argument.
+		"    def on_array_begin(self, fid: int, wtype: WireType, count: int):",
+		"                if count > 2:",
+		// A float array carries no declared width, so the corelib does not call
+		// that hook for one: its count stays in on_field, framed by the subtype.
 		"if fld.type == WireType.ARRAY_FIXLEN and fld.subtype == FixlenSubtype.FP32 and fld.count > 2:",
 		// An unmatched sequence is declined, which skips its whole subtree.
 		"        return False",
@@ -1232,7 +1243,7 @@ messages:
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	for _, want := range []string{
-		"if fld.type == WireType.ARRAY_UNSIGNED and fld.count > 3:",
+		"            if count > 3:",
 		`raise SofaDecodeError("numrows row: array count above schema capacity 3")`,
 		"if fld.type == WireType.ARRAY_FIXLEN and fld.subtype == FixlenSubtype.FP32 and fld.count > 2:",
 		`raise SofaDecodeError("fprows row: array count above schema capacity 2")`,
@@ -1250,10 +1261,10 @@ messages:
 	// decoded -- so a truncated tail cannot downgrade the verdict. Pinned as
 	// "the bound is in on_field, not in the value hook": the value hook only ever
 	// sees a row that fully arrived.
-	onField := strings.Index(mod, "    def on_field(self, fld: Field) -> bool:")
-	guard := strings.Index(mod, "if fld.type == WireType.ARRAY_UNSIGNED and fld.count > 3:")
-	if onField < 0 || guard < onField {
-		t.Errorf("the row count bound must sit inside on_field (on_field=%d guard=%d)", onField, guard)
+	onArrayBegin := strings.Index(mod, "    def on_array_begin(self, fid: int, wtype: WireType, count: int):")
+	guard := strings.Index(mod, "            if count > 3:")
+	if onArrayBegin < 0 || guard < onArrayBegin {
+		t.Errorf("the row count bound must sit inside on_array_begin (hook=%d guard=%d)", onArrayBegin, guard)
 	}
 
 	// Lockstep with the on-demand import: when the ONLY counted native array in
@@ -1267,8 +1278,8 @@ messages:
     payload:
       rows: { id: 0, type: array, items: { type: array, items: { type: u32, count: 3 } } }
 `), map[string]any{})["message.py"])
-	if !strings.Contains(rows, "from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType\n") {
-		t.Errorf("a nested-row-only over-count guard still needs Field/WireType imported:\n%s", rows)
+	if !strings.Contains(rows, "from sofab import Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType\n") {
+		t.Errorf("a nested-row-only over-count guard still needs WireType imported:\n%s", rows)
 	}
 
 	// And the behaviour itself, against corelib-py.

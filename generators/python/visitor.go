@@ -195,6 +195,7 @@ func (g *gen) emitVisitor(f *pyfile, name string, fields []*ir.Field) {
 	f.blank()
 
 	g.emitSeqHooks(f, scopes)
+	g.emitOnArrayBegin(f, scopes)
 	for _, hook := range pyValueHooks {
 		g.emitValueHook(f, scopes, hook)
 	}
@@ -535,16 +536,18 @@ func (g *gen) objFieldArm(sc *pyScope) []string {
 			}
 			chk = fixlenCheck(fld.Kind, fld.Maxlen, fld.Name)
 		case ir.KindArray:
-			if !isNativeArrayElem(fld.Elem) {
-				continue
-			}
-			if fld.HasCount {
+			// An INTEGER array is bounded in on_array_begin, which carries the
+			// count as an argument and can state the element width besides. Only
+			// a float array is left here: it has no declared width to state, so
+			// the corelib does not call that hook for one.
+			if !isNativeArrayElem(fld.Elem) || !isIntArrayElem(fld.Elem) {
+				if !isNativeArrayElem(fld.Elem) || !fld.HasCount {
+					continue
+				}
 				chk = countCheck(fld.Elem, fld.Count, fld.Name)
+				break
 			}
-			chk = append(chk, elemWidthDecl(fld.Elem)...)
-			if len(chk) == 0 {
-				continue
-			}
+			continue
 		default:
 			continue
 		}
@@ -572,11 +575,10 @@ func (g *gen) arrFieldArm(sc *pyScope) []string {
 			out = append(out, elemFixlenCheck(sc.elem, sc.elemMax, sc.loc)...)
 		}
 	case ir.KindArray:
-		if isNativeArrayElem(sc.elemItems.Elem) {
-			if sc.elemItems.HasCount {
-				out = append(out, countCheck(sc.elemItems.Elem, sc.elemItems.Count, sc.loc+" row")...)
-			}
-			out = append(out, elemWidthDecl(sc.elemItems.Elem)...)
+		// As above: an integer row is bounded in on_array_begin.
+		if isNativeArrayElem(sc.elemItems.Elem) && !isIntArrayElem(sc.elemItems.Elem) &&
+			sc.elemItems.HasCount {
+			out = append(out, countCheck(sc.elemItems.Elem, sc.elemItems.Count, sc.loc+" row")...)
 		}
 	}
 	return out
@@ -651,9 +653,11 @@ func indent(lines []string) []string {
 // own conditions -- which is how the import drifted out of lockstep before
 // (generator#246). Here they cannot disagree.
 func visitorNeeds(section string) (field, wire, fixlen bool) {
+	// Substring, not "WireType.": on_array_begin names the type as a bare
+	// parameter annotation, with no member access after it.
 	return strings.Contains(section, "def on_field("),
-		strings.Contains(section, "WireType."),
-		strings.Contains(section, "FixlenSubtype.")
+		strings.Contains(section, "WireType"),
+		strings.Contains(section, "FixlenSubtype")
 }
 
 // capArm renders the receiver-side decode limits (CORELIB_PLAN §6.2.1) for the
@@ -705,29 +709,117 @@ func (g *gen) capArm(sc *pyScope, bounded bool) []string {
 	return append([]string{"else:"}, indent(chk)...)
 }
 
-// elemWidthDecl states a native array's declared ELEMENT width on the Field, for
-// the decoder to apply as it decodes each element.
+// isIntArrayElem reports whether a native array element rides the integer array
+// wire types -- the ones on_array_begin is called for. fp32/fp64 arrays are
+// fixlen-framed, carry no declared width to state, and are moved into their
+// destination in one piece, so the corelib does not call the hook for them.
+func isIntArrayElem(k ir.Kind) bool {
+	switch k {
+	case ir.KindFP32, ir.KindFP64:
+		return false
+	}
+	return isNativeArrayElem(k)
+}
+
+// emitOnArrayBegin writes the integer-array header hook.
 //
-// It is a declaration, not a check. The values are gone by the time
-// on_*_array receives the finished list, so a scan there is exact for an array
-// that ARRIVES and never runs for one that does not -- and a message truncated
-// behind an out-of-width element is exactly the case S5.2 is about, where INVALID
-// must dominate INCOMPLETE (generator#267, Crucible F-0043 width_elem_trunc).
-// Handing the bound to the decoder puts the verdict AT the element, so it stops
-// depending on how much of the array followed.
+// It is the only point at which anything can be said about an array's ELEMENTS:
+// the typed hook below it receives them already decoded, so a scan there is
+// exact for an array that arrives and never runs for one that does not -- and a
+// message truncated behind an out-of-width element is exactly the case where a
+// malformed verdict must outrank a truncated one. The declared width is
+// therefore STATED here and applied by the decoder at each element.
 //
-// The scan in the value hook stays alongside it: it is what still bounds the
-// elements against a corelib whose reader ignores the declaration, over a list
-// already in hand. Nothing is emitted for u64/i64, whose range is the value
-// domain, or for enum/bitfield elements.
-func elemWidthDecl(elem ir.Kind) []string {
-	lo, hi, ok := ir.NarrowRange(elem)
-	if !ok {
+// The schema capacity is checked here too, on the count argument, for the same
+// reason and one hook earlier than it used to be.
+func (g *gen) emitOnArrayBegin(f *pyfile, scopes []*pyScope) {
+	type arm struct {
+		sc   *pyScope
+		body []string
+	}
+	var arms []arm
+	for _, sc := range scopes {
+		var body []string
+		if sc.isArr {
+			body = g.arrArrayBeginArm(sc)
+		} else {
+			body = g.objArrayBeginArm(sc)
+		}
+		if len(body) > 0 {
+			arms = append(arms, arm{sc, body})
+		}
+	}
+	if len(arms) == 0 {
+		return
+	}
+	f.line("    def on_array_begin(self, fid: int, wtype: WireType, count: int):")
+	f.line("        \"\"\"An integer array's header, before any element is decoded.")
+	f.line("")
+	f.line("        Returns the declared element width for the decoder to apply AT each")
+	f.line("        element, so a value outside it is rejected whether the array completes")
+	f.line("        or is cut short behind it. The schema capacity is checked on the count")
+	f.line("        the header carries, one step ahead of the first element.")
+	f.line("        \"\"\"")
+	f.line("        c = self._c")
+	first := true
+	for _, a := range arms {
+		f.line("        %s c == %s:", kw(&first), a.sc.name)
+		for _, ln := range a.body {
+			f.line("            %s", ln)
+		}
+	}
+	f.line("        return None")
+	f.blank()
+}
+
+// objArrayBeginArm renders an object scope's integer-array arms.
+func (g *gen) objArrayBeginArm(sc *pyScope) []string {
+	var out []string
+	inner := true
+	for _, fld := range sc.fields {
+		if fld.Kind != ir.KindArray || !isIntArrayElem(fld.Elem) {
+			continue
+		}
+		body := arrayBeginBody(fld.Elem, capOf(fld.HasCount, fld.Count), fld.Name)
+		if len(body) == 0 {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s fid == %d:", kw(&inner), fld.ID))
+		out = append(out, indent(body)...)
+	}
+	return out
+}
+
+// arrArrayBeginArm renders an array scope's integer ROW arm, keyed by row index.
+func (g *gen) arrArrayBeginArm(sc *pyScope) []string {
+	if sc.elem != ir.KindArray || !isIntArrayElem(sc.elemItems.Elem) {
 		return nil
 	}
-	out := []string{fmt.Sprintf("fld.elem_max = %d", hi)}
-	if lo < 0 {
-		out = append(out, fmt.Sprintf("fld.elem_min = %d", lo))
+	return arrayBeginBody(sc.elemItems.Elem,
+		capOf(sc.elemItems.HasCount, sc.elemItems.Count), sc.loc+" row")
+}
+
+// arrayBeginBody is the shared body: bound the count, then state the width.
+func arrayBeginBody(elem ir.Kind, cap int64, loc string) []string {
+	var out []string
+	if cap >= 0 {
+		out = append(out,
+			fmt.Sprintf("if count > %d:", cap),
+			fmt.Sprintf("    raise SofaDecodeError(%q)",
+				fmt.Sprintf("%s: array count above schema capacity %d", loc, cap)))
+	}
+	lo, hi, ok := ir.NarrowRange(elem)
+	switch {
+	case !ok:
+		// u64/i64 (and enum/bitfield): the declared width IS the value domain,
+		// so there is nothing to narrow and the default answer will do.
+		if len(out) > 0 {
+			out = append(out, "return None")
+		}
+	case lo < 0:
+		out = append(out, fmt.Sprintf("return (None, %d, %d)", lo, hi))
+	default:
+		out = append(out, fmt.Sprintf("return (None, None, %d)", hi))
 	}
 	return out
 }

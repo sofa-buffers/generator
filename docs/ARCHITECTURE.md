@@ -683,10 +683,10 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    also needs no `_DEAD` location: `on_sequence_begin` returning `False` makes
    corelib-py skip the entire subtree, delivering nothing and firing no
    `on_sequence_end`, so the stack is only ever pushed for a scope the visitor
-   entered. Two consequences follow from the coarser surface: every bound whose
-   verdict must precede the payload moves into `on_field` — the header hook,
-   which carries the fixlen length and the array element count — and the
-   per-element width bound has no equivalent at all (see §9.3's closing note).
+   entered. Every bound whose verdict must precede the payload moves to a header
+   hook: `on_field` carries a fixlen length and a wrapper element index, and
+   `on_array_begin` carries an integer array's count and takes the declared
+   element width for the decoder to apply per element.
 
    **Optional bulk element hand-off (Java and Kotlin, `Visitor.arrayBulk`/`arrayBulkEnd`).**
    A flat visitor pays its per-callback routing *per element*, which for a short
@@ -1189,11 +1189,13 @@ only party that knows the bound, so the bound has to travel into the decoder:
   `read_signed_array(elem_min, elem_max)`. **That seam is gone** — corelib-py
   removed the pull API (§5.3.1), and its visitor surface has no per-element hook
   to replace it, so Python is the one backend where this bound is currently
-  post-assembly only: `on_*_array` hands the generated visitor a list that has
-  already fully arrived, so the scan cannot fire for an array that never
-  assembles, and a message truncated behind an out-of-width element reports
-  INCOMPLETE where §5.2 owes INVALID. Closing it needs an element bound the
-  decoder can apply during the read — the seam every other model still has.
+  stated at the array header instead: corelib-py's `on_array_begin(id, wtype,
+  count)` returns `(dst, elem_min, elem_max)`, and the decoder applies the width
+  AT each element. `on_*_array` hands over a list that has already fully
+  arrived, so a check there could only ever decide an array that *arrives* —
+  which is the one case §5.2 is about. The same hook carries the schema count on
+  its `count` argument and can hand over a destination buffer, so an integer
+  array need never build a Python object per element.
 
 `kind` is what the **wire** declares and the bound applies only in the arm
 matching the declared element type — the §7.3 rule `ArrayBegin` already carries,
