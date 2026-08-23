@@ -61,17 +61,19 @@ func genPy(t *testing.T, s *ir.Schema, cfg map[string]any) map[string][]byte {
 func TestPythonStructural(t *testing.T) {
 	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["message.py"])
 	for _, want := range []string{
-		// example.yaml has count-bearing native arrays, so the over-count guard
-		// (generator#100) pulls in SofaDecodeError.
-		"from sofab import Encoder, Decoder, SofaDecodeError, WireType",
+		// example.yaml has count-bearing native arrays and bounded string/blob
+		// fields, so the flat visitor overrides on_field and needs Field/WireType/
+		// FixlenSubtype alongside the always-present decode names.
+		"from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType",
 		"@dataclass",
 		"class Myfirstmessage:",
 		"def serialize(self, e: Encoder)",
-		"def deserialize(self, d: Decoder)",
+		"class _MyfirstmessageVisitor(Visitor):",
+		"def decoder(cls) -> _StreamDecoder:",
 		"class MyfirstmessageSomeenum(IntEnum):",
 		"def to_jsonable(self)",
-		"e.write_sequence_begin_lazy(", // every sequence opens lazily (MESSAGE_SPEC S2)
-		"if fld.count > 4:",            // over-count scalar array rejected at the count header (generator#100/#216)
+		"e.write_sequence_begin_lazy(",  // every sequence opens lazily (MESSAGE_SPEC S2)
+		"                if count > 4:", // over-count scalar array rejected at the count header (generator#100/#216)
 		`raise SofaDecodeError("someuintarray: array count above schema capacity 4")`,
 	} {
 		if !strings.Contains(mod, want) {
@@ -191,22 +193,28 @@ messages:
 		// stay tight around what the schema left open (generator#325).
 		"MAX_DYN_ARRAY_COUNT = 65536",
 		"MAX_DYN_STRING_LEN = 4096",
-		"o.deserialize(Decoder(io.BytesIO(data), max_array_count=MAX_DYN_ARRAY_COUNT, max_string_len=MAX_DYN_STRING_LEN))",
+		// §6.2.1 keeps the caps OUT of the Decoder: they are applied in on_field,
+		// where the schema is known, so they cannot bind a schema-bounded field.
+		`raise SofaLimitError("array count %d exceeds max_array_count %d" % (fld.count, MAX_DYN_ARRAY_COUNT))`,
+		`raise SofaLimitError("string length %d exceeds max_string_len %d" % (fld.size, MAX_DYN_STRING_LEN))`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q", want)
 		}
 	}
-	if strings.Contains(mod, "MAX_DYN_BLOB_LEN") || strings.Contains(mod, "max_blob_len") {
+	if strings.Contains(mod, "MAX_DYN_BLOB_LEN") {
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
+	}
+	if strings.Contains(mod, "max_array_count=") || strings.Contains(mod, "max_string_len=") {
+		t.Error("a Decoder-level cap also binds schema-bounded fields, which §6.2.1 forbids")
 	}
 
 	// No limits configured -> byte-identical plumbing-free output.
 	plain := string(genPy(t, s, map[string]any{})["message.py"])
-	if strings.Contains(plain, "MAX_DYN") || strings.Contains(plain, "max_array_count") {
+	if strings.Contains(plain, "MAX_DYN") || strings.Contains(plain, "SofaLimitError") {
 		t.Error("unset limits must emit no limit plumbing")
 	}
-	if !strings.Contains(plain, "o.deserialize(Decoder(io.BytesIO(data)))") {
+	if !strings.Contains(plain, "d = Decoder(visitor=_DynVisitor(o))") {
 		t.Error("unset limits must leave the plain Decoder call unchanged")
 	}
 }
@@ -232,24 +240,31 @@ messages:
 	// The over-index guard raises SofaDecodeError, so the on-demand import MUST be
 	// emitted even when the schema has no scalar over-count array (the #100 case) —
 	// a wrapper-only schema like this one. Missing it is a NameError at decode time.
-	// FixlenSubtype rides along: the string/blob ELEMENT guards name it even though
+	// FixlenSubtype rides along: the string/blob ELEMENT bounds name it even though
 	// no *field* here is fixlen (generator#246), so the full line is asserted — a
-	// prefix match would pass either way and let the missing name through.
-	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType, FixlenSubtype\n") {
+	// prefix match would pass either way and let the missing name through. There is
+	// no WireType: this schema has no native array, so nothing compares one.
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
 		t.Errorf("message.py needs SofaDecodeError (over-index guard) AND FixlenSubtype (element guard) imported, else NameError at decode:\n%s", mod)
 	}
 	for _, want := range []string{
-		`if _ef0.id >= 4:`,
-		`raise SofaDecodeError("self.bs: array index above schema capacity 4")`,
-		`raise SofaDecodeError("self.bb: array index above schema capacity 3")`,
-		`raise SofaDecodeError("self.bp: array index above schema capacity 2")`,
+		// A VALUE element (string/blob) is bounded at the header, in on_field, so
+		// the verdict precedes the payload (§5.2).
+		`if fld.id >= 4:`,
+		`raise SofaDecodeError("bs: array index above schema capacity 4")`,
+		`raise SofaDecodeError("bb: array index above schema capacity 3")`,
+		// A STRUCT element opens a scope instead, and no on_field precedes a
+		// sequence header — so its bound sits in on_sequence_begin, which is still
+		// ahead of every byte of the element.
+		`if fid >= 2:`,
+		`raise SofaDecodeError("bp: array index above schema capacity 2")`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing over-index guard %q", want)
 		}
 	}
 	// Dynamic string array keeps every index — no guard raised for it.
-	if strings.Contains(mod, `raise SofaDecodeError("self.ds: array index above schema capacity`) {
+	if strings.Contains(mod, `raise SofaDecodeError("ds: array index above schema capacity`) {
 		t.Errorf("dynamic string array must not carry an over-index guard")
 	}
 }
@@ -282,31 +297,30 @@ messages:
 	// Asserted as the FULL line (FixlenSubtype included — this schema has string
 	// and blob fields, and a string wrapper element): a prefix match cannot tell a
 	// complete import line from a truncated one (generator#246).
-	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType, FixlenSubtype\n") {
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
 		t.Errorf("message.py must import SofaDecodeError for the maxlen guard (else NameError at decode):\n%s", mod)
 	}
 
+	// Every bound below sits in on_field, which the decoder calls at the HEADER --
+	// before a payload byte is read. That is what keeps the verdict INVALID on a
+	// message cut right after the length word, where §5.2 makes INVALID dominate
+	// INCOMPLETE (generator#267 / F-0043, and #377 / F-0062 at the element).
+	// The subtype test alongside it is §7.3: a header carrying a different fixlen
+	// kind at this id is a SKIPPED field, not this field's length.
 	for _, want := range []string{
-		// (b) scalar string: bound the wire byte length (non-consuming peek), not a
-		// re-encode of the decoded str (#155).
-		`if d.fixlen_len() > 8:`,
+		// (b) scalar string: bound the wire byte length the header declares, never
+		// a re-encode of the decoded str (#155).
+		`if fld.subtype == FixlenSubtype.STRING and fld.size > 8:`,
 		`raise SofaDecodeError("s: string byte length above schema maxlen 8")`,
-		// (b) scalar blob: the same non-consuming length peek as the string, and for
-		// the same reason -- the verdict is latched at the length word, so a message
-		// truncated right after it is still INVALID rather than INCOMPLETE
-		// (generator#267 / F-0043, MESSAGE_SPEC S5.2).
-		`if d.fixlen_len() > 8:
-                    raise SofaDecodeError("b: blob byte length above schema maxlen 8")
-                self.b = d.bytes()`,
-		// (c) bounded wrapper string element (maxlen 5): wire byte length peek.
-		`if d.fixlen_len() > 5:`,
-		`raise SofaDecodeError("self.arr: string element byte length above schema maxlen 5")`,
-		// (c) bounded wrapper BLOB element (maxlen 5): the same peek, ahead of the
-		// payload read, for the same §5.2 reason as the scalar blob above
-		// (generator#377 / F-0062 — the site #267 did not cover).
-		`if d.fixlen_len() > 5:
-                        raise SofaDecodeError("self.barr: blob element byte length above schema maxlen 5")
-                    self.barr[_ef0.id] = d.bytes()`,
+		// (b) scalar blob: same shape, same reason.
+		`if fld.subtype == FixlenSubtype.BLOB and fld.size > 8:
+                    raise SofaDecodeError("b: blob byte length above schema maxlen 8")`,
+		// (c) bounded wrapper string element (maxlen 5), at its own array scope.
+		`if fld.subtype == FixlenSubtype.STRING and fld.size > 5:
+                raise SofaDecodeError("arr: string element byte length above schema maxlen 5")`,
+		// (c) bounded wrapper BLOB element (maxlen 5).
+		`if fld.subtype == FixlenSubtype.BLOB and fld.size > 5:
+                raise SofaDecodeError("barr: blob element byte length above schema maxlen 5")`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing maxlen guard %q", want)
@@ -348,27 +362,75 @@ messages:
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
 	for _, want := range []string{
-		"self.ua = d.read_unsigned_array(255)",
-		"self.sa = d.read_signed_array(-32768, 32767)",
+		`if any(_v > 255 for _v in value):`,
+		`raise SofaDecodeError("ua element: value outside declared width u8")`,
+		`if any(_v < -32768 or _v > 32767 for _v in value):`,
 		// The width is a property of the element TYPE, not of the array length,
 		// so a count-less array carries it too.
-		"self.da = d.read_unsigned_array(4294967295)",
-		// The scan stays: it is what still bounds the elements against a corelib
-		// whose readers ignore the arguments, over a list already in hand.
-		`if any(_v > 255 for _v in self.ua):`,
-		`if any(_v < -32768 or _v > 32767 for _v in self.sa):`,
+		`raise SofaDecodeError("da element: value outside declared width u32")`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing element bound %q:\n%s", want, mod)
 		}
 	}
-	// u64 spans the value domain the reader already returns, so it passes no
-	// bound — and an fp32 array has no width bound to pass at all.
-	if !strings.Contains(mod, "self.wa = d.read_unsigned_array()") {
-		t.Errorf("a u64 array must pass no element bound:\n%s", mod)
+	// u64 spans the value domain the corelib already hands over, so it carries no
+	// scan — and an fp32 array has no width bound at all.
+	for _, unwanted := range []string{
+		`raise SofaDecodeError("wa element:`,
+		`raise SofaDecodeError("fa element:`,
+	} {
+		if strings.Contains(mod, unwanted) {
+			t.Errorf("a u64/fp32 array must carry no element bound (%q):\n%s", unwanted, mod)
+		}
 	}
-	if strings.Contains(mod, "read_float32_array(") && !strings.Contains(mod, "read_float32_array()") {
-		t.Errorf("an fp32 array must pass no element bound:\n%s", mod)
+}
+
+// TestPythonArrayElemBoundIsPostAssembly pins a KNOWN GAP so it cannot be
+// mistaken for a passing guarantee.
+//
+// The removed pull API took the declared element width as an argument to
+// read_*_array, so the corelib rejected an out-of-width element AT that element
+// — which kept the verdict INVALID on a message truncated behind it, as §5.2
+// requires (generator#267 / Crucible F-0043 width_elem_trunc).
+//
+// corelib-py's visitor surface has no equivalent: on_*_array hands over a list
+// that has already fully arrived, and on_field carries only the count, not the
+// values. So the scan can only run on an array that assembles, and a truncated
+// array carrying an out-of-width element now reports INCOMPLETE where INVALID is
+// owed. The scan below is therefore the whole bound, not a belt-and-braces
+// second one — asserted here so the day corelib-py grows an element-width hook
+// this test fails and the guard moves back ahead of the payload.
+func TestPythonArrayElemBoundIsPostAssembly(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      ua: { id: 0, type: array, items: { type: u8, count: 4 } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	const want = `    def on_unsigned_array(self, fid: int, value: list[int]) -> None:
+        c = self._c
+        if c == _L_M:
+            if fid == 0:
+                if any(_v > 255 for _v in value):
+                    raise SofaDecodeError("ua element: value outside declared width u8")
+                self._o.ua = value`
+	if !strings.Contains(mod, want) {
+		t.Errorf("the element-width scan must sit in on_unsigned_array, over the assembled list:\n%s", mod)
+	}
+	// Both the count and the element width are settled in on_array_begin, at the
+	// header, ahead of the first element — the count on its argument, the width
+	// by being handed to the decoder rather than checked here.
+	const hdr = `    def on_array_begin(self, fid: int, wtype: WireType, count: int):`
+	if !strings.Contains(mod, hdr) {
+		t.Errorf("an integer array must be bounded in on_array_begin:\n%s", mod)
+	}
+	if !strings.Contains(mod, "                if count > 4:") {
+		t.Errorf("the array COUNT bound must sit on on_array_begin's count argument:\n%s", mod)
+	}
+	if !strings.Contains(mod, "                return (None, None, 255)") {
+		t.Errorf("the declared element width must be STATED for the decoder to apply:\n%s", mod)
 	}
 }
 
@@ -463,9 +525,10 @@ messages:
 		"if not (self.shortDflt == [1, 2]):",
 		"if not (len(self.fixedStrs) == 0):",
 		"if not (len(self.fixedObjs) == 0):",
-		// The bound itself is untouched -- that is all `count` still does.
-		"if fld.count > 5:",
-		"if _ef0.id >= 3:",
+		// The bound itself is untouched -- that is all `count` still does. Both
+		// now land at the header, in on_field.
+		"                if count > 5:",
+		"if fld.id >= 3:",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
@@ -657,12 +720,22 @@ func scalarJSON(op, rawValue string) (string, bool) {
 	return "", false
 }
 
-// TestPythonWireTypeGuard pins the MESSAGE_SPEC §7.3 guard (generator#174): the
-// generated dispatch compares each field header's wire type — plus the fixlen
-// subtype where the wire type alone is ambiguous — against the type the schema
-// declares, and skips the field like an unknown id on a mismatch. Without it the
-// schema-typed reader is called for a type the field does not carry, which
-// corelib-py correctly rejects with SofaStateError, failing the whole decode.
+// TestPythonWireTypeGuard pins how MESSAGE_SPEC §7.3 is satisfied on the visitor
+// surface (generator#174).
+//
+// The pull decoder needed an explicit guard: the caller chose which typed reader
+// to run, so a header contradicting the schema had to be detected and skipped
+// before the wrong reader consumed the wrong byte count and desynchronized the
+// stream. The flat visitor inverts that. The CORELIB picks the hook from the
+// wire type, so a contradicting field is delivered to a different hook, where its
+// (location, id) matches no arm and it falls through — skipped, exactly like an
+// unknown id, with no generated code at all. A sequence header at a scalar id
+// reaches on_sequence_begin, matches nothing, and is declined with False, which
+// makes the corelib skip the whole subtree.
+//
+// The one place a wire-type test survives is on_field, where a header-time bound
+// has to know the header really is the field it bounds — §7.3 again, in the only
+// form the visitor still needs it.
 func TestPythonWireTypeGuard(t *testing.T) {
 	s := schema(t, `
 version: 1
@@ -683,33 +756,43 @@ messages:
       l: { id: 11, type: array, items: { type: string, count: 2, maxlen: 4 } }
 `)
 	mod := string(genPy(t, s, map[string]any{})["message.py"])
-	// FixlenSubtype is referenced by the fixlen guards, so it must be imported.
-	if !strings.Contains(mod, "from sofab import Encoder, Decoder, SofaDecodeError, WireType, FixlenSubtype") {
-		t.Errorf("message.py missing FixlenSubtype import:\n%s", mod)
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType") {
+		t.Errorf("message.py missing the full decode import line:\n%s", mod)
 	}
 	for _, want := range []string{
-		// Wire type alone settles the integer/bool kinds...
-		"if fld.type != WireType.UNSIGNED:",
-		"if fld.type != WireType.SIGNED:",
-		// ...but fp32/fp64/string/blob all share FIXLEN, so the subtype decides.
-		"if fld.type != WireType.FIXLEN or fld.subtype != FixlenSubtype.FP32:",
-		"if fld.type != WireType.FIXLEN or fld.subtype != FixlenSubtype.FP64:",
-		"if fld.type != WireType.FIXLEN or fld.subtype != FixlenSubtype.STRING:",
-		"if fld.type != WireType.FIXLEN or fld.subtype != FixlenSubtype.BLOB:",
-		// Nested messages and composite (wrapper) arrays open a sequence.
-		"if fld.type != WireType.SEQUENCE_START:",
-		// Native scalar arrays carry the matching ARRAY_* wire type; the fp array
-		// shares ARRAY_FIXLEN with the other fixlen arrays, so it too needs the
-		// subtype.
-		"if fld.type != WireType.ARRAY_UNSIGNED:",
-		"if fld.type != WireType.ARRAY_SIGNED:",
-		"if fld.type != WireType.ARRAY_FIXLEN or fld.subtype != FixlenSubtype.FP32:",
-		// A mismatch skips the field and resumes the loop — never falls through
-		// into the reader below it.
-		"                    d.skip()\n                    continue",
+		// Each kind lands in the hook the corelib routes its wire type to, and
+		// nowhere else — that routing IS the §7.3 dispatch.
+		"    def on_unsigned(self, fid: int, value: int) -> None:",
+		"    def on_signed(self, fid: int, value: int) -> None:",
+		"    def on_float32(self, fid: int, value: float) -> None:",
+		"    def on_float64(self, fid: int, value: float) -> None:",
+		"    def on_string(self, fid: int, value: str) -> None:",
+		"    def on_bytes(self, fid: int, value: bytes) -> None:",
+		"    def on_unsigned_array(self, fid: int, value: list[int]) -> None:",
+		"    def on_signed_array(self, fid: int, value: list[int]) -> None:",
+		"    def on_float32_array(self, fid: int, value: list[float]) -> None:",
+		// A bound in on_field first checks that the header is the declared type:
+		// fp32/fp64/string/blob all share FIXLEN, so only the subtype separates
+		// them, and the native arrays share ARRAY_FIXLEN the same way.
+		"if fld.subtype == FixlenSubtype.STRING and fld.size > 8:",
+		"if fld.subtype == FixlenSubtype.BLOB and fld.size > 8:",
+		// Integer arrays are bounded in on_array_begin, on the count argument.
+		"    def on_array_begin(self, fid: int, wtype: WireType, count: int):",
+		"                if count > 2:",
+		// A float array carries no declared width, so the corelib does not call
+		// that hook for one: its count stays in on_field, framed by the subtype.
+		"if fld.type == WireType.ARRAY_FIXLEN and fld.subtype == FixlenSubtype.FP32 and fld.count > 2:",
+		// An unmatched sequence is declined, which skips its whole subtree.
+		"        return False",
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("message.py missing wire-type guard %q\n%s", want, mod)
+			t.Errorf("message.py missing %q\n%s", want, mod)
+		}
+	}
+	// No skip plumbing survives: the corelib does it.
+	for _, bad := range []string{"d.skip()", "fld.type != WireType."} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("the visitor must carry no explicit skip plumbing, found %q", bad)
 		}
 	}
 }
@@ -730,7 +813,7 @@ messages:
 	if strings.Contains(mod, "FixlenSubtype") {
 		t.Errorf("message.py must not import FixlenSubtype when no fixlen field exists:\n%s", mod)
 	}
-	if !strings.Contains(mod, "from sofab import Encoder, Decoder, WireType") {
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
 		t.Errorf("message.py missing plain import line:\n%s", mod)
 	}
 }
@@ -750,30 +833,40 @@ func TestPythonFixlenSubtypeImportMatchesUse(t *testing.T) {
 		src  string
 	}{
 		// The issue's reproduction: the ONLY fixlen use is a wrapper string
-		// ELEMENT. Pre-fix this imported nothing and died in _unmarshal.
-		{"wrapper string array", true, `
-      tags: { id: 0, type: array, items: { type: string } }
+		// ELEMENT. Under the visitor a subtype is compared where a BOUND has to
+		// know the header is really the field it bounds -- so the element carries
+		// its maxlen here, which is what puts FixlenSubtype in the body.
+		{"bounded wrapper string array", true, `
+      tags: { id: 0, type: array, items: { type: string, maxlen: 8 } }
       n:    { id: 1, type: u32 }`},
-		{"wrapper blob array", true, `
-      parts: { id: 0, type: array, items: { type: blob } }
+		{"bounded wrapper blob array", true, `
+      parts: { id: 0, type: array, items: { type: blob, maxlen: 8 } }
       n:     { id: 1, type: u32 }`},
-		// Nested rows: the guard sits one (or two) levels below the field.
-		{"nested string rows", true, `
-      rows: { id: 0, type: array, items: { type: array, items: { type: string } } }
+		// Nested rows: the bound sits one (or two) levels below the field.
+		{"bounded nested string rows", true, `
+      rows: { id: 0, type: array, items: { type: array, items: { type: string, maxlen: 4 } } }
       n:    { id: 1, type: u32 }`},
-		{"nested fp32 rows", true, `
-      grid: { id: 0, type: array, items: { type: array, items: { type: fp32 } } }
+		{"counted nested fp32 rows", true, `
+      grid: { id: 0, type: array, items: { type: array, items: { type: fp32, count: 3 } } }
       n:    { id: 1, type: u32 }`},
-		{"doubly nested blob rows", true, `
-      cube: { id: 0, type: array, items: { type: array, items: { type: array, items: { type: blob } } } }
+		{"doubly nested bounded blob rows", true, `
+      cube: { id: 0, type: array, items: { type: array, items: { type: array, items: { type: blob, maxlen: 4 } } } }
       n:    { id: 1, type: u32 }`},
-		// A string reached through a STRUCT element is guarded inside the struct's
-		// own class, which schemaHasField already walks via the named types.
-		{"string inside a struct element", true, `
-      items: { id: 0, type: array, items: { type: struct, fields: { s: { id: 0, type: string } } } }
+		// A bounded string reached through a STRUCT element is bounded inside that
+		// struct's own visitor, which the scope walk reaches through the element.
+		{"bounded string inside a struct element", true, `
+      items: { id: 0, type: array, items: { type: struct, fields: { s: { id: 0, type: string, maxlen: 8 } } } }
       n:     { id: 1, type: u32 }`},
 		// Negatives — the import must stay out, or every module carries an unused
-		// name (the reason the gate exists at all).
+		// name (the reason the gate exists at all). UNBOUNDED fixlen fields are
+		// negatives now: with no bound there is nothing for on_field to frame, and
+		// §7.3 needs no code of its own on the visitor surface.
+		{"unbounded wrapper string array", false, `
+      tags: { id: 0, type: array, items: { type: string } }
+      n:    { id: 1, type: u32 }`},
+		{"unbounded fp32 rows", false, `
+      grid: { id: 0, type: array, items: { type: array, items: { type: fp32 } } }
+      n:    { id: 1, type: u32 }`},
 		{"native integer array", false, `
       a: { id: 0, type: array, items: { type: u32 } }
       n: { id: 1, type: u32 }`},
@@ -911,30 +1004,39 @@ messages:
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
 	for _, want := range []string{
-		// struct elements: place, not append -- and the gap-fill that precedes it
-		"                    while len(self.objs) <= _ef0.id:\n" +
-			"                        self.objs.append(VecObjsElem())\n" +
-			"                    self.objs[_ef0.id].deserialize(d)\n",
-		// leaf elements, unchanged: they always got this right
-		"                    while len(self.strs) <= _ef0.id:\n" +
-			"                        self.strs.append(\"\")\n",
-		// native matrix rows: read the row, check the elements against the declared
-		// u32 width (§7.1), then place it at its id
-		"                    _e0 = d.read_unsigned_array(4294967295)\n" +
-			"                    if any(_v > 4294967295 for _v in _e0):\n" +
-			"                        raise SofaDecodeError(\"mat row element: value outside declared width u32\")\n" +
-			"                    while len(self.mat) <= _ef0.id:\n" +
-			"                        self.mat.append([])\n" +
-			"                    self.mat[_ef0.id] = _e0\n",
-		// wrapper rows: same again
-		"                    while len(self.rows) <= _ef0.id:\n" +
-			"                        self.rows.append([])\n" +
-			"                    self.rows[_ef0.id] = _e0\n",
-		// the over-index guard bounds every id-keyed fill
-		"if _ef0.id >= 4:",
-		"if _ef0.id >= 2:",
+		// struct elements: gap-fill, then descend into the element the index names
+		// -- the index register is what carries it into the element scope, and
+		// decoding INTO the object already there gives the §7.4 merge for free.
+		"            _t = self._o.objs\n" +
+			"            while len(_t) <= fid:\n" +
+			"                _t.append(VecObjsElem())\n" +
+			"            self._ix1 = fid\n",
+		"                self._o.objs[self._ix1].k = value",
+		// leaf elements: placed at the index, never appended
+		"            _t = self._o.strs\n" +
+			"            while len(_t) <= fid:\n" +
+			"                _t.append(\"\")\n" +
+			"            _t[fid] = value",
+		// native matrix rows: gap-fill, check the elements against the declared u32
+		// width (§7.1), then place the row at its index
+		"            _t = self._o.mat\n" +
+			"            while len(_t) <= fid:\n" +
+			"                _t.append([])\n" +
+			"            if any(_v > 4294967295 for _v in value):\n" +
+			"                raise SofaDecodeError(\"mat row element: value outside declared width u32\")\n" +
+			"            _t[fid] = value",
+		// wrapper rows: the row itself is a scope, and its own elements are placed
+		// through the row the outer index register selected
+		"            _t = self._o.rows[self._ix5]\n" +
+			"            while len(_t) <= fid:\n" +
+			"                _t.append(\"\")\n" +
+			"            _t[fid] = value",
+		// the over-index bound guards every id-keyed fill: at the header for a
+		// value element, in on_sequence_begin for one that opens a scope
+		"            if fid >= 4:",
+		"            if fld.id >= 2:",
 		// a count-less array is placed by id like every other, just unbounded
-		"while len(self.dyn) <= _ef0.id:",
+		"            _t = self._o.dyn\n            while len(_t) <= fid:",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
@@ -943,10 +1045,10 @@ messages:
 	// The defects this replaced: rows appended id-blind, and the N-refill that made
 	// the superseded trailing elision lossless.
 	for _, bad := range []string{
-		"self.mat.append(_e0)",
-		"self.rows.append(_e0)",
-		"while len(self.objs) < 4:",
-		"while len(self.strs) < 3:",
+		"self._o.mat.append(value)",
+		"self._o.rows.append(value)",
+		"while len(_t) < 4:",
+		"while len(_t) < 3:",
 		"_pad_to(",
 	} {
 		if strings.Contains(mod, bad) {
@@ -1141,9 +1243,9 @@ messages:
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	for _, want := range []string{
-		"if _ef0.count > 3:",
+		"            if count > 3:",
 		`raise SofaDecodeError("numrows row: array count above schema capacity 3")`,
-		"if _ef0.count > 2:",
+		"if fld.type == WireType.ARRAY_FIXLEN and fld.subtype == FixlenSubtype.FP32 and fld.count > 2:",
 		`raise SofaDecodeError("fprows row: array count above schema capacity 2")`,
 	} {
 		if !strings.Contains(mod, want) {
@@ -1154,12 +1256,15 @@ messages:
 	if strings.Contains(mod, `raise SofaDecodeError("dynrows row: array count`) {
 		t.Errorf("a count-less nested row must carry no over-count guard:\n%s", mod)
 	}
-	// INVALID must dominate INCOMPLETE (§5.2): the guard precedes the read that
-	// would otherwise raise SofaIncompleteError on a truncated tail.
-	guard := strings.Index(mod, "if _ef0.count > 3:")
-	read := strings.Index(mod, "_e0 = d.read_unsigned_array(4294967295)")
-	if guard < 0 || read < 0 || guard > read {
-		t.Errorf("the row count guard must precede the row read (guard=%d read=%d)", guard, read)
+	// INVALID must dominate INCOMPLETE (§5.2). The bound lives in on_field, which
+	// the decoder calls at the row's own count header -- before an element is
+	// decoded -- so a truncated tail cannot downgrade the verdict. Pinned as
+	// "the bound is in on_field, not in the value hook": the value hook only ever
+	// sees a row that fully arrived.
+	onArrayBegin := strings.Index(mod, "    def on_array_begin(self, fid: int, wtype: WireType, count: int):")
+	guard := strings.Index(mod, "            if count > 3:")
+	if onArrayBegin < 0 || guard < onArrayBegin {
+		t.Errorf("the row count bound must sit inside on_array_begin (hook=%d guard=%d)", onArrayBegin, guard)
 	}
 
 	// Lockstep with the on-demand import: when the ONLY counted native array in
@@ -1173,8 +1278,8 @@ messages:
     payload:
       rows: { id: 0, type: array, items: { type: array, items: { type: u32, count: 3 } } }
 `), map[string]any{})["message.py"])
-	if !strings.Contains(rows, "from sofab import Encoder, Decoder, SofaDecodeError, WireType\n") {
-		t.Errorf("a nested-row-only over-count guard still needs SofaDecodeError imported:\n%s", rows)
+	if !strings.Contains(rows, "from sofab import Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType\n") {
+		t.Errorf("a nested-row-only over-count guard still needs WireType imported:\n%s", rows)
 	}
 
 	// And the behaviour itself, against corelib-py.
@@ -1238,30 +1343,33 @@ messages:
 `
 	got := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	for _, want := range []string{
-		"self.a_u8 = d.unsigned()\n                if self.a_u8 > 255:\n" +
-			`                    raise SofaDecodeError("a_u8: value outside declared width u8")`,
-		"self.c_u32 = d.unsigned()\n                if self.c_u32 > 4294967295:\n" +
-			`                    raise SofaDecodeError("c_u32: value outside declared width u32")`,
-		"self.e_i8 = d.signed()\n                if self.e_i8 < -128 or self.e_i8 > 127:\n" +
-			`                    raise SofaDecodeError("e_i8: value outside declared width i8")`,
-		"self.g_i32 = d.signed()\n                if self.g_i32 < -2147483648 or self.g_i32 > 2147483647:\n" +
-			`                    raise SofaDecodeError("g_i32: value outside declared width i32")`,
+		"                if value > 255:\n" +
+			`                    raise SofaDecodeError("a_u8: value outside declared width u8")` +
+			"\n                self._o.a_u8 = value",
+		"                if value > 4294967295:\n" +
+			`                    raise SofaDecodeError("c_u32: value outside declared width u32")` +
+			"\n                self._o.c_u32 = value",
+		"                if value < -128 or value > 127:\n" +
+			`                    raise SofaDecodeError("e_i8: value outside declared width i8")` +
+			"\n                self._o.e_i8 = value",
+		"                if value < -2147483648 or value > 2147483647:\n" +
+			`                    raise SofaDecodeError("g_i32: value outside declared width i32")` +
+			"\n                self._o.g_i32 = value",
 		// The array arrives whole, so one scan over the elements decides it.
-		"if any(_v > 255 for _v in self.arr_u8):\n" +
+		"                if any(_v > 255 for _v in value):\n" +
 			`                    raise SofaDecodeError("arr_u8 element: value outside declared width u8")`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.py missing width guard %q:\n%s", want, got)
 		}
 	}
-	// 64-bit destinations read bare: the next line is the following field's read,
-	// not a bound check.
+	// 64-bit destinations store bare: the whole arm is the assignment.
 	for _, want := range []string{
-		"self.d_u64 = d.unsigned()\n            elif",
-		"self.h_i64 = d.signed()\n            elif",
+		"            elif fid == 3:\n                self._o.d_u64 = value",
+		"            elif fid == 7:\n                self._o.h_i64 = value",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("message.py: a 64-bit destination must read unguarded (%q):\n%s", want, got)
+			t.Errorf("message.py: a 64-bit destination must store unguarded (%q):\n%s", want, got)
 		}
 	}
 }
@@ -1389,27 +1497,39 @@ messages:
 		"max_dyn_array_count": 2,
 	})["message.py"])
 
-	// Declared ahead of every schema-bound guard — including the length peek that
-	// fronts each bounded string/blob read.
-	for _, want := range []string{
-		"                d.schema_bounded()\n                if d.fixlen_len() > 8:",
-		"d.schema_bounded()\n                if fld.count > 4:",
-		"d.schema_bounded()\n                    if _ef0.id >= 3:",
-	} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("message.py missing %q", want)
+	// The caps are NOT handed to the Decoder: it knows no schema, so a Decoder cap
+	// bounds every field alike -- which is exactly what §6.2.1 forbids.
+	for _, bad := range []string{"max_string_len=", "max_array_count=", "max_blob_len="} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("a Decoder-level cap (%q) also binds schema-bounded fields, which §6.2.1 forbids:\n%s", bad, mod)
 		}
 	}
-	// One per bounded position: s, b, arr, sa's index and sa's element maxlen.
-	if got := strings.Count(mod, "d.schema_bounded()"); got != 5 {
-		t.Errorf("expected 5 declarations (s, b, arr, sa index, sa element), got %d", got)
+	// Instead each scope's cap sits in the ELSE of its schema-bound chain, so a
+	// bounded id can never reach it.
+	for _, want := range []string{
+		`                if fld.subtype == FixlenSubtype.STRING and fld.size > 8:
+                    raise SofaDecodeError("s: string byte length above schema maxlen 8")`,
+		`            else:
+                if fld.subtype == FixlenSubtype.STRING and fld.size > MAX_DYN_STRING_LEN:
+                    raise SofaLimitError("string length %d exceeds max_string_len %d" % (fld.size, MAX_DYN_STRING_LEN))`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q:\n%s", want, mod)
+		}
+	}
+	// Every array in this schema declares a count, so max_dyn_array_count is inert
+	// and nothing is emitted for it.
+	if strings.Contains(mod, "MAX_DYN_ARRAY_COUNT") {
+		t.Errorf("a cap with no unbounded field of its kind must stay inert:\n%s", mod)
+	}
+	// sa's elements are schema-bounded by their own maxlen, so that scope carries
+	// no cap at all -- an array scope dispatches by index, so one bound covers it.
+	// Exactly one cap site survives: the root scope's else.
+	if got := strings.Count(mod, "MAX_DYN_STRING_LEN)"); got != 1 {
+		t.Errorf("expected exactly one cap site (the root scope's else), got %d:\n%s", got, mod)
 	}
 	// The cap stays at the configured number rather than being raised to 8.
 	if !strings.Contains(mod, "MAX_DYN_STRING_LEN = 4") {
 		t.Error("the configured cap must be emitted as configured, not raised to the largest schema maxlen")
-	}
-	// An UNBOUNDED field must keep the cap: no declaration on dyn's read.
-	if strings.Contains(mod, "d.schema_bounded()\n                self.dyn") {
-		t.Error("an unbounded field must stay capped — no declaration before its read")
 	}
 }

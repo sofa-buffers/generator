@@ -188,9 +188,13 @@ echo "==> over-maxlen reject OK"
 # Crucible F-0043 width_elem_trunc). someuintarray (id 15) declares u32 elements;
 # an element carrying 2^32 is outside that width, which S7.1 makes INVALID, and it
 # is established by its own bytes -- so S5.2 keeps the verdict INVALID however
-# little of the array follows. The any() scan cannot fire for an array that never
-# assembles, so the bound travels WITH the read (d.read_unsigned_array(4294967295))
-# and the corelib applies it to the elements it does decode.
+# little of the array follows.
+#
+# The declared width is STATED in on_array_begin, which the decoder calls at the
+# array header, and applied by it AT each element -- so the verdict does not
+# depend on how much of the array followed. A handler cannot do this itself: by
+# the time it holds the list, an array that never arrived is indistinguishable
+# from one that did.
 # Wire: 7b (id 15 unsigned-array) 04 (count 4) 80 80 80 80 10 (2^32) <EOF>.
 echo "==> over-width element + truncation must be INVALID (generator#267)"
 printf '\173\004\200\200\200\200\020' > "$WORK/overwidth_trunc.bin"

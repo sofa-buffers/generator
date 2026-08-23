@@ -44,8 +44,9 @@ classification is a **parser / deserialization API style**, along three axes:
     the **Visitor pattern** / event-driven parsing. Several corelibs name the type
     literally `Visitor` (rust, go, dart `MessageVisitor`).
   - **Pull** (StAX-style): *your code drives* and pulls the next token/value
-    (`next()`, `read()`) — the **Cursor / Iterator pattern** (ts `Cursor`, py
-    `d.next()`).
+    (`next()`, `read()`) — the **Cursor / Iterator pattern** (ts `Cursor`). py
+    was here until corelib-py removed its pull API; CORELIB_PLAN §5.3.1 now
+    forbids the shape outright, so ts is the last one left.
 - **Streaming vs materialized** (DOM-style): process token-by-token vs. build the
   whole value in memory first. Ours are streaming-nah; whole-unit /
   measure-then-deliver materialize per field.
@@ -118,35 +119,49 @@ pub fn arrayBegin(self: *_dec_M, id: sofab.Id, kind: sofab.ArrayKind, count: usi
 Fixed-capacity storage (`[N]T` in Zig, `heapless::Vec<T, N>` in no_std Rust) maps
 the schema bound directly onto the buffer capacity.
 
-### A2 — pull, `Field` carries the count · `corelib-py`
+### A2 — flat visitor, `on_field` carries the count · `corelib-py`
 
-`d.next()` returns a `Field` whose header (`count`, `size`) is already parsed;
-the generated code then pulls the value in one batched read (per-element Python
-calls would be far too slow).
+**Was a pull model until 2026-08.** corelib-py removed its pull API when
+CORELIB_PLAN §5.3.1 made the visitor the only decode surface, so `d.next()` and
+the typed readers are gone. The header data survived the move: `on_field(fld)` is
+called at every field header with the same already-parsed `Field(count, size)`,
+before a payload byte is read, so the count bound still lands where §5.2 needs
+it. Arrays are still delivered in one batch (`on_unsigned_array(id, values)`) —
+per-element Python calls would be far too slow.
 
 **Corelib API (Python):**
 ```python
-fld = d.next()          # Field(id, type, count, size) — header only
-d.read_unsigned_array() # batched element read
-d.fixlen_len()          # peek a string/blob byte length (bound seam)
+d = Decoder(visitor=v)      # feed / status / error / reset — no reader, no pull
+v.on_field(fld)             # Field(id, type, count, size) — header only
+v.on_unsigned_array(id, vs) # the whole array, once it has arrived
 ```
 
-**Generated decode (Python) — the bound is a compare on `fld.count`:**
+**Generated decode (Python) — the bound is a compare on `fld.count`, in `on_field`:**
 ```python
-def _unserialize(self, d: Decoder) -> None:
-    while True:
-        fld = d.next()
-        if fld is None or fld.type == WireType.SEQUENCE_END:
-            return
+def on_field(self, fld: Field) -> bool:
+    if self._c == _L_M:
         if fld.id == 15:
-            # generator#216: reject over-count at the header, before read_*_array().
-            if fld.count > 4:
+            # generator#216: reject over-count at the header, before the elements.
+            if fld.type == WireType.ARRAY_UNSIGNED and fld.count > 4:
                 raise SofaDecodeError("arr: array count above schema capacity 4")
-            self.arr = d.read_unsigned_array()
-            self.arr = _pad_to(self.arr, 4, 0)
-        else:
-            d.skip()
+    return True
+
+def on_unsigned_array(self, fid: int, value: list[int]) -> None:
+    if self._c == _L_M and fid == 15:
+        self._o.arr = value
 ```
+
+An unknown id needs no `skip` arm: it is delivered to whichever hook its wire
+type routes to, matches no `(location, id)`, and falls through.
+
+**What did NOT survive the move.** The element *width* bound used to ride along
+with the read (`d.read_unsigned_array(255)`), so the corelib rejected an
+out-of-width element as it decoded it. `on_unsigned_array` hands over a list that
+has already arrived and `on_field` carries no values, so the scan can only run on
+an array that assembles: a message truncated behind an out-of-width element now
+reports INCOMPLETE where §5.2 owes INVALID. Closing it needs an element bound the
+decoder can apply during the read — the seam models A1, B, C and E all have and
+corelib-py no longer does.
 `SofaDecodeError` (INVALID) and `SofaIncompleteError` (INCOMPLETE) are distinct
 sibling exceptions, so the header-time raise wins over a later truncation.
 
@@ -343,7 +358,7 @@ void MyMsg::deserialize(IStreamImpl& is, sofab::id id, size_t size, size_t count
 | Model | Corelibs | Reader shape | Bound delivered via | §5.2 free? |
 |---|---|---|---|---|
 | A1 push streaming | rust, zig | `array_begin(count)` + element events | compare inside the header event | ✅ |
-| A2 pull `Field` | python | `next()→Field.count` + batched read | compare on `fld.count` | ✅ |
+| A2 flat visitor, `on_field` | python | `on_field→Field.count` + whole-array delivery | compare on `fld.count` in `on_field` | ✅ (count) / ❌ (element width — no seam) |
 | B pull cursor | ts | `readUnsignedArray(bound)` | bound arg on the reader (corelib-ts#69) | ✅ |
 | C whole-unit push | go, dart | `UnsignedArray(id, []T)` + `ArrayBegin` | header callback `ArrayBegin`/`onArrayBegin` | ✅ |
 | D measure-then-deliver | cpp | `deserialize` + pull `read()` (zero-copy available, unused by codegen) | measure-phase schema (`setSchema`) | ✅ |
