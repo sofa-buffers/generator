@@ -133,31 +133,31 @@ export class Scalars {
   }
 
   static decode(bytes: Uint8Array): Scalars {
-    return Scalars.decodeFrom(new Cursor(bytes));
+    return _decodeFromScalars(new Cursor(bytes));
   }
+}
 
-  static decodeFrom(c: Cursor): Scalars {
-    return Scalars.decodeInto(c, new Scalars());
-  }
+function _decodeFromScalars(c: Cursor): Scalars {
+  return _decodeIntoScalars(c, new Scalars());
+}
 
-  // Monomorphic pull decode: one switch(id) reads straight into this type's fields.
-  // Decodes into `o` so a re-opened sequence continues its scope.
-  static decodeInto(c: Cursor, o: Scalars): Scalars {
-    while (c.readHeader()) {
-      switch (c.id) {
-      case 0: { if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } const _v = c.readUnsigned(); if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "u8min: value outside declared width u8"); o.u8min = _v as number; break; }
-      case 1: { if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } const _v = c.readUnsigned(); if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "u8max: value outside declared width u8"); o.u8max = _v as number; break; }
-      case 2: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.u64max = BigInt(c.readUnsigned()); break;
-      case 3: { if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } const _v = c.readSigned(); if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "i8min: value outside declared width i8"); o.i8min = _v as number; break; }
-      case 4: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o.i64min = BigInt(c.readSigned()); break;
-      case 5: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp32) { c.skip(c.wire); break; } const _r = c.readFp32Raw(); const _v = _fp32FromRaw(_r, 0); o.f32 = _v; o.f32Fp32Raw = Number.isNaN(_v) ? _r.slice() : null; break; }
-      case 6: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp64) { c.skip(c.wire); break; } o.f64 = c.readFp64(); break;
-      case 7: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.flag = Boolean(c.readUnsigned()); break;
-      default: c.skip(c.wire); break;
-      }
+// Monomorphic pull decode: one switch(id) reads straight into this type's fields.
+// Decodes into `o` so a re-opened sequence continues its scope.
+function _decodeIntoScalars(c: Cursor, o: Scalars): Scalars {
+  while (c.readHeader()) {
+    switch (c.id) {
+    case 0: { if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } const _v = c.readUnsigned(); if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "u8min: value outside declared width u8"); o.u8min = _v as number; break; }
+    case 1: { if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } const _v = c.readUnsigned(); if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "u8max: value outside declared width u8"); o.u8max = _v as number; break; }
+    case 2: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.u64max = BigInt(c.readUnsigned()); break;
+    case 3: { if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } const _v = c.readSigned(); if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "i8min: value outside declared width i8"); o.i8min = _v as number; break; }
+    case 4: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o.i64min = BigInt(c.readSigned()); break;
+    case 5: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp32) { c.skip(c.wire); break; } const _r = c.readFp32Raw(); const _v = _fp32FromRaw(_r, 0); o.f32 = _v; o.f32Fp32Raw = Number.isNaN(_v) ? _r.slice() : null; break; }
+    case 6: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp64) { c.skip(c.wire); break; } o.f64 = c.readFp64(); break;
+    case 7: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.flag = Boolean(c.readUnsigned()); break;
+    default: c.skip(c.wire); break;
     }
-    return o;
   }
+  return o;
 }
 
 /** Streaming decode visitor for {@link Scalars}. */

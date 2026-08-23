@@ -8,6 +8,15 @@ into the generator (`github.com/sofa-buffers/generator`,
 `docs/perf/decode-design.md` (the cross-language "design C") and
 `docs/perf/bottlenecks.md` (item 8, and the TS-specific item 9).
 
+> **Naming note (generator#384).** The shipped emitter puts the two cursor-level
+> steps this doc calls `Example.decodeFrom` / `Example.decodeInto` at **module
+> level**, as `_decodeFromExample(c)` / `_decodeIntoExample(c, o)`, because
+> CORELIB_PLAN §6.1.1 closes the generated class's name set and lists
+> `decode_from`/`decode_into` among the spellings a port must not add. The class
+> keeps `static decode(bytes)` alone. Nothing about the decode *shape* below —
+> one `switch(id)`, one caller per reader, no closures — changes; read
+> `T.decodeFrom(c)` in the snippets as `_decodeFromT(c)`.
+
 ## Problem
 
 sofabgen emits a **push / visitor** decoder per message type:

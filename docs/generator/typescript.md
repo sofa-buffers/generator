@@ -64,6 +64,47 @@ Two things hold the paths together, and a new verdict should use both:
   bytes through both paths at six chunk sizes (one byte included) and requires
   identical values *and* identical `SofabError` codes on rejection.
 
+### The class's decode surface is `decode` and nothing else (issue #384)
+
+CORELIB_PLAN §6.1.1 closes the generated object's name set to `encode`, `decode`,
+`try_decode`, `serialize`, `deserialize` and `decoder`, and names `decode_from`
+and `decode_into` among the spellings a port must **not** invent beside them. The
+only adaptation the clause allows is casing/idiom, so `decodeFrom` is not a new
+name — it *is* `decode_from`, written the way TypeScript writes it. Generated
+types land in the user's namespace; a developer should not have to learn a
+per-language second entry point into the same operation.
+
+The two cursor-level steps still exist, because §7.4 needs them (a re-opened
+scope decodes *into* the object an earlier opening populated, so the loop must be
+separable from the fresh-object entry). They are **module-level functions** in the
+generated file:
+
+```ts
+export class Probe {
+  static decode(bytes: Uint8Array): Probe {
+    return _decodeFromProbe(new Cursor(bytes));
+  }
+}
+
+function _decodeFromProbe(c: Cursor): Probe { return _decodeIntoProbe(c, new Probe()); }
+function _decodeIntoProbe(c: Cursor, o: Probe): Probe { /* the switch(id) loop */ }
+```
+
+Not exported, so they are reachable from every sibling class in the module — the
+classes decode into one another — and from nowhere outside it. This is the
+TypeScript analogue of the Dart backend's library-private `_decodeInto`; §6.1.1's
+closing paragraph puts anything genuinely *below* the generated layer in the
+corelib, and these are above it, so out of the module is as far as they go.
+
+One consequence is worth naming. The loop is no longer a member of the class it
+writes into, so a `private` backing field — the `_name` slot behind a Long-backed
+accessor pair (see `int64` below) — cannot be reached with a dot. It is reached
+with `o["_name"]` instead: TypeScript's `private` is a compile-time rule and
+element access is its sanctioned escape hatch, emitting the identical property
+write. The hot path is therefore unchanged — still no getter call and no setter
+conversion per decoded field — and the accessor pair stays the only *public* way
+in (`decodeStorage` in `helpers.go`).
+
 ### `int64` — 64-bit field representation
 
 `bigint` (default) · `long` · `number` — à la protobufjs's `int64` option.
@@ -370,7 +411,7 @@ every wrapper-sequence **element** down the array element chain. A gate that
 inspects field kinds plus one level of *native* array element misses
 `array<string>`, `array<blob>` and nested rows such as `array<array<fp32>>`,
 which name `FixlenSubtype` from an element guard while no field is fixlen; the
-emitted module then throws `ReferenceError` in `decodeInto` and fails `tsc`. The
+emitted module then throws `ReferenceError` in the pull decoder and fails `tsc`. The
 element-chain walk lives in `fieldHasFixlenGuard` (visitor.go); the maxlen /
 over-index gates already descend the same way (`arrayHasBoundedStrBlob`,
 `arrayOverIndexed`).
@@ -464,7 +505,7 @@ exactly "the array is empty".
 A wrapper element is **placed at `arr[id]`** after gap-filling with default
 elements — never appended, because the element id *is* the array index (§5.1). A
 reopened element id then merges into the element already there (§7.4,
-`T.decodeInto(c, arr[_id]!)`) instead of appending a second one (generator#247).
+`_decodeInto<T>(c, arr[_id]!)`) instead of appending a second one (generator#247).
 
 That placement now covers **nested rows** too. `seqCollectBody`'s row arm used to
 `arr.push(...)` id-blind, which was unreachable while every row was written; an

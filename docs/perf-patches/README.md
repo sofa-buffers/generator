@@ -53,7 +53,7 @@ repo under `docs/perf/bottlenecks.md`.
 | 2 | **Java** | primitive `long[]/float[]/double[]` instead of boxed `List<Long>` + string single-shot | `generators/java/{backend,visitor,project}.go` | 0.62× → **0.86×** |
 | 3 | **C#** | string/blob single-shot decode | `generators/csharp/visitor.go` | 0.81× → **0.89×** |
 | 4 | **Go** | decode via the corelib's zero-copy `AcceptBytes` visitor instead of the pull API | `generators/golang/backend.go` | 0.46× → **0.99×** |
-| 5 | **TypeScript** | monomorphic `decodeFrom(Cursor)` per type instead of the megamorphic push/visitor decoder | `generators/typescript/{backend,visitor,project}.go` | decode **+22%** (see note) |
+| 5 | **TypeScript** | monomorphic per-type pull decoder over a `Cursor` instead of the megamorphic push/visitor decoder | `generators/typescript/{backend,visitor,project}.go` | decode **+22%** (see note) |
 | 6 | **TypeScript** | allocation-free UTF-8 encode + blob/string-list marshal guards (corelib-ts #17 is the decisive part) | `generators/typescript/{backend,visitor}.go` | encode **−45%**; TS combined → **~0.81×** |
 
 Each row links to a `<lang>-*.md` implementation guide and a `<lang>-*.patch`
