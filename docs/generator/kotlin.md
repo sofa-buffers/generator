@@ -6,12 +6,9 @@ Emits one class per message and named type, against `corelib-kotlin-mp`.
 
 | key | type | default | effect |
 |---|---|---|---|
-| `package` | string | `message` | The `package <name>` declaration, and the source-directory layout in project mode. |
-| `emit` | `sources` \| `project` | `sources` | `project` additionally scaffolds a Gradle build and the JSON conformance harness. |
-| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size. See the [generic config](README.md). |
-| `max_dyn_array_count` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_string_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_blob_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
+| `package` | string | `message` | The `package <name>` declaration, and the source-directory layout. |
+
+The generic options apply here too; see the [generic config](README.md).
 
 ## `package`
 

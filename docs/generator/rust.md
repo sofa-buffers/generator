@@ -10,11 +10,8 @@ choice decides the whole profile — throughput or footprint.
 | `corelib` | `rs` \| `rs-no-std` | `rs` | Which Rust corelib the generated crate targets. |
 | `no_std` | boolean | `true` for `rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate. `corelib: rs-no-std` only. |
 | `allow_dynamic` | boolean | depends on `corelib` | Storage for schema-bounded fields: `String`/`Vec` or fixed-capacity `heapless` ones. |
-| `emit` | `sources` \| `project` | `sources` | `project` additionally scaffolds a Cargo crate and the JSON conformance harness. |
-| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size. See the [generic config](README.md). |
-| `max_dyn_array_count` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_string_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_blob_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
+
+The generic options apply here too; see the [generic config](README.md).
 
 ## `corelib`
 

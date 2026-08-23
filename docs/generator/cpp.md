@@ -10,11 +10,8 @@ choice decides the whole profile — throughput or footprint.
 | `corelib` | `cpp` \| `c-cpp` | `cpp` | Which C++ corelib the generated code targets. |
 | `allow_dynamic` | boolean | depends on `corelib` | Storage for schema-bounded fields: dynamic containers or fixed-capacity inline ones. |
 | `namespace` | string | `message` | The namespace wrapping the generated types. |
-| `emit` | `sources` \| `project` | `sources` | `project` additionally scaffolds a CMake build and the JSON conformance harness. |
-| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size. See the [generic config](README.md). |
-| `max_dyn_array_count` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_string_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_blob_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
+
+The generic options apply here too; see the [generic config](README.md).
 
 ## `corelib`
 

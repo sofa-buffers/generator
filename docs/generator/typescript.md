@@ -7,11 +7,8 @@ Emits one class per message and named type, against `corelib-ts`.
 | key | type | default | effect |
 |---|---|---|---|
 | `int64` | `bigint` \| `long` \| `number` | `bigint` | How 64-bit fields are represented in the generated API. |
-| `emit` | `sources` \| `project` | `sources` | `project` additionally scaffolds a `package.json` / `tsconfig.json` and the JSON conformance harness. |
-| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size. See the [generic config](README.md). |
-| `max_dyn_array_count` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_string_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_blob_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
+
+The generic options apply here too; see the [generic config](README.md).
 
 ## `int64`
 
