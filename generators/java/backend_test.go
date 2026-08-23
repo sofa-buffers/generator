@@ -247,10 +247,20 @@ messages:
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 
-	// No limits configured -> no limit plumbing at all.
+	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
+	// (§9.5, generator#385). Java is on the server tier.
 	plain := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/Dyn.java"]
-	if strings.Contains(plain, "MAX_DYN") || strings.Contains(plain, "LIMIT_EXCEEDED") {
-		t.Error("unset limits must emit no limit plumbing")
+	for _, want := range []string{
+		"static final long MAX_DYN_ARRAY_COUNT = 65536L;",
+		"static final long MAX_DYN_STRING_LEN = 1048576L;",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("default limits missing %q", want)
+		}
+	}
+	// Liveness is still a property of the schema, not of the configuration.
+	if strings.Contains(plain, "MAX_DYN_BLOB_LEN") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 }
 
@@ -283,9 +293,19 @@ func TestJavaMaxlenReject(t *testing.T) {
 	if strings.Contains(m, `"u: string length above schema maxlen`) {
 		t.Error("unbounded string must not carry a maxlen guard")
 	}
-	// No config limits set -> no configured-limit plumbing, only the maxlen guards.
-	if strings.Contains(m, "MAX_DYN") || strings.Contains(m, "LIMIT_EXCEEDED") {
-		t.Error("unset limits must emit no configured-limit plumbing")
+	// The finite default cap (§9.5, generator#385) covers the unbounded string
+	// `u`, alongside (never instead of) the schema maxlen guards.
+	if !strings.Contains(m, "static final long MAX_DYN_STRING_LEN = 1048576L;") {
+		t.Error("M.java missing the default string cap")
+	}
+	// The other two stay inert: liveness is a property of the schema, not of the
+	// configuration. There is no unbounded blob, and `arr` is a WRAPPER array,
+	// which carries no count header for arrayBegin to check (its element index is
+	// what would have to be capped -- generator#387).
+	for _, gone := range []string{"MAX_DYN_BLOB_LEN", "MAX_DYN_ARRAY_COUNT"} {
+		if strings.Contains(m, gone) {
+			t.Errorf("inert limit %s must not be emitted", gone)
+		}
 	}
 }
 
@@ -410,9 +430,11 @@ messages:
 		`case 3: if (kind != ArrayKind.UNSIGNED) break; if (count > 2) throw Sofab.invalid("ba: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; m.ba.clear(); break;`,
 		// enum elements ride the SIGNED wire type.
 		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw Sofab.invalid("ea: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; abulk = m.ea = new long[count]; break;`,
-		// A count-less array has no schema bound, but still gets the kind test --
-		// and keeps the capped reservation, because nothing has bounded its count.
-		`case 5: if (kind != ArrayKind.UNSIGNED) break; askip = 0; afill = count; atgt = 3; m.da = new short[Math.min(count, Seq.ARRAY_INIT_CAP)]; break;`,
+		// A count-less array has no schema bound, so the target's finite default
+		// cap governs it (§9.5, generator#385) -- checked, like a schema bound,
+		// BEHIND the kind test. It keeps the capped reservation, because nothing
+		// has bounded its count to a size worth reserving outright.
+		`case 5: if (kind != ArrayKind.UNSIGNED) break; if (count > MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "da: array count above configured limit 65536")); askip = 0; afill = count; atgt = 3; m.da = new short[Math.min(count, Seq.ARRAY_INIT_CAP)]; break;`,
 		// Skipping is the default; only the arms above disarm it.
 		"        askip = count;\n        afill = 0;\n        abulk = null;",
 	} {

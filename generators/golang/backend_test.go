@@ -377,10 +377,10 @@ func TestGoStructuralInvariants(t *testing.T) {
 		"func (m *Myfirstmessage) BeginSequence(id sofab.ID) (sofab.Visitor, error)",
 		"func NewMyfirstmessage() *Myfirstmessage",
 		"func DecodeMyfirstmessage(",
-		"sofab.AcceptBytes(data, m)", // zero-copy cursor decode
-		"e.WriteSequenceBeginLazy(",  // nested struct/union framing (MESSAGE_SPEC S2)
-		"e.WriteSequenceEndKeep()",   // ... and an array ELEMENT keeps its frame
-		"`json:\"somei8\"`",          // canonical json tags
+		"sofab.AcceptBytes(data, m", // zero-copy cursor decode (limit options may follow)
+		"e.WriteSequenceBeginLazy(", // nested struct/union framing (MESSAGE_SPEC S2)
+		"e.WriteSequenceEndKeep()",  // ... and an array ELEMENT keeps its frame
+		"`json:\"somei8\"`",         // canonical json tags
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("myfirstmessage.go missing %q", want)
@@ -663,10 +663,18 @@ messages:
 		t.Error("Decode must pass the active limits into AcceptBytes")
 	}
 
-	// No limits configured -> byte-identical plumbing-free output.
+	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
+	// (§9.5, generator#385). The blob cap stays inert either way: liveness is a
+	// property of the schema, not of the configuration.
 	plain := genGo(t, s, map[string]any{})
-	if strings.Contains(plain["sofab_visitor.go"], "MaxDyn") || strings.Contains(plain["dyn.go"], "WithMax") {
-		t.Error("unset limits must emit no limit plumbing")
+	if !regexp.MustCompile(`MaxDynArrayCount\s+= 100000`).MatchString(plain["sofab_visitor.go"]) {
+		t.Error("default array cap must be emitted (and raised to the schema count)")
+	}
+	if !regexp.MustCompile(`MaxDynStringLen\s+= 1048576`).MatchString(plain["sofab_visitor.go"]) {
+		t.Error("default string cap must be emitted")
+	}
+	if strings.Contains(plain["sofab_visitor.go"], "MaxDynBlobLen") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 }
 
@@ -961,7 +969,9 @@ messages:
 	if !strings.Contains(msg, "func DecodeVecFrom(r io.Reader) (*Vec, error)") {
 		t.Error("missing the io.Reader-driven decode entry point")
 	}
-	if !strings.Contains(msg, "sofab.NewDecoder(r).AcceptStream(m)") {
+	// The schema's `s` is a schema-unbounded string, so the target's finite
+	// default cap (§9.5, generator#385) is live and reaches both entry points.
+	if !strings.Contains(msg, "sofab.NewDecoder(r, sofab.WithMaxStringLen(MaxDynStringLen)).AcceptStream(m)") {
 		t.Error("streaming decode must go through AcceptStream")
 	}
 	// The slurping entry points must not be what the reader path is built on.
@@ -969,7 +979,7 @@ messages:
 		t.Error("Decoder.Accept slurps the reader — it does not bound memory")
 	}
 	// ...and the in-memory path is unchanged: this is an addition.
-	if !strings.Contains(msg, "sofab.AcceptBytes(data, m)") {
+	if !strings.Contains(msg, "sofab.AcceptBytes(data, m") {
 		t.Error("the []byte path must stay AcceptBytes")
 	}
 

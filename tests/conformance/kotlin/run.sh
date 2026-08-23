@@ -321,8 +321,9 @@ echo "==> skipped occurrence keeps struct OK"
 # Receiver-side decode limits (generator#102): `a` is an UNBOUNDED u64 array
 # (id 0 -> header 0x03). With max_dyn_array_count: 4 a wire count of 5 MUST fail
 # with LIMIT_EXCEEDED (checked at the count header, before allocation); exactly 4
-# still decodes; and the same 5-element bytes MUST decode against a project built
-# without limits.
+# still decodes; and the same 5-element bytes MUST decode against a project with
+# no key set, which carries the TARGET DEFAULT rather than no cap
+# (generator#385).
 echo "==> receiver-side decode limits (generator#102)"
 cat > "$WORK/lim.yaml" <<'YAML'
 version: 1
@@ -344,7 +345,7 @@ if $HL decode dyn < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/limerr.txt"; then
 fi
 grep -q "LIMIT_EXCEEDED" "$WORK/limerr.txt" || { echo "FAIL: rejection must carry LIMIT_EXCEEDED"; exit 1; }
 $HL decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count 4 at the limit must decode"; exit 1; }
-$HN decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: no-limits project must decode 5 elements"; exit 1; }
+$HN decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must decode 5 elements"; exit 1; }
 echo "==> decode limits OK"
 
 echo "==> shared-vector byte-exact conformance"

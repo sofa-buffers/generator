@@ -162,14 +162,14 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"std::vector<std::uint32_t> arr = {};",                              // unbounded native -> vector (was std::array<T,0>)
-		"std::vector<bool> bl = {};",                                        // unbounded bool -> vector
-		"std::vector<std::uint32_t> fixed = {};",                            // a bounded native array is length-carrying too
-		"std::vector<std::vector<std::uint32_t>> matrix",                    // matrix rows are dynamic vectors too
-		"is.readArray(arr, -1, -1, sofab::ElemBound::of<std::uint32_t>());", // readArray sizes the vector to the wire count
-		"if (!arr.empty()) {",                                               // whole-omit: no declared default -> empty()
-		"std::size_t _count) noexcept override",                             // _count is named for the resize
-		"sofab::MessageSeq<std::vector<std::vector<std::uint32_t>>>",        // matrix rows collected by the corelib placer
+		"std::vector<std::uint32_t> arr = {};",                                                     // unbounded native -> vector (was std::array<T,0>)
+		"std::vector<bool> bl = {};",                                                               // unbounded bool -> vector
+		"std::vector<std::uint32_t> fixed = {};",                                                   // a bounded native array is length-carrying too
+		"std::vector<std::vector<std::uint32_t>> matrix",                                           // matrix rows are dynamic vectors too
+		"is.readArray(arr, -1, SOFAB_MAX_DYN_ARRAY_COUNT, sofab::ElemBound::of<std::uint32_t>());", // readArray sizes the vector to the wire count, bounded by the finite default cap
+		"if (!arr.empty()) {",                                                                      // whole-omit: no declared default -> empty()
+		"std::size_t _count) noexcept override",                                                    // _count is named for the resize
+		"sofab::MessageSeq<std::vector<std::vector<std::uint32_t>>>",                               // matrix rows collected by the corelib placer
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap header missing %q:\n%s", want, h)
@@ -593,13 +593,24 @@ messages:
 		t.Errorf("want exactly 1 string limit guard (unbounded field only), got %d", n)
 	}
 
-	// No limits configured -> no plumbing at all.
+	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
+	// (§9.5, generator#385). Pure corelib-cpp is on the server tier.
 	plain, err := genHeader(t, src, "dyn.hpp", map[string]any{})
 	if err != nil {
 		t.Fatalf("generate plain: %v", err)
 	}
-	if strings.Contains(plain, "SOFAB_MAX_DYN") || strings.Contains(plain, "exceedLimit") {
-		t.Error("unset limits must emit no limit plumbing")
+	for _, want := range []string{
+		"#define SOFAB_MAX_DYN_ARRAY_COUNT 65536",
+		"#define SOFAB_MAX_DYN_STRING_LEN 1048576",
+		"if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("default limits missing %q", want)
+		}
+	}
+	// Liveness is still a property of the schema, not of the configuration.
+	if strings.Contains(plain, "SOFAB_MAX_DYN_BLOB_LEN") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 }
 
@@ -647,22 +658,30 @@ func TestCppBufferedFieldCapIsBytes(t *testing.T) {
 		}
 	}
 
-	// A field kind left uncapped has no legitimate maximum, and the reassembly cap
-	// is one number for the whole stream — so none is emitted rather than one that
-	// would reject valid traffic. The per-field policy guard still stands.
+	// "A field kind left uncapped" no longer exists on this target: every cap has
+	// a finite default (§9.5, generator#385), so the span is derivable for any
+	// schema. A key set on ONE kind therefore leaves the others at their default
+	// rather than suppressing the derivation, and the cap is the byte span of the
+	// widest field -- here the defaulted 4 MiB blob, not the configured 16-byte
+	// string.
 	mixed := "version: 1\nmessages:\n  m:\n    payload:\n" +
 		"      s: { id: 0, type: string }\n" +
-		"      b: { id: 1, type: blob }\n" // unbounded AND uncapped
+		"      b: { id: 1, type: blob }\n"
 	h, err = genHeader(t, mixed, "m.hpp", map[string]any{"max_dyn_string_len": 16})
 	if err != nil {
 		t.Fatalf("generate mixed: %v", err)
 	}
-	if !strings.Contains(h, "if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }") {
-		t.Errorf("the configured per-field string guard must still be emitted:\n%s", h)
-	}
-	for _, notWant := range []string{"SOFAB_MAX_DYN_BUFFERED_FIELD", "sofab::Limits{"} {
-		if strings.Contains(h, notWant) {
-			t.Errorf("an uncapped dynamic field must leave reassembly uncapped, got %q:\n%s", notWant, h)
+	for _, want := range []string{
+		"#define SOFAB_MAX_DYN_STRING_LEN 16",
+		"#define SOFAB_MAX_DYN_BLOB_LEN 4194304",
+		"if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }",
+		"if (_size > SOFAB_MAX_DYN_BLOB_LEN) { is.exceedLimit(); return; }",
+		// blob span: the widest-form header and fixlen word plus the 4 MiB payload.
+		"#define SOFAB_MAX_DYN_BUFFERED_FIELD 4194309",
+		"sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("mixed config missing %q:\n%s", want, h)
 		}
 	}
 }
@@ -916,7 +935,9 @@ func TestCppDynamicArrayNoReset(t *testing.T) {
 	if strings.Contains(h, "\n            dyn = {};") {
 		t.Errorf("dynamic array must not emit a reset:\n%s", h)
 	}
-	if !strings.Contains(h, "is.readArray(dyn, -1, -1, sofab::ElemBound::of<std::uint32_t>());") {
+	// The wire count is bounded by the target's finite default cap (§9.5,
+	// generator#385); readArray still sizes the vector from it.
+	if !strings.Contains(h, "is.readArray(dyn, -1, SOFAB_MAX_DYN_ARRAY_COUNT, sofab::ElemBound::of<std::uint32_t>());") {
 		t.Errorf("dynamic array should read through readArray (which sizes it):\n%s", h)
 	}
 }
@@ -1287,8 +1308,13 @@ func TestCppTryDecodeCarriesTheDerivedReassemblyCap(t *testing.T) {
 		t.Errorf("try_decode's stream must carry the cap after the callback:\n%s", h)
 	}
 	// The uncapped case passes the callback alone (the fixed profile's
-	// IStreamInline has no limits parameter at all).
-	plain, err := genHeader(t, src, "m.hpp", map[string]any{})
+	// IStreamInline has no limits parameter at all). It is now reachable only
+	// through corelib: c-cpp, which is statically bounded and where the keys are
+	// inert -- on pure corelib-cpp every cap has a finite default (§9.5,
+	// generator#385), so a cap is always derived.
+	bounded := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      a: { id: 0, type: array, items: { type: u32, count: 4 } }\n"
+	plain, err := genHeader(t, bounded, "m.hpp", map[string]any{"corelib": "c-cpp"})
 	if err != nil {
 		t.Fatalf("generate plain: %v", err)
 	}

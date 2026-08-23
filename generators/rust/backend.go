@@ -131,9 +131,12 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102),
-// resolved against the schema. An entry is active only when its max_dyn_* key
-// is configured AND the schema actually has an unbounded field of that kind —
-// otherwise the option would be inert and no limit plumbing is emitted. The
+// resolved against the schema. Every cap is always set — the target carries a
+// finite default that the max_dyn_* key only overrides (§9.5, generator#385) —
+// so an entry is active exactly when the schema actually has an unbounded field
+// of that kind; otherwise the cap would be inert and no plumbing is emitted.
+// Resolution is skipped entirely on corelib-rs-no-std, which rejects an
+// unbounded field at schema validation and has nothing for a cap to govern. The
 // guards are per-field on unbounded fields only (a schema-bounded field keeps
 // its own generator#100 schema guard instead), so the configured value is
 // emitted as-is, with no raise to the largest schema bound.
@@ -144,23 +147,24 @@ type limitSet struct {
 
 func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
 
-// resolveLimits reads the max_dyn_* config keys and resolves them against the
-// schema's bounds (see limitSet).
+// resolveLimits resolves the max_dyn_* caps over the target's finite defaults
+// and against the schema's bounds (see limitSet).
 func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	var all []*ir.Field
 	for _, m := range s.Messages {
 		all = append(all, m.Fields...)
 	}
 	b := ir.Bounds(all)
+	d := generator.ServerDynLimits.Resolve(cfg)
 	var l limitSet
-	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
-		l.arrayCount, l.arrayHas = v, true
+	if b.HasDynArray {
+		l.arrayCount, l.arrayHas = d.ArrayCount, true
 	}
-	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
-		l.stringLen, l.stringHas = v, true
+	if b.HasDynString {
+		l.stringLen, l.stringHas = d.StringLen, true
 	}
-	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
-		l.blobLen, l.blobHas = v, true
+	if b.HasDynBlob {
+		l.blobLen, l.blobHas = d.BlobLen, true
 	}
 	return l
 }

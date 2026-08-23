@@ -20,10 +20,40 @@ target; a per-target value overrides the `generic` value for that target
 | `output_dir` | string | — | Directory the generated files are written to. The CLI `--out` flag overrides it. |
 | `tool_banner` | string | `sofabgen` | Tool name stamped into every generated file header. |
 | `license` | string | none | SPDX identifier for the `SPDX-License-Identifier` header stamped into every generated file (e.g. `MIT`, `Apache-2.0`, `LicenseRef-Acme`). Unset or `none` emits no SPDX line. |
-| `max_dyn_array_count` | integer | unset = unlimited | Receiver-side decode limit: maximum element count accepted for an **unbounded** array (no schema `count`). Exceeding it fails the decode with the corelib's `LimitExceeded` error — never a clamp. Schema-bounded fields are governed by their own bound (#100); a field that legitimately needs more gets an explicit schema bound. Inert on statically bounded targets (`c`, `cpp` `corelib: c-cpp`, rust `no_std`). |
-| `max_dyn_string_len` | integer | unset = unlimited | Receiver-side decode limit: maximum byte length for an **unbounded** string (no schema `maxlen`); checked at the length header, before the payload is buffered or allocated. Same semantics as above. |
-| `max_dyn_blob_len` | integer | unset = unlimited | Receiver-side decode limit: maximum byte length for an **unbounded** blob (no schema `maxlen`); checked at the length header. Same semantics as above. |
+| `max_dyn_array_count` | integer | 65536 server / 16384 client | Receiver-side decode limit: maximum element count accepted for an **unbounded** array (no schema `count`). Exceeding it fails the decode with the corelib's `LimitExceeded` error — never a clamp. Schema-bounded fields are governed by their own bound (#100); a field that legitimately needs more gets an explicit schema bound. Inert on statically bounded targets (`c`, `cpp` `corelib: c-cpp`, rust `no_std`). |
+| `max_dyn_string_len` | integer | 1 MiB server / 256 KiB client | Receiver-side decode limit: maximum byte length for an **unbounded** string (no schema `maxlen`); checked at the length header, before the payload is buffered or allocated. Same semantics as above. |
+| `max_dyn_blob_len` | integer | 4 MiB server / 1 MiB client | Receiver-side decode limit: maximum byte length for an **unbounded** blob (no schema `maxlen`); checked at the length header. Same semantics as above. |
 | `max_message_size` | integer | `4096` | Ceiling on a message's encoded size, in bytes. Two roles. **Fallback:** a message with an unbounded field has no computable worst case — the generated code then emits this value as `MAX_SIZE_LIMIT` and aliases `MAX_SIZE` to it, so the number is visibly *imposed* rather than *derived*. **Budget:** when set explicitly it is also checked — a schema whose computed worst case exceeds it **fails generation**, which is where a message too large for the target transport belongs. A message the schema *does* bound keeps its exact computed size; this key never replaces a number the schema can supply. Documented here because its meaning is one thing everywhere, but it is a **per-target key**: the closed schema accepts it under `targets.<lang>` only, and `generic.max_message_size` is rejected at load. |
+
+### The `max_dyn_*` defaults
+
+**There is no unset state and no unlimited mode.** Every target carries a finite
+default for all three keys; setting one overrides that target's default, and the
+`generic:` / per-target override mechanism is unchanged.
+
+| Tier | Targets | `max_dyn_array_count` | `max_dyn_string_len` | `max_dyn_blob_len` |
+|---|---|---|---|---|
+| Server / native | `go`, `java`, `csharp`, `python`, `rust` (std), `cpp` (`corelib: cpp`), `zig` | 65536 | 1 MiB | 4 MiB |
+| Client | `typescript`, `dart`, `kotlin` | 16384 | 256 KiB | 1 MiB |
+| Statically bounded | `c`, `cpp` (`corelib: c-cpp`), `rust` (`rs-no-std`) | inert — see below | | |
+
+The numbers are an **amplification barrier, not application policy**: a ~10-byte
+message claiming `count = 2^31` would otherwise ask for a 2 GB allocation, and
+65536 takes five orders of magnitude off that. Tightening them further buys
+little against that attack while rejecting ordinary traffic, so an
+application-tight bound belongs in the **schema** (`count`/`maxlen`), where it is
+visible to both peers and enforced as `INVALID` everywhere. The client tier sits
+one order of magnitude down because a browser tab or a phone process has a
+smaller memory budget than a server — and TypeScript pays 2× on strings, a byte
+cap on the wire becoming UTF-16 in memory.
+
+Note the unit on `max_dyn_array_count`: it is an **element** count, never a byte
+budget. 65536 `u64` elements is 512 KiB; 65536 elements of a nested object type
+is 65536 × the element's size.
+
+On the statically bounded targets every string, blob and array must declare a
+`maxlen` or `count` — generation fails otherwise — so no field a cap could govern
+can exist and the keys change nothing.
 
 ## Per-target options — `targets.<lang>:`
 

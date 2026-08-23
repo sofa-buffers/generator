@@ -216,7 +216,9 @@ messages:
 	}
 	// The dynamic string array keeps every index (no over-index guard); its store
 	// is still strict-UTF-8-wrapped (issue #85) since a string element is materialized.
-	if !strings.Contains(m, `.root_ds => if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk); },`) {
+	// The element's own length is capped by the target's finite default instead
+	// (§9.5, generator#385) -- a LimitExceeded policy bound, not an INVALID one.
+	if !strings.Contains(m, `.root_ds => if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk); } },`) {
 		t.Errorf("dynamic string array must not carry an over-index guard:\n%s", m)
 	}
 }
@@ -259,12 +261,18 @@ messages:
 	// The unbounded scalar string (no maxlen, no configured limit) has no length
 	// guard, but its store is still strict-UTF-8-wrapped (issue #85): invalid
 	// UTF-8 is INVALID (self.inv), never lossy — applies to unbounded strings too.
-	if !strings.Contains(m, `3 => if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.us = chunk; },`) {
+	if !strings.Contains(m, `if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.us = chunk; }`) {
 		t.Errorf("unbounded string must store straight through (utf8-checked):\n%s", m)
 	}
-	// With no maxlen and no configured limits, no length guard exists at all.
-	if strings.Contains(m, "self.lim") {
-		t.Errorf("no configured limit -> no lim plumbing expected:\n%s", m)
+	// What it does carry is the receiver cap, at the target's finite default
+	// (§9.5, generator#385) -- a separate bound with a separate verdict: over the
+	// cap is self.lim (LimitExceeded), never self.inv.
+	if !strings.Contains(m, "3 => if (total > max_dyn_string_len) { self.lim = true; } else {") {
+		t.Errorf("unbounded string must carry the default receiver cap:\n%s", m)
+	}
+	// ...and no schema maxlen guard, which is what the 8 above would be.
+	if strings.Contains(m, "3 => if (total > 8)") {
+		t.Errorf("unbounded string must not carry a maxlen guard:\n%s", m)
 	}
 }
 
@@ -475,13 +483,22 @@ messages:
 		t.Errorf("want exactly 2 limit guards, got %d", got)
 	}
 
-	// No limits configured -> no limit plumbing at all; the eager-allocation
-	// hardening stays (it is a bugfix, not an option).
+	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
+	// (§9.5, generator#385). Zig is on the server tier. The eager-allocation
+	// hardening is orthogonal and stays either way (a bugfix, not an option).
 	plain := gen(map[string]any{})
-	for _, notWant := range []string{"max_dyn", "lim: bool", "self.lim", "LimitExceeded"} {
-		if strings.Contains(plain, notWant) {
-			t.Errorf("unset limits must not emit %q", notWant)
+	for _, want := range []string{
+		"const max_dyn_array_count: usize = 65536;",
+		"const max_dyn_string_len: usize = 1048576;",
+		"if (v.lim) return error.LimitExceeded;",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("default limits missing %q", want)
 		}
+	}
+	// Liveness is still a property of the schema, not of the configuration.
+	if strings.Contains(plain, "max_dyn_blob_len") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 	if !strings.Contains(plain, "sofab.arrays.allocCapped(") {
 		t.Error("no-config output must keep the capped allocation")

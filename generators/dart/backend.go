@@ -99,8 +99,10 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 // resolved against the schema like the Go/Python/TS backends: corelib-dart
 // enforces the limits globally per decode (a DecoderLimits passed to the
 // decoder), so each active cap is the configured value raised to the largest
-// schema bound of its kind, and an entry is active only when its key is set AND
-// the schema actually has an unbounded field of that kind.
+// schema bound of its kind. Every cap is always set — the target carries a
+// finite default that the config key only overrides (§9.5, generator#385) — so
+// an entry is active exactly when the schema actually has an unbounded field of
+// that kind.
 type limitSet struct {
 	arrayCount, stringLen, blobLen int64
 	arrayHas, stringHas, blobHas   bool
@@ -114,15 +116,16 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 		all = append(all, m.Fields...)
 	}
 	b := ir.Bounds(all)
+	d := generator.ClientDynLimits.Resolve(cfg)
 	var l limitSet
-	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
-		l.arrayCount, l.arrayHas = max(v, b.MaxCount), true
+	if b.HasDynArray {
+		l.arrayCount, l.arrayHas = max(d.ArrayCount, b.MaxCount), true
 	}
-	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
-		l.stringLen, l.stringHas = max(v, b.MaxStringLen), true
+	if b.HasDynString {
+		l.stringLen, l.stringHas = max(d.StringLen, b.MaxStringLen), true
 	}
-	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
-		l.blobLen, l.blobHas = max(v, b.MaxBlobLen), true
+	if b.HasDynBlob {
+		l.blobLen, l.blobHas = max(d.BlobLen, b.MaxBlobLen), true
 	}
 	return l
 }

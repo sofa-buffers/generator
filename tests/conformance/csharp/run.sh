@@ -337,8 +337,10 @@ echo "==> skipped occurrence keeps struct OK"
 # (id 0 -> header 0x03 = 0<<3 | unsigned-array), so a configured
 # max_dyn_array_count: 4 makes a wire count of 5 fail decode with
 # LimitExceeded (non-zero exit) at the count header; exactly 4 still decode,
-# and the same oversized bytes decode fine against a project generated
-# without limits (unset = unlimited).
+# and the same oversized bytes decode fine against a project generated with no
+# key set -- which is the TARGET DEFAULT, not unlimited (generator#385): 5
+# elements is far under it, which is the point of a default sized as an
+# amplification barrier rather than as application policy.
 echo "==> receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn.yaml" <<'YAML'
 version: 1
@@ -359,7 +361,7 @@ if $HL decode dyn < "$WORK/overlimit.bin" >/dev/null 2>&1; then
     echo "FAIL: 5 elements above max_dyn_array_count 4 must fail decode"; exit 1
 fi
 $HL decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: 4 elements at the limit must decode"; exit 1; }
-$HF decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: no-limits project must decode the oversized message"; exit 1; }
+$HF decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must decode the oversized message"; exit 1; }
 echo "==> decode limits OK"
 
 echo "==> shared-vector byte-exact conformance"

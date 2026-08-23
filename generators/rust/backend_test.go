@@ -280,11 +280,17 @@ messages:
 		t.Error("bounded array barr must not get a limit guard")
 	}
 
-	// No limits configured -> byte-identical plumbing-free output.
+	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
+	// (§9.5, generator#385). Rust std is on the server tier.
 	plain := gen(map[string]any{})
-	for _, notWant := range []string{"MAX_DYN_", "lim:", "LimitExceeded", "limited"} {
-		if strings.Contains(plain, notWant) {
-			t.Errorf("unset limits must emit no limit plumbing, found %q", notWant)
+	for _, want := range []string{
+		"const MAX_DYN_ARRAY_COUNT: usize = 65536;",
+		"const MAX_DYN_STRING_LEN: usize = 1048576;",
+		"const MAX_DYN_BLOB_LEN: usize = 4194304;",
+		"if limited { return Err(sofab::Error::LimitExceeded); }",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("default limits missing %q", want)
 		}
 	}
 
@@ -539,9 +545,15 @@ messages:
 				t.Errorf("message.rs (%v) missing maxlen guard %q", cfg, want)
 			}
 		}
-		// The unbounded string field ds carries no maxlen guard.
-		if strings.Contains(m, "(_Loc::Root, 3) => if total >") {
+		// The unbounded string field ds carries no SCHEMA maxlen guard -- what it
+		// does carry is the receiver cap, which is a different bound with a
+		// different verdict (LimitExceeded, not INVALID).
+		if strings.Contains(m, "(_Loc::Root, 3) => if total > 8") {
 			t.Errorf("(%v) unbounded string must not carry a maxlen guard", cfg)
+		}
+		if cfg["corelib"] != "rs-no-std" &&
+			!strings.Contains(m, "(_Loc::Root, 3) => if total > MAX_DYN_STRING_LEN { self.lim = true; return; },") {
+			t.Errorf("(%v) unbounded string must carry the default receiver cap", cfg)
 		}
 	}
 }

@@ -61,21 +61,27 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 // emitted per-field in the generated visitor and only on schema-unbounded
 // fields, so each configured cap is used as-is (no raise to the largest schema
 // bound): a schema-bounded field never meets a cap and keeps only its
-// generator#100 schema-capacity guard. A configured key is still inert for a
-// message whose reachable fields have no unbounded field of that kind
-// (ir.Bounds, checked per visitor) — then no constant or guard is emitted.
+// generator#100 schema-capacity guard. Each cap is always SET — every target
+// carries a finite default (§9.5, generator#385) — so the only question left is
+// whether it is LIVE: a cap is inert for a message whose reachable fields have
+// no unbounded field of that kind (ir.Bounds, checked per visitor), and then no
+// constant or guard is emitted.
 type limitSet struct {
 	arrayCount, stringLen, blobLen int64
 	arrayHas, stringHas, blobHas   bool
 }
 
-// resolveLimits reads the max_dyn_* config keys (see limitSet).
+// resolveLimits reads the max_dyn_* config keys over the target's finite
+// defaults (see limitSet). Unlike the other backends it does not consult the
+// schema here: liveness is decided per message in emitVisitor, because C# emits
+// the constants and guards per visitor rather than once per module.
 func resolveLimits(cfg map[string]any) limitSet {
-	var l limitSet
-	l.arrayCount, l.arrayHas = cfgLimit(cfg, "max_dyn_array_count")
-	l.stringLen, l.stringHas = cfgLimit(cfg, "max_dyn_string_len")
-	l.blobLen, l.blobHas = cfgLimit(cfg, "max_dyn_blob_len")
-	return l
+	d := generator.ServerDynLimits.Resolve(cfg)
+	return limitSet{
+		arrayCount: d.ArrayCount, arrayHas: true,
+		stringLen: d.StringLen, stringHas: true,
+		blobLen: d.BlobLen, blobHas: true,
+	}
 }
 
 type cfile struct{ b strings.Builder }

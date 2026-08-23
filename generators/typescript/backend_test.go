@@ -284,7 +284,7 @@ func TestTSStructural(t *testing.T) {
 		"export class Myfirstmessage {",
 		"serialize(os: OStream): void {",
 		"static decode(bytes: Uint8Array): Myfirstmessage {",
-		"return _decodeFromMyfirstmessage(new Cursor(bytes));",
+		"return _decodeFromMyfirstmessage(new Cursor(bytes",
 		"function _decodeFromMyfirstmessage(c: Cursor): Myfirstmessage {",
 		"while (c.readHeader()) {",        // monomorphic pull loop
 		"switch (c.id) {",                 // one switch per type
@@ -343,7 +343,7 @@ func TestTSStructural(t *testing.T) {
 	}
 	// decode() still goes through the Cursor, not the visitor.
 	for _, want := range []string{
-		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    return _decodeFromMyfirstmessage(new Cursor(bytes));",
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    return _decodeFromMyfirstmessage(new Cursor(bytes",
 		"function _decodeIntoMyfirstmessage(c: Cursor, o: Myfirstmessage): Myfirstmessage {\n  while (c.readHeader()) {",
 	} {
 		if !strings.Contains(mod, want) {
@@ -759,13 +759,22 @@ messages:
 		}
 	}
 
-	// No limits configured -> byte-identical plumbing-free output.
+	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
+	// (§9.5, generator#385). TypeScript is on the client tier: 16384 elements
+	// (here raised to barr's schema count) and 256 KiB of string.
 	plain := genTSWith(t, src, map[string]any{})
-	if strings.Contains(plain, "MAX_DYN") || strings.Contains(plain, "maxArrayCount") {
-		t.Error("unset limits must emit no limit plumbing")
+	for _, want := range []string{
+		"export const MAX_DYN_ARRAY_COUNT = 100000;",
+		"export const MAX_DYN_STRING_LEN = 262144;",
+		"return _decodeFromDyn(new Cursor(bytes, _LIMITS));",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("default limits missing %q", want)
+		}
 	}
-	if !strings.Contains(plain, "return _decodeFromDyn(new Cursor(bytes));") {
-		t.Error("unset limits must keep the bare Cursor construction")
+	// Liveness is still a property of the schema, not of the configuration.
+	if strings.Contains(plain, "MAX_DYN_BLOB_LEN") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 }
 
@@ -2072,7 +2081,7 @@ func TestTSClosedNameSet(t *testing.T) {
 	}
 	// What replaces them, and the delegation chain kept intact.
 	for _, want := range []string{
-		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    return _decodeFromMyfirstmessage(new Cursor(bytes));",
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    return _decodeFromMyfirstmessage(new Cursor(bytes",
 		"function _decodeFromMyfirstmessage(c: Cursor): Myfirstmessage {\n  return _decodeIntoMyfirstmessage(c, new Myfirstmessage());",
 		"function _decodeIntoMyfirstmessage(c: Cursor, o: Myfirstmessage): Myfirstmessage {",
 	} {
