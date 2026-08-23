@@ -42,5 +42,14 @@ target; a per-target value overrides the `generic` value for that target
 | `dart` | [dart.md](dart.md) | — |
 | `docs` | [docs.md](docs.md) | `format` |
 
-The `max_dyn_*` limits are accepted by every target except `c`, whose storage is
-sized from the schema and has no unbounded field to cap.
+Each per-target file documents **only** the keys in the right-hand column. The
+generic options above apply to every target and are documented here alone.
+
+Two exceptions to that, both enforced by the closed schema:
+
+- **`c` does not accept the `max_dyn_*` limits.** They cap fields the schema
+  leaves unbounded, and this target has none — every string, blob and array must
+  declare a `maxlen` or `count`, or generation fails. The schema bound already
+  *is* the limit.
+- **`docs` accepts only `format`.** There is no code and no project to scaffold,
+  so `emit` and the rest do not apply.

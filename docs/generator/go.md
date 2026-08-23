@@ -10,11 +10,8 @@ Emits the generated types for every message and named type, against
 | `package` | string | `message` | The `package <name>` clause of the generated files. |
 | `module_path` | string | `example.com/generated` | The module path written to `go.mod`. Project mode only. |
 | `go_version` | string | `1.21` | The `go <version>` directive written to `go.mod`. Project mode only. |
-| `emit` | `sources` \| `project` | `sources` | `project` additionally scaffolds `go.mod` and the JSON conformance harness. |
-| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size. See the [generic config](README.md). |
-| `max_dyn_array_count` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_string_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_blob_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
+
+The generic options apply here too; see the [generic config](README.md).
 
 ## `package`
 

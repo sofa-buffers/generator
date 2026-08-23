@@ -9,6 +9,9 @@ and named type, with their fields, ids, types, defaults and bounds.
 |---|---|---|---|
 | `format` | `html` | `html` | Output format. |
 
+This target takes no other options — not even `emit`; there is no project to
+scaffold around a document.
+
 ## `format`
 
 `html` is currently the only value. It produces a **single self-contained page**

@@ -1,17 +1,16 @@
 # Java target — `targets.java`
 
-Emits one class per message and named type, against `corelib-java`.
+Emits one class per message and named type, against `corelib-java`. Java allows
+a single public top-level class per file, so every named struct and union gets
+its own alongside the message.
 
 ## Options
 
 | key | type | default | effect |
 |---|---|---|---|
-| `package` | string | `message` | The `package <name>;` declaration, and the source-directory layout in project mode. |
-| `emit` | `sources` \| `project` | `sources` | `project` additionally scaffolds a Maven build and the JSON conformance harness. |
-| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size. See the [generic config](README.md). |
-| `max_dyn_array_count` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_string_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
-| `max_dyn_blob_len` | integer | unset | Receiver-side decode limit. See the [generic config](README.md). |
+| `package` | string | `message` | The `package <name>;` declaration, and the source-directory layout. |
+
+The generic options apply here too; see the [generic config](README.md).
 
 ## `package`
 
@@ -30,6 +29,3 @@ mirror the package, so the output is always laid out under
 This holds in both `emit` modes — `sources` emits the same tree without the
 build files. Changing the package changes the paths, so point `output_dir` at
 the root of a source tree, not at the package directory itself.
-
-One file per public type: Java allows a single public top-level class per file,
-so every named struct and union gets its own alongside the message.
