@@ -1,0 +1,8 @@
+# Corelib branches this branch is developed against (docs/CI.md).
+# Delete before merging: every entry pins a corelib to unmerged code.
+#
+# corelib-py#119 gives the visitor surface the element-width bound the removed
+# pull API used to carry (Field.elem_min/elem_max). Without it the generated
+# on_field declaration is inert and the conformance leg for a truncated
+# out-of-width array element reports its known-gap line instead of gating.
+SOFAB_CORELIB_PY_REF=feat/visitor-element-width

@@ -321,37 +321,35 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 	}
 	f.blank()
 	f.line("    @classmethod")
+	f.line("    def decoder(cls) -> _StreamDecoder:")
+	f.line(`        """The streaming reader: feed it chunks of any size.`)
+	f.line("")
+	f.line("        The half-built message is on ``.message`` throughout; each ``feed``")
+	f.line("        returns the outcome for the bytes so far.")
+	f.line(`        """`)
+	f.line("        return _StreamDecoder(cls, _%sVisitor)", name)
+	f.blank()
+	f.line("    @classmethod")
 	f.line("    def decode(cls, data: bytes) -> %q:", name)
 	f.line(`        """Decode a message that OWNS its bytes.`)
 	f.line("")
 	f.line("        Every destination holds a copy -- ``str``/``bytes`` values the corelib")
 	f.line("        built, never a window into ``data`` -- so the message outlives the")
 	f.line("        input and ``data`` may be reused or mutated the moment this returns.")
+	f.line("")
+	f.line("        One-shot over the streaming pair: the three-valued outcome is not")
+	f.line("        hidden, so anything short of COMPLETE is raised, and")
+	f.line("        INCOMPLETE stays distinguishable from INVALID.")
 	f.line(`        """`)
 	f.line("        o = cls()")
-	f.line("        o.deserialize(Decoder(io.BytesIO(data)%s))", g.decoderArgs())
+	f.line("        d = Decoder(visitor=_%sVisitor(o))", name)
+	f.line("        st = d.feed(data)")
+	f.line("        if st is Status.INVALID:")
+	f.line(`            raise SofaDecodeError(d.error or "invalid message")`)
+	f.line("        if st is Status.INCOMPLETE:")
+	f.line(`            raise SofaIncompleteError(d.error or "truncated message")`)
 	f.line("        return o")
 	f.blank()
-}
-
-// decoderArgs renders the Decoder keyword arguments for the active
-// receiver-side decode limits ("" when none), appended to every generated
-// Decoder construction; corelib-py enforces the caps and raises SofaLimitError.
-func (g *gen) decoderArgs() string {
-	var opts []string
-	if g.limits.arrayHas {
-		opts = append(opts, "max_array_count=MAX_DYN_ARRAY_COUNT")
-	}
-	if g.limits.stringHas {
-		opts = append(opts, "max_string_len=MAX_DYN_STRING_LEN")
-	}
-	if g.limits.blobHas {
-		opts = append(opts, "max_blob_len=MAX_DYN_BLOB_LEN")
-	}
-	if len(opts) == 0 {
-		return ""
-	}
-	return ", " + strings.Join(opts, ", ")
 }
 
 func (g *gen) toJSONExpr(f *ir.Field) string {

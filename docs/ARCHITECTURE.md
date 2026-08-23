@@ -667,7 +667,7 @@ width-reduced corelib builds compile — §11).
 Decoding has **six families**; a backend picks the one its corelib exposes. All
 route by `(scope, id)` and are forward-compatible (skip unknown ids).
 
-1. **Flat visitor + location-stack** (Rust, C#, Java, Kotlin, and the C++ `c-cpp`
+1. **Flat visitor + location-stack** (Rust, C#, Java, Kotlin, Python, and the C++ `c-cpp`
    wrapper). The corelib drives a `Visitor` with flat callbacks; the generated
    visitor is a `(location, id)` state machine with a stack pushed/popped on
    sequence begin/end. Callbacks: `unsigned(id,v)`, `signed(id,v)`,
@@ -675,6 +675,18 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    (delivered in chunks; `total` is the full length), `array_begin(id, kind,
    count)` then element callbacks, `sequence_begin(id)`, `sequence_end()`. This
    is the **reusable template for any new flat-visitor corelib**.
+
+   **Python is the same shape over a coarser corelib surface.** corelib-py's
+   visitor delivers each array WHOLE (`on_unsigned_array(id, values)`) rather
+   than element by element, so the generated visitor needs no `ai`/`askip`/
+   `afill` element bookkeeping — it is the location stack and nothing else. It
+   also needs no `_DEAD` location: `on_sequence_begin` returning `False` makes
+   corelib-py skip the entire subtree, delivering nothing and firing no
+   `on_sequence_end`, so the stack is only ever pushed for a scope the visitor
+   entered. Two consequences follow from the coarser surface: every bound whose
+   verdict must precede the payload moves into `on_field` — the header hook,
+   which carries the fixlen length and the array element count — and the
+   per-element width bound has no equivalent at all (see §9.3's closing note).
 
    **Optional bulk element hand-off (Java and Kotlin, `Visitor.arrayBulk`/`arrayBulkEnd`).**
    A flat visitor pays its per-callback routing *per element*, which for a short
@@ -835,10 +847,16 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    terminal INVALID after the corelib returns (the Rust/Zig sticky-flag model);
    the receiver-side `max_dyn_*` limits are enforced by the corelib itself via a
    `DecoderLimits` (family "passed into the corelib decoder", §9.5).
-3. **Pull-parser** (Python; Go's corelib still exposes it for streaming). The
-   generated `decode` loops `Decoder.Next()` → a field `{id, wire-type}`,
-   switches on `id`, reads the typed value, and `Skip()`s unknowns; returns at
-   EOF or sequence end.
+3. **Pull-parser** (Go's corelib still exposes one for streaming, though the Go
+   backend drives the visitor). The generated `decode` loops `Decoder.Next()` →
+   a field `{id, wire-type}`, switches on `id`, reads the typed value, and
+   `Skip()`s unknowns; returns at EOF or sequence end.
+
+   **Python left this family in 2026-08** when corelib-py removed its pull API
+   (CORELIB_PLAN §5.3.1, "the visitor is the only decode surface", now forbids a
+   second one). It moved to family 1 above. TypeScript (family 6) is the remaining
+   backend whose generated code pull-reads, and will need the same move whenever
+   corelib-ts follows.
 4. **Child-visitor** (pure C++ `corelib-cpp`). Nested objects decode via
    `is.read(child)` (a child `IStreamMessage`); scalars via `is.read(member)`.
 5. **Descriptor-table callback** (C `corelib-c-cpp`). A static descriptor table
@@ -1069,7 +1087,9 @@ a bound established by a word, checked after the bytes that word describes:
   it mattered: the emitted `d.schema_bounded()` turns the receiver-side
   `max_blob_len` cap off (§6.2.1) on the promise that generated code enforces the
   schema bound instead, and until #377 nothing did so before the payload wait.
-  Fixed by emitting the string arm's peek verbatim (generator#377).
+  Fixed by emitting the string arm's peek verbatim (generator#377). This entry is
+  history: `fixlen_len()` and `schema_bounded()` are gone with corelib-py's pull
+  API, and both sites are `on_field` arms now, so the two can no longer drift.
 - **An array element's declared width in typescript.** A `u8[]`/`i16[]` element
   outside its type's range was found by a scan over the *assembled* array, which
   cannot fire for an array that never assembles. The bound now goes **into the
@@ -1164,9 +1184,16 @@ only party that knows the bound, so the bound has to travel into the decoder:
   `ArrayBegin`/`FixlenHeader` off for every visitor generated before it existed.
 - **dart** gains `MessageVisitor.onArrayElemBound(id, kind) -> ElemRange?`, a
   virtual with a `null` default, so it is additive by construction.
-- **python** takes it as reader arguments, where the schema count and a blob's
-  `maxlen` already go: `read_unsigned_array(elem_max)` /
-  `read_signed_array(elem_min, elem_max)`.
+- **python** took it as reader arguments, where the schema count and a blob's
+  `maxlen` already went: `read_unsigned_array(elem_max)` /
+  `read_signed_array(elem_min, elem_max)`. **That seam is gone** — corelib-py
+  removed the pull API (§5.3.1), and its visitor surface has no per-element hook
+  to replace it, so Python is the one backend where this bound is currently
+  post-assembly only: `on_*_array` hands the generated visitor a list that has
+  already fully arrived, so the scan cannot fire for an array that never
+  assembles, and a message truncated behind an out-of-width element reports
+  INCOMPLETE where §5.2 owes INVALID. Closing it needs an element bound the
+  decoder can apply during the read — the seam every other model still has.
 
 `kind` is what the **wire** declares and the bound applies only in the arm
 matching the declared element type — the §7.3 rule `ArrayBegin` already carries,

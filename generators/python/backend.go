@@ -1,11 +1,13 @@
 // Package python is the Python throughput backend (PLAN §6.4): it emits
-// dataclasses with _marshal (Encoder) and a pull-parser _unmarshal
-// (Decoder.next/skip + typed readers) against corelib-py, plus JSON helpers for
-// the conformance harness.
+// dataclasses with serialize (Encoder) and, per class, a FLAT decode visitor
+// against corelib-py -- whose pull API is gone, CORELIB_PLAN §5.3.1 making the
+// visitor the only decode surface. See visitor.go for the decode half. Plus JSON
+// helpers for the conformance harness.
 package python
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -121,33 +123,46 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("# SPDX-License-Identifier: %s", g.license)
 	}
 	f.line("from __future__ import annotations")
-	f.line("import io")
 	f.line("from dataclasses import dataclass, field")
 	f.line("from enum import IntEnum")
-	// SofaDecodeError is raised by the over-count scalar-array guard
-	// (generator#100) and the over-index wrapper-array guard (generator#142), so
-	// import it only when a fixed-count array of either kind exists — an
-	// unconditional import would be unused for other schemas.
-	names := []string{"Encoder", "Decoder"}
-	if schemaHasCountedNativeArray(s) || schemaHasCountedWrapperArray(s) || schemaHasMaxlenStringBlob(s) {
-		names = append(names, "SofaDecodeError")
+	// The decode section is emitted FIRST, into a buffer, so the import line can
+	// be read off what it actually references (visitorNeeds) instead of a second
+	// walk over the schema that has to agree with the emitter by hand.
+	decodeSection := g.decodeSection(s)
+	// SofaDecodeError and SofaIncompleteError are unconditional: every class's
+	// decode() surfaces the three-valued outcome through them (MESSAGE_SPEC §7).
+	names := []string{
+		"Decoder", "Encoder", "SofaDecodeError", "SofaIncompleteError",
+		"Status", "Visitor",
 	}
-	names = append(names, "WireType")
-	// FixlenSubtype is referenced only by the §7.3 guard of a fixlen-framed field;
-	// importing it unconditionally would leave it unused for schemas without one.
-	if schemaHasFixlenField(s) {
+	if g.limits.any() {
+		names = append(names, "SofaLimitError")
+	}
+	// Field is the on_field argument, and WireType / FixlenSubtype are the tags
+	// its §7.3 tests compare against; each appears only where a bound exists.
+	needField, needWire, needFixlen := visitorNeeds(decodeSection)
+	if needField {
+		names = append(names, "Field")
+	}
+	if needFixlen {
 		names = append(names, "FixlenSubtype")
 	}
+	if needWire {
+		names = append(names, "WireType")
+	}
+	sort.Strings(names)
 	f.line("from sofab import %s", strings.Join(names, ", "))
 	f.blank()
 
 	if g.limits.any() {
 		f.line("# Receiver-side decode limits, baked from the sofabgen config")
 		f.line("# (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
-		f.line("# only fields the schema left unbounded; each cap is raised to the largest")
-		f.line("# schema bound of its kind, so a schema-bounded field stays governed by its")
-		f.line("# own bound alone. Exceeding a cap raises sofab.SofaLimitError at the count/")
-		f.line("# length header, before any allocation.")
+		f.line("# only fields the schema left unbounded -- a cap must never bind a field")
+		f.line("# the schema already bounds -- so they are applied in on_field,")
+		f.line("# in the else of the schema-bound chain, rather than handed to the Decoder,")
+		f.line("# which knows no schema and would cap every field alike. Exceeding one")
+		f.line("# raises sofab.SofaLimitError at the count/length header, before any")
+		f.line("# allocation.")
 		if g.limits.arrayHas {
 			f.line("MAX_DYN_ARRAY_COUNT = %d", g.limits.arrayCount)
 		}
@@ -180,7 +195,64 @@ func (g *gen) module(s *ir.Schema) []byte {
 	for _, m := range s.Messages {
 		g.emitDataclass(f, exported(m.Name), m.Summary, m.Fields)
 	}
+	// Decode last: an array scope gap-fills with an element CONSTRUCTOR, so every
+	// dataclass a visitor can name must already be defined.
+	f.b.WriteString(decodeSection)
 	return f.bytes()
+}
+
+// decodeSection renders the module's decode half -- the streaming reader plus
+// one flat visitor per generated class -- as text, so module() can size its
+// import line from it.
+func (g *gen) decodeSection(s *ir.Schema) string {
+	f := &pyfile{}
+	f.line("# --- decode ---------------------------------------------------------------")
+	f.blank()
+	g.emitStreamDecoder(f)
+	for _, key := range s.NamedOrder {
+		nt := s.Named[key]
+		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+			g.emitVisitor(f, g.typeName(key), nt.Fields)
+		}
+	}
+	for _, m := range s.Messages {
+		g.emitVisitor(f, exported(m.Name), m.Fields)
+	}
+	return f.b.String()
+}
+
+// emitStreamDecoder writes the generated reader §6.1.1 requires: the streaming
+// half of the decode pair, obtained from a class's decoder() and fed chunks of
+// any size. There is deliberately no finish()/end() — the status each feed
+// returns IS the outcome so far, and whether an INCOMPLETE at end-of-input is
+// acceptable is the caller's framing decision (CORELIB_PLAN §5.2.4).
+func (g *gen) emitStreamDecoder(f *pyfile) {
+	f.line("class _StreamDecoder:")
+	f.line("    \"\"\"Streaming reader: feed chunks, read the message when it is COMPLETE.")
+	f.line("")
+	f.line("    Every feed() returns the outcome for the bytes so far --")
+	f.line("    COMPLETE / INCOMPLETE / INVALID. There is no finalize step: an")
+	f.line("    INCOMPLETE tail is retained and continued by the next chunk, and only")
+	f.line("    the caller's framing knows whether more can still come.")
+	f.line(`    """`)
+	f.line("")
+	f.line("    __slots__ = (\"message\", \"_d\")")
+	f.line("")
+	f.line("    def __init__(self, msg_cls, vis_cls) -> None:")
+	f.line("        self.message = msg_cls()")
+	f.line("        self._d = Decoder(visitor=vis_cls(self.message))")
+	f.line("")
+	f.line("    def feed(self, chunk) -> Status:")
+	f.line("        return self._d.feed(chunk)")
+	f.line("")
+	f.line("    @property")
+	f.line("    def status(self) -> Status:")
+	f.line("        return self._d.status")
+	f.line("")
+	f.line("    @property")
+	f.line("    def error(self):")
+	f.line("        return self._d.error")
+	f.blank()
 }
 
 // schemaHasCountedNativeArray reports whether any field (recursively through
@@ -253,45 +325,6 @@ func schemaHasMaxlenStringBlob(s *ir.Schema) bool {
 	})
 }
 
-// schemaHasFixlenField reports whether any §7.3 guard the module emits needs to
-// compare a fixlen subtype — i.e. whether the generated module references
-// FixlenSubtype at all. fp32/fp64/string/blob and their native arrays all share
-// one wire type (FIXLEN / ARRAY_FIXLEN), so only the subtype separates them;
-// every other kind is settled by the wire type alone and needs no import.
-//
-// Guards are emitted at TWO levels and both must be counted (generator#246): the
-// field-level pyWireGuard, and pyElemWireGuard for every wrapper-sequence
-// ELEMENT down the array element chain — so an `array<string>` (element guard
-// names FixlenSubtype.STRING) or an `array<array<fp32>>` (the nested row's guard
-// names FixlenSubtype.FP32) needs the import even though no *field* is fixlen.
-func schemaHasFixlenField(s *ir.Schema) bool {
-	return schemaHasField(s, fieldHasFixlenGuard)
-}
-
-// fieldHasFixlenGuard reports whether any guard emitted for fld — pyWireGuard on
-// the field itself, plus one pyElemWireGuard per level of the array element chain
-// — names a FixlenSubtype member. A fixlen kind anywhere in that chain does it:
-// as a native array element the containing array's guard carries the subtype
-// (ARRAY_FIXLEN is ambiguous), and as a wrapper element the element's own guard
-// does (FIXLEN is). A struct/union element carries no subtype; its own fields are
-// reached separately through the named types (schemaHasField).
-func fieldHasFixlenGuard(fld *ir.Field) bool {
-	if pyFixlenSubtype(fld.Kind) != "" {
-		return true
-	}
-	if fld.Kind != ir.KindArray {
-		return false
-	}
-	for elem, items := fld.Elem, fld.ElemItems; ; elem, items = items.Elem, items.ElemItems {
-		if pyFixlenSubtype(elem) != "" {
-			return true
-		}
-		if elem != ir.KindArray || items == nil {
-			return false
-		}
-	}
-}
-
 // pyFixlenSubtype returns the FixlenSubtype member a fixlen kind must carry, or
 // "" for a kind that is not fixlen-framed.
 func pyFixlenSubtype(k ir.Kind) string {
@@ -338,45 +371,6 @@ func pyExpectedWire(fld *ir.Field) string {
 		}
 	}
 	return "WireType.SEQUENCE_START" // unreachable: keeps the switch total
-}
-
-// pyWireGuard renders the §7.3 condition a field header must satisfy before its
-// schema-typed reader may run: the wire type the declared type maps to, plus the
-// fixlen subtype where the wire type alone is ambiguous (fp32/fp64/string/blob,
-// and the fp32/fp64 native arrays, which share FIXLEN / ARRAY_FIXLEN).
-func pyWireGuard(fld *ir.Field) string {
-	cond := "fld.type != " + pyExpectedWire(fld)
-	sub := pyFixlenSubtype(fld.Kind)
-	if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
-		sub = pyFixlenSubtype(fld.Elem)
-	}
-	if sub != "" {
-		cond += " or fld.subtype != " + sub
-	}
-	return cond
-}
-
-// pyElemWireGuard is pyWireGuard for a wrapper-sequence ELEMENT: §5.1 makes each
-// element a normal field, so §7.3 applies — an element whose wire type/subtype
-// contradicts the declared element type is skipped like an unknown id (issue
-// #189), not fed to the schema-typed reader. Named by the element's header
-// variable `ef` (`_ef<depth>`) rather than the field's `fld`, and mapped through
-// a synthetic field so it stays in lockstep with the field-level guard.
-func pyElemWireGuard(ef string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
-	x := &ir.Field{Kind: elem, Ref: ref}
-	if elem == ir.KindArray {
-		x.Elem = items.Elem
-		x.ElemRef = items.ElemRef
-	}
-	cond := ef + ".type != " + pyExpectedWire(x)
-	sub := pyFixlenSubtype(elem)
-	if elem == ir.KindArray && isNativeArrayElem(items.Elem) {
-		sub = pyFixlenSubtype(items.Elem)
-	}
-	if sub != "" {
-		cond += " or " + ef + ".subtype != " + sub
-	}
-	return cond
 }
 
 // schemaHasField reports whether any message or named-type field satisfies pred.
@@ -553,38 +547,10 @@ func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field)
 	}
 	f.blank()
 
-	// _unmarshal (pull-parser)
-	f.line("    def deserialize(self, d: Decoder) -> None:")
-	f.line("        while True:")
-	f.line("            fld = d.next()")
-	f.line("            if fld is None or fld.type == WireType.SEQUENCE_END:")
-	f.line("                return")
-	for i, fld := range fields {
-		kw := "elif"
-		if i == 0 {
-			kw = "if"
-		}
-		f.line("            %s fld.id == %d:", kw, fld.ID)
-		// Frame each field by its header wire type before reading (MESSAGE_SPEC
-		// §7.3). The schema-typed readers assume they are only called for their
-		// matching wire type — corelib-py raises SofaStateError from _take_scalar /
-		// _take_fixlen when they are not, which is the right answer to a *caller*
-		// error but the wrong outcome here: a field whose header contradicts the
-		// schema must be skipped like an unknown id, not fail the whole decode.
-		// The wire type is already in hand (fld.type is read above), so the guard
-		// costs one comparison and keeps the decoder synced.
-		f.line("                if %s:", pyWireGuard(fld))
-		f.line("                    d.skip()")
-		f.line("                    continue")
-		g.emitUnmarshal(f, fld)
-	}
-	if len(fields) > 0 {
-		f.line("            else:")
-		f.line("                d.skip()")
-	} else {
-		f.line("            d.skip()")
-	}
-	f.blank()
+	// Decode lives in the flat visitor emitted for this class (visitor.go);
+	// §7.3's "skip a contradicting field" needs no code at all there, because a
+	// field whose wire type contradicts the schema is delivered to a DIFFERENT
+	// typed hook, where its (location, id) matches no arm and it falls through.
 
 	// JSON helpers + encode/decode
 	g.emitJSON(f, name, fields, ms)
@@ -850,128 +816,6 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 	}
 }
 
-// emitWidthGuard writes the §7.1 declared-width rejection for the value just read
-// into `acc` (documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination
-// carrying a value outside its declared range is malformed input. Python's int is
-// unbounded, so nothing masks the value here — the whole defect on this backend
-// was that an out-of-range value was simply KEPT — and the raise aborts the
-// decode before the object is handed back. Nothing is emitted for u64/i64.
-//
-// Mirrors the blob arm's read-then-check order rather than reading into a temp:
-// the guard reads better beside the store, and a raised decode never returns the
-// object it was filling.
-func emitWidthGuard(f *pyfile, ind, acc, name string, k ir.Kind) {
-	lo, hi, ok := ir.NarrowRange(k)
-	if !ok {
-		return
-	}
-	cond := fmt.Sprintf("%s > %d", acc, hi)
-	if lo < 0 {
-		cond = fmt.Sprintf("%s < %d or %s > %d", acc, lo, acc, hi)
-	}
-	f.line("%sif %s:", ind, cond)
-	f.line(`%s    raise SofaDecodeError("%s: value outside declared width %s")`, ind, name, k)
-}
-
-// elemBoundArgs renders the declared element width as the read call's argument
-// list — `255` for an unsigned array, `-128, 127` for a signed one — or "" for
-// u64/i64, whose range is the value domain the corelib already returns.
-//
-// The bound travels WITH the read for the same reason the schema count and a
-// blob's maxlen already do: a scan over the returned list decides an array that
-// arrives, and never runs for one that does not, so a message cut short after an
-// out-of-width element reported INCOMPLETE where §5.2 requires INVALID
-// (generator#267, Crucible F-0043 width_elem_trunc). corelib-py takes the bound
-// on both engines: the native one checks at the element, the pure one at the
-// truncation, which is the same verdict either way.
-func elemBoundArgs(elem ir.Kind) string {
-	lo, hi, ok := ir.NarrowRange(elem)
-	if !ok {
-		return ""
-	}
-	if lo < 0 {
-		return fmt.Sprintf("%d, %d", lo, hi)
-	}
-	return fmt.Sprintf("%d", hi)
-}
-
-// emitArrayWidthGuard is the same §7.1 bound for a native array's ELEMENTS,
-// applied to the assembled list.
-//
-// It stays alongside elemBoundArgs rather than being replaced by it. The two
-// answer different questions: the reader's bound is what makes a TRUNCATED array
-// INVALID, and this scan is what still bounds the elements if a consumer builds
-// against a corelib whose readers ignore the arguments. It costs one pass over a
-// list already in hand.
-func emitArrayWidthGuard(f *pyfile, ind, target, loc string, elem ir.Kind) {
-	lo, hi, ok := ir.NarrowRange(elem)
-	if !ok {
-		return
-	}
-	cond := fmt.Sprintf("_v > %d", hi)
-	if lo < 0 {
-		cond = fmt.Sprintf("_v < %d or _v > %d", lo, hi)
-	}
-	f.line("%sif any(%s for _v in %s):", ind, cond, target)
-	f.line(`%s    raise SofaDecodeError("%s element: value outside declared width %s")`, ind, loc, elem)
-}
-
-func (g *gen) emitUnmarshal(f *pyfile, fld *ir.Field) {
-	acc := "self." + pyIdent(fld.Name)
-	switch fld.Kind {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		f.line("                %s = d.unsigned()", acc)
-		if fld.Kind != ir.KindBitfield {
-			emitWidthGuard(f, "                ", acc, fld.Name, fld.Kind)
-		}
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		f.line("                %s = d.signed()", acc)
-		if fld.Kind != ir.KindEnum {
-			emitWidthGuard(f, "                ", acc, fld.Name, fld.Kind)
-		}
-	case ir.KindBool:
-		f.line("                %s = d.bool()", acc)
-	case ir.KindFP32:
-		f.line("                %s = d.float32()", acc)
-	case ir.KindFP64:
-		f.line("                %s = d.float64()", acc)
-	case ir.KindString:
-		// A bounded string whose UTF-8 BYTE length exceeds its schema maxlen is
-		// malformed input — reject, never truncate (MESSAGE_SPEC §7.1). Bound
-		// against the exact wire byte length the decoder already parsed
-		// (d.fixlen_len(), a non-consuming peek), checked before the string is
-		// materialized — never re-encode the decoded str to measure it.
-		if fld.HasMaxlen {
-			f.line("                d.schema_bounded()")
-			f.line("                if d.fixlen_len() > %d:", fld.Maxlen)
-			f.line(`                    raise SofaDecodeError("%s: string byte length above schema maxlen %d")`, fld.Name, fld.Maxlen)
-		}
-		f.line("                %s = d.string()", acc)
-	case ir.KindBlob:
-		// A bounded blob whose byte length exceeds its schema maxlen is malformed
-		// input — reject, never truncate (MESSAGE_SPEC §7.1). Bound against the
-		// exact wire byte length the decoder already parsed (d.fixlen_len(), a
-		// non-consuming peek) BEFORE the payload is read, exactly as the string arm
-		// above does.
-		//
-		// The order is the whole point (generator#267 / Crucible F-0043): §5.2 makes
-		// INVALID dominate INCOMPLETE, so a message truncated right after the length
-		// word — where the violation is already fully established — must still be
-		// INVALID. Reading first and measuring the decoded bytes afterwards never
-		// reaches the check on such a message and reported INCOMPLETE instead.
-		if fld.HasMaxlen {
-			f.line("                d.schema_bounded()")
-			f.line("                if d.fixlen_len() > %d:", fld.Maxlen)
-			f.line(`                    raise SofaDecodeError("%s: blob byte length above schema maxlen %d")`, fld.Name, fld.Maxlen)
-		}
-		f.line("                %s = d.bytes()", acc)
-	case ir.KindStruct, ir.KindUnion:
-		f.line("                %s.deserialize(d)", acc)
-	case ir.KindArray:
-		g.emitUnmarshalArray(f, fld, acc)
-	}
-}
-
 // capOf maps a schema fixed-count bound to a wrapper array's cap: N when the
 // array declares a count, -1 (dynamic/unbounded) otherwise.
 func capOf(hasCount bool, count int64) int64 {
@@ -979,179 +823,4 @@ func capOf(hasCount bool, count int64) int64 {
 		return count
 	}
 	return -1
-}
-
-func (g *gen) emitUnmarshalArray(f *pyfile, fld *ir.Field, acc string) {
-	// The wire count M IS the array's length (MESSAGE_SPEC §3): the M elements that
-	// arrived are the whole value, so they are taken as they come. A declared
-	// `count: N` is a capacity and bounds M (emitCountGuard, inside); it never adds
-	// elements, so there is nothing to fill in at [M, N).
-	g.unmarshalArray(f, "                ", acc, fld.Name, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax, 0)
-}
-
-// arrayFieldVar names the generated variable holding the Field header that
-// delivered the array being read at `depth`: the message loop's `fld` for a
-// top-level array field, and the enclosing wrapper loop's `_ef<depth-1>` for a
-// nested row (the row's own header, read by that loop's d.next()).
-func arrayFieldVar(depth int) string {
-	if depth == 0 {
-		return "fld"
-	}
-	return fmt.Sprintf("_ef%d", depth-1)
-}
-
-// emitCountGuard rejects a NATIVE array whose wire element count exceeds the
-// schema `count` capacity N. Such a count is INVALID per MESSAGE_SPEC §3+§7 —
-// reject the whole message, never keep-all (generator#100). Decide it at the
-// count header: the wire element count is on the delivered Field (`.count`, read
-// by d.next() before any element), so rejecting BEFORE read_*_array() — which
-// would raise SofaIncompleteError on a truncated tail — makes INVALID dominate
-// INCOMPLETE per §5.2 (generator#216 / F-0032). A check on len() after the read
-// never fires when truncation cuts the array short of the announced count.
-//
-// This lives with the native READ rather than at the top-level field, because a
-// nested native row (array<array<u32>>) is read through exactly the same branch
-// and carries its own capacity: its count header is the row element's header in
-// the enclosing wrapper loop, and bounding it there is the only place the row's
-// `count` can be enforced at all. Count-less (dynamic) arrays have no bound;
-// wrapper-element arrays have no count header and are bounded by element id
-// instead (§5.1, the over-index guard below).
-func emitCountGuard(f *pyfile, ind, loc string, cap int64, depth int) {
-	if cap < 0 {
-		return
-	}
-	f.line("%sd.schema_bounded()", ind)
-	f.line("%sif %s.count > %d:", ind, arrayFieldVar(depth), cap)
-	f.line(`%s    raise SofaDecodeError("%s: array count above schema capacity %d")`, ind, loc, cap)
-}
-
-// unmarshalArray reads an array into `target`, mirroring marshalArray: native
-// array readers for numeric/enum/boolean/bitfield elements, a wrapper-sequence
-// loop for string/blob/struct/union/array elements. Recurses for nested arrays.
-//
-// `loc` is the schema location named in a rejection message (the field name at
-// the top level, suffixed per nesting level for a row).
-func (g *gen) unmarshalArray(f *pyfile, ind, target, loc string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap int64, elemMaxHas bool, elemMax int64, depth int) {
-	switch elem {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		emitCountGuard(f, ind, loc, cap, depth)
-		if elem == ir.KindBitfield {
-			f.line("%s%s = d.read_unsigned_array()", ind, target)
-		} else {
-			f.line("%s%s = d.read_unsigned_array(%s)", ind, target, elemBoundArgs(elem))
-			emitArrayWidthGuard(f, ind, target, loc, elem)
-		}
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		emitCountGuard(f, ind, loc, cap, depth)
-		if elem == ir.KindEnum {
-			f.line("%s%s = d.read_signed_array()", ind, target)
-		} else {
-			f.line("%s%s = d.read_signed_array(%s)", ind, target, elemBoundArgs(elem))
-			emitArrayWidthGuard(f, ind, target, loc, elem)
-		}
-	case ir.KindBool:
-		emitCountGuard(f, ind, loc, cap, depth)
-		f.line("%s%s = [bool(_v) for _v in d.read_unsigned_array()]", ind, target)
-	case ir.KindFP32:
-		emitCountGuard(f, ind, loc, cap, depth)
-		f.line("%s%s = d.read_float32_array()", ind, target)
-	case ir.KindFP64:
-		emitCountGuard(f, ind, loc, cap, depth)
-		f.line("%s%s = d.read_float64_array()", ind, target)
-	default: // string/blob/struct/union/array -> wrapper sequence
-		ef := fmt.Sprintf("_ef%d", depth)
-		ev := fmt.Sprintf("_e%d", depth)
-		f.line("%s%s = []", ind, target)
-		f.line("%swhile True:", ind)
-		f.line("%s    %s = d.next()", ind, ef)
-		f.line("%s    if %s is None or %s.type == WireType.SEQUENCE_END:", ind, ef, ef)
-		f.line("%s        break", ind)
-		// §7.3 (issue #189): an element whose wire type/subtype contradicts the
-		// declared element type is skipped like an unknown id — before the
-		// over-index check, so a mis-typed element is skipped, not rejected for its
-		// id — never handed to the schema-typed reader (which would raise).
-		f.line("%s    if %s:", ind, pyElemWireGuard(ef, elem, ref, items))
-		f.line("%s        d.skip()", ind)
-		f.line("%s        continue", ind)
-		// Fixed-count wrapper array: an element id >= N is INVALID (MESSAGE_SPEC
-		// §5.1/§7 — issue #142), rejected before the list grows, which also bounds
-		// an over-index heap-amplification fill. A dynamic array keeps every index.
-		if cap >= 0 {
-			f.line("%s    d.schema_bounded()", ind)
-			f.line("%s    if %s.id >= %d:", ind, ef, cap)
-			f.line(`%s        raise SofaDecodeError("%s: array index above schema capacity %d")`, ind, target, cap)
-		}
-		switch elem {
-		case ir.KindString:
-			// A string element is keyed by index id: an INTERIOR element equal to the
-			// element default is omitted on the wire, so place the value at its id and
-			// fill any gap with the element default "" (MESSAGE_SPEC §2). The array's
-			// LAST element is always present, so the decoded length -- highest present
-			// id + 1 -- is exact.
-			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
-			f.line(`%s        %s.append("")`, ind, target)
-			// A bounded string element whose UTF-8 BYTE length exceeds the element
-			// maxlen is malformed — reject, never truncate (MESSAGE_SPEC §7.1). Bound
-			// against the wire byte length (non-consuming peek) before the element is
-			// materialized — never re-encode the decoded str to measure it.
-			if elemMaxHas {
-				f.line("%s    d.schema_bounded()", ind)
-				f.line(`%s    if d.fixlen_len() > %d:`, ind, elemMax)
-				f.line(`%s        raise SofaDecodeError("%s: string element byte length above schema maxlen %d")`, ind, target, elemMax)
-			}
-			f.line("%s    %s[%s.id] = d.string()", ind, target, ef)
-		case ir.KindBlob:
-			// A blob element is keyed by index id: a default (empty) element is
-			// omitted on the wire, so place the value at its id and fill any gap
-			// with the element default b"" (MESSAGE_SPEC S2).
-			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
-			f.line(`%s        %s.append(b"")`, ind, target)
-			// A bounded blob element whose byte length exceeds the element maxlen
-			// is malformed — reject, never truncate (MESSAGE_SPEC §7.1). Bound
-			// against the exact wire byte length the decoder already parsed
-			// (d.fixlen_len(), a non-consuming peek) BEFORE the payload is read,
-			// exactly as the string element arm above does.
-			//
-			// The order is the whole point (generator#377 / Crucible F-0062, the
-			// same class as #267 / F-0043 at a site that fix did not cover): §5.2
-			// makes INVALID dominate INCOMPLETE, so a message truncated right after
-			// the fixlen_word — where the violation is already fully established —
-			// must still be INVALID. Reading first and measuring the decoded bytes
-			// afterwards never reaches the check on such a message and reported
-			// INCOMPLETE instead. d.schema_bounded() also switches the receiver-side
-			// max_blob_len cap off (§6.2.1), so this check is the only thing left
-			// standing between a sender-declared length and the payload wait.
-			if elemMaxHas {
-				f.line("%s    d.schema_bounded()", ind)
-				f.line(`%s    if d.fixlen_len() > %d:`, ind, elemMax)
-				f.line(`%s        raise SofaDecodeError("%s: blob element byte length above schema maxlen %d")`, ind, target, elemMax)
-			}
-			f.line("%s    %s[%s.id] = d.bytes()", ind, target, ef)
-		case ir.KindStruct, ir.KindUnion:
-			// A struct/union element is keyed by index id exactly like the string and
-			// blob leaves above (MESSAGE_SPEC §5.1: the element id IS the array
-			// index), so the element is PLACED at target[id] after gap-filling with
-			// default elements -- never appended (generator#247). Appending would
-			// shorten the array by the size of any interior id gap, and would decode a
-			// REOPENED element id as a second element instead of merging into the
-			// first; decoding INTO the element already at that index gives the §7.4
-			// struct-merge for free. The over-index guard above still rejects an
-			// element id >= N, which also bounds this gap-fill.
-			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
-			f.line("%s        %s.append(%s())", ind, target, g.typeName(ref.Key))
-			f.line("%s    %s[%s.id].deserialize(d)", ind, target, ef)
-		case ir.KindArray:
-			// A ROW is keyed by its element id exactly like every other element kind
-			// (§5.1), so it is PLACED at target[id] after gap-filling with empty rows
-			// -- never appended. Appending was unreachable while every row was framed
-			// unconditionally; under §2's sparse rule an interior row equal to the
-			// element default (the empty row) is omitted, and an appending collector
-			// would then shift every later row down by one. The over-index guard above
-			// rejects a row id >= N, which also bounds this gap-fill.
-			g.unmarshalArray(f, ind+"    ", ev, loc+" row", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax, depth+1)
-			f.line("%s    while len(%s) <= %s.id:", ind, target, ef)
-			f.line("%s        %s.append([])", ind, target)
-			f.line("%s    %s[%s.id] = %s", ind, target, ef, ev)
-		}
-	}
 }
