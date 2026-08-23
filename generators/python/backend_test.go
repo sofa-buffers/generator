@@ -64,7 +64,7 @@ func TestPythonStructural(t *testing.T) {
 		// example.yaml has count-bearing native arrays and bounded string/blob
 		// fields, so the flat visitor overrides on_field and needs Field/WireType/
 		// FixlenSubtype alongside the always-present decode names.
-		"from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType",
+		"from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType",
 		"@dataclass",
 		"class Myfirstmessage:",
 		"def serialize(self, e: Encoder)",
@@ -209,13 +209,22 @@ messages:
 		t.Error("a Decoder-level cap also binds schema-bounded fields, which §6.2.1 forbids")
 	}
 
-	// No limits configured -> byte-identical plumbing-free output.
+	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
+	// (§9.5, generator#385). Python is on the server tier, and the caps still
+	// stay out of the Decoder: liveness and placement are unchanged, only the
+	// values' origin is.
 	plain := string(genPy(t, s, map[string]any{})["message.py"])
-	if strings.Contains(plain, "MAX_DYN") || strings.Contains(plain, "SofaLimitError") {
-		t.Error("unset limits must emit no limit plumbing")
+	for _, want := range []string{
+		"MAX_DYN_ARRAY_COUNT = 65536",
+		"MAX_DYN_STRING_LEN = 1048576",
+		"d = Decoder(visitor=_DynVisitor(o))",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("default limits missing %q", want)
+		}
 	}
-	if !strings.Contains(plain, "d = Decoder(visitor=_DynVisitor(o))") {
-		t.Error("unset limits must leave the plain Decoder call unchanged")
+	if strings.Contains(plain, "MAX_DYN_BLOB_LEN") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 }
 
@@ -244,7 +253,7 @@ messages:
 	// no *field* here is fixlen (generator#246), so the full line is asserted — a
 	// prefix match would pass either way and let the missing name through. There is
 	// no WireType: this schema has no native array, so nothing compares one.
-	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor\n") {
 		t.Errorf("message.py needs SofaDecodeError (over-index guard) AND FixlenSubtype (element guard) imported, else NameError at decode:\n%s", mod)
 	}
 	for _, want := range []string{
@@ -297,7 +306,7 @@ messages:
 	// Asserted as the FULL line (FixlenSubtype included — this schema has string
 	// and blob fields, and a string wrapper element): a prefix match cannot tell a
 	// complete import line from a truncated one (generator#246).
-	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor\n") {
 		t.Errorf("message.py must import SofaDecodeError for the maxlen guard (else NameError at decode):\n%s", mod)
 	}
 
@@ -756,6 +765,8 @@ messages:
       l: { id: 11, type: array, items: { type: string, count: 2, maxlen: 4 } }
 `)
 	mod := string(genPy(t, s, map[string]any{})["message.py"])
+	// No SofaLimitError: every field in this schema is bounded, so no receiver
+	// cap is live and the name would be dead (§9.5, generator#385).
 	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType") {
 		t.Errorf("message.py missing the full decode import line:\n%s", mod)
 	}
@@ -861,7 +872,10 @@ func TestPythonFixlenSubtypeImportMatchesUse(t *testing.T) {
 		// name (the reason the gate exists at all). UNBOUNDED fixlen fields are
 		// negatives now: with no bound there is nothing for on_field to frame, and
 		// §7.3 needs no code of its own on the visitor surface.
-		{"unbounded wrapper string array", false, `
+		// An unbounded string element is a POSITIVE again since every target
+		// carries a finite default string cap (§9.5, generator#385): the guard
+		// keys on fld.subtype == FixlenSubtype.STRING, so the name is used.
+		{"unbounded wrapper string array", true, `
       tags: { id: 0, type: array, items: { type: string } }
       n:    { id: 1, type: u32 }`},
 		{"unbounded fp32 rows", false, `
@@ -1278,7 +1292,7 @@ messages:
     payload:
       rows: { id: 0, type: array, items: { type: array, items: { type: u32, count: 3 } } }
 `), map[string]any{})["message.py"])
-	if !strings.Contains(rows, "from sofab import Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType\n") {
+	if !strings.Contains(rows, "from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType\n") {
 		t.Errorf("a nested-row-only over-count guard still needs WireType imported:\n%s", rows)
 	}
 

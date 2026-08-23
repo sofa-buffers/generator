@@ -7,7 +7,11 @@ generic:
   license: MIT                  # SPDX header; omit (or `none`) for no SPDX line
   emit: sources                 # or `project` for a buildable project scaffold
   # Receiver-side decode limits for schema-unbounded fields (no count/maxlen).
-  # Unset = unlimited; exceeding one fails the decode with LimitExceeded.
+  # Every target has a finite DEFAULT for all three (65536 / 1 MiB / 4 MiB on the
+  # server tier, one order down on the client tier) -- there is no unlimited
+  # mode. These lines only OVERRIDE those defaults; exceeding a cap fails the
+  # decode with LimitExceeded, never a clamp. An application-tight bound belongs
+  # in the schema (count/maxlen), where both peers can see it.
   max_dyn_array_count: 65536    # elements, per unbounded array
   max_dyn_string_len: 4096      # bytes, per unbounded string
   max_dyn_blob_len: 4096        # bytes, per unbounded blob

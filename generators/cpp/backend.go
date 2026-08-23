@@ -109,9 +109,10 @@ type gen struct {
 	// check whichever container holds the field.
 	allowDynamic bool
 	// Receiver-side decode limits (generator#102), pure-corelib-cpp path only
-	// (the c-cpp wrapper is statically schema-bounded). Each is active when its
-	// max_dyn_* config key is set AND the schema has an unbounded field of that
-	// kind; the generated deserialize then guards those fields per-field
+	// (the c-cpp wrapper is statically schema-bounded). Each carries the target's
+	// finite default unless the max_dyn_* config key overrides it (§9.5,
+	// generator#385), and is active when the schema has an unbounded field of
+	// that kind; the generated deserialize then guards those fields per-field
 	// (is.exceedLimit() -> Error::LimitExceeded) before any read. limBuffered
 	// additionally caps the corelib's streaming reassembly buffer
 	// (sofab::Limits{max_buffered_field}) — derived, not its own config key: the
@@ -173,24 +174,26 @@ func (g *gen) resolveLimits(s *ir.Schema, cfg map[string]any) {
 		all = append(all, m.Fields...)
 	}
 	b := ir.Bounds(all)
-	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
-		g.limArr, g.limArrHas = v, true
+	d := generator.ServerDynLimits.Resolve(cfg)
+	if b.HasDynArray {
+		g.limArr, g.limArrHas = d.ArrayCount, true
 	}
-	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
-		g.limStr, g.limStrHas = v, true
+	if b.HasDynString {
+		g.limStr, g.limStrHas = d.StringLen, true
 	}
-	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
-		g.limBlob, g.limBlobHas = v, true
+	if b.HasDynBlob {
+		g.limBlob, g.limBlobHas = d.BlobLen, true
 	}
 	// The reassembly cap is the largest byte span a single top-level field can
 	// legitimately reach, so no message the per-field guards accept can trip it
-	// (#228). Derived from the same cost walk as _maxSize, with the configured
-	// caps standing in for the missing schema bounds. A field that is neither
-	// schema-bounded nor covered by a configured cap has no legitimate maximum,
-	// and the cap is one number for the whole stream — so rather than pick a
-	// value that would reject valid traffic, none is emitted and reassembly stays
-	// uncapped (as it is with no limits configured at all). Capping every dynamic
-	// field kind the schema uses is what buys the bound.
+	// (#228). Derived from the same cost walk as _maxSize, with the resolved
+	// caps standing in for the missing schema bounds. Every cap is now finite
+	// (§9.5), so every dynamic field kind the schema uses is covered and the span
+	// is derivable for any schema — where it used to be emitted only for one
+	// whose every dynamic kind happened to be configured. maxFieldSpan may still
+	// decline (an overflowing walk), and then none is emitted and reassembly
+	// stays uncapped rather than carrying a number that would reject valid
+	// traffic.
 	if g.anyLimit() {
 		if v, ok := g.maxFieldSpan(s); ok {
 			g.limBuffered = v

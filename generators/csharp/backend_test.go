@@ -222,8 +222,10 @@ messages:
 		// type, enum the Signed one.
 		`case (Root, 3): if (kind != ArrayKind.Unsigned) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ba: array count above schema capacity 2"); m.ba.Clear(); break;`,
 		`case (Root, 4): if (kind != ArrayKind.Signed) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ea: array count above schema capacity 2"); m.ea.Clear(); break;`,
-		// A count-less array has no schema bound, but still gets the kind test.
-		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; m.da = new ushort[Math.Min(count, Seq.ArrayInitCap)]; break;`,
+		// A count-less array has no schema bound, so the target's finite default
+		// cap governs it (§9.5, generator#385) -- like a schema bound, checked
+		// BEHIND the kind test.
+		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "da: array count above configured limit 65536"); m.da = new ushort[Math.Min(count, Seq.ArrayInitCap)]; break;`,
 		// The skip counter is armed per kind; each id disarms under its own kind only.
 		"            ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 3) => 0,\n                (Root, 5) => 0,\n                _ => count,\n            },",
 		"            ArrayKind.Signed => (cur, id) switch {\n                (Root, 1) => 0,\n                (Root, 4) => 0,\n                _ => count,\n            },",
@@ -274,8 +276,9 @@ messages:
 		// the schema capacity bound behind it.
 		`case (Root, 0): if (kind != ArrayKind.Fp32) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "f32: array count above schema capacity 4"); m.f32 = new float[count]; break;`,
 		`case (Root, 1): if (kind != ArrayKind.Fp64) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "f64: array count above schema capacity 2"); m.f64 = new double[count]; break;`,
-		// A count-less fixlen array has no schema bound but still gets the kind test.
-		`case (Root, 2): if (kind != ArrayKind.Fp32) break; m.dyn = new float[Math.Min(count, Seq.ArrayInitCap)]; break;`,
+		// A count-less fixlen array has no schema bound, so the finite default cap
+		// governs it (§9.5, generator#385), behind the kind test.
+		`case (Root, 2): if (kind != ArrayKind.Fp32) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "dyn: array count above configured limit 65536"); m.dyn = new float[Math.Min(count, Seq.ArrayInitCap)]; break;`,
 		// The skip counter: the fp32 ids disarm only under Fp32, the fp64 id only
 		// under Fp64. An fp64 header at id 0 therefore arms `count` discards.
 		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 2) => 0,\n                _ => count,\n            },",
@@ -449,19 +452,22 @@ messages:
 		t.Error("bounded field must keep only its #100 schema-capacity guard")
 	}
 
-	// No limits configured -> no limit plumbing at all; only the unconditional
-	// eager-allocation hardening of the count-less arm remains.
+	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
+	// (§9.5, generator#385). C# is on the server tier. The eager-allocation
+	// hardening of the count-less arm is orthogonal and remains either way.
 	plain := buildModule(t, []byte(src), "dyn.yaml", map[string]any{})
-	if strings.Contains(plain, "MaxDyn") || strings.Contains(plain, "LimitExceeded") {
-		t.Error("unset limits must emit no limit plumbing")
-	}
 	for _, want := range []string{
-		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; m.arr = new ulong[Math.Min(count, Seq.ArrayInitCap)]; break;",
+		"const long MaxDynArrayCount = 65536;",
+		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[Math.Min(count, Seq.ArrayInitCap)]; break;",
 		"m.arr = Seq.EnsureCap(m.arr, ai, acap); m.arr[ai++] = (ulong)value;",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("no-config Message.cs missing hardened count-less arm %q", want)
 		}
+	}
+	// Liveness is still a property of the schema, not of the configuration.
+	if strings.Contains(plain, "MaxDynBlobLen") {
+		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 	// The bounded array allocates the wire count exactly (bounded by its schema
 	// capacity guard), never lazy growth and never N.
@@ -774,7 +780,12 @@ messages:
 		// NATIVE row (the id-blind collector): placed at out[id], bounded by the outer
 		// array's count, and the fill then addresses the latched row. The §7.3 kind
 		// test fronts both (generator#254): a mis-typed row is skipped whole.
-		"case (Root_rows, _): if (kind != ArrayKind.Unsigned) break; if (id >= 2) throw new SofabException(SofabError.InvalidMessage, " +
+		// The ROW itself is count-less, so its element count also meets the
+		// target's finite default cap (§9.5, generator#385) -- a bound on the
+		// inner array, distinct from the outer index bound beside it.
+		"case (Root_rows, _): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, " +
+			"\"Root_rows element: array count above configured limit 65536\"); " +
+			"if (id >= 2) throw new SofabException(SofabError.InvalidMessage, " +
 			"\"Root_rows element: array index above schema capacity 2\"); " +
 			"while (m.rows.Count <= id) m.rows.Add(new List<uint>()); m.rows[id] = new List<uint>(); _ixRoot_rows = id; break;",
 		// the §7.1 width guard for the u32 element follows afill-- and precedes the

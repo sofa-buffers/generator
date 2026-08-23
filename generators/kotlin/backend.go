@@ -88,10 +88,11 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 	return ms
 }
 
-// limitSet is the receiver-side decode-limit configuration (generator#102). An
-// entry is active only when its key is configured AND the schema actually has an
-// unbounded field of that kind -- otherwise the option would be inert and no
-// limit plumbing is emitted. The Kotlin visitor guards each unbounded field
+// limitSet is the receiver-side decode-limit configuration (generator#102).
+// Every cap is always set -- the target carries a finite default that the config
+// key only overrides (§9.5, generator#385) -- so an entry is active exactly when
+// the schema actually has an unbounded field of that kind; otherwise the cap
+// would be inert and no limit plumbing is emitted. The Kotlin visitor guards each unbounded field
 // individually (like Rust/Java/C#), so the configured value is emitted as-is;
 // schema-bounded fields never see it and keep their own §7.1 guard.
 type limitSet struct {
@@ -105,15 +106,16 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 		all = append(all, m.Fields...)
 	}
 	b := ir.Bounds(all)
+	d := generator.ClientDynLimits.Resolve(cfg)
 	var l limitSet
-	if v, ok := cfgLimit(cfg, "max_dyn_array_count"); ok && b.HasDynArray {
-		l.arrayCount, l.arrayHas = v, true
+	if b.HasDynArray {
+		l.arrayCount, l.arrayHas = d.ArrayCount, true
 	}
-	if v, ok := cfgLimit(cfg, "max_dyn_string_len"); ok && b.HasDynString {
-		l.stringLen, l.stringHas = v, true
+	if b.HasDynString {
+		l.stringLen, l.stringHas = d.StringLen, true
 	}
-	if v, ok := cfgLimit(cfg, "max_dyn_blob_len"); ok && b.HasDynBlob {
-		l.blobLen, l.blobHas = v, true
+	if b.HasDynBlob {
+		l.blobLen, l.blobHas = d.BlobLen, true
 	}
 	return l
 }

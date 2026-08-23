@@ -56,17 +56,17 @@
     "max_dyn_array_count": {
       "type": "integer",
       "minimum": 1,
-      "description": "Receiver-side decode limit: maximum element count accepted for an UNBOUNDED array (one without a schema `count`). Exceeding it fails the decode with the corelib's LimitExceeded error - never a clamp. Unset (the default) = unlimited (today's behavior). Fields with a schema `count` are governed by that bound instead (generator#100); a field that legitimately needs more than this cap gets an explicit schema bound. Not honored by targets whose storage is statically schema-bounded (c, cpp corelib: c-cpp, rust no_std)."
+      "description": "Receiver-side decode limit: maximum element count accepted for an UNBOUNDED array (one without a schema `count`). Exceeding it fails the decode with the corelib's LimitExceeded error - never a clamp. There is no unset state and no unlimited mode: every target has a finite DEFAULT, and this key only overrides it. The defaults are 65536 on the server tier (go, java, csharp, python, rust std, cpp with corelib: cpp, zig) and 16384 on the client tier (typescript, dart, kotlin). Note the unit: this is an ELEMENT count, not a byte budget - 65536 u64 elements is 512 KiB. Fields with a schema `count` are governed by that bound instead (generator#100); a field that legitimately needs more than this cap gets an explicit schema bound. Not honored by targets whose storage is statically schema-bounded (c, cpp corelib: c-cpp, rust no_std)."
     },
     "max_dyn_string_len": {
       "type": "integer",
       "minimum": 1,
-      "description": "Receiver-side decode limit: maximum byte length accepted for an UNBOUNDED string (one without a schema `maxlen`). Checked at the length header, before the payload is buffered or allocated; exceeding it fails the decode with the corelib's LimitExceeded error. Unset (the default) = unlimited. Fields with a schema `maxlen` are governed by that bound instead. Not honored by statically bounded targets (c, cpp corelib: c-cpp, rust no_std)."
+      "description": "Receiver-side decode limit: maximum byte length accepted for an UNBOUNDED string (one without a schema `maxlen`). Checked at the length header, before the payload is buffered or allocated; exceeding it fails the decode with the corelib's LimitExceeded error - never a clamp. There is no unset state and no unlimited mode: every target has a finite DEFAULT, and this key only overrides it. The defaults are 1 MiB (1048576) on the server tier (go, java, csharp, python, rust std, cpp with corelib: cpp, zig) and 256 KiB (262144) on the client tier (typescript, dart, kotlin). Fields with a schema `maxlen` are governed by that bound instead. Not honored by statically bounded targets (c, cpp corelib: c-cpp, rust no_std)."
     },
     "max_dyn_blob_len": {
       "type": "integer",
       "minimum": 1,
-      "description": "Receiver-side decode limit: maximum byte length accepted for an UNBOUNDED blob (one without a schema `maxlen`). Checked at the length header, before the payload is buffered or allocated; exceeding it fails the decode with the corelib's LimitExceeded error. Unset (the default) = unlimited. Fields with a schema `maxlen` are governed by that bound instead. Not honored by statically bounded targets (c, cpp corelib: c-cpp, rust no_std)."
+      "description": "Receiver-side decode limit: maximum byte length accepted for an UNBOUNDED blob (one without a schema `maxlen`). Checked at the length header, before the payload is buffered or allocated; exceeding it fails the decode with the corelib's LimitExceeded error - never a clamp. There is no unset state and no unlimited mode: every target has a finite DEFAULT, and this key only overrides it. The defaults are 4 MiB (4194304) on the server tier (go, java, csharp, python, rust std, cpp with corelib: cpp, zig) and 1 MiB (1048576) on the client tier (typescript, dart, kotlin). Fields with a schema `maxlen` are governed by that bound instead. Not honored by statically bounded targets (c, cpp corelib: c-cpp, rust no_std)."
     },
     "emit": {
       "type": "string",

@@ -595,8 +595,10 @@ func TestKotlinResetForReuse(t *testing.T) {
 // TestKotlinDecodeLimits: the max_dyn_* config keys bake receiver-side caps into
 // the generated visitor -- named constants plus a LIMIT_EXCEEDED guard on every
 // SCHEMA-UNBOUNDED field, checked at the wire count/length header before any
-// allocation. Schema-bounded fields keep only their INVALID guard, and an unset
-// (or inert) key emits nothing at all.
+// allocation. Schema-bounded fields keep only their INVALID guard, and a cap
+// that the schema leaves nothing to govern emits nothing at all. Every target
+// has a finite default, so an unconfigured key means the default, not unlimited
+// (§9.5, generator#385).
 func TestKotlinDecodeLimits(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      da: { id: 0, type: array, items: { type: u32 } }\n" +
@@ -624,10 +626,22 @@ func TestKotlinDecodeLimits(t *testing.T) {
 	if !strings.Contains(m, `if (count > 4) throw SofabException(SofabError.INVALID_MSG, "ba: array count above schema capacity 4")`) {
 		t.Error("a schema-bounded array keeps its own INVALID guard")
 	}
-	// Unset keys emit nothing.
+	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
+	// (§9.5, generator#385). Kotlin Multiplatform is on the client tier: 16384
+	// elements, 256 KiB of string, 1 MiB of blob.
 	plain := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
-	if strings.Contains(plain, "MAX_DYN_") || strings.Contains(plain, "LIMIT_EXCEEDED") {
-		t.Error("an unset max_dyn_* key must leave the output free of limit plumbing")
+	for _, want := range []string{
+		"const val MAX_DYN_ARRAY_COUNT = 16384L",
+		"const val MAX_DYN_STRING_LEN = 262144L",
+		"const val MAX_DYN_BLOB_LEN = 1048576L",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("M.kt missing default cap %q", want)
+		}
+	}
+	// The schema-bounded array is still governed by its own bound alone.
+	if strings.Contains(plain, `"ba: array count above configured limit`) {
+		t.Error("a schema-bounded array must not be governed by a receiver cap")
 	}
 }
 
