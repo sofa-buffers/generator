@@ -60,7 +60,11 @@ for a language with similar requirements as a reference:
   `generators/zig/`.
 - Managed/GC runtime → `generators/java/`, `csharp/`, `golang/`.
 
-Per-target design notes live in `docs/generator/<lang>.md`.
+Per-target **design** notes live in `./docs/ARCHITECTURE.md`.
+`docs/generator/<lang>.md` is **user documentation for that target's config
+options** — the options table plus a chapter per non-trivial switch, describing
+the current state. Design rationale, issue numbers and change history do not
+belong there.
 
 ## Definition of done for a new target/corelib
 

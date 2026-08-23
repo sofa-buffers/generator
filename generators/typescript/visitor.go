@@ -220,8 +220,7 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			// element widens through a JS double, so readFp32Array would quiet a
 			// signaling NaN element exactly as readFp32 quiets a scalar one
 			// (generator#235). Only a native fp32 array (the field's own element kind)
-			// is covered; an fp32 row nested inside a wrapper array still widens --
-			// see docs/generator/typescript.md.
+			// is covered; an fp32 row nested inside a wrapper array still widens.
 			g.emitFp32ArrayDecodeCase(f, x, guard, acc)
 			return
 		}

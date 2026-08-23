@@ -213,7 +213,7 @@ func (g *gen) decodeStorage(f *ir.Field) string {
 // fp32). Both decode through a JS number, which cannot carry an fp32 NaN payload
 // (MESSAGE_SPEC §4.6), so the wire bytes are kept beside the value. An fp32 row
 // nested inside a wrapper array is NOT covered — its rows have no field of their
-// own to hang the companion on; see docs/generator/typescript.md.
+// own to hang the companion on. See ARCHITECTURE §9.3 (decode families).
 func fp32RawCompanion(f *ir.Field) bool {
 	return f.Kind == ir.KindFP32 || (f.Kind == ir.KindArray && f.Elem == ir.KindFP32)
 }

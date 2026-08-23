@@ -444,7 +444,7 @@ func (g *gen) cppDefault(f *ir.Field) string {
 // N stays shorter than N on every profile. That is what the container change
 // bought: previously a std::array<T,N> zero-filled whatever the initializer left
 // out, and the same schema then had two different construction values (and two
-// different wire images). See docs/generator/cpp.md.
+// different wire images).
 func (g *gen) cppNativeArrayBraces(f *ir.Field) string {
 	vals, _ := f.Default.([]any)
 	return "{" + strings.Join(g.cppArrayElemLits(f, vals), ", ") + "}"
