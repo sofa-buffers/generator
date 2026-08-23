@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -94,11 +95,11 @@ func TestTSWireTypeGuard(t *testing.T) {
 		// generator#235 — see TestTSFp32SignalingNaNRawChannel); the guard in front
 		// of it is the same one every other fixlen field gets.
 		"case 3: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp32) { c.skip(c.wire); break; } const _r = c.readFp32Raw();",
-		"case 4: if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; } ME.decodeInto(c, o.e); break;", // nested message, decoded into the existing member (§7.4)
+		"case 4: if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; } _decodeIntoME(c, o.e); break;", // nested message, decoded into the existing member (§7.4)
 		"case 5: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.f = c.readUnsignedArray(undefined, 4294967295) as number[]; break;",
 		"case 6: if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } o.g = c.readSignedArray(undefined, -32768, 32767) as number[]; break;",
 		"case 7: if (c.wire !== WireType.ArrayFixlen || c.fixSub !== FixlenSubtype.Fp64) { c.skip(c.wire); break; } o.h = c.readFp64Array(); break;",
-		"case 8: {\n        if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; }", // composite array wrapper sequence (SequenceStart, no subtype)
+		"case 8: {\n      if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; }", // composite array wrapper sequence (SequenceStart, no subtype)
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing wire-type guard %q\n%s", want, mod)
@@ -136,7 +137,7 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 		`if (c.id >= 3) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 3"); const _id = c.id; while (arr.length <= _id) arr.push(new Uint8Array());`,
 		// The struct-element path now places by id like the leaf paths above; the
 		// guard runs first and so also bounds the gap-fill (generator#247).
-		`if (c.id >= 2) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 2"); const _id = c.id; while (arr.length <= _id) arr.push(new MBpElem()); MBpElem.decodeInto(c, arr[_id]!);`,
+		`if (c.id >= 2) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 2"); const _id = c.id; while (arr.length <= _id) arr.push(new MBpElem()); _decodeIntoMBpElem(c, arr[_id]!);`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing over-index guard %q", want)
@@ -283,16 +284,16 @@ func TestTSStructural(t *testing.T) {
 		"export class Myfirstmessage {",
 		"serialize(os: OStream): void {",
 		"static decode(bytes: Uint8Array): Myfirstmessage {",
-		"return Myfirstmessage.decodeFrom(new Cursor(bytes));",
-		"static decodeFrom(c: Cursor): Myfirstmessage {",
+		"return _decodeFromMyfirstmessage(new Cursor(bytes));",
+		"function _decodeFromMyfirstmessage(c: Cursor): Myfirstmessage {",
 		"while (c.readHeader()) {",        // monomorphic pull loop
 		"switch (c.id) {",                 // one switch per type
 		"default: c.skip(c.wire); break;", // forward-compat skip
-		"static decodeInto(c: Cursor, o: Myfirstmessage): Myfirstmessage {",
+		"function _decodeIntoMyfirstmessage(c: Cursor, o: Myfirstmessage): Myfirstmessage {",
 		// Nested message recursion decodes INTO the existing member, so a repeated
 		// field id continues that scope instead of replacing it (MESSAGE_SPEC §7.4,
 		// generator#175).
-		"MyfirstmessageSomestruct.decodeInto(c, o.somestruct); break;",
+		"_decodeIntoMyfirstmessageSomestruct(c, o.somestruct); break;",
 		`while (c.readHeader()) { if ((c.wire as WireType) !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); continue; } if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(16); }`, // wrapper-element §7.3 wire guard (#189) + id-aware string-list, over-index + over-maxlen rejected (S2/S5.1/S7/S7.1, #142)
 		"o.someu64 = BigInt(c.readUnsigned()); break;", // u64 -> bigint, number-first
 		// MESSAGE_SPEC §2: a struct/union FIELD opens lazily and closes with the
@@ -342,8 +343,8 @@ func TestTSStructural(t *testing.T) {
 	}
 	// decode() still goes through the Cursor, not the visitor.
 	for _, want := range []string{
-		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    return Myfirstmessage.decodeFrom(new Cursor(bytes));",
-		"  static decodeInto(c: Cursor, o: Myfirstmessage): Myfirstmessage {\n    while (c.readHeader()) {",
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    return _decodeFromMyfirstmessage(new Cursor(bytes));",
+		"function _decodeIntoMyfirstmessage(c: Cursor, o: Myfirstmessage): Myfirstmessage {\n  while (c.readHeader()) {",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("the one-shot decode must stay on the Cursor; missing %q", want)
@@ -520,8 +521,8 @@ func TestTSInt64Long(t *testing.T) {
 		// Decode bypasses the setter (readers return canonical Long[]); a wire count
 		// above the schema capacity rejects as INVALID (generator#100), and a wire
 		// count below it is simply the array's length — nothing is filled in.
-		`case 0: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o._us = c.readUnsignedArrayLong(8); break;`,
-		`case 1: if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } o._is = c.readSignedArrayLong(8); break;`,
+		`case 0: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o["_us"] = c.readUnsignedArrayLong(8); break;`,
+		`case 1: if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } o["_is"] = c.readSignedArrayLong(8); break;`,
 		// toJSON prints via Long.toString with the schema signedness.
 		`"us": this._us.map((_x0) => _x0.toString(false)),`,
 		`"is": this._is.map((_x0) => _x0.toString(true)),`,
@@ -544,8 +545,8 @@ func TestTSInt64Long(t *testing.T) {
 		"if (!(this._i.low === 4294967289 && this._i.high === 4294967295)) return false;",
 		// Decode bypasses the accessor and takes the corelib's scalar Long readers,
 		// so no bigint is materialised on the hot path in either direction.
-		"case 4: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o._u = c.readUnsignedLong(); break;",
-		"case 5: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o._i = c.readSignedLong(); break;",
+		"case 4: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o[\"_u\"] = c.readUnsignedLong(); break;",
+		"case 5: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o[\"_i\"] = c.readSignedLong(); break;",
 		// This schema is all-64-bit, so it also takes corelib-ts's opt-in Long
 		// channel on the push decoders (#344): the visitor declares the flag, its
 		// integer hooks are typed Long, and a 64-bit arm stores the value with no
@@ -698,7 +699,7 @@ func TestTSInt64Number(t *testing.T) {
 	for _, want := range []string{
 		// Arrays are Long-backed exactly as in long mode.
 		"os.writeUnsignedArrayLong(0, this._us);",
-		`case 0: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o._us = c.readUnsignedArrayLong(8); break;`,
+		`case 0: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o["_us"] = c.readUnsignedArrayLong(8); break;`,
 		// Scalars are plain numbers: number default, !== 0 guard, Number() decode.
 		"u: number = 0;",
 		"i: number = -7;",
@@ -747,7 +748,7 @@ messages:
 			// the caps are constants, so a fresh literal per decode() call would be
 			// an allocation with a constant value on the decode hot path (#339).
 			"const _LIMITS = Object.freeze({ maxArrayCount: MAX_DYN_ARRAY_COUNT, maxStringLen: MAX_DYN_STRING_LEN });",
-			"return Dyn.decodeFrom(new Cursor(bytes, _LIMITS));",
+			"return _decodeFromDyn(new Cursor(bytes, _LIMITS));",
 		} {
 			if !strings.Contains(mod, want) {
 				t.Errorf("int64: %s message.ts missing %q", mode, want)
@@ -763,7 +764,7 @@ messages:
 	if strings.Contains(plain, "MAX_DYN") || strings.Contains(plain, "maxArrayCount") {
 		t.Error("unset limits must emit no limit plumbing")
 	}
-	if !strings.Contains(plain, "return Dyn.decodeFrom(new Cursor(bytes));") {
+	if !strings.Contains(plain, "return _decodeFromDyn(new Cursor(bytes));") {
 		t.Error("unset limits must keep the bare Cursor construction")
 	}
 }
@@ -1124,8 +1125,8 @@ func TestTSInt64Default(t *testing.T) {
 // TestTSDecodeIntoNestedScope pins the MESSAGE_SPEC §7.4 struct/union half
 // (generator#175): a field id repeating within one scope RE-OPENS that scope
 // rather than starting a new one, so children an earlier opening set whose ids do
-// not recur must survive. The decode loop therefore lives in decodeInto(c, o) and
-// nested members decode INTO the existing object; assigning decodeFrom(c)'s fresh
+// not recur must survive. The decode loop therefore lives in _decodeInto<T>(c, o)
+// and nested members decode INTO the existing object; assigning the from-decoder's fresh
 // object instead discarded the earlier opening.
 func TestTSDecodeIntoNestedScope(t *testing.T) {
 	mod := genTSWith(t, `
@@ -1138,13 +1139,13 @@ messages:
       e: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u8 } } } }
 `, map[string]any{})
 	for _, want := range []string{
-		// decodeFrom stays the fresh-object entry point, delegating to decodeInto.
-		"static decodeFrom(c: Cursor): M {",
-		"return M.decodeInto(c, new M());",
-		"static decodeInto(c: Cursor, o: M): M {",
+		// The from-decoder stays the fresh-object entry point, delegating to the into one.
+		"function _decodeFromM(c: Cursor): M {",
+		"return _decodeIntoM(c, new M());",
+		"function _decodeIntoM(c: Cursor, o: M): M {",
 		// Nested struct and union both decode into the existing member.
-		"MS.decodeInto(c, o.s); break;",
-		"MU.decodeInto(c, o.u); break;",
+		"_decodeIntoMS(c, o.s); break;",
+		"_decodeIntoMU(c, o.u); break;",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q\n%s", want, mod)
@@ -1152,8 +1153,8 @@ messages:
 	}
 	// A nested member must never be replaced by a fresh object.
 	for _, bad := range []string{
-		"o.s = MS.decodeFrom(c)",
-		"o.u = MU.decodeFrom(c)",
+		"o.s = _decodeFromMS(c)",
+		"o.u = _decodeFromMU(c)",
 	} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("message.ts must not replace a nested member (%q):\n%s", bad, mod)
@@ -1164,10 +1165,10 @@ messages:
 	// must merge into it exactly like a re-opened field (§7.4, generator#247). It
 	// therefore decodes INTO the element placed at that index, never into a fresh
 	// object that would be appended alongside.
-	if !strings.Contains(mod, "MEElem.decodeInto(c, arr[_id]!);") {
+	if !strings.Contains(mod, "_decodeIntoMEElem(c, arr[_id]!);") {
 		t.Errorf("array elements must decode INTO the element at their id:\n%s", mod)
 	}
-	if strings.Contains(mod, "arr.push(MEElem.decodeFrom(c))") {
+	if strings.Contains(mod, "arr.push(_decodeFromMEElem(c))") {
 		t.Errorf("array elements must not be appended id-blind:\n%s", mod)
 	}
 }
@@ -1279,8 +1280,8 @@ messages:
 
 	for _, want := range []string{
 		// placement, not append — and the gap-fill that precedes it
-		"const _id = c.id; while (arr.length <= _id) arr.push(new VecObjsElem()); VecObjsElem.decodeInto(c, arr[_id]!);",
-		"const _id = c.id; while (arr.length <= _id) arr.push(new VecDynElem()); VecDynElem.decodeInto(c, arr[_id]!);",
+		"const _id = c.id; while (arr.length <= _id) arr.push(new VecObjsElem()); _decodeIntoVecObjsElem(c, arr[_id]!);",
+		"const _id = c.id; while (arr.length <= _id) arr.push(new VecDynElem()); _decodeIntoVecDynElem(c, arr[_id]!);",
 		`const _id = c.id; while (arr.length <= _id) arr.push(""); `,
 		// A nested ROW is placed by id too. This was the id-blind append: it was
 		// unreachable while every row was written, and an interior gap makes it
@@ -1296,7 +1297,7 @@ messages:
 	}
 	// The defects this replaced: appending ignored the id entirely.
 	for _, bad := range []string{
-		"arr.push(VecObjsElem.decodeFrom(c))",
+		"arr.push(_decodeFromVecObjsElem(c))",
 		"arr.push(c.readUnsignedArray(3, 4294967295) as number[])",
 		"arr.push(((): string[] =>",
 	} {
@@ -2040,5 +2041,61 @@ messages:
 	// plain expression — a guard here would be dead code on every element.
 	if !strings.Contains(got, `"wrows", (v) => BigInt(v))`) {
 		t.Errorf("a u64 row must keep the bare conversion:\n%s", got)
+	}
+}
+
+// TestTSClosedNameSet pins CORELIB_PLAN §6.1.1 on the generated class surface
+// (issue #384, Crucible G-0040). The set of names a generated object may carry
+// for the wire operations is CLOSED — encode, decode, try_decode, serialize,
+// deserialize, decoder — and the clause names `decode_from` and `decode_into`
+// among the spellings a port must not invent beside them. Only the casing/idiom
+// may be adapted, so `decodeFrom` is not a different name from `decode_from`: it
+// is that name spelled in TypeScript, and a generated class carrying it makes a
+// developer learn a per-language second entry point into one operation.
+//
+// The cursor-level steps still exist — §7.4 needs the loop separable from the
+// fresh-object entry — but as MODULE-LEVEL functions of the generated file:
+// reachable from the sibling classes that decode into one another (that is why a
+// `#private` static cannot do the job), exported to nobody.
+func TestTSClosedNameSet(t *testing.T) {
+	// example.yaml reaches every class shape the backend emits: message, nested
+	// struct, union, and the per-element wrapper classes.
+	mod := genTS(t)
+	for _, gone := range []string{
+		"static decodeFrom", "static decodeInto", // on the class itself
+		".decodeFrom(", ".decodeInto(", // and as a call on any generated type
+		"export function _decodeFrom", "export function _decodeInto", // module-level, but exported
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("§6.1.1 closes the generated object's name set: message.ts must not emit %q", gone)
+		}
+	}
+	// What replaces them, and the delegation chain kept intact.
+	for _, want := range []string{
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    return _decodeFromMyfirstmessage(new Cursor(bytes));",
+		"function _decodeFromMyfirstmessage(c: Cursor): Myfirstmessage {\n  return _decodeIntoMyfirstmessage(c, new Myfirstmessage());",
+		"function _decodeIntoMyfirstmessage(c: Cursor, o: Myfirstmessage): Myfirstmessage {",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q", want)
+		}
+	}
+	// `decode` is the only decode-side name the CLASS carries. Any other static
+	// on a generated class must come from the language-mandated-extra escape
+	// hatch, not from a second spelling of a wire operation.
+	statics := regexp.MustCompile(`(?m)^  static (?:readonly )?(\w+)`).FindAllStringSubmatch(mod, -1)
+	if len(statics) == 0 {
+		t.Fatal("no statics found — the scan is not seeing the class bodies")
+	}
+	allowed := map[string]bool{
+		"decode":         true, // §6.1.1
+		"fromJSON":       true, // JSON bridge, not a wire entry point
+		"MAX_SIZE":       true, // the schema's worst-case size constant, not an entry point
+		"MAX_SIZE_LIMIT": true, // its unbounded-schema companion, likewise a constant
+	}
+	for _, m := range statics {
+		if !allowed[m[1]] {
+			t.Errorf("generated class carries static %q; §6.1.1 closes the set (add it to the allowlist only if it is a language-mandated extra, never a second wire entry point)", m[1])
+		}
 	}
 }

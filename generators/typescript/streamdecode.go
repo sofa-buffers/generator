@@ -269,12 +269,12 @@ func (g *gen) emitStreamVisitor(f *tsfile, typeName string, fields []*ir.Field) 
 // message class.
 //
 // It differs from storage() in one case and for one reason: a Long-backed array
-// keeps a PRIVATE `_name` backing field that the cursor path writes directly,
-// which it may because decodeInto is a static method of the class itself. The
-// visitor is a separate class and cannot, so it goes through the public
-// accessor. That is not merely a workaround -- the getter hands back the backing
-// array itself, so an indexed element write still lands on it, and the setter's
-// one-time conversion is exactly right for `= []`.
+// keeps a PRIVATE `_name` backing field that the cursor path writes directly (as
+// `o["_name"]` -- see decodeStorage). The visitor holds the object as `this.o`
+// and goes through the public accessor instead. That is not merely a workaround
+// -- the getter hands back the backing array itself, so an indexed element write
+// still lands on it, and the setter's one-time conversion is exactly right for
+// `= []`.
 func (g *gen) streamStorage(x *ir.Field) string {
 	return "this.o." + x.Name
 }

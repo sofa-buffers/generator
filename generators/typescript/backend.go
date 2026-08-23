@@ -305,7 +305,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 }
 
 // decodesAnyField reports whether any emitted class (message, struct or union)
-// has at least one field, i.e. whether decodeFrom emits any switch case and thus
+// has at least one field, i.e. whether the pull decoder emits any switch case and thus
 // the WireType-guarded import is needed. Enums and bitfields carry no fields.
 func decodesAnyField(s *ir.Schema) bool {
 	for _, m := range s.Messages {
@@ -419,10 +419,12 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field, isM
 	// JSON
 	g.emitJSON(f, name, fields)
 
-	// decode (monomorphic pull cursor)
-	g.emitDecode(f, name, fields)
+	// decode (monomorphic pull cursor): the class carries only the public
+	// decode(bytes) entry; its loop follows at module level (see emitDecode).
+	g.emitDecode(f, name)
 	f.line("}")
 	f.blank()
+	g.emitDecodeLoop(f, name, fields)
 }
 
 // emitEncode emits a message's worst-case size constant and the convenience

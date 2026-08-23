@@ -7,50 +7,74 @@ import (
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
-// emitDecode generates the message's decode surface: a static decode(bytes)
-// entry plus a monomorphic pull decoder decodeFrom(c: Cursor). One switch(id)
-// reads each field straight off a corelib Cursor into `this` (PLAN §6.4). Every
-// reader call site has a single caller (this per-type decoder), so V8 keeps it
+// emitDecode generates the class-side half of the message's decode surface: the
+// single public entry point decode(bytes), which runs the monomorphic pull
+// decoder emitDecodeLoop puts at module level. One switch(id) reads each field
+// straight off a corelib Cursor into the destination object (PLAN §6.4). Every
+// reader call site has a single caller (that per-type decoder), so V8 keeps it
 // monomorphic and inlines the loop — unlike the former push/visitor path, whose
 // shared call sites went megamorphic across the nested message types. A nested
-// message recurses into its own decodeInto, which consumes through its matching
-// SequenceEnd (readHeader() returns false there); an unknown id is consumed by
-// skip() for forward/backward compatibility.
+// message recurses into its own decode-into function, which consumes through its
+// matching SequenceEnd (readHeader() returns false there); an unknown id is
+// consumed by skip() for forward/backward compatibility.
 //
-// The loop body lives in decodeInto(c, o) rather than decodeFrom so a re-opened
-// nested scope can decode INTO the member an earlier opening already populated
-// (MESSAGE_SPEC §7.4): last occurrence wins per field id, and children the
-// earlier opening set whose ids do not recur are retained. decodeFrom keeps its
-// signature as the fresh-object entry point.
-func (g *gen) emitDecode(f *tsfile, name string, fields []*ir.Field) {
+// decode(bytes) is the whole decode surface the generated CLASS carries.
+// CORELIB_PLAN §6.1.1 closes the generated object's name set to
+// encode/decode/try_decode/serialize/deserialize/decoder and names `decode_from`
+// and `decode_into` among the spellings a port must not invent beside them; the
+// only adaptation it allows is casing/idiom, so `decodeFrom` IS `decode_from`
+// spelled in TypeScript (issue #384). The two intermediate steps are therefore
+// module-level functions, which is the TypeScript analogue of Dart's
+// library-private `_decodeInto`: reachable from every sibling class in the
+// generated module (they call each other's decoders), exported from it nowhere.
+func (g *gen) emitDecode(f *tsfile, name string) {
 	f.line("  static decode(bytes: Uint8Array): %s {", name)
-	f.line("    return %s.decodeFrom(new Cursor(bytes%s));", name, g.cursorLimits())
+	f.line("    return %s(new Cursor(bytes%s));", decodeFromFn(name), g.cursorLimits())
 	f.line("  }")
+}
+
+// decodeFromFn / decodeIntoFn name a type's module-level decoders. The leading
+// underscore cannot collide with a generated type name (typeName always yields a
+// leading capital) nor with a schema field, and marks them as module internals to
+// a reader on top of the missing `export`.
+func decodeFromFn(name string) string { return "_decodeFrom" + name }
+func decodeIntoFn(name string) string { return "_decodeInto" + name }
+
+// emitDecodeLoop writes the module-level half, emitted right after the class it
+// decodes into. Function declarations hoist, so a type whose field refers to a
+// class emitted later still resolves.
+//
+// The loop body lives in the into-function rather than the from-function so a
+// re-opened nested scope can decode INTO the member an earlier opening already
+// populated (MESSAGE_SPEC §7.4): last occurrence wins per field id, and children
+// the earlier opening set whose ids do not recur are retained. The from-function
+// is the fresh-object entry point on top of it.
+func (g *gen) emitDecodeLoop(f *tsfile, name string, fields []*ir.Field) {
+	f.line("function %s(c: Cursor): %s {", decodeFromFn(name), name)
+	f.line("  return %s(c, new %s());", decodeIntoFn(name), name)
+	f.line("}")
 	f.blank()
-	f.line("  static decodeFrom(c: Cursor): %s {", name)
-	f.line("    return %s.decodeInto(c, new %s());", name, name)
-	f.line("  }")
-	f.blank()
-	f.line("  // Monomorphic pull decode: one switch(id) reads straight into this type's fields.")
-	f.line("  // Decodes into `o` so a re-opened sequence continues its scope.")
-	f.line("  static decodeInto(c: Cursor, o: %s): %s {", name, name)
-	f.line("    while (c.readHeader()) {")
-	f.line("      switch (c.id) {")
+	f.line("// Monomorphic pull decode: one switch(id) reads straight into this type's fields.")
+	f.line("// Decodes into `o` so a re-opened sequence continues its scope.")
+	f.line("function %s(c: Cursor, o: %s): %s {", decodeIntoFn(name), name, name)
+	f.line("  while (c.readHeader()) {")
+	f.line("    switch (c.id) {")
 	for _, x := range fields {
 		g.emitDecodeCase(f, x)
 	}
-	f.line("      default: c.skip(c.wire); break;")
-	f.line("      }")
+	f.line("    default: c.skip(c.wire); break;")
 	f.line("    }")
-	f.line("    return o;")
 	f.line("  }")
+	f.line("  return o;")
+	f.line("}")
+	f.blank()
 }
 
 // emitDecodeCase emits the switch case reading one field off the cursor. Scalars
 // read a single value (number-first for u64/i64); nested messages recurse into
-// decodeFrom; native scalar arrays read the whole array in one call; composite
-// (string/blob/message/nested-array) arrays loop readHeader over their wrapper
-// sequence. An `as number[]` cast bridges the reader's number-first
+// their own module-level decoder; native scalar arrays read the whole array in one
+// call; composite (string/blob/message/nested-array) arrays loop readHeader over
+// their wrapper sequence. An `as number[]` cast bridges the reader's number-first
 // `(number | bigint)[]` to a narrow element type, where the declared width has
 // already proved every element is a number; a `bigint` destination CONVERTS
 // instead of casting — see nativeArrayRead and the 64-bit scalar arms.
@@ -58,7 +82,7 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 	// A Long-backed array decodes into the private backing field directly: the
 	// readers produce canonical Long[], so the setter's fromValue pass (and its
 	// array copy) would be pure overhead on the hot path.
-	acc := g.storage("o", x)
+	acc := g.decodeStorage(x)
 	// Frame each field by the header wire type before reading (issue #160). The
 	// schema-typed readers assume they are only called for their matching wire
 	// type; a header whose wire type differs is skip()'d like an unknown id, which
@@ -79,9 +103,9 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// only; it emits nothing. An unguarded destination keeps the conversion,
 		// since nothing there proves the narrowing.
 		if cond := widthCond("_v", x.Kind); cond != "" {
-			f.line("      case %d: { %sconst _v = c.readUnsigned(); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v as number; break; }", x.ID, guard, cond, x.Name, x.Kind, acc)
+			f.line("    case %d: { %sconst _v = c.readUnsigned(); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v as number; break; }", x.ID, guard, cond, x.Name, x.Kind, acc)
 		} else {
-			f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
+			f.line("    case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
 		}
 	case ir.KindU64:
 		// A `bigint` destination CONVERTS; it does not cast. The reader is
@@ -98,34 +122,34 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// the three agree. `BigInt` of a `bigint` is that same value, so the
 		// conversion only allocates where the cast was lying.
 		if g.numberScalars() {
-			f.line("      case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
+			f.line("    case %d: %s%s = Number(c.readUnsigned()); break;", x.ID, guard, acc)
 		} else if g.longScalars() {
 			// The corelib's scalar Long reader (corelib-ts#143): the halves come
 			// straight off the varint reader, so no bigint is materialised and no
 			// representation is decided per value — the field is a Long whatever
 			// arrived. `acc` is the private backing field, so the setter's
 			// Long.fromValue is off the hot path too.
-			f.line("      case %d: %s%s = c.readUnsignedLong(); break;", x.ID, guard, acc)
+			f.line("    case %d: %s%s = c.readUnsignedLong(); break;", x.ID, guard, acc)
 		} else {
-			f.line("      case %d: %s%s = BigInt(c.readUnsigned()); break;", x.ID, guard, acc)
+			f.line("    case %d: %s%s = BigInt(c.readUnsigned()); break;", x.ID, guard, acc)
 		}
 	case ir.KindBool:
-		f.line("      case %d: %s%s = Boolean(c.readUnsigned()); break;", x.ID, guard, acc)
+		f.line("    case %d: %s%s = Boolean(c.readUnsigned()); break;", x.ID, guard, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32:
 		// See the unsigned case: the width guard in front of the store makes the
 		// Number() conversion dead work on every decode.
-		f.line("      case %d: { %sconst _v = c.readSigned(); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v as number; break; }", x.ID, guard, widthCond("_v", x.Kind), x.Name, x.Kind, acc)
+		f.line("    case %d: { %sconst _v = c.readSigned(); if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: value outside declared width %s\"); %s = _v as number; break; }", x.ID, guard, widthCond("_v", x.Kind), x.Name, x.Kind, acc)
 	case ir.KindI64:
 		// See KindU64: convert, do not cast (issue #340).
 		if g.numberScalars() {
-			f.line("      case %d: %s%s = Number(c.readSigned()); break;", x.ID, guard, acc)
+			f.line("    case %d: %s%s = Number(c.readSigned()); break;", x.ID, guard, acc)
 		} else if g.longScalars() {
-			f.line("      case %d: %s%s = c.readSignedLong(); break;", x.ID, guard, acc)
+			f.line("    case %d: %s%s = c.readSignedLong(); break;", x.ID, guard, acc)
 		} else {
-			f.line("      case %d: %s%s = BigInt(c.readSigned()); break;", x.ID, guard, acc)
+			f.line("    case %d: %s%s = BigInt(c.readSigned()); break;", x.ID, guard, acc)
 		}
 	case ir.KindEnum:
-		f.line("      case %d: %s%s = Number(c.readSigned()) as %s; break;", x.ID, guard, acc, g.typeName(x.Ref.Key))
+		f.line("    case %d: %s%s = Number(c.readSigned()) as %s; break;", x.ID, guard, acc, g.typeName(x.Ref.Key))
 	case ir.KindFP32:
 		// Bit-exact fp32 decode (MESSAGE_SPEC §4.6, generator#235): read the four
 		// wire bytes rather than the widened number, because widening an fp32
@@ -138,10 +162,10 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// readBlob), and the object outlives one feed. The assignment is
 		// unconditional so a re-opened field id (§7.4) drops the bits a previous
 		// occurrence captured instead of re-emitting them under a new value.
-		f.line("      case %d: { %sconst _r = c.readFp32Raw(); const _v = _fp32FromRaw(_r, 0); %s = _v; %s = Number.isNaN(_v) ? _r.slice() : null; break; }",
+		f.line("    case %d: { %sconst _r = c.readFp32Raw(); const _v = _fp32FromRaw(_r, 0); %s = _v; %s = Number.isNaN(_v) ? _r.slice() : null; break; }",
 			x.ID, guard, acc, g.fp32RawStorage("o", x))
 	case ir.KindFP64:
-		f.line("      case %d: %s%s = c.readFp64(); break;", x.ID, guard, acc)
+		f.line("    case %d: %s%s = c.readFp64(); break;", x.ID, guard, acc)
 	case ir.KindString:
 		// A wire string longer than its schema maxlen is malformed input: reject the
 		// whole message rather than silently truncate (MESSAGE_SPEC §7.1). "Length"
@@ -159,9 +183,9 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// truncation). It re-walks every decoded string on the hot path for that:
 		// measured at 3.5k Ir/op, 7% of this schema's whole decode (issue #339).
 		if x.HasMaxlen {
-			f.line("      case %d: %s%s = c.readString(%d); break;", x.ID, guard, acc, x.Maxlen)
+			f.line("    case %d: %s%s = c.readString(%d); break;", x.ID, guard, acc, x.Maxlen)
 		} else {
-			f.line("      case %d: %s%s = c.readString(); break;", x.ID, guard, acc)
+			f.line("    case %d: %s%s = c.readString(); break;", x.ID, guard, acc)
 		}
 	case ir.KindBlob:
 		// A wire blob longer than its schema maxlen is malformed: reject, never
@@ -177,10 +201,10 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			// See the string case: the maxlen is passed to readBlob so an over-maxlen
 			// blob is INVALID at the length word, dominating a truncated payload
 			// (generator#216 / §5.2); the _b.length guard stays as defense.
-			f.line("      case %d: { %sconst _b = c.readBlob(%d); if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: blob byte length above schema maxlen %d\"); %s = _b.slice(); break; }",
+			f.line("    case %d: { %sconst _b = c.readBlob(%d); if (_b.length > %d) throw new SofabError(SofabErrorCode.InvalidMsg, \"%s: blob byte length above schema maxlen %d\"); %s = _b.slice(); break; }",
 				x.ID, guard, x.Maxlen, x.Maxlen, x.Name, x.Maxlen, acc)
 		} else {
-			f.line("      case %d: %s%s = c.readBlob().slice(); break;", x.ID, guard, acc)
+			f.line("    case %d: %s%s = c.readBlob().slice(); break;", x.ID, guard, acc)
 		}
 	case ir.KindStruct, ir.KindUnion:
 		// Decode INTO the existing member, never replace it: a field id repeating
@@ -188,8 +212,8 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 		// children an earlier opening set whose ids do not recur must survive
 		// (MESSAGE_SPEC §7.4). The member is always constructed (tsDefault emits
 		// `new T()`), so there is nothing to allocate here. Assigning
-		// decodeFrom(c)'s fresh object instead would discard the earlier opening.
-		f.line("      case %d: %s%s.decodeInto(c, %s); break;", x.ID, guard, g.typeName(x.Ref.Key), acc)
+		// the from-function's fresh object instead would discard the earlier opening.
+		f.line("    case %d: %s%s(c, %s); break;", x.ID, guard, decodeIntoFn(g.typeName(x.Ref.Key)), acc)
 	case ir.KindArray:
 		if x.Elem == ir.KindFP32 {
 			// Same §4.6 raw channel as the scalar above, one position deeper: every
@@ -227,18 +251,18 @@ func (g *gen) emitDecodeCase(f *tsfile, x *ir.Field) {
 			if x.HasCount {
 				cnt = fmt.Sprintf("%d", x.Count)
 			}
-			f.line("      case %d: %s%s = %s; break;", x.ID, guard, acc, g.nativeArrayRead(x.Elem, x.ElemRef, cnt))
+			f.line("    case %d: %s%s = %s; break;", x.ID, guard, acc, g.nativeArrayRead(x.Elem, x.ElemRef, cnt))
 			return
 		}
 		// Composite array: a wrapper sequence whose elements arrive one per
 		// readHeader. Loop until the sequence-end (readHeader() -> false).
-		f.line("      case %d: {", x.ID)
-		f.line("        if (%s) { c.skip(c.wire); break; }", g.tsWireGuardCond(x))
-		f.line("        const arr: %s = [];", g.tsType(x))
-		f.line("        while (c.readHeader()) { %s }", g.seqCollectBody("arr", x.Elem, x.ElemRef, x.ElemItems, capOf(x.HasCount, x.Count), x.ElemMaxHas, x.ElemMax))
-		f.line("        %s = arr;", acc)
-		f.line("        break;")
-		f.line("      }")
+		f.line("    case %d: {", x.ID)
+		f.line("      if (%s) { c.skip(c.wire); break; }", g.tsWireGuardCond(x))
+		f.line("      const arr: %s = [];", g.tsType(x))
+		f.line("      while (c.readHeader()) { %s }", g.seqCollectBody("arr", x.Elem, x.ElemRef, x.ElemItems, capOf(x.HasCount, x.Count), x.ElemMaxHas, x.ElemMax))
+		f.line("      %s = arr;", acc)
+		f.line("      break;")
+		f.line("    }")
 	}
 }
 
@@ -264,22 +288,22 @@ func (g *gen) emitFp32ArrayDecodeCase(f *tsfile, x *ir.Field, guard, acc string)
 	if x.HasCount {
 		cnt = fmt.Sprintf("%d", x.Count)
 	}
-	f.line("      case %d: {", x.ID)
-	f.line("        %s", strings.TrimSpace(guard))
-	f.line("        const _p = c.readFp32ArrayRaw(%s);", cnt)
-	f.line("        const _n = _p.length >> 2;")
+	f.line("    case %d: {", x.ID)
+	f.line("      %s", strings.TrimSpace(guard))
+	f.line("      const _p = c.readFp32ArrayRaw(%s);", cnt)
+	f.line("      const _n = _p.length >> 2;")
 	// Elements widen through the shared 4-byte scratch (_fp32FromRaw), not through
 	// a `new DataView(_p.buffer, …)` built per field read. Constructing a DataView
 	// is a heavyweight allocation — corelib-ts measures ~115 ns and caches one per
 	// decoder for exactly this reason — and this one was paid on every decode of
 	// every fp32 array, to read as few as a handful of elements (issue #339).
-	f.line("        const _a = new Array<number>(_n);")
-	f.line("        let _nan = false;")
-	f.line("        for (let _i = 0; _i < _n; _i++) { const _v = _fp32FromRaw(_p, _i * 4); if (Number.isNaN(_v)) _nan = true; _a[_i] = _v; }")
-	f.line("        %s = _a;", acc)
-	f.line("        %s = _nan ? _p.slice() : null;", g.fp32RawStorage("o", x))
-	f.line("        break;")
-	f.line("      }")
+	f.line("      const _a = new Array<number>(_n);")
+	f.line("      let _nan = false;")
+	f.line("      for (let _i = 0; _i < _n; _i++) { const _v = _fp32FromRaw(_p, _i * 4); if (Number.isNaN(_v)) _nan = true; _a[_i] = _v; }")
+	f.line("      %s = _a;", acc)
+	f.line("      %s = _nan ? _p.slice() : null;", g.fp32RawStorage("o", x))
+	f.line("      break;")
+	f.line("    }")
 }
 
 // expectedWire returns the WireType member a field's header must carry for its
@@ -509,8 +533,8 @@ func (g *gen) nativeArrayRead(elem ir.Kind, ref *ir.TypeRef, cnt string) string 
 
 // elemDecode returns the expression decoding ONE element of a composite wrapper
 // sequence whose header readHeader() has just accepted. Leaf string/blob elements
-// read a value; message elements recurse into decodeFrom (their opening
-// SequenceStart was the header just read, and decodeFrom consumes to the matching
+// read a value; message elements recurse into their type's from-function (their
+// opening SequenceStart was the header just read, and it consumes to the matching
 // SequenceEnd). A nested-array element is itself a row: a native inner array reads
 // in one call, a composite inner array recurses via an inline IIFE loop.
 func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
@@ -524,7 +548,7 @@ func (g *gen) elemDecode(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) str
 		// why it must not be the one place the rule is missing.
 		return "c.readBlob().slice()"
 	case ir.KindStruct, ir.KindUnion:
-		return g.typeName(ref.Key) + ".decodeFrom(c)"
+		return decodeFromFn(g.typeName(ref.Key)) + "(c)"
 	case ir.KindArray:
 		if nativeArrayElem(items.Elem) {
 			cnt := ""
@@ -636,12 +660,12 @@ func (g *gen) seqCollectBody(arr string, elem ir.Kind, ref *ir.TypeRef, items *i
 		// with default elements — never appended. Appending would shorten the array
 		// by the size of any interior id gap, and would decode a REOPENED element id
 		// as a second element instead of merging into the first (§7.4) — which
-		// placement gives for free, because decodeInto continues the element an
+		// placement gives for free, because the into-function continues the element an
 		// earlier opening already populated. The over-index guard above rejects an
 		// element id >= N, which also bounds the gap-fill.
 		t := g.typeName(ref.Key)
 		return guard + "const _id = c.id; while (" + arr + ".length <= _id) " + arr + ".push(new " + t + "()); " +
-			t + ".decodeInto(c, " + arr + "[_id]!);"
+			decodeIntoFn(t) + "(c, " + arr + "[_id]!);"
 	default:
 		// A nested-array element (a matrix row, native or wrapper) is placed at the
 		// index its element id names, growing arr with empty rows so an id GAP decodes

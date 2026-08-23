@@ -192,6 +192,22 @@ func (g *gen) storage(recv string, f *ir.Field) string {
 	return recv + "." + f.Name
 }
 
+// decodeStorage is storage() for the module-level pull decoder (visitor.go). That
+// decoder is not a member of the class it writes into — CORELIB_PLAN §6.1.1 keeps
+// `decodeFrom`/`decodeInto` off the generated object's surface, so the loop lives
+// beside the class rather than in it (issue #384) — and therefore cannot name a
+// `private` backing field with a dot. Element access reaches it: TypeScript's
+// `private` is a compile-time rule and bracket notation is its sanctioned escape
+// hatch, emitting the very same property write. So a Long-backed field keeps
+// bypassing its accessor pair on the hot path — no getter call, no setter
+// conversion — exactly as it did when the loop was a static method of the class.
+func (g *gen) decodeStorage(f *ir.Field) string {
+	if g.longBacked(f) {
+		return fmt.Sprintf("o[%q]", "_"+f.Name)
+	}
+	return "o." + f.Name
+}
+
 // fp32RawCompanion reports whether a field carries the fp32 raw-bits companion
 // slot (generator#235): an fp32 scalar, or a NATIVE fp32 array (element kind
 // fp32). Both decode through a JS number, which cannot carry an fp32 NaN payload

@@ -410,8 +410,8 @@ messages:
       # A 64-bit pair one level down. Every other 64-bit field in the corpus sits
       # at message level, so without this nothing exercises the representation in
       # a NESTED position — where the field is emitted by the same code but reached
-      # through a nested class's own serialize/decodeFrom, and (under the Long
-      # modes) through that class's private backing field.
+      # through the nested class's own serialize and its own module-level pull
+      # decoder, and (under the Long modes) through that class's private backing field.
       n:  { id: 5, type: struct, fields: { nu: { id: 0, type: u64 }, ni: { id: 1, type: i64, default: -7 } } }
       # Two NARROW destinations in an otherwise 64-bit message. Under `int64: long`
       # this schema is over the line for corelib-ts's opt-in Long channel
@@ -533,7 +533,7 @@ const m = M64.decode(wire);
 want("u", m.u);
 want("i", m.i);
 // One level down: same emission, reached through the nested class's own
-// serialize/decodeFrom and its own private backing field.
+// serialize, its own module-level pull decoder and its own private backing field.
 want("n.nu", m.n.nu);
 want("n.ni", m.n.ni);
 m.us.forEach((v, k) => want(`us[${k}]`, v));
