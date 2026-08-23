@@ -1384,7 +1384,7 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// is nothing to fill in at [M, N). The one exception is forced by C++
 		// storage rather than by the spec: a fixed std::array<T, N> has no logical
 		// length, so its value is always N elements and readArray value-initialises
-		// it before the M that arrived land on top -- see docs/generator/cpp.md.
+		// it before the M that arrived land on top.
 
 		// A composite array's wrapper sequence IS the array's value (MESSAGE_SPEC
 		// §5), so a field id repeating within one scope REPLACES it whole — unlike a

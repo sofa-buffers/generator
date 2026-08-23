@@ -14,7 +14,7 @@ target; a per-target value overrides the `generic` value for that target
 
 | Option | Type | Default | Effect |
 |--------|------|---------|--------|
-| `emit` | `sources` \| `project` | `sources` | `sources`: just the message-type source files. `project`: additionally scaffold a buildable project (build files + the canonical-JSON conformance harness, which also carries the `bench` verb `tests/bench` drives — see ARCHITECTURE §15). Also settable per target. |
+| `emit` | `sources` \| `project` | `sources` | `sources`: just the message-type source files. `project`: additionally scaffold a buildable project — build files plus a canonical-JSON conformance harness. Also settable per target. |
 | `namespace` | string | per-language | Namespace wrapping the generated types, for targets that have one (C++, C#). Deliberately not defaulted generically — each backend applies its idiomatic default (C++ `message`, C# `Message`). |
 | `input_dir` | string | — | Directory of message definitions to generate from. The CLI `--in` flag overrides it. |
 | `output_dir` | string | — | Directory the generated files are written to. The CLI `--out` flag overrides it. |
@@ -23,14 +23,14 @@ target; a per-target value overrides the `generic` value for that target
 | `max_dyn_array_count` | integer | unset = unlimited | Receiver-side decode limit: maximum element count accepted for an **unbounded** array (no schema `count`). Exceeding it fails the decode with the corelib's `LimitExceeded` error — never a clamp. Schema-bounded fields are governed by their own bound (#100); a field that legitimately needs more gets an explicit schema bound. Inert on statically bounded targets (`c`, `cpp` `corelib: c-cpp`, rust `no_std`). |
 | `max_dyn_string_len` | integer | unset = unlimited | Receiver-side decode limit: maximum byte length for an **unbounded** string (no schema `maxlen`); checked at the length header, before the payload is buffered or allocated. Same semantics as above. |
 | `max_dyn_blob_len` | integer | unset = unlimited | Receiver-side decode limit: maximum byte length for an **unbounded** blob (no schema `maxlen`); checked at the length header. Same semantics as above. |
-| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size, in bytes. Two roles. **Fallback:** a message with an unbounded field has no computable worst case — the generated code then emits this value as `MAX_SIZE_LIMIT` and aliases `MAX_SIZE` to it, so the number is visibly *imposed* rather than *derived*. **Budget:** when set explicitly it is also checked — a schema whose computed worst case exceeds it **fails generation**, which is where a message too large for the target transport belongs. A message the schema *does* bound keeps its exact computed size; this key never replaces a number the schema can supply. Honored by the targets that emit a size constant (`c`, `cpp`, `rust`, `go`, `java`, `kotlin`, `csharp`, `zig`, `dart`, `python`, `typescript`). Documented here because its meaning is one thing everywhere, but it is a **per-target key**: the closed schema accepts it under `targets.<lang>` only, and `generic.max_message_size` is rejected at load. See ARCHITECTURE §9.6. |
+| `max_message_size` | integer | `4096` | Ceiling on a message's encoded size, in bytes. Two roles. **Fallback:** a message with an unbounded field has no computable worst case — the generated code then emits this value as `MAX_SIZE_LIMIT` and aliases `MAX_SIZE` to it, so the number is visibly *imposed* rather than *derived*. **Budget:** when set explicitly it is also checked — a schema whose computed worst case exceeds it **fails generation**, which is where a message too large for the target transport belongs. A message the schema *does* bound keeps its exact computed size; this key never replaces a number the schema can supply. Documented here because its meaning is one thing everywhere, but it is a **per-target key**: the closed schema accepts it under `targets.<lang>` only, and `generic.max_message_size` is rejected at load. |
 
 ## Per-target options — `targets.<lang>:`
 
-| Target | Doc | Language-specific options |
+| Target | Doc | Options of its own |
 |--------|-----|---------------------------|
 | `c` | [c.md](c.md) | `symbol_prefix` |
-| `cpp` | [cpp.md](cpp.md) | `corelib`, `namespace`, `allow_dynamic` |
+| `cpp` | [cpp.md](cpp.md) | `corelib`, `allow_dynamic`, `namespace` |
 | `rust` | [rust.md](rust.md) | `corelib`, `no_std`, `allow_dynamic` |
 | `go` | [go.md](go.md) | `package`, `module_path`, `go_version` |
 | `python` | [python.md](python.md) | — |
@@ -42,8 +42,5 @@ target; a per-target value overrides the `generic` value for that target
 | `dart` | [dart.md](dart.md) | — |
 | `docs` | [docs.md](docs.md) | `format` |
 
-> **History.** The schema used to validate a set of *reserved* planning-era
-> keys (`buffer`, `validation`, `naming`, `file_layout`, `timestamp`, …) that
-> no backend ever consumed. They were removed: the schema now stays in
-> lockstep with the set of keys the generator actually reads, so a key that
-> validates is a key that works.
+The `max_dyn_*` limits are accepted by every target except `c`, whose storage is
+sized from the schema and has no unbounded field to cap.

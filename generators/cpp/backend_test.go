@@ -1081,7 +1081,7 @@ messages:
 // The fixed std::array<T,N> has no logical length at all, so its value is always
 // N elements: the aggregate initializer zero-fills whatever the default leaves
 // out, and a shorter value is simply not representable there. That divergence is
-// storage, not spec — see docs/generator/cpp.md.
+// storage, not spec.
 func TestCppNativeArrayIsNotPaddedToCount(t *testing.T) {
 	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
 		"      zeros:   { id: 0, type: array, items: { type: u32, count: 4 } }\n" +
@@ -1603,7 +1603,7 @@ func TestCppWrapperArrayInteriorIsSparseLastElementKept(t *testing.T) {
 //
 // The one container that cannot say so is std::array<T,N>, which the native
 // arrays keep: it has no logical length, so its value is always N elements. That
-// divergence is storage, not spec (docs/generator/cpp.md).
+// divergence is storage, not spec.
 func TestCppCountIsACapacityNotALength(t *testing.T) {
 	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
 		"      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }\n" +
