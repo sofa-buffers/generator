@@ -96,11 +96,11 @@ func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
 // the message exactly that much tightness -- §9.5 records it, and #388 is about
 // removing it. Enforced per field, where the schema is known, no raise is needed.
 //
-// The one place a raise would still be owed is the residual DecodeLimits below
-// (wrapperElemDyn), and it is not applied there either: that cap governs wrapper
-// ELEMENTS, whose own schema `maxlen` the collector enforces itself, so the
-// corelib's global check is a strictly looser outer bound that no legal element
-// can trip.
+// The residual DecodeLimits below (wrapperElemDyn) is the exception, and it is
+// NOT this value: see residualLen. corelib-ts measures every fixlen length
+// against a DecodeLimits it is given, with no schema exemption and BEFORE the
+// visitor's fixlenBegin runs, so anything still routed through it has to be
+// raised or a schema-bounded field is rejected on the way in.
 func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	var all []*ir.Field
 	for _, m := range s.Messages {
@@ -134,6 +134,29 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 // that field -- the natural twin of the `receiverCap` it already has, filed as
 // corelib-ts#164 -- the only thing bounding such an element is the corelib's
 // global DecodeLimits, so it is kept for exactly this case and dropped otherwise.
+// residualLen is the value the residual DecodeLimits carries for one kind: the
+// configured cap, RAISED to the largest schema `maxlen` of that kind anywhere in
+// the schema.
+//
+// The raise is owed here and only here. corelib-ts checks a fixlen length against
+// the DecodeLimits it was handed with no schema exemption, and it does so at the
+// length word — BEFORE the visitor's fixlenBegin, so the per-field guard cannot
+// rescue a field the corelib has already rejected. Handing it the tight cap would
+// reject a field the schema declares perfectly legal: a `maxlen: 4096` element
+// under a `max_dyn_string_len: 1024` is exactly the case, and it decodes
+// everywhere else in the family.
+//
+// The EXPORTED constant stays as configured. Only this literal is raised, so the
+// per-field guards keep their precision and the loosening reaches nothing but the
+// corelib's own outer check. That check governs the wrapper elements alone, and
+// corelib-ts#164 retires it.
+func residualLen(configured, schemaMax int64) int64 {
+	if schemaMax > configured {
+		return schemaMax
+	}
+	return configured
+}
+
 func wrapperElemDyn(s *ir.Schema) (str, blob bool) {
 	var walk func([]*ir.Field)
 	seen := map[*ir.NamedType]bool{}
@@ -189,14 +212,24 @@ func (g *gen) cursorLimits() string {
 // takes. Only the two LENGTH caps can survive, and only for the element shape
 // wrapperElemDyn names.
 func (g *gen) limitFields() []string {
+	b := ir.Bounds(g.allFields())
 	var parts []string
 	if g.limits.stringHas && g.wrapStrDyn {
-		parts = append(parts, "maxStringLen: MAX_DYN_STRING_LEN")
+		parts = append(parts, fmt.Sprintf("maxStringLen: %d", residualLen(g.limits.stringLen, b.MaxStringLen)))
 	}
 	if g.limits.blobHas && g.wrapBlobDyn {
-		parts = append(parts, "maxBlobLen: MAX_DYN_BLOB_LEN")
+		parts = append(parts, fmt.Sprintf("maxBlobLen: %d", residualLen(g.limits.blobLen, b.MaxBlobLen)))
 	}
 	return parts
+}
+
+// allFields is every message's field list, for the schema-wide walks (ir.Bounds).
+func (g *gen) allFields() []*ir.Field {
+	var all []*ir.Field
+	for _, m := range g.schema.Messages {
+		all = append(all, m.Fields...)
+	}
+	return all
 }
 
 type tsfile struct{ b strings.Builder }
