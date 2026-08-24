@@ -27,6 +27,7 @@ const corelibPkg = "@sofa-buffers/corelib"
 // package.json + tsconfig.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), i64rep: cfgInt64Mode(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
+	g.wrapStrDyn, g.wrapBlobDyn = wrapperElemDyn(s)
 	files := []generator.File{{Path: "message.ts", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -45,6 +46,11 @@ type gen struct {
 	license string    // SPDX id, "" to omit the header line
 	i64rep  int64Mode // 64-bit representation (config key `int64`)
 	limits  limitSet  // receiver-side decode limits (generator#102)
+	// wrapStrDyn / wrapBlobDyn mark the one shape whose LENGTH cap generated code
+	// cannot take -- an unbounded string/blob element inside a wrapper array, whose
+	// header goes to the corelib collector rather than to the visitor. They are the
+	// only reason a residual DecodeLimits survives generator#388 (wrapperElemDyn).
+	wrapStrDyn, wrapBlobDyn bool
 	// size is the max_message_size policy; sizeErr carries a violation out of
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
@@ -80,6 +86,21 @@ func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
 
 // resolveLimits resolves the max_dyn_* caps over the target's finite defaults
 // and against the schema's bounds (see limitSet).
+//
+// The values are emitted AS CONFIGURED. They used to be raised to the largest
+// schema bound of their kind, because the caps rode into the corelib as a
+// DecodeLimits that applies GLOBALLY per decode: corelib-ts measures every fixlen
+// length and every array count against them with no schema exemption, so a cap
+// below a sibling's `maxlen`/`count` would have rejected a field the schema
+// declares perfectly legal. Keeping those decodable cost every UNBOUNDED field in
+// the message exactly that much tightness -- §9.5 records it, and #388 is about
+// removing it. Enforced per field, where the schema is known, no raise is needed.
+//
+// The one place a raise would still be owed is the residual DecodeLimits below
+// (wrapperElemDyn), and it is not applied there either: that cap governs wrapper
+// ELEMENTS, whose own schema `maxlen` the collector enforces itself, so the
+// corelib's global check is a strictly looser outer bound that no legal element
+// can trip.
 func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	var all []*ir.Field
 	for _, m := range s.Messages {
@@ -89,39 +110,90 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	d := generator.ClientDynLimits.Resolve(cfg)
 	var l limitSet
 	if b.HasDynArray {
-		l.arrayCount, l.arrayHas = max(d.ArrayCount, b.MaxCount), true
+		l.arrayCount, l.arrayHas = d.ArrayCount, true
 	}
 	if b.HasDynString {
-		l.stringLen, l.stringHas = max(d.StringLen, b.MaxStringLen), true
+		l.stringLen, l.stringHas = d.StringLen, true
 	}
 	if b.HasDynBlob {
-		l.blobLen, l.blobHas = max(d.BlobLen, b.MaxBlobLen), true
+		l.blobLen, l.blobHas = d.BlobLen, true
 	}
 	return l
 }
 
-// cursorLimits renders the DecodeLimits argument every generated static
-// decode() passes to its Cursor ("" when no limit is active). The object
-// literal references the exported MAX_DYN_* constants, independent of the
-// int64 representation mode.
+// wrapperElemDyn reports whether the schema has a string or blob element inside a
+// WRAPPER array with no `maxlen` -- the one shape whose length cap generated code
+// cannot take.
+//
+// Everything else moved into the visitor in generator#388: a scalar string/blob
+// is bounded in `fixlenBegin`, a native array in `arrayBegin`, and a wrapper
+// array's element INDEX by the `receiverCap` StringSeq/BlobSeq already accept.
+// What is left is the element's byte LENGTH: those elements' headers go to the
+// collector, not to the generated visitor, and the collector takes only the
+// schema `maxlen` (`elemMax`). Until corelib-ts grows the receiver-side sibling of
+// that field -- the natural twin of the `receiverCap` it already has, filed as
+// corelib-ts#164 -- the only thing bounding such an element is the corelib's
+// global DecodeLimits, so it is kept for exactly this case and dropped otherwise.
+func wrapperElemDyn(s *ir.Schema) (str, blob bool) {
+	var walk func([]*ir.Field)
+	seen := map[*ir.NamedType]bool{}
+	walk = func(fs []*ir.Field) {
+		for _, x := range fs {
+			switch x.Kind {
+			case ir.KindStruct, ir.KindUnion:
+				if x.Ref != nil && x.Ref.Target != nil && !seen[x.Ref.Target] {
+					seen[x.Ref.Target] = true
+					walk(x.Ref.Target.Fields)
+				}
+			case ir.KindArray:
+				switch x.Elem {
+				case ir.KindString:
+					if !x.ElemMaxHas {
+						str = true
+					}
+				case ir.KindBlob:
+					if !x.ElemMaxHas {
+						blob = true
+					}
+				case ir.KindStruct, ir.KindUnion:
+					if x.ElemRef != nil && x.ElemRef.Target != nil && !seen[x.ElemRef.Target] {
+						seen[x.ElemRef.Target] = true
+						walk(x.ElemRef.Target.Fields)
+					}
+				}
+			}
+		}
+	}
+	for _, m := range s.Messages {
+		walk(m.Fields)
+	}
+	return str, blob
+}
+
+// cursorLimits renders the DecodeLimits argument the generated decode entry
+// points pass to the corelib -- "" whenever generated code enforces every cap
+// itself, which after generator#388 is every schema without an unbounded wrapper
+// string/blob element (see wrapperElemDyn).
 func (g *gen) cursorLimits() string {
-	if !g.limits.any() {
+	if len(g.limitFields()) == 0 {
 		return ""
 	}
 	return ", _LIMITS"
 }
 
-// limitFields renders the configured caps as DecodeLimits object fields, for the
-// single module-level `_LIMITS` the decode entry points share.
+// limitFields renders the residual DecodeLimits object fields.
+//
+// `maxArrayCount` is never among them: a native array's count is bounded in the
+// generated `arrayBegin`, and a wrapper array's INDEX -- which is what its
+// receiver cap actually binds (§9.5, #387) -- by the `receiverCap` the collector
+// takes. Only the two LENGTH caps can survive, and only for the element shape
+// wrapperElemDyn names.
 func (g *gen) limitFields() []string {
 	var parts []string
-	if g.limits.arrayHas {
-		parts = append(parts, "maxArrayCount: MAX_DYN_ARRAY_COUNT")
-	}
-	if g.limits.stringHas {
+	if g.limits.stringHas && g.wrapStrDyn {
 		parts = append(parts, "maxStringLen: MAX_DYN_STRING_LEN")
 	}
-	if g.limits.blobHas {
+	if g.limits.blobHas && g.wrapBlobDyn {
 		parts = append(parts, "maxBlobLen: MAX_DYN_BLOB_LEN")
 	}
 	return parts
@@ -213,10 +285,11 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 	if g.limits.any() {
 		f.line("// Receiver-side decode limits, baked from the sofabgen config")
 		f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
-		f.line("// only fields the schema left unbounded; each cap is raised to the largest")
-		f.line("// schema bound of its kind, so a schema-bounded field stays governed by its")
-		f.line("// own bound alone. Every decode() passes them to the corelib; exceeding")
-		f.line("// a cap throws SofabError with code LimitExceeded, before allocation.")
+		f.line("// only fields the schema left unbounded -- a schema-bounded field keeps its")
+		f.line("// own bound and its own INVALID verdict -- and they are enforced per field,")
+		f.line("// at the count/length header, before any allocation: exceeding one throws")
+		f.line("// SofabError with code LimitExceeded, which is a policy rejection of")
+		f.line("// well-formed bytes and deliberately not InvalidMsg.")
 		if g.limits.arrayHas {
 			f.line("export const MAX_DYN_ARRAY_COUNT = %d;", g.limits.arrayCount)
 		}
@@ -227,14 +300,20 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 			f.line("export const MAX_DYN_BLOB_LEN = %d;", g.limits.blobLen)
 		}
 		f.blank()
-		// One frozen object, not a literal per decode. The caps are compile-time
-		// constants, so a fresh `{ maxArrayCount: … }` at every `decode(bytes)`
-		// call site is an allocation with a constant value — on a decode hot path,
-		// and paid by every schema that configures a cap at all.
-		f.line("// The DecodeLimits every decode() hands the corelib. Module-level and")
-		f.line("// frozen: the caps above are constants, so this is built once rather than")
-		f.line("// re-allocated on every decode.")
-		f.line("const _LIMITS = Object.freeze({ %s });", strings.Join(g.limitFields(), ", "))
+	}
+	// The residual DecodeLimits, for the one shape the visitor never sees: an
+	// unbounded string/blob element inside a wrapper array, whose length word goes
+	// to the corelib collector. Everything else is enforced above, per field.
+	//
+	// One frozen object, not a literal per decode: the caps are compile-time
+	// constants, so a fresh `{ maxStringLen: … }` at every decode() call site
+	// would be an allocation with a constant value, on a decode hot path.
+	if fields := g.limitFields(); len(fields) > 0 {
+		f.line("// The only caps this module cannot apply itself: a wrapper array's")
+		f.line("// string/blob element LENGTH, whose length word the corelib's collector")
+		f.line("// receives rather than this visitor. Every other cap above is applied per")
+		f.line("// field, at the field's own count/length header.")
+		f.line("const _LIMITS = Object.freeze({ %s });", strings.Join(fields, ", "))
 		f.blank()
 	}
 	if use.longArrEq {

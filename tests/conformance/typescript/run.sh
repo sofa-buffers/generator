@@ -322,9 +322,13 @@ echo "==> skipped occurrence keeps struct OK"
 
 # Receiver-side decode limits (generator#102): a count-less u64 array with
 # max_dyn_array_count: 4 baked into the generated module (id 0 -> header 0x03 =
-# 0<<3 | unsigned-array). A wire count of 5 MUST throw the corelib's
-# LIMIT_EXCEEDED (decode exits non-zero); a count of 4 still decodes; and the
-# same 5-element bytes MUST decode in a project generated WITHOUT limits.
+# 0<<3 | unsigned-array). A wire count of 5 MUST throw LIMIT_EXCEEDED (decode
+# exits non-zero); a count of 4 still decodes; and the same 5-element bytes MUST
+# decode in a project generated WITHOUT limits.
+#
+# The throw comes from the GENERATED visitor since generator#388, not from the
+# corelib: the cap is applied per field, at that field's own count header. The
+# message names the field, which the corelib's could not -- it has no schema.
 echo "==> receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn.yaml" <<'YAML'
 version: 1
@@ -345,7 +349,19 @@ printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
 if (cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/limerr.txt"; then
     echo "FAIL: dynamic array count 5 must exceed max_dyn_array_count 4"; exit 1
 fi
-grep -q "maxArrayCount" "$WORK/limerr.txt" || { echo "FAIL: over-limit error must mention the limit"; cat "$WORK/limerr.txt"; exit 1; }
+grep -q "a: array count above configured limit 4" "$WORK/limerr.txt" \
+    || { echo "FAIL: the over-limit error must name the field and the limit"; cat "$WORK/limerr.txt"; exit 1; }
+# ...and the CATEGORY is LIMIT_EXCEEDED, not INVALID: the bytes are well formed
+# and the nolim project below decodes them (CORELIB_PLAN S6.2.1). Read through the
+# `status` mode, not by grepping stderr -- a thrown stack trace echoes the source
+# line, so grepping it would match the generated code rather than the outcome.
+ST=$( (cd "$WORK/lim" && npx tsx harness.ts status dyn) < "$WORK/overlimit.bin" | head -n1 )
+[ "$ST" = "LIMIT_EXCEEDED" ] \
+    || { echo "FAIL: an over-cap count is a policy rejection, got $ST"; exit 1; }
+# The corelib is handed no cap at all for this schema: nothing in it is beyond the
+# visitor's reach, so there is no DecodeLimits object to build (generator#388).
+grep -q "_LIMITS" "$WORK/lim/message.ts" \
+    && { echo "FAIL: a fully covered schema must pass the corelib no DecodeLimits"; exit 1; }
 (cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count == limit (4) must decode"; exit 1; }
 (cd "$WORK/nolim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
