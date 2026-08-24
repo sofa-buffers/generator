@@ -452,6 +452,27 @@ func (g *gen) elemDefault(sc *tsScope) string {
 // is driven through, and build one over the destination. Both index bounds, the
 // element maxlen, the payload join and the strict UTF-8 decode live there
 // (ARCHITECTURE §8): none of it knows a schema, all of it arrives as arguments.
+// arrayCountBound is the count reject for one native array field, emitted in
+// arrayBegin ahead of the destination it sizes.
+//
+// TWO bounds land here and they are mutually exclusive by rule: an array the
+// schema counts is INVALID above that count, and one the schema leaves uncounted
+// is LimitExceeded above the receiver's configured cap (generator#388). §9.5: the
+// caps govern ONLY what the schema left unbounded. CORELIB_PLAN §6.2.1: the two
+// categories must not be folded, the cap being a policy rejection of well-formed
+// bytes. `what` names the field for the message.
+func (g *gen) arrayCountBound(cap int64, what string) string {
+	if cap >= 0 {
+		return fmt.Sprintf("if (count > %d) throw new SofabError(SofabErrorCode.InvalidMsg, %q); ",
+			cap, fmt.Sprintf("%s: array count above schema capacity %d", what, cap))
+	}
+	if !g.limits.arrayHas {
+		return ""
+	}
+	return fmt.Sprintf("if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, %q + MAX_DYN_ARRAY_COUNT); ",
+		fmt.Sprintf("%s: array count above configured limit ", what))
+}
+
 func (g *gen) seqClass(elem ir.Kind) string {
 	if elem == ir.KindBlob {
 		return "BlobSeq"
@@ -607,20 +628,32 @@ func (g *gen) emitFixlenBegin(f *tsfile, scopes []*tsScope) {
 		}
 		var ids []string
 		for _, x := range sc.fields {
-			if !x.HasMaxlen {
-				continue
-			}
 			var sub, kind string
+			var capConst string
+			var capOn bool
 			switch x.Kind {
 			case ir.KindString:
-				sub, kind = "FixlenSubtype.String", "string"
+				sub, kind, capConst, capOn = "FixlenSubtype.String", "string", "MAX_DYN_STRING_LEN", g.limits.stringHas
 			case ir.KindBlob:
-				sub, kind = "FixlenSubtype.Blob", "blob"
+				sub, kind, capConst, capOn = "FixlenSubtype.Blob", "blob", "MAX_DYN_BLOB_LEN", g.limits.blobHas
 			default:
 				continue
 			}
-			ids = append(ids, fmt.Sprintf("    case %d: if (sub === %s && total > %d) throw new SofabError(SofabErrorCode.InvalidMsg, %q); break;",
-				x.ID, sub, x.Maxlen, fmt.Sprintf("%s: %s byte length above schema maxlen %d", x.Name, kind, x.Maxlen)))
+			// TWO bounds land here and they are mutually exclusive by rule: a field
+			// the schema bounds is governed by its own `maxlen` and is INVALID above
+			// it; a field the schema leaves unbounded is governed by the receiver's
+			// configured cap and is LimitExceeded above it (generator#388). §9.5:
+			// the caps govern ONLY what the schema left unbounded. CORELIB_PLAN
+			// §6.2.1: the two categories must not be folded, the cap being a policy
+			// rejection of well-formed bytes.
+			switch {
+			case x.HasMaxlen:
+				ids = append(ids, fmt.Sprintf("    case %d: if (sub === %s && total > %d) throw new SofabError(SofabErrorCode.InvalidMsg, %q); break;",
+					x.ID, sub, x.Maxlen, fmt.Sprintf("%s: %s byte length above schema maxlen %d", x.Name, kind, x.Maxlen)))
+			case capOn:
+				ids = append(ids, fmt.Sprintf("    case %d: if (sub === %s && total > %s) throw new SofabError(SofabErrorCode.LimitExceeded, %q + %s); break;",
+					x.ID, sub, capConst, fmt.Sprintf("%s: %s byte length above configured limit ", x.Name, kind), capConst))
+			}
 		}
 		if body := idSwitch(ids); body != nil {
 			arms[sc.id] = body
@@ -709,9 +742,8 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			// hook would run.
 			b = append(b, fmt.Sprintf("    if (kind !== ArrayKind.%s) return;", tsArrayKind(sc.elemItems.Elem)))
 			b = append(b, g.indexBound(sc)...)
-			if rc := capOf(sc.elemItems.HasCount, sc.elemItems.Count); rc >= 0 {
-				b = append(b, fmt.Sprintf("    if (count > %d) throw new SofabError(SofabErrorCode.InvalidMsg, %q);",
-					rc, fmt.Sprintf("%s element: array count above schema capacity %d", sc.loc, rc)))
+			if bound := g.arrayCountBound(capOf(sc.elemItems.HasCount, sc.elemItems.Count), sc.loc+" element"); bound != "" {
+				b = append(b, "    "+strings.TrimSuffix(bound, " "))
 			}
 			b = append(b, "    while (_t.length <= id) _t.push([]);",
 				fmt.Sprintf("    const _r: %s = []; _t[id] = _r; this.%s = _r;", g.matRowType(sc), sc.row))
@@ -748,10 +780,7 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			// block scope, so two array fields in a scope would redeclare it.
 			b := fmt.Sprintf("    case %d: { ", x.ID)
 			b += fmt.Sprintf("if (kind !== ArrayKind.%s) break; ", tsArrayKind(x.Elem))
-			if cap >= 0 {
-				b += fmt.Sprintf("if (count > %d) throw new SofabError(SofabErrorCode.InvalidMsg, %q); ",
-					cap, fmt.Sprintf("%s: array count above schema capacity %d", x.Name, cap))
-			}
+			b += g.arrayCountBound(cap, x.Name)
 			// Built once, assigned to the field AND kept in the register the element
 			// arms read. A re-opened array id replaces (§7.4), so both are rebuilt.
 			b += fmt.Sprintf("const _d: %s = []; %s = _d; this.%s = _d; ",

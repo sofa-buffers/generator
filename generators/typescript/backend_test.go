@@ -94,9 +94,9 @@ func TestTSWireTypeGuard(t *testing.T) {
 	for _, want := range []string{
 		// fp32/fp64/string/blob all ride WireType.Fixlen, so an ARRAY of them is
 		// separated only by the announced element kind.
-		"case 5: { if (kind !== ArrayKind.Unsigned) break; const _d: number[] = []; this.o.f = _d; this._a0F = _d; break; }",
-		"case 6: { if (kind !== ArrayKind.Signed) break; const _d: number[] = []; this.o.g = _d; this._a0G = _d; break; }",
-		"case 7: { if (kind !== ArrayKind.Fp64) break; const _d: number[] = []; this.o.h = _d; this._a0H = _d; break; }",
+		`case 5: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "f: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d: number[] = []; this.o.f = _d; this._a0F = _d; break; }`,
+		`case 6: { if (kind !== ArrayKind.Signed) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "g: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d: number[] = []; this.o.g = _d; this._a0G = _d; break; }`,
+		`case 7: { if (kind !== ArrayKind.Fp64) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "h: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d: number[] = []; this.o.h = _d; this._a0H = _d; break; }`,
 		// ...and a fixlen SCALAR is separated by the announced subtype, which is
 		// what the collector of a string wrapper array tests for its elements.
 		"  fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {",
@@ -216,13 +216,18 @@ func TestTSHeaderBoundReject(t *testing.T) {
 			t.Errorf("message.ts missing header-bound reject %q:\n%s", want, mod)
 		}
 	}
-	// The dynamic array must NOT gain a schema count (would wrongly reject a valid
-	// long array). It DOES carry the element width bound — that is a property of
-	// the element TYPE, not of the array length, and it is taken as each element
-	// arrives, so a truncation behind an out-of-range element cannot downgrade the
-	// verdict (§7.1).
-	if !strings.Contains(mod, "case 2: { if (kind !== ArrayKind.Unsigned) break; const _d: number[] = []; this.o.da = _d; this._a0Da = _d; break; }") {
-		t.Errorf("a dynamic array must carry no count bound:\n%s", mod)
+	// The dynamic array must NOT gain a SCHEMA count (that would wrongly reject a
+	// valid long array as INVALID). What it does carry is the receiver CAP, in the
+	// same place and with the other category -- LimitExceeded, a policy rejection
+	// of well-formed bytes (generator#388, CORELIB_PLAN §6.2.1). It also carries
+	// the element width bound: a property of the element TYPE, not of the array
+	// length, taken as each element arrives so a truncation behind an out-of-range
+	// element cannot downgrade the verdict (§7.1).
+	if !strings.Contains(mod, `case 2: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "da: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d: number[] = []; this.o.da = _d; this._a0Da = _d; break; }`) {
+		t.Errorf("a dynamic array must carry the cap, never a schema count:\n%s", mod)
+	}
+	if strings.Contains(mod, `"da: array count above schema capacity`) {
+		t.Errorf("a dynamic array must not gain a schema count bound:\n%s", mod)
 	}
 	if !strings.Contains(mod, `case 2: { const _e = v as number; if (_e > 4294967295) throw new SofabError(SofabErrorCode.InvalidMsg, "da: value outside declared width u32"); this._a0Da[i] = _e; break; }`) {
 		t.Errorf("a dynamic array must still bound each element's declared width:\n%s", mod)
@@ -311,7 +316,10 @@ func TestTSStructural(t *testing.T) {
 		"serialize(os: OStream): void {",
 		// decode(bytes) is the corelib's one-shot decode driving THIS type's flat
 		// visitor: one decode surface, because CORELIB_PLAN §5.3.1 permits no second.
-		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _MyfirstmessageVis(o, new PayloadAcc()), _LIMITS);\n    return o;\n  }",
+		// The example schema HAS an unbounded string element inside a wrapper array
+		// (somestringarray), the one shape the visitor never sees a header for, so
+		// the residual DecodeLimits survives here (generator#388).
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _MyfirstmessageVis(o, new PayloadAcc()));\n    return o;\n  }",
 		// Dispatch is keyed on (location, id): a field id is unique only WITHIN a
 		// scope, and corelib-ts's visitor is flat.
 		"const _L_Myfirstmessage = 0;",
@@ -790,13 +798,20 @@ func TestTSInt64Number(t *testing.T) {
 	}
 }
 
-// TestTSDecodeLimits: the max_dyn_* config keys bake receiver-side decode
-// limits (generator#102) into the generated module — exported MAX_DYN_*
-// constants referenced by the DecodeLimits object every static decode() passes
-// to the corelib. The cap is raised to the largest schema bound of its kind
-// (escape hatch: schema-bounded fields stay governed by their own bound), an
-// unset key emits nothing, a key whose kind has no unbounded field is inert,
-// and the plumbing is identical across all three int64 modes.
+// TestTSDecodeLimits: the max_dyn_* config keys bake receiver-side decode limits
+// (generator#102) into the generated module as exported MAX_DYN_* constants, and
+// generator#388 moved their ENFORCEMENT into the visitor -- per field, at the
+// count/length header, as the else of the schema bound.
+//
+// Two consequences this pins. The values are emitted AS CONFIGURED: the raise to
+// the largest schema bound existed only because the caps rode into the corelib as
+// a DecodeLimits applied globally per decode, which would otherwise have rejected
+// a schema-bounded sibling. And no DecodeLimits is passed at all for this schema
+// -- there is no wrapper string/blob element here, so nothing is left that
+// generated code cannot bound itself.
+//
+// A key whose kind has no unbounded field stays inert, and the plumbing is
+// identical across all three int64 modes.
 func TestTSDecodeLimits(t *testing.T) {
 	const src = `
 version: 1
@@ -815,13 +830,17 @@ messages:
 			"max_dyn_blob_len":    2048, // no unbounded blob in the schema -> inert
 		})
 		for _, want := range []string{
-			"export const MAX_DYN_ARRAY_COUNT = 100000;", // raised to the schema count of barr
+			"export const MAX_DYN_ARRAY_COUNT = 65536;", // as configured, NOT raised to barr's 100000
 			"export const MAX_DYN_STRING_LEN = 4096;",
-			// One frozen module-level object, shared by every decode entry point:
-			// the caps are constants, so a fresh literal per decode() call would be
-			// an allocation with a constant value on the decode hot path (#339).
-			"const _LIMITS = Object.freeze({ maxArrayCount: MAX_DYN_ARRAY_COUNT, maxStringLen: MAX_DYN_STRING_LEN });",
-			"_decode(bytes, new _DynVis(o, new PayloadAcc()), _LIMITS);",
+			// Enforced per field, in the visitor, at the header.
+			`case 0: if (sub === FixlenSubtype.String && total > MAX_DYN_STRING_LEN) throw new SofabError(SofabErrorCode.LimitExceeded, "s: string byte length above configured limit " + MAX_DYN_STRING_LEN); break;`,
+			`if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "arr: array count above configured limit " + MAX_DYN_ARRAY_COUNT);`,
+			// ...and `barr`, which the schema bounds, keeps its own bound and its own
+			// category. At a cap of 65536 the old global DecodeLimits would have
+			// rejected it outright -- which is exactly why the raise had to exist.
+			`if (count > 100000) throw new SofabError(SofabErrorCode.InvalidMsg, "barr: array count above schema capacity 100000");`,
+			// No DecodeLimits: nothing here is beyond the visitor's reach.
+			"_decode(bytes, new _DynVis(o, new PayloadAcc()));",
 		} {
 			if !strings.Contains(mod, want) {
 				t.Errorf("int64: %s message.ts missing %q", mode, want)
@@ -830,16 +849,19 @@ messages:
 		if strings.Contains(mod, "MAX_DYN_BLOB_LEN") {
 			t.Errorf("int64: %s: inert blob limit must not be emitted (no unbounded blob)", mode)
 		}
+		if strings.Contains(mod, "_LIMITS") {
+			t.Errorf("int64: %s: the corelib must take no cap for a schema the visitor fully covers:\n%s", mode, mod)
+		}
 	}
 
 	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
-	// (§9.5, generator#385). TypeScript is on the client tier: 16384 elements
-	// (here raised to barr's schema count) and 256 KiB of string.
+	// (§9.5, generator#385). TypeScript is on the client tier: 16384 elements and
+	// 256 KiB of string, and neither is raised.
 	plain := genTSWith(t, src, map[string]any{})
 	for _, want := range []string{
-		"export const MAX_DYN_ARRAY_COUNT = 100000;",
+		"export const MAX_DYN_ARRAY_COUNT = 16384;",
 		"export const MAX_DYN_STRING_LEN = 262144;",
-		"_decode(bytes, new _DynVis(o, new PayloadAcc()), _LIMITS);",
+		"_decode(bytes, new _DynVis(o, new PayloadAcc()));",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("default limits missing %q", want)
@@ -1071,11 +1093,11 @@ func TestTSFixlenSubtypeImportMatchesUse(t *testing.T) {
 		{"doubly nested blob rows", true, `
       cube: { id: 0, type: array, items: { type: array, items: { type: array, items: { type: blob } } } }
       n:    { id: 1, type: u32 }`},
-		// An UNBOUNDED string carries no length verdict, so it needs no fixlenBegin
-		// arm at all: the corelib routes the payload to `string()` by wire type, and
-		// a field of another type never reaches it (§7.3). The subtype is named only
-		// where a bound has to be taken at the length word.
-		{"string inside a struct element", false, `
+		// An unbounded string carries a length verdict too since generator#388 -- the
+		// receiver cap, taken at the same length word as a schema maxlen and keyed on
+		// the same subtype (§7.3: a field of another type at this id was never this
+		// field's value and must not be measured against its bound).
+		{"string inside a struct element", true, `
       items: { id: 0, type: array, items: { type: struct, fields: { s: { id: 0, type: string } } } }
       n:     { id: 1, type: u32 }`},
 		{"bounded string inside a struct element", true, `
@@ -1712,7 +1734,7 @@ func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
 		"case 2: { this._a0Fa[i] = v; const _r = this._raw0Fa; if (_r !== null && (i + 1) * 4 <= _r.length) _fp32RawInto(_r, i * 4, bits); if (Number.isNaN(v)) this._rawNaN0Fa = true; break; }",
 		"case 2: this.o.faFp32Raw = this._rawNaN0Fa ? this._raw0Fa : null; this._raw0Fa = null; break;",
 		// dynamic array: no schema count, but the same companion machinery
-		"case 3: { if (kind !== ArrayKind.Fp32) break; const _d: number[] = []; this.o.da = _d; this._a0Da = _d; this.o.daFp32Raw = null;",
+		`case 3: { if (kind !== ArrayKind.Fp32) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "da: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d: number[] = []; this.o.da = _d; this._a0Da = _d; this.o.daFp32Raw = null;`,
 		// Array encode: the payload is re-rendered from the value, taking captured
 		// bits only for an element that is still the NaN it decoded as.
 		"os.writeFp32ArrayRaw(2, _fp32ArrayRaw(this.fa, this.faFp32Raw));",
@@ -2167,7 +2189,10 @@ func TestTSClosedNameSet(t *testing.T) {
 	// exported, and not a member of the class -- so it adds no name to the closed
 	// set §6.1.1 defines.
 	for _, want := range []string{
-		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _MyfirstmessageVis(o, new PayloadAcc()), _LIMITS);\n    return o;\n  }",
+		// The example schema HAS an unbounded string element inside a wrapper array
+		// (somestringarray), the one shape the visitor never sees a header for, so
+		// the residual DecodeLimits survives here (generator#388).
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _MyfirstmessageVis(o, new PayloadAcc()));\n    return o;\n  }",
 		"class _MyfirstmessageVis implements Visitor {",
 	} {
 		if !strings.Contains(mod, want) {
@@ -2191,5 +2216,99 @@ func TestTSClosedNameSet(t *testing.T) {
 		if !allowed[m[1]] {
 			t.Errorf("generated class carries static %q; §6.1.1 closes the set (add it to the allowlist only if it is a language-mandated extra, never a second wire entry point)", m[1])
 		}
+	}
+}
+
+// TestTSCapsAreEnforcedPerField: the receiver caps are applied by the generated
+// visitor, at each field's own count/length header, rather than handed to the
+// corelib as a DecodeLimits (ARCHITECTURE §9.5, generator#388).
+//
+// The corelib has no schema. A cap it is given applies to every field it sees, so
+// it cannot honour §6.2.1's "MUST NOT be applied to a field the schema already
+// bounds" -- which is why the emitted value had to be RAISED to the largest schema
+// bound in the message, and why every unbounded field lost that much tightness.
+// The visitor knows the schema, so it needs neither.
+func TestTSCapsAreEnforcedPerField(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      s:    { id: 0, type: string }
+      bs:   { id: 1, type: string, maxlen: 8 }
+      b:    { id: 2, type: blob }
+      arr:  { id: 3, type: array, items: { type: u32 } }
+      barr: { id: 4, type: array, items: { type: u32, count: 100000 } }
+      mat:  { id: 5, type: array, items: { type: array, items: { type: u32 } } }
+`
+	mod := genTSWith(t, src, map[string]any{"max_dyn_array_count": 64, "max_dyn_string_len": 32})
+
+	for _, want := range []string{
+		// Emitted as configured. 64 is far below barr's schema count of 100000 --
+		// under the old global DecodeLimits that combination was impossible, because
+		// the corelib would have rejected barr at 64 and the value had to be lifted.
+		"export const MAX_DYN_ARRAY_COUNT = 64;",
+		"export const MAX_DYN_STRING_LEN = 32;",
+		// Unbounded scalar string/blob: the cap, at the length word.
+		`case 0: if (sub === FixlenSubtype.String && total > MAX_DYN_STRING_LEN) throw new SofabError(SofabErrorCode.LimitExceeded, "s: string byte length above configured limit " + MAX_DYN_STRING_LEN); break;`,
+		// Schema-bounded string: its own bound, its own category, no cap.
+		`case 1: if (sub === FixlenSubtype.String && total > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "bs: string byte length above schema maxlen 8"); break;`,
+		// Unbounded native array: the cap, at the count word, behind the §7.3 kind test.
+		`case 3: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "arr: array count above configured limit " + MAX_DYN_ARRAY_COUNT);`,
+		// Schema-bounded native array: its own bound at 100000, NOT the cap at 64.
+		`case 4: { if (kind !== ArrayKind.Unsigned) break; if (count > 100000) throw new SofabError(SofabErrorCode.InvalidMsg, "barr: array count above schema capacity 100000");`,
+		// A matrix ROW's own element count takes the cap the same way.
+		`if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "mat element: array count above configured limit " + MAX_DYN_ARRAY_COUNT);`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing per-field cap %q:\n%s", want, mod)
+		}
+	}
+	// Nothing in this schema is beyond the visitor's reach, so the corelib is
+	// handed no cap at all and there is no DecodeLimits object to build.
+	for _, gone := range []string{"_LIMITS", "maxArrayCount", "maxStringLen", "maxBlobLen"} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("the corelib must take no cap for a fully covered schema (%q):\n%s", gone, mod)
+		}
+	}
+	// The blob cap stays inert on liveness, not on enforcement: `b` is unbounded,
+	// so MAX_DYN_BLOB_LEN IS live here and is applied at id 2.
+	if !strings.Contains(mod, `case 2: if (sub === FixlenSubtype.Blob && total > MAX_DYN_BLOB_LEN) throw new SofabError(SofabErrorCode.LimitExceeded, "b: blob byte length above configured limit " + MAX_DYN_BLOB_LEN); break;`) {
+		t.Errorf("an unbounded blob must be capped at its length word:\n%s", mod)
+	}
+}
+
+// TestTSWrapperElementLengthKeepsTheCorelibCap: the ONE cap generated code cannot
+// take, and the only reason a DecodeLimits survives at all.
+//
+// A wrapper array's string/blob elements are collected by the corelib's
+// StringSeq/BlobSeq, so their length words never reach the generated visitor. The
+// collector applies the schema `maxlen` it is handed (`elemMax`) but has no
+// receiver-side sibling for it -- unlike the element INDEX, where it already takes
+// a `receiverCap`. Until it does, the corelib's global cap is what bounds such an
+// element, so it is kept for exactly this shape and dropped everywhere else.
+func TestTSWrapperElementLengthKeepsTheCorelibCap(t *testing.T) {
+	// Unbounded string element -> the residual DecodeLimits, string only.
+	dyn := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n      w: { id: 0, type: array, items: { type: string } }\n", map[string]any{})
+	if !strings.Contains(dyn, "const _LIMITS = Object.freeze({ maxStringLen: MAX_DYN_STRING_LEN });") {
+		t.Errorf("an unbounded wrapper string element must keep the corelib's length cap:\n%s", dyn)
+	}
+	if !strings.Contains(dyn, "_decode(bytes, new _MVis(o, new PayloadAcc()), _LIMITS);") {
+		t.Errorf("the residual limits must reach the corelib:\n%s", dyn)
+	}
+	// maxArrayCount is never among them: the array's INDEX is what its receiver cap
+	// binds, and the collector already takes that as its own argument.
+	if strings.Contains(dyn, "maxArrayCount") {
+		t.Errorf("the index cap travels on the collector, not in DecodeLimits:\n%s", dyn)
+	}
+	if !strings.Contains(dyn, `new StringSeq(_t, this.a, -1, -1, "w", MAX_DYN_ARRAY_COUNT)`) {
+		t.Errorf("the collector must receive the index cap directly:\n%s", dyn)
+	}
+
+	// A maxlen on the element is enough to retire it: the collector enforces that
+	// bound itself, so nothing is left for the corelib to cap.
+	bounded := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n      w: { id: 0, type: array, items: { type: string, maxlen: 16 } }\n", map[string]any{})
+	if strings.Contains(bounded, "_LIMITS") {
+		t.Errorf("a bounded wrapper element needs no corelib cap:\n%s", bounded)
 	}
 }
