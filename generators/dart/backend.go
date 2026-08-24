@@ -151,7 +151,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	f.line("// ignore_for_file: unused_field, unused_element, deprecated_member_use_from_same_package")
 	f.line("import 'dart:typed_data';")
-	f.line("import 'package:sofabuffers/sofabuffers.dart' as sofab;")
+	f.line("import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;")
 	f.blank()
 
 	g.emitLimits(f)
