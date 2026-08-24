@@ -318,11 +318,13 @@ func TestKotlinOverIndexWrapperArray(t *testing.T) {
 			t.Errorf("M.kt missing over-index guard %q", want)
 		}
 	}
-	if strings.Contains(m, `"ds element: array index`) {
-		t.Error("a dynamic wrapper array has no N and must carry no over-index guard")
-	}
-	if !strings.Contains(m, `while (m.ds.size <= id) m.ds.add(""); m.ds[id] = s`) {
-		t.Error("a dynamic string array must place by id and gap-fill with the element default")
+	// A DYNAMIC wrapper array is bounded too, and by the same test in the same
+	// place -- what differs is the bound and the category. Its length is its
+	// highest index, so the receiver cap binds the index; the bytes are well
+	// formed and decode under a looser cap, so the verdict is LIMIT_EXCEEDED and
+	// not INVALID_MSG (generator#387, CORELIB_PLAN §6.2.1).
+	if !strings.Contains(m, `if (id >= MAX_DYN_ARRAY_COUNT) throw SofabException(SofabError.LIMIT_EXCEEDED, "ds element: array index above configured limit 16384"); while (m.ds.size <= id) m.ds.add(""); m.ds[id] = s`) {
+		t.Errorf("a dynamic wrapper array must cap its element index, then place by id and gap-fill:\n%s", m)
 	}
 }
 
@@ -1086,5 +1088,46 @@ messages:
 		if strings.Contains(m, gone) {
 			t.Errorf("M.kt must not still grow into an array (%q):\n%s", gone, m)
 		}
+	}
+}
+
+// TestKotlinWrapperIndexCap: a DYNAMIC wrapper array's element index is bounded
+// by the receiver cap, checked before the container grows (ARCHITECTURE §9.5,
+// generator#387). See the Java twin for why the INDEX and not the element count:
+// gap filling makes the array's length its highest present id, so two delivered
+// elements can be an arbitrarily large container.
+func TestKotlinWrapperIndexCap(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      dstrs: { id: 0, type: array, items: { type: string } }
+      dblbs: { id: 1, type: array, items: { type: blob } }
+      dobjs: { id: 2, type: array, items: { type: struct, fields: { x: { id: 0, type: u32 } } } }
+      dmat:  { id: 3, type: array, items: { type: array, items: { type: u32 } } }
+      bstrs: { id: 4, type: array, items: { type: string, count: 4 } }
+`
+	m := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
+
+	for _, want := range []string{
+		`if (id >= MAX_DYN_ARRAY_COUNT) throw SofabException(SofabError.LIMIT_EXCEEDED, "dstrs element: array index above configured limit 16384"); while (m.dstrs.size <= id)`,
+		`"dblbs element: array index above configured limit 16384"); while (m.dblbs.size <= id)`,
+		`"dobjs element: array index above configured limit 16384"); while (m.dobjs.size <= id)`,
+		// A native matrix ROW takes the index cap too: its id is the outer array's
+		// length. Its own element count is capped separately, beside it (#386).
+		`"dmat element: array index above configured limit 16384")`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.kt missing wrapper index cap %q:\n%s", want, m)
+		}
+	}
+	// The cap governs only what the schema left unbounded (§9.5): a count:N array
+	// keeps its own bound and its own category.
+	if !strings.Contains(m, `if (id >= 4) throw SofabException(SofabError.INVALID_MSG, "bstrs element: array index above schema capacity 4")`) {
+		t.Errorf("a count:N wrapper array must keep its INVALID schema bound:\n%s", m)
+	}
+	if strings.Contains(m, `"bstrs element: array index above configured limit`) {
+		t.Errorf("a schema-bounded array must not also carry the receiver cap:\n%s", m)
 	}
 }

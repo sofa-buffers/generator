@@ -171,13 +171,32 @@ func limitThrow(name, noun string, limit int64) string {
 		ktStringLit(fmt.Sprintf("%s: %s %d", name, noun, limit)))
 }
 
-// overIndexGuard returns the reject clause for a fixed-count wrapper array: an
-// element id >= N throws INVALID_MSG before the list grows (MESSAGE_SPEC
-// §5.1/§7), which also bounds an over-index heap-amplification fill. Empty for a
-// dynamic array (cap == -1).
-func overIndexGuard(cap int64, name string) string {
+// overIndexGuard returns the reject clause for a wrapper array's element id,
+// emitted ahead of the grow it bounds.
+//
+// A wrapper array carries no count HEADER: its elements are keyed by an
+// unbounded varint index and the collector grows the list to id + 1, so the
+// index IS the array's length (MESSAGE_SPEC §5.1 — two elements at id 0 and id
+// 16383 are a 16384-slot list). A single over-index element is therefore an
+// amplification vector by itself, and it is the INDEX that has to be bounded:
+// capping how many elements arrived would not bound the allocation, because a
+// sparse array allocates by its highest id.
+//
+// Which bound applies depends on whether the schema counts the array, and the
+// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
+// `count: N` makes id >= N INVALID_MSG (the bytes contradict the agreed schema),
+// no count makes id >= MAX_DYN_ARRAY_COUNT LIMIT_EXCEEDED (the bytes are well
+// formed and the same message decodes under a looser cap — folding the two
+// together is forbidden by CORELIB_PLAN §6.2.1).
+//
+// Empty only when the array is dynamic AND no cap is live for this schema.
+func (g *gen) overIndexGuard(cap int64, name string) string {
 	if cap < 0 {
-		return ""
+		if !g.limArr {
+			return ""
+		}
+		return fmt.Sprintf("if (id >= MAX_DYN_ARRAY_COUNT) %s; ",
+			limitThrow(locName(name)+" element", "array index above configured limit", g.limits.arrayCount))
 	}
 	return fmt.Sprintf("if (id >= %d) %s; ", cap,
 		invalidThrow(fmt.Sprintf("%s element: array index above schema capacity %d", locName(name), cap)))
@@ -287,6 +306,7 @@ func (g *gen) emitVisitor(f *kfile, name string, fields []*ir.Field) {
 	primTypes := primArrayTypesUsed(fs)
 	rowTypes := primRowTypesUsed(fs)
 	limArr, limStr, limBlob := g.activeLimits(fs)
+	g.limArr = limArr // for overIndexGuard, which cannot reach fs
 	// A native array is the only thing that fills an array destination, and a
 	// string or blob destination is the only thing that ever reassembles a split
 	// payload -- so a message with neither carries neither piece of state. The
@@ -502,6 +522,14 @@ func (g *gen) activeLimits(fs []frame) (limArr, limStr, limBlob bool) {
 				limArr = true
 			}
 		}
+		// Any wrapper array the schema leaves uncounted makes the array cap live:
+		// since generator#387 it bounds that array's element INDEX, which is the
+		// array's length (§9.5). Separate from the count conditions above -- a
+		// message whose only unbounded array is a string wrapper has no count
+		// header anywhere and still needs the constant.
+		if fr.kind != fkNormal && fr.cap < 0 {
+			limArr = true
+		}
 	}
 	return limArr && g.limits.arrayHas, limStr && g.limits.stringHas, limBlob && g.limits.blobHas
 }
@@ -657,7 +685,7 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, noun string) []string {
 	var arms []string
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0) {
-			body := overIndexGuard(fr.cap, fr.loc)
+			body := g.overIndexGuard(fr.cap, fr.loc)
 			if fr.emax >= 0 {
 				body += fmt.Sprintf("if (total > %d) %s", fr.emax,
 					invalidThrow(fmt.Sprintf("%s element: %s above schema maxlen %d", locName(fr.loc), noun, fr.emax)))
@@ -721,7 +749,7 @@ func (g *gen) emitStringCb(f *kfile, fs []frame, limStr bool) {
 			// (empty) element is omitted on the wire, so the value is PLACED at
 			// its id and any gap filled with the element default ("").
 			f.line("            %d -> { %swhile (%s.size <= id) %s.add(\"\"); %s[id] = s }",
-				fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
+				fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -762,7 +790,7 @@ func (g *gen) emitBlobCb(f *kfile, fs []frame, limBlob bool) {
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindBlob {
 			f.line("            %d -> { %swhile (%s.size <= id) %s.add(Seq.EMPTY_BYTES); %s[id] = b }",
-				fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
+				fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -840,7 +868,7 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 			// below can only ever reject a row that survives the kind test; then
 			// the row's ID, then its element count, the order every backend takes
 			// the two INVALID verdicts in.
-			body := overIndexGuard(fr.cap, fr.loc) + guard + armFill(fs, fr, nil)
+			body := g.overIndexGuard(fr.cap, fr.loc) + guard + armFill(fs, fr, nil)
 			arrType := primArrayType(fr.innerElem)
 			// Sized at exactly the wire count, once: the guard above bounded it
 			// (§9.5, shape A). The wire already said how big the row is.
@@ -1019,14 +1047,14 @@ func (g *gen) emitSequenceCbs(f *kfile, fs []frame) {
 			// and decoded a REOPENED id as a second element instead of merging
 			// into the first (§7.4 struct-merge, which placement gives for free).
 			f.line("            %d -> { %swhile (%s.size <= id) %s.add(%s()); %s = id; cur = %d }",
-				fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.elemType, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
+				fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.elemType, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkSeqMat:
 			// A row of an array-of-wrapper-arrays is placed at the index its
 			// element id names, for the same reason as the struct element above.
 			// An array wrapper IS the array's value, so a REOPENED row id
 			// replaces the row rather than merging into it (§7.4).
 			f.line("            %d -> { %sSeq.reserveRowList(%s, id); %s = id; cur = %d }",
-				fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
+				fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkNormal:
 			var arms []string
 			for _, fld := range fr.fields {

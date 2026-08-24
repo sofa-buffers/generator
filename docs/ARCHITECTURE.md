@@ -2149,6 +2149,48 @@ backend:
     number of elements delivered is what closes this — a sparse array allocates by
     its highest id, not by how many elements arrived.
 
+    **Landed in generator#387** for the six backends whose gap-fill is generated
+    code: **Java**, **Kotlin**, **C#**, **Zig**, **Rust** (std) and **Python**. The
+    check goes in the same place as the `count: N` reject of #142, because the two
+    are one decision with two answers — the bound (schema `count` vs. the cap) and
+    the category (INVALID vs. `LimitExceeded`) — so each backend has ONE helper
+    returning both, rather than a second guard beside the first. That the two must
+    not be folded together is CORELIB_PLAN §6.2.1: the same bytes decode under a
+    looser cap, so an over-index element is a policy rejection and not malformed
+    input. A native matrix **row** takes the index cap too, ahead of the row's own
+    element count from the A-shape work above — id first, then count, in every
+    backend.
+
+    Two points the implementation settled:
+
+    - **Liveness now has a second source.** A cap's state is emitted only where the
+      schema actually reaches an unbounded field of its kind, and three backends
+      decided that by walking for an unbounded *count* — a native array with no
+      `count`, or a matrix row with none. A message whose only unbounded array is a
+      string wrapper has no count header anywhere, so nothing was emitted while the
+      new guard named it: Java and Kotlin did not emit `MAX_DYN_ARRAY_COUNT`, and
+      Zig did not declare the sticky `lim` field. All three now count a `cap < 0`
+      wrapper frame as making the array cap live, and thread that per-message
+      decision down to the guard, which sits too deep to re-derive it. **Both were
+      caught by conformance and by neither unit test** — the generated source did
+      not compile, which a codegen assertion on substrings cannot see. C#, Rust and
+      Python were already right, deriving liveness from `ir.Bounds`, which marks
+      any array without a schema count.
+    - **Zig refuses in three different ways** — an error return from `fixlenBegin`,
+      the sticky `self.lim` in the payload callback, a break to the dead scope in
+      `sequenceBegin` — so its helper returns the *test* and the *category* and
+      each site spells its own refusal.
+
+    **Three backends cannot take this generator-side**, because their gap-fill is
+    not generated: **Go** (`sofab.StringSeq{Cap:}` and siblings), **Dart**
+    (`sofab.StringSeq(out, cap, emax)`) and pure **C++** (`sofab::StringSeq{out,
+    cap, emax}`) hand the whole wrapper array to a corelib collector, and the `cap`
+    they pass means the *schema* bound and answers `INVALID`. Passing a receiver
+    cap through it would produce the forbidden category. Each needs a second field
+    carrying the policy bound: corelib-go#129, corelib-dart#86, corelib-cpp#124.
+    **TypeScript** takes it generator-side like the six, but on top of its
+    flat-visitor rebuild (#395) rather than the cursor path being retired.
+
 Enforcement by family: **generated visitor guards** (Rust std, Java, Kotlin, C#,
 Zig, pure C++, and Python — the corelib callback exposes `count`/`total`
 pre-allocation; the corelibs contribute only the error category); **passed into

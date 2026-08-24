@@ -1561,3 +1561,53 @@ messages:
 		t.Error("the configured cap must be emitted as configured, not raised to the largest schema maxlen")
 	}
 }
+
+// TestPythonWrapperIndexCap: a DYNAMIC wrapper array's element index is bounded
+// by the receiver cap, checked before the list is gap-filled (ARCHITECTURE §9.5,
+// generator#387).
+//
+// A wrapper array carries no count header, so MAX_DYN_ARRAY_COUNT never reached
+// it: its elements are keyed by an unbounded varint index and the gap-fill
+// extends the list to fid + 1. Gap filling (§5.1) is why the INDEX and not the
+// element count is the bound -- two delivered elements at id 0 and id 16383 are
+// a 16384-slot list, so the index IS the length.
+//
+// The category is SofaLimitError, not SofaDecodeError: the bytes are well formed
+// and the same message decodes under a looser cap (CORELIB_PLAN §6.2.1).
+func TestPythonWrapperIndexCap(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      dstrs: { id: 0, type: array, items: { type: string } }
+      dblbs: { id: 1, type: array, items: { type: blob } }
+      dobjs: { id: 2, type: array, items: { type: struct, fields: { x: { id: 0, type: u32 } } } }
+      bstrs: { id: 4, type: array, items: { type: string, count: 4 } }
+`
+	m := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+
+	for _, want := range []string{
+		// A VALUE element is bounded at the header, in on_field, one step ahead of
+		// the payload that would be placed.
+		`if fld.id >= MAX_DYN_ARRAY_COUNT:`,
+		`raise SofaLimitError("dstrs: array index %d exceeds max_array_count %d" % (fld.id, MAX_DYN_ARRAY_COUNT))`,
+		`raise SofaLimitError("dblbs: array index %d exceeds max_array_count %d" % (fld.id, MAX_DYN_ARRAY_COUNT))`,
+		// An element that OPENS a scope has no on_field in front of it, so it is
+		// bounded in on_sequence_begin instead -- where fid names the index.
+		`if fid >= MAX_DYN_ARRAY_COUNT:`,
+		`raise SofaLimitError("dobjs: array index %d exceeds max_array_count %d" % (fid, MAX_DYN_ARRAY_COUNT))`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.py missing wrapper index cap %q:\n%s", want, m)
+		}
+	}
+	// The cap governs only what the schema left unbounded (§9.5): a count:N array
+	// keeps its own bound and its own category.
+	if !strings.Contains(m, `raise SofaDecodeError("bstrs: array index above schema capacity 4")`) {
+		t.Errorf("a count:N wrapper array must keep its SofaDecodeError schema bound:\n%s", m)
+	}
+	if strings.Contains(m, `"bstrs: array index %d exceeds max_array_count`) {
+		t.Errorf("a schema-bounded array must not also carry the receiver cap:\n%s", m)
+	}
+}

@@ -241,6 +241,15 @@ func (g *gen) msgLimitGuards(fields []*ir.Field) bool {
 		return false
 	}
 	for _, fr := range g.frames(&ir.Message{Fields: fields}) {
+		// Any wrapper array the schema leaves uncounted needs the flag: since
+		// generator#387 the array cap bounds that array's element INDEX, which is
+		// the array's length (§9.5). Checked ahead of the per-kind conditions
+		// below, and separately from them -- a message whose only unbounded array
+		// is a string wrapper has no count header anywhere, so none of them fires
+		// while the index guard still sets self.lim.
+		if g.limits.arrayHas && fr.kind != fkStruct && fr.cap < 0 {
+			return true
+		}
 		switch fr.kind {
 		case fkNestedNative:
 			if g.limits.arrayHas && fr.elemDynCount {
@@ -349,6 +358,7 @@ func widthGuard(k ir.Kind) string {
 func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	use := visitorUseOf(fs)
+	g.msgLim = g.msgLimitGuards(fields) // for overIndexCond, which cannot reach fields
 
 	f.line("/// Flat-visitor decoder for %s: a (location, id) state machine over the", name)
 	f.line("/// corelib's streaming callbacks, with a bounded location stack.")
@@ -833,8 +843,8 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 // The payload-side guards stay -- unreachable for a message that gets this far,
 // and the only thing still bounding a consumer built against an older corelib.
 func (g *gen) emitFixlenBegin(f *zfile, fs []frame, name string) {
-	str := fixlenBeginArms(fs, ir.KindString)
-	blob := fixlenBeginArms(fs, ir.KindBlob)
+	str := g.fixlenBeginArms(fs, ir.KindString)
+	blob := g.fixlenBeginArms(fs, ir.KindBlob)
 	if len(str) == 0 && len(blob) == 0 {
 		return
 	}
@@ -878,18 +888,55 @@ func (g *gen) emitFixlenBegin(f *zfile, fs []frame, name string) {
 	f.line("    }")
 }
 
+// overIndexCond is the test that bounds a wrapper array's element INDEX, and the
+// verdict that test carries.
+//
+// A wrapper array carries no count HEADER: its elements are keyed by an
+// unbounded varint index and the destination grows to id + 1, so the index IS
+// the array's length (MESSAGE_SPEC §5.1 -- two elements at id 0 and id 16383 are
+// a 16384-slot slice). A single over-index element is therefore an amplification
+// vector by itself, and it is the INDEX that has to be bounded: capping how many
+// elements arrived would not bound the allocation, because a sparse array
+// allocates by its highest id.
+//
+// Which bound applies depends on whether the schema counts the array, and the
+// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
+// `count: N` makes id >= N INVALID (the bytes contradict the agreed schema,
+// issue #142), no count makes id >= max_dyn_array_count LimitExceeded (the bytes
+// are well formed and the same message decodes under a looser cap, issue #387 --
+// folding the two together is forbidden by CORELIB_PLAN §6.2.1).
+//
+// The callers differ in how they REFUSE -- a sticky flag, an error return, a
+// break to the dead scope -- so this returns the test and the category and lets
+// each spell its own refusal. ok is false only when the array is dynamic AND no
+// cap is live for this schema.
+func (g *gen) overIndexCond(cap int64) (cond string, overLimit, ok bool) {
+	if cap >= 0 {
+		return fmt.Sprintf("id >= %d", cap), false, true
+	}
+	if !g.msgLim {
+		return "", false, false
+	}
+	return "id >= max_dyn_array_count", true, true
+}
+
 // fixlenBeginArms builds the per-scope arms for one fixlen subtype. A wrapper
 // element carries its array's over-index bound AND its element maxlen, in that
 // order: an element that is not this array's element at all must not have its
 // length measured against the element bound. A scalar field carries its own
 // maxlen, keyed by field id inside its scope.
-func fixlenBeginArms(fs []frame, kind ir.Kind) []string {
+func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind) []string {
 	var arms []string
 	for _, fr := range fs {
-		if fr.kind == fkSeqArr && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0) {
+		idCond, idLim, idOK := g.overIndexCond(fr.cap)
+		if fr.kind == fkSeqArr && fr.elemKind == kind && (idOK || fr.emax >= 0) {
 			body := ""
-			if fr.cap >= 0 {
-				body += fmt.Sprintf("if (id >= %d) return sofab.Error.InvalidMessage; ", fr.cap)
+			if idOK {
+				err := "InvalidMessage"
+				if idLim {
+					err = "LimitExceeded"
+				}
+				body += fmt.Sprintf("if (%s) return sofab.Error.%s; ", idCond, err)
 			}
 			if fr.emax >= 0 {
 				body += fmt.Sprintf("if (total > %d) return sofab.Error.InvalidMessage; ", fr.emax)
@@ -977,11 +1024,15 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 				body = fmt.Sprintf("if (total > %d) { self.inv = true; } else { %s }", fr.emax, stmt)
 				stmt = body
 			}
-			// Fixed-count wrapper array: reject an element id >= N as INVALID
-			// (MESSAGE_SPEC §5.1/§7 — issue #142) before _setElem grows the slice,
-			// which also bounds an over-index heap-amplification fill.
-			if fr.cap >= 0 {
-				body = fmt.Sprintf("if (id >= %d) { self.inv = true; } else { %s }", fr.cap, stmt)
+			// Bound the element INDEX before setElem grows the slice: the index IS
+			// the array's length, so this is what bounds an over-index heap
+			// amplification (see overIndexCond).
+			if cond, lim, ok := g.overIndexCond(fr.cap); ok {
+				flag := "self.inv"
+				if lim {
+					flag = "self.lim"
+				}
+				body = fmt.Sprintf("if (%s) { %s = true; } else { %s }", cond, flag, stmt)
 			}
 			all = append(all, frameArms{fr: fr, body: body})
 		}
@@ -1164,8 +1215,12 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 			}
 			// The row's ID is bounded before its element count, matching the order
 			// every other backend takes the two verdicts in.
-			if fr.cap >= 0 {
-				body = fmt.Sprintf("if (id >= %d) { self.inv = true; self.an = 0; } else %s", fr.cap, body)
+			if cond, lim, ok := g.overIndexCond(fr.cap); ok {
+				flag := "self.inv"
+				if lim {
+					flag = "self.lim"
+				}
+				body = fmt.Sprintf("if (%s) { %s = true; self.an = 0; } else %s", cond, flag, body)
 			}
 			// Same rule as the leaf arms: a row is grown and sized only for a
 			// header whose element kind matches the one this row declares. A
@@ -1295,12 +1350,15 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 			idUsed = true
 			var b strings.Builder
 			b.WriteString("blk: {\n")
-			// Fixed-count wrapper array: an element id >= N is a schema-bound
-			// violation, rejected as INVALID (MESSAGE_SPEC §5.1/§7 — issue #142)
-			// before the destination grows, which also bounds the gap-fill against
-			// an over-index heap amplification.
-			if fr.cap >= 0 {
-				fmt.Fprintf(&b, "                if (id >= %d) { self.inv = true; break :blk .dead; }\n", fr.cap)
+			// Bound the element INDEX before the destination grows, which is what
+			// bounds the gap-fill against an over-index heap amplification (see
+			// overIndexCond).
+			if cond, lim, ok := g.overIndexCond(fr.cap); ok {
+				flag := "self.inv"
+				if lim {
+					flag = "self.lim"
+				}
+				fmt.Fprintf(&b, "                if (%s) { %s = true; break :blk .dead; }\n", cond, flag)
 			}
 			fmt.Fprintf(&b, "                if (!sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, %s)) break :blk .dead;\n",
 				fr.elemType, fr.path, fr.elemFill)

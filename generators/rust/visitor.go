@@ -78,20 +78,40 @@ func boundOf(has bool, v int64) int64 {
 	return -1
 }
 
-// overIndexGuard returns the reject clause for a fixed-count wrapper array: an
-// element id >= N sets self.inv (surfaced as Error::InvalidMsg) and
-// returns before the Vec grows (MESSAGE_SPEC §5.1/§7 — issue #142), which also
-// bounds an over-index heap-amplification fill. Empty for a dynamic array
-// (cap == -1). Emitted on BOTH profiles: on no_std it fires ahead of the heapless
-// Vec<_, N> capacity drop (issue #126), so an over-index element is INVALID, not
-// silently dropped — the fixed-capacity twin of the over-maxlen reject
-// (emitMaxlenGuard) and the convergence §7.1 requires across memory models
-// (issue #149 / F-0013).
-func overIndexGuard(cap int64) string {
-	if cap < 0 {
+// overIndexGuard returns the reject clause for a wrapper array's element id,
+// emitted ahead of the grow it bounds.
+//
+// A wrapper array carries no count HEADER: its elements are keyed by an
+// unbounded varint index and the destination grows to id + 1, so the index IS
+// the array's length (MESSAGE_SPEC §5.1 — two elements at id 0 and id 16383 are
+// a 16384-slot Vec). A single over-index element is therefore an amplification
+// vector by itself, and it is the INDEX that has to be bounded: capping how many
+// elements arrived would not bound the allocation, because a sparse array
+// allocates by its highest id.
+//
+// Which bound applies depends on whether the schema counts the array, and the
+// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
+//
+//   - `count: N` -> id >= N sets self.inv, surfaced as Error::InvalidMsg (issue
+//     #142). The bytes contradict the schema both peers agreed on. Emitted on
+//     BOTH profiles: on no_std it fires ahead of the heapless Vec<_, N> capacity
+//     drop (issue #126), so an over-index element is INVALID rather than silently
+//     dropped — the convergence §7.1 requires across memory models (#149/F-0013).
+//   - no count -> id >= MAX_DYN_ARRAY_COUNT sets self.lim, surfaced as
+//     Error::LimitExceeded (issue #387). The bytes are well formed and the same
+//     message decodes under a looser cap, so folding this into INVALID is
+//     forbidden by CORELIB_PLAN §6.2.1. std only: corelib-rs-no-std has no
+//     LimitExceeded, and checkBounded has already refused an unbounded field
+//     there, so the case cannot arise — g.limits is left zero for that profile
+//     and this returns "" for it.
+func (g *gen) overIndexGuard(cap int64) string {
+	if cap >= 0 {
+		return fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", cap)
+	}
+	if !g.limits.arrayHas {
 		return ""
 	}
-	return fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", cap)
+	return "if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } "
 }
 
 // rowReject builds one reject clause for a NATIVE ROW frame (fkNestedNative) in
@@ -113,14 +133,20 @@ func rowReject(cond, flag string) string {
 
 // rowGuards returns the reject clauses that front a native row's array_begin arm,
 // in the order §5.2 needs them decided: the ROW id against the outer array's
-// count (cap), then the row's own element count against the row's count (ecap) —
-// or, for a row the schema leaves unbounded, against the receiver's configured
-// array limit. Both bounds are decided at the header, before the row is opened
+// count (cap) — or, for a count-less outer array, against the receiver's
+// configured array limit — then the row's own element count against the row's
+// count (ecap), or again against that limit. Both bounds are decided at the header, before the row is opened
 // or filled, so INVALID dominates a truncated tail (generator#216).
 func (g *gen) rowGuards(fr frame) string {
 	var out string
-	if fr.cap >= 0 {
+	switch {
+	case fr.cap >= 0:
 		out += rowReject(fmt.Sprintf("id as usize >= %d", fr.cap), "inv")
+	case g.limits.arrayHas:
+		// A row of a count-less matrix: its ID is the outer array's length, so
+		// the receiver cap binds it exactly as it binds a leaf wrapper element
+		// (issue #387, see overIndexGuard).
+		out += rowReject("id as usize >= MAX_DYN_ARRAY_COUNT", "lim")
 	}
 	switch {
 	case fr.ecap >= 0:
@@ -978,7 +1004,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 					// concatenated onto the first, and the capacity check below — written
 					// for an empty destination — then tripped into Error::BufferFull on
 					// any repeat at any size (generator#273 / Crucible F-0048).
-					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { _e.clear(); let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { _e.clear(); let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -1000,7 +1026,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _s; }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _s; }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -1028,7 +1054,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
 					// The blob twin of the string arm above: replace, never append
 					// (generator#273 / F-0048).
-					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { _e.clear(); let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { _e.clear(); let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
@@ -1045,7 +1071,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _b; }", fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _b; }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
@@ -1193,14 +1219,14 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				// capacity); returning early leaves cur on the array frame, which the
 				// element's own sequence_end pops back off the already-pushed stack.
 				add("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
-					fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
+					fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
 			case fkArrArr:
 				// Same rule as fkStructArr above: the element id IS the row's index
 				// (§5.1), so the row is placed at out[id] rather than appended -- an
 				// interior all-default row is omitted (§2) and leaves an id gap that
 				// an appending collector would close, shifting every later row down.
 				add("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
-					fr.loc, overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
+					fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
 			}
 		}
 		// The default arm is a SKIP, not "stay where you are". An id the schema does
