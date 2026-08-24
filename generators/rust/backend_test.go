@@ -253,7 +253,10 @@ messages:
 		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
-		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
+		// A count-less matrix: the ROW's id is the outer array's length, so the cap
+		// binds it (generator#387), and the row's own element count is capped
+		// beside it -- two bounds, id first, both LimitExceeded.
+		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
 		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; return; } { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
@@ -1780,5 +1783,76 @@ messages:
 	if !strings.Contains(m, "fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {") ||
 		strings.Count(m, "total > 8") < 2 {
 		t.Error("the payload-side maxlen guard must remain as defense")
+	}
+}
+
+// TestRustWrapperIndexCap: a DYNAMIC wrapper array's element index is bounded by
+// the receiver cap, checked before the Vec grows (ARCHITECTURE §9.5,
+// generator#387).
+//
+// A wrapper array carries no count header, so `max_dyn_array_count` never
+// reached it: its elements are keyed by an unbounded varint index and the
+// collector grows to id + 1. Gap filling (§5.1) is why the INDEX and not the
+// element count is the bound -- two delivered elements at id 0 and id 16383 are
+// a 16384-slot Vec, so the index IS the length.
+//
+// The category is LimitExceeded, not InvalidMsg: the bytes are well formed and
+// the same message decodes under a looser cap (CORELIB_PLAN §6.2.1).
+func TestRustWrapperIndexCap(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      dstrs: { id: 0, type: array, items: { type: string } }
+      dblbs: { id: 1, type: array, items: { type: blob } }
+      dobjs: { id: 2, type: array, items: { type: struct, fields: { x: { id: 0, type: u32 } } } }
+      dmat:  { id: 3, type: array, items: { type: array, items: { type: u32 } } }
+      bstrs: { id: 4, type: array, items: { type: string, count: 4 } }
+`
+	doc, err := parser.Parse([]byte(src), "m.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var m string
+	for _, f := range files {
+		if f.Path == "src/message.rs" {
+			m = string(f.Content)
+		}
+	}
+
+	for _, want := range []string{
+		"(_Loc::Root_dstrs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } while self.m.dstrs.len() <= id as usize",
+		"(_Loc::Root_dblbs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } while self.m.dblbs.len() <= id as usize",
+		"(_Loc::Root_dobjs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } while self.m.dobjs.len() <= id as usize",
+		// A native matrix ROW takes the index cap too: its id is the outer array's
+		// length. Its own element count is capped beside it, id first.
+		"_Loc::Root_dmat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT",
+		// and the flag is surfaced as the policy category, never as InvalidMsg.
+		"if limited { return Err(sofab::Error::LimitExceeded); }",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.rs missing wrapper index cap %q:\n%s", want, m)
+		}
+	}
+	// The cap governs only what the schema left unbounded (§9.5): a count:N array
+	// keeps its own bound and its own category.
+	if !strings.Contains(m, "(_Loc::Root_bstrs, _) => { if id as usize >= 4 { self.inv = true; return; }") {
+		t.Errorf("a count:N wrapper array must keep its InvalidMsg schema bound:\n%s", m)
 	}
 }

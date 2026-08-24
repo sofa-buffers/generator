@@ -57,13 +57,32 @@ func boundOf(has bool, v int64) int64 {
 	return -1
 }
 
-// overIndexGuard returns the reject clause for a `count: N` wrapper array: an
-// element id >= N throws InvalidMessage (aborting decode) before the List grows
-// (MESSAGE_SPEC §5.1/§7 — issue #142), which also bounds an over-index
-// heap-amplification fill. Empty for a count-less array (cap == -1).
+// overIndexGuard returns the reject clause for a wrapper array's element id,
+// emitted ahead of the grow it bounds.
+//
+// A wrapper array carries no count HEADER: its elements are keyed by an
+// unbounded varint index and the collector grows the List to id + 1, so the
+// index IS the array's length (MESSAGE_SPEC §5.1 — two elements at id 0 and id
+// 16383 are a 16384-slot List). A single over-index element is therefore an
+// amplification vector by itself, and it is the INDEX that has to be bounded:
+// capping how many elements arrived would not bound the allocation, because a
+// sparse array allocates by its highest id.
+//
+// Which bound applies depends on whether the schema counts the array, and the
+// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
+// `count: N` makes id >= N InvalidMessage (the bytes contradict the agreed
+// schema, issue #142), no count makes id >= MaxDynArrayCount LimitExceeded (the
+// bytes are well formed and the same message decodes under a looser cap, issue
+// #387 — folding the two together is forbidden by CORELIB_PLAN §6.2.1).
+//
+// Empty only when the array is dynamic AND no cap is live for this schema.
 func (g *gen) overIndexGuard(cap int64, loc string) string {
 	if cap < 0 {
-		return ""
+		if !g.limits.arrayHas {
+			return ""
+		}
+		return fmt.Sprintf("if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"%s element: array index above configured limit %d\"); ",
+			loc, g.limits.arrayCount)
 	}
 	return fmt.Sprintf("if (id >= %d) throw new SofabException(SofabError.InvalidMessage, \"%s element: array index above schema capacity %d\"); ", cap, loc, cap)
 }

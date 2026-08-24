@@ -65,6 +65,11 @@ type gen struct {
 	banner  string
 	license string // SPDX id, "" to omit the header line
 	limits  limitSet
+	// limArr is the ARRAY cap's liveness for the visitor being emitted right now,
+	// as activeLimits decided it. The cap CONSTANT is per-visitor, so every guard
+	// that names it has to take the same decision, and the deepest of them --
+	// overIndexGuard -- has no path to `fs`. Set by emitVisitor before it emits.
+	limArr bool
 	// size is the max_message_size policy; sizeErr carries a violation out of
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy

@@ -266,18 +266,50 @@ func (g *gen) objSeqArm(sc *pyScope, scopes []*pyScope) []string {
 	return out
 }
 
+// indexBound renders the reject for a wrapper array's element INDEX, emitted
+// ahead of the gap-fill it bounds. `idExpr` names the index in the caller's
+// scope (`fid` in the value hooks, `fld.id` in on_field).
+//
+// A wrapper array carries no count HEADER: its elements are keyed by an
+// unbounded varint index and the gap-fill extends the list to fid + 1, so the
+// index IS the array's length (MESSAGE_SPEC §5.1 -- two elements at id 0 and id
+// 16383 are a 16384-slot list). A single over-index element is therefore an
+// amplification vector by itself, and it is the INDEX that has to be bounded:
+// capping how many elements arrived would not bound the allocation, because a
+// sparse array allocates by its highest id.
+//
+// Which bound applies depends on whether the schema counts the array, and the
+// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
+// `count: N` makes fid >= N a SofaDecodeError (the bytes contradict the agreed
+// schema, issue #142), no count makes it a SofaLimitError against the configured
+// cap (the bytes are well formed and the same message decodes under a looser
+// cap, issue #387 -- folding the two together is forbidden by CORELIB_PLAN
+// §6.2.1).
+//
+// Empty only when the array is dynamic AND no cap is live for this schema.
+func (g *gen) indexBound(cap int64, idExpr, loc string) []string {
+	if cap >= 0 {
+		return []string{
+			fmt.Sprintf("if %s >= %d:", idExpr, cap),
+			fmt.Sprintf("    raise SofaDecodeError(%q)",
+				fmt.Sprintf("%s: array index above schema capacity %d", loc, cap)),
+		}
+	}
+	if !g.limits.arrayHas {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("if %s >= MAX_DYN_ARRAY_COUNT:", idExpr),
+		fmt.Sprintf(`    raise SofaLimitError("%s: array index %%d exceeds max_array_count %%d" %% (%s, MAX_DYN_ARRAY_COUNT))`, loc, idExpr),
+	}
+}
+
 // arrSeqArm renders an array scope's element arm. The id IS the index, so there
 // is no id test -- only the §5.1 capacity bound, then the gap-fill that places
 // the element at its index (an interior element equal to the element default is
 // omitted on the wire, MESSAGE_SPEC §2).
 func (g *gen) arrSeqArm(sc *pyScope, child *pyScope) []string {
-	var out []string
-	if sc.cap >= 0 {
-		out = append(out,
-			fmt.Sprintf("if fid >= %d:", sc.cap),
-			fmt.Sprintf("    raise SofaDecodeError(%q)",
-				fmt.Sprintf("%s: array index above schema capacity %d", sc.loc, sc.cap)))
-	}
+	out := g.indexBound(sc.cap, "fid", sc.loc)
 	out = append(out, fmt.Sprintf("_t = %s", sc.arrPath))
 	out = append(out, "while len(_t) <= fid:")
 	out = append(out, fmt.Sprintf("    _t.append(%s)", g.elemDefault(sc)))
@@ -565,13 +597,10 @@ func (g *gen) objFieldArm(sc *pyScope) []string {
 // bounded string/blob element's byte length, and a native row's element count.
 func (g *gen) arrFieldArm(sc *pyScope) []string {
 	var out []string
-	if sc.cap >= 0 && sc.child < 0 {
+	if sc.child < 0 {
 		// A value element is bounded here; an element that opens a scope is
 		// bounded in on_sequence_begin, which no on_field precedes.
-		out = append(out,
-			fmt.Sprintf("if fld.id >= %d:", sc.cap),
-			fmt.Sprintf("    raise SofaDecodeError(%q)",
-				fmt.Sprintf("%s: array index above schema capacity %d", sc.loc, sc.cap)))
+		out = append(out, g.indexBound(sc.cap, "fld.id", sc.loc)...)
 	}
 	switch sc.elem {
 	case ir.KindString, ir.KindBlob:

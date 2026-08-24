@@ -52,6 +52,12 @@ type gen struct {
 	banner  string
 	license string // SPDX id, "" to omit the header line
 	limits  limitSet
+	// msgLim is the `lim` flag's liveness for the decoder being emitted right
+	// now, as msgLimitGuards decided it. The flag is declared per MESSAGE (a
+	// message with no unbounded field must not carry one), so every guard that
+	// sets it has to take the same decision, and the deepest of them --
+	// overIndexCond -- has no path to the field list. Set by emitDecoder.
+	msgLim bool
 	// size is the max_message_size policy; sizeErr carries a violation out of
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy

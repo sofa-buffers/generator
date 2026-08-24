@@ -163,15 +163,35 @@ func elemIdxVar(loc string) string {
 	return b.String()
 }
 
-// overIndexGuard returns the reject clause for a fixed-count wrapper array: an
-// element id >= N throws INVALID_MSG (aborting decode) before the List grows
-// (MESSAGE_SPEC §5.1/§7 — issue #142), which also bounds an over-index
-// heap-amplification fill. Empty for a dynamic array (cap == -1).
-func overIndexGuard(cap int64, name string) string {
-	if cap < 0 {
+// overIndexGuard returns the reject clause for a wrapper array's element id,
+// emitted ahead of the grow it bounds.
+//
+// A wrapper array carries no count HEADER: its elements are keyed by an
+// unbounded varint index, and an id-keyed collector grows the container to
+// id + 1, so the index IS the array's length (MESSAGE_SPEC §5.1 — two elements
+// at id 0 and id 16383 are a 16384-slot container). That makes a single
+// over-index element an amplification vector by itself, and it is the INDEX that
+// has to be bounded: capping how many elements arrived would not bound the
+// allocation at all, because a sparse array allocates by its highest id.
+//
+// Which bound applies depends on whether the schema counts the array, and the
+// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
+//
+//   - `count: N` -> id >= N is INVALID_MSG (issue #142). The bytes contradict
+//     the schema both peers agreed on.
+//   - no count -> id >= MAX_DYN_ARRAY_COUNT is LIMIT_EXCEEDED (issue #387). The
+//     bytes are well-formed and the same message decodes under a looser cap, so
+//     folding this into INVALID is forbidden by CORELIB_PLAN §6.2.1.
+//
+// Empty only when the array is dynamic AND no cap is live for this schema.
+func (g *gen) overIndexGuard(cap int64, name string) string {
+	if cap >= 0 {
+		return fmt.Sprintf("if (id >= %d) throw Sofab.invalid(\"%s element: array index above schema capacity %d\"); ", cap, name, cap)
+	}
+	if !g.limArr {
 		return ""
 	}
-	return fmt.Sprintf("if (id >= %d) throw Sofab.invalid(\"%s element: array index above schema capacity %d\"); ", cap, name, cap)
+	return limitThrowGuard("id >= MAX_DYN_ARRAY_COUNT", name+" element", "array index above configured limit", g.limits.arrayCount) + " "
 }
 
 // locIndex maps a loc name to its index (for sequenceBegin targets).
@@ -216,6 +236,14 @@ func (g *gen) activeLimits(fs []frame) (limArr, limStr, limBlob bool) {
 			if !fr.innerHasCount {
 				limArr = true
 			}
+		}
+		// Any wrapper array the schema leaves uncounted makes the array cap live:
+		// since generator#387 it bounds that array's element INDEX, which is the
+		// array's length (§9.5). This is separate from the count conditions above
+		// -- a message whose only unbounded array is a string wrapper has no count
+		// header anywhere and still needs the constant.
+		if fr.kind != fkNormal && fr.cap < 0 {
+			limArr = true
 		}
 	}
 	return limArr && g.limits.arrayHas, limStr && g.limits.stringHas, limBlob && g.limits.blobHas
@@ -359,7 +387,7 @@ func (g *gen) emitStringCb(f *jfile, fs []frame, limStr bool) {
 			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
 			// element is omitted on the wire, so place the value at its id and fill
 			// any gap with the element default ("").
-			f.line("        case %d: %swhile (%s.size() <= id) %s.add(\"\"); %s.set(id, _s); break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
+			f.line("        case %d: %swhile (%s.size() <= id) %s.add(\"\"); %s.set(id, _s); break;", fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -511,7 +539,7 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, noun string) []string {
 	var arms []string
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0) {
-			body := overIndexGuard(fr.cap, fr.loc)
+			body := g.overIndexGuard(fr.cap, fr.loc)
 			if fr.emax >= 0 {
 				body += fmt.Sprintf("if (total > %d) %s ", fr.emax, maxlenThrow(locName(fr.loc)+" element", noun, fr.emax))
 			}
@@ -680,6 +708,7 @@ func (g *gen) emitArraySkipGuard(f *jfile) {
 func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	limArr, limStr, limBlob := g.activeLimits(fs) // per-visitor decode limits (generator#102)
+	g.limArr = limArr                             // for overIndexGuard, which cannot reach fs
 
 	f.line("class %sVisitor implements Visitor {", name)
 	f.line("    private final %s m;", name)
@@ -837,7 +866,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
 			// element is omitted on the wire, so place the value at its id and fill
 			// any gap with the element default (empty bytes).
-			f.line("        case %d: %swhile (%s.size() <= id) %s.add(new byte[0]); %s.set(id, _b); break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
+			f.line("        case %d: %swhile (%s.size() <= id) %s.add(new byte[0]); %s.set(id, _b); break;", fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -915,7 +944,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// every other backend takes the two verdicts in -- both are INVALID, so
 			// only the message differs, and a family that words the same rejection
 			// differently is a conformance diff waiting to happen.
-			arm := kindGuard + overIndexGuard(fr.cap, fr.loc) + guard + armFill(fs, fr, nil)
+			arm := kindGuard + g.overIndexGuard(fr.cap, fr.loc) + guard + armFill(fs, fr, nil)
 			// The row's element id IS its index in the outer array (§5.1), so it is
 			// PLACED there after gap-filling with empty rows -- never appended.
 			// Appending ignored the id, which an interior gap (an omitted all-default
@@ -1031,7 +1060,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// The over-index guard still rejects id >= N, which also bounds the
 			// gap-fill.
 			f.line("        case %d: %swhile (%s.size() <= id) %s.add(new %s()); %s = id; cur = %d; break;",
-				fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.elemType, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
+				fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.elemType, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkSeqMat:
 			// A row of an array-of-wrapper-arrays is placed at the index its element
 			// id names, for the same reason as the struct element above and the
@@ -1039,7 +1068,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// interior gap (an omitted all-default row, §2) then shifts every later
 			// row down by one. An array wrapper IS the array's value, so a REOPENED
 			// row id replaces the row rather than merging into it (§7.4).
-			f.line("        case %d: %sSeq.reserveRow(%s, id); %s = id; cur = %d; break;", fr.idx, overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
+			f.line("        case %d: %sSeq.reserveRow(%s, id); %s = id; cur = %d; break;", fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkNormal:
 			var arms []string
 			for _, fld := range fr.fields {

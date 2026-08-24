@@ -214,12 +214,14 @@ messages:
 			t.Errorf("message.zig missing over-index guard %q", want)
 		}
 	}
-	// The dynamic string array keeps every index (no over-index guard); its store
-	// is still strict-UTF-8-wrapped (issue #85) since a string element is materialized.
-	// The element's own length is capped by the target's finite default instead
-	// (§9.5, generator#385) -- a LimitExceeded policy bound, not an INVALID one.
-	if !strings.Contains(m, `.root_ds => if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk); } },`) {
-		t.Errorf("dynamic string array must not carry an over-index guard:\n%s", m)
+	// The dynamic string array is bounded too, and by the same test in the same
+	// place -- what differs is the bound and the category. Its length is its
+	// highest INDEX, so the receiver cap binds the index (self.lim, generator#387)
+	// where a count:N binds it as INVALID; the element's own length is capped
+	// beside it (§9.5, generator#385). Its store stays strict-UTF-8-wrapped
+	// (issue #85), a string element being materialized.
+	if !strings.Contains(m, `.root_ds => if (id >= max_dyn_array_count) { self.lim = true; } else { if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk); } } },`) {
+		t.Errorf("a dynamic wrapper array must cap its element index:\n%s", m)
 	}
 }
 
@@ -1416,5 +1418,59 @@ messages:
 	// one, and a remaining allocCapped would be an arm that skipped its bound.
 	if strings.Contains(m, "allocCapped") {
 		t.Errorf("no array may still be reserved capped and grown into:\n%s", m)
+	}
+}
+
+// TestZigWrapperIndexCap: a DYNAMIC wrapper array's element index is bounded by
+// the receiver cap, checked before the slice grows (ARCHITECTURE §9.5,
+// generator#387). See the Java twin for why the INDEX and not the element count:
+// gap filling makes the array's length its highest present id, so two delivered
+// elements can be an arbitrarily large slice.
+//
+// Zig refuses in three different ways depending on the surface -- an error
+// return from fixlenBegin, the sticky self.lim in the payload callback, a break
+// to the dead scope in sequenceBegin -- so all three are asserted here: a shared
+// helper decides the test and the category, each site spells its own refusal,
+// and a site that spelled it wrong would be a silent divergence.
+func TestZigWrapperIndexCap(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      dstrs: { id: 0, type: array, items: { type: string } }
+      dblbs: { id: 1, type: array, items: { type: blob } }
+      dobjs: { id: 2, type: array, items: { type: struct, fields: { x: { id: 0, type: u32 } } } }
+      dmat:  { id: 3, type: array, items: { type: array, items: { type: u32 } } }
+      bstrs: { id: 4, type: array, items: { type: string, count: 4 } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	for _, want := range []string{
+		// fixlenBegin: refuses by returning the error.
+		".root_dstrs => { if (id >= max_dyn_array_count) return sofab.Error.LimitExceeded; },",
+		".root_dblbs => { if (id >= max_dyn_array_count) return sofab.Error.LimitExceeded; },",
+		// the payload callback: refuses by setting the sticky flag.
+		".root_dstrs => if (id >= max_dyn_array_count) { self.lim = true; } else {",
+		// sequenceBegin: refuses by breaking to the dead scope.
+		"if (id >= max_dyn_array_count) { self.lim = true; break :blk .dead; }",
+		// a native matrix ROW: its id is the outer array's length, capped ahead of
+		// its own element count (#386).
+		".root_dmat => if (kind == .unsigned) if (id >= max_dyn_array_count) { self.lim = true; self.an = 0; } else if (count > max_dyn_array_count)",
+		// and the flag is surfaced as the policy category, never as INVALID.
+		"if (v.lim) return error.LimitExceeded;",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing wrapper index cap %q:\n%s", want, m)
+		}
+	}
+	// The cap governs only what the schema left unbounded (§9.5): a count:N array
+	// keeps its own bound and its own category.
+	if !strings.Contains(m, ".root_bstrs => if (id >= 4) { self.inv = true; }") {
+		t.Errorf("a count:N wrapper array must keep its INVALID schema bound:\n%s", m)
 	}
 }

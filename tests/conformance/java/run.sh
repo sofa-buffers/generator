@@ -360,6 +360,49 @@ $HL decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count 4 at the 
 $HN decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must decode 5 elements"; exit 1; }
 echo "==> decode limits OK"
 
+# A WRAPPER array carries no count header, so the cap has to bind its element
+# INDEX instead (generator#387). Gap filling (S5.1) is exactly why: an interior
+# element equal to the default is omitted, so the array's length is highest
+# present id + 1 and two delivered elements can be a huge container. Capping how
+# many elements ARRIVED would bound nothing.
+#
+# `w` is a string array with no count. Both messages below are produced by the
+# UNCAPPED harness and fed to the capped one, and the encoder's own interior
+# elision (S2) is what makes them sparse: an element equal to the default is
+# omitted, so ["x","","","x"] goes out as ids 0 and 3 and nothing between.
+#
+#   sparse:  ids 0 and 3 -> length 4, ACCEPTED at cap 4 (highest id is 3).
+#   overidx: ids 0 and 4 -> length 5 > cap 4 -> LIMIT_EXCEEDED.
+#
+# TWO elements are delivered either way. That is the whole point: a cap on how
+# many elements ARRIVED would accept both, so the bound has to be the index.
+echo "==> wrapper-array element index must be capped (generator#387)"
+cat > "$WORK/widx.yaml" <<'YAML'
+version: 1
+messages:
+  wr: { payload: { w: { id: 0, type: array, items: { type: string } } } }
+YAML
+cat > "$WORK/widxcfg.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4 }
+targets: { java: { package: message } }
+YAML
+build "$WORK/widx.yaml" "$WORK/widx" "$WORK/widxcfg.yaml"
+build "$WORK/widx.yaml" "$WORK/widxnolim"
+HW="java -jar $WORK/widx/target/harness.jar"
+HWN="java -jar $WORK/widxnolim/target/harness.jar"
+printf '{"w":["x","","","x"]}'     | $HWN encode wr > "$WORK/widx_sparse.bin"
+printf '{"w":["x","","","","x"]}'  | $HWN encode wr > "$WORK/widx_over.bin"
+# The premise: both carry exactly two elements, and the second is one byte longer
+# only because its element id is one higher.
+$HWN decode wr < "$WORK/widx_sparse.bin" >/dev/null || { echo "FAIL: uncapped harness must round-trip the sparse array"; exit 1; }
+$HW  decode wr < "$WORK/widx_sparse.bin" >/dev/null || { echo "FAIL: sparse ids 0,3 (length 4 = cap) must decode"; exit 1; }
+if $HW decode wr < "$WORK/widx_over.bin" >/dev/null 2>"$WORK/widxerr.txt"; then
+    echo "FAIL: element id 4 >= max_dyn_array_count 4 must be rejected"; exit 1
+fi
+grep -q "LIMIT_EXCEEDED" "$WORK/widxerr.txt" || { echo "FAIL: an over-index element is LIMIT_EXCEEDED, not INVALID (CORELIB_PLAN S6.2.1)"; exit 1; }
+$HWN decode wr < "$WORK/widx_over.bin" >/dev/null || { echo "FAIL: the same bytes must decode under the default cap"; exit 1; }
+echo "==> wrapper index cap OK (sparse accepted, over-index LIMIT_EXCEEDED)"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/java/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/target/harness.jar"
 

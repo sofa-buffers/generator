@@ -70,9 +70,13 @@ func TestCsOverIndexWrapperArray(t *testing.T) {
 			t.Errorf("Message.cs missing over-index guard %q", want)
 		}
 	}
-	// Dynamic string array keeps every index (bare grow, no throw).
-	if !strings.Contains(m, `case (Root_ds, _): while (m.ds.Count <= id) m.ds.Add(""); m.ds[id] = _s; break;`) {
-		t.Errorf("dynamic string array must not carry an over-index guard:\n%s", m)
+	// A DYNAMIC wrapper array is bounded too, and by the same test in the same
+	// place -- what differs is the bound and the category. Its length is its
+	// highest index, so the receiver cap binds the index; the bytes are well
+	// formed and decode under a looser cap, so the verdict is LimitExceeded and
+	// not InvalidMessage (generator#387, CORELIB_PLAN §6.2.1).
+	if !strings.Contains(m, `case (Root_ds, _): if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "Root_ds element: array index above configured limit 65536"); while (m.ds.Count <= id) m.ds.Add(""); m.ds[id] = _s; break;`) {
+		t.Errorf("a dynamic wrapper array's element index must be capped:\n%s", m)
 	}
 }
 
@@ -794,9 +798,13 @@ messages:
 		"case (Root_rows, _): if (afill == 0) break; afill--; if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, " +
 			"\"Root_rows element: value outside declared width u32\"); m.rows[_ixRoot_rows].Add((uint)value); break;",
 		// WRAPPER row: same placement, then the descent.
-		"case (Root_srows, _): while (m.srows.Count <= id) m.srows.Add(new List<string>()); " +
+		"case (Root_srows, _): if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, " +
+			"\"Root_srows element: array index above configured limit 65536\"); " +
+			"while (m.srows.Count <= id) m.srows.Add(new List<string>()); " +
 			"m.srows[id] = new List<string>(); _ixRoot_srows = id; cur = Root_srows_e; break;",
-		"case (Root_srows_e, _): while (m.srows[_ixRoot_srows].Count <= id) m.srows[_ixRoot_srows].Add(\"\"); m.srows[_ixRoot_srows][id] = _s; break;",
+		"case (Root_srows_e, _): if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, " +
+			"\"Root_srows_e element: array index above configured limit 65536\"); " +
+			"while (m.srows[_ixRoot_srows].Count <= id) m.srows[_ixRoot_srows].Add(\"\"); m.srows[_ixRoot_srows][id] = _s; break;",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing %q:\n%s", want, m)
@@ -1078,5 +1086,42 @@ messages:
 		if strings.Contains(m, gone) {
 			t.Errorf("Message.cs must not still grow into an array (%q):\n%s", gone, m)
 		}
+	}
+}
+
+// TestCsWrapperIndexCap: a DYNAMIC wrapper array's element index is bounded by
+// the receiver cap, checked before the List grows (ARCHITECTURE §9.5,
+// generator#387). See the Java twin for why the INDEX and not the element count:
+// gap filling makes the array's length its highest present id, so two delivered
+// elements can be an arbitrarily large List.
+func TestCsWrapperIndexCap(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      dstrs: { id: 0, type: array, items: { type: string } }
+      dblbs: { id: 1, type: array, items: { type: blob } }
+      dobjs: { id: 2, type: array, items: { type: struct, fields: { x: { id: 0, type: u32 } } } }
+      dmat:  { id: 3, type: array, items: { type: array, items: { type: u32 } } }
+      bstrs: { id: 4, type: array, items: { type: string, count: 4 } }
+`
+	m := buildModule(t, []byte(src), "m.yaml", map[string]any{})
+
+	for _, want := range []string{
+		`if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "Root_dstrs element: array index above configured limit 65536"); while (m.dstrs.Count <= id)`,
+		`"Root_dblbs element: array index above configured limit 65536"); while (m.dblbs.Count <= id)`,
+		`"Root_dobjs element: array index above configured limit 65536"); while (m.dobjs.Count <= id)`,
+		`"Root_dmat element: array index above configured limit 65536");`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing wrapper index cap %q:\n%s", want, m)
+		}
+	}
+	if !strings.Contains(m, `if (id >= 4) throw new SofabException(SofabError.InvalidMessage, "Root_bstrs element: array index above schema capacity 4")`) {
+		t.Errorf("a count:N wrapper array must keep its InvalidMessage schema bound:\n%s", m)
+	}
+	if strings.Contains(m, `"Root_bstrs element: array index above configured limit`) {
+		t.Errorf("a schema-bounded array must not also carry the receiver cap:\n%s", m)
 	}
 }

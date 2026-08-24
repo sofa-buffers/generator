@@ -300,14 +300,16 @@ func TestJavaMaxlenReject(t *testing.T) {
 	if !strings.Contains(m, "static final long MAX_DYN_STRING_LEN = 1048576L;") {
 		t.Error("M.java missing the default string cap")
 	}
-	// The other two stay inert: liveness is a property of the schema, not of the
-	// configuration. There is no unbounded blob, and `arr` is a WRAPPER array,
-	// which carries no count header for arrayBegin to check (its element index is
-	// what would have to be capped -- generator#387).
-	for _, gone := range []string{"MAX_DYN_BLOB_LEN", "MAX_DYN_ARRAY_COUNT"} {
-		if strings.Contains(m, gone) {
-			t.Errorf("inert limit %s must not be emitted", gone)
-		}
+	// The blob cap stays inert: liveness is a property of the schema, not of the
+	// configuration, and there is no unbounded blob.
+	if strings.Contains(m, "MAX_DYN_BLOB_LEN") {
+		t.Error("inert limit MAX_DYN_BLOB_LEN must not be emitted")
+	}
+	// The ARRAY cap is live, and `arr` is why. It is a WRAPPER array, so it
+	// carries no count header for arrayBegin to check -- but its element INDEX is
+	// its length, and that is what the cap binds here (generator#387).
+	if !strings.Contains(m, `if (id >= MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "Root_arr element: array index above configured limit 65536"));`) {
+		t.Errorf("a dynamic wrapper array's element index must be capped:\n%s", m)
 	}
 }
 
@@ -1449,5 +1451,57 @@ messages:
 		if strings.Contains(m, gone) {
 			t.Errorf("M.java must not still grow into an array (%q):\n%s", gone, m)
 		}
+	}
+}
+
+// TestJavaWrapperIndexCap: a DYNAMIC wrapper array's element index is bounded by
+// the receiver cap, checked before the container grows (ARCHITECTURE §9.5,
+// generator#387).
+//
+// A wrapper array carries no count header, so `max_dyn_array_count` never
+// reached it: its elements are keyed by an unbounded varint index and the
+// collector grows to id + 1, which makes a ~9-byte message with a single
+// over-index element an arbitrarily large allocation. Capping how many elements
+// ARRIVED would not close that -- gap filling (§5.1) means two delivered
+// elements at id 0 and id 16383 are a 16384-slot container, so the index IS the
+// length and the index is what has to be bounded.
+//
+// The category is LIMIT_EXCEEDED, not INVALID_MSG: the bytes are well formed and
+// the same message decodes under a looser cap (CORELIB_PLAN §6.2.1).
+func TestJavaWrapperIndexCap(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      dstrs: { id: 0, type: array, items: { type: string } }
+      dblbs: { id: 1, type: array, items: { type: blob } }
+      dobjs: { id: 2, type: array, items: { type: struct, fields: { x: { id: 0, type: u32 } } } }
+      dmat:  { id: 3, type: array, items: { type: array, items: { type: u32 } } }
+      bstrs: { id: 4, type: array, items: { type: string, count: 4 } }
+`
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+
+	// Every dynamic wrapper shape carries the cap, ahead of its grow.
+	for _, want := range []string{
+		`if (id >= MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "Root_dstrs element: array index above configured limit 65536")); while (m.dstrs.size() <= id)`,
+		`"Root_dblbs element: array index above configured limit 65536")); while (m.dblbs.size() <= id)`,
+		`"Root_dobjs element: array index above configured limit 65536")); while (m.dobjs.size() <= id)`,
+		// A native matrix ROW takes the index cap too: its id is the outer array's
+		// length. Its own element count is capped separately, beside it (#386).
+		`"Root_dmat element: array index above configured limit 65536"));`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing wrapper index cap %q:\n%s", want, m)
+		}
+	}
+	// A SCHEMA-BOUNDED array keeps its own bound and its own category: the cap
+	// governs only what the schema left unbounded (§9.5), so `bstrs` must be
+	// INVALID at 4 and must not also carry the cap.
+	if !strings.Contains(m, `case 6: if (id >= 4) throw Sofab.invalid("Root_bstrs element: array index above schema capacity 4"); while (m.bstrs.size() <= id)`) {
+		t.Errorf("a count:N wrapper array must keep its INVALID schema bound:\n%s", m)
+	}
+	if strings.Contains(m, `"Root_bstrs element: array index above configured limit`) {
+		t.Errorf("a schema-bounded array must not also carry the receiver cap:\n%s", m)
 	}
 }
