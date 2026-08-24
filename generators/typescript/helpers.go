@@ -49,88 +49,14 @@ func cfgInt64Mode(cfg map[string]any) int64Mode {
 // longArrays reports whether 64-bit integer arrays are Long-backed.
 func (g *gen) longArrays() bool { return g.i64rep != int64Bigint }
 
-// streamLongs reports whether the generated visitors take corelib-ts's opt-in
-// `Visitor.longs` channel (corelib-ts#146), on which the four integer hooks
-// deliver a `Long` instead of the number-first `number | bigint`.
-//
-// It is a TRADE, decided per schema and only under `int64: long`:
-//
-//   - a 64-bit position saves the whole conversion — the value arrives as the
-//     Long the field stores, where the number-first channel costs a
-//     `Long.fromValue(v)` per value, and that goes through `BigInt(...)` for
-//     anything a `number` can hold, i.e. a bigint allocated on the one path the
-//     Long modes exist to keep bigint-free;
-//   - a NARROW position pays for it: the flag is read once from the root and
-//     covers every integer field and element in the message, so the corelib
-//     allocates a `Long` for values that used to arrive as a plain `number`.
-//
-// So it pays exactly when 64-bit positions carry the message, which the schema
-// says statically (see intPositions). Under `int64: bigint` there is nothing to
-// win — a bigint field would convert either way — and under `number` the scalars
-// want a `number` back, so both stay on the number-first channel.
-func (g *gen) streamLongs() bool { return g.longs }
-
-// longsThreshold is how many NARROW integer positions a schema may carry per
-// 64-bit one and still profit from the Long channel (see streamLongs).
-//
-// Measured, not guessed — chunked decode of one message, Ir/op by the subtract
-// method under Callgrind, same baseline-tier node flags as tests/bench, the two
-// projects differing in nothing but the flag:
-//
-//	64-bit positions   narrow positions   Long channel
-//	       4                   0             −29.6%
-//	       4                   4             −20.3%
-//	       4                   8             −15.8%
-//	       4                  14             +1.5%   (vehicle_telemetry)
-//
-// A 64-bit value saves its whole conversion; a narrow one pays for a `Long` the
-// corelib now allocates where a plain `number` used to arrive. Two-to-one still
-// wins clearly and the realistic narrow-heavy schema (which also carries narrow
-// ARRAYS, i.e. many more narrow values than positions) loses, so the line goes
-// between them — on the conservative side, because an array position counts
-// ONCE here whatever its runtime length: a static count cannot know that length,
-// and a declared `count` is a capacity, not a promise.
-const longsThreshold = 2
-
-// intPositions counts the integer positions of a schema as the push decoder sees
-// them: every field and native array element that arrives on the unsigned/signed
-// hooks, split into 64-bit and narrow. Array elements count once — a static count
-// cannot know a runtime length, and weighting by a declared `count` (a capacity,
-// not a length) would be a guess dressed up as a measurement.
-func intPositions(s *ir.Schema) (big, narrow int) {
-	var elem func(k ir.Kind, items *ir.ArrayElem)
-	elem = func(k ir.Kind, items *ir.ArrayElem) {
-		switch {
-		case isBig(k):
-			big++
-		case k == ir.KindArray:
-			if items != nil {
-				elem(items.Elem, items.ElemItems)
-			}
-		case ir.IsNarrow(k), k == ir.KindBitfield, k == ir.KindEnum, k == ir.KindBool:
-			narrow++
-		}
-	}
-	count := func(fields []*ir.Field) {
-		for _, f := range fields {
-			if f.Kind == ir.KindArray {
-				elem(f.Elem, f.ElemItems)
-				continue
-			}
-			elem(f.Kind, nil)
-		}
-	}
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			count(nt.Fields)
-		}
-	}
-	for _, m := range s.Messages {
-		count(m.Fields)
-	}
-	return big, narrow
-}
+// The opt-in `Visitor.longs` channel this backend used to negotiate per schema is
+// withdrawn (corelib-ts#161). Every integer hook now carries `lo` / `hi` — the
+// exact wire halves the varint reader already holds — so a Long-backed
+// destination takes its value with no conversion and no flag, and a narrow field
+// in the same message no longer pays for that choice: the flag was read once from
+// the ROOT visitor and covered every field alike, which is what made it a trade
+// at all. With the trade gone, `longsThreshold` and the position count that fed
+// it have nothing left to decide.
 
 // longScalars reports whether 64-bit integer SCALARS are Long-backed. Only
 // `int64: long` does that: `number` deliberately keeps its scalars on the
@@ -174,22 +100,6 @@ func (g *gen) storage(recv string, f *ir.Field) string {
 		return recv + "._" + f.Name
 	}
 	return recv + "." + f.Name
-}
-
-// decodeStorage is storage() for the module-level pull decoder (visitor.go). That
-// decoder is not a member of the class it writes into — CORELIB_PLAN §6.1.1 keeps
-// `decodeFrom`/`decodeInto` off the generated object's surface, so the loop lives
-// beside the class rather than in it (issue #384) — and therefore cannot name a
-// `private` backing field with a dot. Element access reaches it: TypeScript's
-// `private` is a compile-time rule and bracket notation is its sanctioned escape
-// hatch, emitting the very same property write. So a Long-backed field keeps
-// bypassing its accessor pair on the hot path — no getter call, no setter
-// conversion — exactly as it did when the loop was a static method of the class.
-func (g *gen) decodeStorage(f *ir.Field) string {
-	if g.longBacked(f) {
-		return fmt.Sprintf("o[%q]", "_"+f.Name)
-	}
-	return "o." + f.Name
 }
 
 // fp32RawCompanion reports whether a field carries the fp32 raw-bits companion
