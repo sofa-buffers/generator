@@ -370,26 +370,31 @@ messages:
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
+	// The bound is STATED to the decoder at the header, as the (min, max) pair it
+	// applies at each element, rather than scanned out of the assembled list.
 	for _, want := range []string{
-		`if any(_v > 255 for _v in value):`,
-		`raise SofaDecodeError("ua element: value outside declared width u8")`,
-		`if any(_v < -32768 or _v > 32767 for _v in value):`,
+		`return (None, None, 255)`,
+		`return (None, -32768, 32767)`,
 		// The width is a property of the element TYPE, not of the array length,
 		// so a count-less array carries it too.
-		`raise SofaDecodeError("da element: value outside declared width u32")`,
+		`return (None, None, 4294967295)`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing element bound %q:\n%s", want, mod)
 		}
 	}
-	// u64 spans the value domain the corelib already hands over, so it carries no
-	// scan — and an fp32 array has no width bound at all.
+	// u64 spans the value domain the corelib already hands over, so it states no
+	// width — and an fp32 array is not offered on_array_begin at all.
 	for _, unwanted := range []string{
 		`raise SofaDecodeError("wa element:`,
 		`raise SofaDecodeError("fa element:`,
+		// The verdict is the decoder's, at each element. A post-assembly scan is a
+		// second, weaker one: it cannot reject an element a truncation stops the
+		// array from ever completing (§5.2 INVALID over INCOMPLETE).
+		`for _v in value`,
 	} {
 		if strings.Contains(mod, unwanted) {
-			t.Errorf("a u64/fp32 array must carry no element bound (%q):\n%s", unwanted, mod)
+			t.Errorf("a u64/fp32 array must carry no element bound, and no kind a post-assembly scan (%q):\n%s", unwanted, mod)
 		}
 	}
 }
@@ -409,7 +414,7 @@ messages:
 // owed. The scan below is therefore the whole bound, not a belt-and-braces
 // second one — asserted here so the day corelib-py grows an element-width hook
 // this test fails and the guard moves back ahead of the payload.
-func TestPythonArrayElemBoundIsPostAssembly(t *testing.T) {
+func TestPythonArrayElemBoundIsAtTheHeader(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -422,11 +427,9 @@ messages:
         c = self._c
         if c == _L_M:
             if fid == 0:
-                if any(_v > 255 for _v in value):
-                    raise SofaDecodeError("ua element: value outside declared width u8")
                 self._o.ua = value`
 	if !strings.Contains(mod, want) {
-		t.Errorf("the element-width scan must sit in on_unsigned_array, over the assembled list:\n%s", mod)
+		t.Errorf("the typed hook must only STORE -- the width was applied per element:\n%s", mod)
 	}
 	// Both the count and the element width are settled in on_array_begin, at the
 	// header, ahead of the first element — the count on its argument, the width
@@ -1031,13 +1034,12 @@ messages:
 			"            while len(_t) <= fid:\n" +
 			"                _t.append(\"\")\n" +
 			"            _t[fid] = value",
-		// native matrix rows: gap-fill, check the elements against the declared u32
-		// width (§7.1), then place the row at its index
+		// native matrix rows: gap-fill, then place the row at its index. The row's
+		// elements were bounded against the declared u32 width one step earlier,
+		// in on_array_begin (§7.1).
 		"            _t = self._o.mat\n" +
 			"            while len(_t) <= fid:\n" +
 			"                _t.append([])\n" +
-			"            if any(_v > 4294967295 for _v in value):\n" +
-			"                raise SofaDecodeError(\"mat row element: value outside declared width u32\")\n" +
 			"            _t[fid] = value",
 		// wrapper rows: the row itself is a scope, and its own elements are placed
 		// through the row the outer index register selected
@@ -1369,9 +1371,11 @@ messages:
 		"                if value < -2147483648 or value > 2147483647:\n" +
 			`                    raise SofaDecodeError("g_i32: value outside declared width i32")` +
 			"\n                self._o.g_i32 = value",
-		// The array arrives whole, so one scan over the elements decides it.
-		"                if any(_v > 255 for _v in value):\n" +
-			`                    raise SofaDecodeError("arr_u8 element: value outside declared width u8")`,
+		// An ARRAY's elements are bounded one step earlier, at the count header: the
+		// pair is handed to the decoder, which applies it as each element is read.
+		// A scan of the assembled list would come too late to reject an element a
+		// truncation stops the array from ever completing (§5.2).
+		"                return (None, None, 255)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.py missing width guard %q:\n%s", want, got)
@@ -1448,9 +1452,13 @@ messages:
 		"    MAX_SIZE = MAX_SIZE_LIMIT",
 		"        out: list[bytes] = []",
 		"        scratch = bytearray(512)",
-		"        e = Encoder.over_buffer(scratch, 0, out.append)",
 		"        e.flush()",
-		`        return b"".join(out)`,
+		// The sink COPIES. §5.1.6 hands it the installed buffer -- a memoryview
+		// over `scratch`, which the encoder goes on writing into -- rather than a
+		// snapshot, so appending the view itself would append the same live window
+		// each time and every piece would alias the scratch's final contents.
+		`        e = Encoder.over_buffer(scratch, 0, lambda _v: out.append(bytes(_v)))`,
+		`        return out[0] if len(out) == 1 else b"".join(out)`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("unbounded encode must stream into caller storage, missing %q:\n%s", want, got)
@@ -1463,6 +1471,12 @@ messages:
 	}
 	if strings.Contains(got, "Encoder()") || strings.Contains(got, "getvalue()") {
 		t.Errorf("the corelib must not be left owning the buffer:\n%s", got)
+	}
+	// The bare `out.append` this replaced kept the corelib's view, so every piece
+	// aliased one buffer -- silently correct for a single-drain message and wrong
+	// for every message that filled the scratch more than once.
+	if strings.Contains(got, "Encoder.over_buffer(scratch, 0, out.append)") {
+		t.Errorf("the sink must copy the view it is handed (§5.1.6):\n%s", got)
 	}
 }
 

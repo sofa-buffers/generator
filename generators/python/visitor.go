@@ -403,20 +403,24 @@ func (g *gen) storeValue(acc, loc string, fld *ir.Field) []string {
 	return append(out, fmt.Sprintf("%s = value", acc))
 }
 
-// storeNativeArray renders a native array's store, with the §7.1 element-width
-// scan over the assembled list.
+// storeNativeArray renders a native array's store.
+//
+// It carries NO element-width scan. The §7.1 element bound is stated once, in
+// on_array_begin, as the (elem_min, elem_max) pair the decoder applies AT each
+// element -- which is where the bound has to be taken anyway, since a scan of
+// the finished list cannot reject an element a truncation prevents the array
+// from ever completing (§5.2's INVALID over INCOMPLETE). Repeating it here was a
+// second, weaker verdict on a list the decoder had already vetted: a pure-Python
+// pass over every element of every integer array, per message, for nothing.
+//
+// The two stay in lockstep by construction: widthCond is non-empty exactly for
+// the narrow kinds ir.NarrowRange answers for, and arrayBeginBody emits the pair
+// for exactly those (see isIntArrayElem).
 func (g *gen) storeNativeArray(acc, loc string, elem ir.Kind) []string {
-	var out []string
-	if cond := widthCond("_v", elem); cond != "" {
-		out = append(out,
-			fmt.Sprintf("if any(%s for _v in value):", cond),
-			fmt.Sprintf("    raise SofaDecodeError(%q)",
-				fmt.Sprintf("%s element: value outside declared width %s", loc, elem)))
-	}
 	if elem == ir.KindBool {
-		return append(out, fmt.Sprintf("%s = [bool(_v) for _v in value]", acc))
+		return []string{fmt.Sprintf("%s = [bool(_v) for _v in value]", acc)}
 	}
-	return append(out, fmt.Sprintf("%s = value", acc))
+	return []string{fmt.Sprintf("%s = value", acc)}
 }
 
 // widthCond renders the out-of-range test for a narrow declared width, or "" for
