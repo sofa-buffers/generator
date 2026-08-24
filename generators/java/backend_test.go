@@ -64,7 +64,7 @@ func TestJavaStructural(t *testing.T) {
 		"os.writeArrayUnsigned(15, this.someuintarray);",                                                   // direct write, no box, no trim: the wire count IS the length
 		"private static final int[] _arrdef_someuintarray = new int[]{0, 1, 1000, -1};",                    // omit-default hoisted to a static (#146)
 		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",                       // guard reads the static -- no per-encode new long[] (#146)
-		"m.someuintarray = Seq.ensureCap(m.someuintarray, ai, acap); m.someuintarray[ai++] = (int) value;", // grow-on-demand indexed decode (#96)
+		"m.someuintarray[ai++] = (int) value;", // plain indexed store: arrayBegin sized the array at the checked count (§9.5 shape A)
 		"case 15: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw Sofab.invalid(\"someuintarray: array count above schema capacity 4\"); askip = 0; afill = count; atgt = 1; abulk = m.someuintarray = new int[count]; break;", // mis-typed header skipped before the bound (#254); over-count rejected (#100); the M that arrived is the whole value
 		"OStream os = OStream.overScratch(MAX_SIZE);",                            // the corelib owns the scratch buffer; MAX_SIZE stays ours (§5.1)
 		"return os.copyOfBytesUsed();",                                           // exact-size copy out of it
@@ -230,8 +230,10 @@ messages:
 	for _, want := range []string{
 		"static final long MAX_DYN_ARRAY_COUNT = 4L;",
 		"static final long MAX_DYN_STRING_LEN = 4096L;",
-		// Unbounded array: count checked against the cap before the (lazy) reservation.
-		`case 1: if (kind != ArrayKind.UNSIGNED) break; if (count > MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "arr: array count above configured limit 4")); askip = 0; afill = count; atgt = 1; m.arr = new long[Math.min(count, Seq.ARRAY_INIT_CAP)]; break;`,
+		// Unbounded array: the cap bounds the count, and the destination is then
+		// allocated at exactly that count -- the check is what makes the exact
+		// allocation safe (§9.5 shape A), and it is bulk-capable for the same reason.
+		`case 1: if (kind != ArrayKind.UNSIGNED) break; if (count > MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "arr: array count above configured limit 4")); askip = 0; afill = count; atgt = 1; abulk = m.arr = new long[count]; break;`,
 		// Bounded array: only the generator#100 schema guard, never the cap. Both
 		// bounds sit BEHIND the §7.3 kind test (generator#254).
 		`case 2: if (kind != ArrayKind.SIGNED) break; if (count > 6) throw Sofab.invalid("barr: array count above schema capacity 6"); askip = 0; afill = count; atgt = 1; abulk = m.barr = new int[count]; break;`,
@@ -432,9 +434,9 @@ messages:
 		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw Sofab.invalid("ea: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; abulk = m.ea = new long[count]; break;`,
 		// A count-less array has no schema bound, so the target's finite default
 		// cap governs it (§9.5, generator#385) -- checked, like a schema bound,
-		// BEHIND the kind test. It keeps the capped reservation, because nothing
-		// has bounded its count to a size worth reserving outright.
-		`case 5: if (kind != ArrayKind.UNSIGNED) break; if (count > MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "da: array count above configured limit 65536")); askip = 0; afill = count; atgt = 3; m.da = new short[Math.min(count, Seq.ARRAY_INIT_CAP)]; break;`,
+		// BEHIND the kind test, and it is that check which lets the destination be
+		// allocated at exactly the wire count (§9.5 shape A).
+		`case 5: if (kind != ArrayKind.UNSIGNED) break; if (count > MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "da: array count above configured limit 65536")); askip = 0; afill = count; atgt = 3; abulk = m.da = new short[count]; break;`,
 		// Skipping is the default; only the arms above disarm it.
 		"        askip = count;\n        afill = 0;\n        abulk = null;",
 	} {
@@ -597,12 +599,13 @@ messages:
 		}
 	}
 
-	// Dynamic arrays were already right and must be untouched.
+	// Dynamic arrays keep the same encode side, and decode into an exactly-sized
+	// destination now that their count is checked against the cap first.
 	for _, want := range []string{
 		"os.writeArrayUnsigned(7, this.du);",
 		"os.writeArrayFp32(8, this.df32);",
 		"os.writeArrayUnsigned(9, Seq.boolsToLongs(this.db));",
-		"m.du = new int[Math.min(count, Seq.ARRAY_INIT_CAP)]",
+		"abulk = m.du = new int[count]",
 		"m.db.clear()",
 	} {
 		if !strings.Contains(m, want) {
@@ -1012,10 +1015,11 @@ func TestJavaMatrixRowsArePlacedByID(t *testing.T) {
 		// native rows: placed in arrayBegin, bounded by the OUTER array's count --
 		// behind the §7.3 kind test, so a mis-typed row is skipped, never placed
 		// and never bound-checked (generator#254).
-		`case 8: if (kind != ArrayKind.UNSIGNED) break; if (id >= 4) throw Sofab.invalid("Root_mat element: array index above schema capacity 4"); askip = 0; afill = count; atgt = 1; _arowInt = Seq.reserveRowInts(m.mat, id, Math.min(count, Seq.ARRAY_INIT_CAP)); _ex_Root_mat = id; break;`,
+		`case 8: if (kind != ArrayKind.UNSIGNED) break; if (id >= 4) throw Sofab.invalid("Root_mat element: array index above schema capacity 4"); if (count > 3) throw Sofab.invalid("mat element: array count above schema capacity 3"); askip = 0; afill = count; atgt = 1; _arowInt = Seq.reserveRowInts(m.mat, id, count); _ex_Root_mat = id; break;`,
 		// and the elements land in the row that id named -- through the cursor
-		// arrayBegin parked, written back to that index only when growth moved it
-		"if (ai >= _arowInt.length) { _arowInt = Seq.ensureCap(_arowInt, ai, acap); m.mat.set(_ex_Root_mat, _arowInt); } _arowInt[ai++] = (int) value; return;",
+		// arrayBegin parked, which is already exactly `count` long, so the store is
+		// a plain indexed write with no growth and no write-back (§9.5 shape A)
+		"_arowInt[ai++] = (int) value; return;",
 		// wrapper rows: placed in sequenceBegin, same shape
 		`case 9: if (id >= 4) throw Sofab.invalid("Root_smat element: array index above schema capacity 4"); Seq.reserveRow(m.smat, id); _ex_Root_smat = id; cur = 10; break;`,
 		"while (m.smat.get(_ex_Root_smat).size() <= id) m.smat.get(_ex_Root_smat).add(\"\");",
@@ -1387,5 +1391,63 @@ messages:
 	// The payload-side guard stays as defense for an older corelib.
 	if strings.Count(m, "total > 8") < 2 {
 		t.Error("the payload-side maxlen guard must remain")
+	}
+}
+
+// TestJavaAShapeCheckThenAllocate: an array whose size arrives BEFORE its payload
+// -- a native integer or fp array, and a native matrix row -- is bounded at the
+// count header and then allocated at exactly that count, once (ARCHITECTURE §9.5,
+// shape A, generator#386).
+//
+// What this replaced was the #96/#98 shape: reserve Seq.ARRAY_INIT_CAP elements
+// and grow toward the count with Seq.ensureCap. That was the heap-exhaustion
+// mitigation for an untrusted wire count, written the day before the config caps
+// of #102 existed; once the count is checked against a finite bound before the
+// allocation, allocating it exactly is both safe and cheaper. The check is what
+// makes it safe, so the two assertions belong together and this test keeps them
+// in one place: no arm may allocate without a bound in front of it.
+func TestJavaAShapeCheckThenAllocate(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      dyn: { id: 0, type: array, items: { type: u32 } }
+      bnd: { id: 1, type: array, items: { type: u32, count: 8 } }
+      fps: { id: 2, type: array, items: { type: fp32 } }
+      mat: { id: 3, type: array, items: { type: array, count: 3, items: { type: u32, count: 4 } } }
+`
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+
+	for _, want := range []string{
+		// Schema-unbounded: the cap decides, then the exact allocation.
+		`if (count > MAX_DYN_ARRAY_COUNT)`,
+		`abulk = m.dyn = new int[count]`,
+		// Schema-bounded: its own bound decides, then the exact allocation.
+		`if (count > 8) throw Sofab.invalid("bnd: array count above schema capacity 8"); askip = 0; afill = count; atgt = 2; abulk = m.bnd = new int[count]`,
+		// An fp array is not bulk-capable (the offer is integer-only) but is sized
+		// the same way -- the shape is about the allocation, not about the offer.
+		`m.fps = new float[count]`,
+		// A ROW's own element count is bounded by the INNER schema count, which is
+		// not the same bound as the outer array's capacity beside it: that one
+		// bounds the row's id. Both, in that order.
+		`if (id >= 3) throw Sofab.invalid("Root_mat element: array index above schema capacity 3"); if (count > 4) throw Sofab.invalid("mat element: array count above schema capacity 4");`,
+		`Seq.reserveRowInts(m.mat, id, count)`,
+		// The stores are plain indexed writes: nothing grows, so nothing is
+		// re-assigned into the message object per element.
+		`m.dyn[ai++] = (int) value`,
+		`_arowInt[ai++] = (int) value`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing %q:\n%s", want, m)
+		}
+	}
+	// The growth machinery must be gone, not merely unused: Seq.ensureCap and
+	// Seq.ARRAY_INIT_CAP are corelib API with no call site left here, and `acap`
+	// was the per-array growth ceiling that fed them.
+	for _, gone := range []string{"Seq.ensureCap", "Seq.ARRAY_INIT_CAP", "Math.min(count", "acap"} {
+		if strings.Contains(m, gone) {
+			t.Errorf("M.java must not still grow into an array (%q):\n%s", gone, m)
+		}
 	}
 }

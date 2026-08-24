@@ -124,24 +124,6 @@ func (g *gen) frames(m *ir.Message) []frame {
 	return out
 }
 
-// hasDynPrimArray reports whether any object-scope field is a primitive (T[])
-// array without a schema count: its wire count is untrusted AND unbounded, so
-// the visitor needs the lazy-growth machinery (Seq.ArrayInitCap/acap/Seq.EnsureCap)
-// instead of an eager new T[count] (cf. generator#96/#100/#102).
-func hasDynPrimArray(fs []frame) bool {
-	for _, fr := range fs {
-		if fr.isArr {
-			continue
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && !fld.HasCount {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // widthThrow renders the declared-width rejection (MESSAGE_SPEC §7.1,
 // documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination receiving a
 // value outside its declared range is malformed input and fails the decode with
@@ -163,19 +145,15 @@ func widthThrow(k ir.Kind, name string) string {
 }
 
 // primFill is the statement filling the next slot of the primitive array field
-// `target`. A `count: N` array was allocated at exactly the WIRE count M by
-// ArrayBegin — M IS the array's length (MESSAGE_SPEC §3) and the generator#100
-// guard already rejected M > N — so the elements land in place with nothing to
-// fill in behind them. A count-less array starts small and grows on demand via
-// Seq.EnsureCap, so an untrusted wire count never allocates.
+// `target`. ArrayBegin allocated it at exactly the WIRE count M — M IS the array's
+// length (MESSAGE_SPEC §3), and it was bounded there against the schema capacity
+// or the configured cap before the allocation (ARCHITECTURE §9.5, shape A) — so
+// the elements land in place: nothing to grow into, nothing to fill in behind them.
 //
 // `guard` is the element's §7.1 width rejection (widthThrow), placed AFTER
 // fillGuard and never before it: an over-width scalar at an array id with no
 // ArrayBegin in front of it is a §7.3 skip, not an INVALID.
 func primFill(target string, fld *ir.Field, guard, rhs string) string {
-	if !fld.HasCount {
-		return fillGuard + guard + fmt.Sprintf("%s = Seq.EnsureCap(%s, ai, acap); %s[ai++] = %s;", target, target, target, rhs)
-	}
 	return fillGuard + guard + fmt.Sprintf("%s[ai++] = %s;", target, rhs)
 }
 
@@ -209,10 +187,15 @@ func nativeListFill(target, guard, rhs string) string {
 // The over-index guard runs first: `count: N` is a capacity, so a row id >= N is
 // INVALID (§5.1/§7) and rejecting before the grow also bounds the id-keyed fill
 // against an over-index amplification DoS.
-func (g *gen) placeRow(fr frame) string {
+func (g *gen) placeRow(fr frame) string { return g.overIndexGuard(fr.cap, fr.loc) + g.placeRowAt(fr) }
+
+// placeRowAt is placeRow without the over-index guard, for the one caller that
+// has a SECOND verdict to take between the two: a native row's own element count
+// (§7.1), which must be checked after the row's id and before the row is placed.
+func (g *gen) placeRowAt(fr frame) string {
 	row, _ := g.csSeqElemDefault(fr.elem, fr.ref, fr.items) // the empty row
-	return fmt.Sprintf("%swhile (%s.Count <= id) %s.Add(%s); %s[id] = %s; %s = id; ",
-		g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, row, fr.path, row, ixVar(fr.loc))
+	return fmt.Sprintf("while (%s.Count <= id) %s.Add(%s); %s[id] = %s; %s = id; ",
+		fr.path, fr.path, row, fr.path, row, ixVar(fr.loc))
 }
 
 // emitLenGuard writes the generator#102 length guard at the top of the String/
@@ -575,7 +558,6 @@ func (g *gen) emitArrayFillArm(f *cfile, fs []frame) {
 
 func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
-	dynPrim := hasDynPrimArray(fs)
 	// A configured max_dyn_* cap is live only when this message actually has a
 	// schema-unbounded field of that kind — otherwise it is inert and no
 	// constant or guard is emitted (generator#102).
@@ -605,13 +587,6 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// element count at legitimate native-array positions; a fill arm runs only
 	// while it is positive, so an unarmed bare scalar (afill == 0) is skipped.
 	f.line("    private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)")
-	if dynPrim {
-		// The wire-supplied element count of a count-less array is untrusted, so
-		// the destination is reserved small and grown against elements that
-		// actually arrive (Seq.ArrayInitCap / Seq.EnsureCap, cf. generator#96/#100).
-		// The ceiling is per-array state and stays here.
-		f.line("    private int acap = 0;              // wire count = growth ceiling for the count-less array being filled")
-	}
 	f.line("    private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)")
 	f.line("    private int sp = 0;")
 	f.line("    private readonly PayloadAcc pay = new PayloadAcc(); // reassembles a string/blob payload split across feeds")
@@ -748,19 +723,24 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// and the index IS the row's position, see placeRow).
 	f.line("    public void ArrayBegin(int id, ArrayKind kind, int count) {")
 	f.line("        ai = 0;")
-	if dynPrim {
-		f.line("        acap = count;")
-	}
 	g.emitArraySkipArm(f, fs)
 	g.emitArrayFillArm(f, fs)
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && nativeArrayElem(fr.items.Elem) {
-				// A count-less inner row of a nested array is governed by the
-				// configured cap at its own count header (generator#102).
+				// An inner ROW is itself a native array, and its own element count
+				// needs its own bound -- fr.cap bounds the row's ID against the
+				// outer array's capacity, never how many elements the row claims.
+				// A row the schema counts is bounded by that count (INVALID above
+				// it, §7.1); one the schema leaves unbounded is governed by the
+				// configured cap (LimitExceeded, generator#102).
 				guard := ""
-				if limArr && !fr.items.HasCount {
+				switch {
+				case fr.items.HasCount:
+					guard = fmt.Sprintf("if (count > %d) throw new SofabException(SofabError.InvalidMessage, \"%s element: array count above schema capacity %d\"); ",
+						fr.items.Count, fr.loc, fr.items.Count)
+				case limArr:
 					guard = fmt.Sprintf("if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"%s element: array count above configured limit %d\"); ",
 						fr.loc, g.limits.arrayCount)
 				}
@@ -769,7 +749,10 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				// are already discarded by the skip counter above, and the row itself
 				// must not be materialized either. Checked FIRST, so any bound below
 				// only ever rejects a row that survives the kind test.
-				f.line("            case (%s, _): %s%s%sbreak;", fr.loc, arrayKindGuard(fr.items.Elem), guard, g.placeRow(fr))
+				// Kind first (§7.3), then the row's ID, then its element count -- the
+				// order every backend takes the two INVALID verdicts in.
+				f.line("            case (%s, _): %s%s%s%sbreak;", fr.loc, arrayKindGuard(fr.items.Elem),
+					g.overIndexGuard(fr.cap, fr.loc), guard, g.placeRowAt(fr))
 			}
 			continue
 		}
@@ -799,16 +782,17 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 					fld.Name, g.limits.arrayCount)
 			}
 			if fld.Kind == ir.KindArray && primArrayElem(fld.Elem) {
-				// The wire count M IS the array's length (MESSAGE_SPEC §3), so a
-				// `count: N` array is allocated at exactly M -- bounded by the schema
-				// capacity N through the guard above, so the untrusted count can never
-				// over-allocate. A count-less array has no such bound and still grows
-				// lazily from a small reservation (cf. #96).
-				alloc := "new %s[count]"
-				if !fld.HasCount {
-					alloc = "new %s[Math.Min(count, Seq.ArrayInitCap)]"
+				// The wire count M IS the array's length (MESSAGE_SPEC §3), and the
+				// guard above has just bounded M -- against the schema capacity N, or
+				// against the configured cap where the schema declares none. So the
+				// destination is allocated at exactly M, once (ARCHITECTURE §9.5,
+				// shape A): the wire already said how big the array is and a bound
+				// already said the claim is allowed, which leaves growth nothing to
+				// protect against and only copies to add.
+				if guard == "" {
+					panic("csharp: native array with neither a schema count nor a cap -- every target has a finite default (§9.5)")
 				}
-				f.line("            case (%s, %d): %s%s%s.%s = "+alloc+"; break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name), g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
+				f.line("            case (%s, %d): %s%s%s.%s = new %s[count]; break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name), g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				// List<T> (boolean/enum/bitfield): cleared and appended to, with or
 				// without a count -- the M elements the wire carried are the whole value.

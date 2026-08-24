@@ -33,6 +33,12 @@ type frame struct {
 	// schema bounds, for the receiver-side decode limits (generator#102):
 	elemMaxHas    bool // fkSeqLeaf: the string/blob element declares a maxlen
 	innerHasCount bool // fkNativeMat: the inner array declares a count
+	// innerCap is the inner array's own schema count N (-1 == none) -- the bound on
+	// a ROW's element count, which `cap` does not give: cap bounds the row's ID
+	// against the outer array's capacity. Both are needed, for different reasons:
+	// the id bound stops an over-index gap-fill, this one stops a row header
+	// claiming more elements than the schema allows it (§7.1).
+	innerCap int64
 	// cap is the wrapper array's schema count bound N (-1 == no count). N is a
 	// CAPACITY, not a length (MESSAGE_SPEC §3): it never reaches the wire and
 	// never adds elements the wire did not carry. All it does here is bound the
@@ -99,7 +105,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			// later row down by one across an interior id gap -- which an omitted
 			// all-default row makes reachable (§2).
 			if nativeArrayElem(items.Elem) {
-				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerHasCount: items.HasCount, cap: cap})
+				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerHasCount: items.HasCount, innerCap: capOf(items.HasCount, items.Count), cap: cap})
 			} else {
 				innerLoc := loc + "_e"
 				out = append(out, frame{kind: fkSeqMat, loc: loc, listExpr: listExpr, childLoc: innerLoc, cap: cap})
@@ -269,24 +275,6 @@ func nativeElemCb(k ir.Kind) string {
 // The emitted visitor
 // ---------------------------------------------------------------------------
 
-// arrayInitCap mirrors the corelib's Seq.ARRAY_INIT_CAP: the bounded eager
-// reservation a decode makes for an array before any element has arrived. The
-// generator needs the VALUE only to decide whether a schema capacity is already
-// below it; the emitted code names the corelib's constant.
-const arrayInitCap = 16
-
-// reserveExpr is the backing-store length arrayBegin reserves for an array whose
-// schema capacity is cap (-1 == unbounded). The wire count is UNTRUSTED, so the
-// reservation is capped and the fill grows from there -- except when the schema
-// capacity is already at or below that cap, where the count guard has just
-// proved count <= cap <= Seq.ARRAY_INIT_CAP.
-func reserveExpr(cap int64) string {
-	if cap >= 0 && cap <= arrayInitCap {
-		return "count"
-	}
-	return "minOf(count, Seq.ARRAY_INIT_CAP)"
-}
-
 // rowCursor is the visitor field holding the primitive matrix row currently
 // being filled. The row also lives in the message's MutableList at its element
 // index, but reading it back through the list on every element -- and storing
@@ -342,14 +330,6 @@ func (g *gen) emitVisitor(f *kfile, name string, fields []*ir.Field) {
 	}
 	if hasBulk(fs) {
 		f.line("    private var abulk: Any? = null      // destination offered to Visitor.arrayBulk, null when not offered")
-	}
-	if hasArray {
-		// The wire-supplied element count is UNTRUSTED: a malformed message can
-		// claim ~2^31 elements, so we never allocate the full count up front.
-		// Instead reserve a small backing array and grow it as elements actually
-		// arrive, capped at `acap` (the declared count) so the array still ends
-		// exactly right-sized.
-		f.line("    private var acap = 0                // declared element count = growth ceiling for the array being filled")
 	}
 	f.line("    private var stk = IntArray(16)      // sequence scope stack")
 	f.line("    private var sp = 0")
@@ -821,7 +801,6 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 	f.line("    override fun arrayBegin(id: Int, kind: ArrayKind, count: Int) {")
 	if hasArray {
 		f.line("        ai = 0")
-		f.line("        acap = count")
 	}
 	f.line("        // An array delivered at an id that does not declare one of the SAME array")
 	f.line("        // kind is a wire-type contradiction: drop exactly `count` elements and")
@@ -838,23 +817,34 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 	for i := range fs {
 		fr := &fs[i]
 		if fr.kind == fkNativeMat {
-			// A native-matrix row is itself a native array: an inner array the
-			// schema left unbounded is governed by the configured cap too,
-			// checked at its own count header.
+			// A native-matrix row is itself a native array, and its own element
+			// count needs its own bound -- `cap` bounds the row's ID, not how many
+			// elements the row claims. A row the schema counts is bounded by that
+			// count (INVALID above it, §7.1); one the schema leaves unbounded is
+			// governed by the configured cap (LIMIT_EXCEEDED). Either way the row
+			// is bounded BEFORE it is sized, which is what lets the sizing be exact.
 			guard := ""
-			if limArr && !fr.innerHasCount {
+			switch {
+			case fr.innerHasCount:
+				guard = fmt.Sprintf("if (count > %d) %s; ", fr.innerCap,
+					invalidThrow(fmt.Sprintf("%s element: array count above schema capacity %d", locName(fr.loc), fr.innerCap)))
+			case limArr:
 				guard = fmt.Sprintf("if (count > MAX_DYN_ARRAY_COUNT) %s; ",
 					limitThrow(locName(fr.loc), "array count above configured limit", g.limits.arrayCount))
 			}
+			if guard == "" {
+				panic("kotlin: unbounded matrix row with no cap -- every target has a finite default (§9.5)")
+			}
 			// A row whose header carries a different array kind than the inner
 			// element declares is skipped whole (§7.3). Checked FIRST, so a bound
-			// below can only ever reject a row that survives the kind test.
-			body := guard + overIndexGuard(fr.cap, fr.loc) + armFill(fs, fr, nil)
+			// below can only ever reject a row that survives the kind test; then
+			// the row's ID, then its element count, the order every backend takes
+			// the two INVALID verdicts in.
+			body := overIndexGuard(fr.cap, fr.loc) + guard + armFill(fs, fr, nil)
 			arrType := primArrayType(fr.innerElem)
-			// Capped, never the wire count: fr.cap bounds the row's ID against the
-			// OUTER array's capacity, and nothing here has bounded the row's own
-			// element count.
-			f.line("            %d -> if (kind == ArrayKind.%s) { %s%s = Seq.reserveRow%s(%s, id, minOf(count, Seq.ARRAY_INIT_CAP)); %s = id }",
+			// Sized at exactly the wire count, once: the guard above bounded it
+			// (§9.5, shape A). The wire already said how big the row is.
+			f.line("            %d -> if (kind == ArrayKind.%s) { %s%s = Seq.reserveRow%s(%s, id, count); %s = id }",
 				fr.idx, arrayWireKind(fr.innerElem), body, rowCursor(arrType), seqSuffix(arrType), fr.listExpr, elemIdxVar(fr.loc))
 			continue
 		}
@@ -874,12 +864,10 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 			// applies only to a field that survives this check, so an over-count
 			// MIS-TYPED array is skipped, not a false INVALID.
 			guard := ""
-			cap := int64(-1)
 			if fld.HasCount {
 				// A wire element count above the schema `count` capacity is
 				// INVALID per MESSAGE_SPEC §3+§7 -- reject up front, never clamp
 				// or keep-all.
-				cap = fld.Count
 				guard = fmt.Sprintf("if (count > %d) %s; ", fld.Count,
 					invalidThrow(fmt.Sprintf("%s: array count above schema capacity %d", fld.Name, fld.Count)))
 			} else if limArr {
@@ -897,15 +885,20 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 			target := fr.path + "." + ktIdent(fld.Name)
 			body := guard + armFill(fs, fr, fld)
 			arrType := primArrayType(fld.Elem)
+			// Allocated at exactly the wire count, once (ARCHITECTURE §9.5, shape
+			// A): the guard above has already bounded that count against the
+			// schema capacity or the configured cap. Growing into it from a capped
+			// reservation -- the #96/#98 shape, written the day before the caps of
+			// #102 existed -- would only add doubling and copies.
+			if guard == "" {
+				panic("kotlin: native array with neither a schema count nor a cap -- every target has a finite default (§9.5)")
+			}
+			body += fmt.Sprintf("%s = %s(count)", target, arrType)
 			if bulkCapable(fld) {
-				// Bulk-capable: the destination is exactly `count` long (the
-				// guard above proved it). Its element WIDTH is what tells the
-				// decoder the declared width, so the §7.1 check and the narrowing
-				// happen in the pass that decodes. The per-element arms stay as
-				// the fallback for a decoder that declines the offer.
-				body += fmt.Sprintf("%s = %s(count); abulk = %s", target, arrType, bulkView(fld.Elem, target))
-			} else {
-				body += fmt.Sprintf("%s = %s(%s)", target, arrType, reserveExpr(cap))
+				// Its element WIDTH is what tells the decoder the declared width, so
+				// the §7.1 check and the narrowing happen in the pass that decodes.
+				// The per-element arms stay the fallback for a decoder that declines.
+				body += fmt.Sprintf("; abulk = %s", bulkView(fld.Elem, target))
 			}
 			arms = append(arms, fmt.Sprintf("%d -> if (kind == ArrayKind.%s) { %s }", fld.ID, arrayWireKind(fld.Elem), body))
 		}
@@ -941,12 +934,13 @@ func bulkView(k ir.Kind, target string) string {
 // hasBulk reports whether the message has any array the corelib's bulk offer can
 // be taken for.
 //
-// Exactly the integer arrays with a schema `count`: the offer needs a
-// destination sized to `count` up front, and only a SCHEMA-BOUNDED count may be
-// allocated against (the wire's count is untrusted). That leaves out the
-// unbounded arrays (reserved capped, grown by the fill), boolean arrays (no
-// integer element), fp arrays (the offer is integer-only) and matrix rows (their
-// cap bounds the row's ID, not its element count).
+// Exactly the integer arrays: the offer needs a destination sized to `count` up
+// front, which every native array now has -- the count is checked against the
+// schema bound or the cap before it is allocated from, so the untrusted-count
+// objection that once restricted this to SCHEMA-BOUNDED arrays is answered by the
+// check rather than by the reservation (ARCHITECTURE §9.5, shape A). That leaves
+// out boolean arrays (no integer element), fp arrays (the offer is integer-only)
+// and matrix rows (whose destination is a row cursor, not a field).
 func hasBulk(fs []frame) bool {
 	for i := range fs {
 		fr := &fs[i]
@@ -964,7 +958,7 @@ func hasBulk(fs []frame) bool {
 
 // bulkCapable reports whether a field is one of those arrays.
 func bulkCapable(fld *ir.Field) bool {
-	if fld.Kind != ir.KindArray || !fld.HasCount {
+	if fld.Kind != ir.KindArray {
 		return false
 	}
 	switch fld.Elem {
@@ -1211,17 +1205,16 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 			continue
 		}
 		if fr.kind == fkNativeMat {
-			// Fill the row through the cursor arrayBegin parked, and write the
-			// reference back into the list only when growth actually replaced it.
+			// Fill the row through the cursor arrayBegin parked. The row was sized
+			// at exactly the announced count, so there is no growth and no
+			// reference to write back into the list (§9.5, shape A).
 			cur := rowCursor(primArrayType(fr.innerElem))
 			guard := ""
 			if cb == "unsigned" || cb == "signed" {
 				guard = widthThrow(fr.innerElem, locName(fr.loc)+" element")
 			}
-			arms = append(arms, arm{ids[-1], fmt.Sprintf(
-				"%sif (ai >= %s.size) { %s = Seq.ensureCap(%s, ai, acap); %s[%s] = %s }; %s[ai] = %s; ai++",
-				guard, cur, cur, cur, fr.listExpr, elemIdxVar(fr.loc), cur,
-				cur, elemStore(fr.innerElem, cb))})
+			arms = append(arms, arm{ids[-1], fmt.Sprintf("%s%s[ai] = %s; ai++",
+				guard, cur, elemStore(fr.innerElem, cb))})
 			continue
 		}
 		for _, fld := range fr.fields {
@@ -1234,12 +1227,12 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 			if cb == "unsigned" || cb == "signed" {
 				guard = widthThrow(fld.Elem, fld.Name+" element")
 			}
-			// Grow the backing array on demand (never trust the wire count), up
-			// to the announced count, so a valid array ends exactly M long.
-			arms = append(arms, arm{code, fmt.Sprintf(
-				"%sif (ai >= %s.size) %s = Seq.ensureCap(%s, ai, acap); %s[ai] = %s; ai++",
-				guard, target, target, target, target,
-				elemStore(fld.Elem, cb))})
+			// A plain indexed store. arrayBegin allocated the destination at
+			// exactly the announced count, having first bounded that count against
+			// the schema capacity or the configured cap (§9.5, shape A), so nothing
+			// here can run past the end and nothing has to grow.
+			arms = append(arms, arm{code, fmt.Sprintf("%s%s[ai] = %s; ai++",
+				guard, target, elemStore(fld.Elem, cb))})
 		}
 	}
 	f.line("        // An element of the array arrayBegin armed: its destination is already")

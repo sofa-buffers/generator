@@ -35,6 +35,12 @@ type frame struct {
 	// schema bounds, for the receiver-side decode limits (generator#102):
 	elemMaxHas    bool // fkSeqLeaf: the string/blob element declares a maxlen
 	innerHasCount bool // fkNativeMat: the inner array declares a count
+	// innerCap is the inner array's own schema count N (-1 == none) -- the bound on
+	// a ROW's element count, which `cap` above does not give: cap bounds the row's
+	// ID against the outer array's capacity. Both are needed, and for different
+	// reasons: the id bound stops an over-index gap-fill, this one stops a row
+	// header claiming more elements than the schema allows it (§7.1).
+	innerCap int64
 	// cap is the wrapper array's schema count bound N (-1 == no count). N is a
 	// CAPACITY, not a length (MESSAGE_SPEC §3): it never reaches the wire and never
 	// adds elements the wire did not carry. All it does here is bound the array --
@@ -110,7 +116,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			// row down by one across an interior id gap -- which an omitted
 			// all-default row now makes reachable (§2).
 			if nativeArrayElem(items.Elem) {
-				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerRef: items.ElemRef, innerHasCount: items.HasCount, cap: cap})
+				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerRef: items.ElemRef, innerHasCount: items.HasCount, innerCap: capOf(items.HasCount, items.Count), cap: cap})
 			} else {
 				innerLoc := loc + "_e"
 				out = append(out, frame{kind: fkSeqMat, loc: loc, listExpr: listExpr, childLoc: innerLoc, cap: cap})
@@ -673,7 +679,6 @@ func (g *gen) emitArraySkipGuard(f *jfile) {
 
 func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
-	hasPrim := len(primArrayBasesUsed(fs)) > 0    // any primitive-array field: needs the ai/acap fill cursor
 	limArr, limStr, limBlob := g.activeLimits(fs) // per-visitor decode limits (generator#102)
 
 	f.line("class %sVisitor implements Visitor {", name)
@@ -711,15 +716,6 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	// field read rather than a third dispatch over (scope, id).
 	if hasBulk(fs) {
 		f.line("    private Object abulk;               // destination offered to Visitor.arrayBulk, null when not offered")
-	}
-	if hasPrim {
-		// The wire-supplied element count is UNTRUSTED: a malformed message can
-		// claim ~2^31 elements, so we never allocate `new T[count]` up front (that
-		// is an OutOfMemoryError DoS — see generator issue #96). Instead reserve
-		// Seq.ARRAY_INIT_CAP elements and let Seq.ensureCap grow the array as they
-		// actually arrive, capped at `acap` (the declared count) so it still ends
-		// exactly right-sized.
-		f.line("    private int acap = 0;               // declared element count = growth ceiling for the array being filled")
 	}
 	f.line("    private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)")
 	f.line("    private int sp = 0;")
@@ -882,9 +878,6 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	// its element id names.
 	f.line("    public void arrayBegin(int id, ArrayKind kind, int count) {")
 	f.line("        ai = 0;")
-	if hasPrim {
-		f.line("        acap = count;")
-	}
 	f.line("        // An array delivered at an id that does not declare one of the SAME")
 	f.line("        // array kind is a wire-type contradiction: drop exactly `count` elements")
 	f.line("        // and leave the declared field untouched (S7.3). Every arm below that")
@@ -898,11 +891,19 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	for i := range fs {
 		fr := &fs[i]
 		if fr.kind == fkNativeMat {
-			// A native-matrix row is itself a native array: an inner array the
-			// schema left unbounded is governed by the configured cap too
-			// (generator#102), checked at its own count header.
+			// A native-matrix row is itself a native array, and its own element
+			// count needs its own bound -- `cap` above bounds the row's ID, not
+			// how many elements the row claims. A row the schema counts is bounded
+			// by that count (INVALID above it, §7.1); one the schema leaves
+			// unbounded is governed by the configured cap (LIMIT_EXCEEDED,
+			// generator#102). Either way the row is bounded BEFORE it is sized,
+			// which is what lets the sizing below be exact.
 			guard := ""
-			if limArr && !fr.innerHasCount {
+			switch {
+			case fr.innerHasCount:
+				guard = fmt.Sprintf("if (count > %d) throw Sofab.invalid(\"%s element: array count above schema capacity %d\"); ",
+					fr.innerCap, locName(fr.loc), fr.innerCap)
+			case limArr:
 				guard = limitThrowGuard("count > MAX_DYN_ARRAY_COUNT", locName(fr.loc), "array count above configured limit", g.limits.arrayCount) + " "
 			}
 			// A row whose header carries a different array kind than the inner
@@ -910,7 +911,11 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// FIRST, so a bound below can only ever reject a row that survives the
 			// kind test.
 			kindGuard := arrayKindGuard(fr.innerElem)
-			arm := kindGuard + guard + overIndexGuard(fr.cap, fr.loc) + armFill(fs, fr, nil)
+			// The row's ID is bounded before its element count, matching the order
+			// every other backend takes the two verdicts in -- both are INVALID, so
+			// only the message differs, and a family that words the same rejection
+			// differently is a conformance diff waiting to happen.
+			arm := kindGuard + overIndexGuard(fr.cap, fr.loc) + guard + armFill(fs, fr, nil)
 			// The row's element id IS its index in the outer array (§5.1), so it is
 			// PLACED there after gap-filling with empty rows -- never appended.
 			// Appending ignored the id, which an interior gap (an omitted all-default
@@ -921,11 +926,14 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 				// in its cursor, so the element fill neither re-reads it out of the
 				// List nor boxes a value into one.
 				base := primArrayBase(fr.innerElem)
-				// Capped, never `new T[count]`: fr.cap bounds the row's ID against the
-				// OUTER array's capacity, and nothing here has bounded the row's own
-				// element count -- so the reservation stays untrusted-count-safe (#96)
-				// and the fill grows it.
-				f.line("        case %d: %s%s = Seq.%s(%s, id, Math.min(count, Seq.ARRAY_INIT_CAP)); %s = id; break;",
+				// Sized at exactly the wire count, once: the guard above has just
+				// bounded it against the row's schema count or against the cap
+				// (ARCHITECTURE §9.5, shape A). The wire already said how big the row
+				// is, so growing into it would only add copies.
+				if guard == "" {
+					panic("java: unbounded matrix row with no cap -- every target has a finite default (§9.5)")
+				}
+				f.line("        case %d: %s%s = Seq.%s(%s, id, count); %s = id; break;",
 					fr.idx, arm, rowCursor(base), reserveRowFn(base), fr.listExpr, elemIdxVar(fr.loc))
 				continue
 			}
@@ -959,9 +967,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// configured max_dyn_array_count when set (generator#102): exceeding
 			// it is LIMIT_EXCEEDED — a receiver policy error, not INVALID_MSG.
 			guard := ""
-			cap := int64(-1)
 			if fld.HasCount {
-				cap = fld.Count
 				guard = fmt.Sprintf("if (count > %d) throw Sofab.invalid(\"%s: array count above schema capacity %d\"); ",
 					fld.Count, fld.Name, fld.Count)
 			} else if limArr {
@@ -975,17 +981,25 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// filled exactly like a count-less one.
 			target := fr.path + "." + javaIdent(fld.Name)
 			arm := kindGuard + guard + armFill(fs, fr, fld)
-			if bulkCapable(fld) {
-				// Bulk-capable: the destination is exactly `count` long (the guard
-				// above proved it). A long-backed field IS the destination; a
-				// narrowed one is filled through the scratch and reduced into the
-				// field by arrayBulkEnd. Either way the field is allocated here, so
-				// the per-element arm above still works as the fallback for a
-				// decoder that declines the offer.
-				arms = append(arms, jcase(fld.ID, fmt.Sprintf("%sabulk = %s = new %s[count]",
-					arm, target, primArrayBase(fld.Elem))))
-			} else if primitiveArrayElem(fld.Elem) {
-				arms = append(arms, jcase(fld.ID, arm+target+" = new "+primArrayBase(fld.Elem)+"["+reserveExpr(cap)+"]"))
+			// Allocated at exactly the wire count, once (ARCHITECTURE §9.5, shape
+			// A): the guard above has already bounded that count against the
+			// schema capacity or the configured cap, so the wire has said how big
+			// the array is and a bound has said the claim is allowed. Growing into
+			// it from a capped reservation -- the #96/#98 shape, written the day
+			// before the caps of #102 existed -- would only add doubling and copies.
+			if primitiveArrayElem(fld.Elem) {
+				if guard == "" {
+					panic("java: native array with neither a schema count nor a cap -- every target has a finite default (§9.5)")
+				}
+				alloc := target + " = new " + primArrayBase(fld.Elem) + "[count]"
+				if bulkCapable(fld) {
+					// A long-backed field IS the bulk destination; a narrowed one is
+					// filled through the scratch and reduced into the field by
+					// arrayBulkEnd. Either way the field is allocated here, so the
+					// per-element arm stays the fallback for a decoder that declines.
+					alloc = "abulk = " + alloc
+				}
+				arms = append(arms, jcase(fld.ID, arm+alloc))
 			} else { // boolean List
 				arms = append(arms, jcase(fld.ID, arm+target+".clear()"))
 			}
@@ -1065,8 +1079,8 @@ func primArrayBasesUsed(fs []frame) []string {
 	var out []string
 	for _, order := range primBaseOrder {
 		for _, fr := range fs {
-			// A native-matrix ROW is a primitive array too (List<long[]>), grown by
-			// the same Seq.ensureCap and indexed by the same ai/acap as a top-level one.
+			// A native-matrix ROW is a primitive array too (List<long[]>), sized by
+			// the same arrayBegin and indexed by the same ai as a top-level one.
 			if fr.kind == fkNativeMat && primitiveArrayElem(fr.innerElem) &&
 				primArrayBase(fr.innerElem) == order && !seen[order] {
 				seen[order] = true
@@ -1109,8 +1123,7 @@ func primRowBasesUsed(fs []frame) []string {
 }
 
 // emitBulkCbs writes the two halves of the corelib's bulk-array offer
-// (Visitor.arrayBulk / arrayBulkEnd), the fast path for an integer array whose
-// length the schema already bounds.
+// (Visitor.arrayBulk / arrayBulkEnd), the fast path for an integer array.
 //
 // arrayBegin has resolved and sized the destination, so the offer is a field read
 // -- not a third walk over (scope, id) -- and the decoder then writes the elements
@@ -1182,12 +1195,13 @@ func fillTargetsFor(fs []frame, cb string) map[*frame]map[int64]int {
 // hasBulk reports whether the message has any array the corelib's bulk offer can
 // be taken for.
 //
-// Exactly the integer arrays with a schema `count`: the offer needs a destination
-// sized to `count` up front, and only a SCHEMA-BOUNDED count may be allocated
-// against (#96 -- the wire's count is untrusted). That leaves out the unbounded
-// arrays (reserved capped, grown by the fill), boolean arrays (a List), fp arrays
-// (the offer is integer-only) and matrix rows (their cap bounds the row's ID, not
-// its element count).
+// Exactly the integer arrays: the offer needs a destination sized to `count` up
+// front, which every native array now has -- the count is checked against the
+// schema bound or the cap before it is allocated from, so the untrusted-count
+// objection that once restricted this to SCHEMA-BOUNDED arrays (#96) is answered
+// by the check rather than by the reservation (ARCHITECTURE §9.5, shape A). That
+// leaves out boolean arrays (a List), fp arrays (the offer is integer-only) and
+// matrix rows (whose destination is a row cursor, not a field).
 func hasBulk(fs []frame) bool {
 	for i := range fs {
 		fr := &fs[i]
@@ -1205,7 +1219,7 @@ func hasBulk(fs []frame) bool {
 
 // bulkCapable reports whether a field is one of those arrays.
 func bulkCapable(fld *ir.Field) bool {
-	if fld.Kind != ir.KindArray || !fld.HasCount || !primitiveArrayElem(fld.Elem) {
+	if fld.Kind != ir.KindArray || !primitiveArrayElem(fld.Elem) {
 		return false
 	}
 	switch primArrayBase(fld.Elem) {
@@ -1238,25 +1252,6 @@ func armFill(fs []frame, fr *frame, fld *ir.Field) string {
 	}
 	return fmt.Sprintf("askip = 0; afill = count; atgt = %d; ", fillTargetsFor(fs, cb)[fr][key])
 }
-
-// reserveExpr is the backing-store length arrayBegin reserves for an array whose
-// schema capacity is cap (-1 == unbounded). The wire count is UNTRUSTED, so the
-// reservation is capped at Seq.ARRAY_INIT_CAP and the fill grows from there (#96)
-// -- except when the schema capacity is already at or below that cap, where the
-// count guard above has just proved count <= cap <= ARRAY_INIT_CAP and the
-// Math.min can only return count.
-func reserveExpr(cap int64) string {
-	if cap >= 0 && cap <= arrayInitCap {
-		return "count"
-	}
-	return "Math.min(count, Seq.ARRAY_INIT_CAP)"
-}
-
-// arrayInitCap mirrors the corelib's Seq.ARRAY_INIT_CAP: the bounded eager
-// reservation a decode makes for an array before any element has arrived. Held
-// here only so reserveExpr can fold the Math.min away when the schema capacity is
-// already at or below it; the value that reaches the wire path is the corelib's.
-const arrayInitCap = 16
 
 // rowCursor is the visitor field holding the primitive matrix row currently being
 // filled. The row also lives in the message's List<T[]> at its element index, but
@@ -1350,13 +1345,12 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 		}
 		if fr.kind == fkNativeMat {
 			if primitiveArrayElem(fr.innerElem) {
-				// Fill the row through the cursor arrayBegin parked, and write the
-				// reference back into the List only when growth actually replaced it.
+				// Fill the row through the cursor arrayBegin parked. The row was sized
+				// at exactly the announced count, so there is no growth and no
+				// reference to write back into the List (§9.5, shape A).
 				cur := rowCursor(primArrayBase(fr.innerElem))
-				arms = append(arms, arm{ids[-1], fmt.Sprintf(
-					"%sif (ai >= %s.length) { %s = Seq.ensureCap(%s, ai, acap); %s.set(%s, %s); } %s[ai++] = %svalue",
-					widthThrow(fr.innerElem, fr.loc+" element"), cur, cur, cur, fr.listExpr, elemIdxVar(fr.loc), cur, cur,
-					primArrayCast(fr.innerElem))})
+				arms = append(arms, arm{ids[-1], fmt.Sprintf("%s%s[ai++] = %svalue",
+					widthThrow(fr.innerElem, fr.loc+" element"), cur, primArrayCast(fr.innerElem))})
 				continue
 			}
 			// A boxed row (boolean): the row arrayBegin PLACED at the element id, not
@@ -1380,17 +1374,12 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 				arms = append(arms, arm{code, target + ".add(value != 0)"})
 				continue
 			}
-			// Grow the backing array on demand (never trust the wire count), up to
-			// the announced count, so a valid array ends exactly M long.
-			//
-			// The growth call is behind its own `ai >= length` test rather than
-			// assigning Seq.ensureCap's result unconditionally. It already returns the
-			// same array when nothing grows, but ASSIGNING it is a reference store
-			// into the message object -- a putfield plus the GC's card-marking write
-			// barrier -- on every element of every array, for a pointer that changes
-			// at most log2(count) times.
+			// A plain indexed store. arrayBegin allocated the destination at exactly
+			// the announced count, having first bounded that count against the schema
+			// capacity or the configured cap (§9.5, shape A), so nothing here can
+			// run past the end and nothing has to grow: no doubling, no copies, and
+			// no reference store into the message object per element.
 			arms = append(arms, arm{code, widthThrow(fld.Elem, fld.Name+" element") +
-				"if (ai >= " + target + ".length) " + target + " = Seq.ensureCap(" + target + ", ai, acap); " +
 				target + "[ai++] = " + primArrayCast(fld.Elem) + "value"})
 		}
 	}

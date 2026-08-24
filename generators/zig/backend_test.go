@@ -459,7 +459,7 @@ messages:
 		"const max_dyn_string_len: usize = 4096;",
 		// Unbounded fields are guarded at the count/length header, before the
 		// field's storage is taken.
-		"1 => if (kind == .unsigned) { if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.arr = sofab.arrays.allocCapped(u64, self.alloc, count); } },",
+		"1 => if (kind == .unsigned) { if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.arr = sofab.arrays.allocN(u64, self.alloc, count); } },",
 		"0 => if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.s = chunk; } },",
 		// InvalidMessage (generator#100) takes precedence over LimitExceeded.
 		"if (v.inv) return error.InvalidMessage;",
@@ -467,9 +467,10 @@ messages:
 		// The schema-bounded array keeps its generator#100 guard, now behind the
 		// generator#188 fill guard (a bare scalar at this array id is skipped).
 		"2 => { if (self.afill != 0) { self.afill -= 1; if (value < -2147483648 or value > 2147483647) { self.inv = true; return; } self.m.barr.push(@intCast(value), &self.inv); } },",
-		// Hardened eager allocation: the untrusted wire count is capped here, and
-		// sofab.arrays.putGrowing extends the slice as elements actually arrive.
-		"self.m.arr = sofab.arrays.allocCapped(u64, self.alloc, count)",
+		// The cap bounds the untrusted wire count, and the destination is then
+		// allocated at exactly that count -- the check is what makes the exact
+		// allocation safe (ARCHITECTURE §9.5, shape A).
+		"self.m.arr = sofab.arrays.allocN(u64, self.alloc, count)",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("limits message.zig missing %q", want)
@@ -484,8 +485,7 @@ messages:
 	}
 
 	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
-	// (§9.5, generator#385). Zig is on the server tier. The eager-allocation
-	// hardening is orthogonal and stays either way (a bugfix, not an option).
+	// (§9.5, generator#385). Zig is on the server tier.
 	plain := gen(map[string]any{})
 	for _, want := range []string{
 		"const max_dyn_array_count: usize = 65536;",
@@ -500,8 +500,11 @@ messages:
 	if strings.Contains(plain, "max_dyn_blob_len") {
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
-	if !strings.Contains(plain, "sofab.arrays.allocCapped(") {
-		t.Error("no-config output must keep the capped allocation")
+	// The cap is what bounds the count, so the allocation is exact with the
+	// default cap exactly as with a configured one -- and the capped reservation
+	// is gone entirely (§9.5, shape A).
+	if !strings.Contains(plain, "sofab.arrays.allocN(") || strings.Contains(plain, "allocCapped") {
+		t.Error("no-config output must allocate the checked count exactly")
 	}
 }
 
@@ -1060,7 +1063,7 @@ messages:
 	for _, want := range []string{
 		// The row is placed at its element id, after the gap-fill, and the index is
 		// recorded so the element stores address THAT row.
-		".root_mat => if (kind == .unsigned) if (id >= 4) { self.inv = true; } else { self.ei_root_mat = id; if (sofab.arrays.grow([]const u32, self.alloc, &(self.m.mat), @as(usize, id) + 1, &.{})) { sofab.arrays.at(self.m.mat, id).* = sofab.arrays.allocCapped(u32, self.alloc, count); } },",
+		".root_mat => if (kind == .unsigned) if (id >= 4) { self.inv = true; self.an = 0; } else if (count > 4) { self.inv = true; self.an = 0; } else { self.ei_root_mat = id; if (sofab.arrays.grow([]const u32, self.alloc, &(self.m.mat), @as(usize, id) + 1, &.{})) { sofab.arrays.at(self.m.mat, id).* = sofab.arrays.allocN(u32, self.alloc, count); } },",
 		"self.ei_root_mat < self.m.mat.len) sofab.arrays.putGrowing(sofab.arrays.at(self.m.mat, self.ei_root_mat), self.alloc, &self.ai, self.an,",
 		// The fp row collector is the same shape.
 		"if (self.ei_root_dyn < self.m.dyn.len) sofab.arrays.putGrowing(sofab.arrays.at(self.m.dyn, self.ei_root_dyn), self.alloc, &self.ai, self.an, value)",
@@ -1359,5 +1362,59 @@ messages:
 	}
 	if strings.Count(m, "total > 8") < 2 {
 		t.Error("the payload-side maxlen guard must remain as defense")
+	}
+}
+
+// TestZigAShapeCheckThenAllocate: the Zig half of ARCHITECTURE §9.5's shape A
+// (generator#386) -- an array whose size arrives before its payload is bounded at
+// the count header and then allocated at exactly that count, once.
+//
+// What this replaced was sofab.arrays.allocCapped: reserve ARRAY_INIT_CAP
+// elements and let putGrowing extend the slice as elements arrive. That was the
+// mitigation for an untrusted wire count, and the config caps of #102 replaced
+// the need for it -- a count checked against a finite bound before the allocation
+// can be allocated exactly.
+//
+// A `count: N` field is inline storage and was never growing, so it must come out
+// of this unchanged: its store is still the capacity-checked push.
+func TestZigAShapeCheckThenAllocate(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      dyn: { id: 0, type: array, items: { type: u32 } }
+      bnd: { id: 1, type: array, items: { type: u32, count: 8 } }
+      fps: { id: 2, type: array, items: { type: fp32 } }
+      mat: { id: 3, type: array, items: { type: array, count: 3, items: { type: u32, count: 4 } } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	for _, want := range []string{
+		// Schema-unbounded: the cap decides, then the exact allocation.
+		"if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.dyn = sofab.arrays.allocN(u32, self.alloc, count); }",
+		"self.m.fps = sofab.arrays.allocN(f32, self.alloc, count)",
+		// A count:N field is INLINE storage: never allocated, never grown, and so
+		// untouched by this -- it clears at the header and pushes with a capacity
+		// check, exactly as before.
+		"if (count > 8) { self.inv = true; return; } self.m.bnd.clear();",
+		"self.m.bnd.push(@intCast(value), &self.inv)",
+		// A ROW: its id first, then its own element count -- two different bounds,
+		// the second of which the row did not have.
+		"if (id >= 3) { self.inv = true; self.an = 0; } else if (count > 4) { self.inv = true; self.an = 0; }",
+		"sofab.arrays.at(self.m.mat, id).* = sofab.arrays.allocN(u32, self.alloc, count);",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing %q:\n%s", want, m)
+		}
+	}
+	// The capped reservation is gone entirely: every allocation is now the exact
+	// one, and a remaining allocCapped would be an arm that skipped its bound.
+	if strings.Contains(m, "allocCapped") {
+		t.Errorf("no array may still be reserved capped and grown into:\n%s", m)
 	}
 }

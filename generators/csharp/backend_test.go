@@ -225,7 +225,7 @@ messages:
 		// A count-less array has no schema bound, so the target's finite default
 		// cap governs it (§9.5, generator#385) -- like a schema bound, checked
 		// BEHIND the kind test.
-		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "da: array count above configured limit 65536"); m.da = new ushort[Math.Min(count, Seq.ArrayInitCap)]; break;`,
+		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "da: array count above configured limit 65536"); m.da = new ushort[count]; break;`,
 		// The skip counter is armed per kind; each id disarms under its own kind only.
 		"            ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 3) => 0,\n                (Root, 5) => 0,\n                _ => count,\n            },",
 		"            ArrayKind.Signed => (cur, id) switch {\n                (Root, 1) => 0,\n                (Root, 4) => 0,\n                _ => count,\n            },",
@@ -278,7 +278,7 @@ messages:
 		`case (Root, 1): if (kind != ArrayKind.Fp64) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "f64: array count above schema capacity 2"); m.f64 = new double[count]; break;`,
 		// A count-less fixlen array has no schema bound, so the finite default cap
 		// governs it (§9.5, generator#385), behind the kind test.
-		`case (Root, 2): if (kind != ArrayKind.Fp32) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "dyn: array count above configured limit 65536"); m.dyn = new float[Math.Min(count, Seq.ArrayInitCap)]; break;`,
+		`case (Root, 2): if (kind != ArrayKind.Fp32) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "dyn: array count above configured limit 65536"); m.dyn = new float[count]; break;`,
 		// The skip counter: the fp32 ids disarm only under Fp32, the fp64 id only
 		// under Fp64. An fp64 header at id 0 therefore arms `count` discards.
 		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 2) => 0,\n                _ => count,\n            },",
@@ -430,8 +430,8 @@ messages:
 		"private const long MaxDynStringLen = 4096;",
 		// Unbounded array: LimitExceeded at the count header, then a bounded
 		// initial reservation grown on demand — never `new ulong[count]`.
-		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[Math.Min(count, Seq.ArrayInitCap)]; break;",
-		"m.arr = Seq.EnsureCap(m.arr, ai, acap); m.arr[ai++] = (ulong)value;",
+		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[count]; break;",
+		"m.arr[ai++] = (ulong)value;",
 		// Bounded array: only the #100 schema-capacity guard, and an alloc at the
 		// WIRE count -- `count: N` is a capacity, so M is the length (§3) and the
 		// guard is what still bounds the untrusted count.
@@ -458,8 +458,8 @@ messages:
 	plain := buildModule(t, []byte(src), "dyn.yaml", map[string]any{})
 	for _, want := range []string{
 		"const long MaxDynArrayCount = 65536;",
-		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[Math.Min(count, Seq.ArrayInitCap)]; break;",
-		"m.arr = Seq.EnsureCap(m.arr, ai, acap); m.arr[ai++] = (ulong)value;",
+		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[count]; break;",
+		"m.arr[ai++] = (ulong)value;",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("no-config Message.cs missing hardened count-less arm %q", want)
@@ -783,10 +783,11 @@ messages:
 		// The ROW itself is count-less, so its element count also meets the
 		// target's finite default cap (§9.5, generator#385) -- a bound on the
 		// inner array, distinct from the outer index bound beside it.
-		"case (Root_rows, _): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, " +
-			"\"Root_rows element: array count above configured limit 65536\"); " +
+		"case (Root_rows, _): if (kind != ArrayKind.Unsigned) break; " +
 			"if (id >= 2) throw new SofabException(SofabError.InvalidMessage, " +
 			"\"Root_rows element: array index above schema capacity 2\"); " +
+			"if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, " +
+			"\"Root_rows element: array count above configured limit 65536\"); " +
 			"while (m.rows.Count <= id) m.rows.Add(new List<uint>()); m.rows[id] = new List<uint>(); _ixRoot_rows = id; break;",
 		// the §7.1 width guard for the u32 element follows afill-- and precedes the
 		// store (see TestCsDeclaredWidthIsAValidityBound)
@@ -1034,5 +1035,48 @@ messages:
 	}
 	if strings.Count(m, "total > 8") < 2 {
 		t.Error("the payload-side maxlen guard must remain as defense")
+	}
+}
+
+// TestCsAShapeCheckThenAllocate: the C# half of ARCHITECTURE §9.5's shape A
+// (generator#386) -- an array whose size arrives before its payload is bounded at
+// the count header and then allocated at exactly that count, once, replacing the
+// #96/#98 reserve-at-Seq.ArrayInitCap-and-grow shape the config caps made
+// unnecessary.
+//
+// A native matrix ROW is a List<T> here rather than a T[], so nothing is
+// allocated from its count either way -- but its count still needs a VERDICT,
+// which it did not have: fr.cap bounds the row's id, never how many elements the
+// row claims (§7.1).
+func TestCsAShapeCheckThenAllocate(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      dyn: { id: 0, type: array, items: { type: u32 } }
+      bnd: { id: 1, type: array, items: { type: u32, count: 8 } }
+      fps: { id: 2, type: array, items: { type: fp32 } }
+      mat: { id: 3, type: array, items: { type: array, count: 3, items: { type: u32, count: 4 } } }
+`
+	m := buildModule(t, []byte(src), "m.yaml", map[string]any{})
+
+	for _, want := range []string{
+		`if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "dyn: array count above configured limit 65536"); m.dyn = new uint[count];`,
+		`if (count > 8) throw new SofabException(SofabError.InvalidMessage, "bnd: array count above schema capacity 8"); m.bnd = new uint[count];`,
+		`m.fps = new float[count];`,
+		// The row's id, then the row's own element count.
+		`if (id >= 3) throw new SofabException(SofabError.InvalidMessage, "Root_mat element: array index above schema capacity 3"); if (count > 4) throw new SofabException(SofabError.InvalidMessage, "Root_mat element: array count above schema capacity 4");`,
+		// A plain indexed store: the destination is already exactly `count` long.
+		`m.dyn[ai++] = (uint)value;`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q:\n%s", want, m)
+		}
+	}
+	for _, gone := range []string{"Seq.EnsureCap", "Seq.ArrayInitCap", "Math.Min(count", "acap"} {
+		if strings.Contains(m, gone) {
+			t.Errorf("Message.cs must not still grow into an array (%q):\n%s", gone, m)
+		}
 	}
 }
