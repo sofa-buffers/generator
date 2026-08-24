@@ -32,7 +32,7 @@ version: 0.0.0
 environment:
   sdk: ^3.4.0
 dependencies:
-  sofabuffers:
+  sofa_buffers_corelib:
     path: ${SOFAB_DART_CORELIB}
 `
 
@@ -44,7 +44,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("import 'dart:io';")
 	f.line("import 'dart:typed_data';")
 	f.line("import 'package:harness/message.dart';")
-	f.line("import 'package:sofabuffers/sofabuffers.dart' as sofab;")
+	f.line("import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;")
 	f.blank()
 
 	// Per-object JSON codecs (message + named struct/union).

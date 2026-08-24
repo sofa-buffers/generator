@@ -53,7 +53,7 @@ const exampleDef = "../../examples/messages/example.yaml"
 func TestModuleShape(t *testing.T) {
 	out := genFor(t, exampleDef, map[string]any{})
 	for _, want := range []string{
-		"import 'package:sofabuffers/sofabuffers.dart' as sofab;",
+		"import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;",
 		"class Myfirstmessage {",
 		"void serialize(sofab.Encoder e) {",
 		// example.yaml has an unbounded field, so encode() takes the scratch+sink
