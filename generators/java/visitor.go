@@ -708,7 +708,7 @@ func (g *gen) emitArraySkipGuard(f *jfile) {
 func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	limArr, limStr, limBlob := g.activeLimits(fs) // per-visitor decode limits (generator#102)
-	g.limArr = limArr                            // for overIndexGuard, which cannot reach fs
+	g.limArr = limArr                             // for overIndexGuard, which cannot reach fs
 
 	f.line("class %sVisitor implements Visitor {", name)
 	f.line("    private final %s m;", name)
