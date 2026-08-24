@@ -2290,7 +2290,9 @@ messages:
 func TestTSWrapperElementLengthKeepsTheCorelibCap(t *testing.T) {
 	// Unbounded string element -> the residual DecodeLimits, string only.
 	dyn := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n      w: { id: 0, type: array, items: { type: string } }\n", map[string]any{})
-	if !strings.Contains(dyn, "const _LIMITS = Object.freeze({ maxStringLen: MAX_DYN_STRING_LEN });") {
+	// The literal, not the constant: see TestTSResidualLimitsAreRaised for why the
+	// two are separate numbers. With no schema maxlen anywhere they coincide.
+	if !strings.Contains(dyn, "const _LIMITS = Object.freeze({ maxStringLen: 262144 });") {
 		t.Errorf("an unbounded wrapper string element must keep the corelib's length cap:\n%s", dyn)
 	}
 	if !strings.Contains(dyn, "_decode(bytes, new _MVis(o, new PayloadAcc()), _LIMITS);") {
@@ -2310,5 +2312,59 @@ func TestTSWrapperElementLengthKeepsTheCorelibCap(t *testing.T) {
 	bounded := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n      w: { id: 0, type: array, items: { type: string, maxlen: 16 } }\n", map[string]any{})
 	if strings.Contains(bounded, "_LIMITS") {
 		t.Errorf("a bounded wrapper element needs no corelib cap:\n%s", bounded)
+	}
+}
+
+// TestTSResidualLimitsAreRaised: the residual DecodeLimits carries a value RAISED
+// to the largest schema maxlen of its kind, while the exported constant stays as
+// configured.
+//
+// This is a regression test for a real defect. generator#388 dropped the raise --
+// correctly, since the caps are applied per field now -- but kept handing the
+// corelib a DecodeLimits for the one shape it still governs. corelib-ts measures
+// EVERY fixlen length against that object, with no schema exemption and at the
+// length word, which is BEFORE the visitor's fixlenBegin runs. So the tight cap
+// reached fields the schema bounds and rejected them on the way in: a wrapper
+// element declaring `maxlen: 4096` was refused at 2000 bytes under a
+// `max_dyn_string_len: 1024` -- a message every other target decodes.
+//
+// Only the literal inside _LIMITS is raised. The constant stays tight, so the
+// per-field guards keep the precision #388 bought them and the loosening reaches
+// nothing but the corelib's own outer check.
+func TestTSResidualLimitsAreRaised(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      s:    { id: 0, type: string }
+      wdyn: { id: 1, type: array, items: { type: string } }
+      wbnd: { id: 2, type: array, items: { type: string, maxlen: 4096 } }
+`
+	mod := genTSWith(t, src, map[string]any{"max_dyn_string_len": 1024})
+
+	// The constant is what the per-field guards read: as configured, unraised.
+	if !strings.Contains(mod, "export const MAX_DYN_STRING_LEN = 1024;") {
+		t.Errorf("the exported cap must stay as configured:\n%s", mod)
+	}
+	if !strings.Contains(mod, `case 0: if (sub === FixlenSubtype.String && total > MAX_DYN_STRING_LEN) throw new SofabError(SofabErrorCode.LimitExceeded, "s: string byte length above configured limit " + MAX_DYN_STRING_LEN); break;`) {
+		t.Errorf("the scalar guard must read the tight constant:\n%s", mod)
+	}
+	// The residual is raised to wbnd's 4096, so the corelib cannot reject an
+	// element the schema declares legal.
+	if !strings.Contains(mod, "const _LIMITS = Object.freeze({ maxStringLen: 4096 });") {
+		t.Errorf("the residual DecodeLimits must be raised past every schema maxlen:\n%s", mod)
+	}
+	// ...and it must NOT be the constant, which would reintroduce the defect.
+	if strings.Contains(mod, "maxStringLen: MAX_DYN_STRING_LEN") {
+		t.Errorf("the residual must not carry the tight constant:\n%s", mod)
+	}
+
+	// With no bounded wrapper element there is nothing to raise past, so the two
+	// numbers coincide -- the raise is owed to the schema, not to the shape.
+	plain := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n      w: { id: 0, type: array, items: { type: string } }\n",
+		map[string]any{"max_dyn_string_len": 1024})
+	if !strings.Contains(plain, "const _LIMITS = Object.freeze({ maxStringLen: 1024 });") {
+		t.Errorf("with no schema maxlen to clear, the residual is the configured cap:\n%s", plain)
 	}
 }

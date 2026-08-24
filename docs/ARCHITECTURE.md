@@ -2214,7 +2214,14 @@ the schema; the corelib does not. Two have moved:
   impossible. Most schemas hand the corelib **no `DecodeLimits` at all** now.
 
   One shape survives, and it is what the remaining two are blocked on: a wrapper
-  array's string/blob element **length**. Those elements are collected by
+  array's string/blob element **length**. Note the residual carries a **raised**
+  value while the exported constant stays as configured: corelib-ts measures every
+  fixlen length against the `DecodeLimits` it is handed, with no schema exemption
+  and at the length word — *before* the visitor's `fixlenBegin` runs — so a tight
+  cap routed through it rejects a schema-bounded field on the way in, which cost a
+  `maxlen: 4096` element its decode under a 1024 cap. Raising only the literal
+  keeps the per-field guards tight and confines the loosening to the corelib's own
+  outer check, which governs nothing but those elements. Those elements are collected by
   corelib-ts's `StringSeq`/`BlobSeq`, so their length words never reach the
   generated visitor, and the collector takes only the schema `maxlen` — it has a
   receiver-side bound for the element *index* (`receiverCap`, §9.5's index cap)
