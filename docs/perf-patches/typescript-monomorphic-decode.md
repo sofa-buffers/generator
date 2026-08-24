@@ -1,5 +1,13 @@
 # TypeScript codegen: monomorphic pull decode (design C)
 
+> **SUPERSEDED (2026-08).** corelib-ts withdrew `Cursor` along with every other
+> second decode surface: CORELIB_PLAN §5.3.1 now makes the visitor the *only* one
+> and forbids a pull parser beside it. The generated backend decodes through a flat
+> visitor (ARCHITECTURE §9.3 family 1). Measured cost of the move on
+> `vehicle_telemetry`: decode 682k → 780k Ir/op, ~+14%. That is the price of the
+> rule, not a regression to chase — and the measurement below is why we know what
+> it bought, so this document stays as the record of it.
+
 Status: implemented + measured in the arena as a re-applied patch
 (`languages/typescript/sofab/monomorphic-decode.patch`, wired into
 `languages/typescript/setup.sh`). This doc is the spec for folding the change

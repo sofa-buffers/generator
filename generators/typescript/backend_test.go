@@ -80,29 +80,42 @@ func TestTSWireTypeGuard(t *testing.T) {
 			mod = string(f.Content)
 		}
 	}
-	// (SofabError/SofabErrorCode ride along because this schema's u8/i32 fields
-	// carry the §7.1 over-width reject — see TestTSDeclaredWidthIsAValidityBound.)
-	if !strings.Contains(mod, `import { OStream, Cursor, WireType, FixlenSubtype`) {
-		t.Errorf("message.ts missing WireType/FixlenSubtype import:\n%s", mod)
+	if !strings.Contains(mod, `import { OStream, FixlenSubtype, ArrayKind`) {
+		t.Errorf("message.ts missing FixlenSubtype/ArrayKind import:\n%s", mod)
 	}
+	// A field whose WIRE TYPE contradicts the declared one needs no guard in the
+	// generated code at all: the corelib routes by wire type, so such a field
+	// arrives at a callback this id has no arm in — or at none — and is skipped
+	// (MESSAGE_SPEC §7.3). A `string` at id 0 reaches `string()`, where only id 2
+	// has an arm; it cannot reach the `unsigned()` arm that would store it.
+	//
+	// The two cases the wire type does NOT settle keep an explicit test, because
+	// several declared kinds share one wire type:
 	for _, want := range []string{
-		"case 0: { if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } const _v = c.readUnsigned(); if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, \"a: value outside declared width u8\"); o.a = _v as number; break; }",
-		"case 1: { if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } const _v = c.readSigned(); if (_v < -2147483648 || _v > 2147483647) throw new SofabError(SofabErrorCode.InvalidMsg, \"b: value outside declared width i32\"); o.b = _v as number; break; }",
-		// fp32/fp64/string/blob share WireType.Fixlen, so the guard also checks the
-		// fixlen subtype (corelib-ts#58); the fp arrays share ArrayFixlen likewise.
-		"case 2: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } o.c = c.readString(); break;",
-		// fp32 reads its four wire bytes rather than the widened number (§4.6,
-		// generator#235 — see TestTSFp32SignalingNaNRawChannel); the guard in front
-		// of it is the same one every other fixlen field gets.
-		"case 3: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp32) { c.skip(c.wire); break; } const _r = c.readFp32Raw();",
-		"case 4: if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; } _decodeIntoME(c, o.e); break;", // nested message, decoded into the existing member (§7.4)
-		"case 5: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.f = c.readUnsignedArray(undefined, 4294967295) as number[]; break;",
-		"case 6: if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } o.g = c.readSignedArray(undefined, -32768, 32767) as number[]; break;",
-		"case 7: if (c.wire !== WireType.ArrayFixlen || c.fixSub !== FixlenSubtype.Fp64) { c.skip(c.wire); break; } o.h = c.readFp64Array(); break;",
-		"case 8: {\n      if (c.wire !== WireType.SequenceStart) { c.skip(c.wire); break; }", // composite array wrapper sequence (SequenceStart, no subtype)
+		// fp32/fp64/string/blob all ride WireType.Fixlen, so an ARRAY of them is
+		// separated only by the announced element kind.
+		"case 5: { if (kind !== ArrayKind.Unsigned) break; const _d: number[] = []; this.o.f = _d; this._a0F = _d; break; }",
+		"case 6: { if (kind !== ArrayKind.Signed) break; const _d: number[] = []; this.o.g = _d; this._a0G = _d; break; }",
+		"case 7: { if (kind !== ArrayKind.Fp64) break; const _d: number[] = []; this.o.h = _d; this._a0H = _d; break; }",
+		// ...and a fixlen SCALAR is separated by the announced subtype, which is
+		// what the collector of a string wrapper array tests for its elements.
+		"  fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {",
+		"    this._q2?.begin(id, sub, total);",
+		// A nested struct is a sequence: entering its scope is the whole guard.
+		"    case 4: { this._c = _L_M_e; return true; }",
+		// ...and its i32 field dispatches on the scope, not on the id alone: id 0
+		// means something different in every scope of the tree.
+		`      case _L_M_e: {`,
+		`        case 0: { const _v = v as number; if (_v < -2147483648 || _v > 2147483647) throw new SofabError(SofabErrorCode.InvalidMsg, "x: value outside declared width i32"); this.o.e.x = _v; break; }`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing wire-type guard %q\n%s", want, mod)
+		}
+	}
+	// The header hook must not ignore what it was told.
+	for _, bad := range []string{"arrayBegin(id: number, _kind:", "fixlenBegin(id: number, _sub:"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("%q ignores the announced kind/subtype (generator#300)", bad)
 		}
 	}
 }
@@ -133,23 +146,29 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 		t.Errorf("message.ts must import SofabError/SofabErrorCode for the over-index guard:\n%s", mod[:min(len(mod), 200)])
 	}
 	for _, want := range []string{
-		`if (c.id >= 4) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 4"); const _id = c.id; while (arr.length <= _id) arr.push("");`,
-		`if (c.id >= 3) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 3"); const _id = c.id; while (arr.length <= _id) arr.push(new Uint8Array());`,
-		// The struct-element path now places by id like the leaf paths above; the
-		// guard runs first and so also bounds the gap-fill (generator#247).
-		`if (c.id >= 2) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 2"); const _id = c.id; while (arr.length <= _id) arr.push(new MBpElem()); _decodeIntoMBpElem(c, arr[_id]!);`,
+		// A leaf element's index bound is the corelib collector's: the capacity and
+		// the element maxlen are constructor arguments, and it judges the index at
+		// the length word — before the payload, and before the destination grows.
+		`this._q1 = new StringSeq(_t, this.a, 4, 16, "bs", MAX_DYN_ARRAY_COUNT);`,
+		`this._q2 = new BlobSeq(_t, this.a, 3, 16, "bb", MAX_DYN_ARRAY_COUNT);`,
+		// A FRAMED element opens a scope, so generated code places it — and the
+		// guard runs before the gap-fill, so an over-index id extends nothing
+		// (generator#247, CORELIB_PLAN §7.2 item 8).
+		"        const _t = this.o.bp;\n" +
+			"        if (id >= 2) throw new SofabError(SofabErrorCode.InvalidMsg, \"bp: array index above schema capacity 2\");\n" +
+			"        while (_t.length <= id) _t.push(new MBpElem());\n",
+		// A dynamic array has no schema capacity, so the receiver cap governs
+		// instead (§6.2.1) — never both.
+		`this._q5 = new StringSeq(_t, this.a, -1, -1, "ds", MAX_DYN_ARRAY_COUNT);`,
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("message.ts missing over-index guard %q", want)
+			t.Errorf("message.ts missing over-index guard %q:\n%s", want, mod)
 		}
 	}
-	// Dynamic string array keeps every index (no over-index guard), but still
-	// carries the §7.3 wrapper-element wire guard (#189).
-	if !strings.Contains(mod, `while (c.readHeader()) { if ((c.wire as WireType) !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); continue; } const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(); }`) {
-		t.Errorf("dynamic string array must carry the wire guard but no over-index guard:\n%s", mod)
-	}
-	if strings.Contains(mod, `while (c.readHeader()) { const _id = c.id; while (arr.length <= _id) arr.push("");`) {
-		t.Error("dynamic string array must not be missing the §7.3 wrapper-element wire guard (#189)")
+	// A schema-bounded array must NOT also carry the receiver cap as a rejection of
+	// its own: §6.2.1 keeps a cap off a field the schema already bounds.
+	if strings.Contains(mod, `if (id >= MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "bp:`) {
+		t.Error("a schema-bounded wrapper array must not also apply the receiver cap (§6.2.1)")
 	}
 }
 
@@ -182,27 +201,31 @@ func TestTSHeaderBoundReject(t *testing.T) {
 			harness = string(f.Content)
 		}
 	}
-	// Bounded native arrays pass their schema count into the reader (header reject);
-	// the dynamic array passes nothing (unbounded — no header arg).
+	// A bounded native array takes its over-count verdict in arrayBegin, at the
+	// COUNT WORD, before a single element arrives: that is what keeps an
+	// over-count array INVALID rather than INCOMPLETE when the message is
+	// truncated inside it (§5.2.3, F-0032).
 	for _, want := range []string{
-		"c.readUnsignedArray(4, 4294967295) as number[]", // ua, count 4 -> header reject + per-element width
-		// fp32 arrays read the raw payload (§4.6, generator#235), but the schema
-		// count still goes into the reader: the header reject is what makes INVALID
-		// dominate a truncated over-count, and it must not be lost to the raw path.
-		"c.readFp32ArrayRaw(3)", // fa, count 3 -> header reject
+		`case 0: { if (kind !== ArrayKind.Unsigned) break; if (count > 4) throw new SofabError(SofabErrorCode.InvalidMsg, "ua: array count above schema capacity 4");`,
+		// fp32 arrays keep the raw wire bits beside the value (§6.5,
+		// generator#235), but the count verdict is the same one and stays at the
+		// header — it must not be lost to the raw path.
+		`case 1: { if (kind !== ArrayKind.Fp32) break; if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, "fa: array count above schema capacity 3");`,
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("message.ts missing header-bound reader call %q:\n%s", want, mod)
+			t.Errorf("message.ts missing header-bound reject %q:\n%s", want, mod)
 		}
 	}
 	// The dynamic array must NOT gain a schema count (would wrongly reject a valid
-	// long array): its count slot stays `undefined`. It DOES carry the element
-	// width bound — that is a property of the element type, not of the array
-	// length, and applies to a dynamic array exactly as to a bounded one.
-	// (The element bound is the reader's only; the call-site rescans that used to
-	// follow it were removed in #339 — see emitDecodeCase.)
-	if !strings.Contains(mod, "o.da = c.readUnsignedArray(undefined, 4294967295) as number[];") {
-		t.Errorf("dynamic array must keep the unbounded reader call:\n%s", mod)
+	// long array). It DOES carry the element width bound — that is a property of
+	// the element TYPE, not of the array length, and it is taken as each element
+	// arrives, so a truncation behind an out-of-range element cannot downgrade the
+	// verdict (§7.1).
+	if !strings.Contains(mod, "case 2: { if (kind !== ArrayKind.Unsigned) break; const _d: number[] = []; this.o.da = _d; this._a0Da = _d; break; }") {
+		t.Errorf("a dynamic array must carry no count bound:\n%s", mod)
+	}
+	if !strings.Contains(mod, `case 2: { const _e = v as number; if (_e > 4294967295) throw new SofabError(SofabErrorCode.InvalidMsg, "da: value outside declared width u32"); this._a0Da[i] = _e; break; }`) {
+		t.Errorf("a dynamic array must still bound each element's declared width:\n%s", mod)
 	}
 	// The harness exposes a `status` mode surfacing the §7 outcome so INVALID vs
 	// INCOMPLETE is assertable (the bare decode mode only yields a non-zero exit).
@@ -250,26 +273,29 @@ func TestTSMaxlenReject(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		// (b) Scalar string + blob reject on an over-length byte check.
-		`case 0: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } o.s = c.readString(8); break;`,
-		// The blob destination COPIES the reader's view (see
-		// TestTSDecodedBlobOwnsItsBytes): the guard still runs on the view, so
-		// nothing over-bound is duplicated first.
-		`case 1: { if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Blob) { c.skip(c.wire); break; } const _b = c.readBlob(8); if (_b.length > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8"); o.b = _b.slice(); break; }`,
-		// (c) A bounded wrapper-string element rejects on its element maxlen, and
-		// carries that bound INTO the reader so the verdict is taken at the length
-		// word rather than after the payload -- the scalar arms above have always
-		// done this, and the element arm not doing it was generator#300's larger
-		// half. That bound is the WHOLE bound (see the dedicated test).
-		`arr[_id] = c.readString(5);`,
+		// (b) The payload callback re-takes the same verdict against `total`, the
+		// word that established the violation -- not against the assembled payload
+		// -- so an over-maxlen field stays INVALID even when the message is
+		// truncated inside it, and an over-long payload is never buffered (#267).
+		`case 0: { if (total > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8");`,
+		`case 1: { if (total > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8");`,
+		// (c) A bounded wrapper-string ELEMENT carries its maxlen into the corelib
+		// collector, which takes the verdict at the element's length word rather
+		// than after its payload -- generator#300's larger half.
+		`new StringSeq(_t, this.a, -1, 5, "es", MAX_DYN_ARRAY_COUNT)`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing maxlen guard %q\n%s", want, mod)
 		}
 	}
-	// (d) An unbounded string keeps the bare read (never truncated, no guard).
-	if !strings.Contains(mod, "case 2: if (c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); break; } o.u = c.readString(); break;") {
-		t.Errorf("unbounded string must keep the bare read:\n%s", mod)
+	// (d) An unbounded string keeps the bare store: never truncated, no guard.
+	if !strings.Contains(mod, `case 2: { if (offset === 0 && end - start === total) { this.o.u = decodeUtf8(src, start, end); }`) {
+		t.Errorf("unbounded string must keep the bare store:\n%s", mod)
+	}
+	// (e) A decoded blob is storage of its own -- what PayloadAcc hands back is a
+	// buffer it allocated, never a view into the fed chunk (§6.7).
+	if !strings.Contains(mod, "const _p = this.a.take(total, offset, src, start, end); if (_p !== null) this.o.b = _p;") {
+		t.Errorf("a decoded blob must take the accumulator's own buffer:\n%s", mod)
 	}
 	// (f) The per-decode TextEncoder allocation is gone from the hot path (issue #153).
 	if strings.Contains(mod, "TextEncoder") {
@@ -280,22 +306,26 @@ func TestTSMaxlenReject(t *testing.T) {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, Cursor, WireType, FixlenSubtype, SofabError, SofabErrorCode, elementsEqual, Visitor, IStream, DecodeStatus, ArrayKind, PayloadAcc, decodeUtf8, StringSeq, BlobSeq } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard (corelib-ts#58); SofabError: over-count reject (generator#100); the rest is the generated layer's support, owned by the corelib (corelib-ts#151)
+		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, IStream, PayloadAcc, decodeUtf8, StringSeq, BlobSeq, decode as _decode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); the rest is the generated layer's support, owned by the corelib (corelib-ts#151/#161)
 		"export class Myfirstmessage {",
 		"serialize(os: OStream): void {",
-		"static decode(bytes: Uint8Array): Myfirstmessage {",
-		"return _decodeFromMyfirstmessage(new Cursor(bytes",
-		"function _decodeFromMyfirstmessage(c: Cursor): Myfirstmessage {",
-		"while (c.readHeader()) {",        // monomorphic pull loop
-		"switch (c.id) {",                 // one switch per type
-		"default: c.skip(c.wire); break;", // forward-compat skip
-		"function _decodeIntoMyfirstmessage(c: Cursor, o: Myfirstmessage): Myfirstmessage {",
-		// Nested message recursion decodes INTO the existing member, so a repeated
-		// field id continues that scope instead of replacing it (MESSAGE_SPEC §7.4,
-		// generator#175).
-		"_decodeIntoMyfirstmessageSomestruct(c, o.somestruct); break;",
-		`while (c.readHeader()) { if ((c.wire as WireType) !== WireType.Fixlen || c.fixSub !== FixlenSubtype.String) { c.skip(c.wire); continue; } if (c.id >= 5) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 5"); const _id = c.id; while (arr.length <= _id) arr.push(""); arr[_id] = c.readString(16); }`, // wrapper-element §7.3 wire guard (#189) + id-aware string-list, over-index + over-maxlen rejected (S2/S5.1/S7/S7.1, #142)
-		"o.someu64 = BigInt(c.readUnsigned()); break;", // u64 -> bigint, number-first
+		// decode(bytes) is the corelib's one-shot decode driving THIS type's flat
+		// visitor: one decode surface, because CORELIB_PLAN §5.3.1 permits no second.
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _MyfirstmessageVis(o, new PayloadAcc()), _LIMITS);\n    return o;\n  }",
+		// Dispatch is keyed on (location, id): a field id is unique only WITHIN a
+		// scope, and corelib-ts's visitor is flat.
+		"const _L_Myfirstmessage = 0;",
+		"const _L_Myfirstmessage_somestruct_nestedstruct = 4;",
+		"class _MyfirstmessageVis implements Visitor {",
+		"  private _c = _L_Myfirstmessage;",
+		// A nested struct/union enters its own scope and MERGES on re-open (§7.4):
+		// nothing is cleared, so a second opening continues what the first set.
+		"    case 20: { this._c = _L_Myfirstmessage_somestruct; return true; }",
+		// A wrapper array REPLACES on re-open (§7.4), so its destination is rebuilt
+		// and the corelib collector that owns the element rules is bound to it.
+		`    case 18: { const _t: string[] = []; this.o.somestringarray = _t; this._q1 = new StringSeq(_t, this.a, 5, 16, "somestringarray", MAX_DYN_ARRAY_COUNT); this._c = _L_Myfirstmessage_somestringarray; return true; }`,
+		// u64 -> bigint, off the number-first value the hook already carries.
+		`    case 3: this.o.someu64 = typeof v === "bigint" ? v : BigInt(v); break;`,
 		// MESSAGE_SPEC §2: a struct/union FIELD opens lazily and closes with the
 		// dropping end, so an all-default nested object is omitted, not framed empty.
 		"    os.writeSequenceBeginLazy(20);\n    this.somestruct.serialize(os);\n    os.writeSequenceEnd();\n",
@@ -315,79 +345,71 @@ func TestTSStructural(t *testing.T) {
 			t.Errorf("message.ts missing %q", want)
 		}
 	}
-	// The megamorphic push/visitor ONE-SHOT decode is gone. What that ruling
-	// protected is the hot path: decode() must reach fields through the
-	// monomorphic Cursor, never through a visitor whose call sites go
-	// megamorphic across differently-shaped nested types.
-	//
-	// A visitor as such is no longer forbidden — the streaming decoder needs one,
-	// and corelib-ts's IStream cannot be driven any other way — but it is a
-	// SEPARATE surface reached only through decoder()/feed(). The assertions
-	// below pin that split: the old shapes stay gone, and the cursor path stays
-	// the one decode() uses.
+	// There is exactly ONE decode surface (CORELIB_PLAN §5.3.1). The Cursor pull
+	// decoder this backend used to emit beside the visitor is gone from
+	// corelib-ts, and nothing may reintroduce a second route to the same bytes:
+	// a second surface is a second implementation of every rule in the spec, and
+	// the divergences it produces are invisible to the shared vectors.
 	for _, gone := range []string{
-		"_visitor()", "ChunkAcc", "type Visitor",
-		// generator#345: the schema-free support the corelib now owns (corelib-ts#151)
+		"Cursor", "readHeader()", "c.skip(", "_decodeFrom", "_decodeInto",
+		// generator#345: the schema-free support the corelib owns (corelib-ts#151)
 		// must be CALLED, not re-emitted — a leftover copy is dead weight in every
 		// generated package and drifts from the library it duplicates.
 		"class _Acc", "class _StrSeq", "class _BlobSeq",
+		// ...and the collectors that were re-emitted because the CHILD-visitor
+		// shape needed one visitor per element scope. A flat visitor routes the
+		// element scope itself, so they have no reason to exist.
+		"class _ObjSeq", "class _MatSeq", "class _RowSeq",
 		"function arrEq", "new TextDecoder", "function _str(",
-		"stringListVisitor", "unsigned(id: number, value: bigint)",
+		"stringListVisitor",
+		// corelib-ts#161 withdrew the opt-in Long channel: `lo`/`hi` are on every
+		// integer hook now, so a 64-bit field takes the wire halves without a flag
+		// and a narrow one no longer pays for the choice.
+		"LongVisitor", "AnyVisitor", "readonly longs: true",
 		// The eager begin no longer exists in corelib-ts: every sequence is opened
 		// with writeSequenceBeginLazy (MESSAGE_SPEC §2).
 		"os.writeSequenceBegin(",
 	} {
 		if strings.Contains(mod, gone) {
-			t.Errorf("message.ts should no longer emit %q (push/visitor one-shot decode removed)", gone)
+			t.Errorf("message.ts should no longer emit %q (one visitor surface, §5.3.1)", gone)
 		}
 	}
-	// decode() still goes through the Cursor, not the visitor.
-	for _, want := range []string{
-		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    return _decodeFromMyfirstmessage(new Cursor(bytes",
-		"function _decodeIntoMyfirstmessage(c: Cursor, o: Myfirstmessage): Myfirstmessage {\n  while (c.readHeader()) {",
-	} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("the one-shot decode must stay on the Cursor; missing %q", want)
-		}
-	}
-	// The streaming decoder is the separate surface, and it is the only place a
-	// visitor appears.
+	// The streaming surface is the same visitor, fed incrementally.
 	for _, want := range []string{
 		"export class MyfirstmessageDecoder {",
-		"  feed(chunk: Uint8Array): DecodeStatus {",
-		"class _MyfirstmessageVis implements Visitor {",
-		// An id the schema does not declare is DECLINED, not routed to a dummy:
-		// corelib-ts#154 reads null as "skip this subtree".
-		"  sequenceBegin(id: number): Visitor | null {",
-		"    return null;",
-		// Malformed UTF-8 leaves as SofabError on this path too, because the store
-		// site transcodes through the corelib's decodeUtf8 rather than a fatal
-		// TextDecoder of its own: that one raises a platform TypeError, which walks
-		// past a caller's `instanceof SofabError` guard, so an unconverted visitor
-		// made one library report the same bytes two ways (generator#297).
-		"this.o.somestring = decodeUtf8(_p);",
+		"  feed(chunk: Uint8Array): DecodeStatus { return this.is.feed(chunk); }",
+		"  sequenceBegin(id: number): boolean {",
+		// The scope graph is a tree, so the parent is static and sequenceEnd needs
+		// no stack to restore it.
+		"  sequenceEnd(): void {",
+		"    case _L_Myfirstmessage_somestruct_nestedstruct: this._c = _L_Myfirstmessage_somestruct; break;",
+		// Malformed UTF-8 leaves as SofabError, because the store site transcodes
+		// through the corelib's decodeUtf8 rather than a fatal TextDecoder of its
+		// own: that one raises a platform TypeError, which walks past a caller's
+		// `instanceof SofabError` guard (generator#297).
+		"this.o.somestring = decodeUtf8(src, start, end);",
 		// An array header is routed by id alone, so the arm also receives one whose
 		// element kind CONTRADICTS the declared field. Such a field is skipped whole
 		// (S7.3): its count is not this field's count, so the kind test has to come
 		// before the capacity bound -- and before the destination is cleared
 		// (generator#300).
-		"case 15: if (kind !== ArrayKind.Unsigned) break; if (count > 4) throw new SofabError(SofabErrorCode.InvalidMsg, \"someuintarray: array count above schema capacity 4\");",
+		"case 15: { if (kind !== ArrayKind.Unsigned) break; if (count > 4) throw new SofabError(SofabErrorCode.InvalidMsg, \"someuintarray: array count above schema capacity 4\");",
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("message.ts missing streaming decode surface %q", want)
+			t.Errorf("message.ts missing decode surface %q", want)
 		}
 	}
 	// The header hook must not ignore the announced kind: an `_kind` parameter is
 	// how generator#300 happened, and it reads as a deliberate "not needed".
 	if strings.Contains(mod, "arrayBegin(id: number, _kind: ArrayKind") {
-		t.Error("the streaming arrayBegin must test the announced element kind, not ignore it (generator#300)")
+		t.Error("arrayBegin must test the announced element kind, not ignore it (generator#300)")
 	}
 	// The maxlen verdict must be taken at the LENGTH WORD, via fixlenBegin. In the
 	// payload callback it cannot fire at all for a message that ends right after an
-	// over-maxlen word, so the same bytes were INVALID one-shot and INCOMPLETE
-	// chunked (generator#300). Like arrayBegin, it has to test the announced
-	// subtype rather than trust the id: a string arriving at a blob field's id is a
-	// §7.3 mismatch to skip, not something to bound.
+	// over-maxlen word, so a truncated message would report INCOMPLETE where §5.2.3
+	// requires INVALID. Like arrayBegin, it has to test the announced subtype
+	// rather than trust the id: a string arriving at a blob field's id is a §7.3
+	// mismatch to skip, not something to bound.
 	if strings.Contains(mod, "fixlenBegin(id: number, _sub:") {
 		t.Error("fixlenBegin must test the announced subtype, not ignore it (generator#300)")
 	}
@@ -496,7 +518,7 @@ func genTSWith(t *testing.T, src string, cfg map[string]any) string {
 func TestTSInt64Long(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "long"})
 	for _, want := range []string{
-		`import { OStream, Cursor, WireType, Long, LongVisitor, SofabError, SofabErrorCode, Visitor, IStream, DecodeStatus, ArrayKind, PayloadAcc, AnyVisitor } from "@sofa-buffers/corelib";`,
+		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, elementsEqual, Visitor, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once. `count: 8` is a
 		// CAPACITY, not a length (§3), so a fresh us is the EMPTY array — not 8
 		// Long zeros.
@@ -518,11 +540,13 @@ func TestTSInt64Long(t *testing.T) {
 		`private _ud: Long[] = [Long.fromValue(1n), Long.fromValue(18446744073709551615n)];`,
 		"if (!longArrEq(this._ud, [Long.fromValue(1n), Long.fromValue(18446744073709551615n)])) {",
 		"function longArrEq(a: readonly Long[], b: readonly Long[]): boolean {",
-		// Decode bypasses the setter (readers return canonical Long[]); a wire count
-		// above the schema capacity rejects as INVALID (generator#100), and a wire
-		// count below it is simply the array's length — nothing is filled in.
-		`case 0: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o["_us"] = c.readUnsignedArrayLong(8); break;`,
-		`case 1: if (c.wire !== WireType.ArraySigned) { c.skip(c.wire); break; } o["_is"] = c.readSignedArrayLong(8); break;`,
+		// Decode bypasses the setter (the hot path writes the canonical Long[]
+		// directly); a wire count above the schema capacity rejects as INVALID at
+		// the count word (generator#100), and a wire count below it is simply the
+		// array's length — nothing is filled in.
+		`case 0: { if (kind !== ArrayKind.Unsigned) break; if (count > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); const _d: Long[] = []; this.o["_us"] = _d; this._a0Us = _d; break; }`,
+		`case 0: this._a0Us[i] = Long.fromBits(lo, hi); break;`,
+		`case 1: this._a0Is[i] = Long.fromBits(lo, hi); break;`,
 		// toJSON prints via Long.toString with the schema signedness.
 		`"us": this._us.map((_x0) => _x0.toString(false)),`,
 		`"is": this._is.map((_x0) => _x0.toString(true)),`,
@@ -545,21 +569,18 @@ func TestTSInt64Long(t *testing.T) {
 		"if (!(this._i.low === 4294967289 && this._i.high === 4294967295)) return false;",
 		// Decode bypasses the accessor and takes the corelib's scalar Long readers,
 		// so no bigint is materialised on the hot path in either direction.
-		"case 4: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o[\"_u\"] = c.readUnsignedLong(); break;",
-		"case 5: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o[\"_i\"] = c.readSignedLong(); break;",
-		// This schema is all-64-bit, so it also takes corelib-ts's opt-in Long
-		// channel on the push decoders (#344): the visitor declares the flag, its
-		// integer hooks are typed Long, and a 64-bit arm stores the value with no
-		// conversion at all — one runtime type per field on either decode API
-		// (#335), now reached without paying for it on either.
-		"class _MVis implements LongVisitor {",
-		"readonly longs: true = true;",
-		"unsigned(id: number, v: Long): void {",
-		"signed(id: number, v: Long): void {",
-		"arrayUnsigned(id: number, i: number, v: Long): void {",
-		"case 4: this.o.u = v; break;",
-		"  sequenceBegin(id: number): AnyVisitor | null {",
-		"    return null;",
+		"case 4: this.o[\"_u\"] = Long.fromBits(lo, hi); break;",
+		"case 5: this.o[\"_i\"] = Long.fromBits(lo, hi); break;",
+		// corelib-ts#161 withdrew the opt-in `Visitor.longs` channel and put `lo`/`hi`
+		// -- the exact wire halves the varint reader already holds -- on every
+		// integer hook instead. A Long-backed destination therefore takes the value
+		// with no conversion at all and no flag to opt into, and a NARROW field in
+		// the same message no longer pays for that choice: the channel was read once
+		// from the root and covered every field alike (#344, #335).
+		"class _MVis implements Visitor {",
+		"  unsigned(id: number, v: number | bigint, lo: number, hi: number): void {",
+		"  arrayUnsigned(id: number, i: number, v: number | bigint, lo: number, hi: number): void {",
+		"  sequenceBegin(id: number): boolean {",
 		// JSON keeps the decimal-string form, with the schema's signedness.
 		`"u": this._u.toString(false),`,
 		`"i": this._i.toString(true),`,
@@ -590,8 +611,83 @@ func TestTSInt64Long(t *testing.T) {
 // it pays: every integer value on the push path becomes a Long, which a 64-bit
 // destination wants and a narrow one does not (generator#344, corelib-ts#146).
 // Measured break-even and the threshold: see longsThreshold.
-func TestTSLongsChannelOnlyWhenItPays(t *testing.T) {
-	// Narrow-heavy: four 64-bit positions would have to carry nine narrow ones.
+// TestTSArrayBulkIsOfferedOnlyWhereItPays pins both halves of the bulk
+// destination hand-off (corelib-ts BULK_MIN): which arrays get an `arrayBulk` arm,
+// and which deliberately do not.
+//
+// The offer is a call out to the visitor and costs ~1300 Ir per array; the fill it
+// enables saves ~435-730 Ir per element. So it pays from a handful of elements up
+// and loses below that — measured on a message whose arrays are all four elements
+// long, offering unconditionally cost +7572 Ir and returned 1740. A declared
+// `count` is a CAPACITY, so an array declared under the threshold can never reach
+// it on the wire and the arm is left out statically.
+func TestTSArrayBulkIsOfferedOnlyWhereItPays(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+$defs:
+  enum:
+    Mode: { Off: { value: 0 }, On: { value: 1 } }
+messages:
+  M:
+    payload:
+      big:   { id: 0, type: array, items: { type: u32, count: 64 } }
+      open:  { id: 1, type: array, items: { type: i16 } }
+      small: { id: 2, type: array, items: { type: u16, count: 4 } }
+      wide:  { id: 3, type: array, items: { type: u64, count: 64 } }
+      flags: { id: 4, type: array, items: { type: boolean, count: 64 } }
+      mode:  { id: 5, type: array, items: { type: enum, count: 64, enum: { $ref: "#/$defs/enum/Mode" } } }
+      fp:    { id: 6, type: array, items: { type: fp32, count: 64 } }
+`, map[string]any{})
+
+	for _, want := range []string{
+		// A schema-bounded array at or above the threshold, and an array the schema
+		// left open (only the wire knows its length, so the corelib's own gate
+		// decides per message).
+		`case 0: { if (kind !== ArrayKind.Unsigned) break; const _t = this._bt; _t.out = this._a0Big; _t.min = 0; _t.max = 4294967295; return _t; }`,
+		`case 1: { if (kind !== ArrayKind.Signed) break; const _t = this._bt; _t.out = this._a0Open; _t.min = -32768; _t.max = 32767; return _t; }`,
+		// ONE target for the whole visitor, re-pointed per array.
+		"  private readonly _bt: ArrayTarget = { out: [], min: 0, max: 0 };",
+		// The element arms stay, for the arrays that decline and for a corelib that
+		// predates the hook. That is what makes taking it additive.
+		`case 2: { const _e = v as number; if (_e > 65535) throw new SofabError(SofabErrorCode.InvalidMsg, "small: value outside declared width u16"); this._a0Small[i] = _e; break; }`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
+	}
+	// No arm for: an array declared too short to pay; a destination that is not a
+	// plain JS number (u64 -> bigint, boolean); or a kind with no declared width to
+	// state (enum, bitfield) — inventing bounds there would reject legal values.
+	// fp32/fp64 are never offered one by the corelib at all.
+	for _, id := range []string{"case 2: { if (kind", "case 3: { if (kind", "case 4: { if (kind", "case 5: { if (kind", "case 6: { if (kind"} {
+		if strings.Contains(mod, id+" !== ArrayKind.Unsigned) break; const _t") ||
+			strings.Contains(mod, id+" !== ArrayKind.Signed) break; const _t") ||
+			strings.Contains(mod, id+" !== ArrayKind.Fp32) break; const _t") {
+			t.Errorf("%s must not be offered a bulk destination:\n%s", id, mod)
+		}
+	}
+	// ...and a schema whose arrays ALL fall below the threshold emits no hook at
+	// all, so nothing pays the call.
+	short := genTSWith(t, `
+version: 1
+messages:
+  S:
+    payload:
+      a: { id: 0, type: array, items: { type: u16, count: 4 } }
+      b: { id: 1, type: array, items: { type: u32, count: 8 } }
+`, map[string]any{})
+	if strings.Contains(short, "arrayBulk") || strings.Contains(short, "ArrayTarget") {
+		t.Errorf("a schema of short arrays must emit no bulk hook:\n%s", short)
+	}
+}
+
+func TestTSLongChannelIsWithdrawn(t *testing.T) {
+	// A narrow-heavy schema and a 64-bit-heavy one used to generate DIFFERENTLY:
+	// the opt-in `Visitor.longs` channel was read once from the root visitor and
+	// covered every integer field alike, so taking it made 64-bit fields free and
+	// narrow ones dearer, and the backend had to guess from the schema which way
+	// that traded (#344). corelib-ts#161 put `lo` / `hi` on every integer hook
+	// instead, so there is no trade left and both schemas emit the same shape.
 	narrow := `
 version: 1
 messages:
@@ -600,37 +696,13 @@ messages:
       u:  { id: 0, type: u64 }
       a:  { id: 1, type: array, items: { type: u64, count: 4 } }
       n0: { id: 2, type: u8 }
-      n1: { id: 3, type: u16 }
-      n2: { id: 4, type: u32 }
-      n3: { id: 5, type: i8 }
+      n1: { id: 3, type: i8 }
+      n2: { id: 4, type: boolean }
+      n3: { id: 5, type: u16 }
       n4: { id: 6, type: i16 }
       n5: { id: 7, type: i32 }
-      n6: { id: 8, type: boolean }
-      n7: { id: 9, type: u8 }
-      n8: { id: 10, type: u16 }
 `
-	mod := genTSWith(t, narrow, map[string]any{"int64": "long"})
-	for _, gone := range []string{"longs: true", "LongVisitor", "function _u(", "function _i("} {
-		if strings.Contains(mod, gone) {
-			t.Errorf("narrow-heavy schema should stay off the Long channel, but emits %q", gone)
-		}
-	}
-	// ...and the number-first arms are the ones a module off the channel has
-	// always had, unchanged.
-	for _, want := range []string{
-		"unsigned(id: number, v: number | bigint): void {",
-		"case 0: this.o.u = v; break;",
-		"case 2: { const _v = Number(v); if (_v > 255) throw",
-	} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("off the Long channel, message.ts missing %q", want)
-		}
-	}
-
-	// The same schema with the narrow fields removed is over the line, and the
-	// narrow one that remains narrows back through the emitted helper — with the
-	// declared-width reject untouched, which is the whole risk of the channel.
-	pays := `
+	wide := `
 version: 1
 messages:
   m:
@@ -641,29 +713,30 @@ messages:
       n1: { id: 3, type: i8 }
       n2: { id: 4, type: boolean }
 `
-	mod = genTSWith(t, pays, map[string]any{"int64": "long"})
-	for _, want := range []string{
-		"readonly longs: true = true;",
-		"function _u(v: Long): number {",
-		"function _i(v: Long): number {",
-		"case 0: this.o.u = v; break;",
-		`case 2: { const _v = _u(v); if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "n0: value outside declared width u8"); this.o.n0 = _v; break; }`,
-		`case 3: { const _v = _i(v); if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "n1: value outside declared width i8"); this.o.n1 = _v; break; }`,
-		// Boolean(Long) is TRUE for the 64-bit zero — the conversion has to read
-		// the halves.
-		"case 4: this.o.n2 = (v.low | v.high) !== 0; break;",
-	} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("on the Long channel, message.ts missing %q", want)
+	for _, src := range []string{narrow, wide} {
+		mod := genTSWith(t, src, map[string]any{"int64": "long"})
+		for _, gone := range []string{"longs: true", "LongVisitor", "AnyVisitor", "function _u(", "function _i("} {
+			if strings.Contains(mod, gone) {
+				t.Errorf("the Long channel is withdrawn, but the module still emits %q", gone)
+			}
 		}
-	}
-	if strings.Contains(mod, "Boolean(v)") {
-		t.Error("on the Long channel, Boolean(v) is true for the 64-bit zero")
-	}
-	// The accessor setters still convert (that is their job); what must be gone is
-	// the conversion in a VISITOR arm — the value arrives as the Long already.
-	if strings.Contains(mod, "= Long.fromValue(v); break;") {
-		t.Error("on the Long channel, a hook value needs no conversion in the visitor arm")
+		for _, want := range []string{
+			"  unsigned(id: number, v: number | bigint, lo: number, hi: number): void {",
+			// A 64-bit destination is built from the halves: no bigint on the path
+			// the Long mode exists to keep bigint-free, and no flag to reach it.
+			`case 0: this.o["_u"] = Long.fromBits(lo, hi); break;`,
+			`case 1: this._a0A[i] = Long.fromBits(lo, hi); break;`,
+			// ...and a narrow one in the SAME message reads the number-first value
+			// directly, which is what it costs now that it is not paying for the
+			// 64-bit fields' channel.
+			`case 2: { const _v = v as number; if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "n0: value outside declared width u8"); this.o.n0 = _v; break; }`,
+			`case 3: { const _v = v as number; if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "n1: value outside declared width i8"); this.o.n1 = _v; break; }`,
+			"case 4: this.o.n2 = Boolean(v); break;",
+		} {
+			if !strings.Contains(mod, want) {
+				t.Errorf("message.ts missing %q", want)
+			}
+		}
 	}
 }
 
@@ -697,16 +770,16 @@ func TestTSBenchStreamWorkload(t *testing.T) {
 func TestTSInt64Number(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "number"})
 	for _, want := range []string{
-		// Arrays are Long-backed exactly as in long mode.
+		// Arrays are Long-backed exactly as in long mode, and take the wire halves.
 		"os.writeUnsignedArrayLong(0, this._us);",
-		`case 0: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o["_us"] = c.readUnsignedArrayLong(8); break;`,
+		`case 0: this._a0Us[i] = Long.fromBits(lo, hi); break;`,
 		// Scalars are plain numbers: number default, !== 0 guard, Number() decode.
 		"u: number = 0;",
 		"i: number = -7;",
 		"if (this.u !== 0) {",
 		"os.writeUnsigned(4, this.u);",
-		"case 4: if (c.wire !== WireType.Unsigned) { c.skip(c.wire); break; } o.u = Number(c.readUnsigned()); break;",
-		"case 5: if (c.wire !== WireType.Signed) { c.skip(c.wire); break; } o.i = Number(c.readSigned()); break;",
+		"case 4: this.o.u = Number(v); break;",
+		"case 5: this.o.i = Number(v); break;",
 		`if ("u" in d) o.u = Number(d["u"] as string | number);`,
 		// toJSON stays a string (number.toString()) for cross-mode JSON parity.
 		`"u": this.u.toString(),`,
@@ -720,7 +793,7 @@ func TestTSInt64Number(t *testing.T) {
 // TestTSDecodeLimits: the max_dyn_* config keys bake receiver-side decode
 // limits (generator#102) into the generated module — exported MAX_DYN_*
 // constants referenced by the DecodeLimits object every static decode() passes
-// to its Cursor. The cap is raised to the largest schema bound of its kind
+// to the corelib. The cap is raised to the largest schema bound of its kind
 // (escape hatch: schema-bounded fields stay governed by their own bound), an
 // unset key emits nothing, a key whose kind has no unbounded field is inert,
 // and the plumbing is identical across all three int64 modes.
@@ -748,7 +821,7 @@ messages:
 			// the caps are constants, so a fresh literal per decode() call would be
 			// an allocation with a constant value on the decode hot path (#339).
 			"const _LIMITS = Object.freeze({ maxArrayCount: MAX_DYN_ARRAY_COUNT, maxStringLen: MAX_DYN_STRING_LEN });",
-			"return _decodeFromDyn(new Cursor(bytes, _LIMITS));",
+			"_decode(bytes, new _DynVis(o, new PayloadAcc()), _LIMITS);",
 		} {
 			if !strings.Contains(mod, want) {
 				t.Errorf("int64: %s message.ts missing %q", mode, want)
@@ -766,7 +839,7 @@ messages:
 	for _, want := range []string{
 		"export const MAX_DYN_ARRAY_COUNT = 100000;",
 		"export const MAX_DYN_STRING_LEN = 262144;",
-		"return _decodeFromDyn(new Cursor(bytes, _LIMITS));",
+		"_decode(bytes, new _DynVis(o, new PayloadAcc()), _LIMITS);",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("default limits missing %q", want)
@@ -824,12 +897,18 @@ func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 		"os.writeUnsignedArray(6, this.fbool.map((_e0) => (_e0 ? 1 : 0)));",
 		"os.writeSignedArray(8, this.fenum);",
 		"os.writeUnsignedArray(9, this.fbits);",
-		// Decode: the M elements that arrived ARE the value, taken as they come.
-		// The over-count reject stays — `count` still bounds M (generator#100).
-		`case 0: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.fu32 = c.readUnsignedArray(5, 4294967295) as number[]; break;`,
-		`o.ffp64 = c.readFp64Array(3); break;`,
-		`o.fbool = (c.readUnsignedArray(4) as number[]).map((_e) => Boolean(_e)); break;`,
-		`o.fenum = (c.readSignedArray(2) as number[]).map((_e) => _e as EnumMode); break;`,
+		// Decode: the M elements that arrived ARE the value, taken as they come --
+		// no fill-to-count on arrayEnd. The over-count reject stays and is taken at
+		// the count word, where `count` still bounds M (generator#100).
+		`case 0: { if (kind !== ArrayKind.Unsigned) break; if (count > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); const _d: number[] = []; this.o.fu32 = _d; this._a0Fu32 = _d; break; }`,
+		`case 4: { if (kind !== ArrayKind.Fp64) break; if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, "ffp64: array count above schema capacity 3"); const _d: number[] = []; this.o.ffp64 = _d; this._a0Ffp64 = _d; break; }`,
+		`case 6: this._a0Fbool[i] = Boolean(v); break;`,
+		// An ENUM array is SIGNED on the wire (serialize writes writeSignedArray),
+		// so its header must be recognised as such -- classifying it as unsigned
+		// made arrayBegin skip every enum array as a §7.3 contradiction, losing the
+		// count bound and the §7.4 replace while the elements still arrived.
+		`case 8: { if (kind !== ArrayKind.Signed) break; if (count > 2) throw new SofabError(SofabErrorCode.InvalidMsg, "fenum: array count above schema capacity 2"); const _d: EnumMode[] = []; this.o.fenum = _d; this._a0Fenum = _d; break; }`,
+		`case 8: this._a0Fenum[i] = Number(v) as EnumMode; break;`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-count message.ts missing %q", want)
@@ -982,16 +1061,25 @@ func TestTSFixlenSubtypeImportMatchesUse(t *testing.T) {
 		{"nested string rows", true, `
       rows: { id: 0, type: array, items: { type: array, items: { type: string } } }
       n:    { id: 1, type: u32 }`},
-		{"nested fp32 rows", true, `
+		// An fp32/fp64 ROW is separated by the corelib's ArrayKind, which names the
+		// element subtype directly (Fp32 / Fp64) -- so the row guard needs no
+		// FixlenSubtype, where the withdrawn Cursor path had only WireType.Fixlen
+		// to work with and had to reach for the subtype.
+		{"nested fp32 rows", false, `
       grid: { id: 0, type: array, items: { type: array, items: { type: fp32 } } }
       n:    { id: 1, type: u32 }`},
 		{"doubly nested blob rows", true, `
       cube: { id: 0, type: array, items: { type: array, items: { type: array, items: { type: blob } } } }
       n:    { id: 1, type: u32 }`},
-		// Reached through a struct element: guarded inside that struct's own class,
-		// which the named-type walk already covers.
-		{"string inside a struct element", true, `
+		// An UNBOUNDED string carries no length verdict, so it needs no fixlenBegin
+		// arm at all: the corelib routes the payload to `string()` by wire type, and
+		// a field of another type never reaches it (§7.3). The subtype is named only
+		// where a bound has to be taken at the length word.
+		{"string inside a struct element", false, `
       items: { id: 0, type: array, items: { type: struct, fields: { s: { id: 0, type: string } } } }
+      n:     { id: 1, type: u32 }`},
+		{"bounded string inside a struct element", true, `
+      items: { id: 0, type: array, items: { type: struct, fields: { s: { id: 0, type: string, maxlen: 8 } } } }
       n:     { id: 1, type: u32 }`},
 		// Negatives — the import must stay out, else every module carries a dead name.
 		{"native integer array", false, `
@@ -1113,12 +1201,12 @@ func TestTSInt64Default(t *testing.T) {
 	for _, cfg := range []map[string]any{{}, {"int64": "bigint"}} {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
-			`import { OStream, Cursor, WireType, SofabError, SofabErrorCode, elementsEqual, Visitor, IStream, DecodeStatus, ArrayKind, PayloadAcc } from "@sofa-buffers/corelib";`,
+			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
 			// count: 8 is a CAPACITY, so a fresh array is empty (§3, af536c4).
 			"us: bigint[] = [];",
 			// ...and the value goes out whole, the wire count being its length.
 			"os.writeUnsignedArray(0, this.us);",
-			`case 0: if (c.wire !== WireType.ArrayUnsigned) { c.skip(c.wire); break; } o.us = c.readUnsignedArray(8).map((_e) => BigInt(_e)); break;`,
+			`case 0: this._a0Us[i] = typeof v === "bigint" ? v : BigInt(v); break;`,
 			"u: bigint = 0n;",
 		} {
 			if !strings.Contains(mod, want) {
@@ -1148,37 +1236,38 @@ messages:
       e: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u8 } } } }
 `, map[string]any{})
 	for _, want := range []string{
-		// The from-decoder stays the fresh-object entry point, delegating to the into one.
-		"function _decodeFromM(c: Cursor): M {",
-		"return _decodeIntoM(c, new M());",
-		"function _decodeIntoM(c: Cursor, o: M): M {",
-		// Nested struct and union both decode into the existing member.
-		"_decodeIntoMS(c, o.s); break;",
-		"_decodeIntoMU(c, o.u); break;",
+		// Entering a nested struct/union scope CLEARS NOTHING: the fields decode
+		// into the member that is already there, so a re-opened scope continues
+		// what the first opening set.
+		"    case 0: { this._c = _L_M_s; return true; }",
+		"    case 1: { this._c = _L_M_u; return true; }",
+		"        case 0: { const _v = v as number; if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, \"a: value outside declared width u8\"); this.o.s.a = _v; break; }",
+		"        case 0: { const _v = v as number; if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, \"o1: value outside declared width u8\"); this.o.u.o1 = _v; break; }",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q\n%s", want, mod)
 		}
 	}
-	// A nested member must never be replaced by a fresh object.
-	for _, bad := range []string{
-		"o.s = _decodeFromMS(c)",
-		"o.u = _decodeFromMU(c)",
-	} {
+	// A nested member must never be replaced by a fresh object on re-open. Only a
+	// wrapper ARRAY replaces (§7.4), and that is the `_t = []` in its own arm.
+	for _, bad := range []string{"this.o.s = new MS()", "this.o.u = new MU()"} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("message.ts must not replace a nested member (%q):\n%s", bad, mod)
 		}
 	}
 	// A wrapper-array ELEMENT is not new per arrival either: the element id IS the
-	// array index (§5.1), so a REOPENED element id re-opens that element's scope and
-	// must merge into it exactly like a re-opened field (§7.4, generator#247). It
-	// therefore decodes INTO the element placed at that index, never into a fresh
-	// object that would be appended alongside.
-	if !strings.Contains(mod, "_decodeIntoMEElem(c, arr[_id]!);") {
+	// array index (§5.1), so a REOPENED element id re-opens that element's scope
+	// and must merge into it exactly like a re-opened field (§7.4, generator#247).
+	// The gap-fill places an element at the index and the element scope decodes
+	// into whatever is there -- so a repeat lands on the same object.
+	if !strings.Contains(mod, "        while (_t.length <= id) _t.push(new MEElem());\n        this._ix3 = id;") {
 		t.Errorf("array elements must decode INTO the element at their id:\n%s", mod)
 	}
-	if strings.Contains(mod, "arr.push(_decodeFromMEElem(c))") {
-		t.Errorf("array elements must not be appended id-blind:\n%s", mod)
+	if !strings.Contains(mod, "this.o.e[this._ix3]!.x = _v;") {
+		t.Errorf("an element scope must write through the index register:\n%s", mod)
+	}
+	if strings.Contains(mod, "this._ix3 = id; _t[id] = new MEElem()") {
+		t.Errorf("a re-opened element id must not be replaced by a fresh object:\n%s", mod)
 	}
 }
 
@@ -1288,28 +1377,33 @@ messages:
 `, map[string]any{})
 
 	for _, want := range []string{
-		// placement, not append — and the gap-fill that precedes it
-		"const _id = c.id; while (arr.length <= _id) arr.push(new VecObjsElem()); _decodeIntoVecObjsElem(c, arr[_id]!);",
-		"const _id = c.id; while (arr.length <= _id) arr.push(new VecDynElem()); _decodeIntoVecDynElem(c, arr[_id]!);",
-		`const _id = c.id; while (arr.length <= _id) arr.push(""); `,
-		// A nested ROW is placed by id too. This was the id-blind append: it was
-		// unreachable while every row was written, and an interior gap makes it
-		// reachable, shifting every later row down one index.
-		"const _id = c.id; while (arr.length <= _id) arr.push([]); arr[_id] = c.readUnsignedArray(3, 4294967295) as number[];",
-		// ...including a wrapper row, whose own collector — typed with the ROW's type,
-		// see TestTSNestedWrapperRowCollectorTypes — runs inside the placement.
-		"const _id = c.id; while (arr.length <= _id) arr.push([]); arr[_id] = ((): string[] =>",
+		// Placement, not append — the gap-fill precedes it, and the index bound
+		// precedes the gap-fill so a rejected id extends nothing (§7.2 item 8).
+		"        if (id >= 4) throw new SofabError(SofabErrorCode.InvalidMsg, \"objs: array index above schema capacity 4\");\n" +
+			"        while (_t.length <= id) _t.push(new VecObjsElem());\n",
+		// A count-less array has no schema capacity, so the receiver cap governs
+		// instead — a policy rejection, not INVALID (§6.2.1).
+		"        if (id >= MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, \"dyn: array index \" + id + \" exceeds the receiver cap \" + MAX_DYN_ARRAY_COUNT);\n" +
+			"        while (_t.length <= id) _t.push(new VecDynElem());\n",
+		// A leaf element's placement is the corelib collector's, which does the
+		// same thing with the same ordering.
+		`this._q5 = new StringSeq(_t, this.a, 3, 8, "strs", MAX_DYN_ARRAY_COUNT);`,
+		// A native ROW is placed by id too. The id-blind append was unreachable
+		// while every row was written, and an interior gap makes it reachable,
+		// shifting every later row down one index.
+		"    while (_t.length <= id) _t.push([]);\n" +
+			"    const _r: number[] = []; _t[id] = _r; this._row6 = _r;",
+		// ...including a WRAPPER row, whose own collector is bound to the row the
+		// placement just made — a re-opened row index replaces (§7.4).
+		"        const _e: string[] = []; _t[id] = _e;\n" +
+			"        this._q8 = new StringSeq(_e, this.a, -1, 8, \"wrows row\", MAX_DYN_ARRAY_COUNT);",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q:\n%s", want, mod)
 		}
 	}
 	// The defects this replaced: appending ignored the id entirely.
-	for _, bad := range []string{
-		"arr.push(_decodeFromVecObjsElem(c))",
-		"arr.push(c.readUnsignedArray(3, 4294967295) as number[])",
-		"arr.push(((): string[] =>",
-	} {
+	for _, bad := range []string{"_t.push(new VecObjsElem()); this._c", ".push(_r);", "_t.push(_e);"} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("elements must not be appended id-blind (%q):\n%s", bad, mod)
 		}
@@ -1318,19 +1412,18 @@ messages:
 	// exactly as for a count-less array, because the last element is always on the
 	// wire. The fill-to-N that the superseded fixed-length reading needed is gone.
 	for _, gone := range []string{
-		"while (arr.length < 4) arr.push(new VecObjsElem());",
-		`while (arr.length < 3) arr.push("");`,
-		"while (arr.length < 3) arr.push([]);",
-		"while (_r.length < ",
+		"while (_t.length < 4)", "while (_t.length < 3)", "while (_r.length < ",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("a decoded wrapper array must not be filled to N (%q):\n%s", gone, mod)
 		}
 	}
-	// The cap bound still rejects an out-of-range element id, which also bounds the
-	// gap-fill above — a capacity is still a bound, just not a length.
-	if !strings.Contains(mod, `if (c.id >= 4) throw new SofabError(SofabErrorCode.InvalidMsg, "arr: array index above schema capacity 4");`) {
-		t.Errorf("the over-index guard must survive:\n%s", mod)
+	// A scope arm leaves the callback with `return`, never a bare `break`: the arm
+	// is emitted inside a `case` only when the hook has more than one scope, and
+	// bare when it has one — where a `break` has no enclosing switch and is a
+	// SyntaxError. `rows` is this schema's only arrayBegin scope.
+	if strings.Contains(mod, "if (kind !== ArrayKind.Unsigned) break;") {
+		t.Errorf("a single-scope arm must not `break` — there is no switch to break out of:\n%s", mod)
 	}
 }
 
@@ -1516,80 +1609,53 @@ messages:
       numrows:    { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
 `, map[string]any{})
 
-	// The row collector is declared with the row's own type: one "[]" less than the
-	// member it is placed into. Depth 3 wraps the depth-2 collector, so the outer
-	// row is string[][] and the inner one string[].
+	// The FIELD is declared with the member's type; the ROW built inside its scope
+	// is one "[]" less. Depth 3 has two levels of row, so the outer one is
+	// string[][] and the inner one string[] — a row typed one level too high was
+	// the defect this pins.
 	for _, tc := range []struct{ member, row string }{
 		{"string[][]", "string[]"},
 		{"Uint8Array[][]", "Uint8Array[]"},
 		{"StructPoint[][]", "StructPoint[]"},
 		{"string[][][]", "string[][]"},
 	} {
-		if !strings.Contains(mod, "const arr: "+tc.member+" = [];") {
+		if !strings.Contains(mod, "const _t: "+tc.member+" = [];") {
 			t.Fatalf("expected a member declared %q:\n%s", tc.member, mod)
 		}
-		want := "arr[_id] = ((): " + tc.row + " => { const _r: " + tc.row + " = [];"
+		if !strings.Contains(mod, "const _e: "+tc.row+" = []; _t[id] = _e;") {
+			t.Errorf("row of %s must be typed %s:\n%s", tc.member, tc.row, mod)
+		}
+	}
+	// A LEAF row hands its elements to the corelib collector, carrying the row's
+	// own capacity and element maxlen — never the enclosing array's.
+	for _, want := range []string{
+		`this._q2 = new StringSeq(_e, this.a, 3, 8, "strrows row");`,
+		`this._q4 = new BlobSeq(_e, this.a, 2, 4, "blobrows row");`,
+		`this._q10 = new StringSeq(_e, this.a, 2, 4, "strcube row row");`,
+	} {
 		if !strings.Contains(mod, want) {
-			// The pristine emission put tc.member here instead: the collector carried
-			// the container type of the level above while its body collected that
-			// container's leaf elements.
-			t.Errorf("row collector for %s must be typed %s, missing %q:\n%s", tc.member, tc.row, want, mod)
+			t.Errorf("message.ts missing row collector %q:\n%s", want, mod)
 		}
 	}
-
-	// Structural invariant, independent of the shapes above: in every emitted row
-	// collector `((): T => { const _r: T = []; … _r.push(D)`, the gap-fill default D
-	// must be the default of T's ELEMENT type. A collector typed one level too high
-	// gets exactly that wrong, whatever the shape.
-	elemDefault := map[string]string{"string": `""`, "Uint8Array": "new Uint8Array()"}
-	collectors := 0
-	for rest := mod; ; {
-		i := strings.Index(rest, "((): ")
-		if i < 0 {
-			break
-		}
-		rest = rest[i+len("((): "):]
-		j := strings.Index(rest, " => { const _r: ")
-		if j < 0 {
-			continue
-		}
-		collectors++
-		rowT := rest[:j]
-		if !strings.HasSuffix(rowT, "[]") {
-			t.Errorf("row collector type %q is not an array type:\n%s", rowT, mod)
-			continue
-		}
-		elem := strings.TrimSuffix(rowT, "[]")
-		want, ok := elemDefault[elem]
-		if !ok {
-			if strings.HasSuffix(elem, "[]") {
-				want = "[]" // a deeper row: the empty row is the element default
-			} else {
-				want = "new " + elem + "()" // struct/union element
-			}
-		}
-		body := rest[j:]
-		if e := strings.Index(body, "; })()"); e >= 0 {
-			body = body[:e]
-		}
-		if !strings.Contains(body, "_r.push("+want+")") {
-			t.Errorf("collector typed %s must gap-fill with the %s default %s:\n%s", rowT, elem, want, body)
-		}
+	// A FRAMED row opens a scope of its own instead, one level down, and its
+	// elements are placed there.
+	if !strings.Contains(mod, "      case _L_NestedRows_structrows_r: {\n        const _t = this.o.structrows[this._ix5]!;") {
+		t.Errorf("a struct row must open its own element scope:\n%s", mod)
 	}
-	if collectors != 5 { // 3 depth-2 rows + the depth-3 row and its inner row
-		t.Errorf("expected 5 row collectors, found %d:\n%s", collectors, mod)
+	// A NATIVE row needs no collector at all: its elements arrive on the array
+	// hooks in the row scope, and the row register carries the destination.
+	if !strings.Contains(mod, "const _r: number[] = []; _t[id] = _r; this._row11 = _r;") {
+		t.Errorf("a native row must be held in a row register:\n%s", mod)
 	}
-
-	// Control: a row of native scalars still reads in one corelib call, untouched.
-	if !strings.Contains(mod, "arr[_id] = c.readUnsignedArray(3, 4294967295) as number[];") {
-		t.Errorf("a native row must still read in one call:\n%s", mod)
+	// The generated collectors this replaced are gone: the corelib owns the leaf
+	// ones, and a flat visitor routes the framed and native rows itself.
+	for _, gone := range []string{"class _ObjSeq", "class _MatSeq", "class _RowSeq"} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("message.ts must no longer emit %q (ARCHITECTURE §8):\n%s", gone, mod)
+		}
 	}
 }
 
-// fp32RawDef exercises every position the fp32 raw-bits channel covers: an fp32
-// scalar (with and without a schema default), a fixed-count fp32 array, a dynamic
-// fp32 array, and the same pair inside a struct — plus fp64 neighbours, which must
-// stay on the plain number path.
 const fp32RawDef = `version: 1
 messages:
   m:
@@ -1630,7 +1696,8 @@ func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
 		// valid only until it is reused (readBlob's contract), and the object
 		// outlives one feed. The bytes are kept only for a NaN, and the assignment
 		// is unconditional so a re-opened id (§7.4) drops an earlier capture.
-		"const _r = c.readFp32Raw(); const _v = _fp32FromRaw(_r, 0); o.f32 = _v; o.f32Fp32Raw = Number.isNaN(_v) ? _r.slice() : null;",
+		`case 0: { this.o.f32 = v; this.o.f32Fp32Raw = Number.isNaN(v) ? _fp32Raw(bits) : null; break; }`,
+		`case 0: { this.o.st.inner = v; this.o.st.innerFp32Raw = Number.isNaN(v) ? _fp32Raw(bits) : null; break; }`,
 		// Scalar encode: the captured bytes go out verbatim. corelib-ts 0.9.0 has no
 		// writeFp32Raw by design — writeFixlen with subtype fp32 emits the identical
 		// fixlenHead(id, 4, Fp32) + 4 bytes.
@@ -1638,17 +1705,14 @@ func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
 		"os.writeFixlen(0, this.f32Fp32Raw, FixlenSubtype.Fp32);",
 		"os.writeFp32(0, this.f32);", // the number path survives for every non-NaN
 
-		// Array decode: the raw payload, the schema count passed to the reader
-		// (INVALID at the count word must keep dominating a truncated over-count --
-		// and that IS the whole over-count bound now; the `_n > N` re-check that used
-		// to follow it was removed in #339), and the payload copied only when some
-		// element is a NaN.
-		"const _p = c.readFp32ArrayRaw(3);",
-		"const _n = _p.length >> 2;",
-		"for (let _i = 0; _i < _n; _i++) { const _v = _fp32FromRaw(_p, _i * 4); if (Number.isNaN(_v)) _nan = true; _a[_i] = _v; }",
-		"o.fa = _a;",
-		"o.faFp32Raw = _nan ? _p.slice() : null;",
-		"const _p = c.readFp32ArrayRaw();", // dynamic array: unbounded, no count arg
+		// Array decode: the companion is sized at the COUNT WORD, from a count the
+		// over-count reject has already bounded, then filled element by element and
+		// kept at arrayEnd only when some element was a NaN.
+		`case 2: { if (kind !== ArrayKind.Fp32) break; if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, "fa: array count above schema capacity 3"); const _d: number[] = []; this.o.fa = _d; this._a0Fa = _d; this.o.faFp32Raw = null; this._raw0Fa = new Uint8Array(count * 4); this._rawNaN0Fa = false; break; }`,
+		"case 2: { this._a0Fa[i] = v; const _r = this._raw0Fa; if (_r !== null && (i + 1) * 4 <= _r.length) _fp32RawInto(_r, i * 4, bits); if (Number.isNaN(v)) this._rawNaN0Fa = true; break; }",
+		"case 2: this.o.faFp32Raw = this._rawNaN0Fa ? this._raw0Fa : null; this._raw0Fa = null; break;",
+		// dynamic array: no schema count, but the same companion machinery
+		"case 3: { if (kind !== ArrayKind.Fp32) break; const _d: number[] = []; this.o.da = _d; this._a0Da = _d; this.o.daFp32Raw = null;",
 		// Array encode: the payload is re-rendered from the value, taking captured
 		// bits only for an element that is still the NaN it decoded as.
 		"os.writeFp32ArrayRaw(2, _fp32ArrayRaw(this.fa, this.faFp32Raw));",
@@ -1666,15 +1730,15 @@ func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
 	// The quieting readers must be gone from the fp32 paths entirely — this is the
 	// defect itself, not a style point. (fp64 keeps its own readers; they are
 	// spelled differently and are asserted below.)
-	for _, gone := range []string{"c.readFp32();", "c.readFp32Array("} {
-		if strings.Contains(mod, gone) {
-			t.Errorf("fp32 still decodes through a JS number (%q quiets a signaling NaN):\n%s", gone, mod)
-		}
+	// The value alone must never be the only thing kept: `bits` is the 32-bit wire
+	// word the hook carries, and the companion is built from it.
+	if !strings.Contains(mod, "function _fp32Raw(bits: number): Uint8Array {") {
+		t.Errorf("the fp32 companion must be built from the hook's wire word:\n%s", mod)
 	}
 
 	// fp64 is untouched: a JS number IS an fp64, so its NaN payload round-trips
 	// through the plain readers. Widening the fix to fp64 would be pure cost.
-	for _, want := range []string{"o.f64 = c.readFp64(); break;", "c.readFp64Array(3)", "os.writeFp64(4, this.f64);", "os.writeFp64Array(5, this.d64);"} {
+	for _, want := range []string{"case 4: this.o.f64 = v; break;", "case 5: this._a0D64[i] = v; break;", "os.writeFp64(4, this.f64);", "os.writeFp64Array(5, this.d64);"} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fp64 must keep the plain number path, missing %q:\n%s", want, mod)
 		}
@@ -1773,24 +1837,32 @@ messages:
 `
 	got := genTSWith(t, src, map[string]any{})
 	for _, want := range []string{
-		`const _v = c.readUnsigned(); if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "a_u8: value outside declared width u8"); o.a_u8 = _v as number;`,
-		`const _v = c.readUnsigned(); if (_v > 4294967295) throw new SofabError(SofabErrorCode.InvalidMsg, "c_u32: value outside declared width u32"); o.c_u32 = _v as number;`,
-		`const _v = c.readSigned(); if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "e_i8: value outside declared width i8"); o.e_i8 = _v as number;`,
-		`const _v = c.readSigned(); if (_v < -2147483648 || _v > 2147483647) throw new SofabError(SofabErrorCode.InvalidMsg, "g_i32: value outside declared width i32"); o.g_i32 = _v as number;`,
-		// The array element bound is the READER's: it is passed in so the verdict
-		// lands on the element that carries the value, which is what keeps INVALID
-		// ahead of a truncation right behind it (#267, #339).
-		`o.arr_u8 = c.readUnsignedArray(4, 255) as number[];`,
+		// The value is read as the `number` a narrow destination holds, WITHOUT a
+		// conversion call -- and the guard on the next line is what makes that
+		// assertion true. corelib-ts hands over a bigint in exactly one case, a
+		// magnitude above 2^53-1, and every narrow width tops out at 2^32-1, so
+		// such a value throws before it can be stored.
+		`case 0: { const _v = v as number; if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "a_u8: value outside declared width u8"); this.o.a_u8 = _v; break; }`,
+		`case 2: { const _v = v as number; if (_v > 4294967295) throw new SofabError(SofabErrorCode.InvalidMsg, "c_u32: value outside declared width u32"); this.o.c_u32 = _v; break; }`,
+		`case 4: { const _v = v as number; if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "e_i8: value outside declared width i8"); this.o.e_i8 = _v; break; }`,
+		`case 6: { const _v = v as number; if (_v < -2147483648 || _v > 2147483647) throw new SofabError(SofabErrorCode.InvalidMsg, "g_i32: value outside declared width i32"); this.o.g_i32 = _v; break; }`,
+		// The array element bound lands on the element that carries the value, as
+		// it arrives, which is what keeps INVALID ahead of a truncation right
+		// behind it (#267, #339).
+		`case 8: { const _e = v as number; if (_e > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "arr_u8: value outside declared width u8"); this._a0ArrU8[i] = _e; break; }`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.ts missing width guard %q:\n%s", want, got)
 		}
 	}
-	// 64-bit destinations keep the bare read (bigint-backed under the default
-	// int64 mode): their range is the reader's own, so there is nothing to bound.
-	for _, want := range []string{"o.d_u64 = BigInt(c.readUnsigned()); break;", "o.h_i64 = BigInt(c.readSigned()); break;"} {
+	// 64-bit destinations store unguarded (bigint-backed under the default int64
+	// mode): their range is the wire's own, so there is nothing to bound.
+	for _, want := range []string{
+		`case 3: this.o.d_u64 = typeof v === "bigint" ? v : BigInt(v); break;`,
+		`case 7: this.o.h_i64 = typeof v === "bigint" ? v : BigInt(v); break;`,
+	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("message.ts: a 64-bit destination must read unguarded (%q):\n%s", want, got)
+			t.Errorf("message.ts: a 64-bit destination must store unguarded (%q):\n%s", want, got)
 		}
 	}
 }
@@ -1819,13 +1891,16 @@ messages:
       b: { id: 1, type: array, items: { type: fp64, count: 4 } }
 `, map[string]any{})
 
-	// The callback must ACCEPT the raw view -- without the parameter the corelib's
-	// 4th argument is silently dropped and everything below is unreachable.
-	if !strings.Contains(out, "arrayFp32(id: number, i: number, v: number, raw?: Uint8Array): void") {
-		t.Error("arrayFp32 must take the raw view")
+	// The callback must ACCEPT the wire word -- without the parameter the corelib's
+	// 4th argument is silently dropped and everything below is unreachable. It is a
+	// 32-bit NUMBER, not a byte view: a number costs nothing to pass, where the
+	// view it replaced was an allocation per element and a borrowed slice §6.7
+	// forbids.
+	if !strings.Contains(out, "arrayFp32(id: number, i: number, v: number, bits: number): void") {
+		t.Error("arrayFp32 must take the element's wire word")
 	}
 	// ...store it at the element's own offset...
-	if !strings.Contains(out, "_r.set(raw, i * 4)") {
+	if !strings.Contains(out, "_fp32RawInto(_r, i * 4, bits)") {
 		t.Error("the element's wire bytes must land at i*4 in the companion")
 	}
 	// ...and the companion must be decided at arrayEnd, kept only when some
@@ -1833,17 +1908,17 @@ messages:
 	if !strings.Contains(out, "arrayEnd(id: number): void") {
 		t.Error("missing arrayEnd, where the companion is decided")
 	}
-	if !strings.Contains(out, "this.o.aFp32Raw = this._rawNaNA ? this._rawA : null;") {
+	if !strings.Contains(out, "this.o.aFp32Raw = this._rawNaN0A ? this._raw0A : null;") {
 		t.Error("arrayEnd must keep the payload only when an element was NaN")
 	}
 	// A re-opened array id REPLACES (§7.4), so arrayBegin resets the companion;
 	// otherwise a second occurrence inherits the first's bytes.
-	if !strings.Contains(out, "this.o.aFp32Raw = null; this._rawA = new Uint8Array(count * 4);") {
+	if !strings.Contains(out, "this.o.aFp32Raw = null; this._raw0A = new Uint8Array(count * 4);") {
 		t.Error("arrayBegin must reset the companion and size the scratch from the count")
 	}
 	// fp64 needs none of this -- a double holds all 64 bits verbatim -- so it must
 	// not grow a companion, a scratch slot, or an arrayEnd arm.
-	if strings.Contains(out, "_rawB") || strings.Contains(out, "bFp32Raw") {
+	if strings.Contains(out, "_raw0B") || strings.Contains(out, "bFp32Raw") {
 		t.Error("an fp64 array must not get an fp32 raw companion")
 	}
 	if strings.Contains(out, "case 1: this.o.bFp32Raw") {
@@ -1875,28 +1950,29 @@ messages:
       s:  { id: 2, type: string, maxlen: 8 }
 `, map[string]any{})
 
-	// The element reads must carry the bound...
-	if !strings.Contains(out, "c.readString(6)") {
-		t.Error("a bounded string element must pass its maxlen into readString")
+	// The element collectors must carry the bound, so the verdict is taken at the
+	// element's LENGTH WORD rather than after its payload.
+	if !strings.Contains(out, `this._q1 = new StringSeq(_t, this.a, 4, 6, "sa");`) {
+		t.Error("a bounded string element must pass its maxlen into StringSeq")
 	}
-	if !strings.Contains(out, "const _b = c.readBlob(5); ") {
-		t.Error("a bounded blob element must pass its maxlen into readBlob")
+	if !strings.Contains(out, `this._q2 = new BlobSeq(_t, this.a, 4, 5, "ba");`) {
+		t.Error("a bounded blob element must pass its maxlen into BlobSeq")
 	}
-	// ...and the scalar arm, which already did, must be unchanged.
-	if !strings.Contains(out, "c.readString(8)") {
-		t.Error("the scalar string bound must still be passed")
+	// ...and the element's length word must actually reach the collector, not only
+	// its payload: the whole point is a verdict that survives a truncation inside
+	// the element.
+	if !strings.Contains(out, "this._q1?.begin(id, sub, total);") {
+		t.Error("the element's length word must reach the collector")
 	}
-	// The reader's bound is the whole bound. The `_utf8Len` re-scan that used to
-	// follow the string element was removed in #339: it could only fire once the
-	// payload had arrived and been decoded, so it was strictly later and strictly
-	// weaker than the verdict it duplicated, and it re-walked every decoded string
-	// on the hot path. The blob element keeps its check -- reading `.length` on a
-	// view the reader already produced is O(1), so there is nothing to reclaim.
+	// ...and the scalar arm keeps its own bound, at the same word.
+	if !strings.Contains(out, `case 2: if (sub === FixlenSubtype.String && total > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8"); break;`) {
+		t.Error("the scalar string bound must still be taken at the length word")
+	}
+	// The collector's bound is the whole bound: nothing may re-walk a decoded
+	// string on the hot path to reach a verdict that was already taken, and taken
+	// earlier.
 	if strings.Contains(out, "_utf8Len") {
-		t.Error("the string element must not re-scan what the reader already bounded")
-	}
-	if !strings.Contains(out, "if (_b.length > 5)") {
-		t.Error("the blob element keeps its O(1) length check")
+		t.Error("the string element must not re-scan what the collector already bounded")
 	}
 }
 
@@ -1938,7 +2014,10 @@ func TestTSCallerOwnsTheEncodeBuffer(t *testing.T) {
 	for _, want := range []string{
 		"  static readonly MAX_SIZE_LIMIT = 2048;",
 		"  static readonly MAX_SIZE = M.MAX_SIZE_LIMIT;",
-		"    const _os = new OStream(new Uint8Array(512), 0, (_c) => { const _k = _c.slice(); _out.push(_k); _n += _k.length; });",
+		// The sink is handed the INSTALLED buffer plus the region's coordinates,
+		// never a view the encoder built: a subarray would be an allocation per
+		// flush, and the encoder allocates nothing after construction (§6.6/§5.1.6).
+		"    const _os = new OStream(new Uint8Array(512), 0, (_b, _s, _e) => { const _k = _b.slice(_s, _e); _out.push(_k); _n += _k.length; });",
 		"    _os.flush();",
 	} {
 		if !strings.Contains(unbounded, want) {
@@ -1980,14 +2059,15 @@ func TestTSStructsGetNoEncodeEntryPoint(t *testing.T) {
 }
 
 // TestTSDecodedBlobOwnsItsBytes: the same ownership rule read on the decode side.
-// corelib-ts's Cursor.readBlob returns a Uint8Array VIEW into the input buffer —
-// correct of the corelib, which allocated nothing — but a destination that keeps
-// that view makes the message's lifetime the buffer's, silently. Every blob
-// destination therefore copies, at both positions and bounded or not.
+// A blob payload reaches the visitor as a range of the CALLER's own fed chunk
+// (§6.6.3): the corelib builds no view over it and holds no storage of its own,
+// so a destination that kept the range would make the message's lifetime the
+// caller's buffer's, silently — and §6.7 forbids the decoder handing out a
+// borrowed value in the first place.
 //
-// The two decoders disagreed on this: the streaming visitor has always copied
-// (`_p.slice()`), while the cursor path aliased, and the differential test
-// compares VALUES, which are equal either way until the buffer is reused.
+// PayloadAcc is the way across: what `take` hands back is a buffer it allocated
+// and gave away, so the destination owns its bytes at every position, bounded or
+// not, and the caller may reuse the chunk the moment `feed` returns.
 func TestTSDecodedBlobOwnsItsBytes(t *testing.T) {
 	mod := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
 		"      bb: { id: 0, type: blob, maxlen: 8 }\n"+
@@ -1995,19 +2075,23 @@ func TestTSDecodedBlobOwnsItsBytes(t *testing.T) {
 		"      ab: { id: 2, type: array, items: { type: blob, count: 3, maxlen: 4 } }\n"+
 		"      au: { id: 3, type: array, items: { type: blob } }\n", map[string]any{})
 	for _, want := range []string{
-		`o.bb = _b.slice();`,               // bounded scalar
-		`o.bu = c.readBlob().slice();`,     // unbounded scalar
-		`arr[_id] = _b.slice();`,           // bounded wrapper element
-		`arr[_id] = c.readBlob().slice();`, // unbounded wrapper element
+		// bounded + unbounded scalar: the accumulator's own buffer, taken whole
+		"const _p = this.a.take(total, offset, src, start, end); if (_p !== null) this.o.bb = _p;",
+		"const _p = this.a.take(total, offset, src, start, end); if (_p !== null) this.o.bu = _p;",
+		// bounded + unbounded wrapper element: the corelib's BlobSeq, which stores
+		// what the same accumulator hands it, never a range of the chunk
+		`this._q1 = new BlobSeq(_t, this.a, 3, 4, "ab", MAX_DYN_ARRAY_COUNT);`,
+		`this._q2 = new BlobSeq(_t, this.a, -1, -1, "au", MAX_DYN_ARRAY_COUNT);`,
+		"this._q1?.element(id, total, offset, src, start, end);",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("a decoded blob destination must own its bytes: missing %q\n%s", want, mod)
 		}
 	}
-	// ...and nothing may still assign the raw view.
-	for _, bad := range []string{"o.bb = _b;", "o.bu = c.readBlob();", "arr[_id] = _b;", "arr[_id] = c.readBlob();"} {
+	// ...and nothing may keep a range of the fed chunk (§6.7).
+	for _, bad := range []string{"= src;", "= src.subarray(", "src.slice(start, end)"} {
 		if strings.Contains(mod, bad) {
-			t.Errorf("a decoded blob destination still aliases the input buffer: %q", bad)
+			t.Errorf("a decoded blob destination still aliases the fed chunk: %q", bad)
 		}
 	}
 }
@@ -2033,22 +2117,21 @@ messages:
 `
 	got := genTSWith(t, src, map[string]any{})
 	for _, want := range []string{
-		// push: the guard travels in the collector's own conversion, so it fires
-		// on the element that carries the value rather than on the finished row.
-		`(v) => { const _e = Number(v); if (_e > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "urows element: value outside declared width u8"); return _e; }`,
-		`(v) => { const _e = Number(v); if (_e < -128 || _e > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "irows element: value outside declared width i8"); return _e; }`,
-		// pull: unchanged, and asserted alongside so the two surfaces stay pinned
-		// to one verdict rather than drifting apart again.
-		`c.readUnsignedArray(3, 255) as number[]`,
-		`c.readSignedArray(3, -128, 127) as number[]`,
+		// The guard fires on the element that carries the value, as it arrives —
+		// not on the finished row. A scan of the row could not reject an element a
+		// truncation stops the row from ever completing (§5.2.3).
+		"        const _e = v as number; if (_e > 255) throw new SofabError(SofabErrorCode.InvalidMsg, \"urows element: value outside declared width u8\");\n" +
+			"        this._row1[i] = _e;",
+		"    const _e = v as number; if (_e < -128 || _e > 127) throw new SofabError(SofabErrorCode.InvalidMsg, \"irows element: value outside declared width i8\");\n" +
+			"    this._row2[i] = _e;",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.ts missing nested-row width guard %q:\n%s", want, got)
 		}
 	}
-	// u64 has nothing narrower than the wire to check, so the conversion stays a
-	// plain expression — a guard here would be dead code on every element.
-	if !strings.Contains(got, `"wrows", (v) => BigInt(v))`) {
+	// u64 has nothing narrower than the wire to check, so the store stays a plain
+	// conversion — a guard here would be dead code on every element.
+	if !strings.Contains(got, `this._row3[i] = typeof v === "bigint" ? v : BigInt(v);`) {
 		t.Errorf("a u64 row must keep the bare conversion:\n%s", got)
 	}
 }
@@ -2079,11 +2162,13 @@ func TestTSClosedNameSet(t *testing.T) {
 			t.Errorf("§6.1.1 closes the generated object's name set: message.ts must not emit %q", gone)
 		}
 	}
-	// What replaces them, and the delegation chain kept intact.
+	// What replaces them: one public entry, running the corelib's one-shot decode
+	// against this type's flat visitor. The visitor is a module internal -- not
+	// exported, and not a member of the class -- so it adds no name to the closed
+	// set §6.1.1 defines.
 	for _, want := range []string{
-		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    return _decodeFromMyfirstmessage(new Cursor(bytes",
-		"function _decodeFromMyfirstmessage(c: Cursor): Myfirstmessage {\n  return _decodeIntoMyfirstmessage(c, new Myfirstmessage());",
-		"function _decodeIntoMyfirstmessage(c: Cursor, o: Myfirstmessage): Myfirstmessage {",
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _MyfirstmessageVis(o, new PayloadAcc()), _LIMITS);\n    return o;\n  }",
+		"class _MyfirstmessageVis implements Visitor {",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q", want)

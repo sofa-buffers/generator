@@ -384,9 +384,10 @@ a reimplementation should emit code that honors all of them:
   No second spelling for either — no `serialize_to`, `to_bytes`, `from_bytes`,
   `decode_from`, `decode_into`, `marshal`/`unmarshal`. The `marshal`/`unmarshal`
   spelling is **gone family-wide** (generator#239 API pass), and so is
-  TypeScript's `decodeFrom`/`decodeInto` pair (generator#384: the two cursor-level
-  steps are module-level functions in the generated file, reachable from the
-  sibling classes that decode into each other and exported nowhere). What is
+  TypeScript's `decodeFrom`/`decodeInto` pair (generator#384; with the cursor path
+  itself withdrawn there is no intermediate step left to name — `decode(bytes)` runs
+  the corelib's one-shot decode against the type's flat visitor, which is a module
+  internal and not a member of the class). What is
   *still* not uniform is narrower and listed per backend in §10: `try_decode` is
   absent from C, Go, Python, TypeScript and Zig.
   - **`serialize` vs `encode_to`.** They are not two spellings of one thing.
@@ -407,8 +408,10 @@ a reimplementation should emit code that honors all of them:
     unbounded decode**: §5.6 asks for the memory bound, not for a particular
     shape, and a reader-driven entry point delivers it. Go had the encode half
     only until generator#312 added `Decode<Msg>From` over corelib-go's
-    `AcceptStream`. TypeScript has a resumable `IStream`, but no generated
-    visitor to drive it (§9.3 family 6).
+    `AcceptStream`. TypeScript's generated `<Msg>Decoder` drives corelib-ts's
+    resumable `IStream` with the same flat visitor `decode(bytes)` uses, so the
+    streaming and one-shot paths cannot disagree — there is one implementation of
+    every rule, which is what §5.3.1 is for.
 - **Decode by `switch` on field id**, not an if-chain — compilers build a jump
   table; unknown ids fall through to the corelib's skip path, giving
   forward/backward compatibility for free.
@@ -424,9 +427,9 @@ a reimplementation should emit code that honors all of them:
   depth — it is strictly later and strictly weaker than the one that already
   decided, and it is not free: re-walking every decoded string and every decoded
   array was 10% of the TypeScript decode (generator#339). Keep a call-site check
-  only where the corelib has no argument to take the bound (the streaming visitor
-  surfaces, where `arrayBegin` / `fixlenBegin` carry it instead) or where it is
-  O(1) on a value already in hand (a blob's `.length`). What guards against a
+  only where the corelib has no argument to take the bound — on a visitor surface
+  that is every bound, which is why `arrayBegin` / `fixlenBegin` exist and why the
+  verdict is taken there rather than in the value callback behind it. What guards against a
   corelib that stops honouring an argument is the conformance suite, which
   exercises each reject and its truncated twin — not a duplicate branch on the
   hot path.
@@ -664,11 +667,11 @@ width-reduced corelib builds compile — §11).
 
 ### 9.3 Decode models
 
-Decoding has **six families**; a backend picks the one its corelib exposes. All
+Decoding has **five families**; a backend picks the one its corelib exposes. All
 route by `(scope, id)` and are forward-compatible (skip unknown ids).
 
-1. **Flat visitor + location-stack** (Rust, C#, Java, Kotlin, Python, and the C++ `c-cpp`
-   wrapper). The corelib drives a `Visitor` with flat callbacks; the generated
+1. **Flat visitor + location-stack** (Rust, C#, Java, Kotlin, Python, TypeScript, and
+   the C++ `c-cpp` wrapper). The corelib drives a `Visitor` with flat callbacks; the generated
    visitor is a `(location, id)` state machine with a stack pushed/popped on
    sequence begin/end. Callbacks: `unsigned(id,v)`, `signed(id,v)`,
    `fp32/fp64(id,v)`, `string(id, total, offset, chunk)` and `blob(...)`
@@ -852,11 +855,11 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    a field `{id, wire-type}`, switches on `id`, reads the typed value, and
    `Skip()`s unknowns; returns at EOF or sequence end.
 
-   **Python left this family in 2026-08** when corelib-py removed its pull API
-   (CORELIB_PLAN §5.3.1, "the visitor is the only decode surface", now forbids a
-   second one). It moved to family 1 above. TypeScript (family 6) is the remaining
-   backend whose generated code pull-reads, and will need the same move whenever
-   corelib-ts follows.
+   **Python and TypeScript both left this family in 2026-08**, when corelib-py and
+   corelib-ts removed their pull APIs (CORELIB_PLAN §5.3.1, "the visitor is the only
+   decode surface", now forbids a second one). Both moved to family 1 above. Go is
+   the last corelib still exposing a pull parser for streaming callers, and its own
+   backend does not use it.
 4. **Child-visitor** (pure C++ `corelib-cpp`). Nested objects decode via
    `is.read(child)` (a child `IStreamMessage`); scalars via `is.read(member)`.
 5. **Descriptor-table callback** (C `corelib-c-cpp`). A static descriptor table
@@ -877,31 +880,82 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    holder stores each element as a `{ len; buf[maxlen]; }` slot and emits a
    per-element `SOFAB_OBJECT_FIELD_BLOB_SIZED`, so a sub-`maxlen` element keeps
    its exact length (an empty element is omitted by index, preserving the gap).
-6. **Monomorphic pull cursor** (TypeScript). Each type emits a module-level
-   `_decodeFrom<T>(c: Cursor)` that loops `c.readHeader()` and runs one
-   `switch (c.id)` reading straight into `o.<field>` via typed pull primitives
-   (`readUnsigned/readSigned` number-first, `readFp32/64`, `readString`,
-   `readBlob` zero-copy view, `readUnsignedArray/readSignedArray/readFp32Array/
-   readFp64Array`); a nested message recurses into `_decodeFrom<Child>(c)` (which
-   consumes through its own `SequenceEnd`), a wrapper-sequence array loops
-   `readHeader` pushing elements, and `default: c.skip(c.wire)` drops unknown ids.
-   The class itself carries only `static decode(bytes)`, which constructs the
-   `Cursor` and calls that function: the cursor-level steps would otherwise be
-   `decode_from`/`decode_into` on the generated object, which §6.1.1 forbids
-   (generator#384). They are not exported, so they stay reachable from the
-   sibling classes that decode into one another and from nothing else.
-   Each `case` first **frames the field by the header wire type**: a header whose
-   `c.wire` differs from the field's schema type is routed through `c.skip(c.wire)`
-   — exactly like an unknown id — rather than calling the schema-typed reader,
-   which would consume the wrong byte count and desynchronize the stream
-   (generator#160). This makes the pull decoder match the wire-type dispatch the
-   corelib performs for every other backend: a mismatched header is rejected as
-   `INVALID` (or reported `INCOMPLETE`) by the corelib, never silently misread.
-   Because the only caller of each reader is that one per-type decoder, V8 keeps
-   the call sites monomorphic and inlines the loop — replacing the earlier
-   push/visitor path, whose shared call sites went **megamorphic** across the
-   nested message types' differently-shaped visitor objects. corelib-ts keeps the
-   flat `Visitor`/`decode` path too, for streaming callers.
+**TypeScript's move into family 1 (2026-08).** corelib-ts withdrew its `Cursor`
+pull decoder, its child-visitor shape and its opt-in `Visitor.longs` channel in one
+refactor, leaving a single flat `Visitor` driven by `IStream`/`decode`. The generated
+backend followed exactly the shape family 1 describes, with four TypeScript-specific
+points worth recording:
+
+- **The scope stack is static.** The scopes of one generated type form a *tree* — a
+  location is assigned per (type, path), so a scope is only ever entered from one
+  parent — and corelib-ts fires `sequenceEnd` only for a scope the visitor accepted
+  (a declined subtree reports nothing at all). `sequenceEnd` therefore restores the
+  parent from a `switch (this._c)`, and the visitor carries no stack: one array less
+  per decode, and no push/pop per nested scope. The same reasoning applies to every
+  family-1 backend; TypeScript is the first to take it.
+- **64-bit values come from `lo`/`hi`, without a flag.** Every integer hook carries
+  the exact wire halves the varint reader already holds, so `int64: long` and
+  `int64: number` build their destination with `Long.fromBits(lo, hi)` and never
+  materialise a `bigint` on the decode path. This replaces the withdrawn `longs`
+  channel, which was read once from the ROOT visitor and so covered every integer
+  field alike — making 64-bit fields free and narrow ones dearer, a trade the
+  backend had to guess from the schema (#344). There is no trade left to guess.
+- **A narrow destination reads the hook value as a `number`, not through
+  `Number(v)`.** The assertion is made true by the declared-width guard on the next
+  line: corelib-ts hands over a `bigint` in exactly one case, a magnitude above
+  2^53-1, and every narrow width tops out at 2^32-1, so such a value throws before
+  it can be stored. Where no guard follows (a `bitfield`, an `enum`) the conversion
+  stays.
+- **A native array is filled through a destination, not element by element.** The
+  element callbacks were the single largest item in what the move cost: measured
+  against the withdrawn cursor, a `u32` element read in bulk cost 177 Ir and
+  1067 Ir through `arrayUnsigned`. corelib-ts's `Visitor.arrayBulk`
+  (corelib-ts#163) is the `arrayBulk` hand-off this section already describes for
+  Java and Kotlin, ported: generated code points one reused `ArrayTarget` at the
+  destination `arrayBegin` just built and states the element's declared width, and
+  the decoder fills it with no element callback at all — 425 434 → 280 215 Ir/op
+  on a 200-element array, −34.1 %.
+  **Gated twice, and both gates are load-bearing.** The offer is itself a call
+  (~1300 Ir per array, against ~435–730 Ir saved per element), so the corelib
+  refuses below `BULK_MIN = 16` elements, and the generator does not emit an arm at
+  all for an array whose declared `count` — a capacity, hence an upper bound — can
+  never reach it. Without the second gate a message of four-element arrays paid
+  +7572 Ir to be told no; with both it pays +1850 (+0.24 %) for the branch, and
+  emits no hook when nothing in the schema qualifies. An arm is offered only where
+  a **declared narrow width** exists, which is exactly where the elements are plain
+  JS numbers *and* there are bounds to state: `u64`/`i64` (bigint/Long), `boolean`,
+  `enum` and `bitfield` (no declared width — inventing one would reject legal
+  values) and the floats all keep the element callbacks. Those arms stay emitted
+  regardless: they are what runs for a declined array and against a corelib that
+  predates the hook, which is what makes taking it additive.
+- **Only the leaf wrapper-array collectors come from the corelib.** `StringSeq` and
+  `BlobSeq` own the index rules, both bounds, the payload join and the strict UTF-8
+  decode for a `string`/`blob` element (ARCHITECTURE §8). A *framed* element — a
+  struct, a union, a nested row — is placed by generated code instead, because
+  `ElementSeq` fills a gap with one shared `def` value: right for the immutable `""`
+  and empty-bytes defaults its two subclasses use, and aliasing for an element whose
+  default is a fresh object. The `_ObjSeq` / `_MatSeq` / `_RowSeq` classes the
+  child-visitor shape needed are gone: a flat visitor routes the element scope
+  itself.
+
+**What the move cost, decomposed** (Callgrind, subtract method, §15,
+`vehicle_telemetry`). The headline is +13.8 % on decode, 684 761 → 779 440 Ir/op,
+and it is worth knowing where that sits because the obvious reading — "the corelib
+got slower" — is wrong:
+
+| | old (cursor) | new (visitor) |
+|---|---:|---:|
+| framing only (skip the whole message) | 491 252 | 491 411 (+0.03 %) |
+| full decode | 684 761 | 779 440 |
+| ⇒ value delivery (full − framing) | 193 509 | 288 029 (+48.8 %) |
+
+The parse is **identical**; the whole regression is in handing values to the
+generated class. Removing the schema's eight array fields shrinks it from +94 679
+to +36 894 Ir, so **61 % of it is native array elements** — 54 of them, at ~1070 Ir
+each, which a 200-element micro-schema confirms independently at 1067. The
+remaining 39 % is per-field visitor dispatch. On a pure-scalar schema the new path
+is 24 % *faster* than the cursor was. That is what the bulk hand-off above
+addresses, and why it is the array path it addresses rather than the dispatch.
 
 **Decode outcome (MESSAGE_SPEC §7).** Every corelib reports the finish-less
 three-valued outcome — COMPLETE / INCOMPLETE / INVALID — and the generated
@@ -986,7 +1040,7 @@ arrays have no N and keep every element. Who enforces it differs by family
   (`ArrayBegin` throws `SofabException(InvalidMessage)` — the guard also bounds
   the eager `new T[count]` allocation), Python (`raise SofaDecodeError` from
   `on_array_begin`, at the count word), TypeScript (`throw SofabError(InvalidMsg)`
-  after the whole-array read).
+  from `arrayBegin`, at the count word).
 
 The infallible best-effort entry points kept for back-compat (Rust/C++
 `decode`) still discard the verdict; the fallible path is authoritative, and
@@ -1031,14 +1085,16 @@ Whether the fix is generator-only splits by the corelib's decode model:
     `onFixlenHeader(id, subtype, length)` overrides set the sticky `e.inv`, which
     `tryDecode` reads before returning the incomplete status. Emitted only for
     bounded fields, and subtype-gated as above.
-  - **TypeScript** — the corelib readers take an optional `schemaCount` /
-    `schemaMaxlen` (`readUnsignedArray(N)`, `readString(N)`, …) and throw
-    `InvalidMsg` at the count/length word before the truncated-field `Incomplete`;
-    the generator passes the schema bound in for every bounded native array and
-    scalar string/blob (precedence INVALID > LIMIT_EXCEEDED > INCOMPLETE). The
-    whole-value guards stay as defense. The generated harness gained a `status`
-    mode surfacing the `SofabError.code` so conformance can assert the
-    INVALID-vs-INCOMPLETE distinction a bare non-zero exit hides.
+  - **TypeScript** — the verdict is taken in the header hooks the flat visitor
+    receives before any payload: `arrayBegin(id, kind, count)` for a bounded
+    native array, `fixlenBegin(id, subtype, total)` for a bounded scalar
+    string/blob, and `StringSeq`/`BlobSeq.begin` for a bounded wrapper element —
+    each throwing `InvalidMsg` at the count/length word, ahead of the truncated
+    field's `Incomplete` (precedence INVALID > LIMIT_EXCEEDED > INCOMPLETE). The
+    payload callbacks re-take the same verdict against `total` rather than against
+    the assembled value, so an over-bound field is never buffered. The generated
+    harness has a `status` mode surfacing the `SofabError.code` so conformance can
+    assert the INVALID-vs-INCOMPLETE distinction a bare non-zero exit hides.
   - **C++ `corelib-cpp`** — the pure profile *measures* a whole top-level field
     for completeness (`measureField`) before delivering it to `deserialize` where
     the `is.invalidate()` guards live, so those guards run too late once the field
@@ -1092,21 +1148,22 @@ a bound established by a word, checked after the bytes that word describes:
   API, and both sites are `on_field` arms now, so the two can no longer drift.
 - **An array element's declared width in typescript.** A `u8[]`/`i16[]` element
   outside its type's range was found by a scan over the *assembled* array, which
-  cannot fire for an array that never assembles. The bound now goes **into the
-  reader** — `readUnsignedArray(count, max)` / `readSignedArray(count, min, max)`,
-  corelib-ts#90 — alongside the schema count that is already passed there for
-  exactly this reason. The post-read scan stays as defense for a consumer building
-  against an older corelib (generator#304). A **dynamic** array keeps `undefined`
-  in the count slot and still carries the width bound: width is a property of the
-  element *type*, not of the array *length*.
+  cannot fire for an array that never assembles. The bound now sits on the element
+  callback, so it fires as each element arrives and a truncation behind an
+  out-of-range element cannot downgrade the verdict. (It briefly lived inside the
+  cursor readers, `readUnsignedArray(count, max)` / `readSignedArray(count, min,
+  max)`, corelib-ts#90; that surface is withdrawn.) A **dynamic** array carries the
+  width bound too and no count bound: width is a property of the element *type*,
+  not of the array *length*.
 
 TypeScript additionally had no counterpart to `arrayBegin` for a **scalar**
-string/blob, so its streaming visitor's `maxlen` check had nowhere earlier to live
-than the payload callback. corelib-ts#89 added `Visitor.fixlenBegin(id, subtype,
-total)` and the generator emits into it, **testing the announced subtype** — one
-callback serves both kinds, so ignoring the subtype would measure a blob field's
-`maxlen` against a string arriving at that id, a §7.3 skip rather than a bound
-(generator#303, closing #300).
+string/blob, so its visitor's `maxlen` check had nowhere earlier to live than the
+payload callback. corelib-ts#89 added `Visitor.fixlenBegin(id, subtype, total)` and
+the generator emits into it, **testing the announced subtype** — one callback
+serves both kinds, so ignoring the subtype would measure a blob field's `maxlen`
+against a string arriving at that id, a §7.3 skip rather than a bound
+(generator#303, closing #300). With the cursor path withdrawn this is no longer one
+of two surfaces to keep in step; it is the only place the verdict is taken.
 
 **The remaining five were a corelib gap first, and that is worth keeping on the
 record because it decided the sequencing.** `rust`, `rust-no-std`, `java`, `csharp`
@@ -1171,8 +1228,9 @@ INVALID precisely for the array that does not arrive. As with the fixlen header,
 the decoder is the only party that sees the element in time and the schema the
 only party that knows the bound, so the bound has to travel into the decoder:
 
-- **typescript** already did (`readUnsignedArray(count, max)`, generator#304), but
-  `Cursor.arrayCount` rejected a count larger than the bytes remaining as
+- **typescript** already did (`readUnsignedArray(count, max)`, generator#304 — the
+  bound now travels on `arrayBegin` and the element callback instead), but the
+  cursor's `arrayCount` rejected a count larger than the bytes remaining as
   INCOMPLETE *before* the element loop — an allocation guard (corelib-ts#38)
   deciding the verdict from the count word alone. It is now a cap on the
   **allocation** (`min(count, bytes remaining)`) instead of a rejection, which is
@@ -1210,7 +1268,7 @@ fits but the elements do not — **both** branches, which is why the conformance
 vector deliberately cuts at the second), dart walks the decoded prefix when the
 contiguous array fails, and python-pure turns its `SofaIncompleteError` into a
 `SofaDecodeError` at that point. The two that can afford exactness check at the
-element: corelib-ts inside `readUnsignedArray`, and python's Cython engine with
+element: corelib-ts at the element callback, and python's Cython engine with
 two typed compares before the value is boxed. Dart's *streaming* path also checks
 at the element, because its state machine already decodes one at a time. The
 verdicts are identical, which is what the shared vectors and the chunk-invariance
@@ -1225,15 +1283,16 @@ and both python engines measure 0 on the same axis.
 
 **What is still open, and why it is not fixed here.** One F-0043 row remains: an
 over-index wrapper element truncated *inside* its `fixlen_word`
-(`overindex_trunc_in_fixlen_word.bin`, `c6 0c 2a c2`). TypeScript rejects it —
-its cursor reads the subtype from the low three bits of the word's **first**
-byte, so the element has passed the §7.3 type test and its id is over `count`
-before the length is known — and the other fourteen drivers report INCOMPLETE.
-Whether the earliest-decidable reading is the required one is a **spec** question
-(documentation#43), and closing it TypeScript's way needs a corelib callback that
-fires on the subtype rather than on the completed word (corelib-ts#97). It is the
-same defect as generator#300's direction B, seen through the other decode
-surface, and it stays with #267 until the spec settles.
+(`overindex_trunc_in_fixlen_word.bin`, `c6 0c 2a c2`). It once split the family:
+TypeScript's withdrawn cursor read the subtype from the low three bits of the
+word's **first** byte, so the element had passed the §7.3 type test and its id was
+over `count` before the length was known, and it rejected where the other drivers
+reported INCOMPLETE. With that surface gone TypeScript takes the verdict where
+every other driver does — at the completed word, in `fixlenBegin`, which
+CORELIB_PLAN §4.1.1 makes normative ("the low 3 bits of an unfinished varint must
+not influence an outcome even though they are already arithmetically fixed") — so
+the family is unanimous and the divergence is closed by the spec having settled
+rather than by a corelib callback (documentation#43, corelib-ts#97 withdrawn).
 
 #### Decode verdict: over-index wrapper-array elements are INVALID (all targets)
 
@@ -1461,8 +1520,14 @@ by family (generator#174, Crucible F-0020):
   possible — the generator emits descriptors, not dispatch. Note this covers the
   **C** target only: C++ over `c-cpp` drives `istream.c` directly, not the object
   API, so it does not inherit the fix (see the gap below).
-- **TypeScript** — guards on the **wire type only** (issue #161). That settles
-  every non-fixlen kind, but not the fixlen subtype (see the gap below).
+- **TypeScript** — settles it *structurally*, like the group below. corelib-ts
+  resolves the fixlen word itself and dispatches to distinct typed callbacks, so a
+  contradictory header lands in a callback whose id switch has no case for that
+  field and evaporates. Two cases the wire type alone does not settle keep an
+  explicit test: an ARRAY header, where `arrayBegin`'s `kind` separates the four
+  element kinds that share one wire type, and a bounded fixlen SCALAR, where
+  `fixlenBegin`'s `subtype` keeps a `string` arriving at a `blob` id from being
+  bounded by that field's `maxlen`.
 - **Go, Rust (std + `no_std`), C#, Java, Zig** — conformant *structurally* for
   every mismatch but one. Their corelibs resolve the fixlen word themselves and
   dispatch to *distinct typed callbacks* (`Float64` vs `String`, …), each
@@ -1647,10 +1712,10 @@ features. Both are now closed:
 - **cpp** (`corelib-cpp`) — was `wire()` + `fixType()` (corelib-cpp#43); the
   decision has since moved inside the reads themselves, so generated code needs
   neither. ✅
-- **typescript** — `Cursor.wire` plus **`Cursor.fixSub`**, the subtype companion
-  recorded at `readHeader` via a non-consuming peek (corelib-ts#58). The guard
-  emits `c.wire !== WireType.Fixlen || c.fixSub !== FixlenSubtype.Fp64` for a
-  fixlen field, and the same for the `ArrayFixlen` native fp arrays. ✅
+- **typescript** — was `Cursor.wire` + `Cursor.fixSub` (corelib-ts#58); with the
+  cursor withdrawn the decision moved into the visitor's own header hooks, which
+  carry the announced `subtype` (`fixlenBegin`) and the announced element `kind`
+  (`arrayBegin`, where `ArrayKind` names `Fp32`/`Fp64` directly). ✅
 - **cpp over `c-cpp`** — likewise: `wire()` + `fixType()` were added with the
   same `sofab::Wire`/`sofab::Fix` surface as `corelib-cpp` (corelib-c-cpp#104),
   and are now used by the corelib's own reads rather than by generated guards.
@@ -1739,9 +1804,9 @@ Three adjacent findings from the same audit:
   **no** bound, so it is measured for completeness only (a truncated skipped field
   is `INCOMPLETE`, never `INVALID`), while a *matching* subtype keeps the full
   anti-folding order.
-- **typescript is clean by construction** — the generated `c.wire !== Fixlen ||
-  c.fixSub !== …` guard runs *before* `readString(N)`/`readBlob(N)`, so a
-  mismatched subtype is skipped and never reaches the bounded reader.
+- **typescript is clean by construction** — the `maxlen` verdict lives in
+  `fixlenBegin` and is gated on the announced `sub`, so a mismatched subtype is
+  skipped and never measured against this field's bound at all.
 
 #### Decode verdict: a repeated field id — scopes merge, wrappers replace (§7.4)
 
@@ -2087,8 +2152,9 @@ backend:
 Enforcement by family: **generated visitor guards** (Rust std, Java, Kotlin, C#,
 Zig, pure C++, and Python — the corelib callback exposes `count`/`total`
 pre-allocation; the corelibs contribute only the error category); **passed into
-the corelib decoder** (Go `sofab.WithMax*` options, TypeScript
-`Cursor(buf, DecodeLimits)`, Dart `sofab.DecoderLimits` — the corelib allocates,
+the corelib decoder** (Go `sofab.WithMax*` options, TypeScript `DecodeLimits` on
+`decode(bytes, visitor, limits)` / `new IStream(visitor, limits)`, Dart
+`sofab.DecoderLimits` — the corelib allocates,
 so it enforces; the generated cap is raised to the largest schema bound of its
 kind because these apply globally per decode). **Python left the second family in
 generator#325**: a `Decoder`-level cap binds every field indiscriminately,
@@ -2266,7 +2332,7 @@ above was found by that check on its first run.
 | **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. Field storage is a SEPARATE axis from the environment: `allow_dynamic` selects `String`/`Vec` or fixed-capacity `heapless` on **either** corelib, so a std crate can hold its bounded fields inline while keeping serde, the heap decode stack and the ordinary std prelude. String/blob chunk reassembly is the corelib's — `sofab::PayloadAcc`, and `PayloadAcc<MAX_SIZE>` on no_std where the storage is the caller's and an over-long split payload is `Error::BufferFull` (generator#345). |
 | **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; exported `Serialize(*sofab.Encoder)` + `EncodeTo(io.Writer)` — generated code owns every encode buffer (§5.1): `Encode` allocates one exactly-sized `<Msg>MaxSize` buffer (`NewEncoderBuffer`) for a bounded schema and drains a fixed 512-byte scratch into a caller `[]byte` (`NewEncoderSink`) for an unbounded one, and `EncodeTo` drains that same scratch into the writer, so a message never exists as one contiguous `[]byte`; **no `feed()`** — corelib-go streams pull-shaped (`Decoder.Next` over an `io.Reader`), so a push feed needs a resumable decoder there first; `Decode<Msg>` via `sofab.AcceptBytes` for bytes in hand (the cursor is zero-copy, but every generated destination COPIES, so a decoded message owns its bytes and outlives the input buffer), `Decode<Msg>From(io.Reader)` via `AcceptStream` for a byte stream (memory bounded by the largest single field, §5.6); `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
 | **Python** | `corelib-py` | pull-parser | dataclasses + `serialize`/`deserialize` (public since generator#239; `deserialize(Decoder(reader))` IS the chunk-capable path — the corelib pulls from any reader); generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `MAX_SIZE` `bytearray` (`Encoder.over_buffer(buf, 0)`) for a bounded schema and drains a fixed 512-byte scratch into a caller list (`Encoder.over_buffer(scratch, 0, out.append)`) for an unbounded one, so `Encoder()`/`getvalue()` — the corelib installing and growing its own storage — is gone from generated code; every decoded field COPIES, so a decoded message outlives the input buffer. |
-| **TypeScript** | `corelib-ts` | monomorphic pull cursor | classes + `serialize(os)` plus `encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `MAX_SIZE` `Uint8Array` (`new OStream(buf)`) for a bounded schema and drains a fixed 512-byte scratch into a caller list (`new OStream(scratch, 0, sink)`) for an unbounded one; the corelib's no-argument `new OStream()` (an alias for the growing accumulator) is emitted nowhere; `decoder()` → `feed`/`finish` for chunked decode, driving a SECOND, generated visitor over the corelib's resumable `IStream` (the cursor cannot be fed in pieces) — which under `int64: long` takes corelib-ts's opt-in `Visitor.longs` channel when the schema carries at most two narrow integer positions per 64-bit one (measured: −16% to −30% chunked Ir/op over the line, +1.5% under it, generator#344), narrowing the narrow destinations back with helpers that leave every §7.1 width verdict identical — the two paths are held together by a differential test over values AND rejections, since a verdict reached in generated code rather than in the corelib can drift, as an unconverted `TextDecoder` TypeError did (generator#297) — which is why the whole schema-free half of this output is the corelib's: `PayloadAcc`, `StringSeq`/`BlobSeq`, `decodeUtf8` and `elementsEqual` are called, not re-emitted (#345, on corelib-ts#151); per-type module-level `_decodeFrom<T>(Cursor)` (monomorphic, inlinable; off the class, whose only decode name is `decode` — §6.1.1, #384); 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors — and the scalars too, as `Long` under `long` (generator#339, on corelib-ts's scalar `Long` codecs) or as `number` under `number` — for a bigint-free, wire-identical hot path; alloc-free `writeString`; a `number` is a 64-bit double, so an fp32 NaN routes through the corelib raw channel (`readFp32Raw`/`writeFixlen(fp32)` for a scalar, `readFp32ArrayRaw`/`writeFp32ArrayRaw` for an array, each with a `Uint8Array \| null` companion slot captured only for a NaN) to preserve a signaling NaN bit-for-bit (§4.6, #235); `recode` harness mode (wire → object → wire) exercises it; the cursor is zero-copy, but every generated destination COPIES (`readBlob().slice()`), so a decoded message owns its bytes and outlives the input buffer. |
+| **TypeScript** | `corelib-ts` | flat visitor + static scope map | classes + `serialize(os)` plus `encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `MAX_SIZE` `Uint8Array` (`new OStream(buf)`) for a bounded schema and drains a fixed 512-byte scratch into a caller list for an unbounded one, where the sink is handed the INSTALLED buffer plus the region's coordinates (`(_b, _s, _e) => _out.push(_b.slice(_s, _e))`, §5.1.6 — a `subarray` would be an allocation per flush) and the corelib's no-argument `new OStream()` is emitted nowhere; ONE decode surface (§5.3.1): `decode(bytes)` runs the corelib's `decode` against a per-type flat `Visitor`, and `decoder()` → `feed`/`finish` drives the very same visitor over the resumable `IStream`, so the chunked and one-shot paths cannot drift; dispatch keys on `(location, id)` with the parent restored from a static `switch` rather than a stack (the scopes of a type form a tree, and a declined subtree fires no `sequenceEnd`); the schema-free half is the corelib's — `PayloadAcc`, `StringSeq`/`BlobSeq`, `decodeUtf8` and `elementsEqual` are called, not re-emitted (#345, on corelib-ts#151), and the `_ObjSeq`/`_MatSeq`/`_RowSeq` collectors the withdrawn child-visitor shape needed are gone; 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors — and the scalars too, as `Long` under `long` or `number` under `number` — built from the hooks' `lo`/`hi` wire halves (`Long.fromBits`), so the hot path materialises no `bigint` and needs no opt-in channel (corelib-ts#161 withdrew `Visitor.longs`, whose per-schema trade #344 had to guess); a narrow destination reads the hook value as a `number` with no conversion call, the declared-width guard on the next line being what makes that assertion true; alloc-free `writeString`; a `number` is a 64-bit double, so an fp32 NaN keeps the hook's 32-bit wire word in a `Uint8Array \| null` companion, captured only for a NaN, to preserve a signaling NaN bit-for-bit (§4.6, #235); `recode` harness mode (wire → object → wire) exercises it; every decoded value is COPIED out of the fed chunk (§6.7), so a message owns its bytes and outlives the input. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Serialize`/`EncodeTo`; nested `Msg.Decoder` (constructed with `new`, not a `Decoder()` factory — C# puts nested types and members in one declaration space) → `Feed`/`Finish` for chunked decode; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | one public class per file (`<Message>.java`, one `<Type>.java` per struct/union) — schema types are public like every other target's, and a type reached from two messages is emitted once (#305); no support file beside them: `Seq`, `PayloadAcc`, `Utf8.decode`, `Sofab.invalid` and `OStream.overScratch` are corelib API (corelib-java#97 / #345); classes + `serialize`/`encodeTo`; nested `Msg.Decoder` via `decoder()` → `feed`/`finish` for chunked decode (`finish` throws `IllegalStateException`, not `SofabException`: `SofabError` has no INCOMPLETE, and an incomplete message is not a malformed one); ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
 | **Kotlin** | `corelib-kotlin-mp` (Gradle/Maven Central) | flat-visitor location-stack | Kotlin Multiplatform: the emitted message sources are plain `commonMain` (stdlib + `sofab`, no JVM API), so one source set compiles for the JVM, Node/browser and native, and only the `emit: project` scaffolding is JVM-specific. One file per declaration (`<Message>.kt` + the internal `<Message>Visitor`, one `<Type>.kt` per struct/union) and no support file of its own -- element placement, array growth, payload reassembly and UTF-8 materialisation are the corelib's `Seq`/`PayloadAcc`/`Utf8` (#345); classes + `serialize`/`encodeTo`/`encode()`; nested `Msg.Decoder` via `decoder()` -> `feed`/`finish`. Integers map to their EXACT declared width, unsigned included (`u8` is a `UByte`, `u8[]` a `UByteArray`) -- the C# position, not Java's widen-to-`long`, since Java's reason for widening does not apply. What is Kotlin-specific is that this costs nothing at the corelib boundary: the unsigned arrays are inline classes over their signed peers, so `asIntArray()` is a reinterpretation and the field's own backing array reaches `writeArrayUnsigned`, while the `arrayBulk` offer hands that same view over as the destination, whose element width IS the declared width (§7.1 checked in the pass that decodes). `enum` -> `Int` and `bitfield` -> `ULong`, the widths that cannot lose a legal value, with the declared members emitted as documented named constants in an `object` beside the field -- so per-constant metadata is rendered where C and Java have no symbol for it. `boolean[]` is a `BooleanArray` (no native array boxes). Keyword field names are BACKTICK-escaped, never mangled; a name colliding with a generated member is mangled instead. `tryDecode(data, out)` returns the §7 `DecodeStatus` and `decode(bytes)` is STRICT about both non-COMPLETE outcomes (`IllegalStateException` on a terminal INCOMPLETE, deliberately not `SofabException`). Guards throw the corelib's `SofabException` unwrapped -- Kotlin has no checked exceptions. Hand-written JSON harness (exact u64 from the literal text). |
