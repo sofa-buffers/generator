@@ -984,9 +984,9 @@ arrays have no N and keep every element. Who enforces it differs by family
   corelib's own `SofabException` leaves a Visitor callback directly and the
   category reaching the caller is the one the format defines), C#
   (`ArrayBegin` throws `SofabException(InvalidMessage)` — the guard also bounds
-  the eager `new T[count]` allocation), Python (`raise SofaDecodeError` after
-  the whole-array read), TypeScript (`throw SofabError(InvalidMsg)` after the
-  whole-array read).
+  the eager `new T[count]` allocation), Python (`raise SofaDecodeError` from
+  `on_array_begin`, at the count word), TypeScript (`throw SofabError(InvalidMsg)`
+  after the whole-array read).
 
 The infallible best-effort entry points kept for back-compat (Rust/C++
 `decode`) still discard the verdict; the fallible path is authoritative, and

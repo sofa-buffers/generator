@@ -285,9 +285,16 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 		// so the shape is a fixed scratch drained into caller-owned storage: the
 		// corelib still allocates nothing, and the ceiling never bounds a value.
 		//
-		// list.append is a COPYING sink in §5.1's terms -- it is handed a fresh
-		// snapshot and returns without installing a buffer -- so the encoder keeps
-		// the scratch and resumes at 0, with no take-and-replace handover.
+		// This is a COPYING sink in §5.1's terms: it takes a copy and returns
+		// without installing a replacement buffer, so the encoder keeps the scratch
+		// and resumes at 0, with no take-and-replace handover.
+		//
+		// The copy is the sink's own job, and not optional. §5.1.6 hands a sink the
+		// INSTALLED buffer -- here a memoryview over `scratch` -- rather than a
+		// snapshot of it, precisely so that a sink which wants to keep the bytes
+		// has to say so. Appending the view itself would append the same live
+		// window every time and every element would alias the scratch's final
+		// contents.
 		f.line("    def encode(self) -> bytes:")
 		f.line(`        """Encode into storage this call allocates and owns.`)
 		f.line("")
@@ -298,10 +305,15 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 		f.line(`        """`)
 		f.line("        out: list[bytes] = []")
 		f.line("        scratch = bytearray(%d)", pyScratchSize)
-		f.line("        e = Encoder.over_buffer(scratch, 0, out.append)")
+		f.line("        # The sink is handed a view over ``scratch``, which the encoder goes")
+		f.line("        # on writing into, so each piece is copied out here.")
+		f.line("        e = Encoder.over_buffer(scratch, 0, lambda _v: out.append(bytes(_v)))")
 		f.line("        self.serialize(e)")
 		f.line("        e.flush()")
-		f.line("        return b\"\".join(out)")
+		f.line("        # One drain is the common case (a message below the scratch size), and")
+		f.line("        # that piece is already an owned copy -- joining it with itself would")
+		f.line("        # copy the whole message a second time.")
+		f.line("        return out[0] if len(out) == 1 else b\"\".join(out)")
 	}
 	f.blank()
 	f.line("    @classmethod")
