@@ -43,6 +43,12 @@ type frame struct {
 	// (generator#102): only unbounded fields are guarded.
 	elemDynLen   bool // fkSeqArr: element string/blob has no schema maxlen
 	elemDynCount bool // fkNestedNative: inner native array has no schema count
+	// elemCap is the inner native array's own schema count N (-1 == none) -- the
+	// bound on a ROW's element count, which `cap` below does not give: cap bounds
+	// the row's ID against the outer array's capacity. Both are needed, for
+	// different reasons: the id bound stops an over-index gap-fill, this one stops
+	// a row header claiming more elements than the schema allows it (§7.1).
+	elemCap int64
 
 	// cap is the wrapper array's schema count bound N (-1 == no count). N is a
 	// CAPACITY, not a length: it never reaches the wire and never adds elements the
@@ -125,7 +131,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 					loc: loc, path: path, kind: fkNestedNative, idx: "ei_" + loc,
 					elemKind: items.Elem, elemRef: items.ElemRef,
 					elemType: "[]const " + inner, elemFill: "&.{}",
-					elemDynCount: !items.HasCount, cap: cap,
+					elemDynCount: !items.HasCount, elemCap: capOf(items.HasCount, items.Count), cap: cap,
 				})
 			} else {
 				el := loc + "_e"
@@ -263,9 +269,15 @@ func (g *gen) msgLimitGuards(fields []*ir.Field) bool {
 
 // putCall renders the element store for a direct native array field: the
 // capacity-checked push into a count:N field's inline storage -- an element
-// past the capacity flags the message INVALID -- or the growing putGrowing
-// for a dynamic (count-less) slice, which keeps every wire element up to the
-// announced count while never trusting that count for the eager allocation.
+// past the capacity flags the message INVALID -- or sofab.arrays.putGrowing
+// into a dynamic (count-less) slice.
+//
+// putGrowing no longer grows anything here, and cannot: arrayBegin sizes that
+// slice at exactly the announced count `n` after bounding it against the cap
+// (ARCHITECTURE §9.5, shape A), so `i >= s.len` implies `i >= n` and the helper
+// has already returned on its first line. It stays the call because it is still
+// the corelib's store for this destination shape; reducing it to the bounded put
+// it has become is corelib-zig's half of #386.
 //
 // A count:N field carries its own index, so its store needs none of the
 // visitor's: the wire count M IS the array's length (MESSAGE_SPEC §3), so the
@@ -1095,16 +1107,22 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 				if g.dynNativeArray(fld) {
 					idUsed, countUsed = true, true
 					elem := g.zigArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems)
-					body := fmt.Sprintf("%s.%s = sofab.arrays.allocCapped(%s, self.alloc, count)", fr.path, zigIdent(fld.Name), elem)
-					if g.limits.arrayHas {
-						// A count-less array is always unbounded, so every
-						// direct dynamic native array gets the guard. an = 0
-						// drops the rejected array's elements: a field over
-						// the cap never allocates (generator#102).
-						body = fmt.Sprintf("if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { %s; }", body)
-					} else {
-						body += ";"
+					if !g.limits.arrayHas {
+						panic("zig: count-less native array with no cap -- every target has a finite default (§9.5)")
 					}
+					// A count-less array is always unbounded, so every direct
+					// dynamic native array gets the guard. an = 0 drops the
+					// rejected array's elements: a field over the cap never
+					// allocates (generator#102).
+					//
+					// And because the cap has just bounded the count, the
+					// destination is allocated at EXACTLY that count, once
+					// (ARCHITECTURE §9.5, shape A). The capped reservation this
+					// replaces -- sofab.arrays.allocCapped, grown by putGrowing --
+					// existed because nothing had bounded the count yet; the cap
+					// bounds it, so the reservation only added doubling and copies.
+					body := fmt.Sprintf("if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { %s.%s = sofab.arrays.allocN(%s, self.alloc, count); }",
+						fr.path, zigIdent(fld.Name), elem)
 					// A count-less array has no schema bound to misapply, but it
 					// still must not ALLOCATE from a header that is being skipped
 					// (CORELIB_PLAN §4.8 / MESSAGE_SPEC §7.3, generator#259). The
@@ -1128,13 +1146,26 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 			// `count` bounds the id (an id >= N is INVALID, §5.1/§7), which also
 			// bounds the id-keyed gap-fill against an over-index amplification.
 			inner := strings.TrimPrefix(fr.elemType, "[]const ")
-			body := fmt.Sprintf("{ self.%s = id; if (sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, &.{})) { sofab.arrays.at(%s, id).* = sofab.arrays.allocCapped(%s, self.alloc, count); } }",
+			// The row is sized at exactly the announced count, which the guard
+			// below has bounded first (§9.5, shape A).
+			body := fmt.Sprintf("{ self.%s = id; if (sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, &.{})) { sofab.arrays.at(%s, id).* = sofab.arrays.allocN(%s, self.alloc, count); } }",
 				fr.idx, fr.elemType, fr.path, fr.path, inner)
-			if fr.cap >= 0 {
-				body = fmt.Sprintf("if (id >= %d) { self.inv = true; } else %s", fr.cap, body)
-			}
-			if g.limits.arrayHas && fr.elemDynCount {
+			// A ROW's own element count needs its own bound -- fr.cap bounds the
+			// row's ID, never how many elements the row claims. A row the schema
+			// counts is bounded by that count (INVALID above it, §7.1); one the
+			// schema leaves unbounded is governed by the configured cap.
+			switch {
+			case fr.elemCap >= 0:
+				body = fmt.Sprintf("if (count > %d) { self.inv = true; self.an = 0; } else %s", fr.elemCap, body)
+			case g.limits.arrayHas:
 				body = fmt.Sprintf("if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else %s", body)
+			default:
+				panic("zig: unbounded native row with no cap -- every target has a finite default (§9.5)")
+			}
+			// The row's ID is bounded before its element count, matching the order
+			// every other backend takes the two verdicts in.
+			if fr.cap >= 0 {
+				body = fmt.Sprintf("if (id >= %d) { self.inv = true; self.an = 0; } else %s", fr.cap, body)
 			}
 			// Same rule as the leaf arms: a row is grown and sized only for a
 			// header whose element kind matches the one this row declares. A

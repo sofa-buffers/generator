@@ -714,11 +714,17 @@ func TestKotlinNativeMatrixRowsArePlacedByID(t *testing.T) {
 	if !strings.Contains(out, "public var m: MutableList<UIntArray> = mutableListOf()") {
 		t.Error("a matrix with native rows is a list of primitive arrays, not of boxed lists")
 	}
-	if !strings.Contains(out, "_arowUInt = Seq.reserveRowUInts(m.m, id, minOf(count, Seq.ARRAY_INIT_CAP))") {
-		t.Error("a native row must be PLACED at its element id, with a capped reservation")
+	// The row's element count is bounded by its own schema count first, then the
+	// row is sized at exactly that count -- one allocation, no growth (§9.5 A).
+	if !strings.Contains(out, `if (count > 4) throw SofabException(SofabError.INVALID_MSG, "m element: array count above schema capacity 4")`) {
+		t.Error("a row header claiming more elements than the inner count allows is INVALID (S7.1)")
 	}
-	if !strings.Contains(out, "m.m[_ex_Root_m] = _arowUInt") {
-		t.Error("a grown row must be written back at the index arrayBegin placed it")
+	if !strings.Contains(out, "_arowUInt = Seq.reserveRowUInts(m.m, id, count)") {
+		t.Error("a native row must be PLACED at its element id and sized at the checked count")
+	}
+	// Nothing grows, so nothing is written back.
+	if strings.Contains(out, "m.m[_ex_Root_m] = _arowUInt") {
+		t.Error("an exactly-sized row never moves, so it must not be written back per element")
 	}
 }
 
@@ -759,11 +765,13 @@ func TestKotlinBoundedAndUnboundedEncodeShapes(t *testing.T) {
 	}
 }
 
-// TestKotlinBulkOfferOnlyForSchemaBoundedIntegerArrays: the corelib's bulk offer
-// needs a destination sized to `count` up front, and only a SCHEMA-BOUNDED count
-// may be allocated against -- the wire's count is the sender's claim. So the
-// offer is made for bounded integer arrays and for nothing else.
-func TestKotlinBulkOfferOnlyForSchemaBoundedIntegerArrays(t *testing.T) {
+// TestKotlinBulkOfferOnlyForIntegerArrays: the corelib's bulk offer needs a
+// destination sized to `count` up front, which every native array now has -- the
+// count is bounded by the schema capacity or by the configured cap before it is
+// allocated from (§9.5, shape A), so an unbounded array is offered too. What is
+// still left out is what has no integer destination to offer: fp arrays (the
+// offer is integer-only) and boolean arrays (a List).
+func TestKotlinBulkOfferOnlyForIntegerArrays(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      bounded:   { id: 0, type: array, items: { type: u32, count: 4 } }\n" +
 		"      unbounded: { id: 1, type: array, items: { type: u32 } }\n" +
@@ -773,17 +781,20 @@ func TestKotlinBulkOfferOnlyForSchemaBoundedIntegerArrays(t *testing.T) {
 	if !strings.Contains(m, "override fun arrayBulk(id: Int, kind: ArrayKind, count: Int): Any? {") {
 		t.Fatal("a bulk-capable message must implement arrayBulk")
 	}
-	if !strings.Contains(m, "abulk = m.bounded.asIntArray()") {
-		t.Error("a schema-bounded integer array must offer its own backing array")
+	for _, want := range []string{"abulk = m.bounded.asIntArray()", "abulk = m.unbounded.asIntArray()"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("an integer array must offer its own backing array, missing %q", want)
+		}
 	}
-	for _, no := range []string{"abulk = m.unbounded", "abulk = m.floats", "abulk = m.bools"} {
+	for _, no := range []string{"abulk = m.floats", "abulk = m.bools"} {
 		if strings.Contains(m, no) {
 			t.Errorf("the bulk offer must not be made for %q", no)
 		}
 	}
-	// An unbounded array reserves capped and grows with the elements delivered.
-	if !strings.Contains(m, "m.unbounded = UIntArray(minOf(count, Seq.ARRAY_INIT_CAP))") {
-		t.Error("an unbounded array must reserve capped, never from the untrusted wire count")
+	// The unbounded array is sized from the wire count -- which the cap has just
+	// bounded on the line before, and that is what makes it safe.
+	if !strings.Contains(m, `if (count > MAX_DYN_ARRAY_COUNT) throw SofabException(SofabError.LIMIT_EXCEEDED, "unbounded: array count above configured limit 16384"); askip = 0; afill = count; atgt = 2; m.unbounded = UIntArray(count)`) {
+		t.Error("an unbounded array must be checked against the cap, then allocated at exactly the count")
 	}
 	// A message with no bulk-capable array emits neither hook.
 	plain := genFromYAML(t, "version: 1\nmessages:\n  P:\n    payload:\n      a: { id: 0, type: array, items: { type: fp32, count: 2 } }\n",
@@ -986,11 +997,17 @@ func TestKotlinSupportIsTheCorelibs(t *testing.T) {
 		}
 	})
 
-	t.Run("an unbounded array grows through Seq.ensureCap", func(t *testing.T) {
+	t.Run("an unbounded array is sized at the checked count, not grown", func(t *testing.T) {
 		m := gen(t, "      a: { id: 0, type: array, items: { type: u32 } }\n")["src/main/kotlin/m/M.kt"]
-		for _, want := range []string{"Seq.EMPTY_UINTS", "Seq.ensureCap(m.a, ai, acap)", "Seq.ARRAY_INIT_CAP"} {
-			if !strings.Contains(m, want) {
-				t.Errorf("M.kt missing %q", want)
+		if !strings.Contains(m, "Seq.EMPTY_UINTS") {
+			t.Error("M.kt missing the corelib's empty-array constant")
+		}
+		// Growth is the corelib's Seq.ensureCap / Seq.ARRAY_INIT_CAP, and it is no
+		// longer reachable from generated code: the count is bounded before the
+		// allocation, so the allocation is exact (§9.5, shape A).
+		for _, gone := range []string{"Seq.ensureCap", "Seq.ARRAY_INIT_CAP", "acap"} {
+			if strings.Contains(m, gone) {
+				t.Errorf("M.kt must not still grow through %q", gone)
 			}
 		}
 	})
@@ -1028,4 +1045,46 @@ func TestKotlinSupportIsTheCorelibs(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestKotlinAShapeCheckThenAllocate: the Kotlin half of ARCHITECTURE §9.5's
+// shape A (generator#386) -- an array whose size arrives before its payload is
+// bounded at the count header and then allocated at exactly that count, once.
+// See the Java twin for why the check and the allocation are asserted together.
+func TestKotlinAShapeCheckThenAllocate(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      dyn: { id: 0, type: array, items: { type: u32 } }
+      bnd: { id: 1, type: array, items: { type: u32, count: 8 } }
+      fps: { id: 2, type: array, items: { type: fp32 } }
+      mat: { id: 3, type: array, items: { type: array, count: 3, items: { type: u32, count: 4 } } }
+`
+	m := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
+
+	for _, want := range []string{
+		`if (count > MAX_DYN_ARRAY_COUNT)`,
+		`m.dyn = UIntArray(count); abulk = m.dyn.asIntArray()`,
+		`if (count > 8) throw SofabException(SofabError.INVALID_MSG, "bnd: array count above schema capacity 8")`,
+		`m.bnd = UIntArray(count); abulk = m.bnd.asIntArray()`,
+		// fp arrays are sized the same way but carry no bulk offer.
+		`m.fps = FloatArray(count)`,
+		// The row's id, then the row's own element count -- two different bounds.
+		`if (id >= 3) throw SofabException(SofabError.INVALID_MSG, "mat element: array index above schema capacity 3"); if (count > 4) throw SofabException(SofabError.INVALID_MSG, "mat element: array count above schema capacity 4")`,
+		`Seq.reserveRowUInts(m.mat, id, count)`,
+		// Plain indexed stores; no growth, no write-back.
+		`m.dyn[ai] = value.toUInt(); ai++`,
+		`_arowUInt[ai] = value.toUInt(); ai++`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.kt missing %q:\n%s", want, m)
+		}
+	}
+	for _, gone := range []string{"Seq.ensureCap", "Seq.ARRAY_INIT_CAP", "minOf(count", "acap"} {
+		if strings.Contains(m, gone) {
+			t.Errorf("M.kt must not still grow into an array (%q):\n%s", gone, m)
+		}
+	}
 }

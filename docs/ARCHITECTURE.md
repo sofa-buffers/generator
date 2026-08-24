@@ -2199,6 +2199,40 @@ need for it: once an untrusted count is checked against a finite bound before th
 allocation, allocating it exactly is both safe and cheaper than growing into it.
 Statically bounded profiles are unaffected — they were never growing.
 
+**The A shape landed in generator#386**, in the four backends that had copied the
+#96/#98 pattern: **Java**, **Kotlin**, **C#** and **Zig**. Each reserved a small
+fixed capacity (`Seq.ARRAY_INIT_CAP` / `Seq.ArrayInitCap` = 16,
+`sofab.arrays.ARRAY_INIT_CAP` = 1024) and grew toward the announced count as the
+elements arrived; each now allocates the checked count exactly, and the per-element
+store is a plain indexed write with no growth call, no per-element reference store
+back into the message object, and no per-array growth ceiling to carry. Rust and Go
+were already in this shape. Three things are worth recording about the conversion:
+
+- **The A/B split is decided by the wire, not by the schema.** A native array
+  *without* a schema `count` still has a wire count **header**, so it is shape A —
+  the caps are what bound it, and the earlier wording ("count-less array arms")
+  read as if it were B. Only a wrapper/sequence array, which has no count header at
+  all, is B.
+- **A row's own element count was unbounded in all four.** The outer array's
+  `count: N` bounds a native matrix row's **id**; nothing bounded how many elements
+  the row itself claimed unless the row was schema-unbounded and picked up the cap
+  by accident. A row now takes both verdicts, id first, then count: INVALID against
+  the inner schema `count`, `LimitExceeded` against the cap. This is not a cost
+  change — it is the §7.1 bound the row was missing, and it is what makes the row's
+  exact sizing safe.
+- **Java and Kotlin's bulk offer widened as a consequence.** `Visitor.arrayBulk`
+  needs a destination sized to `count` up front, which is why it was restricted to
+  schema-bounded arrays: theirs was the only count that had been checked. Every
+  native integer array is now sized that way, so the offer reaches the unbounded
+  ones too — the untrusted-count objection is answered by the check rather than by
+  the reservation.
+
+One call site survives the conversion as a no-op: Zig's dynamic slices still store
+through `sofab.arrays.putGrowing`, whose growth branch is now unreachable (the
+slice is already `count` long, so `i >= s.len` implies `i >= n` and the helper
+returns on its first line). Reducing it to the bounded put it has become is
+corelib-zig's half, filed as corelib-zig#67.
+
 ### 9.6 Worst-case message size (one walk, all backends)
 
 Most targets emit a `MAX_SIZE` constant and size their encode buffer from it.
