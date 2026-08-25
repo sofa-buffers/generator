@@ -612,7 +612,11 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 		"sofab.StringSeq(o.fstrs, 3, 8)",
 		"sofab.BlobSeq(o.fblobs, 4, 8)",
 		"sofab.IntMatrixSeq(o.rows, 3, false, 0, 4294967295)",
-		"sofab.NestedSeq<String>(o.srows, 3, (p) => sofab.StringSeq(p, -1, 4))",
+		// ...and where the schema declares NO count, the receiver cap on the element
+		// INDEX travels instead (§6.2.1, generator#387). `srows` is bounded, so its
+		// own collector takes none; its ROWS are not, so each row's does. Never
+		// both: corelib-dart consults rcap only where cap is -1.
+		"sofab.NestedSeq<String>(o.srows, 3, (p) => sofab.StringSeq(p, -1, 4, rcap: maxDynArrayCount))",
 		// M elements arrived, M is the length: the count word is bounded, nothing
 		// is filled in behind it.
 		("        if (values.length > 4) { invalidate(); return; }\n" +
@@ -1149,5 +1153,73 @@ messages:
 		if strings.Contains(got, gone) {
 			t.Errorf("emitted %q, which `dart analyze --fatal-warnings` rejects as unnecessary_cast:\n%s", gone, got)
 		}
+	}
+}
+
+// TestDartWrapperIndexCapTravelsUnraised: the receiver cap on a wrapper array's
+// element INDEX is the number the deployment configured, not the raised one the
+// per-decode DecoderLimits has to carry (ARCHITECTURE §9.5, generator#387 /
+// generator#402 item 3).
+//
+// A wrapper array carries no count header — its elements are keyed by an
+// unbounded varint index and the list is grown to fit — so the index IS the
+// length and the index is what bounds the allocation. corelib-dart's collectors
+// take that bound as `rcap`, consulted only where the schema declared no
+// `count:`; this backend never passed it, so every wrapper array in every
+// generated project was bounded by the corelib's own family ceiling instead of
+// by the configured number.
+//
+// The two numbers differ on purpose. `maxDynArrayCount` reaches a DecoderLimits,
+// which applies per decode to every field alike, so it must clear the largest
+// schema `count:` in the message or it rejects a schema-bounded field CORELIB_PLAN
+// §6.2.1 forbids it to touch. `rcap` has no such problem — it cannot reach a
+// bounded field at all — so it needs no raise, and raising it would hand an
+// unbounded array a looser cap because some sibling declared a large one.
+func TestDartWrapperIndexCapTravelsUnraised(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      w: { id: 0, type: array, items: { type: string } }
+      b: { id: 1, type: array, items: { type: string, count: 100 } }
+`
+	out := genFor(t, writeDef(t, src), map[string]any{"max_dyn_array_count": 4})
+
+	for _, want := range []string{
+		// The per-decode limit is raised past b's count: 100, as it must be.
+		"const int maxDynArrayCount = 100;",
+		// The index cap is not, and is its own constant because of it.
+		"const int maxDynWrapperIndex = 4;",
+		// The unbounded array takes it...
+		"sofab.StringSeq(o.w, -1, -1, rcap: maxDynWrapperIndex)",
+		// ...and the schema-bounded one takes no receiver cap at all: there the
+		// schema bound governs and its breach is INVALID, not LimitExceeded.
+		"sofab.StringSeq(o.b, 100, -1)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated Dart missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "sofab.StringSeq(o.b, 100, -1, rcap") {
+		t.Errorf("a schema-bounded wrapper array must carry no receiver cap:\n%s", out)
+	}
+
+	// With no schema bound to clear, the raise is a no-op and the second constant
+	// would be a second name for one number — so it is not emitted, and the
+	// collectors name the one that exists.
+	const plain = `
+version: 1
+messages:
+  M:
+    payload:
+      w: { id: 0, type: array, items: { type: string } }
+`
+	out = genFor(t, writeDef(t, plain), map[string]any{"max_dyn_array_count": 4})
+	if strings.Contains(out, "maxDynWrapperIndex") {
+		t.Errorf("an unraised cap needs no second constant:\n%s", out)
+	}
+	if !strings.Contains(out, "sofab.StringSeq(o.w, -1, -1, rcap: maxDynArrayCount)") {
+		t.Errorf("the collector must still take the index cap:\n%s", out)
 	}
 }

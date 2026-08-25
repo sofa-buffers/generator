@@ -309,37 +309,72 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 	}
 }
 
+// rcapArg is the receiver cap on a wrapper array's element INDEX, rendered as
+// the trailing named argument every corelib-dart collector takes, or "" when
+// none applies (ARCHITECTURE §9.5, generator#387).
+//
+// A wrapper array carries no count header: its elements are keyed by an
+// unbounded varint index and the list is grown to fit, so the INDEX is the
+// length and the index is what has to be bounded. Two delivered elements at id 0
+// and id 16383 are a 16384-slot list, which is why capping how many arrived
+// would not bound the allocation.
+//
+// Emitted only where it can fire: `cap >= 0` means the schema declared a
+// `count:`, and corelib-dart then answers INVALID against that and never
+// consults the receiver cap -- §6.2.1 forbids a policy cap on a field the schema
+// bounds. Left off, the collector's own default stands, which is the family
+// ceiling and not the deployment's number.
+func (g *gen) rcapArg(cap int64) string {
+	if cap >= 0 || !g.limits.arrayHas {
+		return ""
+	}
+	return ", rcap: " + g.wrapperIndexConst()
+}
+
+// wrapperIndexConst names the constant emitLimits emitted for the index cap: its
+// own when the raise made it differ from maxDynArrayCount, else that one.
+func (g *gen) wrapperIndexConst() string {
+	if g.limits.wrapperIndex != g.limits.arrayCount {
+		return "maxDynWrapperIndex"
+	}
+	return "maxDynArrayCount"
+}
+
 // collector returns the Dart expression constructing the MessageVisitor that
 // gathers a wrapper-sequence array's elements into the (freshly-cleared) list
 // `out`. It recurses for nested arrays.
 func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64) string {
+	rcap := g.rcapArg(cap)
 	switch elem {
 	case ir.KindString:
-		return fmt.Sprintf("sofab.StringSeq(%s, %d, %d)", out, cap, emax)
+		return fmt.Sprintf("sofab.StringSeq(%s, %d, %d%s)", out, cap, emax, rcap)
 	case ir.KindBlob:
-		return fmt.Sprintf("sofab.BlobSeq(%s, %d, %d)", out, cap, emax)
+		return fmt.Sprintf("sofab.BlobSeq(%s, %d, %d%s)", out, cap, emax, rcap)
 	case ir.KindStruct, ir.KindUnion:
 		t := g.typeName(ref.Key)
-		return fmt.Sprintf("sofab.MessageSeq<%s>(%s, %d, () => %s(), (x) => %s(x))", t, out, cap, t, visitorName(t))
+		return fmt.Sprintf("sofab.MessageSeq<%s>(%s, %d, () => %s(), (x) => %s(x)%s)", t, out, cap, t, visitorName(t), rcap)
 	case ir.KindArray:
 		// The row collectors take the OUTER array's cap: a row's element id is its
-		// index in this array (§5.1), so cap is what bounds it.
+		// index in this array (§5.1), so cap is what bounds it -- and so is the
+		// receiver cap beside it, for the same reason.
 		if nativeArrayElem(items.Elem) {
 			switch {
 			case items.Elem == ir.KindBool:
-				return fmt.Sprintf("sofab.BoolMatrixSeq(%s, %d)", out, cap)
+				return fmt.Sprintf("sofab.BoolMatrixSeq(%s, %d%s)", out, cap, rcap)
 			case items.Elem == ir.KindFP32 || items.Elem == ir.KindFP64:
-				return fmt.Sprintf("sofab.DoubleMatrixSeq(%s, %d, %v)", out, cap, items.Elem == ir.KindFP64)
+				return fmt.Sprintf("sofab.DoubleMatrixSeq(%s, %d, %v%s)", out, cap, items.Elem == ir.KindFP64, rcap)
 			default:
 				_lo, _hi, _ := ir.NarrowRange(items.Elem)
-				return fmt.Sprintf("sofab.IntMatrixSeq(%s, %d, %v, %d, %d)", out, cap, signedArrayElem(items.Elem), _lo, _hi)
+				return fmt.Sprintf("sofab.IntMatrixSeq(%s, %d, %v, %d, %d%s)", out, cap, signedArrayElem(items.Elem), _lo, _hi, rcap)
 			}
 		}
 		// Array of wrapper arrays: each element opens a sequence collected into the
-		// inner list its element id names, by a recursively-built collector.
+		// inner list its element id names, by a recursively-built collector. The
+		// inner one takes its OWN index cap: the row's schema `count` bounds the
+		// row's elements, and where the row declares none the receiver cap does.
 		innerT := g.dartArrayElemType(items.Elem, items.ElemRef, items.ElemItems)
 		inner := g.collector("p", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), emaxOf(items.ElemMaxHas, items.ElemMax))
-		return fmt.Sprintf("sofab.NestedSeq<%s>(%s, %d, (p) => %s)", innerT, out, cap, inner)
+		return fmt.Sprintf("sofab.NestedSeq<%s>(%s, %d, (p) => %s%s)", innerT, out, cap, inner, rcap)
 	}
 	return "null"
 }
