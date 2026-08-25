@@ -902,7 +902,10 @@ func TestPythonFixlenSubtypeImportMatchesUse(t *testing.T) {
 		{"unbounded wrapper string array", true, `
       tags: { id: 0, type: array, items: { type: string } }
       n:    { id: 1, type: u32 }`},
-		{"unbounded fp32 rows", false, `
+		// An unbounded fp32 row is a POSITIVE too: the row's own element COUNT is
+		// capped by the receiver, and that cap sits behind the §7.3 tag test for
+		// the row -- which for a fixlen array names the subtype.
+		{"unbounded fp32 rows", true, `
       grid: { id: 0, type: array, items: { type: array, items: { type: fp32 } } }
       n:    { id: 1, type: u32 }`},
 		{"native integer array", false, `
@@ -1531,8 +1534,12 @@ messages:
 //
 // on_schema_bound declares the count/length the schema puts on a field, and the
 // corelib takes the cap off any field that declares one (§6.2.1). Generated code
-// applies the caps itself besides, in the ELSE of the chain whose arms are
-// exactly the schema-bounded ids -- so neither half can reach a bounded field.
+// applies the caps itself besides, PER DECLARED ID and behind the same §7.3 tag
+// test -- so a bounded id carries no cap, and an id this scope does not declare
+// carries no arm at all. The caps used to sit in the ELSE of the bounded ids'
+// chain, which kept them off a bounded field but let them fire on an UNKNOWN
+// one: a field the handler was never going to read, which §6.2.1 says allocates
+// nothing and must not be capped (generator#410).
 func TestPythonSchemaBoundedFieldsOptOutOfTheCap(t *testing.T) {
 	const src = `
 version: 1
@@ -1557,18 +1564,32 @@ messages:
 			t.Errorf("a Decoder-level cap (%q) also binds schema-bounded fields, which §6.2.1 forbids:\n%s", bad, mod)
 		}
 	}
-	// Instead each scope's cap sits in the ELSE of the chain whose arms are the
-	// schema-bounded ids, so a bounded id can never reach it.
+	// Instead each cap sits in ITS OWN id arm, beside the ids whose bound
+	// on_schema_bound declares -- exclusive by construction, and reachable by
+	// nothing else.
 	for _, want := range []string{
 		`                return 8  # s: schema maxlen`,
 		`                return 4  # arr: schema count`,
-		`            else:
+		// id 5 is the one unbounded field: it takes the cap, behind the §7.3 tag
+		// test, and it is the only id in this scope that does.
+		`            elif fld.id == 5:
                 if fld.subtype == FixlenSubtype.STRING and fld.size > MAX_DYN_STRING_LEN:
                     raise SofaLimitError("string length %d exceeds max_string_len %d" % (fld.size, MAX_DYN_STRING_LEN))`,
+		// ...while the bounded string at id 1 gets the §7.3 decline and no cap.
+		`            if fld.id == 1:
+                if fld.subtype != FixlenSubtype.STRING:
+                    return False`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
 		}
+	}
+	// No `else:` fallthrough anywhere in on_field: that is where an unknown id
+	// used to pick up a cap it must never be measured against (§6.2.1).
+	body := mod[strings.Index(mod, "def on_field("):]
+	body = body[:strings.Index(body, "def on_schema_bound(")]
+	if strings.Contains(body, "else:") {
+		t.Errorf("on_field must carry no cap fallthrough -- a skipped field is never capped:\n%s", body)
 	}
 	// Every array in this schema declares a count, so max_dyn_array_count is inert
 	// and nothing is emitted for it.
@@ -1577,7 +1598,7 @@ messages:
 	}
 	// sa's elements are schema-bounded by their own maxlen, so that scope carries
 	// no cap at all -- an array scope dispatches by index, so one bound covers it.
-	// Exactly one cap site survives: the root scope's else.
+	// Exactly one cap site survives: id 5's own arm.
 	if got := strings.Count(mod, "MAX_DYN_STRING_LEN)"); got != 1 {
 		t.Errorf("expected exactly one cap site (the root scope's else), got %d:\n%s", got, mod)
 	}
