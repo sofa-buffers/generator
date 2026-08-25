@@ -200,6 +200,7 @@ func (g *gen) emitVisitor(f *pyfile, name string, fields []*ir.Field) {
 		g.emitValueHook(f, scopes, hook)
 	}
 	g.emitOnField(f, scopes)
+	g.emitOnSchemaBound(f, scopes)
 }
 
 // emitSeqHooks writes on_sequence_begin / on_sequence_end.
@@ -501,18 +502,29 @@ func (g *gen) arrValueArm(sc *pyScope, hook string) []string {
 
 // --- on_field ---------------------------------------------------------------
 
-// emitOnField writes the header-time bounds hook.
+// emitOnField writes the header-time ACCEPT/DECLINE hook.
 //
-// It exists for the ordering §5.2 requires: INVALID dominates INCOMPLETE, so a
-// message truncated right after a length or count word -- where the violation is
-// already fully established -- must still be INVALID. on_field is called at the
-// header, before a payload byte is read or an element decoded, which is the only
-// point in the visitor surface where that verdict can be reached (the typed hooks
-// receive a value that has already fully arrived).
+// Two things live here, and both have to be decided at the header, before a
+// payload byte is read or an element decoded:
+//
+//   - the §7.3 tag test for a field the schema BOUNDS. A header whose wire type
+//     -- or, for fixlen, whose subtype -- contradicts the declared type is a
+//     skipped field, and MESSAGE_SPEC §7.3 is explicit that against a schema
+//     bound this clause wins: "the subtype is therefore decided first and the
+//     schema bound applied only to a field that survives it". Declining here is
+//     what keeps the bound this scope declares in on_schema_bound off a field
+//     that is not the declared field's value -- the hook is asked one step
+//     later and is told only the id and the announced count/length, so it
+//     cannot make that distinction itself.
+//   - the receiver-side caps (capArm), for every id the schema leaves open.
+//
+// The bound ITSELF is not here: it is a number now, returned from
+// on_schema_bound, and applied by the corelib in the one place that knows what
+// a declared count/length means (CORELIB_PLAN §6.2.1).
 //
 // It costs a Field object per field, so it is emitted only when the tree
-// actually carries a bound: corelib-py builds one only for a visitor that
-// overrides this method.
+// actually needs one: corelib-py builds one only for a visitor that overrides
+// this method.
 func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 	type arm struct {
 		sc   *pyScope
@@ -528,7 +540,8 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 		}
 		// The receiver caps govern every id the SCHEMA does not bound -- an
 		// unbounded field of a bounded scope, and an unknown id alike -- so they
-		// go in the else of the schema-bound chain, and give every scope an arm.
+		// go in the else of the tag chain above, whose arms are exactly the
+		// schema-bounded ids, and give every scope an arm.
 		if cap := g.capArm(sc, len(body) > 0); len(cap) > 0 {
 			body = append(body, cap...)
 		}
@@ -540,11 +553,14 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 		return
 	}
 	f.line("    def on_field(self, fld: Field) -> bool:")
-	f.line(`        """Schema bounds that must be decided at the field HEADER.`)
+	f.line(`        """Accept or decline a field at its HEADER, before its value is read.`)
 	f.line("")
-	f.line("        A malformed message outranks a truncated one, so a length or count that")
-	f.line("        already breaches the schema is rejected here -- before the payload is")
-	f.line("        read -- and stays INVALID however little of the field follows.")
+	f.line("        A schema-bounded id is declined when the header's wire type -- or, for a")
+	f.line("        fixlen one, its subtype -- is not the one its declared type maps to. Such")
+	f.line("        a field is SKIPPED, exactly like an unknown id, so the bound")
+	f.line("        ``on_schema_bound`` declares must not reach it. Every other id is measured")
+	f.line("        against the receiver-side caps, which govern exactly what the schema")
+	f.line("        leaves open.")
 	f.line(`        """`)
 	f.line("        c = self._c")
 	first := true
@@ -558,43 +574,40 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 	f.blank()
 }
 
-// objFieldArm renders an object scope's header bounds: a bounded string/blob's
-// byte length, and a native array's element count.
+// objFieldArm renders an object scope's §7.3 tag arms: one per id the schema
+// bounds, declining a header that does not carry the tag the declared type maps
+// to. The bound itself is declared in on_schema_bound.
 func (g *gen) objFieldArm(sc *pyScope) []string {
 	var out []string
 	inner := true
 	for _, fld := range sc.fields {
-		var chk []string
+		var cond string
 		switch fld.Kind {
 		case ir.KindString, ir.KindBlob:
 			if !fld.HasMaxlen {
 				continue
 			}
-			chk = fixlenCheck(fld.Kind, fld.Maxlen, fld.Name)
+			cond = tagMismatch(fld.Kind, 0)
 		case ir.KindArray:
-			// An INTEGER array is bounded in on_array_begin, which carries the
-			// count as an argument and can state the element width besides. Only
-			// a float array is left here: it has no declared width to state, so
-			// the corelib does not call that hook for one.
-			if !isNativeArrayElem(fld.Elem) || !isIntArrayElem(fld.Elem) {
-				if !isNativeArrayElem(fld.Elem) || !fld.HasCount {
-					continue
-				}
-				chk = countCheck(fld.Elem, fld.Count, fld.Name)
-				break
+			// A wrapper array carries no count header of its own -- its length is
+			// its highest element index -- so it is bounded in on_sequence_begin
+			// and on_field, not through on_schema_bound.
+			if !isNativeArrayElem(fld.Elem) || !fld.HasCount {
+				continue
 			}
-			continue
+			cond = tagMismatch(ir.KindArray, fld.Elem)
 		default:
 			continue
 		}
 		out = append(out, fmt.Sprintf("%s fld.id == %d:", kw(&inner), fld.ID))
-		out = append(out, indent(chk)...)
+		out = append(out, indent(declineOnMismatch(cond, fld.Name))...)
 	}
 	return out
 }
 
-// arrFieldArm renders an array scope's header bounds: the §5.1 index bound, a
-// bounded string/blob element's byte length, and a native row's element count.
+// arrFieldArm renders an array scope's header work: the §5.1 index bound, then
+// the §7.3 tag test for an element the schema bounds. Every element of a scope
+// shares one declared type, so there is no id test in front of either.
 func (g *gen) arrFieldArm(sc *pyScope) []string {
 	var out []string
 	if sc.child < 0 {
@@ -605,58 +618,163 @@ func (g *gen) arrFieldArm(sc *pyScope) []string {
 	switch sc.elem {
 	case ir.KindString, ir.KindBlob:
 		if sc.elemMaxHas {
-			out = append(out, elemFixlenCheck(sc.elem, sc.elemMax, sc.loc)...)
+			out = append(out, declineOnMismatch(tagMismatch(sc.elem, 0), sc.loc)...)
 		}
 	case ir.KindArray:
-		// As above: an integer row is bounded in on_array_begin.
-		if isNativeArrayElem(sc.elemItems.Elem) && !isIntArrayElem(sc.elemItems.Elem) &&
-			sc.elemItems.HasCount {
-			out = append(out, countCheck(sc.elemItems.Elem, sc.elemItems.Count, sc.loc+" row")...)
+		if isNativeArrayElem(sc.elemItems.Elem) && sc.elemItems.HasCount {
+			out = append(out, declineOnMismatch(
+				tagMismatch(ir.KindArray, sc.elemItems.Elem), sc.loc+" row")...)
 		}
 	}
 	return out
 }
 
-// fixlenCheck bounds a string/blob payload by its declared byte length. The
-// subtype test is §7.3: a header whose fixlen kind contradicts the schema is a
-// SKIPPED field, not this field's length.
-func fixlenCheck(k ir.Kind, maxlen int64, loc string) []string {
-	kindWord := "string"
-	if k == ir.KindBlob {
-		kindWord = "blob"
+// tagMismatch renders the test that a header does NOT carry the tag its declared
+// type maps to -- MESSAGE_SPEC §7.3's wire type, plus the subtype for a fixlen
+// one. `elem` is read only for ir.KindArray.
+//
+// A string/blob needs no wire-type test in front of its subtype: `subtype` is
+// set only for a fixlen scalar and a fixlen ARRAY, and a fixlen array's subtype
+// is always fp32/fp64 (the corelib rejects any other at the header), so
+// `subtype == STRING` already says "a fixlen scalar carrying a string". A fixlen
+// ARRAY does need both, because fp32/fp64 name a scalar subtype too.
+func tagMismatch(kind, elem ir.Kind) string {
+	switch kind {
+	case ir.KindString, ir.KindBlob:
+		return "fld.subtype != " + pyFixlenSubtype(kind)
+	case ir.KindArray:
+		x := &ir.Field{Kind: ir.KindArray, Elem: elem}
+		cond := "fld.type != " + pyExpectedWire(x)
+		if sub := pyFixlenSubtype(elem); sub != "" {
+			cond += " or fld.subtype != " + sub
+		}
+		return cond
+	}
+	return ""
+}
+
+// declineOnMismatch renders the §7.3 skip: a header that contradicts the
+// declared type is not this field's value, so it is declined here rather than
+// measured against the schema bound one hook later.
+//
+// Declining is what an unknown id gets, which is what §7.3 asks for ("skipped,
+// exactly as a field with an unknown id is skipped"). It is also strictly less
+// work than letting the value through to a typed hook with no arm for it: the
+// payload is neither materialized nor validated (CORELIB_PLAN §6.7.2).
+func declineOnMismatch(cond, loc string) []string {
+	if cond == "" {
+		return nil
 	}
 	return []string{
-		fmt.Sprintf("if fld.subtype == %s and fld.size > %d:", pyFixlenSubtype(k), maxlen),
-		fmt.Sprintf("    raise SofaDecodeError(%q)",
-			fmt.Sprintf("%s: %s byte length above schema maxlen %d", loc, kindWord, maxlen)),
+		fmt.Sprintf("if %s:", cond),
+		fmt.Sprintf("    return False  # %s: header is not the declared type -- skip it", loc),
 	}
 }
 
-func elemFixlenCheck(k ir.Kind, maxlen int64, loc string) []string {
-	kindWord := "string"
-	if k == ir.KindBlob {
-		kindWord = "blob"
+// --- on_schema_bound --------------------------------------------------------
+
+// emitOnSchemaBound writes the hook that names the count/length the SCHEMA
+// declares for a field, or -1.
+//
+// The comparison itself is the corelib's: it is asked at the count/length
+// header, before a payload byte is read or any storage is written, and a wire
+// count/length above the answer is INVALID (MESSAGE_SPEC §7.1) while the
+// receiver-side cap stops applying to the field (CORELIB_PLAN §6.2.1). Both
+// halves matter here -- the second is what keeps a schema-bounded field
+// decodable under a tighter deployment cap, which §6.3 states as "never raised
+// for a field the schema bounds".
+//
+// The hook takes two INTEGERS, so overriding it costs no object per field: the
+// decoder builds a Field only for on_field. That is why the bound moved here
+// and the tag test did not -- the tag is not among the two integers.
+//
+// Only a field carrying a count or a length on the wire reaches it: a string or
+// blob with a `maxlen`, and a NATIVE array with a `count` (integer and float
+// alike). A wrapper array's length is its highest element index, with no count
+// header anywhere on the wire, so §5.1 bounds it in on_sequence_begin/on_field
+// instead.
+func (g *gen) emitOnSchemaBound(f *pyfile, scopes []*pyScope) {
+	type arm struct {
+		sc   *pyScope
+		body []string
 	}
-	return []string{
-		fmt.Sprintf("if fld.subtype == %s and fld.size > %d:", pyFixlenSubtype(k), maxlen),
-		fmt.Sprintf("    raise SofaDecodeError(%q)",
-			fmt.Sprintf("%s: %s element byte length above schema maxlen %d", loc, kindWord, maxlen)),
+	var arms []arm
+	for _, sc := range scopes {
+		var body []string
+		if sc.isArr {
+			body = arrSchemaBoundArm(sc)
+		} else {
+			body = objSchemaBoundArm(sc)
+		}
+		if len(body) > 0 {
+			arms = append(arms, arm{sc, body})
+		}
 	}
+	if len(arms) == 0 {
+		return
+	}
+	f.line("    def on_schema_bound(self, fid: int, n: int) -> int:")
+	f.line(`        """The count or length the SCHEMA declares for this field, or -1.`)
+	f.line("")
+	f.line("        Answered at the count/length header, before any payload byte is read.")
+	f.line("        A wire count/length above it is INVALID; a field that declares one is")
+	f.line("        no longer governed by the receiver-side caps, which bound only what the")
+	f.line("        schema left open.")
+	f.line(`        """`)
+	f.line("        c = self._c")
+	first := true
+	for _, a := range arms {
+		f.line("        %s c == %s:", kw(&first), a.sc.name)
+		for _, ln := range a.body {
+			f.line("            %s", ln)
+		}
+	}
+	f.line("        return -1")
+	f.blank()
 }
 
-// countCheck bounds a native array's wire element count by the schema capacity.
-// The wire-type test is §7.3, as in fixlenCheck.
-func countCheck(elem ir.Kind, count int64, loc string) []string {
-	x := &ir.Field{Kind: ir.KindArray, Elem: elem}
-	cond := "fld.type == " + pyExpectedWire(x)
-	if sub := pyFixlenSubtype(elem); sub != "" {
-		cond += " and fld.subtype == " + sub
+// objSchemaBoundArm renders an object scope's declarations, one per bounded id.
+func objSchemaBoundArm(sc *pyScope) []string {
+	var out []string
+	inner := true
+	for _, fld := range sc.fields {
+		var n int64
+		var why string
+		switch fld.Kind {
+		case ir.KindString, ir.KindBlob:
+			if !fld.HasMaxlen {
+				continue
+			}
+			n, why = fld.Maxlen, "maxlen"
+		case ir.KindArray:
+			if !isNativeArrayElem(fld.Elem) || !fld.HasCount {
+				continue
+			}
+			n, why = fld.Count, "count"
+		default:
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s fid == %d:", kw(&inner), fld.ID))
+		out = append(out, fmt.Sprintf("    return %d  # %s: schema %s", n, fld.Name, why))
 	}
-	return []string{
-		fmt.Sprintf("if %s and fld.count > %d:", cond, count),
-		fmt.Sprintf("    raise SofaDecodeError(%q)",
-			fmt.Sprintf("%s: array count above schema capacity %d", loc, count)),
+	return out
+}
+
+// arrSchemaBoundArm renders an array scope's declaration. Every element of a
+// scope shares one declared type, so the answer is the same for every index and
+// needs no test.
+func arrSchemaBoundArm(sc *pyScope) []string {
+	switch sc.elem {
+	case ir.KindString, ir.KindBlob:
+		if sc.elemMaxHas {
+			return []string{fmt.Sprintf("return %d  # %s: schema element maxlen", sc.elemMax, sc.loc)}
+		}
+	case ir.KindArray:
+		if isNativeArrayElem(sc.elemItems.Elem) && sc.elemItems.HasCount {
+			return []string{fmt.Sprintf("return %d  # %s row: schema count", sc.elemItems.Count, sc.loc)}
+		}
 	}
+	return nil
 }
 
 // --- small helpers ----------------------------------------------------------
@@ -696,16 +814,18 @@ func visitorNeeds(section string) (field, wire, fixlen bool) {
 // capArm renders the receiver-side decode limits (CORELIB_PLAN §6.2.1) for the
 // ids of one scope that the schema leaves unbounded.
 //
-// The caps are enforced HERE rather than handed to the Decoder, because
-// corelib-py applies a Decoder cap to every field indiscriminately -- including
-// the ones whose schema declares a count:/maxlen:, which §6.2.1 forbids
-// ("MUST NOT be applied to a field the schema already bounds") and §6.3 backs up
-// by forbidding SofaLimitError there. The removed pull API had
-// d.schema_bounded() to say so per field; the visitor surface has no equivalent,
-// so the split is made where the schema is actually known: in generated code.
+// The caps are enforced HERE rather than handed to the Decoder, because a
+// Decoder cap is applied to every field indiscriminately -- including the ones
+// whose schema declares a count:/maxlen:, which §6.2.1 forbids ("MUST NOT be
+// applied to a field the schema already bounds") and §6.3 backs up by forbidding
+// SofaLimitError there. The split is therefore made where the schema is known,
+// in generated code, and generator#388 is what moves it back once the corelib
+// can be told which ids are exempt.
 //
-// `bounded` says the scope already emitted schema bounds, so the caps become the
-// else of that chain and cannot fire on a field the schema governs.
+// `bounded` says the scope emitted a tag arm for every id the schema bounds, so
+// the caps become the else of that chain and cannot fire on a field the schema
+// governs -- which is also why an id whose bound is DECLARED must have an arm
+// here even when nothing else needs one.
 func (g *gen) capArm(sc *pyScope, bounded bool) []string {
 	if !g.limits.any() {
 		return nil
@@ -763,8 +883,10 @@ func isIntArrayElem(k ir.Kind) bool {
 // malformed verdict must outrank a truncated one. The declared width is
 // therefore STATED here and applied by the decoder at each element.
 //
-// The schema capacity is checked here too, on the count argument, for the same
-// reason and one hook earlier than it used to be.
+// The element WIDTH is all that is left here. The schema capacity is declared
+// in on_schema_bound, which the corelib asks one hook earlier -- so the count
+// verdict still lands before the first element, and it lands in the one place
+// that applies a declared bound (CORELIB_PLAN §6.2.1).
 func (g *gen) emitOnArrayBegin(f *pyfile, scopes []*pyScope) {
 	type arm struct {
 		sc   *pyScope
@@ -790,8 +912,8 @@ func (g *gen) emitOnArrayBegin(f *pyfile, scopes []*pyScope) {
 	f.line("")
 	f.line("        Returns the declared element width for the decoder to apply AT each")
 	f.line("        element, so a value outside it is rejected whether the array completes")
-	f.line("        or is cut short behind it. The schema capacity is checked on the count")
-	f.line("        the header carries, one step ahead of the first element.")
+	f.line("        or is cut short behind it. The schema capacity is not checked here:")
+	f.line("        ``on_schema_bound`` declares it one hook earlier.")
 	f.line("        \"\"\"")
 	f.line("        c = self._c")
 	first := true
@@ -813,7 +935,7 @@ func (g *gen) objArrayBeginArm(sc *pyScope) []string {
 		if fld.Kind != ir.KindArray || !isIntArrayElem(fld.Elem) {
 			continue
 		}
-		body := arrayBeginBody(fld.Elem, capOf(fld.HasCount, fld.Count), fld.Name)
+		body := arrayBeginBody(fld.Elem)
 		if len(body) == 0 {
 			continue
 		}
@@ -828,31 +950,22 @@ func (g *gen) arrArrayBeginArm(sc *pyScope) []string {
 	if sc.elem != ir.KindArray || !isIntArrayElem(sc.elemItems.Elem) {
 		return nil
 	}
-	return arrayBeginBody(sc.elemItems.Elem,
-		capOf(sc.elemItems.HasCount, sc.elemItems.Count), sc.loc+" row")
+	return arrayBeginBody(sc.elemItems.Elem)
 }
 
-// arrayBeginBody is the shared body: bound the count, then state the width.
-func arrayBeginBody(elem ir.Kind, cap int64, loc string) []string {
-	var out []string
-	if cap >= 0 {
-		out = append(out,
-			fmt.Sprintf("if count > %d:", cap),
-			fmt.Sprintf("    raise SofaDecodeError(%q)",
-				fmt.Sprintf("%s: array count above schema capacity %d", loc, cap)))
-	}
+// arrayBeginBody is the shared body: state the declared element width.
+//
+// Empty for u64/i64 (and enum/bitfield), whose declared width IS the value
+// domain -- there is nothing to narrow, so the base class's default answer will
+// do and no arm is worth a dispatch.
+func arrayBeginBody(elem ir.Kind) []string {
 	lo, hi, ok := ir.NarrowRange(elem)
 	switch {
 	case !ok:
-		// u64/i64 (and enum/bitfield): the declared width IS the value domain,
-		// so there is nothing to narrow and the default answer will do.
-		if len(out) > 0 {
-			out = append(out, "return None")
-		}
+		return nil
 	case lo < 0:
-		out = append(out, fmt.Sprintf("return (None, %d, %d)", lo, hi))
+		return []string{fmt.Sprintf("return (None, %d, %d)", lo, hi)}
 	default:
-		out = append(out, fmt.Sprintf("return (None, None, %d)", hi))
+		return []string{fmt.Sprintf("return (None, None, %d)", hi)}
 	}
-	return out
 }

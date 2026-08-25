@@ -72,14 +72,13 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 // that kind; otherwise the cap would be inert and no plumbing is emitted.
 //
 // The configured value is emitted AS CONFIGURED. It used to be raised to the
-// largest schema bound of its kind, because corelib-py applies its caps per
+// largest schema bound of its kind, because a Decoder applies its caps per
 // Decoder and would otherwise reject a schema-bounded field larger than the cap
 // -- which §6.2.1 forbids, since there the schema bound governs. That raise kept
 // such messages decodable by loosening the cap for the UNBOUNDED fields too,
-// which is exactly the protection §6.2.1 wants kept tight. Generated code now
-// declares each bounded field with d.schema_bounded() instead, so the cap binds
-// only what the schema left open and can stay at the number the deployment
-// chose (generator#325).
+// which is exactly the protection §6.2.1 wants kept tight. Generated code
+// applies the caps itself instead, to exactly the ids the schema leaves open, so
+// the cap can stay at the number the deployment chose (generator#325).
 type limitSet struct {
 	arrayCount, stringLen, blobLen int64
 	arrayHas, stringHas, blobHas   bool
@@ -160,11 +159,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("# Receiver-side decode limits, baked from the sofabgen config")
 		f.line("# (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
 		f.line("# only fields the schema left unbounded -- a cap must never bind a field")
-		f.line("# the schema already bounds -- so they are applied in on_field,")
-		f.line("# in the else of the schema-bound chain, rather than handed to the Decoder,")
-		f.line("# which knows no schema and would cap every field alike. Exceeding one")
-		f.line("# raises sofab.SofaLimitError at the count/length header, before any")
-		f.line("# allocation.")
+		f.line("# the schema already bounds -- so they are applied in on_field, in the else")
+		f.line("# of the chain whose arms are the schema-bounded ids, rather than handed to")
+		f.line("# the Decoder, which knows no schema and would cap every field alike.")
+		f.line("# Exceeding one raises sofab.SofaLimitError at the count/length header,")
+		f.line("# before any allocation.")
 		if g.limits.arrayHas {
 			f.line("MAX_DYN_ARRAY_COUNT = %d", g.limits.arrayCount)
 		}
