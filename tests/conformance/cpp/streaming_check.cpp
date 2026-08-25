@@ -28,6 +28,8 @@
 #include <cstdio>
 #include <cstring>
 #include <span>
+#include <string_view>
+#include <type_traits>
 #include <vector>
 
 static std::vector<std::uint8_t> g_sink;
@@ -59,6 +61,35 @@ static void fillMessage(MSG_TYPE &m)
     m.somestruct.nestedint = 7;
     m.somestruct.nestedstring = "nested-string-straddles";               // maxlen 32
     m.somestruct.nestedstruct.deepint = -99;
+
+    // The array kinds whose decode destination is NOT the wire element type, and
+    // the wrapper-sequence kinds. Chunked feeding is the only thing that tells
+    // these apart from the native arrays above: a resumed field is delivered once
+    // per chunk that carries part of it, into the destination it was handed, so
+    // anything decoded through a per-delivery temporary keeps just the last
+    // chunk's elements and silently drops the rest. Every array here carries a
+    // schema default, so its size is already non-zero and the loops below only
+    // have to give each element a value the default does not have.
+    using EnumElem = std::remove_cvref_t<decltype(m.someenumarray[0])>;
+    for (std::size_t i = 0; i < m.someenumarray.size(); ++i)
+    {
+        m.someenumarray[i] = static_cast<EnumElem>(i % 3);
+    }
+    for (std::size_t i = 0; i < m.someboolarray.size(); ++i)
+    {
+        m.someboolarray[i] = (i % 2 == 0);
+    }
+    for (std::size_t i = 0; i < m.somestringarray.size(); ++i)
+    {
+        // maxlen 16 per element, and long enough to straddle a small chunk.
+        m.somestringarray[i].assign(std::string_view{"straddle-0123456"}.substr(0, 10 + i % 6));
+    }
+    for (std::size_t i = 0; i < m.someblobarray.size(); ++i)
+    {
+        // assign(initializer_list) is spelled the same on std::vector<uint8_t>
+        // and on sofab::FixedBytes<N>. maxlen 8 per element.
+        m.someblobarray[i].assign({std::uint8_t(i + 1), 0x7f, 0x00, 0xff});
+    }
 }
 
 // Comparing the re-encoded bytes rather than the fields keeps this independent

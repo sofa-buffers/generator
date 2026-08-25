@@ -875,7 +875,47 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    `NewDecoder(io.Reader)` went with it (corelib-go#130): the reader-driven entry
    point is a wrapper over the same `Feed`, not a surface of its own.
 4. **Child-visitor** (pure C++ `corelib-cpp`). Nested objects decode via
-   `is.read(child)` (a child `IStreamMessage`); scalars via `is.read(member)`.
+   `sofab::read(is, child)` (a child `IStreamMessage`); scalars via
+   `sofab::read(is, member)`.
+
+   **The call goes through the `sofab::` helper layer, not through the stream's
+   own members** (generator#404 / corelib-cpp#125). CORELIB_PLAN §6.6 forbids the
+   codec growing a caller's destination from a wire number — "it moved the
+   allocator call one type away, where a source-level audit no longer sees it" —
+   so `IStreamImpl::read` / `readString` / `readBlob` / `readArray` now fill the
+   room the destination already holds and refuse one too short with
+   `InvalidArgument` (§6.3's third tier). The sizing moved into free functions
+   beside them, `sofab::read(is, dst)` and friends, which size a growable
+   destination for the announced value — clamped to what the bytes in hand could
+   fill, and only once the tag (§7.3), the schema bound (§7.1) and the receiver
+   cap (§6.2.1) admit the field, so neither a mistyped occurrence nor a hostile
+   count reaches an allocator. **Generated code calls the free functions**; for a
+   heap-free destination the sizing compiles away, so `allow_dynamic: false` pays
+   nothing for going through them. The two-argument `is.read(dst, maxlen)`
+   raw-blob copy is not part of this: it has no growable destination and keeps its
+   member form.
+
+   **The decoder is also resumable, which decides what a decode destination may
+   be.** A field split across `feed` chunks is delivered once per chunk that
+   carries part of it, with the same id, and each delivery continues where the
+   last stopped — into the destination it was handed. So a generated arm must not
+   reset its destination inside `deserialize` (that would throw away what earlier
+   chunks delivered; `is.progress() == 0` is the guard if one is ever needed), and
+   must not read into a **temporary** that dies with the call: a fresh temporary
+   per delivery keeps only the last chunk's elements. That is what retired the two
+   arms which used to convert through one — the same two the `c-cpp` leg had
+   already had to change for its deferred decoder, so both C++ legs now emit the
+   same shape:
+
+   - a **boolean array**'s member element type is the wire's `std::uint8_t` on
+     every `cpp` profile, so the member is a native destination like any other.
+     `std::vector<bool>` could never have been one: it is the bit-packed
+     specialisation and has no `data()`;
+   - an **enum array**'s member keeps its scoped enum element (the generated API
+     and the JSON harness stay value-typed) and binds through
+     `sofabgen::RawArray`, which reinterprets the **elements** — never the
+     container — and forwards `resize()`/`size()`, so `readArray` keeps ownership
+     of the tag check, the bound check and the reset, in that order.
 5. **Descriptor-table callback** (C `corelib-c-cpp`). A static descriptor table
    (id → offset → wire type, generated per object) drives
    `sofab_object_encode`/`decode`; a field callback fills members by id. Member
@@ -1526,7 +1566,12 @@ by family (generator#174, Crucible F-0020):
   *before* binding it — sizing a string or blob, resetting an array, emptying a
   wrapper sequence — that preparation moved into the read too
   (`readString`/`readBlob`/`readArray`/`readSequence`), because a check is only
-  a check if it precedes the side effect it protects. This is the "seam"
+  a check if it precedes the side effect it protects. §6.6 later moved the
+  **sizing** half back out of the codec, into the `sofab::` helper the generated
+  arm actually calls (§9.3 family 4), and the ordering survived the move intact:
+  the helper consults the tag, the schema bound and the receiver cap itself before
+  it sizes anything, so a mistyped or over-long occurrence still reaches no
+  allocator and leaves the destination as it was. This is the "seam"
   (`docs/models/type-reconciliation.md`); it replaced a generated guard per field
   arm, whose earlier failure mode in C++ was *silent*: `read<T>` zig-zags on
   `T`'s signedness rather than the wire type, so a `Signed` header on a `u8`
@@ -2468,7 +2513,7 @@ above was found by that check on its first run.
 | Lang | Corelib(s) | Decode model | Notes |
 |---|---|---|---|
 | **C** | `corelib-c-cpp` | descriptor-table callback | `object.h` struct + static descriptor; `symbol_prefix`; auto capability + API-version guards; analytic `MAX_SIZE`; project mode also emits `Makefile` + `CMakeLists.txt`, `run.sh`, and a devcontainer. |
-| **C++** | `corelib-cpp` (default) / `corelib-c-cpp` (`corelib: c-cpp`) | child-visitor / flat-visitor wrapper | header-only `OStreamMessage`+`IStreamMessage`; `c-cpp` decode pre-sizes varlen fields + links the C sources. |
+| **C++** | `corelib-cpp` (default) / `corelib-c-cpp` (`corelib: c-cpp`) | child-visitor / flat-visitor wrapper | header-only `OStreamMessage`+`IStreamMessage`; decode on the `cpp` leg goes through the `sofab::read`/`readString`/`readBlob`/`readArray` **helper layer**, which sizes the destination the codec then fills (§6.6, §9.3 family 4); a boolean array's element is `std::uint8_t` and an enum array binds through `sofabgen::RawArray` on **both** legs, because neither a deferred nor a resumable decode may land in a temporary; `c-cpp` decode pre-sizes varlen fields + links the C sources. |
 | **Rust** | `corelib-rs` (default) / `corelib-rs-no-std` (`corelib: rs-no-std`) | flat-visitor location-stack | std (throughput, no features) vs no_std (feature-gated, footprint); feature-clean codegen. Field storage is a SEPARATE axis from the environment: `allow_dynamic` selects `String`/`Vec` or fixed-capacity `heapless` on **either** corelib, so a std crate can hold its bounded fields inline while keeping serde, the heap decode stack and the ordinary std prelude. String/blob chunk reassembly is the corelib's — `sofab::PayloadAcc`, and `PayloadAcc<MAX_SIZE>` on no_std where the storage is the caller's and an over-long split payload is `Error::BufferFull` (generator#345). |
 | **Go** | `corelib-go` | push child-visitor | struct implements `sofab.Visitor`; exported `Serialize(*sofab.Encoder)` + `EncodeTo(io.Writer)` — generated code owns every encode buffer (§5.1): `Encode` allocates one exactly-sized `<Msg>MaxSize` buffer (`NewEncoderBuffer`) for a bounded schema and drains a fixed 512-byte scratch into a caller `[]byte` (`NewEncoderSink`) for an unbounded one, and `EncodeTo` drains that same scratch into the writer, so a message never exists as one contiguous `[]byte`; ONE decode surface (§5.3.1) since corelib-go#130 retired the pull `Decoder` — `Decode<Msg>` via `sofab.AcceptBytes` for bytes in hand and `Decode<Msg>From(io.Reader)` via `sofab.NewDecoder(m).FeedFrom(r, scratch)` for a byte stream are both one resumable `Feed`, so the chunked and one-shot paths cannot drift (memory bounded by the 4 KiB scratch plus the largest single field, §5.6); **no generated `feed()`** yet, though the corelib now has the push decoder one needs; the codec builds NO aggregate (§6.6.3), so a string/blob arrives in pieces (`String(id, total, offset, chunk)`) and is assembled by a `sofab.PayloadAcc` the object carries — one per object, since a fixlen payload is contiguous and two fields are never in flight at once — while a native array arrives as `ArrayBegin` / one `Array*(id, index, v)` per element / `ArrayEnd`, with the destination opened at the header (a repeated id REPLACES, §7.4) and each element width-checked as it lands (§5.2: an over-width element behind a truncation stays INVALID); every generated destination COPIES, so a decoded message owns its bytes and outlives the input buffer; the object embeds `sofab.StringCheck`, so `WithStrictUTF8` reaches the destination's UTF-8 check (§6.4) rather than only the build tag; `BeginSequence` descends into nested objects / array collectors; canonical-JSON tags. |
 | **Python** | `corelib-py` | pull-parser | dataclasses + `serialize`/`deserialize` (public since generator#239; `deserialize(Decoder(reader))` IS the chunk-capable path — the corelib pulls from any reader); generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `MAX_SIZE` `bytearray` (`Encoder.over_buffer(buf, 0)`) for a bounded schema and drains a fixed 512-byte scratch into a caller list (`Encoder.over_buffer(scratch, 0, out.append)`) for an unbounded one, so `Encoder()`/`getvalue()` — the corelib installing and growing its own storage — is gone from generated code; every decoded field COPIES, so a decoded message outlives the input buffer. |

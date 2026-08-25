@@ -291,15 +291,12 @@ func (g *gen) header(m *ir.Message) []byte {
 	return f.bytes()
 }
 
-// needsRawArray reports whether this header decodes an ENUM array through the
-// corelib-c-cpp wrapper, which is the one case that needs the sofabgen::RawArray
-// element view: the member's element type is the scoped enum (so JSON and the
-// generated API stay value-typed) while the wire element is its backing integer.
-// Every other native array's member element already IS the wire element type.
+// needsRawArray reports whether this header decodes an ENUM array, the one case
+// that needs the sofabgen::RawArray element view: the member's element type is
+// the scoped enum (so JSON and the generated API stay value-typed) while the
+// wire element is its backing integer. Every other native array's member element
+// already IS the wire element type.
 func (g *gen) needsRawArray(m *ir.Message) bool {
-	if !g.clib {
-		return false
-	}
 	has := func(fields []*ir.Field) bool {
 		for _, fld := range fields {
 			if fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum {
@@ -321,14 +318,17 @@ func (g *gen) needsRawArray(m *ir.Message) bool {
 }
 
 // emitRawArrayHelper writes sofabgen::RawArray, the element-level view an enum
-// array's decode destination takes on the corelib-c-cpp leg.
+// array's decode destination takes on both C++ legs.
 //
-// corelib-c-cpp is a DEFERRED decoder: is.read()/readArray() record the
-// destination's ADDRESS and the C runtime writes the bytes after the field
-// callback returns. So the destination must be the member itself; a temporary of
-// the wire element type -- the shape the synchronous corelib-cpp leg uses -- would
-// dangle. But the member's element type is the scoped enum, which the corelib's
-// span read does not know how to tag.
+// Neither leg may read into a temporary of the wire element type. corelib-c-cpp
+// is a DEFERRED decoder: is.read()/readArray() record the destination's ADDRESS
+// and the C runtime writes the bytes after the field callback returns, so a
+// temporary would dangle. corelib-cpp is synchronous but RESUMES: a field split
+// across feed chunks is delivered once per chunk that carries part of it, into
+// the destination it was handed, so a fresh temporary per delivery keeps only the
+// last chunk's elements. Either way the destination must be the member itself.
+// But the member's element type is the scoped enum, which the corelib's span read
+// does not know how to tag.
 //
 // RawArray closes exactly that gap and nothing else: it reinterprets the
 // ELEMENTS (a std::vector<Color>'s bytes ARE an array of Color's backing type),
@@ -354,8 +354,10 @@ func (g *gen) emitRawArrayHelper(f *hfile, m *ir.Message) {
 	f.line(" * An enum array's member elements are the scoped enum; the wire elements are")
 	f.line(" * the enum's backing integer. The two have the same size and the same object")
 	f.line(" * representation, so the member's own storage IS a valid destination -- which")
-	f.line(" * matters because corelib-c-cpp binds a destination by ADDRESS and fills it")
-	f.line(" * after the field callback returns, so a temporary would dangle.")
+	f.line(" * matters because the decode has to land there and not in a temporary:")
+	f.line(" * corelib-c-cpp binds a destination by ADDRESS and fills it after the field")
+	f.line(" * callback returns, and corelib-cpp resumes a field split across feed chunks")
+	f.line(" * into the destination it was handed, once per chunk that carries part of it.")
 	f.line(" *")
 	f.line(" * The view forwards `resize()`/`size()` to the member and exposes `data()`")
 	f.line(" * as the wire element type, which is all `IStreamImpl::readArray` needs: it")
@@ -1200,16 +1202,10 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		f.line("%s{ %s %s; %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
 			ind, g.nativeTemp(enumBacking(ref.Target), count), tv, tv, val, iv, iv, val, iv, tv, iv, enumBacking(ref.Target), val, iv, idExpr, tv)
 	case ir.KindBool:
-		if g.clib {
-			// On the c-cpp leg the element already IS the wire's std::uint8_t (see
-			// cppArrayElem), so there is nothing to convert: the member is written
-			// directly, exactly like a numeric array. The bytes are the same ones
-			// the bool->0/1 temporary produced.
-			f.line("%s(void)os.write(%s, %s);", ind, idExpr, val)
-		} else {
-			f.line("%s{ std::vector<std::uint8_t> %s(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = %s[%s] ? 1 : 0; (void)os.write(%s, %s); }",
-				ind, tv, val, iv, iv, val, iv, tv, iv, val, iv, idExpr, tv)
-		}
+		// The element already IS the wire's std::uint8_t (see cppArrayElem), so
+		// there is nothing to convert: the member is written directly, exactly
+		// like a numeric array.
+		f.line("%s(void)os.write(%s, %s);", ind, idExpr, val)
 	case ir.KindBlob:
 		// A blob element is a leaf: in the array's INTERIOR it is omitted when it
 		// equals the element default (empty), leaving an id gap the decoder
@@ -1298,9 +1294,9 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			// field's maxlen — the maxlen reject (MESSAGE_SPEC S7.1: INVALID, never a
 			// truncating read) therefore hangs off a successful read. Checking _size
 			// first would resurrect generator#224/#229 on the deliver path.
-			f.line("            is.readString(%s, %d);", acc, fld.Maxlen)
+			f.line("            sofab::readString(is, %s, %d);", acc, fld.Maxlen)
 		} else {
-			f.line("            is.readString(%s);", acc)
+			f.line("            sofab::readString(is, %s);", acc)
 		}
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindBool, ir.KindFP32, ir.KindFP64, ir.KindStruct, ir.KindUnion:
@@ -1327,8 +1323,10 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 				cond = fmt.Sprintf("_v < %d || _v > %d", lo, hi)
 			}
 			f.line("            { %s _v; if (is.read(_v)) { if (%s) { is.invalidate(); return; } %s = static_cast<%s>(_v); } }", tmp, cond, acc, g.cppType(fld))
-		} else {
+		} else if g.clib {
 			f.line("            is.read(%s);", acc)
+		} else {
+			f.line("            sofab::read(is, %s);", acc)
 		}
 	case ir.KindBlob:
 		// corelib-c-cpp binds blobs with the BLOB tag via its read(void*, size_t)
@@ -1347,9 +1345,9 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			// readBlob declares Fix::Blob and reads straight into the byte container
 			// (no std::string round-trip); the maxlen reject hangs off the successful
 			// read for the same S7.3 reason as the string case above.
-			f.line("            is.readBlob(%s, %d);", acc, fld.Maxlen)
+			f.line("            sofab::readBlob(is, %s, %d);", acc, fld.Maxlen)
 		} else {
-			f.line("            is.readBlob(%s);", acc)
+			f.line("            sofab::readBlob(is, %s);", acc)
 		}
 	case ir.KindEnum:
 		// corelib-c-cpp's read binds a target by address and fills it after the
@@ -1465,12 +1463,11 @@ func (g *gen) nativeArrayRead(f *hfile, ind, target string, elem ir.Kind, ref *i
 	// The element-width bound rides along on this leg (generator#279): the
 	// declared width is a validity bound (§1/§7.1) and readArray enforces it, but
 	// only once armed -- unarmed it runs the unbounded decode, which masks.
-	f.line("%sis.readArray(%s%s);", ind, target, g.cppArrayArgs(count, hasCount, g.cppElemBound(elem, ref)))
+	f.line("%ssofab::readArray(is, %s%s);", ind, target, g.cppArrayArgs(count, hasCount, g.cppElemBound(elem, ref)))
 }
 
 func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, elemMaxHas bool, elemMax int64, depth int) {
 	tv := fmt.Sprintf("_t%d", depth)
-	iv := fmt.Sprintf("_i%d", depth)
 	rv := fmt.Sprintf("_r%d", depth)
 	// Fixed-count wrapper array: an element id >= N is INVALID (MESSAGE_SPEC
 	// S5.1/S7). cap is that bound N handed to the collector; -1 == dynamic (no
@@ -1486,44 +1483,40 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		g.nativeArrayRead(f, ind, target, elem, ref, count, hasCount, cap, depth)
 	case ir.KindEnum:
 		bk := enumBacking(ref.Target)
-		et := g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax)
+		// Both corelibs bind the MEMBER, through sofabgen::RawArray -- the member's
+		// element type is the scoped enum, the wire element is its backing integer,
+		// and the two have the same object representation. Neither leg may read
+		// into a temporary of the wire element type: corelib-c-cpp is a DEFERRED
+		// decoder that records the destination's ADDRESS and fills it after this
+		// callback returns, so the temporary would dangle, and corelib-cpp RESUMES
+		// a field split across feed chunks into the destination it was given --
+		// delivering it once per chunk that carries part of it -- so a fresh
+		// temporary per delivery drops every element the earlier chunks brought.
+		// It also allocated, on a profile whose whole point is that it does not.
+		//
+		// What RawArray must NOT do is reinterpret the CONTAINER: casting a
+		// std::vector<E> to a std::array<int8, N> made the vector's own
+		// begin/end/capacity words the first N elements, so wire bytes overwrote
+		// the begin pointer and the destructor freed a pointer assembled from the
+		// message. It reinterprets the ELEMENTS instead -- exactly what the scalar
+		// enum arm does -- and forwards resize/size, so readArray keeps ownership
+		// of the tag/bound/reset order and the bytes land in the member's own
+		// storage.
 		if g.clib {
-			// corelib-c-cpp's decoder is DEFERRED: readArray records the
-			// destination's ADDRESS and the C runtime writes the element bytes after
-			// this callback has returned, so the destination has to be the member
-			// itself -- a temporary would dangle, which is why this arm cannot take
-			// the corelib-cpp shape below. What it must NOT do is reinterpret the
-			// CONTAINER: casting a std::vector<E> to a std::array<int8, N> made the
-			// vector's own begin/end/capacity words the first N elements, so wire
-			// bytes overwrote the begin pointer and the destructor freed a pointer
-			// assembled from the message. RawArray reinterprets the ELEMENTS
-			// instead -- exactly what the scalar enum arm does -- and forwards
-			// resize/size, so readArray keeps ownership of the tag/bound/reset
-			// order and the bytes land in the member's own storage.
 			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; is.readArray(%s, _count, %d); }",
 				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, tv, cap)
 		} else {
-			// corelib-cpp decodes synchronously, so the temp is safe here: it carries
-			// the read (and with it the tag/bound/reset decision) and the member is
-			// only resized and filled once that succeeded, so a §7.3-skipped
-			// occurrence leaves it untouched. The member is sized to the TEMP's
-			// length, which is the wire count -- the array's length (§3) -- and never
-			// to the schema `count`.
-			f.line("%s{ std::vector<%s> %s; if (is.readArray(%s%s)) { %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = static_cast<%s>(%s[%s]); } }",
-				ind, bk, tv, tv, g.cppArrayBounds(count, hasCount), target, tv, iv, iv, tv, iv, target, iv, et, tv, iv)
+			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; sofab::readArray(is, %s%s); }",
+				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, tv,
+				g.cppArrayArgs(count, hasCount, g.cppElemBound(elem, ref)))
 		}
 	case ir.KindBool:
-		if g.clib {
-			// On the c-cpp leg the element already IS the wire's std::uint8_t
-			// (cppArrayElem), so the member is a native destination like any other
-			// and takes the numeric arm verbatim -- no conversion, and above all no
-			// reinterpret_cast of the container, which is what corrupted a
-			// std::vector<bool>'s control words under allow_dynamic.
-			g.nativeArrayRead(f, ind, target, elem, ref, count, hasCount, cap, depth)
-		} else {
-			f.line("%s{ std::vector<std::uint8_t> %s; if (is.readArray(%s%s)) { %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = %s[%s] != 0; } }",
-				ind, tv, tv, g.cppArrayBounds(count, hasCount), target, tv, iv, iv, tv, iv, target, iv, tv, iv)
-		}
+		// The element already IS the wire's std::uint8_t (cppArrayElem), so the
+		// member is a native destination like any other and takes the numeric arm
+		// verbatim -- no conversion, no temporary, and above all no
+		// reinterpret_cast of the container, which is what corrupted a
+		// std::vector<bool>'s control words under allow_dynamic.
+		g.nativeArrayRead(f, ind, target, elem, ref, count, hasCount, cap, depth)
 	case ir.KindString:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
 		// The leaf collectors stay in the corelib: they already PLACE each element
@@ -1547,7 +1540,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		} else {
 			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::StringSeq %s{%s, %d, %d};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax)),
-				fmt.Sprintf("is.read(%s)", rv))
+				fmt.Sprintf("sofab::read(is, %s)", rv))
 		}
 	case ir.KindBlob:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
@@ -1564,7 +1557,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		} else {
 			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::BlobSeq %s{%s, %d, %d};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax)),
-				fmt.Sprintf("is.read(%s)", rv))
+				fmt.Sprintf("sofab::read(is, %s)", rv))
 		}
 	case ir.KindStruct, ir.KindUnion:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
@@ -1656,7 +1649,7 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 		}
 		f.line("%sstatic %s %s; is.readSequence(%s, %s);", in2, sv, rv, rv, target)
 	} else {
-		f.line("%s%s %s; %s.out = &%s; is.read(%s);", in2, sv, rv, rv, target, rv)
+		f.line("%s%s %s; %s.out = &%s; sofab::read(is, %s);", in2, sv, rv, rv, target, rv)
 	}
 	f.line("%s}", ind)
 }
@@ -1700,7 +1693,7 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 		return
 	}
 	g.emitSeqRead(f, ind, fmt.Sprintf("sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d;", container, rv, rv, target, rv, cap),
-		fmt.Sprintf("is.read(%s)", rv))
+		fmt.Sprintf("sofab::read(is, %s)", rv))
 }
 
 // emitSeqRead writes one wrapper-array read: the collector declaration and the
