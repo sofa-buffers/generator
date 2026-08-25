@@ -245,6 +245,14 @@ class _ScalarsVisitor extends sofab.VisitorBase {
     }
   }
   @override
+  Uint8List? onBytesDest(int id, int subtype, int total) {
+    return null;
+  }
+  @override
+  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {
+    return null;
+  }
+  @override
   sofab.MessageVisitor? onSequenceStart(int id) {
     return null;
   }

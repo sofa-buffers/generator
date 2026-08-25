@@ -463,10 +463,12 @@ messages:
       b: { id: 1, type: array, items: { type: string, count: 100 } }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/wrap.yaml" --out "$WORK/wraplim" )
-grep -q 'rcap: maxDynWrapperIndex' "$WORK/wraplim/lib/message.dart" \
-    || { echo "FAIL: the wrapper index cap must travel unraised, as its own constant"; exit 1; }
-grep -q 'const int maxDynWrapperIndex = 4;' "$WORK/wraplim/lib/message.dart" \
-    || { echo "FAIL: the wrapper index cap must be the CONFIGURED 4, not the raised 100"; exit 1; }
+grep -q 'rcap: maxDynArrayCount' "$WORK/wraplim/lib/message.dart" \
+    || { echo "FAIL: the wrapper index cap must reach the collector"; exit 1; }
+grep -q 'const int maxDynArrayCount = 4;' "$WORK/wraplim/lib/message.dart" \
+    || { echo "FAIL: the cap must be the CONFIGURED 4, never raised to a sibling's count: 100"; exit 1; }
+grep -q 'maxDynWrapperIndex' "$WORK/wraplim/lib/message.dart" \
+    && { echo "FAIL: the second, unraised constant is gone with the raise"; exit 1; }
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/wraplim/pubspec.yaml"
 ( cd "$WORK/wraplim" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
 build "$WORK/wrap.yaml" "$WORK/wrapfree"
@@ -482,6 +484,61 @@ fi
 "$WORK/wrapfree/harness" decode wrap < "$WORK/wrapover.bin" >/dev/null \
     || { echo "FAIL: default-cap build must decode index 5 (the breach is policy, not INVALID)"; exit 1; }
 echo "==> wrapper index cap OK"
+
+# CORELIB_PLAN S6.2.1, the two rules a per-decode DecoderLimits could not honour.
+# Both are end-to-end: the generator's unit tests can only see emitted substrings.
+echo "==> a cap must not reach a schema-bounded field, nor a skipped one (S6.2.1)"
+cat > "$WORK/excl.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      a: { id: 0, type: array, items: { type: u64 } }
+      b: { id: 1, type: array, items: { type: i32, count: 100000 } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/excl.yaml" --out "$WORK/excl" )
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/excl/pubspec.yaml"
+( cd "$WORK/excl" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+# b (id 1, signed array, count 6) is bounded by its own `count: 100000`, so the
+# cap of 4 must not touch it. Under the raise this decoded only because the cap
+# had been lifted to 100000 for EVERY field, `a` included.
+printf '\014\006\002\002\002\002\002\002' > "$WORK/bounded6.bin"
+"$WORK/excl/harness" decode dyn < "$WORK/bounded6.bin" >/dev/null \
+    || { echo "FAIL: a schema-bounded array must not be judged against the receiver cap"; exit 1; }
+# ...while the unbounded sibling at the same cap still rejects at 6.
+printf '\003\006\001\001\001\001\001\001' > "$WORK/unbounded6.bin"
+if "$WORK/excl/harness" decode dyn < "$WORK/unbounded6.bin" >/dev/null 2>&1; then
+    echo "FAIL: the unbounded sibling must still be capped at 4"; exit 1
+fi
+# A field the visitor SKIPS is never capped (S6.2.1: it allocates nothing). id 9
+# is declared nowhere, so an over-cap array there must stay COMPLETE -- and with
+# the generated onArrayDest declining it, nothing is even allocated for it.
+printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
+"$WORK/dynlim/harness" decode dyn < "$WORK/skipcap.bin" >/dev/null \
+    || { echo "FAIL: an over-cap array at an UNDECLARED id must be skipped, not capped"; exit 1; }
+echo "==> cap exclusivity OK (bounded sibling decodes, skipped field decodes)"
+
+# A native matrix ROW's own element count. The outer `count:` bounds the row ID;
+# the row's count header was bounded by nothing generated code passed on -- it
+# rode on the decoder-wide cap, and with that gone the row bound has to travel to
+# the collector as rowCount/rowCap.
+echo "==> a matrix row's element count is bounded (MESSAGE_SPEC S7.1)"
+cat > "$WORK/mat.yaml" <<'YAML'
+version: 1
+messages:
+  mat:
+    payload:
+      m: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 2 } } }
+YAML
+build "$WORK/mat.yaml" "$WORK/mat"
+printf '\006\003\002\001\002\007' > "$WORK/row_ok.bin"       # row 0: 2 elements == count 2
+printf '\006\003\003\001\002\003\007' > "$WORK/row_over.bin" # row 0: 3 elements > count 2
+"$WORK/mat/harness" decode mat < "$WORK/row_ok.bin" >/dev/null \
+    || { echo "FAIL: an at-count matrix row must decode"; exit 1; }
+if "$WORK/mat/harness" decode mat < "$WORK/row_over.bin" >/dev/null 2>&1; then
+    echo "FAIL: a matrix row over its schema count must be INVALID"; exit 1
+fi
+echo "==> matrix row count OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/dart/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/harness"
