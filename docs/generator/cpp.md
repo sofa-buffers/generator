@@ -44,6 +44,12 @@ either way — this is never a format or API decision.
 Arrays and blobs follow the same split: `std::vector<T>` / `sofab::InlineVector<T, N>`
 and `std::string` / `sofab::FixedBytes<N>`.
 
+**A `boolean` array's element `T` is `std::uint8_t`, not `bool`**, in both storage
+modes. The member itself is the decode destination, and `std::vector<bool>` — the
+bit-packed specialisation, with no `data()` — cannot be one. It still reads and
+writes as a truth value (`0` is false, anything else true) and still appears as
+`true`/`false` in JSON; only the C++ element type differs.
+
 **The default depends on `corelib`** — `false` for `c-cpp` (an embedded target
 has no heap to spare), `true` for `cpp` (a server target would rather allocate
 what a message carries than its declared worst case).

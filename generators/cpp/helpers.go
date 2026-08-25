@@ -276,25 +276,22 @@ func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, e
 		}
 		return "std::vector<std::uint8_t>"
 	case ir.KindBool:
-		// On the c-cpp leg a boolean array's element is the wire's own
-		// std::uint8_t, not bool. corelib-c-cpp's decoder is DEFERRED: read()
-		// records the destination's ADDRESS and the C runtime writes the element
-		// bytes after the field callback has returned, so the destination must be
-		// the member itself and must have one addressable byte per element.
-		// std::vector<bool> is the bit-packed specialisation -- no data(), no byte
-		// per element -- so it cannot be a decode destination at all, and the
-		// std::array<bool, N> leg was only ever reached through a
-		// reinterpret_cast. One element type for both c-cpp storage modes keeps
-		// the two legs' generated API identical, which is the profile promise.
-		// corelib-cpp decodes synchronously through a temporary, so it keeps bool.
+		// A boolean array's element is the wire's own std::uint8_t, not bool, on
+		// BOTH C++ corelibs and in both storage modes -- one element type, so the
+		// four cpp profiles share one generated API.
 		//
-		// This is a RUNTIME property, not a storage one: it follows the corelib,
-		// not allow_dynamic. corelib-cpp keeps `bool` in both storage modes, so
-		// InlineVector<bool, N> is a fine destination there.
-		if g.clib {
-			return "std::uint8_t"
-		}
-		return "bool"
+		// The reason is that the member itself has to be the decode destination,
+		// with one addressable byte per element. std::vector<bool> is the
+		// bit-packed specialisation -- no data(), no byte per element -- so it
+		// cannot be one at all, and each corelib needs it for its own reason:
+		// corelib-c-cpp is a DEFERRED decoder that records the destination's
+		// ADDRESS and fills it after the field callback returns, and corelib-cpp
+		// RESUMES a field split across feed chunks into the destination it was
+		// given, delivering it once per chunk that carries part of it. Both make a
+		// temporary of the wire element type wrong: the c-cpp one dangles, and the
+		// corelib-cpp one is empty again on the next chunk, so every element an
+		// earlier chunk delivered is lost.
+		return "std::uint8_t"
 	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
 		return g.typeName(ref.Key)
 	case ir.KindBitfield:

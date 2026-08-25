@@ -180,22 +180,22 @@ struct Scalars : sofab::Message {
             { std::uint64_t _v; if (is.read(_v)) { if (_v > 255) { is.invalidate(); return; } u8max = static_cast<std::uint8_t>(_v); } }
             break;
         case 2:
-            is.read(u64max);
+            sofab::read(is, u64max);
             break;
         case 3:
             { std::int64_t _v; if (is.read(_v)) { if (_v < -128 || _v > 127) { is.invalidate(); return; } i8min = static_cast<std::int8_t>(_v); } }
             break;
         case 4:
-            is.read(i64min);
+            sofab::read(is, i64min);
             break;
         case 5:
-            is.read(f32);
+            sofab::read(is, f32);
             break;
         case 6:
-            is.read(f64);
+            sofab::read(is, f64);
             break;
         case 7:
-            is.read(flag);
+            sofab::read(is, flag);
             break;
         default: break;
         }
