@@ -149,8 +149,8 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 		// A leaf element's index bound is the corelib collector's: the capacity and
 		// the element maxlen are constructor arguments, and it judges the index at
 		// the length word — before the payload, and before the destination grows.
-		`this._q1 = new StringSeq(_t, this.a, 4, 16, "bs", MAX_DYN_ARRAY_COUNT);`,
-		`this._q2 = new BlobSeq(_t, this.a, 3, 16, "bb", MAX_DYN_ARRAY_COUNT);`,
+		`this._q1 = new StringSeq(_t, this.a, 4, 16, "bs", MAX_DYN_ARRAY_COUNT, MAX_DYN_STRING_LEN);`,
+		`this._q2 = new BlobSeq(_t, this.a, 3, 16, "bb", MAX_DYN_ARRAY_COUNT, 1048576);`,
 		// A FRAMED element opens a scope, so generated code places it — and the
 		// guard runs before the gap-fill, so an over-index id extends nothing
 		// (generator#247, CORELIB_PLAN §7.2 item 8).
@@ -159,7 +159,7 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 			"        while (_t.length <= id) _t.push(new MBpElem());\n",
 		// A dynamic array has no schema capacity, so the receiver cap governs
 		// instead (§6.2.1) — never both.
-		`this._q5 = new StringSeq(_t, this.a, -1, -1, "ds", MAX_DYN_ARRAY_COUNT);`,
+		`this._q5 = new StringSeq(_t, this.a, -1, -1, "ds", MAX_DYN_ARRAY_COUNT, MAX_DYN_STRING_LEN);`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing over-index guard %q:\n%s", want, mod)
@@ -287,7 +287,7 @@ func TestTSMaxlenReject(t *testing.T) {
 		// (c) A bounded wrapper-string ELEMENT carries its maxlen into the corelib
 		// collector, which takes the verdict at the element's length word rather
 		// than after its payload -- generator#300's larger half.
-		`new StringSeq(_t, this.a, -1, 5, "es", MAX_DYN_ARRAY_COUNT)`,
+		`new StringSeq(_t, this.a, -1, 5, "es", MAX_DYN_ARRAY_COUNT, MAX_DYN_STRING_LEN)`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing maxlen guard %q\n%s", want, mod)
@@ -316,9 +316,9 @@ func TestTSStructural(t *testing.T) {
 		"serialize(os: OStream): void {",
 		// decode(bytes) is the corelib's one-shot decode driving THIS type's flat
 		// visitor: one decode surface, because CORELIB_PLAN §5.3.1 permits no second.
-		// The example schema HAS an unbounded string element inside a wrapper array
-		// (somestringarray), the one shape the visitor never sees a header for, so
-		// the residual DecodeLimits survives here (generator#388).
+		// It takes the bytes and nothing else: every receiver cap is a per-field
+		// guard in generated code or an argument to a collector, so the corelib is
+		// handed no DecodeLimits at all (generator#405).
 		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _MyfirstmessageVis(o, new PayloadAcc()));\n    return o;\n  }",
 		// Dispatch is keyed on (location, id): a field id is unique only WITHIN a
 		// scope, and corelib-ts's visitor is flat.
@@ -331,7 +331,7 @@ func TestTSStructural(t *testing.T) {
 		"    case 20: { this._c = _L_Myfirstmessage_somestruct; return true; }",
 		// A wrapper array REPLACES on re-open (§7.4), so its destination is rebuilt
 		// and the corelib collector that owns the element rules is bound to it.
-		`    case 18: { const _t: string[] = []; this.o.somestringarray = _t; this._q1 = new StringSeq(_t, this.a, 5, 16, "somestringarray", MAX_DYN_ARRAY_COUNT); this._c = _L_Myfirstmessage_somestringarray; return true; }`,
+		`    case 18: { const _t: string[] = []; this.o.somestringarray = _t; this._q1 = new StringSeq(_t, this.a, 5, 16, "somestringarray", MAX_DYN_ARRAY_COUNT, 262144); this._c = _L_Myfirstmessage_somestringarray; return true; }`,
 		// u64 -> bigint, off the number-first value the hook already carries.
 		`    case 3: this.o.someu64 = typeof v === "bigint" ? v : BigInt(v); break;`,
 		// MESSAGE_SPEC §2: a struct/union FIELD opens lazily and closes with the
@@ -1409,7 +1409,7 @@ messages:
 			"        while (_t.length <= id) _t.push(new VecDynElem());\n",
 		// A leaf element's placement is the corelib collector's, which does the
 		// same thing with the same ordering.
-		`this._q5 = new StringSeq(_t, this.a, 3, 8, "strs", MAX_DYN_ARRAY_COUNT);`,
+		`this._q5 = new StringSeq(_t, this.a, 3, 8, "strs", MAX_DYN_ARRAY_COUNT, 262144);`,
 		// A native ROW is placed by id too. The id-blind append was unreachable
 		// while every row was written, and an interior gap makes it reachable,
 		// shifting every later row down one index.
@@ -1418,7 +1418,7 @@ messages:
 		// ...including a WRAPPER row, whose own collector is bound to the row the
 		// placement just made — a re-opened row index replaces (§7.4).
 		"        const _e: string[] = []; _t[id] = _e;\n" +
-			"        this._q8 = new StringSeq(_e, this.a, -1, 8, \"wrows row\", MAX_DYN_ARRAY_COUNT);",
+			"        this._q8 = new StringSeq(_e, this.a, -1, 8, \"wrows row\", MAX_DYN_ARRAY_COUNT, 262144);",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q:\n%s", want, mod)
@@ -1651,9 +1651,9 @@ messages:
 	// A LEAF row hands its elements to the corelib collector, carrying the row's
 	// own capacity and element maxlen — never the enclosing array's.
 	for _, want := range []string{
-		`this._q2 = new StringSeq(_e, this.a, 3, 8, "strrows row");`,
-		`this._q4 = new BlobSeq(_e, this.a, 2, 4, "blobrows row");`,
-		`this._q10 = new StringSeq(_e, this.a, 2, 4, "strcube row row");`,
+		`this._q2 = new StringSeq(_e, this.a, 3, 8, "strrows row", 16384, 262144);`,
+		`this._q4 = new BlobSeq(_e, this.a, 2, 4, "blobrows row", 16384, 1048576);`,
+		`this._q10 = new StringSeq(_e, this.a, 2, 4, "strcube row row", 16384, 262144);`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing row collector %q:\n%s", want, mod)
@@ -1974,10 +1974,10 @@ messages:
 
 	// The element collectors must carry the bound, so the verdict is taken at the
 	// element's LENGTH WORD rather than after its payload.
-	if !strings.Contains(out, `this._q1 = new StringSeq(_t, this.a, 4, 6, "sa");`) {
+	if !strings.Contains(out, `this._q1 = new StringSeq(_t, this.a, 4, 6, "sa", 16384, 262144);`) {
 		t.Error("a bounded string element must pass its maxlen into StringSeq")
 	}
-	if !strings.Contains(out, `this._q2 = new BlobSeq(_t, this.a, 4, 5, "ba");`) {
+	if !strings.Contains(out, `this._q2 = new BlobSeq(_t, this.a, 4, 5, "ba", 16384, 1048576);`) {
 		t.Error("a bounded blob element must pass its maxlen into BlobSeq")
 	}
 	// ...and the element's length word must actually reach the collector, not only
@@ -2102,8 +2102,8 @@ func TestTSDecodedBlobOwnsItsBytes(t *testing.T) {
 		"const _p = this.a.take(total, offset, src, start, end); if (_p !== null) this.o.bu = _p;",
 		// bounded + unbounded wrapper element: the corelib's BlobSeq, which stores
 		// what the same accumulator hands it, never a range of the chunk
-		`this._q1 = new BlobSeq(_t, this.a, 3, 4, "ab", MAX_DYN_ARRAY_COUNT);`,
-		`this._q2 = new BlobSeq(_t, this.a, -1, -1, "au", MAX_DYN_ARRAY_COUNT);`,
+		`this._q1 = new BlobSeq(_t, this.a, 3, 4, "ab", MAX_DYN_ARRAY_COUNT, MAX_DYN_BLOB_LEN);`,
+		`this._q2 = new BlobSeq(_t, this.a, -1, -1, "au", MAX_DYN_ARRAY_COUNT, MAX_DYN_BLOB_LEN);`,
 		"this._q1?.element(id, total, offset, src, start, end);",
 	} {
 		if !strings.Contains(mod, want) {
@@ -2278,60 +2278,19 @@ messages:
 	}
 }
 
-// TestTSWrapperElementLengthKeepsTheCorelibCap: the ONE cap generated code cannot
-// take, and the only reason a DecodeLimits survives at all.
+// TestTSWrapperElementCapsRideOnTheCollector: a wrapper array's elements never
+// reach the generated visitor -- neither their index nor their length word -- so
+// BOTH of their receiver caps are arguments to the corelib collector, and the
+// module hands the corelib no DecodeLimits at all.
 //
-// A wrapper array's string/blob elements are collected by the corelib's
-// StringSeq/BlobSeq, so their length words never reach the generated visitor. The
-// collector applies the schema `maxlen` it is handed (`elemMax`) but has no
-// receiver-side sibling for it -- unlike the element INDEX, where it already takes
-// a `receiverCap`. Until it does, the corelib's global cap is what bounds such an
-// element, so it is kept for exactly this shape and dropped everywhere else.
-func TestTSWrapperElementLengthKeepsTheCorelibCap(t *testing.T) {
-	// Unbounded string element -> the residual DecodeLimits, string only.
-	dyn := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n      w: { id: 0, type: array, items: { type: string } }\n", map[string]any{})
-	// The literal, not the constant: see TestTSResidualLimitsAreRaised for why the
-	// two are separate numbers. With no schema maxlen anywhere they coincide.
-	if !strings.Contains(dyn, "const _LIMITS = Object.freeze({ maxStringLen: 262144 });") {
-		t.Errorf("an unbounded wrapper string element must keep the corelib's length cap:\n%s", dyn)
-	}
-	if !strings.Contains(dyn, "_decode(bytes, new _MVis(o, new PayloadAcc()), _LIMITS);") {
-		t.Errorf("the residual limits must reach the corelib:\n%s", dyn)
-	}
-	// maxArrayCount is never among them: the array's INDEX is what its receiver cap
-	// binds, and the collector already takes that as its own argument.
-	if strings.Contains(dyn, "maxArrayCount") {
-		t.Errorf("the index cap travels on the collector, not in DecodeLimits:\n%s", dyn)
-	}
-	if !strings.Contains(dyn, `new StringSeq(_t, this.a, -1, -1, "w", MAX_DYN_ARRAY_COUNT)`) {
-		t.Errorf("the collector must receive the index cap directly:\n%s", dyn)
-	}
-
-	// A maxlen on the element is enough to retire it: the collector enforces that
-	// bound itself, so nothing is left for the corelib to cap.
-	bounded := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n      w: { id: 0, type: array, items: { type: string, maxlen: 16 } }\n", map[string]any{})
-	if strings.Contains(bounded, "_LIMITS") {
-		t.Errorf("a bounded wrapper element needs no corelib cap:\n%s", bounded)
-	}
-}
-
-// TestTSResidualLimitsAreRaised: the residual DecodeLimits carries a value RAISED
-// to the largest schema maxlen of its kind, while the exported constant stays as
-// configured.
-//
-// This is a regression test for a real defect. generator#388 dropped the raise --
-// correctly, since the caps are applied per field now -- but kept handing the
-// corelib a DecodeLimits for the one shape it still governs. corelib-ts measures
-// EVERY fixlen length against that object, with no schema exemption and at the
-// length word, which is BEFORE the visitor's fixlenBegin runs. So the tight cap
-// reached fields the schema bounds and rejected them on the way in: a wrapper
-// element declaring `maxlen: 4096` was refused at 2000 bytes under a
-// `max_dyn_string_len: 1024` -- a message every other target decodes.
-//
-// Only the literal inside _LIMITS is raised. The constant stays tight, so the
-// per-field guards keep the precision #388 bought them and the loosening reaches
-// nothing but the corelib's own outer check.
-func TestTSResidualLimitsAreRaised(t *testing.T) {
+// This replaces the residual DecodeLimits that used to carry the element LENGTH
+// cap. That object had to be RAISED past every schema `maxlen` in the module,
+// because corelib-ts measured every fixlen length against it with no schema
+// exemption and at the length word -- before the visitor's fixlenBegin -- so a
+// tight cap rejected a schema-bounded field on the way in. The collector's
+// `receiverElemMax` (corelib-ts#164) is per field and exclusive with the `elemMax`
+// beside it, so the cap travels tight and the raise is gone with the object.
+func TestTSWrapperElementCapsRideOnTheCollector(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -2343,28 +2302,71 @@ messages:
 `
 	mod := genTSWith(t, src, map[string]any{"max_dyn_string_len": 1024})
 
-	// The constant is what the per-field guards read: as configured, unraised.
+	// As configured, and read by every guard alike -- the scalar's, and the
+	// collector's. 1024 coexists with wbnd's `maxlen: 4096`, which the raised
+	// residual could not: it had to carry 4096 or reject that field on the way in.
 	if !strings.Contains(mod, "export const MAX_DYN_STRING_LEN = 1024;") {
 		t.Errorf("the exported cap must stay as configured:\n%s", mod)
 	}
-	if !strings.Contains(mod, `case 0: if (sub === FixlenSubtype.String && total > MAX_DYN_STRING_LEN) throw new SofabError(SofabErrorCode.LimitExceeded, "s: string byte length above configured limit " + MAX_DYN_STRING_LEN); break;`) {
-		t.Errorf("the scalar guard must read the tight constant:\n%s", mod)
+	for _, want := range []string{
+		// The unbounded element: schema bounds -1/-1, then both receiver caps.
+		`this._q1 = new StringSeq(_t, this.a, -1, -1, "wdyn", MAX_DYN_ARRAY_COUNT, MAX_DYN_STRING_LEN);`,
+		// The bounded one: its own maxlen governs and the cap beside it is inert,
+		// but it is passed all the same -- an omitted argument is the format
+		// ceiling, i.e. no receiver bound, never "the corelib's default".
+		`this._q2 = new StringSeq(_t, this.a, -1, 4096, "wbnd", MAX_DYN_ARRAY_COUNT, MAX_DYN_STRING_LEN);`,
+		// The scalar keeps its own guard, at the same word, on the same constant.
+		`case 0: if (sub === FixlenSubtype.String && total > MAX_DYN_STRING_LEN) throw new SofabError(SofabErrorCode.LimitExceeded, "s: string byte length above configured limit " + MAX_DYN_STRING_LEN); break;`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
 	}
-	// The residual is raised to wbnd's 4096, so the corelib cannot reject an
-	// element the schema declares legal.
-	if !strings.Contains(mod, "const _LIMITS = Object.freeze({ maxStringLen: 4096 });") {
-		t.Errorf("the residual DecodeLimits must be raised past every schema maxlen:\n%s", mod)
+	// Nothing is left for a decoder-level cap: no object, and no argument for it.
+	for _, gone := range []string{"_LIMITS", "maxStringLen", "maxBlobLen", "maxArrayCount"} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("the corelib must be handed no DecodeLimits (%q):\n%s", gone, mod)
+		}
 	}
-	// ...and it must NOT be the constant, which would reintroduce the defect.
-	if strings.Contains(mod, "maxStringLen: MAX_DYN_STRING_LEN") {
-		t.Errorf("the residual must not carry the tight constant:\n%s", mod)
+	if !strings.Contains(mod, "_decode(bytes, new _MVis(o, new PayloadAcc()));") {
+		t.Errorf("decode() must pass the bytes and the visitor, nothing else:\n%s", mod)
 	}
+	if !strings.Contains(mod, "this.is = new IStream(new _MVis(this.out, new PayloadAcc()));") {
+		t.Errorf("the streaming decoder must pass the visitor, nothing else:\n%s", mod)
+	}
+}
 
-	// With no bounded wrapper element there is nothing to raise past, so the two
-	// numbers coincide -- the raise is owed to the schema, not to the shape.
-	plain := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n      w: { id: 0, type: array, items: { type: string } }\n",
-		map[string]any{"max_dyn_string_len": 1024})
-	if !strings.Contains(plain, "const _LIMITS = Object.freeze({ maxStringLen: 1024 });") {
-		t.Errorf("with no schema maxlen to clear, the residual is the configured cap:\n%s", plain)
+// TestTSCollectorCapsAreNeverOmitted: where the schema bounds every field of a
+// kind, its exported constant is not emitted -- the cap is inert and would be dead
+// code -- but the collector's argument is still filled, with the target's own
+// resolved default as a literal.
+//
+// The argument cannot simply be dropped. corelib-ts falls back to the FORMAT
+// CEILING for an omitted receiver cap (ARRAY_MAX / FIXLEN_MAX, corelib-ts#165), so
+// leaving one out is not "the corelib's default" but no receiver bound at all --
+// and §6.2.1 puts the number in generated code either way.
+func TestTSCollectorCapsAreNeverOmitted(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  M:
+    payload:
+      w: { id: 0, type: array, items: { type: string, count: 4, maxlen: 8 } }
+      b: { id: 1, type: array, items: { type: blob, count: 2, maxlen: 9 } }
+`, map[string]any{})
+
+	for _, want := range []string{
+		`this._q1 = new StringSeq(_t, this.a, 4, 8, "w", 16384, 262144);`,
+		`this._q2 = new BlobSeq(_t, this.a, 2, 9, "b", 16384, 1048576);`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
+	}
+	// Inert, so no constant: nothing in this schema can reach one.
+	for _, gone := range []string{"MAX_DYN_ARRAY_COUNT", "MAX_DYN_STRING_LEN", "MAX_DYN_BLOB_LEN"} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("a schema that bounds everything must export no cap (%q):\n%s", gone, mod)
+		}
 	}
 }

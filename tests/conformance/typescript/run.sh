@@ -358,13 +358,67 @@ grep -q "a: array count above configured limit 4" "$WORK/limerr.txt" \
 ST=$( (cd "$WORK/lim" && npx tsx harness.ts status dyn) < "$WORK/overlimit.bin" | head -n1 )
 [ "$ST" = "LIMIT_EXCEEDED" ] \
     || { echo "FAIL: an over-cap count is a policy rejection, got $ST"; exit 1; }
-# The corelib is handed no cap at all for this schema: nothing in it is beyond the
-# visitor's reach, so there is no DecodeLimits object to build (generator#388).
+# The corelib is handed no cap at all, by any module: every receiver bound is a
+# per-field guard in generated code (generator#388) or an argument to the wrapper
+# collector that owns the field's headers (generator#405).
 grep -q "_LIMITS" "$WORK/lim/message.ts" \
-    && { echo "FAIL: a fully covered schema must pass the corelib no DecodeLimits"; exit 1; }
+    && { echo "FAIL: a generated module must pass the corelib no DecodeLimits"; exit 1; }
+grep -q "_decode(bytes, new _DynVis(o, new PayloadAcc()));" "$WORK/lim/message.ts" \
+    || { echo "FAIL: decode() must take the bytes and the visitor, nothing else"; exit 1; }
 (cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count == limit (4) must decode"; exit 1; }
 (cd "$WORK/nolim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
+
+# A wrapper array's string/blob elements never reach the generated visitor: their
+# index and their length word both go to the corelib's StringSeq/BlobSeq. So both
+# of their receiver caps ride ON the collector (`receiverCap`, `receiverElemMax`),
+# which is what retired the residual DecodeLimits the module used to hand over.
+#
+# Two halves, and the second is the one that matters: a cap must NOT touch a field
+# the schema already bounds (CORELIB_PLAN S6.2.1). Both messages live in the SAME
+# project, under the same tight max_dyn_string_len, so the exemption is the only
+# thing that can tell them apart.
+echo "==> wrapper-element receiver caps (generator#405)"
+cat > "$WORK/wrap.yaml" <<'YAML'
+version: 1
+messages:
+  wdyn: { payload: { w: { id: 0, type: array, items: { type: string } } } }
+  wbnd: { payload: { w: { id: 0, type: array, items: { type: string, maxlen: 16 } } } }
+YAML
+cat > "$WORK/cfg_wlim.yaml" <<'YAML'
+generic: { emit: project, max_dyn_string_len: 4 }
+targets: { typescript: {} }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_wlim.yaml" --lang typescript --in "$WORK/wrap.yaml" --out "$WORK/wlim" )
+gen "$WORK/wrap.yaml" "$WORK/wnolim"
+ln -s "$WORK/ex/node_modules" "$WORK/wlim/node_modules"
+ln -s "$WORK/ex/node_modules" "$WORK/wnolim/node_modules"
+( cd "$WORK/wlim" && npx tsc --noEmit )
+# The bytes are produced by the UNCAPPED project, so they are well formed by
+# construction and the capped project's refusal can only be a policy one.
+printf '%s' '{"w":["abcdefgh"]}' | (cd "$WORK/wnolim" && npx tsx harness.ts encode wdyn) > "$WORK/wrap8.bin"
+if (cd "$WORK/wlim" && npx tsx harness.ts decode wdyn) < "$WORK/wrap8.bin" >/dev/null 2>"$WORK/wraperr.txt"; then
+    echo "FAIL: an 8-byte unbounded wrapper element must exceed max_dyn_string_len 4"; exit 1
+fi
+grep -q "exceeds the receiver cap 4" "$WORK/wraperr.txt" \
+    || { echo "FAIL: the over-cap element must name the receiver cap"; cat "$WORK/wraperr.txt"; exit 1; }
+ST=$( (cd "$WORK/wlim" && npx tsx harness.ts status wdyn) < "$WORK/wrap8.bin" | head -n1 )
+[ "$ST" = "LIMIT_EXCEEDED" ] \
+    || { echo "FAIL: an over-cap element is a policy rejection, got $ST"; exit 1; }
+(cd "$WORK/wnolim" && npx tsx harness.ts decode wdyn) < "$WORK/wrap8.bin" >/dev/null \
+    || { echo "FAIL: default-cap project must accept an 8-byte element"; exit 1; }
+# The exemption: the SAME 8 bytes at an element the schema bounds at 16 decode
+# under the same cap of 4. The schema bound governs and the cap never applies --
+# this is what the raised residual DecodeLimits used to buy, one module at a time.
+printf '%s' '{"w":["abcdefgh"]}' | (cd "$WORK/wnolim" && npx tsx harness.ts encode wbnd) > "$WORK/wrapb8.bin"
+(cd "$WORK/wlim" && npx tsx harness.ts decode wbnd) < "$WORK/wrapb8.bin" >/dev/null \
+    || { echo "FAIL: a schema-bounded element must not be capped (S6.2.1)"; exit 1; }
+# ...and over its own bound it is INVALID, not a policy rejection.
+printf '%s' '{"w":["0123456789abcdefg"]}' | (cd "$WORK/wnolim" && npx tsx harness.ts encode wbnd) > "$WORK/wrapb17.bin"
+ST=$( (cd "$WORK/wlim" && npx tsx harness.ts status wbnd) < "$WORK/wrapb17.bin" | head -n1 )
+[ "$ST" = "INVALID" ] \
+    || { echo "FAIL: over the schema maxlen is INVALID, got $ST"; exit 1; }
+echo "==> wrapper-element caps OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
