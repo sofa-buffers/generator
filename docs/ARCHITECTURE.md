@@ -2218,7 +2218,17 @@ backend:
     its highest id, not by how many elements arrived.
 
     **Landed in generator#387** for the six backends whose gap-fill is generated
-    code: **Java**, **Kotlin**, **C#**, **Zig**, **Rust** (std) and **Python**. The
+    code: **Java**, **Kotlin**, **C#**, **Zig**, **Rust** (std) and **Python** —
+    and in **Dart** since, where the gap-fill is the corelib's but the bound is
+    not: `corelib-dart`'s collectors all take an `rcap` beside the schema `cap`,
+    consulted only where the schema declared no `count:`, so generated code passes
+    the deployment's number and the two can never both be in play. It travels
+    **unraised**, as its own constant where the raise made one differ: a per-decode
+    `DecoderLimits` must clear the largest schema bound in the message or it
+    rejects a field §6.2.1 forbids it to touch, while a per-array cap that cannot
+    reach a bounded field needs no such loosening — and raising it would hand an
+    unbounded array a looser cap because some sibling declared a large `count:`.
+    The
     check goes in the same place as the `count: N` reject of #142, because the two
     are one decision with two answers — the bound (schema `count` vs. the cap) and
     the category (INVALID vs. `LimitExceeded`) — so each backend has ONE helper
@@ -2318,7 +2328,13 @@ and their `cap`/`ElemMax` mean the *schema* bound and answer INVALID, so a recei
 cap routed through them would report the category §6.2.1 forbids. Retiring their
 options before the collectors can take a policy bound would leave wrapper elements
 unguarded, which is strictly worse than today's imprecision: corelib-go#129,
-corelib-dart#86. **corelib-go additionally already has `SchemaBoundVisitor`** — the
+corelib-dart#86.
+
+**Dart's half of that has since landed on the corelib side** — every collector in
+`seq.dart` now carries `rcap` for the element index (see #387 above) — so what Dart
+still owes the full move is the element **length** and the matrix row's element
+**count**, not the index. Go has no receiver-cap sibling at all yet.
+**corelib-go additionally already has `SchemaBoundVisitor`** — the
 §6.2.1 hook that keeps a decoder cap off a schema-bounded field, consulted only
 after a cap is exceeded — and the generator does not emit it. That omission alone
 is why Go's cap is raised; emitting it would fix the precision half with no corelib

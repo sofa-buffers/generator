@@ -106,6 +106,19 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 type limitSet struct {
 	arrayCount, stringLen, blobLen int64
 	arrayHas, stringHas, blobHas   bool
+
+	// wrapperIndex is max_dyn_array_count AS CONFIGURED, unraised, and it is the
+	// number a wrapper array's element index is bounded by (ARCHITECTURE §9.5,
+	// generator#387).
+	//
+	// The raise the three above carry exists only because a DecoderLimits applies
+	// per decode, to every field alike, so it has to clear the largest schema
+	// bound in the message or it rejects a schema-bounded field §6.2.1 forbids it
+	// to touch. A collector's receiver cap has no such problem: corelib-dart
+	// consults it only where the schema declared no `count`, so it can never
+	// collide with a schema bound and never needs loosening. The deployment's
+	// number therefore travels intact — which is the whole point of the cap.
+	wrapperIndex int64
 }
 
 func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
@@ -120,6 +133,7 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	var l limitSet
 	if b.HasDynArray {
 		l.arrayCount, l.arrayHas = max(d.ArrayCount, b.MaxCount), true
+		l.wrapperIndex = d.ArrayCount
 	}
 	if b.HasDynString {
 		l.stringLen, l.stringHas = max(d.StringLen, b.MaxStringLen), true
@@ -188,6 +202,18 @@ func (g *gen) emitLimits(f *dfile) {
 	f.line("// schema bound of its kind. Exceeding a cap fails decode with limitExceeded.")
 	if g.limits.arrayHas {
 		f.line("const int maxDynArrayCount = %d;", g.limits.arrayCount)
+		// The wrapper index cap needs no raise, so it is a second constant rather
+		// than the same one: it is only ever consulted for an array the schema left
+		// unbounded, so it cannot reach a schema-bounded field and travels as the
+		// deployment configured it. Emitted only when it can actually differ --
+		// otherwise it would be a second name for one number.
+		if g.limits.wrapperIndex != g.limits.arrayCount {
+			f.line("// The element index of an unbounded WRAPPER array is bounded by the")
+			f.line("// configured number instead: the raise above is what a per-decode limit")
+			f.line("// needs to clear the schema bounds it would otherwise bind, and a")
+			f.line("// per-array cap never sees one.")
+			f.line("const int maxDynWrapperIndex = %d;", g.limits.wrapperIndex)
+		}
 	}
 	if g.limits.stringHas {
 		f.line("const int maxDynStringLen = %d;", g.limits.stringLen)

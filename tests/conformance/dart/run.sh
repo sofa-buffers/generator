@@ -436,6 +436,53 @@ fi
 "$WORK/dynfree/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap build must decode the oversized message"; exit 1; }
 echo "==> decode limits OK"
 
+# The WRAPPER half of the same cap (generator#387/#402 item 3). A wrapper array
+# carries no count header: its elements are keyed by an unbounded varint index and
+# the list is grown to fit, so the INDEX is the length and the index is what has to
+# be bounded -- two elements at id 0 and id 999 are a 1000-slot list. The decoder's
+# DecoderLimits never reached it, because the element headers go to the collector;
+# generated code now passes the deployment's number as the collector's `rcap`.
+#
+# `w` is a count-less string array (id 0), max_dyn_array_count: 4. Element index 5
+# must be refused, index 3 must decode. The category is limitExceeded and not
+# INVALID: the bytes are well formed and the same message decodes under a looser
+# cap (CORELIB_PLAN S6.2.1/S6.3), which the default-cap build proves.
+#
+# The number must arrive UNRAISED. `b` declares count: 100 in the same schema, so
+# the per-decode DecoderLimits is lifted to 100 or it would reject b's own
+# schema-bounded elements -- and before this the wrapper index inherited that 100,
+# silently ignoring the configured 4. rcap needs no raise: it is only consulted
+# where the schema declared no count.
+echo "==> wrapper-array element INDEX takes the configured cap (generator#387)"
+cat > "$WORK/wrap.yaml" <<'YAML'
+version: 1
+messages:
+  wrap:
+    payload:
+      w: { id: 0, type: array, items: { type: string } }
+      b: { id: 1, type: array, items: { type: string, count: 100 } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/wrap.yaml" --out "$WORK/wraplim" )
+grep -q 'rcap: maxDynWrapperIndex' "$WORK/wraplim/lib/message.dart" \
+    || { echo "FAIL: the wrapper index cap must travel unraised, as its own constant"; exit 1; }
+grep -q 'const int maxDynWrapperIndex = 4;' "$WORK/wraplim/lib/message.dart" \
+    || { echo "FAIL: the wrapper index cap must be the CONFIGURED 4, not the raised 100"; exit 1; }
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/wraplim/pubspec.yaml"
+( cd "$WORK/wraplim" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+build "$WORK/wrap.yaml" "$WORK/wrapfree"
+# 06 seq_begin(id 0) | 2a string element id 5 | 0a 78 (fixlen "x") | 07 end
+printf '\006\052\012\170\007' > "$WORK/wrapover.bin"
+# ...and the same element at index 3, inside the cap.
+printf '\006\032\012\170\007' > "$WORK/wrapok.bin"
+if "$WORK/wraplim/harness" decode wrap < "$WORK/wrapover.bin" >/dev/null 2>&1; then
+    echo "FAIL: wrapper element index 5 above max_dyn_array_count 4 must fail decode"; exit 1
+fi
+"$WORK/wraplim/harness" decode wrap < "$WORK/wrapok.bin" >/dev/null \
+    || { echo "FAIL: wrapper element index 3 under the cap must decode"; exit 1; }
+"$WORK/wrapfree/harness" decode wrap < "$WORK/wrapover.bin" >/dev/null \
+    || { echo "FAIL: default-cap build must decode index 5 (the breach is policy, not INVALID)"; exit 1; }
+echo "==> wrapper index cap OK"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/dart/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/harness"
 
