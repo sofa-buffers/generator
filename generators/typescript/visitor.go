@@ -159,7 +159,7 @@ func visitorName(typeName string) string { return "_" + typeName + "Vis" }
 func (g *gen) emitDecode(f *tsfile, name string) {
 	f.line("  static decode(bytes: Uint8Array): %s {", name)
 	f.line("    const o = new %s();", name)
-	f.line("    _decode(bytes, new %s(o, new PayloadAcc())%s);", visitorName(name), g.cursorLimits())
+	f.line("    _decode(bytes, new %s(o, new PayloadAcc()));", visitorName(name))
 	f.line("    return o;")
 	f.line("  }")
 }
@@ -449,8 +449,8 @@ func (g *gen) elemDefault(sc *tsScope) string {
 }
 
 // seqClass / seqCtor name the corelib collector a string or blob wrapper array
-// is driven through, and build one over the destination. Both index bounds, the
-// element maxlen, the payload join and the strict UTF-8 decode live there
+// is driven through, and build one over the destination. Both index bounds, both
+// element-length bounds, the payload join and the strict UTF-8 decode live there
 // (ARCHITECTURE §8): none of it knows a schema, all of it arrives as arguments.
 // arrayCountBound is the count reject for one native array field, emitted in
 // arrayBegin ahead of the destination it sizes.
@@ -480,18 +480,24 @@ func (g *gen) seqClass(elem ir.Kind) string {
 	return "StringSeq"
 }
 
+// seqCtor builds the collector for one string/blob wrapper array: the schema
+// bounds first (`cap`, `elemMax`) and then, behind them, the receiver caps for
+// whichever of the two the schema left open.
+//
+// All four are passed, always. The collector is where BOTH of this shape's
+// receiver bounds land -- a wrapper array's elements never reach the generated
+// visitor, neither their index nor their length word -- and an omitted argument
+// is not "the corelib's default" but the format ceiling, i.e. no receiver bound
+// at all. Each pair is exclusive by rule (§6.2.1): where the schema declares a
+// `count`/`maxlen` the cap beside it is inert and the violation is INVALID, and
+// where it does not, the cap governs and its violation is LimitExceeded.
 func (g *gen) seqCtor(sc *tsScope, dst string) string {
 	emax := int64(-1)
 	if sc.elemMaxHas {
 		emax = sc.elemMax
 	}
-	cap := "MAX_DYN_ARRAY_COUNT"
-	if !g.limits.arrayHas {
-		// No configured cap: the collector's own documented default applies, which
-		// is the corelib's DEFAULT_MAX_DYN_ARRAY_COUNT rather than "no limit".
-		return fmt.Sprintf("new %s(%s, this.a, %d, %d, %q)", g.seqClass(sc.elem), dst, sc.cap, emax, sc.loc)
-	}
-	return fmt.Sprintf("new %s(%s, this.a, %d, %d, %q, %s)", g.seqClass(sc.elem), dst, sc.cap, emax, sc.loc, cap)
+	return fmt.Sprintf("new %s(%s, this.a, %d, %d, %q, %s, %s)",
+		g.seqClass(sc.elem), dst, sc.cap, emax, sc.loc, g.arrayCap(), g.elemMaxCap(sc.elem))
 }
 
 // --- typed value callbacks --------------------------------------------------
@@ -1119,7 +1125,7 @@ func (g *gen) emitDecoderClass(f *tsfile, name string) {
 	f.blank()
 	f.line("  constructor(out?: %s) {", name)
 	f.line("    this.out = out ?? new %s();", name)
-	f.line("    this.is = new IStream(new %s(this.out, new PayloadAcc())%s);", visitorName(name), g.cursorLimits())
+	f.line("    this.is = new IStream(new %s(this.out, new PayloadAcc()));", visitorName(name))
 	f.line("  }")
 	f.blank()
 	f.line("  /**")
