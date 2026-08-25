@@ -413,6 +413,62 @@ fi
 (cd "$WORK/nolim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/over102.bin" >/dev/null) || { echo "FAIL: under the target default the same bytes must decode"; exit 1; }
 echo "==> decode limits OK (over-cap rejected, in-cap + target-default accepted)"
 
+# CORELIB_PLAN S6.2.1, the two rules a decoder-wide cap could not honour. Both
+# are end-to-end assertions on generated code, because the generator's own unit
+# tests can only see the emitted substrings and neither of these is a substring.
+echo "==> a cap must not reach a schema-bounded field, nor a skipped one (S6.2.1)"
+cat > "$WORK/excl.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      a: { id: 0, type: array, items: { type: u64 } }
+      b: { id: 1, type: array, items: { type: i32, count: 100000 } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limits.yaml" --lang go --in "$WORK/excl.yaml" --out "$WORK/excl" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/excl/go.mod"
+# b (id 1, signed array, count 6) is bounded by its own `count: 100000` and the
+# cap of 4 must not touch it. Under the raise this decoded only because the cap
+# had been lifted to 100000 for EVERY field, `a` included.
+printf '\014\006\002\002\002\002\002\002' > "$WORK/bounded6.bin"
+(cd "$WORK/excl" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/bounded6.bin" >/dev/null) \
+    || { echo "FAIL: a schema-bounded array must not be judged against the receiver cap"; exit 1; }
+# ...while the unbounded sibling at the same cap still rejects at 6.
+printf '\003\006\001\001\001\001\001\001' > "$WORK/unbounded6.bin"
+if (cd "$WORK/excl" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/unbounded6.bin" >/dev/null 2>&1); then
+    echo "FAIL: the unbounded sibling must still be capped at 4"; exit 1
+fi
+# A field the visitor SKIPS is never capped (S6.2.1: it allocates nothing).
+# id 9 is declared nowhere, so an over-cap array there must stay COMPLETE --
+# this is generator#410, which the decoder-wide cap got wrong by construction.
+printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
+(cd "$WORK/lim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/skipcap.bin" >/dev/null) \
+    || { echo "FAIL: an over-cap array at an UNDECLARED id must be skipped, not capped"; exit 1; }
+echo "==> cap exclusivity OK (bounded sibling decodes, skipped field decodes)"
+
+# A native matrix ROW's own element count. The outer `count:` bounds the row ID;
+# the row's count header was bounded by nothing generated code passed on -- it
+# rode on the decoder-wide cap, and with that gone the row bound has to travel to
+# the collector as RowCount/RowCap.
+echo "==> a matrix row's element count is bounded (MESSAGE_SPEC S7.1)"
+cat > "$WORK/mat.yaml" <<'YAML'
+version: 1
+messages:
+  mat:
+    payload:
+      m: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 2 } } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/mat.yaml" --out "$WORK/mat" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/mat/go.mod"
+printf '\006\003\002\001\002\007' > "$WORK/row_ok.bin"    # row 0: 2 elements == count 2
+printf '\006\003\003\001\002\003\007' > "$WORK/row_over.bin" # row 0: 3 elements > count 2
+(cd "$WORK/mat" && GOFLAGS=-mod=mod go run ./harness decode mat < "$WORK/row_ok.bin" >/dev/null) \
+    || { echo "FAIL: an at-count matrix row must decode"; exit 1; }
+if (cd "$WORK/mat" && GOFLAGS=-mod=mod go run ./harness decode mat < "$WORK/row_over.bin" >/dev/null 2>&1); then
+    echo "FAIL: a matrix row over its schema count must be INVALID"; exit 1
+fi
+echo "==> matrix row count OK"
+
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
 # declared width is INVALID: it MUST NOT be masked to the width and MUST NOT be

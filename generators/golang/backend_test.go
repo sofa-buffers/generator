@@ -81,7 +81,15 @@ func TestGeneratedGoParses(t *testing.T) {
 // TestGoOverIndexWrapperArray: a fixed-count wrapper array (string/blob/struct
 // elements) threads its schema count N into the collector as cap, so an element
 // id >= N is rejected as INVALID before the slice grows (issue #142 /
-// MESSAGE_SPEC §5.1/§7). A dynamic wrapper array (no count) gets cap -1.
+// MESSAGE_SPEC §5.1/§7). A dynamic wrapper array (no count) gets cap -1 and is
+// bounded by the RECEIVER cap beside it instead — a wrapper array's element ids
+// never reach the generated visitor, so the collector is where that shape's
+// receiver bounds land (CORELIB_PLAN §6.2.1, corelib-go#132).
+//
+// Both receiver fields are emitted on EVERY collector, including where the
+// schema bound beside them makes them inert: corelib-go falls back to the format
+// ceiling for a missing one, which bounds nothing the format does not already
+// reject, so omitting one is no receiver bound at all rather than a default.
 func TestGoOverIndexWrapperArray(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
@@ -92,10 +100,18 @@ func TestGoOverIndexWrapperArray(t *testing.T) {
 	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
 	msg := files["m.go"]
 	for _, want := range []string{
-		"&sofab.StringSeq{Out: &m.Bs, Cap: 4, ElemMax: 16}", // bounded string -> Cap 4, maxlen 16
-		"&sofab.BlobSeq{Out: &m.Bb, Cap: 3, ElemMax: 16}",   // bounded blob   -> Cap 3, maxlen 16
-		"Cap: 2}", // bounded struct -> sofab.MessageSeq Cap 2
-		"&sofab.StringSeq{Out: &m.Ds, Cap: -1, ElemMax: -1}", // dynamic string -> unbounded, no maxlen
+		// bounded string -> Cap 4, maxlen 16; the caps beside them are inert.
+		"&sofab.StringSeq{Out: &m.Bs, Cap: 4, ElemMax: 16, RCap: MaxDynArrayCount, RElemMax: MaxDynStringLen}",
+		// bounded blob -> Cap 3, maxlen 16. No unbounded blob in the schema, so
+		// MaxDynBlobLen is not exported and the configured number goes in as a
+		// literal rather than the package growing a constant nothing reads.
+		"&sofab.BlobSeq{Out: &m.Bb, Cap: 3, ElemMax: 16, RCap: MaxDynArrayCount, RElemMax: 4194304}",
+		// bounded struct -> sofab.MessageSeq Cap 2, index cap inert beside it
+		"Cap: 2, RCap: MaxDynArrayCount}",
+		// dynamic string -> unbounded, no maxlen: here BOTH receiver caps govern,
+		// and they are the only bound this shape has.
+		"&sofab.StringSeq{Out: &m.Ds, Cap: -1, ElemMax: -1, RCap: MaxDynArrayCount, RElemMax: MaxDynStringLen}",
+		"&sofab.MessageSeq[MDpElem, *MDpElem]{Out: &m.Dp, Cap: -1, RCap: MaxDynArrayCount}",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("m.go missing %q:\n%s", want, msg)
@@ -134,7 +150,14 @@ func TestGoMaxlenReject(t *testing.T) {
 		// is a §7.3 skip, never this field's length (generator#224).
 		"case 0:\n\t\tif sub != sofab.FixlenStr {\n\t\t\treturn nil\n\t\t}\n\t\tif total > 8 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}",
 		"case 1:\n\t\tif sub != sofab.FixlenBlob {\n\t\t\treturn nil\n\t\t}\n\t\tif total > 8 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}",
-		"&sofab.StringSeq{Out: &m.Ws, Cap: -1, ElemMax: 5}", // wrapper element maxlen threaded as ElemMax
+		// wrapper element maxlen threaded as ElemMax; RElemMax beside it is inert
+		// (§6.2.1 keeps a cap off a field the schema bounds), RCap is not — the
+		// array itself declares no count.
+		"&sofab.StringSeq{Out: &m.Ws, Cap: -1, ElemMax: 5, RCap: MaxDynArrayCount, RElemMax: MaxDynStringLen}",
+		// The unbounded string (id 2) is bounded at the very same word, by the
+		// receiver cap and in the other category (§6.2.1: a policy rejection of
+		// well-formed bytes, never folded into INVALID).
+		"case 2:\n\t\tif sub != sofab.FixlenStr {\n\t\t\treturn nil\n\t\t}\n\t\tif total > MaxDynStringLen {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("m.go missing %q:\n%s", want, msg)
@@ -151,7 +174,8 @@ func TestGoMaxlenReject(t *testing.T) {
 	if strings.Contains(msg, "len(_b) >") {
 		t.Errorf("the assembled payload must carry no bound of its own:\n%s", msg)
 	}
-	// The unbounded string carries no maxlen guard -- but it does carry the UTF-8
+	// The unbounded string carries no maxlen guard in the PAYLOAD arm (its cap
+	// lives at the length word, asserted above) -- but it does carry the UTF-8
 	// check, which is not a bound: it fires wherever a string is MATERIALIZED
 	// (generator#257), bounded or not. m.UTF8Valid, not the package-level
 	// primitive, so WithStrictUTF8 reaches the destination (§6.4).
@@ -205,10 +229,14 @@ func TestGoHeaderBoundsAtTheWord(t *testing.T) {
 		// above has just bounded -- and by make, never by reslicing, so an array
 		// that arrives EMPTY decodes as the empty array and not as a nil slice.
 		"m.Ua = make([]uint32, 0, count)",
-		// An unbounded array is opened the same way: its count is bounded a
-		// callback earlier, by the receiver cap that exists to bound exactly this
-		// allocation (§6.2.1).
-		"case 4:\n\t\tif kind != sofab.ArrayUnsigned {\n\t\t\treturn nil\n\t\t}\n\t\tm.Da = make([]uint32, 0, count)",
+		// An unbounded array is bounded in the very same arm, one line up, by the
+		// receiver cap that exists to bound exactly this allocation -- and in the
+		// other category, the cap being a policy rejection of well-formed bytes
+		// (§6.2.1). The corelib holds no cap of its own to fall back on any more
+		// (corelib-go#133), so this arm is the whole bound on this shape.
+		"case 4:\n\t\tif kind != sofab.ArrayUnsigned {\n\t\t\treturn nil\n\t\t}\n\t\tif count > MaxDynArrayCount {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}\n\t\tm.Da = make([]uint32, 0, count)",
+		// ...and the unbounded string likewise, at its length word.
+		"case 5:\n\t\tif sub != sofab.FixlenStr {\n\t\t\treturn nil\n\t\t}\n\t\tif total > MaxDynStringLen {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("m.go missing header guard %q:\n%s", want, msg)
@@ -223,24 +251,51 @@ func TestGoHeaderBoundsAtTheWord(t *testing.T) {
 			t.Errorf("m.go: a header bound %q is not gated on the declared kind/subtype:\n%s", notWant, msg)
 		}
 	}
-	// The unbounded string (id 5) contributes no FixlenBegin arm, and the
-	// wrapper-sequence array (id 6) descends via BeginSequence and is bounded at
-	// the collector's cap, so neither header switch names them.
-	for _, notWant := range []string{"case 5:", "case 6:"} {
-		if strings.Contains(switchBody(t, msg, "func (m *M) FixlenBegin("), notWant) ||
-			strings.Contains(switchBody(t, msg, "func (m *M) ArrayBegin("), notWant) {
-			t.Errorf("m.go: %q must not carry a header bound:\n%s", notWant, msg)
+	// A CAP never reaches a field the schema already bounds (§6.2.1): the four
+	// bounded fields answer INVALID and nothing else, so no MaxDyn* constant may
+	// appear in their arms.
+	for _, notWant := range []string{
+		"if count > 4 {\n\t\t\treturn sofab.ErrLimitExceeded",
+		"if total > 8 {\n\t\t\treturn sofab.ErrLimitExceeded",
+		"if count > MaxDynArrayCount {\n\t\t\treturn sofab.ErrInvalidMsg",
+	} {
+		if strings.Contains(msg, notWant) {
+			t.Errorf("m.go: the two categories must not be folded (%q):\n%s", notWant, msg)
 		}
 	}
+	// Exactly two arms carry the array cap: the dynamic native array (id 4). The
+	// wrapper-sequence array (id 6) descends via BeginSequence -- no count header
+	// exists for it at all -- so it is bounded on its collector instead and never
+	// names a header switch.
+	if got := strings.Count(switchBody(t, msg, "func (m *M) ArrayBegin("), "MaxDynArrayCount"); got != 1 {
+		t.Errorf("expected exactly 1 array cap in ArrayBegin, got %d:\n%s", got, msg)
+	}
+	if strings.Contains(switchBody(t, msg, "func (m *M) FixlenBegin("), "case 6:") ||
+		strings.Contains(switchBody(t, msg, "func (m *M) ArrayBegin("), "case 6:") {
+		t.Errorf("m.go: the wrapper array must not carry a header bound:\n%s", msg)
+	}
 	// A type with no bound of a kind does not override that method at all: the
-	// embedded sofab.VisitorBase no-op stands, and the decode pays no call.
+	// embedded sofab.VisitorBase no-op stands, and the decode pays no call. With
+	// the caps enforced per field, "no bound" now means neither a schema bound nor
+	// a live cap -- a scalar-only payload.
 	plain := genGo(t, schemaFromYAMLString(t,
-		"version: 1\nmessages:\n  P:\n    payload:\n      x: { id: 0, type: u32 }\n      s: { id: 1, type: string }\n"),
+		"version: 1\nmessages:\n  P:\n    payload:\n      x: { id: 0, type: u32 }\n      y: { id: 1, type: i32 }\n"),
 		map[string]any{"package": "p"})["p.go"]
 	for _, notWant := range []string{"ArrayBegin(id sofab.ID", "FixlenBegin(id sofab.ID"} {
 		if strings.Contains(plain, notWant) {
 			t.Errorf("p.go: a type with no header bound must not override the hook (%q):\n%s", notWant, plain)
 		}
+	}
+	// An unbounded string alone is enough to make FixlenBegin exist -- that is
+	// where its cap goes -- and still drags no ArrayBegin along.
+	capped := genGo(t, schemaFromYAMLString(t,
+		"version: 1\nmessages:\n  R:\n    payload:\n      x: { id: 0, type: u32 }\n      s: { id: 1, type: string }\n"),
+		map[string]any{"package": "r"})["r.go"]
+	if !strings.Contains(capped, "if total > MaxDynStringLen {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}") {
+		t.Errorf("r.go: an unbounded string must carry its receiver cap at the length word:\n%s", capped)
+	}
+	if strings.Contains(capped, "ArrayBegin(id sofab.ID") {
+		t.Errorf("r.go: a string cap must not drag ArrayBegin along:\n%s", capped)
 	}
 	// ...and one kind of bound no longer drags the other's method along, which is
 	// what the retired HeaderVisitor assertion forced.
@@ -660,11 +715,21 @@ func firstLines(s string, n int) string {
 }
 
 // TestGoDecodeLimits: the max_dyn_* config keys bake receiver-side decode
-// limits (generator#102) into the generated package — constants in the prelude
-// plus sofab.WithMax* options on every AcceptBytes call. The cap is raised to
-// the largest schema bound of its kind (escape hatch: schema-bounded fields
-// stay governed by their own bound), an unset key emits nothing, and a key
-// whose kind has no unbounded field is inert.
+// limits (generator#102) into the generated package as constants, and generated
+// code enforces them ITSELF, per field, at that field's own count/length header.
+//
+// Nothing is passed into the corelib any more: CORELIB_PLAN §6.2.1 puts the
+// numbers with the layer that knows the schema, and corelib-go#133 removed the
+// sofab.WithMax* options entirely. Two properties follow, and both are asserted
+// here:
+//
+//   - the caps travel AS CONFIGURED. They used to be raised to the largest schema
+//     bound of their kind, because a decoder-level option binds every field alike
+//     and would otherwise reject a schema-bounded sibling §6.2.1 forbids it to
+//     touch. The raise bought that at the price of loosening the cap for the
+//     UNBOUNDED fields -- the ones it exists to protect.
+//   - a cap never reaches a schema-bounded field, so the two can now disagree
+//     freely: max_dyn_array_count 65536 coexists with a sibling's count: 100000.
 func TestGoDecodeLimits(t *testing.T) {
 	const src = `
 version: 1
@@ -683,7 +748,7 @@ messages:
 	})
 	prelude, msg := files["sofab_visitor.go"], files["dyn.go"]
 	for _, want := range []*regexp.Regexp{
-		regexp.MustCompile(`MaxDynArrayCount\s+= 100000`), // raised to the schema count of barr
+		regexp.MustCompile(`MaxDynArrayCount\s+= 65536`), // AS CONFIGURED, below barr's count: 100000
 		regexp.MustCompile(`MaxDynStringLen\s+= 4096`),
 	} {
 		if !want.MatchString(prelude) {
@@ -693,16 +758,37 @@ messages:
 	if strings.Contains(prelude, "MaxDynBlobLen") {
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
-	if !strings.Contains(msg, "sofab.AcceptBytes(data, m, sofab.WithMaxArrayCount(MaxDynArrayCount), sofab.WithMaxStringLen(MaxDynStringLen))") {
-		t.Error("Decode must pass the active limits into AcceptBytes")
+	// The corelib is handed no cap at all -- neither entry point takes one.
+	for _, notWant := range []string{"sofab.WithMax", "AcceptBytes(data, m,", "NewDecoder(m,"} {
+		if strings.Contains(msg, notWant) {
+			t.Errorf("the corelib must be handed no receiver cap (%q):\n%s", notWant, msg)
+		}
+	}
+	if !strings.Contains(msg, "sofab.AcceptBytes(data, m)") {
+		t.Errorf("Decode must drive the corelib with the visitor alone:\n%s", msg)
+	}
+	// Enforced per field, in the header hooks, in the right category each time.
+	for _, want := range []string{
+		// the unbounded string: policy, at the length word
+		"case 0:\n\t\tif sub != sofab.FixlenStr {\n\t\t\treturn nil\n\t\t}\n\t\tif total > MaxDynStringLen {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}",
+		// the unbounded array: policy, at the count word
+		"case 1:\n\t\tif kind != sofab.ArrayUnsigned {\n\t\t\treturn nil\n\t\t}\n\t\tif count > MaxDynArrayCount {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}",
+		// the schema-bounded array: its OWN bound, INVALID, and no cap beside it --
+		// a wire count of 70000 decodes here and is refused at id 1, which the
+		// raised decoder-level cap made impossible to express.
+		"case 2:\n\t\tif kind != sofab.ArraySigned {\n\t\t\treturn nil\n\t\t}\n\t\tif count > 100000 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("dyn.go missing per-field bound %q:\n%s", want, msg)
+		}
 	}
 
 	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
 	// (§9.5, generator#385). The blob cap stays inert either way: liveness is a
 	// property of the schema, not of the configuration.
 	plain := genGo(t, s, map[string]any{})
-	if !regexp.MustCompile(`MaxDynArrayCount\s+= 100000`).MatchString(plain["sofab_visitor.go"]) {
-		t.Error("default array cap must be emitted (and raised to the schema count)")
+	if !regexp.MustCompile(`MaxDynArrayCount\s+= 65536`).MatchString(plain["sofab_visitor.go"]) {
+		t.Error("default array cap must be emitted, unraised")
 	}
 	if !regexp.MustCompile(`MaxDynStringLen\s+= 1048576`).MatchString(plain["sofab_visitor.go"]) {
 		t.Error("default string cap must be emitted")
@@ -866,11 +952,16 @@ messages:
 	// The placement itself is corelib-go's (sofab.MessageSeq / sofab.PlaceRow /
 	// sofab.NestedSeq): identical for every schema, so the generator only names
 	// the collector and hands it the bounds that differ.
+	// Every collector also carries the RECEIVER caps beside the schema bounds it
+	// is exclusive with (§6.2.1) -- for a matrix, on both axes: RCap for the row
+	// id and RowCount/RowCap for the row's OWN element count, which nothing
+	// bounded before (the inner `count:` was dropped on the floor here, and the
+	// codec cap that stood in for it is gone -- corelib-go#132/#133).
 	for _, want := range []string{
-		"&sofab.MessageSeq[VecObjsElem, *VecObjsElem]{Out: &m.Objs, Cap: 4}",
-		"&sofab.UnsignedMatrixSeq[uint32]{Out: &m.Mat, Cap: 2, Hi: 4294967295}",
-		"&sofab.NestedSeq[string]{Out: &m.Rows, Cap: 2,",
-		"&sofab.StringSeq{Out: p, Cap: -1, ElemMax: 4}",
+		"&sofab.MessageSeq[VecObjsElem, *VecObjsElem]{Out: &m.Objs, Cap: 4, RCap: MaxDynArrayCount}",
+		"&sofab.UnsignedMatrixSeq[uint32]{Out: &m.Mat, Cap: 2, RCap: MaxDynArrayCount, RowCount: 3, RowCap: MaxDynArrayCount, Hi: 4294967295}",
+		"&sofab.NestedSeq[string]{Out: &m.Rows, Cap: 2, RCap: MaxDynArrayCount,",
+		"&sofab.StringSeq{Out: p, Cap: -1, ElemMax: 4, RCap: MaxDynArrayCount, RElemMax: 1048576}",
 	} {
 		if !strings.Contains(files["vec.go"], want) {
 			t.Errorf("vec.go must bind the corelib collector, missing %q:\n%s", want, files["vec.go"])
@@ -940,7 +1031,7 @@ func TestGoSkippedStringIsNotValidated(t *testing.T) {
 	// validates it there (and, embedding sofab.StringCheck, sees the decode's own
 	// WithStrictUTF8 policy rather than only the build tag). Binding the collector
 	// is all the generator has to emit for it.
-	if !strings.Contains(msg, "&sofab.StringSeq{Out: &m.Sa, Cap: 4, ElemMax: -1}") {
+	if !strings.Contains(msg, "&sofab.StringSeq{Out: &m.Sa, Cap: 4, ElemMax: -1, RCap: 65536, RElemMax: MaxDynStringLen}") {
 		t.Errorf("the string array must bind the validating collector:\n%s", msg)
 	}
 	// A blob carries no encoding, so its arms must not grow a check.
@@ -1018,9 +1109,7 @@ messages:
 	if !strings.Contains(msg, "func DecodeVecFrom(r io.Reader) (*Vec, error)") {
 		t.Error("missing the io.Reader-driven decode entry point")
 	}
-	// The schema's `s` is a schema-unbounded string, so the target's finite
-	// default cap (§9.5, generator#385) is live and reaches both entry points.
-	if !strings.Contains(msg, "sofab.NewDecoder(m, sofab.WithMaxStringLen(MaxDynStringLen)).FeedFrom(r, scratch)") {
+	if !strings.Contains(msg, "sofab.NewDecoder(m).FeedFrom(r, scratch)") {
 		t.Error("streaming decode must feed the decoder in chunks")
 	}
 	// The scratch buffer is the CALLER's by contract (§6.6: the corelib sizes no
@@ -1041,18 +1130,25 @@ messages:
 		}
 	}
 	// ...and the in-memory path is unchanged: this is an addition.
-	if !strings.Contains(msg, "sofab.AcceptBytes(data, m") {
+	if !strings.Contains(msg, "sofab.AcceptBytes(data, m)") {
 		t.Error("the []byte path must stay AcceptBytes")
 	}
 
-	// Receiver-side decode limits (generator#102) bind BOTH entry points. They
-	// reach AcceptBytes as trailing arguments and NewDecoder as its options, so
-	// the same renderer serves both only because the two signatures happen to be
-	// variadic in the same position — worth pinning, since a limit enforced on
-	// one path and not the other is a silent asymmetry.
+	// The schema's `s` is a schema-unbounded string, so a receiver cap is live —
+	// and it reaches BOTH entry points by reaching NEITHER. The cap is enforced by
+	// the visitor, which is the one argument the two calls share, so a limit
+	// applied on one path and not the other is no longer expressible: the old
+	// asymmetry risk was that the caps rode in as per-call options.
 	lim := genGo(t, s, map[string]any{"max_dyn_string_len": 4096})["vec.go"]
-	if !strings.Contains(lim, "sofab.NewDecoder(m, sofab.WithMaxStringLen(MaxDynStringLen)).FeedFrom(r, scratch)") {
-		t.Error("streaming decode must carry the active decode limits")
+	if strings.Contains(lim, "sofab.WithMax") {
+		t.Errorf("no receiver cap may reach the corelib (corelib-go#133):\n%s", lim)
+	}
+	if !strings.Contains(lim, "if total > MaxDynStringLen {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}") {
+		t.Errorf("the cap must be enforced by the visitor both paths drive:\n%s", lim)
+	}
+	if !strings.Contains(lim, "sofab.NewDecoder(m).FeedFrom(r, scratch)") ||
+		!strings.Contains(lim, "sofab.AcceptBytes(data, m)") {
+		t.Errorf("both entry points must drive that same visitor:\n%s", lim)
 	}
 }
 
@@ -1162,11 +1258,11 @@ func TestGoNestedRowElemWidth(t *testing.T) {
 	msg := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})["m.go"]
 	// The bound travels with the collector, so the scan can run before Narrow* masks.
 	for _, want := range []string{
-		"&sofab.UnsignedMatrixSeq[uint8]{Out: &m.Urows, Cap: 2, Hi: 255}",
-		"&sofab.SignedMatrixSeq[int16]{Out: &m.Srows, Cap: 2, Lo: -32768, Hi: 32767}",
+		"&sofab.UnsignedMatrixSeq[uint8]{Out: &m.Urows, Cap: 2, RCap: 65536, RowCount: 3, RowCap: 65536, Hi: 255}",
+		"&sofab.SignedMatrixSeq[int16]{Out: &m.Srows, Cap: 2, RCap: 65536, RowCount: 3, RowCap: 65536, Lo: -32768, Hi: 32767}",
 		// u64 spans the callback parameter's own range: nothing can fall outside,
 		// so the zero bound switches the scan off rather than emitting a dead one.
-		"&sofab.UnsignedMatrixSeq[uint64]{Out: &m.Wide, Cap: 2, Hi: 0}",
+		"&sofab.UnsignedMatrixSeq[uint64]{Out: &m.Wide, Cap: 2, RCap: 65536, RowCount: 3, RowCap: 65536, Hi: 0}",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("missing %q in:\n%s", want, msg)

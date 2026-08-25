@@ -2,6 +2,7 @@ package golang
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -79,14 +80,14 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 	return ms
 }
 
-// limitSet is the receiver-side decode-limit configuration (generator#102),
-// resolved against the schema: each active entry is the configured cap raised
-// to the largest schema bound of its kind, so a schema-bounded field larger
-// than the cap stays governed by its schema bound alone (the corelib enforces
-// these globally per decode). Every cap is always SET — the target carries a
-// finite default that the config key only overrides (§9.5, generator#385) — so
-// an entry is active exactly when the schema actually has an unbounded field of
-// that kind; otherwise the cap would be inert and no plumbing is emitted.
+// limitSet is the receiver-side decode-limit configuration (generator#102).
+//
+// Every cap is always SET — the target carries a finite default that the config
+// key only overrides (§9.5, generator#385) — so the three values are always
+// available to emit. The `*Has` flags say something narrower: whether the schema
+// actually has an unbounded field of that kind, and therefore whether the
+// EXPORTED constant is emitted at all. A cap nothing in the schema can reach is
+// inert, and an inert constant is dead code in every generated package.
 type limitSet struct {
 	arrayCount, stringLen, blobLen int64
 	arrayHas, stringHas, blobHas   bool
@@ -94,8 +95,20 @@ type limitSet struct {
 
 func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
 
-// resolveLimits resolves the max_dyn_* caps over the target's finite defaults
-// and against the schema's bounds (see limitSet).
+// resolveLimits resolves the max_dyn_* caps over the target's finite defaults,
+// and reads off the schema which of them the package actually exports.
+//
+// The values are emitted AS CONFIGURED. They used to be raised to the largest
+// schema bound of their kind, because the caps rode into the corelib as
+// sofab.WithMax* options that apply GLOBALLY per decode: corelib-go measured
+// every fixlen length and every array count against them with no schema
+// exemption, so a cap below a sibling's `maxlen`/`count` would have rejected a
+// field the schema declares perfectly legal. Keeping those decodable cost every
+// UNBOUNDED field in the message exactly that much tightness. Enforced per
+// field, where the schema is known, no raise is needed anywhere: the corelib
+// holds no cap at all now (corelib-go#133), and the caps a wrapper array's
+// collector takes are exclusive with the schema bounds beside them
+// (corelib-go#132).
 func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	var all []*ir.Field
 	for _, m := range s.Messages {
@@ -103,17 +116,47 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	}
 	b := ir.Bounds(all)
 	d := generator.ServerDynLimits.Resolve(cfg)
-	var l limitSet
-	if b.HasDynArray {
-		l.arrayCount, l.arrayHas = max(d.ArrayCount, b.MaxCount), true
+	return limitSet{
+		arrayCount: d.ArrayCount, arrayHas: b.HasDynArray,
+		stringLen: d.StringLen, stringHas: b.HasDynString,
+		blobLen: d.BlobLen, blobHas: b.HasDynBlob,
 	}
-	if b.HasDynString {
-		l.stringLen, l.stringHas = max(d.StringLen, b.MaxStringLen), true
+}
+
+// arrayCapExpr / elemMaxExpr render the receiver-side caps a wrapper array's
+// collector is handed (§6.2.1) -- the element INDEX bound and the element
+// LENGTH bound -- and the row-count cap of a matrix collector.
+//
+// All of them are ALWAYS emitted. corelib-go's own fallback for a non-positive
+// field is the format ceiling, which bounds nothing the format does not already
+// reject one step earlier, so leaving one out is not "the corelib's default" but
+// no receiver bound at all. §6.2.1 puts the number here regardless: it comes
+// from generated code, which knows the schema and the target, never from one the
+// corelib invented.
+//
+// The exported constant is preferred so the package keeps one number per kind;
+// it exists only where the schema has an unbounded field of that kind, and where
+// it does not, the collector's field is inert (the schema bound beside it
+// governs and the two are exclusive) -- so the configured value goes in as a
+// literal rather than the package growing a constant nothing reads.
+func (g *gen) arrayCapExpr() string {
+	if g.limits.arrayHas {
+		return "MaxDynArrayCount"
 	}
-	if b.HasDynBlob {
-		l.blobLen, l.blobHas = max(d.BlobLen, b.MaxBlobLen), true
+	return strconv.FormatInt(g.limits.arrayCount, 10)
+}
+
+func (g *gen) elemMaxExpr(elem ir.Kind) string {
+	if elem == ir.KindBlob {
+		if g.limits.blobHas {
+			return "MaxDynBlobLen"
+		}
+		return strconv.FormatInt(g.limits.blobLen, 10)
 	}
-	return l
+	if g.limits.stringHas {
+		return "MaxDynStringLen"
+	}
+	return strconv.FormatInt(g.limits.stringLen, 10)
 }
 
 // hasObject reports whether the schema emits at least one struct/union/message —
@@ -151,9 +194,12 @@ type _isDefaulter interface{ isDefault() bool }`)
 		f.blank()
 		f.line("// Receiver-side decode limits, baked from the sofabgen config")
 		f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
-		f.line("// only fields the schema left unbounded; each cap is raised to the largest")
-		f.line("// schema bound of its kind, so a schema-bounded field stays governed by its")
-		f.line("// own bound alone. Exceeding a cap fails Decode with sofab.ErrLimitExceeded.")
+		f.line("// ONLY the fields the schema left unbounded: a field with its own count/maxlen")
+		f.line("// is judged against that alone, and its violation is sofab.ErrInvalidMsg. The")
+		f.line("// numbers travel AS CONFIGURED -- nothing raises them to a sibling's schema")
+		f.line("// bound, because no cap can reach a bounded field to begin with.")
+		f.line("// Exceeding a cap fails the decode with sofab.ErrLimitExceeded, a policy")
+		f.line("// category distinct from INVALID: the same bytes decode under a looser cap.")
 		f.line("const (")
 		if g.limits.arrayHas {
 			f.line("\tMaxDynArrayCount = %d", g.limits.arrayCount)
@@ -167,25 +213,6 @@ type _isDefaulter interface{ isDefault() bool }`)
 		f.line(")")
 	}
 	return f.bytes(g.banner, g.license)
-}
-
-// acceptOpts renders the sofab decode options for the active receiver-side
-// limits ("" when none), appended to every generated AcceptBytes call.
-func (g *gen) acceptOpts() string {
-	var opts []string
-	if g.limits.arrayHas {
-		opts = append(opts, "sofab.WithMaxArrayCount(MaxDynArrayCount)")
-	}
-	if g.limits.stringHas {
-		opts = append(opts, "sofab.WithMaxStringLen(MaxDynStringLen)")
-	}
-	if g.limits.blobHas {
-		opts = append(opts, "sofab.WithMaxBlobLen(MaxDynBlobLen)")
-	}
-	if len(opts) == 0 {
-		return ""
-	}
-	return ", " + strings.Join(opts, ", ")
 }
 
 // ---- types.go : all named types -----------------------------------------
@@ -748,8 +775,8 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			// A string is a byte container in Go (§6.4): the wire bytes pass
 			// through verbatim and are validated here, at the destination.
 			str = append(str, arm(fld.ID, takePayload+utf8Guard+acc+" = string(_b)"))
-			if fld.HasMaxlen {
-				fixBegin = append(fixBegin, arm(fld.ID, fixlenBeginBody("sofab.FixlenStr", fld.Maxlen)))
+			if body := g.fixlenBeginBody("sofab.FixlenStr", fld); body != "" {
+				fixBegin = append(fixBegin, arm(fld.ID, body))
 			}
 		case ir.KindBlob:
 			// _b may alias the caller's fed chunk -- a payload that arrived whole
@@ -758,8 +785,8 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			// over, which needs no copy, but the arm cannot tell the two apart and
 			// the copy is what makes the message outlive the input either way.
 			blob = append(blob, arm(fld.ID, takePayload+acc+" = append([]byte(nil), _b...)"))
-			if fld.HasMaxlen {
-				fixBegin = append(fixBegin, arm(fld.ID, fixlenBeginBody("sofab.FixlenBlob", fld.Maxlen)))
+			if body := g.fixlenBeginBody("sofab.FixlenBlob", fld); body != "" {
+				fixBegin = append(fixBegin, arm(fld.ID, body))
 			}
 		case ir.KindStruct, ir.KindUnion:
 			seq = append(seq, arm(fld.ID, fmt.Sprintf("return &%s, nil", acc)))
@@ -824,11 +851,18 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	}
 }
 
-// fixlenBeginBody is the FixlenBegin arm rejecting a string/blob whose wire byte
-// length exceeds the schema maxlen, at the length word and before a byte of
-// payload is read (MESSAGE_SPEC §7.1, §5.2).
+// fixlenBeginBody is the FixlenBegin arm bounding a string/blob's wire byte
+// length, at the length word and before a byte of payload is read
+// (MESSAGE_SPEC §7.1, §5.2). "" when the field has neither bound to state.
 //
-// It is the ONLY place that bound is taken now. The old whole-value guard beside
+// TWO bounds land here and they are mutually exclusive by rule: a field the
+// schema bounds is governed by its own `maxlen` and is sofab.ErrInvalidMsg above
+// it; a field the schema leaves unbounded is governed by the receiver's
+// configured cap and is sofab.ErrLimitExceeded above it. CORELIB_PLAN §6.2.1
+// forbids folding the two -- a cap rejects well-formed bytes that decode under a
+// looser cap -- and forbids a cap reaching a field the schema already bounds.
+//
+// It is the ONLY place either bound is taken. The old whole-value guard beside
 // it (`len(v) > N` on the assembled string) was the one that fired for a field
 // that arrives and stayed silent for one that does not; this fires for both, and
 // the payload callbacks below it therefore carry no bound at all.
@@ -837,11 +871,23 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 // fixlen subtype at a field id -- the corelib resolves what ARRIVED but cannot
 // know what was declared, which is schema knowledge only generated code has --
 // and a fixlen value whose subtype contradicts the declaration is SKIPPED, not
-// measured against this field's maxlen (MESSAGE_SPEC §7.3, generator#224).
+// measured against this field's maxlen or against a cap (MESSAGE_SPEC §7.3,
+// CORELIB_PLAN §6.2.1 "a skipped field is never capped", generator#224).
 // Without the gate an fp64 (8 bytes) landing on a `blob` with `maxlen: 4` was
 // rejected as INVALID instead of skipped.
-func fixlenBeginBody(sub string, n int64) string {
-	return fmt.Sprintf("if sub != %s {\n\t\t\treturn nil\n\t\t}\n\t\tif total > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", sub, n)
+func (g *gen) fixlenBeginBody(sub string, fld *ir.Field) string {
+	gate := fmt.Sprintf("if sub != %s {\n\t\t\treturn nil\n\t\t}\n\t\t", sub)
+	if fld.HasMaxlen {
+		return gate + fmt.Sprintf("if total > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", fld.Maxlen)
+	}
+	live := g.limits.stringHas
+	if fld.Kind == ir.KindBlob {
+		live = g.limits.blobHas
+	}
+	if !live {
+		return ""
+	}
+	return gate + fmt.Sprintf("if total > %s {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}", g.elemMaxExpr(fld.Kind))
 }
 
 // arrayBeginBody is the ArrayBegin arm for one native array field: the §7.3 kind
@@ -866,17 +912,24 @@ func fixlenBeginBody(sub string, n int64) string {
 // what makes an array that arrives EMPTY decode as the empty array rather than
 // as a nil slice, which Go's zero value would render as JSON `null`.
 //
-// It is sized from the wire count, which is bounded before the make in both
-// directions: by the schema `count:` where one is declared (the check on the
-// line above), and by the receiver cap otherwise -- corelib-go rejects a count
-// over max_dyn_array_count at the count varint, one callback earlier, which is
-// exactly the allocation §6.2.1 gives that cap to bound. §6.6.1 puts the
-// allocation on this side of the callback either way: "the generated layer
-// allocates; the codec does not".
+// It is sized from the wire count, which is bounded on the line above before the
+// make, in one of two mutually exclusive ways: by the schema `count:` where one
+// is declared (ErrInvalidMsg, MESSAGE_SPEC §7.1), and by the receiver's
+// configured cap where none is (ErrLimitExceeded, CORELIB_PLAN §6.2.1). The
+// corelib holds no cap of its own to fall back on (corelib-go#133) -- "the
+// numbers and the allocation are not the codec's" -- so this arm is the whole
+// bound on a schema-unbounded native array, and it sits at the count header,
+// which is the enforcement point §6.2.1 names. Both live inside the §7.3 kind
+// gate: a skipped field is never capped. §6.6.1 puts the allocation on this side
+// of the callback either way: "the generated layer allocates; the codec does
+// not".
 func (g *gen) arrayBeginBody(fld *ir.Field, acc, elemType string) string {
 	body := fmt.Sprintf("if kind != sofab.%s {\n\t\t\treturn nil\n\t\t}\n\t\t", goArrayWireKind(fld.Elem))
-	if fld.HasCount {
+	switch {
+	case fld.HasCount:
 		body += fmt.Sprintf("if count > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", fld.Count)
+	case g.limits.arrayHas:
+		body += fmt.Sprintf("if count > %s {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}\n\t\t", g.arrayCapExpr())
 	}
 	return body + fmt.Sprintf("%s = make([]%s, 0, count)", acc, elemType)
 }
@@ -940,25 +993,40 @@ func emitIDSwitch(f *gofile, recv, sig string, arms []string) {
 // arrayCollector returns an expression constructing the sofab.Visitor that
 // collects a wrapper-sequence array's elements into the slice at ptr (an address
 // expression like "&m.Field" or a "*[]T" pointer). It recurses for nested arrays.
+//
+// Every collector is handed BOTH bounds of every axis it has: the schema pair
+// (Cap, ElemMax / RowCount) and the receiver pair beside it (RCap, RElemMax /
+// RowCap). A wrapper array's elements never reach the generated visitor --
+// neither their index nor their length word -- so the collector is where this
+// shape's receiver caps land, and corelib-go keeps the two exclusive per
+// §6.2.1: where the schema declares a `count`/`maxlen` the cap beside it is
+// inert and the violation is ErrInvalidMsg, where it does not the cap governs
+// and the violation is ErrLimitExceeded.
+//
+// The receiver fields are emitted unconditionally, including where the schema
+// bound beside them makes them inert. corelib-go falls back to the format
+// ceiling for a non-positive one, which bounds nothing the format does not
+// already reject one step earlier, so omitting one is not "the corelib's
+// default" but no receiver bound at all.
 func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64) string {
 	switch elem {
 	case ir.KindString:
-		return fmt.Sprintf("&sofab.StringSeq{Out: %s, Cap: %d, ElemMax: %d}", ptr, cap, emax)
+		return fmt.Sprintf("&sofab.StringSeq{Out: %s, Cap: %d, ElemMax: %d, RCap: %s, RElemMax: %s}", ptr, cap, emax, g.arrayCapExpr(), g.elemMaxExpr(ir.KindString))
 	case ir.KindBlob:
-		return fmt.Sprintf("&sofab.BlobSeq{Out: %s, Cap: %d, ElemMax: %d}", ptr, cap, emax)
+		return fmt.Sprintf("&sofab.BlobSeq{Out: %s, Cap: %d, ElemMax: %d, RCap: %s, RElemMax: %s}", ptr, cap, emax, g.arrayCapExpr(), g.elemMaxExpr(ir.KindBlob))
 	case ir.KindStruct, ir.KindUnion:
 		t := g.typeName(ref.Key)
-		return fmt.Sprintf("&sofab.MessageSeq[%s, *%s]{Out: %s, Cap: %d}", t, t, ptr, cap)
+		return fmt.Sprintf("&sofab.MessageSeq[%s, *%s]{Out: %s, Cap: %d, RCap: %s}", t, t, ptr, cap, g.arrayCapExpr())
 	case ir.KindArray:
 		if isNativeArrayElem(items.Elem) {
-			return g.matrixCollector(ptr, items.Elem, items.ElemRef, cap)
+			return g.matrixCollector(ptr, items, cap)
 		}
 		// Array of wrapper-sequence arrays: each element is itself a sequence
 		// collected into an inner slice by a recursively-built collector. The
 		// inner collector carries the inner array's own count bound.
 		inner := g.goArrayElem(items.Elem, items.ElemRef, items.ElemItems)
 		mk := g.arrayCollector("p", items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), emaxOf(items.ElemMaxHas, items.ElemMax))
-		return fmt.Sprintf("&sofab.NestedSeq[%s]{Out: %s, Cap: %d, Make: func(p *[]%s) sofab.Visitor { return %s }}", inner, ptr, cap, inner, mk)
+		return fmt.Sprintf("&sofab.NestedSeq[%s]{Out: %s, Cap: %d, RCap: %s, Make: func(p *[]%s) sofab.Visitor { return %s }}", inner, ptr, cap, g.arrayCapExpr(), inner, mk)
 	}
 	return "nil"
 }
@@ -1007,28 +1075,38 @@ func emaxOf(hasMax bool, max int64) int64 {
 // matrixCollector builds the row collector for an array whose elements are native
 // arrays ([][]elem): rows arrive via the widened *Array callbacks, keyed by the
 // row's element id. cap is the OUTER array's count bound, which bounds that id.
-func (g *gen) matrixCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, cap int64) string {
+//
+// A matrix has TWO axes and therefore four bounds. Cap/RCap bound the ROW ID, as
+// on every collector above. RowCount/RowCap bound a row's OWN element count,
+// which the row announces as a real count header because a row IS a native
+// array -- and which nothing bounded before: `items` (the inner array's `count:`)
+// was dropped on the floor here, and the codec's cap that used to stand in for it
+// is gone. RowCount is that inner `count:` (ErrInvalidMsg above it, §7.1) and
+// RowCap the receiver cap where the row declares none (ErrLimitExceeded).
+func (g *gen) matrixCollector(ptr string, items *ir.ArrayElem, cap int64) string {
+	elem, ref := items.Elem, items.ElemRef
 	// The row element's declared width travels with the collector, so the scan
 	// runs before sofab.Narrow* masks anything (generator#330). NarrowRange
 	// answers false for u64/i64 and for enum/bitfield -- all four span the callback
 	// parameter's own range, so the zero bound switches the scan off rather than
 	// emitting one that can never fire.
 	lo, hi, _ := ir.NarrowRange(elem)
+	rows := fmt.Sprintf("Cap: %d, RCap: %s, RowCount: %d, RowCap: %s", cap, g.arrayCapExpr(), capOf(items.HasCount, items.Count), g.arrayCapExpr())
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		return fmt.Sprintf("&sofab.UnsignedMatrixSeq[%s]{Out: %s, Cap: %d, Hi: %d}", goNumType(elem), ptr, cap, uint64(hi))
+		return fmt.Sprintf("&sofab.UnsignedMatrixSeq[%s]{Out: %s, %s, Hi: %d}", goNumType(elem), ptr, rows, uint64(hi))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		return fmt.Sprintf("&sofab.SignedMatrixSeq[%s]{Out: %s, Cap: %d, Lo: %d, Hi: %d}", goNumType(elem), ptr, cap, lo, hi)
+		return fmt.Sprintf("&sofab.SignedMatrixSeq[%s]{Out: %s, %s, Lo: %d, Hi: %d}", goNumType(elem), ptr, rows, lo, hi)
 	case ir.KindBitfield:
-		return fmt.Sprintf("&sofab.UnsignedMatrixSeq[%s]{Out: %s, Cap: %d, Hi: 0}", g.typeName(ref.Key), ptr, cap)
+		return fmt.Sprintf("&sofab.UnsignedMatrixSeq[%s]{Out: %s, %s, Hi: 0}", g.typeName(ref.Key), ptr, rows)
 	case ir.KindEnum:
-		return fmt.Sprintf("&sofab.SignedMatrixSeq[%s]{Out: %s, Cap: %d, Lo: 0, Hi: 0}", g.typeName(ref.Key), ptr, cap)
+		return fmt.Sprintf("&sofab.SignedMatrixSeq[%s]{Out: %s, %s, Lo: 0, Hi: 0}", g.typeName(ref.Key), ptr, rows)
 	case ir.KindFP32:
-		return fmt.Sprintf("&sofab.Float32MatrixSeq{Out: %s, Cap: %d}", ptr, cap)
+		return fmt.Sprintf("&sofab.Float32MatrixSeq{Out: %s, %s}", ptr, rows)
 	case ir.KindFP64:
-		return fmt.Sprintf("&sofab.Float64MatrixSeq{Out: %s, Cap: %d}", ptr, cap)
+		return fmt.Sprintf("&sofab.Float64MatrixSeq{Out: %s, %s}", ptr, rows)
 	case ir.KindBool:
-		return fmt.Sprintf("&sofab.BoolMatrixSeq{Out: %s, Cap: %d}", ptr, cap)
+		return fmt.Sprintf("&sofab.BoolMatrixSeq{Out: %s, %s}", ptr, rows)
 	}
 	return "nil"
 }
@@ -1181,7 +1259,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("// streaming twin for a message that is not.")
 	f.line("func Decode%s(data []byte) (*%s, error) {", typeName, typeName)
 	f.line("\tm := New%s()", typeName)
-	f.line("\tif err := sofab.AcceptBytes(data, m%s); err != nil {", g.acceptOpts())
+	f.line("\tif err := sofab.AcceptBytes(data, m); err != nil {")
 	f.line("\t\treturn nil, err")
 	f.line("\t}")
 	f.line("\treturn m, nil")
@@ -1216,7 +1294,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("func Decode%sFrom(r io.Reader) (*%s, error) {", typeName, typeName)
 	f.line("\tm := New%s()", typeName)
 	f.line("\tscratch := make([]byte, %d)", decodeChunkSize)
-	f.line("\tout, err := sofab.NewDecoder(m%s).FeedFrom(r, scratch)", g.acceptOpts())
+	f.line("\tout, err := sofab.NewDecoder(m).FeedFrom(r, scratch)")
 	f.line("\tif err != nil {")
 	f.line("\t\treturn nil, err")
 	f.line("\t}")
