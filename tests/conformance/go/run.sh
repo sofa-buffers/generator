@@ -43,15 +43,18 @@ echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"
 echo "==> round-trip OK"
 
 # Streaming decode: the same bytes through the io.Reader-driven entry point
-# (CORELIB_PLAN S5.6, generator#312 / corelib-go#71+#72). DecodeXFrom drives
-# corelib-go's AcceptStream, which dispatches each field as the reader delivers
-# it instead of requiring the whole wire image resident the way AcceptBytes does
-# by construction.
+# (CORELIB_PLAN S5.6, generator#312 / corelib-go#130). DecodeXFrom drives
+# corelib-go's Decoder.FeedFrom, which feeds the decoder whatever the reader
+# delivered and resumes on the next chunk, instead of requiring the whole wire
+# image resident the way AcceptBytes does by construction.
 #
 # The harness feeds it ONE BYTE PER Read. That is the point of the check: a
 # reader handing the message over in a single Read would exercise the new
 # signature without ever making the decoder suspend and resume, which is the
-# half that can actually be wrong. Every byte position becomes a boundary.
+# half that can actually be wrong. Every byte position becomes a boundary --
+# which since corelib-go#130 also means every string and blob payload is
+# delivered one byte at a time, so the destination's piecewise assembly
+# (sofab.PayloadAcc) is exercised at every offset it can suspend at.
 #
 # The assertion is EQUIVALENCE, not "it decodes": byte-identical JSON to the
 # in-memory path. A streaming decode that quietly dropped a field would still

@@ -179,12 +179,13 @@ func (m *Scalars) EncodeTo(w io.Writer) error {
 }
 
 // DecodeScalars parses bytes into a new message (with defaults pre-applied).
-// Decode runs the corelib's AcceptBytes cursor over the buffer, dispatching
+// Decode feeds the buffer to the corelib's decoder in one go, dispatching
 // each field to the message's sofab.Visitor implementation.
 //
-// The cursor hands a payload over as a window into data, but the decoded
-// message OWNS its bytes: every destination copies. The message therefore
-// outlives data, and data may be reused or mutated the moment this returns.
+// A payload arrives as a window into data, in as many pieces as it was fed
+// in, but the decoded message OWNS its bytes: every destination assembles
+// and copies. The message therefore outlives data, and data may be reused
+// or mutated the moment this returns.
 //
 // Use this when the message is already in memory. DecodeScalarsFrom is the
 // streaming twin for a message that is not.
@@ -198,19 +199,27 @@ func DecodeScalars(data []byte) (*Scalars, error) {
 
 // DecodeScalarsFrom parses a message straight out of r (with defaults pre-applied).
 //
-// The wire image is never held whole in memory: each field is read and
-// dispatched as r delivers it, so what bounds memory is the largest single
-// field, not the message. DecodeScalars is the in-memory path for bytes you
-// already hold; this is the one to reach for over a network connection, a
-// file, or any producer that outruns the memory you want to spend.
+// The wire image is never held whole in memory: r is drained in chunks and
+// each field is dispatched as its bytes arrive, so what bounds memory is
+// the chunk plus the largest single field, not the message. DecodeScalars is
+// the in-memory path for bytes you already hold; this is the one to reach
+// for over a network connection, a file, or any producer that outruns the
+// memory you want to spend.
 //
 // The verdict is identical either way -- the same visitor sees the same
 // events in the same order -- so a message that is INVALID whole is INVALID
-// streamed, at every chunk boundary.
+// streamed, at every chunk boundary. A reader that ends inside a field is
+// INCOMPLETE, which is sofab.ErrIncomplete here: only the caller's framing
+// knows whether more could still have come (S5.2.4).
 func DecodeScalarsFrom(r io.Reader) (*Scalars, error) {
 	m := NewScalars()
-	if err := sofab.NewDecoder(r).AcceptStream(m); err != nil {
+	scratch := make([]byte, 4096)
+	out, err := sofab.NewDecoder(m).FeedFrom(r, scratch)
+	if err != nil {
 		return nil, err
+	}
+	if out != sofab.Complete {
+		return nil, sofab.ErrIncomplete
 	}
 	return m, nil
 }
