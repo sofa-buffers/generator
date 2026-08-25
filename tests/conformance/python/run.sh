@@ -349,9 +349,13 @@ echo "==> decode-limit reject OK"
 # Conformance covers the per-field scalar vectors; WireArraySparsity covers the
 # array ones -- the MESSAGE_SPEC S2 element rule and S3's "count is a capacity",
 # both byte-exact against the regenerated shared vectors, both executed through a
-# generated project driving corelib-py.
+# generated project driving corelib-py. SchemaBoundIsDeclaredNotCopied is the
+# S6.2.1/S6.3 split the same way: a schema-bounded field decodes past a tighter
+# receiver cap, its own bound still rejects as INVALID, and a header that
+# contradicts the declared type is skipped rather than measured against it (S7.3).
 echo "==> shared-vector byte-exact conformance"
-( cd "$ROOT" && SOFAB_PY_CORELIB="$CORELIB" go test ./generators/python/ -run 'Conformance|WireArraySparsity|NestedNativeRowCountBound' -count=1 )
+( cd "$ROOT" && SOFAB_PY_CORELIB="$CORELIB" go test ./generators/python/ \
+    -run 'Conformance|WireArraySparsity|NestedNativeRowCountBound|SchemaBoundIsDeclaredNotCopied' -count=1 )
 
 echo "==> corpus + realworld: every definition imports"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do

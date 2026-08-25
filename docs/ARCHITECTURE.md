@@ -691,9 +691,12 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    corelib-py skip the entire subtree, delivering nothing and firing no
    `on_sequence_end`, so the stack is only ever pushed for a scope the visitor
    entered. Every bound whose verdict must precede the payload moves to a header
-   hook: `on_field` carries a fixlen length and a wrapper element index, and
-   `on_array_begin` carries an integer array's count and takes the declared
-   element width for the decoder to apply per element.
+   hook, and since generator#406 they are split by who owns the rule: the
+   **schema's** `count:`/`maxlen:` is *declared* to the corelib in
+   `on_schema_bound(field_id, n) -> int` and applied there (§9.5 below);
+   `on_field` keeps the §7.3 tag test in front of it and the wrapper element
+   index; `on_array_begin` keeps the declared element width, which the decoder
+   applies per element.
 
    **Optional bulk element hand-off (Java and Kotlin, `Visitor.arrayBulk`/`arrayBulkEnd`).**
    A flat visitor pays its per-callback routing *per element*, which for a short
@@ -1311,7 +1314,9 @@ only party that knows the bound, so the bound has to travel into the decoder:
   arrived, so a check there could only ever decide an array that *arrives* —
   which is the one case §5.2 is about. The same hook carries the schema count on
   its `count` argument and can hand over a destination buffer, so an integer
-  array need never build a Python object per element.
+  array need never build a Python object per element. Its `count` argument is no
+  longer *checked* there — generator#406 moved the schema count into
+  `on_schema_bound`, which the decoder asks one hook earlier.
 
 `kind` is what the **wire** declares and the bound applies only in the arm
 matching the declared element type — the §7.3 rule `ArrayBegin` already carries,
@@ -2269,6 +2274,13 @@ for the *unbounded* fields too — the ones it exists to protect. The generator 
 the schema; the corelib does not. Two have moved:
 
 - **Python, generator#325** — guards into `on_field`, cap emitted as configured.
+  generator#406 then moved the schema bound itself out of generated code and into
+  corelib-py's `on_schema_bound`, leaving `on_field` the §7.3 tag test and the
+  caps. That is what actually closed the §6.2.1 half for Python: a native integer
+  array's count used to be checked in `on_array_begin`, which left its id in the
+  *else* of `on_field`'s chain — where the array cap sat — so a `count: 8` array
+  under a configured `max_dyn_array_count: 4` was rejected at a wire count of 6, a
+  message the schema plainly admits. See §9.5.1 for what the move cost.
 - **TypeScript, generator#388 and generator#405** — the cap becomes the *else* of
   the schema bound in the very hooks that already carry it: `fixlenBegin` for a
   scalar string/blob, `arrayBegin` for a native array and for a matrix row.
@@ -2383,6 +2395,51 @@ through `sofab.arrays.putGrowing`, whose growth branch is now unreachable (the
 slice is already `count` long, so `i >= s.len` implies `i >= n` and the helper
 returns on its first line). Reducing it to the bounded put it has become is
 corelib-zig's half, filed as corelib-zig#67.
+
+#### 9.5.1 Python: declaring the schema bound, and what the declaration costs
+
+corelib-py owns the schema-bound rule in one place (`Decoder._settle_bound`) and
+reaches it from two routes: a destination map's entry, and
+`Visitor.on_schema_bound(field_id, n) -> int`, asked at the count/length header
+for a `string`, a `blob` or an array the handler accepted. Returning `n >= 0`
+does two things — a wire count/length above it is INVALID (§7.1), and the
+receiver-side cap stops applying to the field (§6.2.1). The `python` backend
+declares through the hook (generator#406) instead of carrying a generated copy of
+the comparison.
+
+**The §7.3 tag test cannot go with it.** The hook is told the id and the
+announced count/length and nothing else, so it cannot tell this field's value
+from a header that merely reuses its id with a contradicting wire type — and
+MESSAGE_SPEC §7.3 is explicit that against a schema bound the skip wins ("the
+subtype is therefore decided first and the schema bound applied only to a field
+that survives it"). Generated code therefore keeps the tag test one hook earlier,
+in `on_field`, and **declines** a mis-tagged field outright. Without that, a
+40-byte `blob` arriving at the id of a `string, maxlen: 32` is reported
+`SofaDecodeError` where the spec says skip. The map route needs no such guard:
+the corelib runs the tag test ahead of a table entry itself.
+
+**Measured, and it is a loss.** Ir/op for `decode`, `tests/bench` row
+`python-native`, `vehicle_telemetry`, one corelib-py build:
+
+| generated handler shape | Ir/op | vs before |
+|---|---:|---:|
+| bound chain in `on_field`, count in `on_array_begin` | 522,503 | — |
+| bound declared in `on_schema_bound`, tag test in `on_field` | 574,968 | **+10.0%** |
+| *(the same without the §7.3 tag test — not conformant)* | 565,054 | +8.1% |
+
+The cost is one **Python call per aggregate field** (+37,397 Ir on its own,
+~1,300 Ir per call), which the two-integer signature reduces but cannot remove;
+the attribute reads it replaces are worth a tenth of that, and the §7.3 tag test
+is worth 9,914. `on_array_begin`'s count check was only 2,105 Ir to begin with.
+The change is kept for what it fixes, not for what it costs: the §6.2.1 defect
+above, and one implementation of the rule instead of two.
+
+**The shape that would pay is the table.** A destination map declares its bounds
+**once**, at construction, so no hook is called per field *and* the corelib's own
+§7.3 tag test sits ahead of the bound — both problems above disappear together.
+Adopting it means keying the flat visitor's `(location, id)` dispatch onto
+corelib-py's `Binding`, which is a larger change than this one and is not in
+generator#388's path either. Until then Python pays the call.
 
 ### 9.6 Worst-case message size (one walk, all backends)
 
