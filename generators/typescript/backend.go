@@ -447,9 +447,9 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field, isM
 // sizing a buffer from the ceiling in the unbounded case would refuse a larger
 // message the caller legitimately built.
 //
-// `new OStream()` — the no-argument form — is deliberately not used anywhere:
-// corelib-ts deprecates it as an alias for growingOStream(), which allocates a
-// slab and doubles it as the message grows, i.e. the corelib owning the storage.
+// corelib-ts's `growingOStream()` is deliberately not used anywhere: it allocates
+// a slab and doubles it as the message grows, i.e. the CORELIB owning the
+// storage, which is what §5.1 puts on this side of the call.
 func (g *gen) emitEncode(f *tsfile, name string, fields []*ir.Field) {
 	ms := g.messageSize(name, fields)
 	if ms.Bounded {
