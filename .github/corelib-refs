@@ -1,0 +1,6 @@
+# Corelib branch pins for CI (docs/CI.md). One VAR=value per line; honoured on
+# branches only, never on main. Delete a pin as soon as its corelib has merged.
+
+# generator#405 needs corelib-ts#165: the receiver caps default to the format
+# ceiling, and StringSeq/BlobSeq take `receiverElemMax` as a 7th argument.
+SOFAB_CORELIB_TS_REF=conformance/spec-c837108
