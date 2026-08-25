@@ -257,16 +257,33 @@ func (g *gen) emitBitfield(f *gofile, nt *ir.NamedType) {
 // for an id scope. Decode is push/visitor: the struct embeds sofab.VisitorBase
 // (no-op defaults) and overrides the callbacks its fields need.
 //
-// One visitor, two entry points. DecodeX runs the corelib's zero-copy
-// AcceptBytes cursor over a buffer the caller already holds; DecodeXFrom runs
-// AcceptStream, which pulls through a bufio.Reader so nothing larger than a
-// single field is ever resident (§5.6). They are event-equivalent, so what is
-// emitted here serves both and neither can tell which is driving it.
+// One visitor, two entry points. DecodeX feeds the corelib's decoder a buffer
+// the caller already holds; DecodeXFrom feeds it whatever a reader delivers, so
+// nothing larger than one fed chunk is ever resident (§5.6). Both are Feed, on
+// the same state machine, so what is emitted here serves both and neither can
+// tell which is driving it.
+//
+// The object carries two pieces of decode STATE, and both are consequences of
+// CORELIB_PLAN §6.6: the codec builds no aggregate, so a string or blob arrives
+// in pieces and the destination assembles it.
+//
+//   - _acc is the assembly buffer (sofab.PayloadAcc). ONE per object is enough
+//     and correct: a fixlen payload is contiguous on the wire, so two of this
+//     object's fields can never be in flight at once, and Take opens a fresh
+//     payload at every offset == 0. It costs nothing while payloads arrive
+//     whole -- the single-piece case hands the fed chunk straight back.
+//   - sofab.StringCheck is the decode's SOFAB_STRICT_UTF8 policy (§6.4),
+//     delivered by the decoder before this scope's first string. Embedding it
+//     promotes UTF8Valid onto the object, so the check a generated arm runs is
+//     the one the caller configured rather than the build tag alone.
 func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 	f.imp(corelibImport)
 	f.line("// %s is a generated SofaBuffers object.", typeName)
 	f.line("type %s struct {", typeName)
 	f.line("\tsofab.VisitorBase")
+	if hasStringField(fields) {
+		f.line("\tsofab.StringCheck")
+	}
 	// Declare fields widest-first to minimise struct padding; marshal/decode stay
 	// in schema/id order, so the wire bytes are unchanged.
 	for _, fld := range ir.SortedForLayout(fields) {
@@ -303,6 +320,11 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 			continue
 		}
 		f.line("\t%s %s %s%s", name, g.goType(fld), tag, fieldDoc(fld))
+	}
+	if hasFixlenField(fields) {
+		f.line("\t// _acc assembles a string or blob payload the codec delivers in pieces")
+		f.line("\t// (S6.6.3). Unexported, so it is not part of the object's JSON form.")
+		f.line("\t_acc sofab.PayloadAcc")
 	}
 	f.line("}")
 	f.blank()
@@ -651,41 +673,31 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 
 	// scalar callbacks
 	var uns, sig, f32, f64, str, blob []string
-	// array callbacks (native, delivered widened)
+	// The two HEADER callbacks. They carry every bound that is decided by a count
+	// or a length WORD, which is where §5.2 requires it: INVALID dominates
+	// INCOMPLETE, so a field whose header already breaches the schema must stay
+	// INVALID even when the message then ends before the payload or the elements
+	// arrive. A guard on the assembled value cannot say that -- it never runs for
+	// a field that never completes (generator#216 / F-0032).
+	var fixBegin, arrBegin []string
+	// The per-ELEMENT array callbacks. A native array is delivered one element at
+	// a time now (§6.6.3), so the declared element width is checked as each one
+	// lands -- again for §5.2: an over-width element followed by a truncation is
+	// INVALID where it lands, not INCOMPLETE at the end (generator#267,
+	// Crucible F-0043).
 	var uArr, sArr, f32Arr, f64Arr []string
 	// sequence descents (nested object + wrapper-sequence arrays)
 	var seq []string
-	// HeaderVisitor hooks: schema-bound rejects at the count/length word, BEFORE
-	// the truncation check, so INVALID dominates INCOMPLETE when the field is also
-	// truncated (generator#216 / F-0032, MESSAGE_SPEC §5.2). The whole-value guards
-	// below (len(v) > N in the *Array/String/Bytes arms) only fire once every
-	// element/byte has arrived, so a truncated over-count/over-maxlen field never
-	// reaches them — the header hook is what makes the over-bound win the tie.
-	var arrBegin, fixHdr []string
-	// ElemBoundVisitor: the declared width of a native integer array's ELEMENTS,
-	// handed to the decoder so it can apply the bound while the elements go past.
-	// The arrayWidthGuard below scans the assembled slice, which is exact for an
-	// array that arrives — and never runs for one that does not, so a message cut
-	// short after an out-of-width element reported INCOMPLETE where §5.2 requires
-	// INVALID (generator#267 residue, Crucible F-0043 width_elem_trunc). Same
-	// shape as the header hooks one level down: only the decoder sees the element
-	// in time, only the schema knows the bound.
-	var elemBound []string
 
 	arm := func(id int64, body string) string { return fmt.Sprintf("case %d:\n%s", id, body) }
-	// maxlenGuard rejects a scalar string/blob whose wire byte length exceeds the
-	// schema maxlen as INVALID (MESSAGE_SPEC §7.1); "" when the field is unbounded.
-	maxlenGuard := func(has bool, max int64) string {
-		if !has {
-			return ""
-		}
-		return fmt.Sprintf("if len(v) > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", max)
-	}
-	// widthGuard rejects a scalar whose value falls outside the range its declared
-	// integer width allows (MESSAGE_SPEC §7.1, documentation#32). The width is a
-	// normative validity bound, not a storage hint: the `uint8(v)` conversion that
-	// follows IS the mask §7.1 forbids, so the check has to precede it. "" for
-	// u64/i64, whose range is the visitor parameter's own.
+	// widthGuard rejects a value outside the range its declared integer width
+	// allows (MESSAGE_SPEC §7.1, documentation#32). The width is a normative
+	// validity bound, not a storage hint: the `uint8(v)` conversion that follows
+	// IS the mask §7.1 forbids, so the check has to precede it. "" for u64/i64
+	// (and for bool/enum/bitfield), whose range is the callback parameter's own.
+	//
+	// It serves the scalar callbacks and the array-element ones alike: both name
+	// the value `v`, and the bound is the same statement about the same width.
 	//
 	// No negative-value term is needed on the unsigned side: Unsigned delivers a
 	// uint64, so the comparison is already unsigned.
@@ -699,31 +711,22 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 		}
 		return fmt.Sprintf("if v > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", hi)
 	}
-	// arrayWidthGuard is the same bound for a native array's ELEMENTS. The corelib
-	// hands the whole array over as []uint64/[]int64 and sofab.Narrow* then converts
-	// element-wise, so the raw values are still visible here and the scan runs
-	// before the narrowing — one out-of-range element makes the message INVALID.
-	arrayWidthGuard := func(elem ir.Kind) string {
-		lo, hi, ok := ir.NarrowRange(elem)
-		if !ok {
-			return ""
-		}
-		cond := fmt.Sprintf("_x > %d", hi)
-		if lo < 0 {
-			cond = fmt.Sprintf("_x < %d || _x > %d", lo, hi)
-		}
-		return fmt.Sprintf("for _, _x := range v {\n\t\t\tif %s {\n\t\t\t\treturn sofab.ErrInvalidMsg\n\t\t\t}\n\t\t}\n\t\t", cond)
-	}
+	// takePayload is the first two lines of every String/Bytes arm: contribute
+	// this piece and do nothing until the payload is whole. The bound was already
+	// taken at the length word (fixlenBeginBody), so what is left here is the
+	// assembly and the store.
+	takePayload := "_b, _done := m._acc.Take(total, offset, chunk)\n\t\tif !_done {\n\t\t\treturn nil\n\t\t}\n\t\t"
 	// utf8Guard rejects invalid UTF-8 in a `string` being MATERIALIZED. It is
 	// emitted inside the arm that resolves the destination and nowhere else:
 	// validation belongs where a string is read into a field, never on a payload
 	// the decoder is skipping (CORELIB_PLAN §6.4, generator#257). The corelib's
-	// visitor path deliberately does not validate — the cursor cannot tell a field
-	// this visitor binds from one it skips — so the check is ours to make here.
-	// sofab.UTF8Valid carries its own compile-time gate, so it is called
-	// unconditionally and generated code never depends on the corelib's build
-	// configuration.
-	utf8Guard := "if !sofab.UTF8Valid([]byte(v)) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t"
+	// visitor path deliberately does not validate -- it cannot tell a field this
+	// visitor binds from one it skips -- so the check is ours to make here.
+	//
+	// m.UTF8Valid, not the package-level sofab.UTF8Valid: the object embeds
+	// sofab.StringCheck, so this reads the policy the decoder resolved for this
+	// decode (WithStrictUTF8) and not only the build-tag gate.
+	utf8Guard := "if !m.UTF8Valid(_b) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t"
 	for _, fld := range fields {
 		acc := "m." + goFieldName(fld.Name)
 		switch fld.Kind {
@@ -742,58 +745,43 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 		case ir.KindFP64:
 			f64 = append(f64, arm(fld.ID, acc+" = v"))
 		case ir.KindString:
-			// A wire byte length above the schema maxlen is malformed input
-			// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate.
-			str = append(str, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+utf8Guard+acc+" = v"))
+			// A string is a byte container in Go (§6.4): the wire bytes pass
+			// through verbatim and are validated here, at the destination.
+			str = append(str, arm(fld.ID, takePayload+utf8Guard+acc+" = string(_b)"))
 			if fld.HasMaxlen {
-				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard(fixSubString, fld.Maxlen)))
+				fixBegin = append(fixBegin, arm(fld.ID, fixlenBeginBody("sofab.FixlenStr", fld.Maxlen)))
 			}
 		case ir.KindBlob:
-			// v aliases the decode buffer (AcceptBytes) — copy what we keep.
-			// The copy stays even though AcceptStream hands over freshly read
-			// buffers that need none: one visitor serves both entry points, and
-			// it cannot tell which one is driving it.
-			blob = append(blob, arm(fld.ID, maxlenGuard(fld.HasMaxlen, fld.Maxlen)+acc+" = append([]byte(nil), v...)"))
+			// _b may alias the caller's fed chunk -- a payload that arrived whole
+			// in one piece is handed back as that piece (§6.7) -- so what is kept
+			// is a copy. A split payload arrives in storage the accumulator hands
+			// over, which needs no copy, but the arm cannot tell the two apart and
+			// the copy is what makes the message outlive the input either way.
+			blob = append(blob, arm(fld.ID, takePayload+acc+" = append([]byte(nil), _b...)"))
 			if fld.HasMaxlen {
-				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard(fixSubBlob, fld.Maxlen)))
+				fixBegin = append(fixBegin, arm(fld.ID, fixlenBeginBody("sofab.FixlenBlob", fld.Maxlen)))
 			}
 		case ir.KindStruct, ir.KindUnion:
 			seq = append(seq, arm(fld.ID, fmt.Sprintf("return &%s, nil", acc)))
 		case ir.KindArray:
-			// A wire element count above the schema `count` capacity is INVALID
-			// per MESSAGE_SPEC §3+§7 — reject, never clamp or keep-all
-			// (generator#100). Count-less (dynamic) arrays have no bound.
-			guard := ""
-			if fld.HasCount {
-				guard = fmt.Sprintf("if len(v) > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", fld.Count)
-				// Native arrays (unsigned/signed/fp32/fp64) fire ArrayBegin at the
-				// header; wrapper-sequence arrays descend via BeginSequence and
-				// have no header hook, so bound them at the collector's cap instead.
-				// The bound is keyed on the wire kind of the DECLARED element type
-				// (generator#259 / F-0042) — see overcountHdrGuard.
-				if isNativeArrayElem(fld.Elem) {
-					arrBegin = append(arrBegin, arm(fld.ID, overcountHdrGuard(goArrayWireKind(fld.Elem), fld.Count)))
-				}
-			}
 			// The wire count M IS the array's length (MESSAGE_SPEC §3): the M
-			// elements that arrived are the whole value, so they are taken as they
-			// come. A declared `count: N` is a capacity and bounds M (above); it
-			// never adds elements, so there is nothing to fill in at [M, N).
+			// elements that arrived are the whole value. A declared `count: N` is a
+			// capacity and bounds M at the header (arrayBeginBody); it never adds
+			// elements, so there is nothing to fill in at [M, N).
 			switch {
-			case isUnsignedNativeArray(fld.Elem):
-				uArr = append(uArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem)+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
-				if b := elemBoundArm(goArrayWireKind(fld.Elem), fld.Elem); b != "" {
-					elemBound = append(elemBound, arm(fld.ID, b))
+			case isNativeArrayElem(fld.Elem):
+				arrBegin = append(arrBegin, arm(fld.ID, g.arrayBeginBody(fld, acc, g.goArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems))))
+				elemArm := arm(fld.ID, widthGuard(fld.Elem)+g.elemAppendStmt(acc, fld.Elem, fld.ElemRef))
+				switch {
+				case isUnsignedNativeArray(fld.Elem):
+					uArr = append(uArr, elemArm)
+				case isSignedNativeArray(fld.Elem):
+					sArr = append(sArr, elemArm)
+				case fld.Elem == ir.KindFP32:
+					f32Arr = append(f32Arr, elemArm)
+				default:
+					f64Arr = append(f64Arr, elemArm)
 				}
-			case isSignedNativeArray(fld.Elem):
-				sArr = append(sArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem)+g.narrowArrayStmt(acc, fld.Elem, fld.ElemRef)))
-				if b := elemBoundArm(goArrayWireKind(fld.Elem), fld.Elem); b != "" {
-					elemBound = append(elemBound, arm(fld.ID, b))
-				}
-			case fld.Elem == ir.KindFP32:
-				f32Arr = append(f32Arr, arm(fld.ID, guard+acc+" = v"))
-			case fld.Elem == ir.KindFP64:
-				f64Arr = append(f64Arr, arm(fld.ID, guard+acc+" = v"))
 			default: // wrapper-sequence array (string/blob/struct/union/nested)
 				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s = %s[:0]\n\t\treturn %s, nil", acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), emaxOf(fld.ElemMaxHas, fld.ElemMax)))))
 			}
@@ -804,46 +792,19 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	emitIDSwitch(f, recv, "Signed(id sofab.ID, v int64) error", sig)
 	emitIDSwitch(f, recv, "Float32(id sofab.ID, v float32) error", f32)
 	emitIDSwitch(f, recv, "Float64(id sofab.ID, v float64) error", f64)
-	emitIDSwitch(f, recv, "String(id sofab.ID, v string) error", str)
-	emitIDSwitch(f, recv, "Bytes(id sofab.ID, v []byte) error", blob)
-	emitIDSwitch(f, recv, "UnsignedArray(id sofab.ID, v []uint64) error", uArr)
-	emitIDSwitch(f, recv, "SignedArray(id sofab.ID, v []int64) error", sArr)
-	emitIDSwitch(f, recv, "Float32Array(id sofab.ID, v []float32) error", f32Arr)
-	emitIDSwitch(f, recv, "Float64Array(id sofab.ID, v []float64) error", f64Arr)
-
-	// Optional HeaderVisitor extension (corelib sofab.HeaderVisitor): emitted only
-	// when a field declares a count/maxlen bound, so a type without bounds does not
-	// implement the interface and the decoder's max-speed path is unchanged
-	// (generator#216). ArrayBegin/FixlenHeader fire at the array/fixlen header, before
-	// the truncation check, so an over-count/over-maxlen field that is also truncated is
-	// INVALID, not INCOMPLETE (§5.2 anti-folding).
-	//
-	// Both hooks fire for ANY wire kind arriving at a bounded field id, so both arm
-	// bodies gate their compare on the kind the schema declared — ArrayBegin on
-	// sofab.ArrayKind (generator#259), FixlenHeader on the fixlen subtype
-	// (generator#224). A contradicting kind is a §7.3 skip, not a bound violation.
-	//
-	// HeaderVisitor declares BOTH methods, and the cursor reaches the hooks through
-	// a single `v.(HeaderVisitor)` assertion — so emitting only the one kind a type
-	// happens to need leaves the assertion FAILING and silently disables the header
-	// rejects altogether. A type with any bound therefore gets both methods; the one
-	// with no arms is an empty switch (a no-op returning nil), which costs a call per
-	// bounded field and nothing on the bound-free max-speed path.
-	if len(arrBegin) > 0 || len(fixHdr) > 0 {
-		emitIDSwitchAlways(f, recv, "ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error", arrBegin)
-		emitIDSwitchAlways(f, recv, "FixlenHeader(id sofab.ID, subtype int, length int) error", fixHdr)
-	}
-
-	// Optional ElemBoundVisitor extension (corelib sofab.ElemBoundVisitor), a
-	// SEPARATE interface from HeaderVisitor and so emitted on its own condition:
-	// a type may declare an element width without declaring any count/maxlen, and
-	// a type that declares a bound the corelib version in use does not know about
-	// simply has a method nobody calls.
-	if len(elemBound) > 0 {
-		emitIDSwitchRet(f, recv,
-			"ArrayElemBound(id sofab.ID, kind sofab.ArrayKind) (int64, int64, bool)",
-			elemBound, "return 0, 0, false")
-	}
+	// The header pair. Both are ordinary Visitor methods now -- the corelib's
+	// optional HeaderVisitor is gone, and with it the trap that emitting only one
+	// of them left the interface assertion failing and BOTH hooks silently dead.
+	// A type with no bound of that kind simply does not override the method and
+	// sofab.VisitorBase's no-op stands.
+	emitIDSwitch(f, recv, "FixlenBegin(id sofab.ID, sub sofab.FixlenSubtype, total int) error", fixBegin)
+	emitIDSwitch(f, recv, "ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error", arrBegin)
+	emitIDSwitch(f, recv, "String(id sofab.ID, total, offset int, chunk []byte) error", str)
+	emitIDSwitch(f, recv, "Bytes(id sofab.ID, total, offset int, chunk []byte) error", blob)
+	emitIDSwitch(f, recv, "ArrayUnsigned(id sofab.ID, _ int, v uint64) error", uArr)
+	emitIDSwitch(f, recv, "ArraySigned(id sofab.ID, _ int, v int64) error", sArr)
+	emitIDSwitch(f, recv, "ArrayFloat32(id sofab.ID, _ int, v float32) error", f32Arr)
+	emitIDSwitch(f, recv, "ArrayFloat64(id sofab.ID, _ int, v float64) error", f64Arr)
 
 	if len(seq) > 0 {
 		f.line("%sBeginSequence(id sofab.ID) (sofab.Visitor, error) {", recv)
@@ -863,58 +824,117 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	}
 }
 
-// emitIDSwitch emits `func … { switch id { <arms> }; return nil }` for a scalar/
-// native-array callback, or nothing when the type has no field for it (the
-// embedded sofab.VisitorBase no-op then applies).
+// fixlenBeginBody is the FixlenBegin arm rejecting a string/blob whose wire byte
+// length exceeds the schema maxlen, at the length word and before a byte of
+// payload is read (MESSAGE_SPEC §7.1, §5.2).
+//
+// It is the ONLY place that bound is taken now. The old whole-value guard beside
+// it (`len(v) > N` on the assembled string) was the one that fired for a field
+// that arrives and stayed silent for one that does not; this fires for both, and
+// the payload callbacks below it therefore carry no bound at all.
+//
+// The compare sits inside the declared-subtype test. FixlenBegin fires for ANY
+// fixlen subtype at a field id -- the corelib resolves what ARRIVED but cannot
+// know what was declared, which is schema knowledge only generated code has --
+// and a fixlen value whose subtype contradicts the declaration is SKIPPED, not
+// measured against this field's maxlen (MESSAGE_SPEC §7.3, generator#224).
+// Without the gate an fp64 (8 bytes) landing on a `blob` with `maxlen: 4` was
+// rejected as INVALID instead of skipped.
+func fixlenBeginBody(sub string, n int64) string {
+	return fmt.Sprintf("if sub != %s {\n\t\t\treturn nil\n\t\t}\n\t\tif total > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", sub, n)
+}
+
+// arrayBeginBody is the ArrayBegin arm for one native array field: the §7.3 kind
+// gate, the schema count bound at the header, and the destination the elements
+// are appended into.
+//
+// The kind gate is what the old header hook's `kind ==` test was, inverted into an
+// early return because the arm now does more than compare: an array whose
+// element kind contradicts the declaration was never this field's value
+// (MESSAGE_SPEC §7.3, generator#259 / Crucible F-0042), so neither its count nor
+// its elements may touch this field -- not the bound, and not the destination.
+// Un-gated, an fp64 array of 8 elements landing on a declared `array<fp32,
+// count 5>` was rejected as INVALID instead of skipped.
+//
+// This is also why the corelib defers the hook for a fixlen array until after the
+// fixlen_word: the kind handed in is the real element subtype, never a guess. A
+// message that ends between the count word and the fixlen_word is therefore
+// INCOMPLETE -- no bound can be judged yet -- which is the intended verdict.
+//
+// The destination is opened here rather than in the element arm, which is also
+// what makes a repeated id REPLACE the array rather than extend it (§7.4) -- and
+// what makes an array that arrives EMPTY decode as the empty array rather than
+// as a nil slice, which Go's zero value would render as JSON `null`.
+//
+// It is sized from the wire count, which is bounded before the make in both
+// directions: by the schema `count:` where one is declared (the check on the
+// line above), and by the receiver cap otherwise -- corelib-go rejects a count
+// over max_dyn_array_count at the count varint, one callback earlier, which is
+// exactly the allocation §6.2.1 gives that cap to bound. §6.6.1 puts the
+// allocation on this side of the callback either way: "the generated layer
+// allocates; the codec does not".
+func (g *gen) arrayBeginBody(fld *ir.Field, acc, elemType string) string {
+	body := fmt.Sprintf("if kind != sofab.%s {\n\t\t\treturn nil\n\t\t}\n\t\t", goArrayWireKind(fld.Elem))
+	if fld.HasCount {
+		body += fmt.Sprintf("if count > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", fld.Count)
+	}
+	return body + fmt.Sprintf("%s = make([]%s, 0, count)", acc, elemType)
+}
+
+// elemAppendStmt appends one native array element, narrowed to the declared
+// element width. The widthGuard on the line above is what makes the conversion a
+// narrowing and not the §7.1 mask: a value outside the width is already refused.
+func (g *gen) elemAppendStmt(acc string, elem ir.Kind, ref *ir.TypeRef) string {
+	switch elem {
+	case ir.KindU64, ir.KindI64, ir.KindFP32, ir.KindFP64:
+		return fmt.Sprintf("%s = append(%s, v)", acc, acc)
+	case ir.KindBool:
+		return fmt.Sprintf("%s = append(%s, v != 0)", acc, acc)
+	case ir.KindBitfield, ir.KindEnum:
+		return fmt.Sprintf("%s = append(%s, %s(v))", acc, acc, g.typeName(ref.Key))
+	default: // u8/u16/u32, i8/i16/i32
+		return fmt.Sprintf("%s = append(%s, %s(v))", acc, acc, goNumType(elem))
+	}
+}
+
+// hasStringField / hasFixlenField report what decode STATE an object needs: a
+// string field means the UTF-8 policy (sofab.StringCheck), and any string or
+// blob field means the payload accumulator, since both arrive in pieces.
+func hasStringField(fields []*ir.Field) bool {
+	for _, fld := range fields {
+		if fld.Kind == ir.KindString {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFixlenField(fields []*ir.Field) bool {
+	for _, fld := range fields {
+		if fld.Kind == ir.KindString || fld.Kind == ir.KindBlob {
+			return true
+		}
+	}
+	return false
+}
+
+// emitIDSwitch emits `func … { switch id { <arms> }; return nil }` for one
+// visitor callback, or nothing when the type has no field for it -- the embedded
+// sofab.VisitorBase no-op then applies, which is also what keeps a decode from
+// paying a call per field for a callback nobody binds.
 func emitIDSwitch(f *gofile, recv, sig string, arms []string) {
 	if len(arms) == 0 {
 		return
 	}
-	emitIDSwitchAlways(f, recv, sig, arms)
-}
-
-// emitIDSwitchAlways is emitIDSwitch without the skip-when-empty shortcut: the
-// method is emitted even with no arms. Used for the HeaderVisitor pair, where the
-// method set — not the arms — is what makes the interface assertion succeed.
-func emitIDSwitchAlways(f *gofile, recv, sig string, arms []string) {
-	emitIDSwitchRet(f, recv, sig, arms, "return nil")
-}
-
-// emitIDSwitchRet is emitIDSwitchAlways for a callback whose fall-through is not
-// `return nil` — ArrayElemBound answers with a triple, and "this id declares no
-// bound" is one of its values rather than the absence of an error.
-func emitIDSwitchRet(f *gofile, recv, sig string, arms []string, fallthru string) {
 	f.line("%s%s {", recv, sig)
 	f.line("\tswitch id {")
 	for _, a := range arms {
 		f.line("\t%s", a)
 	}
 	f.line("\t}")
-	f.line("\t%s", fallthru)
+	f.line("\treturn nil")
 	f.line("}")
 	f.blank()
-}
-
-// narrowArrayStmt assigns a widened native array (v) into the field, narrowing to
-// the declared element width. 64-bit widths (and bitfield/enum at 64-bit) assign
-// the widened slice directly; narrower widths allocate via the corelib narrowers.
-func (g *gen) narrowArrayStmt(acc string, elem ir.Kind, ref *ir.TypeRef) string {
-	switch elem {
-	case ir.KindU64:
-		return acc + " = v"
-	case ir.KindI64:
-		return acc + " = v"
-	case ir.KindBool:
-		return fmt.Sprintf("%s = make([]bool, len(v))\n\t\tfor _i, _x := range v {\n\t\t\t%s[_i] = _x != 0\n\t\t}", acc, acc)
-	case ir.KindBitfield:
-		return fmt.Sprintf("%s = sofab.NarrowUnsigned[%s](v)", acc, g.typeName(ref.Key))
-	case ir.KindEnum:
-		return fmt.Sprintf("%s = sofab.NarrowSigned[%s](v)", acc, g.typeName(ref.Key))
-	case ir.KindU8, ir.KindU16, ir.KindU32:
-		return fmt.Sprintf("%s = sofab.NarrowUnsigned[%s](v)", acc, goNumType(elem))
-	default: // i8/i16/i32
-		return fmt.Sprintf("%s = sofab.NarrowSigned[%s](v)", acc, goNumType(elem))
-	}
 }
 
 // arrayCollector returns an expression constructing the sofab.Visitor that
@@ -953,52 +973,6 @@ func capOf(hasCount bool, count int64) int64 {
 	return -1
 }
 
-// overcountHdrGuard is the ArrayBegin arm body rejecting a native array whose
-// wire element count exceeds the schema count N as INVALID, at the array header
-// (generator#216). Reused for every native-array kind (unsigned/signed/fp32/fp64
-// arrays all fire ArrayBegin). gofmt fixes the indentation on emit.
-//
-// The compare is gated on `kind`, the element kind the wire header declares, and
-// fires only when it matches the kind the schema declared at this id
-// (generator#259 / Crucible F-0042, CORELIB_PLAN §4.8). ArrayBegin fires for ANY
-// array header at a field id — the corelib resolves the wire kind but cannot know
-// the declared one, which is schema knowledge only the generated code has — and
-// an array whose element kind contradicts the declaration is SKIPPED under
-// MESSAGE_SPEC §7.3: the field was never that array's value, so the array's
-// element count is not this field's count and the schema bound must not be
-// applied to it. Un-gated, an fp64 array of 8 elements landing on a declared
-// `array<fp32, count 5>` was rejected as INVALID instead of skipped.
-//
-// This is also why the corelib defers the hook for a fixlen array until after the
-// fixlen_word: the kind handed in is the real element subtype, never a guess. A
-// message that ends between the count word and the fixlen_word is therefore
-// INCOMPLETE — no bound can be judged yet — which is the intended verdict.
-func overcountHdrGuard(kind string, n int64) string {
-	return fmt.Sprintf("if kind == sofab.%s && count > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", kind, n)
-}
-
-// elemBoundArm is the ArrayElemBound arm body declaring the range an element of
-// this array may take (MESSAGE_SPEC §7.1) — "" for u64/i64 and for enum/bitfield/
-// bool elements, whose range is the visitor parameter's own and needs no bound.
-//
-// Emitted exactly where arrayWidthGuard is: the two are the same bound at two
-// times. The guard scans the assembled slice, which decides an array that
-// ARRIVES; this one is what the decoder applies to an array that does not, where
-// the whole-slice callback never fires and the guard therefore never runs
-// (generator#267).
-//
-// Gated on `kind` for the reason overcountHdrGuard is: the hook is asked per
-// field id, and an array whose wire element kind contradicts the declared one is
-// skipped under §7.3 — its elements were never this field's value, so this
-// field's width must not be measured against them.
-func elemBoundArm(kind string, elem ir.Kind) string {
-	lo, hi, ok := ir.NarrowRange(elem)
-	if !ok {
-		return ""
-	}
-	return fmt.Sprintf("if kind == sofab.%s {\n\t\t\treturn %d, %d, true\n\t\t}", kind, lo, hi)
-}
-
 // goArrayWireKind is the sofab.ArrayKind constant naming the wire element kind an
 // array of `elem` is encoded with — what ArrayBegin reports for a header that IS
 // this field's value. fp32 and fp64 are distinct kinds (they are two subtypes of
@@ -1018,29 +992,6 @@ func goArrayWireKind(elem ir.Kind) string {
 	default:
 		return "ArrayUnsigned"
 	}
-}
-
-// The fixlen subtype tag carried in the low 3 bits of a fixlen word (MESSAGE_SPEC
-// §4.6). corelib-go keeps its own copies unexported, so the generated guard spells
-// the wire values out; they are fixed by the format and cannot drift.
-const (
-	fixSubString = 2
-	fixSubBlob   = 3
-)
-
-// maxlenHdrGuard is the FixlenHeader arm body rejecting a string/blob whose wire
-// byte length exceeds the schema maxlen as INVALID, at the length word
-// (generator#216). The bound is enforced only when the wire `subtype` matches the
-// field's DECLARED one: FixlenHeader fires for ANY fixlen subtype at a field id
-// (the corelib resolves the subtype but cannot know the declared one — that is
-// schema knowledge only the generated code has), and a fixlen value whose subtype
-// contradicts the declaration must be SKIPPED, not measured against this field's
-// maxlen (MESSAGE_SPEC §7.3, generator#224). Without the gate an fp64 (8 bytes)
-// landing on a `blob` with `maxlen: 4` was rejected as INVALID instead of skipped.
-// The payload callbacks (String/Bytes) are already subtype-dispatched by the
-// corelib, so only this pre-dispatch hook needs the explicit check.
-func maxlenHdrGuard(sub int, n int64) string {
-	return fmt.Sprintf("if subtype == %d && length > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", sub, n)
 }
 
 // emaxOf maps a string/blob element maxlen bound to the collector's emax field:
@@ -1088,6 +1039,15 @@ func isUnsignedNativeArray(k ir.Kind) bool {
 func isSignedNativeArray(k ir.Kind) bool {
 	return k == ir.KindI8 || k == ir.KindI16 || k == ir.KindI32 || k == ir.KindI64 || k == ir.KindEnum
 }
+
+// decodeChunkSize is the scratch buffer Decode<Msg>From drains a reader into.
+// §6.6 leaves input storage to the caller, so the corelib sizes nothing from the
+// stream and this number is the generated layer's. It bounds nothing about the
+// message: a field larger than one chunk simply arrives in several, which is the
+// point of a piecewise callback surface. 4 KiB is one page, and eight times the
+// 512-byte encode scratch beside it because a read syscall per chunk is what is
+// being amortised here.
+const decodeChunkSize = 4096
 
 // ---- per-message file ----------------------------------------------------
 
@@ -1209,12 +1169,13 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("}")
 	f.blank()
 	f.line("// Decode%s parses bytes into a new message (with defaults pre-applied).", typeName)
-	f.line("// Decode runs the corelib's AcceptBytes cursor over the buffer, dispatching")
+	f.line("// Decode feeds the buffer to the corelib's decoder in one go, dispatching")
 	f.line("// each field to the message's sofab.Visitor implementation.")
 	f.line("//")
-	f.line("// The cursor hands a payload over as a window into data, but the decoded")
-	f.line("// message OWNS its bytes: every destination copies. The message therefore")
-	f.line("// outlives data, and data may be reused or mutated the moment this returns.")
+	f.line("// A payload arrives as a window into data, in as many pieces as it was fed")
+	f.line("// in, but the decoded message OWNS its bytes: every destination assembles")
+	f.line("// and copies. The message therefore outlives data, and data may be reused")
+	f.line("// or mutated the moment this returns.")
 	f.line("//")
 	f.line("// Use this when the message is already in memory. Decode%sFrom is the", typeName)
 	f.line("// streaming twin for a message that is not.")
@@ -1227,32 +1188,40 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("}")
 	f.blank()
 	// Streaming decode -- the twin of EncodeTo above, and what makes this target
-	// meet CORELIB_PLAN §5.6 (generator#312). AcceptBytes needs the whole wire
-	// image in one contiguous buffer BY CONSTRUCTION, and Decoder.Accept only
-	// moves that requirement inside the corelib (it slurps the reader first), so
-	// neither is bounded by anything but the message. AcceptStream drives the
-	// pull primitives directly and dispatches each field as the reader delivers
-	// it, so peak memory is the largest single field (corelib-go#71/#72).
+	// meet CORELIB_PLAN §5.6 (generator#312). Decode%s needs the whole wire image
+	// in one contiguous buffer BY CONSTRUCTION; this one hands the decoder
+	// whatever the reader delivered and resumes on the next chunk, so peak memory
+	// is the scratch buffer plus the largest single field, not the message.
 	//
-	// The VISITOR is unchanged: AcceptStream is event-equivalent to AcceptBytes
-	// -- same callbacks, same HeaderVisitor hooks, same INVALID/INCOMPLETE
-	// verdicts -- so only the entry point that feeds it differs. That is why this
-	// is an addition and not a replacement.
+	// It is a WRAPPER over the same Feed, not a second decode surface (§5.3.1):
+	// the same visitor sees the same events in the same order, so a message that
+	// is INVALID whole is INVALID streamed, at every chunk boundary.
+	//
+	// The scratch buffer is the CALLER's by contract (§6.6: the corelib sizes no
+	// buffer from a stream), so it is allocated here, once per call.
 	f.line("// Decode%sFrom parses a message straight out of r (with defaults pre-applied).", typeName)
 	f.line("//")
-	f.line("// The wire image is never held whole in memory: each field is read and")
-	f.line("// dispatched as r delivers it, so what bounds memory is the largest single")
-	f.line("// field, not the message. Decode%s is the in-memory path for bytes you", typeName)
-	f.line("// already hold; this is the one to reach for over a network connection, a")
-	f.line("// file, or any producer that outruns the memory you want to spend.")
+	f.line("// The wire image is never held whole in memory: r is drained in chunks and")
+	f.line("// each field is dispatched as its bytes arrive, so what bounds memory is")
+	f.line("// the chunk plus the largest single field, not the message. Decode%s is", typeName)
+	f.line("// the in-memory path for bytes you already hold; this is the one to reach")
+	f.line("// for over a network connection, a file, or any producer that outruns the")
+	f.line("// memory you want to spend.")
 	f.line("//")
 	f.line("// The verdict is identical either way -- the same visitor sees the same")
 	f.line("// events in the same order -- so a message that is INVALID whole is INVALID")
-	f.line("// streamed, at every chunk boundary.")
+	f.line("// streamed, at every chunk boundary. A reader that ends inside a field is")
+	f.line("// INCOMPLETE, which is sofab.ErrIncomplete here: only the caller's framing")
+	f.line("// knows whether more could still have come (S5.2.4).")
 	f.line("func Decode%sFrom(r io.Reader) (*%s, error) {", typeName, typeName)
 	f.line("\tm := New%s()", typeName)
-	f.line("\tif err := sofab.NewDecoder(r%s).AcceptStream(m); err != nil {", g.acceptOpts())
+	f.line("\tscratch := make([]byte, %d)", decodeChunkSize)
+	f.line("\tout, err := sofab.NewDecoder(m%s).FeedFrom(r, scratch)", g.acceptOpts())
+	f.line("\tif err != nil {")
 	f.line("\t\treturn nil, err")
+	f.line("\t}")
+	f.line("\tif out != sofab.Complete {")
+	f.line("\t\treturn nil, sofab.ErrIncomplete")
 	f.line("\t}")
 	f.line("\treturn m, nil")
 	f.line("}")

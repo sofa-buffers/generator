@@ -112,6 +112,13 @@ func TestGoOverIndexWrapperArray(t *testing.T) {
 // wire byte length exceeds its schema maxlen is rejected as INVALID (never
 // truncated) — for scalar fields and wrapper-array elements alike. Unbounded
 // fields carry no guard.
+//
+// The bound has exactly ONE site now: FixlenBegin, at the length word. The
+// whole-value guard that used to sit beside it in the payload arm went with the
+// callback that carried a whole value (corelib-go#130): a string arrives in
+// pieces, so a guard on the assembled result is the one that cannot fire for a
+// field the message truncates — which is the §5.2 tie the header hook exists to
+// win.
 func TestGoMaxlenReject(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s:  { id: 0, type: string, maxlen: 8 }\n" +
@@ -121,23 +128,34 @@ func TestGoMaxlenReject(t *testing.T) {
 	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
 	msg := files["m.go"]
 	for _, want := range []string{
-		"if len(v) > 8 {",                                   // scalar string + blob guard
-		"return sofab.ErrInvalidMsg",                        // both scalar and wrapper reject with this
+		"func (m *M) FixlenBegin(id sofab.ID, sub sofab.FixlenSubtype, total int) error {",
+		// Both bounds sit behind the DECLARED subtype: FixlenBegin fires for any
+		// fixlen subtype at a field id, and a value contradicting the declaration
+		// is a §7.3 skip, never this field's length (generator#224).
+		"case 0:\n\t\tif sub != sofab.FixlenStr {\n\t\t\treturn nil\n\t\t}\n\t\tif total > 8 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}",
+		"case 1:\n\t\tif sub != sofab.FixlenBlob {\n\t\t\treturn nil\n\t\t}\n\t\tif total > 8 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}",
 		"&sofab.StringSeq{Out: &m.Ws, Cap: -1, ElemMax: 5}", // wrapper element maxlen threaded as ElemMax
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("m.go missing %q:\n%s", want, msg)
 		}
 	}
-	// The scalar guard must fire for the bounded string (id 0) and blob (id 1) —
-	// once in String and once in Bytes — but NOT for the unbounded string (id 2).
-	if got := strings.Count(msg, "if len(v) > 8 {"); got != 2 {
-		t.Errorf("expected exactly 2 scalar maxlen guards (string+blob), got %d:\n%s", got, msg)
+	// Exactly two length-word guards: the bounded string (id 0) and blob (id 1),
+	// and nothing for the unbounded string (id 2).
+	if got := strings.Count(msg, "if total > 8 {"); got != 2 {
+		t.Errorf("expected exactly 2 length-word maxlen guards (string+blob), got %d:\n%s", got, msg)
+	}
+	// The payload arms measure NOTHING. A bound on the assembled value would be a
+	// second enforcement point that disagrees with the first on exactly the
+	// messages this design is about — the truncated ones.
+	if strings.Contains(msg, "len(_b) >") {
+		t.Errorf("the assembled payload must carry no bound of its own:\n%s", msg)
 	}
 	// The unbounded string carries no maxlen guard -- but it does carry the UTF-8
 	// check, which is not a bound: it fires wherever a string is MATERIALIZED
-	// (generator#257), bounded or not.
-	if !strings.Contains(msg, "case 2:\n\t\tif !sofab.UTF8Valid([]byte(v)) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.U = v") {
+	// (generator#257), bounded or not. m.UTF8Valid, not the package-level
+	// primitive, so WithStrictUTF8 reaches the destination (§6.4).
+	if !strings.Contains(msg, "case 2:\n\t\t_b, _done := m._acc.Take(total, offset, chunk)\n\t\tif !_done {\n\t\t\treturn nil\n\t\t}\n\t\tif !m.UTF8Valid(_b) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.U = string(_b)") {
 		t.Errorf("m.go: unbounded string (id 2) must store without a maxlen guard:\n%s", msg)
 	}
 	// The wrapper-element guard is sofab.StringSeq's own; the generator hands it
@@ -147,95 +165,128 @@ func TestGoMaxlenReject(t *testing.T) {
 	}
 }
 
-// TestGoHeaderVisitorReject verifies the generator#216 / F-0032 fix: a schema
-// bound is rejected at the header word (sofab.HeaderVisitor) so INVALID dominates
-// a subsequent truncation (MESSAGE_SPEC §5.2). ArrayBegin rejects an over-count
-// native array at the count word, FixlenHeader an over-maxlen string/blob at the
-// length word — both BEFORE the corelib's truncation check, which the whole-value
-// len(v)>N guards run too late to beat. A type with no bound must implement
-// neither method, so the decoder's max-speed path (no type assertion hit) is kept.
-func TestGoHeaderVisitorReject(t *testing.T) {
+// TestGoHeaderBoundsAtTheWord verifies the generator#216 / F-0032 fix: a schema
+// bound is rejected at the header word so INVALID dominates a subsequent
+// truncation (MESSAGE_SPEC §5.2). ArrayBegin rejects an over-count native array
+// at the count word, FixlenBegin an over-maxlen string/blob at the length word —
+// both before a byte of the value is read.
+//
+// Both are ORDINARY Visitor methods since corelib-go#130. The optional
+// HeaderVisitor they used to reach the decoder through is gone, and with it the
+// trap it carried: the cursor found both hooks through one interface assertion,
+// so a type emitting only the method it needed left that assertion failing and
+// silently disabled the header rejects altogether. Each method now stands alone
+// and a type with no bound of that kind simply keeps sofab.VisitorBase's no-op.
+func TestGoHeaderBoundsAtTheWord(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      ua: { id: 0, type: array, items: { type: u32, count: 4 } }\n" +
 		"      fa: { id: 1, type: array, items: { type: fp32, count: 3 } }\n" +
 		"      s:  { id: 2, type: string, maxlen: 8 }\n" +
 		"      b:  { id: 3, type: blob,   maxlen: 16 }\n" +
-		"      da: { id: 4, type: array, items: { type: u32 } }\n" + // dynamic: no bound
-		"      us: { id: 5, type: string }\n" + // unbounded string: no bound
+		"      da: { id: 4, type: array, items: { type: u32 } }\n" + // dynamic: no count bound
+		"      us: { id: 5, type: string }\n" + // unbounded string: no length bound
 		"      wa: { id: 6, type: array, items: { type: string, count: 5 } }\n" // wrapper array: no ArrayBegin arm
 	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
 	msg := files["m.go"]
 	for _, want := range []string{
 		"func (m *M) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error {",
-		"func (m *M) FixlenHeader(id sofab.ID, subtype int, length int) error {",
-		// Each count guard is gated on the wire ArrayKind an array of the DECLARED
-		// element type maps to: ArrayBegin fires for any array header at a field id,
-		// and a contradicting kind must be skipped, not measured against this
-		// field's capacity (§7.3, generator#259).
-		"if kind == sofab.ArrayUnsigned && count > 4 {", // native u32 array (id 0)
-		"if kind == sofab.ArrayFp32 && count > 3 {",     // fixlen fp32 array (id 1)
-		// Each maxlen guard is gated on the DECLARED fixlen subtype (2 = string,
-		// 3 = blob): FixlenHeader fires for any subtype at a field id, and a
-		// contradicting one must be skipped, not measured against this field's
-		// bound (§7.3, generator#224).
-		"if subtype == 2 && length > 8 {",  // scalar string (id 2) maxlen
-		"if subtype == 3 && length > 16 {", // scalar blob (id 3) maxlen
+		"func (m *M) FixlenBegin(id sofab.ID, sub sofab.FixlenSubtype, total int) error {",
+		// Each arm opens on the wire kind an array of the DECLARED element type
+		// maps to, and leaves on a mismatch: ArrayBegin fires for any array header
+		// at a field id, and a contradicting kind was never this field's value —
+		// so neither its count nor its elements may touch the field (§7.3,
+		// generator#259).
+		"case 0:\n\t\tif kind != sofab.ArrayUnsigned {\n\t\t\treturn nil\n\t\t}\n\t\tif count > 4 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}", // native u32 array
+		"case 1:\n\t\tif kind != sofab.ArrayFp32 {\n\t\t\treturn nil\n\t\t}\n\t\tif count > 3 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}",     // fixlen fp32 array
+		// Same shape for the two length bounds, on the declared fixlen subtype.
+		"case 2:\n\t\tif sub != sofab.FixlenStr {\n\t\t\treturn nil\n\t\t}\n\t\tif total > 8 {",
+		"case 3:\n\t\tif sub != sofab.FixlenBlob {\n\t\t\treturn nil\n\t\t}\n\t\tif total > 16 {",
+		// The destination is opened at the header, sized from the count the line
+		// above has just bounded -- and by make, never by reslicing, so an array
+		// that arrives EMPTY decodes as the empty array and not as a nil slice.
+		"m.Ua = make([]uint32, 0, count)",
+		// An unbounded array is opened the same way: its count is bounded a
+		// callback earlier, by the receiver cap that exists to bound exactly this
+		// allocation (§6.2.1).
+		"case 4:\n\t\tif kind != sofab.ArrayUnsigned {\n\t\t\treturn nil\n\t\t}\n\t\tm.Da = make([]uint32, 0, count)",
 	} {
 		if !strings.Contains(msg, want) {
-			t.Errorf("m.go missing header-visitor guard %q:\n%s", want, msg)
+			t.Errorf("m.go missing header guard %q:\n%s", want, msg)
 		}
 	}
 	// Neither bound may ever be enforced on the wire count/length alone — an
 	// un-gated compare is exactly the generator#224 (maxlen) and generator#259
 	// (count) defect: a fixlen value or array whose subtype contradicts the
 	// declaration was rejected as INVALID instead of skipped.
-	for _, notWant := range []string{"if length > 8 {", "if length > 16 {", "if count > 4 {", "if count > 3 {"} {
+	for _, notWant := range []string{"case 2:\n\t\tif total >", "case 0:\n\t\tif count >"} {
 		if strings.Contains(msg, notWant) {
-			t.Errorf("m.go: maxlen header guard %q is not gated on the fixlen subtype (generator#224):\n%s", notWant, msg)
+			t.Errorf("m.go: a header bound %q is not gated on the declared kind/subtype:\n%s", notWant, msg)
 		}
 	}
-	// The dynamic array (id 4) and unbounded string (id 5) declare no bound, so
-	// they contribute no ArrayBegin/FixlenHeader arm. The wrapper-sequence array
-	// (id 6) descends via BeginSequence and is bounded at the collector cap, not by
-	// ArrayBegin — so ArrayBegin holds exactly the two native arrays' arms.
-	if got := strings.Count(msg, "return sofab.ErrInvalidMsg"); got == 0 {
-		t.Errorf("m.go: expected header-visitor rejects, found none:\n%s", msg)
+	// The unbounded string (id 5) contributes no FixlenBegin arm, and the
+	// wrapper-sequence array (id 6) descends via BeginSequence and is bounded at
+	// the collector's cap, so neither header switch names them.
+	for _, notWant := range []string{"case 5:", "case 6:"} {
+		if strings.Contains(switchBody(t, msg, "func (m *M) FixlenBegin("), notWant) ||
+			strings.Contains(switchBody(t, msg, "func (m *M) ArrayBegin("), notWant) {
+			t.Errorf("m.go: %q must not carry a header bound:\n%s", notWant, msg)
+		}
 	}
-	// A message with no bounded field must NOT implement HeaderVisitor at all,
-	// keeping the corelib's max-speed decode path (the once-per-scope type
-	// assertion stays a miss).
+	// A type with no bound of a kind does not override that method at all: the
+	// embedded sofab.VisitorBase no-op stands, and the decode pays no call.
 	plain := genGo(t, schemaFromYAMLString(t,
-		"version: 1\nmessages:\n  P:\n    payload:\n      x: { id: 0, type: u32 }\n      da: { id: 1, type: array, items: { type: u32 } }\n"),
+		"version: 1\nmessages:\n  P:\n    payload:\n      x: { id: 0, type: u32 }\n      s: { id: 1, type: string }\n"),
 		map[string]any{"package": "p"})["p.go"]
-	for _, notWant := range []string{"ArrayBegin(id sofab.ID", "FixlenHeader(id sofab.ID"} {
+	for _, notWant := range []string{"ArrayBegin(id sofab.ID", "FixlenBegin(id sofab.ID"} {
 		if strings.Contains(plain, notWant) {
-			t.Errorf("p.go: an unbounded-only type must not implement HeaderVisitor (%q):\n%s", notWant, plain)
+			t.Errorf("p.go: a type with no header bound must not override the hook (%q):\n%s", notWant, plain)
 		}
 	}
-	// sofab.HeaderVisitor declares BOTH methods and the cursor reaches the hooks
-	// through one `v.(HeaderVisitor)` assertion, so a type carrying only ONE kind of
-	// bound must still implement both — emitting just the needed method leaves the
-	// assertion failing and silently disables the header rejects entirely.
-	for _, tc := range []struct{ name, src string }{
-		{"maxlen only", "version: 1\nmessages:\n  Q:\n    payload:\n      s: { id: 0, type: string, maxlen: 8 }\n"},
-		{"count only", "version: 1\nmessages:\n  Q:\n    payload:\n      a: { id: 0, type: array, items: { type: u32, count: 4 } }\n"},
+	// ...and one kind of bound no longer drags the other's method along, which is
+	// what the retired HeaderVisitor assertion forced.
+	for _, tc := range []struct{ name, src, want, notWant string }{
+		{"maxlen only", "version: 1\nmessages:\n  Q:\n    payload:\n      s: { id: 0, type: string, maxlen: 8 }\n",
+			"func (m *Q) FixlenBegin(", "func (m *Q) ArrayBegin("},
+		{"count only", "version: 1\nmessages:\n  Q:\n    payload:\n      a: { id: 0, type: array, items: { type: u32, count: 4 } }\n",
+			"func (m *Q) ArrayBegin(", "func (m *Q) FixlenBegin("},
 	} {
 		out := genGo(t, schemaFromYAMLString(t, tc.src), map[string]any{"package": "q"})["q.go"]
-		for _, want := range []string{"func (m *Q) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error {", "func (m *Q) FixlenHeader(id sofab.ID, subtype int, length int) error {"} {
-			if !strings.Contains(out, want) {
-				t.Errorf("q.go (%s): a bounded type must implement the whole HeaderVisitor, missing %q:\n%s", tc.name, want, out)
-			}
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("q.go (%s): missing %q:\n%s", tc.name, tc.want, out)
+		}
+		if strings.Contains(out, tc.notWant) {
+			t.Errorf("q.go (%s): must not emit %q:\n%s", tc.name, tc.notWant, out)
 		}
 	}
 }
 
-// TestGoArrayElemBound covers generator#267's element position: an array element
-// outside its DECLARED WIDTH is INVALID (§7.1) and, being established by its own
-// bytes, dominates a truncation behind it (§5.2). The `for _, _x := range v` scan
-// in the *Array arms decides an array that arrives and never runs for one that
-// does not, so the bound also goes to the corelib as sofab.ElemBoundVisitor,
-// which applies it while the elements go past.
-func TestGoArrayElemBound(t *testing.T) {
+// switchBody returns the body of the method whose declaration starts with decl,
+// so a "this id carries no arm" assertion reads that switch alone: the same id
+// legitimately appears in the neighbouring callbacks.
+func switchBody(t *testing.T, src, decl string) string {
+	t.Helper()
+	i := strings.Index(src, decl)
+	if i < 0 {
+		return ""
+	}
+	body := src[i:]
+	if j := strings.Index(body, "\n}\n"); j >= 0 {
+		body = body[:j]
+	}
+	return body
+}
+
+// TestGoArrayElementWidth covers generator#267's element position: an array
+// element outside its DECLARED WIDTH is INVALID (§7.1) and, being established by
+// its own bytes, dominates a truncation behind it (§5.2).
+//
+// corelib-go#130 is what makes that reachable in generated code. The elements
+// used to arrive as one assembled slice, so the guard was a scan that decided an
+// array which ARRIVES and never ran for one that does not — the bound therefore
+// had to be handed to the decoder through sofab.ElemBoundVisitor to be applied
+// in time. They arrive one at a time now, so the check sits in the element arm,
+// where it fires as the element lands, and the extension is gone.
+func TestGoArrayElementWidth(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      ua: { id: 0, type: array, items: { type: u8,  count: 4 } }\n" +
 		"      sa: { id: 1, type: array, items: { type: i16, count: 4 } }\n" +
@@ -245,57 +296,40 @@ func TestGoArrayElemBound(t *testing.T) {
 		"      wr: { id: 5, type: array, items: { type: string, count: 4 } }\n" // wrapper array
 	msg := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})["m.go"]
 	for _, want := range []string{
-		"func (m *M) ArrayElemBound(id sofab.ID, kind sofab.ArrayKind) (int64, int64, bool) {",
-		// Gated on the wire kind an array of the DECLARED element type maps to,
-		// for the reason ArrayBegin is: the hook is asked per field id, and an
-		// array whose kind contradicts the declaration is a §7.3 skip whose
-		// elements were never this field's value.
-		"if kind == sofab.ArrayUnsigned {\n\t\t\treturn 0, 255, true\n\t\t}",
-		"if kind == sofab.ArraySigned {\n\t\t\treturn -32768, 32767, true\n\t\t}",
+		"func (m *M) ArrayUnsigned(id sofab.ID, _ int, v uint64) error {",
+		"func (m *M) ArraySigned(id sofab.ID, _ int, v int64) error {",
+		// The guard precedes the conversion, which is the whole point: the
+		// `uint8(v)` below it IS the mask §7.1 forbids, so a value outside the
+		// declared width has to be refused before it.
+		"case 0:\n\t\tif v > 255 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.Ua = append(m.Ua, uint8(v))",
+		"case 1:\n\t\tif v < -32768 || v > 32767 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.Sa = append(m.Sa, int16(v))",
 		// The width is a property of the element TYPE, not of the array length,
 		// so a count-less array carries it too.
-		"return 0, 4294967295, true",
-		"return 0, 0, false",
+		"case 3:\n\t\tif v > 4294967295 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.Da = append(m.Da, uint32(v))",
+		// u64 spans the callback parameter's own range: nothing to bound, and the
+		// element is stored as delivered.
+		"case 2:\n\t\tm.Wa = append(m.Wa, v)",
+		// fp32 has no integer width at all.
+		"case 4:\n\t\tm.Fa = append(m.Fa, v)",
 	} {
 		if !strings.Contains(msg, want) {
-			t.Errorf("m.go missing element bound %q:\n%s", want, msg)
+			t.Errorf("m.go missing element width guard %q:\n%s", want, msg)
 		}
 	}
-	// The scan over the assembled slice stays: it is what still bounds the
-	// elements against a corelib that does not know the extension, and it costs
-	// one pass over a slice already in hand.
-	if !strings.Contains(msg, "for _, _x := range v {") {
-		t.Errorf("m.go: the assembled-slice width scan must stay:\n%s", msg)
+	// The scan over an assembled slice is gone with the slice.
+	if strings.Contains(msg, "for _, _x := range v {") {
+		t.Errorf("m.go: the assembled-slice width scan must not survive:\n%s", msg)
 	}
-	// u64 (id 2), fp32 (id 4) and the wrapper array (id 5) declare no element
-	// width — the first because its range IS the callback parameter's, the others
-	// because they are not integer elements at all. Read the ArrayElemBound body
-	// alone: those ids DO carry arms in the neighbouring ArrayBegin switch.
-	body := msg[strings.Index(msg, "func (m *M) ArrayElemBound("):]
-	body = body[:strings.Index(body, "\n}\n")]
-	for _, notWant := range []string{"case 2:", "case 4:", "case 5:"} {
-		if strings.Contains(body, notWant) {
-			t.Errorf("m.go: unexpected element bound %q:\n%s", notWant, body)
+	// ...and so is the extension that carried the bound to the decoder.
+	for _, notWant := range []string{"ArrayElemBound", "sofab.NarrowUnsigned", "sofab.NarrowSigned"} {
+		if strings.Contains(msg, notWant) {
+			t.Errorf("m.go: %q was retired with the whole-slice callback:\n%s", notWant, msg)
 		}
 	}
-	// A type with no narrowed array element must not implement the interface at
-	// all, so the corelib's assertion stays a miss.
-	plain := genGo(t, schemaFromYAMLString(t,
-		"version: 1\nmessages:\n  P:\n    payload:\n      a: { id: 0, type: array, items: { type: u64, count: 4 } }\n"),
-		map[string]any{"package": "p"})["p.go"]
-	if strings.Contains(plain, "ArrayElemBound(id sofab.ID") {
-		t.Errorf("p.go: a type with no narrowed element must not implement ElemBoundVisitor:\n%s", plain)
-	}
-	// ElemBoundVisitor is its OWN interface, so a schema that declares an element
-	// width but no count/maxlen gets it without HeaderVisitor coming along.
-	only := genGo(t, schemaFromYAMLString(t,
-		"version: 1\nmessages:\n  R:\n    payload:\n      a: { id: 0, type: array, items: { type: u8 } }\n"),
-		map[string]any{"package": "r"})["r.go"]
-	if !strings.Contains(only, "func (m *R) ArrayElemBound(") {
-		t.Errorf("r.go: an element width alone must still be declared:\n%s", only)
-	}
-	if strings.Contains(only, "func (m *R) ArrayBegin(") {
-		t.Errorf("r.go: an element width alone must not drag in HeaderVisitor:\n%s", only)
+	// The wrapper array (id 5) has no element callback at all: it descends via
+	// BeginSequence into a collector that owns its elements.
+	if strings.Contains(switchBody(t, msg, "func (m *M) ArrayUnsigned("), "case 5:") {
+		t.Errorf("m.go: a wrapper array must not carry an element arm:\n%s", msg)
 	}
 }
 
@@ -323,15 +357,15 @@ func TestGoFixlenArrayKindPerSubtype(t *testing.T) {
 		// A declared fp32 array is bounded only under ArrayFp32, a declared fp64
 		// array only under ArrayFp64 — never the other way round, and never on a
 		// count that arrived under the sibling subtype.
-		"case 0:\n\t\tif kind == sofab.ArrayFp32 && count > 5 {",
-		"case 1:\n\t\tif kind == sofab.ArrayFp64 && count > 7 {",
+		"case 0:\n\t\tif kind != sofab.ArrayFp32 {\n\t\t\treturn nil\n\t\t}\n\t\tif count > 5 {",
+		"case 1:\n\t\tif kind != sofab.ArrayFp64 {\n\t\t\treturn nil\n\t\t}\n\t\tif count > 7 {",
 		// Integer arrays are keyed the same way, on the single wire kind their
 		// element type maps to; enum rides the signed array wire type and
 		// boolean the unsigned one.
-		"case 2:\n\t\tif kind == sofab.ArrayUnsigned && count > 9 {",
-		"case 3:\n\t\tif kind == sofab.ArraySigned && count > 9 {",
-		"case 4:\n\t\tif kind == sofab.ArraySigned && count > 2 {",
-		"case 5:\n\t\tif kind == sofab.ArrayUnsigned && count > 2 {",
+		"case 2:\n\t\tif kind != sofab.ArrayUnsigned {\n\t\t\treturn nil\n\t\t}\n\t\tif count > 9 {",
+		"case 3:\n\t\tif kind != sofab.ArraySigned {\n\t\t\treturn nil\n\t\t}\n\t\tif count > 9 {",
+		"case 4:\n\t\tif kind != sofab.ArraySigned {\n\t\t\treturn nil\n\t\t}\n\t\tif count > 2 {",
+		"case 5:\n\t\tif kind != sofab.ArrayUnsigned {\n\t\t\treturn nil\n\t\t}\n\t\tif count > 2 {",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("m.go missing kind-keyed count bound %q:\n%s", want, msg)
@@ -341,8 +375,8 @@ func TestGoFixlenArrayKindPerSubtype(t *testing.T) {
 	// arm may accept both fixlen subtypes at one declared field.
 	for _, notWant := range []string{
 		"sofab.ArrayFixlen",
-		"sofab.ArrayFp32 || kind == sofab.ArrayFp64",
-		"sofab.ArrayFp64 || kind == sofab.ArrayFp32",
+		"sofab.ArrayFp32 && kind != sofab.ArrayFp64",
+		"sofab.ArrayFp64 && kind != sofab.ArrayFp32",
 	} {
 		if strings.Contains(msg, notWant) {
 			t.Errorf("m.go: a fixlen array must be keyed by its own subtype alone, found %q:\n%s", notWant, msg)
@@ -358,9 +392,9 @@ func TestGoFixlenArrayKindPerSubtype(t *testing.T) {
 			t.Errorf("m.go: %s named %d times, want %d:\n%s", tc.kind, got, tc.n, msg)
 		}
 	}
-	// And the hook still carries the kind — a stale signature would satisfy
-	// sofab.HeaderVisitor structurally nowhere, but it would compile locally and
-	// silently drop every header reject, so pin the exact one the corelib declares.
+	// And the hook still carries the kind — a stale signature compiles locally
+	// and simply never overrides sofab.VisitorBase's no-op, silently dropping
+	// every header reject, so pin the exact one the corelib declares.
 	if !strings.Contains(msg, "func (m *M) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error {") {
 		t.Errorf("m.go: ArrayBegin must take the wire ArrayKind:\n%s", msg)
 	}
@@ -753,8 +787,11 @@ messages:
 	if strings.Contains(got, "m.Fnums = []uint32{0, 0, 0, 0}") {
 		t.Errorf("a count:N native array with no default must stay empty:\n%s", got)
 	}
-	// The bound itself is untouched -- that is all `count` still does.
-	if !strings.Contains(got, "Cap: 5") || !strings.Contains(got, "if len(v) > 4 {") {
+	// The bound itself is untouched -- that is all `count` still does. It is taken
+	// at the count word now (ArrayBegin), which is where §5.2 wants it and the
+	// only place left: the elements arrive one at a time, so there is no
+	// assembled slice to measure (corelib-go#130).
+	if !strings.Contains(got, "Cap: 5") || !strings.Contains(got, "if count > 4 {") {
 		t.Errorf("the count bound must still be enforced:\n%s", got)
 	}
 }
@@ -880,12 +917,24 @@ func TestGoSkippedStringIsNotValidated(t *testing.T) {
 	for _, f := range files {
 		all += f
 	}
-	if got := strings.Count(all, "if !sofab.UTF8Valid([]byte(v)) {"); got != 3 {
+	// m.UTF8Valid rather than the package-level sofab.UTF8Valid: the object embeds
+	// sofab.StringCheck, so the decode's own WithStrictUTF8 policy reaches the
+	// destination and not only the build tag (§6.4).
+	if got := strings.Count(all, "if !m.UTF8Valid(_b) {"); got != 3 {
 		t.Errorf("want a UTF-8 check at each string destination, got %d:\n%s", got, all)
 	}
-	// It sits behind the maxlen guard, which decides on the wire length alone.
-	if !strings.Contains(msg, "if len(v) > 8 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tif !sofab.UTF8Valid([]byte(v)) {") {
-		t.Errorf("the maxlen reject must stay ahead of the UTF-8 check:\n%s", msg)
+	if strings.Contains(all, "sofab.UTF8Valid(") {
+		t.Errorf("a destination inside a decode must read the decode's policy:\n%s", all)
+	}
+	// It runs once the payload is whole -- on the assembled bytes, never on a
+	// piece: a chunk boundary must not turn a valid string invalid (§6.4).
+	if !strings.Contains(msg, "_b, _done := m._acc.Take(total, offset, chunk)\n\t\tif !_done {\n\t\t\treturn nil\n\t\t}\n\t\tif !m.UTF8Valid(_b) {") {
+		t.Errorf("the UTF-8 check must run on the assembled payload:\n%s", msg)
+	}
+	// The maxlen reject is one callback earlier, at the length word, so it wins
+	// the §5.2 tie against a truncation the UTF-8 check would never see.
+	if !strings.Contains(msg, "case 0:\n\t\tif sub != sofab.FixlenStr {\n\t\t\treturn nil\n\t\t}\n\t\tif total > 8 {") {
+		t.Errorf("the maxlen reject must stay at the length word:\n%s", msg)
 	}
 	// The wrapper-array element is materialized by sofab.StringSeq, which
 	// validates it there (and, embedding sofab.StringCheck, sees the decode's own
@@ -895,8 +944,7 @@ func TestGoSkippedStringIsNotValidated(t *testing.T) {
 		t.Errorf("the string array must bind the validating collector:\n%s", msg)
 	}
 	// A blob carries no encoding, so its arms must not grow a check.
-	if strings.Contains(msg, "Bytes(id sofab.ID, v []byte) error") &&
-		strings.Contains(msg, "UTF8Valid(v)") {
+	if strings.Contains(switchBody(t, msg, "func (m *M) Bytes("), "UTF8Valid") {
 		t.Errorf("blob must never be UTF-8-validated:\n%s", msg)
 	}
 }
@@ -925,9 +973,11 @@ messages:
 		"if v > 4294967295 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.CU32 = uint32(v)",
 		"if v < -128 || v > 127 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.EI8 = int8(v)",
 		"if v < -2147483648 || v > 2147483647 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.GI32 = int32(v)",
-		// The array's ELEMENTS carry the same bound: the corelib hands the whole
-		// array over as []uint64, so one scan precedes the narrowing conversion.
-		"for _, _x := range v {\n\t\t\tif _x > 255 {\n\t\t\t\treturn sofab.ErrInvalidMsg\n\t\t\t}\n\t\t}",
+		// The array's ELEMENTS carry the same bound, at the element: they arrive
+		// one at a time (corelib-go#130), so the guard precedes the narrowing
+		// conversion of each and an over-width element is INVALID where it lands
+		// rather than after the array completes.
+		"if v > 255 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.ArrU8 = append(m.ArrU8, uint8(v))",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("w.go missing width guard %q:\n%s", want, got)
@@ -946,16 +996,15 @@ messages:
 
 // CORELIB_PLAN §5.6 asks generated code to process a message in small chunks,
 // not only whole-buffer-at-once. `AcceptBytes` cannot: it takes a `[]byte` and
-// therefore requires the whole wire image resident by construction, and
-// `Decoder.Accept` only moves that requirement inside the corelib (it slurps the
-// reader before dispatching). `AcceptStream` is the reader-driven entry point
-// that actually bounds memory by the largest single field (corelib-go#71/#72,
-// generator#312).
+// therefore requires the whole wire image resident by construction. `FeedFrom`
+// drains the reader into a scratch buffer and feeds the decoder chunk by chunk,
+// so peak memory is that buffer plus the largest single field (generator#312,
+// corelib-go#130).
 //
 // The assertion is on the emitted CALL, not on the presence of a `From` helper:
-// a streaming-shaped signature over `Decoder.Accept` would satisfy "takes an
-// io.Reader" while still slurping, which is exactly the state this replaces.
-func TestGoStreamingDecodeUsesAcceptStream(t *testing.T) {
+// a streaming-shaped signature over a slurping call would satisfy "takes an
+// io.Reader" while holding the whole message, which is what this replaces.
+func TestGoStreamingDecodeFeedsInChunks(t *testing.T) {
 	s := schemaFromYAMLString(t, `
 version: 1
 messages:
@@ -971,12 +1020,25 @@ messages:
 	}
 	// The schema's `s` is a schema-unbounded string, so the target's finite
 	// default cap (§9.5, generator#385) is live and reaches both entry points.
-	if !strings.Contains(msg, "sofab.NewDecoder(r, sofab.WithMaxStringLen(MaxDynStringLen)).AcceptStream(m)") {
-		t.Error("streaming decode must go through AcceptStream")
+	if !strings.Contains(msg, "sofab.NewDecoder(m, sofab.WithMaxStringLen(MaxDynStringLen)).FeedFrom(r, scratch)") {
+		t.Error("streaming decode must feed the decoder in chunks")
 	}
-	// The slurping entry points must not be what the reader path is built on.
-	if strings.Contains(msg, "NewDecoder(r).Accept(m)") {
-		t.Error("Decoder.Accept slurps the reader — it does not bound memory")
+	// The scratch buffer is the CALLER's by contract (§6.6: the corelib sizes no
+	// buffer from a stream), so generated code is what allocates it.
+	if !strings.Contains(msg, "scratch := make([]byte, 4096)") {
+		t.Error("the chunk buffer must be the generated layer's")
+	}
+	// A reader that stops inside a field is INCOMPLETE, and the outcome — not the
+	// error — is what says so: FeedFrom returns a nil error there, so a caller
+	// that only checked err would accept a truncated message as whole.
+	if !strings.Contains(msg, "if out != sofab.Complete {\n\t\treturn nil, sofab.ErrIncomplete\n\t}") {
+		t.Error("an INCOMPLETE stream must not be returned as a decoded message")
+	}
+	// The retired pull surface must not be what the reader path is built on.
+	for _, gone := range []string{"AcceptStream", "NewDecoder(r"} {
+		if strings.Contains(msg, gone) {
+			t.Errorf("%q is gone with the pull API (corelib-go#130):\n%s", gone, msg)
+		}
 	}
 	// ...and the in-memory path is unchanged: this is an addition.
 	if !strings.Contains(msg, "sofab.AcceptBytes(data, m") {
@@ -989,7 +1051,7 @@ messages:
 	// variadic in the same position — worth pinning, since a limit enforced on
 	// one path and not the other is a silent asymmetry.
 	lim := genGo(t, s, map[string]any{"max_dyn_string_len": 4096})["vec.go"]
-	if !strings.Contains(lim, "sofab.NewDecoder(r, sofab.WithMaxStringLen(MaxDynStringLen)).AcceptStream(m)") {
+	if !strings.Contains(lim, "sofab.NewDecoder(m, sofab.WithMaxStringLen(MaxDynStringLen)).FeedFrom(r, scratch)") {
 		t.Error("streaming decode must carry the active decode limits")
 	}
 }

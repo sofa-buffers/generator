@@ -1,0 +1,7 @@
+# Corelib branch pins for CI (docs/CI.md). One VAR=value per line; honoured on
+# branches only, never on main. Delete a pin as soon as its corelib has merged.
+
+# generator#403 needs corelib-go#131: an empty matrix row that arrived must not
+# come back as a nil slice. The Visitor rewrite this branch follows (corelib-go#130)
+# is already on corelib-go main.
+SOFAB_CORELIB_GO_REF=fix/matrix-empty-row-is-not-nil
