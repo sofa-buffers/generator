@@ -785,9 +785,18 @@ func declineOnMismatch(cond, loc string) []string {
 // decodable under a tighter deployment cap, which §6.3 states as "never raised
 // for a field the schema bounds".
 //
-// The hook takes two INTEGERS, so overriding it costs no object per field: the
-// decoder builds a Field only for on_field. That is why the bound moved here
-// and the tag test did not -- the tag is not among the two integers.
+// The hook is handed the wire's tag as well as the two integers (corelib-py#135):
+// reached from a route with no table entry in front of it, it could not otherwise
+// tell its own field's value from a header that reuses the id under a
+// contradicting wire type. Generated code does not consult it, and that is
+// deliberate -- the §7.3 test runs one hook earlier, in on_field, which DECLINES
+// such a header so the field is skipped before any bound or cap can reach it.
+// Testing the tag again here would be a second implementation of a rule
+// CORELIB_PLAN §5.3.1 requires to have exactly one. The parameters are accepted
+// because the decoder passes them positionally, and named for what they are.
+//
+// Overriding it still costs no object per field: the decoder builds a Field only
+// for on_field.
 //
 // Only a field carrying a count or a length on the wire reaches it: a string or
 // blob with a `maxlen`, and a NATIVE array with a `count` (integer and float
@@ -814,13 +823,18 @@ func (g *gen) emitOnSchemaBound(f *pyfile, scopes []*pyScope) {
 	if len(arms) == 0 {
 		return
 	}
-	f.line("    def on_schema_bound(self, fid: int, n: int) -> int:")
+	f.line("    def on_schema_bound(self, fid: int, n: int, wt, st) -> int:")
 	f.line(`        """The count or length the SCHEMA declares for this field, or -1.`)
 	f.line("")
 	f.line("        Answered at the count/length header, before any payload byte is read.")
 	f.line("        A wire count/length above it is INVALID; a field that declares one is")
 	f.line("        no longer governed by the receiver-side caps, which bound only what the")
 	f.line("        schema left open.")
+	f.line("")
+	f.line("        ``wt``/``st`` are the header's wire type and fixlen subtype. Neither is")
+	f.line("        consulted here: ``on_field`` has already declined a header whose type")
+	f.line("        contradicts the one this field declares, so a field that reaches this")
+	f.line("        hook is the declared field and no other.")
 	f.line(`        """`)
 	f.line("        c = self._c")
 	first := true

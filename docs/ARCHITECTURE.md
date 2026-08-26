@@ -2273,7 +2273,7 @@ backend:
     and element length are the one shape in the family still bounded by the schema
     alone.
 
-**Enforcement is one family now** (generator#388, closed by #411/#412/#413):
+**Enforcement is one family now** (generator#388):
 every backend applies the caps in generated code, per field, at that field's own
 count/length header, and **no corelib is handed a cap at all**. The corelib
 callback exposes `count`/`total` pre-allocation and the corelibs contribute only
@@ -2360,11 +2360,11 @@ to invent, so there is nothing to default to.
   array's count used to be checked in `on_array_begin`, leaving its id in the
   *else* where the array cap sat, so a `count: 8` array under a configured
   `max_dyn_array_count: 4` was rejected at a wire count of 6). See §9.5.1 for
-  what the move cost. #413 finished it by keying every cap on its own id.
+  what the move cost. The move that finished it keys every cap on its own id.
 - **TypeScript, generator#388/#405** — the first full move: the cap became the
   else of the schema bound in `fixlenBegin`/`arrayBegin`, and the corelib is
   handed no `DecodeLimits` at all.
-- **Go and Dart, generator#411/#412** — blocked until their collectors could
+- **Go and Dart** — blocked until their collectors could
   carry a policy bound, because `cap`/`ElemMax` there mean the *schema* bound and
   answer INVALID: routing a receiver cap through them would have produced the
   category §6.2.1 forbids, and retiring the options first would have left wrapper

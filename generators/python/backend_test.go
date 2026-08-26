@@ -75,7 +75,7 @@ func TestPythonStructural(t *testing.T) {
 		"e.write_sequence_begin_lazy(", // every sequence opens lazily (MESSAGE_SPEC S2)
 		// The schema count is DECLARED, and the corelib applies it at the count
 		// header (generator#100/#216/#406).
-		"    def on_schema_bound(self, fid: int, n: int) -> int:",
+		"    def on_schema_bound(self, fid: int, n: int, wt, st) -> int:",
 		"                return 4  # someuintarray: schema count",
 	} {
 		if !strings.Contains(mod, want) {
@@ -1304,7 +1304,7 @@ messages:
 	// before an element is decoded -- so a truncated tail cannot downgrade the
 	// verdict. Pinned as "the bound is at the header, not in the value hook": the
 	// value hook only ever sees a row that fully arrived.
-	onSchemaBound := strings.Index(mod, "    def on_schema_bound(self, fid: int, n: int) -> int:")
+	onSchemaBound := strings.Index(mod, "    def on_schema_bound(self, fid: int, n: int, wt, st) -> int:")
 	guard := strings.Index(mod, "            return 3  # numrows row: schema count")
 	if onSchemaBound < 0 || guard < onSchemaBound {
 		t.Errorf("the row count bound must sit inside on_schema_bound (hook=%d guard=%d)", onSchemaBound, guard)
