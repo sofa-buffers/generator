@@ -3,12 +3,26 @@ package ir
 // BoundsInfo summarizes the schema bounds of a message's reachable fields, for
 // the receiver-side decode limits (generator#102). HasDyn* report whether any
 // reachable array / string / blob is unbounded (no schema count / maxlen) —
-// only those fields are governed by the configured max_dyn_* caps. Max* carry
-// the largest schema-declared bound of each kind (0 when none): backends whose
-// corelib enforces the limits globally (Go, Python, TypeScript) raise the cap
-// they pass in to at least these, so a schema-bounded field larger than the
-// configured cap stays governed by its schema bound alone (the #102 escape
-// hatch), while its own generator#100 guard still rejects over-schema counts.
+// only those fields are governed by the configured max_dyn_* caps, and a backend
+// that emits none of them at all needs no limit plumbing in the module.
+//
+// Max* carry the largest schema-declared bound of each kind (0 when none), and
+// they are NOT a floor under any cap. They used to be: while a cap travelled as
+// a decoder-level option that bound every field of the message alike, the number
+// passed in had to be raised to at least these or a schema-bounded field larger
+// than the cap was rejected — the very thing CORELIB_PLAN §6.2.1 forbids a cap to
+// touch — and that raise loosened the cap for exactly the unbounded fields it
+// exists to protect. Every backend now applies the caps PER FIELD, at that
+// field's own count/length header and behind the MESSAGE_SPEC §7.3 tag test, so
+// the cap never reaches a bounded field and travels AS CONFIGURED.
+//
+// What still reads Max* is the worst-case size walk (ARCHITECTURE §9.6) and the
+// tests/matrix guard over the bench rows, which asserts that an `-unbounded` row
+// keeps a schema-BOUNDED array and string beside the unbounded ones — the cost
+// that row measures is a decoder telling a schema bound (INVALID) from a receiver
+// cap (LimitExceeded) per field, and with no bounded twin left it measures caps
+// in isolation instead. Reaching for Max* to size a cap is the mistake; reading
+// it to ask what the schema declared is not.
 type BoundsInfo struct {
 	HasDynArray  bool
 	HasDynString bool
