@@ -334,6 +334,9 @@ YAML
 cat > "$WORK/limit-cfg.yaml" <<YAML
 generic: { emit: project, max_dyn_array_count: 4 }
 YAML
+cat > "$WORK/blobcap-cfg.yaml" <<YAML
+generic: { emit: project, max_dyn_blob_len: 4 }
+YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/limitproj" )
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/nolimitproj" )
 printf '\003\005\001\002\003\004\005' > "$WORK/limit-over.bin"
@@ -379,6 +382,46 @@ printf '\004\005\002\002\002\002\002' > "$WORK/mistyped.bin"
 (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/mistyped.bin" >/dev/null \
     || { echo "FAIL: an over-cap array of the WRONG kind must be skipped, not capped"; exit 1; }
 echo "==> cap exclusivity OK (bounded sibling, unknown id and mistyped kind all decode)"
+
+# The same rule for a PAYLOAD at an id nothing declares, and for a schema that
+# declares no string, blob or array at all -- the case a liveness test would have
+# reasoned its way out of emitting anything for. corelib-py compares its three
+# max_dyn_* arguments against every count/length header the handler ACCEPTS, so
+# what keeps these COMPLETE is on_field DECLINING them: S6.2.1's "a skipped field
+# is never capped", and S6.4.5's "skipped fields are never validated" with it --
+# the over-cap blob below is also invalid UTF-8 if anyone were to read it as a
+# string, and nobody may.
+echo "==> an over-cap payload at an undeclared id is skipped, not capped (S6.2.1/S6.4.5)"
+cat > "$WORK/scalars-only.yaml" <<'YAML'
+version: 1
+messages:
+  plain:
+    payload:
+      n: { id: 0, type: u32 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/scalars-only.yaml" --out "$WORK/plainproj" )
+# id 0 = 0x00 unsigned 7; then id 9 (0x4a) fixlen, word = (10 << 3) | 3 = 0x53
+# (BLOB, 10 bytes), payload 10 x 0xff -- over any sane blob cap and not UTF-8.
+printf '\000\007\112\123\377\377\377\377\377\377\377\377\377\377' > "$WORK/unknown_blob.bin"
+OUT=$( (cd "$WORK/plainproj" && python3 harness.py decode plain) < "$WORK/unknown_blob.bin" ) \
+    || { echo "FAIL: an over-cap blob at an UNDECLARED id must be skipped, not capped"; exit 1; }
+echo "$OUT" | tr -d ' ' | grep -q '"n":7' || { echo "FAIL: the declared field must still decode; got: $OUT"; exit 1; }
+# The same bytes against a schema that DOES declare a blob there stay capped:
+# the guard is the declaration, not the absence of blobs from the module.
+cat > "$WORK/hasblob.yaml" <<'YAML'
+version: 1
+messages:
+  plain:
+    payload:
+      n: { id: 0, type: u32 }
+      b: { id: 9, type: blob }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/blobcap-cfg.yaml" --lang python --in "$WORK/hasblob.yaml" --out "$WORK/hasblobproj" )
+if (cd "$WORK/hasblobproj" && python3 harness.py decode plain) < "$WORK/unknown_blob.bin" >/dev/null 2>&1; then
+    echo "FAIL: a DECLARED blob of 10 bytes must still be capped at 4"; exit 1
+fi
+echo "==> undeclared-payload skip OK"
+
 
 # A wrapper string element's own byte LENGTH, and a matrix ROW's own element
 # count: two numbers the generated visitor is the only thing that can bound,

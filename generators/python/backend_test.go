@@ -167,11 +167,11 @@ messages:
 }
 
 // TestPythonDecodeLimits: the max_dyn_* config keys bake receiver-side decode
-// limits (generator#102) into the generated module -- named constants at
-// module level plus Decoder(max_array_count=..., ...) kwargs in every decode.
-// The cap is raised to the largest schema bound of its kind (escape hatch:
-// schema-bounded fields stay governed by their own bound), an unset key emits
-// nothing, and a key whose kind has no unbounded field is inert.
+// limits (generator#102) into the generated module -- three named constants at
+// module level, ALWAYS all three, and every Decoder construction site passes
+// them. corelib-py performs the comparison and holds no limit of its own
+// (CORELIB_PLAN §6.2.1), so an omitted argument is a caller defect, not an
+// uncapped decode: there is nothing for liveness to switch off.
 func TestPythonDecodeLimits(t *testing.T) {
 	const src = `
 version: 1
@@ -186,47 +186,116 @@ messages:
 	mod := string(genPy(t, s, map[string]any{
 		"max_dyn_array_count": 65536,
 		"max_dyn_string_len":  4096,
-		"max_dyn_blob_len":    2048, // no unbounded blob in the schema -> inert
+		"max_dyn_blob_len":    2048, // no unbounded blob in the schema
 	})["message.py"])
 	for _, want := range []string{
-		// AS CONFIGURED. It used to be raised to barr's schema count (100000) so a
-		// schema-bounded field larger than the cap stayed decodable; generated code
-		// now declares those fields with d.schema_bounded() instead, so the cap can
-		// stay tight around what the schema left open (generator#325).
+		// AS CONFIGURED, never raised to barr's schema count (100000): generated
+		// code declares a schema bound per field through on_schema_bound, and the
+		// corelib takes the cap off exactly those fields, so the cap stays tight
+		// around what the schema left open (generator#325).
 		"MAX_DYN_ARRAY_COUNT = 65536",
 		"MAX_DYN_STRING_LEN = 4096",
-		// §6.2.1 keeps the caps OUT of the Decoder: they are applied in on_field,
-		// where the schema is known, so they cannot bind a schema-bounded field.
-		`raise SofaLimitError("array count %d exceeds max_array_count %d" % (fld.count, MAX_DYN_ARRAY_COUNT))`,
-		`raise SofaLimitError("string length %d exceeds max_string_len %d" % (fld.size, MAX_DYN_STRING_LEN))`,
+		// Emitted even with no unbounded blob in the schema: the argument is
+		// required, and an omitted one would be neither a cap nor an honest
+		// "none here" (§6.2.1's "no unset state and no unlimited mode").
+		"MAX_DYN_BLOB_LEN = 2048",
+		// Passed at BOTH construction sites -- one-shot and streaming -- so the
+		// two routes cannot be capped differently.
+		"max_dyn_array_count=MAX_DYN_ARRAY_COUNT,",
+		"max_dyn_string_len=MAX_DYN_STRING_LEN,",
+		"max_dyn_blob_len=MAX_DYN_BLOB_LEN,",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q", want)
 		}
 	}
-	if strings.Contains(mod, "MAX_DYN_BLOB_LEN") {
-		t.Error("inert blob limit must not be emitted (no unbounded blob)")
+	if n := strings.Count(mod, "max_dyn_blob_len=MAX_DYN_BLOB_LEN,"); n != 2 {
+		t.Errorf("expected the caps at both Decoder sites, got %d", n)
 	}
-	if strings.Contains(mod, "max_array_count=") || strings.Contains(mod, "max_string_len=") {
-		t.Error("a Decoder-level cap also binds schema-bounded fields, which §6.2.1 forbids")
+	// The comparison is the corelib's now: no generated guard re-implements it,
+	// which is §6.2.1's "one implementation, wherever it runs".
+	for _, gone := range []string{
+		"fld.size > MAX_DYN_STRING_LEN",
+		"fld.size > MAX_DYN_BLOB_LEN",
+		"fld.count > MAX_DYN_ARRAY_COUNT",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("the corelib owns this check now; generated code must not repeat it: %q", gone)
+		}
 	}
 
 	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
-	// (§9.5, generator#385). Python is on the server tier, and the caps still
-	// stay out of the Decoder: liveness and placement are unchanged, only the
-	// values' origin is.
+	// (§9.5, generator#385). Python is on the server tier.
 	plain := string(genPy(t, s, map[string]any{})["message.py"])
 	for _, want := range []string{
 		"MAX_DYN_ARRAY_COUNT = 65536",
 		"MAX_DYN_STRING_LEN = 1048576",
-		"d = Decoder(visitor=_DynVisitor(o))",
+		"MAX_DYN_BLOB_LEN = 4194304",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("default limits missing %q", want)
 		}
 	}
-	if strings.Contains(plain, "MAX_DYN_BLOB_LEN") {
-		t.Error("inert blob limit must not be emitted (no unbounded blob)")
+}
+
+// TestPythonFullyBoundedSchemaStillStatesTheCaps: a schema that bounds every
+// field still emits all three constants and still passes them. The caps cannot
+// fire there -- every field declares a bound and §6.2.1 takes the cap off one
+// that does -- but corelib-py requires the arguments, and omitting one would be
+// a SofaArgumentError at construction rather than a tighter decode.
+func TestPythonFullyBoundedSchemaStillStatesTheCaps(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  bounded:
+    payload:
+      s:   { id: 0, type: string, maxlen: 8 }
+      arr: { id: 1, type: array, items: { type: u64, count: 4 } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		"MAX_DYN_ARRAY_COUNT = ",
+		"MAX_DYN_STRING_LEN = ",
+		"MAX_DYN_BLOB_LEN = ",
+		"max_dyn_array_count=MAX_DYN_ARRAY_COUNT,",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("a fully bounded schema still states its caps; missing %q", want)
+		}
+	}
+}
+
+// TestPythonSkippedFieldIsNeverCapped: the corelib caps every count/length
+// header the handler ACCEPTS, and it cannot know which declared type an id
+// carries -- so on_field must DECLINE a header that is not the declared field's
+// value. Without that, a §7.3 mismatch and an unknown id would both be measured
+// against a cap they must never reach (CORELIB_PLAN §6.2.1, §6.4.5).
+func TestPythonSkippedFieldIsNeverCapped(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      s:   { id: 0, type: string }
+      n:   { id: 1, type: u32 }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		// The gate: exactly the headers a cap or a schema bound can reach.
+		"if fld.type < _COUNTED_WIRE and (fld.subtype or 0) < _SIZED_SUBTYPE:",
+		// The declared string, accepted only under its own subtype.
+		"return fld.subtype == FixlenSubtype.STRING",
+		// Everything else behind the gate -- a mismatch, or an id the schema
+		// never declared -- is skipped.
+		"return False",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q", want)
+		}
+	}
+	// A scalar id is NOT in the chain: no count, no length, nothing to cap.
+	if strings.Contains(mod, "if fld.id == 1:\n") {
+		t.Error("a scalar id costs nothing to accept and must not pay for the chain")
 	}
 }
 
@@ -251,11 +320,11 @@ messages:
 	// The over-index guard raises SofaDecodeError, so the on-demand import MUST be
 	// emitted even when the schema has no scalar over-count array (the #100 case) —
 	// a wrapper-only schema like this one. Missing it is a NameError at decode time.
-	// FixlenSubtype rides along: the string/blob ELEMENT bounds name it even though
-	// no *field* here is fixlen (generator#246), so the full line is asserted — a
-	// prefix match would pass either way and let the missing name through. There is
-	// no WireType: this schema has no native array, so nothing compares one.
-	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor\n") {
+	// FixlenSubtype and WireType both ride along: on_field's §7.3 gate names them
+	// in every scope (it is the test for "a header a cap or a bound can reach"),
+	// so the full line is asserted — a prefix match would pass either way and let
+	// a missing name through (generator#246).
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType\n") {
 		t.Errorf("message.py needs SofaDecodeError (over-index guard) AND FixlenSubtype (element guard) imported, else NameError at decode:\n%s", mod)
 	}
 	for _, want := range []string{
@@ -305,10 +374,9 @@ messages:
 	// (a) The maxlen guard raises SofaDecodeError, so the on-demand import MUST be
 	// present even though this schema has no counted native/wrapper array — the
 	// import bug this test guards against.
-	// Asserted as the FULL line (FixlenSubtype included — this schema has string
-	// and blob fields, and a string wrapper element): a prefix match cannot tell a
-	// complete import line from a truncated one (generator#246).
-	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor\n") {
+	// Asserted as the FULL line: a prefix match cannot tell a complete import line
+	// from a truncated one (generator#246).
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType\n") {
 		t.Errorf("message.py must import SofaDecodeError for the maxlen guard (else NameError at decode):\n%s", mod)
 	}
 
@@ -325,12 +393,10 @@ messages:
 		// (b) scalar string: bound the wire byte length the header declares, never
 		// a re-encode of the decoded str (#155).
 		`                return 8  # s: schema maxlen`,
-		`if fld.subtype != FixlenSubtype.STRING:
-                    return False  # s: header is not the declared type -- skip it`,
+		`return fld.subtype == FixlenSubtype.STRING  # s: only under its declared type (7.3)`,
 		// (b) scalar blob: same shape, same reason.
 		`                return 8  # b: schema maxlen`,
-		`if fld.subtype != FixlenSubtype.BLOB:
-                    return False  # b: header is not the declared type -- skip it`,
+		`return fld.subtype == FixlenSubtype.BLOB  # b: only under its declared type (7.3)`,
 		// (c) bounded wrapper string element (maxlen 5), at its own array scope --
 		// every element shares one declared type, so neither the declaration nor
 		// the tag test carries an id test.
@@ -352,10 +418,15 @@ messages:
 		t.Error(`string maxlen check must not re-encode via .encode("utf-8") (#155)`)
 	}
 
-	// (e) the unbounded string field declares no bound and is declined by nothing:
-	// it is the receiver caps' business, not the schema's.
-	if strings.Contains(mod, `# us:`) {
+	// (e) the unbounded string field declares no BOUND -- that is the receiver
+	// cap's business, not the schema's -- but it still gets a §7.3 arm, because
+	// the corelib caps only the headers this hook accepts and cannot tell a
+	// `string` id from a `blob` one on its own (§6.2.1).
+	if strings.Contains(mod, `# us: schema maxlen`) {
 		t.Error("unbounded string must not declare a schema bound")
+	}
+	if !strings.Contains(mod, "return fld.subtype == FixlenSubtype.STRING  # us: only under its declared type (7.3)") {
+		t.Error("an unbounded string still needs its §7.3 arm, or the corelib caps a field it must skip")
 	}
 }
 
@@ -805,11 +876,11 @@ messages:
 		// subtype separates them, and a fixlen array shares ARRAY_FIXLEN the same
 		// way. §7.3 wins over the schema bound, so the tag is decided first and
 		// the bound reaches only a field that survives it.
-		"if fld.subtype != FixlenSubtype.STRING:",
-		"if fld.subtype != FixlenSubtype.BLOB:",
-		"if fld.type != WireType.ARRAY_UNSIGNED:",
-		"if fld.type != WireType.ARRAY_SIGNED:",
-		"if fld.type != WireType.ARRAY_FIXLEN or fld.subtype != FixlenSubtype.FP32:",
+		"return fld.subtype == FixlenSubtype.STRING",
+		"return fld.subtype == FixlenSubtype.BLOB",
+		"return fld.type == WireType.ARRAY_UNSIGNED",
+		"return fld.type == WireType.ARRAY_SIGNED",
+		"return fld.type == WireType.ARRAY_FIXLEN and fld.subtype == FixlenSubtype.FP32",
 		// on_array_begin is left with the declared element WIDTH alone.
 		"    def on_array_begin(self, fid: int, wtype: WireType, count: int):",
 		"                return (None, None, 4294967295)",
@@ -832,10 +903,16 @@ messages:
 	}
 }
 
-// TestPythonNoFixlenSubtypeImportWhenUnused keeps the import line honest: a
-// schema with no fixlen-framed field never references FixlenSubtype, so
-// importing it would leave an unused name in every generated module.
-func TestPythonNoFixlenSubtypeImportWhenUnused(t *testing.T) {
+// TestPythonScalarOnlySchemaStillGuardsTheSkip: a schema of nothing but scalars
+// still emits on_field, and still declines every header a cap could reach.
+//
+// It reads like plumbing for nothing until you ask what an UNKNOWN id carries:
+// corelib-py compares its three max_dyn_* arguments against every count/length
+// header the handler accepts, so a 10 MB blob at an id this schema never heard
+// of would be rejected as LimitExceeded where MESSAGE_SPEC §7 says skip it and
+// §6.4.5 says do not even validate it. The gate is what keeps that decode
+// COMPLETE — and it costs one comparison, on a hook the scalars never enter.
+func TestPythonScalarOnlySchemaStillGuardsTheSkip(t *testing.T) {
 	s := schema(t, `
 version: 1
 messages:
@@ -845,11 +922,11 @@ messages:
       b: { id: 1, type: i32 }
 `)
 	mod := string(genPy(t, s, map[string]any{})["message.py"])
-	if strings.Contains(mod, "FixlenSubtype") {
-		t.Errorf("message.py must not import FixlenSubtype when no fixlen field exists:\n%s", mod)
+	if !strings.Contains(mod, "if fld.type < _COUNTED_WIRE and (fld.subtype or 0) < _SIZED_SUBTYPE:") {
+		t.Errorf("a scalar-only schema still declines the headers a cap can reach:\n%s", mod)
 	}
-	if !strings.Contains(mod, "from sofab import Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
-		t.Errorf("message.py missing plain import line:\n%s", mod)
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType\n") {
+		t.Errorf("message.py missing the full import line:\n%s", mod)
 	}
 }
 
@@ -908,13 +985,18 @@ func TestPythonFixlenSubtypeImportMatchesUse(t *testing.T) {
 		{"unbounded fp32 rows", true, `
       grid: { id: 0, type: array, items: { type: array, items: { type: fp32 } } }
       n:    { id: 1, type: u32 }`},
-		{"native integer array", false, `
+		// There are no negatives left: on_field's §7.3 gate names FixlenSubtype in
+		// every scope, because "a header a receiver cap can reach" is defined by
+		// the fixlen subtype as much as by the wire type. The invariant below is
+		// what this test is for, and it is unchanged -- imported exactly when
+		// referenced, read off the emitted text rather than re-derived.
+		{"native integer array", true, `
       a: { id: 0, type: array, items: { type: u32 } }
       n: { id: 1, type: u32 }`},
-		{"nested integer rows", false, `
+		{"nested integer rows", true, `
       m: { id: 0, type: array, items: { type: array, items: { type: i32 } } }
       n: { id: 1, type: u32 }`},
-		{"struct elements without fixlen", false, `
+		{"struct elements without fixlen", true, `
       items: { id: 0, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }
       n:     { id: 1, type: u32 }`},
 	}
@@ -1321,7 +1403,7 @@ messages:
     payload:
       rows: { id: 0, type: array, items: { type: array, items: { type: u32, count: 3 } } }
 `), map[string]any{})["message.py"])
-	if !strings.Contains(rows, "from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType\n") {
+	if !strings.Contains(rows, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType\n") {
 		t.Errorf("a nested-row-only §7.3 tag test still needs WireType imported:\n%s", rows)
 	}
 
@@ -1524,22 +1606,24 @@ messages:
 	}
 }
 
-// TestPythonSchemaBoundedFieldsOptOutOfTheCap is generator#325: corelib-py
-// applies its receiver caps per Decoder, so they also bound the fields whose
-// schema declares a count:/maxlen: — which CORELIB_PLAN §6.2.1 forbids, since
-// there the schema bound governs and its violation is INVALID, not
-// LimitExceeded. The generator used to keep such messages decodable by raising
-// the cap to the largest schema bound, which loosened it for the UNBOUNDED
-// fields too — the protection §6.2.1 wants kept tight.
+// TestPythonSchemaBoundedFieldsOptOutOfTheCap: a schema-bounded field must stay
+// decodable under a TIGHTER receiver cap. §6.2.1 forbids applying a cap "to a
+// field the schema already bounds": there the schema bound governs and its
+// violation is INVALID, never LimitExceeded. The generator used to keep such
+// messages decodable by raising the cap to the largest schema bound, which
+// loosened it for the UNBOUNDED fields too — the protection §6.2.1 wants kept
+// tight.
 //
-// on_schema_bound declares the count/length the schema puts on a field, and the
-// corelib takes the cap off any field that declares one (§6.2.1). Generated code
-// applies the caps itself besides, PER DECLARED ID and behind the same §7.3 tag
-// test -- so a bounded id carries no cap, and an id this scope does not declare
-// carries no arm at all. The caps used to sit in the ELSE of the bounded ids'
-// chain, which kept them off a bounded field but let them fire on an UNKNOWN
-// one: a field the handler was never going to read, which §6.2.1 says allocates
-// nothing and must not be capped (generator#410).
+// What replaces the raise is on_schema_bound: it declares the count/length the
+// schema puts on a field, and corelib-py takes the cap off any field that
+// declares one. So the cap can be passed to the Decoder AS CONFIGURED, and the
+// two bounds are exclusive by construction rather than by arithmetic.
+//
+// on_field is what keeps a field the handler will not read out of the cap's way
+// entirely: the corelib measures every count/length header this hook ACCEPTS,
+// and cannot tell a `string` id from a `blob` one. A §7.3 mismatch and an
+// unknown id are both declined here, so neither is capped and neither is
+// validated (§6.2.1's "a skipped field is never capped", §6.4.5; generator#410).
 func TestPythonSchemaBoundedFieldsOptOutOfTheCap(t *testing.T) {
 	const src = `
 version: 1
@@ -1557,54 +1641,43 @@ messages:
 		"max_dyn_array_count": 2,
 	})["message.py"])
 
-	// The caps are NOT handed to the Decoder: it knows no schema, so a Decoder cap
-	// bounds every field alike -- which is exactly what §6.2.1 forbids.
-	for _, bad := range []string{"max_string_len=", "max_array_count=", "max_blob_len="} {
-		if strings.Contains(mod, bad) {
-			t.Errorf("a Decoder-level cap (%q) also binds schema-bounded fields, which §6.2.1 forbids:\n%s", bad, mod)
-		}
-	}
-	// Instead each cap sits in ITS OWN id arm, beside the ids whose bound
-	// on_schema_bound declares -- exclusive by construction, and reachable by
-	// nothing else.
 	for _, want := range []string{
+		// The schema bounds, declared once each, in the one hook that carries them.
 		`                return 8  # s: schema maxlen`,
 		`                return 4  # arr: schema count`,
-		// id 5 is the one unbounded field: it takes the cap, behind the §7.3 tag
-		// test, and it is the only id in this scope that does.
-		`            elif fld.id == 5:
-                if fld.subtype == FixlenSubtype.STRING and fld.size > MAX_DYN_STRING_LEN:
-                    raise SofaLimitError("string length %d exceeds max_string_len %d" % (fld.size, MAX_DYN_STRING_LEN))`,
-		// ...while the bounded string at id 1 gets the §7.3 decline and no cap.
-		`            if fld.id == 1:
-                if fld.subtype != FixlenSubtype.STRING:
-                    return False`,
+		// The caps go to the Decoder as configured -- not raised to 8, which is
+		// what the old per-decode cap needed to keep `s` decodable.
+		"MAX_DYN_STRING_LEN = 4",
+		"max_dyn_string_len=MAX_DYN_STRING_LEN,",
+		// Bounded and unbounded ids alike carry a §7.3 arm, and nothing else:
+		// the comparison is the corelib's, the tag test is not.
+		`return fld.subtype == FixlenSubtype.STRING  # s: only under its declared type (7.3)`,
+		`return fld.subtype == FixlenSubtype.STRING  # dyn: only under its declared type (7.3)`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
 		}
 	}
-	// No `else:` fallthrough anywhere in on_field: that is where an unknown id
-	// used to pick up a cap it must never be measured against (§6.2.1).
+
+	// No generated comparison against a cap survives anywhere: §6.2.1's "one
+	// implementation, wherever it runs", and the corelib is where it runs.
 	body := mod[strings.Index(mod, "def on_field("):]
 	body = body[:strings.Index(body, "def on_schema_bound(")]
-	if strings.Contains(body, "else:") {
-		t.Errorf("on_field must carry no cap fallthrough -- a skipped field is never capped:\n%s", body)
+	for _, bad := range []string{"fld.size > MAX_DYN", "fld.count > MAX_DYN"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("the corelib owns the comparison now; found %q in on_field:\n%s", bad, body)
+		}
 	}
-	// Every array in this schema declares a count, so max_dyn_array_count is inert
-	// and nothing is emitted for it.
-	if strings.Contains(mod, "MAX_DYN_ARRAY_COUNT") {
-		t.Errorf("a cap with no unbounded field of its kind must stay inert:\n%s", mod)
+	// Every declared id in this scope is answered by a return, so an unknown one
+	// falls to the decline rather than through the hook.
+	if !strings.Contains(body, "                return False") {
+		t.Errorf("on_field must decline what it does not read -- a skipped field is never capped:\n%s", body)
 	}
-	// sa's elements are schema-bounded by their own maxlen, so that scope carries
-	// no cap at all -- an array scope dispatches by index, so one bound covers it.
-	// Exactly one cap site survives: id 5's own arm.
-	if got := strings.Count(mod, "MAX_DYN_STRING_LEN)"); got != 1 {
-		t.Errorf("expected exactly one cap site (the root scope's else), got %d:\n%s", got, mod)
-	}
-	// The cap stays at the configured number rather than being raised to 8.
-	if !strings.Contains(mod, "MAX_DYN_STRING_LEN = 4") {
-		t.Error("the configured cap must be emitted as configured, not raised to the largest schema maxlen")
+	// MAX_DYN_ARRAY_COUNT is emitted even though every array here declares a
+	// count: the Decoder argument is required, and an omitted one would be
+	// neither a cap nor an honest "none here" (§6.2.1).
+	if !strings.Contains(mod, "MAX_DYN_ARRAY_COUNT = 2") {
+		t.Errorf("all three caps are always stated:\n%s", mod)
 	}
 }
 

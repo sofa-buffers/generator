@@ -338,7 +338,16 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 	f.line("        INCOMPLETE stays distinguishable from INVALID.")
 	f.line(`        """`)
 	f.line("        o = cls()")
-	f.line("        d = Decoder(visitor=_%sVisitor(o))", name)
+	// The receiver caps ride the construction call the decode path already
+	// makes (CORELIB_PLAN §6.2.1): corelib-py performs the comparison, at the
+	// count/length header, and holds no limit of its own -- so all three are
+	// required arguments and are always stated.
+	f.line("        d = Decoder(")
+	f.line("            visitor=_%sVisitor(o),", name)
+	f.line("            max_dyn_array_count=MAX_DYN_ARRAY_COUNT,")
+	f.line("            max_dyn_string_len=MAX_DYN_STRING_LEN,")
+	f.line("            max_dyn_blob_len=MAX_DYN_BLOB_LEN,")
+	f.line("        )")
 	f.line("        st = d.feed(data)")
 	f.line("        if st is Status.INVALID:")
 	f.line(`            raise SofaDecodeError(d.error or "invalid message")`)

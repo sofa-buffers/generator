@@ -28,7 +28,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		schema:  s,
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
 		license: generator.LicenseID(cfg),
-		limits:  resolveLimits(s, cfg),
+		limits:  resolveLimits(cfg),
 		size:    generator.NewSizePolicy(cfg),
 	}
 	module := g.module(s)
@@ -66,46 +66,32 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102),
-// resolved against the schema. Every cap is always set -- the target carries a
-// finite default that the config key only overrides (§9.5, generator#385) -- so
-// an entry is active exactly when the schema actually has an unbounded field of
-// that kind; otherwise the cap would be inert and no plumbing is emitted.
+// resolved over the target's finite defaults (§9.5, generator#385).
 //
-// The configured value is emitted AS CONFIGURED. It used to be raised to the
-// largest schema bound of its kind, because a Decoder applies its caps per
-// Decoder and would otherwise reject a schema-bounded field larger than the cap
-// -- which §6.2.1 forbids, since there the schema bound governs. That raise kept
-// such messages decodable by loosening the cap for the UNBOUNDED fields too,
-// which is exactly the protection §6.2.1 wants kept tight. Generated code
-// applies the caps itself instead, to exactly the ids the schema leaves open, so
-// the cap can stay at the number the deployment chose (generator#325).
+// All three are ALWAYS emitted and ALWAYS passed. corelib-py performs the
+// comparison itself (CORELIB_PLAN §6.2.1: "a corelib MAY take a limit as an
+// argument and perform the check itself, and a port that does is conformant")
+// and holds no limit of its own -- a Decoder built without the three arguments
+// is a caller defect and raises SofaArgumentError, §6.3's InvalidArgument tier,
+// never SofaLimitError, "which would promise a limit to raise that was never
+// configured". So there is no liveness question left to get wrong: stating the
+// numbers is what §6.2.1 makes generated code's duty ("there is no unset state
+// and no unlimited mode"), and an omitted argument would be neither a cap nor an
+// honest "none here".
+//
+// The values are emitted AS CONFIGURED, never raised to the largest schema bound
+// of their kind. A raise would loosen the cap for the UNBOUNDED fields it exists
+// to protect; it is unnecessary here because the schema bound is declared per
+// field through on_schema_bound, and the corelib takes the cap off exactly the
+// fields that declare one (generator#325, generator#406).
 type limitSet struct {
 	arrayCount, stringLen, blobLen int64
-	arrayHas, stringHas, blobHas   bool
 }
 
-func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
-
-// resolveLimits resolves the max_dyn_* caps over the target's finite defaults
-// and against the schema's bounds (see limitSet).
-func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
-	var all []*ir.Field
-	for _, m := range s.Messages {
-		all = append(all, m.Fields...)
-	}
-	b := ir.Bounds(all)
+// resolveLimits resolves the max_dyn_* caps over the target's finite defaults.
+func resolveLimits(cfg map[string]any) limitSet {
 	d := generator.ServerDynLimits.Resolve(cfg)
-	var l limitSet
-	if b.HasDynArray {
-		l.arrayCount, l.arrayHas = d.ArrayCount, true
-	}
-	if b.HasDynString {
-		l.stringLen, l.stringHas = d.StringLen, true
-	}
-	if b.HasDynBlob {
-		l.blobLen, l.blobHas = d.BlobLen, true
-	}
-	return l
+	return limitSet{arrayCount: d.ArrayCount, stringLen: d.StringLen, blobLen: d.BlobLen}
 }
 
 type pyfile struct{ b strings.Builder }
@@ -136,45 +122,55 @@ func (g *gen) module(s *ir.Schema) []byte {
 		"Decoder", "Encoder", "SofaDecodeError", "SofaIncompleteError",
 		"Status", "Visitor",
 	}
-	if g.limits.any() {
+	// WireType and FixlenSubtype are unconditional: the module header below binds
+	// _COUNTED_WIRE / _SIZED_SUBTYPE from them, in every module, because on_field
+	// is emitted for every tree (see emitOnField). Field is the on_field argument
+	// and rides along for the same reason; the probe stays anyway, so the import
+	// line keeps being read off the emitted text rather than off a rule about it
+	// (generator#246). SofaLimitError is raised by the one limit that stays in
+	// generated code -- a wrapper array's element INDEX, which no corelib call
+	// carries (§9.5) -- so it appears only where that guard does.
+	names = append(names, "FixlenSubtype", "WireType")
+	needField, _, _, needLimit := visitorNeeds(decodeSection)
+	if needLimit {
 		names = append(names, "SofaLimitError")
 	}
-	// Field is the on_field argument, and WireType / FixlenSubtype are the tags
-	// its §7.3 tests compare against; each appears only where a bound exists.
-	needField, needWire, needFixlen := visitorNeeds(decodeSection)
 	if needField {
 		names = append(names, "Field")
-	}
-	if needFixlen {
-		names = append(names, "FixlenSubtype")
-	}
-	if needWire {
-		names = append(names, "WireType")
 	}
 	sort.Strings(names)
 	f.line("from sofab import %s", strings.Join(names, ", "))
 	f.blank()
 
-	if g.limits.any() {
-		f.line("# Receiver-side decode limits, baked from the sofabgen config")
-		f.line("# (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
-		f.line("# only fields the schema left unbounded -- a cap must never bind a field")
-		f.line("# the schema already bounds -- so they are applied in on_field, in the else")
-		f.line("# of the chain whose arms are the schema-bounded ids, rather than handed to")
-		f.line("# the Decoder, which knows no schema and would cap every field alike.")
-		f.line("# Exceeding one raises sofab.SofaLimitError at the count/length header,")
-		f.line("# before any allocation.")
-		if g.limits.arrayHas {
-			f.line("MAX_DYN_ARRAY_COUNT = %d", g.limits.arrayCount)
-		}
-		if g.limits.stringHas {
-			f.line("MAX_DYN_STRING_LEN = %d", g.limits.stringLen)
-		}
-		if g.limits.blobHas {
-			f.line("MAX_DYN_BLOB_LEN = %d", g.limits.blobLen)
-		}
-		f.blank()
-	}
+	// Always all three (see limitSet): the corelib holds none, so a Decoder
+	// built without them is a caller defect rather than an uncapped decode.
+	f.line("# Receiver-side decode limits, baked from the sofabgen config keys")
+	f.line("# max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len. They bound the")
+	f.line("# fields this schema leaves unbounded -- a count or a length the SENDER")
+	f.line("# chooses -- so that no message can make this decoder allocate without limit.")
+	f.line("# They are this deployment's numbers: the library holds none of its own and")
+	f.line("# requires all three, so there is no unset state and no unlimited mode.")
+	f.line("#")
+	f.line("# The comparison runs inside the library, at the count/length header, before")
+	f.line("# anything is allocated for the value. It never touches a field this schema")
+	f.line("# bounds -- there the schema's own count/maxlen governs and a violation is a")
+	f.line("# decode error -- and never a field skipped for carrying the wrong wire type,")
+	f.line("# which on_field declines below. Exceeding a cap raises sofab.SofaLimitError:")
+	f.line("# the message is well formed, and the same bytes decode under a looser limit.")
+	f.line("MAX_DYN_ARRAY_COUNT = %d", g.limits.arrayCount)
+	f.line("MAX_DYN_STRING_LEN = %d", g.limits.stringLen)
+	f.line("MAX_DYN_BLOB_LEN = %d", g.limits.blobLen)
+	f.blank()
+	// Bound once, at module level, because on_field tests both for EVERY field:
+	// a module global is one lookup where an enum member is two (the module, then
+	// the attribute). Worth 3.6% of decode on vehicle_telemetry -- 595,700 ->
+	// 574,530 Ir/op, the last row of the table in visitor.go's emitOnField.
+	f.line("# The two tags that separate a header carrying a count or a payload length")
+	f.line("# -- the only kind a limit or a declared count/maxlen can apply to -- from one")
+	f.line("# that carries neither. Read by on_field, once per field.")
+	f.line("_COUNTED_WIRE = WireType.ARRAY_UNSIGNED  # .. ARRAY_SIGNED, ARRAY_FIXLEN")
+	f.line("_SIZED_SUBTYPE = FixlenSubtype.STRING  # .. BLOB")
+	f.blank()
 
 	// enums + bitfield constants first
 	for _, key := range s.NamedOrder {
@@ -241,7 +237,16 @@ func (g *gen) emitStreamDecoder(f *pyfile) {
 	f.line("")
 	f.line("    def __init__(self, msg_cls, vis_cls) -> None:")
 	f.line("        self.message = msg_cls()")
-	f.line("        self._d = Decoder(visitor=vis_cls(self.message))")
+	// The three receiver caps, stated here because corelib-py holds none
+	// (CORELIB_PLAN §6.2.1). Both construction sites -- this one and decode()'s
+	// -- pass the same constants, so the streaming and one-shot routes cannot
+	// be capped differently.
+	f.line("        self._d = Decoder(")
+	f.line("            visitor=vis_cls(self.message),")
+	f.line("            max_dyn_array_count=MAX_DYN_ARRAY_COUNT,")
+	f.line("            max_dyn_string_len=MAX_DYN_STRING_LEN,")
+	f.line("            max_dyn_blob_len=MAX_DYN_BLOB_LEN,")
+	f.line("        )")
 	f.line("")
 	f.line("    def feed(self, chunk) -> Status:")
 	f.line("        return self._d.feed(chunk)")

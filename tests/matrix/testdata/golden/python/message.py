@@ -2,7 +2,30 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
-from sofab import Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor
+from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType
+
+# Receiver-side decode limits, baked from the sofabgen config keys
+# max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len. They bound the
+# fields this schema leaves unbounded -- a count or a length the SENDER
+# chooses -- so that no message can make this decoder allocate without limit.
+# They are this deployment's numbers: the library holds none of its own and
+# requires all three, so there is no unset state and no unlimited mode.
+#
+# The comparison runs inside the library, at the count/length header, before
+# anything is allocated for the value. It never touches a field this schema
+# bounds -- there the schema's own count/maxlen governs and a violation is a
+# decode error -- and never a field skipped for carrying the wrong wire type,
+# which on_field declines below. Exceeding a cap raises sofab.SofaLimitError:
+# the message is well formed, and the same bytes decode under a looser limit.
+MAX_DYN_ARRAY_COUNT = 65536
+MAX_DYN_STRING_LEN = 1048576
+MAX_DYN_BLOB_LEN = 4194304
+
+# The two tags that separate a header carrying a count or a payload length
+# -- the only kind a limit or a declared count/maxlen can apply to -- from one
+# that carries neither. Read by on_field, once per field.
+_COUNTED_WIRE = WireType.ARRAY_UNSIGNED  # .. ARRAY_SIGNED, ARRAY_FIXLEN
+_SIZED_SUBTYPE = FixlenSubtype.STRING  # .. BLOB
 
 @dataclass
 class Scalars:
@@ -127,7 +150,12 @@ class Scalars:
         INCOMPLETE stays distinguishable from INVALID.
         """
         o = cls()
-        d = Decoder(visitor=_ScalarsVisitor(o))
+        d = Decoder(
+            visitor=_ScalarsVisitor(o),
+            max_dyn_array_count=MAX_DYN_ARRAY_COUNT,
+            max_dyn_string_len=MAX_DYN_STRING_LEN,
+            max_dyn_blob_len=MAX_DYN_BLOB_LEN,
+        )
         st = d.feed(data)
         if st is Status.INVALID:
             raise SofaDecodeError(d.error or "invalid message")
@@ -150,7 +178,12 @@ class _StreamDecoder:
 
     def __init__(self, msg_cls, vis_cls) -> None:
         self.message = msg_cls()
-        self._d = Decoder(visitor=vis_cls(self.message))
+        self._d = Decoder(
+            visitor=vis_cls(self.message),
+            max_dyn_array_count=MAX_DYN_ARRAY_COUNT,
+            max_dyn_string_len=MAX_DYN_STRING_LEN,
+            max_dyn_blob_len=MAX_DYN_BLOB_LEN,
+        )
 
     def feed(self, chunk) -> Status:
         return self._d.feed(chunk)
@@ -226,4 +259,27 @@ class _ScalarsVisitor(Visitor):
         if c == _L_Scalars:
             if fid == 6:
                 self._o.f64 = value
+
+    def on_field(self, fld: Field) -> bool:
+        """Accept or decline a field at its HEADER, before its value is read.
+
+        A header whose wire type -- or, for a fixlen one, whose subtype -- is
+        not the one this field's declared type maps to is not this field's
+        value. It is declined, and SKIPPED exactly like an unknown id: nothing
+        is stored for it, nothing is validated, and neither the schema bound
+        declared below nor a receiver limit is ever measured against it.
+
+        Array elements are placed by their id, so an array that declares no
+        ``count`` is bounded here as well -- an element id IS the length of the
+        list it lands in. Every other limit is an argument of the ``Decoder``,
+        checked at the count or length word it belongs to.
+        """
+        if fld.type < _COUNTED_WIRE and (fld.subtype or 0) < _SIZED_SUBTYPE:
+            # Neither a count nor a payload length: nothing here for a limit
+            # to bound or a declared count/maxlen to be measured against.
+            return True
+        # Not a field this class reads: either the header contradicts the
+        # declared type, or the id is one this schema never declared. Skipped,
+        # so it is neither stored, nor validated, nor measured against a limit.
+        return False
 

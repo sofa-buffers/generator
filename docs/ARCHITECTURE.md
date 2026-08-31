@@ -2273,23 +2273,59 @@ backend:
     and element length are the one shape in the family still bounded by the schema
     alone.
 
-**Enforcement is one family now** (generator#388):
-every backend applies the caps in generated code, per field, at that field's own
-count/length header, and **no corelib is handed a cap at all**. The corelib
-callback exposes `count`/`total` pre-allocation and the corelibs contribute only
-the error category. There is no second family and no decoder-level option left
-in the tree: `sofab.WithMax*` (Go), `sofab.DecoderLimits` (Dart) and
-`Decoder(max_dyn_*)` (Python) are gone from their corelibs along with the numbers
-those libraries had invented, because CORELIB_PLAN §6.2.1 puts the numbers with
-the layer that knows the schema and the target — "the codec never invents a limit
-of its own and never clamps to one".
+**Enforcement is one family now** (generator#388): every backend applies the caps
+per field, at that field's own count/length header, and **the number always comes
+from generated code**. The corelib callback exposes `count`/`total`
+pre-allocation and the corelibs contribute the error category. There is no
+decoder-level option left in the tree that a corelib *owns*: `sofab.WithMax*`
+(Go), `sofab.DecoderLimits` (Dart) and the old defaulting `Decoder(max_dyn_*)`
+(Python) are gone along with the numbers those libraries had invented, because
+CORELIB_PLAN §6.2.1 puts the numbers with the layer that knows the schema and the
+target — "the codec never invents a limit of its own and never clamps to one".
 
-**The shape, in every backend.** The cap is the *else* of the schema bound, in
-the very hook that already carries it — `fixlenBegin`/`onFixlenHeader`/`on_field`
-for a scalar `string`/`blob`, `arrayBegin`/`onArrayBegin`/`on_field` for a native
-array and for a matrix row — behind the same MESSAGE_SPEC §7.3 tag test, with a
-different error category. Never both, and never on an id the scope does not
-declare.
+**Where the comparison runs is a second question, and §6.2.1 leaves it open**: "a
+corelib MAY take a limit as an argument and perform the check itself, and a port
+that does is conformant." What it fixes is the *provenance* — no held limit, no
+default for an argument that was not given, no reading an omitted argument as
+unlimited, no clamp — and **one implementation, wherever it runs**: a port checks
+in the corelib or in generated code for a given rule, never both. **Python takes
+the argument route** for the three scalar kinds (below); everyone else compares
+in the generated visitor. Either way the check sits at the count/length header
+and behind the MESSAGE_SPEC §7.3 tag test.
+
+**The shape, in every backend that compares in generated code.** The cap is the
+*else* of the schema bound, in the very hook that already carries it —
+`fixlenBegin`/`onFixlenHeader` for a scalar `string`/`blob`,
+`arrayBegin`/`onArrayBegin` for a native array and for a matrix row — behind the
+same MESSAGE_SPEC §7.3 tag test, with a different error category. Never both, and
+never on an id the scope does not declare.
+
+**Python's shape is the argument** (generator#421 follow-up, on corelib-py's
+`fix/caps-are-arguments`). Its decode path already makes exactly one call that
+owns every count and length word — `Decoder(visitor=…)` — so the three numbers
+ride it: `Decoder(visitor=…, max_dyn_array_count=…, max_dyn_string_len=…,
+max_dyn_blob_len=…)`, and generated code compares nothing. corelib-py checks at
+the header it reads, *parks* the verdict rather than raising it, and drops the
+parked verdict when the field turns out to be schema-bounded (`on_schema_bound`)
+or skipped — so the two bounds still cannot both be in play and a skipped field
+still allocates nothing. All three arguments are **required**: the library holds
+no limit, defaults none, and refuses a `Decoder` built without them with
+`SofaArgumentError` (§6.3's `InvalidArgument`), never `SofaLimitError`, "which
+would promise a limit to raise that was never configured". Generated code
+therefore emits all three constants **always**, including where the schema bounds
+every field of that kind — an omitted argument would be neither a cap nor an
+honest "none here", and liveness is one less thing that can be got wrong.
+
+**What Python pays for the argument route is a complete §7.3 filter**, and this
+is the load-bearing half of the change. A decoder-level comparison sees every
+count/length header the handler ACCEPTS and cannot know which declared type an id
+carries, so `on_field` must DECLINE anything this class will not read: a header
+whose tag contradicts the declaration, and an id the schema never declared.
+Without that, an over-cap payload at an unknown id — a newer peer's field, on a
+receiver that would have stepped over it — comes back `LimitExceeded` where §6.2.1
+says a skipped field is never capped and §6.4.5 says it is not even validated.
+The filter is emitted for **every** scope, including a scalar-only one, for
+exactly that reason: the risk is the unknown id, not this schema's own fields.
 
 **Emitted as configured, with no raise.** Four backends used to lift each cap to
 the largest schema bound of its kind. That raise existed only because a
@@ -2311,8 +2347,13 @@ receiver bounds ride **on the collector**, beside the schema bounds they are
 exclusive with — `RCap`/`rcap`/`receiverCap` for the index, `RElemMax`/`relemMax`/
 `receiverElemMax` for the byte length, and `RowCount`/`RowCap` for a matrix row's
 own element count (corelib-go#132, corelib-dart#88/#89, corelib-ts#164/#165).
-Python's gap-fill is generated, so its caps sit in the array scope's own
-`on_field` arm. Either way the number comes from generated code.
+Python's gap-fill is generated, so the one bound with no header behind it — a
+wrapper array's element **index** — stays in the array scope's own `on_field`
+arm, while that element's own length word goes to the corelib with the rest. A
+deliberate split per field kind, which §6.2.1 permits and §9.5.2 argues for:
+where no call already owns the number, inventing one purely to hold the check is
+what the performance argument rules out. Either way the number comes from
+generated code.
 
 Every collector argument is **always emitted**, including where the schema bound
 beside it makes it inert. A corelib's fallback for an omitted receiver cap is the
@@ -2456,12 +2497,15 @@ makes a wire count/length above it INVALID (§7.1). The `python` backend declare
 through the hook (generator#406) instead of carrying a generated copy of the
 comparison.
 
-The hook carried a second half until corelib-py stopped holding receiver caps:
-declaring a bound also **waived** the decoder's cap for that field, which is how
-§6.2.1's exclusivity was honoured while the numbers lived in the `Decoder`. With
-no cap in the codec there is nothing to waive — the exclusivity is a property of
-where generated code puts the two, one arm per declared id, and the hook states
-the schema bound and nothing else.
+The hook has a second half, and it is what makes the argument route above
+possible: declaring a bound also **waives** the receiver limit for that field.
+corelib-py parks an over-limit verdict on the pending field rather than raising
+it at once, precisely so this hook — asked one step later, still at the header,
+still before a payload byte — can take it off again. That is §6.2.1's
+exclusivity, enforced in one place for both routes into `_settle_bound` (a
+destination map's entry and this hook), rather than in every caller's arithmetic.
+It is why the caps travel **as configured** with no raise: a tighter
+`max_dyn_string_len` than some sibling's `maxlen` is no longer a contradiction.
 
 **The §7.3 tag test cannot go with it.** The hook is told the id and the
 announced count/length and nothing else, so it cannot tell this field's value
@@ -2474,8 +2518,42 @@ in `on_field`, and **declines** a mis-tagged field outright. Without that, a
 `SofaDecodeError` where the spec says skip. The map route needs no such guard:
 the corelib runs the tag test ahead of a table entry itself.
 
-**Measured, and it is a loss.** Ir/op for `decode`, `tests/bench` row
-`python-native`, `vehicle_telemetry`, one corelib-py build:
+**And the tag test has to cover every id, declared or not.** A limit checked
+inside the codec is checked against every count/length header the handler
+**accepts**, and the codec cannot know which declared type an id carries. So
+`on_field` declines three things, not one: a mis-tagged header at a bounded id
+(above), a mis-tagged header at an *unbounded* id, and any such header at an id
+the schema never declared at all. The last is the one that is easy to miss and
+the one §6.2.1 states outright — "a skipped field is never capped ... it is
+walked, not materialized" — with §6.4.5 saying the same about UTF-8. A newer
+peer's 10 MB field, on a receiver that would have stepped over it, must not come
+back `LimitExceeded`; the conformance suite pins it, for a schema with no
+`string`, `blob` or array of its own as well as for one with them. The hook is
+therefore emitted for **every** tree, which is a change: it used to appear only
+where some id needed an arm.
+
+**The gate is what keeps that affordable, and its placement is the whole cost.**
+`on_field` opens with one test — *is this a header carrying a count or a payload
+length at all?* — above the scope dispatch, not inside it:
+
+```python
+if fld.type < _COUNTED_WIRE and (fld.subtype or 0) < _SIZED_SUBTYPE:
+    return True
+```
+
+A scalar, a `bool`, an `fp32`/`fp64` payload: none of them can allocate from a
+number the wire chose, so none of them reaches the scope chain. Only a `string`,
+a `blob` or an array does — and only scopes that *declare* one appear in that
+chain, so a 46-scope tree dispatches over six. `_COUNTED_WIRE` and
+`_SIZED_SUBTYPE` are bound once at module level because a module global is one
+lookup where an enum member is two, and this test runs for every field on the
+wire.
+
+**Measured, twice, and the second one is why the gate sits where it does.**
+Ir/op for `decode`, `tests/bench` row `python-native`, `vehicle_telemetry`, one
+corelib-py build per table.
+
+Declaring the bound through the hook (generator#406) cost:
 
 | generated handler shape | Ir/op | vs before |
 |---|---:|---:|
@@ -2483,21 +2561,44 @@ the corelib runs the tag test ahead of a table entry itself.
 | bound declared in `on_schema_bound`, tag test in `on_field` | 574,968 | **+10.0%** |
 | *(the same without the §7.3 tag test — not conformant)* | 565,054 | +8.1% |
 
-The cost is one **Python call per aggregate field** (+37,397 Ir on its own,
+That cost is one **Python call per aggregate field** (+37,397 Ir on its own,
 ~1,300 Ir per call), which the two-integer signature reduces but cannot remove;
 the attribute reads it replaces are worth a tenth of that, and the §7.3 tag test
 is worth 9,914. `on_array_begin`'s count check was only 2,105 Ir to begin with.
-The change is kept for what it fixes, not for what it costs: the §6.2.1 defect
-above, and one implementation of the rule instead of two.
+It was kept for what it fixes, not for what it costs.
+
+Handing the limits to the `Decoder` and deleting the generated comparisons then
+paid part of it back — but only after the gate moved:
+
+| generated handler shape | Ir/op | vs before |
+|---|---:|---:|
+| limits compared in `on_field`, per declared id | 579,863 | — |
+| gate inside every scope's arm | 660,180 | **+13.85%** |
+| gate hoisted above the scope dispatch | 595,700 | +2.73% |
+| + `_COUNTED_WIRE`/`_SIZED_SUBTYPE` at module level | **574,530** | **−0.92%** |
+
+The middle row is the whole lesson. With the gate inside each scope's arm every
+scope needed one, so all 46 went into the `elif c == …` chain and every scalar
+field walked it — a 14% decode regression from a change that *removes* work. The
+same tests pass on every row; only the bench told them apart. Encode is flat
+throughout (130,533 → 130,634, inside the file's 0.3% band), which is the
+expected shape: nothing on the encode path changed.
+
+The corelib half is free on this workload: the same generated source measures
+574,530 against corelib-py `main` and 574,095 against the branch that makes the
+three arguments required, a 0.08% spread. The `+13.0%` its own commit reports is
+per **construction** — three keyword arguments parsed and range-checked once —
+which shows on a 37-byte message decoded by a fresh `Decoder` and disappears into
+a 956-byte one.
 
 **The shape that would pay is the table.** A destination map declares its bounds
 **once**, at construction, so no hook is called per field *and* the corelib's own
 §7.3 tag test sits ahead of the bound — both problems above disappear together.
 Adopting it means keying the flat visitor's `(location, id)` dispatch onto
-corelib-py's `Binding`, which is a larger change than this one was. Until then
-Python pays the call — and `on_field` is no cheaper for the caps having moved
-into per-id arms: the same hook is entered, with one comparison chain instead of
-one blanket chain.
+corelib-py's `Binding`, which is a larger change than either of the two above.
+Until then Python pays the call, and `on_field` stays the place the §7.3 test has
+to live — the gate is what makes it cost about what the per-id cap chain it
+replaced did.
 
 ### 9.6 Worst-case message size (one walk, all backends)
 
