@@ -720,6 +720,27 @@ lim_reject "$WORK/lim" dyn '\012\112ABCDEFGHI'             LimitExceeded "a 9-by
 lim_reject "$WORK/lim" dyn '\022\113ABCDEFGHI'             LimitExceeded "a 9-byte blob > max_dyn_blob_len 8"
 lim_complete "$WORK/lim" dyn '\003\004\001\002\003\004'    '"a":\[1,2,3,4\]' "4 elements == the cap"
 
+# (1b) An over-cap count/length followed by END OF INPUT is LimitExceeded, not
+# INCOMPLETE. The cap is decided at the count/length header (CORELIB_PLAN §6.2.1
+# "Enforcement point") and the rejection is terminal (§6.3): the header has
+# arrived, the verdict is in, and no continuation can lift it -- so INCOMPLETE
+# would both lose the category and invite the caller to feed bytes that cannot
+# help. That is the hostile-sender shape this pins: a 4-byte message that holds a
+# connection open. The rest of the family already answered LimitExceeded here;
+# Rust was reporting feed's Incomplete because try_decode surfaced it ahead of
+# the sticky lim flag.
+lim_reject "$WORK/lim" dyn '\003\005\001\002' LimitExceeded "an over-cap count (5 > 4) then EOF"
+lim_reject "$WORK/lim" dyn '\012\112ABC'      LimitExceeded "an over-cap string length (9 > 8) then EOF"
+lim_reject "$WORK/lim" dyn '\022\113ABC'      LimitExceeded "an over-cap blob length (9 > 8) then EOF"
+# The precision controls. An IN-cap header that is genuinely truncated is a clean
+# truncation and MUST stay Incomplete -- the cap must not turn every short
+# message into a policy rejection.
+lim_reject "$WORK/lim" dyn '\003\004\001\002' Incomplete "an in-cap count (4 == 4) then EOF"
+lim_reject "$WORK/lim" dyn '\012\102ABC'      Incomplete "an in-cap string length (8 == 8) then EOF"
+# ...and a §7.3-skipped field is never capped (#410), truncated or not: an
+# over-cap array at an unknown id leaves only the truncation to report.
+lim_reject "$WORK/lim" dyn '\073\005\001\002' Incomplete "an over-cap array at the UNKNOWN id 7, then EOF"
+
 # (2) generator#410: a §7.3-skipped field is never capped. Every row is over its
 # kind's cap, and every row must decode COMPLETE with the declared field left at
 # its default -- a receiver refusing a message whose only offence is a field it

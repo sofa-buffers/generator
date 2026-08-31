@@ -94,8 +94,9 @@ mod scalars_dec {
         // invalid-UTF-8 string, an over-length string/blob, or an over-index
         // wrapper element: INVALID, and it dominates a truncated tail (S5.2).
         if invalid { return Err(sofab::Error::InvalidMsg); }
-        // No INVALID flag: now surface feed's own verdict (a clean Incomplete
-        // on a truncated-but-otherwise-valid message, or a structural InvalidMsg).
+        // Nothing refused above: now surface feed's own verdict (a clean
+        // Incomplete on a truncated-but-otherwise-valid message, or a
+        // structural InvalidMsg).
         fed?;
         // A fixed-capacity field overflowed during the fill:
         // report it rather than return a silently-truncated value.
