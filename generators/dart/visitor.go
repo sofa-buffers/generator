@@ -36,6 +36,25 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// must never be measured against this field's bound (generator#224 for
 	// onFixlenHeader, generator#259 / F-0042 for onArrayBegin).
 	var arrBegin, fixHdr []string
+	// onBytesDest / onArrayDest: the DESTINATION hooks, and the guard for the one
+	// shape a receiver cap never covered.
+	//
+	// corelib-dart's defaults allocate a destination sized from the wire count or
+	// length -- exactly right for a hand-written visitor that wants every field,
+	// and wrong for a schema-bound scope. MESSAGE_SPEC §7.3 makes an id this scope
+	// does not declare, or one whose wire kind contradicts what it declares, a
+	// SKIPPED field, and CORELIB_PLAN §6.2.1 says a skipped field is never capped
+	// *because* it allocates nothing. That is only true if the scope says so.
+	//
+	// So both are ALWAYS overridden, even by a scope with no array and no
+	// string/blob field: an id with no arm returns null and nothing is
+	// materialized at all -- not "at most N elements" but none, which is a
+	// tighter bound than any cap and the only one this shape has now that the
+	// decoder holds none (corelib-dart#88).
+	var arrDest, bytesDest []string
+	destArm := func(id int64, test, call string) string {
+		return fmt.Sprintf("      case %d:\n        if (%s) return super.%s;\n        return null;", id, test, call)
+	}
 	// onArrayElemBound (corelib-dart): the declared width of a native integer
 	// array's ELEMENTS, handed to the decoder so it can apply the bound while the
 	// elements go past. arrayWidthGuard below scans the assembled list, which is
@@ -86,20 +105,30 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 				// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate. The raw
 				// bytes ARE the wire length, so this needs no re-encode.
 				body = fmt.Sprintf("if (bytes.length > %d) { invalidate(); return; }\n        %s", fld.Maxlen, body)
-				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard("string", fld.Maxlen)))
 			}
+			if hdr := g.maxlenHdrGuard("string", fld); hdr != "" {
+				fixHdr = append(fixHdr, arm(fld.ID, hdr))
+			}
+			bytesDest = append(bytesDest, destArm(fld.ID, "subtype == sofab.FixlenType.string", "onBytesDest(id, subtype, total)"))
 			str = append(str, arm(fld.ID, body))
 		case ir.KindBlob:
 			// value aliases the decode buffer — copy what we keep.
 			body := acc + " = Uint8List.fromList(value);"
 			if fld.HasMaxlen {
 				body = fmt.Sprintf("if (value.length > %d) { invalidate(); return; }\n        %s", fld.Maxlen, body)
-				fixHdr = append(fixHdr, arm(fld.ID, maxlenHdrGuard("blob", fld.Maxlen)))
 			}
+			if hdr := g.maxlenHdrGuard("blob", fld); hdr != "" {
+				fixHdr = append(fixHdr, arm(fld.ID, hdr))
+			}
+			bytesDest = append(bytesDest, destArm(fld.ID, "subtype == sofab.FixlenType.blob", "onBytesDest(id, subtype, total)"))
 			blob = append(blob, arm(fld.ID, body))
 		case ir.KindStruct, ir.KindUnion:
 			seq = append(seq, seqArm(fld.ID, fmt.Sprintf("return %s(%s);", visitorName(g.typeName(fld.Ref.Key)), acc)))
 		case ir.KindArray:
+			if nativeArrayElem(fld.Elem) {
+				arrDest = append(arrDest, destArm(fld.ID,
+					"kind == sofab.ArrayKind."+wireArrayKind(fld.Elem), "onArrayDest(id, kind, count)"))
+			}
 			g.emitArrayDecode(fld, acc, arm, seqArm, &uArr, &sArr, &f32Arr, &f64Arr, &seq, &arrBegin, &elemBound)
 		}
 	}
@@ -133,6 +162,10 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// by the decoder per element — the position arrayWidthGuard cannot reach for
 	// an array that never completes (generator#267).
 	emitSwitchRet(f, "sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind)", elemBound, "return null;")
+	// Always emitted, arms or none: an id this scope does not bind gets NO
+	// destination, so a §7.3-skipped array or payload is never materialized.
+	emitDestSwitch(f, "Uint8List? onBytesDest(int id, int subtype, int total)", bytesDest)
+	emitDestSwitch(f, "TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count)", arrDest)
 	// onSequenceStart is ALWAYS overridden: the base returns `this` (descend),
 	// which would misread an unknown nested sequence as this object's fields.
 	// Returning null skips any unhandled sequence (forward-compat + §7.3).
@@ -162,8 +195,28 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 // landing on a `blob` with `maxlen: 4` was rejected as INVALID instead of skipped.
 // The payload callbacks (onString/onBlob) are already subtype-dispatched by the
 // corelib, so only this pre-dispatch hook needs the explicit check.
-func maxlenHdrGuard(sub string, n int64) string {
-	return fmt.Sprintf("if (subtype == sofab.FixlenType.%s && length > %d) invalidate();", sub, n)
+// TWO bounds land here and they are mutually exclusive by rule: a field the
+// schema bounds is governed by its own `maxlen` and is INVALID above it; a field
+// the schema leaves unbounded is governed by the receiver's configured cap and
+// is limitExceeded() above it (CORELIB_PLAN §6.2.1). The two categories must not
+// be folded -- a cap rejects well-formed bytes that decode under a looser cap --
+// and a cap must never reach a field the schema already bounds.
+//
+// The corelib holds no cap of its own to fall back on any more
+// (corelib-dart#88): this arm is the whole receiver bound on a schema-unbounded
+// scalar string or blob. "" when the field has neither bound to state.
+func (g *gen) maxlenHdrGuard(sub string, fld *ir.Field) string {
+	if fld.HasMaxlen {
+		return fmt.Sprintf("if (subtype == sofab.FixlenType.%s && length > %d) invalidate();", sub, fld.Maxlen)
+	}
+	live := g.limits.stringHas
+	if fld.Kind == ir.KindBlob {
+		live = g.limits.blobHas
+	}
+	if !live {
+		return ""
+	}
+	return fmt.Sprintf("if (subtype == sofab.FixlenType.%s && length > %s) limitExceeded();", sub, g.elemMaxExpr(fld.Kind))
 }
 
 // arrayCountHdrGuard is the onArrayBegin arm body rejecting a native array whose
@@ -193,8 +246,18 @@ func maxlenHdrGuard(sub string, n int64) string {
 // with no arm for this id and evaporates — which also leaves a correctly typed
 // earlier occurrence of the same id intact (§7.4). This pre-dispatch hook is the
 // one place the kind has to be tested explicitly.
-func arrayCountHdrGuard(kind string, n int64) string {
-	return fmt.Sprintf("if (kind == sofab.ArrayKind.%s && count > %d) invalidate();", kind, n)
+// The receiver cap is the ELSE of that bound, in the same arm, inside the same
+// kind gate, and in the other category (§6.2.1): a schema-bounded array answers
+// INVALID and never sees a cap, a schema-unbounded one answers limitExceeded()
+// and has no other bound at all -- the corelib holds none (corelib-dart#88).
+func (g *gen) arrayCountHdrGuard(kind string, fld *ir.Field) string {
+	if fld.HasCount {
+		return fmt.Sprintf("if (kind == sofab.ArrayKind.%s && count > %d) invalidate();", kind, fld.Count)
+	}
+	if !g.limits.arrayHas {
+		return ""
+	}
+	return fmt.Sprintf("if (kind == sofab.ArrayKind.%s && count > %s) limitExceeded();", kind, g.arrayCapExpr())
 }
 
 // emitArrayDecode appends the decode arm(s) for an array field to the right
@@ -281,11 +344,14 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 		// A wire element count above the schema `count` is INVALID (MESSAGE_SPEC
 		// §3+§7): reject, never clamp (generator#100).
 		guard = fmt.Sprintf("if (values.length > %d) { invalidate(); return; }\n        ", fld.Count)
-		// Native arrays fire onArrayBegin at the array header; wrapper-sequence arrays
-		// descend via onSequenceStart (no header hook) and are bounded at the
-		// collector cap instead. So the header reject is only for the native kinds.
-		if nativeArrayElem(fld.Elem) {
-			*arrBegin = append(*arrBegin, arm(fld.ID, arrayCountHdrGuard(wireArrayKind(fld.Elem), fld.Count)))
+	}
+	// Native arrays fire onArrayBegin at the array header; wrapper-sequence arrays
+	// descend via onSequenceStart (no header hook) and are bounded on the
+	// collector instead. So the header bound is only for the native kinds -- and
+	// an unbounded one carries the receiver cap there, in the schema bound's place.
+	if nativeArrayElem(fld.Elem) {
+		if hdr := g.arrayCountHdrGuard(wireArrayKind(fld.Elem), fld); hdr != "" {
+			*arrBegin = append(*arrBegin, arm(fld.ID, hdr))
 		}
 	}
 	switch {
@@ -309,47 +375,32 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 	}
 }
 
-// rcapArg is the receiver cap on a wrapper array's element INDEX, rendered as
-// the trailing named argument every corelib-dart collector takes, or "" when
-// none applies (ARCHITECTURE §9.5, generator#387).
-//
-// A wrapper array carries no count header: its elements are keyed by an
-// unbounded varint index and the list is grown to fit, so the INDEX is the
-// length and the index is what has to be bounded. Two delivered elements at id 0
-// and id 16383 are a 16384-slot list, which is why capping how many arrived
-// would not bound the allocation.
-//
-// Emitted only where it can fire: `cap >= 0` means the schema declared a
-// `count:`, and corelib-dart then answers INVALID against that and never
-// consults the receiver cap -- §6.2.1 forbids a policy cap on a field the schema
-// bounds. Left off, the collector's own default stands, which is the family
-// ceiling and not the deployment's number.
-func (g *gen) rcapArg(cap int64) string {
-	if cap >= 0 || !g.limits.arrayHas {
-		return ""
-	}
-	return ", rcap: " + g.wrapperIndexConst()
-}
-
-// wrapperIndexConst names the constant emitLimits emitted for the index cap: its
-// own when the raise made it differ from maxDynArrayCount, else that one.
-func (g *gen) wrapperIndexConst() string {
-	if g.limits.wrapperIndex != g.limits.arrayCount {
-		return "maxDynWrapperIndex"
-	}
-	return "maxDynArrayCount"
-}
-
 // collector returns the Dart expression constructing the MessageVisitor that
 // gathers a wrapper-sequence array's elements into the (freshly-cleared) list
 // `out`. It recurses for nested arrays.
+//
+// Every collector is handed BOTH bounds of every axis it has: the schema pair
+// (cap, emax / rowCount) and the receiver pair beside it (rcap, relemMax /
+// rowCap). A wrapper array carries no count header -- its elements are keyed by
+// an unbounded varint INDEX and the list is grown to fit, so the index IS the
+// length -- and neither that index nor an element's length word ever reaches the
+// generated visitor. The collector is therefore where this shape's receiver
+// bounds land, and corelib-dart keeps each pair exclusive per §6.2.1: where the
+// schema declares a `count`/`maxlen` the cap beside it is inert and the
+// violation is INVALID, where it does not the cap governs and the violation is
+// limitExceeded.
+//
+// The receiver arguments are REQUIRED by corelib-dart and emitted here
+// unconditionally, including where the schema sibling makes them inert: §6.2.1
+// gives that library no number to invent, so there is no default to leave one
+// out in favour of.
 func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64) string {
-	rcap := g.rcapArg(cap)
+	rcap := ", rcap: " + g.arrayCapExpr()
 	switch elem {
 	case ir.KindString:
-		return fmt.Sprintf("sofab.StringSeq(%s, %d, %d%s)", out, cap, emax, rcap)
+		return fmt.Sprintf("sofab.StringSeq(%s, %d, %d%s, relemMax: %s)", out, cap, emax, rcap, g.elemMaxExpr(ir.KindString))
 	case ir.KindBlob:
-		return fmt.Sprintf("sofab.BlobSeq(%s, %d, %d%s)", out, cap, emax, rcap)
+		return fmt.Sprintf("sofab.BlobSeq(%s, %d, %d%s, relemMax: %s)", out, cap, emax, rcap, g.elemMaxExpr(ir.KindBlob))
 	case ir.KindStruct, ir.KindUnion:
 		t := g.typeName(ref.Key)
 		return fmt.Sprintf("sofab.MessageSeq<%s>(%s, %d, () => %s(), (x) => %s(x)%s)", t, out, cap, t, visitorName(t), rcap)
@@ -358,14 +409,20 @@ func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.Arr
 		// index in this array (§5.1), so cap is what bounds it -- and so is the
 		// receiver cap beside it, for the same reason.
 		if nativeArrayElem(items.Elem) {
+			// A matrix has TWO axes and therefore four bounds. cap/rcap bound the ROW
+			// ID; rowCount/rowCap bound a row's OWN element count, which the row
+			// announces as a real count header because a row IS a native array -- and
+			// which nothing bounded before: the inner `count:` was dropped on the
+			// floor here, and the decoder-wide cap that stood in for it is gone.
+			rows := fmt.Sprintf("%s, rowCount: %d, rowCap: %s", rcap, capOf(items.HasCount, items.Count), g.arrayCapExpr())
 			switch {
 			case items.Elem == ir.KindBool:
-				return fmt.Sprintf("sofab.BoolMatrixSeq(%s, %d%s)", out, cap, rcap)
+				return fmt.Sprintf("sofab.BoolMatrixSeq(%s, %d%s)", out, cap, rows)
 			case items.Elem == ir.KindFP32 || items.Elem == ir.KindFP64:
-				return fmt.Sprintf("sofab.DoubleMatrixSeq(%s, %d, %v%s)", out, cap, items.Elem == ir.KindFP64, rcap)
+				return fmt.Sprintf("sofab.DoubleMatrixSeq(%s, %d, %v%s)", out, cap, items.Elem == ir.KindFP64, rows)
 			default:
 				_lo, _hi, _ := ir.NarrowRange(items.Elem)
-				return fmt.Sprintf("sofab.IntMatrixSeq(%s, %d, %v, %d, %d%s)", out, cap, signedArrayElem(items.Elem), _lo, _hi, rcap)
+				return fmt.Sprintf("sofab.IntMatrixSeq(%s, %d, %v, %d, %d%s)", out, cap, signedArrayElem(items.Elem), _lo, _hi, rows)
 			}
 		}
 		// Array of wrapper arrays: each element opens a sequence collected into the
@@ -397,6 +454,25 @@ func emaxOf(has bool, max int64) int64 {
 // object has no field for it (the base no-op then applies).
 func emitSwitch(f *dfile, sig string, arms []string) {
 	emitSwitchRet(f, sig, arms, "")
+}
+
+// emitDestSwitch is emitSwitchRet for the two DESTINATION hooks, with one
+// difference that is the whole point of it: it emits the override even when
+// there are no arms. A scope that binds no array and no payload must still
+// DECLINE every array and every payload, or corelib-dart's allocating default
+// stands and a skipped field is materialized from the wire (§6.2.1, §7.3).
+func emitDestSwitch(f *dfile, sig string, arms []string) {
+	f.line("  @override")
+	f.line("  %s {", sig)
+	if len(arms) > 0 {
+		f.line("    switch (id) {")
+		for _, a := range arms {
+			f.line("%s", a)
+		}
+		f.line("    }")
+	}
+	f.line("    return null;")
+	f.line("  }")
 }
 
 // emitSwitchRet is emitSwitch for a callback that answers with a value: `tail`
