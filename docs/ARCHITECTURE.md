@@ -2457,6 +2457,52 @@ Adopting it means keying the flat visitor's `(location, id)` dispatch onto
 corelib-py's `Binding`, which is a larger change than this one and is not in
 generator#388's path either. Until then Python pays the call.
 
+#### 9.5.2 Rust: why the cap stays in the generated visitor
+
+CORELIB_PLAN §6.2.1 (doc PR #86) settles that a corelib **MAY** take a receiver cap
+as an argument and run the comparison itself, and that the cheap way to do it is to
+hang the number on a call generated code already makes — the compare then folds in
+beside a bound test already there. Every other target has such a call: C++
+`readString`/`readArray`, Zig `arrays.allocN`/`grow`/`setElem`, Go's and Dart's
+collectors, Java's and C#'s `PayloadAcc`, TypeScript's and Python's decode entry.
+
+**Rust std has none, and cannot be given one by adding a parameter.** The generated
+visitor holds the whole message mutably:
+
+```rust
+struct V<'a> { m: &'a mut VehicleTelemetry, acc: sofab::PayloadAcc, lim: bool, ... }
+```
+
+The collector shape Go and Dart use hands the corelib the *destination* —
+`&sofab.StringSeq{Out: &m.Warnings, RCap: ...}`. Its Rust equivalent would be
+`&mut self.m.warnings` alongside the `&mut self.m` the visitor already holds: two
+overlapping mutable borrows, which the language rejects. That is an aliasing rule,
+not an omission, and it is why corelib-rs has no collectors, no `Seq` types and no
+allocation helpers — its entire decode surface is `decode(buf, visitor)` and
+`feed(chunk, visitor)`. The one corelib call on the path, `acc.feed(total, offset,
+chunk)`, sits *after* the point a cap must fire at; moving the check there would
+buffer the payload first and reject it after, which is the eager-allocation §6.2.1
+exists to prevent.
+
+**The one route that stays open is not worth taking.** Limits handed in per decode,
+with the corelib checking in its own header walk, borrows nothing and would work —
+but the corelib knows no schema, so it would cap schema-bounded fields too unless a
+`schema_bound` callback is added for it to consult. That is exactly the shape of
+Go's retired `WithMax*` options: a global bound tested against every field, with a
+dynamic call on breach. Measured, that shape costs **+3.14%** of decode in Go
+against **+0.77%** for Rust's present inline guard — so the move would very likely
+make Rust slower while adding a corelib feature and a generated bound table. (The
+3.14% is measured in Go, not Rust; the transfer is reasoned, and no Rust
+measurement was taken.)
+
+**Rust std is therefore exempt**: its `max_dyn_*` guards stay in the generated
+visitor, per field, at the count/length header, ahead of any accumulation. This
+concedes nothing to §6.2.1 — the numbers still come from generated code and
+corelib-rs holds no limit of its own, which is the rule the section is about, and
+it **MUST NOT** gain one. `rs-no-std` is out of scope for a different reason: its
+profile rejects an unbounded field at schema-validation time, so no field a cap
+could govern exists there.
+
 ### 9.6 Worst-case message size (one walk, all backends)
 
 Most targets emit a `MAX_SIZE` constant and size their encode buffer from it.
