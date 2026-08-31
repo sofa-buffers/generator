@@ -2380,6 +2380,15 @@ there is nothing for an omitted one to mean.
   contradicted the declaration. Python reaches the same verdict from the other
   side now — its codec parks the cap and drops it the moment `on_field` declines —
   which is why that hook has to decline an undeclared id explicitly (§9.5.1).
+  Pinned end-to-end in the `go`, `python` and `dart` suites, because §7.3 has
+  **two** skip shapes and only one of them is an unknown id: an over-cap array at
+  an **undeclared** id; the same array at a **declared** id whose wire kind
+  contradicts the declaration; and, one level down where the comparison is the
+  collector's rather than generated code's, a wrapper element whose fixlen
+  subtype contradicts the declared element type sitting at an index above
+  `max_dyn_array_count`. Each sits beside the matching-kind control that must
+  still answer `LimitExceeded` — a build that accepted both would be
+  indistinguishable from one that had simply lost the cap.
 - **A matrix ROW's own element count** was bounded by nothing the generator
   passed on. The outer `count:` bounds the row *id*; the row's count header rode
   on the decoder-wide cap in Go and Dart, and the inner `count:` was dropped on

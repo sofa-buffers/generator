@@ -495,6 +495,7 @@ messages:
     payload:
       a: { id: 0, type: array, items: { type: u64 } }
       b: { id: 1, type: array, items: { type: i32, count: 100000 } }
+      w: { id: 2, type: array, items: { type: string } }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/excl.yaml" --out "$WORK/excl" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/excl/pubspec.yaml"
@@ -516,7 +517,34 @@ fi
 printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
 "$WORK/dynlim/harness" decode dyn < "$WORK/skipcap.bin" >/dev/null \
     || { echo "FAIL: an over-cap array at an UNDECLARED id must be skipped, not capped"; exit 1; }
-echo "==> cap exclusivity OK (bounded sibling decodes, skipped field decodes)"
+# ...and neither is the OTHER S7.3 skip shape, which the unknown id above does
+# not reach: id 0 IS declared, but as array<u64> -- UNSIGNED. A SIGNED array
+# header (wire type 4) there was never this field's value, so it is skipped and
+# its count is measured against neither the schema bound nor the cap
+# (MESSAGE_SPEC S7.3, CORELIB_PLAN S6.2.1, generator#410). What pins it is the
+# kind test arrayCountHdrGuard emits AROUND the cap; with the cap unconditional,
+# these five elements answer limitExceeded instead of decoding.
+printf '\004\005\000\000\000\000\000' > "$WORK/mistypedcap.bin"
+"$WORK/dynlim/harness" decode dyn < "$WORK/mistypedcap.bin" >/dev/null \
+    || { echo "FAIL: an over-cap array whose wire KIND contradicts the declaration must be skipped, not capped"; exit 1; }
+# The same rule one level down, on the path where the cap is NOT compared by
+# generated code: a wrapper array hands its elements to a corelib collector and
+# the receiver cap travels as sofab.StringSeq's `rcap`, so corelib-dart is what
+# has to run the S7.3 element test ahead of the index compare. `w` (id 2) is a
+# count-less string array, so its ELEMENT INDEX is its length and takes
+# max_dyn_array_count (4).
+# Wire: 16 seq_begin(id 2) | 2a element id 5 | 0b fixlen_word (len 1, subtype
+# BLOB, contradicting the declared `string`) | 'x' | 07 end.
+printf '\026\052\013\170\007' > "$WORK/wrapmistyped.bin"
+"$WORK/excl/harness" decode dyn < "$WORK/wrapmistyped.bin" >/dev/null \
+    || { echo "FAIL: a mis-subtyped wrapper element above the index cap must be skipped, not capped"; exit 1; }
+# ...told apart from the very same element as a STRING, which this scope DOES
+# read and which the index cap therefore does bound.
+printf '\026\052\012\170\007' > "$WORK/wrapovercap.bin"
+if "$WORK/excl/harness" decode dyn < "$WORK/wrapovercap.bin" >/dev/null 2>&1; then
+    echo "FAIL: a string element at index 5 must still exceed max_dyn_array_count 4"; exit 1
+fi
+echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kind and mis-subtyped wrapper element all skipped)"
 
 # The ENFORCEMENT POINT, pinned end-to-end (CORELIB_PLAN S6.2.1: a limit "MUST be
 # enforced at the count/length header -- before the allocation it is meant to

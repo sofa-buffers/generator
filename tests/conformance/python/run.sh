@@ -356,6 +356,7 @@ messages:
     payload:
       a: { id: 0, type: array, items: { type: u64 } }
       b: { id: 1, type: array, items: { type: i32, count: 100000 } }
+      w: { id: 2, type: array, items: { type: string } }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/excl.yaml" --out "$WORK/exclproj" )
 # b (id 1, signed array, count 6) is bounded by its own `count: 100000`, so the
@@ -378,7 +379,24 @@ printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
 printf '\004\005\002\002\002\002\002' > "$WORK/mistyped.bin"
 (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/mistyped.bin" >/dev/null \
     || { echo "FAIL: an over-cap array of the WRONG kind must be skipped, not capped"; exit 1; }
-echo "==> cap exclusivity OK (bounded sibling, unknown id and mistyped kind all decode)"
+# The same rule one level down, where the number generated code states is the
+# only one in play: a WRAPPER array carries no count header, so its element
+# INDEX is its length and takes max_dyn_array_count (4). `w` (id 2) is a
+# count-less string array; an element whose fixlen subtype contradicts `string`
+# is a S7.3 skip, so it never grows the list and the index cap must not fire on
+# it -- which needs the tag test to run AHEAD of the index compare.
+# Wire: 16 seq_begin(id 2) | 2a element id 5 | 0b fixlen_word (len 1, subtype
+# BLOB, contradicting the declared `string`) | 'x' | 07 end.
+printf '\026\052\013\170\007' > "$WORK/wrapmistyped.bin"
+(cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/wrapmistyped.bin" >/dev/null \
+    || { echo "FAIL: a mis-subtyped wrapper element above the index cap must be skipped, not capped"; exit 1; }
+# ...told apart from the very same element as a STRING, which this scope DOES
+# read and which the index cap therefore does bound.
+printf '\026\052\012\170\007' > "$WORK/wrapovercap.bin"
+if (cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/wrapovercap.bin" >/dev/null 2>&1; then
+    echo "FAIL: a string element at index 5 must still exceed max_dyn_array_count 4"; exit 1
+fi
+echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kind and mis-subtyped wrapper element all skipped)"
 
 # A wrapper string element's own byte LENGTH, and a matrix ROW's own element
 # count: two numbers the generated visitor is the only thing that can bound,
