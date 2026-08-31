@@ -1,0 +1,113 @@
+# The bench's SECOND schema: the one the receiver caps can be seen in.
+#
+# `examples/messages/realworld/vehicle_telemetry.yaml` — the schema every other
+# row measures — bounds every array with `count` and every string/blob with
+# `maxlen`. That is deliberate (it is what lets the footprint rows generate at
+# all), but it means no field there is schema-UNBOUNDED, and a receiver cap
+# governs unbounded fields only (CORELIB_PLAN §6.2.1, ARCHITECTURE §9.5). On that
+# schema the whole cap machinery is dead code: not one `max_dyn_*` constant, not
+# one cap argument, not one guard is emitted in any row. Its cost and its saving
+# were both invisible to `results.txt`.
+#
+# This schema is the opposite case and exists for that one reason. Every field
+# kind a cap can govern appears here WITHOUT its schema bound:
+#
+#   * a scalar `string` and a scalar `blob`   -> max_dyn_string_len / _blob_len
+#   * a native scalar array with no `count`   -> max_dyn_array_count, at the count
+#                                                header (ARCHITECTURE §9.5 shape A)
+#   * a matrix whose outer AND inner arrays are unbounded -> the row's index, then
+#                                                the row's own element count
+#   * arrays of `string` and of `blob`        -> the wrapper collectors, whose
+#                                                element index and element length
+#                                                are the two headers a generated
+#                                                visitor never sees on the
+#                                                collector ports
+#   * an array of `struct`                    -> a sequence array: no count header
+#                                                at all, so the cap binds the
+#                                                element INDEX (§9.5 shape B)
+#
+# It keeps a BOUNDED twin of each kind too, because the interesting cost is the
+# mixture: a decoder that has to tell "governed by the schema, INVALID on breach"
+# from "governed by the receiver cap, LimitExceeded on breach" per field, which is
+# what every port's cap plumbing actually implements. A schema of nothing but
+# unbounded fields would measure the caps without measuring that choice.
+#
+# Deliberately NOT under examples/: it is a measurement fixture, not a showcase,
+# and it generates only for the heap-backed targets. The statically bounded
+# profiles (c, cpp `corelib: c-cpp`, rust `rs-no-std`) reject an unbounded field
+# at schema-validation time, so they have no unbounded row and keep measuring
+# vehicle_telemetry — which is exactly §9.5's claim that their caps are inert.
+version: 1
+messages:
+  IngestBatch:
+    summary: |
+      A batch of telemetry rows as an ingest gateway receives it from an
+      untrusted client: sizes are whatever the sender claims, so every
+      variable-length field here is bounded by the RECEIVER rather than by the
+      schema.
+    payload:
+      # --- unbounded scalars ---------------------------------------------------
+      source_id:    { id: 0, type: string, description: "Client-supplied source id (no maxlen: the receiver cap bounds it)" }
+      payload_blob: { id: 1, type: blob, description: "Opaque client body (no maxlen)" }
+
+      # --- bounded twins, so both verdicts live in one message -----------------
+      site:         { id: 2, type: string, maxlen: 16, description: "Ingest site code; schema-bounded, so INVALID on breach" }
+      received_at:  { id: 3, type: u64, unit: us, description: "Gateway receive timestamp" }
+      partition:    { id: 4, type: u32, description: "Shard the batch landed on" }
+
+      # --- unbounded native scalar array: a count header, shape A --------------
+      sample_us:
+        id: 5
+        type: array
+        description: "Per-row sample offsets (us); no count, so the cap bounds it at the count header"
+        items: { type: u64 }
+
+      # --- bounded native scalar array: same shape, the schema's bound ---------
+      crc32:
+        id: 6
+        type: array
+        description: "One CRC per segment; schema-bounded"
+        items: { type: u32, count: 4 }
+
+      # --- unbounded matrix: the row index, then the row's own count -----------
+      channel_mv:
+        id: 7
+        type: array
+        description: "Per-channel readings (mV); neither the number of rows nor a row's length is declared"
+        items:
+          type: array
+          items: { type: i32 }
+
+      # --- unbounded wrapper arrays: the collectors' index and element length --
+      tags:
+        id: 8
+        type: array
+        description: "Free-form client tags; no count and no per-element maxlen"
+        items: { type: string }
+      frames:
+        id: 9
+        type: array
+        description: "Raw sub-frames as received; no count and no per-element maxlen"
+        items: { type: blob }
+
+      # --- bounded wrapper array: same shape, schema bounds both ---------------
+      labels:
+        id: 10
+        type: array
+        description: "Operator labels; schema-bounded in count and in element length"
+        items: { type: string, count: 3, maxlen: 12 }
+
+      # --- unbounded sequence array: no count header, so the cap binds the index
+      events:
+        id: 11
+        type: array
+        description: "Events in the batch; a sequence array, so its length is highest present id + 1"
+        items:
+          type: struct
+          fields:
+            seq:     { id: 0, type: u32, description: "Monotonic sequence number" }
+            level:   { id: 1, type: u8, default: 0, description: "Severity" }
+            at_us:   { id: 2, type: u64, unit: us }
+            # An unbounded string in a NESTED scope: the string cap has to be live
+            # below the top level too, which is where a per-scope emission bug hides.
+            message: { id: 3, type: string, description: "Event text (no maxlen)" }

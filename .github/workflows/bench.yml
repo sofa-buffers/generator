@@ -40,8 +40,11 @@ jobs:
       matrix:
         # The -dyn rows are the allow_dynamic half of each footprint pair; they reuse
         # their sibling's toolchain, which the `cpp-*` case and the startsWith('rust-')
-        # guard below already cover.
-        row: [c, cpp-cpp, cpp-cpp-static, cpp-c-cpp, cpp-c-cpp-dyn, rust-rs, rust-rs-static, rust-rs-no-std, rust-rs-no-std-dyn, zig, go, java, csharp, dart, python, python-native, ts-bigint, ts-long]
+        # guard below already cover. The -unbounded rows are the receiver-cap half of
+        # four maxspeed rows: same config, same toolchain, a schema whose fields the
+        # schema does not bound (tests/bench/rows.json). They cost what their sibling
+        # costs — all four are `toggle` rows, i.e. one op each.
+        row: [c, cpp-cpp, cpp-cpp-static, cpp-cpp-unbounded, cpp-c-cpp, cpp-c-cpp-dyn, rust-rs, rust-rs-static, rust-rs-unbounded, rust-rs-no-std, rust-rs-no-std-dyn, zig, zig-unbounded, go, go-unbounded, java, csharp, dart, python, python-native, ts-bigint, ts-long]
     steps:
       - uses: actions/checkout@v7
 
@@ -70,7 +73,7 @@ jobs:
           components: llvm-tools-preview
 
       - uses: mlugg/setup-zig@v2
-        if: matrix.row == 'zig'
+        if: startsWith(matrix.row, 'zig')
         with: { version: "0.16.0" }
 
       - uses: actions/setup-java@v6

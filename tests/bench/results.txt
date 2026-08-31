@@ -11,6 +11,7 @@
 #             footprint profiles actually ship to.
 #
 # schema:  examples/messages/realworld/vehicle_telemetry.yaml  sha256 6e6451af0e06
+# schema:  tests/bench/schema/unbounded_ingest.yaml  sha256 807f72142204  rows: cpp-cpp-unbounded,go-unbounded,rust-rs-unbounded,zig-unbounded
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
@@ -23,9 +24,11 @@ cpp-c-cpp          footprint  toggle    33825         40150
 cpp-c-cpp-dyn      footprint  toggle    34096         50923
 cpp-cpp            maxspeed   toggle    12687         32677
 cpp-cpp-static     maxspeed   toggle    12394         24750
+cpp-cpp-unbounded  maxspeed   toggle    8245          22814
 csharp             maxspeed   subtract  31556         70467
 dart               maxspeed   subtract  25793         57452
 go                 maxspeed   toggle    20501         60958
+go-unbounded       maxspeed   toggle    13384         45884
 java               maxspeed   subtract  17008         30744
 kotlin             maxspeed   subtract  17203         32655
 python             maxspeed   subtract  1081554       2063814
@@ -34,28 +37,30 @@ rust-rs            maxspeed   toggle    8273          23329
 rust-rs-no-std     footprint  toggle    8078          29687
 rust-rs-no-std-dyn footprint  toggle    8280          38402
 rust-rs-static     maxspeed   toggle    8120          16503
+rust-rs-unbounded  maxspeed   toggle    6762          21044
 ts-bigint          maxspeed   subtract  605081        772930
 ts-long            maxspeed   subtract  597309        776394
 ts-number          maxspeed   subtract  614802        772105
 zig                maxspeed   toggle    9929          20870
+zig-unbounded      maxspeed   toggle    7837          16573
 
 ## toolchain
 tool                      version       rows
 arm-none-eabi-gcc         14.2.1        c,cpp-c-cpp,cpp-c-cpp-dyn
 dotnet                    10.0.400      csharp
-g++                       15.2.0        cpp-c-cpp,cpp-c-cpp-dyn,cpp-cpp,cpp-cpp-static
+g++                       15.2.0        cpp-c-cpp,cpp-c-cpp-dyn,cpp-cpp,cpp-cpp-static,cpp-cpp-unbounded
 gcc                       15.2.0        c
-go                        1.24.4        go
+go                        1.24.4        go,go-unbounded
 javac                     25.0.3        java
 kotlin-jdk                21.0.11       kotlin
 node                      24.19.0       ts-bigint,ts-long,ts-number
 python3                   3.14.4        python,python-native
 riscv64-unknown-elf-gcc   14.2.0        c
-rustc                     1.98.0        rust-rs,rust-rs-no-std,rust-rs-no-std-dyn,rust-rs-static
+rustc                     1.98.0        rust-rs,rust-rs-no-std,rust-rs-no-std-dyn,rust-rs-static,rust-rs-unbounded
 sofab-engine              pure          python
 sofab-engine              native        python-native
 valgrind                  3.26.0        all
-zig                       0.16.0        zig
+zig                       0.16.0        zig,zig-unbounded
 
 ## footprint
 row                profile    arch            text    data   bss

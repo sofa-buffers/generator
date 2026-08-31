@@ -26,7 +26,7 @@ benches itself — see below).
 
 | metric | rows | how |
 | - | - | - |
-| Ir/op | all 12 | one op under Callgrind, host x86-64, `-O3` |
+| Ir/op | every row | one op under Callgrind, host x86-64, `-O3` |
 | `.text`/`.data`/`.bss` | the 3 `footprint` rows | cross-compiled to the embedded targets those profiles ship to, `-Os` |
 
 ## Why instruction counts, not wall-clock
@@ -74,8 +74,11 @@ compiler that built a row. Read both first:
 | moved | moved | the corelib or a toolchain did it |
 | moved | unchanged | corelib moved, no impact |
 
-The `schema:` line carries a sha256 for the same reason: if you edit
-`vehicle_telemetry.yaml`, every number legitimately moves, and the hash says so.
+Each `schema:` line carries a sha256 for the same reason: if you edit
+`vehicle_telemetry.yaml`, every number measured on it legitimately moves, and the
+hash says so. There is one line per schema, and the second names the rows it covers
+(see [Schemas](#schemas)) — a single hash would be a true statement about most rows
+and a false one about the rest.
 
 **Corelibs are deliberately NOT pinned.** They are cloned from their default branch,
 exactly as `tests/conformance/*/run.sh` does. A corelib must match the generated
@@ -93,24 +96,77 @@ Override a clone to test a local corelib:
 SOFAB_C_CORELIB=~/src/corelib-c-cpp tests/bench/run.sh --rows c
 ```
 
-## Schema
+## Schemas
 
-`examples/messages/realworld/vehicle_telemetry.yaml`. Chosen because every array is
-bounded (`count`) and every string/blob has a `maxlen`, so it generates for **every**
-row — including C and the no_std/c-cpp footprint profiles — with no `allow_dynamic`
-and no per-config mutation. Every row therefore measures the identical schema.
+Two, named in `rows.json`: a top-level `schema`/`payload`/`message` every row
+measures, and a per-row override that four rows take.
 
-`examples/messages/example.yaml` cannot be used: its intentionally-unbounded
+**The default — `examples/messages/realworld/vehicle_telemetry.yaml`.** Chosen
+because every array is bounded (`count`) and every string/blob has a `maxlen`, so it
+generates for **every** row — including C and the no_std/c-cpp footprint profiles —
+with no `allow_dynamic` and no per-config mutation. Twenty of the rows therefore
+measure the identical schema, which is what makes them comparable to each other.
+
+`examples/messages/example.yaml` cannot be used for it: its intentionally-unbounded
 `somemap` forces `allow_dynamic: true` on the footprint rows and an injected
 `count: 8` for C (see `tests/gen-artifacts.sh`), so the rows would no longer be
 measuring the same thing.
+
+**The second — `tests/bench/schema/unbounded_ingest.yaml`.** Full boundedness is
+exactly what makes the default schema usable everywhere, and it is also a blind
+spot: a **receiver cap** (`max_dyn_array_count` / `_string_len` / `_blob_len`,
+ARCHITECTURE §9.5, CORELIB_PLAN §6.2.1) governs schema-**unbounded** fields only, and
+a backend emits the constant and the check only where the message reaches one. On
+`vehicle_telemetry` no target emits a single `max_dyn_*` constant, cap argument or
+guard, so the entire cap machinery was invisible to this file **in both directions**:
+neither what it costs nor what removing it saves could show up in a diff.
+
+`unbounded_ingest.yaml` is that machinery's row. Every kind a cap governs appears
+there without its schema bound — scalar `string`/`blob`, a native array with no
+`count`, a matrix unbounded in both dimensions, `string`/`blob` wrapper arrays, and a
+`struct` sequence array (no count header at all, so the cap binds the element index)
+— **plus a bounded twin of each**, because the cost being measured is a decoder
+telling "schema bound → INVALID" from "receiver cap → LimitExceeded" per field, which
+is what every port's cap plumbing implements. `tests/matrix/bench_rows_test.go`
+asserts both halves of that on the IR, so a stray `count:` added to the fixture fails
+a test instead of silently emptying the rows.
+
+It is not under `examples/` on purpose: it is a measurement fixture, not a showcase,
+and being unbounded it generates only for the heap-backed targets. The statically
+bounded profiles (`c`, `cpp` `corelib: c-cpp`, `rust` `rs-no-std`) reject an
+unbounded field at schema-validation time, so they have no unbounded twin — which is
+the same fact as §9.5's "their caps are inert".
+
+### The `-unbounded` rows: a pair, and not a speedup
+
+Four rows take it — `cpp-cpp-unbounded`, `zig-unbounded`, `go-unbounded`,
+`rust-rs-unbounded` — each with the **same config** as its bounded sibling. Read each
+as a pair with that sibling, the way the `-dyn` and `-static` rows are read, with one
+difference: **the two numbers are not comparable as a difference.** They are
+different messages of different sizes; the pair is not "caps cost X". What the pair
+gives is a place where a cap change moves a number *at all*, and a control row beside
+it that must **not** move when it does.
+
+Four rows rather than one because the enforcement **site** differs per port and per
+field kind, and that is the thing being measured (ARCHITECTURE §9.5):
+
+| row | where the comparison runs |
+| - | - |
+| `cpp-cpp-unbounded` | all three kinds ride into the corelib, on the `readString`/`readArray` calls generated code already makes |
+| `zig-unbounded` | split: array counts and wrapper indices in the corelib's `arrays.*` allocation calls, string/blob lengths generated |
+| `go-unbounded` | the wrapper arrays go to corelib collectors, which own an element's index and length |
+| `rust-rs-unbounded` | entirely generated (§9.5.2: the borrow checker rules out the collector shape) |
+
+The fifth shape — Java/Kotlin/C#'s `PayloadAcc` — has no row because those are
+`subtract` rows at minutes each, while all four above are `toggle` rows costing one op.
+Add one if that path starts moving.
 
 ## Not comparable to the corelibs' own benches
 
 Every corelib ships `bench/run_callgrind.sh` reporting Ir/op for four fixed
 workloads (`encode_u64_array`, `encode_typical`, …) that call the corelib API
 directly. This harness reuses their **method**, not their numbers: our workload is
-the generated code for `vehicle_telemetry`, which is a different thing. Do not put
+the generated code for the bench schemas, which is a different thing. Do not put
 the two tables side by side.
 
 Likewise `corelib-c-cpp/tools/footprint.sh` measures the corelib library; this
@@ -161,6 +217,7 @@ change the numbers — and only what has a row gets measured. The axes that exis
 | `allow_dynamic` | `cpp` (only on `c-cpp`), `rust` (only on `no_std`) | `cpp-c-cpp-dyn`, `rust-rs-no-std-dyn` |
 | `int64` mode | `typescript`: `bigint` \| `long` | `ts-bigint`, `ts-long` |
 | corelib engine (python) | pure-Python vs the Cython `_speedups` accelerator | `python`, `python-native` |
+| receiver caps (§9.5) | live only where the *schema* leaves a field unbounded, so this is a schema axis, not a config one | `cpp-cpp-unbounded`, `zig-unbounded`, `go-unbounded`, `rust-rs-unbounded` |
 | corelib build switches | `SOFAB_DISABLE_*` (c-cpp), cargo features (rs-no-std), `sofab_no_strict_utf8` (go) | **nothing** — every row builds the defaults |
 | corelib engine (ts) | `setKernel`: `jsKernel` vs native (N-API) / wasm | **nothing** |
 
@@ -484,6 +541,10 @@ found the hard way while building this.
   encoding drops default-valued fields, so a lazily-built payload silently halves the
   workload. `payload/vehicle_telemetry.json` sets every field to a non-default value
   with every bounded container full, and `rows.json` carries a `wire_len` floor.
+  `payload/unbounded_ingest.json` is written to the same rule; there "full" is a
+  judgement rather than a schema `count`, so its containers carry the element counts
+  a plausible batch would (4–16), well under the caps, because a payload at the cap
+  would measure the rejection path instead of the accept path.
 
 ## How the `bench` verb is emitted
 

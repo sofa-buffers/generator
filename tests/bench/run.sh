@@ -81,12 +81,24 @@ IRS="$WORK/irs.tsv"       # row \t encode_ir \t decode_ir
 # shellcheck source=lib/callgrind.sh
 . "$BENCH/lib/callgrind.sh"
 
+# What the row being measured is measured ON: its schema, the payload fed to the
+# bench verb, and the message name the workload is suffixed with. measure_row sets
+# all three from rows.json — the top-level defaults unless the row overrides them.
+#
+# There are two schemas, and the second one is not a variation for its own sake:
+# vehicle_telemetry bounds every array and every string/blob, so no receiver cap
+# (§9.5) is emitted in any row measured on it. The unbounded schema is the only
+# place the cap machinery exists at all. See tests/bench/README.md, "Schemas".
+ROW_SCHEMA=""
+ROW_PAYLOAD=""
+ROW_MSG=""
+
 generate() { # <lang> <config> <out>
     local lang="$1" config="$2" out="$3" cfg="$WORK/cfg.yaml"
     rm -rf "$out"; mkdir -p "$out"
     printf '%s\n' "$config" > "$cfg"
     ( cd "$ROOT" && go run ./cmd/sofabgen ${config:+--config "$cfg"} \
-        --lang "$lang" --in "$(q "print(d['schema'])")" --out "$out" ) >/dev/null
+        --lang "$lang" --in "$ROW_SCHEMA" --out "$out" ) >/dev/null
 }
 
 # measure_ir <row-id> <lang> <corelib> <method>
@@ -102,11 +114,9 @@ measure_ir() {
     # gate reject them every run.
     [ "$(q "print(next(r.get('ir', True) for r in d['rows'] if r['id']=='$id'))")" = "False" ] && return 0
 
-    local proj="$WORK/g/$id-ir" msg
-    msg="$(q "
-import re,sys
-# the workload suffix is the message name, lowercased — one message in the bench schema
-print('vehicletelemetry')")"
+    # The workload suffix is the message name, lowercased — one message per bench
+    # schema, named by `message` in rows.json (per row, or the top-level default).
+    local proj="$WORK/g/$id-ir" msg="$ROW_MSG"
     generate "$lang" "generic: { emit: project }
 $(q "print(next(r['config'] for r in d['rows'] if r['id']=='$id'))" | grep -v '^generic:' || true)" "$proj"
 
@@ -133,7 +143,7 @@ $(q "print(next(r['config'] for r in d['rows'] if r['id']=='$id'))" | grep -v '^
             v="$(env $envs bash -c "
                 . '$BENCH/lib/callgrind.sh'
                 ir_subtract '${w}_$msg' '$WORK' $reps $(bench_cmd_ir "$proj" "${w}_$msg") \
-                  < '$BENCH/payload/vehicle_telemetry.json'" 2>/dev/null || true)"
+                  < '$ROOT/$ROW_PAYLOAD'" 2>/dev/null || true)"
         else
             # Go's symbols are package-mangled (main.run_<w>); most languages are not.
             local sym="run_${w}_$msg"
@@ -142,7 +152,7 @@ $(q "print(next(r['config'] for r in d['rows'] if r['id']=='$id'))" | grep -v '^
             v="$(SYM="$sym" env $envs bash -c "
                 . '$BENCH/lib/callgrind.sh'
                 ir_toggle '${w}_$msg' '$WORK' $(bench_cmd_ir "$proj" "${w}_$msg") \
-                  < '$BENCH/payload/vehicle_telemetry.json'" 2>/dev/null || true)"
+                  < '$ROOT/$ROW_PAYLOAD'" 2>/dev/null || true)"
         fi
         [ "$w" = encode ] && enc="$v" || dec="$v"
     done
@@ -180,6 +190,18 @@ measure_row() { # <row-id>
     config="$(q "print(next(r['config'] for r in d['rows'] if r['id']=='$id'))")"
     archs="$(q "print(' '.join(next(r['archs'] for r in d['rows'] if r['id']=='$id')))")"
     method="$(q "print(next(r['method'] for r in d['rows'] if r['id']=='$id'))")"
+
+    # What this row measures ON. A row inherits the top-level schema/payload/message
+    # unless it names its own — which the *-unbounded rows do, and only they.
+    ROW_SCHEMA="$(q "
+r = next(r for r in d['rows'] if r['id']=='$id')
+print(r.get('schema', d['schema']))")"
+    ROW_PAYLOAD="$(q "
+r = next(r for r in d['rows'] if r['id']=='$id')
+print(r.get('payload', d['payload']))")"
+    ROW_MSG="$(q "
+r = next(r for r in d['rows'] if r['id']=='$id')
+print(r.get('message', d['message']))")"
 
     # Rows whose recipe does not exist yet are simply not measured (Phase 2/3 work
     # in progress); they keep whatever results.txt already holds for them.

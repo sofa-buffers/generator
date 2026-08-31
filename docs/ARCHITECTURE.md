@@ -865,8 +865,10 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    Dart callbacks return `void`, the over-count/over-index/over-maxlen INVALID
    verdicts ride a **sticky `_inv` flag** the generated `tryDecode` converts to a
    terminal INVALID after the corelib returns (the Rust/Zig sticky-flag model);
-   the receiver-side `max_dyn_*` limits are enforced by the corelib itself via a
-   `DecoderLimits` (family "passed into the corelib decoder", §9.5).
+   the receiver-side `max_dyn_*` limits are compared inside the corelib — the
+   wrapper collectors take theirs per field, beside the schema bound they are
+   exclusive with — and every number is supplied by generated code, corelib-dart
+   holding none (§9.5).
 3. **Pull-parser** — *empty*. The generated `decode` used to loop
    `Decoder.Next()` → a field `{id, wire-type}`, switch on `id`, read the typed
    value and `Skip()` unknowns.
@@ -2188,10 +2190,12 @@ backend:
   silent clamping is data corruption).
 - The check runs at the count/length **header**, before any allocation or
   buffering — a claimed oversize fails fast even if the payload never arrives.
-- The corelib reports what arrives — the count at the header, the index of the
-  element in hand — and the generated visitor decides against the cap. Where a
-  corelib takes the caps itself (the enforcement families below), the value still
-  comes from generated code, never from a default the corelib invented.
+- The corelib surfaces what arrives — the count at the header, the index of the
+  element in hand — and the number it is measured against always comes from
+  generated code. **Which layer performs the comparison is a separate question**,
+  answered per field kind and per port below ("Where the comparison runs"): a
+  corelib may take the cap as an argument and check it itself, and most now do,
+  but none holds, defaults or clamps to a limit of its own.
   A wrapper-sequence array carries no count *header*, but its elements
   are keyed by an unbounded varint **index** and an id-keyed collector grows the
   container to `id+1` — so a single over-index element **is** an amplification
@@ -2224,8 +2228,8 @@ backend:
     consulted only where the schema declared no `count:`, so generated code passes
     the deployment's number and the two can never both be in play. It travels
     **unraised**, as its own constant where the raise made one differ: a per-decode
-    `DecoderLimits` must clear the largest schema bound in the message or it
-    rejects a field §6.2.1 forbids it to touch, while a per-array cap that cannot
+    `DecoderLimits` had to clear the largest schema bound in the message or it
+    rejected a field §6.2.1 forbids it to touch, while a per-array cap that cannot
     reach a bounded field needs no such loosening — and raising it would hand an
     unbounded array a looser cap because some sibling declared a large `count:`.
     The
@@ -2259,86 +2263,125 @@ backend:
       `sequenceBegin` — so its helper returns the *test* and the *category* and
       each site spells its own refusal.
 
-    **Three backends cannot take this generator-side**, because their gap-fill is
-    not generated: **Go** (`sofab.StringSeq{Cap:}` and siblings), **Dart**
-    (`sofab.StringSeq(out, cap, emax)`) and pure **C++** (`sofab::StringSeq{out,
-    cap, emax}`) hand the whole wrapper array to a corelib collector, and the `cap`
-    they pass means the *schema* bound and answers `INVALID`. Passing a receiver
-    cap through it would produce the forbidden category. Each needs a second field
-    carrying the policy bound: corelib-go#129, corelib-dart#86, corelib-cpp#124.
-    **TypeScript** takes it generator-side like the six, but on top of its
-    flat-visitor rebuild (#395) rather than the cursor path being retired.
+    **Three backends could not take it generator-side at all**, because their
+    gap-fill is not generated: **Go**, **Dart** and pure **C++** hand the whole
+    wrapper array to a corelib collector, so neither an element's index nor its
+    length word ever reaches generated code. The `cap`/`ElemMax` those collectors
+    already took mean the *schema* bound and answer `INVALID`, so routing a
+    receiver cap through them would have produced the category §6.2.1 forbids.
+    Each corelib therefore grew a **second, separate** field for the policy bound —
+    `Caps{ArrayCount, StringLen, BlobLen}` beside `Bounds` in corelib-go, `rcap`
+    and its element-length sibling in corelib-dart, `indexCap`/`elemLenCap` on
+    `sofab::StringSeq`/`BlobSeq` in corelib-cpp — and that is what turned that
+    blocker into the split the family now has, rather than a compromise.
 
-Enforcement by family: **generated visitor guards** — Rust std, Java, Kotlin, C#,
-Zig, pure C++, Python and TypeScript. The corelib callback exposes `count`/`total`
-pre-allocation and the corelibs contribute only the error category. **Passed into
-the corelib decoder** — Go (`sofab.WithMax*` options) and Dart
-(`sofab.DecoderLimits`); the generated cap is raised to the largest schema bound
-of its kind, because these apply globally per decode and would otherwise reject a
-schema-bounded sibling.
+**Where the comparison runs (normative).** §6.2.1 separates two questions that had
+been treated as one, and the answers are not the same:
 
-**The second family is being retired** (generator#388). A decoder-level cap binds
-every field indiscriminately, including the schema-bounded ones §6.2.1 forbids it
-to touch, and the raise that keeps those decodable does so by loosening the cap
-for the *unbounded* fields too — the ones it exists to protect. The generator has
-the schema; the corelib does not. Two have moved:
+- **Provenance — always generated code.** The *numbers* come from the layer that
+  knows the schema and the target. A codec **MUST NOT** hold a limit of its own,
+  supply a default for one it was not given, read an omitted argument as
+  *unlimited*, or clamp to one. A format ceiling (§6.2 `ARRAY_MAX` / `FIXLEN_MAX`)
+  reached because no cap was stated is the **format's** bound and **MUST NOT** be
+  presented as a receiver cap — reporting `LimitExceeded` against a ceiling nobody
+  configured promises a limit to raise that never existed. A **missing** cap is a
+  caller defect and belongs in §6.3's `InvalidArgument` category for the same
+  reason. The strictest form of that, and the one the corelibs took, is to make the
+  argument **required**: a struct literal's zero value is exactly the omission the
+  API must not accept.
+- **Site — wherever a call already exists to carry it.** §6.2.1 is explicit that a
+  corelib **MAY** take a limit as an argument and perform the check itself. Where
+  generated code already calls the corelib at the count/length header — the point
+  the check must happen at anyway — the number rides that call and the comparison
+  folds in beside a bound test already there. Where no such call exists for a field
+  kind, the check stays in generated code.
 
-- **Python, generator#325** — guards into `on_field`, cap emitted as configured.
-  generator#406 then moved the schema bound itself out of generated code and into
-  corelib-py's `on_schema_bound`, leaving `on_field` the §7.3 tag test and the
-  caps. That is what actually closed the §6.2.1 half for Python: a native integer
-  array's count used to be checked in `on_array_begin`, which left its id in the
-  *else* of `on_field`'s chain — where the array cap sat — so a `count: 8` array
-  under a configured `max_dyn_array_count: 4` was rejected at a wire count of 6, a
-  message the schema plainly admits. See §9.5.1 for what the move cost.
-- **TypeScript, generator#388 and generator#405** — the cap becomes the *else* of
-  the schema bound in the very hooks that already carry it: `fixlenBegin` for a
-  scalar string/blob, `arrayBegin` for a native array and for a matrix row.
-  Emitted as configured, with no raise, so a `max_dyn_array_count: 64` now
-  coexists with a sibling's `count: 100000` — a combination the global
-  `DecodeLimits` made impossible. The corelib is handed **no `DecodeLimits` at
-  all**: `decode(bytes)` and `new IStream(visitor)` take nothing else.
+**One implementation, wherever it runs.** A port whose corelib offers the check for
+a kind **MUST NOT** also emit it into the generated layer, and vice versa. Two
+routes to one rule is the divergence §5.3.1's one-implementation test is written
+over, and the receiver caps are named in it.
 
-  One shape is not the visitor's, and it is what the remaining two are blocked on:
-  a wrapper array's string/blob elements are collected by corelib-ts's
-  `StringSeq`/`BlobSeq`, so neither their index nor their length word reaches
-  generated code. Both of their receiver caps therefore ride **on the collector**,
-  beside the schema bounds they are exclusive with: `receiverCap` for the element
-  index and `receiverElemMax` for its byte length (corelib-ts#164). Per field,
-  checked at the header, and off any field the schema bounds — so the cap travels
-  as configured here too, and the module-wide `DecodeLimits` that used to carry
-  the length bound is gone with the raise it needed. That raise is worth recording,
-  because it is what a decoder-level cap costs: the object was measured against
-  *every* fixlen length with no schema exemption and at the length word — *before*
-  the visitor's `fixlenBegin` — so it had to be lifted past the largest `maxlen`
-  in the module or it rejected a schema-bounded field on the way in, and a
-  `maxlen: 4096` element lost its decode under a 1024 cap.
+**Moving the check does not move where it fires.** It stays at the count/length
+header, *before* the allocation it exists to prevent, and *behind* the MESSAGE_SPEC
+§7.3 tag test — a field whose wire type contradicts the declared one is skipped, and
+a skipped field is never capped (§6.2.1). Riding an existing call is what makes both
+conditions structural instead of a discipline every call site has to keep: on most
+surfaces only the codec can see the tag before the destination is bound, so a caller
+checking *in front of* its own read caps exactly the field it was required to skip.
+The hazard to watch for is the destination being **sized** before the check runs —
+corelib-cpp had that defect hidden behind the generated guard, its free
+`readString` calling `fitDest()` on the announced length before any cap was
+consulted, so an over-cap string was materialised and only then rejected.
 
-  Every collector argument is **always emitted**, including where the schema bound
-  beside it makes it inert. corelib-ts falls back to the format ceiling for an
-  omitted receiver cap (`ARRAY_MAX` / `FIXLEN_MAX`, corelib-ts#165) — finite, as
-  §6.2.1 admits no unset state, but a bound the format already enforces one step
-  earlier — so omitting one is not "the corelib's default" but no receiver bound
-  at all. §6.2.1 puts the number in generated code regardless: it comes from the
-  layer that knows the schema and the target, never from one the corelib invented.
+**The split is per field kind AND per port, deliberate, and this is the list.**
+"In the corelib" below always means *passed in by generated code, compared there*;
+never a number the corelib knows:
 
-**Go and Dart are blocked on the same thing, one step further back.** Their
-collectors own the whole wrapper array — the element index as well as its length —
-and their `cap`/`ElemMax` mean the *schema* bound and answer INVALID, so a receiver
-cap routed through them would report the category §6.2.1 forbids. Retiring their
-options before the collectors can take a policy bound would leave wrapper elements
-unguarded, which is strictly worse than today's imprecision: corelib-go#129,
-corelib-dart#86.
+| target | compared in the corelib, on this existing call | compared in generated code |
+|---|---|---|
+| **C++** (`corelib: cpp`) | all three kinds: `readString`/`readBlob`/`readArray`, plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors | — |
+| **Zig** | array counts and wrapper element indices: `arrays.allocNCapped` / `growCapped` / `setElemCapped` | string and blob lengths |
+| **Go**, **Dart** | wrapper arrays — the element index and the element length — through the collectors' receiver-cap fields | scalar string/blob lengths, native array counts |
+| **Java**, **Kotlin**, **C#** | string and blob lengths, in `PayloadAcc`, which the payload already passes through | array counts and wrapper element indices |
+| **Python** | all three kinds, in the corelib's own header walk: `Decoder(max_dyn_*=…)` takes the three numbers as **required** arguments and the schema bounds are *declared* to it (`on_schema_bound`, or a destination map's entry), so a bounded field is never capped — §9.5.1 | — |
+| **TypeScript** | a wrapper array's element index and element length, on the `StringSeq`/`BlobSeq` collectors that receive those two headers instead of the visitor (`receiverCap`/`receiverElemMax`) | the other kinds, in the flat visitor's own `fixlenBegin`/`arrayBegin` — the hooks that already carry the schema bound, so the cap is its `else`; corelib-ts is handed no limits object at all |
+| **Rust** (std) | — | all three kinds (§9.5.2: there is no call to hang a cap on, and the collector shape the others use is two overlapping mutable borrows) |
+| **C**, **C++** `corelib: c-cpp`, **Rust** `no_std` | inert — the profile rejects an unbounded field at schema validation, so no field a cap could govern exists | inert |
 
-**Dart's half of that has since landed on the corelib side** — every collector in
-`seq.dart` now carries `rcap` for the element index (see #387 above) — so what Dart
-still owes the full move is the element **length** and the matrix row's element
-**count**, not the index. Go has no receiver-cap sibling at all yet.
-**corelib-go additionally already has `SchemaBoundVisitor`** — the
-§6.2.1 hook that keeps a decoder cap off a schema-bounded field, consulted only
-after a cap is exceeded — and the generator does not emit it. That omission alone
-is why Go's cap is raised; emitting it would fix the precision half with no corelib
-change, and it conflicts with the full move, so the two are steps of one change.
+**Which halves have landed.** The corelib side is done in every port that takes an
+argument (corelib-cpp, -go, -dart, -zig, -java, -kotlin-mp, -cs, -py, -ts): each
+made the cap a **required** parameter and holds none of its own. The generator side
+lands per port, one PR each, in the generator#402 series — so a port whose PR is
+still open keeps its previous shape until it merges, and the `-unbounded` bench rows
+below are where that shows.
+
+A deliberate split *within* one port is the normal case, not an anomaly: Zig's
+arrays go one way and its strings the other because `arrays.allocNCapped` exists at
+the array's count header and nothing equivalent exists at a string's length word.
+Inventing a new helper purely to hold a check is what this design rejects — it
+costs 1–2.5 percentage points of decode and buys nothing that the guard in place
+did not already give.
+
+**Measured**, callgrind Ir/op on the decode path, identical generated source and one
+corelib build per pair. Each pair was taken in its own port's PR rather than from
+`results.txt`, because until the `-unbounded` rows below existed the committed file
+could not see any of it:
+
+| port | shape | decode |
+|---|---|---:|
+| C++ | guard emitted in front of `readString` | +3.39% |
+| C++ | the cap passed into `readString` | **+0.11%** |
+| Zig | generated guards | +5.10% |
+| Zig | the cap on `arrays.allocN` / `grow` / `setElem` | **+1.00%** |
+| Go | decoder-level `WithMax*` options | +3.14% |
+| Go | the cap as a per-field collector argument | **~0%** |
+| Rust std | generated inline guard (the §9.5.2 exemption) | +0.77% |
+
+The pattern is the same everywhere: the cost is not the comparison, it is the
+*place*. A check bolted in front of a call the code already makes duplicates that
+call's setup and defeats its inlining; the same check inside it is a compare
+against a register the callee already holds.
+
+**The raise is gone, so a configured cap is binding rather than advisory.** This is
+the user-visible half of the change. A decoder-level cap — Go's `WithMax*` options,
+Dart's and TypeScript's module-wide limits object — was tested against *every*
+field, including the schema-bounded ones §6.2.1 forbids it to touch. Keeping those
+decodable meant raising the number generated code passed to at least the largest
+schema bound of its kind in the message, which loosened it for exactly the
+unbounded fields it existed to protect: a `maxlen: 4096` element in the module
+lifted a configured 1024-byte string cap for every unbounded string beside it, and
+`max_dyn_array_count: 64` could not coexist with a sibling's `count: 100000` at
+all. Per-field enforcement needs no such loosening, so **every cap is now emitted as
+configured**. `ir.Bounds.Max*` survives only as an input to the worst-case size walk
+(§9.6), not as a floor under any cap.
+
+**And it is measured rather than argued.** The bench schema
+(`vehicle_telemetry`) bounds every array and every string/blob, so no row measured
+on it emits a single `max_dyn_*` constant, cap argument or guard: for the whole life
+of this section its cost was invisible to `tests/bench/results.txt` in both
+directions. Four `-unbounded` rows — `cpp-cpp-unbounded`, `zig-unbounded`,
+`go-unbounded`, `rust-rs-unbounded`, one per enforcement shape above — measure a
+deliberately unbounded schema instead (§15).
 
 Pure C++ additionally derives a
 streaming reassembly cap (`sofab::Limits{max_buffered_field}`) for its `acc_`
@@ -2463,8 +2506,9 @@ CORELIB_PLAN §6.2.1 (doc PR #86) settles that a corelib **MAY** take a receiver
 as an argument and run the comparison itself, and that the cheap way to do it is to
 hang the number on a call generated code already makes — the compare then folds in
 beside a bound test already there. Every other target has such a call: C++
-`readString`/`readArray`, Zig `arrays.allocN`/`grow`/`setElem`, Go's and Dart's
-collectors, Java's and C#'s `PayloadAcc`, TypeScript's and Python's decode entry.
+`readString`/`readArray`, Zig `arrays.allocN`/`grow`/`setElem`, Go's, Dart's and
+TypeScript's collectors, Java's, Kotlin's and C#'s `PayloadAcc`, Python's decode
+entry — see the table in §9.5 for which kinds each one carries.
 
 **Rust std has none, and cannot be given one by adding a parameter.** The generated
 visitor holds the whole message mutably:
@@ -3203,6 +3247,25 @@ A fourth is the corelib's own engine where it has one: `python` / `python-native
 (below). Uncovered axes are named in `tests/bench/README.md`: the corelib build
 switches (`SOFAB_DISABLE_*`, cargo features, `sofab_no_strict_utf8`) — which is the
 footprint story itself — and corelib-ts's `setKernel` seam.
+
+**A fifth axis is not a config at all: the SCHEMA.** Whether a field is bounded is
+a property of the message definition, and one whole subsystem is live only where it
+is not — the receiver caps of §9.5 govern schema-**unbounded** fields, so on
+`vehicle_telemetry`, which bounds every array and every string/blob, no target
+emits a single `max_dyn_*` constant, cap argument or guard. The bench measured that
+subsystem's cost as zero for as long as it existed, in both directions. `rows.json`
+therefore takes a per-row `schema`/`payload`/`message`, and four rows use it:
+`cpp-cpp-unbounded`, `zig-unbounded`, `go-unbounded` and `rust-rs-unbounded`, one
+per enforcement shape in §9.5's table (into the reads; split; via the collectors;
+entirely generated), each with the same config as its bounded sibling and all four
+`toggle` rows, i.e. one op apiece. **The pair is not a difference**: the two rows
+measure different messages, so the sibling is a control that must stay still, not a
+baseline to subtract. The footprint rows have no unbounded twin because their
+profiles reject an unbounded field at schema-validation time — the same fact as
+§9.5's "their caps are inert". `tests/matrix/bench_rows_test.go` asserts on the IR
+that the default schema stays fully bounded and that a row-level schema is unbounded
+in all three kinds *and* keeps a bounded twin of each, so the rows cannot quietly
+stop measuring what they are named for.
 
 **What ran is recorded, not assumed.** The header carries the corelib SHAs and the
 `## toolchain` table the compiler versions, because each moves numbers with the
