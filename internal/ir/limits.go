@@ -3,19 +3,23 @@ package ir
 // BoundsInfo summarizes the schema bounds of a message's reachable fields, for
 // the receiver-side decode limits (generator#102). HasDyn* report whether any
 // reachable array / string / blob is unbounded (no schema count / maxlen) —
-// only those fields are governed by the configured max_dyn_* caps. Max* carry
-// the largest schema-declared bound of each kind (0 when none): backends whose
-// corelib enforces the limits globally (Go, Python, TypeScript) raise the cap
-// they pass in to at least these, so a schema-bounded field larger than the
-// configured cap stays governed by its schema bound alone (the #102 escape
-// hatch), while its own generator#100 guard still rejects over-schema counts.
+// only those fields are governed by the configured max_dyn_* caps, and a
+// backend that emits none of them at all needs no limit plumbing in the module.
+//
+// Nothing here records how LARGE the schema bounds are, because nothing needs
+// it any more. The caps are applied PER FIELD now, at that field's own
+// count/length header and behind the MESSAGE_SPEC §7.3 tag test, so a cap never
+// reaches a field the schema bounds (CORELIB_PLAN §6.2.1) and never has to be
+// raised past one. The raise existed only while a cap travelled as a
+// decoder-level option that bound every field of the message alike: it had to
+// clear the largest maxlen/count in the message or reject a schema-bounded
+// field §6.2.1 forbids it to touch — and that loosened the cap for exactly the
+// unbounded fields it exists to protect. With the cap on the field, the number
+// travels AS CONFIGURED.
 type BoundsInfo struct {
 	HasDynArray  bool
 	HasDynString bool
 	HasDynBlob   bool
-	MaxCount     int64 // largest schema `count` over all reachable arrays
-	MaxStringLen int64 // largest schema `maxlen` over all reachable strings
-	MaxBlobLen   int64 // largest schema `maxlen` over all reachable blobs
 }
 
 // HasDyn reports whether any reachable field is unbounded at all — when false
@@ -30,31 +34,19 @@ func Bounds(fields []*Field) BoundsInfo {
 	seen := map[*NamedType]bool{}
 
 	var walkFields func([]*Field)
-	var walkElem func(elem Kind, ref *TypeRef, items *ArrayElem, hasCount bool, count int64, elemMaxHas bool, elemMax int64)
+	var walkElem func(elem Kind, ref *TypeRef, items *ArrayElem, hasCount bool, elemMaxHas bool)
 
-	walkElem = func(elem Kind, ref *TypeRef, items *ArrayElem, hasCount bool, count int64, elemMaxHas bool, elemMax int64) {
-		if hasCount {
-			if count > b.MaxCount {
-				b.MaxCount = count
-			}
-		} else {
+	walkElem = func(elem Kind, ref *TypeRef, items *ArrayElem, hasCount bool, elemMaxHas bool) {
+		if !hasCount {
 			b.HasDynArray = true
 		}
 		switch elem {
 		case KindString:
-			if elemMaxHas {
-				if elemMax > b.MaxStringLen {
-					b.MaxStringLen = elemMax
-				}
-			} else {
+			if !elemMaxHas {
 				b.HasDynString = true
 			}
 		case KindBlob:
-			if elemMaxHas {
-				if elemMax > b.MaxBlobLen {
-					b.MaxBlobLen = elemMax
-				}
-			} else {
+			if !elemMaxHas {
 				b.HasDynBlob = true
 			}
 		case KindStruct, KindUnion:
@@ -64,7 +56,7 @@ func Bounds(fields []*Field) BoundsInfo {
 			}
 		case KindArray:
 			if items != nil {
-				walkElem(items.Elem, items.ElemRef, items.ElemItems, items.HasCount, items.Count, items.ElemMaxHas, items.ElemMax)
+				walkElem(items.Elem, items.ElemRef, items.ElemItems, items.HasCount, items.ElemMaxHas)
 			}
 		}
 	}
@@ -73,19 +65,11 @@ func Bounds(fields []*Field) BoundsInfo {
 		for _, f := range fields {
 			switch f.Kind {
 			case KindString:
-				if f.HasMaxlen {
-					if f.Maxlen > b.MaxStringLen {
-						b.MaxStringLen = f.Maxlen
-					}
-				} else {
+				if !f.HasMaxlen {
 					b.HasDynString = true
 				}
 			case KindBlob:
-				if f.HasMaxlen {
-					if f.Maxlen > b.MaxBlobLen {
-						b.MaxBlobLen = f.Maxlen
-					}
-				} else {
+				if !f.HasMaxlen {
 					b.HasDynBlob = true
 				}
 			case KindStruct, KindUnion:
@@ -94,7 +78,7 @@ func Bounds(fields []*Field) BoundsInfo {
 					walkFields(f.Ref.Target.Fields)
 				}
 			case KindArray:
-				walkElem(f.Elem, f.ElemRef, f.ElemItems, f.HasCount, f.Count, f.ElemMaxHas, f.ElemMax)
+				walkElem(f.Elem, f.ElemRef, f.ElemItems, f.HasCount, f.ElemMaxHas)
 			}
 		}
 	}

@@ -22,9 +22,9 @@ func TestBounds(t *testing.T) {
 	if !b.HasDyn() {
 		t.Fatal("HasDyn should be true")
 	}
-	if b.MaxCount != 5 || b.MaxStringLen != 64 || b.MaxBlobLen != 0 {
-		t.Fatalf("maxima wrong: %+v", b)
-	}
+	// No maxima are recorded any more: the caps are applied per field and are
+	// never raised to a sibling's schema bound (CORELIB_PLAN 6.2.1), so the
+	// largest declared count/maxlen in the message is nobody's input.
 
 	all := Bounds([]*Field{{Name: "s", Kind: KindString, HasMaxlen: true, Maxlen: 8}})
 	if all.HasDyn() {
