@@ -338,7 +338,7 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 	f.line("        INCOMPLETE stays distinguishable from INVALID.")
 	f.line(`        """`)
 	f.line("        o = cls()")
-	f.line("        d = Decoder(visitor=_%sVisitor(o))", name)
+	f.line("        d = Decoder(visitor=_%sVisitor(o), %s)", name, g.capsArgs())
 	f.line("        st = d.feed(data)")
 	f.line("        if st is Status.INVALID:")
 	f.line(`            raise SofaDecodeError(d.error or "invalid message")`)

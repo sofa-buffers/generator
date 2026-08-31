@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
-from sofab import Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor
+from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, Status, Visitor
 
 @dataclass
 class Scalars:
@@ -127,7 +127,7 @@ class Scalars:
         INCOMPLETE stays distinguishable from INVALID.
         """
         o = cls()
-        d = Decoder(visitor=_ScalarsVisitor(o))
+        d = Decoder(visitor=_ScalarsVisitor(o), max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304)
         st = d.feed(data)
         if st is Status.INVALID:
             raise SofaDecodeError(d.error or "invalid message")
@@ -150,7 +150,7 @@ class _StreamDecoder:
 
     def __init__(self, msg_cls, vis_cls) -> None:
         self.message = msg_cls()
-        self._d = Decoder(visitor=vis_cls(self.message))
+        self._d = Decoder(visitor=vis_cls(self.message), max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304)
 
     def feed(self, chunk) -> Status:
         return self._d.feed(chunk)
@@ -226,4 +226,23 @@ class _ScalarsVisitor(Visitor):
         if c == _L_Scalars:
             if fid == 6:
                 self._o.f64 = value
+
+    def on_field(self, fld: Field) -> bool:
+        """Accept or decline a field at its HEADER, before its value is read.
+
+        An id is declined when the header's wire type -- or, for a fixlen one,
+        its subtype -- is not the one its declared type maps to. Such a field is
+        SKIPPED, exactly like an unknown id, so neither the bound
+        ``on_schema_bound`` declares nor a receiver-side cap may reach it.
+
+        An id this scope does not declare AT ALL is declined for the same
+        reason: it is not a field this handler reads, so it is walked rather
+        than materialized, and no receiver cap may reach it. A decode that
+        steps over an over-cap field it does not want stays COMPLETE.
+        """
+        c = self._c
+        if c == _L_Scalars:
+            if fld.id not in {0, 1, 2, 3, 4, 5, 6, 7}:
+                return False  # an id this scope does not declare is walked, not read
+        return True
 

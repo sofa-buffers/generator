@@ -8,6 +8,7 @@ package python
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -95,17 +96,33 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	}
 	b := ir.Bounds(all)
 	d := generator.ServerDynLimits.Resolve(cfg)
-	var l limitSet
-	if b.HasDynArray {
-		l.arrayCount, l.arrayHas = d.ArrayCount, true
+	// The VALUES are kept whatever the schema declares, because every Decoder
+	// takes all three and a missing one is a caller defect, not a looser bound.
+	// The Has flags say only whether a MODULE CONSTANT is worth exporting: a cap
+	// no field of that kind can ever be judged against is a name nothing reads.
+	return limitSet{
+		arrayCount: d.ArrayCount, arrayHas: b.HasDynArray,
+		stringLen: d.StringLen, stringHas: b.HasDynString,
+		blobLen: d.BlobLen, blobHas: b.HasDynBlob,
 	}
-	if b.HasDynString {
-		l.stringLen, l.stringHas = d.StringLen, true
+}
+
+// capsArgs renders the three receiver-cap keyword arguments every Decoder in the
+// module is built with. The exported constant is preferred where one exists, so
+// the module keeps one number per kind; where the schema bounds every field of
+// that kind no constant is emitted and the configured value goes in as a literal
+// rather than the module growing a name nothing else reads.
+func (g *gen) capsArgs() string {
+	name := func(has bool, konst string, v int64) string {
+		if has {
+			return konst
+		}
+		return strconv.FormatInt(v, 10)
 	}
-	if b.HasDynBlob {
-		l.blobLen, l.blobHas = d.BlobLen, true
-	}
-	return l
+	return fmt.Sprintf("max_dyn_array_count=%s, max_dyn_string_len=%s, max_dyn_blob_len=%s",
+		name(g.limits.arrayHas, "MAX_DYN_ARRAY_COUNT", g.limits.arrayCount),
+		name(g.limits.stringHas, "MAX_DYN_STRING_LEN", g.limits.stringLen),
+		name(g.limits.blobHas, "MAX_DYN_BLOB_LEN", g.limits.blobLen))
 }
 
 type pyfile struct{ b strings.Builder }
@@ -136,7 +153,13 @@ func (g *gen) module(s *ir.Schema) []byte {
 		"Decoder", "Encoder", "SofaDecodeError", "SofaIncompleteError",
 		"Status", "Visitor",
 	}
-	if g.limits.any() {
+	// SofaLimitError is raised by exactly one thing generated code still emits:
+	// the wrapper-array element INDEX bound, which is a field id and not a
+	// count/length word, so the Decoder that was handed the caps cannot see it.
+	// Read off the emitted text rather than re-derived, for the reason
+	// visitorNeeds is: a second walk over the schema has to agree with the
+	// emitter by hand.
+	if strings.Contains(decodeSection, "SofaLimitError") {
 		names = append(names, "SofaLimitError")
 	}
 	// Field is the on_field argument, and WireType / FixlenSubtype are the tags
@@ -159,11 +182,14 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("# Receiver-side decode limits, baked from the sofabgen config")
 		f.line("# (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
 		f.line("# only fields the schema left unbounded -- a cap must never bind a field")
-		f.line("# the schema already bounds -- so they are applied in on_field, in the else")
-		f.line("# of the chain whose arms are the schema-bounded ids, rather than handed to")
-		f.line("# the Decoder, which knows no schema and would cap every field alike.")
-		f.line("# Exceeding one raises sofab.SofaLimitError at the count/length header,")
-		f.line("# before any allocation.")
+		f.line("# the schema already bounds -- and every Decoder built below is handed all")
+		f.line("# three. It applies them at the count/length header, before any allocation,")
+		f.line("# and takes one back off a field on_schema_bound declares or a field that")
+		f.line("# is skipped; exceeding one raises sofab.SofaLimitError.")
+		f.line("#")
+		f.line("# The numbers are the caller's, not the library's: it holds none, defaults")
+		f.line("# none, and reads no omitted argument as unlimited, so all three are")
+		f.line("# required arguments.")
 		if g.limits.arrayHas {
 			f.line("MAX_DYN_ARRAY_COUNT = %d", g.limits.arrayCount)
 		}
@@ -241,7 +267,7 @@ func (g *gen) emitStreamDecoder(f *pyfile) {
 	f.line("")
 	f.line("    def __init__(self, msg_cls, vis_cls) -> None:")
 	f.line("        self.message = msg_cls()")
-	f.line("        self._d = Decoder(visitor=vis_cls(self.message))")
+	f.line("        self._d = Decoder(visitor=vis_cls(self.message), %s)", g.capsArgs())
 	f.line("")
 	f.line("    def feed(self, chunk) -> Status:")
 	f.line("        return self._d.feed(chunk)")
