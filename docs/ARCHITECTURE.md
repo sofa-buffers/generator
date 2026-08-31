@@ -2379,6 +2379,21 @@ whole payload is in hand, so a chunked sender could stream an arbitrarily long
 over-cap payload into the accumulator and only the last byte triggered the
 rejection. It now rides `fixlenBegin`, the hook the schema `maxlen` already used.
 
+**A skipped field is never capped, and §7.3 has TWO skip shapes.** Only one of them
+is an unknown id. A decoder-wide cap could honour neither — it saw a count header,
+not a schema — so an over-cap array at an id the receiver never reads failed the
+decode; that was generator#410. Both shapes are now pinned end-to-end in the `go`,
+`python` and `dart` suites: an over-cap array at an **undeclared** id, and the same
+array at a **declared** id whose wire kind contradicts the declaration. One level
+down, where the comparison is the collector's rather than generated code's, a third
+case pins the same rule for a wrapper element whose fixlen subtype contradicts the
+declared element type while sitting at an index above `max_dyn_array_count`. Each
+sits beside the matching-kind control that must still answer `LimitExceeded` — a
+build that accepted both would be indistinguishable from one that had simply lost
+the cap. Python reaches the verdict from the other side, its codec parking the cap
+and dropping it the moment `on_field` declines, which is why that hook has to
+decline an undeclared id explicitly (§9.5.1).
+
 **A truncated over-cap header reports `LimitExceeded`, never `INCOMPLETE`
 (normative).** Bytes that declare a count or length above the cap and then end
 before the field completes are a **policy rejection**, not a truncation. §6.2.1
