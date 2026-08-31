@@ -1561,7 +1561,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		}
 	case ir.KindStruct, ir.KindUnion:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
-		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, cap, rv, cont)
+		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, cap, -1, rv, cont)
 	case ir.KindArray:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
 		// A row of native scalars IS readable by the corelib: MessageSeq/
@@ -1574,7 +1574,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		// own collector, one level down.
 		if isNativeArrayElem(items.Elem) {
 			inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
-			g.deserializeSeqInto(f, ind, target, inner, count, cap, rv, cont)
+			g.deserializeSeqInto(f, ind, target, inner, count, cap, items.Count, rv, cont)
 			return
 		}
 		g.deserializeRowSeq(f, ind, target, items, count, cap, rv, cont, depth)
@@ -1673,7 +1673,14 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 // so its collector gets static storage, the wrapper's own presence is decided
 // from the field tag before readSequence, and a fixed count reserves the target
 // up front so a later placement never reallocates a still-bound element.
-func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, cap int64, rv, container string) {
+// elemCount is the ROW element's own schema `count` for a native-scalar row, or
+// -1 when the elements are structs/unions and there is no row. A GROWABLE row
+// publishes no capacity of its own, so that number is the only ceiling it has:
+// without it corelib-c-cpp's MessageSeq would size the row straight from the
+// wire count, i.e. from a number the SENDER chose (CORELIB_PLAN §6.6), and since
+// corelib-c-cpp#159 it refuses such a read rather than reading the omission as
+// unlimited. An INLINE row needs none of this -- its capacity is the bound.
+func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, cap, elemCount int64, rv, container string) {
 	if g.clib {
 		if strings.HasPrefix(container, "sofab::InlineVector") {
 			// The inline container's capacity IS the schema `count`, so the
@@ -1688,7 +1695,13 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 			// deferred decoder still has to fill is bound into it.
 			reserve = fmt.Sprintf(" %s.reserve(%d);", target, count)
 		}
-		g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::MessageSeq<%s> %s; %s.cap = %d;%s", container, rv, rv, cap, reserve),
+		// The row's own bound, where the row is a growable container of scalars.
+		// Inline rows carry it as their capacity and take nothing here.
+		row := ""
+		if elemCount > 0 && !strings.HasPrefix(elemType, "sofab::InlineVector") {
+			row = fmt.Sprintf(" %s.elemCount = %d;", rv, elemCount)
+		}
+		g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::MessageSeq<%s> %s; %s.cap = %d;%s%s", container, rv, rv, cap, row, reserve),
 			fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		return
 	}

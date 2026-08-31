@@ -2287,3 +2287,45 @@ func TestCppObjectArraysCollectInTheCorelib(t *testing.T) {
 		})
 	}
 }
+
+// TestCppCCppGrowableRowCarriesItsBound: on the c-cpp wrapper under
+// allow_dynamic, a matrix row lowers to std::vector<T>, which publishes no
+// capacity of its own. The row's schema `count` is then the ONLY ceiling it has,
+// and the collector is the only place to state it: without it corelib-c-cpp's
+// MessageSeq would size the row straight from the wire count -- a number the
+// SENDER chose (CORELIB_PLAN §6.6) -- and since corelib-c-cpp#159 it refuses
+// such a read rather than reading the omission as unlimited (§6.2.1: "no unset
+// state and no unlimited mode").
+//
+// An INLINE row needs none of it: its capacity IS the bound, so the static
+// storage mode must NOT emit elemCount, and neither must a struct/union element,
+// which is not a row at all.
+func TestCppCCppGrowableRowCarriesItsBound(t *testing.T) {
+	// c-cpp requires a bound on every array level in both storage modes.
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      matrix: { id: 0, type: array, items: { type: array, count: 4, items: { type: u32, count: 3 } } }\n" +
+		"      objs:   { id: 1, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }\n"
+
+	dyn, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp", "allow_dynamic": true})
+	if err != nil {
+		t.Fatalf("generate (dynamic): %v", err)
+	}
+	if !strings.Contains(dyn, "sofab::MessageSeq<std::vector<std::vector<std::uint32_t>>>") {
+		t.Fatalf("expected a growable row collector:\n%s", dyn)
+	}
+	if !strings.Contains(dyn, "_r0.elemCount = 3;") {
+		t.Errorf("a growable row must carry its own schema count, or the corelib refuses the read:\n%s", dyn)
+	}
+	// A struct element is not a row and has no element count to state.
+	if strings.Contains(dyn, "_r1.elemCount") {
+		t.Errorf("a struct-element sequence must not carry a row bound:\n%s", dyn)
+	}
+
+	fixed, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp", "allow_dynamic": false})
+	if err != nil {
+		t.Fatalf("generate (fixed): %v", err)
+	}
+	if strings.Contains(fixed, ".elemCount") {
+		t.Errorf("an inline row states its bound as its capacity, not as elemCount:\n%s", fixed)
+	}
+}
