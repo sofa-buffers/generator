@@ -683,6 +683,33 @@ func (g *gen) cppElemBound(elem ir.Kind, ref *ir.TypeRef) string {
 	return ""
 }
 
+// cppLenArgs renders the trailing sofab::readString()/readBlob() arguments: the
+// schema `maxlen` and the configured §6.2.1 receiver cap, in that order. It is
+// the string/blob twin of cppArrayBounds, and the two answer the same shape of
+// question for the same reason.
+//
+// Which of the two applies is decided by the SCHEMA, and stating the pair is all
+// generated code has to do — CORELIB_PLAN §6.2.1 gives the corelib "the report
+// and the category" and keeps the numbers here. A declared `maxlen` is a
+// statement about VALIDITY, so exceeding it is INVALID (MESSAGE_SPEC §7.1) and a
+// receiver cap "MUST NOT be applied to a field the schema already bounds": the
+// corelib consults the cap only where the bound is negative, so the two can never
+// both fire and the bounded case need not spell the cap at all.
+//
+// An unbounded field with no cap configured renders neither argument, which is
+// the corelib's "no cap was supplied" — not "unlimited". That state is reachable
+// only when max_dyn_* was configured to nothing for a schema that has such a
+// field; resolveLimits otherwise always resolves a finite default (§9.5).
+func cppLenArgs(hasMaxlen bool, maxlen int64, capHas bool, capMacro string) string {
+	if hasMaxlen {
+		return fmt.Sprintf(", %d", maxlen)
+	}
+	if capHas {
+		return ", -1, " + capMacro
+	}
+	return ""
+}
+
 // cppArrayArgs renders the trailing readArray() arguments WITH the element-width
 // bound. The bound is the fourth parameter, so the schema count and the policy cap
 // have to be spelled out even where they are the defaults -- which is why this

@@ -2584,7 +2584,7 @@ CORELIB_PLAN §6.2.1 (doc PR #86) settles that a corelib **MAY** take a receiver
 as an argument and run the comparison itself, and that the cheap way to do it is to
 hang the number on a call generated code already makes — the compare then folds in
 beside a bound test already there. Every other target has such a call: C++
-`readString`/`readArray`, Zig `arrays.allocN`/`grow`/`setElem`, Go's, Dart's and
+`readString`/`readBlob`/`readArray`, Zig `arrays.allocN`/`grow`/`setElem`, Go's, Dart's and
 TypeScript's collectors, Java's, Kotlin's and C#'s `PayloadAcc`, Python's decode
 entry — see the table in §9.5 for which kinds each one carries.
 
