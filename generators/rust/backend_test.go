@@ -1327,16 +1327,79 @@ messages:
 	}
 }
 
-// A blob carries no encoding, so its callback keeps the plain shape: the guard is
-// a string-only concern and blob() must not grow one.
-func TestRustSkippedBlobKeepsPlainShape(t *testing.T) {
+// The blob twin of the test above, and the correction of an earlier reading of
+// it: the destination guard was called "a string-only concern" because UTF-8 is
+// the only thing a blob has nothing of. But validation was never all the guard
+// bought. Without it a blob at an id this scope does not declare still reached
+// `self.acc.feed(total, ..)`, which sizes its buffer from the wire `total` and
+// copies the payload in, and only the match below found no arm and dropped it --
+// a payload MATERIALIZED for a field MESSAGE_SPEC §7.3 says is walked over, and a
+// buffer sized from the wire for a value never delivered (CORELIB_PLAN §6.2.1,
+// §6.6, §6.7.2).
+//
+// ARCHITECTURE §9.5.2 exempts Rust std from moving the receiver CAP into the
+// corelib. It exempts nothing from this: where the comparison lives is a separate
+// question from whether a skipped field is materialized at all -- so both Rust
+// profiles are checked.
+func TestRustSkippedBlobIsNotMaterialized(t *testing.T) {
+	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std", "allow_dynamic": true}} {
+		m := moduleFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      b:  { id: 0, type: blob, maxlen: 16 }
+      ba: { id: 1, type: array, items: { type: blob, count: 4, maxlen: 8 } }
+      n:
+        id: 2
+        type: struct
+        fields:
+          t: { id: 3, type: blob, maxlen: 8 }
+`, cfg)
+		fn := sliceFn(t, m, "    fn blob(")
+		gi := strings.Index(fn, "_ => return,")
+		if gi < 0 {
+			t.Fatalf("blob() (%v) missing the §6.2.1 destination guard:\n%s", cfg, fn)
+		}
+		guard := fn[:gi+len("_ => return,")]
+		for _, want := range []string{
+			"(_Loc::Root, 0) => {},",    // the scalar blob
+			"(_Loc::Root_ba, _) => {},", // every id of the blob-array row
+			"(_Loc::Root_n, 3) => {},",  // the nested struct's blob
+		} {
+			if !strings.Contains(guard, want) {
+				t.Errorf("blob() (%v) missing destination arm %q:\n%s", cfg, want, fn)
+			}
+		}
+		// The whole point: the guard precedes the accumulator, so an undeclared id
+		// never sizes a buffer from the wire and never copies a byte into it.
+		ai := strings.Index(fn, "self.acc")
+		if ai < 0 {
+			t.Fatalf("blob() (%v) does not feed the accumulator at all:\n%s", cfg, fn)
+		}
+		if gi > ai {
+			t.Errorf("blob() (%v): the destination guard must precede the accumulator:\n%s", cfg, fn)
+		}
+		// The schema maxlen stays destination-scoped behind it.
+		if mi := strings.Index(fn, "self.inv = true; return; },"); mi < 0 || gi > mi {
+			t.Errorf("blob() (%v): the maxlen reject must survive behind the guard:\n%s", cfg, fn)
+		}
+	}
+}
+
+// A message that declares no blob binds no destination anywhere, so the guard
+// would have nothing but its `_ => return` -- and rust emits the callback only
+// when the message uses the kind at all. Pinned so the empty-arms path of
+// emitDestGuard can never silently degrade into "no guard, materialize
+// everything".
+func TestRustBlobFreeSchemaHasNoBlobCallback(t *testing.T) {
 	m := moduleFromYAML(t, `
 version: 1
 messages:
-  m: { payload: { b: { id: 0, type: blob, maxlen: 16 } } }
+  m: { payload: { a: { id: 0, type: u32 }, s: { id: 1, type: string, maxlen: 8 } } }
 `, map[string]any{})
-	if strings.Contains(sliceFn(t, m, "    fn blob("), "_ => return,") {
-		t.Errorf("blob() must not carry a destination guard:\n%s", m)
+	if strings.Contains(m, "    fn blob(") {
+		t.Errorf("a blob-free schema must not emit blob() at all:\n%s", m)
 	}
 }
 

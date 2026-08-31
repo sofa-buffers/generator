@@ -364,6 +364,42 @@ $HL decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: 4 elements at t
 $HF decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must decode the oversized message"; exit 1; }
 echo "==> decode limits OK"
 
+# The string/blob half of the same rule, and the half no "does it decode" row can
+# check. A blob at an id the schema does not declare is SKIPPED: its bytes are
+# walked over, never materialised (MESSAGE_SPEC S7.3; CORELIB_PLAN S6.2.1 "a
+# skipped field is never capped", S6.6 "the codec allocates no payload storage").
+# A decoder that copies the payload out and then drops it satisfies every status
+# assertion in this file, so this one MEASURES: the probe decodes a message whose
+# only field is a 1 MiB blob at an undeclared id and requires the decode to
+# allocate a small fraction of it.
+#
+# max_dyn_blob_len: 8 is set on purpose. The same message is over the receiver cap
+# by five orders of magnitude and must still decode Complete -- a skipped field is
+# never capped -- while still costing nothing.
+#
+# The probe REPLACES the generated Program.cs: the project's own Main is the JSON
+# harness, and this needs its own entry point in the same assembly.
+echo "==> a S7.3-skipped 1 MiB blob allocates nothing (CORELIB_PLAN S6.2.1/S6.6)"
+cat > "$WORK/skipblob.yaml" <<'YAML'
+version: 1
+messages:
+  skipblob:
+    payload:
+      b: { id: 0, type: blob }
+      s: { id: 1, type: string, maxlen: 32 }
+YAML
+cat > "$WORK/cfg-skipblob.yaml" <<'YAML'
+generic: { emit: project, max_dyn_blob_len: 8 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-skipblob.yaml" --lang csharp \
+    --in "$WORK/skipblob.yaml" --out "$WORK/skipblob" )
+rm "$WORK/skipblob/Program.cs"
+cp "$ROOT/tests/conformance/csharp/SkippedBlobAlloc.cs" "$WORK/skipblob/"
+( cd "$WORK/skipblob" && dotnet build -v q >/dev/null )
+dotnet "$WORK/skipblob/bin/Debug/net9.0/harness.dll" \
+    || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
+echo "==> skipped-blob allocation OK"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"
 

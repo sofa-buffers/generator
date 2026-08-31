@@ -242,21 +242,21 @@ func (g *gen) emitLenGuard(f *cfile, fs []frame, kind ir.Kind, constName, what s
 	f.line("        }")
 }
 
-// stringDestLabels collects the switch labels for every (loc, id) that can
-// materialize a string: the string-declaring fields plus the wrapper-sequence
-// rows whose element kind is string. An empty result means the message never
-// materializes a string at all.
-func (g *gen) stringDestLabels(fs []frame) []string {
+// kindDestLabels collects the switch labels for every (loc, id) that can
+// materialize a value of `kind`: the fields declaring it plus the
+// wrapper-sequence rows whose element kind matches. An empty result means the
+// message never materializes a value of that kind at all.
+func (g *gen) kindDestLabels(fs []frame, kind ir.Kind) []string {
 	var labels []string
 	for _, fr := range fs {
 		if fr.isArr {
-			if fr.elem == ir.KindString {
+			if fr.elem == kind {
 				labels = append(labels, fmt.Sprintf("case (%s, _):", fr.loc))
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindString {
+			if fld.Kind == kind {
 				labels = append(labels, fmt.Sprintf("case (%s, %d):", fr.loc, fld.ID))
 			}
 		}
@@ -281,7 +281,7 @@ func (g *gen) emitStringCb(f *cfile, fs []frame, limStr bool) {
 	f.line("    public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
 	defer f.line("    }")
 
-	labels := g.stringDestLabels(fs)
+	labels := g.kindDestLabels(fs, ir.KindString)
 	if len(labels) == 0 {
 		f.line("        // No field of this message is a string, so every string payload the")
 		f.line("        // decoder delivers is skipped whole -- its bytes are never inspected.")
@@ -316,6 +316,64 @@ func (g *gen) emitStringCb(f *cfile, fs []frame, limStr bool) {
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindString {
 				f.line("            case (%s, %d): %s.%s = _s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
+			}
+		}
+	}
+	f.line("        }")
+}
+
+// emitBlobCb writes the Blob visitor callback: the twin of emitStringCb minus
+// the UTF-8 validation, destination gate included.
+//
+// The gate used to be String-only, on the reasoning that a blob carries no
+// encoding and so has nothing to validate -- but validation was never the only
+// thing behind it. A blob at a (loc, id) this message does not bind was still
+// handed to PayloadAcc.Blob, which sizes a byte[] from the wire `total` and
+// copies the payload into it; only then did the switch below find no arm and
+// drop it. A 1 MiB blob at an unknown id therefore cost 1 MiB of heap for a
+// field nobody reads: a payload MATERIALIZED where MESSAGE_SPEC §7.3 says the
+// bytes are walked over, and storage sized from the wire for a value that is
+// never delivered (CORELIB_PLAN §6.2.1, §6.6, §6.7.2). Kotlin has gated both
+// callbacks since it was written; this is C# catching up.
+//
+// A message with no blob field at all binds nothing anywhere, so its body is
+// empty rather than guarded -- an empty body IS the skip.
+func (g *gen) emitBlobCb(f *cfile, fs []frame, limBlob bool) {
+	f.line("    public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
+	defer f.line("    }")
+
+	labels := g.kindDestLabels(fs, ir.KindBlob)
+	if len(labels) == 0 {
+		f.line("        // No field of this message is a blob, so every blob payload the decoder")
+		f.line("        // delivers is skipped whole -- its bytes are never copied out.")
+		return
+	}
+	g.emitDestGuard(f, labels)
+	// MESSAGE_SPEC §7.1: a bounded blob whose wire byte length exceeds its schema
+	// maxlen is malformed input, rejected as INVALID at the `total` header before
+	// any bytes accumulate (never truncated).
+	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
+	if limBlob {
+		// generator#102: reject an over-cap unbounded blob at its `total`
+		// header, before the fast path allocates or the accumulator grows.
+		g.emitLenGuard(f, fs, ir.KindBlob, "MaxDynBlobLen", "blob length", g.limits.blobLen)
+	}
+	f.line("        byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength);")
+	f.line("        if (_b == null) return;   // payload incomplete: more chunks to come")
+	f.line("        switch ((cur, id)) {")
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == ir.KindBlob {
+				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
+				// element is omitted on the wire, so place each value at its id and
+				// grow the list, filling any gap with the element default (empty bytes).
+				f.line("            case (%s, _): %swhile (%s.Count <= id) %s.Add(Array.Empty<byte>()); %s[id] = _b; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, fr.path)
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindBlob {
+				f.line("            case (%s, %d): %s.%s = _b; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			}
 		}
 	}
@@ -705,37 +763,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	g.emitStringCb(f, fs, limStr)
 
 	// Blob. Single-shot on the whole-in-one-chunk fast path (see String).
-	f.line("    public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
-	// MESSAGE_SPEC §7.1: a bounded blob whose wire byte length exceeds its schema
-	// maxlen is malformed input, rejected as INVALID at the `total` header before
-	// any bytes accumulate (never truncated).
-	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
-	if limBlob {
-		// generator#102: reject an over-cap unbounded blob at its `total`
-		// header, before the fast path allocates or the accumulator grows.
-		g.emitLenGuard(f, fs, ir.KindBlob, "MaxDynBlobLen", "blob length", g.limits.blobLen)
-	}
-	f.line("        byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength);")
-	f.line("        if (_b == null) return;   // payload incomplete: more chunks to come")
-	f.line("        switch ((cur, id)) {")
-	for _, fr := range fs {
-		if fr.isArr {
-			if fr.elem == ir.KindBlob {
-				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
-				// element is omitted on the wire, so place each value at its id and
-				// grow the list, filling any gap with the element default (empty bytes).
-				f.line("            case (%s, _): %swhile (%s.Count <= id) %s.Add(Array.Empty<byte>()); %s[id] = _b; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, fr.path)
-			}
-			continue
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindBlob {
-				f.line("            case (%s, %d): %s.%s = _b; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
-			}
-		}
-	}
-	f.line("        }")
-	f.line("    }")
+	g.emitBlobCb(f, fs, limBlob)
 
 	// ArrayBegin: clear direct native arrays; place a fresh inner row for a
 	// native-nested (array-of-array) scope (each row arrives as ArrayBegin(index),

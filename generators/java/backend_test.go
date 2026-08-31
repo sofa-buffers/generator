@@ -1150,9 +1150,83 @@ messages:
 	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
 		t.Errorf("string(): the maxlen reject must survive behind the guard:\n%s", fn)
 	}
-	// A blob carries no encoding, so blob() keeps the plain shape.
-	if strings.Contains(javaMethod(t, files["src/main/java/message/M.java"], "    public void blob(int id,"), "default: return;") {
-		t.Errorf("blob() must not carry a destination guard:\n%s", files["src/main/java/message/M.java"])
+}
+
+// The blob twin of the test above, and the correction of an earlier reading of
+// it: the guard was called a string-only concern because UTF-8 is the only thing
+// a blob has nothing of. Validation was never all it bought. Without it a blob at
+// an id this scope does not declare still reached acc.blob(), which sizes a
+// byte[] from the wire `total` and copies the payload into it -- and only the
+// switch below found no arm and dropped it. A 1 MiB blob at an unknown id cost
+// 1 MiB of heap for a field nobody reads: a payload MATERIALIZED where
+// MESSAGE_SPEC §7.3 says the bytes are walked over, and storage sized from the
+// wire for a value never delivered (CORELIB_PLAN §6.2.1, §6.6, §6.7.2).
+func TestJavaSkippedBlobIsNotMaterialized(t *testing.T) {
+	files := genJavaFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      b:  { id: 0, type: blob, maxlen: 16 }
+      n:
+        id: 1
+        type: struct
+        fields:
+          t: { id: 2, type: blob, maxlen: 8 }
+      ba: { id: 3, type: array, items: { type: blob, count: 4, maxlen: 8 } }
+`, map[string]any{})
+	fn := javaMethod(t, files["src/main/java/message/M.java"], "    public void blob(int id,")
+
+	const guardTail = "\n        default: return;\n        }"
+	guardEnd := strings.Index(fn, guardTail)
+	if guardEnd < 0 {
+		t.Fatalf("blob() missing the §6.2.1 destination guard:\n%s", fn)
+	}
+	guard := fn[:guardEnd]
+	for _, want := range []string{
+		"case 0: switch (id) { case 0: break; default: return; } break;", // the scalar blob
+		"case 1: switch (id) { case 2: break; default: return; } break;", // the nested struct's blob
+		"case 2: break;", // the blob-array row: every id
+	} {
+		if !strings.Contains(guard, want) {
+			t.Errorf("blob() missing destination arm %q:\n%s", want, fn)
+		}
+	}
+	// The whole point: nothing is sized from the wire or copied before the gate.
+	for _, after := range []string{"acc.blob(", "byte[] _b"} {
+		if i := strings.Index(fn, after); i < 0 || guardEnd > i {
+			t.Errorf("blob(): the destination guard must precede %q:\n%s", after, fn)
+		}
+	}
+	// The maxlen reject stays destination-scoped behind it.
+	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
+		t.Errorf("blob(): the maxlen reject must survive behind the guard:\n%s", fn)
+	}
+}
+
+// The blob twin of TestJavaStringFreeSchemaNeverDecodesAString: a message that
+// declares NO blob still gets the callback (Visitor declares it, and the corelib
+// still routes blob fields at unknown ids to it), but every blob reaching it is
+// skipped by definition, so the body must be empty. A guard whose every arm
+// returns is the same thing said longer -- and Java rejects the unreachable
+// statements that would follow it.
+func TestJavaBlobFreeSchemaNeverCopiesABlob(t *testing.T) {
+	files := genJavaFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+      s: { id: 1, type: string, maxlen: 8 }
+`, map[string]any{})
+	fn := javaMethod(t, files["src/main/java/message/M.java"], "    public void blob(int id,")
+	for _, forbidden := range []string{"acc.blob(", "acc", "switch (cur)", "byte[] _b"} {
+		if strings.Contains(fn, forbidden) {
+			t.Errorf("a blob-free schema must not %q in blob():\n%s", forbidden, fn)
+		}
+	}
+	if !strings.Contains(files["src/main/java/message/M.java"], "public void blob(int id,") {
+		t.Errorf("blob() must still be declared -- Visitor requires it:\n%s", files["src/main/java/message/M.java"])
 	}
 }
 

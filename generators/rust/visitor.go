@@ -1041,8 +1041,28 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	}
 
 	if use.blob {
-		// blob: scalar blobs + blob-array elements
+		// blob: scalar blobs + blob-array elements.
+		//
+		// The destination gate is the string callback's, and it belongs here for
+		// the half of its reason that has nothing to do with encoding. A blob at a
+		// (loc, id) this message does not bind still went through emitPayloadFeed,
+		// i.e. into `self.acc`, which sizes its buffer from the wire `total` and
+		// copies the payload in -- and only then did the match below find no arm
+		// and drop it. A 1 MiB blob at an unknown id therefore cost 1 MiB for a
+		// field nobody reads: a payload MATERIALIZED where MESSAGE_SPEC §7.3 says
+		// the bytes are walked over, and storage sized from the wire for a value
+		// that is never delivered (CORELIB_PLAN §6.2.1, §6.6, §6.7.2). Under
+		// rs-no-std it is worse than waste: the accumulator is a fixed arena, so a
+		// skipped blob bigger than it answered Err(Argument) -- BufferFull for the
+		// WHOLE MESSAGE, measured. A sender adding a field this receiver has not
+		// been rebuilt for is the ordinary forward-compatibility case §7.3 exists
+		// to make safe, so there the missing gate was a denial of service.
+		//
+		// §9.5.2 exempts Rust std from moving the receiver CAP into the corelib.
+		// It exempts nothing from this: where the comparison lives is a separate
+		// question from whether a skipped field is materialized at all.
 		f.line("    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
+		g.emitDestGuard(f, fs, ir.KindBlob)
 		g.emitMaxlenGuard(f, fs, ir.KindBlob)
 		if g.limits.blobHas {
 			g.emitLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN")
@@ -1298,20 +1318,21 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.blank()
 }
 
-// emitDestGuard emits the skip gate at the very top of the string callback
-// (CORELIB_PLAN §6.4, generator#257): "skipped fields are never validated".
-// Skipping is a length jump over bytes that are not inspected (§5.2), and
-// UTF-8 validation runs only where a `string` is materialized — read into a
-// destination. So the destination is resolved FIRST: every (loc, id) that
-// declares a string, plus the wrapper-sequence rows whose element kind is
-// string, falls through; anything else returns right here.
+// emitDestGuard emits the skip gate at the very top of the string and blob
+// callbacks (CORELIB_PLAN §6.4, generator#257): "skipped fields are never
+// validated", and — the half that made it a blob gate too — never materialized.
+// Skipping is a length jump over bytes that are not inspected (§5.2), so the
+// destination is resolved FIRST: every (loc, id) that declares a payload of
+// this kind, plus the wrapper-sequence rows whose element kind matches, falls
+// through; anything else returns right here.
 //
 // Returning here is what makes the skip a true skip: an unknown id, or a §7.3
 // wire-type contradiction routed down the same path, never accumulates into
-// the shared `acc` (so a later declared field cannot inherit its bytes), never
-// transcodes, and never trips the sticky `inv` flag. Without it a 3-byte
-// isolate carrying a lone continuation byte at an undeclared id turned an
-// otherwise valid message into INVALID.
+// the shared `acc` (so a later declared field cannot inherit its bytes and no
+// buffer is sized from the wire for it, §6.6), never transcodes, and never
+// trips the sticky `inv` flag. Without it a 3-byte isolate carrying a lone
+// continuation byte at an undeclared id turned an otherwise valid message into
+// INVALID, and a 1 MiB blob at an undeclared id was copied out whole.
 //
 // Placed ahead of the maxlen/limit guards, which are already destination-scoped
 // and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is

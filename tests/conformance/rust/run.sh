@@ -729,6 +729,7 @@ lim_complete "$WORK/lim" dyn '\073\005\001\002\003\004\005' '"a":\[\]'  "an over
 lim_complete "$WORK/lim" dyn '\012\113ABCDEFGHI'            '"s":""'    "a BLOB at the string-declared id 1 (§7.3 skip)"
 lim_complete "$WORK/lim" dyn '\022\112ABCDEFGHI'            '"b":\[\]'  "a STRING at the blob-declared id 2 (§7.3 skip)"
 lim_complete "$WORK/lim" dyn '\072\112ABCDEFGHI'            '"s":""'    "an over-cap string at the UNKNOWN id 7"
+lim_complete "$WORK/lim" dyn '\072\113ABCDEFGHI'            '"b":\[\]'  "an over-cap blob at the UNKNOWN id 7"
 
 # (3) The shared property: a schema-bounded field is governed by its OWN bound,
 # never by a cap. `bs` declares maxlen 32 against a string cap of 8, `ba` a count
@@ -766,6 +767,31 @@ crate_bin_name "$WORK/nolim"
 printf '\003\005\001\002\003\004\005' > "$WORK/lim-over.bin"
 (cd "$WORK/nolim" && cargo run -q -- decode dyn < "$WORK/lim-over.bin" >/dev/null) || { echo "FAIL: default-cap project must decode oversized input"; exit 1; }
 echo "==> [rs] decode limits OK"
+
+# A skipped payload is WALKED, not materialised -- and that is a MEASUREMENT,
+# because every row above passes with a decoder that materialises the payload and
+# then drops it. The generated blob callback used to do exactly that: it fed every
+# delivered payload into `self.acc`, which sizes its buffer from the wire `total`
+# and copies the bytes in, and only then dispatched on (loc, id) and found no arm.
+# A 1 MiB blob at an unknown id cost 1 MiB for a field nobody reads (CORELIB_PLAN
+# §6.2.1, §6.6, §6.7.2 / MESSAGE_SPEC §7.3).
+#
+# Built against the CAPPED config on purpose (max_dyn_blob_len: 8), so the row
+# carries both halves at once: over the cap by five orders of magnitude and still
+# COMPLETE, because a skipped field is never capped -- and still free.
+#
+# The check replaces the crate's main with a counting global allocator, the same
+# way the streaming legs replace it with streaming_check.rs.
+echo "==> [rs] a §7.3-skipped 1 MiB blob allocates nothing (CORELIB_PLAN §6.2.1/§6.6)"
+rm -rf "$WORK/skipalloc"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/skipalloc" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/skipalloc/Cargo.toml"
+crate_bin_name "$WORK/skipalloc"
+printf 'mod message;\nuse message::*;\n' > "$WORK/skipalloc/src/main.rs"
+sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/skipped_blob_alloc.rs" \
+    >> "$WORK/skipalloc/src/main.rs"
+( cd "$WORK/skipalloc" && cargo run -q ) || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
+echo "==> [rs] skipped-blob allocation OK"
 
 # corelib-rs-no-std is the genuinely #![no_std] profile. Every field is
 # schema-bounded there whatever storage it uses, and allow_dynamic selects that
@@ -885,6 +911,30 @@ printf 'use sofabuffers_generated::*;\n' > "$WORK/no-std-static/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/streaming_check_nostd.rs" \
     >> "$WORK/no-std-static/src/main.rs"
 ( cd "$WORK/no-std-static" && cargo run -q --features std )
+
+# The footprint half of the skipped-blob rule, and the half that is a hard
+# failure rather than a measurement. corelib-rs-no-std's PayloadAcc is a FIXED
+# arena sized from the schema's largest bounded payload, and `feed` answers
+# Err(Argument) the moment `total` exceeds it. So while the blob callback fed
+# every delivered payload into that arena before resolving a destination, a blob
+# at an id the schema does not declare was not merely copied for nothing --
+# anything larger than the arena failed the WHOLE DECODE with BufferFull. A sender
+# adding a field this receiver has not been rebuilt for is the ordinary
+# forward-compatibility case MESSAGE_SPEC §7.3 exists to make safe, and on this
+# profile it was a denial of service in one field (CORELIB_PLAN §6.7.2).
+#
+# Its own tiny crate: the arena has to be SMALL for the row to mean anything, and
+# it is sized from the schema -- conf.yaml's maxlen 4096 would swallow the test.
+echo "==> [no-std-static] a §7.3-skipped blob larger than the fixed accumulator still decodes"
+printf 'version: 1\nmessages:\n  sb: { payload: { b: { id: 0, type: blob, maxlen: 8 }, s: { id: 1, type: string, maxlen: 8 } } }\n' > "$WORK/sb.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-no-std-static.yaml" --lang rust --in "$WORK/sb.yaml" --out "$WORK/skipnostd" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/skipnostd/Cargo.toml"
+crate_bin_name "$WORK/skipnostd"
+printf 'use sofabuffers_generated::*;\n' > "$WORK/skipnostd/src/main.rs"
+sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/skipped_blob_nostd.rs" \
+    >> "$WORK/skipnostd/src/main.rs"
+( cd "$WORK/skipnostd" && cargo run -q --features std ) \
+    || { echo "FAIL: a skipped blob must not be fed to the fixed accumulator"; exit 1; }
 
 # An unbounded field is rejected under no_std in BOTH storage modes: allow_dynamic
 # chooses the container, never whether a bound is needed, so one schema stays
