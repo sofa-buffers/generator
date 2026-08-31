@@ -2266,16 +2266,68 @@ backend:
     they pass means the *schema* bound and answers `INVALID`. Passing a receiver
     cap through it would produce the forbidden category. Each needs a second field
     carrying the policy bound: corelib-go#129, corelib-dart#86, corelib-cpp#124.
+    corelib-cpp has since added both — `indexCap` and `elemLenCap` on `StringSeq`
+    / `BlobSeq` (corelib-cpp#127) — and the generator does not yet state either;
+    that is generator#402 item 3, not generator#420, which moved the three
+    **scalar** kinds.
     **TypeScript** takes it generator-side like the six, but on top of its
     flat-visitor rebuild (#395) rather than the cursor path being retired.
 
 Enforcement by family: **generated visitor guards** — Rust std, Java, Kotlin, C#,
-Zig, pure C++, Python and TypeScript. The corelib callback exposes `count`/`total`
+Zig, Python and TypeScript. The corelib callback exposes `count`/`total`
 pre-allocation and the corelibs contribute only the error category. **Passed into
 the corelib decoder** — Go (`sofab.WithMax*` options) and Dart
 (`sofab.DecoderLimits`); the generated cap is raised to the largest schema bound
 of its kind, because these apply globally per decode and would otherwise reject a
-schema-bounded sibling.
+schema-bounded sibling. **Passed into the call that reads the field** — pure C++,
+for all three kinds (below).
+
+**Pure C++ takes a route of its own** (generator#420, on corelib-cpp#127). §6.2.1 fixes
+the *provenance* of a cap, not the *site of the comparison*: "a corelib **MAY** take
+a limit as an argument and perform the check itself, and a port that does is
+conformant." Every unbounded field kind on this leg already reaches the corelib
+through a call that owns the header word — `sofab::readString`, `sofab::readBlob`,
+`sofab::readArray` — so the cap is a trailing argument to each rather than a guard
+in front of it:
+
+```cpp
+sofab::readString(is, name, -1, SOFAB_MAX_DYN_STRING_LEN);   // schema declares none
+sofab::readString(is, code, 8);                              // schema maxlen 8
+```
+
+The third argument stays the **schema** `maxlen` / `count`, `-1` where the schema
+declares none, and the corelib consults the cap only where it is negative. So the
+two bounds cannot both fire, a receiver cap is never applied to a field the schema
+already bounds, and neither is ever reported in the other's category. Arrays were
+emitted this way already; #420 brought `string` and `blob` across and deleted the
+`if (_size > SOFAB_MAX_DYN_*) { is.exceedLimit(); return; }` pre-guards.
+
+Three properties this preserves, and they are the whole point of the section:
+
+- **The number is still generated code's.** Each cap is a `#define` in the
+  generated header, passed per call and retained nowhere. corelib-cpp holds no
+  limit, defaults none, and reads no omitted argument as *unlimited*.
+- **A schema bound never routes through a cap.** The bound travels in its own
+  argument and answers `INVALID` (MESSAGE_SPEC §7.1); the format ceiling (§6.2) is
+  never presented as a receiver cap.
+- **A skipped field is never capped.** This is why the guard had to go rather than
+  merely move. MESSAGE_SPEC §7.3's tag test lives *inside* `readString`, so a guard
+  in front of the call ran ahead of it and capped exactly the field it was required
+  to skip: a `blob` arriving at a `string` id answered `LimitExceeded` where the
+  decode must stay `COMPLETE` — #410's class, reproduced against this repo's own
+  C++ conformance harness before the fix and pinned by it after.
+
+The guard also could not honour §6.2.1's "before the allocation it is meant to
+prevent" in the other direction: the free `sofab::readString` sizes a growable
+destination from the announced length, and only the corelib can gate that sizing on
+the cap (corelib-cpp#127's `fitDest` fix). Cost is why it is an argument and not a
+new helper call — measured on identical generated source, the guard cost +3.39%
+Ir/op against the passed cap's +0.11%.
+
+The **c-cpp** wrapper emits no cap at all and needs none: `checkBounded` refuses a
+schema-unbounded `string`, `blob` or array on that leg, so no field the caps could
+bind ever reaches the code it generates and the `max_dyn_*` keys are inert
+provably rather than by convention. Its read calls are unchanged.
 
 **The second family is being retired** (generator#388). A decoder-level cap binds
 every field indiscriminately, including the schema-bounded ones §6.2.1 forbids it
@@ -2463,8 +2515,9 @@ CORELIB_PLAN §6.2.1 (doc PR #86) settles that a corelib **MAY** take a receiver
 as an argument and run the comparison itself, and that the cheap way to do it is to
 hang the number on a call generated code already makes — the compare then folds in
 beside a bound test already there. Every other target has such a call: C++
-`readString`/`readArray`, Zig `arrays.allocN`/`grow`/`setElem`, Go's and Dart's
-collectors, Java's and C#'s `PayloadAcc`, TypeScript's and Python's decode entry.
+`readString`/`readBlob`/`readArray` (taken — §9.5 above, generator#420), Zig
+`arrays.allocN`/`grow`/`setElem`, Go's and Dart's collectors, Java's and C#'s
+`PayloadAcc`, TypeScript's and Python's decode entry.
 
 **Rust std has none, and cannot be given one by adding a parameter.** The generated
 visitor holds the whole message mutably:

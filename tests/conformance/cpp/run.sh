@@ -477,8 +477,9 @@ run_variant c-cpp-static  "c-cpp" false "-I$CC/src/include" SOFAB_C_DIR="$CC"
 
 # Receiver-side decode limits (generator#102), pure corelib-cpp only (the c-cpp
 # profile is statically schema-bounded). An unbounded array claiming more than
-# the configured max_dyn_array_count must fail the decode (LimitExceeded via
-# is.exceedLimit()); the same bytes decode fine without a configured limit.
+# the configured max_dyn_array_count must fail the decode (LimitExceeded, raised
+# inside sofab::readArray, which is handed the cap); the same bytes decode fine
+# without a configured limit.
 echo "==> [cpp] receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn102.yaml" <<'YAML'
 version: 1
@@ -510,6 +511,68 @@ DEC=$("$WORK/lim102/harness/harness" decode dyn < "$WORK/in102.bin") || { echo "
 echo "$DEC" | grep -q '"a":\[1,2,3,4\]' || { echo "FAIL: [cpp] unbounded native array lost its elements (regression generator#112); got: $DEC"; exit 1; }
 "$WORK/nolim102/harness/harness" decode dyn < "$WORK/over102.bin" >/dev/null || { echo "FAIL: [cpp] under the target default the same bytes must decode"; exit 1; }
 echo "==> [cpp] decode limits OK (over-cap rejected, in-cap preserves elements, unlimited accepted)"
+
+# The string/blob half of the same rule, and the §7.3 ordering it turns on
+# (generator#420). The cap is PASSED INTO readString/readBlob rather than tested
+# in front of them, because the MESSAGE_SPEC §7.3 tag test lives inside the call:
+# CORELIB_PLAN §6.2.1, "a skipped field is never capped". A guard in front runs
+# BEFORE the tag test and so caps exactly the field it was required to skip --
+# which is what this backend emitted until #420, and what the last case here
+# pins. A unit test cannot see the difference: a removed guard with nothing
+# replacing it reads the same in a diff, so the first two cases run the binary.
+echo "==> [cpp] receiver caps ride into the read, behind the §7.3 tag test (generator#420)"
+# The array field is load-bearing, and not as a subject: it is what makes the
+# derived reassembly cap (SOFAB_MAX_DYN_BUFFERED_FIELD, #228) wide enough that
+# these images reach readString at all. Sized off the string/blob caps alone it
+# comes out at cap + 2 bytes, and an over-cap field always spans cap + 3 -- so
+# every case below would be rejected by the byte budget before the per-field cap
+# was ever consulted, and the test would pass while proving nothing.
+cat > "$WORK/dyn420.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      s: { id: 0, type: string }
+      b: { id: 1, type: blob }
+      a: { id: 2, type: array, items: { type: u64 } }
+YAML
+cat > "$WORK/cfg-420.yaml" <<'YAML'
+generic: { emit: project, max_dyn_string_len: 8, max_dyn_blob_len: 8, max_dyn_array_count: 4 }
+targets: { cpp: { namespace: sofabuffers } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-420.yaml" --lang cpp --in "$WORK/dyn420.yaml" --out "$WORK/lim420" )
+make -C "$WORK/lim420" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+# No cap may be tested in generated code in front of a read; the whole point of
+# #420 is that the corelib gets handed the number instead.
+grep -q 'is.exceedLimit()' "$WORK/lim420/dyn.hpp" && {
+    echo "FAIL: [cpp] a cap is checked in front of the read (§6.2.1, generator#420)"; exit 1; }
+grep -q 'sofab::readString(is, s, -1, SOFAB_MAX_DYN_STRING_LEN);' "$WORK/lim420/dyn.hpp" || {
+    echo "FAIL: [cpp] the string cap must be an argument to readString"; exit 1; }
+# Header byte `id << 3 | wire`, wire 2 = Fixlen; then the length word
+# `len << 3 | subtype`, subtype 2 = String, 3 = Blob (MESSAGE_SPEC §4).
+printf '\002\112123456789' > "$WORK/over420.bin"  # s: 9 bytes > cap 8  -> reject
+printf '\002\102' > "$WORK/in420.bin"             # s: 8 bytes == cap   -> accept
+printf '12345678' >> "$WORK/in420.bin"
+printf '\012\113AAAAAAAAA' > "$WORK/overb420.bin"  # b (id 1): 9 bytes > cap 8 -> reject
+printf '\002\113AAAAAAAAA' > "$WORK/skip420.bin"  # a 9-byte BLOB at the string id
+if "$WORK/lim420/harness/harness" decode dyn < "$WORK/over420.bin" >/dev/null 2>&1; then
+    echo "FAIL: [cpp] over-cap unbounded string (9 > max_dyn_string_len 8) must be rejected"; exit 1
+fi
+if "$WORK/lim420/harness/harness" decode dyn < "$WORK/overb420.bin" >/dev/null 2>&1; then
+    echo "FAIL: [cpp] over-cap unbounded blob (9 > max_dyn_blob_len 8) must be rejected"; exit 1
+fi
+DEC=$("$WORK/lim420/harness/harness" decode dyn < "$WORK/in420.bin") || {
+    echo "FAIL: [cpp] at-cap string must decode -- a cap rejects, it never truncates"; exit 1; }
+echo "$DEC" | grep -q '"s":"12345678"' || {
+    echo "FAIL: [cpp] at-cap string lost its bytes; got: $DEC"; exit 1; }
+# The one the pre-guard got wrong. A blob at a string-declared id contradicts the
+# schema, so §7.3 skips it -- and a skipped field is never capped, however long
+# it claims to be. The decode stays COMPLETE and `s` keeps its default.
+DEC=$("$WORK/lim420/harness/harness" decode dyn < "$WORK/skip420.bin") || {
+    echo "FAIL: [cpp] an over-cap BLOB at a string id must be SKIPPED, not capped (§6.2.1/§7.3)"; exit 1; }
+echo "$DEC" | grep -q '"s":""' || {
+    echo "FAIL: [cpp] the skipped field must bind nothing; got: $DEC"; exit 1; }
+echo "==> [cpp] string/blob caps OK (over-cap rejected, at-cap intact, mis-typed skipped)"
 
 # The derived reassembly cap is a BYTE budget (generator#228). It used to be
 # derived from element COUNTS -- a different dimension -- so the corelib's

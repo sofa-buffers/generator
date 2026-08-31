@@ -168,12 +168,19 @@ func TestCppHeapUnboundedArray(t *testing.T) {
 		"std::vector<std::vector<std::uint32_t>> matrix",                                                   // matrix rows are dynamic vectors too
 		"sofab::readArray(is, arr, -1, SOFAB_MAX_DYN_ARRAY_COUNT, sofab::ElemBound::of<std::uint32_t>());", // readArray sizes the vector to the wire count, bounded by the finite default cap
 		"if (!arr.empty()) {",                                                                              // whole-omit: no declared default -> empty()
-		"std::size_t _count) noexcept override",                                                            // _count is named for the resize
 		"sofab::MessageSeq<std::vector<std::vector<std::uint32_t>>>",                                       // matrix rows collected by the corelib placer
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap header missing %q:\n%s", want, h)
 		}
+	}
+	// Neither delivered header word is NAMED on this leg: sofab::readArray reads
+	// the count off the stream and sizes the destination itself, and since #420
+	// the string/blob length is readString/readBlob's business too. A named _size
+	// or _count here is the raw material of a check in front of the read, which is
+	// where CORELIB_PLAN §6.2.1 forbids one -- the tag test lives inside the call.
+	if !strings.Contains(h, "sofab::id id, std::size_t, std::size_t) noexcept override") {
+		t.Errorf("the pure path must take both header words unnamed:\n%s", h)
 	}
 	// The zero-length fixed array must never appear — that is the bug.
 	if strings.Contains(h, "std::array<std::uint32_t, 0>") {
@@ -544,10 +551,10 @@ func TestCppSparse(t *testing.T) {
 
 // TestCppDecodeLimits: the max_dyn_* config keys bake receiver-side decode
 // limits (generator#102) into the generated header on the pure-corelib-cpp
-// path: guarded macros, per-field exceedLimit() guards on unbounded fields
-// only, and the derived streaming reassembly cap passed as sofab::Limits into
-// the one-shot decode entry points. Unset keys or the c-cpp profile emit none
-// of it.
+// path: guarded macros, the cap PASSED INTO the read of each unbounded field
+// (never checked in front of it -- CORELIB_PLAN §6.2.1, generator#420), and the
+// derived streaming reassembly cap passed as sofab::Limits into the one-shot
+// decode entry points. Unset keys or the c-cpp profile emit none of it.
 func TestCppDecodeLimits(t *testing.T) {
 	const src = `
 version: 1
@@ -577,8 +584,13 @@ messages:
 		// 8000-byte bs, and emphatically not the count 65536 itself: a count is an
 		// element count, never a byte budget.
 		"#define SOFAB_MAX_DYN_BUFFERED_FIELD 655364",
-		"if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }",
-		"sofab::readArray(is, arr, -1, SOFAB_MAX_DYN_ARRAY_COUNT, sofab::ElemBound::of<std::uint64_t>());", // the cap rides into readArray
+		// The cap rides INTO the read, behind the §7.3 tag test that lives there,
+		// exactly as it already does for readArray. The schema-bounded twin keeps
+		// its maxlen and states no cap: §6.2.1 forbids applying one to a field the
+		// schema already bounds.
+		"sofab::readString(is, s, -1, SOFAB_MAX_DYN_STRING_LEN);",
+		"sofab::readString(is, bs, 8000);",
+		"sofab::readArray(is, arr, -1, SOFAB_MAX_DYN_ARRAY_COUNT, sofab::ElemBound::of<std::uint64_t>());",
 		"sofab::IStreamObject<Dyn> in{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}};",
 	} {
 		if !strings.Contains(h, want) {
@@ -588,10 +600,17 @@ messages:
 	if strings.Contains(h, "SOFAB_MAX_DYN_BLOB_LEN") {
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
-	// The bounded string (maxlen 8000) must NOT get a limit guard: exactly one
-	// string guard (for the unbounded s), governed otherwise by its schema bound.
-	if n := strings.Count(h, "SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit()"); n != 1 {
-		t.Errorf("want exactly 1 string limit guard (unbounded field only), got %d", n)
+	// No cap may be tested in FRONT of a read. Such a guard runs before the tag
+	// test inside readString/readBlob/readArray, so it caps a field MESSAGE_SPEC
+	// §7.3 requires to be skipped -- and it also sizes nothing, which is the half
+	// §6.2.1 wants decided before the allocation (generator#420, #410's class).
+	if strings.Contains(h, "is.exceedLimit()") {
+		t.Errorf("no cap may be checked in generated code in front of the read (§6.2.1):\n%s", h)
+	}
+	// The bounded string (maxlen 8000) must not carry a cap at all: exactly one
+	// string cap argument, on the unbounded s.
+	if n := strings.Count(h, "SOFAB_MAX_DYN_STRING_LEN)"); n != 1 {
+		t.Errorf("want exactly 1 string cap argument (unbounded field only), got %d", n)
 	}
 
 	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
@@ -603,7 +622,7 @@ messages:
 	for _, want := range []string{
 		"#define SOFAB_MAX_DYN_ARRAY_COUNT 65536",
 		"#define SOFAB_MAX_DYN_STRING_LEN 1048576",
-		"if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }",
+		"sofab::readString(is, s, -1, SOFAB_MAX_DYN_STRING_LEN);",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("default limits missing %q", want)
@@ -675,8 +694,8 @@ func TestCppBufferedFieldCapIsBytes(t *testing.T) {
 	for _, want := range []string{
 		"#define SOFAB_MAX_DYN_STRING_LEN 16",
 		"#define SOFAB_MAX_DYN_BLOB_LEN 4194304",
-		"if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }",
-		"if (_size > SOFAB_MAX_DYN_BLOB_LEN) { is.exceedLimit(); return; }",
+		"sofab::readString(is, s, -1, SOFAB_MAX_DYN_STRING_LEN);",
+		"sofab::readBlob(is, b, -1, SOFAB_MAX_DYN_BLOB_LEN);",
 		// blob span: the widest-form header and fixlen word plus the 4 MiB payload.
 		"#define SOFAB_MAX_DYN_BUFFERED_FIELD 4194309",
 		"sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}",
