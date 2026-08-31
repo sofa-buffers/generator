@@ -1856,3 +1856,93 @@ messages:
 		t.Errorf("a count:N wrapper array must keep its InvalidMsg schema bound:\n%s", m)
 	}
 }
+
+// TestRustCapGuardsSitInsideKeyedArms: a §7.3-skipped field must never be capped
+// (CORELIB_PLAN §6.2.1, generator#410). Rust keeps every receiver cap in the
+// generated visitor (ARCHITECTURE §9.5.2), so nothing but this repo decides where
+// the guard sits — and the property that makes the skip safe is structural: every
+// cap lives inside a match arm keyed by the wire callback it is written in plus
+// `(location, id)`, so an unknown id, or a wire type that contradicts the declared
+// one, reaches no arm at all and is walked past uncapped.
+//
+// The test is on the arms, not on a decode, because the failure it guards against
+// is a widened arm: a cap hoisted to the top of a callback, or an arm relaxed to
+// match any location, still compiles, still passes every substring assertion about
+// the cap being present, and silently caps the field §7.3 requires to be skipped.
+// tests/conformance/rust/run.sh decodes the bytes that prove the same property end
+// to end; this pins the shape that keeps it true.
+func TestRustCapGuardsSitInsideKeyedArms(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  dyn:
+    payload:
+      s:   { id: 0, type: string }
+      b:   { id: 1, type: blob }
+      arr: { id: 2, type: array, items: { type: u64 } }
+      sa:  { id: 3, type: array, items: { type: string } }
+      bs:  { id: 4, type: string, maxlen: 32 }
+`
+	doc, err := parser.Parse([]byte(src), "dyn.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := doc.Resolve()
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("invalid: %v", errs)
+	}
+	sc, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(sc); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(sc, map[string]any{
+		"max_dyn_array_count": 4,
+		"max_dyn_string_len":  16,
+		"max_dyn_blob_len":    8,
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var m string
+	for _, f := range files {
+		if f.Path == "src/message.rs" {
+			m = string(f.Content)
+		}
+	}
+	if m == "" {
+		t.Fatal("no module")
+	}
+
+	seen := 0
+	for _, line := range strings.Split(m, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, "MAX_DYN_") ||
+			strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "const ") {
+			continue
+		}
+		seen++
+		// Every remaining occurrence is a comparison, and it must be the body of a
+		// match arm whose pattern names the location (and, for arrays, the wire
+		// kind) this field decodes at. A guard that is not one caps whatever the
+		// callback was handed, skipped or not.
+		if !strings.HasPrefix(trimmed, "(_Loc::") && !strings.HasPrefix(trimmed, "(ArrayKind::") {
+			t.Errorf("a receiver cap outside a keyed match arm (§7.3-skipped fields would be capped):\n%s", trimmed)
+		}
+	}
+	if seen < 4 {
+		t.Fatalf("expected a cap on each unbounded kind (string, blob, array, wrapper array), found %d", seen)
+	}
+
+	// The schema-bounded twin is compared against its own maxlen and never against
+	// the cap: §6.2.1 forbids a cap on a field the schema already bounds, and the
+	// verdict differs too (InvalidMsg, not LimitExceeded).
+	if strings.Contains(m, "(_Loc::Root, 4) => if total > MAX_DYN_STRING_LEN") {
+		t.Error("a maxlen-bounded string must not be measured against the receiver cap")
+	}
+	if !strings.Contains(m, "(_Loc::Root, 4) => if total > 32 { self.inv = true; return; },") {
+		t.Errorf("the maxlen-bounded string must keep its own INVALID guard:\n%s", m)
+	}
+}
