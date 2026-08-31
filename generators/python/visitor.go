@@ -2,6 +2,7 @@ package python
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -516,11 +517,18 @@ func (g *gen) arrValueArm(sc *pyScope, hook string) []string {
 //     that is not the declared field's value -- the hook is asked one step
 //     later and is told only the id and the announced count/length, so it
 //     cannot make that distinction itself.
-//   - the receiver-side caps (capArm), for every id the schema leaves open.
+//   - the DECLINE of an id the scope does not declare at all. That field is not
+//     one this handler was ever going to read, so §6.7.2 walks it and §6.2.1
+//     forbids a cap to reach it -- and the decoder cannot know that on its own:
+//     a field a visitor ACCEPTS is a field it reads, whatever the visitor then
+//     does with the value. Saying so here is what keeps a decode that steps over
+//     an over-cap field it does not want at COMPLETE.
 //
-// The bound ITSELF is not here: it is a number now, returned from
-// on_schema_bound, and applied by the corelib in the one place that knows what
-// a declared count/length means (CORELIB_PLAN §6.2.1).
+// Neither the schema bound nor the receiver cap is here. The bound is a number
+// returned from on_schema_bound; the caps are the three the Decoder is built
+// with. Both are applied by the corelib, in the one place that knows what a
+// declared count/length means (CORELIB_PLAN §6.2.1), and generated code states
+// them rather than comparing against them a second time.
 //
 // It costs a Field object per field, so it is emitted only when the tree
 // actually needs one: corelib-py builds one only for a visitor that overrides
@@ -538,13 +546,6 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 		} else {
 			body = g.objFieldArm(sc)
 		}
-		// The receiver caps govern every id the SCHEMA does not bound -- an
-		// unbounded field of a bounded scope, and an unknown id alike -- so they
-		// go in the else of the tag chain above, whose arms are exactly the
-		// schema-bounded ids, and give every scope an arm.
-		if cap := g.capArm(sc, len(body) > 0); len(cap) > 0 {
-			body = append(body, cap...)
-		}
 		if len(body) > 0 {
 			arms = append(arms, arm{sc, body})
 		}
@@ -555,12 +556,15 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 	f.line("    def on_field(self, fld: Field) -> bool:")
 	f.line(`        """Accept or decline a field at its HEADER, before its value is read.`)
 	f.line("")
-	f.line("        A schema-bounded id is declined when the header's wire type -- or, for a")
-	f.line("        fixlen one, its subtype -- is not the one its declared type maps to. Such")
-	f.line("        a field is SKIPPED, exactly like an unknown id, so the bound")
-	f.line("        ``on_schema_bound`` declares must not reach it. Every other id is measured")
-	f.line("        against the receiver-side caps, which govern exactly what the schema")
-	f.line("        leaves open.")
+	f.line("        An id is declined when the header's wire type -- or, for a fixlen one,")
+	f.line("        its subtype -- is not the one its declared type maps to. Such a field is")
+	f.line("        SKIPPED, exactly like an unknown id, so neither the bound")
+	f.line("        ``on_schema_bound`` declares nor a receiver-side cap may reach it.")
+	f.line("")
+	f.line("        An id this scope does not declare AT ALL is declined for the same")
+	f.line("        reason: it is not a field this handler reads, so it is walked rather")
+	f.line("        than materialized, and no receiver cap may reach it. A decode that")
+	f.line("        steps over an over-cap field it does not want stays COMPLETE.")
 	f.line(`        """`)
 	f.line("        c = self._c")
 	first := true
@@ -574,59 +578,114 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 	f.blank()
 }
 
-// objFieldArm renders an object scope's §7.3 tag arms: one per id the schema
-// bounds, declining a header that does not carry the tag the declared type maps
-// to. The bound itself is declared in on_schema_bound.
+// objFieldArm renders an object scope's header work, ONE ARM PER DECLARED ID.
+//
+// Each arm carries whichever of two mutually exclusive things the field needs,
+// and both sit behind the §7.3 tag test:
+//
+// Every count- or length-bearing field is DECLINED when the header does not
+// carry the tag its declared type maps to, so a value that was never this
+// field's reaches neither the bound on_schema_bound declares one hook later nor
+// the receiver cap the Decoder parked one hook earlier. §7.3 asks for a skip, and
+// a skipped field is never capped (§6.2.1) — the codec drops the parked verdict
+// the moment this hook declines.
+//
+// The caps themselves are NOT here. The Decoder is handed all three and compares
+// them at the count/length header, off any field on_schema_bound declares and off
+// any field this hook skips, so a second comparison in generated code would be
+// the two routes to one rule §6.2.1 forbids. What remains generated is the one
+// number the codec cannot see: a WRAPPER array's element index, which is a field
+// id and not a count (indexBound).
+//
+// Never on an id this scope does not declare, either: the caps used to sit in
+// the ELSE of this chain, where they also fired on an unknown id -- a field the
+// handler was never going to read, which §6.2.1 says is skipped and "allocates
+// nothing", so a decode that steps over an over-cap field it does not want stays
+// COMPLETE.
 func (g *gen) objFieldArm(sc *pyScope) []string {
-	var out []string
+	out := []string{
+		fmt.Sprintf("if fld.id not in %s:", pyIDSet(sc.fields)),
+		"    return False  # an id this scope does not declare is walked, not read",
+	}
 	inner := true
 	for _, fld := range sc.fields {
-		var cond string
+		var body []string
 		switch fld.Kind {
 		case ir.KindString, ir.KindBlob:
-			if !fld.HasMaxlen {
-				continue
-			}
-			cond = tagMismatch(fld.Kind, 0)
+			body = declineOnMismatch(tagMismatch(fld.Kind, 0), fld.Name)
 		case ir.KindArray:
 			// A wrapper array carries no count header of its own -- its length is
 			// its highest element index -- so it is bounded in on_sequence_begin
-			// and on_field, not through on_schema_bound.
-			if !isNativeArrayElem(fld.Elem) || !fld.HasCount {
+			// and in the array scope's own arm, not here.
+			if !isNativeArrayElem(fld.Elem) {
 				continue
 			}
-			cond = tagMismatch(ir.KindArray, fld.Elem)
+			body = declineOnMismatch(tagMismatch(ir.KindArray, fld.Elem), fld.Name)
 		default:
 			continue
 		}
+		if len(body) == 0 {
+			continue
+		}
 		out = append(out, fmt.Sprintf("%s fld.id == %d:", kw(&inner), fld.ID))
-		out = append(out, indent(declineOnMismatch(cond, fld.Name))...)
+		out = append(out, indent(body)...)
 	}
 	return out
 }
 
-// arrFieldArm renders an array scope's header work: the §5.1 index bound, then
-// the §7.3 tag test for an element the schema bounds. Every element of a scope
-// shares one declared type, so there is no id test in front of either.
+// arrFieldArm renders an array scope's header work. Every element of a scope
+// shares one declared type, so there is no id test in front of any of it -- but
+// there is a TAG test, and it comes FIRST:
+//
+//  1. the §7.3 decline. An element whose wire type (or fixlen subtype)
+//     contradicts the declared element type was never this array's element, so
+//     neither its index nor its length nor its count may be measured against
+//     this array's bounds. It used to sit BEHIND the index bound, which made a
+//     mistyped element at an over-capacity index INVALID where §7.3 asks for a
+//     skip -- the same ordering corelib-go's and corelib-dart's collectors take
+//     for the wrapper arrays they own.
+//  2. the §5.1 index bound: the schema `count:` as INVALID, or the receiver cap
+//     as a policy rejection where the schema declares none. A wrapper array
+//     announces no count, so the INDEX is the length and the index is what
+//     bounds the allocation.
+//
+// An element's own header number -- a string/blob element's byte LENGTH, a
+// matrix row's element COUNT -- is not bounded here. Both are count/length words
+// the Decoder reads, so it applies the receiver cap to them itself; what it
+// cannot see is the INDEX, which is a field id.
 func (g *gen) arrFieldArm(sc *pyScope) []string {
 	var out []string
+	switch sc.elem {
+	case ir.KindString, ir.KindBlob:
+		out = append(out, declineOnMismatch(tagMismatch(sc.elem, 0), sc.loc)...)
+	case ir.KindArray:
+		if isNativeArrayElem(sc.elemItems.Elem) {
+			out = append(out, declineOnMismatch(
+				tagMismatch(ir.KindArray, sc.elemItems.Elem), sc.loc+" row")...)
+		}
+	}
 	if sc.child < 0 {
 		// A value element is bounded here; an element that opens a scope is
 		// bounded in on_sequence_begin, which no on_field precedes.
 		out = append(out, g.indexBound(sc.cap, "fld.id", sc.loc)...)
 	}
-	switch sc.elem {
-	case ir.KindString, ir.KindBlob:
-		if sc.elemMaxHas {
-			out = append(out, declineOnMismatch(tagMismatch(sc.elem, 0), sc.loc)...)
-		}
-	case ir.KindArray:
-		if isNativeArrayElem(sc.elemItems.Elem) && sc.elemItems.HasCount {
-			out = append(out, declineOnMismatch(
-				tagMismatch(ir.KindArray, sc.elemItems.Elem), sc.loc+" row")...)
-		}
-	}
 	return out
+}
+
+// pyIDSet renders the scope's declared ids as a set display of literals. CPython
+// folds `x in {1, 2, 3}` into a frozenset constant, so the membership test is one
+// hash lookup rather than a walk down the id chain -- and it is reached once per
+// field, ahead of everything else this hook does.
+func pyIDSet(fields []*ir.Field) string {
+	if len(fields) == 0 {
+		// An empty set display is a dict literal; frozenset() is the constant.
+		return "frozenset()"
+	}
+	ids := make([]string, 0, len(fields))
+	for _, f := range fields {
+		ids = append(ids, strconv.FormatInt(f.ID, 10))
+	}
+	return "{" + strings.Join(ids, ", ") + "}"
 }
 
 // tagMismatch renders the test that a header does NOT carry the tag its declared
@@ -684,9 +743,18 @@ func declineOnMismatch(cond, loc string) []string {
 // decodable under a tighter deployment cap, which §6.3 states as "never raised
 // for a field the schema bounds".
 //
-// The hook takes two INTEGERS, so overriding it costs no object per field: the
-// decoder builds a Field only for on_field. That is why the bound moved here
-// and the tag test did not -- the tag is not among the two integers.
+// The hook is handed the wire's tag as well as the two integers (corelib-py#135):
+// reached from a route with no table entry in front of it, it could not otherwise
+// tell its own field's value from a header that reuses the id under a
+// contradicting wire type. Generated code does not consult it, and that is
+// deliberate -- the §7.3 test runs one hook earlier, in on_field, which DECLINES
+// such a header so the field is skipped before any bound or cap can reach it.
+// Testing the tag again here would be a second implementation of a rule
+// CORELIB_PLAN §5.3.1 requires to have exactly one. The parameters are accepted
+// because the decoder passes them positionally, and named for what they are.
+//
+// Overriding it still costs no object per field: the decoder builds a Field only
+// for on_field.
 //
 // Only a field carrying a count or a length on the wire reaches it: a string or
 // blob with a `maxlen`, and a NATIVE array with a `count` (integer and float
@@ -713,13 +781,18 @@ func (g *gen) emitOnSchemaBound(f *pyfile, scopes []*pyScope) {
 	if len(arms) == 0 {
 		return
 	}
-	f.line("    def on_schema_bound(self, fid: int, n: int) -> int:")
+	f.line("    def on_schema_bound(self, fid: int, n: int, wt, st) -> int:")
 	f.line(`        """The count or length the SCHEMA declares for this field, or -1.`)
 	f.line("")
 	f.line("        Answered at the count/length header, before any payload byte is read.")
 	f.line("        A wire count/length above it is INVALID; a field that declares one is")
 	f.line("        no longer governed by the receiver-side caps, which bound only what the")
 	f.line("        schema left open.")
+	f.line("")
+	f.line("        ``wt``/``st`` are the header's wire type and fixlen subtype. Neither is")
+	f.line("        consulted here: ``on_field`` has already declined a header whose type")
+	f.line("        contradicts the one this field declares, so a field that reaches this")
+	f.line("        hook is the declared field and no other.")
 	f.line(`        """`)
 	f.line("        c = self._c")
 	first := true
@@ -809,57 +882,6 @@ func visitorNeeds(section string) (field, wire, fixlen bool) {
 	return strings.Contains(section, "def on_field("),
 		strings.Contains(section, "WireType"),
 		strings.Contains(section, "FixlenSubtype")
-}
-
-// capArm renders the receiver-side decode limits (CORELIB_PLAN §6.2.1) for the
-// ids of one scope that the schema leaves unbounded.
-//
-// The caps are enforced HERE rather than handed to the Decoder, because a
-// Decoder cap is applied to every field indiscriminately -- including the ones
-// whose schema declares a count:/maxlen:, which §6.2.1 forbids ("MUST NOT be
-// applied to a field the schema already bounds") and §6.3 backs up by forbidding
-// SofaLimitError there. The split is therefore made where the schema is known,
-// in generated code, and generator#388 is what moves it back once the corelib
-// can be told which ids are exempt.
-//
-// `bounded` says the scope emitted a tag arm for every id the schema bounds, so
-// the caps become the else of that chain and cannot fire on a field the schema
-// governs -- which is also why an id whose bound is DECLARED must have an arm
-// here even when nothing else needs one.
-func (g *gen) capArm(sc *pyScope, bounded bool) []string {
-	if !g.limits.any() {
-		return nil
-	}
-	// A scope whose every id IS schema-bounded has nothing left for a cap: an
-	// array scope dispatches by index, so one bound covers all of it.
-	if sc.isArr && bounded && sc.elemMaxHas {
-		return nil
-	}
-	var chk []string
-	if g.limits.stringHas {
-		chk = append(chk,
-			"if fld.subtype == FixlenSubtype.STRING and fld.size > MAX_DYN_STRING_LEN:",
-			`    raise SofaLimitError("string length %d exceeds max_string_len %d" % (fld.size, MAX_DYN_STRING_LEN))`)
-	}
-	if g.limits.blobHas {
-		chk = append(chk,
-			"if fld.subtype == FixlenSubtype.BLOB and fld.size > MAX_DYN_BLOB_LEN:",
-			`    raise SofaLimitError("blob length %d exceeds max_blob_len %d" % (fld.size, MAX_DYN_BLOB_LEN))`)
-	}
-	if g.limits.arrayHas {
-		// fld.count is 0 for everything that is not an array, so the wire type
-		// needs no separate test.
-		chk = append(chk,
-			"if fld.count > MAX_DYN_ARRAY_COUNT:",
-			`    raise SofaLimitError("array count %d exceeds max_array_count %d" % (fld.count, MAX_DYN_ARRAY_COUNT))`)
-	}
-	if len(chk) == 0 {
-		return nil
-	}
-	if !bounded {
-		return chk
-	}
-	return append([]string{"else:"}, indent(chk)...)
 }
 
 // isIntArrayElem reports whether a native array element rides the integer array
