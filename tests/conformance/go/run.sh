@@ -413,6 +413,29 @@ fi
 (cd "$WORK/nolim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/over102.bin" >/dev/null) || { echo "FAIL: under the target default the same bytes must decode"; exit 1; }
 echo "==> decode limits OK (over-cap rejected, in-cap + target-default accepted)"
 
+# An over-cap count followed by END OF INPUT is LimitExceeded, not INCOMPLETE.
+# The cap is decided at the count/length header (CORELIB_PLAN §6.2.1 "Enforcement
+# point") and the rejection is terminal (§6.3): the header has arrived, the
+# verdict is in, and no continuation can lift it -- so INCOMPLETE would both lose
+# the category and invite the caller to feed bytes that cannot help. Go already
+# answers this correctly because its visitor callback returns an error and aborts
+# the feed on the spot; the case is pinned here as the family reference, since
+# the ports whose callback is infallible have to CHOOSE the order and two of them
+# had chosen the truncation.
+echo "==> over-cap + truncation must be LimitExceeded, not INCOMPLETE (§6.2.1/§6.3)"
+printf '\003\005\001\002' > "$WORK/over102trunc.bin"   # count 5 > cap 4, then EOF
+printf '\003\004\001\002' > "$WORK/in102trunc.bin"     # count 4 == cap, then EOF
+ERR=$( (cd "$WORK/lim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/over102trunc.bin" >/dev/null) 2>&1 || true )
+echo "$ERR" | grep -q 'decode limit exceeded' \
+    || { echo "FAIL: over-cap(5>4)+truncated must be LimitExceeded, not INCOMPLETE; got: $ERR"; exit 1; }
+# Precision control: an IN-cap count genuinely truncated is a clean truncation
+# and MUST stay INCOMPLETE -- the cap must not turn every short message into a
+# policy rejection.
+ERR=$( (cd "$WORK/lim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/in102trunc.bin" >/dev/null) 2>&1 || true )
+echo "$ERR" | grep -q 'incomplete message' \
+    || { echo "FAIL: in-cap(4==4)+truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
+echo "==> over-cap/truncation ordering OK"
+
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
 # declared width is INVALID: it MUST NOT be masked to the width and MUST NOT be

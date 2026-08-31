@@ -277,6 +277,35 @@ messages:
 	if invIdx < 0 || limIdx < 0 || errIdx < 0 || !(invIdx < limIdx && limIdx < errIdx) {
 		t.Errorf("try_decode checks out of order: inv=%d lim=%d err=%d (want inv < lim < err)", invIdx, limIdx, errIdx)
 	}
+	// ...and AHEAD of feed's own verdict, so a message that declares an over-cap
+	// count/length and then STOPS reports LimitExceeded rather than Incomplete.
+	// The cap was decided at the header (§6.2.1) and the rejection is terminal
+	// (§6.3): no continuation can lift it, so Incomplete would tell the caller to
+	// feed bytes that cannot help -- which is precisely what a hostile sender
+	// wants, a connection held open at the cost of a truncated header. A
+	// structural INVALID from feed still dominates the cap (§5.2.3), so that
+	// check stays in front of it.
+	fedIdx := strings.Index(m, "\n        fed?;")
+	fedInvIdx := strings.Index(m, "if let Err(sofab::Error::InvalidMsg) = fed { return Err(sofab::Error::InvalidMsg); }")
+	if fedIdx < 0 || fedInvIdx < 0 || !(invIdx < fedInvIdx && fedInvIdx < limIdx && limIdx < fedIdx) {
+		t.Errorf("try_decode must report LimitExceeded before feed's Incomplete, and a structural InvalidMsg before both: inv=%d fedInv=%d lim=%d fed=%d", invIdx, fedInvIdx, limIdx, fedIdx)
+	}
+	// The same order on the streaming surface. feed() must surface the crossed cap
+	// on the very chunk that crossed it -- §6.3 calls the rejection terminal, and a
+	// decoder that answers Ok(()) and waits for finish() keeps a refused stream
+	// alive for exactly as long as the sender likes.
+	feedFn := m[strings.Index(m, "pub fn feed(&mut self, chunk: &[u8])"):]
+	feedFn = feedFn[:strings.Index(feedFn, "pub fn finish(")]
+	if !strings.Contains(feedFn, "if self.lim { return Err(sofab::Error::LimitExceeded); }") {
+		t.Errorf("Decoder::feed must surface a crossed cap on the feed that crossed it:\n%s", feedFn)
+	}
+	finishFn := m[strings.Index(m, "pub fn finish("):]
+	finishFn = finishFn[:strings.Index(finishFn, "Ok(self.m)")]
+	finLim := strings.Index(finishFn, "if self.lim { return Err(sofab::Error::LimitExceeded); }")
+	finProbe := strings.Index(finishFn, "self.feed(&[])?;")
+	if finLim < 0 || finProbe < 0 || finLim > finProbe {
+		t.Errorf("Decoder::finish must check the cap ahead of the end-of-input probe: lim=%d probe=%d\n%s", finLim, finProbe, finishFn)
+	}
 	// The BOUNDED array (barr, id 2, fixed [i32; 3]) must NOT get a limit guard:
 	// its schema count governs it (generator#100 over-count guard).
 	if strings.Contains(m, "(_Loc::Root, 2) => { if count > MAX_DYN_ARRAY_COUNT") {

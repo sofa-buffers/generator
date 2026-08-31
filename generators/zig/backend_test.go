@@ -1451,9 +1451,11 @@ messages:
 	m := string(files[0].Content)
 
 	for _, want := range []string{
-		// fixlenBegin: refuses by returning the error.
-		".root_dstrs => { if (id >= max_dyn_array_count) return sofab.Error.LimitExceeded; },",
-		".root_dblbs => { if (id >= max_dyn_array_count) return sofab.Error.LimitExceeded; },",
+		// fixlenBegin: refuses by returning the error. The element LENGTH cap sits
+		// here too, behind the index cap -- both are decided by the length word,
+		// so neither may wait for the payload (see TestZigDynLenCapAtLengthWord).
+		".root_dstrs => { if (id >= max_dyn_array_count) return sofab.Error.LimitExceeded; if (total > max_dyn_string_len) return sofab.Error.LimitExceeded; },",
+		".root_dblbs => { if (id >= max_dyn_array_count) return sofab.Error.LimitExceeded; if (total > max_dyn_blob_len) return sofab.Error.LimitExceeded; },",
 		// the payload callback: refuses by setting the sticky flag.
 		".root_dstrs => if (id >= max_dyn_array_count) { self.lim = true; } else {",
 		// sequenceBegin: refuses by breaking to the dead scope.
@@ -1472,5 +1474,72 @@ messages:
 	// keeps its own bound and its own category.
 	if !strings.Contains(m, ".root_bstrs => if (id >= 4) { self.inv = true; }") {
 		t.Errorf("a count:N wrapper array must keep its INVALID schema bound:\n%s", m)
+	}
+}
+
+// A schema-unbounded string/blob length is capped at the fixlen LENGTH WORD, not
+// at payload completion (CORELIB_PLAN §6.2.1 "Enforcement point", ARCHITECTURE
+// §9.5).
+//
+// The cap used to live only in the string/blob payload callback, behind
+// `_reassemble`, which returns nothing until the whole payload is in hand. Two
+// consequences, both of them the thing the cap exists to stop:
+//
+//   - bytes the cap forbids were BUFFERED before it was consulted. A sender
+//     could stream an arbitrarily long over-cap payload into the reassembly
+//     accumulator one chunk at a time, and the rejection came only after the
+//     last byte -- so max_dyn_string_len bounded nothing a chunked sender did;
+//   - a message that declared an over-cap length and then STOPPED reported
+//     INCOMPLETE, because the callback never fired at all. The verdict was
+//     available at the length word and the decode was over, but the status
+//     invited the sender to keep the connection open and feed more.
+//
+// The schema maxlen twin already sat at this hook (generator#267); the receiver
+// cap is the same decision one category over -- §6.2.1 forbids folding them, so
+// a bounded field keeps InvalidMessage and only an unbounded one reaches
+// LimitExceeded. The payload-side guard stays as the fallback for a consumer
+// built against a corelib without the hook.
+func TestZigDynLenCapAtLengthWord(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      s:  { id: 0, type: string }
+      b:  { id: 1, type: blob }
+      bs: { id: 2, type: string, maxlen: 32 }
+      es: { id: 3, type: array, items: { type: string } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{
+		"max_dyn_array_count": 4,
+		"max_dyn_string_len":  8,
+		"max_dyn_blob_len":    8,
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	hook := m[strings.Index(m, "pub fn fixlenBegin("):]
+	hook = hook[:strings.Index(hook, "\n    }")]
+	for _, want := range []string{
+		// The scalar caps, at the length word, inside the ARRIVED subtype's arm
+		// -- a §7.3-mismatched subtype lands in the other arm and is never
+		// capped (generator#410).
+		"0 => if (total > max_dyn_string_len) return sofab.Error.LimitExceeded,",
+		"1 => if (total > max_dyn_blob_len) return sofab.Error.LimitExceeded,",
+		// The schema-bounded field keeps its own bound and its own category.
+		"2 => if (total > 32) return sofab.Error.InvalidMessage,",
+		// A wrapper element's length is capped here too, behind the index cap.
+		".root_es => { if (id >= max_dyn_array_count) return sofab.Error.LimitExceeded; if (total > max_dyn_string_len) return sofab.Error.LimitExceeded; },",
+	} {
+		if !strings.Contains(hook, want) {
+			t.Errorf("fixlenBegin missing %q:\n%s", want, hook)
+		}
+	}
+	// The bounded field must not pick the cap up as well: one length bound per
+	// field, chosen by whether the schema declared one.
+	if strings.Contains(hook, "2 => if (total > max_dyn_string_len)") {
+		t.Errorf("a maxlen-bounded field must not also carry the receiver cap:\n%s", hook)
 	}
 }

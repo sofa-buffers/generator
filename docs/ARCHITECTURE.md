@@ -2311,7 +2311,43 @@ checking *in front of* its own read caps exactly the field it was required to sk
 The hazard to watch for is the destination being **sized** before the check runs —
 corelib-cpp had that defect hidden behind the generated guard, its free
 `readString` calling `fitDest()` on the announced length before any cap was
-consulted, so an over-cap string was materialised and only then rejected.
+consulted, so an over-cap string was materialised and only then rejected. The Zig
+backend had the same shape at its own layer: the string/blob cap sat in the payload
+callback, *behind* the generated reassembly helper that returns nothing until the
+whole payload is in hand, so a chunked sender could stream an arbitrarily long
+over-cap payload into the accumulator and only the last byte triggered the
+rejection. It now rides `fixlenBegin`, the hook the schema `maxlen` already used.
+
+**A truncated over-cap header reports `LimitExceeded`, never `INCOMPLETE`
+(normative).** Bytes that declare a count or length above the cap and then end
+before the field completes are a **policy rejection**, not a truncation. §6.2.1
+puts the check at the count/length header *for the same reason `INVALID` is
+decided there* (§5.2.3): the describing bytes have arrived, so the verdict is in,
+and a decoder that waits for the payload reaches end-of-input first and reports
+the wrong thing. §6.3 then makes the rejection **terminal** — no continuation can
+lift it — while `INCOMPLETE` means precisely "more bytes can change this" and is
+read by a streaming caller as *feed me the next chunk* (§5.2.4). Answering
+`INCOMPLETE` therefore loses the category **and** tells a hostile sender its
+connection is still wanted: a 4-byte message holds a receiver open indefinitely,
+which is the amplification this whole section exists to close. The rule holds on
+the streaming surface too — a crossed cap is surfaced by the `feed` that crossed
+it, not deferred to a `finish`. §5.2.3's own precedence is unaffected: a
+**structural `INVALID`** still dominates a crossed cap, because those bytes are
+malformed regardless of what follows.
+
+The answer is not a matter of taste per port: §6.2.1 says conformance compares
+implementations configured with **identical** limits, so two ports disagreeing on
+the same bytes under the same numbers is a conformance defect by that sentence
+alone. Nine of the eleven ports already answered `LimitExceeded` — everywhere the
+guard sits in a callback that can abort the feed (an error return, a raised
+exception, an `exceedLimit()` latch), it terminates on the spot and the question
+never arises. The two that answered `INCOMPLETE` are the ones whose callback is
+infallible and whose generated code therefore has to **choose** an order: Rust std
+(all three kinds, `try_decode` surfaced `fed?` ahead of the sticky `lim`) and Zig
+(string/blob only, via the reassembly hazard above). Both now report the cap
+first. Where a port has an existing conformance case for the schema-bound twin
+("over-count + truncation must be INVALID, not INCOMPLETE", generator#216/#267),
+the cap case belongs beside it — it is the same decision one category over.
 
 **And the gate that makes the skip structural has to cover every payload kind.**
 The visitor surfaces (Java, Kotlin, C#, Rust) put a **destination gate** at the top

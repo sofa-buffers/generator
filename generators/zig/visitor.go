@@ -921,15 +921,38 @@ func (g *gen) overIndexCond(cap int64) (cond string, overLimit, ok bool) {
 }
 
 // fixlenBeginArms builds the per-scope arms for one fixlen subtype. A wrapper
-// element carries its array's over-index bound AND its element maxlen, in that
-// order: an element that is not this array's element at all must not have its
-// length measured against the element bound. A scalar field carries its own
-// maxlen, keyed by field id inside its scope.
+// element carries its array's over-index bound AND its element length bound, in
+// that order: an element that is not this array's element at all must not have
+// its length measured against the element bound. A scalar field carries its own
+// length bound, keyed by field id inside its scope.
+//
+// The length bound is the schema `maxlen` where the schema declares one
+// (INVALID, MESSAGE_SPEC §7.1) and the configured receiver cap where it does not
+// (LimitExceeded, CORELIB_PLAN §6.2.1). The two are mutually exclusive by
+// construction -- §6.2.1 forbids applying a cap to a field the schema already
+// bounds -- and lenBound returns whichever governs.
 func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind) []string {
+	// lenBound: the test a fixlen LENGTH WORD faces at this field/element, and
+	// the error it raises. ok is false when neither a schema maxlen nor a live
+	// receiver cap governs the length.
+	capActive, capName := g.limits.stringHas, "max_dyn_string_len"
+	if kind == ir.KindBlob {
+		capActive, capName = g.limits.blobHas, "max_dyn_blob_len"
+	}
+	lenBound := func(maxlen int64, dynLen bool) (stmt string, ok bool) {
+		if maxlen >= 0 {
+			return fmt.Sprintf("if (total > %d) return sofab.Error.InvalidMessage;", maxlen), true
+		}
+		if capActive && dynLen {
+			return fmt.Sprintf("if (total > %s) return sofab.Error.LimitExceeded;", capName), true
+		}
+		return "", false
+	}
 	var arms []string
 	for _, fr := range fs {
 		idCond, idLim, idOK := g.overIndexCond(fr.cap)
-		if fr.kind == fkSeqArr && fr.elemKind == kind && (idOK || fr.emax >= 0) {
+		elemLen, elemLenOK := lenBound(fr.emax, fr.elemDynLen)
+		if fr.kind == fkSeqArr && fr.elemKind == kind && (idOK || elemLenOK) {
 			body := ""
 			if idOK {
 				err := "InvalidMessage"
@@ -938,8 +961,8 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind) []string {
 				}
 				body += fmt.Sprintf("if (%s) return sofab.Error.%s; ", idCond, err)
 			}
-			if fr.emax >= 0 {
-				body += fmt.Sprintf("if (total > %d) return sofab.Error.InvalidMessage; ", fr.emax)
+			if elemLenOK {
+				body += elemLen + " "
 			}
 			arms = append(arms, fmt.Sprintf("                .%s => { %s},", fr.loc, body))
 			continue
@@ -949,8 +972,17 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind) []string {
 		}
 		var inner []string
 		for _, fld := range fr.fields {
-			if fld.Kind == kind && fld.HasMaxlen {
-				inner = append(inner, fmt.Sprintf("%d => if (total > %d) return sofab.Error.InvalidMessage,", fld.ID, fld.Maxlen))
+			if fld.Kind != kind {
+				continue
+			}
+			maxlen := int64(-1)
+			if fld.HasMaxlen {
+				maxlen = fld.Maxlen
+			}
+			// A scalar string/blob the schema leaves unbounded is exactly the
+			// field a receiver cap governs, so it is dyn-length by definition.
+			if stmt, ok := lenBound(maxlen, true); ok {
+				inner = append(inner, fmt.Sprintf("%d => %s", fld.ID, strings.TrimSuffix(stmt, ";")+","))
 			}
 		}
 		if len(inner) > 0 {

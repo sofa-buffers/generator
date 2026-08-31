@@ -454,6 +454,58 @@ fi
 "$WORK/nolim/zig-out/bin/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
 
+# A string/blob receiver cap is decided at the fixlen LENGTH WORD, not at payload
+# completion (CORELIB_PLAN §6.2.1 "Enforcement point"). The cap used to sit only
+# in the payload callback, behind the reassembly helper that returns nothing
+# until the whole payload is in hand, so:
+#   * bytes the cap forbids were BUFFERED before it was consulted -- a chunked
+#     sender could stream an arbitrarily long over-cap payload into the
+#     accumulator and the rejection came after the last byte;
+#   * an over-cap length followed by EOF reported IncompleteMessage, because the
+#     callback never fired. The verdict was available at the length word and the
+#     rejection is terminal (§6.3), so INCOMPLETE both lost the category and
+#     invited the sender to hold the connection open.
+# Headers below: (id << 3) | wire type; a fixlen word is (length << 3) | subtype
+# (2 = string, 3 = blob). Caps: string 8, blob 8.
+echo "==> a string/blob cap fires at the length word, not at payload completion (§6.2.1)"
+cat > "$WORK/dynsb.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      s:  { id: 0, type: string }
+      b:  { id: 1, type: blob }
+      bs: { id: 2, type: string, maxlen: 32 }
+YAML
+printf 'generic: { emit: project, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\n' > "$WORK/cfg_sb.yaml"
+zig_build "$WORK/dynsb.yaml" "$WORK/sblim" "$WORK/cfg_sb.yaml"
+# sb_expect OCTAL EXPECTED-STDERR-SUBSTRING DESC ("" == must decode)
+sb_expect() {
+    SB_RC=0
+    (printf "$1" | "$WORK/sblim/zig-out/bin/harness" decode dyn >/dev/null) 2>"$WORK/sb.err" || SB_RC=$?
+    if [ -z "$2" ]; then
+        [ "$SB_RC" = 0 ] || { echo "FAIL: $3 must decode; got: $(cat "$WORK/sb.err")"; exit 1; }
+        return
+    fi
+    [ "$SB_RC" != 0 ] || { echo "FAIL: $3 must be refused as $2; it decoded"; exit 1; }
+    grep -q "$2" "$WORK/sb.err" || { echo "FAIL: $3 must be $2; got: $(cat "$WORK/sb.err")"; exit 1; }
+}
+sb_expect '\002\112ABC'  LimitExceeded     "an over-cap string length (9 > 8) then EOF"
+sb_expect '\012\113ABC'  LimitExceeded     "an over-cap blob length (9 > 8) then EOF"
+# Precision: an IN-cap length genuinely truncated is a clean truncation and MUST
+# stay INCOMPLETE -- the cap must not turn every short message into a rejection.
+sb_expect '\002\102ABC'  IncompleteMessage "an in-cap string length (8 == 8) then EOF"
+# A schema-bounded field is governed by its OWN bound and its own category: the
+# cap of 8 must not reach `bs`, and its maxlen of 32 is INVALID, not the cap
+# (§6.2.1 forbids folding the two).
+sb_expect '\022\242\001ABCDEFGHIJKLMNOPQRST' ""             "a 20-byte string on a maxlen-32 field (the cap of 8 must not apply)"
+sb_expect '\022\302\002ABC'                  InvalidMessage "a 40-byte string over maxlen 32, then EOF"
+# A §7.3-skipped field is never capped (#410), truncated or not: an over-cap blob
+# at the string-declared id 0 leaves only the truncation to report.
+sb_expect '\002\113ABC'  IncompleteMessage "an over-cap BLOB at the string-declared id 0 (§7.3 skip), then EOF"
+sb_expect '\072\112ABC'  IncompleteMessage "an over-cap string at the UNKNOWN id 7, then EOF"
+echo "==> string/blob cap enforcement point OK"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/zig/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
 

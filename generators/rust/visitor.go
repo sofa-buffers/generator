@@ -694,14 +694,21 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("        // invalid-UTF-8 string, an over-length string/blob, or an over-index")
 	f.line("        // wrapper element: INVALID, and it dominates a truncated tail (S5.2).")
 	f.line("        if invalid { return Err(sofab::Error::InvalidMsg); }")
-	f.line("        // No INVALID flag: now surface feed's own verdict (a clean Incomplete")
-	f.line("        // on a truncated-but-otherwise-valid message, or a structural InvalidMsg).")
-	f.line("        fed?;")
 	if g.limits.any() {
+		f.line("        // A structural INVALID from feed still dominates: those bytes are")
+		f.line("        // malformed regardless of what follows (S5.2.3).")
+		f.line("        if let Err(sofab::Error::InvalidMsg) = fed { return Err(sofab::Error::InvalidMsg); }")
 		f.line("        // An unbounded field exceeded a configured receiver-side decode")
-		f.line("        // limit: reject, never clamp.")
+		f.line("        // limit: reject, never clamp -- and report it AHEAD of a truncated")
+		f.line("        // tail. The cap was decided at the count/length header (S6.2.1), the")
+		f.line("        // rejection is terminal (S6.3), and no continuation can lift it, so")
+		f.line("        // Incomplete would tell the caller to feed bytes that cannot help.")
 		f.line("        if limited { return Err(sofab::Error::LimitExceeded); }")
 	}
+	f.line("        // Nothing refused above: now surface feed's own verdict (a clean")
+	f.line("        // Incomplete on a truncated-but-otherwise-valid message, or a")
+	f.line("        // structural InvalidMsg).")
+	f.line("        fed?;")
 	f.line("        // A fixed-capacity field overflowed during the fill:")
 	f.line("        // report it rather than return a silently-truncated value.")
 	f.line("        if overflow { return Err(sofab::Error::BufferFull); }")
@@ -780,6 +787,12 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("            // INVALID dominates a truncated tail (S5.2), so it is reported")
 	f.line("            // ahead of feed's own Incomplete verdict.")
 	f.line("            if self.inv { return Err(sofab::Error::InvalidMsg); }")
+	if g.limits.any() {
+		f.line("            // A crossed receiver cap is TERMINAL (S6.3): surface it on the very")
+		f.line("            // feed that crossed it rather than at finish(), so a caller does not")
+		f.line("            // keep reading a stream this decoder has already refused.")
+		f.line("            if self.lim { return Err(sofab::Error::LimitExceeded); }")
+	}
 	f.line("            fed")
 	f.line("        }")
 	f.blank()
@@ -789,13 +802,16 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("        /// must be rejected, not returned half-filled.")
 	f.line("        pub fn finish(mut self) -> Result<%s, sofab::Error> {", name)
 	f.line("            if self.inv { return Err(sofab::Error::InvalidMsg); }")
+	if g.limits.any() {
+		f.line("            // Ahead of the end-of-input probe: a crossed cap is terminal and")
+		f.line("            // was decided at a header, so it must not be downgraded to the")
+		f.line("            // Incomplete a truncated tail would report (S6.2.1/S6.3).")
+		f.line("            if self.lim { return Err(sofab::Error::LimitExceeded); }")
+	}
 	f.line("            // An empty chunk probes end-of-input without supplying any: Ok only")
 	f.line("            // when nothing is half-read. This is what makes a truncated stream")
 	f.line("            // an error here rather than a silently partial value.")
 	f.line("            self.feed(&[])?;")
-	if g.limits.any() {
-		f.line("            if self.lim { return Err(sofab::Error::LimitExceeded); }")
-	}
 	f.line("            if self.err { return Err(sofab::Error::BufferFull); }")
 	f.line("            Ok(self.m)")
 	f.line("        }")
