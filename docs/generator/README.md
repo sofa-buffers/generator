@@ -47,6 +47,12 @@ one order of magnitude down because a browser tab or a phone process has a
 smaller memory budget than a server — and TypeScript pays 2× on strings, a byte
 cap on the wire becoming UTF-16 in memory.
 
+**A skipped field is never capped.** These limits bound what a decode
+*allocates*, and a field the decoder walks past allocates nothing — an unknown
+id, or a declared id whose wire type contradicts the schema. A message carrying
+an over-cap field the receiver never reads still decodes, so adding an unbounded
+field to a schema does not break older receivers whose cap is smaller than it.
+
 Note the unit on `max_dyn_array_count`: it is an **element** count, never a byte
 budget. 65536 `u64` elements is 512 KiB; 65536 elements of a nested object type
 is 65536 × the element's size.

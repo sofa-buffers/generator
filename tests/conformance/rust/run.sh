@@ -633,31 +633,137 @@ YAML
 # corelib-rs (std, the default): always-on, no feature flags.
 run_variant rs "corelib: rs" "$STD"
 
-# Receiver-side decode limits (generator#102), std corelib only (the no_std
-# profile is statically bounded, the keys are inert there): an unbounded u64
-# array (id 0 -> header 0x03 = 0<<3 | unsigned-array) under
-# max_dyn_array_count: 4. 5 wire elements MUST fail try_decode with
-# LimitExceeded (harness exits non-zero); exactly 4 still decode; and the same
-# oversized bytes MUST decode against a project with no key set -- the TARGET
-# DEFAULT, not unlimited (generator#385); 5 elements is far under it.
-echo "==> [rs] receiver-side decode limits (generator#102)"
-printf 'version: 1\nmessages:\n  dyn: { payload: { a: { id: 0, type: array, items: { type: u64 } } } }\n' > "$WORK/dyn.yaml"
-printf 'generic: { emit: project, max_dyn_array_count: 4 }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-lim.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/lim" )
-sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/lim/Cargo.toml"
-crate_bin_name "$WORK/lim"
-( cd "$WORK/lim" && cargo build -q )
-printf '\003\005\001\002\003\004\005' > "$WORK/lim-over.bin"
-printf '\003\004\001\002\003\004' > "$WORK/lim-ok.bin"
-if (cd "$WORK/lim" && cargo run -q -- decode dyn < "$WORK/lim-over.bin" >/dev/null 2>&1); then
-    echo "FAIL: 5 elements > max_dyn_array_count 4 must reject (LimitExceeded)"; exit 1
-fi
-(cd "$WORK/lim" && cargo run -q -- decode dyn < "$WORK/lim-ok.bin" >/dev/null) || { echo "FAIL: 4 elements == cap must decode"; exit 1; }
+# Receiver-side decode limits (generator#102) and their §6.2.1 precision rules,
+# std corelib only (the no_std profile is statically bounded, so the keys are
+# inert there -- an unbounded field is a generate-time error, never a capped one).
+#
+# Rust std is the one target that enforces every cap in GENERATED CODE and keeps
+# it there (ARCHITECTURE §9.5.2): its visitor owns the whole message mutably, so
+# there is no corelib call to hang the number on. That makes the placement of
+# each guard this repo's business alone, and these rows are what pins it:
+#
+#   * the cap fires at the count/length header of a field actually READ, and
+#     answers LimitExceeded -- a policy verdict on well-formed bytes (§6.3);
+#   * a field MESSAGE_SPEC §7.3 skips -- an unknown id, or a wire type that
+#     contradicts the declared one -- is NEVER capped, so the decode stays
+#     COMPLETE and the field keeps its default (generator#410). In Rust this
+#     falls out of the dispatch itself: every guard sits in a match arm keyed by
+#     (wire callback, location, id), so a skipped field reaches no arm. That is a
+#     property to prove, not to assume -- the arms are generated, and an arm
+#     widened to `_` would cap the skip silently;
+#   * a SCHEMA-bounded field is never governed by a cap: its own bound governs
+#     and its violation is InvalidMsg (MESSAGE_SPEC §7.1). Both halves are
+#     pinned below with the schema bound deliberately ABOVE the cap (maxlen 32
+#     and count 6 against caps of 8 and 4), so a field that answered the cap
+#     would be visible as a rejection where the schema still permits the value.
+#     That is the precision a decoder-level cap cannot have (§6.2.1).
+echo "==> [rs] receiver-side decode limits (generator#102, CORELIB_PLAN §6.2.1)"
+cat > "$WORK/dyn.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      a:  { id: 0, type: array, items: { type: u64 } }
+      s:  { id: 1, type: string }
+      b:  { id: 2, type: blob }
+      bs: { id: 3, type: string, maxlen: 32 }
+      ba: { id: 4, type: array, items: { type: u64, count: 6 } }
+YAML
+cat > "$WORK/wrap.yaml" <<'YAML'
+version: 1
+$defs:
+  struct:
+    Kv:
+      k: { id: 0, type: u32 }
+messages:
+  wrap:
+    payload:
+      strs: { id: 0, type: array, items: { type: string } }
+      objs: { id: 1, type: array, items: { type: struct, fields: { $ref: '#/$defs/struct/Kv' } } }
+YAML
+printf 'generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-lim.yaml"
+lim_project() { # DEF OUT -- generate, point at the std corelib, build
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust --in "$1" --out "$2" )
+    sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$2/Cargo.toml"
+    crate_bin_name "$2"
+    ( cd "$2" && cargo build -q )
+}
+lim_project "$WORK/dyn.yaml" "$WORK/lim"
+lim_project "$WORK/wrap.yaml" "$WORK/wlim"
+
+# lim_run DIR MSG OCTAL -- decode one hand-built message; JSON in LIM_OUT, the
+# harness's `decode error: <category>` line in LIM_ERR, exit status in LIM_RC.
+# Only that line is kept: `cargo run` re-emits the crate's build warnings on
+# stderr, and a diagnostic drowned in them is a test nobody can read.
+lim_run() {
+    LIM_RC=0
+    (printf "$3" | (cd "$1" && cargo run -q -- decode "$2") >"$WORK/lim.out") 2>"$WORK/lim.err" || LIM_RC=$?
+    LIM_OUT=$(tr -d ' ' < "$WORK/lim.out")
+    LIM_ERR=$(grep 'decode error' "$WORK/lim.err" || tail -2 "$WORK/lim.err")
+}
+lim_complete() { # DIR MSG OCTAL EXPECT-JSON-SUBSTRING DESC
+    lim_run "$1" "$2" "$3"
+    [ "$LIM_RC" = 0 ] || { echo "FAIL: $5 must decode COMPLETE; got: $LIM_ERR"; exit 1; }
+    echo "$LIM_OUT" | grep -q "$4" || { echo "FAIL: $5 -- expected $4 in: $LIM_OUT"; exit 1; }
+}
+lim_reject() { # DIR MSG OCTAL CATEGORY DESC
+    lim_run "$1" "$2" "$3"
+    [ "$LIM_RC" != 0 ] || { echo "FAIL: $5 must be refused as $4; decoded: $LIM_OUT"; exit 1; }
+    echo "$LIM_ERR" | grep -q "$4" || { echo "FAIL: $5 must be $4 (§6.3 keeps the categories apart); got: $LIM_ERR"; exit 1; }
+}
+
+# (1) The cap itself, on each of the three unbounded kinds. Headers are
+# (id << 3) | wire type; a fixlen word is (length << 3) | subtype (2 = string,
+# 3 = blob). Caps: array count 4, string len 8, blob len 8.
+lim_reject "$WORK/lim" dyn '\003\005\001\002\003\004\005'  LimitExceeded "5 elements > max_dyn_array_count 4"
+lim_reject "$WORK/lim" dyn '\012\112ABCDEFGHI'             LimitExceeded "a 9-byte string > max_dyn_string_len 8"
+lim_reject "$WORK/lim" dyn '\022\113ABCDEFGHI'             LimitExceeded "a 9-byte blob > max_dyn_blob_len 8"
+lim_complete "$WORK/lim" dyn '\003\004\001\002\003\004'    '"a":\[1,2,3,4\]' "4 elements == the cap"
+
+# (2) generator#410: a §7.3-skipped field is never capped. Every row is over its
+# kind's cap, and every row must decode COMPLETE with the declared field left at
+# its default -- a receiver refusing a message whose only offence is a field it
+# was never going to read is the defect this pins.
+lim_complete "$WORK/lim" dyn '\004\005\000\000\000\000\000' '"a":\[\]'  "a SIGNED array at the unsigned-declared id 0 (§7.3 skip)"
+lim_complete "$WORK/lim" dyn '\073\005\001\002\003\004\005' '"a":\[\]'  "an over-cap array at the UNKNOWN id 7"
+lim_complete "$WORK/lim" dyn '\012\113ABCDEFGHI'            '"s":""'    "a BLOB at the string-declared id 1 (§7.3 skip)"
+lim_complete "$WORK/lim" dyn '\022\112ABCDEFGHI'            '"b":\[\]'  "a STRING at the blob-declared id 2 (§7.3 skip)"
+lim_complete "$WORK/lim" dyn '\072\112ABCDEFGHI'            '"s":""'    "an over-cap string at the UNKNOWN id 7"
+
+# (3) The shared property: a schema-bounded field is governed by its OWN bound,
+# never by a cap. `bs` declares maxlen 32 against a string cap of 8, `ba` a count
+# of 6 against an array cap of 4 -- so a value between the two proves the cap is
+# not consulted, and a value above the schema bound proves the verdict is
+# InvalidMsg and not the cap's category.
+lim_complete "$WORK/lim" dyn '\032\242\001ABCDEFGHIJKLMNOPQRST' '"bs":"ABCDEFGHIJKLMNOPQRST"' "a 20-byte string on a maxlen-32 field (cap 8 must not apply)"
+lim_complete "$WORK/lim" dyn '\043\005\001\002\003\004\005'     '"ba":\[1,2,3,4,5\]'          "5 elements on a count-6 field (cap 4 must not apply)"
+lim_reject "$WORK/lim" dyn '\032\302\002ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl' InvalidMsg "a 40-byte string over maxlen 32"
+lim_reject "$WORK/lim" dyn '\043\007\001\002\003\004\005\006\007'                InvalidMsg "7 elements over count 6"
+
+# (4) The same three rules on WRAPPER arrays, whose element index is itself
+# capped (generator#387/#397) and whose element payloads are capped per element.
+# `strs` and `objs` are sequence-framed: the sequence header is (id << 3) | 6,
+# each element's id IS its array index, and 0x07 closes the sequence.
+lim_complete "$WORK/wlim" wrap '\006\002\022AB\007'      '"strs":\["AB"\]' "a well-typed string element at index 0"
+lim_reject   "$WORK/wlim" wrap '\006\112\022AB\007'      LimitExceeded     "an element index 9 >= max_dyn_array_count 4"
+lim_reject   "$WORK/wlim" wrap '\006\002\112ABCDEFGHI\007' LimitExceeded   "a 9-byte string element > max_dyn_string_len 8"
+lim_complete "$WORK/wlim" wrap '\016\006\000\052\007\007' '"k":42'         "a well-typed object element at index 0"
+lim_reject   "$WORK/wlim" wrap '\016\116\000\052\007\007' LimitExceeded     "an object element index 9 >= max_dyn_array_count 4"
+# #410 on the wrapper leg: a mistyped element is skipped, so neither the index
+# cap nor the element cap may fire -- including at an index far above the cap.
+lim_complete "$WORK/wlim" wrap '\006\112\023AB\007'        '"strs":\[\]' "a BLOB element at a string-array index 9 (§7.3 skip)"
+lim_complete "$WORK/wlim" wrap '\006\002\113ABCDEFGHI\007' '"strs":\[\]' "an over-cap BLOB element at a string-array index 0 (§7.3 skip)"
+lim_complete "$WORK/wlim" wrap '\016\112\022AB\007'        '"objs":\[\]' "a STRING at an object-array index 9 (§7.3 skip)"
+
+# The keys are what set the number, but an unset key is the TARGET DEFAULT and
+# never "unlimited" (generator#385): the same oversized bytes decode against a
+# project with no key set, because 5 elements is far under that default.
 printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-nolim.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/nolim" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/nolim/Cargo.toml"
 crate_bin_name "$WORK/nolim"
 ( cd "$WORK/nolim" && cargo build -q )
+printf '\003\005\001\002\003\004\005' > "$WORK/lim-over.bin"
 (cd "$WORK/nolim" && cargo run -q -- decode dyn < "$WORK/lim-over.bin" >/dev/null) || { echo "FAIL: default-cap project must decode oversized input"; exit 1; }
 echo "==> [rs] decode limits OK"
 

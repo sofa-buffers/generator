@@ -2503,6 +2503,35 @@ it **MUST NOT** gain one. `rs-no-std` is out of scope for a different reason: it
 profile rejects an unbounded field at schema-validation time, so no field a cap
 could govern exists there.
 
+**An exemption is a claim about where the guard sits, so conformance pins where it
+sits.** The other ports inherit the placement from the corelib call they hang the
+cap on; Rust's is generated, and only a decode of real bytes can show it is in the
+right place. `tests/conformance/rust/run.sh` builds one project with all three
+`max_dyn_*` keys set and asserts, per hand-built message:
+
+* the cap fires on each unbounded kind and answers **`LimitExceeded`** — the §6.3
+  category for a policy refusal of well-formed bytes — while a value at the cap
+  still decodes;
+* a **MESSAGE_SPEC §7.3 skip is never capped** (generator#410): a signed array at
+  an unsigned-declared id, a blob at a string id, a string at a blob id, an
+  unknown id, and the wrapper-array twins of all four. Every row is over its
+  kind's cap and every row must decode **`COMPLETE`** with the declared field left
+  at its default — a receiver that refuses a message whose only offence is a field
+  it was never going to read is the defect the rule exists to prevent;
+* a **schema-bounded field is governed by its own bound alone**, and the schema
+  bound is deliberately set *above* the cap so the two cannot be confused:
+  `maxlen: 32` under a string cap of 8 accepts 20 bytes and answers `InvalidMsg`
+  at 40, `count: 6` under an array cap of 4 accepts 5 elements and rejects 7 the
+  same way. Neither ever answers the cap's category, which is the precision a
+  decoder-level cap cannot have (§6.2.1) and the reason §9.5's second family is
+  being retired.
+
+All of it passed unchanged — the rows were written against the backend, not for a
+fix — and the reason is structural: every guard is a match arm keyed by `(wire
+callback, location, id)`, so a field the dispatch skips reaches no arm at all. The
+arms are generated, though, and one widened to `_` would cap a skip silently with
+no unit test able to see it. That is what the rows are for.
+
 ### 9.6 Worst-case message size (one walk, all backends)
 
 Most targets emit a `MAX_SIZE` constant and size their encode buffer from it.
