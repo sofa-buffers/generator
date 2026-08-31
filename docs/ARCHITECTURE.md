@@ -2267,9 +2267,30 @@ backend:
     cap through it would produce the forbidden category. Each needs a second field
     carrying the policy bound: corelib-go#129, corelib-dart#86, corelib-cpp#124.
     corelib-cpp has since added both — `indexCap` and `elemLenCap` on `StringSeq`
-    / `BlobSeq` (corelib-cpp#127) — and the generator does not yet state either;
-    that is generator#402 item 3, not generator#420, which moved the three
-    **scalar** kinds.
+    / `BlobSeq` (corelib-cpp#127) — and pure C++ **now states both**
+    (generator#402 item 3): the collector call carries the two schema bounds
+    followed by the two caps, `sofab::StringSeq _r0{w, -1, -1,
+    SOFAB_MAX_DYN_ARRAY_COUNT, SOFAB_MAX_DYN_STRING_LEN}`, and `sofab::MessageSeq`
+    takes the index cap as `dynCap` beside its `cap`. Each is stated only where
+    the schema states nothing on that axis, so the two can never both be in play.
+    **What this closed was not a rough edge.** Measured on the shipping pair, an
+    **eight-byte** message naming one element at index 2,000,000 decoded to
+    **`Complete`** while allocating **134 MB** (`array<string>`; 100 MB for
+    `array<struct>` and for a nested row) — the amplification a wrapper array's
+    missing count header leaves open, since its length is *highest present id + 1*
+    (§5.1) and the collector grows to it. With the caps stated the same bytes are
+    `LimitExceeded` having allocated **0 bytes**, and the schema-bounded control
+    stays `INVALID` at 0 bytes. The verdict alone would not have shown this: the
+    C++ conformance harness counts every global `operator new` across the decode,
+    because a cap that rejects *after* materialising the container has prevented
+    nothing.
+    One C++ shape stays in generated code, and it is the exception to the row in
+    the table below: an array of wrapper **rows** (`array<array<string>>`) is
+    gathered by a *generated* placer, since what a row costs to read is the
+    schema's business rather than the wire format's. The stream bounds a
+    collector's element index only for one that also publishes its element wire
+    type, which a row placer cannot, so the same cap is compared there — before
+    the grow, in the policy category — rather than a second time in the corelib.
     **TypeScript** takes it generator-side like the six, but on top of its
     flat-visitor rebuild (#395) rather than the cursor path being retired.
 

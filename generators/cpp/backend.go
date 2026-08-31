@@ -1522,7 +1522,11 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::StringSeq %s; %s.cap = %d; %s.elemMax = %d;", rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax)),
 				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		} else {
-			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::StringSeq %s{%s, %d, %d};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax)),
+			// The two schema bounds are followed by the two §6.2.1 receiver caps
+			// (cppSeqCaps): the element INDEX cap, which is this shape's whole
+			// amplification defence -- the array's length is highest present id + 1
+			// and the collector grows to it -- and the element LENGTH cap beside it.
+			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::StringSeq %s{%s, %d, %d%s};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax), g.cppSeqCaps(cap, elemMaxHas, elem)),
 				fmt.Sprintf("sofab::read(is, %s)", rv))
 		}
 	case ir.KindBlob:
@@ -1539,7 +1543,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::BlobSeq %s; %s.cap = %d; %s.elemMax = %d;", rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax)),
 				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		} else {
-			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::BlobSeq %s{%s, %d, %d};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax)),
+			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::BlobSeq %s{%s, %d, %d%s};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax), g.cppSeqCaps(cap, elemMaxHas, elem)),
 				fmt.Sprintf("sofab::read(is, %s)", rv))
 		}
 	case ir.KindStruct, ir.KindUnion:
@@ -1620,6 +1624,18 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 		f.line("%sif (static_cast<std::size_t>(_id) >= out->capacity()) { is.invalidate(); return; }", in4)
 	} else {
 		f.line("%sif (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }", in4)
+		// The receiver index cap, where the schema declared no `count` — the same
+		// bound the corelib's own collectors take as `dynCap`, in the same place
+		// (before the grow below) and in the other category (§6.2.1: policy, never
+		// INVALID). A generated collector cannot hand this one to the stream: the
+		// stream applies an element bound only for a collector that also publishes
+		// its element wire type, and a row's is the schema's business rather than
+		// the format's. Unstated, the grow below is an allocation the wire dictates
+		// — a wrapper array's length being highest present id + 1 (MESSAGE_SPEC
+		// §5.1), one over-index row is an arbitrarily large one.
+		if cap < 0 && g.limArrHas {
+			f.line("%sif (static_cast<std::size_t>(_id) >= static_cast<std::size_t>(SOFAB_MAX_DYN_ARRAY_COUNT)) { is.exceedLimit(); return; }", in4)
+		}
 	}
 	f.line("%swhile (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();", in4)
 	f.line("%sauto &%s = (*out)[_id];", in4, ev)
@@ -1675,7 +1691,13 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 			fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		return
 	}
-	g.emitSeqRead(f, ind, fmt.Sprintf("sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d;", container, rv, rv, target, rv, cap),
+	// The receiver index cap rides beside the schema `count`, on the same
+	// collector and in the same category split: `cap` answers INVALID, `dynCap`
+	// answers LimitExceeded, and corelib-cpp consults the second only where the
+	// first is absent (§6.2.1). Without it an unbounded array of objects grew to
+	// whatever id the wire named -- the amplification a wrapper array's missing
+	// count header leaves open (MESSAGE_SPEC §5.1).
+	g.emitSeqRead(f, ind, fmt.Sprintf("sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d;%s", container, rv, rv, target, rv, cap, g.cppSeqIndexCap(rv, cap)),
 		fmt.Sprintf("sofab::read(is, %s)", rv))
 }
 
