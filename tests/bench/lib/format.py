@@ -255,8 +255,22 @@ def main():
     out.append("#             footprint profiles actually ship to.")
     out.append("#")
 
-    schema = spec["schema"]
-    out.append(f"# schema:  {schema}  sha256 {sha256(root / schema)}")
+    # One line per distinct schema, naming its rows once there is more than one. The
+    # hash is here for the reason it always was — edit a schema and every number
+    # measured on it legitimately moves, and the header says so — and it is per
+    # schema for the same reason: a row measures the top-level `schema` unless it
+    # names its own, so a single hash would be a true statement about some rows and
+    # a false one about the rest. The default line names no rows ("all the others"),
+    # which keeps it byte-stable as rows are added to it.
+    by_schema = {}
+    for row in spec["rows"]:
+        by_schema.setdefault(row.get("schema", spec["schema"]), []).append(row["id"])
+    default = spec["schema"]
+    for schema in [default] + sorted(s for s in by_schema if s != default):
+        line = f"# schema:  {schema}  sha256 {sha256(root / schema)}"
+        if schema != default:
+            line += "  rows: " + ",".join(sorted(by_schema[schema]))
+        out.append(line)
     out.append("#")
     out.append("# Numbers shift when anything below shifts. Check here FIRST: if the header is")
     out.append("# unchanged and a number moved, the generator caused it.")
