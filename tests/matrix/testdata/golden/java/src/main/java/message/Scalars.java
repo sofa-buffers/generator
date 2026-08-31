@@ -210,10 +210,8 @@ class ScalarsVisitor implements Visitor {
         // decoder delivers is skipped whole -- its bytes are never inspected.
     }
     public void blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
-        byte[] _b = acc.blob(total, offset, data, chunkOffset, chunkLength);
-        if (_b == null) return;
-        switch (cur) {
-        }
+        // No field of this message is a blob, so every blob payload the decoder
+        // delivers is skipped whole -- its bytes are never copied out.
     }
     public void arrayBegin(int id, ArrayKind kind, int count) {
         ai = 0;

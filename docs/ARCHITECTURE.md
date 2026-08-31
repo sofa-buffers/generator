@@ -2313,6 +2313,37 @@ corelib-cpp had that defect hidden behind the generated guard, its free
 `readString` calling `fitDest()` on the announced length before any cap was
 consulted, so an over-cap string was materialised and only then rejected.
 
+**And the gate that makes the skip structural has to cover every payload kind.**
+The visitor surfaces (Java, Kotlin, C#, Rust) put a **destination gate** at the top
+of the payload callbacks: resolve `(scope, id)` first and `return` when nothing
+binds, so a skipped field leaves before a byte is buffered. It was written for
+`string`, where the visible symptom was UTF-8 — a lone continuation byte at an
+undeclared id turning a valid message INVALID — and in Java, C# and Rust it was
+emitted for `string` **only**, on the reading that a blob carries no encoding and so
+has nothing to validate. Validation was never all the gate bought. Without it a blob
+at an undeclared id still reached the payload accumulator, which sizes its buffer
+from the wire `total` and copies the payload in, and only the dispatch below found
+no destination and dropped it: a measured 1 MiB of heap per decode for a field
+nobody reads. That is §6.6 storage sized from the wire for a value never delivered,
+and §6.7.2's walk-don't-materialise, quite apart from any cap. Kotlin gated both
+callbacks from the start and is the shape the other three now match. Two properties
+follow for any new target: the gate is **per payload kind, not per validation
+need**, and a schema declaring no field of a kind gets an **empty** callback body
+rather than a gate whose every arm returns. Note also that "the skipped field
+decodes COMPLETE" does **not** test this — a decoder that materialises the payload
+and then drops it passes that row, which is why the conformance suites measure the
+allocation instead.
+
+On a **footprint** profile the same defect is not waste but a wrong verdict.
+corelib-rs-no-std's `PayloadAcc` is a fixed arena sized from the schema's largest
+bounded payload, and `feed` refuses a `total` above it; feeding a skipped payload
+through it therefore turned any undeclared field bigger than the arena into
+`BufferFull` for the whole message. Adding a field a receiver has not been rebuilt
+for is the ordinary forward-compatibility case §7.3 exists to make safe, so on that
+profile the missing gate was a denial of service in one field. `tests/conformance/rust`
+pins both halves: the std leg measures the allocation, the no_std leg asserts the
+verdict.
+
 **The split is per field kind AND per port, deliberate, and this is the list.**
 "In the corelib" below always means *passed in by generated code, compared there*;
 never a number the corelib knows:

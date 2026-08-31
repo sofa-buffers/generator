@@ -406,6 +406,69 @@ func (g *gen) emitStringCb(f *jfile, fs []frame, limStr bool) {
 	f.line("        }")
 }
 
+// emitBlobCb writes the blob() visitor callback: the destination gate, the
+// schema and receiver bounds, then the corelib accumulator that reassembles a
+// split payload.
+//
+// It is the twin of emitStringCb minus the UTF-8 validation, and that now
+// includes the destination gate. The gate used to be string-only, on the
+// reasoning that a blob carries no encoding and so has nothing to validate --
+// but validation was never the only thing behind it. A blob at an id this scope
+// does not declare was still fed to acc.blob(), which sizes a byte[] from the
+// wire `total` and copies the payload into it, only for the switch below to find
+// no arm and drop it. A 1 MiB blob at an unknown id therefore cost 1 MiB of heap
+// for a field nobody reads: a payload MATERIALIZED where MESSAGE_SPEC §7.3 says
+// the bytes are walked over, and storage sized from the wire for a value that is
+// never delivered (CORELIB_PLAN §6.2.1, §6.6, §6.7.2). Kotlin has gated both
+// callbacks since it was written; this is Java catching up.
+//
+// A message that declares no blob at all still gets the callback -- Visitor
+// declares it, and the corelib still delivers blob fields to a message that has
+// none -- but its body is EMPTY, for the same reason emitStringCb's is: an empty
+// body IS the skip. Java rejects unreachable statements, so this is a separate
+// shape rather than a guard placed in front of dead code.
+func (g *gen) emitBlobCb(f *jfile, fs []frame, limBlob bool) {
+	f.line("    public void blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
+	defer f.line("    }")
+
+	dests := kindDests(fs, ir.KindBlob)
+	if len(dests) == 0 {
+		f.line("        // No field of this message is a blob, so every blob payload the decoder")
+		f.line("        // delivers is skipped whole -- its bytes are never copied out.")
+		return
+	}
+	g.emitDestGuard(f, fs, dests)
+	if limBlob {
+		g.emitLenLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN", "blob length", g.limits.blobLen)
+	}
+	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
+	f.line("        byte[] _b = acc.blob(total, offset, data, chunkOffset, chunkLength);")
+	f.line("        if (_b == null) return;")
+	f.line("        switch (cur) {")
+	for _, fr := range fs {
+		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindBlob {
+			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
+			// element is omitted on the wire, so place the value at its id and fill
+			// any gap with the element default (empty bytes).
+			f.line("        case %d: %swhile (%s.size() <= id) %s.add(new byte[0]); %s.set(id, _b); break;", fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
+			continue
+		}
+		if fr.kind != fkNormal {
+			continue
+		}
+		var arms []string
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindBlob {
+				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+" = _b"))
+			}
+		}
+		if len(arms) > 0 {
+			g.frameSwitch(f, fr.idx, arms)
+		}
+	}
+	f.line("        }")
+}
+
 // destFrame is one frame that can materialize a value of the scanned kind:
 // `ids` empty means every id lands there (a wrapper-sequence row).
 type destFrame struct {
@@ -438,29 +501,31 @@ func kindDests(fs []frame, kind ir.Kind) []destFrame {
 	return dests
 }
 
-// emitDestGuard writes the skip gate at the very top of the string() callback
-// (CORELIB_PLAN §6.4, generator#257): "skipped fields are never validated".
-// Skipping is a length jump over bytes that are not inspected (§5.2), and UTF-8
-// validation runs only where a `string` is materialized — read into a
-// destination. So the destination is resolved FIRST: every (cur, id) that
-// declares a string, plus the wrapper-sequence rows whose element kind is
-// string, falls through; anything else returns right here.
+// emitDestGuard writes the skip gate at the very top of the string() and blob()
+// callbacks (CORELIB_PLAN §6.4, generator#257): "skipped fields are never
+// validated", and — the half that made it a blob gate too — never materialized.
+// Skipping is a length jump over bytes that are not inspected (§5.2), so the
+// destination is resolved FIRST: every (cur, id) that declares a payload of this
+// kind, plus the wrapper-sequence rows whose element kind matches, falls through;
+// anything else returns right here.
 //
 // Returning here is what makes the skip a true skip: an unknown id, or a §7.3
 // wire-type contradiction routed down the same path, is never validated and never
-// enters the shared accumulator (so a later declared field cannot inherit its
-// bytes). Without it a lone continuation byte at an undeclared id turned an
-// otherwise valid message into INVALID_MSG.
+// enters the shared accumulator — so a later declared field cannot inherit its
+// bytes, and no byte[] is sized from the wire for a value nobody reads (§6.6).
+// Without it a lone continuation byte at an undeclared id turned an otherwise
+// valid message into INVALID_MSG, and a 1 MiB blob at an undeclared id was copied
+// out of the input whole.
 //
 // Placed ahead of the maxlen/limit guards, which are already destination-scoped
 // and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is
 // preserved.
 //
 // A schema with no field of this kind at all has no destination *anywhere*, so
-// the callback body is empty rather than guarded — see stringDests, whose empty
+// the callback body is empty rather than guarded — see kindDests, whose empty
 // result is what the caller keys that on. (The callback itself is still emitted:
-// Visitor declares it, and the corelib still delivers strings to a message that
-// declares none.)
+// Visitor declares it, and the corelib still delivers strings and blobs to a
+// message that declares none.)
 func (g *gen) emitDestGuard(f *jfile, fs []frame, dests []destFrame) {
 	f.line("        // A payload this scope does not declare is skipped: its bytes are jumped")
 	f.line("        // over, never inspected. Resolve the destination first and leave before a")
@@ -852,38 +917,8 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 
 	g.emitStringCb(f, fs, limStr)
 
-	// blob, through the same accumulator.
-	f.line("    public void blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
-	if limBlob {
-		g.emitLenLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN", "blob length", g.limits.blobLen)
-	}
-	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
-	f.line("        byte[] _b = acc.blob(total, offset, data, chunkOffset, chunkLength);")
-	f.line("        if (_b == null) return;")
-	f.line("        switch (cur) {")
-	for _, fr := range fs {
-		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindBlob {
-			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
-			// element is omitted on the wire, so place the value at its id and fill
-			// any gap with the element default (empty bytes).
-			f.line("        case %d: %swhile (%s.size() <= id) %s.add(new byte[0]); %s.set(id, _b); break;", fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
-			continue
-		}
-		if fr.kind != fkNormal {
-			continue
-		}
-		var arms []string
-		for _, fld := range fr.fields {
-			if fld.Kind == ir.KindBlob {
-				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+" = _b"))
-			}
-		}
-		if len(arms) > 0 {
-			g.frameSwitch(f, fr.idx, arms)
-		}
-	}
-	f.line("        }")
-	f.line("    }")
+	// blob, through the same accumulator and behind the same destination gate.
+	g.emitBlobCb(f, fs, limBlob)
 
 	// arrayBegin: one dispatch, not two.
 	//

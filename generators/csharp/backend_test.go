@@ -889,9 +889,79 @@ messages:
 	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
 		t.Errorf("String(): the maxlen reject must survive behind the guard:\n%s", fn)
 	}
-	// A blob carries no encoding, so Blob() keeps the plain shape.
-	if strings.Contains(csMethod(t, m, "    public void Blob(int id,"), "default: return;") {
-		t.Errorf("Blob() must not carry a destination guard:\n%s", m)
+}
+
+// The blob twin of the test above, and the correction of an earlier reading of
+// it: the guard was called a string-only concern because UTF-8 is the only thing
+// a blob has nothing of. Validation was never all it bought. Without it a blob at
+// a (loc, id) this message does not bind still reached PayloadAcc.Blob, which
+// sizes a byte[] from the wire `total` and copies the payload in -- and only the
+// switch below found no arm and dropped it. A 1 MiB blob at an unknown id cost
+// 1 MiB of heap for a field nobody reads: a payload MATERIALIZED where
+// MESSAGE_SPEC §7.3 says the bytes are walked over, and storage sized from the
+// wire for a value never delivered (CORELIB_PLAN §6.2.1, §6.6, §6.7.2).
+func TestCsSkippedBlobIsNotMaterialized(t *testing.T) {
+	m := buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      b:  { id: 0, type: blob, maxlen: 16 }
+      n:
+        id: 1
+        type: struct
+        fields:
+          t: { id: 2, type: blob, maxlen: 8 }
+      ba: { id: 3, type: array, items: { type: blob, count: 4, maxlen: 8 } }
+`), "skipblob.yaml", map[string]any{})
+	fn := csMethod(t, m, "    public void Blob(int id,")
+
+	guardEnd := strings.Index(fn, "default: return;")
+	if guardEnd < 0 {
+		t.Fatalf("Blob() missing the §6.2.1 destination guard:\n%s", fn)
+	}
+	guard := fn[:guardEnd]
+	for _, want := range []string{
+		"case (Root, 0):",    // the scalar blob
+		"case (Root_n, 2):",  // the nested struct's blob
+		"case (Root_ba, _):", // every id of the blob-array row
+	} {
+		if !strings.Contains(guard, want) {
+			t.Errorf("Blob() missing destination arm %q:\n%s", want, fn)
+		}
+	}
+	// The whole point: nothing is sized from the wire or copied before the gate.
+	if i := strings.Index(fn, "pay.Blob("); i < 0 || guardEnd > i {
+		t.Errorf("Blob(): the destination guard must precede the accumulator:\n%s", fn)
+	}
+	// The maxlen reject stays destination-scoped behind it.
+	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
+		t.Errorf("Blob(): the maxlen reject must survive behind the guard:\n%s", fn)
+	}
+}
+
+// The blob twin of the string-free schema test: a message that declares NO blob
+// still gets the callback (the Visitor interface declares it, and the corelib
+// still routes blob fields at unknown ids to it), but every blob reaching it is
+// skipped by definition -- so the body must be empty. A guard whose every arm
+// returns is the same thing said longer.
+func TestCsBlobFreeSchemaNeverCopiesABlob(t *testing.T) {
+	m := buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+      s: { id: 1, type: string, maxlen: 8 }
+`), "noblob.yaml", map[string]any{})
+	fn := csMethod(t, m, "    public void Blob(int id,")
+	for _, forbidden := range []string{"pay.Blob(", "switch ((cur, id))", "byte[] _b"} {
+		if strings.Contains(fn, forbidden) {
+			t.Errorf("a blob-free schema must not %q in Blob():\n%s", forbidden, fn)
+		}
+	}
+	if !strings.Contains(m, "public void Blob(int id,") {
+		t.Errorf("Blob() must still be declared -- Visitor requires it:\n%s", m)
 	}
 }
 

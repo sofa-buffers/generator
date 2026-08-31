@@ -175,10 +175,8 @@ internal sealed class ScalarsVisitor : IVisitor {
         // decoder delivers is skipped whole -- its bytes are never inspected.
     }
     public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
-        byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength);
-        if (_b == null) return;   // payload incomplete: more chunks to come
-        switch ((cur, id)) {
-        }
+        // No field of this message is a blob, so every blob payload the decoder
+        // delivers is skipped whole -- its bytes are never copied out.
     }
     public void ArrayBegin(int id, ArrayKind kind, int count) {
         ai = 0;

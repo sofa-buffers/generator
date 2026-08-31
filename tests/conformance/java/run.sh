@@ -360,6 +360,39 @@ $HL decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count 4 at the 
 $HN decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must decode 5 elements"; exit 1; }
 echo "==> decode limits OK"
 
+# The string/blob half of the same rule, and the half no "does it decode" row can
+# check. A blob at an id the schema does not declare is SKIPPED: its bytes are
+# walked over, never materialised (MESSAGE_SPEC S7.3; CORELIB_PLAN S6.2.1 "a
+# skipped field is never capped", S6.6 "the codec allocates no payload storage").
+# A decoder that copies the payload out and then drops it satisfies every status
+# assertion in this file, so this one MEASURES: the probe decodes a message whose
+# only field is a 1 MiB blob at an undeclared id and requires the decode to
+# allocate a small fraction of it.
+#
+# max_dyn_blob_len: 8 is set on purpose. The same message is over the receiver cap
+# by five orders of magnitude and must still decode COMPLETE -- a skipped field is
+# never capped -- while still costing nothing.
+echo "==> a S7.3-skipped 1 MiB blob allocates nothing (CORELIB_PLAN S6.2.1/S6.6)"
+cat > "$WORK/skipblob.yaml" <<'YAML'
+version: 1
+messages:
+  skipblob:
+    payload:
+      b: { id: 0, type: blob }
+      s: { id: 1, type: string, maxlen: 32 }
+YAML
+cat > "$WORK/skipblobcfg.yaml" <<'YAML'
+generic: { emit: project, max_dyn_blob_len: 8 }
+targets: { java: { package: message } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/skipblobcfg.yaml" --lang java \
+    --in "$WORK/skipblob.yaml" --out "$WORK/skipblob" )
+cp "$ROOT/tests/conformance/java/SkippedBlobAlloc.java" "$WORK/skipblob/src/main/java/message/"
+( cd "$WORK/skipblob" && mvn -q -Dsofab.version="$VER" package )
+java -cp "$WORK/skipblob/target/harness.jar" message.SkippedBlobAlloc \
+    || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
+echo "==> skipped-blob allocation OK"
+
 # A WRAPPER array carries no count header, so the cap has to bind its element
 # INDEX instead (generator#387). Gap filling (S5.1) is exactly why: an interior
 # element equal to the default is omitted, so the array's length is highest
