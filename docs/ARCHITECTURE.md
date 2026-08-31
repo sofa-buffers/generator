@@ -2286,6 +2286,27 @@ backend:
     `sofab::StringSeq`/`BlobSeq` in corelib-cpp — and that is what turned that
     blocker into the split the family now has, rather than a compromise.
 
+    **What the C++ half of that closed was not a rough edge.** Measured on the
+    shipping pair, an **eight-byte** message naming one element at index 2,000,000
+    decoded to **`Complete`** while allocating **134 MB** (`array<string>`; 100 MB
+    for `array<struct>` and for a nested row). With `indexCap`/`elemLenCap` stated
+    — `sofab::StringSeq _r0{w, -1, -1, SOFAB_MAX_DYN_ARRAY_COUNT,
+    SOFAB_MAX_DYN_STRING_LEN}`, and `dynCap` beside `cap` on `sofab::MessageSeq` —
+    the same bytes are `LimitExceeded` having allocated **0 bytes**, and the
+    schema-bounded control stays `INVALID` at 0 bytes. Each is stated only where
+    the schema states nothing on that axis, so the two can never both be in play.
+    The verdict alone would not have shown this: the C++ conformance harness counts
+    every global `operator new` across the decode, because a cap that rejects
+    *after* materialising the container has prevented nothing.
+
+    **One C++ shape stays in generated code**, and it is the exception to the row in
+    the table below: an array of wrapper **rows** (`array<array<string>>`) is
+    gathered by a *generated* placer, since what a row costs to read is the schema's
+    business rather than the wire format's. The stream bounds a collector's element
+    index only for one that also publishes its element wire type, which a row placer
+    cannot, so the same cap is compared there — before the grow, in the policy
+    category — rather than a second time in the corelib.
+
 **Where the comparison runs (normative).** §6.2.1 separates two questions that had
 been treated as one, and the answers are not the same:
 
@@ -2397,7 +2418,7 @@ never a number the corelib knows:
 
 | target | compared in the corelib, on this existing call | compared in generated code |
 |---|---|---|
-| **C++** (`corelib: cpp`) | all three kinds: `readString`/`readBlob`/`readArray`, plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors | — |
+| **C++** (`corelib: cpp`) | all three kinds: `readString`/`readBlob`/`readArray`, plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
 | **Zig** | array counts and wrapper element indices: `arrays.allocNCapped` / `growCapped` / `setElemCapped` | string and blob lengths |
 | **Go**, **Dart** | wrapper arrays — the element index and the element length — through the collectors' receiver-cap fields | scalar string/blob lengths, native array counts |
 | **Java**, **Kotlin**, **C#** | string and blob lengths, in `PayloadAcc`, which the payload already passes through | array counts and wrapper element indices |

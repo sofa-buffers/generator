@@ -224,8 +224,11 @@ func TestCppOverIndexWrapperArray(t *testing.T) {
 		"{ sofab::StringSeq _r0{bs, 4, 16}; sofab::read(is, _r0); }", // bounded string -> cap 4, elem maxlen 16, never refilled
 		"{ sofab::BlobSeq _r0{bb, 3, 16}; sofab::read(is, _r0); }",   // bounded blob -> cap 3, elem maxlen 16, never refilled
 		"_r0.cap = 2;", // bounded struct -> placer cap 2
-		"{ sofab::StringSeq _r0{ds, -1, -1}; sofab::read(is, _r0); }", // dynamic string -> unbounded cap + maxlen
-		"_r0.cap = -1;", // dynamic struct -> unbounded
+		// Schema-unbounded: no `count` and no element `maxlen`, so both schema
+		// arguments stay -1 and the two §6.2.1 receiver caps behind them are what
+		// bounds the element index and the element length instead.
+		"{ sofab::StringSeq _r0{ds, -1, -1, SOFAB_MAX_DYN_ARRAY_COUNT, SOFAB_MAX_DYN_STRING_LEN}; sofab::read(is, _r0); }",
+		"_r0.cap = -1; _r0.dynCap = SOFAB_MAX_DYN_ARRAY_COUNT;", // dynamic struct -> the index cap governs
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("heap over-index bound missing %q:\n%s", want, h)
@@ -237,6 +240,71 @@ func TestCppOverIndexWrapperArray(t *testing.T) {
 		if strings.Contains(h, notWant) {
 			t.Errorf("the pure path must use the corelib collector, not emit %q:\n%s", notWant, h)
 		}
+	}
+}
+
+// TestCppWrapperArrayReceiverCaps: a schema-unbounded WRAPPER array states both
+// of its §6.2.1 receiver caps to the collector that compares them — the element
+// INDEX cap and, for string/blob elements, the element LENGTH cap.
+//
+// The index is the whole point. A wrapper array carries no count header: its
+// length is *highest present id + 1* (MESSAGE_SPEC §5.1) and the collector grows
+// the destination to `id + 1`, so one element at a large id is an arbitrarily
+// large allocation out of a nine-byte message. Unstated, that decode returned
+// Complete. The conformance harness runs it; this pins what is emitted.
+//
+// The exclusivity is asserted alongside it, per axis: a `count:` takes the index
+// cap out (the schema bound governs, INVALID), an element `maxlen:` takes the
+// length cap out, and each is independent of the other.
+func TestCppWrapperArrayReceiverCaps(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: { id: 0, type: array, items: { type: string } }\n" + // unbounded on both axes
+		"      b: { id: 1, type: array, items: { type: blob } }\n" + // ditto, blob length cap
+		"      c: { id: 2, type: array, items: { type: string, count: 4 } }\n" + // count: index cap out
+		"      d: { id: 3, type: array, items: { type: string, maxlen: 8 } }\n" + // maxlen: length cap out
+		"      e: { id: 4, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }\n" + // object elements: index only
+		"      f: { id: 5, type: array, items: { type: array, items: { type: string } } }\n" // generated row collector
+	h, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, want := range []string{
+		// {out, schema count, schema elem maxlen, index cap, elem length cap}
+		"{ sofab::StringSeq _r0{a, -1, -1, SOFAB_MAX_DYN_ARRAY_COUNT, SOFAB_MAX_DYN_STRING_LEN}; sofab::read(is, _r0); }",
+		"{ sofab::BlobSeq _r0{b, -1, -1, SOFAB_MAX_DYN_ARRAY_COUNT, SOFAB_MAX_DYN_BLOB_LEN}; sofab::read(is, _r0); }",
+		"{ sofab::StringSeq _r0{c, 4, -1, -1, SOFAB_MAX_DYN_STRING_LEN}; sofab::read(is, _r0); }",
+		"{ sofab::StringSeq _r0{d, -1, 8, SOFAB_MAX_DYN_ARRAY_COUNT}; sofab::read(is, _r0); }",
+		"_r0.cap = -1; _r0.dynCap = SOFAB_MAX_DYN_ARRAY_COUNT;",
+		// A row that is itself a wrapper sequence is collected by a GENERATED
+		// placer, which the stream cannot bound for it (it publishes no element
+		// wire type), so the same cap is compared there, in the same place —
+		// before the grow — and in the policy category.
+		"if (static_cast<std::size_t>(_id) >= static_cast<std::size_t>(SOFAB_MAX_DYN_ARRAY_COUNT)) { is.exceedLimit(); return; }",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("wrapper-array receiver cap missing %q:\n%s", want, h)
+		}
+	}
+}
+
+// TestCppWrapperArrayCapsAreExclusive: a wrapper array the schema bounds on both
+// axes states NEITHER receiver cap. §6.2.1: a receiver limit "MUST NOT be applied
+// to a field the schema already bounds. There the schema bound governs and its
+// violation is INVALID" — a cap emitted beside it would be a second bound in the
+// wrong category.
+func TestCppWrapperArrayCapsAreExclusive(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s: { id: 0, type: array, items: { type: string, count: 4, maxlen: 8 } }\n" +
+		"      p: { id: 1, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }\n"
+	h, err := genHeader(t, src, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if !strings.Contains(h, "{ sofab::StringSeq _r0{s, 4, 8}; sofab::read(is, _r0); }") {
+		t.Errorf("a fully bounded wrapper array must state its schema bounds alone:\n%s", h)
+	}
+	if strings.Contains(h, "SOFAB_MAX_DYN") {
+		t.Errorf("a fully bounded schema must emit no receiver cap at all:\n%s", h)
 	}
 }
 

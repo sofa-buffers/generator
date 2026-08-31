@@ -742,3 +742,57 @@ func (g *gen) cppArrayBounds(count int64, hasCount bool) string {
 	}
 	return fmt.Sprintf(", %d", schema)
 }
+
+// cppSeqCaps renders the trailing sofab::StringSeq / sofab::BlobSeq constructor
+// arguments carrying the two §6.2.1 receiver caps of a WRAPPER array: the
+// element INDEX cap and the element LENGTH cap, in the order corelib-cpp
+// declares them (`{out, count, elemMax, indexCap, elemLenCap}`).
+//
+// The index is what has to be checked, and it is the one shape the config caps
+// could not reach before. A wrapper array carries no count header — its length
+// is *highest present id + 1* (MESSAGE_SPEC §5.1) — so the collector grows the
+// destination to `id + 1` and the INDEX **is** the allocation. §6.2.1 names
+// exactly that: "for a sequence array it surfaces the index of the element in
+// hand […] there being no count header to check", to be enforced "before the
+// container it indexes into is extended". Left unstated it is an amplification
+// vector of the first order: a nine-byte message naming one element at a large
+// id allocated tens of megabytes and still decoded Complete.
+//
+// The element-length cap is the second half of the same shape: an index cap
+// alone still admits two elements of a gigabyte each.
+//
+// Both are stated only where the SCHEMA states nothing — `count:` for the index,
+// the element `maxlen:` for the length. §6.2.1 forbids a receiver cap on a field
+// the schema already bounds, so there the argument stays -1 and corelib-cpp
+// consults the schema bound alone, answering INVALID (MESSAGE_SPEC §7.1) instead
+// of LimitExceeded. A -1 is "no cap was supplied", never "unlimited": it is
+// reachable only where the schema bound beside it governs, or where max_dyn_*
+// was configured away for a schema that has no unbounded field of that kind.
+func (g *gen) cppSeqCaps(cap int64, elemMaxHas bool, elem ir.Kind) string {
+	lenHas, lenMacro := g.limStrHas, "SOFAB_MAX_DYN_STRING_LEN"
+	if elem == ir.KindBlob {
+		lenHas, lenMacro = g.limBlobHas, "SOFAB_MAX_DYN_BLOB_LEN"
+	}
+	idx := cap < 0 && g.limArrHas
+	length := !elemMaxHas && lenHas
+	switch {
+	case idx && length:
+		return ", SOFAB_MAX_DYN_ARRAY_COUNT, " + lenMacro
+	case length:
+		return ", -1, " + lenMacro
+	case idx:
+		return ", SOFAB_MAX_DYN_ARRAY_COUNT"
+	}
+	return ""
+}
+
+// cppSeqIndexCap is cppSeqCaps' index half for a collector that takes its bounds
+// as MEMBERS rather than constructor arguments — sofab::MessageSeq, whose
+// elements are objects or native rows and which therefore has no element-length
+// axis of its own. "" where the schema's `count:` governs the index instead.
+func (g *gen) cppSeqIndexCap(rv string, cap int64) string {
+	if cap >= 0 || !g.limArrHas {
+		return ""
+	}
+	return fmt.Sprintf(" %s.dynCap = SOFAB_MAX_DYN_ARRAY_COUNT;", rv)
+}
