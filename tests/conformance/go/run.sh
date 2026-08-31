@@ -511,6 +511,183 @@ if (cd "$WORK/mat" && GOFLAGS=-mod=mod go run ./harness decode mat < "$WORK/row_
 fi
 echo "==> matrix row count OK"
 
+# The WRAPPER-array half of S6.2.1 (generator#402 item 3), and the only
+# measurement that settles it: a nine-byte message must not be able to allocate.
+#
+# A wrapper array carries no count header -- its length is *highest present id +
+# 1* (MESSAGE_SPEC S5.1) -- so the element INDEX is the array's length, and one
+# element at a large id forces an arbitrarily large allocation out of nothing.
+# S6.2.1 names the index for that reason and puts the check "before the container
+# it indexes into is extended". Against the generator and corelib-go this branch
+# replaces, the four images below decoded to COMPLETE while allocating 172 MB,
+# 41 MB and 250 MB.
+#
+# The verdict alone would not prove it, so the probe reads runtime.MemStats
+# around each decode and asserts the allocation NEVER HAPPENED: a cap that
+# rejects after the container was grown has prevented nothing. It also pins the
+# two things the cap must NOT do -- reach a schema-bounded array (its own `count:`
+# governs, ErrInvalidMsg) and reject anything under the cap.
+echo "==> a wrapper array's element index is capped, and nothing is allocated (generator#402)"
+cat > "$WORK/dyn402.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      w: { id: 0, type: array, items: { type: string } }
+      p: { id: 1, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }
+      n: { id: 2, type: array, items: { type: array, items: { type: string } } }
+      b: { id: 3, type: array, items: { type: string, count: 4 } }
+YAML
+cat > "$WORK/cfg-402.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 64, max_dyn_string_len: 32, max_dyn_blob_len: 32 }
+targets: { go: { package: message, module_path: example.com/gen, go_version: "1.21" } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-402.yaml" --lang go --in "$WORK/dyn402.yaml" --out "$WORK/lim402" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/lim402/go.mod"
+mkdir -p "$WORK/lim402/probe"
+cat > "$WORK/lim402/probe/main.go" <<'GO'
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"runtime"
+
+	message "example.com/gen/message"
+	sofab "github.com/sofa-buffers/corelib-go"
+)
+
+func varint(out []byte, v uint64) []byte {
+	for v >= 0x80 {
+		out = append(out, byte(v&0x7f)|0x80)
+		v >>= 7
+	}
+	return append(out, byte(v))
+}
+
+// hdr: (id << 3) | wire. Wire 2 = Fixlen, 6 = SequenceStart, 7 = SequenceEnd
+// (MESSAGE_SPEC S4.3, S4.9).
+func hdr(out []byte, id, wire uint64) []byte { return varint(out, (id<<3)|wire) }
+
+// Four orders of magnitude below the wire-sized allocation: what is being
+// excluded is the container, not every byte the decode touches.
+const budget = 1 << 16
+
+var failures int
+
+func verdict(err error) string {
+	switch {
+	case err == nil:
+		return "Complete"
+	case errors.Is(err, sofab.ErrLimitExceeded):
+		return "LimitExceeded"
+	case errors.Is(err, sofab.ErrInvalidMsg):
+		return "Invalid"
+	case errors.Is(err, sofab.ErrIncomplete):
+		return "Incomplete"
+	case errors.Is(err, sofab.ErrArgument):
+		return "InvalidArgument"
+	}
+	return err.Error()
+}
+
+func run(what string, wire []byte, want string) {
+	m := message.NewDyn()
+	_ = sofab.AcceptBytes(wire, m) // warm, so the measured decode counts wire-driven growth
+
+	var before, after runtime.MemStats
+	m = message.NewDyn()
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	err := sofab.AcceptBytes(wire, m)
+	runtime.ReadMemStats(&after)
+	used := after.TotalAlloc - before.TotalAlloc
+	got := verdict(err)
+	fmt.Printf("    %-34s verdict=%-15s allocated=%d bytes\n", what, got, used)
+	if got != want {
+		fmt.Printf("FAIL: %s: expected %s, got %s\n", what, want, got)
+		failures++
+	}
+	if used > budget {
+		fmt.Printf("FAIL: %s: allocated %d bytes -- the allocation the cap exists to prevent HAPPENED\n", what, used)
+		failures++
+	}
+}
+
+func main() {
+	const big = 2000000 // ~64 MB of string headers, asked for in nine bytes
+
+	var w []byte // array<string>, schema-unbounded
+	w = hdr(w, 0, 6)
+	w = hdr(w, big, 2)
+	w = varint(w, (1<<3)|2) // fixlen word: 1 byte, subtype String
+	w = append(w, 'A')
+	w = hdr(w, 0, 7)
+	fmt.Printf("    attack message: %d bytes, one element at index %d\n", len(w), big)
+	run("array<string> over-index", w, "LimitExceeded")
+
+	var p []byte // array<struct>
+	p = hdr(p, 1, 6)
+	p = hdr(p, big, 6)
+	p = hdr(p, 0, 7)
+	p = hdr(p, 0, 7)
+	run("array<struct> over-index", p, "LimitExceeded")
+
+	var n []byte // array<array<string>>
+	n = hdr(n, 2, 6)
+	n = hdr(n, big, 6)
+	n = hdr(n, 0, 7)
+	n = hdr(n, 0, 7)
+	run("array<array<string>> over-index", n, "LimitExceeded")
+
+	// The schema bounds this one, so the cap must not touch it: `count: 4`
+	// governs and an over-index element is INVALID (MESSAGE_SPEC S7.1).
+	var b []byte
+	b = hdr(b, 3, 6)
+	b = hdr(b, big, 2)
+	b = varint(b, (1<<3)|2)
+	b = append(b, 'A')
+	b = hdr(b, 0, 7)
+	run("bounded array<string> over-index", b, "Invalid")
+
+	// The element LENGTH cap, the collector's second axis: one element longer
+	// than max_dyn_string_len, at a perfectly ordinary index.
+	var l []byte
+	l = hdr(l, 0, 6)
+	l = hdr(l, 0, 2)
+	l = varint(l, (64<<3)|2)
+	for i := 0; i < 64; i++ {
+		l = append(l, 'A')
+	}
+	l = hdr(l, 0, 7)
+	run("array<string> over-long element", l, "LimitExceeded")
+
+	// The control: a sparse array under the caps decodes intact, at its wire
+	// length -- highest present id + 1 -- and a cap never truncates.
+	var ok []byte
+	ok = hdr(ok, 0, 6)
+	ok = hdr(ok, 3, 2)
+	ok = varint(ok, (2<<3)|2)
+	ok = append(ok, 'h', 'i')
+	ok = hdr(ok, 0, 7)
+	good, err := message.DecodeDyn(ok)
+	if err != nil || len(good.W) != 4 || good.W[3] != "hi" {
+		fmt.Printf("FAIL: an in-cap sparse wrapper array must decode intact: %v\n", err)
+		failures++
+	} else {
+		fmt.Printf("    %-34s verdict=Complete        len=%d, last=%q\n", "in-cap control", len(good.W), good.W[3])
+	}
+
+	if failures > 0 {
+		os.Exit(1)
+	}
+}
+GO
+(cd "$WORK/lim402" && GOFLAGS=-mod=mod go run ./probe) \
+    || { echo "FAIL: wrapper-array receiver caps (generator#402, S6.2.1)"; exit 1; }
+echo "==> wrapper index + element caps OK (rejected before the allocation, bounded array untouched)"
+
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
 # declared width is INVALID: it MUST NOT be masked to the width and MUST NOT be
