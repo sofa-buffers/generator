@@ -324,14 +324,29 @@ echo "==> skipped occurrence keeps struct OK"
 # still decodes; and the same 5-element bytes MUST decode against a project with
 # no key set, which carries the TARGET DEFAULT rather than no cap
 # (generator#385).
+#
+# The other three fields cover the caps this backend hands to the CORELIB rather
+# than comparing itself (CORELIB_PLAN §6.2.1): a payload length goes to
+# PayloadAcc.string/blob and a wrapper row index to Seq.reserveRow*. A removed
+# guard with nothing replacing it reads exactly like a working one in a diff, so
+# each is exercised over the wire, at the cap and one past it. `bs` is the
+# exclusivity case: a schema `maxlen: 6` under a `max_dyn_string_len: 4` must
+# still decode six bytes -- the receiver cap may not touch a bounded field -- and
+# seven must fail as INVALID_MSG, the other category.
 echo "==> receiver-side decode limits (generator#102)"
 cat > "$WORK/lim.yaml" <<'YAML'
 version: 1
 messages:
-  dyn: { payload: { a: { id: 0, type: array, items: { type: u64 } } } }
+  dyn:
+    payload:
+      a:   { id: 0, type: array, items: { type: u64 } }
+      s:   { id: 1, type: string }
+      b:   { id: 2, type: blob }
+      mat: { id: 3, type: array, items: { type: array, items: { type: u64 } } }
+      bs:  { id: 4, type: string, maxlen: 6 }
 YAML
 cat > "$WORK/limcfg.yaml" <<'YAML'
-generic: { emit: project, max_dyn_array_count: 4 }
+generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 4, max_dyn_blob_len: 4 }
 targets: { kotlin: { package: message } }
 YAML
 build "$WORK/lim.yaml" "$WORK/lim" "$WORK/limcfg.yaml"
@@ -346,6 +361,51 @@ fi
 grep -q "LIMIT_EXCEEDED" "$WORK/limerr.txt" || { echo "FAIL: rejection must carry LIMIT_EXCEEDED"; exit 1; }
 $HL decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count 4 at the limit must decode"; exit 1; }
 $HN decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must decode 5 elements"; exit 1; }
+
+# Unbounded string, id 1: header 0x0a, fixlen_word (len<<3)|2. Five bytes is one
+# over max_dyn_string_len: 4; four is exactly at it.
+printf '\012\052\141\141\141\141\141' > "$WORK/overstr.bin"
+printf '\012\042\141\141\141\141' > "$WORK/atstr.bin"
+if $HL decode dyn < "$WORK/overstr.bin" >/dev/null 2>"$WORK/serr.txt"; then
+    echo "FAIL: string length 5 above max_dyn_string_len 4 must be rejected"; exit 1
+fi
+grep -q "LIMIT_EXCEEDED" "$WORK/serr.txt" || { echo "FAIL: over-cap string must carry LIMIT_EXCEEDED"; cat "$WORK/serr.txt"; exit 1; }
+$HL decode dyn < "$WORK/atstr.bin" >/dev/null || { echo "FAIL: string length 4 at the cap must decode"; exit 1; }
+$HN decode dyn < "$WORK/overstr.bin" >/dev/null || { echo "FAIL: default-cap project must decode a 5-byte string"; exit 1; }
+
+# Unbounded blob, id 2: header 0x12, fixlen_word (len<<3)|3.
+printf '\022\053\001\001\001\001\001' > "$WORK/overblob.bin"
+printf '\022\043\001\001\001\001' > "$WORK/atblob.bin"
+if $HL decode dyn < "$WORK/overblob.bin" >/dev/null 2>"$WORK/berr.txt"; then
+    echo "FAIL: blob length 5 above max_dyn_blob_len 4 must be rejected"; exit 1
+fi
+grep -q "LIMIT_EXCEEDED" "$WORK/berr.txt" || { echo "FAIL: over-cap blob must carry LIMIT_EXCEEDED"; cat "$WORK/berr.txt"; exit 1; }
+$HL decode dyn < "$WORK/atblob.bin" >/dev/null || { echo "FAIL: blob length 4 at the cap must decode"; exit 1; }
+$HN decode dyn < "$WORK/overblob.bin" >/dev/null || { echo "FAIL: default-cap project must decode a 5-byte blob"; exit 1; }
+
+# Dynamic matrix, id 3: sequence start 0x1e, then one ROW whose element id IS its
+# index -- 0x23 is index 4 (over max_dyn_array_count: 4), 0x1b is index 3 (at the
+# last accepted slot). One element each, so only the INDEX is in question.
+printf '\036\043\001\001\007' > "$WORK/overrow.bin"
+printf '\036\033\001\001\007' > "$WORK/atrow.bin"
+if $HL decode dyn < "$WORK/overrow.bin" >/dev/null 2>"$WORK/rerr.txt"; then
+    echo "FAIL: matrix row index 4 above max_dyn_array_count 4 must be rejected"; exit 1
+fi
+grep -q "LIMIT_EXCEEDED" "$WORK/rerr.txt" || { echo "FAIL: over-cap row index must carry LIMIT_EXCEEDED"; cat "$WORK/rerr.txt"; exit 1; }
+$HL decode dyn < "$WORK/atrow.bin" >/dev/null || { echo "FAIL: matrix row index 3 at the cap must decode"; exit 1; }
+$HN decode dyn < "$WORK/overrow.bin" >/dev/null || { echo "FAIL: default-cap project must decode row index 4"; exit 1; }
+
+# The exclusivity rule (§6.2.1): `bs` declares maxlen 6, so the configured cap of
+# 4 must not reach it -- six bytes decode. Seven is over the SCHEMA bound and is
+# INVALID_MSG, never the policy category.
+printf '\042\062\141\141\141\141\141\141' > "$WORK/bsok.bin"
+printf '\042\072\141\141\141\141\141\141\141' > "$WORK/bsbad.bin"
+$HL decode dyn < "$WORK/bsok.bin" >/dev/null \
+    || { echo "FAIL: a schema-bounded string must not be governed by the receiver cap"; exit 1; }
+if $HL decode dyn < "$WORK/bsbad.bin" >/dev/null 2>"$WORK/bserr.txt"; then
+    echo "FAIL: string length 7 above the declared maxlen 6 must be rejected"; exit 1
+fi
+grep -q "INVALID_MSG" "$WORK/bserr.txt" || { echo "FAIL: over-maxlen must be INVALID_MSG, not a policy rejection"; cat "$WORK/bserr.txt"; exit 1; }
 echo "==> decode limits OK"
 
 echo "==> shared-vector byte-exact conformance"
