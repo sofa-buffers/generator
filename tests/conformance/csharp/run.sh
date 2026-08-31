@@ -400,6 +400,74 @@ dotnet "$WORK/skipblob/bin/Debug/net9.0/harness.dll" \
     || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
 echo "==> skipped-blob allocation OK"
 
+# The string/blob half of the same rule, and the half a diff cannot check
+# (CORELIB_PLAN 6.2.1, corelib-cs#101). The generated guard in front of the
+# payload callback is gone: the cap now travels INTO PayloadAcc.String/.Blob,
+# which compares `total` against it at the length header before it takes a byte.
+# A removed guard with nothing behind it reads identically in review, so this
+# runs the four cases that tell the two apart.
+#
+#   ds (id 0, no maxlen)   -> capped at max_dyn_string_len: 8
+#   bs (id 1, maxlen: 32)  -> SCHEMA-bounded, and bounded ABOVE the cap
+#   db (id 2, no maxlen)   -> capped at max_dyn_blob_len: 8
+#
+# Wire: header = (id<<3)|2 (fixlen), then a fixlen word = (len<<3)|subtype with
+# subtype 2 = string, 3 = blob, then the payload bytes (0x61 = 'a').
+echo "==> receiver caps on string/blob length (CORELIB_PLAN 6.2.1)"
+cat > "$WORK/caps.yaml" <<'YAML'
+version: 1
+messages:
+  caps:
+    payload:
+      ds: { id: 0, type: string }
+      bs: { id: 1, type: string, maxlen: 32 }
+      db: { id: 2, type: blob }
+YAML
+cat > "$WORK/cfg-caps.yaml" <<'YAML'
+generic: { emit: project, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-caps.yaml" --lang csharp --in "$WORK/caps.yaml" --out "$WORK/caps" )
+( cd "$WORK/caps" && dotnet build -v q >/dev/null )
+HP="dotnet $WORK/caps/bin/Debug/net9.0/harness.dll"
+
+# 1. 9 bytes into the uncapped-by-schema string: one over max_dyn_string_len 8.
+printf '\002\112aaaaaaaaa' > "$WORK/cap_str_over.bin"
+# 2. exactly 8: at the cap, still decodes -- rejected, never clamped.
+printf '\002\102aaaaaaaa' > "$WORK/cap_str_at.bin"
+# 3. 16 bytes into bs, whose schema maxlen is 32: OVER the receiver cap but
+#    inside the schema bound. 6.2.1 forbids a cap on a field the schema bounds,
+#    so this must decode -- it is the case a single global cap gets wrong.
+printf '\012\202\001aaaaaaaaaaaaaaaa' > "$WORK/cap_str_bounded.bin"
+# 4. 9 bytes at id 7, which this message does not declare: the field is SKIPPED,
+#    and "a skipped field is never capped" (6.2.1). Must decode COMPLETE.
+printf '\072\112aaaaaaaaa' > "$WORK/cap_str_skipped.bin"
+# 5-6. the blob twin: over the cap at the declared id, and over it at a skipped one.
+printf '\022\113aaaaaaaaa' > "$WORK/cap_blob_over.bin"
+printf '\072\113aaaaaaaaa' > "$WORK/cap_blob_skipped.bin"
+
+# The CATEGORY is asserted, not just the failure: the bytes are well-formed and
+# the same message decodes under a looser cap, so this is LimitExceeded and never
+# InvalidMessage (CORELIB_PLAN 6.3). Asserting only a non-zero exit would pass on
+# any exception at all -- including the one a cap-free build cannot throw.
+for v in cap_str_over cap_blob_over; do
+    if $HP decode caps < "$WORK/$v.bin" >/dev/null 2>"$WORK/$v.err"; then
+        echo "FAIL: $v (9 bytes over a cap of 8) must fail decode"; exit 1
+    fi
+    grep -q "LimitExceeded" "$WORK/$v.err" || {
+        echo "FAIL: $v must be refused as LimitExceeded, not as malformed input; got:"
+        cat "$WORK/$v.err"; exit 1; }
+done
+OUT=$($HP decode caps < "$WORK/cap_str_at.bin") || { echo "FAIL: 8 bytes at the cap must decode"; exit 1; }
+echo "$OUT" | grep -q '"ds":"aaaaaaaa"' || { echo "FAIL: at-cap value must arrive whole, never clamped; got: $OUT"; exit 1; }
+OUT=$($HP decode caps < "$WORK/cap_str_bounded.bin") \
+    || { echo "FAIL: a schema-bounded field must not meet the receiver cap (6.2.1)"; exit 1; }
+echo "$OUT" | grep -q '"bs":"aaaaaaaaaaaaaaaa"' || { echo "FAIL: bounded 16-byte value lost; got: $OUT"; exit 1; }
+$HP decode caps < "$WORK/cap_str_skipped.bin" >/dev/null \
+    || { echo "FAIL: an over-cap string at an undeclared id is SKIPPED, never capped (6.2.1)"; exit 1; }
+$HP decode caps < "$WORK/cap_blob_skipped.bin" >/dev/null \
+    || { echo "FAIL: an over-cap blob at an undeclared id is SKIPPED, never capped (6.2.1)"; exit 1; }
+echo "==> string/blob caps OK"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"
 

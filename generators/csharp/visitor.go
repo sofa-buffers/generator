@@ -23,7 +23,6 @@ type frame struct {
 	ref      *ir.TypeRef   // enum/bitfield/struct/union element
 	items    *ir.ArrayElem // nested-array element descriptor
 	childLoc string        // struct/union element or sequence-nested inner-array scope
-	elemDyn  bool          // string/blob element without a schema maxlen (generator#102)
 	// cap is the wrapper array's schema count bound N (-1 == no count). N is a
 	// CAPACITY, not a length: it never reaches the wire and never adds elements the
 	// wire did not carry. All it does here is bound the array — a wrapper element id
@@ -90,7 +89,7 @@ func (g *gen) overIndexGuard(cap int64, loc string) string {
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	var walkObj func(loc, path string, fields []*ir.Field)
-	var walkArr func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemDyn bool, cap, emax int64)
+	var walkArr func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64)
 
 	walkObj = func(loc, path string, fields []*ir.Field) {
 		out = append(out, frame{loc: loc, path: path, fields: fields})
@@ -99,17 +98,18 @@ func (g *gen) frames(m *ir.Message) []frame {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				walkObj(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				walkArr(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, !fld.ElemMaxHas, capOf(fld.HasCount, fld.Count), boundOf(fld.ElemMaxHas, fld.ElemMax))
+				walkArr(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), boundOf(fld.ElemMaxHas, fld.ElemMax))
 			}
 		}
 	}
 
 	// walkArr registers the array scope entered on SequenceBegin(field/index),
-	// plus any child scope its elements descend into. elemDyn marks a string/
-	// blob element scope whose elements carry no schema maxlen (generator#102);
-	// cap is the array's schema fixed-count bound (-1 == dynamic); emax is the
-	// string/blob element's schema maxlen (-1 == unbounded).
-	walkArr = func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemDyn bool, cap, emax int64) {
+	// plus any child scope its elements descend into. cap is the array's schema
+	// fixed-count bound (-1 == dynamic); emax is the string/blob element's schema
+	// maxlen (-1 == unbounded), and `emax < 0` is what marks an element scope the
+	// receiver cap governs -- one bound, read one way, rather than a second
+	// boolean saying the same thing.
+	walkArr = func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64) {
 		fr := frame{loc: loc, path: list, isArr: true, elem: elem, ref: ref, items: items, cap: cap, emax: emax}
 		switch elem {
 		case ir.KindStruct, ir.KindUnion:
@@ -129,12 +129,11 @@ func (g *gen) frames(m *ir.Message) []frame {
 				// row equal to the element default is omitted by a conformant encoder
 				// (§2), so an id gap is ordinary and appending would shift every later
 				// row down by one.
-				walkArr(fr.childLoc, elemAt(list, loc), items.Elem, items.ElemRef, items.ElemItems, !items.ElemMaxHas, capOf(items.HasCount, items.Count), boundOf(items.ElemMaxHas, items.ElemMax))
+				walkArr(fr.childLoc, elemAt(list, loc), items.Elem, items.ElemRef, items.ElemItems, capOf(items.HasCount, items.Count), boundOf(items.ElemMaxHas, items.ElemMax))
 			} else {
 				out = append(out, fr) // native inner rows collected in place
 			}
 		default: // string/blob
-			fr.elemDyn = elemDyn
 			out = append(out, fr)
 		}
 	}
@@ -217,51 +216,128 @@ func (g *gen) placeRowAt(fr frame) string {
 		fr.path, fr.path, row, fr.path, row, ixVar(fr.loc))
 }
 
-// emitLenGuard writes the generator#102 length guard at the top of the String/
-// Blob callback: when the wire `total` exceeds the configured cap and the
-// target (cur, id) is a schema-unbounded field, decode fails with
-// LimitExceeded before any bytes are accumulated (single-shot and chunked
-// paths alike). Schema-bounded fields fall through unaffected.
-func (g *gen) emitLenGuard(f *cfile, fs []frame, kind ir.Kind, constName, what string, limit int64) {
-	f.line("        if (total > %s) {", constName)
-	f.line("            switch ((cur, id)) {")
+// payloadCapArms builds the (scope, id) arms of the String/Blob callback's
+// single dispatch: they resolve the DESTINATION, apply the schema bound, and
+// carry the receiver cap into the PayloadAcc call that follows.
+//
+// One switch, three jobs, because all three answer the same question -- *what is
+// this (scope, id), and what is it read under?*
+//
+//   - Destination. An id this scope does not declare gets no arm, so the
+//     `default: return` skips it before a byte is buffered, decoded or checked.
+//     That is what makes a skip a true skip (CORELIB_PLAN §6.4.5, generator#257)
+//     and it is also the MESSAGE_SPEC §7.3 tag test: a payload whose wire type
+//     contradicts the declared one arrives at an id this callback does not bind
+//     and leaves here -- ahead of everything below, so a skipped field is never
+//     bounded and never capped (§6.2.1, "a skipped field is never capped").
+//   - Schema bound. A field the schema bounds carries its own `maxlen`, and a
+//     wire `total` above it is malformed input: InvalidMessage at the length
+//     header, before any bytes accumulate, never truncated (MESSAGE_SPEC §7.1).
+//   - Receiver cap. `_cap` is the number PayloadAcc compares `total` against.
+//     For a schema-unbounded field it is the configured max_dyn_* constant; for a
+//     bounded one it is that field's own `maxlen`, which the arm has just
+//     enforced and under which the corelib's comparison can no longer fire -- the
+//     schema bound governs there, and its category is INVALID, not LimitExceeded
+//     (CORELIB_PLAN §6.3).
+//
+// Why the cap travels rather than being compared here: §6.2.1 fixes the
+// PROVENANCE of the number (generated code's, always) separately from the SITE of
+// the comparison ("a corelib MAY take a limit as an argument and perform the
+// check itself, and a port that does is conformant"). PayloadAcc.String/.Blob is
+// a call this callback already makes, with `total` in hand and before a byte is
+// taken, so the compare folds in beside a bound test already on the path instead
+// of standing as a branch in front of it. The number stays this layer's: passed
+// per call, retained nowhere, and with no omitted-argument spelling of
+// "unlimited" -- the parameter is required (corelib-cs#101).
+func (g *gen) payloadCapArms(fs []frame, kind ir.Kind, constName, what string) []string {
+	var arms []string
+	bounded := func(loc, id, name string, max int64) string {
+		return fmt.Sprintf("            case (%s, %s): if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s: %s above schema maxlen %d\"); _cap = %d; break;",
+			loc, id, max, name, what, max, max)
+	}
 	for _, fr := range fs {
 		if fr.isArr {
-			if fr.elem == kind && fr.elemDyn {
-				f.line("            case (%s, _): throw new SofabException(SofabError.LimitExceeded, \"%s element: %s above configured limit %d\");", fr.loc, fr.loc, what, limit)
+			if fr.elem != kind {
+				continue
+			}
+			if fr.emax >= 0 {
+				arms = append(arms, bounded(fr.loc, "_", fr.loc+" element", fr.emax))
+			} else {
+				arms = append(arms, fmt.Sprintf("            case (%s, _): _cap = %s; break;", fr.loc, constName))
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind != kind {
+				continue
+			}
+			if fld.HasMaxlen {
+				arms = append(arms, bounded(fr.loc, fmt.Sprintf("%d", fld.ID), fld.Name, fld.Maxlen))
+			} else {
+				arms = append(arms, fmt.Sprintf("            case (%s, %d): _cap = %s; break;", fr.loc, fld.ID, constName))
+			}
+		}
+	}
+	return arms
+}
+
+// emitPayloadDispatch writes the arms payloadCapArms built as the one switch at
+// the top of the String/Blob callback.
+func (g *gen) emitPayloadDispatch(f *cfile, arms []string) {
+	f.line("        // Destination, schema bound and receiver cap, resolved in one dispatch.")
+	f.line("        // An id this scope does not declare leaves at `default` -- before a byte is")
+	f.line("        // buffered and before either bound applies, which is the S7.3 skip and is")
+	f.line("        // why a skipped field is never capped. _cap is what PayloadAcc measures")
+	f.line("        // `total` against below: the configured cap, or a maxlen already enforced.")
+	f.line("        long _cap;")
+	f.line("        switch ((cur, id)) {")
+	for _, a := range arms {
+		f.line("%s", a)
+	}
+	f.line("            default: return;")
+	f.line("        }")
+}
+
+// capLive reports whether this message reaches a schema-unbounded field of the
+// given kind -- the only fields a max_dyn_* constant is emitted for and passed
+// on. Derived from the same frames the arms are, so the constant and the arms
+// referencing it can never disagree.
+func (g *gen) capLive(fs []frame, kind ir.Kind) bool {
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == kind && fr.emax < 0 {
+				return true
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
 			if fld.Kind == kind && !fld.HasMaxlen {
-				f.line("            case (%s, %d): throw new SofabException(SofabError.LimitExceeded, \"%s: %s above configured limit %d\");", fr.loc, fld.ID, fld.Name, what, limit)
+				return true
 			}
 		}
 	}
-	f.line("            }")
-	f.line("        }")
+	return false
 }
 
-// kindDestLabels collects the switch labels for every (loc, id) that can
-// materialize a value of `kind`: the fields declaring it plus the
-// wrapper-sequence rows whose element kind matches. An empty result means the
-// message never materializes a value of that kind at all.
-func (g *gen) kindDestLabels(fs []frame, kind ir.Kind) []string {
-	var labels []string
+// hasPayloadDest reports whether this message materializes a `string` or a
+// `blob` anywhere — the only reason a visitor holds a PayloadAcc. A message with
+// neither skips every payload the decoder delivers, so both callbacks have empty
+// bodies and the accumulator would be a field nothing reads.
+func hasPayloadDest(fs []frame) bool {
 	for _, fr := range fs {
 		if fr.isArr {
-			if fr.elem == kind {
-				labels = append(labels, fmt.Sprintf("case (%s, _):", fr.loc))
+			if fr.elem == ir.KindString || fr.elem == ir.KindBlob {
+				return true
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
-			if fld.Kind == kind {
-				labels = append(labels, fmt.Sprintf("case (%s, %d):", fr.loc, fld.ID))
+			if fld.Kind == ir.KindString || fld.Kind == ir.KindBlob {
+				return true
 			}
 		}
 	}
-	return labels
+	return false
 }
 
 // emitStringCb writes the String visitor callback. Single-shot: when the whole
@@ -275,32 +351,24 @@ func (g *gen) kindDestLabels(fs []frame, kind ir.Kind) []string {
 // definition skipped, and an empty body is what skipping means: decoding one
 // only to drop it would validate a payload nobody reads, which is what
 // CORELIB_PLAN §6.4 forbids (generator#257).
-func (g *gen) emitStringCb(f *cfile, fs []frame, limStr bool) {
+func (g *gen) emitStringCb(f *cfile, fs []frame) {
 	g.emitFixlenBegin(f, fs)
 
 	f.line("    public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
 	defer f.line("    }")
 
-	labels := g.kindDestLabels(fs, ir.KindString)
-	if len(labels) == 0 {
+	arms := g.payloadCapArms(fs, ir.KindString, "MaxDynStringLen", "string length")
+	if len(arms) == 0 {
 		f.line("        // No field of this message is a string, so every string payload the")
 		f.line("        // decoder delivers is skipped whole -- its bytes are never inspected.")
 		return
 	}
-	g.emitDestGuard(f, labels)
-	// MESSAGE_SPEC §7.1: a bounded string whose wire byte length exceeds its
-	// schema maxlen is malformed input, rejected as INVALID at the `total` header
-	// before any bytes accumulate (never truncated).
-	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
-	if limStr {
-		// generator#102: reject an over-cap unbounded string at its `total`
-		// header, before the fast path decodes or the accumulator grows.
-		g.emitLenGuard(f, fs, ir.KindString, "MaxDynStringLen", "string length", g.limits.stringLen)
-	}
+	g.emitPayloadDispatch(f, arms)
 	// PayloadAcc.String reassembles a split payload and validates the UTF-8 once,
 	// on the complete value -- a multi-byte sequence split across a feed is a
-	// well-formed prefix, not a defect (CORELIB_PLAN §6.4).
-	f.line("        string _s = pay.String(total, offset, data, chunkOffset, chunkLength);")
+	// well-formed prefix, not a defect (CORELIB_PLAN §6.4). It also compares
+	// `total` against _cap before it takes a byte (§6.2.1, corelib-cs#101).
+	f.line("        string _s = pay.String(total, offset, data, chunkOffset, chunkLength, _cap);")
 	f.line("        if (_s == null) return;   // payload incomplete: more chunks to come")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
@@ -336,29 +404,28 @@ func (g *gen) emitStringCb(f *cfile, fs []frame, limStr bool) {
 // never delivered (CORELIB_PLAN §6.2.1, §6.6, §6.7.2). Kotlin has gated both
 // callbacks since it was written; this is C# catching up.
 //
+// Resolving the destination first is also what keeps the receiver cap off a
+// skipped blob: the arm that binds an id is the arm that names its `_cap`, so an
+// id with no arm is measured against nothing at all (CORELIB_PLAN §6.2.1, "a
+// skipped field is never capped").
+//
 // A message with no blob field at all binds nothing anywhere, so its body is
 // empty rather than guarded -- an empty body IS the skip.
-func (g *gen) emitBlobCb(f *cfile, fs []frame, limBlob bool) {
+func (g *gen) emitBlobCb(f *cfile, fs []frame) {
 	f.line("    public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
 	defer f.line("    }")
 
-	labels := g.kindDestLabels(fs, ir.KindBlob)
-	if len(labels) == 0 {
+	arms := g.payloadCapArms(fs, ir.KindBlob, "MaxDynBlobLen", "blob length")
+	if len(arms) == 0 {
 		f.line("        // No field of this message is a blob, so every blob payload the decoder")
 		f.line("        // delivers is skipped whole -- its bytes are never copied out.")
 		return
 	}
-	g.emitDestGuard(f, labels)
-	// MESSAGE_SPEC §7.1: a bounded blob whose wire byte length exceeds its schema
-	// maxlen is malformed input, rejected as INVALID at the `total` header before
-	// any bytes accumulate (never truncated).
-	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
-	if limBlob {
-		// generator#102: reject an over-cap unbounded blob at its `total`
-		// header, before the fast path allocates or the accumulator grows.
-		g.emitLenGuard(f, fs, ir.KindBlob, "MaxDynBlobLen", "blob length", g.limits.blobLen)
-	}
-	f.line("        byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength);")
+	g.emitPayloadDispatch(f, arms)
+	// PayloadAcc.Blob reassembles a split payload and hands back a copy the caller
+	// owns; it compares `total` against _cap before it takes a byte, at the length
+	// header, ahead of the allocation the cap exists to prevent (§6.2.1).
+	f.line("        byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength, _cap);")
 	f.line("        if (_b == null) return;   // payload incomplete: more chunks to come")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
@@ -380,46 +447,7 @@ func (g *gen) emitBlobCb(f *cfile, fs []frame, limBlob bool) {
 	f.line("        }")
 }
 
-// emitDestGuard writes the skip gate at the very top of the String callback
-// (CORELIB_PLAN §6.4, generator#257): "skipped fields are never validated".
-// Skipping is a length jump over bytes that are not inspected (§5.2), and UTF-8
-// validation runs only where a `string` is materialized — read into a
-// destination. So the destination is resolved FIRST: every (loc, id) that
-// declares a string, plus the wrapper-sequence rows whose element kind is
-// string, falls through; anything else returns right here.
-//
-// Returning here is what makes the skip a true skip: an unknown id, or a §7.3
-// wire-type contradiction routed down the same path, never reaches Utf8.Decode()
-// and never enters the shared PayloadAcc (so a later declared field cannot
-// inherit its bytes). Without it a lone continuation byte at an undeclared id
-// turned an otherwise valid message into InvalidMessage.
-//
-// Placed ahead of the maxlen/limit guards, which are already destination-scoped
-// and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is
-// preserved. The case labels mirror the materializing switch below one for one,
-// so a loc is never both a `(loc, _)` row and a `(loc, id)` field arm.
-func (g *gen) emitDestGuard(f *cfile, labels []string) {
-	f.line("        // A payload this scope does not declare is skipped: its bytes are jumped")
-	f.line("        // over, never inspected. Resolve the destination first and leave before a")
-	f.line("        // byte is buffered, decoded or checked.")
-	f.line("        switch ((cur, id)) {")
-	for _, l := range labels {
-		f.line("            %s", l)
-	}
-	f.line("                break;")
-	f.line("            default: return;")
-	f.line("        }")
-}
-
-// emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
-// of the String/Blob callback, the bounded-field twin of emitLenGuard: every
-// field of that kind with a schema `maxlen` (scalar fields and wrapper-sequence
-// elements alike) gets a (loc, id) arm that throws InvalidMessage when the wire
-// `total` exceeds its own maxlen — checked at the length header before any bytes
-// accumulate (single-shot and chunked paths alike), never truncated. Unbounded
-// fields get no arm: the generator#102 configured limit governs them. Each
-// bounded field carries a distinct maxlen, so the arms compare per-arm rather
-// / emitFixlenBegin latches every schema bound a fixlen field's LENGTH WORD already
+// emitFixlenBegin latches every schema bound a fixlen field's LENGTH WORD already
 // decides, at that word (CORELIB_PLAN §5.2, generator#267).
 //
 // The bounds are not new -- a scalar/element `maxlen` and a wrapper element's
@@ -490,40 +518,6 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, what string) []string {
 		}
 	}
 	return arms
-}
-
-// emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
-// of the String/Blob callback, the bounded-field twin of emitLenGuard: every
-// field of that kind with a schema `maxlen` (scalar fields and wrapper-sequence
-// elements alike) gets a (loc, id) arm that throws InvalidMessage when the wire
-// `total` exceeds its own maxlen — checked at the length header before any bytes
-// accumulate (single-shot and chunked paths alike), never truncated. Unbounded
-// fields get no arm: the generator#102 configured limit governs them. Each
-// bounded field carries a distinct maxlen, so the arms compare per-arm rather
-// than sharing one outer `if` (unlike emitLenGuard's single constant cap).
-func (g *gen) emitMaxlenGuard(f *cfile, fs []frame, kind ir.Kind, what string) {
-	var arms []string
-	for _, fr := range fs {
-		if fr.isArr {
-			if fr.elem == kind && fr.emax >= 0 {
-				arms = append(arms, fmt.Sprintf("            case (%s, _): if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s element: %s above schema maxlen %d\"); break;", fr.loc, fr.emax, fr.loc, what, fr.emax))
-			}
-			continue
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == kind && fld.HasMaxlen {
-				arms = append(arms, fmt.Sprintf("            case (%s, %d): if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s: %s above schema maxlen %d\"); break;", fr.loc, fld.ID, fld.Maxlen, fld.Name, what, fld.Maxlen))
-			}
-		}
-	}
-	if len(arms) == 0 {
-		return
-	}
-	f.line("        switch ((cur, id)) {")
-	for _, a := range arms {
-		f.line("%s", a)
-	}
-	f.line("        }")
 }
 
 // emitArraySkipGuard prepends the S7.3 discard clause to Unsigned()/Signed()
@@ -638,10 +632,17 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// A configured max_dyn_* cap is live only when this message actually has a
 	// schema-unbounded field of that kind — otherwise it is inert and no
 	// constant or guard is emitted (generator#102).
+	//
+	// The string and blob caps read that liveness off the FRAMES rather than off
+	// ir.Bounds, because the payload dispatch now names the constant from an arm
+	// built out of the same walk: deriving the declaration and its references from
+	// one source is what keeps them from disagreeing (the generator#387 liveness
+	// bug, one shape over — there the constant was missing and the generated
+	// source did not compile, which no substring assertion sees).
 	b := ir.Bounds(fields)
 	limArr := g.limits.arrayHas && b.HasDynArray
-	limStr := g.limits.stringHas && b.HasDynString
-	limBlob := g.limits.blobHas && b.HasDynBlob
+	limStr := g.limits.stringHas && g.capLive(fs, ir.KindString)
+	limBlob := g.limits.blobHas && g.capLive(fs, ir.KindBlob)
 
 	f.line("internal sealed class %sVisitor : IVisitor {", name)
 	f.line("    private readonly %s m;", name)
@@ -666,7 +667,9 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("    private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)")
 	f.line("    private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)")
 	f.line("    private int sp = 0;")
-	f.line("    private readonly PayloadAcc pay = new PayloadAcc(); // reassembles a string/blob payload split across feeds")
+	if hasPayloadDest(fs) {
+		f.line("    private readonly PayloadAcc pay = new PayloadAcc(); // reassembles a string/blob payload split across feeds")
+	}
 	f.line("    public %sVisitor(%s msg) { m = msg; }", name, name)
 	for i, fr := range fs {
 		f.line("    private const int %s = %d;", fr.loc, i)
@@ -760,10 +763,9 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	g.emitFloatVisit(f, fs, ir.KindFP32, "Fp32", "float")
 	g.emitFloatVisit(f, fs, ir.KindFP64, "Fp64", "double")
 
-	g.emitStringCb(f, fs, limStr)
+	g.emitStringCb(f, fs)
 
-	// Blob. Single-shot on the whole-in-one-chunk fast path (see String).
-	g.emitBlobCb(f, fs, limBlob)
+	g.emitBlobCb(f, fs)
 
 	// ArrayBegin: clear direct native arrays; place a fresh inner row for a
 	// native-nested (array-of-array) scope (each row arrives as ArrayBegin(index),

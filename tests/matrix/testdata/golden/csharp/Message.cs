@@ -138,7 +138,6 @@ internal sealed class ScalarsVisitor : IVisitor {
     private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)
     private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)
     private int sp = 0;
-    private readonly PayloadAcc pay = new PayloadAcc(); // reassembles a string/blob payload split across feeds
     public ScalarsVisitor(Scalars msg) { m = msg; }
     private const int Root = 0;
 
