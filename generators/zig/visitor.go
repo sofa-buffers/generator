@@ -906,10 +906,19 @@ func (g *gen) emitFixlenBegin(f *zfile, fs []frame, name string) {
 // are well formed and the same message decodes under a looser cap, issue #387 --
 // folding the two together is forbidden by CORELIB_PLAN §6.2.1).
 //
-// The callers differ in how they REFUSE -- a sticky flag, an error return, a
-// break to the dead scope -- so this returns the test and the category and lets
-// each spell its own refusal. ok is false only when the array is dynamic AND no
-// cap is live for this schema.
+// Only ONE of the two is ever emitted here, and which one decides where the
+// comparison runs. A schema `count` is generated code's: the caller emits this
+// test in front of the corelib call, and callers differ in how they REFUSE -- a
+// sticky flag, an error return, a break to the dead scope -- so this returns the
+// test and the category and lets each spell its own refusal. A receiver cap is
+// corelib-zig's: `overLimit` true means the caller emits NO test and passes
+// max_dyn_array_count to the capped helper (`growCapped` / `setElemCapped`)
+// instead, which compares it before it extends the destination and answers
+// error.LimitExceeded. CORELIB_PLAN §6.2.1 permits that site and requires it be
+// the only one -- a caller that emitted this condition too would be the "two
+// routes to one rule" the section forbids.
+//
+// ok is false only when the array is dynamic AND no cap is live for this schema.
 func (g *gen) overIndexCond(cap int64) (cond string, overLimit, ok bool) {
 	if cap >= 0 {
 		return fmt.Sprintf("id >= %d", cap), false, true
@@ -921,10 +930,14 @@ func (g *gen) overIndexCond(cap int64) (cond string, overLimit, ok bool) {
 }
 
 // fixlenBeginArms builds the per-scope arms for one fixlen subtype. A wrapper
-// element carries its array's over-index bound AND its element length bound, in
-// that order: an element that is not this array's element at all must not have
-// its length measured against the element bound. A scalar field carries its own
-// length bound, keyed by field id inside its scope.
+// element carries its array's SCHEMA over-index bound AND its element length
+// bound, in that order: an element that is not this array's element at all must
+// not have its length measured against the element bound. A scalar field carries
+// its own length bound, keyed by field id inside its scope.
+//
+// The array's RECEIVER cap on the index is not here: it is passed to the
+// corelib call that grows the destination (`setElemCapped`) and compared there,
+// so this hook emits no test for it (CORELIB_PLAN §6.2.1, overIndexCond).
 //
 // The length bound is the schema `maxlen` where the schema declares one
 // (INVALID, MESSAGE_SPEC §7.1) and the configured receiver cap where it does not
@@ -952,14 +965,26 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind) []string {
 	for _, fr := range fs {
 		idCond, idLim, idOK := g.overIndexCond(fr.cap)
 		elemLen, elemLenOK := lenBound(fr.emax, fr.elemDynLen)
-		if fr.kind == fkSeqArr && fr.elemKind == kind && (idOK || elemLenOK) {
+		// Only the SCHEMA count is latched here. A receiver cap on an unbounded
+		// array is the corelib's comparison now, made inside the setElemCapped
+		// this element's payload callback issues (CORELIB_PLAN §6.2.1), and
+		// §6.2.1's "one implementation, wherever it runs" forbids emitting it a
+		// second time in generated code. It still lands before the destination is
+		// sized, which is the enforcement point §6.2.1 fixes for a wrapper array:
+		// "the element index, checked before the container it indexes into is
+		// extended". The schema bound cannot move with it — MESSAGE_SPEC §7.1 is a
+		// validity verdict, and §5.2.3 wants it decided at the length word so a
+		// message truncated right after it is INVALID, not INCOMPLETE.
+		//
+		// The element LENGTH bound is untouched by that move and stays here for
+		// both flavours (#438): its receiver cap has no corelib call of its own to
+		// ride, and deciding it at the length word is what keeps a truncated
+		// over-cap payload LimitExceeded rather than INCOMPLETE.
+		latchIdx := idOK && !idLim
+		if fr.kind == fkSeqArr && fr.elemKind == kind && (latchIdx || elemLenOK) {
 			body := ""
-			if idOK {
-				err := "InvalidMessage"
-				if idLim {
-					err = "LimitExceeded"
-				}
-				body += fmt.Sprintf("if (%s) return sofab.Error.%s; ", idCond, err)
+			if latchIdx {
+				body += fmt.Sprintf("if (%s) return sofab.Error.InvalidMessage; ", idCond)
 			}
 			if elemLenOK {
 				body += elemLen + " "
@@ -1033,7 +1058,20 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	}
 	for _, fr := range fs {
 		if fr.kind == fkSeqArr && fr.elemKind == kind {
+			// The element INDEX bound. A SCHEMA `count` is a validity statement and
+			// stays a generated INVALID guard (below); the receiver cap on an
+			// unbounded array rides the placement call itself — setElemCapped
+			// compares `id` against it and refuses before it grows the destination
+			// (CORELIB_PLAN §6.2.1, "a corelib MAY take a limit as an argument and
+			// perform the check itself"). One implementation, in one place: with the
+			// cap passed in, generated code emits no index guard for this array at
+			// all, here or at the element's length word (fixlenBeginArms).
+			idCond, idLim, idOK := g.overIndexCond(fr.cap)
+			capped := idOK && idLim
 			set := fmt.Sprintf("sofab.arrays.setElem([]const u8, self.alloc, &(%s), id, \"\", chunk)", fr.path)
+			if capped {
+				set = fmt.Sprintf("sofab.arrays.setElemCapped([]const u8, self.alloc, &(%s), id, \"\", chunk, max_dyn_array_count) catch { self.lim = true; }", fr.path)
+			}
 			// stmt is the placement as a single statement (trailing ;), for use
 			// inside an { ... } block; body is the raw arm expression. For a string
 			// element the materialization is UTF-8-validated (mat); blob is verbatim.
@@ -1041,6 +1079,9 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 			body := set
 			if kind == ir.KindString {
 				body = stmt
+			} else if capped {
+				// `x catch { ... }` is a statement, not an arm expression: brace it.
+				body = "{ " + stmt + " }"
 			}
 			if active && fr.elemDynLen {
 				totalUsed = true
@@ -1056,15 +1097,13 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 				body = fmt.Sprintf("if (total > %d) { self.inv = true; } else { %s }", fr.emax, stmt)
 				stmt = body
 			}
-			// Bound the element INDEX before setElem grows the slice: the index IS
-			// the array's length, so this is what bounds an over-index heap
-			// amplification (see overIndexCond).
-			if cond, lim, ok := g.overIndexCond(fr.cap); ok {
-				flag := "self.inv"
-				if lim {
-					flag = "self.lim"
-				}
-				body = fmt.Sprintf("if (%s) { %s = true; } else { %s }", cond, flag, stmt)
+			// The schema `count`: an element id at or past it is INVALID
+			// (MESSAGE_SPEC §7.1), decided here, before setElem grows the slice —
+			// the index IS the array's length, so this is what bounds an
+			// over-index heap amplification (see overIndexCond). The receiver-cap
+			// case took the setElemCapped route above and emits nothing here.
+			if idOK && !idLim {
+				body = fmt.Sprintf("if (%s) { self.inv = true; } else { %s }", idCond, stmt)
 			}
 			all = append(all, frameArms{fr: fr, body: body})
 		}
@@ -1194,17 +1233,26 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 						panic("zig: count-less native array with no cap -- every target has a finite default (§9.5)")
 					}
 					// A count-less array is always unbounded, so every direct
-					// dynamic native array gets the guard. an = 0 drops the
-					// rejected array's elements: a field over the cap never
-					// allocates (generator#102).
+					// dynamic native array is capped. The cap is passed INTO the
+					// allocation it exists to prevent: allocNCapped compares the
+					// wire count against it and refuses before it allocates
+					// (CORELIB_PLAN §6.2.1 -- "a corelib MAY take a limit as an
+					// argument and perform the check itself"), so generated code
+					// emits no guard of its own and the rule has one implementation.
+					// The number is still ours: it is a constant of this file,
+					// passed per call and not retained anywhere.
 					//
-					// And because the cap has just bounded the count, the
-					// destination is allocated at EXACTLY that count, once
-					// (ARCHITECTURE §9.5, shape A). The capped reservation this
-					// replaces -- sofab.arrays.allocCapped, grown by putGrowing --
-					// existed because nothing had bounded the count yet; the cap
-					// bounds it, so the reservation only added doubling and copies.
-					body := fmt.Sprintf("if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { %s.%s = sofab.arrays.allocN(%s, self.alloc, count); }",
+					// an = 0 drops the rejected array's elements, and the
+					// destination keeps the value it had -- rejected, never
+					// clamped, and never half-filled.
+					//
+					// A count that clears the cap is allocated at EXACTLY that
+					// count, once (ARCHITECTURE §9.5, shape A). The capped
+					// reservation this replaces -- sofab.arrays.allocCapped, grown
+					// by putGrowing -- existed because nothing had bounded the
+					// count yet; the cap bounds it, so the reservation only added
+					// doubling and copies.
+					body := fmt.Sprintf("%s.%s = sofab.arrays.allocNCapped(%s, self.alloc, count, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; };",
 						fr.path, zigIdent(fld.Name), elem)
 					// A count-less array has no schema bound to misapply, but it
 					// still must not ALLOCATE from a header that is being skipped
@@ -1229,30 +1277,39 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 			// `count` bounds the id (an id >= N is INVALID, §5.1/§7), which also
 			// bounds the id-keyed gap-fill against an over-index amplification.
 			inner := strings.TrimPrefix(fr.elemType, "[]const ")
-			// The row is sized at exactly the announced count, which the guard
-			// below has bounded first (§9.5, shape A).
-			body := fmt.Sprintf("{ self.%s = id; if (sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, &.{})) { sofab.arrays.at(%s, id).* = sofab.arrays.allocN(%s, self.alloc, count); } }",
-				fr.idx, fr.elemType, fr.path, fr.path, inner)
 			// A ROW's own element count needs its own bound -- fr.cap bounds the
 			// row's ID, never how many elements the row claims. A row the schema
-			// counts is bounded by that count (INVALID above it, §7.1); one the
-			// schema leaves unbounded is governed by the configured cap.
-			switch {
-			case fr.elemCap >= 0:
-				body = fmt.Sprintf("if (count > %d) { self.inv = true; self.an = 0; } else %s", fr.elemCap, body)
-			case g.limits.arrayHas:
-				body = fmt.Sprintf("if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else %s", body)
-			default:
-				panic("zig: unbounded native row with no cap -- every target has a finite default (§9.5)")
-			}
-			// The row's ID is bounded before its element count, matching the order
-			// every other backend takes the two verdicts in.
-			if cond, lim, ok := g.overIndexCond(fr.cap); ok {
-				flag := "self.inv"
-				if lim {
-					flag = "self.lim"
+			// counts is bounded by that count (INVALID above it, §7.1), decided by
+			// generated code before it calls; one the schema leaves unbounded is
+			// bounded by the receiver cap, which is passed INTO allocNCapped and
+			// compared there (CORELIB_PLAN §6.2.1). Either way the row is sized at
+			// exactly the announced count only once that count has been bounded
+			// (§9.5, shape A).
+			rowAlloc := fmt.Sprintf("sofab.arrays.at(%s, id).* = sofab.arrays.allocN(%s, self.alloc, count);", fr.path, inner)
+			if fr.elemCap < 0 {
+				if !g.limits.arrayHas {
+					panic("zig: unbounded native row with no cap -- every target has a finite default (§9.5)")
 				}
-				body = fmt.Sprintf("if (%s) { %s = true; self.an = 0; } else %s", cond, flag, body)
+				rowAlloc = fmt.Sprintf("sofab.arrays.at(%s, id).* = sofab.arrays.allocNCapped(%s, self.alloc, count, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; };",
+					fr.path, inner)
+			}
+			// The row's ID, bounded before the outer slice grows to hold it. A
+			// schema `count` is again generated code's (INVALID); the receiver cap
+			// rides growCapped, which refuses the index before it extends the
+			// destination -- §6.2.1's enforcement point for an array with no count
+			// header, and the site the cap now has ONE implementation at.
+			idCond, idLim, idOK := g.overIndexCond(fr.cap)
+			grow := fmt.Sprintf("sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, &.{})", fr.elemType, fr.path)
+			if idOK && idLim {
+				grow = fmt.Sprintf("sofab.arrays.growCapped(%s, self.alloc, &(%s), @as(usize, id) + 1, &.{}, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; }",
+					fr.elemType, fr.path)
+			}
+			body := fmt.Sprintf("{ self.%s = id; if (%s) { %s } }", fr.idx, grow, rowAlloc)
+			if fr.elemCap >= 0 {
+				body = fmt.Sprintf("if (count > %d) { self.inv = true; self.an = 0; } else %s", fr.elemCap, body)
+			}
+			if idOK && !idLim {
+				body = fmt.Sprintf("if (%s) { self.inv = true; self.an = 0; } else %s", idCond, body)
 			}
 			// Same rule as the leaf arms: a row is grown and sized only for a
 			// header whose element kind matches the one this row declares. A
@@ -1384,16 +1441,22 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 			b.WriteString("blk: {\n")
 			// Bound the element INDEX before the destination grows, which is what
 			// bounds the gap-fill against an over-index heap amplification (see
-			// overIndexCond).
-			if cond, lim, ok := g.overIndexCond(fr.cap); ok {
-				flag := "self.inv"
-				if lim {
-					flag = "self.lim"
-				}
-				fmt.Fprintf(&b, "                if (%s) { %s = true; break :blk .dead; }\n", cond, flag)
+			// overIndexCond). A schema `count` is a validity bound and is decided
+			// here (INVALID, MESSAGE_SPEC §7.1); the receiver cap on an unbounded
+			// array is handed to growCapped instead, which compares it and refuses
+			// before it extends anything -- the enforcement point §6.2.1 names for
+			// an array with no count header, and the rule's single implementation.
+			idCond, idLim, idOK := g.overIndexCond(fr.cap)
+			if idOK && !idLim {
+				fmt.Fprintf(&b, "                if (%s) { self.inv = true; break :blk .dead; }\n", idCond)
 			}
-			fmt.Fprintf(&b, "                if (!sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, %s)) break :blk .dead;\n",
-				fr.elemType, fr.path, fr.elemFill)
+			if idOK && idLim {
+				fmt.Fprintf(&b, "                if (!(sofab.arrays.growCapped(%s, self.alloc, &(%s), @as(usize, id) + 1, %s, max_dyn_array_count) catch { self.lim = true; break :blk .dead; })) break :blk .dead;\n",
+					fr.elemType, fr.path, fr.elemFill)
+			} else {
+				fmt.Fprintf(&b, "                if (!sofab.arrays.grow(%s, self.alloc, &(%s), @as(usize, id) + 1, %s)) break :blk .dead;\n",
+					fr.elemType, fr.path, fr.elemFill)
+			}
 			fmt.Fprintf(&b, "                self.%s = id;\n", fr.idx)
 			fmt.Fprintf(&b, "                break :blk .%s;\n", fr.elemLoc)
 			b.WriteString("            }")

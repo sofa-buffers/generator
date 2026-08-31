@@ -505,6 +505,76 @@ sb_expect '\022\302\002ABC'                  InvalidMessage "a 40-byte string ov
 sb_expect '\002\113ABC'  IncompleteMessage "an over-cap BLOB at the string-declared id 0 (§7.3 skip), then EOF"
 sb_expect '\072\112ABC'  IncompleteMessage "an over-cap string at the UNKNOWN id 7, then EOF"
 echo "==> string/blob cap enforcement point OK"
+# The receiver cap on a WRAPPER array's element INDEX, and on a matrix row's own
+# element count (CORELIB_PLAN 6.2.1). These are the caps corelib-zig compares --
+# generated code passes max_dyn_array_count into arrays.setElemCapped (string and
+# blob elements), arrays.growCapped (struct elements, and a matrix row's index)
+# and arrays.allocNCapped (the row's count), and emits no guard of its own -- so
+# a codegen change that stopped passing the number would look identical in review
+# and would be caught only here. Every case is driven as raw wire bytes, because
+# an over-cap message is one the encoder will not produce.
+#
+#   s (id 0)  wrapper array of string: 06 = sequence start id 0; element header
+#             (id << 3) | 2 = fixlen; fixlen word (1 << 3) | 2 = 0x0a (1 byte,
+#             string); payload 'x'; 07 = sequence end.
+#   o (id 1)  wrapper array of struct: 0e = sequence start id 1; element
+#             (id << 3) | 6 = nested sequence; child x (id 1) = 1; 07 07.
+#   m (id 2)  matrix: 16 = sequence start id 2; row = unsigned-array header
+#             (id << 3) | 3, then its own count and elements; 07.
+#
+# max_dyn_array_count is 4, so index 3 is the last admissible one and index 4 is
+# over -- a wrapper array's length being its highest present id + 1 (MESSAGE_SPEC
+# 5.1), which is why it is the INDEX that is capped and not a count.
+echo "==> receiver cap on wrapper element index and row count (CORELIB_PLAN 6.2.1)"
+cat > "$WORK/wrap.yaml" <<'YAML'
+version: 1
+messages:
+  wrap:
+    payload:
+      s: { id: 0, type: array, items: { type: string } }
+      o: { id: 1, type: array, items: { type: struct, fields: { x: { id: 1, type: u32 } } } }
+      m: { id: 2, type: array, items: { type: array, items: { type: u32 } } }
+YAML
+zig_build "$WORK/wrap.yaml" "$WORK/wrap" "$WORK/cfg_lim.yaml"
+WRAPH="$WORK/wrap/zig-out/bin/harness"
+
+# accepts: at the cap, every shape still decodes.
+for row in \
+    'string element at index 3:\006\032\012\170\007' \
+    'struct element at index 3:\016\036\010\001\007\007' \
+    'matrix row at index 3:\026\033\001\001\007' \
+    'matrix row of 4 elements:\026\003\004\001\002\003\004\007'
+do
+    what=${row%%:*}; bytes=${row#*:}
+    printf "$bytes" | "$WRAPH" decode wrap >/dev/null 2>&1 || {
+        echo "FAIL: $what is at the cap and must decode"; exit 1; }
+done
+
+# rejects: one past the cap, and as LimitExceeded -- the policy category. The
+# bytes are well formed and the same message decodes under a looser cap, so
+# reporting InvalidMessage here would be the fold CORELIB_PLAN 6.2.1 forbids.
+for row in \
+    'string element at index 4:\006\042\012\170\007' \
+    'struct element at index 4:\016\046\010\001\007\007' \
+    'matrix row at index 4:\026\043\001\001\007' \
+    'matrix row of 5 elements:\026\003\005\001\002\003\004\005\007'
+do
+    what=${row%%:*}; bytes=${row#*:}
+    if printf "$bytes" | "$WRAPH" decode wrap >/dev/null 2>&1; then
+        echo "FAIL: $what is over the cap and must be rejected"; exit 1
+    fi
+    printf "$bytes" | "$WRAPH" decode wrap 2>&1 | grep -q LimitExceeded || {
+        echo "FAIL: $what must be refused as LimitExceeded, not as another category"; exit 1; }
+done
+
+# A skipped field is never capped (6.2.1). An unsigned ARRAY arrives at id 0,
+# which the schema declares a string wrapper array: the wire type contradicts the
+# declared one, so MESSAGE_SPEC 7.3 skips the field -- and its 9-element count,
+# over the cap of 4, is not this field's count and must not be measured against
+# it. The decode stays COMPLETE.
+printf '\003\011\001\002\003\004\005\006\007\010\011' | "$WRAPH" decode wrap >/dev/null 2>&1 || {
+    echo "FAIL: a 7.3-skipped over-cap array must not be capped"; exit 1; }
+echo "==> wrapper index / row count caps OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/zig/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"

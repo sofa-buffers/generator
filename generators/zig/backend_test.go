@@ -214,14 +214,21 @@ messages:
 			t.Errorf("message.zig missing over-index guard %q", want)
 		}
 	}
-	// The dynamic string array is bounded too, and by the same test in the same
-	// place -- what differs is the bound and the category. Its length is its
+	// The dynamic string array is bounded too, and at the same point -- what
+	// differs is the bound, the category, and who compares. Its length is its
 	// highest INDEX, so the receiver cap binds the index (self.lim, generator#387)
 	// where a count:N binds it as INVALID; the element's own length is capped
-	// beside it (§9.5, generator#385). Its store stays strict-UTF-8-wrapped
-	// (issue #85), a string element being materialized.
-	if !strings.Contains(m, `.root_ds => if (id >= max_dyn_array_count) { self.lim = true; } else { if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem([]const u8, self.alloc, &(self.m.ds), id, "", chunk); } } },`) {
+	// beside it (§9.5, generator#385). The cap is handed to setElemCapped, which
+	// refuses the index before it grows the destination (CORELIB_PLAN §6.2.1), so
+	// no guard is emitted in front of the call. Its store stays
+	// strict-UTF-8-wrapped (issue #85), a string element being materialized.
+	if !strings.Contains(m, `.root_ds => if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.ds), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; } },`) {
 		t.Errorf("a dynamic wrapper array must cap its element index:\n%s", m)
+	}
+	// And the rule has ONE implementation (§6.2.1): with the cap passed in, the
+	// generated layer must not test the index a second time.
+	if strings.Contains(m, "id >= max_dyn_array_count") {
+		t.Errorf("the receiver index cap must be the corelib's alone, not also a generated guard:\n%s", m)
 	}
 }
 
@@ -251,8 +258,10 @@ messages:
 		// Bounded scalar string and blob: reject over-maxlen before storing.
 		`0 => if (total > 8) { self.inv = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.bs = chunk; } },`, // string: strict UTF-8 wraps the store
 		`1 => if (total > 8) { self.inv = true; } else { self.m.bb = chunk; },`,                                                            // blob: opaque, verbatim
-		// Bounded wrapper string element: maxlen guard, then strict UTF-8, wrap the sofab.arrays.setElem placement.
-		`if (total > 5) { self.inv = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem([]const u8, self.alloc, &(self.m.ws), id, "", chunk); } }`,
+		// Bounded wrapper string element in an UNCOUNTED array: maxlen guard, then
+		// strict UTF-8, wrap the placement -- which carries the array's receiver
+		// cap on the element index as an argument (CORELIB_PLAN §6.2.1).
+		`if (total > 5) { self.inv = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.ws), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; } }`,
 		// Surfaced as INVALID.
 		`if (v.inv) return error.InvalidMessage;`,
 	} {
@@ -461,7 +470,7 @@ messages:
 		"const max_dyn_string_len: usize = 4096;",
 		// Unbounded fields are guarded at the count/length header, before the
 		// field's storage is taken.
-		"1 => if (kind == .unsigned) { if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.arr = sofab.arrays.allocN(u64, self.alloc, count); } },",
+		"1 => if (kind == .unsigned) { self.m.arr = sofab.arrays.allocNCapped(u64, self.alloc, count, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; }; },",
 		"0 => if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.s = chunk; } },",
 		// InvalidMessage (generator#100) takes precedence over LimitExceeded.
 		"if (v.inv) return error.InvalidMessage;",
@@ -469,10 +478,11 @@ messages:
 		// The schema-bounded array keeps its generator#100 guard, now behind the
 		// generator#188 fill guard (a bare scalar at this array id is skipped).
 		"2 => { if (self.afill != 0) { self.afill -= 1; if (value < -2147483648 or value > 2147483647) { self.inv = true; return; } self.m.barr.push(@intCast(value), &self.inv); } },",
-		// The cap bounds the untrusted wire count, and the destination is then
-		// allocated at exactly that count -- the check is what makes the exact
-		// allocation safe (ARCHITECTURE §9.5, shape A).
-		"self.m.arr = sofab.arrays.allocN(u64, self.alloc, count)",
+		// The cap bounds the untrusted wire count INSIDE the allocation call --
+		// allocNCapped refuses above it and allocates exactly it below
+		// (CORELIB_PLAN §6.2.1, ARCHITECTURE §9.5 shape A). One comparison, in
+		// the corelib, on a call the decode path already made.
+		"self.m.arr = sofab.arrays.allocNCapped(u64, self.alloc, count, max_dyn_array_count)",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("limits message.zig missing %q", want)
@@ -505,7 +515,7 @@ messages:
 	// The cap is what bounds the count, so the allocation is exact with the
 	// default cap exactly as with a configured one -- and the capped reservation
 	// is gone entirely (§9.5, shape A).
-	if !strings.Contains(plain, "sofab.arrays.allocN(") || strings.Contains(plain, "allocCapped") {
+	if !strings.Contains(plain, "sofab.arrays.allocNCapped(u64, self.alloc, count, max_dyn_array_count)") || strings.Contains(plain, "allocCapped") {
 		t.Error("no-config output must allocate the checked count exactly")
 	}
 }
@@ -1397,9 +1407,10 @@ messages:
 	m := string(files[0].Content)
 
 	for _, want := range []string{
-		// Schema-unbounded: the cap decides, then the exact allocation.
-		"if (count > max_dyn_array_count) { self.lim = true; self.an = 0; } else { self.m.dyn = sofab.arrays.allocN(u32, self.alloc, count); }",
-		"self.m.fps = sofab.arrays.allocN(f32, self.alloc, count)",
+		// Schema-unbounded: the cap rides the allocation call, which decides it
+		// before it allocates (CORELIB_PLAN §6.2.1).
+		"self.m.dyn = sofab.arrays.allocNCapped(u32, self.alloc, count, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; };",
+		"self.m.fps = sofab.arrays.allocNCapped(f32, self.alloc, count, max_dyn_array_count)",
 		// A count:N field is INLINE storage: never allocated, never grown, and so
 		// untouched by this -- it clears at the header and pushes with a capacity
 		// check, exactly as before.
@@ -1427,11 +1438,23 @@ messages:
 // gap filling makes the array's length its highest present id, so two delivered
 // elements can be an arbitrarily large slice.
 //
-// Zig refuses in three different ways depending on the surface -- an error
-// return from fixlenBegin, the sticky self.lim in the payload callback, a break
-// to the dead scope in sequenceBegin -- so all three are asserted here: a shared
-// helper decides the test and the category, each site spells its own refusal,
-// and a site that spelled it wrong would be a silent divergence.
+// The comparison itself is the corelib's: the cap is passed to the helper the
+// decode path already calls at that index -- setElemCapped for a string/blob
+// element, growCapped for a struct element and for a native matrix row -- which
+// refuses before it extends the destination (CORELIB_PLAN §6.2.1, "a corelib MAY
+// take a limit as an argument and perform the check itself"). Generated code
+// therefore emits NO index guard of its own for an unbounded array: §6.2.1's
+// "one implementation, wherever it runs" makes a second test at the same index a
+// defect, not belt and braces.
+//
+// What still differs per surface is how each site turns the refusal into this
+// decoder's outcome -- the sticky self.lim in the payload callback, a break to
+// the dead scope in sequenceBegin, an early return in arrayBegin -- so all three
+// are asserted here; a site that spelled it wrong would be a silent divergence.
+//
+// The element LENGTH cap did not move with it (#438): it has no corelib call at
+// the length word to ride, so it stays a generated guard in fixlenBegin, and
+// fixlenBegin is asserted here for that and only that.
 func TestZigWrapperIndexCap(t *testing.T) {
 	s := buildSchema(t, `
 version: 1
@@ -1451,23 +1474,47 @@ messages:
 	m := string(files[0].Content)
 
 	for _, want := range []string{
-		// fixlenBegin: refuses by returning the error. The element LENGTH cap sits
-		// here too, behind the index cap -- both are decided by the length word,
-		// so neither may wait for the payload (see TestZigDynLenCapAtLengthWord).
-		".root_dstrs => { if (id >= max_dyn_array_count) return sofab.Error.LimitExceeded; if (total > max_dyn_string_len) return sofab.Error.LimitExceeded; },",
-		".root_dblbs => { if (id >= max_dyn_array_count) return sofab.Error.LimitExceeded; if (total > max_dyn_blob_len) return sofab.Error.LimitExceeded; },",
-		// the payload callback: refuses by setting the sticky flag.
-		".root_dstrs => if (id >= max_dyn_array_count) { self.lim = true; } else {",
-		// sequenceBegin: refuses by breaking to the dead scope.
-		"if (id >= max_dyn_array_count) { self.lim = true; break :blk .dead; }",
-		// a native matrix ROW: its id is the outer array's length, capped ahead of
-		// its own element count (#386).
-		".root_dmat => if (kind == .unsigned) if (id >= max_dyn_array_count) { self.lim = true; self.an = 0; } else if (count > max_dyn_array_count)",
+		// fixlenBegin: refuses by returning the error. What is left here is the
+		// element LENGTH cap alone -- it has no corelib call of its own to ride,
+		// and it must be decided at the length word rather than at payload
+		// completion (#438, TestZigDynLenCapAtLengthWord). The index cap that used
+		// to sit in front of it has moved into setElemCapped below.
+		".root_dstrs => { if (total > max_dyn_string_len) return sofab.Error.LimitExceeded; },",
+		".root_dblbs => { if (total > max_dyn_blob_len) return sofab.Error.LimitExceeded; },",
+		// the payload callback: the cap goes into the placement, and the refusal
+		// comes back as the sticky flag. The length cap stays in front of it as
+		// the fallback for a consumer built against a corelib without the hook.
+		`.root_dstrs => if (total > max_dyn_string_len) { self.lim = true; } else { if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.dstrs), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; } },`,
+		`.root_dblbs => if (total > max_dyn_blob_len) { self.lim = true; } else { sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.dblbs), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; },`,
+		// sequenceBegin: the cap goes into the growth, and the refusal breaks to
+		// the dead scope.
+		"if (!(sofab.arrays.growCapped(MDobjsElem, self.alloc, &(self.m.dobjs), @as(usize, id) + 1, .{}, max_dyn_array_count) catch { self.lim = true; break :blk .dead; })) break :blk .dead;",
+		// a native matrix ROW: its id is the outer array's length, bounded by
+		// growCapped before the outer slice is extended, and its own element count
+		// by allocNCapped before the row is sized (#386).
+		".root_dmat => if (kind == .unsigned) { self.ei_root_dmat = id; if (sofab.arrays.growCapped([]const u32, self.alloc, &(self.m.dmat), @as(usize, id) + 1, &.{}, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; }) { sofab.arrays.at(self.m.dmat, id).* = sofab.arrays.allocNCapped(u32, self.alloc, count, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; }; } },",
 		// and the flag is surfaced as the policy category, never as INVALID.
 		"if (v.lim) return error.LimitExceeded;",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.zig missing wrapper index cap %q:\n%s", want, m)
+		}
+	}
+	// One implementation (§6.2.1): the index cap is compared in the corelib, so
+	// nothing in the generated layer -- fixlenBegin included -- may test it too.
+	if strings.Contains(m, "id >= max_dyn_array_count") {
+		t.Errorf("a receiver index cap must not also be a generated guard:\n%s", m)
+	}
+	// The uncapped helpers stay the SCHEMA-bounded entry points, so an unbounded
+	// array must not reach one: a plain grow/setElem here would be an index that
+	// nothing bounded.
+	for _, gone := range []string{
+		"sofab.arrays.setElem([]const u8, self.alloc, &(self.m.dstrs)",
+		"sofab.arrays.grow(MDobjsElem,",
+		"sofab.arrays.grow([]const u32, self.alloc, &(self.m.dmat)",
+	} {
+		if strings.Contains(m, gone) {
+			t.Errorf("an unbounded array must not use the uncapped helper %q:\n%s", gone, m)
 		}
 	}
 	// The cap governs only what the schema left unbounded (§9.5): a count:N array
@@ -1530,8 +1577,10 @@ messages:
 		"1 => if (total > max_dyn_blob_len) return sofab.Error.LimitExceeded,",
 		// The schema-bounded field keeps its own bound and its own category.
 		"2 => if (total > 32) return sofab.Error.InvalidMessage,",
-		// A wrapper element's length is capped here too, behind the index cap.
-		".root_es => { if (id >= max_dyn_array_count) return sofab.Error.LimitExceeded; if (total > max_dyn_string_len) return sofab.Error.LimitExceeded; },",
+		// A wrapper element's length is capped here too. Its array's INDEX cap is
+		// not: that one rides setElemCapped (#423), so this arm carries the length
+		// bound alone.
+		".root_es => { if (total > max_dyn_string_len) return sofab.Error.LimitExceeded; },",
 	} {
 		if !strings.Contains(hook, want) {
 			t.Errorf("fixlenBegin missing %q:\n%s", want, hook)
