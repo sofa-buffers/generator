@@ -69,7 +69,7 @@ func TestPythonStructural(t *testing.T) {
 		"class Myfirstmessage:",
 		"def serialize(self, e: Encoder)",
 		"class _MyfirstmessageVisitor(Visitor):",
-		"def decoder(cls) -> _StreamDecoder:",
+		"def decoder(cls, reassembly: int = REASSEMBLY) -> _StreamDecoder:",
 		"class MyfirstmessageSomeenum(IntEnum):",
 		"def to_jsonable(self)",
 		"e.write_sequence_begin_lazy(", // every sequence opens lazily (MESSAGE_SPEC S2)
@@ -202,7 +202,11 @@ messages:
 		// has no constant (no unbounded blob) and travels as a literal: an
 		// omitted argument is a caller defect, not a looser bound.
 		"d = Decoder(visitor=_DynVisitor(o), max_dyn_array_count=MAX_DYN_ARRAY_COUNT, " +
-			"max_dyn_string_len=MAX_DYN_STRING_LEN, max_dyn_blob_len=2048)",
+			"max_dyn_string_len=MAX_DYN_STRING_LEN, max_dyn_blob_len=2048,",
+		// The reassembly buffer is the caller's too, and required (corelib-py#139).
+		// A one-shot decode never touches it, so it is sized at the construct in
+		// flight rather than at the streaming reader's number.
+		"                    reassembly=MAX_FIELD_SPAN)",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q", want)
@@ -226,7 +230,7 @@ messages:
 		"MAX_DYN_ARRAY_COUNT = 65536",
 		"MAX_DYN_STRING_LEN = 1048576",
 		"d = Decoder(visitor=_DynVisitor(o), max_dyn_array_count=MAX_DYN_ARRAY_COUNT, " +
-			"max_dyn_string_len=MAX_DYN_STRING_LEN, max_dyn_blob_len=4194304)",
+			"max_dyn_string_len=MAX_DYN_STRING_LEN, max_dyn_blob_len=4194304,",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("default limits missing %q", want)

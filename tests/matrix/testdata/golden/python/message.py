@@ -4,6 +4,27 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, Status, Visitor
 
+# Bytes of reassembly space, derived from the schema and the decode limits.
+#
+# A construct split across two fed chunks is joined in a buffer the caller
+# supplies, sized once and never grown; the library holds no size of its
+# own, so -- like the limits -- the number is stated here.
+#
+# MAX_FIELD_SPAN is the largest single value this schema can carry: one
+# string or blob payload, or one native array's whole element run, with
+# every varint at its widest and each decode limit standing in for a
+# missing schema bound. A nested message is NOT one construct -- its fields
+# are read one at a time -- and neither is a wrapper array of strings,
+# blobs or structs. A field the receiver SKIPS never enters the buffer at
+# all, whatever its size, so this covers what is READ.
+MAX_FIELD_SPAN = 16
+#
+# The streaming reader also holds the chunk it was just fed, and only the
+# caller knows how large those are. 65536 bytes is what decoder() assumes;
+# a caller streaming larger pieces passes its own size. The one-shot
+# decode() needs none of it -- one chunk spans no boundary.
+REASSEMBLY = MAX_FIELD_SPAN + 65536
+
 @dataclass
 class Scalars:
     u8min: int = 0
@@ -106,13 +127,19 @@ class Scalars:
         return bytes(memoryview(buf)[: e.bytes_used()])
 
     @classmethod
-    def decoder(cls) -> _StreamDecoder:
+    def decoder(cls, reassembly: int = REASSEMBLY) -> _StreamDecoder:
         """The streaming reader: feed it chunks of any size.
 
         The half-built message is on ``.message`` throughout; each ``feed``
         returns the outcome for the bytes so far.
+
+        ``reassembly`` is where a construct split across two chunks is
+        joined. The default holds this schema's largest single value plus
+        one chunk of the size a socket reader usually lands on; pass a
+        larger one to feed larger chunks. What is SKIPPED never enters it,
+        whatever its size.
         """
-        return _StreamDecoder(cls, _ScalarsVisitor)
+        return _StreamDecoder(cls, _ScalarsVisitor, reassembly)
 
     @classmethod
     def decode(cls, data: bytes) -> "Scalars":
@@ -127,7 +154,8 @@ class Scalars:
         INCOMPLETE stays distinguishable from INVALID.
         """
         o = cls()
-        d = Decoder(visitor=_ScalarsVisitor(o), max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304)
+        d = Decoder(visitor=_ScalarsVisitor(o), max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304,
+                    reassembly=MAX_FIELD_SPAN)
         st = d.feed(data)
         if st is Status.INVALID:
             raise SofaDecodeError(d.error or "invalid message")
@@ -148,9 +176,10 @@ class _StreamDecoder:
 
     __slots__ = ("message", "_d")
 
-    def __init__(self, msg_cls, vis_cls) -> None:
+    def __init__(self, msg_cls, vis_cls, reassembly=REASSEMBLY) -> None:
         self.message = msg_cls()
-        self._d = Decoder(visitor=vis_cls(self.message), max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304)
+        self._d = Decoder(visitor=vis_cls(self.message), max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304,
+                          reassembly=reassembly)
 
     def feed(self, chunk) -> Status:
         return self._d.feed(chunk)
