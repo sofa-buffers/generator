@@ -430,6 +430,52 @@ run_variant() {
     echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: [$label] control must decode to 2.5; got: $OUT"; exit 1; }
     echo "==> [$label] fp array-at-scalar skip OK"
 
+    # generator#440: a S7.3-skipped fp array must not swallow the field AFTER it.
+    # The case above uses example.yaml, which declares BOTH fp kinds, so both
+    # fp32() and fp64() are overridden and both drain the skip counter. Visitor
+    # gives them DEFAULT NO-OP bodies and the impl emits one only for an fp kind
+    # the schema uses, so a schema that uses only ONE of them armed a counter for
+    # the other that nothing could spend -- and the next unsigned()/signed() field
+    # drained it and was lost, COMPLETE, with the wrong value. Its own tiny crate:
+    # the defect is invisible in any schema that mentions both fp kinds.
+    cat > "$WORK/fpskip.yaml" <<'YAML'
+version: 1
+messages:
+  fpskip:
+    payload:
+      f:    { id: 2, type: fp32 }
+      keep: { id: 4, type: u32 }
+YAML
+    echo "==> [$label] a skipped fp array must not eat the NEXT field (S7.3, generator#440)"
+    rust_build "$WORK/fpskip.yaml" "$WORK/fpskip-$label"
+    # 15 = id 2 ARRAY_FIXLEN, 01 = count 1, 41 = fixlen word (len 8, FP64 subtype),
+    # 2.5 little-endian -- an fp64 array at an fp32-declared id, so a S7.3 skip and
+    # a kind this schema has NO fp64() for. Then 20 07 = keep (id 4, unsigned) = 7.
+    printf '\025\001\101\000\000\000\000\000\000\004\100\040\007' > "$WORK/fp64_arr_eats.bin"
+    # the same shape for the fp kind that IS overridden: it must still skip whole.
+    # 20 = fixlen word (len 4, FP32 subtype) + 2.5 little-endian.
+    printf '\025\001\040\000\000\040\100\040\007' > "$WORK/fp32_arr_eats.bin"
+    # control: keep alone, proving the trailing two bytes really say keep = 7.
+    printf '\040\007' > "$WORK/fpskip_control.bin"
+    for img in fp64_arr_eats fp32_arr_eats; do
+        OUT=$(cd "$WORK/fpskip-$label" && cargo run -q -- decode fpskip < "$WORK/$img.bin") \
+            || { echo "FAIL: [$label] $img: a skipped fp array followed by a scalar must decode"; exit 1; }
+        echo "$OUT" | grep -q '"keep":7' \
+            || { echo "FAIL: [$label] $img: THE SKIPPED FP ARRAY ATE THE NEXT FIELD -- keep should be 7; got: $OUT"; exit 1; }
+        echo "$OUT" | grep -q '"f":0' \
+            || { echo "FAIL: [$label] $img: the skipped fp array must not be stored either; got: $OUT"; exit 1; }
+    done
+    OUT=$(cd "$WORK/fpskip-$label" && cargo run -q -- decode fpskip < "$WORK/fpskip_control.bin")
+    echo "$OUT" | grep -q '"keep":7' || { echo "FAIL: [$label] control keep=7 must decode; got: $OUT"; exit 1; }
+    # ...and a legitimate fp32 scalar at that same id still decodes, which pins that
+    # the counter self-terminated rather than being left armed across the message.
+    # 12 = id 2 scalar FIXLEN, 20 = fixlen word (len 4, FP32), 2.5 little-endian.
+    printf '\022\040\000\000\040\100\040\007' > "$WORK/fpskip_scalar.bin"
+    OUT=$(cd "$WORK/fpskip-$label" && cargo run -q -- decode fpskip < "$WORK/fpskip_scalar.bin")
+    echo "$OUT" | grep -q '"f":2.5' || { echo "FAIL: [$label] legitimate fp32 scalar must decode to 2.5; got: $OUT"; exit 1; }
+    echo "$OUT" | grep -q '"keep":7' || { echo "FAIL: [$label] legitimate fp32 scalar must not eat keep; got: $OUT"; exit 1; }
+    echo "==> [$label] skipped fp array does not eat the next field OK"
+
     # Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins
     # per field id. A re-opened sequence CONTINUES its scope, so a struct merges
     # and the children an earlier opening set whose ids do not recur are retained.
