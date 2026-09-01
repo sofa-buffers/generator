@@ -2328,6 +2328,21 @@ been treated as one, and the answers are not the same:
   folds in beside a bound test already there. Where no such call exists for a field
   kind, the check stays in generated code.
 
+**A number that cannot be left out.** The provenance rule above is only as strong
+as the API that carries it, and an optional parameter quietly restores everything
+it forbids: an omitted argument becomes a default, and a default is a limit the
+codec supplied. corelib-cpp therefore offers **no signature a number can be left
+out of** (corelib-cpp#128) — a schema-bounded field goes through `readString`, a
+schema-unbounded one through `readStringCapped`, and there is no third spelling
+that takes neither; `sofab::Limits` has no default constructor, so even the
+reassembly budget has to be stated (generated code passes `SIZE_MAX` where the
+worst-case walk derives no cap, which is a number the receiver stated rather than
+a mode the library offers); and a wrapper collector that publishes a schema `cap`
+must publish a `dynCap` beside it or the translation unit does not compile, since
+a collector carrying only the first left the second silently at "no cap" and
+nothing diagnosed it. Generated code is then not *trusted* to state the pair — it
+cannot compile without doing so.
+
 **One implementation, wherever it runs.** A port whose corelib offers the check for
 a kind **MUST NOT** also emit it into the generated layer, and vice versa. Two
 routes to one rule is the divergence §5.3.1's one-implementation test is written
@@ -2418,7 +2433,7 @@ never a number the corelib knows:
 
 | target | compared in the corelib, on this existing call | compared in generated code |
 |---|---|---|
-| **C++** (`corelib: cpp`) | all three kinds: `readString`/`readBlob`/`readArray`, plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
+| **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
 | **Zig** | array counts and wrapper element indices: `arrays.allocNCapped` / `growCapped` / `setElemCapped` | string and blob lengths |
 | **Go**, **Dart** | wrapper arrays — the element index and the element length — through the collectors' receiver-cap fields | scalar string/blob lengths, native array counts |
 | **Java**, **Kotlin**, **C#** | string and blob lengths, in `PayloadAcc`, which the payload already passes through | array counts and wrapper element indices |

@@ -146,24 +146,44 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 
 func (g *gen) anyLimit() bool { return g.limArrHas || g.limStrHas || g.limBlobHas }
 
-// istreamLimits renders the IStreamObject constructor argument carrying the
-// derived streaming reassembly cap ("" when no length limit is configured).
-func (g *gen) istreamLimits() string {
+// bufferedFieldArg is the number the pure path states as sofab::Limits'
+// max_buffered_field: the derived reassembly cap where the worst-case walk
+// produced one, and the platform ceiling where it did not.
+//
+// corelib-cpp offers no constructor that leaves it out (corelib-cpp#128): §6.2.1
+// forbids a codec to "supply a default for one it was not given", so the number
+// has to be stated even when this generator has none to derive -- an overflowing
+// walk, or a schema whose every field the schema itself bounds. SIZE_MAX is the
+// corelib's documented spelling for "this receiver's budget is the platform's
+// ceiling", a number the caller stated rather than a mode the library offers, and
+// it is what this generator has always meant by emitting no cap: reassembly stays
+// uncapped rather than carrying a derived number that would reject valid traffic.
+func (g *gen) bufferedFieldArg() string {
 	if g.limBuffered <= 0 {
+		return "SIZE_MAX"
+	}
+	return "SOFAB_MAX_DYN_BUFFERED_FIELD"
+}
+
+// istreamLimits renders the IStreamObject constructor argument carrying the
+// streaming reassembly cap ("" on the c-cpp leg, whose IStreamObject takes none:
+// its containers are statically bounded and nothing is reassembled into a heap
+// buffer).
+func (g *gen) istreamLimits() string {
+	if g.clib {
 		return ""
 	}
-	return "{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}}"
+	return "{sofab::Limits{" + g.bufferedFieldArg() + "}}"
 }
 
 // istreamInlineLimits is the same cap as a trailing constructor argument, for
 // IStreamInline — whose first parameter is the field callback. Empty in the
-// fixed profile: its containers are statically bounded, so no cap is derived and
-// the corelib-c-cpp IStreamInline takes the callback alone.
+// fixed profile, where the corelib-c-cpp IStreamInline takes the callback alone.
 func (g *gen) istreamInlineLimits() string {
-	if g.limBuffered <= 0 {
+	if g.clib {
 		return ""
 	}
-	return ", sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}"
+	return ", sofab::Limits{" + g.bufferedFieldArg() + "}"
 }
 
 // resolveLimits fills the gen's limit fields from the max_dyn_* config keys and
@@ -1286,7 +1306,8 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			// check "before the allocation it is meant to prevent", which only the
 			// corelib can do -- sofab::readString sizes a growable destination, and it
 			// consults the cap before it does (corelib-cpp#127's fitDest fix).
-			f.line("            sofab::readString(is, %s%s);", acc, cppLenArgs(fld.HasMaxlen, fld.Maxlen, g.limStrHas, "SOFAB_MAX_DYN_STRING_LEN"))
+			fn, args := cppLenCall("readString", fld.HasMaxlen, fld.Maxlen, g.limStrHas, "SOFAB_MAX_DYN_STRING_LEN")
+			f.line("            sofab::%s(is, %s%s);", fn, acc, args)
 		}
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindBool, ir.KindFP32, ir.KindFP64, ir.KindStruct, ir.KindUnion:
@@ -1330,7 +1351,8 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			// (no std::string round-trip); it carries the schema maxlen and the
 			// §6.2.1 cap for the same reason, and in the same order, as the string
 			// arm above. `blob` and `string` are separate limits.
-			f.line("            sofab::readBlob(is, %s%s);", acc, cppLenArgs(fld.HasMaxlen, fld.Maxlen, g.limBlobHas, "SOFAB_MAX_DYN_BLOB_LEN"))
+			fn, args := cppLenCall("readBlob", fld.HasMaxlen, fld.Maxlen, g.limBlobHas, "SOFAB_MAX_DYN_BLOB_LEN")
+			f.line("            sofab::%s(is, %s%s);", fn, acc, args)
 		}
 	case ir.KindEnum:
 		// corelib-c-cpp's read binds a target by address and fills it after the
@@ -1446,7 +1468,8 @@ func (g *gen) nativeArrayRead(f *hfile, ind, target string, elem ir.Kind, ref *i
 	// The element-width bound rides along on this leg (generator#279): the
 	// declared width is a validity bound (§1/§7.1) and readArray enforces it, but
 	// only once armed -- unarmed it runs the unbounded decode, which masks.
-	f.line("%ssofab::readArray(is, %s%s);", ind, target, g.cppArrayArgs(count, hasCount, g.cppElemBound(elem, ref)))
+	fn, args := g.cppArrayCall(count, hasCount, g.cppElemBound(elem, ref))
+	f.line("%ssofab::%s(is, %s%s);", ind, fn, target, args)
 }
 
 func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, elemMaxHas bool, elemMax int64, depth int) {
@@ -1489,9 +1512,9 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; is.readArray(%s, _count, %d); }",
 				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, tv, cap)
 		} else {
-			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; sofab::readArray(is, %s%s); }",
-				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, tv,
-				g.cppArrayArgs(count, hasCount, g.cppElemBound(elem, ref)))
+			fn, args := g.cppArrayCall(count, hasCount, g.cppElemBound(elem, ref))
+			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; sofab::%s(is, %s%s); }",
+				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, fn, tv, args)
 		}
 	case ir.KindBool:
 		// The element already IS the wire's std::uint8_t (cppArrayElem), so the
@@ -1613,6 +1636,15 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 	f.line("%s%s *out = nullptr;", in3, container)
 	if !inlineRows {
 		f.line("%slong cap = %d;", in3, cap)
+		// The receiver index cap beside the schema `count`, named as corelib-cpp's
+		// own collectors name it. It is stated even where it is -1: corelib-cpp
+		// static_asserts that a collector publishing `cap` publishes `dynCap` too,
+		// because a duck-typed collector carrying only the first left the second
+		// silently at "no cap" and nothing diagnosed it (§6.2.1 -- the stream has no
+		// limit of its own to lend). The COMPARISON is still this placer's, below:
+		// the stream bounds an element index only for a collector that also
+		// publishes its element wire type, which a row cannot.
+		f.line("%slong dynCap = %s;", in3, g.rowIndexCap(cap))
 	}
 	if !g.clib {
 		// Declaring prepare() is how a collector asks read() for the §7.4

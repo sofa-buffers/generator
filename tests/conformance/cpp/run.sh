@@ -126,7 +126,13 @@ run_variant() {
     # have, but nothing drove either -- the capability was demonstrable and
     # unverified. Property: streaming is indistinguishable from the one-shot path.
     echo "==> [$label] streaming: serialize through a sink, feed in chunks"
-    g++ -std=c++20 -Wall -Werror $include -I"$WORK/ex-$label" \
+    # corelib-cpp's IStreamObject takes a sofab::Limits (corelib-cpp#128: no
+    # constructor leaves the byte budget out); the corelib-c-cpp one takes none,
+    # its containers being statically bounded. The check is about chunk
+    # boundaries, so the pure leg states the platform ceiling.
+    STREAM_LIMITS=-DSOFAB_STREAM_LIMITS=1
+    [ -n "$corelib" ] && STREAM_LIMITS=
+    g++ -std=c++20 -Wall -Werror $include -I"$WORK/ex-$label" $STREAM_LIMITS \
         -DMSG_TYPE=sofabuffers::Myfirstmessage -include myfirstmessage.hpp \
         -o "$WORK/stream-$label" "$ROOT/tests/conformance/cpp/streaming_check.cpp" \
         $STREAM_OBJS
@@ -478,7 +484,7 @@ run_variant c-cpp-static  "c-cpp" false "-I$CC/src/include" SOFAB_C_DIR="$CC"
 # Receiver-side decode limits (generator#102), pure corelib-cpp only (the c-cpp
 # profile is statically schema-bounded). An unbounded array claiming more than
 # the configured max_dyn_array_count must fail the decode (LimitExceeded, raised
-# inside sofab::readArray, which is handed the cap); the same bytes decode fine
+# inside sofab::readArrayCapped, which is handed the cap); the same bytes decode fine
 # without a configured limit.
 echo "==> [cpp] receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn102.yaml" <<'YAML'
@@ -546,8 +552,8 @@ make -C "$WORK/lim420" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
 # #420 is that the corelib gets handed the number instead.
 grep -q 'is.exceedLimit()' "$WORK/lim420/dyn.hpp" && {
     echo "FAIL: [cpp] a cap is checked in front of the read (§6.2.1, generator#420)"; exit 1; }
-grep -q 'sofab::readString(is, s, -1, SOFAB_MAX_DYN_STRING_LEN);' "$WORK/lim420/dyn.hpp" || {
-    echo "FAIL: [cpp] the string cap must be an argument to readString"; exit 1; }
+grep -q 'sofab::readStringCapped(is, s, SOFAB_MAX_DYN_STRING_LEN);' "$WORK/lim420/dyn.hpp" || {
+    echo "FAIL: [cpp] the string cap must be an argument to readStringCapped"; exit 1; }
 # Header byte `id << 3 | wire`, wire 2 = Fixlen; then the length word
 # `len << 3 | subtype`, subtype 2 = String, 3 = Blob (MESSAGE_SPEC §4).
 printf '\002\112123456789' > "$WORK/over420.bin"  # s: 9 bytes > cap 8  -> reject
