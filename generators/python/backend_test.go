@@ -75,7 +75,7 @@ func TestPythonStructural(t *testing.T) {
 		"e.write_sequence_begin_lazy(", // every sequence opens lazily (MESSAGE_SPEC S2)
 		// The schema count is DECLARED, and the corelib applies it at the count
 		// header (generator#100/#216/#406).
-		"    def on_schema_bound(self, fid: int, n: int) -> int:",
+		"    def on_schema_bound(self, fid: int, n: int, wt, st) -> int:",
 		"                return 4  # someuintarray: schema count",
 	} {
 		if !strings.Contains(mod, want) {
@@ -167,11 +167,12 @@ messages:
 }
 
 // TestPythonDecodeLimits: the max_dyn_* config keys bake receiver-side decode
-// limits (generator#102) into the generated module -- named constants at
-// module level plus Decoder(max_array_count=..., ...) kwargs in every decode.
-// The cap is raised to the largest schema bound of its kind (escape hatch:
-// schema-bounded fields stay governed by their own bound), an unset key emits
-// nothing, and a key whose kind has no unbounded field is inert.
+// limits (generator#102) into the generated module -- a named constant per kind
+// the schema can reach, and all three handed to every Decoder as the required
+// arguments it compares at the count/length header. The numbers travel AS
+// CONFIGURED (nothing is raised to a sibling's schema bound), and a kind with no
+// unbounded field exports no constant, its configured value going in as a
+// literal rather than the module growing a name nothing reads.
 func TestPythonDecodeLimits(t *testing.T) {
 	const src = `
 version: 1
@@ -195,10 +196,13 @@ messages:
 		// stay tight around what the schema left open (generator#325).
 		"MAX_DYN_ARRAY_COUNT = 65536",
 		"MAX_DYN_STRING_LEN = 4096",
-		// §6.2.1 keeps the caps OUT of the Decoder: they are applied in on_field,
-		// where the schema is known, so they cannot bind a schema-bounded field.
-		`raise SofaLimitError("array count %d exceeds max_array_count %d" % (fld.count, MAX_DYN_ARRAY_COUNT))`,
-		`raise SofaLimitError("string length %d exceeds max_string_len %d" % (fld.size, MAX_DYN_STRING_LEN))`,
+		// §6.2.1 lets the codec perform the comparison, so the caps go INTO the
+		// Decoder -- but only because it takes the schema bound off a field
+		// on_schema_bound declares and off a field on_field skips. The blob cap
+		// has no constant (no unbounded blob) and travels as a literal: an
+		// omitted argument is a caller defect, not a looser bound.
+		"d = Decoder(visitor=_DynVisitor(o), max_dyn_array_count=MAX_DYN_ARRAY_COUNT, " +
+			"max_dyn_string_len=MAX_DYN_STRING_LEN, max_dyn_blob_len=2048)",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q", want)
@@ -207,19 +211,22 @@ messages:
 	if strings.Contains(mod, "MAX_DYN_BLOB_LEN") {
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
-	if strings.Contains(mod, "max_array_count=") || strings.Contains(mod, "max_string_len=") {
-		t.Error("a Decoder-level cap also binds schema-bounded fields, which §6.2.1 forbids")
+	// One implementation, wherever it runs (§6.2.1): with the codec comparing,
+	// generated code must not compare again. The one cap left in the visitor is
+	// the wrapper element INDEX, which is a field id and not a count/length word,
+	// so the codec cannot see it -- and this schema has no wrapper array.
+	if strings.Contains(mod, "raise SofaLimitError") {
+		t.Error("a count/length cap must be compared once, in the codec that was handed it")
 	}
 
 	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
-	// (§9.5, generator#385). Python is on the server tier, and the caps still
-	// stay out of the Decoder: liveness and placement are unchanged, only the
-	// values' origin is.
+	// (§9.5, generator#385). Python is on the server tier.
 	plain := string(genPy(t, s, map[string]any{})["message.py"])
 	for _, want := range []string{
 		"MAX_DYN_ARRAY_COUNT = 65536",
 		"MAX_DYN_STRING_LEN = 1048576",
-		"d = Decoder(visitor=_DynVisitor(o))",
+		"d = Decoder(visitor=_DynVisitor(o), max_dyn_array_count=MAX_DYN_ARRAY_COUNT, " +
+			"max_dyn_string_len=MAX_DYN_STRING_LEN, max_dyn_blob_len=4194304)",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("default limits missing %q", want)
@@ -352,10 +359,15 @@ messages:
 		t.Error(`string maxlen check must not re-encode via .encode("utf-8") (#155)`)
 	}
 
-	// (e) the unbounded string field declares no bound and is declined by nothing:
-	// it is the receiver caps' business, not the schema's.
-	if strings.Contains(mod, `# us:`) {
+	// (e) the unbounded string field declares no bound -- on_schema_bound has no
+	// arm for it -- but it IS declined on a tag mismatch, like every other
+	// declared field: the cap the Decoder applies to it must not reach a header
+	// that was never this field's value (MESSAGE_SPEC §7.3, CORELIB_PLAN §6.2.1).
+	if strings.Contains(mod, `return 0  # us:`) || strings.Contains(mod, `# us: schema maxlen`) {
 		t.Error("unbounded string must not declare a schema bound")
+	}
+	if !strings.Contains(mod, `return False  # us: header is not the declared type -- skip it`) {
+		t.Errorf("an unbounded string must still be declined on a §7.3 tag mismatch:\n%s", mod)
 	}
 }
 
@@ -848,7 +860,10 @@ messages:
 	if strings.Contains(mod, "FixlenSubtype") {
 		t.Errorf("message.py must not import FixlenSubtype when no fixlen field exists:\n%s", mod)
 	}
-	if !strings.Contains(mod, "from sofab import Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
+	// Field is unconditional: on_field carries the undeclared-id decline in every
+	// scope, so every generated visitor overrides it (§6.2.1 -- a field this
+	// handler does not read must be skipped, or the codec's cap reaches it).
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
 		t.Errorf("message.py missing plain import line:\n%s", mod)
 	}
 }
@@ -902,7 +917,10 @@ func TestPythonFixlenSubtypeImportMatchesUse(t *testing.T) {
 		{"unbounded wrapper string array", true, `
       tags: { id: 0, type: array, items: { type: string } }
       n:    { id: 1, type: u32 }`},
-		{"unbounded fp32 rows", false, `
+		// An unbounded fp32 row is a POSITIVE too: the row's own element COUNT is
+		// capped by the receiver, and that cap sits behind the §7.3 tag test for
+		// the row -- which for a fixlen array names the subtype.
+		{"unbounded fp32 rows", true, `
       grid: { id: 0, type: array, items: { type: array, items: { type: fp32 } } }
       n:    { id: 1, type: u32 }`},
 		{"native integer array", false, `
@@ -1301,7 +1319,7 @@ messages:
 	// before an element is decoded -- so a truncated tail cannot downgrade the
 	// verdict. Pinned as "the bound is at the header, not in the value hook": the
 	// value hook only ever sees a row that fully arrived.
-	onSchemaBound := strings.Index(mod, "    def on_schema_bound(self, fid: int, n: int) -> int:")
+	onSchemaBound := strings.Index(mod, "    def on_schema_bound(self, fid: int, n: int, wt, st) -> int:")
 	guard := strings.Index(mod, "            return 3  # numrows row: schema count")
 	if onSchemaBound < 0 || guard < onSchemaBound {
 		t.Errorf("the row count bound must sit inside on_schema_bound (hook=%d guard=%d)", onSchemaBound, guard)
@@ -1530,9 +1548,14 @@ messages:
 // fields too — the protection §6.2.1 wants kept tight.
 //
 // on_schema_bound declares the count/length the schema puts on a field, and the
-// corelib takes the cap off any field that declares one (§6.2.1). Generated code
-// applies the caps itself besides, in the ELSE of the chain whose arms are
-// exactly the schema-bounded ids -- so neither half can reach a bounded field.
+// corelib takes the cap off any field that declares one (§6.2.1) -- which is
+// what makes handing it the caps conformant. What generated code owes instead is
+// the two DECLINES that keep the codec's cap off a field it must not reach: the
+// §7.3 tag mismatch, and an id this scope does not declare at all. The caps used
+// to sit in the ELSE of the bounded ids'"'"' chain, which kept them off a bounded
+// field but let them fire on an UNKNOWN one: a field the handler was never going
+// to read, which §6.2.1 says allocates nothing and must not be capped
+// (generator#410).
 func TestPythonSchemaBoundedFieldsOptOutOfTheCap(t *testing.T) {
 	const src = `
 version: 1
@@ -1550,37 +1573,44 @@ messages:
 		"max_dyn_array_count": 2,
 	})["message.py"])
 
-	// The caps are NOT handed to the Decoder: it knows no schema, so a Decoder cap
-	// bounds every field alike -- which is exactly what §6.2.1 forbids.
-	for _, bad := range []string{"max_string_len=", "max_array_count=", "max_blob_len="} {
-		if strings.Contains(mod, bad) {
-			t.Errorf("a Decoder-level cap (%q) also binds schema-bounded fields, which §6.2.1 forbids:\n%s", bad, mod)
-		}
-	}
-	// Instead each scope's cap sits in the ELSE of the chain whose arms are the
-	// schema-bounded ids, so a bounded id can never reach it.
+	// The caps ARE handed to the Decoder, which compares them at the count/length
+	// header -- §6.2.1 permits the codec to run the comparison, and corelib-py
+	// spends the verdict on any field on_schema_bound declares.
 	for _, want := range []string{
+		"max_dyn_string_len=MAX_DYN_STRING_LEN",
+		"max_dyn_array_count=2",
 		`                return 8  # s: schema maxlen`,
 		`                return 4  # arr: schema count`,
-		`            else:
-                if fld.subtype == FixlenSubtype.STRING and fld.size > MAX_DYN_STRING_LEN:
-                    raise SofaLimitError("string length %d exceeds max_string_len %d" % (fld.size, MAX_DYN_STRING_LEN))`,
+		// The bounded string at id 1 gets the §7.3 decline...
+		`            if fld.id == 1:
+                if fld.subtype != FixlenSubtype.STRING:
+                    return False`,
+		// ...and so does the UNBOUNDED one at id 5. It is the field the cap
+		// governs, which is exactly why a header contradicting its declared type
+		// must be skipped before the codec's parked verdict can be spent on it.
+		`            elif fld.id == 5:
+                if fld.subtype != FixlenSubtype.STRING:
+                    return False`,
+		// An id this scope does not declare is skipped outright.
+		`            if fld.id not in {1, 2, 3, 4, 5}:
+                return False`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
 		}
+	}
+	// No comparison in generated code: one implementation, and it is the codec's
+	// (§6.2.1). This schema has no wrapper array, the one shape whose bound the
+	// codec cannot see.
+	if strings.Contains(mod, "raise SofaLimitError") {
+		t.Errorf("the count/length caps must be compared once, in the codec:\n%s", mod)
 	}
 	// Every array in this schema declares a count, so max_dyn_array_count is inert
 	// and nothing is emitted for it.
 	if strings.Contains(mod, "MAX_DYN_ARRAY_COUNT") {
 		t.Errorf("a cap with no unbounded field of its kind must stay inert:\n%s", mod)
 	}
-	// sa's elements are schema-bounded by their own maxlen, so that scope carries
-	// no cap at all -- an array scope dispatches by index, so one bound covers it.
-	// Exactly one cap site survives: the root scope's else.
-	if got := strings.Count(mod, "MAX_DYN_STRING_LEN)"); got != 1 {
-		t.Errorf("expected exactly one cap site (the root scope's else), got %d:\n%s", got, mod)
-	}
+
 	// The cap stays at the configured number rather than being raised to 8.
 	if !strings.Contains(mod, "MAX_DYN_STRING_LEN = 4") {
 		t.Error("the configured cap must be emitted as configured, not raised to the largest schema maxlen")

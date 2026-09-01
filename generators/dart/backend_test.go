@@ -398,15 +398,94 @@ func TestDartArrayElemBound(t *testing.T) {
 	}
 }
 
+// TestDecodeLimitsPlumbing: the max_dyn_* keys reach generated Dart as module
+// constants and are enforced BY generated Dart, per field, at each field's own
+// count/length header. Nothing is passed into the corelib any more
+// (corelib-dart#88: "the numbers and the allocation are not the codec's").
 func TestDecodeLimitsPlumbing(t *testing.T) {
-	// An unbounded string + a configured cap wires a DecoderLimits (no_maxlen.yaml
-	// has an unbounded string `s` and blob `b`).
+	// no_maxlen.yaml has an unbounded string `s`, an unbounded blob `b`, and a
+	// `count: 2` string array `names`.
 	out := genFor(t, "../../tests/matrix/corpus/defs/no_maxlen.yaml", map[string]any{"max_dyn_string_len": 8})
-	if !strings.Contains(out, "sofab.DecoderLimits(") {
-		t.Error("configured max_dyn_string_len should bake a DecoderLimits")
+	if strings.Contains(out, "sofab.DecoderLimits") || strings.Contains(out, "limits: _limits") {
+		t.Errorf("the corelib must be handed no receiver cap:\n%s", out)
 	}
-	if !strings.Contains(out, ", limits: _limits)") {
-		t.Error("DecoderLimits should be passed to Decoder.decode")
+	for _, want := range []string{
+		"const int maxDynStringLen = 8;",
+		// the unbounded string and blob: policy, at the length word, gated on the
+		// declared subtype so a §7.3 mismatch is skipped rather than capped.
+		"case 0:\n        if (subtype == sofab.FixlenType.string && length > maxDynStringLen) limitExceeded();",
+		"case 1:\n        if (subtype == sofab.FixlenType.blob && length > maxDynBlobLen) limitExceeded();",
+		// the decode entry points drive the visitor and nothing else
+		"sofab.Decoder.decode(data, _DynVisitor(out));",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated module missing %q:\n%s", want, out)
+		}
+	}
+	// A cap is a POLICY rejection and must never be folded into INVALID, nor
+	// reach the schema-bounded array beside it.
+	if strings.Contains(out, "length > maxDynStringLen) invalidate()") {
+		t.Errorf("a cap must not be reported as INVALID:\n%s", out)
+	}
+	if strings.Contains(out, "count > maxDynArrayCount") {
+		t.Errorf("a `count: 2` array must not be judged against a cap:\n%s", out)
+	}
+}
+
+// A cap must not reach a field the schema bounds, and the two must be able to
+// disagree: max_dyn_array_count 4 beside a sibling's count: 100000 is exactly
+// what a per-decode DecoderLimits could not express, and the raise that made it
+// decodable loosened the cap for the unbounded field too.
+func TestDartCapsTravelAsConfigured(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: { id: 0, type: array, items: { type: u64 } }\n" +
+		"      b: { id: 1, type: array, items: { type: i32, count: 100000 } }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{"max_dyn_array_count": 4})
+	if !strings.Contains(out, "const int maxDynArrayCount = 4;") {
+		t.Errorf("the cap must be emitted AS CONFIGURED, unraised:\n%s", out)
+	}
+	for _, want := range []string{
+		"case 0:\n        if (kind == sofab.ArrayKind.unsigned && count > maxDynArrayCount) limitExceeded();",
+		"case 1:\n        if (kind == sofab.ArrayKind.signed && count > 100000) invalidate();",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated module missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// Rule 5 for Dart: corelib-dart's onBytesDest/onArrayDest defaults allocate a
+// destination sized from the wire, so a generated scope has to DECLINE every id
+// it does not bind or a §7.3-skipped field is materialized anyway — the one
+// shape no receiver cap ever covered, and the decoder now holds none.
+func TestDartDeclinesUnboundDestinations(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      s: { id: 0, type: string }\n" +
+		"      a: { id: 1, type: array, items: { type: u32 } }\n" +
+		"  N:\n    payload:\n      x: { id: 0, type: u32 }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+	for _, want := range []string{
+		"Uint8List? onBytesDest(int id, int subtype, int total) {",
+		"TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {",
+		// a bound id keeps the corelib's exactly-sized destination...
+		"case 0:\n        if (subtype == sofab.FixlenType.string) return super.onBytesDest(id, subtype, total);\n        return null;",
+		"case 1:\n        if (kind == sofab.ArrayKind.unsigned) return super.onArrayDest(id, kind, count);\n        return null;",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated module missing %q:\n%s", want, out)
+		}
+	}
+	// ...and a scope that binds NOTHING of that shape still declines: the
+	// override is emitted with no switch at all, which is the case that would
+	// otherwise fall through to the allocating default.
+	nv := out[strings.Index(out, "class _NVisitor"):]
+	for _, want := range []string{
+		"Uint8List? onBytesDest(int id, int subtype, int total) {\n    return null;\n  }",
+		"TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {\n    return null;\n  }",
+	} {
+		if !strings.Contains(nv, want) {
+			t.Errorf("a scope binding no payload must decline every destination, missing %q:\n%s", want, nv)
+		}
 	}
 }
 
@@ -609,14 +688,20 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 		// the ROW collectors take the OUTER array's cap (a row id is its index there)
 		"sofab.MessageSeq<VecFixedElem>(o.fixed, 5,",
 		"sofab.MessageSeq<VecDynamicElem>(o.dynamic_, -1,",
-		"sofab.StringSeq(o.fstrs, 3, 8)",
-		"sofab.BlobSeq(o.fblobs, 4, 8)",
-		"sofab.IntMatrixSeq(o.rows, 3, false, 0, 4294967295)",
-		// ...and where the schema declares NO count, the receiver cap on the element
-		// INDEX travels instead (§6.2.1, generator#387). `srows` is bounded, so its
-		// own collector takes none; its ROWS are not, so each row's does. Never
-		// both: corelib-dart consults rcap only where cap is -1.
-		"sofab.NestedSeq<String>(o.srows, 3, (p) => sofab.StringSeq(p, -1, 4, rcap: maxDynArrayCount))",
+		// ...and beside each schema bound its receiver sibling, ALWAYS emitted:
+		// corelib-dart requires them (§6.2.1 gives that library no number to
+		// invent) and consults each one only where the schema bound beside it is
+		// -1, so the two can never both be in play. `relemMax` is a literal here
+		// because every string/blob in this schema declares a maxlen -- no
+		// module constant of that kind exists to name.
+		"sofab.StringSeq(o.fstrs, 3, 8, rcap: maxDynArrayCount, relemMax: 262144)",
+		"sofab.BlobSeq(o.fblobs, 4, 8, rcap: maxDynArrayCount, relemMax: 1048576)",
+		// A matrix has two axes and four bounds: cap/rcap on the ROW ID, and
+		// rowCount/rowCap on the row's OWN element count -- the inner `count: 3`,
+		// which this backend used to drop on the floor, leaving the row's count
+		// header bounded by nothing but the decoder-wide cap that is now gone.
+		"sofab.IntMatrixSeq(o.rows, 3, false, 0, 4294967295, rcap: maxDynArrayCount, rowCount: 3, rowCap: maxDynArrayCount)",
+		"sofab.NestedSeq<String>(o.srows, 3, (p) => sofab.StringSeq(p, -1, 4, rcap: maxDynArrayCount, relemMax: 262144), rcap: maxDynArrayCount)",
 		// M elements arrived, M is the length: the count word is bounded, nothing
 		// is filled in behind it.
 		("        if (values.length > 4) { invalidate(); return; }\n" +
@@ -1096,11 +1181,11 @@ messages:
 		// The scan itself is sofab.IntMatrixSeq's (corelib-dart#74, tested there
 		// against decoded bytes). What this backend decides is the pair of bounds
 		// it hands over, per row element kind.
-		"sofab.IntMatrixSeq(o.urows, 2, false, 0, 255)",
-		"sofab.IntMatrixSeq(o.srows, 2, true, -32768, 32767)",
+		"sofab.IntMatrixSeq(o.urows, 2, false, 0, 255, rcap: 16384, rowCount: 3, rowCap: 16384)",
+		"sofab.IntMatrixSeq(o.srows, 2, true, -32768, 32767, rcap: 16384, rowCount: 3, rowCap: 16384)",
 		// u64 spans the callback parameter's own range, so lo == hi switches the
 		// scan off rather than emitting a bound that can never fire.
-		"sofab.IntMatrixSeq(o.wide, 2, false, 0, 0)",
+		"sofab.IntMatrixSeq(o.wide, 2, false, 0, 0, rcap: 16384, rowCount: 3, rowCap: 16384)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
@@ -1156,25 +1241,22 @@ messages:
 	}
 }
 
-// TestDartWrapperIndexCapTravelsUnraised: the receiver cap on a wrapper array's
-// element INDEX is the number the deployment configured, not the raised one the
-// per-decode DecoderLimits has to carry (ARCHITECTURE §9.5, generator#387 /
-// generator#402 item 3).
+// TestDartWrapperIndexCapTravelsUnraised: every receiver cap the module carries
+// is the number the deployment configured, and NOTHING is raised any more.
 //
 // A wrapper array carries no count header — its elements are keyed by an
 // unbounded varint index and the list is grown to fit — so the index IS the
 // length and the index is what bounds the allocation. corelib-dart's collectors
 // take that bound as `rcap`, consulted only where the schema declared no
-// `count:`; this backend never passed it, so every wrapper array in every
-// generated project was bounded by the corelib's own family ceiling instead of
-// by the configured number.
+// `count:`.
 //
-// The two numbers differ on purpose. `maxDynArrayCount` reaches a DecoderLimits,
-// which applies per decode to every field alike, so it must clear the largest
-// schema `count:` in the message or it rejects a schema-bounded field CORELIB_PLAN
-// §6.2.1 forbids it to touch. `rcap` has no such problem — it cannot reach a
-// bounded field at all — so it needs no raise, and raising it would hand an
-// unbounded array a looser cap because some sibling declared a large one.
+// The two numbers used to differ on purpose: `maxDynArrayCount` reached a
+// DecoderLimits, which applies per decode to every field alike, so it had to
+// clear the largest schema `count:` in the message or it rejected a
+// schema-bounded field CORELIB_PLAN §6.2.1 forbids it to touch — and the wrapper
+// index cap, which cannot reach a bounded field at all, needed a second,
+// unraised constant of its own. With EVERY cap enforced per field, nothing needs
+// the raise and the second constant collapses back into the first.
 func TestDartWrapperIndexCapTravelsUnraised(t *testing.T) {
 	const src = `
 version: 1
@@ -1187,39 +1269,25 @@ messages:
 	out := genFor(t, writeDef(t, src), map[string]any{"max_dyn_array_count": 4})
 
 	for _, want := range []string{
-		// The per-decode limit is raised past b's count: 100, as it must be.
-		"const int maxDynArrayCount = 100;",
-		// The index cap is not, and is its own constant because of it.
-		"const int maxDynWrapperIndex = 4;",
-		// The unbounded array takes it...
-		"sofab.StringSeq(o.w, -1, -1, rcap: maxDynWrapperIndex)",
-		// ...and the schema-bounded one takes no receiver cap at all: there the
-		// schema bound governs and its breach is INVALID, not LimitExceeded.
-		"sofab.StringSeq(o.b, 100, -1)",
+		// One constant, AS CONFIGURED, below b's count: 100.
+		"const int maxDynArrayCount = 4;",
+		// The unbounded array is governed by it...
+		"sofab.StringSeq(o.w, -1, -1, rcap: maxDynArrayCount,",
+		// ...and the schema-bounded one carries it too, inert: there the schema
+		// bound governs and its breach is INVALID, never limitExceeded. Emitting it
+		// anyway is what keeps the argument list one shape, and corelib-dart
+		// requires it — leaving it out is not "the corelib's default" but a
+		// compile error, §6.2.1 admitting no unset state.
+		"sofab.StringSeq(o.b, 100, -1, rcap: maxDynArrayCount,",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "sofab.StringSeq(o.b, 100, -1, rcap") {
-		t.Errorf("a schema-bounded wrapper array must carry no receiver cap:\n%s", out)
-	}
-
-	// With no schema bound to clear, the raise is a no-op and the second constant
-	// would be a second name for one number — so it is not emitted, and the
-	// collectors name the one that exists.
-	const plain = `
-version: 1
-messages:
-  M:
-    payload:
-      w: { id: 0, type: array, items: { type: string } }
-`
-	out = genFor(t, writeDef(t, plain), map[string]any{"max_dyn_array_count": 4})
 	if strings.Contains(out, "maxDynWrapperIndex") {
-		t.Errorf("an unraised cap needs no second constant:\n%s", out)
+		t.Errorf("the second, unraised constant is gone with the raise:\n%s", out)
 	}
-	if !strings.Contains(out, "sofab.StringSeq(o.w, -1, -1, rcap: maxDynArrayCount)") {
-		t.Errorf("the collector must still take the index cap:\n%s", out)
+	if strings.Contains(out, "const int maxDynArrayCount = 100;") {
+		t.Errorf("no cap may be raised to a sibling's schema bound:\n%s", out)
 	}
 }

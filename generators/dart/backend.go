@@ -17,8 +17,13 @@
 // over-maxlen (S7.1) verdicts therefore ride a sticky `_inv` flag the visitor
 // sets and the generated `decode`/`tryDecode` converts to a terminal INVALID
 // after the corelib returns — the Rust/Zig "generated guard, sticky flag" model.
-// The receiver-side decode limits (#102) are enforced by the corelib itself,
-// passed in as a `DecoderLimits` (the Go/Python/TS family).
+// The receiver-side decode limits (#102) are enforced HERE, per field, at each
+// field's own count/length header (CORELIB_PLAN §6.2.1: "the numbers and the
+// allocation are not the codec's"). The corelib is handed none: a cap is the
+// `else` of the schema bound in the very header hook that already carries it,
+// reported as limitExceeded() rather than invalidate(), and a wrapper array's
+// two caps ride on the collector beside the schema bounds they are exclusive
+// with.
 //
 // Every encode buffer is allocated by the code emitted here, never by the
 // corelib (CORELIB_PLAN §5.1): generated code is the layer that knows the
@@ -33,6 +38,7 @@ package dart
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -95,34 +101,36 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 	return ms
 }
 
-// limitSet is the receiver-side decode-limit configuration (generator#102),
-// resolved against the schema like the Go/Python/TS backends: corelib-dart
-// enforces the limits globally per decode (a DecoderLimits passed to the
-// decoder), so each active cap is the configured value raised to the largest
-// schema bound of its kind. Every cap is always set — the target carries a
-// finite default that the config key only overrides (§9.5, generator#385) — so
-// an entry is active exactly when the schema actually has an unbounded field of
-// that kind.
+// limitSet is the receiver-side decode-limit configuration (generator#102).
+//
+// Every cap is always SET — the target carries a finite default that the config
+// key only overrides (§9.5, generator#385) — so the three values are always
+// available to emit. The `*Has` flags say something narrower: whether the schema
+// actually has an unbounded field of that kind, and therefore whether the
+// module-level constant is emitted at all. A cap nothing in the schema can reach
+// is inert, and an inert constant is dead code in every generated module.
 type limitSet struct {
 	arrayCount, stringLen, blobLen int64
 	arrayHas, stringHas, blobHas   bool
-
-	// wrapperIndex is max_dyn_array_count AS CONFIGURED, unraised, and it is the
-	// number a wrapper array's element index is bounded by (ARCHITECTURE §9.5,
-	// generator#387).
-	//
-	// The raise the three above carry exists only because a DecoderLimits applies
-	// per decode, to every field alike, so it has to clear the largest schema
-	// bound in the message or it rejects a schema-bounded field §6.2.1 forbids it
-	// to touch. A collector's receiver cap has no such problem: corelib-dart
-	// consults it only where the schema declared no `count`, so it can never
-	// collide with a schema bound and never needs loosening. The deployment's
-	// number therefore travels intact — which is the whole point of the cap.
-	wrapperIndex int64
 }
 
 func (l limitSet) any() bool { return l.arrayHas || l.stringHas || l.blobHas }
 
+// resolveLimits resolves the max_dyn_* caps over the target's finite defaults,
+// and reads off the schema which of them the module actually declares.
+//
+// The values are emitted AS CONFIGURED. They used to be raised to the largest
+// schema bound of their kind, because the caps rode into the corelib as a
+// DecoderLimits that applies GLOBALLY per decode: corelib-dart measured every
+// fixlen length and every array count against them with no schema exemption, so
+// a cap below a sibling's `maxlen`/`count` would have rejected a field the
+// schema declares perfectly legal. Keeping those decodable cost every UNBOUNDED
+// field in the message exactly that much tightness — which is why the wrapper
+// index cap needed a second, unraised constant of its own. Enforced per field,
+// where the schema is known, no raise is needed anywhere and that second
+// constant collapses back into the first: the corelib is handed no DecoderLimits
+// at all (corelib-dart#88/#89), and the caps a collector takes are exclusive
+// with the schema bounds beside them.
 func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	var all []*ir.Field
 	for _, m := range s.Messages {
@@ -130,18 +138,45 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 	}
 	b := ir.Bounds(all)
 	d := generator.ClientDynLimits.Resolve(cfg)
-	var l limitSet
-	if b.HasDynArray {
-		l.arrayCount, l.arrayHas = max(d.ArrayCount, b.MaxCount), true
-		l.wrapperIndex = d.ArrayCount
+	return limitSet{
+		arrayCount: d.ArrayCount, arrayHas: b.HasDynArray,
+		stringLen: d.StringLen, stringHas: b.HasDynString,
+		blobLen: d.BlobLen, blobHas: b.HasDynBlob,
 	}
-	if b.HasDynString {
-		l.stringLen, l.stringHas = max(d.StringLen, b.MaxStringLen), true
+}
+
+// arrayCapExpr / elemMaxExpr render the receiver caps the generated header hooks
+// and the corelib collectors are handed (§6.2.1).
+//
+// On a collector they are ALWAYS emitted, including where the schema bound
+// beside them makes them inert: corelib-dart requires them (there is no number
+// in that library to fall back on) and normalizes a negative one to the FORMAT
+// ceiling, which bounds nothing the format does not already reject one step
+// earlier. §6.2.1 puts the number here regardless: it comes from generated code,
+// which knows the schema and the target, never from one the corelib invented.
+//
+// The module constant is preferred so the module keeps one number per kind; it
+// exists only where the schema has an unbounded field of that kind, and where it
+// does not the configured value goes in as a literal rather than the module
+// growing a constant nothing reads.
+func (g *gen) arrayCapExpr() string {
+	if g.limits.arrayHas {
+		return "maxDynArrayCount"
 	}
-	if b.HasDynBlob {
-		l.blobLen, l.blobHas = max(d.BlobLen, b.MaxBlobLen), true
+	return strconv.FormatInt(g.limits.arrayCount, 10)
+}
+
+func (g *gen) elemMaxExpr(elem ir.Kind) string {
+	if elem == ir.KindBlob {
+		if g.limits.blobHas {
+			return "maxDynBlobLen"
+		}
+		return strconv.FormatInt(g.limits.blobLen, 10)
 	}
-	return l
+	if g.limits.stringHas {
+		return "maxDynStringLen"
+	}
+	return strconv.FormatInt(g.limits.stringLen, 10)
 }
 
 // ---- source file builder --------------------------------------------------
@@ -198,22 +233,14 @@ func (g *gen) emitLimits(f *dfile) {
 	}
 	f.line("// Receiver-side decode limits baked from the sofabgen config")
 	f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
-	f.line("// only fields the schema left unbounded; each cap is raised to the largest")
-	f.line("// schema bound of its kind. Exceeding a cap fails decode with limitExceeded.")
+	f.line("// ONLY the fields the schema left unbounded: a field with its own count/maxlen")
+	f.line("// is judged against that alone, and its violation is INVALID. The numbers")
+	f.line("// travel AS CONFIGURED -- nothing raises them to a sibling's schema bound,")
+	f.line("// because no cap can reach a bounded field to begin with. Exceeding one fails")
+	f.line("// the decode with limitExceeded, a policy category distinct from INVALID: the")
+	f.line("// same bytes decode under a looser cap.")
 	if g.limits.arrayHas {
 		f.line("const int maxDynArrayCount = %d;", g.limits.arrayCount)
-		// The wrapper index cap needs no raise, so it is a second constant rather
-		// than the same one: it is only ever consulted for an array the schema left
-		// unbounded, so it cannot reach a schema-bounded field and travels as the
-		// deployment configured it. Emitted only when it can actually differ --
-		// otherwise it would be a second name for one number.
-		if g.limits.wrapperIndex != g.limits.arrayCount {
-			f.line("// The element index of an unbounded WRAPPER array is bounded by the")
-			f.line("// configured number instead: the raise above is what a per-decode limit")
-			f.line("// needs to clear the schema bounds it would otherwise bind, and a")
-			f.line("// per-array cap never sees one.")
-			f.line("const int maxDynWrapperIndex = %d;", g.limits.wrapperIndex)
-		}
 	}
 	if g.limits.stringHas {
 		f.line("const int maxDynStringLen = %d;", g.limits.stringLen)
@@ -221,27 +248,7 @@ func (g *gen) emitLimits(f *dfile) {
 	if g.limits.blobHas {
 		f.line("const int maxDynBlobLen = %d;", g.limits.blobLen)
 	}
-	var parts []string
-	if g.limits.arrayHas {
-		parts = append(parts, "maxArrayCount: maxDynArrayCount")
-	}
-	if g.limits.stringHas {
-		parts = append(parts, "maxStringLen: maxDynStringLen")
-	}
-	if g.limits.blobHas {
-		parts = append(parts, "maxBlobLen: maxDynBlobLen")
-	}
-	f.line("const sofab.DecoderLimits _limits = sofab.DecoderLimits(%s);", strings.Join(parts, ", "))
 	f.blank()
-}
-
-// limitsArg is the trailing ", limits: _limits" appended to Decoder.decode when
-// any receiver-side cap is active, else "".
-func (g *gen) limitsArg() string {
-	if g.limits.any() {
-		return ", limits: _limits"
-	}
-	return ""
 }
 
 // ---- enum / bitfield ------------------------------------------------------
@@ -410,7 +417,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		f.line("  /// Decodes into a destination the caller guarantees is already at its")
 		f.line("  /// defaults, so [decode]'s fresh instance skips the redundant reset.")
 		f.line("  static sofab.DecodeStatus _decodeInto(Uint8List data, %s out) {", name)
-		f.line("    return sofab.Decoder.decode(data, %s(out)%s);", visitorName(name), g.limitsArg())
+		f.line("    return sofab.Decoder.decode(data, %s(out));", visitorName(name))
 		f.line("  }")
 		f.blank()
 		f.line("  /// Best-effort one-shot decode (the 90 %% case): returns the message with")
@@ -903,7 +910,7 @@ func (g *gen) emitStreamDecoder(f *dfile, name string) {
 	f.line("/// destination, so a chunk may be reused as soon as [feed] returns.")
 	f.line("class %sDecoder {", name)
 	f.line("  %sDecoder._(this._out) {", name)
-	f.line("    _d = sofab.Decoder(%s(_out)%s);", visitorName(name), g.limitsArg())
+	f.line("    _d = sofab.Decoder(%s(_out));", visitorName(name))
 	f.line("  }")
 	f.blank()
 	f.line("  final %s _out;", name)

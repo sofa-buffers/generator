@@ -436,6 +436,309 @@ echo "$ERR" | grep -q 'incomplete message' \
     || { echo "FAIL: in-cap(4==4)+truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
 echo "==> over-cap/truncation ordering OK"
 
+# CORELIB_PLAN S6.2.1, the two rules a decoder-wide cap could not honour. Both
+# are end-to-end assertions on generated code, because the generator's own unit
+# tests can only see the emitted substrings and neither of these is a substring.
+echo "==> a cap must not reach a schema-bounded field, nor a skipped one (S6.2.1)"
+cat > "$WORK/excl.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      a: { id: 0, type: array, items: { type: u64 } }
+      b: { id: 1, type: array, items: { type: i32, count: 100000 } }
+      w: { id: 2, type: array, items: { type: string } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limits.yaml" --lang go --in "$WORK/excl.yaml" --out "$WORK/excl" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/excl/go.mod"
+# b (id 1, signed array, count 6) is bounded by its own `count: 100000` and the
+# cap of 4 must not touch it. Under the raise this decoded only because the cap
+# had been lifted to 100000 for EVERY field, `a` included.
+printf '\014\006\002\002\002\002\002\002' > "$WORK/bounded6.bin"
+(cd "$WORK/excl" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/bounded6.bin" >/dev/null) \
+    || { echo "FAIL: a schema-bounded array must not be judged against the receiver cap"; exit 1; }
+# ...while the unbounded sibling at the same cap still rejects at 6.
+printf '\003\006\001\001\001\001\001\001' > "$WORK/unbounded6.bin"
+if (cd "$WORK/excl" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/unbounded6.bin" >/dev/null 2>&1); then
+    echo "FAIL: the unbounded sibling must still be capped at 4"; exit 1
+fi
+# A field the visitor SKIPS is never capped (S6.2.1: it allocates nothing).
+# id 9 is declared nowhere, so an over-cap array there must stay COMPLETE --
+# this is generator#410, which the decoder-wide cap got wrong by construction.
+printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
+(cd "$WORK/lim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/skipcap.bin" >/dev/null) \
+    || { echo "FAIL: an over-cap array at an UNDECLARED id must be skipped, not capped"; exit 1; }
+# ...and neither is the OTHER S7.3 skip shape, which the unknown id above does
+# not reach: id 0 IS declared, but as array<u64> -- UNSIGNED. A SIGNED array
+# header (wire type 4) there was never this field's value, so it is skipped, and
+# its count is measured against neither the schema bound nor the cap
+# (MESSAGE_SPEC S7.3, CORELIB_PLAN S6.2.1, generator#410). What pins it is the
+# kind gate arrayBeginBody emits AHEAD of the cap; with the cap in front, these
+# five elements answer ErrLimitExceeded instead of decoding.
+printf '\004\005\000\000\000\000\000' > "$WORK/mistypedcap.bin"
+(cd "$WORK/lim102" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/mistypedcap.bin" >/dev/null) \
+    || { echo "FAIL: an over-cap array whose wire KIND contradicts the declaration must be skipped, not capped"; exit 1; }
+# The same rule one level down, on the path where the cap is NOT compared by
+# generated code: a wrapper array hands its elements to a corelib collector and
+# the receiver cap travels as sofab.NewStringSeq's Caps argument, so corelib-go
+# is what has to run the S7.3 element test ahead of the index compare. `w` (id 2)
+# is a count-less string array, so its ELEMENT INDEX is its length and takes
+# max_dyn_array_count (4).
+# Wire: 16 seq_begin(id 2) | 2a element id 5 | 0b fixlen_word (len 1, subtype
+# BLOB, contradicting the declared `string`) | 'x' | 07 end.
+printf '\026\052\013\170\007' > "$WORK/wrapmistyped.bin"
+(cd "$WORK/excl" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/wrapmistyped.bin" >/dev/null) \
+    || { echo "FAIL: a mis-subtyped wrapper element above the index cap must be skipped, not capped"; exit 1; }
+# ...told apart from the very same element as a STRING, which this scope DOES
+# read and which the index cap therefore does bound.
+printf '\026\052\012\170\007' > "$WORK/wrapovercap.bin"
+if (cd "$WORK/excl" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/wrapovercap.bin" >/dev/null 2>&1); then
+    echo "FAIL: a string element at index 5 must still exceed max_dyn_array_count 4"; exit 1
+fi
+echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kind and mis-subtyped wrapper element all skipped)"
+
+# The ENFORCEMENT POINT, pinned end-to-end (CORELIB_PLAN S6.2.1: a limit "MUST be
+# enforced at the count/length header -- before the allocation it is meant to
+# prevent -- for the same reason INVALID is decided there").
+#
+# This is what keeps the scalar cap in the generated FixlenBegin arm rather than
+# on the one corelib call further down the path, sofab.PayloadAcc.Take. Take is
+# reached from the PAYLOAD callback: for a message that ends right after an
+# over-cap length word it is never called at all, so the same bytes would answer
+# INCOMPLETE instead of LimitExceeded and nothing would have been rejected until
+# after the payload was buffered. A guard that moves there looks identical in
+# review -- hence a byte-level probe rather than a codegen assertion.
+#
+# Wire: 02 (id 0, fixlen) a2 06 (fixlen_word = (100 << 3) | 2 -> a 100-byte
+# string) and then end of input. The cap is 24.
+echo "==> an over-cap length must be refused AT THE HEADER, not after the payload"
+cat > "$WORK/dynstr.yaml" <<'YAML'
+version: 1
+messages:
+  dyn: { payload: { s: { id: 0, type: string } } }
+YAML
+cat > "$WORK/cfg-strlim.yaml" <<YAML
+generic: { emit: project, max_dyn_string_len: 24 }
+targets: { go: { package: message, module_path: example.com/gen, go_version: "1.21" } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-strlim.yaml" --lang go --in "$WORK/dynstr.yaml" --out "$WORK/strlim" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/strlim/go.mod"
+printf '\002\242\006' > "$WORK/overcap_trunc.bin"
+OUT=$( (cd "$WORK/strlim" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/overcap_trunc.bin" 2>&1) || true )
+case "$OUT" in
+    *"limit exceeded"*) ;;
+    *) echo "FAIL: an over-cap length word followed by truncation must be LimitExceeded at the header, got: $OUT"; exit 1 ;;
+esac
+# The control: the same header under the cap, equally truncated, is INCOMPLETE --
+# so the case above is the cap firing and not the truncation being misreported.
+# 02 62 = fixlen_word (12 << 3) | 2, a 12-byte string, no payload.
+printf '\002\142' > "$WORK/incap_trunc.bin"
+OUT=$( (cd "$WORK/strlim" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/incap_trunc.bin" 2>&1) || true )
+case "$OUT" in
+    *"limit exceeded"*) echo "FAIL: an UNDER-cap truncated string must not be LimitExceeded, got: $OUT"; exit 1 ;;
+esac
+echo "==> header enforcement point OK"
+
+# A native matrix ROW's own element count. The outer `count:` bounds the row ID;
+# the row's count header was bounded by nothing generated code passed on -- it
+# rode on the decoder-wide cap, and with that gone the row bound has to travel to
+# the collector as its own sofab.Bounds, with the array cap behind it.
+echo "==> a matrix row's element count is bounded (MESSAGE_SPEC S7.1)"
+cat > "$WORK/mat.yaml" <<'YAML'
+version: 1
+messages:
+  mat:
+    payload:
+      m: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 2 } } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/mat.yaml" --out "$WORK/mat" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/mat/go.mod"
+printf '\006\003\002\001\002\007' > "$WORK/row_ok.bin"    # row 0: 2 elements == count 2
+printf '\006\003\003\001\002\003\007' > "$WORK/row_over.bin" # row 0: 3 elements > count 2
+(cd "$WORK/mat" && GOFLAGS=-mod=mod go run ./harness decode mat < "$WORK/row_ok.bin" >/dev/null) \
+    || { echo "FAIL: an at-count matrix row must decode"; exit 1; }
+if (cd "$WORK/mat" && GOFLAGS=-mod=mod go run ./harness decode mat < "$WORK/row_over.bin" >/dev/null 2>&1); then
+    echo "FAIL: a matrix row over its schema count must be INVALID"; exit 1
+fi
+echo "==> matrix row count OK"
+
+# The WRAPPER-array half of S6.2.1 (generator#402 item 3), and the only
+# measurement that settles it: a nine-byte message must not be able to allocate.
+#
+# A wrapper array carries no count header -- its length is *highest present id +
+# 1* (MESSAGE_SPEC S5.1) -- so the element INDEX is the array's length, and one
+# element at a large id forces an arbitrarily large allocation out of nothing.
+# S6.2.1 names the index for that reason and puts the check "before the container
+# it indexes into is extended". Against the generator and corelib-go this branch
+# replaces, the four images below decoded to COMPLETE while allocating 172 MB,
+# 41 MB and 250 MB.
+#
+# The verdict alone would not prove it, so the probe reads runtime.MemStats
+# around each decode and asserts the allocation NEVER HAPPENED: a cap that
+# rejects after the container was grown has prevented nothing. It also pins the
+# two things the cap must NOT do -- reach a schema-bounded array (its own `count:`
+# governs, ErrInvalidMsg) and reject anything under the cap.
+echo "==> a wrapper array's element index is capped, and nothing is allocated (generator#402)"
+cat > "$WORK/dyn402.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      w: { id: 0, type: array, items: { type: string } }
+      p: { id: 1, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }
+      n: { id: 2, type: array, items: { type: array, items: { type: string } } }
+      b: { id: 3, type: array, items: { type: string, count: 4 } }
+YAML
+cat > "$WORK/cfg-402.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 64, max_dyn_string_len: 32, max_dyn_blob_len: 32 }
+targets: { go: { package: message, module_path: example.com/gen, go_version: "1.21" } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-402.yaml" --lang go --in "$WORK/dyn402.yaml" --out "$WORK/lim402" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/lim402/go.mod"
+mkdir -p "$WORK/lim402/probe"
+cat > "$WORK/lim402/probe/main.go" <<'GO'
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"runtime"
+
+	message "example.com/gen/message"
+	sofab "github.com/sofa-buffers/corelib-go"
+)
+
+func varint(out []byte, v uint64) []byte {
+	for v >= 0x80 {
+		out = append(out, byte(v&0x7f)|0x80)
+		v >>= 7
+	}
+	return append(out, byte(v))
+}
+
+// hdr: (id << 3) | wire. Wire 2 = Fixlen, 6 = SequenceStart, 7 = SequenceEnd
+// (MESSAGE_SPEC S4.3, S4.9).
+func hdr(out []byte, id, wire uint64) []byte { return varint(out, (id<<3)|wire) }
+
+// Four orders of magnitude below the wire-sized allocation: what is being
+// excluded is the container, not every byte the decode touches.
+const budget = 1 << 16
+
+var failures int
+
+func verdict(err error) string {
+	switch {
+	case err == nil:
+		return "Complete"
+	case errors.Is(err, sofab.ErrLimitExceeded):
+		return "LimitExceeded"
+	case errors.Is(err, sofab.ErrInvalidMsg):
+		return "Invalid"
+	case errors.Is(err, sofab.ErrIncomplete):
+		return "Incomplete"
+	case errors.Is(err, sofab.ErrArgument):
+		return "InvalidArgument"
+	}
+	return err.Error()
+}
+
+func run(what string, wire []byte, want string) {
+	m := message.NewDyn()
+	_ = sofab.AcceptBytes(wire, m) // warm, so the measured decode counts wire-driven growth
+
+	var before, after runtime.MemStats
+	m = message.NewDyn()
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	err := sofab.AcceptBytes(wire, m)
+	runtime.ReadMemStats(&after)
+	used := after.TotalAlloc - before.TotalAlloc
+	got := verdict(err)
+	fmt.Printf("    %-34s verdict=%-15s allocated=%d bytes\n", what, got, used)
+	if got != want {
+		fmt.Printf("FAIL: %s: expected %s, got %s\n", what, want, got)
+		failures++
+	}
+	if used > budget {
+		fmt.Printf("FAIL: %s: allocated %d bytes -- the allocation the cap exists to prevent HAPPENED\n", what, used)
+		failures++
+	}
+}
+
+func main() {
+	const big = 2000000 // ~64 MB of string headers, asked for in nine bytes
+
+	var w []byte // array<string>, schema-unbounded
+	w = hdr(w, 0, 6)
+	w = hdr(w, big, 2)
+	w = varint(w, (1<<3)|2) // fixlen word: 1 byte, subtype String
+	w = append(w, 'A')
+	w = hdr(w, 0, 7)
+	fmt.Printf("    attack message: %d bytes, one element at index %d\n", len(w), big)
+	run("array<string> over-index", w, "LimitExceeded")
+
+	var p []byte // array<struct>
+	p = hdr(p, 1, 6)
+	p = hdr(p, big, 6)
+	p = hdr(p, 0, 7)
+	p = hdr(p, 0, 7)
+	run("array<struct> over-index", p, "LimitExceeded")
+
+	var n []byte // array<array<string>>
+	n = hdr(n, 2, 6)
+	n = hdr(n, big, 6)
+	n = hdr(n, 0, 7)
+	n = hdr(n, 0, 7)
+	run("array<array<string>> over-index", n, "LimitExceeded")
+
+	// The schema bounds this one, so the cap must not touch it: `count: 4`
+	// governs and an over-index element is INVALID (MESSAGE_SPEC S7.1).
+	var b []byte
+	b = hdr(b, 3, 6)
+	b = hdr(b, big, 2)
+	b = varint(b, (1<<3)|2)
+	b = append(b, 'A')
+	b = hdr(b, 0, 7)
+	run("bounded array<string> over-index", b, "Invalid")
+
+	// The element LENGTH cap, the collector's second axis: one element longer
+	// than max_dyn_string_len, at a perfectly ordinary index.
+	var l []byte
+	l = hdr(l, 0, 6)
+	l = hdr(l, 0, 2)
+	l = varint(l, (64<<3)|2)
+	for i := 0; i < 64; i++ {
+		l = append(l, 'A')
+	}
+	l = hdr(l, 0, 7)
+	run("array<string> over-long element", l, "LimitExceeded")
+
+	// The control: a sparse array under the caps decodes intact, at its wire
+	// length -- highest present id + 1 -- and a cap never truncates.
+	var ok []byte
+	ok = hdr(ok, 0, 6)
+	ok = hdr(ok, 3, 2)
+	ok = varint(ok, (2<<3)|2)
+	ok = append(ok, 'h', 'i')
+	ok = hdr(ok, 0, 7)
+	good, err := message.DecodeDyn(ok)
+	if err != nil || len(good.W) != 4 || good.W[3] != "hi" {
+		fmt.Printf("FAIL: an in-cap sparse wrapper array must decode intact: %v\n", err)
+		failures++
+	} else {
+		fmt.Printf("    %-34s verdict=Complete        len=%d, last=%q\n", "in-cap control", len(good.W), good.W[3])
+	}
+
+	if failures > 0 {
+		os.Exit(1)
+	}
+}
+GO
+(cd "$WORK/lim402" && GOFLAGS=-mod=mod go run ./probe) \
+    || { echo "FAIL: wrapper-array receiver caps (generator#402, S6.2.1)"; exit 1; }
+echo "==> wrapper index + element caps OK (rejected before the allocation, bounded array untouched)"
+
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
 # declared width is INVALID: it MUST NOT be masked to the width and MUST NOT be

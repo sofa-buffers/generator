@@ -346,6 +346,94 @@ grep -qi "limit" "$WORK/limit-err.txt" || { echo "FAIL: over-cap decode error sh
 (cd "$WORK/nolimitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null || { echo "FAIL: unset limit must keep count 5 decodable"; exit 1; }
 echo "==> decode-limit reject OK"
 
+# CORELIB_PLAN S6.2.1, the two rules a scope-wide cap could not honour. Both are
+# end-to-end: the generator's unit tests can only see emitted substrings.
+echo "==> a cap must not reach a schema-bounded field, nor a skipped one (S6.2.1)"
+cat > "$WORK/excl.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      a: { id: 0, type: array, items: { type: u64 } }
+      b: { id: 1, type: array, items: { type: i32, count: 100000 } }
+      w: { id: 2, type: array, items: { type: string } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/excl.yaml" --out "$WORK/exclproj" )
+# b (id 1, signed array, count 6) is bounded by its own `count: 100000`, so the
+# cap of 4 must not touch it.
+printf '\014\006\002\002\002\002\002\002' > "$WORK/bounded6.bin"
+(cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/bounded6.bin" >/dev/null \
+    || { echo "FAIL: a schema-bounded array must not be judged against the receiver cap"; exit 1; }
+# ...while the unbounded sibling at the same cap still rejects at 6.
+printf '\003\006\001\001\001\001\001\001' > "$WORK/unbounded6.bin"
+if (cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/unbounded6.bin" >/dev/null 2>&1; then
+    echo "FAIL: the unbounded sibling must still be capped at 4"; exit 1
+fi
+# A field the handler SKIPS is never capped (S6.2.1: it allocates nothing). id 9
+# is declared nowhere, so an over-cap array there must decode.
+printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
+(cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/skipcap.bin" >/dev/null \
+    || { echo "FAIL: an over-cap array at an UNDECLARED id must be skipped, not capped"; exit 1; }
+# ...and neither is a field whose wire kind contradicts the declaration (S7.3):
+# id 0 is declared array<u64> (unsigned), so a SIGNED array there is skipped.
+printf '\004\005\002\002\002\002\002' > "$WORK/mistyped.bin"
+(cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/mistyped.bin" >/dev/null \
+    || { echo "FAIL: an over-cap array of the WRONG kind must be skipped, not capped"; exit 1; }
+# The same rule one level down, where the number generated code states is the
+# only one in play: a WRAPPER array carries no count header, so its element
+# INDEX is its length and takes max_dyn_array_count (4). `w` (id 2) is a
+# count-less string array; an element whose fixlen subtype contradicts `string`
+# is a S7.3 skip, so it never grows the list and the index cap must not fire on
+# it -- which needs the tag test to run AHEAD of the index compare.
+# Wire: 16 seq_begin(id 2) | 2a element id 5 | 0b fixlen_word (len 1, subtype
+# BLOB, contradicting the declared `string`) | 'x' | 07 end.
+printf '\026\052\013\170\007' > "$WORK/wrapmistyped.bin"
+(cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/wrapmistyped.bin" >/dev/null \
+    || { echo "FAIL: a mis-subtyped wrapper element above the index cap must be skipped, not capped"; exit 1; }
+# ...told apart from the very same element as a STRING, which this scope DOES
+# read and which the index cap therefore does bound.
+printf '\026\052\012\170\007' > "$WORK/wrapovercap.bin"
+if (cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/wrapovercap.bin" >/dev/null 2>&1; then
+    echo "FAIL: a string element at index 5 must still exceed max_dyn_array_count 4"; exit 1
+fi
+echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kind and mis-subtyped wrapper element all skipped)"
+
+# A wrapper string element's own byte LENGTH, and a matrix ROW's own element
+# count: two numbers the generated visitor is the only thing that can bound,
+# since neither reaches a schema bound when the schema declares none.
+echo "==> a wrapper element's length and a matrix row's count are capped (S6.2.1)"
+cat > "$WORK/elem.yaml" <<'YAML'
+version: 1
+messages:
+  el:
+    payload:
+      ws: { id: 0, type: array, items: { type: string } }
+      m:  { id: 1, type: array, items: { type: array, items: { type: u32 } } }
+YAML
+cat > "$WORK/elem-cfg.yaml" <<YAML
+generic: { emit: project, max_dyn_string_len: 4, max_dyn_array_count: 4 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/elem-cfg.yaml" --lang python --in "$WORK/elem.yaml" --out "$WORK/elemproj" )
+# 06 seq_begin(id 0) | 02 string elem id 0 | 2a fixlen_word (len 5, subtype
+# string) | "xxxxx" (5 bytes > cap 4) | 07 end
+printf '\006\002\052\170\170\170\170\170\007' > "$WORK/elemover.bin"
+if (cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/elemover.bin" >/dev/null 2>&1; then
+    echo "FAIL: a wrapper string element 5 bytes long must exceed max_dyn_string_len 4"; exit 1
+fi
+# ...4 bytes is at the cap and decodes.
+printf '\006\002\042\170\170\170\170\007' > "$WORK/elemok.bin"
+(cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/elemok.bin" >/dev/null \
+    || { echo "FAIL: a wrapper string element at the cap must decode"; exit 1; }
+# 0e seq_begin(id 1) | 03 unsigned array elem id 0 | count 5 > cap 4
+printf '\016\003\005\001\002\003\004\005\007' > "$WORK/rowover.bin"
+if (cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/rowover.bin" >/dev/null 2>&1; then
+    echo "FAIL: a matrix row of 5 elements must exceed max_dyn_array_count 4"; exit 1
+fi
+printf '\016\003\004\001\002\003\004\007' > "$WORK/rowok.bin"
+(cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/rowok.bin" >/dev/null \
+    || { echo "FAIL: a matrix row at the cap must decode"; exit 1; }
+echo "==> element length + row count caps OK"
+
 # Conformance covers the per-field scalar vectors; WireArraySparsity covers the
 # array ones -- the MESSAGE_SPEC S2 element rule and S3's "count is a capacity",
 # both byte-exact against the regenerated shared vectors, both executed through a
