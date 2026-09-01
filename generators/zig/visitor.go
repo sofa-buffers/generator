@@ -654,7 +654,21 @@ func (g *gen) emitArraySkipArm(f *zfile, fs []frame, arrSkip bool) {
 	if !arrSkip {
 		return
 	}
-	emit := func(kinds string, want func(ir.Kind) bool) {
+	use := visitorUseOf(fs)
+	emit := func(kinds string, drained bool, want func(ir.Kind) bool) {
+		// A wire kind whose element callback this visitor does not declare is
+		// never delivered at all: corelib-zig guards every element call on
+		// @hasDecl, so those elements go nowhere and there is nothing to
+		// discard. Arming the counter for such a kind is not merely redundant,
+		// it is WRONG -- nothing can drain it, so the next field of a kind that
+		// IS declared drains it and is swallowed. Silent data loss on a fully
+		// bounded schema: a signed array at an `array<u32>` id armed askip, no
+		// signed() existed to spend it, and the u32 scalar that followed was
+		// eaten, decoding COMPLETE with the wrong value (audit 2026-09-01).
+		if !drained {
+			f.line("            %s => 0,", kinds)
+			return
+		}
 		f.line("            %s => switch (self.cur) {", kinds)
 		for _, fr := range fs {
 			switch fr.kind {
@@ -694,10 +708,10 @@ func (g *gen) emitArraySkipArm(f *zfile, fs []frame, arrSkip bool) {
 	// must disarm only for .signed, so an .unsigned header at that id is skipped
 	// AND leaves the fill counter at 0 -- otherwise the NEXT bare scalar is
 	// absorbed into the array (generator#270 / Crucible F-0045).
-	emit(".unsigned", wantUnsignedArrayElem)
-	emit(".signed", wantSignedArrayElem)
-	emit(".fp32", func(k ir.Kind) bool { return k == ir.KindFP32 })
-	emit(".fp64", func(k ir.Kind) bool { return k == ir.KindFP64 })
+	emit(".unsigned", use.unsigned, wantUnsignedArrayElem)
+	emit(".signed", use.signed, wantSignedArrayElem)
+	emit(".fp32", use.fp32, func(k ir.Kind) bool { return k == ir.KindFP32 })
+	emit(".fp64", use.fp64, func(k ir.Kind) bool { return k == ir.KindFP64 })
 	f.line("        };")
 }
 
