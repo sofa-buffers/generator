@@ -103,6 +103,67 @@ fn checkScalarsAllChunkSizes(alloc: std.mem.Allocator, wire: []const u8) !void {
     std.debug.print("==> scalar string fields a..d: chunk-invariant at all {d} chunk sizes\n", .{wire.len});
 }
 
+/// A counting allocator: forwards to `parent` and records every byte handed out.
+///
+/// generator#432: the generated string()/blob() hooks reassembled a split payload
+/// BEFORE the (location, id) switch decided whether anyone wanted it, so an
+/// undeclared id or a §7.3 wire-type contradiction cost a heap copy sized 1:1
+/// from the wire — the very allocation MESSAGE_SPEC §7.3 and CORELIB_PLAN §6.6
+/// say a skipped field must not cost. Asserting the decoded VALUES cannot see
+/// this: the field is dropped either way and every value is correct. Only the
+/// byte count tells the two apart.
+const Counting = struct {
+    parent: std.mem.Allocator,
+    bytes: usize = 0,
+
+    fn alloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        self.bytes += len;
+        return self.parent.vtable.alloc(self.parent.ptr, len, a, ra);
+    }
+    fn resize(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        if (new_len > m.len) self.bytes += new_len - m.len;
+        return self.parent.vtable.resize(self.parent.ptr, m, a, new_len, ra);
+    }
+    fn remap(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        if (new_len > m.len) self.bytes += new_len - m.len;
+        return self.parent.vtable.remap(self.parent.ptr, m, a, new_len, ra);
+    }
+    fn free(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        self.parent.vtable.free(self.parent.ptr, m, a, ra);
+    }
+    const vtable = std.mem.Allocator.VTable{
+        .alloc = alloc, .resize = resize, .remap = remap, .free = free,
+    };
+    fn allocator(self: *Counting) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+};
+
+/// A payload nobody declares must cost NOTHING, whole or split (generator#432).
+fn checkSkippedPayloadIsFree(comptime label: []const u8, wire: []const u8) !void {
+    // Whole (n == 0), then the splits that matter: byte-at-a-time, a small
+    // boundary, one inside the payload, and one either side of the middle.
+    const sizes = [_]usize{ 0, 1, 2, 3, 7, 4096, wire.len / 2, wire.len - 1 };
+    for (sizes) |n| {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        var c = Counting{ .parent = arena.allocator() };
+        const alloc = c.allocator();
+        if (n == 0) {
+            const m = Probe.decode(alloc, wire) catch fail("{s}: whole decode failed", .{label});
+            if (m.a.len != 0) fail("{s}: a must stay empty, got {d} bytes", .{ label, m.a.len });
+        } else {
+            const m = decodeChunked(alloc, wire, n) catch fail("{s}: chunked decode failed at n={d}", .{ label, n });
+            if (m.a.len != 0) fail("{s}: a must stay empty at n={d}", .{ label, n });
+        }
+        if (c.bytes != 0) fail("{s}: a skipped payload allocated {d} bytes at chunk size {d}", .{ label, c.bytes, n });
+    }
+}
+
 pub fn main() !void {
     // An arena is the allocator the generated decoder documents ("storage comes
     // from `alloc` -- an arena frees everything at once"): nothing in the
@@ -120,6 +181,18 @@ pub fn main() !void {
     //   02     element id 0, string      12  fixlen: string, length 2   "ab"
     //   0a     element id 1, string      12  fixlen: string, length 2   "cd"
     //   07     sequence end
+    // generator#432: an undeclared id carrying a 100 KB string must cost zero
+    // bytes, at every chunk boundary. 0x2a = id 5 (undeclared), wire type fixlen;
+    // 0x82 0xea 0x30 = (100000 << 3) | 2 -> string subtype, length 100000.
+    {
+        const N: usize = 100000;
+        const w = try std.heap.page_allocator.alloc(u8, 4 + N);
+        defer std.heap.page_allocator.free(w);
+        w[0] = 0x2a; w[1] = 0x82; w[2] = 0xea; w[3] = 0x30;
+        @memset(w[4..], 'x');
+        try checkSkippedPayloadIsFree("undeclared id, 100 KB string", w);
+    }
+
     try checkAllChunkSizes(
         alloc,
         "string_array [\"ab\",\"cd\"]",
