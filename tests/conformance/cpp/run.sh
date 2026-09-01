@@ -126,7 +126,13 @@ run_variant() {
     # have, but nothing drove either -- the capability was demonstrable and
     # unverified. Property: streaming is indistinguishable from the one-shot path.
     echo "==> [$label] streaming: serialize through a sink, feed in chunks"
-    g++ -std=c++20 -Wall -Werror $include -I"$WORK/ex-$label" \
+    # corelib-cpp's IStreamObject takes a sofab::Limits (corelib-cpp#128: no
+    # constructor leaves the byte budget out); the corelib-c-cpp one takes none,
+    # its containers being statically bounded. The check is about chunk
+    # boundaries, so the pure leg states the platform ceiling.
+    STREAM_LIMITS=-DSOFAB_STREAM_LIMITS=1
+    [ -n "$corelib" ] && STREAM_LIMITS=
+    g++ -std=c++20 -Wall -Werror $include -I"$WORK/ex-$label" $STREAM_LIMITS \
         -DMSG_TYPE=sofabuffers::Myfirstmessage -include myfirstmessage.hpp \
         -o "$WORK/stream-$label" "$ROOT/tests/conformance/cpp/streaming_check.cpp" \
         $STREAM_OBJS
@@ -477,8 +483,9 @@ run_variant c-cpp-static  "c-cpp" false "-I$CC/src/include" SOFAB_C_DIR="$CC"
 
 # Receiver-side decode limits (generator#102), pure corelib-cpp only (the c-cpp
 # profile is statically schema-bounded). An unbounded array claiming more than
-# the configured max_dyn_array_count must fail the decode (LimitExceeded via
-# is.exceedLimit()); the same bytes decode fine without a configured limit.
+# the configured max_dyn_array_count must fail the decode (LimitExceeded, raised
+# inside sofab::readArrayCapped, which is handed the cap); the same bytes decode fine
+# without a configured limit.
 echo "==> [cpp] receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn102.yaml" <<'YAML'
 version: 1
@@ -510,6 +517,239 @@ DEC=$("$WORK/lim102/harness/harness" decode dyn < "$WORK/in102.bin") || { echo "
 echo "$DEC" | grep -q '"a":\[1,2,3,4\]' || { echo "FAIL: [cpp] unbounded native array lost its elements (regression generator#112); got: $DEC"; exit 1; }
 "$WORK/nolim102/harness/harness" decode dyn < "$WORK/over102.bin" >/dev/null || { echo "FAIL: [cpp] under the target default the same bytes must decode"; exit 1; }
 echo "==> [cpp] decode limits OK (over-cap rejected, in-cap preserves elements, unlimited accepted)"
+
+# The string/blob half of the same rule, and the §7.3 ordering it turns on
+# (generator#420). The cap is PASSED INTO readString/readBlob rather than tested
+# in front of them, because the MESSAGE_SPEC §7.3 tag test lives inside the call:
+# CORELIB_PLAN §6.2.1, "a skipped field is never capped". A guard in front runs
+# BEFORE the tag test and so caps exactly the field it was required to skip --
+# which is what this backend emitted until #420, and what the last case here
+# pins. A unit test cannot see the difference: a removed guard with nothing
+# replacing it reads the same in a diff, so the first two cases run the binary.
+echo "==> [cpp] receiver caps ride into the read, behind the §7.3 tag test (generator#420)"
+# The array field is load-bearing, and not as a subject: it is what makes the
+# derived reassembly cap (SOFAB_MAX_DYN_BUFFERED_FIELD, #228) wide enough that
+# these images reach readString at all. Sized off the string/blob caps alone it
+# comes out at cap + 2 bytes, and an over-cap field always spans cap + 3 -- so
+# every case below would be rejected by the byte budget before the per-field cap
+# was ever consulted, and the test would pass while proving nothing.
+cat > "$WORK/dyn420.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      s: { id: 0, type: string }
+      b: { id: 1, type: blob }
+      a: { id: 2, type: array, items: { type: u64 } }
+YAML
+cat > "$WORK/cfg-420.yaml" <<'YAML'
+generic: { emit: project, max_dyn_string_len: 8, max_dyn_blob_len: 8, max_dyn_array_count: 4 }
+targets: { cpp: { namespace: sofabuffers } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-420.yaml" --lang cpp --in "$WORK/dyn420.yaml" --out "$WORK/lim420" )
+make -C "$WORK/lim420" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+# No cap may be tested in generated code in front of a read; the whole point of
+# #420 is that the corelib gets handed the number instead.
+grep -q 'is.exceedLimit()' "$WORK/lim420/dyn.hpp" && {
+    echo "FAIL: [cpp] a cap is checked in front of the read (§6.2.1, generator#420)"; exit 1; }
+grep -q 'sofab::readStringCapped(is, s, SOFAB_MAX_DYN_STRING_LEN);' "$WORK/lim420/dyn.hpp" || {
+    echo "FAIL: [cpp] the string cap must be an argument to readStringCapped"; exit 1; }
+# Header byte `id << 3 | wire`, wire 2 = Fixlen; then the length word
+# `len << 3 | subtype`, subtype 2 = String, 3 = Blob (MESSAGE_SPEC §4).
+printf '\002\112123456789' > "$WORK/over420.bin"  # s: 9 bytes > cap 8  -> reject
+printf '\002\102' > "$WORK/in420.bin"             # s: 8 bytes == cap   -> accept
+printf '12345678' >> "$WORK/in420.bin"
+printf '\012\113AAAAAAAAA' > "$WORK/overb420.bin"  # b (id 1): 9 bytes > cap 8 -> reject
+printf '\002\113AAAAAAAAA' > "$WORK/skip420.bin"  # a 9-byte BLOB at the string id
+if "$WORK/lim420/harness/harness" decode dyn < "$WORK/over420.bin" >/dev/null 2>&1; then
+    echo "FAIL: [cpp] over-cap unbounded string (9 > max_dyn_string_len 8) must be rejected"; exit 1
+fi
+if "$WORK/lim420/harness/harness" decode dyn < "$WORK/overb420.bin" >/dev/null 2>&1; then
+    echo "FAIL: [cpp] over-cap unbounded blob (9 > max_dyn_blob_len 8) must be rejected"; exit 1
+fi
+DEC=$("$WORK/lim420/harness/harness" decode dyn < "$WORK/in420.bin") || {
+    echo "FAIL: [cpp] at-cap string must decode -- a cap rejects, it never truncates"; exit 1; }
+echo "$DEC" | grep -q '"s":"12345678"' || {
+    echo "FAIL: [cpp] at-cap string lost its bytes; got: $DEC"; exit 1; }
+# The one the pre-guard got wrong. A blob at a string-declared id contradicts the
+# schema, so §7.3 skips it -- and a skipped field is never capped, however long
+# it claims to be. The decode stays COMPLETE and `s` keeps its default.
+DEC=$("$WORK/lim420/harness/harness" decode dyn < "$WORK/skip420.bin") || {
+    echo "FAIL: [cpp] an over-cap BLOB at a string id must be SKIPPED, not capped (§6.2.1/§7.3)"; exit 1; }
+echo "$DEC" | grep -q '"s":""' || {
+    echo "FAIL: [cpp] the skipped field must bind nothing; got: $DEC"; exit 1; }
+echo "==> [cpp] string/blob caps OK (over-cap rejected, at-cap intact, mis-typed skipped)"
+
+# The WRAPPER-array half (generator#402 item 3, CORELIB_PLAN §6.2.1), and the
+# only measurement that settles it: a nine-byte message must not be able to
+# allocate.
+#
+# A wrapper array carries no count header -- its length is *highest present id +
+# 1* (MESSAGE_SPEC §5.1) -- so the element INDEX is the array's length, and one
+# element at a large id forces an arbitrarily large allocation out of nothing.
+# §6.2.1 names the index for exactly that reason and puts the check "before the
+# container it indexes into is extended". Before this cap was stated the images
+# below decoded to **Complete** while allocating 134 MB, 100 MB and 100 MB.
+#
+# The verdict alone would not prove the fix, so the probe counts every global
+# operator new and reads the counter around each decode: the assertion is that
+# the allocation NEVER HAPPENED, not merely that an error came back afterwards.
+# It also pins the two things the cap must NOT do -- reach a schema-bounded array
+# (its own `count:` governs, INVALID) and reject anything under the cap.
+echo "==> [cpp] a wrapper array's element index is capped, and nothing is allocated (generator#402)"
+cat > "$WORK/dyn402.yaml" <<'YAML'
+version: 1
+messages:
+  dyn:
+    payload:
+      w: { id: 0, type: array, items: { type: string } }
+      p: { id: 1, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }
+      n: { id: 2, type: array, items: { type: array, items: { type: string } } }
+      b: { id: 3, type: array, items: { type: string, count: 4 } }
+YAML
+cat > "$WORK/cfg-402.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 64, max_dyn_string_len: 32, max_dyn_blob_len: 32 }
+targets: { cpp: { namespace: sofabuffers } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-402.yaml" --lang cpp --in "$WORK/dyn402.yaml" --out "$WORK/lim402" )
+cat > "$WORK/probe402.cpp" <<'CPP'
+#include <cstdio>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+#include <string>
+#include <vector>
+
+#include "dyn.hpp"
+
+static std::size_t g_bytes = 0;
+
+void *operator new(std::size_t n)
+{
+    g_bytes += n;
+    void *p = std::malloc(n ? n : 1);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+void *operator new[](std::size_t n) { return operator new(n); }
+void operator delete(void *p) noexcept { std::free(p); }
+void operator delete[](void *p) noexcept { std::free(p); }
+void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void *p, std::size_t) noexcept { std::free(p); }
+
+static void putVarint(std::vector<std::uint8_t> &out, std::uint64_t v)
+{
+    while (v >= 0x80) { out.push_back(static_cast<std::uint8_t>((v & 0x7f) | 0x80)); v >>= 7; }
+    out.push_back(static_cast<std::uint8_t>(v));
+}
+
+/* (id << 3) | wire; wire 2 = Fixlen, 6 = SequenceStart, 7 = SequenceEnd (§4.3, §4.9). */
+static void hdr(std::vector<std::uint8_t> &out, std::uint64_t id, unsigned wire)
+{
+    putVarint(out, (id << 3) | wire);
+}
+
+static int failures = 0;
+
+static const char *name(sofab::DecodeStatus st)
+{
+    switch (st)
+    {
+        case sofab::DecodeStatus::Complete:        return "Complete";
+        case sofab::DecodeStatus::Incomplete:      return "Incomplete";
+        case sofab::DecodeStatus::Invalid:         return "Invalid";
+        case sofab::DecodeStatus::LimitExceeded:   return "LimitExceeded";
+        case sofab::DecodeStatus::InvalidArgument: return "InvalidArgument";
+    }
+    return "?";
+}
+
+/* budget: the decode of a REJECTED image must allocate essentially nothing. It
+ * is not zero-tolerant on purpose -- what is being excluded is the wire-sized
+ * allocation, which is four orders of magnitude above this. */
+static void run(const char *what, const std::vector<std::uint8_t> &wire, const char *want)
+{
+    const std::size_t budget = 65536;
+    sofabuffers::Dyn out;
+    /* Warm once so the measured decode counts wire-driven growth, not first touch. */
+    (void)sofabuffers::Dyn::try_decode(wire.data(), wire.size(), out);
+    out = sofabuffers::Dyn{};
+    const std::size_t before = g_bytes;
+    auto r = sofabuffers::Dyn::try_decode(wire.data(), wire.size(), out);
+    const std::size_t used = g_bytes - before;
+    std::printf("    %-34s verdict=%-15s allocated=%zu bytes\n", what, name(r.status()), used);
+    if (std::strcmp(name(r.status()), want) != 0)
+    {
+        std::printf("FAIL: [cpp] %s: expected %s, got %s\n", what, want, name(r.status()));
+        ++failures;
+    }
+    if (used > budget)
+    {
+        std::printf("FAIL: [cpp] %s: allocated %zu bytes -- the allocation the cap exists to prevent HAPPENED\n",
+                    what, used);
+        ++failures;
+    }
+}
+
+int main()
+{
+    const std::uint64_t big = 2000000; /* ~64 MB of std::string, asked for in 8 bytes */
+
+    std::vector<std::uint8_t> w;                  /* array<string>, schema-unbounded */
+    hdr(w, 0, 6);
+    hdr(w, big, 2);
+    putVarint(w, (1 << 3) | 2);                   /* fixlen word: 1 byte, subtype String */
+    w.push_back('A');
+    hdr(w, 0, 7);
+    std::printf("    attack message: %zu bytes, one element at index %llu\n",
+                w.size(), static_cast<unsigned long long>(big));
+    run("array<string> over-index", w, "LimitExceeded");
+
+    std::vector<std::uint8_t> p;                  /* array<struct>: the object collector */
+    hdr(p, 1, 6); hdr(p, big, 6); hdr(p, 0, 7); hdr(p, 0, 7);
+    run("array<struct> over-index", p, "LimitExceeded");
+
+    std::vector<std::uint8_t> n;                  /* array<array<string>>: the generated placer */
+    hdr(n, 2, 6); hdr(n, big, 6); hdr(n, 0, 7); hdr(n, 0, 7);
+    run("array<array<string>> over-index", n, "LimitExceeded");
+
+    /* The schema bounds this one, so the cap must not touch it: its own `count: 4`
+     * governs and an over-index element is INVALID (MESSAGE_SPEC §7.1). */
+    std::vector<std::uint8_t> b;
+    hdr(b, 3, 6); hdr(b, big, 2); putVarint(b, (1 << 3) | 2); b.push_back('A'); hdr(b, 0, 7);
+    run("bounded array<string> over-index", b, "Invalid");
+
+    /* The element LENGTH cap, the collector's second axis: one element longer
+     * than max_dyn_string_len, at a perfectly ordinary index. */
+    std::vector<std::uint8_t> l;
+    hdr(l, 0, 6); hdr(l, 0, 2); putVarint(l, (64 << 3) | 2);
+    for (int i = 0; i < 64; ++i) l.push_back('A');
+    hdr(l, 0, 7);
+    run("array<string> over-long element", l, "LimitExceeded");
+
+    /* The control: a sparse array under the caps decodes intact, at its wire
+     * length -- highest present id + 1 -- and a cap never truncates. */
+    std::vector<std::uint8_t> ok;
+    hdr(ok, 0, 6); hdr(ok, 3, 2); putVarint(ok, (2 << 3) | 2);
+    ok.push_back('h'); ok.push_back('i'); hdr(ok, 0, 7);
+    sofabuffers::Dyn good;
+    auto r = sofabuffers::Dyn::try_decode(ok.data(), ok.size(), good);
+    if (!r.ok() || good.w.size() != 4 || good.w[3] != "hi")
+    {
+        std::printf("FAIL: [cpp] an in-cap sparse wrapper array must decode intact (len=%zu)\n", good.w.size());
+        ++failures;
+    }
+    else
+        std::printf("    %-34s verdict=Complete        len=%zu, last=\"%s\"\n",
+                    "in-cap control", good.w.size(), good.w[3].c_str());
+
+    return failures ? 1 : 0;
+}
+CPP
+g++ -std=c++20 -O2 -Wall -I"$WORK/lim402" -I"$CPP/include" "$WORK/probe402.cpp" -o "$WORK/probe402"
+"$WORK/probe402" || { echo "FAIL: [cpp] wrapper-array receiver caps (generator#402, §6.2.1)"; exit 1; }
+echo "==> [cpp] wrapper index + element caps OK (rejected before the allocation, bounded array untouched)"
 
 # The derived reassembly cap is a BYTE budget (generator#228). It used to be
 # derived from element COUNTS -- a different dimension -- so the corelib's

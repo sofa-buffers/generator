@@ -25,12 +25,26 @@
 // only operations that mean the same thing whether a field is a std::string or a
 // sofab::FixedString<N>, a std::vector or an InlineVector.
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <span>
 #include <string_view>
 #include <type_traits>
 #include <vector>
+
+// corelib-cpp's IStreamObject takes a sofab::Limits -- the byte budget for one
+// top-level field -- and offers no constructor that leaves it out (corelib-cpp#128;
+// CORELIB_PLAN §6.2.1: a codec supplies no default for a number it was not given).
+// The corelib-c-cpp one takes none, its containers being statically bounded, and
+// does not declare the type at all, so the choice cannot be a `requires` test and
+// run.sh passes it as a -D. This check is about chunk boundaries rather than caps,
+// so the pure leg states the platform ceiling -- a number stated, not a mode.
+#ifdef SOFAB_STREAM_LIMITS
+#define SOFAB_STREAM_ARGS {sofab::Limits{SIZE_MAX}}
+#else
+#define SOFAB_STREAM_ARGS
+#endif
 
 static std::vector<std::uint8_t> g_sink;
 
@@ -143,7 +157,7 @@ int main()
     for (std::size_t size : {std::size_t{1}, std::size_t{2}, std::size_t{3},
                              std::size_t{5}, std::size_t{16}, std::size_t{64}})
     {
-        sofab::IStreamObject<MSG_TYPE> in;
+        sofab::IStreamObject<MSG_TYPE> in SOFAB_STREAM_ARGS;
         // Neither ok() nor incomplete() means "the message is done": the wire
         // format has no top-level end marker, so a chunk ending on a field
         // boundary reports ok() even when more follows. Feed everything; the
@@ -189,7 +203,7 @@ int main()
     std::size_t incompletes = 0, boundaries = 0;
     for (std::size_t cut = 1; cut < oneShot.size(); ++cut)
     {
-        sofab::IStreamObject<MSG_TYPE> in;
+        sofab::IStreamObject<MSG_TYPE> in SOFAB_STREAM_ARGS;
         const auto r = in.feed(oneShot.data(), cut);
         if (r.incomplete())   { ++incompletes; }
         else if (r.ok())      { ++boundaries; }

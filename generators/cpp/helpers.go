@@ -644,11 +644,6 @@ func cppIdent(name string) string {
 	return name
 }
 
-// cppArrayBounds renders the trailing readArray() arguments carrying the two
-// receiver-side bounds: the schema `count` (INVALID when exceeded) and the
-// configured max_dyn_array_count policy cap (LimitExceeded). Both are omitted
-// when absent, so a plain bounded array reads `is.readArray(x, 4)` and an
-// unbounded one with no cap configured reads `is.readArray(x)`.
 // cppElemBound renders the readArray() element-width argument for a NUMERIC
 // array element, or "" where no bound applies (generator#279 / Crucible F-0052).
 //
@@ -683,35 +678,120 @@ func (g *gen) cppElemBound(elem ir.Kind, ref *ir.TypeRef) string {
 	return ""
 }
 
-// cppArrayArgs renders the trailing readArray() arguments WITH the element-width
-// bound. The bound is the fourth parameter, so the schema count and the policy cap
-// have to be spelled out even where they are the defaults -- which is why this
-// cannot simply append to cppArrayBounds.
-func (g *gen) cppArrayArgs(count int64, hasCount bool, elemBound string) string {
-	if elemBound == "" {
-		return g.cppArrayBounds(count, hasCount)
+// cppLenCall picks the sofab:: entry point that reads a scalar `string`/`blob`
+// and renders its trailing bound argument: `readString(is, s, 32)` for a schema
+// `maxlen`, `readStringCapped(is, s, SOFAB_MAX_DYN_STRING_LEN)` for the §6.2.1
+// receiver cap. It is the string/blob twin of cppArrayCall, and the two answer
+// the same shape of question for the same reason.
+//
+// Which of the two applies is decided by the SCHEMA, and choosing between them is
+// all generated code has to do — CORELIB_PLAN §6.2.1 gives the corelib "the report
+// and the category" and keeps the numbers here. A declared `maxlen` is a
+// statement about VALIDITY, so exceeding it is INVALID (MESSAGE_SPEC §7.1) and a
+// receiver cap "MUST NOT be applied to a field the schema already bounds": there
+// is no call that takes both, so the two can never fire on one field and neither
+// can be reported in the other's category.
+//
+// Why two entry points rather than one with an omittable argument: §6.2.1 forbids
+// a codec to "supply a default for one it was not given" or to "read an omitted
+// argument as unlimited", so corelib-cpp offers no signature a number can be left
+// out of (corelib-cpp#128). A negative one is refused as InvalidArgument rather
+// than obeyed — which is what the unreachable third case below renders, since
+// resolveLimits marks a cap live exactly where the schema leaves a field of that
+// kind unbounded, and always resolves a finite default for it (§9.5).
+func cppLenCall(base string, hasMaxlen bool, maxlen int64, capHas bool, capMacro string) (string, string) {
+	if hasMaxlen {
+		return base, fmt.Sprintf(", %d", maxlen)
 	}
-	schema := int64(-1)
-	if hasCount {
-		schema = count
+	if capHas {
+		return base + "Capped", ", " + capMacro
 	}
-	dyn := "-1"
-	if !hasCount && g.limArrHas {
-		dyn = "SOFAB_MAX_DYN_ARRAY_COUNT"
-	}
-	return fmt.Sprintf(", %d, %s, %s", schema, dyn, elemBound)
+	return base, ", -1"
 }
 
-func (g *gen) cppArrayBounds(count int64, hasCount bool) string {
-	schema := int64(-1)
+// cppArrayCall is cppLenCall for a native COUNT-prefixed array: it picks between
+// sofab::readArray (the schema `count: N`, INVALID when exceeded) and
+// sofab::readArrayCapped (the configured max_dyn_array_count, LimitExceeded), and
+// renders the bound followed by the element-width argument.
+//
+// The element-width bound rides along on whichever one was picked, and must be
+// spelled even where it is the default: unarmed, corelib-cpp runs its unbounded
+// decode and MASKS an over-width element to the width instead of rejecting it
+// (generator#279).
+func (g *gen) cppArrayCall(count int64, hasCount bool, elemBound string) (string, string) {
+	tail := ""
+	if elemBound != "" {
+		tail = ", " + elemBound
+	}
 	if hasCount {
-		schema = count
+		return "readArray", fmt.Sprintf(", %d%s", count, tail)
 	}
-	if !hasCount && g.limArrHas {
-		return fmt.Sprintf(", -1, SOFAB_MAX_DYN_ARRAY_COUNT")
+	if g.limArrHas {
+		return "readArrayCapped", ", SOFAB_MAX_DYN_ARRAY_COUNT" + tail
 	}
-	if schema < 0 {
+	return "readArray", ", -1" + tail
+}
+
+// cppSeqCaps renders the trailing sofab::StringSeq / sofab::BlobSeq constructor
+// arguments carrying the two §6.2.1 receiver caps of a WRAPPER array: the
+// element INDEX cap and the element LENGTH cap, in the order corelib-cpp
+// declares them (`{out, count, elemMax, indexCap, elemLenCap}`).
+//
+// The index is what has to be checked, and it is the one shape the config caps
+// could not reach before. A wrapper array carries no count header — its length
+// is *highest present id + 1* (MESSAGE_SPEC §5.1) — so the collector grows the
+// destination to `id + 1` and the INDEX **is** the allocation. §6.2.1 names
+// exactly that: "for a sequence array it surfaces the index of the element in
+// hand […] there being no count header to check", to be enforced "before the
+// container it indexes into is extended". Left unstated it is an amplification
+// vector of the first order: a nine-byte message naming one element at a large
+// id allocated tens of megabytes and still decoded Complete.
+//
+// The element-length cap is the second half of the same shape: an index cap
+// alone still admits two elements of a gigabyte each.
+//
+// Both are stated only where the SCHEMA states nothing — `count:` for the index,
+// the element `maxlen:` for the length. §6.2.1 forbids a receiver cap on a field
+// the schema already bounds, so there the argument is -1 and corelib-cpp consults
+// the schema bound alone, answering INVALID (MESSAGE_SPEC §7.1) instead of
+// LimitExceeded. A -1 is "no cap was supplied", never "unlimited": corelib-cpp
+// diagnoses a collector that ends up with neither number on an axis rather than
+// running unbounded, which is why BOTH arguments are always spelled — the
+// constructor takes five and a collector built without them does not compile
+// (corelib-cpp#124/#128).
+func (g *gen) cppSeqCaps(cap int64, elemMaxHas bool, elem ir.Kind) string {
+	lenHas, lenMacro := g.limStrHas, "SOFAB_MAX_DYN_STRING_LEN"
+	if elem == ir.KindBlob {
+		lenHas, lenMacro = g.limBlobHas, "SOFAB_MAX_DYN_BLOB_LEN"
+	}
+	idx, length := "-1", "-1"
+	if cap < 0 && g.limArrHas {
+		idx = "SOFAB_MAX_DYN_ARRAY_COUNT"
+	}
+	if !elemMaxHas && lenHas {
+		length = lenMacro
+	}
+	return ", " + idx + ", " + length
+}
+
+// cppSeqIndexCap is cppSeqCaps' index half for a collector that takes its bounds
+// as MEMBERS rather than constructor arguments — sofab::MessageSeq, whose
+// elements are objects or native rows and which therefore has no element-length
+// axis of its own. "" where the schema's `count:` governs the index instead, the
+// member's own -1 default being what "no cap, because the schema bounds it"
+// spells.
+func (g *gen) cppSeqIndexCap(rv string, cap int64) string {
+	if cap >= 0 || !g.limArrHas {
 		return ""
 	}
-	return fmt.Sprintf(", %d", schema)
+	return fmt.Sprintf(" %s.dynCap = SOFAB_MAX_DYN_ARRAY_COUNT;", rv)
+}
+
+// rowIndexCap is the same number for the GENERATED row placer, which declares
+// its bounds as struct members and so has to spell the absent case too.
+func (g *gen) rowIndexCap(cap int64) string {
+	if cap >= 0 || !g.limArrHas {
+		return "-1"
+	}
+	return "SOFAB_MAX_DYN_ARRAY_COUNT"
 }

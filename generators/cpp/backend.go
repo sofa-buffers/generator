@@ -112,8 +112,11 @@ type gen struct {
 	// (the c-cpp wrapper is statically schema-bounded). Each carries the target's
 	// finite default unless the max_dyn_* config key overrides it (§9.5,
 	// generator#385), and is active when the schema has an unbounded field of
-	// that kind; the generated deserialize then guards those fields per-field
-	// (is.exceedLimit() -> Error::LimitExceeded) before any read. limBuffered
+	// that kind; the generated deserialize then PASSES the cap into the read of
+	// each such field -- sofab::readString / readBlob / readArray take it as a
+	// trailing argument beside the schema bound, and compare it at the header,
+	// behind their own MESSAGE_SPEC §7.3 tag test (CORELIB_PLAN §6.2.1,
+	// generator#420). Nothing is checked in front of a read. limBuffered
 	// additionally caps the corelib's streaming reassembly buffer
 	// (sofab::Limits{max_buffered_field}) — derived, not its own config key: the
 	// largest BYTE span any single top-level field can legitimately reach, from
@@ -143,24 +146,44 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 
 func (g *gen) anyLimit() bool { return g.limArrHas || g.limStrHas || g.limBlobHas }
 
-// istreamLimits renders the IStreamObject constructor argument carrying the
-// derived streaming reassembly cap ("" when no length limit is configured).
-func (g *gen) istreamLimits() string {
+// bufferedFieldArg is the number the pure path states as sofab::Limits'
+// max_buffered_field: the derived reassembly cap where the worst-case walk
+// produced one, and the platform ceiling where it did not.
+//
+// corelib-cpp offers no constructor that leaves it out (corelib-cpp#128): §6.2.1
+// forbids a codec to "supply a default for one it was not given", so the number
+// has to be stated even when this generator has none to derive -- an overflowing
+// walk, or a schema whose every field the schema itself bounds. SIZE_MAX is the
+// corelib's documented spelling for "this receiver's budget is the platform's
+// ceiling", a number the caller stated rather than a mode the library offers, and
+// it is what this generator has always meant by emitting no cap: reassembly stays
+// uncapped rather than carrying a derived number that would reject valid traffic.
+func (g *gen) bufferedFieldArg() string {
 	if g.limBuffered <= 0 {
+		return "SIZE_MAX"
+	}
+	return "SOFAB_MAX_DYN_BUFFERED_FIELD"
+}
+
+// istreamLimits renders the IStreamObject constructor argument carrying the
+// streaming reassembly cap ("" on the c-cpp leg, whose IStreamObject takes none:
+// its containers are statically bounded and nothing is reassembled into a heap
+// buffer).
+func (g *gen) istreamLimits() string {
+	if g.clib {
 		return ""
 	}
-	return "{sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}}"
+	return "{sofab::Limits{" + g.bufferedFieldArg() + "}}"
 }
 
 // istreamInlineLimits is the same cap as a trailing constructor argument, for
 // IStreamInline — whose first parameter is the field callback. Empty in the
-// fixed profile: its containers are statically bounded, so no cap is derived and
-// the corelib-c-cpp IStreamInline takes the callback alone.
+// fixed profile, where the corelib-c-cpp IStreamInline takes the callback alone.
 func (g *gen) istreamInlineLimits() string {
-	if g.limBuffered <= 0 {
+	if g.clib {
 		return ""
 	}
-	return ", sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}"
+	return ", sofab::Limits{" + g.bufferedFieldArg() + "}"
 }
 
 // resolveLimits fills the gen's limit fields from the max_dyn_* config keys and
@@ -789,43 +812,29 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.blank()
 
 	// deserialize: unhandled ids are auto-skipped by the driver (no-op default).
-	// In clib mode the field length (_size) pre-sizes variable-length targets;
-	// the pure path needs it for the unbounded string/blob limit guards (#102).
+	// In clib mode the field length (_size) pre-sizes variable-length targets, so
+	// the parameter is named there. The pure path never reads it: since #420 both
+	// the schema maxlen and the §6.2.1 cap are arguments to readString/readBlob,
+	// which measure the announced length themselves and behind the §7.3 tag test.
+	// Leaving the parameter unnamed is how that is kept true -- a named _size is
+	// the raw material of a guard in front of the read.
 	sizeParam := "std::size_t"
 	if g.clib {
 		sizeParam = "std::size_t _size"
-	} else {
+	}
+	// The wire element count (_count) is passed to the c-cpp wrapper's readArray,
+	// which takes it in both storage modes: it bounds the count before a dynamic
+	// resize, and is what a fixed array is filled to. The pure path never reads
+	// it -- sofab::readArray reads the count off the stream and applies the schema
+	// count, the §6.2.1 cap and the element bound itself, all behind the §7.3 tag
+	// test -- so the parameter stays unnamed there, for the same reason _size does.
+	countParam := "std::size_t"
+	if g.clib {
 		for _, fld := range fields {
-			// _size is read by the unbounded #102 limit guard (no maxlen + a
-			// configured cap) and by the bounded schema-maxlen reject (MESSAGE_SPEC
-			// S7.1) — both string and blob.
-			if (fld.Kind == ir.KindString || fld.Kind == ir.KindBlob) &&
-				(fld.HasMaxlen || (!fld.HasMaxlen && (g.limStrHas && fld.Kind == ir.KindString || g.limBlobHas && fld.Kind == ir.KindBlob))) {
-				sizeParam = "std::size_t _size"
+			if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
+				countParam = "std::size_t _count"
 				break
 			}
-		}
-	}
-	// The wire element count (_count) is needed for the over-count guard on
-	// count-bearing native arrays (generator#100), the limit guard on count-less
-	// ones (#102), and to size a native vector before its span read (#112). With
-	// inline storage the C runtime rejects a count/capacity mismatch itself, so
-	// the parameter stays unnamed; with dynamic storage the vector has no
-	// capacity to mismatch, so the generator checks the count and sizes to it.
-	countParam := "std::size_t"
-	for _, fld := range fields {
-		if fld.Kind != ir.KindArray || !isNativeArrayElem(fld.Elem) {
-			continue
-		}
-		if g.clib {
-			// readArray takes the wire count in both storage modes: it bounds the
-			// count before a dynamic resize, and is what a fixed array is filled to.
-			countParam = "std::size_t _count"
-			break
-		}
-		if fld.HasCount || g.limArrHas || g.dynNativeArray(fld.Elem, fld.Count) {
-			countParam = "std::size_t _count"
-			break
 		}
 	}
 	f.line("    /**")
@@ -1271,32 +1280,34 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// field length; a zero-length string binds no target (read_field asserts
 		// varlen > 0), so skip the read and leave it empty. corelib-cpp resizes
 		// for us, so an empty string is fine there.
-		// Unbounded string under a configured receiver-side cap: reject the
-		// claimed length before the read — a policy rejection, LimitExceeded,
-		// never INVALID and never a truncating read (generator#102).
-		if !g.clib && !fld.HasMaxlen && g.limStrHas {
-			f.line("            if (_size > SOFAB_MAX_DYN_STRING_LEN) { is.exceedLimit(); return; }")
-		}
 		if g.clib {
 			// The c-cpp wrapper's three-argument form, for BOTH of its storage modes:
 			// it needs the delivered size to bind the destination before the deferred
 			// decoder fills it, and that is true of a std::string destination too.
-			// corelib-cpp decodes synchronously and takes readString(dst, bound) for
-			// either destination, so its arm is the !clib one below -- unchanged by
-			// the storage mode, which is why allow_dynamic needs no decode change
-			// there at all.
+			// corelib-cpp decodes synchronously and takes readString(dst, bound, cap)
+			// for either destination, so its arm is the !clib one below -- unchanged
+			// by the storage mode, which is why allow_dynamic needs no decode change
+			// there at all. No receiver cap travels on this leg: checkBounded refuses
+			// a schema-unbounded string here, so there is never one to cap.
 			f.line("            is.readString(%s, _size, %d);", acc, maxlenOr(fld.HasMaxlen, fld.Maxlen))
-		} else if g.clib {
-			f.line("            %s.assign(_size, '\\0'); if (_size) is.read(%s);", acc, acc)
-		} else if fld.HasMaxlen {
-			// readString declares the fixlen SUBTYPE, so a contradicting one (a blob,
-			// an fp64) is skipped by the corelib and never measured against this
-			// field's maxlen — the maxlen reject (MESSAGE_SPEC S7.1: INVALID, never a
-			// truncating read) therefore hangs off a successful read. Checking _size
-			// first would resurrect generator#224/#229 on the deliver path.
-			f.line("            sofab::readString(is, %s, %d);", acc, fld.Maxlen)
 		} else {
-			f.line("            sofab::readString(is, %s);", acc)
+			// BOTH receiver-side bounds ride INTO the read (CORELIB_PLAN §6.2.1,
+			// generator#420). readString declares the fixlen SUBTYPE, so it owns the
+			// §7.3 tag test, and everything handed to it is measured behind that test:
+			// a contradicting subtype (a blob, an fp64) is skipped, and neither the
+			// schema maxlen (MESSAGE_SPEC §7.1 -> INVALID, never a truncating read)
+			// nor the configured cap (§6.2.1 -> LimitExceeded) is applied to it --
+			// "a skipped field is never capped".
+			//
+			// A guard in FRONT of the call cannot satisfy that: it sits in front of
+			// the tag test and caps exactly the field it was required to skip. That
+			// was the shape emitted here until #420, and it is the deliver-path twin
+			// of #224/#229 and the same class of defect as #410. §6.2.1 also puts the
+			// check "before the allocation it is meant to prevent", which only the
+			// corelib can do -- sofab::readString sizes a growable destination, and it
+			// consults the cap before it does (corelib-cpp#127's fitDest fix).
+			fn, args := cppLenCall("readString", fld.HasMaxlen, fld.Maxlen, g.limStrHas, "SOFAB_MAX_DYN_STRING_LEN")
+			f.line("            sofab::%s(is, %s%s);", fn, acc, args)
 		}
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindBool, ir.KindFP32, ir.KindFP64, ir.KindStruct, ir.KindUnion:
@@ -1332,22 +1343,16 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// corelib-c-cpp binds blobs with the BLOB tag via its read(void*, size_t)
 		// overload into the address-stable vector buffer; corelib-cpp reads a
 		// length-prefixed blob into a std::string.
-		// Unbounded blob cap: same policy guard as the string case above (#102).
-		if !g.clib && !fld.HasMaxlen && g.limBlobHas {
-			f.line("            if (_size > SOFAB_MAX_DYN_BLOB_LEN) { is.exceedLimit(); return; }")
-		}
 		if g.clib {
 			// As for the string arm above.
 			f.line("            is.readBlob(%s, _size, %d);", acc, maxlenOr(fld.HasMaxlen, fld.Maxlen))
-		} else if g.clib {
-			f.line("            %s.resize(_size); is.read(%s.data(), _size);", acc, acc)
-		} else if fld.HasMaxlen {
-			// readBlob declares Fix::Blob and reads straight into the byte container
-			// (no std::string round-trip); the maxlen reject hangs off the successful
-			// read for the same S7.3 reason as the string case above.
-			f.line("            sofab::readBlob(is, %s, %d);", acc, fld.Maxlen)
 		} else {
-			f.line("            sofab::readBlob(is, %s);", acc)
+			// readBlob declares Fix::Blob and reads straight into the byte container
+			// (no std::string round-trip); it carries the schema maxlen and the
+			// §6.2.1 cap for the same reason, and in the same order, as the string
+			// arm above. `blob` and `string` are separate limits.
+			fn, args := cppLenCall("readBlob", fld.HasMaxlen, fld.Maxlen, g.limBlobHas, "SOFAB_MAX_DYN_BLOB_LEN")
+			f.line("            sofab::%s(is, %s%s);", fn, acc, args)
 		}
 	case ir.KindEnum:
 		// corelib-c-cpp's read binds a target by address and fills it after the
@@ -1463,7 +1468,8 @@ func (g *gen) nativeArrayRead(f *hfile, ind, target string, elem ir.Kind, ref *i
 	// The element-width bound rides along on this leg (generator#279): the
 	// declared width is a validity bound (§1/§7.1) and readArray enforces it, but
 	// only once armed -- unarmed it runs the unbounded decode, which masks.
-	f.line("%ssofab::readArray(is, %s%s);", ind, target, g.cppArrayArgs(count, hasCount, g.cppElemBound(elem, ref)))
+	fn, args := g.cppArrayCall(count, hasCount, g.cppElemBound(elem, ref))
+	f.line("%ssofab::%s(is, %s%s);", ind, fn, target, args)
 }
 
 func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, elemMaxHas bool, elemMax int64, depth int) {
@@ -1506,9 +1512,9 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; is.readArray(%s, _count, %d); }",
 				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, tv, cap)
 		} else {
-			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; sofab::readArray(is, %s%s); }",
-				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, tv,
-				g.cppArrayArgs(count, hasCount, g.cppElemBound(elem, ref)))
+			fn, args := g.cppArrayCall(count, hasCount, g.cppElemBound(elem, ref))
+			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; sofab::%s(is, %s%s); }",
+				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, fn, tv, args)
 		}
 	case ir.KindBool:
 		// The element already IS the wire's std::uint8_t (cppArrayElem), so the
@@ -1539,7 +1545,11 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::StringSeq %s; %s.cap = %d; %s.elemMax = %d;", rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax)),
 				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		} else {
-			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::StringSeq %s{%s, %d, %d};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax)),
+			// The two schema bounds are followed by the two §6.2.1 receiver caps
+			// (cppSeqCaps): the element INDEX cap, which is this shape's whole
+			// amplification defence -- the array's length is highest present id + 1
+			// and the collector grows to it -- and the element LENGTH cap beside it.
+			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::StringSeq %s{%s, %d, %d%s};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax), g.cppSeqCaps(cap, elemMaxHas, elem)),
 				fmt.Sprintf("sofab::read(is, %s)", rv))
 		}
 	case ir.KindBlob:
@@ -1556,7 +1566,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::BlobSeq %s; %s.cap = %d; %s.elemMax = %d;", rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax)),
 				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		} else {
-			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::BlobSeq %s{%s, %d, %d};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax)),
+			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::BlobSeq %s{%s, %d, %d%s};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax), g.cppSeqCaps(cap, elemMaxHas, elem)),
 				fmt.Sprintf("sofab::read(is, %s)", rv))
 		}
 	case ir.KindStruct, ir.KindUnion:
@@ -1626,6 +1636,15 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 	f.line("%s%s *out = nullptr;", in3, container)
 	if !inlineRows {
 		f.line("%slong cap = %d;", in3, cap)
+		// The receiver index cap beside the schema `count`, named as corelib-cpp's
+		// own collectors name it. It is stated even where it is -1: corelib-cpp
+		// static_asserts that a collector publishing `cap` publishes `dynCap` too,
+		// because a duck-typed collector carrying only the first left the second
+		// silently at "no cap" and nothing diagnosed it (§6.2.1 -- the stream has no
+		// limit of its own to lend). The COMPARISON is still this placer's, below:
+		// the stream bounds an element index only for a collector that also
+		// publishes its element wire type, which a row cannot.
+		f.line("%slong dynCap = %s;", in3, g.rowIndexCap(cap))
 	}
 	if !g.clib {
 		// Declaring prepare() is how a collector asks read() for the §7.4
@@ -1637,6 +1656,18 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 		f.line("%sif (static_cast<std::size_t>(_id) >= out->capacity()) { is.invalidate(); return; }", in4)
 	} else {
 		f.line("%sif (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }", in4)
+		// The receiver index cap, where the schema declared no `count` — the same
+		// bound the corelib's own collectors take as `dynCap`, in the same place
+		// (before the grow below) and in the other category (§6.2.1: policy, never
+		// INVALID). A generated collector cannot hand this one to the stream: the
+		// stream applies an element bound only for a collector that also publishes
+		// its element wire type, and a row's is the schema's business rather than
+		// the format's. Unstated, the grow below is an allocation the wire dictates
+		// — a wrapper array's length being highest present id + 1 (MESSAGE_SPEC
+		// §5.1), one over-index row is an arbitrarily large one.
+		if cap < 0 && g.limArrHas {
+			f.line("%sif (static_cast<std::size_t>(_id) >= static_cast<std::size_t>(SOFAB_MAX_DYN_ARRAY_COUNT)) { is.exceedLimit(); return; }", in4)
+		}
 	}
 	f.line("%swhile (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();", in4)
 	f.line("%sauto &%s = (*out)[_id];", in4, ev)
@@ -1705,7 +1736,13 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 			fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
 		return
 	}
-	g.emitSeqRead(f, ind, fmt.Sprintf("sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d;", container, rv, rv, target, rv, cap),
+	// The receiver index cap rides beside the schema `count`, on the same
+	// collector and in the same category split: `cap` answers INVALID, `dynCap`
+	// answers LimitExceeded, and corelib-cpp consults the second only where the
+	// first is absent (§6.2.1). Without it an unbounded array of objects grew to
+	// whatever id the wire named -- the amplification a wrapper array's missing
+	// count header leaves open (MESSAGE_SPEC §5.1).
+	g.emitSeqRead(f, ind, fmt.Sprintf("sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d;%s", container, rv, rv, target, rv, cap, g.cppSeqIndexCap(rv, cap)),
 		fmt.Sprintf("sofab::read(is, %s)", rv))
 }
 

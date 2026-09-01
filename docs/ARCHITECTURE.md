@@ -2286,6 +2286,27 @@ backend:
     `sofab::StringSeq`/`BlobSeq` in corelib-cpp — and that is what turned that
     blocker into the split the family now has, rather than a compromise.
 
+    **What the C++ half of that closed was not a rough edge.** Measured on the
+    shipping pair, an **eight-byte** message naming one element at index 2,000,000
+    decoded to **`Complete`** while allocating **134 MB** (`array<string>`; 100 MB
+    for `array<struct>` and for a nested row). With `indexCap`/`elemLenCap` stated
+    — `sofab::StringSeq _r0{w, -1, -1, SOFAB_MAX_DYN_ARRAY_COUNT,
+    SOFAB_MAX_DYN_STRING_LEN}`, and `dynCap` beside `cap` on `sofab::MessageSeq` —
+    the same bytes are `LimitExceeded` having allocated **0 bytes**, and the
+    schema-bounded control stays `INVALID` at 0 bytes. Each is stated only where
+    the schema states nothing on that axis, so the two can never both be in play.
+    The verdict alone would not have shown this: the C++ conformance harness counts
+    every global `operator new` across the decode, because a cap that rejects
+    *after* materialising the container has prevented nothing.
+
+    **One C++ shape stays in generated code**, and it is the exception to the row in
+    the table below: an array of wrapper **rows** (`array<array<string>>`) is
+    gathered by a *generated* placer, since what a row costs to read is the schema's
+    business rather than the wire format's. The stream bounds a collector's element
+    index only for one that also publishes its element wire type, which a row placer
+    cannot, so the same cap is compared there — before the grow, in the policy
+    category — rather than a second time in the corelib.
+
 **Where the comparison runs (normative).** §6.2.1 separates two questions that had
 been treated as one, and the answers are not the same:
 
@@ -2306,6 +2327,21 @@ been treated as one, and the answers are not the same:
   the check must happen at anyway — the number rides that call and the comparison
   folds in beside a bound test already there. Where no such call exists for a field
   kind, the check stays in generated code.
+
+**A number that cannot be left out.** The provenance rule above is only as strong
+as the API that carries it, and an optional parameter quietly restores everything
+it forbids: an omitted argument becomes a default, and a default is a limit the
+codec supplied. corelib-cpp therefore offers **no signature a number can be left
+out of** (corelib-cpp#128) — a schema-bounded field goes through `readString`, a
+schema-unbounded one through `readStringCapped`, and there is no third spelling
+that takes neither; `sofab::Limits` has no default constructor, so even the
+reassembly budget has to be stated (generated code passes `SIZE_MAX` where the
+worst-case walk derives no cap, which is a number the receiver stated rather than
+a mode the library offers); and a wrapper collector that publishes a schema `cap`
+must publish a `dynCap` beside it or the translation unit does not compile, since
+a collector carrying only the first left the second silently at "no cap" and
+nothing diagnosed it. Generated code is then not *trusted* to state the pair — it
+cannot compile without doing so.
 
 **One implementation, wherever it runs.** A port whose corelib offers the check for
 a kind **MUST NOT** also emit it into the generated layer, and vice versa. Two
@@ -2397,7 +2433,7 @@ never a number the corelib knows:
 
 | target | compared in the corelib, on this existing call | compared in generated code |
 |---|---|---|
-| **C++** (`corelib: cpp`) | all three kinds: `readString`/`readBlob`/`readArray`, plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors | — |
+| **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
 | **Zig** | array counts and wrapper element indices: `arrays.allocNCapped` / `growCapped` / `setElemCapped` | string and blob lengths |
 | **Go**, **Dart** | wrapper arrays — the element index and the element length — through the collectors' receiver-cap fields | scalar string/blob lengths, native array counts |
 | **Java**, **Kotlin**, **C#** | string and blob lengths, in `PayloadAcc`, which the payload already passes through | array counts and wrapper element indices |
@@ -2584,7 +2620,7 @@ CORELIB_PLAN §6.2.1 (doc PR #86) settles that a corelib **MAY** take a receiver
 as an argument and run the comparison itself, and that the cheap way to do it is to
 hang the number on a call generated code already makes — the compare then folds in
 beside a bound test already there. Every other target has such a call: C++
-`readString`/`readArray`, Zig `arrays.allocN`/`grow`/`setElem`, Go's, Dart's and
+`readString`/`readBlob`/`readArray`, Zig `arrays.allocN`/`grow`/`setElem`, Go's, Dart's and
 TypeScript's collectors, Java's, Kotlin's and C#'s `PayloadAcc`, Python's decode
 entry — see the table in §9.5 for which kinds each one carries.
 
