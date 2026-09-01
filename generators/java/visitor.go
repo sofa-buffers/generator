@@ -184,6 +184,14 @@ func elemIdxVar(loc string) string {
 //     folding this into INVALID is forbidden by CORELIB_PLAN §6.2.1.
 //
 // Empty only when the array is dynamic AND no cap is live for this schema.
+//
+// This is the GENERATED half of the split (§6.2.1's "one implementation,
+// wherever it runs"). It stays wherever the gap fill is generated code — the
+// inline `while (list.size() <= id) list.add(...)` that places a string, blob or
+// sub-message element, in string()/blob()/sequenceBegin/fixlenBegin. Where the
+// row is placed by a corelib call instead (Seq.reserveRow and the primitive
+// reserveRow* factories) the cap is that call's argument and this guard is NOT
+// emitted in front of it; see rowIndexBound.
 func (g *gen) overIndexGuard(cap int64, name string) string {
 	if cap >= 0 {
 		return fmt.Sprintf("if (id >= %d) throw Sofab.invalid(\"%s element: array index above schema capacity %d\"); ", cap, name, cap)
@@ -192,6 +200,54 @@ func (g *gen) overIndexGuard(cap int64, name string) string {
 		return ""
 	}
 	return limitThrowGuard("id >= MAX_DYN_ARRAY_COUNT", name+" element", "array index above configured limit", g.limits.arrayCount) + " "
+}
+
+// rowIndexBound is overIndexGuard for a row whose placement goes through the
+// CORELIB — Seq.reserveRow, and the primitive Seq.reserveRow<B>s factories.
+// Since corelib-java 0.12.0 those take the receiver cap as their last argument
+// and compare it against the row index BEFORE they allocate the row and before
+// they grow the outer list (CORELIB_PLAN §6.2.1: "A corelib MAY take a limit as
+// an argument and perform the check itself, and a port that does is
+// conformant"). Hanging the number on a call generated code already makes is
+// also what keeps the check off the decode path as a call of its own.
+//
+// It returns the guard to emit AHEAD of the call and the cap to pass INTO it,
+// and exactly one of the two is ever live:
+//
+//   - schema `count: N` — the guard, INVALID (MESSAGE_SPEC §7.1). A schema bound
+//     is a statement about validity, so it can never travel as the receiver cap:
+//     the call is handed Bound.SCHEMA_BOUNDED, which says precisely that the
+//     schema's count governs this row and there is no second number.
+//   - no count — no guard at all; the cap is the argument, and the corelib
+//     refuses an over-cap index with LIMIT_EXCEEDED before it sizes anything.
+//
+// The row's own element COUNT is a different number and stays in generated code
+// beside this: one argument cannot carry both, and an inner array the schema
+// bounds can sit inside an outer one it does not.
+func (g *gen) rowIndexBound(cap int64, name string) (guard, arg string) {
+	if cap >= 0 {
+		return fmt.Sprintf("if (id >= %d) throw Sofab.invalid(\"%s element: array index above schema capacity %d\"); ", cap, name, cap), "Bound.SCHEMA_BOUNDED"
+	}
+	if !g.limArr {
+		panic("java: dynamic wrapper array with no array cap -- every target has a finite default (§9.5)")
+	}
+	return "", "CAP_DYN_ARRAY_COUNT"
+}
+
+// needsRowCapBound reports whether any row placement in this message actually
+// takes the receiver cap as an argument — a native matrix row or a wrapper
+// matrix row the schema leaves uncounted. Only then is the `Bound` constant
+// emitted: the array cap can be live for a message whose every guard is
+// generated (a native array's count, a flat wrapper's element index), and a
+// Bound nothing references is a constant nobody can read the purpose of.
+
+func needsRowCapBound(fs []frame) bool {
+	for _, fr := range fs {
+		if (fr.kind == fkNativeMat || fr.kind == fkSeqMat) && fr.cap < 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // locIndex maps a loc name to its index (for sequenceBegin targets).
@@ -206,10 +262,12 @@ func locIndex(fs []frame, loc string) int {
 
 // activeLimits reports which receiver-side decode limits (generator#102) apply
 // to this visitor: the limit must be configured AND the message must reach at
-// least one schema-unbounded field the visitor can guard — an unbounded native
-// array (count header via arrayBegin) or an unbounded string/blob (length via
-// the `total` parameter). Otherwise no constant and no guard is emitted, so an
-// unset or inert key leaves the output byte-identical.
+// least one schema-unbounded field of that kind — an unbounded native array
+// (count header via arrayBegin), an unbounded string/blob (length via the
+// `total` parameter), or a wrapper array the schema leaves uncounted. Otherwise
+// the constant is not emitted at all, and neither is anything that would name
+// it: no guard, and no cap on a corelib call (see payloadCap, rowIndexBound).
+// An unset or inert key leaves the output byte-identical.
 func (g *gen) activeLimits(fs []frame) (limArr, limStr, limBlob bool) {
 	for _, fr := range fs {
 		switch fr.kind {
@@ -274,42 +332,6 @@ func locName(loc string) string {
 	return loc
 }
 
-// emitLenLimitGuard writes the receiver-side length guard (generator#102) at
-// the very top of the string()/blob() callback: when the wire `total` exceeds
-// the configured cap AND the (cur, id) destination is a schema-unbounded field
-// of this kind, decoding fails with LIMIT_EXCEEDED before any byte is
-// accumulated — the guard runs ahead of both the single-shot and the chunked
-// path, so an oversized split payload is rejected on its first chunk.
-// Schema-bounded fields fall through unaffected (governed by their own maxlen).
-func (g *gen) emitLenLimitGuard(f *jfile, fs []frame, kind ir.Kind, constName, noun string, limit int64) {
-	f.line("        if (total > %s) {", constName)
-	f.line("            switch (cur) {")
-	for _, fr := range fs {
-		if fr.kind == fkSeqLeaf && fr.elemKind == kind && !fr.elemMaxHas {
-			f.line("            case %d: %s", fr.idx, limitThrow(locName(fr.loc), noun+" above configured limit", limit))
-			continue
-		}
-		if fr.kind != fkNormal {
-			continue
-		}
-		var arms []string
-		for _, fld := range fr.fields {
-			if fld.Kind == kind && !fld.HasMaxlen {
-				arms = append(arms, fmt.Sprintf("case %d: %s", fld.ID, limitThrow(fld.Name, noun+" above configured limit", limit)))
-			}
-		}
-		if len(arms) > 0 {
-			f.line("            case %d: switch (id) {", fr.idx)
-			for _, a := range arms {
-				f.line("                %s", a)
-			}
-			f.line("            } break;")
-		}
-	}
-	f.line("            }")
-	f.line("        }")
-}
-
 // maxlenThrow renders the schema-maxlen rejection (MESSAGE_SPEC §7.1): a bounded
 // string/blob whose wire byte length exceeds its declared maxlen is malformed
 // input, so it fails the decode with INVALID_MSG — Sofab.invalid, the corelib's
@@ -371,15 +393,22 @@ func (g *gen) emitStringCb(f *jfile, fs []frame, limStr bool) {
 		f.line("        // decoder delivers is skipped whole -- its bytes are never inspected.")
 		return
 	}
-	g.emitDestGuard(f, fs, dests)
-	if limStr {
-		g.emitLenLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN", "string length", g.limits.stringLen)
+	// The receiver cap rides ON the accumulator call (§6.2.1); where it has to be
+	// resolved per destination it rides on the destination gate below, which
+	// already dispatches on exactly that.
+	decl, capArg := payloadCap(dests, "CAP_DYN_STRING_LEN", limStr)
+	capConst := ""
+	if decl {
+		emitCapDecl(f, "CAP_DYN_STRING_LEN")
+		capConst = "CAP_DYN_STRING_LEN"
 	}
+	g.emitDestGuard(f, fs, dests, capConst)
 	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
 	// The accumulator answers a whole-in-one-chunk payload straight out of the
-	// input array and buffers only a split one, and validates UTF-8 once the
-	// payload is complete; null means more chunks are still to come.
-	f.line("        String _s = acc.string(total, offset, data, chunkOffset, chunkLength);")
+	// input array and buffers only a split one, validates UTF-8 once the payload
+	// is complete, and refuses an announced length above the cap it is handed
+	// before it does either; null means more chunks are still to come.
+	f.line("        String _s = acc.string(total, offset, data, chunkOffset, chunkLength, %s);", capArg)
 	f.line("        if (_s == null) return;")
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
@@ -437,12 +466,23 @@ func (g *gen) emitBlobCb(f *jfile, fs []frame, limBlob bool) {
 		f.line("        // delivers is skipped whole -- its bytes are never copied out.")
 		return
 	}
-	g.emitDestGuard(f, fs, dests)
-	if limBlob {
-		g.emitLenLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN", "blob length", g.limits.blobLen)
+	// The receiver cap rides ON the accumulator call (§6.2.1), and where it has to
+	// be resolved per destination it rides on the destination gate below — the
+	// same shape emitStringCb takes, which is only available here because that
+	// gate now covers blobs too.
+	decl, capArg := payloadCap(dests, "CAP_DYN_BLOB_LEN", limBlob)
+	capConst := ""
+	if decl {
+		emitCapDecl(f, "CAP_DYN_BLOB_LEN")
+		capConst = "CAP_DYN_BLOB_LEN"
 	}
+	g.emitDestGuard(f, fs, dests, capConst)
 	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
-	f.line("        byte[] _b = acc.blob(total, offset, data, chunkOffset, chunkLength);")
+	// The accumulator answers a whole-in-one-chunk payload straight out of the
+	// input array and buffers only a split one, and refuses an announced length
+	// above the cap it is handed before it does either; null means more chunks
+	// are still to come.
+	f.line("        byte[] _b = acc.blob(total, offset, data, chunkOffset, chunkLength, %s);", capArg)
 	f.line("        if (_b == null) return;")
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
@@ -471,9 +511,25 @@ func (g *gen) emitBlobCb(f *jfile, fs []frame, limBlob bool) {
 
 // destFrame is one frame that can materialize a value of the scanned kind:
 // `ids` empty means every id lands there (a wrapper-sequence row).
+//
+// `dynIds` / `dyn` split those destinations by whether the SCHEMA bounds them.
+// The receiver cap governs only the unbounded ones (CORELIB_PLAN §6.2.1: it
+// "MUST NOT be applied to a field the schema already bounds"), and the cap is
+// now an argument to the corelib call rather than a guard in front of it, so the
+// split has to be resolved per destination before that call is made.
 type destFrame struct {
-	idx int
-	ids []int64
+	idx    int
+	ids    []int64 // every destination id in this frame
+	dynIds []int64 // the subset the schema leaves unbounded (no maxlen)
+	dyn    bool    // wrapper-sequence row whose element declares no maxlen
+}
+
+// allDyn reports whether every destination in this frame is schema-unbounded.
+func (d destFrame) allDyn() bool {
+	if len(d.ids) == 0 {
+		return d.dyn
+	}
+	return len(d.dynIds) == len(d.ids)
 }
 
 // kindDests collects the frames that can materialize `kind`, in emission order.
@@ -482,20 +538,23 @@ func kindDests(fs []frame, kind ir.Kind) []destFrame {
 	var dests []destFrame
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == kind {
-			dests = append(dests, destFrame{idx: fr.idx})
+			dests = append(dests, destFrame{idx: fr.idx, dyn: !fr.elemMaxHas})
 			continue
 		}
 		if fr.kind != fkNormal {
 			continue
 		}
-		var ids []int64
+		var ids, dyn []int64
 		for _, fld := range fr.fields {
 			if fld.Kind == kind {
 				ids = append(ids, fld.ID)
+				if !fld.HasMaxlen {
+					dyn = append(dyn, fld.ID)
+				}
 			}
 		}
 		if len(ids) > 0 {
-			dests = append(dests, destFrame{idx: fr.idx, ids: ids})
+			dests = append(dests, destFrame{idx: fr.idx, ids: ids, dynIds: dyn})
 		}
 	}
 	return dests
@@ -517,33 +576,146 @@ func kindDests(fs []frame, kind ir.Kind) []destFrame {
 // valid message into INVALID_MSG, and a 1 MiB blob at an undeclared id was copied
 // out of the input whole.
 //
-// Placed ahead of the maxlen/limit guards, which are already destination-scoped
-// and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is
-// preserved.
+// Placed ahead of the maxlen guard, which is already destination-scoped and
+// therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is preserved.
 //
 // A schema with no field of this kind at all has no destination *anywhere*, so
 // the callback body is empty rather than guarded — see kindDests, whose empty
 // result is what the caller keys that on. (The callback itself is still emitted:
 // Visitor declares it, and the corelib still delivers strings and blobs to a
 // message that declares none.)
-func (g *gen) emitDestGuard(f *jfile, fs []frame, dests []destFrame) {
+//
+// `capConst` non-empty makes this switch carry the receiver cap as well: the
+// destination it already resolves is exactly what the cap depends on (§6.2.1 —
+// the cap governs a schema-unbounded field and nothing else), so an arm falling
+// through to a dynamic destination sets `_lim` to the constant and a
+// schema-bounded one leaves it at its Bound.SCHEMA_BOUNDED initializer. That
+// costs one store on a dispatch already here, which is why the cap is not a
+// switch of its own — and because the gate has already returned for everything
+// that is not a destination, an undeclared id and a §7.3 contradiction reach the
+// accumulator with no cap by construction (§6.2.1: a skipped field is never
+// capped).
+func (g *gen) emitDestGuard(f *jfile, fs []frame, dests []destFrame, capConst string) {
 	f.line("        // A payload this scope does not declare is skipped: its bytes are jumped")
 	f.line("        // over, never inspected. Resolve the destination first and leave before a")
 	f.line("        // byte is buffered, decoded or checked.")
 	f.line("        switch (cur) {")
+	set := ""
+	if capConst != "" {
+		set = "_lim = " + capConst + "; "
+	}
 	for _, d := range dests {
 		if len(d.ids) == 0 {
-			f.line("        case %d: break;", d.idx)
+			if d.dyn {
+				f.line("        case %d: %sbreak;", d.idx, set)
+			} else {
+				f.line("        case %d: break;", d.idx)
+			}
 			continue
 		}
-		var labels []string
-		for _, id := range d.ids {
-			labels = append(labels, fmt.Sprintf("case %d:", id))
+		// Two label groups per frame at most: the ids the cap governs, then the
+		// ids a schema maxlen governs instead. With no cap in play (capConst empty)
+		// they collapse into the single fall-through arm this used to emit.
+		var arms []string
+		if capConst != "" && len(d.dynIds) > 0 {
+			arms = append(arms, caseLabels(d.dynIds)+" "+set+"break;")
 		}
-		f.line("        case %d: switch (id) { %s break; default: return; } break;", d.idx, strings.Join(labels, " "))
+		if rest := boundedIDs(d, capConst != ""); len(rest) > 0 {
+			arms = append(arms, caseLabels(rest)+" break;")
+		}
+		f.line("        case %d: switch (id) { %s default: return; } break;", d.idx, strings.Join(arms, " "))
 	}
 	f.line("        default: return;")
 	f.line("        }")
+}
+
+// caseLabels renders ids as consecutive `case N:` switch labels.
+func caseLabels(ids []int64) string {
+	var out []string
+	for _, id := range ids {
+		out = append(out, fmt.Sprintf("case %d:", id))
+	}
+	return strings.Join(out, " ")
+}
+
+// boundedIDs returns the frame's destination ids minus the schema-unbounded ones
+// when the two are being split, and all of them otherwise.
+func boundedIDs(d destFrame, split bool) []int64 {
+	if !split {
+		return d.ids
+	}
+	dyn := map[int64]bool{}
+	for _, id := range d.dynIds {
+		dyn[id] = true
+	}
+	var out []int64
+	for _, id := range d.ids {
+		if !dyn[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// payloadCap resolves the receiver cap for one payload callback: what to hand
+// acc.string / acc.blob as its `max` argument, and whether a `_lim` local has to
+// be declared and filled in per destination first.
+//
+// Since corelib-java 0.12.0 the comparison lives in PayloadAcc, against the
+// announced `total` at the top of the method — before the whole-in-one-chunk
+// path materializes anything and before the split path takes a byte into the
+// accumulator (CORELIB_PLAN §6.2.1: "A corelib MAY take a limit as an argument
+// and perform the check itself, and a port that does is conformant"). So this
+// layer states the NUMBER and nothing else; there is no guard in front of the
+// call, because §6.2.1 admits one implementation of the rule and that is it.
+//
+// Three shapes, cheapest first:
+//
+//   - no cap live for this kind — every destination is schema-bounded, so the
+//     schema's maxlen governs and there is no second number:
+//     Bound.SCHEMA_BOUNDED. That is not "unlimited"; it says which of the two
+//     rules applies, and the maxlen guard beside it is what enforces it
+//     (INVALID, §7.1).
+//   - every destination unbounded AND the callback has already gated
+//     non-destinations away — the constant travels as a literal, no dispatch.
+//   - mixed — `_lim`, initialized to Bound.SCHEMA_BOUNDED and raised to the cap
+//     on the destinations the schema leaves open.
+//
+// The second shape has a PRECONDITION: it is sound only because both callers
+// emit the destination gate ahead of the call, so everything that is not a
+// destination has already returned and the literal cannot reach it. Blob had no
+// gate until generator#436 and could not take it — a bare constant there would
+// have capped an undeclared id and a §7.3 contradiction, which §6.2.1's "a
+// skipped field is never capped" forbids. A payload callback added without a
+// gate must not use this.
+func payloadCap(dests []destFrame, constName string, lim bool) (decl bool, arg string) {
+	if !lim {
+		return false, "Bound.SCHEMA_BOUNDED"
+	}
+	all := true
+	for _, d := range dests {
+		if !d.allDyn() {
+			all = false
+		}
+	}
+	if all {
+		return false, constName
+	}
+	return true, "_lim"
+}
+
+// emitCapDecl writes the `_lim` local the mixed shape needs. It starts at
+// Bound.SCHEMA_BOUNDED so that anything the arms below do not name — a
+// schema-bounded destination, or (in blob(), which has no destination gate) a
+// payload this message never reads — carries no receiver cap at all.
+func emitCapDecl(f *jfile, constName string) {
+	f.line("        // The receiver cap for the destination this payload is headed for,")
+	f.line("        // handed to the corelib accumulator, which compares it against the")
+	f.line("        // announced length before it buffers or materializes a byte (S6.2.1).")
+	f.line("        // It stays SCHEMA_BOUNDED where a schema maxlen governs instead, and")
+	f.line("        // for a payload this message does not read at all -- a skipped field")
+	f.line("        // is never capped.")
+	f.line("        Bound _lim = Bound.SCHEMA_BOUNDED;   // raised to %s where the schema declares no maxlen", constName)
 }
 
 // emitFixlenBegin latches every schema bound a fixlen field's LENGTH WORD already
@@ -631,14 +803,19 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, noun string) []string {
 }
 
 // emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
-// of the string()/blob() callback, the bounded-field twin of emitLenLimitGuard:
-// every field of this kind that declares a schema `maxlen` (scalar fields and
-// wrapper-sequence elements alike) gets a (cur, id) arm that rejects a declared
-// `total` above its own maxlen with INVALID_MSG — before any byte is accumulated,
-// so an oversized split payload is rejected on its first chunk, and never
-// truncated. Schema-unbounded fields fall through unaffected (governed by their
-// own generator#102 configured limit). Emitted unconditionally: with no bounded
-// field of this kind the guard is absent, leaving the output byte-identical.
+// of the string()/blob() callback: every field of this kind that declares a
+// schema `maxlen` (scalar fields and wrapper-sequence elements alike) gets a
+// (cur, id) arm that rejects a declared `total` above its own maxlen with
+// INVALID_MSG — before any byte is accumulated, so an oversized split payload is
+// rejected on its first chunk, and never truncated. Emitted unconditionally:
+// with no bounded field of this kind the guard is absent, leaving the output
+// byte-identical.
+//
+// This is the half of the pair that stays in GENERATED code. A schema bound is a
+// statement about validity and its breach is INVALID, so it can never route
+// through the corelib argument that carries the receiver cap — whose breach is
+// LIMIT_EXCEEDED (CORELIB_PLAN §6.2.1). Schema-unbounded fields fall through
+// here and are governed by that argument instead (see payloadCap).
 func (g *gen) emitMaxlenGuard(f *jfile, fs []frame, kind ir.Kind, noun string) {
 	// Detect whether any bounded field of this kind exists before emitting.
 	any := false
@@ -842,14 +1019,25 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		f.line("    // wire count/length header, before any allocation or accumulation --")
 		f.line("    // never a clamp. Schema-bounded fields are not governed by these caps;")
 		f.line("    // they keep their own schema-capacity guard.")
+		// Beside each number, the sofab.Bound that carries it INTO the corelib
+		// call that compares it (§6.2.1). Bound.receiver is the only way to make
+		// one, so every number reaching a cap comparison is a receiver cap the
+		// deployment configured -- there is no sentinel a forgotten argument and
+		// "the schema bounds this field" could share. Built once into a static
+		// final, never per call: a cap is a constant of the deployment.
 		if limArr {
 			f.line("    static final long MAX_DYN_ARRAY_COUNT = %dL;", g.limits.arrayCount)
+			if needsRowCapBound(fs) {
+				f.line("    private static final Bound CAP_DYN_ARRAY_COUNT = Bound.receiver(MAX_DYN_ARRAY_COUNT);")
+			}
 		}
 		if limStr {
 			f.line("    static final long MAX_DYN_STRING_LEN = %dL;", g.limits.stringLen)
+			f.line("    private static final Bound CAP_DYN_STRING_LEN = Bound.receiver(MAX_DYN_STRING_LEN);")
 		}
 		if limBlob {
 			f.line("    static final long MAX_DYN_BLOB_LEN = %dL;", g.limits.blobLen)
+			f.line("    private static final Bound CAP_DYN_BLOB_LEN = Bound.receiver(MAX_DYN_BLOB_LEN);")
 		}
 	}
 	f.line("    %sVisitor(%s msg) { m = msg; }", name, name)
@@ -978,8 +1166,12 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// The row's ID is bounded before its element count, matching the order
 			// every other backend takes the two verdicts in -- both are INVALID, so
 			// only the message differs, and a family that words the same rejection
-			// differently is a conformance diff waiting to happen.
-			arm := kindGuard + g.overIndexGuard(fr.cap, fr.loc) + guard + armFill(fs, fr, nil)
+			// differently is a conformance diff waiting to happen. A SCHEMA count
+			// is the guard below; a receiver cap is the last argument of the
+			// reserveRow call instead (§6.2.1), which compares it before it
+			// allocates the row or grows the outer list.
+			idxGuard, idxCap := g.rowIndexBound(fr.cap, fr.loc)
+			arm := kindGuard + idxGuard + guard + armFill(fs, fr, nil)
 			// The row's element id IS its index in the outer array (§5.1), so it is
 			// PLACED there after gap-filling with empty rows -- never appended.
 			// Appending ignored the id, which an interior gap (an omitted all-default
@@ -997,11 +1189,11 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 				if guard == "" {
 					panic("java: unbounded matrix row with no cap -- every target has a finite default (§9.5)")
 				}
-				f.line("        case %d: %s%s = Seq.%s(%s, id, count); %s = id; break;",
-					fr.idx, arm, rowCursor(base), reserveRowFn(base), fr.listExpr, elemIdxVar(fr.loc))
+				f.line("        case %d: %s%s = Seq.%s(%s, id, count, %s); %s = id; break;",
+					fr.idx, arm, rowCursor(base), reserveRowFn(base), fr.listExpr, idxCap, elemIdxVar(fr.loc))
 				continue
 			}
-			f.line("        case %d: %sSeq.reserveRow(%s, id); %s = id; break;", fr.idx, arm, fr.listExpr, elemIdxVar(fr.loc))
+			f.line("        case %d: %sSeq.reserveRow(%s, id, %s); %s = id; break;", fr.idx, arm, fr.listExpr, idxCap, elemIdxVar(fr.loc))
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -1103,7 +1295,10 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// interior gap (an omitted all-default row, §2) then shifts every later
 			// row down by one. An array wrapper IS the array's value, so a REOPENED
 			// row id replaces the row rather than merging into it (§7.4).
-			f.line("        case %d: %sSeq.reserveRow(%s, id); %s = id; cur = %d; break;", fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
+			// Placed by the corelib, so the receiver cap is that call's argument
+			// and only a SCHEMA count is a guard in front of it (§6.2.1).
+			rowGuard, rowCap := g.rowIndexBound(fr.cap, fr.loc)
+			f.line("        case %d: %sSeq.reserveRow(%s, id, %s); %s = id; cur = %d; break;", fr.idx, rowGuard, fr.listExpr, rowCap, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkNormal:
 			var arms []string
 			for _, fld := range fr.fields {

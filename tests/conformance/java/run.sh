@@ -358,7 +358,25 @@ fi
 grep -q "LIMIT_EXCEEDED" "$WORK/limerr.txt" || { echo "FAIL: rejection must carry LIMIT_EXCEEDED"; exit 1; }
 $HL decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count 4 at the limit must decode"; exit 1; }
 $HN decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must decode 5 elements"; exit 1; }
-echo "==> decode limits OK"
+
+# ...and the cap must NOT reach a field that is SKIPPED (CORELIB_PLAN S6.2.1, the
+# clause generator#410 is filed against): a limit bounds an allocation, and a
+# field the handler walks past allocates nothing. Both skip shapes carry an
+# over-cap count of 5 and both MUST leave the decode COMPLETE:
+#   04 05 ...  a SIGNED array at the unsigned-declared id 0 (wire type
+#              contradiction, MESSAGE_SPEC S7.3)
+#   3b 05 ...  an UNKNOWN id 7 carrying an unsigned array
+# The unknown-id row is the serious one -- a receiver that refuses a message
+# whose only offence is a field it does not know has broken the forward
+# compatibility unknown-id skipping exists to provide.
+printf '\004\005\000\000\000\000\000' > "$WORK/skiplimit_mistyped.bin"
+printf '\073\005\001\002\003\004\005' > "$WORK/skiplimit_unknown.bin"
+for v in skiplimit_mistyped skiplimit_unknown; do
+    OUT=$($HL decode dyn < "$WORK/$v.bin" 2>"$WORK/limerr.txt") || {
+        echo "FAIL: $v -- an over-cap SKIPPED array must leave the decode COMPLETE; got:"; cat "$WORK/limerr.txt"; exit 1; }
+    echo "$OUT" | grep -q '"a":\[\]' || { echo "FAIL: $v must leave the declared array untouched; got: $OUT"; exit 1; }
+done
+echo "==> decode limits OK (rejects at the count header, never on a skipped field)"
 
 # The string/blob half of the same rule, and the half no "does it decode" row can
 # check. A blob at an id the schema does not declare is SKIPPED: its bytes are
@@ -435,6 +453,91 @@ fi
 grep -q "LIMIT_EXCEEDED" "$WORK/widxerr.txt" || { echo "FAIL: an over-index element is LIMIT_EXCEEDED, not INVALID (CORELIB_PLAN S6.2.1)"; exit 1; }
 $HWN decode wr < "$WORK/widx_over.bin" >/dev/null || { echo "FAIL: the same bytes must decode under the default cap"; exit 1; }
 echo "==> wrapper index cap OK (sparse accepted, over-index LIMIT_EXCEEDED)"
+
+# A string/blob LENGTH cap is no longer a guard in generated code: it is an
+# argument to PayloadAcc.string / PayloadAcc.blob, which compares it against the
+# announced `total` before it materializes or buffers a byte (CORELIB_PLAN
+# S6.2.1 -- "A corelib MAY take a limit as an argument and perform the check
+# itself, and a port that does is conformant"). A deleted guard with nothing in
+# its place looks identical in review, so the three rules are pinned END TO END:
+#
+#   * the cap still REJECTS, with LIMIT_EXCEEDED and not INVALID -- the same
+#     bytes decode against a project carrying the target default;
+#   * it does NOT reach a field the schema bounds, even when that field's maxlen
+#     is far above the cap (S6.2.1 forbids it there; the schema bound governs and
+#     ITS breach is INVALID);
+#   * it does NOT reach a SKIPPED field -- an over-cap payload at an id this
+#     message does not declare, and one whose wire type contradicts the declared
+#     one (MESSAGE_SPEC S7.3), both leave the decode COMPLETE.
+#
+# The last is the one a unit test cannot show and the one that has bitten this
+# family before (generator#410, corelib-cpp's pre-guard in front of readString).
+echo "==> string/blob length caps travel as an argument (S6.2.1)"
+cat > "$WORK/plen.yaml" <<'YAML'
+version: 1
+messages:
+  pl:
+    payload:
+      ds: { id: 0, type: string }
+      bs: { id: 1, type: string, maxlen: 32 }
+      db: { id: 2, type: blob }
+      n:  { id: 3, type: u32 }
+YAML
+cat > "$WORK/plencfg.yaml" <<'YAML'
+generic: { emit: project, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
+targets: { java: { package: message } }
+YAML
+build "$WORK/plen.yaml" "$WORK/plen" "$WORK/plencfg.yaml"
+build "$WORK/plen.yaml" "$WORK/plennolim"
+HPC="java -jar $WORK/plen/target/harness.jar"
+HPD="java -jar $WORK/plennolim/target/harness.jar"
+
+# Bytes produced by the DEFAULT-cap harness, fed to the capped one.
+printf '{"ds":"abcdefghijklmnop"}'                    | $HPD encode pl > "$WORK/pl_ds16.bin"
+printf '{"ds":"abcdefgh"}'                            | $HPD encode pl > "$WORK/pl_ds8.bin"
+printf '{"bs":"abcdefghijklmnop"}'                    | $HPD encode pl > "$WORK/pl_bs16.bin"
+printf '{"bs":"0123456789012345678901234567890123"}'  | $HPD encode pl > "$WORK/pl_bs34.bin"
+printf '{"db":[1,2,3,4,5,6,7,8,9,10,11,12]}'          | $HPD encode pl > "$WORK/pl_db12.bin"
+
+if $HPC decode pl < "$WORK/pl_ds16.bin" >/dev/null 2>"$WORK/plerr.txt"; then
+    echo "FAIL: a 16-byte unbounded string above max_dyn_string_len 8 must be rejected"; exit 1
+fi
+grep -q "LIMIT_EXCEEDED" "$WORK/plerr.txt" || {
+    echo "FAIL: an over-cap string is LIMIT_EXCEEDED, not INVALID (S6.2.1); got:"; cat "$WORK/plerr.txt"; exit 1; }
+$HPC decode pl < "$WORK/pl_ds8.bin" >/dev/null || { echo "FAIL: 8 bytes AT the cap must decode"; exit 1; }
+$HPD decode pl < "$WORK/pl_ds16.bin" >/dev/null || { echo "FAIL: the same bytes must decode under the default cap"; exit 1; }
+if $HPC decode pl < "$WORK/pl_db12.bin" >/dev/null 2>"$WORK/plerr.txt"; then
+    echo "FAIL: a 12-byte unbounded blob above max_dyn_blob_len 8 must be rejected"; exit 1
+fi
+grep -q "LIMIT_EXCEEDED" "$WORK/plerr.txt" || { echo "FAIL: an over-cap blob must carry LIMIT_EXCEEDED"; exit 1; }
+
+# maxlen 32 is FOUR TIMES the cap and still governs: the receiver cap must not be
+# applied to a field the schema bounds, and the schema's own breach is INVALID.
+OUT=$($HPC decode pl < "$WORK/pl_bs16.bin") || { echo "FAIL: a 16-byte maxlen:32 string must decode under a cap of 8"; exit 1; }
+echo "$OUT" | grep -q '"bs":"abcdefghijklmnop"' || { echo "FAIL: the schema-bounded string must survive intact; got: $OUT"; exit 1; }
+if $HPC decode pl < "$WORK/pl_bs34.bin" >/dev/null 2>"$WORK/plerr.txt"; then
+    echo "FAIL: 34 bytes above maxlen 32 must be INVALID"; exit 1
+fi
+grep -q "INVALID_MSG\|InvalidMessage" "$WORK/plerr.txt" || {
+    echo "FAIL: an over-MAXLEN string is INVALID, never LIMIT_EXCEEDED; got:"; cat "$WORK/plerr.txt"; exit 1; }
+
+# A skipped field is never capped. Both payloads are 16 bytes, twice the cap.
+#   a2 01  id 20, wire type fixlen -- an id this message does not declare
+#   1a     id 3, wire type fixlen -- declared u32, so S7.3 says skip
+#   82 01  fixlen word: 16 bytes, STRING subtype ((16<<3)|2)
+#   83 01  fixlen word: 16 bytes, BLOB subtype   ((16<<3)|3)
+printf '\242\001\202\001abcdefghijklmnop' > "$WORK/pl_skip_s.bin"
+printf '\032\202\001abcdefghijklmnop'     > "$WORK/pl_mis_s.bin"
+printf '\242\001\203\001abcdefghijklmnop' > "$WORK/pl_skip_b.bin"
+printf '\032\203\001abcdefghijklmnop'     > "$WORK/pl_mis_b.bin"
+for v in pl_skip_s pl_mis_s pl_skip_b pl_mis_b; do
+    OUT=$($HPC decode pl < "$WORK/$v.bin" 2>"$WORK/plerr.txt") || {
+        echo "FAIL: $v -- an over-cap SKIPPED payload must leave the decode COMPLETE; got:"; cat "$WORK/plerr.txt"; exit 1; }
+done
+# ...and the mis-typed pair must not have touched the field whose id they reused.
+OUT=$($HPC decode pl < "$WORK/pl_mis_s.bin")
+echo "$OUT" | grep -q '"n":0' || { echo "FAIL: a skipped payload must leave n at its default; got: $OUT"; exit 1; }
+echo "==> payload length caps OK (rejects, off schema-bounded fields, off skipped ones)"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/java/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/target/harness.jar"
