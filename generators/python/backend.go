@@ -32,6 +32,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		limits:  resolveLimits(s, cfg),
 		size:    generator.NewSizePolicy(cfg),
 	}
+	g.resolveReassembly(s)
 	module := g.module(s)
 	files := []generator.File{{Path: "message.py", Content: module}}
 	if cfgString(cfg, "emit", "sources") == "project" {
@@ -48,10 +49,51 @@ type gen struct {
 	banner  string
 	license string // SPDX id, "" to omit the header line
 	limits  limitSet
+	// span is the largest single construct this schema can carry, and reassembly
+	// the buffer size the streaming reader is built with (see cost.go and
+	// resolveReassembly). corelib-py takes the buffer as a REQUIRED argument and
+	// holds no size of its own (corelib-py#139), so both are derived here.
+	span       int64
+	reassembly int64
 	// size is the max_message_size policy; sizeErr carries a violation out of
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
 	sizeErr error
+}
+
+// The floor corelib-py puts on a reassembly buffer: sofab.MIN_REASSEMBLY, what a
+// single construct's framing (an id header and a length word, ten bytes each at
+// the outside) can need. A schema of nothing but bools still has to clear it.
+const minReassembly = 16
+
+// Room for one incoming chunk on top of the largest construct.
+//
+// corelib-py appends a fed chunk into the reassembly buffer whenever anything is
+// carried, so the buffer has to hold the carry AND the chunk — and only the
+// caller knows how big its chunks are. 64 KiB is the size a socket reader
+// usually lands on, so it is what the streaming reader is built with by default;
+// a caller streaming larger pieces passes its own size to “decoder()“, which
+// takes one for exactly this reason. The one-shot “decode()“ needs none of it:
+// a message fed in a single call never touches the buffer, and the most a
+// truncated one can leave behind is the construct in flight.
+const streamChunkRoom = 64 * 1024
+
+// resolveReassembly derives the two byte counts the generated module states for
+// corelib-py's reassembly buffer. An unbounded construct (which cannot occur
+// while every max_dyn_* cap is finite, §9.5) leaves the span at the floor rather
+// than emitting a number smaller than the schema needs.
+func (g *gen) resolveReassembly(s *ir.Schema) {
+	caps := &ir.DynCaps{
+		ArrayCount: g.limits.arrayCount, HasArray: true,
+		StringLen: g.limits.stringLen, HasString: true,
+		BlobLen: g.limits.blobLen, HasBlob: true,
+	}
+	span, ok := maxConstructSpan(s, caps)
+	if !ok {
+		span = 0
+	}
+	g.span = max(span, minReassembly)
+	g.reassembly = g.span + streamChunkRoom
 }
 
 // messageSize resolves a class's worst-case encoded size via the shared walk
@@ -202,6 +244,32 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.blank()
 	}
 
+	// The reassembly buffer's size, derived the same way and required for the
+	// same reason (corelib-py#139): a construct split across fed chunks is
+	// joined in storage the CALLER supplies, and §6.2.1 leaves the codec no size
+	// to invent any more than it leaves it a cap. See resolveReassembly.
+	f.line("# Bytes of reassembly space, derived from the schema and the decode limits.")
+	f.line("#")
+	f.line("# A construct split across two fed chunks is joined in a buffer the caller")
+	f.line("# supplies, sized once and never grown; the library holds no size of its")
+	f.line("# own, so -- like the limits -- the number is stated here.")
+	f.line("#")
+	f.line("# MAX_FIELD_SPAN is the largest single value this schema can carry: one")
+	f.line("# string or blob payload, or one native array's whole element run, with")
+	f.line("# every varint at its widest and each decode limit standing in for a")
+	f.line("# missing schema bound. A nested message is NOT one construct -- its fields")
+	f.line("# are read one at a time -- and neither is a wrapper array of strings,")
+	f.line("# blobs or structs. A field the receiver SKIPS never enters the buffer at")
+	f.line("# all, whatever its size, so this covers what is READ.")
+	f.line("MAX_FIELD_SPAN = %d", g.span)
+	f.line("#")
+	f.line("# The streaming reader also holds the chunk it was just fed, and only the")
+	f.line("# caller knows how large those are. %d bytes is what decoder() assumes;", streamChunkRoom)
+	f.line("# a caller streaming larger pieces passes its own size. The one-shot")
+	f.line("# decode() needs none of it -- one chunk spans no boundary.")
+	f.line("REASSEMBLY = MAX_FIELD_SPAN + %d", streamChunkRoom)
+	f.blank()
+
 	// enums + bitfield constants first
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
@@ -265,9 +333,10 @@ func (g *gen) emitStreamDecoder(f *pyfile) {
 	f.line("")
 	f.line("    __slots__ = (\"message\", \"_d\")")
 	f.line("")
-	f.line("    def __init__(self, msg_cls, vis_cls) -> None:")
+	f.line("    def __init__(self, msg_cls, vis_cls, reassembly=REASSEMBLY) -> None:")
 	f.line("        self.message = msg_cls()")
-	f.line("        self._d = Decoder(visitor=vis_cls(self.message), %s)", g.capsArgs())
+	f.line("        self._d = Decoder(visitor=vis_cls(self.message), %s,", g.capsArgs())
+	f.line("                          reassembly=reassembly)")
 	f.line("")
 	f.line("    def feed(self, chunk) -> Status:")
 	f.line("        return self._d.feed(chunk)")

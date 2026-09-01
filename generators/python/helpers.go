@@ -317,13 +317,19 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 	}
 	f.blank()
 	f.line("    @classmethod")
-	f.line("    def decoder(cls) -> _StreamDecoder:")
+	f.line("    def decoder(cls, reassembly: int = REASSEMBLY) -> _StreamDecoder:")
 	f.line(`        """The streaming reader: feed it chunks of any size.`)
 	f.line("")
 	f.line("        The half-built message is on ``.message`` throughout; each ``feed``")
 	f.line("        returns the outcome for the bytes so far.")
+	f.line("")
+	f.line("        ``reassembly`` is where a construct split across two chunks is")
+	f.line("        joined. The default holds this schema's largest single value plus")
+	f.line("        one chunk of the size a socket reader usually lands on; pass a")
+	f.line("        larger one to feed larger chunks. What is SKIPPED never enters it,")
+	f.line("        whatever its size.")
 	f.line(`        """`)
-	f.line("        return _StreamDecoder(cls, _%sVisitor)", name)
+	f.line("        return _StreamDecoder(cls, _%sVisitor, reassembly)", name)
 	f.blank()
 	f.line("    @classmethod")
 	f.line("    def decode(cls, data: bytes) -> %q:", name)
@@ -338,7 +344,12 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 	f.line("        INCOMPLETE stays distinguishable from INVALID.")
 	f.line(`        """`)
 	f.line("        o = cls()")
-	f.line("        d = Decoder(visitor=_%sVisitor(o), %s)", name, g.capsArgs())
+	f.line("        d = Decoder(visitor=_%sVisitor(o), %s,", name, g.capsArgs())
+	// One call, so nothing spans a chunk boundary and the buffer is never
+	// written; the most a TRUNCATED message can leave behind is the construct in
+	// flight, which is what MAX_FIELD_SPAN is. Sizing this at REASSEMBLY would
+	// allocate 64 KiB per one-shot decode for a buffer nothing touches.
+	f.line("                    reassembly=MAX_FIELD_SPAN)")
 	f.line("        st = d.feed(data)")
 	f.line("        if st is Status.INVALID:")
 	f.line(`            raise SofaDecodeError(d.error or "invalid message")`)
