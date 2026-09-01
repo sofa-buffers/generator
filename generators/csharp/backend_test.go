@@ -92,11 +92,14 @@ func TestCsMaxlenReject(t *testing.T) {
 		"      us: { id: 3, type: string }\n")
 	m := buildModule(t, src, "in.yaml", map[string]any{"namespace": "S"})
 	for _, want := range []string{
-		// Bounded scalar string + blob: per-field maxlen check at `total`.
-		`case (Root, 0): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "s: string length above schema maxlen 8"); break;`,
-		`case (Root, 1): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "b: blob length above schema maxlen 8"); break;`,
+		// Bounded scalar string + blob: per-field maxlen check at `total`. The arm
+		// closes by handing PayloadAcc that same maxlen as the cap -- the schema
+		// bound governs a bounded field, so the receiver cap must not reach it and
+		// the corelib's comparison can no longer fire (CORELIB_PLAN §6.2.1/§6.3).
+		`case (Root, 0): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "s: string length above schema maxlen 8"); _cap = 8; break;`,
+		`case (Root, 1): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "b: blob length above schema maxlen 8"); _cap = 8; break;`,
 		// Bounded wrapper string element: keyed by the array location, element id agnostic.
-		`case (Root_ws, _): if (total > 5) throw new SofabException(SofabError.InvalidMessage, "Root_ws element: string length above schema maxlen 5"); break;`,
+		`case (Root_ws, _): if (total > 5) throw new SofabException(SofabError.InvalidMessage, "Root_ws element: string length above schema maxlen 5"); _cap = 5; break;`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing maxlen guard %q\n%s", want, m)
@@ -333,8 +336,8 @@ func TestCsStructural(t *testing.T) {
 		// corelib's (corelib-cs#92): the value comes back on the chunk that
 		// completes it, invalid UTF-8 as INVALID (issue #85).
 		"private readonly PayloadAcc pay = new PayloadAcc();",
-		"string _s = pay.String(total, offset, data, chunkOffset, chunkLength);",
-		"byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength);",
+		"string _s = pay.String(total, offset, data, chunkOffset, chunkLength, _cap);",
+		"byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
 		// over-count scalar array rejected as INVALID before the (untrusted-count) allocation (#100)
 		"if (count > 4) throw new SofabException(SofabError.InvalidMessage, \"someuintarray: array count above schema capacity 4\"); ",
 	} {
@@ -440,9 +443,12 @@ messages:
 		// WIRE count -- `count: N` is a capacity, so M is the length (§3) and the
 		// guard is what still bounds the untrusted count.
 		"case (Root, 2): if (kind != ArrayKind.Signed) break; if (count > 100000) throw new SofabException(SofabError.InvalidMessage, \"barr: array count above schema capacity 100000\"); m.barr = new int[count]; break;",
-		// Unbounded string: `total` checked before any accumulation.
-		"if (total > MaxDynStringLen) {",
-		"case (Root, 0): throw new SofabException(SofabError.LimitExceeded, \"s: string length above configured limit 4096\");",
+		// Unbounded string: the cap travels into PayloadAcc, which compares
+		// `total` against it before it takes a byte (CORELIB_PLAN §6.2.1,
+		// corelib-cs#101). The number is still this layer's -- passed per call,
+		// never held by the corelib and with no omitted-argument "unlimited".
+		"case (Root, 0): _cap = MaxDynStringLen; break;",
+		"string _s = pay.String(total, offset, data, chunkOffset, chunkLength, _cap);",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing %q", want)
@@ -885,9 +891,13 @@ messages:
 			t.Errorf("String(): the destination guard must precede %q:\n%s", after, fn)
 		}
 	}
-	// The maxlen reject stays destination-scoped behind it.
-	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
-		t.Errorf("String(): the maxlen reject must survive behind the guard:\n%s", fn)
+	// The maxlen reject is destination-scoped, and it is now scoped by BEING one
+	// of the guard's arms: the same switch resolves the destination, applies the
+	// schema bound and picks the cap, so an id with no arm never reaches either
+	// test. It must therefore sit inside the guard and ahead of the accumulator.
+	i := strings.Index(fn, "above schema maxlen")
+	if i < 0 || i > guardEnd {
+		t.Errorf("String(): the maxlen reject must be an arm of the destination guard:\n%s", fn)
 	}
 }
 
@@ -900,6 +910,11 @@ messages:
 // 1 MiB of heap for a field nobody reads: a payload MATERIALIZED where
 // MESSAGE_SPEC §7.3 says the bytes are walked over, and storage sized from the
 // wire for a value never delivered (CORELIB_PLAN §6.2.1, §6.6, §6.7.2).
+//
+// It is also what keeps the receiver cap off a skipped blob: the arm that binds
+// an id is the arm that names its `_cap`, so an id with no arm is measured
+// against nothing at all (CORELIB_PLAN §6.2.1, "a skipped field is never
+// capped"). Both halves are asserted below.
 func TestCsSkippedBlobIsNotMaterialized(t *testing.T) {
 	m := buildModule(t, []byte(`
 version: 1
@@ -907,12 +922,14 @@ messages:
   m:
     payload:
       b:  { id: 0, type: blob, maxlen: 16 }
+      db: { id: 1, type: blob }
+      s:  { id: 2, type: string }
       n:
-        id: 1
+        id: 3
         type: struct
         fields:
-          t: { id: 2, type: blob, maxlen: 8 }
-      ba: { id: 3, type: array, items: { type: blob, count: 4, maxlen: 8 } }
+          t: { id: 4, type: blob, maxlen: 8 }
+      ba: { id: 5, type: array, items: { type: blob, count: 4, maxlen: 8 } }
 `), "skipblob.yaml", map[string]any{})
 	fn := csMethod(t, m, "    public void Blob(int id,")
 
@@ -923,20 +940,42 @@ messages:
 	guard := fn[:guardEnd]
 	for _, want := range []string{
 		"case (Root, 0):",    // the scalar blob
-		"case (Root_n, 2):",  // the nested struct's blob
+		"case (Root, 1):",    // the schema-unbounded blob
+		"case (Root_n, 4):",  // the nested struct's blob
 		"case (Root_ba, _):", // every id of the blob-array row
 	} {
 		if !strings.Contains(guard, want) {
 			t.Errorf("Blob() missing destination arm %q:\n%s", want, fn)
 		}
 	}
+	// The same arms carry the two bounds. A schema-bounded blob is rejected
+	// against its own maxlen and then hands PayloadAcc that same maxlen as the
+	// cap, under which the corelib's comparison can no longer fire (§6.2.1
+	// forbids a receiver cap on a field the schema bounds; §6.3 gives the two
+	// categories). An unbounded one hands over the configured constant.
+	for _, want := range []string{
+		`case (Root, 0): if (total > 16) throw new SofabException(SofabError.InvalidMessage, "b: blob length above schema maxlen 16"); _cap = 16; break;`,
+		"case (Root, 1): _cap = MaxDynBlobLen; break;",
+		"byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
+	} {
+		if !strings.Contains(fn, want) {
+			t.Errorf("Blob() missing %q:\n%s", want, fn)
+		}
+	}
+	// The string id is not a blob destination: it gets no arm, so a blob arriving
+	// there is skipped by the `default` -- unbuffered, uncopied and uncapped
+	// (MESSAGE_SPEC §7.3).
+	if strings.Contains(guard, "(Root, 2)") {
+		t.Errorf("a string id must not be a blob destination:\n%s", fn)
+	}
 	// The whole point: nothing is sized from the wire or copied before the gate.
 	if i := strings.Index(fn, "pay.Blob("); i < 0 || guardEnd > i {
 		t.Errorf("Blob(): the destination guard must precede the accumulator:\n%s", fn)
 	}
-	// The maxlen reject stays destination-scoped behind it.
-	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
-		t.Errorf("Blob(): the maxlen reject must survive behind the guard:\n%s", fn)
+	// The maxlen reject is destination-scoped by BEING one of the guard's arms,
+	// so it sits inside the guard and ahead of the accumulator.
+	if i := strings.Index(fn, "above schema maxlen"); i < 0 || i > guardEnd {
+		t.Errorf("Blob(): the maxlen reject must be an arm of the destination guard:\n%s", fn)
 	}
 }
 

@@ -2866,6 +2866,60 @@ receiver caps — the rule this section is about — now have exactly one site e
 The header-word latch answers a different obligation, and it is the reachable one:
 the accumulator's `maxlen` arm is unreachable for any message that gets that far.
 
+#### 9.5.5 C#: one resolved number, and the dispatch that resolves it
+
+C# takes the same route as Kotlin for `string`/`blob` — the cap rides
+`PayloadAcc.String`/`.Blob`, the call the generated `String()`/`Blob()` callback
+already makes with the announced `total` in hand and before a byte is taken
+(corelib-cs#101; both parameters are required, so there is no omitted-argument
+spelling of *unlimited*). It differs in **what is passed**: one `_cap`, not a
+`maxlen`/`rmaxlen` pair.
+
+The reason is where the two bounds are decided. The callback opens with a single
+`switch ((cur, id))` that answers all three questions the callback has, in the one
+order §6.2.1 and MESSAGE_SPEC §7.3 permit:
+
+1. **Destination.** An id this scope does not declare gets no arm and leaves at
+   `default: return` — before a byte is buffered and before either bound applies.
+   That is the §7.3 tag test, and it is why **a skipped field is never capped**.
+2. **Schema bound.** A bounded field's arm throws `InvalidMessage` when `total`
+   exceeds its own `maxlen` (§7.1) — at the length header, never truncated.
+3. **Receiver cap.** The same arm closes by assigning `_cap`: the configured
+   `max_dyn_*` constant for a schema-unbounded field, and for a bounded one that
+   field's own `maxlen`, which the arm has *just* enforced. So the corelib's
+   comparison is present on every call but can only fire where §6.2.1 permits it
+   to, and the two categories (§6.3) stay distinct without a second argument.
+
+Because the arm that binds an id is the arm that names its cap, the skip and the
+cap cannot drift apart: there is no arm to reach the cap through that has not
+already resolved a destination. The generated `if (total > MaxDynStringLen)` guard
+that used to stand *in front of* the accumulator is gone, leaving one comparison
+per rule rather than two (§6.2.1's "one implementation, wherever it runs"). The
+blob callback is the exact twin of the string one, destination gate included — the
+half generator#436 landed just ahead of this.
+
+**What stays a generated guard, and why.** Array **counts** and wrapper element
+**indices**. corelib-cs delivers array elements one at a time through the same
+`Unsigned()`/`Signed()` callbacks a lone scalar uses, so there is no per-array call
+to hang a count on and no per-element call to hang an index on. Inventing one
+purely to hold a check is the shape the measurements in §9.5 put at 1–2.5
+percentage points of decode and is what this design rejects. A split by field kind
+is allowed, and this is C#'s.
+
+**Liveness moved source.** `MaxDynStringLen`/`MaxDynBlobLen` are emitted from the
+same frame walk that builds the dispatch arms, rather than from `ir.Bounds`. The
+constant and the only references to it now come from one place, which is the
+failure generator#387 hit from the other side: a constant the guard named and the
+liveness test did not emit does not compile, and no substring assertion on the
+generated source sees that.
+
+**And the `fixlenBegin` latch stays**, for the same reason it does in Kotlin: a
+schema `maxlen` must also be decided at the length *word*, because `PayloadAcc` is
+reached only once payload bytes arrive and a message truncated immediately after an
+over-`maxlen` word would report INCOMPLETE where §5.2.3 requires INVALID
+(generator#267). That is a different obligation from the receiver caps, which have
+exactly one site each.
+
 ### 9.6 Worst-case message size (one walk, all backends)
 
 Most targets emit a `MAX_SIZE` constant and size their encode buffer from it.
