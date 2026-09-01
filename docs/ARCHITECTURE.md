@@ -2258,10 +2258,21 @@ backend:
       not compile, which a codegen assertion on substrings cannot see. C#, Rust and
       Python were already right, deriving liveness from `ir.Bounds`, which marks
       any array without a schema count.
-    - **Zig refuses in three different ways** — an error return from `fixlenBegin`,
-      the sticky `self.lim` in the payload callback, a break to the dead scope in
-      `sequenceBegin` — so its helper returns the *test* and the *category* and
-      each site spells its own refusal.
+    - **Zig refuses in several different ways** — an error return from
+      `fixlenBegin`, the sticky `self.lim` in the payload callback, a break to the
+      dead scope in `sequenceBegin`, an early return from `arrayBegin` — so its
+      helper returns the *test* and the *category* and each site spells its own
+      refusal. For an **unbounded array's index** the *test* is corelib-zig's
+      (corelib-zig#81): the cap is an argument to `arrays.allocNCapped` /
+      `growCapped` / `setElemCapped`, and each site only translates that call's
+      `error.LimitExceeded` into its own refusal — so generated code emits no
+      index test at all, including the one that used to sit in `fixlenBegin`
+      beside the element length cap ("one implementation, wherever it runs"). What
+      stays in `fixlenBegin` is the element **length** cap, which has no corelib
+      call of its own at that word and must still be decided there rather than at
+      payload completion. The helper still decides which bound applies, because a
+      schema `count` is unchanged — INVALID, compared in generated code, and routed
+      to the *uncapped* entry points.
 
     **Three backends could not take it generator-side at all**, because their
     gap-fill is not generated: **Go**, **Dart** and pure **C++** hand the whole
