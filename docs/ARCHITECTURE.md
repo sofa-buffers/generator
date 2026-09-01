@@ -1695,12 +1695,34 @@ it. Every backend emits the same two-part shape:
 
 - in the generated `arrayBegin`, arm a per-visitor counter: `askip = count`
   unless the `(scope, id)` pair declares a native array **of the announced
-  `kind`**; `0` otherwise. Every wire array kind is armed, not just the integer
-  ones: an fp array's elements reach the `fp32`/`fp64` callbacks, which a scalar
-  `fp32`/`fp64` field shares (generator#193), so the same blind spot exists
-  there.
-- in `unsigned` / `signed`, discard while armed: `if askip > 0 { askip -= 1;
-  return; }`.
+  `kind`**; `0` otherwise. The fp kinds are armed too, not just the integer ones:
+  an fp array's elements reach the `fp32`/`fp64` callbacks, which a scalar
+  `fp32`/`fp64` field shares (generator#193), so the same blind spot exists there.
+- in `unsigned` / `signed` (and `fp32` / `fp64`), discard while armed:
+  `if askip > 0 { askip -= 1; return; }`.
+
+**Arm only a kind whose element callback this visitor actually declares**
+(generator PR #439 for `zig`, generator#440 for `rust`). The counter is spent by the
+element callback, and the callback is *conditional*: `corelib-zig` guards every
+element call on `@hasDecl`, and `corelib-rs`/`corelib-rs-no-std` give `fp32()` and
+`fp64()` **default no-op bodies** that a generated visitor overrides only for an
+fp kind the schema uses (in the `no_std` profile it must not override the others —
+they are behind Cargo features). Arming for a kind the visitor does not declare is
+therefore not merely redundant, it is *wrong*: nothing can spend the counter, it
+survives the array, and the next field of a kind that **is** declared drains it and
+is swallowed — silent data loss on a fully bounded schema, decoding `COMPLETE` with
+a default where a value was sent. Nothing is delivered for such a header, so
+nothing is owed a discard and `0` is both correct and cheaper. `unsigned`/`signed`
+are always declared, which is why only the fp kinds were ever affected; `rust` was
+the narrower of the two, needing a schema that mentions **one** fp kind and not the
+other for the hole to open.
+
+The blind spot this closes is a *second-order* one, and worth stating as a rule for
+any new flat-visitor backend: a discard counter is only safe when the code that
+spends it is emitted unconditionally, or when arming is gated on exactly the same
+condition as the spender. A test that asserts only "the skipped field kept its
+default" passes with the defect present — the loss lands on the *next* field, so
+the assertion has to name that field's value, in **one** wire image.
 
 It self-terminates on the announced count, so no array-end callback is needed; it
 survives a feed chunk boundary because the counter lives in the generated visitor

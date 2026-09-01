@@ -1056,8 +1056,13 @@ messages:
 	// A schema that declares only ONE fp subtype must name only that variant and
 	// keep the catch-all. Under corelib-rs-no-std both Fp32 and Fp64 are
 	// #[cfg(feature = "fixlen")], so naming a variant the crate has no array for
-	// is a needless dependency on a feature the schema does not otherwise force;
-	// the catch-all arms the discard counter for the absent subtype instead.
+	// is a needless dependency on a feature the schema does not otherwise force.
+	//
+	// The catch-all arms the counter at 0, NOT at count (generator#440): this
+	// crate declares no fp64 anywhere, so it overrides no fp64() -- the counter
+	// would never be spent, and the next unsigned()/signed() field would drain it
+	// and be swallowed. Nothing is delivered for that header, so nothing is owed a
+	// discard. See TestRustSkippedFpArrayDoesNotEatTheNextField.
 	only32 := moduleFromYAML(t, `
 version: 1
 messages:
@@ -1069,13 +1074,14 @@ messages:
 	if strings.Contains(only32, "ArrayKind::Fp64") {
 		t.Errorf("fp32-only message.rs must not name Fp64 (feature-gated under no_std):\n%s", only32)
 	}
-	if !strings.Contains(only32, "            _ => count,\n        };") {
-		t.Errorf("fp32-only message.rs must keep the catch-all that discards an fp64 header:\n%s", only32)
+	if !strings.Contains(only32, "            _ => 0,\n        };\n        self.afill") {
+		t.Errorf("fp32-only message.rs must arm the skip counter at 0 for the undelivered fp64 header:\n%s", only32)
 	}
 
-	// A schema with NO fp array at all names neither variant: the generated crate
-	// must compile under no_std whatever fixlen provisioning it ends up with, and
-	// an fp header at any id is discarded through the catch-all.
+	// A schema with NO fp at all names neither variant: the generated crate must
+	// compile under no_std whatever fixlen provisioning it ends up with. It
+	// overrides neither fp32() nor fp64(), so BOTH fp headers arm the counter at 0
+	// and one catch-all covers them (generator#440).
 	noFP := moduleFromYAML(t, `
 version: 1
 messages:
@@ -1086,8 +1092,89 @@ messages:
 			t.Errorf("fp-free message.rs must not name %q:\n%s", bad, noFP)
 		}
 	}
-	if !strings.Contains(noFP, "            _ => count,\n        };") {
-		t.Errorf("fp-free message.rs must discard an fp array header through the catch-all:\n%s", noFP)
+	if !strings.Contains(noFP, "            _ => 0,\n        };\n        self.afill") {
+		t.Errorf("fp-free message.rs must arm the skip counter at 0 for an undeliverable fp header:\n%s", noFP)
+	}
+}
+
+// TestRustSkippedFpArrayDoesNotEatTheNextField: the §7.3 discard counter is armed
+// only for an array kind whose element callback the generated visitor actually
+// OVERRIDES (generator#440, the rust face of the zig defect in PR #439).
+//
+// `Visitor` gives fp32() and fp64() default no-op bodies, and the impl emits one
+// only for an fp kind the schema uses (visitorUse). Arming askip for the other
+// one is not merely redundant: nothing can spend it. It survives the array, and
+// the next field of a kind that IS overridden -- unsigned() and signed() always
+// are -- drains it and is lost. Reproduced end to end as silent data loss on a
+// fully bounded schema: `f: fp32 @2, keep: u32 @4` given an fp64 ARRAY at id 2
+// followed by keep = 7 decoded COMPLETE as {"f":0.0,"keep":0} (audit 2026-09-01).
+// That is also why only the fp kinds were ever affected.
+func TestRustSkippedFpArrayDoesNotEatTheNextField(t *testing.T) {
+	// fp32 used (so fp32() is overridden), fp64 not: the two undeclared fp kinds
+	// want DIFFERENT counter values, which is the one shape that has to name a
+	// variant to separate them.
+	const asym = `
+version: 1
+messages:
+  m:
+    payload:
+      f:    { id: 2, type: fp32 }
+      keep: { id: 4, type: u32 }
+`
+	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
+		m := moduleFromYAML(t, asym, cfg)
+		if !strings.Contains(m, "fn fp32(&mut self, id: Id, value: f32) {") {
+			t.Fatalf("message.rs (%v) should override fp32():\n%s", cfg, m)
+		}
+		if strings.Contains(m, "fn fp64(") {
+			t.Fatalf("message.rs (%v) should NOT override fp64():\n%s", cfg, m)
+		}
+		// Fp32 elements arrive at the overridden fp32(), so they must be counted
+		// out; the fp64 header delivers nothing, so it arms nothing.
+		want := "        self.askip = match kind {\n" +
+			"            ArrayKind::Unsigned => match (self.cur, id) {\n" +
+			"                _ => count,\n" +
+			"            },\n" +
+			"            ArrayKind::Signed => match (self.cur, id) {\n" +
+			"                _ => count,\n" +
+			"            },\n" +
+			"            ArrayKind::Fp32 => count,\n" +
+			"            _ => 0,\n" +
+			"        };"
+		if !strings.Contains(m, want) {
+			t.Errorf("message.rs (%v) must arm askip only for a delivered kind; want:\n%s\ngot:\n%s", cfg, want, m)
+		}
+	}
+
+	// The mirror: fp64 used, fp32 not. The named variant follows the DELIVERED
+	// kind, so here it is the undelivered Fp32 that has to be named out.
+	mirror := moduleFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      f:    { id: 2, type: fp64 }
+      keep: { id: 4, type: u32 }
+`, nil)
+	if !strings.Contains(mirror, "            ArrayKind::Fp32 => 0,\n            _ => count,\n        };") {
+		t.Errorf("fp64-only message.rs must arm 0 for the undelivered Fp32 header:\n%s", mirror)
+	}
+
+	// A DECLARED fp array still arms normally at every id that is not its own:
+	// declaring the array is what makes the callback exist.
+	arr := moduleFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      f:    { id: 2, type: array, items: { type: fp64, count: 4 } }
+      keep: { id: 4, type: u32 }
+`, nil)
+	if !strings.Contains(arr, "ArrayKind::Fp64 => match (self.cur, id) {\n                (_Loc::Root, 2) => 0,\n                _ => count,\n            },") {
+		t.Errorf("declared fp64[] must keep arming the discard counter at other ids:\n%s", arr)
+	}
+	if !strings.Contains(arr, "            _ => 0,\n        };\n        self.afill") {
+		t.Errorf("the undeclared, unoverridden Fp32 header must arm 0:\n%s", arr)
 	}
 }
 

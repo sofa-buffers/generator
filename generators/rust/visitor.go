@@ -422,9 +422,26 @@ func wantSignedArrayElem(k ir.Kind) bool {
 // corelib now delivers array_begin only after the fixlen_word, so `kind` names
 // the subtype actually on the wire, and a declared fp32[N] must disarm only for
 // an Fp32 header. See emitArrayKindArms for why the catch-all is conditional.
-func (g *gen) emitArraySkipArm(f *rfile, fs []frame, arrSkip bool) {
+//
+// A kind is armed only when this visitor actually OVERRIDES the callback that
+// spends the counter (generator#440). `Visitor` gives fp32()/fp64() default
+// no-op bodies, and the impl emits them only for a schema that uses that fp kind
+// (visitorUse), so arming for an unemitted one is not merely redundant — nothing
+// can drain it. The counter survives the array and the NEXT field of a kind that
+// IS overridden drains it and is swallowed: silent data loss, COMPLETE, on a
+// fully bounded schema (audit 2026-09-01). unsigned()/signed() are always
+// overridden, which is exactly why only the fp kinds were affected.
+func (g *gen) emitArraySkipArm(f *rfile, fs []frame, use visitorUse, arrSkip bool) {
 	if !arrSkip {
 		return
+	}
+	// count only where the element callback exists to spend it; 0 is both correct
+	// and cheaper everywhere else.
+	rest := func(k ir.Kind) string {
+		if (k == ir.KindFP32 && use.fp32) || (k == ir.KindFP64 && use.fp64) {
+			return "count"
+		}
+		return "0"
 	}
 	emit := func(pat string, want func(ir.Kind) bool) {
 		f.line("            %s => match (self.cur, id) {", pat)
@@ -446,23 +463,26 @@ func (g *gen) emitArraySkipArm(f *rfile, fs []frame, arrSkip bool) {
 		f.line("            },")
 	}
 	f.line("        self.askip = match kind {")
-	g.emitArrayKindArms(f, fs, emit, "            _ => count,")
+	g.emitArrayKindArms(f, fs, emit, rest)
 	f.line("        };")
 }
 
 // emitArrayKindArms lays out the ArrayKind-keyed arms shared by the skip and
 // fill counters: the integer arm (always emitted, since it also carries the
 // "nothing declared here" default for integer headers), then an Fp32 and an Fp64
-// arm for each fp element subtype the schema actually declares, then a catch-all
-// carrying `dflt`.
+// arm for each fp element subtype the schema actually declares, then a tail
+// covering the fp kinds no arm named.
 //
-// The catch-all is omitted exactly when both fp arms were named, because
+// `rest` gives the tail value for one such unnamed fp kind. The fill counter
+// wants 0 for both; the skip counter wants `count` only where the element
+// callback that spends it is actually overridden (see emitArraySkipArm), so the
+// two undeclared kinds can want DIFFERENT values and the tail is not always a
+// single catch-all.
+//
+// The tail is omitted entirely when both fp arms were named, because
 // {Unsigned, Signed, Fp32, Fp64} is then already exhaustive and a trailing `_`
-// would be an unreachable pattern (a Rust warning in generated code). When
-// either fp subtype is undeclared the catch-all is what arms the counter for a
-// header of that kind — a declared-fp32 message must still discard the elements
-// of an fp64 array that arrives at any id.
-func (g *gen) emitArrayKindArms(f *rfile, fs []frame, emit func(pat string, want func(ir.Kind) bool), dflt string) {
+// would be an unreachable pattern (a Rust warning in generated code).
+func (g *gen) emitArrayKindArms(f *rfile, fs []frame, emit func(pat string, want func(ir.Kind) bool), rest func(k ir.Kind) string) {
 	// One arm per wire kind, never a collapsed integer family: a declared `i8[]`
 	// must disarm only for ArraySigned, so an ArrayUnsigned header at that id is
 	// skipped AND leaves the fill counter at 0 (generator#270 / F-0045).
@@ -475,8 +495,24 @@ func (g *gen) emitArrayKindArms(f *rfile, fs []frame, emit func(pat string, want
 	if fp64 {
 		emit("ArrayKind::Fp64", wantFP64Elem)
 	}
-	if !fp32 || !fp64 {
-		f.line("%s", dflt)
+	switch {
+	case fp32 && fp64:
+		// exhaustive already; a `_` arm here would be unreachable.
+	case fp32:
+		f.line("            _ => %s,", rest(ir.KindFP64))
+	case fp64:
+		f.line("            _ => %s,", rest(ir.KindFP32))
+	case rest(ir.KindFP32) == rest(ir.KindFP64):
+		f.line("            _ => %s,", rest(ir.KindFP32))
+	default:
+		// The two undeclared fp kinds want different values, so one has to be
+		// named. Reaching here means the schema uses one of the two fp kinds as a
+		// SCALAR (that is the only way visitorUse and anyArrayElem disagree), and
+		// an fp scalar is a fixlen wire type — so `fixlen`, the one feature both
+		// ArrayKind fp variants sit behind under no_std, is provisioned and naming
+		// the variant compiles.
+		f.line("            ArrayKind::Fp32 => %s,", rest(ir.KindFP32))
+		f.line("            _ => %s,", rest(ir.KindFP64))
 	}
 }
 
@@ -511,7 +547,7 @@ func (g *gen) emitArrayFillArm(f *rfile, fs []frame, fillArm bool) {
 		f.line("            },")
 	}
 	f.line("        self.afill = match kind {")
-	g.emitArrayKindArms(f, fs, emit, "            _ => 0,")
+	g.emitArrayKindArms(f, fs, emit, func(ir.Kind) string { return "0" })
 	f.line("        };")
 }
 
@@ -1157,7 +1193,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// last of the six backends still carrying it: java, csharp, zig, go and
 		// dart all key their integer arms by kind.
 		f.line("    fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {")
-		g.emitArraySkipArm(f, fs, arrSkip)
+		g.emitArraySkipArm(f, fs, use, arrSkip)
 		g.emitArrayFillArm(f, fs, use.scalarArray)
 		f.line("        match (kind, self.cur, id) {")
 		for _, fr := range fs {
