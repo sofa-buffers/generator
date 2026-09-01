@@ -2322,6 +2322,36 @@ backend:
     every global `operator new` across the decode, because a cap that rejects
     *after* materialising the container has prevented nothing.
 
+    **A matrix has two axes, and each needs its own pair.** The whole of the above
+    bounds an element **id**, which is what a wrapper array's length is. A NATIVE
+    nested row (`array<array<u32>>`) has a second axis under it: the row is itself a
+    count-prefixed array announcing a real count header, and that count needs the
+    same two numbers — the row's schema `count:` answering `INVALID`, the row's
+    receiver cap answering `LimitExceeded` — decided on exactly the terms the id
+    axis is. corelib-go's matrix collectors always carried both (`b` for the id,
+    `row` for the row, and `Caps` beside them); pure C++ carried one, `dynCap`, and
+    used it for both axes.
+
+    That mis-fire was **not symmetric, and only one half of it was visible**. The
+    rule two bullets up — a receiver cap governs only what the schema left unbounded
+    — means generated code states `dynCap` *only* where the outer array has no
+    `count:`. So an outer `count:` left the row with **no number at all**, and
+    `sofab::MessageSeq` refused each row `InvalidArgument` rather than reading the
+    omission as unlimited: `array<array<u32>>` with a bounded outer array could not
+    decode its own encoder's output, which is the corpus's own `nested_rows.yaml`.
+    An **unbounded** outer array hid the other half: the row borrowed the id axis's
+    cap, so a row longer than its inner `count:` decoded `COMPLETE` — a §7.1
+    `INVALID` gone missing, and the wrong category had it fired. `sofab::MessageSeq`
+    now carries `rowCap` / `rowDynCap` beside `cap` / `dynCap`, and the backend
+    emits one of each pair per axis (corelib-cpp#124).
+
+    The corpus had carried this shape since generator#250 and stayed green, because
+    the corpus step is `-fsyntax-only`: it proved the header compiles, which is what
+    that issue was about, and nothing ever fed it bytes. `tests/conformance/cpp`
+    now round-trips `nested_rows.yaml` through the JSON harness on all four legs and
+    compares the decoded **values**, the old failure having produced a truncated
+    array beside its refusal — a status-only assert would have passed on it.
+
     **One C++ shape stays in generated code**, and it is the exception to the row in
     the table below: an array of wrapper **rows** (`array<array<string>>`) is
     gathered by a *generated* placer, since what a row costs to read is the schema's
@@ -2549,7 +2579,7 @@ never a number the corelib knows:
 
 | target | compared in the corelib, on this existing call | compared in generated code |
 |---|---|---|
-| **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
+| **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` (element id) / `rowDynCap` (a native row's element count) on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
 | **Zig** | array counts and wrapper element indices: `arrays.allocNCapped` / `growCapped` / `setElemCapped` | string and blob lengths |
 | **Go**, **Dart** | wrapper arrays — the element index, the element length and a matrix **row**'s own element count — as the collector's receiver-cap constructor arguments (`sofab.Caps`; `rcap`/`relemMax`/`rowCap`), beside the `sofab.Bounds` carrying the schema's | scalar string/blob lengths and native array counts, in the generated `FixlenBegin`/`ArrayBegin` (`onFixlenHeader`/`onArrayBegin`) — the accumulator is one callback too late, above |
 | **Java** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus a wrapper **row**'s element index, on the `Seq.reserveRow*` call that places the row — §9.5.3 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
@@ -2646,6 +2676,22 @@ through `try_decode` where a bare `feed` accepted it (#228). A field left both
 unbounded and uncapped yields no cap at all rather than one that would reject valid
 traffic. **Statically bounded profiles** (C, C++ `corelib: c-cpp`,
 Rust `no_std`) are capacity-bound by construction — the keys are inert.
+
+That cap is a receiver cap like any other, so §6.2.1's closing rule binds it too:
+*a skipped field is never capped* — "a decode that steps over an over-cap field it
+was never going to read stays `COMPLETE`". A top-level field is measured from its
+own first byte, so a skipped one costs the next field nothing; a **sequence** is
+not, and accrues field by field so that many small children cannot slip past a
+per-payload check. Those two facts had a gap between them: a sequence the receiver
+*does* read, carrying a child it does *not* — an unknown id, or one §7.3 declines
+— charged that child's bytes to the enclosing field's budget, so the next LIVE
+field, the sequence's own end marker included, was refused `LimitExceeded` and
+every declared field after it was lost. The bytes were walked, never materialized:
+allocation was **zero** in every failing case, and `go`, `rust` and `python`
+decoded the identical images `COMPLETE` with every field intact. corelib-cpp now
+discounts what a skipped subtree spans — header and payload, in one window or
+across ten, so the verdict cannot depend on the caller's chunking — and measures
+the cap against the bulk this receiver actually took on.
 
 **Allocation shape: check first, then allocate once.** No generated decoder may
 allocate from an untrusted wire count *before* checking it, and an over-cap count

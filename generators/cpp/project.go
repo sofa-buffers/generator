@@ -434,10 +434,17 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 			// INCOMPLETE (generator#216 / §5.2). Pure corelib-cpp only: its Result
 			// carries the invalid()/incomplete()/limitExceeded() predicates (the c-cpp
 			// wrapper's Result does not, and has no measure phase to test anyway).
+			//
+			// All FOUR refusal outcomes are named, COMPLETE meaning only that none
+			// of them fired. §6.3's third tier -- InvalidArgument, a mistake in the
+			// call rather than in the message -- used to fall through to COMPLETE,
+			// so a decode this library REFUSED reported success here while `decode`
+			// beside it exited non-zero. That is precisely the shape a status-only
+			// assertion exists to catch, and it hid corelib-cpp#124.
 			f.line("        } else if (mode == \"status\") {")
 			f.line("            %s obj;", mt)
 			f.line("            auto r = %s::try_decode(reinterpret_cast<const std::uint8_t *>(in.data()), in.size(), obj);", mt)
-			f.line("            std::cout << (r.invalid() ? \"INVALID\" : r.incomplete() ? \"INCOMPLETE\" : r.limitExceeded() ? \"LIMIT_EXCEEDED\" : \"COMPLETE\") << \"\\n\";")
+			f.line("            std::cout << (r.invalid() ? \"INVALID\" : r.incomplete() ? \"INCOMPLETE\" : r.limitExceeded() ? \"LIMIT_EXCEEDED\" : r.invalidArgument() ? \"INVALID_ARGUMENT\" : \"COMPLETE\") << \"\\n\";")
 		}
 		f.line("        } else { std::cerr << \"unknown mode\\n\"; return 2; }")
 		f.line("    }")

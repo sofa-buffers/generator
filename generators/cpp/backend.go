@@ -1571,7 +1571,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		}
 	case ir.KindStruct, ir.KindUnion:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
-		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, cap, -1, rv, cont)
+		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, cap, -1, false, rv, cont)
 	case ir.KindArray:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
 		// A row of native scalars IS readable by the corelib: MessageSeq/
@@ -1584,7 +1584,14 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		// own collector, one level down.
 		if isNativeArrayElem(items.Elem) {
 			inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
-			g.deserializeSeqInto(f, ind, target, inner, count, cap, items.Count, rv, cont)
+			// The ROW's own schema `count:`, or -1 where the schema left the row
+			// unbounded -- which is a different fact from "these elements are not
+			// a row at all", and the two used to arrive here as the same 0.
+			rowCount := int64(-1)
+			if items.HasCount {
+				rowCount = items.Count
+			}
+			g.deserializeSeqInto(f, ind, target, inner, count, cap, rowCount, true, rv, cont)
 			return
 		}
 		g.deserializeRowSeq(f, ind, target, items, count, cap, rv, cont, depth)
@@ -1704,14 +1711,20 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 // so its collector gets static storage, the wrapper's own presence is decided
 // from the field tag before readSequence, and a fixed count reserves the target
 // up front so a later placement never reallocates a still-bound element.
-// elemCount is the ROW element's own schema `count` for a native-scalar row, or
-// -1 when the elements are structs/unions and there is no row. A GROWABLE row
-// publishes no capacity of its own, so that number is the only ceiling it has:
-// without it corelib-c-cpp's MessageSeq would size the row straight from the
-// wire count, i.e. from a number the SENDER chose (CORELIB_PLAN §6.6), and since
-// corelib-c-cpp#159 it refuses such a read rather than reading the omission as
-// unlimited. An INLINE row needs none of this -- its capacity is the bound.
-func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, cap, elemCount int64, rv, container string) {
+// nativeRow says the elements ARE rows (array<array<scalar>>) rather than
+// structs/unions, and elemCount is then the ROW's own schema `count`, or -1 where
+// the schema left the row unbounded. The two are separate arguments because they
+// are separate facts: "this is not a row" and "this row has no declared count"
+// both used to arrive as elemCount == 0, and the second needs a receiver cap
+// where the first needs nothing.
+//
+// A GROWABLE row publishes no capacity of its own, so one of those two numbers is
+// the only ceiling it has: without it a MessageSeq would size the row straight
+// from the wire count, i.e. from a number the SENDER chose (CORELIB_PLAN §6.6),
+// and both corelibs now refuse such a read rather than reading the omission as
+// unlimited (corelib-c-cpp#159, corelib-cpp#124). An INLINE row needs none of
+// this -- its capacity is the bound.
+func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, cap, elemCount int64, nativeRow bool, rv, container string) {
 	if g.clib {
 		if strings.HasPrefix(container, "sofab::InlineVector") {
 			// The inline container's capacity IS the schema `count`, so the
@@ -1742,7 +1755,8 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 	// first is absent (§6.2.1). Without it an unbounded array of objects grew to
 	// whatever id the wire named -- the amplification a wrapper array's missing
 	// count header leaves open (MESSAGE_SPEC §5.1).
-	g.emitSeqRead(f, ind, fmt.Sprintf("sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d;%s", container, rv, rv, target, rv, cap, g.cppSeqIndexCap(rv, cap)),
+	g.emitSeqRead(f, ind, fmt.Sprintf("sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d;%s%s", container, rv, rv, target, rv, cap,
+		g.cppSeqIndexCap(rv, cap), g.cppSeqRowCaps(rv, elemType, elemCount, nativeRow)),
 		fmt.Sprintf("sofab::read(is, %s)", rv))
 }
 
