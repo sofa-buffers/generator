@@ -1149,10 +1149,10 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 			default:
 				if kind == ir.KindString {
 					fa.ids = append(fa.ids, int64(fld.ID))
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, mat(store)))
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, mat(store)))
 				} else {
 					fa.ids = append(fa.ids, int64(fld.ID))
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = chunk,", fld.ID, acc))
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = chunk,", fld.ID, acc))
 				}
 			}
 		}
