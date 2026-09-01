@@ -1,6 +1,7 @@
 package cpp
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -1486,8 +1487,13 @@ func TestCppNestedWrapperRowsHeap(t *testing.T) {
 		"if (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }",
 		"while (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();",
 		"void prepare() noexcept { if (out) out->clear(); }",
-		// native rows keep the corelib collector
-		"sofab::MessageSeq<std::vector<std::vector<std::uint32_t>>> _r0; _r0.out = &urows;",
+		// native rows keep the corelib collector -- and carry BOTH axes of the
+		// matrix: `cap` is the OUTER array's `count: 2` (the row id, §5.1) and
+		// `rowCap` is the ROW's own `count: 3`. The row used to state nothing at
+		// all, so with the outer array bounded the collector had no number for
+		// the row and refused every one of them InvalidArgument -- this shape
+		// could not decode its own encoder's output (corelib-cpp#124).
+		"{ sofab::MessageSeq<std::vector<std::vector<std::uint32_t>>> _r0; _r0.out = &urows; _r0.cap = 2; _r0.rowCap = 3; sofab::read(is, _r0); }",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("nested wrapper rows missing %q:\n%s", want, h)
@@ -1505,6 +1511,74 @@ func TestCppNestedWrapperRowsHeap(t *testing.T) {
 		if strings.Contains(h, notWant) {
 			t.Errorf("wrapper row must not be read as %q (static_assert in IStream::read):\n%s", notWant, h)
 		}
+	}
+}
+
+// TestCppNativeRowBothAxes walks all four bound combinations of a native nested
+// row (array<array<u32>>), because which one you pick decides which of the two
+// numbers is emitted -- and the bug was visible in only one of them.
+//
+// A matrix has two axes. The OUTER array's length is the element id (MESSAGE_SPEC
+// §5.1, no count header), bounded by `cap` (schema `count:` -> InvalidMessage) or
+// `dynCap` (receiver cap -> LimitExceeded). The ROW is a native array announcing
+// a real count header, bounded by `rowCap` / `rowDynCap` on exactly the same
+// terms. ARCHITECTURE §9.5 makes the receiver cap govern only what the schema
+// left unbounded, so on each axis exactly ONE of the pair is ever spelled.
+//
+// The row pair did not exist: the row borrowed the OUTER array's `dynCap`
+// (corelib-cpp#124). That is why only the outer-bounded rows broke -- with a
+// `count:` on the outer array §9.5 states no `dynCap` at all, leaving the row
+// with no number, and corelib-cpp refuses a read with no bound rather than
+// letting the wire count size the row. With the outer array unbounded the row
+// silently borrowed a number that was neither its bound nor its category.
+func TestCppNativeRowBothAxes(t *testing.T) {
+	const tmpl = "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      m: { id: 0, type: array, items: { type: array%s, items: { type: u32%s } } }\n"
+	for _, tc := range []struct {
+		name       string
+		outer, row string // the `count:` clause on each axis, or ""
+		want       string
+	}{
+		{
+			// The corpus's own nested_rows.yaml `numrows`, and the shape that
+			// could not round-trip: schema on both axes, no receiver cap on either.
+			name: "both bounded", outer: ", count: 2", row: ", count: 3",
+			want: "_r0.cap = 2; _r0.rowCap = 3;",
+		},
+		{
+			// Outer bounded, row not: the row is the only axis a cap governs.
+			name: "row unbounded", outer: ", count: 2", row: "",
+			want: "_r0.cap = 2; _r0.rowDynCap = SOFAB_MAX_DYN_ARRAY_COUNT;",
+		},
+		{
+			// Outer unbounded, row bounded: the row's `count:` is a §7.1 statement
+			// and must NOT be replaced by the index cap the outer axis carries.
+			name: "outer unbounded", outer: "", row: ", count: 3",
+			want: "_r0.cap = -1; _r0.dynCap = SOFAB_MAX_DYN_ARRAY_COUNT; _r0.rowCap = 3;",
+		},
+		{
+			name: "both unbounded", outer: "", row: "",
+			want: "_r0.cap = -1; _r0.dynCap = SOFAB_MAX_DYN_ARRAY_COUNT; _r0.rowDynCap = SOFAB_MAX_DYN_ARRAY_COUNT;",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := genHeader(t, fmt.Sprintf(tmpl, tc.outer, tc.row), "m.hpp", map[string]any{})
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			if !strings.Contains(h, tc.want) {
+				t.Errorf("native row bounds missing %q:\n%s", tc.want, h)
+			}
+			// Exactly one number per axis: a receiver cap beside a schema bound
+			// would be the §6.2.1 violation ("MUST NOT be applied to a field the
+			// schema already bounds"), and the wrong category with it.
+			if tc.outer != "" && strings.Contains(h, "_r0.dynCap") {
+				t.Errorf("schema-bounded outer axis must state no receiver cap:\n%s", h)
+			}
+			if tc.row != "" && strings.Contains(h, "_r0.rowDynCap") {
+				t.Errorf("schema-bounded row axis must state no receiver cap:\n%s", h)
+			}
+		})
 	}
 }
 

@@ -55,7 +55,15 @@ YAML
 # taken as its first N elements, overwritten by wire bytes), was never executed.
 # The leg stayed green while emitting a use-after-free reachable from any
 # received message. An array kind nothing fills is an array kind nothing tests.
-IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"someu64":18446744073709551615,"somestringarray":["a","b","c","d","e"],"someenumarray":[2,1,2,0],"someboolarray":[true,false,true,true,false,true,true,false],"somebitfieldarray":[1,2,3]}'
+#
+# somematrix is here for exactly that reason, and it took the lesson a second
+# time. example.yaml has declared the field since the matrix shape was added --
+# array<array<u32>>, outer count 2, inner count 4 -- and this JSON left it at its
+# default, so no message ever carried one and the pure C++ collector for it never
+# ran. It could not decode at all: a native row whose OUTER array is
+# schema-bounded reached sofab::MessageSeq with no bound for the row and every
+# row was refused (corelib-cpp#124). The declaration was not the coverage.
+IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"somematrix":[[1,2,3,4],[5,6,7,8]],"someu64":18446744073709551615,"somestringarray":["a","b","c","d","e"],"someenumarray":[2,1,2,0],"someboolarray":[true,false,true,true,false,true,true,false],"somebitfieldarray":[1,2,3]}'
 
 # run_variant LABEL CORELIB DYNAMIC INCLUDE MAKEVARS...
 #   CORELIB  - "" for pure corelib-cpp, "c-cpp" for the corelib-c-cpp wrapper.
@@ -152,6 +160,7 @@ run_variant() {
         '"someenumarray":\[2,1,2,0\]' \
         '"someboolarray":\[true,false,true,true,false,true,true,false\]' \
         '"somebitfieldarray":\[1,2,3\]' \
+        '"somematrix":\[\[1,2,3,4\],\[5,6,7,8\]\]' \
         '"deepint":-99' \
         '"option1":4242'; do
         echo "$OUT" | grep -q "$chk" || { echo "FAIL: [$label] round-trip missing $chk"; echo "  got: $OUT"; exit 1; }
@@ -467,6 +476,72 @@ run_variant() {
         done
     done
     echo "==> [$label] corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+
+    # Nested rows, DECODED (corelib-cpp#124). The loop above is -fsyntax-only, so
+    # for nested_rows.yaml -- the one corpus definition carrying array<array<T>> --
+    # "green" only ever meant "it compiles". It did not decode: a NATIVE nested row
+    # (array<array<u32>>) whose OUTER array carries a schema `count:` reached the
+    # corelib collector with no bound for the ROW at all, because ARCHITECTURE §9.5
+    # correctly states no receiver cap on an axis the schema bounds and the row had
+    # no schema slot of its own. Every row was refused InvalidArgument and the
+    # message could not read back its own encoder's output.
+    #
+    # The check is a full JSON round-trip and it compares VALUES: the old failure
+    # produced a truncated `numrows` beside its refusal, so a status-only assert
+    # would have passed on it. The wrapper rows travel in the same message as the
+    # control -- they were always correct, being placed by generated code rather
+    # than by the corelib collector, and a regression in either half shows up as
+    # exactly one field going missing.
+    echo "==> [$label] nested rows round-trip (corelib-cpp#124)"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$ROOT/tests/matrix/corpus/defs/nested_rows.yaml" --out "$WORK/rows-$label" )
+    make -C "$WORK/rows-$label" "$@" >/dev/null
+    ROWS_IN='{"strrows":[["a","b","c"],["d"]],"blobrows":[[[1,2],[3]],[[4]]],"structrows":[[{"x":1,"y":2},{"x":3,"y":4}],[{"x":5,"y":6}]],"strcube":[[["a","b"],["c"]],[["d"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[3.5]]}'
+    ROWS_BIN="$WORK/rows-$label.bin"
+    printf '%s' "$ROWS_IN" | "$WORK/rows-$label/harness/harness" encode NestedRows > "$ROWS_BIN"
+    if [ -z "$corelib" ]; then
+        # The pure legs can name the outcome. All four refusals are distinct
+        # there, InvalidArgument -- the verdict the defect produced -- included.
+        ROWS_ST=$("$WORK/rows-$label/harness/harness" status NestedRows < "$ROWS_BIN")
+        [ "$ROWS_ST" = COMPLETE ] \
+            || { echo "FAIL: [$label] nested rows decode is $ROWS_ST, not COMPLETE"; exit 1; }
+    fi
+    ROWS_OUT=$("$WORK/rows-$label/harness/harness" decode NestedRows < "$ROWS_BIN")
+    for chk in \
+        '"numrows":\[\[1,2,3\],\[4,5,6\]\]' \
+        '"fprows":\[\[1.5,2.5\],\[3.5\]\]' \
+        '"strrows":\[\["a","b","c"\],\["d"\]\]' \
+        '"blobrows":\[\[\[1,2\],\[3\]\],\[\[4\]\]\]' \
+        '"strcube":\[\[\["a","b"\],\["c"\]\],\[\["d"\]\]\]' \
+        '"structrows":\[\[{"x":1,"y":2},{"x":3,"y":4}\],\[{"x":5,"y":6}\]\]'; do
+        echo "$ROWS_OUT" | grep -q "$chk" || { echo "FAIL: [$label] nested rows round-trip missing $chk"; echo "  got: $ROWS_OUT"; exit 1; }
+    done
+
+    # §7.1 on the ROW axis: `numrows`' inner `count: 3` bounds the row's own
+    # element count, and 4 elements in a row is INVALID -- not LimitExceeded, the
+    # schema being what states this bound (CORELIB_PLAN §6.2.1/§6.3). Before the
+    # row carried its own number this went the other way on an unbounded outer
+    # array: the row was measured against the OUTER array's receiver cap, so an
+    # over-count row decoded COMPLETE. Wire: 26 (seq start id 4) 03 (row id 0,
+    # unsigned array) 04 (count 4) 01020304, 07.
+    echo "==> [$label] nested row over-count must reject (corelib-cpp#124)"
+    printf '\046\003\004\001\002\003\004\007' > "$WORK/rows-over-$label.bin"
+    printf '\046\003\003\001\002\003\007' > "$WORK/rows-ok-$label.bin"
+    if "$WORK/rows-$label/harness/harness" decode NestedRows < "$WORK/rows-over-$label.bin" >/dev/null 2>&1; then
+        echo "FAIL: [$label] a nested row past its schema count (4 > count 3) must be rejected"; exit 1
+    fi
+    "$WORK/rows-$label/harness/harness" decode NestedRows < "$WORK/rows-ok-$label.bin" >/dev/null \
+        || { echo "FAIL: [$label] control (row count == 3) must decode"; exit 1; }
+    # ...and it is INVALID, not the policy category: the row's `count: 3` is the
+    # SCHEMA's statement, and §6.2.1/§6.3 forbid answering a schema bound with
+    # LimitExceeded. Only the pure legs can be asked -- the corelib-c-cpp harness
+    # has no `status` verb -- and only they had the defect.
+    if [ -z "$corelib" ]; then
+        ROWS_OVER=$("$WORK/rows-$label/harness/harness" status NestedRows < "$WORK/rows-over-$label.bin")
+        [ "$ROWS_OVER" = INVALID ] \
+            || { echo "FAIL: [$label] a row past its schema count is $ROWS_OVER, not INVALID"; exit 1; }
+    fi
+    echo "==> [$label] nested rows OK"
 }
 
 # Pure C++20 corelib-cpp (default).

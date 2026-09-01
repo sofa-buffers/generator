@@ -787,6 +787,37 @@ func (g *gen) cppSeqIndexCap(rv string, cap int64) string {
 	return fmt.Sprintf(" %s.dynCap = SOFAB_MAX_DYN_ARRAY_COUNT;", rv)
 }
 
+// cppSeqRowCaps is the ROW half of the same shape, for a native nested row
+// (array<array<u32>>) collected by sofab::MessageSeq.
+//
+// A matrix has two axes and each needs its own pair of numbers. cppSeqIndexCap
+// above states the receiver cap for the row INDEX, which is the outer array's
+// length (MESSAGE_SPEC §5.1); these state the row's own element COUNT, which the
+// row announces as a real count header. Reusing the index cap for both was
+// corelib-cpp#124, and it was wrong in both directions: where the OUTER array
+// carries a `count:` the index cap is (correctly) not stated at all, so the row
+// was read with no number and refused InvalidArgument, and where the outer array
+// was unbounded a row past the inner `count:` was accepted under the index cap --
+// a §7.1 INVALID gone missing.
+//
+// Same exclusivity as everywhere else (§6.2.1): `rowCap` where the schema states
+// the inner `count:`, answering INVALID; `rowDynCap` only where it does not,
+// answering LimitExceeded. Both are spelled out; the corelib refuses a row with
+// neither rather than reading the omission as unlimited. An INLINE row needs
+// neither -- its container capacity is the bound the corelib reads off the type.
+func (g *gen) cppSeqRowCaps(rv, elemType string, rowCount int64, nativeRow bool) string {
+	if !nativeRow || strings.HasPrefix(elemType, "sofab::InlineVector") {
+		return ""
+	}
+	if rowCount >= 0 {
+		return fmt.Sprintf(" %s.rowCap = %d;", rv, rowCount)
+	}
+	if !g.limArrHas {
+		return ""
+	}
+	return fmt.Sprintf(" %s.rowDynCap = SOFAB_MAX_DYN_ARRAY_COUNT;", rv)
+}
+
 // rowIndexCap is the same number for the GENERATED row placer, which declares
 // its bounds as struct members and so has to spell the absent case too.
 func (g *gen) rowIndexCap(cap int64) string {
