@@ -282,6 +282,33 @@ OUT=$("$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/control.bin"
 echo "$OUT" | grep -q '"someuintarray":\[1,2,3,4\]' || { echo "FAIL: legitimate array must still fill; got: $OUT"; exit 1; }
 echo "==> array-at-scalar skip OK"
 
+# generator#440:  a S7.3-skipped ARRAY delivered to an ARRAY-declared id
+# must not swallow the field that FOLLOWS it. The cases above cover an array at a
+# SCALAR id; this is array-kind-vs-array-kind, which nothing exercises today.
+cat > "$WORK/skiprepro.yaml" <<'YAML'
+version: 1
+messages:
+  skiprepro:
+    payload:
+      a:    { id: 2, type: array, items: { type: u32, count: 4 } }
+      keep: { id: 4, type: u32 }
+YAML
+zig_build "$WORK/skiprepro.yaml" "$WORK/sk"
+echo "==> a skipped array must not eat the NEXT field (S7.3)"
+# 14 = id 2, ARRAY_SIGNED (declared unsigned -> S7.3 skip); 05 = count 5; five zig-zag 0s;
+# 20 = id 4 unsigned scalar; 07 = 7. The array must be skipped and keep must be 7.
+printf '\024\005\000\000\000\000\000\040\007' > "$WORK/skip_eats_next.bin"
+OUT=$("$WORK/sk/zig-out/bin/harness" decode skiprepro < "$WORK/skip_eats_next.bin") \
+    || { echo "FAIL: a skipped array followed by a scalar must decode"; exit 1; }
+echo "  decoded: $OUT"
+echo "$OUT" | grep -q '"keep":7' || { echo "FAIL: THE SKIPPED ARRAY ATE THE NEXT FIELD -- keep should be 7; got: $OUT"; exit 1; }
+# control: the same trailing scalar on its own must decode (proves the bytes are right)
+printf '\040\007' > "$WORK/skip_control.bin"
+OUT=$("$WORK/sk/zig-out/bin/harness" decode skiprepro < "$WORK/skip_control.bin")
+echo "$OUT" | grep -q '"keep":7' || { echo "FAIL: control keep=7 must decode; got: $OUT"; exit 1; }
+echo "==> skipped array does not eat the next field OK"
+
+
 # fp ARRAY delivered to a SCALAR-declared fp id (MESSAGE_SPEC S7.3, generator#193):
 # the fp analogue of the integer case above. corelib-zig streams a fixlen (fp) array
 # element-by-element through the very fp32()/fp64() callbacks a lone scalar uses, so
