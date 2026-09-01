@@ -1052,6 +1052,7 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	type frameArms struct {
 		fr   frame
 		arms []string // fkStruct: "id => body" lines
+		ids  []int64  // fkStruct: the ids those arms declare, for the destination gate
 		body string   // fkSeqArr: single body
 	}
 	var all []frameArms
@@ -1138,16 +1139,20 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 				// is stored, never truncated (MESSAGE_SPEC §7.1). A string is then
 				// UTF-8-validated at the store (mat); blob is stored verbatim.
 				totalUsed = true
+				fa.ids = append(fa.ids, int64(fld.ID))
 				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %d) { self.inv = true; } else { %s },", fld.ID, fld.Maxlen, mat(store)))
 			case active:
 				// Unbounded scalar: keep the configured #102 decode-limit behavior.
 				totalUsed = true
+				fa.ids = append(fa.ids, int64(fld.ID))
 				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %s) { self.lim = true; } else { %s },", fld.ID, capName, mat(store)))
 			default:
 				if kind == ir.KindString {
-					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, mat(store)))
+					fa.ids = append(fa.ids, int64(fld.ID))
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, mat(store)))
 				} else {
-					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = chunk,", fld.ID, acc))
+					fa.ids = append(fa.ids, int64(fld.ID))
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = chunk,", fld.ID, acc))
 				}
 			}
 		}
@@ -1164,6 +1169,27 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	// The corelib delivers a payload in as many pieces as the feed chunks split
 	// it into. Rebind `chunk` to the WHOLE payload so every arm below sees one
 	// contiguous slice and none of them has to know about chunking.
+	// §7.3 + §6.6: resolve the destination FIRST and leave before a byte is
+	// buffered. _reassemble copies the whole payload, sized 1:1 from the wire, so
+	// running it ahead of the id switch copies a payload an undeclared id or a
+	// wire-type contradiction is about to drop — measured at exactly the declared
+	// length (1 MiB claimed, 1 MiB copied, then discarded). The other backends
+	// already gate first; zig was the last one buffering ahead of the decision.
+	f.line("        switch (self.cur) {")
+	for _, fa := range all {
+		if fa.body != "" {
+			f.line("            .%s => {},", fa.fr.loc)
+			continue
+		}
+		f.line("            .%s => switch (id) {", fa.fr.loc)
+		for _, id := range fa.ids {
+			f.line("                %d => {},", id)
+		}
+		f.line("                else => return,")
+		f.line("            },")
+	}
+	f.line("            else => return,")
+	f.line("        }")
 	f.line("        const chunk = self._reassemble(total, offset, _chunk) orelse return;")
 	f.line("        switch (self.cur) {")
 	for _, fa := range all {
