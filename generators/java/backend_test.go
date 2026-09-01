@@ -66,9 +66,9 @@ func TestJavaStructural(t *testing.T) {
 		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",    // guard reads the static -- no per-encode new long[] (#146)
 		"m.someuintarray[ai++] = (int) value;",                                          // plain indexed store: arrayBegin sized the array at the checked count (§9.5 shape A)
 		"case 15: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw Sofab.invalid(\"someuintarray: array count above schema capacity 4\"); askip = 0; afill = count; atgt = 1; abulk = m.someuintarray = new int[count]; break;", // mis-typed header skipped before the bound (#254); over-count rejected (#100); the M that arrived is the whole value
-		"OStream os = OStream.overScratch(MAX_SIZE);",                            // the corelib owns the scratch buffer; MAX_SIZE stays ours (§5.1)
-		"return os.copyOfBytesUsed();",                                           // exact-size copy out of it
-		"String _s = acc.string(total, offset, data, chunkOffset, chunkLength);", // reassembly + UTF-8, both the corelib's
+		"OStream os = OStream.overScratch(MAX_SIZE);", // the corelib owns the scratch buffer; MAX_SIZE stays ours (§5.1)
+		"return os.copyOfBytesUsed();",                // exact-size copy out of it
+		"String _s = acc.string(total, offset, data, chunkOffset, chunkLength, Bound.SCHEMA_BOUNDED);", // reassembly, UTF-8 and the receiver cap, all the corelib's
 		"private final PayloadAcc acc = new PayloadAcc();",
 		"public List<Boolean> someboolarray", // boolean array stays boxed List
 	} {
@@ -237,9 +237,11 @@ messages:
 		// Bounded array: only the generator#100 schema guard, never the cap. Both
 		// bounds sit BEHIND the §7.3 kind test (generator#254).
 		`case 2: if (kind != ArrayKind.SIGNED) break; if (count > 6) throw Sofab.invalid("barr: array count above schema capacity 6"); askip = 0; afill = count; atgt = 1; abulk = m.barr = new int[count]; break;`,
-		// Unbounded string: total checked at the top of string(), before accumulation.
-		"if (total > MAX_DYN_STRING_LEN) {",
-		`case 0: throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "s: string length above configured limit 4096"));`,
+		// Unbounded string: the cap is PASSED to the accumulator, which compares it
+		// against the announced total before it buffers or materializes a byte
+		// (CORELIB_PLAN §6.2.1). `s` is the only string destination and it is
+		// unbounded, so the constant travels as a literal -- no guard, no `_lim`.
+		"String _s = acc.string(total, offset, data, chunkOffset, chunkLength, CAP_DYN_STRING_LEN);",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Dyn.java missing %q", want)
@@ -247,6 +249,19 @@ messages:
 	}
 	if strings.Contains(m, "MAX_DYN_BLOB_LEN") {
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
+	}
+	// §6.2.1's "one implementation, wherever it runs": the length cap is either
+	// a guard here or an argument to the corelib call, never both.
+	if strings.Contains(m, "if (total > MAX_DYN_STRING_LEN)") {
+		t.Errorf("the string cap must not ALSO be a generated guard:\n%s", m)
+	}
+	// This schema declares no blob at all, so there is no call for a cap to
+	// travel on either: the callback body is empty and nothing is sized from the
+	// wire for a payload nobody reads (generator#436). The blob twin of the
+	// SCHEMA_BOUNDED literal is pinned in TestJavaSkippedBlobIsNotMaterialized,
+	// whose blobs are all maxlen'd.
+	if strings.Contains(m, "acc.blob(") {
+		t.Errorf("a message with no blob field must not reach the blob accumulator:\n%s", m)
 	}
 
 	// No keys configured -> the target's finite DEFAULTS, not "unlimited"
@@ -518,8 +533,8 @@ func TestJavaFixlenArrayKindPerSubtype(t *testing.T) {
 func TestJavaStringGoesThroughTheCorelibAccumulator(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n      s: { id: 0, type: string }\n"
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
-	if !strings.Contains(m, "String _s = acc.string(total, offset, data, chunkOffset, chunkLength);") {
-		t.Error("a string payload must be materialized through PayloadAcc.string")
+	if !strings.Contains(m, "String _s = acc.string(total, offset, data, chunkOffset, chunkLength, CAP_DYN_STRING_LEN);") {
+		t.Error("a string payload must be materialized through PayloadAcc.string, and carry its receiver cap")
 	}
 	if !strings.Contains(m, "if (_s == null) return;") {
 		t.Error("an incomplete payload must return, not fall through with a null value")
@@ -1017,13 +1032,13 @@ func TestJavaMatrixRowsArePlacedByID(t *testing.T) {
 		// native rows: placed in arrayBegin, bounded by the OUTER array's count --
 		// behind the §7.3 kind test, so a mis-typed row is skipped, never placed
 		// and never bound-checked (generator#254).
-		`case 8: if (kind != ArrayKind.UNSIGNED) break; if (id >= 4) throw Sofab.invalid("Root_mat element: array index above schema capacity 4"); if (count > 3) throw Sofab.invalid("mat element: array count above schema capacity 3"); askip = 0; afill = count; atgt = 1; _arowInt = Seq.reserveRowInts(m.mat, id, count); _ex_Root_mat = id; break;`,
+		`case 8: if (kind != ArrayKind.UNSIGNED) break; if (id >= 4) throw Sofab.invalid("Root_mat element: array index above schema capacity 4"); if (count > 3) throw Sofab.invalid("mat element: array count above schema capacity 3"); askip = 0; afill = count; atgt = 1; _arowInt = Seq.reserveRowInts(m.mat, id, count, Bound.SCHEMA_BOUNDED); _ex_Root_mat = id; break;`,
 		// and the elements land in the row that id named -- through the cursor
 		// arrayBegin parked, which is already exactly `count` long, so the store is
 		// a plain indexed write with no growth and no write-back (§9.5 shape A)
 		"_arowInt[ai++] = (int) value; return;",
 		// wrapper rows: placed in sequenceBegin, same shape
-		`case 9: if (id >= 4) throw Sofab.invalid("Root_smat element: array index above schema capacity 4"); Seq.reserveRow(m.smat, id); _ex_Root_smat = id; cur = 10; break;`,
+		`case 9: if (id >= 4) throw Sofab.invalid("Root_smat element: array index above schema capacity 4"); Seq.reserveRow(m.smat, id, Bound.SCHEMA_BOUNDED); _ex_Root_smat = id; cur = 10; break;`,
 		"while (m.smat.get(_ex_Root_smat).size() <= id) m.smat.get(_ex_Root_smat).add(\"\");",
 	} {
 		if !strings.Contains(got, want) {
@@ -1201,6 +1216,12 @@ messages:
 	// The maxlen reject stays destination-scoped behind it.
 	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
 		t.Errorf("blob(): the maxlen reject must survive behind the guard:\n%s", fn)
+	}
+	// Every blob here declares a maxlen, so no receiver cap governs any of them:
+	// the accumulator is handed Bound.SCHEMA_BOUNDED, which names the rule that
+	// applies rather than a number it must not compare (CORELIB_PLAN §6.2.1).
+	if !strings.Contains(fn, "byte[] _b = acc.blob(total, offset, data, chunkOffset, chunkLength, Bound.SCHEMA_BOUNDED);") {
+		t.Errorf("a fully schema-bounded blob set must pass Bound.SCHEMA_BOUNDED:\n%s", fn)
 	}
 }
 
@@ -1508,7 +1529,7 @@ messages:
 		// not the same bound as the outer array's capacity beside it: that one
 		// bounds the row's id. Both, in that order.
 		`if (id >= 3) throw Sofab.invalid("Root_mat element: array index above schema capacity 3"); if (count > 4) throw Sofab.invalid("mat element: array count above schema capacity 4");`,
-		`Seq.reserveRowInts(m.mat, id, count)`,
+		`Seq.reserveRowInts(m.mat, id, count, `,
 		// The stores are plain indexed writes: nothing grows, so nothing is
 		// re-assigned into the message object per element.
 		`m.dyn[ai++] = (int) value`,
@@ -1556,18 +1577,29 @@ messages:
 `
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
 
-	// Every dynamic wrapper shape carries the cap, ahead of its grow.
+	// Where the GAP FILL is generated code -- the inline `while (list.size() <= id)`
+	// that places a string, blob or sub-message element -- the guard is generated
+	// code's too, ahead of the grow it bounds.
 	for _, want := range []string{
 		`if (id >= MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "Root_dstrs element: array index above configured limit 65536")); while (m.dstrs.size() <= id)`,
 		`"Root_dblbs element: array index above configured limit 65536")); while (m.dblbs.size() <= id)`,
 		`"Root_dobjs element: array index above configured limit 65536")); while (m.dobjs.size() <= id)`,
-		// A native matrix ROW takes the index cap too: its id is the outer array's
-		// length. Its own element count is capped separately, beside it (#386).
-		`"Root_dmat element: array index above configured limit 65536"));`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing wrapper index cap %q:\n%s", want, m)
 		}
+	}
+	// A native matrix ROW is placed by the CORELIB, so its index cap is that
+	// call's last argument instead -- compared before the row is allocated and
+	// before the outer list grows (CORELIB_PLAN §6.2.1). The row's own element
+	// count is a different number and stays a guard beside it (#386).
+	if !strings.Contains(m, `if (count > MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "dmat: array count above configured limit 65536")); askip = 0; afill = count; atgt = 1; _arowInt = Seq.reserveRowInts(m.dmat, id, count, CAP_DYN_ARRAY_COUNT);`) {
+		t.Errorf("a native matrix row must pass its index cap to Seq.reserveRow*:\n%s", m)
+	}
+	// One implementation, wherever it runs (§6.2.1): the index the corelib now
+	// bounds must not ALSO be guarded here.
+	if strings.Contains(m, `"Root_dmat element: array index above configured limit`) {
+		t.Errorf("the row index must not be capped twice:\n%s", m)
 	}
 	// A SCHEMA-BOUNDED array keeps its own bound and its own category: the cap
 	// governs only what the schema left unbounded (§9.5), so `bstrs` must be
@@ -1577,5 +1609,74 @@ messages:
 	}
 	if strings.Contains(m, `"Root_bstrs element: array index above configured limit`) {
 		t.Errorf("a schema-bounded array must not also carry the receiver cap:\n%s", m)
+	}
+}
+
+// TestJavaReceiverCapIsPassedNotGuarded: §6.2.1 fixes the PROVENANCE of a
+// receiver cap (generated code, always) but not the SITE of the comparison --
+// "A corelib MAY take a limit as an argument and perform the check itself, and a
+// port that does is conformant". corelib-java 0.12.0 does, on the three calls
+// this backend already made at the point each limit guards, so the numbers
+// travel as arguments and the guards in front of them are gone.
+//
+// The rule that makes this a test rather than a refactor is "one implementation,
+// wherever it runs": a cap is a guard here or an argument there, never both.
+func TestJavaReceiverCapIsPassedNotGuarded(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      ds:  { id: 0, type: string }
+      bs:  { id: 1, type: string, maxlen: 16 }
+      db:  { id: 2, type: blob }
+      bb:  { id: 3, type: blob, maxlen: 8 }
+      dm:  { id: 4, type: array, items: { type: array, items: { type: u32 } } }
+      sm:  { id: 5, type: array, items: { type: array, items: { type: string } } }
+`
+	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
+
+	// MIXED destinations: the cap depends on which field the payload is headed
+	// for, so it rides on the destination switch already resolving exactly that
+	// -- one store, no dispatch of its own -- and defaults to SCHEMA_BOUNDED.
+	for _, want := range []string{
+		"Bound _lim = Bound.SCHEMA_BOUNDED;",
+		"case 0: switch (id) { case 0: _lim = CAP_DYN_STRING_LEN; break; case 1: break; default: return; } break;",
+		"String _s = acc.string(total, offset, data, chunkOffset, chunkLength, _lim);",
+		"byte[] _b = acc.blob(total, offset, data, chunkOffset, chunkLength, _lim);",
+		// blob() resolves its cap on the SAME gate since generator#436 gave it one:
+		// only the unbounded `db` raises `_lim`, the maxlen'd `bb` falls through at
+		// SCHEMA_BOUNDED, and an undeclared id or a §7.3 contradiction returns
+		// before the accumulator -- a skipped field is never capped, and is never
+		// materialized either.
+		"case 0: switch (id) { case 2: _lim = CAP_DYN_BLOB_LEN; break; case 3: break; default: return; } break;",
+		// A wrapper matrix row goes through the corelib, uncapped by generated code.
+		"Seq.reserveRow(m.sm, id, CAP_DYN_ARRAY_COUNT);",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing %q:\n%s", want, m)
+		}
+	}
+	// The three guards this replaces must be gone -- a removed guard with nothing
+	// in its place reads identically in a diff, which is what these pin.
+	for _, gone := range []string{
+		"if (total > MAX_DYN_STRING_LEN)",
+		"if (total > MAX_DYN_BLOB_LEN)",
+		`"Root_dm element: array index above configured limit`,
+		`"Root_sm element: array index above configured limit`,
+	} {
+		if strings.Contains(m, gone) {
+			t.Errorf("the cap must not ALSO be a generated guard (%q):\n%s", gone, m)
+		}
+	}
+	// A schema-bounded field is never handed a receiver cap: its maxlen governs,
+	// and its breach is INVALID (§7.1), so the guard for it stays right here.
+	for _, want := range []string{
+		`if (total > 16) throw Sofab.invalid("bs: string length above schema maxlen 16");`,
+		`if (total > 8) throw Sofab.invalid("bb: blob length above schema maxlen 8");`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.java missing the schema maxlen reject %q:\n%s", want, m)
+		}
 	}
 }
