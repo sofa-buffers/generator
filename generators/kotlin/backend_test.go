@@ -595,12 +595,13 @@ func TestKotlinResetForReuse(t *testing.T) {
 }
 
 // TestKotlinDecodeLimits: the max_dyn_* config keys bake receiver-side caps into
-// the generated visitor -- named constants plus a LIMIT_EXCEEDED guard on every
-// SCHEMA-UNBOUNDED field, checked at the wire count/length header before any
-// allocation. Schema-bounded fields keep only their INVALID guard, and a cap
-// that the schema leaves nothing to govern emits nothing at all. Every target
-// has a finite default, so an unconfigured key means the default, not unlimited
-// (§9.5, generator#385).
+// the generated visitor as named constants. A native array's COUNT is still
+// compared here, at the wire count header before any allocation; a payload
+// LENGTH is compared inside PayloadAcc and a wrapper row INDEX inside
+// Seq.reserveRow*, which take the cap as an argument (CORELIB_PLAN §6.2.1) --
+// so for those the assertion is that the number is PASSED, and that no guard
+// stands in front of the call repeating it. Every target has a finite default,
+// so an unconfigured key means the default, not unlimited (§9.5, #385).
 func TestKotlinDecodeLimits(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      da: { id: 0, type: array, items: { type: u32 } }\n" +
@@ -610,15 +611,30 @@ func TestKotlinDecodeLimits(t *testing.T) {
 	cfg := map[string]any{"max_dyn_array_count": 8, "max_dyn_string_len": 16, "max_dyn_blob_len": 32}
 	m := genFromYAML(t, src, cfg)["src/main/kotlin/message/M.kt"]
 	for _, want := range []string{
-		"const val MAX_DYN_ARRAY_COUNT = 8L",
-		"const val MAX_DYN_STRING_LEN = 16L",
-		"const val MAX_DYN_BLOB_LEN = 32L",
+		"const val MAX_DYN_ARRAY_COUNT = 8",
+		"const val MAX_DYN_STRING_LEN = 16",
+		"const val MAX_DYN_BLOB_LEN = 32",
 		`if (count > MAX_DYN_ARRAY_COUNT) throw SofabException(SofabError.LIMIT_EXCEEDED, "da: array count above configured limit 8")`,
-		`1 -> throw SofabException(SofabError.LIMIT_EXCEEDED, "ds: string length above configured limit 16")`,
-		`2 -> throw SofabException(SofabError.LIMIT_EXCEEDED, "db: blob length above configured limit 32")`,
+		// The two lengths: stated to the accumulator, beside the schema fact
+		// (-1: no field of this message declares a maxlen) that says which of
+		// the two numbers may apply.
+		"val s = acc.string(total, offset, data, chunkOffset, chunkLength, -1, MAX_DYN_STRING_LEN) ?: return",
+		"val b = acc.blob(total, offset, data, chunkOffset, chunkLength, -1, MAX_DYN_BLOB_LEN) ?: return",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.kt missing decode limit %q", want)
+		}
+	}
+	// One implementation, wherever it runs (§6.2.1): a length the accumulator
+	// now compares must not also be compared in front of the call.
+	for _, gone := range []string{
+		"if (total > MAX_DYN_STRING_LEN)",
+		"if (total > MAX_DYN_BLOB_LEN)",
+		`"ds: string length above configured limit`,
+		`"db: blob length above configured limit`,
+	} {
+		if strings.Contains(m, gone) {
+			t.Errorf("the length cap must be compared once, in the corelib; found %q", gone)
 		}
 	}
 	// A schema-bounded field is governed by its own bound, never by the cap.
@@ -633,9 +649,9 @@ func TestKotlinDecodeLimits(t *testing.T) {
 	// elements, 256 KiB of string, 1 MiB of blob.
 	plain := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
 	for _, want := range []string{
-		"const val MAX_DYN_ARRAY_COUNT = 16384L",
-		"const val MAX_DYN_STRING_LEN = 262144L",
-		"const val MAX_DYN_BLOB_LEN = 1048576L",
+		"const val MAX_DYN_ARRAY_COUNT = 16384",
+		"const val MAX_DYN_STRING_LEN = 262144",
+		"const val MAX_DYN_BLOB_LEN = 1048576",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("M.kt missing default cap %q", want)
@@ -644,6 +660,45 @@ func TestKotlinDecodeLimits(t *testing.T) {
 	// The schema-bounded array is still governed by its own bound alone.
 	if strings.Contains(plain, `"ba: array count above configured limit`) {
 		t.Error("a schema-bounded array must not be governed by a receiver cap")
+	}
+}
+
+// TestKotlinBoundedPayloadStatesItsSchemaMaxlen: the accumulator is handed the
+// SCHEMA's number for the destination in hand, and -1 only where the schema
+// declares none. That is the whole of §6.2.1's exclusivity rule on this path: a
+// bounded field can never reach the receiver cap (its maxlen is >= 0, so the cap
+// arm is not taken) and an unbounded one can never decode uncapped (-1 selects
+// the cap, and there is nothing else for the corelib to fall back to).
+func TestKotlinBoundedPayloadStatesItsSchemaMaxlen(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      bs: { id: 0, type: string, maxlen: 24 }\n" +
+		"      ds: { id: 1, type: string }\n" +
+		"      bb: { id: 2, type: blob, maxlen: 32 }\n" +
+		"      sa: { id: 3, type: array, items: { type: string, maxlen: 12 } }\n"
+	m := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
+	for _, want := range []string{
+		// scalars: the bounded id carries its maxlen, the unbounded one -1.
+		"0 -> when (id) { 0 -> 24; else -> -1 }",
+		// the wrapper-array scope has no field ids -- one bound for every element.
+		"1 -> 12",
+		"val s = acc.string(total, offset, data, chunkOffset, chunkLength, maxlen, MAX_DYN_STRING_LEN) ?: return",
+		"0 -> when (id) { 2 -> 32; else -> -1 }",
+		"val b = acc.blob(total, offset, data, chunkOffset, chunkLength, maxlen, MAX_DYN_BLOB_LEN) ?: return",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("M.kt missing schema bound argument %q", want)
+		}
+	}
+	// The payload-side maxlen COMPARISON is the corelib's now; only the header
+	// hook's copy (fixlenBegin, generator#267) stays, and it is what makes
+	// INVALID dominate INCOMPLETE for a message truncated at the length word.
+	fx := m[strings.Index(m, "override fun fixlenBegin("):strings.Index(m, "override fun string(")]
+	if !strings.Contains(fx, `if (total > 24) throw SofabException(SofabError.INVALID_MSG, "bs: string length above schema maxlen 24")`) {
+		t.Error("the length-word hook keeps the schema maxlen (S5.2.3, generator#267)")
+	}
+	body := m[strings.Index(m, "override fun string("):]
+	if strings.Contains(body[:strings.Index(body, "acc.string(")], "above schema maxlen") {
+		t.Error("the payload-side maxlen guard is the corelib's job now, not a second copy")
 	}
 }
 
@@ -658,7 +713,7 @@ func TestKotlinSkippedStringIsNotValidated(t *testing.T) {
 	m := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
 	body := m[strings.Index(m, "override fun string("):]
 	guard := strings.Index(body, "else -> return")
-	conv := strings.Index(body, "acc.string(total, offset, data, chunkOffset, chunkLength)")
+	conv := strings.Index(body, "acc.string(total, offset, data, chunkOffset, chunkLength,")
 	if guard < 0 || conv < 0 || guard > conv {
 		t.Error("the destination guard must precede any conversion or validation")
 	}
@@ -721,8 +776,14 @@ func TestKotlinNativeMatrixRowsArePlacedByID(t *testing.T) {
 	if !strings.Contains(out, `if (count > 4) throw SofabException(SofabError.INVALID_MSG, "m element: array count above schema capacity 4")`) {
 		t.Error("a row header claiming more elements than the inner count allows is INVALID (S7.1)")
 	}
-	if !strings.Contains(out, "_arowUInt = Seq.reserveRowUInts(m.m, id, count)") {
+	// The row's INDEX rides the reservation: the outer schema count and the
+	// receiver cap travel into Seq.reserveRowUInts, which rejects the id before
+	// it grows the outer list (CORELIB_PLAN §6.2.1). No guard repeats it here.
+	if !strings.Contains(out, "_arowUInt = Seq.reserveRowUInts(m.m, id, count, 3, MAX_DYN_ARRAY_COUNT)") {
 		t.Error("a native row must be PLACED at its element id and sized at the checked count")
+	}
+	if strings.Contains(out, `if (id >= 3) throw SofabException(SofabError.INVALID_MSG, "m element: array index`) {
+		t.Error("the row index is bounded once, inside the reservation")
 	}
 	// Nothing grows, so nothing is written back.
 	if strings.Contains(out, "m.m[_ex_Root_m] = _arowUInt") {
@@ -1032,8 +1093,8 @@ func TestKotlinSupportIsTheCorelibs(t *testing.T) {
 		m := gen(t, "      s: { id: 0, type: string, maxlen: 8 }\n      b: { id: 1, type: blob, maxlen: 8 }\n")["src/main/kotlin/m/M.kt"]
 		for _, want := range []string{
 			"private val acc = PayloadAcc()",
-			"val s = acc.string(total, offset, data, chunkOffset, chunkLength) ?: return",
-			"val b = acc.blob(total, offset, data, chunkOffset, chunkLength) ?: return",
+			"val s = acc.string(total, offset, data, chunkOffset, chunkLength, maxlen, MAX_DYN_STRING_LEN) ?: return",
+			"val b = acc.blob(total, offset, data, chunkOffset, chunkLength, maxlen, MAX_DYN_BLOB_LEN) ?: return",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("M.kt missing %q", want)
@@ -1073,9 +1134,12 @@ messages:
 		`m.bnd = UIntArray(count); abulk = m.bnd.asIntArray()`,
 		// fp arrays are sized the same way but carry no bulk offer.
 		`m.fps = FloatArray(count)`,
-		// The row's id, then the row's own element count -- two different bounds.
-		`if (id >= 3) throw SofabException(SofabError.INVALID_MSG, "mat element: array index above schema capacity 3"); if (count > 4) throw SofabException(SofabError.INVALID_MSG, "mat element: array count above schema capacity 4")`,
-		`Seq.reserveRowUInts(m.mat, id, count)`,
+		// The row's own element COUNT is still bounded here -- the count header
+		// arrives in this callback and the reservation is sized from it, so
+		// there is no earlier corelib call to hang it on. The row's INDEX rides
+		// the reservation instead, with both of its numbers as arguments.
+		`if (count > 4) throw SofabException(SofabError.INVALID_MSG, "mat element: array count above schema capacity 4")`,
+		`Seq.reserveRowUInts(m.mat, id, count, 3, MAX_DYN_ARRAY_COUNT)`,
 		// Plain indexed stores; no growth, no write-back.
 		`m.dyn[ai] = value.toUInt(); ai++`,
 		`_arowUInt[ai] = value.toUInt(); ai++`,
@@ -1115,12 +1179,17 @@ messages:
 		`"dblbs element: array index above configured limit 16384"); while (m.dblbs.size <= id)`,
 		`"dobjs element: array index above configured limit 16384"); while (m.dobjs.size <= id)`,
 		// A native matrix ROW takes the index cap too: its id is the outer array's
-		// length. Its own element count is capped separately, beside it (#386).
-		`"dmat element: array index above configured limit 16384")`,
+		// length. It rides the reservation, which is the call that grows the outer
+		// list, so the cap arrives as an argument and no guard precedes it. Its own
+		// element count is capped separately, beside it (#386).
+		`Seq.reserveRowUInts(m.dmat, id, count, -1, MAX_DYN_ARRAY_COUNT)`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.kt missing wrapper index cap %q:\n%s", want, m)
 		}
+	}
+	if strings.Contains(m, `"dmat element: array index above configured limit`) {
+		t.Errorf("a row index is bounded once, inside the reservation:\n%s", m)
 	}
 	// The cap governs only what the schema left unbounded (§9.5): a count:N array
 	// keeps its own bound and its own category.

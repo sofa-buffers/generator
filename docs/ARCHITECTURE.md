@@ -2437,7 +2437,8 @@ never a number the corelib knows:
 | **Zig** | array counts and wrapper element indices: `arrays.allocNCapped` / `growCapped` / `setElemCapped` | string and blob lengths |
 | **Go**, **Dart** | wrapper arrays — the element index and the element length — through the collectors' receiver-cap fields | scalar string/blob lengths, native array counts |
 | **Java** | string and blob lengths, in `PayloadAcc`, which the payload already passes through; plus a wrapper **row**'s element index, on the `Seq.reserveRow*` call that places the row — §9.5.3 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
-| **Kotlin**, **C#** | string and blob lengths, in `PayloadAcc`, which the payload already passes through | array counts and wrapper element indices |
+| **Kotlin** | string and blob lengths, in `PayloadAcc`, which the payload already passes through; plus a wrapper **row**'s element index — a native matrix row and an array-of-arrays row alike — on the `Seq.reserveRow*` / `Seq.reserveRowList` call that reserves the row before the outer list grows — §9.5.4 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
+| **C#** | string and blob lengths, in `PayloadAcc`, which the payload already passes through | array counts and wrapper element indices |
 | **Python** | all three kinds, in the corelib's own header walk: `Decoder(max_dyn_*=…)` takes the three numbers as **required** arguments and the schema bounds are *declared* to it (`on_schema_bound`, or a destination map's entry), so a bounded field is never capped — §9.5.1 | — |
 | **TypeScript** | a wrapper array's element index and element length, on the `StringSeq`/`BlobSeq` collectors that receive those two headers instead of the visitor (`receiverCap`/`receiverElemMax`) | the other kinds, in the flat visitor's own `fixlenBegin`/`arrayBegin` — the hooks that already carry the schema bound, so the cap is its `else`; corelib-ts is handed no limits object at all |
 | **Rust** (std) | — | all three kinds (§9.5.2: there is no call to hang a cap on, and the collector shape the others use is two overlapping mutable borrows) |
@@ -2794,6 +2795,77 @@ configured limit 1024`. Catching and re-raising to put the name back would wrap
 the decode path in a `try` for a diagnostic, so the name stays out; the category,
 the value and the limit — which is what a receiver acts on — all survive.
 
+#### 9.5.4 Kotlin: the two bounds that ride a call already there
+
+CORELIB_PLAN §6.2.1 fixes the *provenance* of a receiver cap and the *point* it
+must fire at, and leaves the **site of the comparison** open: "a corelib **MAY**
+take a limit as an argument and perform the check itself, and a port that does is
+conformant." The cheap way to take that up is to hang the number on a call
+generated code already makes, so the compare folds in beside a bound test already
+there rather than standing in front of the call as a guard of its own.
+
+corelib-kotlin-mp#30 puts the two arguments on the two support-layer calls the
+generated visitor already makes on the decode path:
+
+| what is bounded | the call | arguments |
+|---|---|---|
+| a `string`/`blob` payload's byte length | `PayloadAcc.string` / `.blob` | `maxlen`, `rmaxlen` |
+| a wrapper array's row **index** | `Seq.reserveRow*` (11 widths), `Seq.reserveRowList` | `cap`, `rcap` |
+
+**Two arguments, not one, and the schema picks which applies.** §6.2.1 forbids a
+receiver cap from touching a field the schema already bounds, and §6.3 gives the
+two refusals different categories. So the generated visitor states *both* numbers:
+the schema's `maxlen`/`count` (negative where the schema declares none) and the
+deployment's cap. Over a declared bound is `INVALID_MSG` (MESSAGE_SPEC §7.1); over
+the cap is `LIMIT_EXCEEDED`. Exactly one can ever be in play, which is why a
+`maxlen: 4096` field needs no cap **raise** and a `max_dyn_string_len: 4` coexists
+with it unchanged. Both arguments are required: there is no default, no sentinel
+for *unlimited* and nothing retained past the call, so a schema-unbounded field
+cannot be decoded uncapped.
+
+**The generated visitor resolves the number; the corelib compares it.** The
+visitor knows the schema and nothing about the length; the accumulator holds the
+length and nothing about the schema. So the emitted `string`/`blob` callback
+computes one `val maxlen = when (cur) { … else -> -1 }` from its own scope/id
+routing and passes it. That `when` sits **behind** the destination guard, so a
+§7.3 wire-type contradiction or an unknown id has already returned: a skipped
+field is never capped (§6.2.1), which the callback got right before and still
+does.
+
+**What deliberately stays a generated guard.** A native array's **count**. Its
+count header arrives in `arrayBegin`, where generated code allocates the
+destination itself, and no corelib call carries the number — inventing a
+`Cap.check()` helper to hold it is what §6.2.1 does *not* license, and the
+measurements behind this work put a new helper call at 1–2.5 percentage points of
+decode. A split by **field kind** is allowed and this is it. A matrix row is the
+one place both appear: its **index** rides `reserveRow*` and its own element
+**count** stays in `arrayBegin`.
+
+**Two consequences worth recording.**
+
+- **A row's two verdicts swap order.** The index used to be checked before the
+  row's element count; the count guard is now emitted ahead of the reservation
+  that carries the index check. Neither allocates before its own bound, which is
+  what §6.2.1 requires; only which category a doubly-bad row reports changes, and
+  no spec text orders the two.
+- **A cap constant is now emitted where it can never fire.** Liveness used to
+  mean "the schema reaches an unbounded field of this kind". A required argument
+  has to be *stated* even where the schema bound beside it makes it inert, so a
+  fully bounded message emits `MAX_DYN_STRING_LEN` and never reads it. Omitting it
+  is not "the corelib's default" — the corelib has none to fall back to — which is
+  the same reasoning that makes Go's, Dart's and TypeScript's collector arguments
+  unconditional.
+
+**The one comparison that still exists twice, and why.** A scalar or wrapper
+element's schema `maxlen` is also latched in `fixlenBegin`, at the length word. It
+has to be: `PayloadAcc` is reached only once payload bytes arrive, so a message
+truncated immediately after an over-`maxlen` length word would report INCOMPLETE
+where §5.2.3 requires INVALID (generator#267, and the conformance leg that asserts
+it). §6.2.1's "one implementation" is about which layer *owns a rule*, and the
+receiver caps — the rule this section is about — now have exactly one site each.
+The header-word latch answers a different obligation, and it is the reachable one:
+the accumulator's `maxlen` arm is unreachable for any message that gets that far.
+
 ### 9.6 Worst-case message size (one walk, all backends)
 
 Most targets emit a `MAX_SIZE` constant and size their encode buffer from it.
@@ -2930,7 +3002,7 @@ above was found by that check on its first run.
 | **TypeScript** | `corelib-ts` | flat visitor + static scope map | classes + `serialize(os)` plus `encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `MAX_SIZE` `Uint8Array` (`new OStream(buf)`) for a bounded schema and drains a fixed 512-byte scratch into a caller list for an unbounded one, where the sink is handed the INSTALLED buffer plus the region's coordinates (`(_b, _s, _e) => _out.push(_b.slice(_s, _e))`, §5.1.6 — a `subarray` would be an allocation per flush) and the corelib's own `growingOStream()`, which owns and doubles a slab of its own, is emitted nowhere; ONE decode surface (§5.3.1): `decode(bytes)` runs the corelib's `decode` against a per-type flat `Visitor`, and `decoder()` → `feed`/`finish` drives the very same visitor over the resumable `IStream`, so the chunked and one-shot paths cannot drift; dispatch keys on `(location, id)` with the parent restored from a static `switch` rather than a stack (the scopes of a type form a tree, and a declined subtree fires no `sequenceEnd`); the schema-free half is the corelib's — `PayloadAcc`, `StringSeq`/`BlobSeq`, `decodeUtf8` and `elementsEqual` are called, not re-emitted (#345, on corelib-ts#151), and the `_ObjSeq`/`_MatSeq`/`_RowSeq` collectors the withdrawn child-visitor shape needed are gone; 64-bit → `bigint` by default, `int64: long`/`number` backs u64/i64 arrays with corelib `Long[]` accessors — and the scalars too, as `Long` under `long` or `number` under `number` — built from the hooks' `lo`/`hi` wire halves (`Long.fromBits`), so the hot path materialises no `bigint` and needs no opt-in channel (corelib-ts#161 withdrew `Visitor.longs`, whose per-schema trade #344 had to guess); a narrow destination reads the hook value as a `number` with no conversion call, the declared-width guard on the next line being what makes that assertion true; alloc-free `writeString`; a `number` is a 64-bit double, so an fp32 NaN keeps the hook's 32-bit wire word in a `Uint8Array \| null` companion, captured only for a NaN, to preserve a signaling NaN bit-for-bit (§4.6, #235); `recode` harness mode (wire → object → wire) exercises it; the receiver-side `max_dyn_*` caps are applied by the generated visitor, per field, at each field's own count/length header (§9.5, #388), and a wrapper array's element index and element length — the two headers the corelib's `StringSeq`/`BlobSeq` receives instead of the visitor — take theirs as the collector's own `receiverCap`/`receiverElemMax` arguments (#405), so the corelib is handed no `DecodeLimits` at all; every decoded value is COPIED out of the fed chunk (§6.7), so a message owns its bytes and outlives the input. |
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Serialize`/`EncodeTo`; nested `Msg.Decoder` (constructed with `new`, not a `Decoder()` factory — C# puts nested types and members in one declaration space) → `Feed`/`Finish` for chunked decode; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | one public class per file (`<Message>.java`, one `<Type>.java` per struct/union) — schema types are public like every other target's, and a type reached from two messages is emitted once (#305); no support file beside them: `Seq`, `PayloadAcc`, `Utf8.decode`, `Sofab.invalid`, `Bound` and `OStream.overScratch` are corelib API (corelib-java#97 / #345 / #105); classes + `serialize`/`encodeTo`; nested `Msg.Decoder` via `decoder()` → `feed`/`finish` for chunked decode (`finish` throws `IllegalStateException`, not `SofabException`: `SofabError` has no INCOMPLETE, and an incomplete message is not a malformed one); ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
-| **Kotlin** | `corelib-kotlin-mp` (Gradle/Maven Central) | flat-visitor location-stack | Kotlin Multiplatform: the emitted message sources are plain `commonMain` (stdlib + `sofab`, no JVM API), so one source set compiles for the JVM, Node/browser and native, and only the `emit: project` scaffolding is JVM-specific. One file per declaration (`<Message>.kt` + the internal `<Message>Visitor`, one `<Type>.kt` per struct/union) and no support file of its own -- element placement, array growth, payload reassembly and UTF-8 materialisation are the corelib's `Seq`/`PayloadAcc`/`Utf8` (#345); classes + `serialize`/`encodeTo`/`encode()`; nested `Msg.Decoder` via `decoder()` -> `feed`/`finish`. Integers map to their EXACT declared width, unsigned included (`u8` is a `UByte`, `u8[]` a `UByteArray`) -- the C# position, not Java's widen-to-`long`, since Java's reason for widening does not apply. What is Kotlin-specific is that this costs nothing at the corelib boundary: the unsigned arrays are inline classes over their signed peers, so `asIntArray()` is a reinterpretation and the field's own backing array reaches `writeArrayUnsigned`, while the `arrayBulk` offer hands that same view over as the destination, whose element width IS the declared width (§7.1 checked in the pass that decodes). `enum` -> `Int` and `bitfield` -> `ULong`, the widths that cannot lose a legal value, with the declared members emitted as documented named constants in an `object` beside the field -- so per-constant metadata is rendered where C and Java have no symbol for it. `boolean[]` is a `BooleanArray` (no native array boxes). Keyword field names are BACKTICK-escaped, never mangled; a name colliding with a generated member is mangled instead. `tryDecode(data, out)` returns the §7 `DecodeStatus` and `decode(bytes)` is STRICT about both non-COMPLETE outcomes (`IllegalStateException` on a terminal INCOMPLETE, deliberately not `SofabException`). Guards throw the corelib's `SofabException` unwrapped -- Kotlin has no checked exceptions. Hand-written JSON harness (exact u64 from the literal text). |
+| **Kotlin** | `corelib-kotlin-mp` (Gradle/Maven Central) | flat-visitor location-stack | Kotlin Multiplatform: the emitted message sources are plain `commonMain` (stdlib + `sofab`, no JVM API), so one source set compiles for the JVM, Node/browser and native, and only the `emit: project` scaffolding is JVM-specific. One file per declaration (`<Message>.kt` + the internal `<Message>Visitor`, one `<Type>.kt` per struct/union) and no support file of its own -- element placement, array growth, payload reassembly and UTF-8 materialisation are the corelib's `Seq`/`PayloadAcc`/`Utf8` (#345); classes + `serialize`/`encodeTo`/`encode()`; nested `Msg.Decoder` via `decoder()` -> `feed`/`finish`. Integers map to their EXACT declared width, unsigned included (`u8` is a `UByte`, `u8[]` a `UByteArray`) -- the C# position, not Java's widen-to-`long`, since Java's reason for widening does not apply. What is Kotlin-specific is that this costs nothing at the corelib boundary: the unsigned arrays are inline classes over their signed peers, so `asIntArray()` is a reinterpretation and the field's own backing array reaches `writeArrayUnsigned`, while the `arrayBulk` offer hands that same view over as the destination, whose element width IS the declared width (§7.1 checked in the pass that decodes). `enum` -> `Int` and `bitfield` -> `ULong`, the widths that cannot lose a legal value, with the declared members emitted as documented named constants in an `object` beside the field -- so per-constant metadata is rendered where C and Java have no symbol for it. `boolean[]` is a `BooleanArray` (no native array boxes). Keyword field names are BACKTICK-escaped, never mangled; a name colliding with a generated member is mangled instead. `tryDecode(data, out)` returns the §7 `DecodeStatus` and `decode(bytes)` is STRICT about both non-COMPLETE outcomes (`IllegalStateException` on a terminal INCOMPLETE, deliberately not `SofabException`). Guards throw the corelib's `SofabException` unwrapped -- Kotlin has no checked exceptions. The receiver caps are split by field kind (§9.5.4): a payload length and a wrapper row index travel as arguments into `PayloadAcc.string`/`.blob` and `Seq.reserveRow*`, beside the schema bound they are exclusive with, so the check lands at the length/index header inside a call the visitor already makes; a native array's count keeps its generated guard in `arrayBegin`, there being no such call to carry it. Hand-written JSON harness (exact u64 from the literal text). |
 | **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `serialize`; `decoder(out, alloc)` → `feed`/`finish` (the destination is the CALLER's: Zig moves structs by value, so a decoder owning its message would dangle its own visitor pointer); zero-copy `decode()` (strings/blobs borrow the input buffer, arrays from a caller allocator) — but the STREAMING path borrows nothing: `feed` copies every string/blob into `alloc`, because a payload stitched across a chunk boundary completes inside the corelib's reused carry buffer and is delivered as a slice into the decoder itself, indistinguishable in the callback from one into the caller's chunk (generator#295); fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
 | **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`/`encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `maxSize` `Uint8List` (`Encoder.overBuffer(buf)`, returning the `written` view over it) for a bounded schema and drains a fixed 512-byte scratch into a caller `BytesBuilder(copy: true)` (`Encoder(sink, buffer: scratch)`) for an unbounded one; the corelib's `Encoder.encodeToBytes` — the one place that package allocates output storage — is emitted nowhere; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); the corelib hands a string/blob over as a view into the decode buffer on the ONE-SHOT path (it allocates the container itself for an array on either path, and reassembles a split payload while streaming), but every generated destination COPIES (`Uint8List.fromList`, `sofab.decodeUtf8Strict`), so a decoded message owns its bytes and outlives the input buffer regardless of which side allocated; the schema-free half of the emitted prelude is the corelib's (`sofab.VisitorBase`, `sofab.elementsEqual`, `sofab.decodeUtf8Strict`, `sofab.utf8Length` — §8, #345); JSON harness carries u64 as a string. |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |

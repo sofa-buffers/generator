@@ -12,6 +12,7 @@ package kotlin
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -31,7 +32,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		pkg:     cfgString(cfg, "package", "message"),
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
 		license: generator.LicenseID(cfg),
-		limits:  resolveLimits(s, cfg),
+		limits:  resolveLimits(cfg),
 		size:    generator.NewSizePolicy(cfg),
 	}
 	dir := "src/main/kotlin/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
@@ -94,35 +95,40 @@ func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize
 }
 
 // limitSet is the receiver-side decode-limit configuration (generator#102).
-// Every cap is always set -- the target carries a finite default that the config
-// key only overrides (§9.5, generator#385) -- so an entry is active exactly when
-// the schema actually has an unbounded field of that kind; otherwise the cap
-// would be inert and no limit plumbing is emitted. The Kotlin visitor guards each unbounded field
-// individually (like Rust/Java/C#), so the configured value is emitted as-is;
-// schema-bounded fields never see it and keep their own §7.1 guard.
+// Every cap carries a finite value -- the target has a default the config key
+// only overrides (§9.5, generator#385), and there is no unset state.
+//
+// There is no per-kind "is it live" flag any more. Since the caps travel INTO
+// the corelib as arguments (CORELIB_PLAN §6.2.1), every `PayloadAcc.string` /
+// `.blob` and every `Seq.reserveRow*` call has to STATE one -- including where
+// the schema bound handed in beside it makes it inert, because an omitted
+// argument would be the codec reading "unlimited" into silence, which §6.2.1
+// forbids. Which constants a visitor emits is therefore decided by the CALL
+// SITES it emits (activeLimits), not by whether the number can ever fire.
 type limitSet struct {
 	arrayCount, stringLen, blobLen int64
-	arrayHas, stringHas, blobHas   bool
 }
 
-func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
-	var all []*ir.Field
-	for _, m := range s.Messages {
-		all = append(all, m.Fields...)
-	}
-	b := ir.Bounds(all)
+func resolveLimits(cfg map[string]any) limitSet {
 	d := generator.ClientDynLimits.Resolve(cfg)
-	var l limitSet
-	if b.HasDynArray {
-		l.arrayCount, l.arrayHas = d.ArrayCount, true
+	return limitSet{
+		arrayCount: ktCap(d.ArrayCount),
+		stringLen:  ktCap(d.StringLen),
+		blobLen:    ktCap(d.BlobLen),
 	}
-	if b.HasDynString {
-		l.stringLen, l.stringHas = d.StringLen, true
+}
+
+// ktCap narrows a configured cap to the range this target can express. The
+// corelib takes each bound as an `Int`, beside the `Int` count or length it is
+// compared with, so a configured number above Int.MAX_VALUE is unreachable by
+// construction: no wire count and no payload length can exceed it. Narrowing it
+// is therefore not a clamp of anything the receiver would otherwise have
+// rejected -- it renders the same verdict on every input the format admits.
+func ktCap(v int64) int64 {
+	if v > math.MaxInt32 {
+		return math.MaxInt32
 	}
-	if b.HasDynBlob {
-		l.blobLen, l.blobHas = d.BlobLen, true
-	}
-	return l
+	return v
 }
 
 // ---------------------------------------------------------------------------
