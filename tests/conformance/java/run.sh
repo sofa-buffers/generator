@@ -521,6 +521,68 @@ fi
 grep -q "INVALID_MSG\|InvalidMessage" "$WORK/plerr.txt" || {
     echo "FAIL: an over-MAXLEN string is INVALID, never LIMIT_EXCEEDED; got:"; cat "$WORK/plerr.txt"; exit 1; }
 
+# ...and the cap is decided AT THE LENGTH WORD, so a message that ends there is
+# a policy rejection and not a truncation (CORELIB_PLAN S6.2.1 "Enforcement
+# point": "before the allocation it is meant to prevent"; ARCHITECTURE S9.5: "a
+# claimed oversize fails fast even if the payload never arrives"). Every row
+# above carries its payload, so all of them reach the string()/blob() callback
+# and a cap applied THERE still answers LIMIT_EXCEEDED -- which is why this port
+# read as correct while it was not. Take the payload away and that callback never
+# fires:
+#
+#   02 a2 06        id 0 (fixlen), fixlen word (100 << 3) | 2 -- a 100-byte string
+#   12 a3 06        id 2 (fixlen), fixlen word (100 << 3) | 3 -- a 100-byte blob
+#   02 82 80 80 04  the same shape claiming 1 MiB
+#
+# Answering INCOMPLETE here loses the category (S6.3 makes the refusal terminal)
+# and tells a streaming caller to feed more of a stream this receiver has already
+# refused -- five bytes holding a connection open, which is the amplification the
+# caps exist to close.
+echo "==> an over-cap length word with NO payload is LIMIT_EXCEEDED, not INCOMPLETE"
+printf '\002\242\006'         > "$WORK/pl_eof_s.bin"
+printf '\022\243\006'         > "$WORK/pl_eof_b.bin"
+printf '\002\202\200\200\004' > "$WORK/pl_eof_1m.bin"
+for v in pl_eof_s pl_eof_b pl_eof_1m; do
+    if $HPC decode pl < "$WORK/$v.bin" >/dev/null 2>"$WORK/plerr.txt"; then
+        echo "FAIL: $v -- an over-cap length word then EOF must be refused, not accepted"; exit 1
+    fi
+    grep -q "LIMIT_EXCEEDED" "$WORK/plerr.txt" || {
+        echo "FAIL: $v -- a truncated over-cap header is LIMIT_EXCEEDED, not INCOMPLETE (S6.2.1/S6.3); got:"
+        cat "$WORK/plerr.txt"; exit 1; }
+done
+
+# The precision controls, and they are the point: the cap must not turn every
+# short message into a policy rejection, and it must not reach a field it does
+# not govern. tryDecode reports the status instead of throwing, so each of these
+# asserts the WORD "INCOMPLETE" rather than merely a clean exit.
+#
+#   02 42     an IN-cap 8-byte string (= the cap) then EOF -- a clean truncation
+#   12 43     the blob twin
+#   a2 01 a2 06   a 100-byte string at id 20, an id this message does not declare:
+#                 S7.3 skips it and "a skipped field is never capped"
+#   0a a2 01  a 20-byte length on bs, whose maxlen is 32: over the receiver cap of
+#             8 but inside the schema bound, which S6.2.1 says governs alone
+printf '\002\102'             > "$WORK/pl_eof_incap.bin"
+printf '\022\103'             > "$WORK/pl_eof_incapb.bin"
+printf '\242\001\242\006'   > "$WORK/pl_eof_skip.bin"
+printf '\012\242\001'        > "$WORK/pl_eof_bounded.bin"
+for v in pl_eof_incap pl_eof_incapb pl_eof_skip pl_eof_bounded; do
+    ST=$($HPC trydecode pl < "$WORK/$v.bin" 2>"$WORK/plerr.txt" | head -n1) || {
+        echo "FAIL: $v must be a clean truncation, not a rejection; got:"; cat "$WORK/plerr.txt"; exit 1; }
+    [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: $v -> $ST (want INCOMPLETE)"; exit 1; }
+done
+# ...and the schema bound keeps ITS category at that same word: 100 bytes on the
+# maxlen-32 field is INVALID_MSG, never the cap's verdict. This is the row that
+# proves the enforcement point was always reachable -- it is where the schema
+# bound has always fired.
+printf '\012\242\006' > "$WORK/pl_bs_eof.bin"
+if $HPC decode pl < "$WORK/pl_bs_eof.bin" >/dev/null 2>"$WORK/plerr.txt"; then
+    echo "FAIL: 100 bytes above maxlen 32 must be refused at the length word"; exit 1
+fi
+grep -q "INVALID_MSG" "$WORK/plerr.txt" || {
+    echo "FAIL: an over-MAXLEN length word is INVALID_MSG, never LIMIT_EXCEEDED; got:"
+    cat "$WORK/plerr.txt"; exit 1; }
+
 # A skipped field is never capped. Both payloads are 16 bytes, twice the cap.
 #   a2 01  id 20, wire type fixlen -- an id this message does not declare
 #   1a     id 3, wire type fixlen -- declared u32, so S7.3 says skip

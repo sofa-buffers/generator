@@ -406,6 +406,73 @@ if $HL decode dyn < "$WORK/bsbad.bin" >/dev/null 2>"$WORK/bserr.txt"; then
     echo "FAIL: string length 7 above the declared maxlen 6 must be rejected"; exit 1
 fi
 grep -q "INVALID_MSG" "$WORK/bserr.txt" || { echo "FAIL: over-maxlen must be INVALID_MSG, not a policy rejection"; cat "$WORK/bserr.txt"; exit 1; }
+# ...and every one of those caps is decided AT THE LENGTH WORD, so a message that
+# ends there is a policy rejection and not a truncation (CORELIB_PLAN §6.2.1
+# "Enforcement point": "before the allocation it is meant to prevent";
+# ARCHITECTURE §9.5: "a claimed oversize fails fast even if the payload never
+# arrives"). Every string/blob row above carries its payload, so all of them reach
+# the string()/blob() callback and a cap applied THERE still answers
+# LIMIT_EXCEEDED -- which is why this port read as correct while it was not. Take
+# the payload away and that callback never fires:
+#
+#   0a a2 06        id 1 (fixlen), fixlen word (100 << 3) | 2 -- a 100-byte string
+#   12 a3 06        id 2 (fixlen), fixlen word (100 << 3) | 3 -- a 100-byte blob
+#   0a 82 80 80 04  the same shape claiming 1 MiB
+#
+# Answering INCOMPLETE here loses the category (§6.3 makes the refusal terminal)
+# and tells a streaming caller to feed more of a stream this receiver has already
+# refused -- five bytes holding a connection open, the amplification the caps
+# exist to close.
+echo "==> an over-cap length word with NO payload is LIMIT_EXCEEDED, not INCOMPLETE"
+printf '\012\242\006'           > "$WORK/eof_str.bin"
+printf '\022\243\006'           > "$WORK/eof_blob.bin"
+printf '\012\202\200\200\004' > "$WORK/eof_1m.bin"
+for v in eof_str eof_blob eof_1m; do
+    if $HL decode dyn < "$WORK/$v.bin" >/dev/null 2>"$WORK/$v.err"; then
+        echo "FAIL: $v -- an over-cap length word then EOF must be refused, not accepted"; exit 1
+    fi
+    grep -q "LIMIT_EXCEEDED" "$WORK/$v.err" || {
+        echo "FAIL: $v -- a truncated over-cap header is LIMIT_EXCEEDED, not INCOMPLETE (§6.2.1/§6.3); got:"
+        cat "$WORK/$v.err"; exit 1; }
+done
+# The same bytes decode against a project carrying the target default, which is
+# what makes this a POLICY verdict on well-formed input rather than malformation
+# -- but they are still truncated, so the verdict there is INCOMPLETE.
+ST=$($HN trydecode dyn < "$WORK/eof_str.bin" | head -n1)
+[ "$ST" = "INCOMPLETE" ] || { echo "FAIL: under the default cap the same bytes are a plain truncation; got $ST"; exit 1; }
+
+# The precision controls, and they are the point: the cap must not turn every
+# short message into a policy rejection, and it must not reach a field it does not
+# govern. `decode` throws on INCOMPLETE here, so these use tryDecode and assert
+# the WORD rather than merely an exit status.
+#
+#   0a 22        an IN-cap 4-byte string (= max_dyn_string_len) then EOF
+#   12 23        the blob twin
+#   a2 01 a2 06  a 100-byte string at id 20, an id this message does not declare:
+#                §7.3 skips it and "a skipped field is never capped"
+#   22 2a        a 5-byte length on bs, whose maxlen is 6: OVER the receiver cap of
+#                4 but inside the schema bound, which §6.2.1 says governs alone
+printf '\012\042'         > "$WORK/eof_incap.bin"
+printf '\022\043'         > "$WORK/eof_incapb.bin"
+printf '\242\001\242\006' > "$WORK/eof_skip.bin"
+printf '\042\052'         > "$WORK/eof_bounded.bin"
+for v in eof_incap eof_incapb eof_skip eof_bounded; do
+    ST=$($HL trydecode dyn < "$WORK/$v.bin" 2>"$WORK/$v.err" | head -n1) || {
+        echo "FAIL: $v must be a clean truncation, not a rejection; got:"; cat "$WORK/$v.err"; exit 1; }
+    [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: $v -> $ST (want INCOMPLETE)"; exit 1; }
+done
+# ...and the schema bound keeps ITS category at that same word: 100 bytes on the
+# maxlen-6 field is INVALID_MSG, never the cap's verdict. This is the row that
+# proves the enforcement point was always reachable -- it is where the schema
+# bound has always fired.
+printf '\042\242\006' > "$WORK/eof_maxlen.bin"
+if $HL decode dyn < "$WORK/eof_maxlen.bin" >/dev/null 2>"$WORK/eof_maxlen.err"; then
+    echo "FAIL: 100 bytes above maxlen 6 must be refused at the length word"; exit 1
+fi
+grep -q "INVALID_MSG" "$WORK/eof_maxlen.err" || {
+    echo "FAIL: an over-MAXLEN length word is INVALID_MSG, never LIMIT_EXCEEDED; got:"
+    cat "$WORK/eof_maxlen.err"; exit 1; }
+
 echo "==> decode limits OK"
 
 echo "==> shared-vector byte-exact conformance"

@@ -2443,7 +2443,12 @@ never arises. The two that answered `INCOMPLETE` are the ones whose callback is
 infallible and whose generated code therefore has to **choose** an order: Rust std
 (all three kinds, `try_decode` surfaced `fed?` ahead of the sticky `lim`) and Zig
 (string/blob only, via the reassembly hazard above). Both now report the cap
-first. Where a port has an existing conformance case for the schema-bound twin
+first. That count was taken on images that carry a payload byte, and it did not
+generalise: with the payload removed entirely, four ports answered `INCOMPLETE`
+because their string/blob cap was not at the header at all — see "Java, Kotlin and
+C# were read as exempt" below. The ordering fixed here and the enforcement point
+fixed there are two different defects with one symptom, which is why fixing the
+first did not close the second. Where a port has an existing conformance case for the schema-bound twin
 ("over-count + truncation must be INVALID, not INCOMPLETE", generator#216/#267),
 the cap case belongs beside it — it is the same decision one category over.
 
@@ -2463,12 +2468,35 @@ buffered before anything was rejected. Go's scalar cap therefore stays in
 site, since the decoder invokes both hooks for every field regardless, so the
 performance rule above is satisfied where it applies. §9.5.2 records the same
 finding for corelib-rs's `acc.feed`, where it is also why the collector shape is
-unavailable. Java, Kotlin and C# reach their accumulator from the length header
-itself and are not in this case — the question is *when the corelib calls its
-accumulator*, not whether one exists, and "before the buffer grows" is not the same
-claim as "at the header". The Go and Dart conformance suites pin it with the three
+unavailable. Every conformance suite that has a cap now pins it with the three
 bytes above plus an under-cap control, because a guard that has moved onto the
 accumulator looks identical in review.
+
+**Java, Kotlin and C# were read as exempt from that and were not.** The claim was
+that their accumulator is reached *from the length header itself*; it is not. Their
+`PayloadAcc.string`/`.blob` compares `total` before it buffers or materialises a
+byte — a true statement, and a different one from "at the header", which is the
+distinction the paragraph above draws and which was then dropped one sentence
+later. The callback that reaches the accumulator still fires only once a payload
+byte exists, so all three answered `INCOMPLETE` to `02 a2 06`, and Rust std did too
+(its cap was in generated code, but in the payload callback). The tests did not
+catch it because every row carried its payload: `0a 4a ABC` announces nine bytes on
+a cap of eight and then *sends three*, which reaches the payload callback and
+answers `LimitExceeded` whichever layer holds the guard. One byte less of input is
+what tells the two apart, and no suite had that image.
+
+The fix is the same shape in all four, and it is not a guard moved back into
+generated code: the corelib now offers the **same comparison** on its own — a
+`checkStringLength`/`checkBlobLength` (`CheckStringLength`/`CheckBlobLength` in C#)
+that `string`/`blob` themselves call first — and the generated `fixlenBegin`, which
+the decoder raises at the length word and which already carried the schema `maxlen`,
+calls it for every schema-unbounded destination. One implementation of the rule
+applied at two points (§6.2.1, "one implementation, wherever it runs"), which is
+also how corelib-go's collectors have always been built: `overLen` runs from
+`FixlenBegin` and from `String`, so a collector driven by hand without the header
+call is still bounded. Rust std needed no corelib change — its cap was already
+generated — only the arm moved to `fixlen_begin`, where the schema `maxlen` arm was
+already sitting.
 
 **And the gate that makes the skip structural has to cover every payload kind.**
 The visitor surfaces (Java, Kotlin, C#, Rust) put a **destination gate** at the top
@@ -2524,9 +2552,9 @@ never a number the corelib knows:
 | **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
 | **Zig** | array counts and wrapper element indices: `arrays.allocNCapped` / `growCapped` / `setElemCapped` | string and blob lengths |
 | **Go**, **Dart** | wrapper arrays — the element index, the element length and a matrix **row**'s own element count — as the collector's receiver-cap constructor arguments (`sofab.Caps`; `rcap`/`relemMax`/`rowCap`), beside the `sofab.Bounds` carrying the schema's | scalar string/blob lengths and native array counts, in the generated `FixlenBegin`/`ArrayBegin` (`onFixlenHeader`/`onArrayBegin`) — the accumulator is one callback too late, above |
-| **Java** | string and blob lengths, in `PayloadAcc`, which the payload already passes through; plus a wrapper **row**'s element index, on the `Seq.reserveRow*` call that places the row — §9.5.3 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
-| **Kotlin** | string and blob lengths, in `PayloadAcc`, which the payload already passes through; plus a wrapper **row**'s element index — a native matrix row and an array-of-arrays row alike — on the `Seq.reserveRow*` / `Seq.reserveRowList` call that reserves the row before the outer list grows — §9.5.4 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
-| **C#** | string and blob lengths, in `PayloadAcc`, which the payload already passes through | array counts and wrapper element indices |
+| **Java** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus a wrapper **row**'s element index, on the `Seq.reserveRow*` call that places the row — §9.5.3 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
+| **Kotlin** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus a wrapper **row**'s element index — a native matrix row and an array-of-arrays row alike — on the `Seq.reserveRow*` / `Seq.reserveRowList` call that reserves the row before the outer list grows — §9.5.4 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
+| **C#** | string and blob lengths, in `PayloadAcc` — `CheckStringLength`/`CheckBlobLength` from the generated `FixlenBegin`, and the same routine again inside the `PayloadAcc.String`/`.Blob` the payload passes through | array counts and wrapper element indices |
 | **Python** | all three kinds, in the corelib's own header walk: `Decoder(max_dyn_*=…)` takes the three numbers as **required** arguments and the schema bounds are *declared* to it (`on_schema_bound`, or a destination map's entry), so a bounded field is never capped — §9.5.1 | one number only: a wrapper array's element **index**, which is a field id and not a count word, so the codec never sees it as one — it stays in the array scope's own `on_field` arm |
 | **TypeScript** | a wrapper array's element index and element length, on the `StringSeq`/`BlobSeq` collectors that receive those two headers instead of the visitor (`receiverCap`/`receiverElemMax`) | the other kinds, in the flat visitor's own `fixlenBegin`/`arrayBegin` — the hooks that already carry the schema bound, so the cap is its `else`; corelib-ts is handed no limits object at all |
 | **Rust** (std) | — | all three kinds (§9.5.2: there is no call to hang a cap on, and the collector shape the others use is two overlapping mutable borrows) |
@@ -2804,7 +2832,14 @@ make Rust slower while adding a corelib feature and a generated bound table. (Th
 measurement was taken.)
 
 **Rust std is therefore exempt**: its `max_dyn_*` guards stay in the generated
-visitor, per field, at the count/length header, ahead of any accumulation. This
+visitor, per field, at the count/length header, ahead of any accumulation. For a
+string or a blob that header is `fixlen_begin`, not the payload callback: the arm
+sat in `string`/`blob` for a release, which is one callback too late — a message
+ending immediately after the length word reaches no payload callback at all, so
+`02 a2 06` answered `Incomplete` while the exemption's own terms promise
+`LimitExceeded` (the array count was always right, at `array_begin`). The arm now
+sits beside the schema-`maxlen` arm that was already there, in `fixlen_begin`,
+which is the only placement the sentence above actually licenses. This
 concedes nothing to §6.2.1 — the numbers still come from generated code and
 corelib-rs holds no limit of its own, which is the rule the section is about, and
 it **MUST NOT** gain one. `rs-no-std` is out of scope for a different reason: its
@@ -2820,6 +2855,12 @@ right place. `tests/conformance/rust/run.sh` builds one project with all three
 * the cap fires on each unbounded kind and answers **`LimitExceeded`** — the §6.3
   category for a policy refusal of well-formed bytes — while a value at the cap
   still decodes;
+* it fires **at the header**, on an image with **no payload byte at all**: `02 a2
+  06` and the blob and 1 MiB twins. This is the row the payload-carrying rows
+  cannot stand in for, because a cap held one callback too late still answers
+  `LimitExceeded` for them, and its controls are what keep it honest — an in-cap
+  length then EOF stays `Incomplete`, an over-cap length at an undeclared id stays
+  `Incomplete`, and an over-`maxlen` length at that same word stays `InvalidMsg`;
 * a **MESSAGE_SPEC §7.3 skip is never capped** (generator#410): a signed array at
   an unsigned-declared id, a blob at a string id, a string at a blob id, an
   unknown id, and the wrapper-array twins of all four. Every row is over its
@@ -2834,8 +2875,8 @@ right place. `tests/conformance/rust/run.sh` builds one project with all three
   decoder-level cap cannot have (§6.2.1) and the reason §9.5's second family is
   being retired.
 
-All of it passed unchanged — the rows were written against the backend, not for a
-fix — and the reason is structural: every guard is a match arm keyed by `(wire
+All of it passed unchanged when the exemption was written — the rows were written
+against the backend, not for a fix — and the reason is structural: every guard is a match arm keyed by `(wire
 callback, location, id)`, so a field the dispatch skips reaches no arm at all. The
 arms are generated, though, and one widened to `_` would cap a skip silently with
 no unit test able to see it. That is what the rows are for.
@@ -2854,9 +2895,20 @@ at:
 
 | cap | call | compared against |
 |---|---|---|
-| `max_dyn_string_len` | `acc.string(total, offset, data, co, cl, bound)` | the announced `total`, before a byte is buffered or a `String` materialized |
-| `max_dyn_blob_len` | `acc.blob(total, offset, data, co, cl, bound)` | the same, on the blob accumulator |
+| `max_dyn_string_len` | `PayloadAcc.checkStringLength(total, bound)` from `fixlenBegin`, and `acc.string(total, offset, data, co, cl, bound)` | the announced `total`, at the length word and again before a byte is buffered or a `String` materialized |
+| `max_dyn_blob_len` | `PayloadAcc.checkBlobLength(total, bound)` from `fixlenBegin`, and `acc.blob(total, offset, data, co, cl, bound)` | the same, on the blob accumulator |
 | `max_dyn_array_count` | `Seq.reserveRow(rows, id, bound)` and `Seq.reserveRow<B>s(rows, id, n, bound)` | the row **index**, before the row is allocated and before the outer list grows |
+
+**The first two rows carry two call sites for one rule, and that is the point.**
+`acc.string`/`acc.blob` alone is *before the buffer grows* but not *at the header*:
+they fire only once a payload byte exists, so a message ending immediately after
+the length word reached neither and answered `INCOMPLETE` — the defect corrected in
+§9.5 above. `checkStringLength`/`checkBlobLength` is the same routine those two run
+at the top of themselves, reached on its own from the hook the decoder raises at
+the length word, so the rule still has exactly one implementation. Kotlin and C#
+carry the identical pair (`PayloadAcc.checkStringLength`/`checkBlobLength`,
+`PayloadAcc.CheckStringLength`/`CheckBlobLength`), and corelib-go's collectors have
+always been built this way: `overLen` runs from `FixlenBegin` and from `String`.
 
 **A schema bound never travels through them.** Where the schema declares a
 `maxlen` or a `count` the call is handed `Bound.SCHEMA_BOUNDED`, and the guard

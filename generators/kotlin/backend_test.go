@@ -1200,3 +1200,64 @@ messages:
 		t.Errorf("a schema-bounded array must not also carry the receiver cap:\n%s", m)
 	}
 }
+
+// TestKotlinFixlenBeginLatchesTheReceiverCapAtTheLengthWord: the RECEIVER CAP is
+// latched at that same length word, and with its own category (CORELIB_PLAN
+// §6.2.1 "Enforcement point", ARCHITECTURE §9.5).
+//
+// The schema-maxlen half above was already latched there. The cap half was not:
+// it travelled only as PayloadAcc.string/.blob's `rmaxlen` argument, and those
+// fire once a payload byte exists. So `0a a2 06` -- a length word declaring 100
+// bytes on a field capped at 8, then end of input -- reached no callback and
+// answered INCOMPLETE, which §6.3 makes the wrong category (the refusal is
+// terminal) and which invites a streaming caller to feed more of a stream this
+// receiver has already refused.
+//
+// The comparison is still the corelib's -- PayloadAcc.checkStringLength is what
+// PayloadAcc.string runs at the top of itself -- so this is one implementation of
+// the rule applied at two points, not a second copy in the generated layer.
+func TestKotlinFixlenBeginLatchesTheReceiverCapAtTheLengthWord(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      ds: { id: 0, type: string }\n" +
+		"      bs: { id: 1, type: string, maxlen: 32 }\n" +
+		"      db: { id: 2, type: blob }\n" +
+		"      sa: { id: 3, type: array, items: { type: string } }\n"
+	m := genFromYAML(t, src, map[string]any{
+		"max_dyn_string_len": 8, "max_dyn_blob_len": 8, "max_dyn_array_count": 4,
+	})["src/main/kotlin/message/M.kt"]
+	fx := m[strings.Index(m, "override fun fixlenBegin("):strings.Index(m, "override fun string(")]
+	if fx == "" {
+		t.Fatal("M.kt must implement fixlenBegin")
+	}
+	for _, want := range []string{
+		// A schema-unbounded string and blob: the corelib's own check, at the
+		// header. -1 is the schema FACT that this field declares no maxlen, the
+		// same number the payload call passes -- not "unlimited".
+		"0 -> PayloadAcc.checkStringLength(total, -1, MAX_DYN_STRING_LEN)",
+		"2 -> PayloadAcc.checkBlobLength(total, -1, MAX_DYN_BLOB_LEN)",
+		// A schema-bounded one keeps INVALID_MSG and its own number: §6.2.1 forbids
+		// the cap on a field the schema bounds, even a maxlen far above the cap.
+		`1 -> if (total > 32) throw SofabException(SofabError.INVALID_MSG, "bs: string length above schema maxlen 32")`,
+		// ...all of it behind the §7.3 declared-subtype gate.
+		"if (subtype == FixlenType.STRING) {",
+		"if (subtype == FixlenType.BLOB) {",
+	} {
+		if !strings.Contains(fx, want) {
+			t.Errorf("fixlenBegin missing %q\ngot:\n%s", want, fx)
+		}
+	}
+	// The cap is never re-implemented here: a bare comparison against the constant
+	// would be the second implementation §6.2.1 forbids.
+	if strings.Contains(fx, "total > MAX_DYN_STRING_LEN") || strings.Contains(fx, "total > MAX_DYN_BLOB_LEN") {
+		t.Error("the cap comparison belongs to the corelib call, not to a guard emitted beside it (§6.2.1)")
+	}
+	// A message whose every string the schema bounds meets no cap anywhere: the
+	// exclusivity rule leaves nothing for the cap to govern.
+	bounded := genFromYAML(t, "version: 1\nmessages:\n  B:\n    payload:\n"+
+		"      s: { id: 0, type: string, maxlen: 8 }\n"+
+		"      b: { id: 1, type: blob, maxlen: 8 }\n",
+		map[string]any{"max_dyn_string_len": 8, "max_dyn_blob_len": 8})["src/main/kotlin/message/B.kt"]
+	if strings.Contains(bounded, "checkStringLength") || strings.Contains(bounded, "checkBlobLength") {
+		t.Error("a schema-bounded field must not meet the receiver cap (§6.2.1)")
+	}
+}

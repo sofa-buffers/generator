@@ -1680,3 +1680,82 @@ messages:
 		}
 	}
 }
+
+// The RECEIVER CAP is latched at that same length word, and with its own
+// category (CORELIB_PLAN §6.2.1 "Enforcement point", ARCHITECTURE §9.5).
+//
+// The schema-maxlen half above was already latched there. The cap half was not:
+// it travelled only as an argument to acc.string/.blob, and those fire once a
+// payload byte exists. So `02 a2 06` -- a length word declaring 100 bytes on a
+// field capped at 8, then end of input -- reached no callback and answered
+// INCOMPLETE, which §6.3 makes the wrong category (the refusal is terminal) and
+// which invites a streaming caller to feed more of a stream this receiver has
+// already refused.
+//
+// The comparison is still the corelib's -- PayloadAcc.checkStringLength is what
+// acc.string runs at the top of itself -- so this is one implementation of the
+// rule applied at two points, not a second copy in the generated layer.
+func TestJavaFixlenBeginLatchesTheReceiverCapAtTheLengthWord(t *testing.T) {
+	files := genJavaFromYAML(t, `version: 1
+messages:
+  m:
+    payload:
+      ds: { id: 0, type: string }
+      bs: { id: 1, type: string, maxlen: 32 }
+      db: { id: 2, type: blob }
+      sa: { id: 3, type: array, items: { type: string } }
+`, map[string]any{"max_dyn_string_len": 8, "max_dyn_blob_len": 8, "max_dyn_array_count": 4})
+	var m string
+	for path, src := range files {
+		if strings.HasSuffix(path, "M.java") {
+			m = src
+		}
+	}
+	if m == "" {
+		t.Fatal("no M.java")
+	}
+	fx := m[strings.Index(m, "public void fixlenBegin("):strings.Index(m, "public void string(")]
+	if fx == "" {
+		t.Fatal("no fixlenBegin implementation")
+	}
+	for _, want := range []string{
+		// A schema-unbounded string and blob: the corelib's own check, at the header.
+		"case 0: PayloadAcc.checkStringLength(total, CAP_DYN_STRING_LEN); break;",
+		"case 2: PayloadAcc.checkBlobLength(total, CAP_DYN_BLOB_LEN); break;",
+		// A schema-bounded one keeps INVALID and its own number: §6.2.1 forbids the
+		// cap on a field the schema bounds, even a maxlen far above the cap.
+		`case 1: if (total > 32) throw Sofab.invalid("bs: string length above schema maxlen 32"); break;`,
+		// ...all of it behind the §7.3 declared-subtype gate.
+		"if (subtype == FixlenType.STRING) {",
+		"if (subtype == FixlenType.BLOB) {",
+	} {
+		if !strings.Contains(fx, want) {
+			t.Errorf("fixlenBegin missing %q\ngot:\n%s", want, fx)
+		}
+	}
+	// The cap is never re-implemented here: no bare comparison against the cap
+	// constant, which would be the second implementation §6.2.1 forbids.
+	if strings.Contains(fx, "total > MAX_DYN_STRING_LEN") || strings.Contains(fx, "total > MAX_DYN_BLOB_LEN") {
+		t.Error("the cap comparison belongs to the corelib call, not to a guard emitted beside it (§6.2.1)")
+	}
+	// A wrapper element's length is capped at the header too.
+	if !strings.Contains(fx, "PayloadAcc.checkStringLength(total, CAP_DYN_STRING_LEN); break;") {
+		t.Error("a schema-unbounded wrapper element must be capped at the length word")
+	}
+	// A message whose every string the schema bounds meets no cap anywhere: the
+	// exclusivity rule leaves nothing for the cap to govern, so no call is made
+	// even though the project configures one.
+	bounded := genJavaFromYAML(t, `version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string, maxlen: 8 }
+      b: { id: 1, type: blob, maxlen: 8 }
+`, map[string]any{"max_dyn_string_len": 8, "max_dyn_blob_len": 8})
+	for path, src := range bounded {
+		if strings.HasSuffix(path, "M.java") &&
+			(strings.Contains(src, "checkStringLength") || strings.Contains(src, "checkBlobLength")) {
+			t.Error("a schema-bounded field must not meet the receiver cap (§6.2.1)")
+		}
+	}
+}

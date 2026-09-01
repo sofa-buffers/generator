@@ -642,16 +642,22 @@ func (g *gen) emitMaxlenArg(f *kfile, fs []frame, kind ir.Kind) bool {
 // The payload-side guards stay: unreachable for a message that gets this far,
 // and the only thing still bounding a consumer built against an older corelib.
 func (g *gen) emitFixlenBegin(f *kfile, fs []frame) {
-	str := g.fixlenBeginArms(fs, ir.KindString, "string length")
-	blob := g.fixlenBeginArms(fs, ir.KindBlob, "blob length")
+	limStr, limBlob := kindDests(fs, ir.KindString), kindDests(fs, ir.KindBlob)
+	str := g.fixlenBeginArms(fs, ir.KindString, "string length", capConstFor(len(limStr) > 0, "MAX_DYN_STRING_LEN"))
+	blob := g.fixlenBeginArms(fs, ir.KindBlob, "blob length", capConstFor(len(limBlob) > 0, "MAX_DYN_BLOB_LEN"))
 	if len(str) == 0 && len(blob) == 0 {
 		return
 	}
 	f.line("    override fun fixlenBegin(id: Int, subtype: FixlenType, total: Int) {")
-	f.line("        // Decided at the LENGTH WORD, not once payload bytes arrive: S5.2 makes")
-	f.line("        // INVALID dominate INCOMPLETE, so truncating right after this word must")
-	f.line("        // not downgrade the verdict. The subtype test is S7.3 -- a contradicting")
-	f.line("        // fixlen kind at this id is a SKIPPED field, not this field's length.")
+	f.line("        // Decided at the LENGTH WORD, not once payload bytes arrive: a message")
+	f.line("        // that ends right after this word reaches no payload callback at all, and")
+	f.line("        // both verdicts outrank the INCOMPLETE it would otherwise report -- a")
+	f.line("        // schema maxlen because S5.2 makes INVALID dominate, a receiver cap")
+	f.line("        // because S6.2.1 puts it \"at the count/length header, before the")
+	f.line("        // allocation it is meant to prevent\" and S6.3 makes the refusal terminal.")
+	f.line("        // The subtype test is S7.3 -- a contradicting fixlen kind at this id is a")
+	f.line("        // SKIPPED field, not this field's length, and a skipped field is never")
+	f.line("        // capped.")
 	for _, a := range []struct {
 		variant string
 		arms    []string
@@ -672,19 +678,54 @@ func (g *gen) emitFixlenBegin(f *kfile, fs []frame) {
 	f.blank()
 }
 
+// capConstFor names the constant carrying a kind's receiver cap, or "" where
+// this message has no destination of that kind and the constant is not declared
+// -- naming it there would not compile.
+func capConstFor(live bool, name string) string {
+	if !live {
+		return ""
+	}
+	return name
+}
+
+// capCheck renders the §6.2.1 receiver-cap comparison AT THE LENGTH WORD: the
+// corelib's own check, reached on its own rather than through a payload chunk.
+//
+// It is the same routine PayloadAcc.string/.blob run at the top of themselves,
+// so this is one implementation of the rule applied at two points, not two
+// implementations of it. The -1 is the schema FACT this destination carries no
+// `maxlen` -- the same number the payload call passes, and the reason the
+// accumulator can tell the two rules apart; it is not "unlimited".
+func capCheck(kind ir.Kind, constName string) string {
+	if kind == ir.KindBlob {
+		return fmt.Sprintf("PayloadAcc.checkBlobLength(total, -1, %s)", constName)
+	}
+	return fmt.Sprintf("PayloadAcc.checkStringLength(total, -1, %s)", constName)
+}
+
 // fixlenBeginArms builds the per-scope arms for one fixlen subtype: a wrapper
-// element carries its array's over-index bound AND its element maxlen, a scalar
-// field carries its own maxlen. Over-index FIRST -- an element that is not this
-// array's element at all must not have its length measured against the element
-// bound.
-func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, noun string) []string {
+// element carries its array's over-index bound AND its element bound, a scalar
+// field carries its own. Over-index FIRST -- an element that is not this array's
+// element at all must not have its length measured against the element bound.
+//
+// Which bound a destination gets is §6.2.1's exclusivity rule, and it settles the
+// CATEGORY with the number: a schema `maxlen` is a statement about validity, so
+// its breach is INVALID_MSG and it is thrown here; a schema-unbounded field is
+// governed by the receiver's configured cap, whose breach is LIMIT_EXCEEDED and
+// which the corelib call compares. Never both on one field, and never one
+// answering in the other's category.
+func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, noun, constName string) []string {
 	var arms []string
 	for _, fr := range fs {
-		if fr.kind == fkSeqLeaf && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0) {
+		elemCapped := constName != "" && fr.emax < 0
+		if fr.kind == fkSeqLeaf && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0 || elemCapped) {
 			body := g.overIndexGuard(fr.cap, fr.loc)
-			if fr.emax >= 0 {
+			switch {
+			case fr.emax >= 0:
 				body += fmt.Sprintf("if (total > %d) %s", fr.emax,
 					invalidThrow(fmt.Sprintf("%s element: %s above schema maxlen %d", locName(fr.loc), noun, fr.emax)))
+			case elemCapped:
+				body += capCheck(kind, constName)
 			}
 			arms = append(arms, fmt.Sprintf("                %d -> { %s }", fr.idx, strings.TrimSuffix(body, "; ")))
 			continue
@@ -694,9 +735,15 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, noun string) []string {
 		}
 		var inner []string
 		for _, fld := range fr.fields {
-			if fld.Kind == kind && fld.HasMaxlen {
+			if fld.Kind != kind {
+				continue
+			}
+			switch {
+			case fld.HasMaxlen:
 				inner = append(inner, fmt.Sprintf("%d -> if (total > %d) %s", fld.ID, fld.Maxlen,
 					invalidThrow(fmt.Sprintf("%s: %s above schema maxlen %d", fld.Name, noun, fld.Maxlen))))
+			case constName != "":
+				inner = append(inner, fmt.Sprintf("%d -> %s", fld.ID, capCheck(kind, constName)))
 			}
 		}
 		if len(inner) > 0 {

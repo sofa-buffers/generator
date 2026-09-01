@@ -2125,3 +2125,69 @@ messages:
 		t.Errorf("the maxlen-bounded string must keep its own INVALID guard:\n%s", m)
 	}
 }
+
+// The RECEIVER CAP is latched at the same length word, and with its own
+// category (CORELIB_PLAN §6.2.1 "Enforcement point", ARCHITECTURE §9.5).
+//
+// The schema-maxlen half above was already latched there; the cap half was not,
+// and stayed in the payload callback. So `02 a2 06` -- a length word declaring
+// 100 bytes on a field capped at 8, then end of input -- reached no callback at
+// all and answered INCOMPLETE, inviting a caller to keep feeding a stream this
+// decoder had already refused. §6.3 makes the refusal terminal, so no
+// continuation can lift it.
+//
+// What this pins beyond "a comparison exists": the CATEGORY split (a schema
+// maxlen sets inv/InvalidMsg, a cap sets lim/LimitExceeded, never swapped), the
+// EXCLUSIVITY of §6.2.1 (a schema-bounded field gets no cap arm at all), and the
+// §7.3 subtype gate the arms sit behind.
+func TestRustFixlenBeginLatchesTheReceiverCapAtTheLengthWord(t *testing.T) {
+	m := moduleFromYAML(t, `version: 1
+messages:
+  m:
+    payload:
+      ds: { id: 0, type: string }
+      bs: { id: 1, type: string, maxlen: 32 }
+      db: { id: 2, type: blob }
+      sa: { id: 3, type: array, items: { type: string } }
+`, map[string]any{"max_dyn_string_len": 8, "max_dyn_blob_len": 8, "max_dyn_array_count": 4})
+
+	fx := m[strings.Index(m, "fn fixlen_begin("):strings.Index(m, "fn string(")]
+	if fx == "" {
+		t.Fatal("no fixlen_begin override")
+	}
+	for _, want := range []string{
+		// A schema-unbounded string/blob: the receiver cap, as LimitExceeded.
+		"(_Loc::Root, 0) => if total > MAX_DYN_STRING_LEN { self.lim = true; return; },",
+		"(_Loc::Root, 2) => if total > MAX_DYN_BLOB_LEN { self.lim = true; return; },",
+		// A schema-bounded one keeps INVALID and its own number: §6.2.1 forbids
+		// the cap on a field the schema bounds, even a maxlen far above the cap.
+		"(_Loc::Root, 1) => if total > 32 { self.inv = true; return; },",
+		// A wrapper element's own length is capped here too. (Its element INDEX
+		// is a separate §6.2.1 bound, still applied in the payload callback --
+		// out of scope here and noted so a reader does not mistake its absence
+		// for a rule this test covers.)
+		"(_Loc::Root_sa, _) => { if total > MAX_DYN_STRING_LEN { self.lim = true; return; } },",
+		// ...all of it behind the §7.3 declared-subtype gate.
+		"FixlenType::Str => match (self.cur, id) {",
+		"FixlenType::Blob => match (self.cur, id) {",
+	} {
+		if !strings.Contains(fx, want) {
+			t.Errorf("fixlen_begin missing %q\ngot:\n%s", want, fx)
+		}
+	}
+	// The cap never wears the schema bound's category, nor the reverse.
+	if strings.Contains(fx, "MAX_DYN_STRING_LEN { self.inv") || strings.Contains(fx, "total > 32 { self.lim") {
+		t.Error("a receiver cap is LimitExceeded and a schema maxlen is InvalidMsg (§6.2.1/§6.3); the two must not be swapped")
+	}
+	// no_std configures no cap at all, so nothing is capped there and the arms
+	// must not appear -- the constants do not exist in that crate.
+	ns := moduleFromYAML(t, `version: 1
+messages:
+  m:
+    payload:
+      ds: { id: 0, type: string, maxlen: 8 }
+`, map[string]any{"corelib": "rs-no-std"})
+	if strings.Contains(ns, "MAX_DYN_STRING_LEN") {
+		t.Error("the no_std profile names no receiver cap")
+	}
+}
