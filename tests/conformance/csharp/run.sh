@@ -466,6 +466,67 @@ $HP decode caps < "$WORK/cap_str_skipped.bin" >/dev/null \
     || { echo "FAIL: an over-cap string at an undeclared id is SKIPPED, never capped (6.2.1)"; exit 1; }
 $HP decode caps < "$WORK/cap_blob_skipped.bin" >/dev/null \
     || { echo "FAIL: an over-cap blob at an undeclared id is SKIPPED, never capped (6.2.1)"; exit 1; }
+# ...and the cap is decided AT THE LENGTH WORD, so a message that ends there is a
+# policy rejection and not a truncation (CORELIB_PLAN 6.2.1 "Enforcement point":
+# "before the allocation it is meant to prevent"; ARCHITECTURE 9.5: "a claimed
+# oversize fails fast even if the payload never arrives"). Every row above
+# carries its payload, so all of them reach String()/Blob() and a cap applied
+# THERE still answers LimitExceeded -- which is why this port read as correct
+# while it was not. Take the payload away and that callback never fires:
+#
+#   02 a2 06        id 0 (fixlen), fixlen word (100 << 3) | 2 -- a 100-byte string
+#   12 a3 06        id 2 (fixlen), fixlen word (100 << 3) | 3 -- a 100-byte blob
+#   02 82 80 80 04  the same shape claiming 1 MiB
+#
+# Answering Incomplete here loses the category (6.3 makes the refusal terminal)
+# and tells a streaming caller to feed more of a stream this receiver has already
+# refused -- five bytes holding a connection open, the amplification the caps
+# exist to close.
+echo "==> an over-cap length word with NO payload is LimitExceeded, not Incomplete"
+printf '\002\242\006'           > "$WORK/cap_eof_str.bin"
+printf '\022\243\006'           > "$WORK/cap_eof_blob.bin"
+printf '\002\202\200\200\004' > "$WORK/cap_eof_1m.bin"
+for v in cap_eof_str cap_eof_blob cap_eof_1m; do
+    if $HP decode caps < "$WORK/$v.bin" >/dev/null 2>"$WORK/$v.err"; then
+        echo "FAIL: $v -- an over-cap length word then EOF must be refused, not accepted"; exit 1
+    fi
+    grep -q "LimitExceeded" "$WORK/$v.err" || {
+        echo "FAIL: $v -- a truncated over-cap header is LimitExceeded, not Incomplete (6.2.1/6.3); got:"
+        cat "$WORK/$v.err"; exit 1; }
+done
+
+# The precision controls, and they are the point: the cap must not turn every
+# short message into a policy rejection, and it must not reach a field it does
+# not govern. TryDecode reports the status instead of throwing, so each asserts
+# the WORD rather than merely a clean exit.
+#
+#   02 42          an IN-cap 8-byte string (= the cap) then EOF -- a clean truncation
+#   12 43          the blob twin
+#   a2 01 a2 06    a 100-byte string at id 20, an id this message does not declare:
+#                  7.3 skips it and "a skipped field is never capped"
+#   0a a2 01       a 20-byte length on bs, whose maxlen is 32: over the receiver cap
+#                  of 8 but inside the schema bound, which 6.2.1 says governs alone
+printf '\002\102'         > "$WORK/cap_eof_incap.bin"
+printf '\022\103'         > "$WORK/cap_eof_incapb.bin"
+printf '\242\001\242\006' > "$WORK/cap_eof_skip.bin"
+printf '\012\242\001'    > "$WORK/cap_eof_bounded.bin"
+for v in cap_eof_incap cap_eof_incapb cap_eof_skip cap_eof_bounded; do
+    ST=$($HP trydecode caps < "$WORK/$v.bin" 2>"$WORK/$v.err" | head -n1) || {
+        echo "FAIL: $v must be a clean truncation, not a rejection; got:"; cat "$WORK/$v.err"; exit 1; }
+    [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: $v -> $ST (want INCOMPLETE)"; exit 1; }
+done
+# ...and the schema bound keeps ITS category at that same word: 100 bytes on the
+# maxlen-32 field is InvalidMessage, never the cap's verdict. This is the row that
+# proves the enforcement point was always reachable -- it is where the schema
+# bound has always fired.
+printf '\012\242\006' > "$WORK/cap_eof_maxlen.bin"
+if $HP decode caps < "$WORK/cap_eof_maxlen.bin" >/dev/null 2>"$WORK/cap_eof_maxlen.err"; then
+    echo "FAIL: 100 bytes above maxlen 32 must be refused at the length word"; exit 1
+fi
+grep -q "InvalidMessage" "$WORK/cap_eof_maxlen.err" || {
+    echo "FAIL: an over-MAXLEN length word is InvalidMessage, never LimitExceeded; got:"
+    cat "$WORK/cap_eof_maxlen.err"; exit 1; }
+
 echo "==> string/blob caps OK"
 
 echo "==> shared-vector byte-exact conformance"

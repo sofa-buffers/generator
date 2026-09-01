@@ -730,16 +730,45 @@ lim_complete "$WORK/lim" dyn '\003\004\001\002\003\004'    '"a":\[1,2,3,4\]' "4 
 # Rust was reporting feed's Incomplete because try_decode surfaced it ahead of
 # the sticky lim flag.
 lim_reject "$WORK/lim" dyn '\003\005\001\002' LimitExceeded "an over-cap count (5 > 4) then EOF"
-lim_reject "$WORK/lim" dyn '\012\112ABC'      LimitExceeded "an over-cap string length (9 > 8) then EOF"
-lim_reject "$WORK/lim" dyn '\022\113ABC'      LimitExceeded "an over-cap blob length (9 > 8) then EOF"
+lim_reject "$WORK/lim" dyn '\012\112ABC'      LimitExceeded "an over-cap string length (9 > 8) then a partial payload"
+lim_reject "$WORK/lim" dyn '\022\113ABC'      LimitExceeded "an over-cap blob length (9 > 8) then a partial payload"
+
+# (1c) ...and the same headers with NO PAYLOAD BYTE AT ALL. This is the row the
+# three above cannot stand in for, and the reason they could not is the whole
+# defect: `ABC` is three payload bytes, so the string()/blob() callback fires and
+# a cap applied THERE still answers LimitExceeded. Truncate one byte earlier and
+# that callback never happens. The array count above needs no twin -- its cap
+# always fired at the count header -- which is exactly why the split went
+# unnoticed: one kind of receiver cap was enforced at its header and two were
+# enforced at their payload, and only an image with an empty payload tells them
+# apart.
+#
+#   02 a2 06  id 0 (fixlen), fixlen word (100 << 3) | 2 -- a 100-byte string
+#   12 a3 06  id 2 (fixlen), fixlen word (100 << 3) | 3 -- a 100-byte blob
+#   02 82 80 80 04  the same shape claiming 1 MiB: 5 bytes of input against a
+#                   cap of 8, the amplification the caps exist to close
+lim_reject "$WORK/lim" dyn '\012\242\006'         LimitExceeded "a 100-byte string length (> 8) then EOF, no payload byte"
+lim_reject "$WORK/lim" dyn '\022\243\006'         LimitExceeded "a 100-byte blob length (> 8) then EOF, no payload byte"
+lim_reject "$WORK/lim" dyn '\012\202\200\200\004' LimitExceeded "a 1 MiB string length then EOF, no payload byte"
+
 # The precision controls. An IN-cap header that is genuinely truncated is a clean
 # truncation and MUST stay Incomplete -- the cap must not turn every short
-# message into a policy rejection.
+# message into a policy rejection. Both the partial-payload and the no-payload
+# form, since the fix moved where the comparison happens.
 lim_reject "$WORK/lim" dyn '\003\004\001\002' Incomplete "an in-cap count (4 == 4) then EOF"
-lim_reject "$WORK/lim" dyn '\012\102ABC'      Incomplete "an in-cap string length (8 == 8) then EOF"
+lim_reject "$WORK/lim" dyn '\012\102ABC'      Incomplete "an in-cap string length (8 == 8) then a partial payload"
+lim_reject "$WORK/lim" dyn '\012\102'         Incomplete "an in-cap string length (8 == 8) then EOF, no payload byte"
+lim_reject "$WORK/lim" dyn '\022\103'         Incomplete "an in-cap blob length (8 == 8) then EOF, no payload byte"
+# A SCHEMA-bounded field keeps its own category at the length word, truncated or
+# not: `bs` (id 3) declares maxlen 32, so 100 bytes is InvalidMsg and never the
+# cap's verdict -- the proof that the enforcement point was always reachable.
+lim_reject "$WORK/lim" dyn '\032\242\006'    InvalidMsg "a 100-byte length on the maxlen-32 field, then EOF"
+lim_reject "$WORK/lim" dyn '\032\242\001'    Incomplete "a 20-byte length inside maxlen 32 (cap 8 must not apply), then EOF"
 # ...and a §7.3-skipped field is never capped (#410), truncated or not: an
 # over-cap array at an unknown id leaves only the truncation to report.
 lim_reject "$WORK/lim" dyn '\073\005\001\002' Incomplete "an over-cap array at the UNKNOWN id 7, then EOF"
+lim_reject "$WORK/lim" dyn '\072\242\006'    Incomplete "an over-cap string at the UNKNOWN id 7, then EOF"
+lim_reject "$WORK/lim" dyn '\072\243\006'    Incomplete "an over-cap blob at the UNKNOWN id 7, then EOF"
 
 # (2) generator#410: a §7.3-skipped field is never capped. Every row is over its
 # kind's cap, and every row must decode COMPLETE with the declared field left at
