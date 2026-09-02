@@ -540,19 +540,28 @@ printf 'version: 1\nmessages:\n' > "$WORK/vecskip.yaml"
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema >> "$WORK/vecskip.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python \
     --in "$WORK/vecskip.yaml" --out "$WORK/vecskip" >/dev/null )
+#
+# ...and on BOTH decode surfaces. `streamdecode` drips the message in ONE BYTE
+# PER feed, so every position inside every skipped payload becomes a
+# suspend/resume boundary; that is where a resync bug the single-buffer path
+# hides shows up (generator#456).
 if [ "$NATIVE" = yes ]; then
     unset SOFAB_PUREPYTHON || true
     require_engine native
-    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
-        "$CORELIB/assets/test_vectors.json" "Python (native)" \
-        --cwd "$WORK/vecskip" -- python3 harness.py
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+            "$CORELIB/assets/test_vectors.json" "Python (native)" --mode "$surface" \
+            --cwd "$WORK/vecskip" -- python3 harness.py
+    done
 fi
 SOFAB_PUREPYTHON=1
 export SOFAB_PUREPYTHON
 require_engine python
-python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
-    "$CORELIB/assets/test_vectors.json" "Python (pure)" \
-    --cwd "$WORK/vecskip" -- python3 harness.py
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "Python (pure)" --mode "$surface" \
+        --cwd "$WORK/vecskip" -- python3 harness.py
+done
 unset SOFAB_PUREPYTHON || true
 
 echo "==> corpus + realworld: every definition imports"

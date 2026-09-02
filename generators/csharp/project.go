@@ -63,7 +63,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    static readonly JsonSerializerOptions Opts = new() { IncludeFields = true, Converters = { new ByteArrayConverter() } };")
 	g.emitBenchBody(f, s)
 	f.line("    static int Main(string[] args) {")
-	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|trydecode|bench> [Message|workload]\"); return 2; }")
+	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|streamdecode|trydecode|bench> [Message|workload]\"); return 2; }")
 	f.line("        string mode = args[0];")
 	f.line("        string name = args.Length > 1 ? args[1] : %q;", defaultMessage(s))
 	f.line("        using var ms = new MemoryStream();")
@@ -83,6 +83,29 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                var bytes = obj.Encode(); stdout.Write(bytes, 0, bytes.Length);")
 		f.line("            } else if (mode == \"decode\") {")
 		f.line("                var obj = %s.Decode(input);", mt)
+		f.line("                var json = JsonSerializer.SerializeToUtf8Bytes(obj, Opts);")
+		f.line("                stdout.Write(json, 0, json.Length); stdout.WriteByte((byte)'\\n');")
+		// The same bytes through the incremental decoder (PLAN §5.6), fed ONE BYTE
+		// per Feed. A whole-buffer Feed would exercise the Decoder's signature
+		// without ever making it suspend and resume, which is the half that can
+		// actually be wrong; drip-feeding turns every byte offset -- inside a
+		// skipped payload included -- into a boundary the parse state has to
+		// survive. The JSON printed here is compared against `decode`'s by the
+		// conformance runner.
+		f.line("            } else if (mode == \"streamdecode\") {")
+		f.line("                var dec = new %s.Decoder();", mt)
+		f.line("                %s obj;", mt)
+		f.line("                try {")
+		// Incomplete mid-stream is the normal verdict for a chunk that ended
+		// mid-field: it says the BYTES ended there, not that the message is bad.
+		// Only Finish() decides on the message as a whole.
+		f.line("                    var one = new byte[1];")
+		f.line("                    foreach (var b in input) { one[0] = b; dec.Feed(one); }")
+		f.line("                    obj = dec.Finish();")
+		f.line("                } catch (Exception e) {")
+		f.line("                    Console.Error.WriteLine(\"decode error: \" + e.Message);")
+		f.line("                    return 1;")
+		f.line("                }")
 		f.line("                var json = JsonSerializer.SerializeToUtf8Bytes(obj, Opts);")
 		f.line("                stdout.Write(json, 0, json.Length); stdout.WriteByte((byte)'\\n');")
 		f.line("            } else if (mode == \"trydecode\") {")

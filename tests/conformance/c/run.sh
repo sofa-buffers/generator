@@ -464,8 +464,15 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema --ma
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
     --in "$WORK/vecskip.yaml" --out "$WORK/vecskip" )
 make -C "$WORK/vecskip" SOFAB_C_CORELIB="$CORELIB" >/dev/null
-python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
-    "$CORELIB/assets/test_vectors.json" "C" --max-id 65535 \
-    -- "$WORK/vecskip/harness/harness"
+#
+# Run on BOTH decode surfaces. `streamdecode` drips the message in ONE BYTE PER
+# feed, so every position inside every skipped payload becomes a suspend/resume
+# boundary; that is where a resync bug the single-buffer path hides shows up
+# (generator#456).
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "C" --max-id 65535 --mode "$surface" \
+        -- "$WORK/vecskip/harness/harness"
+done
 
 echo "PASS"

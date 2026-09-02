@@ -64,6 +64,15 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	}
 	f.line("};")
 	f.blank()
+	// The incremental Decoder classes are exported per message, beside the message
+	// classes rather than on them, so they need a map of their own for the
+	// `streamdecode` mode to reach one by message name.
+	f.line("const DECODERS: Record<string, { new (): { feed(chunk: Uint8Array): unknown; finish(): { toJSON(): Record<string, unknown> } } }> = {")
+	for _, m := range s.Messages {
+		f.line("  %q: M.%sDecoder,", m.Name, exported(m.Name))
+	}
+	f.line("};")
+	f.blank()
 	f.line("// benchMain - see tests/bench/README.md.")
 	f.line("//")
 	f.line("// V8 JIT-compiles the hot path at runtime, so there is no native symbol to")
@@ -148,6 +157,28 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    process.stdout.write(obj.encode());")
 	f.line("  } else if (mode === \"decode\") {")
 	f.line("    const obj = cls.decode(new Uint8Array(input));")
+	f.line("    process.stdout.write(JSON.stringify(obj.toJSON()) + \"\\n\");")
+	// The same bytes through the incremental decoder, fed ONE BYTE per feed. A
+	// whole-buffer feed would exercise the Decoder's signature without ever making
+	// it suspend and resume, which is the half that can actually be wrong;
+	// drip-feeding turns every byte offset -- inside a skipped payload included --
+	// into a boundary the parse state has to survive. The JSON printed here is
+	// compared against `decode`'s by the conformance runner.
+	f.line("  } else if (mode === \"streamdecode\") {")
+	f.line("    const dec = new DECODERS[name]();")
+	// An Incomplete status mid-stream is the normal verdict for a chunk that ended
+	// mid-field: it says the BYTES ended there, not that the message is bad. Only
+	// finish() decides on the message as a whole, and it throws when the stream
+	// ended half-read.
+	f.line("    const one = new Uint8Array(1);")
+	f.line("    let obj;")
+	f.line("    try {")
+	f.line("      for (const b of input) { one[0] = b; dec.feed(one); }")
+	f.line("      obj = dec.finish();")
+	f.line("    } catch (e) {")
+	f.line("      process.stderr.write(`decode error: ${String(e)}\\n`);")
+	f.line("      return 1;")
+	f.line("    }")
 	f.line("    process.stdout.write(JSON.stringify(obj.toJSON()) + \"\\n\");")
 	f.line("  } else if (mode === \"recode\") {")
 	// Bytes in, bytes out: decode and re-encode without a JSON detour. JSON cannot

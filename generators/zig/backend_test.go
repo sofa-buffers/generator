@@ -624,6 +624,15 @@ func TestZigProjectMode(t *testing.T) {
 		"toJson_Myfirstmessage(&obj, out)",
 		".number_string => |s| return std.fmt.parseInt(u64, s, 10) catch 0,", // u64 > 2^53 stays exact
 		"std.json.Stringify.encodeJsonString",
+		// The chunked decode surface (generator#456): the same raw wire bytes
+		// `decode` takes, fed ONE BYTE PER feed, so every position inside every
+		// skipped payload becomes a suspend/resume boundary. It prints what
+		// `decode` prints, and the conformance runner replays the shared vectors
+		// through both and compares.
+		"std.mem.eql(u8, mode, \"streamdecode\")",
+		"var dec = message.Myfirstmessage.decoder(&obj, alloc);",
+		"_ = try dec.feed(&[_]u8{b});",
+		"try dec.finish();",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("main.zig missing %q", want)

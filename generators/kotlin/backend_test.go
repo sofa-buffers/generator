@@ -955,7 +955,8 @@ func TestKotlinProjectMode(t *testing.T) {
 		}
 	}
 	main := out["src/main/kotlin/message/Main.kt"]
-	for _, mode := range []string{`"encode" ->`, `"decode" ->`, `"trydecode" ->`, `"stream" ->`, `if (mode == "bench")`} {
+	for _, mode := range []string{`"encode" ->`, `"decode" ->`, `"trydecode" ->`, `"stream" ->`,
+		`"streamdecode" ->`, `if (mode == "bench")`} {
 		if !strings.Contains(main, mode) {
 			t.Errorf("the harness must expose %s", mode)
 		}
@@ -972,6 +973,21 @@ func TestKotlinProjectMode(t *testing.T) {
 	} {
 		if !strings.Contains(main, want) {
 			t.Errorf("the stream mode is missing %q", want)
+		}
+	}
+	// `streamdecode` is the OTHER chunked half (generator#456): `stream` above
+	// builds its own bytes from a JSON message, so it can only ever feed what this
+	// encoder produces. This one takes RAW WIRE BYTES on stdin, as `decode` does,
+	// which is what lets the shared vectors -- carrying skipped fields of every
+	// wire type, bytes no encoder here emits -- be replayed through the chunked
+	// path and compared against the one-shot surface.
+	for _, want := range []string{
+		"val dec = M.decoder()",
+		"for (b in input) { one[0] = b; dec.feed(one) }",
+		"dec.finish()",
+	} {
+		if !strings.Contains(main, want) {
+			t.Errorf("the streamdecode mode is missing %q", want)
 		}
 	}
 	// A u64 must survive the JSON round trip exactly, which a double-based

@@ -104,7 +104,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	g.emitBench(f, s)
 	f.line("def main() -> int:")
 	f.line("    if len(sys.argv) < 2:")
-	f.line("        sys.stderr.write('usage: harness.py <encode|decode|bench> [Message|workload]\\n')")
+	f.line("        sys.stderr.write('usage: harness.py <encode|decode|streamdecode|bench> [Message|workload]\\n')")
 	f.line("        return 2")
 	f.line("    mode = sys.argv[1]")
 	f.line("    name = sys.argv[2] if len(sys.argv) > 2 else %q", defaultMessage(s))
@@ -122,6 +122,30 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    elif mode == 'decode':")
 	f.line("        obj = cls.decode(data)")
 	f.line("        sys.stdout.write(json.dumps(obj.to_jsonable()))")
+	f.line("        sys.stdout.write('\\n')")
+	// The same bytes through the streaming reader (§6.1.1), fed ONE BYTE per
+	// feed. A whole-buffer feed would exercise the reader's signature without ever
+	// making it suspend and resume, which is the half that can actually be wrong;
+	// drip-feeding turns every byte offset -- inside a skipped payload included --
+	// into a boundary the parse state has to survive. The JSON printed here is
+	// compared against `decode`'s by the conformance runner.
+	f.line("    elif mode == 'streamdecode':")
+	// There is no finish() on this surface (CORELIB_PLAN §5.2.4): the status the
+	// last feed returned IS the outcome, and an INCOMPLETE mid-stream only says
+	// the BYTES ended mid-field. End-of-input is the harness's own framing, so it
+	// is the FINAL status that has to be COMPLETE.
+	f.line("        dec = cls.decoder()")
+	f.line("        st = dec.status")
+	f.line("        try:")
+	f.line("            for i in range(len(data)):")
+	f.line("                st = dec.feed(data[i:i + 1])")
+	f.line("        except Exception as e:")
+	f.line("            sys.stderr.write('decode error: %%s\\n' %% (e,))")
+	f.line("            return 1")
+	f.line("        if st != message.Status.COMPLETE:")
+	f.line("            sys.stderr.write('decode failed: %%s\\n' %% (st,))")
+	f.line("            return 1")
+	f.line("        sys.stdout.write(json.dumps(dec.message.to_jsonable()))")
 	f.line("        sys.stdout.write('\\n')")
 	f.line("    else:")
 	f.line("        sys.stderr.write('unknown mode\\n')")

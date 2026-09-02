@@ -654,10 +654,17 @@ python3 "$ROOT/tests/conformance/zig/check_vectors.py" "$CORELIB/assets/test_vec
 # into a message that declares u64 on the anchors and nothing else, so every
 # other field on the wire is an unknown id or a MESSAGE_SPEC S7.3 wire-type
 # mismatch and must be SKIPPED -- with the anchor behind it still exact.
+#
+# Run on BOTH decode surfaces. `streamdecode` drips the message in ONE BYTE PER
+# feed, so every position inside every skipped payload becomes a suspend/resume
+# boundary; that is where a resync bug the single-buffer path hides shows up
+# (generator#456).
 echo "==> shared-vector decode conformance (skip matrix)"
-python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
-    "$CORELIB/assets/test_vectors.json" "Zig" \
-    -- "$WORK/conf/zig-out/bin/harness"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "Zig" --mode "$surface" \
+        -- "$WORK/conf/zig-out/bin/harness"
+done
 
 echo "==> corpus + realworld: every definition builds"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do

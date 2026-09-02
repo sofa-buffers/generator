@@ -190,6 +190,28 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		f.line("                    val sb = StringBuilder(); Json.to(obj, sb)")
 		f.line("                    System.out.write(sb.toString().encodeToByteArray()); System.out.write('\\n'.code)")
 		f.line("                }")
+		// `stream` below drives the streaming pair from a JSON message it encodes
+		// itself; this one takes RAW WIRE BYTES on stdin, exactly as `decode` does,
+		// and prints exactly what `decode` prints. That is what lets a conformance
+		// driver replay the shared vectors -- bytes no encoder here can produce,
+		// carrying skipped fields of every wire type -- through the chunked path and
+		// compare the two surfaces against identical expectations.
+		f.line("                \"streamdecode\" -> {")
+		f.line("                    val dec = %s.decoder()", mt)
+		// An INCOMPLETE per feed is the normal verdict for a chunk that ended
+		// mid-field: it says the BYTES ended there, not that the message is bad.
+		// Only finish() decides on the message as a whole.
+		f.line("                    val one = ByteArray(1)")
+		f.line("                    val back = try {")
+		f.line("                        for (b in input) { one[0] = b; dec.feed(one) }")
+		f.line("                        dec.finish()")
+		f.line("                    } catch (e: Exception) {")
+		f.line("                        System.err.println(\"decode error: \" + e)")
+		f.line("                        kotlin.system.exitProcess(1)")
+		f.line("                    }")
+		f.line("                    val sb = StringBuilder(); Json.to(back, sb)")
+		f.line("                    System.out.write(sb.toString().encodeToByteArray()); System.out.write('\\n'.code)")
+		f.line("                }")
 		f.line("                \"stream\" -> {")
 		f.line("                    // Both streaming halves, against the one-shot pair as the oracle.")
 		f.line("                    //")

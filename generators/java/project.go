@@ -175,6 +175,29 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		f.line("                %s obj = %s.decode(input);", mt, mt)
 		f.line("                StringBuilder sb = new StringBuilder(); Json.to(obj, sb);")
 		f.line("                System.out.write(sb.toString().getBytes(StandardCharsets.UTF_8)); System.out.write('\\n');")
+		// The same bytes through the incremental decoder (PLAN §5.6), fed ONE BYTE
+		// per feed. A whole-buffer feed would exercise the Decoder's signature
+		// without ever making it suspend and resume, which is the half that can
+		// actually be wrong; drip-feeding turns every byte offset -- inside a
+		// skipped payload included -- into a boundary the parse state has to
+		// survive. The JSON printed here is compared against `decode`'s by the
+		// conformance runner.
+		f.line("            } else if (mode.equals(\"streamdecode\")) {")
+		f.line("                %s.Decoder dec = %s.decoder();", mt, mt)
+		f.line("                %s obj;", mt)
+		f.line("                try {")
+		// INCOMPLETE mid-stream is the normal verdict for a chunk that ended
+		// mid-field: it says the BYTES ended there, not that the message is bad.
+		// Only finish() decides on the message as a whole.
+		f.line("                    byte[] one = new byte[1];")
+		f.line("                    for (byte b : input) { one[0] = b; dec.feed(one); }")
+		f.line("                    obj = dec.finish();")
+		f.line("                } catch (Exception e) {")
+		f.line("                    System.err.println(\"decode error: \" + e);")
+		f.line("                    System.exit(1); return;")
+		f.line("                }")
+		f.line("                StringBuilder sb = new StringBuilder(); Json.to(obj, sb);")
+		f.line("                System.out.write(sb.toString().getBytes(StandardCharsets.UTF_8)); System.out.write('\\n');")
 		f.line("            } else if (mode.equals(\"trydecode\")) {")
 		f.line("                %s obj = new %s();", mt, mt)
 		f.line("                org.sofabuffers.sofab.DecodeStatus st = %s.tryDecode(input, obj);", mt)

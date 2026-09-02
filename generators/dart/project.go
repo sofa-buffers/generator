@@ -65,7 +65,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// a rejected (INVALID/INCOMPLETE/limitExceeded) decode from a clean one.
 	f.line("void main(List<String> args) {")
 	f.line("  if (args.isEmpty) {")
-	f.line("    stderr.writeln('usage: harness <encode|decode|trydecode|recode|bench> [Message|workload]');")
+	f.line("    stderr.writeln('usage: harness <encode|decode|streamdecode|trydecode|recode|bench> [Message|workload]');")
 	f.line("    exit(2);")
 	f.line("  }")
 	f.line("  final mode = args[0];")
@@ -86,6 +86,36 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("        final st = %s.tryDecode(input, obj);", mt)
 		f.line("        if (st != sofab.DecodeStatus.complete) {")
 		f.line("          stderr.writeln('decode failed: ${st.name}');")
+		f.line("          exit(1);")
+		f.line("        }")
+		f.line("        stdout.writeln(jsonEncode(_toJson%s(obj)));", mt)
+		// The same bytes through the incremental decoder (PLAN §5.6), fed ONE BYTE
+		// per feed. A whole-buffer feed would exercise the decoder's signature
+		// without ever making it suspend and resume, which is the half that can
+		// actually be wrong; drip-feeding turns every byte offset -- inside a
+		// skipped payload included -- into a boundary the parse state has to
+		// survive. The JSON printed here is compared against `decode`'s by the
+		// conformance runner.
+		f.line("      } else if (mode == 'streamdecode') {")
+		f.line("        final out = %s();", mt)
+		f.line("        final dec = %s.decoder(out);", mt)
+		// An `incomplete` mid-stream is the normal verdict for a chunk that ended
+		// mid-field: it says the BYTES ended there, not that the message is bad.
+		// Only finish() decides on the message as a whole; it returns null when the
+		// stream ended half-read or was rejected.
+		f.line("        final one = <int>[0];")
+		f.line("        for (final b in input) {")
+		f.line("          one[0] = b;")
+		f.line("          final st = dec.feed(one);")
+		f.line("          if (st != sofab.DecodeStatus.complete &&")
+		f.line("              st != sofab.DecodeStatus.incomplete) {")
+		f.line("            stderr.writeln('decode failed: ${st.name}');")
+		f.line("            exit(1);")
+		f.line("          }")
+		f.line("        }")
+		f.line("        final obj = dec.finish();")
+		f.line("        if (obj == null) {")
+		f.line("          stderr.writeln('decode failed: ${dec.status.name}');")
 		f.line("          exit(1);")
 		f.line("        }")
 		f.line("        stdout.writeln(jsonEncode(_toJson%s(obj)));", mt)
