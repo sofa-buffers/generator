@@ -903,6 +903,36 @@ sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/skipped_blob_alloc.rs"
 ( cd "$WORK/skipalloc" && cargo run -q ) || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
 echo "==> [rs] skipped-blob allocation OK"
 
+# CORELIB_PLAN §7.2 item 8 -- the shared file's `sequence_growth` block
+# (generator#449). Not run in corelib-rs, and not out of oversight: under the
+# ARCHITECTURE §8 rule only PayloadAcc moved into that library (corelib-rs#87);
+# the wrapper array's placement and its growth stayed GENERATED, because there
+# was no uniform shape to hoist. corelib-rs owns no wrapper-array container at
+# all, so a test placed there would have to bring its own destination and would
+# then be asserting its own logic. The behaviour lives in the code this repo
+# emits, so the obligation does too.
+#
+# The cases are a delivery sequence of element ids, not a byte string: a wrapper
+# array carries no count, its length is highest present id + 1, and two ports
+# that grow differently emit IDENTICAL bytes -- so no vector can reach this.
+#
+# Only the `rs` leg runs it. `rs-static` and both no_std legs are capacity-bound
+# by construction and never grow, which is exactly what `requires:
+# ["dynamic_arrays"]` excludes; an unsatisfied tag means SKIP, never reject.
+echo "==> [rs] sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
+printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
+python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust \
+    --in "$WORK/growth.yaml" --out "$WORK/growth" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/growth/Cargo.toml"
+crate_bin_name "$WORK/growth"
+( cd "$WORK/growth" && cargo build -q )
+# --cap must be the max_dyn_array_count cfg-lim.yaml generated with (4): the
+# cases' indices are offsets onto it, so a mismatch silently moves the boundary.
+python3 "$ROOT/tests/conformance/lib/check_growth.py" \
+    "$STD/assets/test_vectors.json" "Rust" --cap 4 \
+    --cwd "$WORK/growth" -- cargo run -q --
+
 # corelib-rs-no-std is the genuinely #![no_std] profile. Every field is
 # schema-bounded there whatever storage it uses, and allow_dynamic selects that
 # storage: alloc::String/alloc::Vec instead of heapless containers, for a target

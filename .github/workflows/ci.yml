@@ -51,7 +51,10 @@ jobs:
   # the file's sparse column, and the generated decoder against its dense one --
   # the latter through a message declaring only the vectors' anchors, so every
   # other field must be skipped as an unknown id or a MESSAGE_SPEC S7.3
-  # wire-type mismatch (generator#444, ARCHITECTURE S12 item 1).
+  # wire-type mismatch (generator#444, ARCHITECTURE S12 item 1). Backends whose
+  # containers grow additionally replay the file's `sequence_growth` block, whose
+  # element-index check is generated code no corelib test can reach
+  # (generator#449, CORELIB_PLAN S7.2 item 8).
   #
   # Language milestone: C (corelib-c-cpp). Generates code, builds it against the
   # real corelib with gcc, round-trips through the harness, and checks byte-exact

@@ -2738,6 +2738,14 @@ shapes are conformant:
   `id + 1` rather than exactly `id + 1`, so a sparse array does not cost O(n²)
   copies.
 
+  This shape is the one the shared file's `sequence_growth` block measures, and
+  since generator#449 every backend whose containers actually grow runs it
+  (§12 item 1, *Growth*). It is worth being precise about what that reaches: the
+  index check is **generated** code in all of them, so no corelib test can make
+  it fail, and until then no tier did. What it still does not reach is the
+  *geometry* — "to at least `id + 1`" is invisible to a length-and-outcome
+  assertion, and stays a per-language allocation-counting concern.
+
 Growth belongs to **B alone**. Its earlier appearance in the A shape (#96/#98 —
 Java's lazy array growth, merged 2026-07-08) was a heap-exhaustion mitigation
 written the day *before* the config caps of #102 existed, and the caps replaced the
@@ -3512,10 +3520,11 @@ target renders the same metadata as HTML page content
 
 A reimplementation is **conformant** when it reproduces these gates:
 
-1. **Shared vectors, both directions** — each corelib ships
-   `assets/test_vectors.json` (currently 131 vectors, authored by
-   `corelib-c-cpp`). It carries two byte columns, and a conformant generator is
-   checked against both.
+1. **The shared conformance file** — each corelib ships
+   `assets/test_vectors.json` (authored by `corelib-c-cpp`). It has three
+   top-level blocks: 131 positive `vectors` with two byte columns, the negative
+   `invalid_utf8` cases, and `sequence_growth`. A conformant generator is checked
+   against the vectors in **both** byte directions and against the growth block.
 
    *Encode* (`tests/conformance/<lang>/check_vectors.py`): the generated
    encoder's output must be byte-identical to the file's **`serialized_sparse`**
@@ -3553,6 +3562,37 @@ A reimplementation is **conformant** when it reproduces these gates:
    `check_vectors.py` carries a `checked == 0` guard, and the upstream C harness
    stopped silently truncating an over-long `skip_ids`: a driver that quietly
    narrows what it selects passes while testing less than it claims.
+
+   *Growth* (`tests/conformance/lib/check_growth.py`): the third block,
+   `sequence_growth` — CORELIB_PLAN §7.2 item 8, the shape-B allocation of §9.5.
+   A wrapper array carries no element count, so its length is *highest present id
+   + 1* and the container **grows** as elements arrive; two ports that grow
+   differently emit **identical bytes**, which is why these cases are a delivery
+   sequence of element ids rather than a byte string and why no vector can reach
+   them. The driver builds the message from `deliver`, decodes it, and asserts
+   only what the block says to assert — the **outcome** and the **container
+   length**, no allocator instrumentation, which is what keeps the cases portable
+   across eleven languages.
+
+   It runs **per backend, not only for Rust** (generator#449). Rust is the case
+   that has nowhere else to go: under the §8 rule only `PayloadAcc` moved into
+   `corelib-rs` (corelib-rs#87), so that library owns no wrapper-array container
+   and a test placed there would assert its own logic. But the *element-index
+   check* — "bound the index before the container grows" — is generated code in
+   **every** backend, so no corelib test can make it fail anywhere; this driver
+   is the only place it is reachable.
+
+   Indices are cap-relative (`id_from_cap`, `length_from_cap`) because §6.2.1
+   fixes no family-wide `max_dyn_array_count`, so each leg passes `--cap` matching
+   the number it generated with. Statically bounded profiles — C, C++
+   `corelib: c-cpp` and `cpp-static`, Rust `no_std` and `rs-static` — are
+   capacity-bound by construction, never grow, and are excluded by the block's own
+   `requires: ["dynamic_arrays"]`: an unsatisfied tag means **skip**, never
+   reject, so those legs simply do not call the driver. One expectation is
+   deliberately *not* asserted and said so out loud rather than counted as passed:
+   `max_length` asks how far a container grew **before** a rejection, and a
+   fallible decode returns an error rather than a partial container, so the JSON
+   harness has no surface on which it is observable.
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one
