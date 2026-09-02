@@ -222,30 +222,22 @@ const _dec_Scalars = struct {
         };
     }
 
-    /// Give the string/blob callbacks ONE contiguous payload, whatever the
-    /// feed chunking was. Returns null while the payload is still incomplete.
+    /// Give a string/blob arm ONE contiguous payload, whatever the feed
+    /// chunking was. Returns null while the payload is still incomplete.
     ///
-    /// On the contiguous decode() path a payload always arrives whole and is
-    /// returned as-is: the destination borrows the caller's buffer and nothing
-    /// is copied. That buffer is the one the caller handed to decode(), so the
-    /// borrow is sound for exactly as long as the documented contract says.
+    /// `borrow` is `!own`. On the contiguous decode() path the payload arrives
+    /// whole inside the buffer the caller handed to decode(), which outlives the
+    /// message, so it is handed straight back and nothing is copied. The
+    /// streaming path borrows NOTHING, whether or not the payload arrived whole:
+    /// a payload completing inside the corelib's fixed, REUSED carry buffer is
+    /// indistinguishable in the callback from one in the caller's chunk, and the
+    /// next stitched item overwrites it.
     ///
-    /// The streaming path (`own`) borrows NOTHING, whether or not the payload
-    /// arrived whole. A payload stitched across a chunk boundary is completed
-    /// inside the corelib's fixed, REUSED carry buffer, and the slice handed
-    /// over then points into the decoder itself -- indistinguishable in the
-    /// callback from a slice into the caller's chunk, and overwritten by the
-    /// next stitched item. Borrowing on that path aliased earlier fields and
-    /// elements onto later ones at particular chunk sizes.
-    ///
-    /// A split payload is stitched by sofab.PayloadAcc, which hands it back
-    /// as its own allocation -- a destination KEEPS the slice it is given.
-    fn _reassemble(self: *_dec_Scalars, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {
-        if (offset == 0 and chunk.len >= total) {
-            if (!self.own) return chunk; // contiguous decode: borrow the caller's buffer
-            return self.alloc.dupe(u8, chunk[0..total]) catch { self.inv = true; return null; };
-        }
-        return self.acc.push(self.alloc, total, offset, chunk) catch { self.inv = true; return null; };
+    /// This is the SCHEMA-BOUNDED entry point. A `maxlen` is a validity bound and
+    /// stays the caller's, decided on `total` before this call; a field the
+    /// schema leaves unbounded goes through _takeCapped instead.
+    fn _take(self: *_dec_Scalars, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {
+        return self.acc.take(self.alloc, total, offset, chunk, !self.own) catch { self.inv = true; return null; };
     }
 
     pub fn sequenceBegin(self: *_dec_Scalars, _: sofab.Id) void {

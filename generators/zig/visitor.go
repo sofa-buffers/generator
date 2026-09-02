@@ -379,10 +379,11 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	// streaming payload that happens to arrive whole in one chunk, which is what
 	// keeps the zero-copy borrow the common case rather than the exception.
 	f.line("    acc: sofab.PayloadAcc = .{}, // only a payload split across feed chunks lands here")
-	// Set by decoder(), left false by decode(). See _reassemble: on the streaming
-	// path a delivered slice may live in the corelib's reusable carry buffer
-	// rather than in the caller's chunk, and nothing in the callback tells the
-	// two apart -- so that path owns every payload instead of borrowing.
+	// Set by decoder(), left false by decode(). It is _take's `borrow` argument,
+	// inverted: on the streaming path a delivered slice may live in the corelib's
+	// reusable carry buffer rather than in the caller's chunk, and nothing in the
+	// callback tells the two apart -- so that path owns every payload instead of
+	// borrowing.
 	f.line("    own: bool = false, // copy every payload instead of borrowing (streaming path)")
 	// Sticky malformed-message flag: a fixed native array received more
 	// elements than its schema count (generator#100); decode() then rejects
@@ -1037,26 +1038,49 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind) []string {
 // emitPayloadVisit emits the string or blob callback. The generated decode()
 // feeds the whole buffer at once, so payloads always arrive single-shot
 // (offset 0, whole chunk) and the borrowed chunk IS the value -- zero-copy.
+// The streaming decoder is the case that has to buffer, and only when a payload
+// straddles a feed boundary.
 //
-// With an active max_dyn_string_len / max_dyn_blob_len (generator#102) every
-// schema-unbounded field checks the header-announced total length before the
-// value is taken: the borrow never allocates, but the cap is a policy bound,
-// so an over-limit payload flags `lim` and decode() fails with LimitExceeded.
+// Every arm binds its own payload, and binds it LAST (generator#432): the id has
+// matched, the location is this field's, and the arm's bound -- a schema
+// `maxlen` decided here, a receiver cap handed to the corelib -- has already
+// been applied to the announced `total`. Nothing above the switch touches the
+// bytes, so a payload MESSAGE_SPEC §7.3 walks over costs nothing and a payload
+// CORELIB_PLAN §6.2.1 refuses is never committed.
+//
+// Which bind an arm takes follows the same split as everywhere else in this
+// backend:
+//
+//   - `_take` -- the SCHEMA-bounded entry point. A `maxlen` is a validity bound
+//     (MESSAGE_SPEC §7.1 -> INVALID) and stays generated code's own test, in
+//     front of the call, because the caller owns that verdict.
+//   - `_takeCapped` -- for a field the schema leaves unbounded, carrying
+//     max_dyn_string_len / max_dyn_blob_len (generator#102) as an ARGUMENT. The
+//     corelib compares it at the announced length and refuses with
+//     error.LimitExceeded before a byte is copied or appended, which is the
+//     enforcement point §6.2.1 names; generated code emits no length test of its
+//     own, so the rule has one implementation.
+//
+// The length-word latch in fixlenBegin is not that second implementation: it
+// owns the VERDICT's timing (a message truncated right after an over-cap header
+// is LimitExceeded, not INCOMPLETE -- #438), while the bind owns the bytes.
 func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb string) {
 	active, capName := g.limits.stringHas, "max_dyn_string_len"
 	if kind == ir.KindBlob {
 		active, capName = g.limits.blobHas, "max_dyn_blob_len"
 	}
-	// Collect arms first: the total-length parameter is named only when some
-	// limit guard reads it (Zig rejects unused parameters).
+	// The two ways an arm binds its payload. Both are emitted INSIDE the arm,
+	// after the id has matched and after the arm's own bound has been decided
+	// (generator#432); `_take` is the schema-bounded entry point and
+	// `_takeCapped` carries the receiver cap into the corelib comparison.
+	bindTake := "const chunk = self._take(total, offset, _chunk) orelse return;"
+	bindCapped := fmt.Sprintf("const chunk = self._takeCapped(total, offset, _chunk, %s) orelse return;", capName)
 	type frameArms struct {
 		fr   frame
 		arms []string // fkStruct: "id => body" lines
-		ids  []int64  // fkStruct: the ids those arms declare, for the destination gate
 		body string   // fkSeqArr: single body
 	}
 	var all []frameArms
-	totalUsed := false
 	// Strict UTF-8 (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4): a `string` payload is
 	// UTF-8. Zig's string is a borrowed byte slice (byte-container), so the corelib
 	// exposes `utf8Valid(bytes)` and generated code emits an UNCONDITIONAL call to
@@ -1087,30 +1111,26 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 			if capped {
 				set = fmt.Sprintf("sofab.arrays.setElemCapped([]const u8, self.alloc, &(%s), id, \"\", chunk, max_dyn_array_count) catch { self.lim = true; }", fr.path)
 			}
-			// stmt is the placement as a single statement (trailing ;), for use
-			// inside an { ... } block; body is the raw arm expression. For a string
-			// element the materialization is UTF-8-validated (mat); blob is verbatim.
-			stmt := mat(set + ";")
-			body := set
-			if kind == ir.KindString {
-				body = stmt
-			} else if capped {
-				// `x catch { ... }` is a statement, not an arm expression: brace it.
-				body = "{ " + stmt + " }"
-			}
+			// The element's payload is bound HERE, inside its own arm. An
+			// unbounded element takes the capped entry point, so the receiver cap
+			// is compared by the corelib at the announced length and nothing is
+			// buffered for a payload it refuses -- generated code adds no length
+			// test of its own (CORELIB_PLAN §6.2.1, generator#432).
+			bind := bindTake
 			if active && fr.elemDynLen {
-				totalUsed = true
-				body = fmt.Sprintf("if (total > %s) { self.lim = true; } else { %s }", capName, stmt)
-				stmt = body
+				bind = bindCapped
 			}
+			// For a string element the materialization is UTF-8-validated (mat);
+			// blob is stored verbatim.
+			body := "{ " + bind + " " + mat(set+";") + " }"
 			// Bounded element (schema maxlen): a wire byte length above the maxlen
-			// is malformed input, rejected as INVALID before the value is stored,
-			// never truncated (MESSAGE_SPEC §7.1). Mutually exclusive with the #102
-			// limit guard above, which only fires on an unbounded element.
+			// is malformed input, rejected as INVALID before the payload is taken,
+			// never truncated (MESSAGE_SPEC §7.1). A validity bound is generated
+			// code's to decide, which is why it sits in front of the uncapped
+			// `_take` rather than riding a capped call. Mutually exclusive with the
+			// cap above, which only governs an unbounded element.
 			if fr.emax >= 0 {
-				totalUsed = true
-				body = fmt.Sprintf("if (total > %d) { self.inv = true; } else { %s }", fr.emax, stmt)
-				stmt = body
+				body = fmt.Sprintf("if (total > %d) { self.inv = true; } else %s", fr.emax, body)
 			}
 			// The schema `count`: an element id at or past it is INVALID
 			// (MESSAGE_SPEC §7.1), decided here, before setElem grows the slice —
@@ -1118,7 +1138,7 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 			// over-index heap amplification (see overIndexCond). The receiver-cap
 			// case took the setElemCapped route above and emits nothing here.
 			if idOK && !idLim {
-				body = fmt.Sprintf("if (%s) { self.inv = true; } else { %s }", idCond, stmt)
+				body = fmt.Sprintf("if (%s) { self.inv = true; } else %s", idCond, body)
 			}
 			all = append(all, frameArms{fr: fr, body: body})
 		}
@@ -1130,67 +1150,44 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 			if fld.Kind != kind {
 				continue
 			}
-			acc := fr.path + "." + zigIdent(fld.Name)
-			store := acc + " = chunk;"
+			store := fr.path + "." + zigIdent(fld.Name) + " = chunk;"
 			switch {
 			case fld.HasMaxlen:
 				// Bounded scalar string/blob: a wire byte length above the schema
-				// maxlen is malformed input, rejected as INVALID before the value
-				// is stored, never truncated (MESSAGE_SPEC §7.1). A string is then
+				// maxlen is malformed input, rejected as INVALID before the payload
+				// is taken, never truncated (MESSAGE_SPEC §7.1). A validity bound is
+				// generated code's own, decided on the announced `total`, and only a
+				// field that clears it reaches the uncapped `_take`. A string is then
 				// UTF-8-validated at the store (mat); blob is stored verbatim.
-				totalUsed = true
-				fa.ids = append(fa.ids, int64(fld.ID))
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %d) { self.inv = true; } else { %s },", fld.ID, fld.Maxlen, mat(store)))
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %d) { self.inv = true; } else { %s %s },", fld.ID, fld.Maxlen, bindTake, mat(store)))
 			case active:
-				// Unbounded scalar: keep the configured #102 decode-limit behavior.
-				totalUsed = true
-				fa.ids = append(fa.ids, int64(fld.ID))
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %s) { self.lim = true; } else { %s },", fld.ID, capName, mat(store)))
+				// Unbounded scalar under a configured cap (#102): the number rides
+				// the corelib call, which compares it at the announced length and
+				// buffers nothing for a payload it refuses. One implementation of
+				// the rule, and it sits at the length header rather than after a
+				// materializing call (CORELIB_PLAN §6.2.1, generator#432).
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => { %s %s },", fld.ID, bindCapped, mat(store)))
 			default:
-				if kind == ir.KindString {
-					fa.ids = append(fa.ids, int64(fld.ID))
-					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, mat(store)))
-				} else {
-					fa.ids = append(fa.ids, int64(fld.ID))
-					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = chunk,", fld.ID, acc))
-				}
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => { %s %s },", fld.ID, bindTake, mat(store)))
 			}
 		}
 		if len(fa.arms) > 0 {
 			all = append(all, fa)
 		}
 	}
-	// `total` is always bound now: the reassembly preamble needs it to tell a
-	// whole payload from the first piece of a split one, whether or not any arm
-	// compares it against a maxlen.
-	_ = totalUsed
 	f.blank()
 	f.line("    pub fn %s(self: *_dec_%s, id: sofab.Id, total: usize, offset: usize, _chunk: []const u8) void {", cb, name)
 	// The corelib delivers a payload in as many pieces as the feed chunks split
-	// it into. Rebind `chunk` to the WHOLE payload so every arm below sees one
-	// contiguous slice and none of them has to know about chunking.
-	// §7.3 + §6.6: resolve the destination FIRST and leave before a byte is
-	// buffered. _reassemble copies the whole payload, sized 1:1 from the wire, so
-	// running it ahead of the id switch copies a payload an undeclared id or a
-	// wire-type contradiction is about to drop — measured at exactly the declared
-	// length (1 MiB claimed, 1 MiB copied, then discarded). The other backends
-	// already gate first; zig was the last one buffering ahead of the decision.
-	f.line("        switch (self.cur) {")
-	for _, fa := range all {
-		if fa.body != "" {
-			f.line("            .%s => {},", fa.fr.loc)
-			continue
-		}
-		f.line("            .%s => switch (id) {", fa.fr.loc)
-		for _, id := range fa.ids {
-			f.line("                %d => {},", id)
-		}
-		f.line("                else => return,")
-		f.line("            },")
-	}
-	f.line("            else => return,")
-	f.line("        }")
-	f.line("        const chunk = self._reassemble(total, offset, _chunk) orelse return;")
+	// it into, and `_take` / `_takeCapped` hand the arm ONE contiguous slice so
+	// none of the stores below has to know about chunking.
+	//
+	// §7.3 + §6.6 + §6.2.1: nothing is buffered above this switch. The bind sits
+	// inside the terminal arm, after the id has matched and after the arm's own
+	// bound has been decided, so a payload at an undeclared id or a wire-type
+	// contradiction is walked rather than copied, and an over-cap payload is
+	// refused at its announced length instead of after a copy sized 1:1 from the
+	// wire. Reassembling above the switch cost a megabyte on both -- measured,
+	// generator#432.
 	f.line("        switch (self.cur) {")
 	for _, fa := range all {
 		if fa.body != "" {
@@ -1503,46 +1500,52 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 			all = append(all, frameArms{fr: fr, body: b.String()})
 		}
 	}
-	// The string/blob reassembly helper. Emitted next to the callbacks that use
-	// it so the whole chunk-boundary story sits in one place.
-	f.blank()
-	f.line("    /// Give the string/blob callbacks ONE contiguous payload, whatever the")
-	f.line("    /// feed chunking was. Returns null while the payload is still incomplete.")
-	f.line("    ///")
-	f.line("    /// On the contiguous decode() path a payload always arrives whole and is")
-	f.line("    /// returned as-is: the destination borrows the caller's buffer and nothing")
-	f.line("    /// is copied. That buffer is the one the caller handed to decode(), so the")
-	f.line("    /// borrow is sound for exactly as long as the documented contract says.")
-	f.line("    ///")
-	f.line("    /// The streaming path (`own`) borrows NOTHING, whether or not the payload")
-	f.line("    /// arrived whole. A payload stitched across a chunk boundary is completed")
-	f.line("    /// inside the corelib's fixed, REUSED carry buffer, and the slice handed")
-	f.line("    /// over then points into the decoder itself -- indistinguishable in the")
-	f.line("    /// callback from a slice into the caller's chunk, and overwritten by the")
-	f.line("    /// next stitched item. Borrowing on that path aliased earlier fields and")
-	f.line("    /// elements onto later ones at particular chunk sizes.")
-	f.line("    ///")
-	f.line("    /// A split payload is stitched by sofab.PayloadAcc, which hands it back")
-	f.line("    /// as its own allocation -- a destination KEEPS the slice it is given.")
-	f.line("    fn _reassemble(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
-	f.line("        if (offset == 0 and chunk.len >= total) {")
-	f.line("            if (!self.own) return chunk; // contiguous decode: borrow the caller's buffer")
-	f.line("            return self.alloc.dupe(u8, chunk[0..total]) catch { self.inv = true; return null; };")
-	f.line("        }")
-	// generator#295: the branch above used to borrow on BOTH paths. corelib-zig
-	// stitches an item that straddles a feed boundary into a fixed `carry` buffer
-	// and parses out of it, so a payload completing inside that stitch is handed
-	// over as a slice into the IStream -- which the next stitched item overwrites.
-	// Measured with pointer instrumentation: at chunk size 4 two of four elements
-	// were delivered from the carry buffer at the SAME address. Copying on the
-	// streaming path is what makes the destination independent of both the carry
-	// buffer and the caller's chunk lifetime.
+	// The string/blob payload binds. Emitted next to the callbacks that use them
+	// so the whole chunk-boundary story sits in one place.
 	//
-	// The split path below owns its result for the same reason, plus the one
-	// PayloadAcc documents (generator#293 / Crucible F-0058): its scratch is
-	// reused by every following payload.
-	f.line("        return self.acc.push(self.alloc, total, offset, chunk) catch { self.inv = true; return null; };")
+	// Both are thin wrappers over sofab.PayloadAcc: the borrow/copy/stitch
+	// decision and the cap comparison are the corelib's (ARCHITECTURE §8 -- a
+	// helper every backend would otherwise re-emit belongs there), and what stays
+	// here is only the mapping from its errors onto this decoder's sticky flags.
+	f.blank()
+	f.line("    /// Give a string/blob arm ONE contiguous payload, whatever the feed")
+	f.line("    /// chunking was. Returns null while the payload is still incomplete.")
+	f.line("    ///")
+	f.line("    /// `borrow` is `!own`. On the contiguous decode() path the payload arrives")
+	f.line("    /// whole inside the buffer the caller handed to decode(), which outlives the")
+	f.line("    /// message, so it is handed straight back and nothing is copied. The")
+	f.line("    /// streaming path borrows NOTHING, whether or not the payload arrived whole:")
+	f.line("    /// a payload completing inside the corelib's fixed, REUSED carry buffer is")
+	f.line("    /// indistinguishable in the callback from one in the caller's chunk, and the")
+	f.line("    /// next stitched item overwrites it.")
+	f.line("    ///")
+	f.line("    /// This is the SCHEMA-BOUNDED entry point. A `maxlen` is a validity bound and")
+	f.line("    /// stays the caller's, decided on `total` before this call; a field the")
+	f.line("    /// schema leaves unbounded goes through _takeCapped instead.")
+	f.line("    fn _take(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
+	f.line("        return self.acc.take(self.alloc, total, offset, chunk, !self.own) catch { self.inv = true; return null; };")
 	f.line("    }")
+	if g.msgLim {
+		f.blank()
+		f.line("    /// _take for a field the schema leaves unbounded, carrying this build's")
+		f.line("    /// receiver cap. The comparison is against the ANNOUNCED length and runs")
+		f.line("    /// before anything is taken -- ahead of the copy, ahead of the")
+		f.line("    /// accumulator's append -- so an over-cap payload costs zero bytes, on")
+		f.line("    /// every chunk of it rather than only the first.")
+		f.line("    ///")
+		f.line("    /// The two failures stay apart: LimitExceeded is the receiver refusing a")
+		f.line("    /// well-formed length, a policy verdict; OutOfMemory is the allocator")
+		f.line("    /// having no room for one that was accepted.")
+		f.line("    fn _takeCapped(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8, cap: usize) ?[]const u8 {", name)
+		f.line("        return self.acc.takeCapped(self.alloc, total, offset, chunk, !self.own, cap) catch |e| {")
+		f.line("            switch (e) {")
+		f.line("                error.LimitExceeded => self.lim = true,")
+		f.line("                error.OutOfMemory => self.inv = true,")
+		f.line("            }")
+		f.line("            return null;")
+		f.line("        };")
+		f.line("    }")
+	}
 
 	idParam := "_"
 	if idUsed {

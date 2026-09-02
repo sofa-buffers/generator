@@ -2431,6 +2431,19 @@ whole payload is in hand, so a chunked sender could stream an arbitrarily long
 over-cap payload into the accumulator and only the last byte triggered the
 rejection. It now rides `fixlenBegin`, the hook the schema `maxlen` already used.
 
+The reassembly itself moved with it (generator#432). The helper was generated code,
+hand-rolled per message, and it ran *above* the callback's location/id switch — so a
+payload §7.3 walks over was copied before anything decided nobody wanted it, and the
+cap, when it was still spelled out in the arm, could only fire after the bytes it
+existed to refuse were committed. Generated `string`/`blob` now bind inside the
+terminal arm, through corelib-zig's `PayloadAcc.take` (schema-bounded) and
+`.takeCapped` (cap as an argument, compared at the announced length before a byte is
+copied or appended). That is the same two-layer shape Java, Kotlin and C# already
+have (§9.5, the receiver-cap table): the length word owns the **verdict** and its
+timing, the accumulator entry point owns the **bytes**. Measured on a 1 MiB payload
+at 64 KiB feeds, with the length-word latch removed as a negative control:
+3,015,016 bytes before, 0 after, verdicts unchanged.
+
 **A skipped field is never capped, and §7.3 has TWO skip shapes.** Only one of them
 is an unknown id. A decoder-wide cap could honour neither — it saw a count header,
 not a schema — so an over-cap array at an id the receiver never reads failed the
@@ -2531,6 +2544,16 @@ call is still bounded. Rust std needed no corelib change — its cap was already
 generated — only the arm moved to `fixlen_begin`, where the schema `maxlen` arm was
 already sitting.
 
+**Zig now has both points too, and got there from the other side.** #438 put its cap
+in the generated `fixlenBegin` for the truncated-header reason above, and left the
+payload arm's `total > max_dyn_*` test standing as a fallback. That fallback was the
+wrong shape twice over: it was a second *implementation* of the rule rather than a
+second call to one, and it sat behind the reassembly, so it could only fire once the
+bytes were committed. generator#432 replaced it with `PayloadAcc.takeCapped`, the
+corelib bind the payload now passes through, which compares the announced `total`
+before it copies or appends. Same conclusion as Java/Kotlin/C#, reached by removing
+a generated test rather than by adding a header one.
+
 **And the gate that makes the skip structural has to cover every payload kind.**
 The visitor surfaces (Java, Kotlin, C#, Rust) put a **destination gate** at the top
 of the payload callbacks: resolve `(scope, id)` first and `return` when nothing
@@ -2583,7 +2606,7 @@ never a number the corelib knows:
 | target | compared in the corelib, on this existing call | compared in generated code |
 |---|---|---|
 | **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` (element id) / `rowDynCap` (a native row's element count) on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
-| **Zig** | array counts and wrapper element indices: `arrays.allocNCapped` / `growCapped` / `setElemCapped` | string and blob lengths |
+| **Zig** | array counts and wrapper element indices: `arrays.allocNCapped` / `growCapped` / `setElemCapped`; and string and blob lengths, in `PayloadAcc.takeCapped` — the bind the payload passes through, compared at the announced length before a byte is copied or appended (generator#432) | string and blob lengths a second time, but only as the length-word *verdict* in the generated `fixlenBegin` — what keeps a truncated over-cap header LimitExceeded rather than INCOMPLETE (#438); no generated arithmetic is left in the payload arm |
 | **Go**, **Dart** | wrapper arrays — the element index, the element length and a matrix **row**'s own element count — as the collector's receiver-cap constructor arguments (`sofab.Caps`; `rcap`/`relemMax`/`rowCap`), beside the `sofab.Bounds` carrying the schema's | scalar string/blob lengths and native array counts, in the generated `FixlenBegin`/`ArrayBegin` (`onFixlenHeader`/`onArrayBegin`) — the accumulator is one callback too late, above |
 | **Java** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus a wrapper **row**'s element index, on the `Seq.reserveRow*` call that places the row — §9.5.3 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
 | **Kotlin** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus a wrapper **row**'s element index — a native matrix row and an array-of-arrays row alike — on the `Seq.reserveRow*` / `Seq.reserveRowList` call that reserves the row before the outer list grows — §9.5.4 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
