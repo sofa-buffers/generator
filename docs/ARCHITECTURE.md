@@ -2435,8 +2435,11 @@ rejection. It now rides `fixlenBegin`, the hook the schema `maxlen` already used
 is an unknown id. A decoder-wide cap could honour neither — it saw a count header,
 not a schema — so an over-cap array at an id the receiver never reads failed the
 decode; that was generator#410. Both shapes are now pinned end-to-end in the `go`,
-`python` and `dart` suites: an over-cap array at an **undeclared** id, and the same
-array at a **declared** id whose wire kind contradicts the declaration. One level
+`python`, `dart`, `rust`, `java`, `typescript`, `kotlin`, `csharp`, `cpp` and `zig`
+suites — every target that carries a cap except `c`, which rejects unbounded fields
+at generate time and so has none to mis-apply: an over-cap array at an **undeclared**
+id, and the same array at a **declared** id whose wire kind contradicts the
+declaration. One level
 down, where the comparison is the collector's rather than generated code's, a third
 case pins the same rule for a wrapper element whose fixlen subtype contradicts the
 declared element type while sitting at an index above `max_dyn_array_count`. Each

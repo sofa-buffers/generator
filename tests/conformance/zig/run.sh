@@ -481,6 +481,45 @@ fi
 "$WORK/nolim/zig-out/bin/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
 
+# CORELIB_PLAN 6.2.1, "a skipped field is never capped": a limit bounds an
+# ALLOCATION, and a field MESSAGE_SPEC 7.3 skips is walked, not materialised, so
+# no cap may reach it. A decode that steps over an over-cap field it was never
+# going to read stays COMPLETE (generator#410).
+#
+# 7.3 skips two shapes and they fail INDEPENDENTLY. The wrapper-array section
+# below pins one of them (an array header at a wrapper-declared id); neither is
+# pinned on the NATIVE array path, which is where the count cap lives:
+#
+#   04 05 ...  id 0 IS declared, but as array<u64> -- UNSIGNED. A SIGNED array
+#              header (wire type 4) there was never this field's value.
+#   4b 05 ...  id 9, an id this message does not declare at all.
+#
+# Both carry a count of 5, one over max_dyn_array_count: 4, and both must decode.
+# What keeps them decoding is ordering: the emitted arrayBegin resolves the
+# destination -- scope, id, then kind -- before the cap is consulted, so a header
+# that resolves to nothing is skipped uncapped. Hoist the cap in front and both
+# rows answer LimitExceeded while every assertion above still passes, because the
+# cap is still there and still fires on the control.
+echo "==> a 7.3-skipped array is never capped (CORELIB_PLAN 6.2.1, generator#410)"
+printf '\004\005\000\000\000\000\000' > "$WORK/skipmistyped.bin"
+printf '\113\005\001\001\001\001\001' > "$WORK/skipunknown.bin"
+for v in skipmistyped skipunknown; do
+    OUT=$("$WORK/lim/zig-out/bin/harness" decode dyn < "$WORK/$v.bin" 2>"$WORK/$v.err") || {
+        echo "FAIL: $v -- an over-cap SKIPPED array must decode; got: $(cat "$WORK/$v.err")"; exit 1; }
+    # ...and skipped means untouched: `a` keeps its default rather than being
+    # sized from the skipped header's count (7.3/7.4).
+    echo "$OUT" | grep -q '"a":\[\]' || { echo "FAIL: $v -- a skipped field must bind nothing; got: $OUT"; exit 1; }
+done
+# The control that keeps the pair honest: the SAME count at the SAME id with the
+# MATCHING kind is this field's own count, and is still refused with the POLICY
+# category (6.3). A build that had simply lost the cap would pass both rows above.
+if "$WORK/lim/zig-out/bin/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/ctlcap.err"; then
+    echo "FAIL: the matching-kind over-cap control must still be refused"; exit 1
+fi
+grep -q "LimitExceeded" "$WORK/ctlcap.err" \
+    || { echo "FAIL: the control must stay LimitExceeded, not malformed input; got: $(cat "$WORK/ctlcap.err")"; exit 1; }
+echo "==> skipped-field cap exclusivity OK"
+
 # A string/blob receiver cap is decided at the fixlen LENGTH WORD, not at payload
 # completion (CORELIB_PLAN §6.2.1 "Enforcement point"). The cap used to sit only
 # in the payload callback, behind the reassembly helper that returns nothing

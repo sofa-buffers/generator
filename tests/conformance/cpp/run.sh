@@ -655,6 +655,48 @@ echo "$DEC" | grep -q '"s":""' || {
     echo "FAIL: [cpp] the skipped field must bind nothing; got: $DEC"; exit 1; }
 echo "==> [cpp] string/blob caps OK (over-cap rejected, at-cap intact, mis-typed skipped)"
 
+# The NATIVE-ARRAY half of the same clause, on the same project (`a`, id 2,
+# array<u64>, max_dyn_array_count: 4). The string/blob rows above pin one §7.3
+# skip shape -- a contradicting fixlen SUBTYPE -- and neither of the two the
+# array path can hit: a contradicting array KIND, and an id this message does not
+# declare at all. They fail independently (CORELIB_PLAN §6.2.1, generator#410).
+#
+# Header `id << 3 | wire`, wire 3 = ARRAY_UNSIGNED, 4 = ARRAY_SIGNED:
+#
+#   14 05 …  a SIGNED array at the UNSIGNED-declared id 2
+#   4b 05 …  an unsigned array at id 9, declared nowhere
+#   13 05 …  the control: the matching kind at id 2, count 5 > cap 4
+#   13 04 …  the control at the cap, count 4
+#
+# Both skip rows are over the cap, and both must stay Complete: a limit bounds an
+# allocation, and a skipped field allocates nothing. What keeps them there is the
+# same ordering #420 established for the payload reads -- the cap travels INTO
+# readArrayCapped, behind the tag test, instead of guarding the call. A guard
+# hoisted back in front reads identically in a diff and still passes the two
+# controls; only these rows tell the two apart.
+echo "==> [cpp] a §7.3-skipped array is never capped (§6.2.1, generator#410)"
+printf '\024\005\000\000\000\000\000' > "$WORK/skipmistyped.bin"
+printf '\113\005\001\001\001\001\001' > "$WORK/skipunknown.bin"
+printf '\023\005\001\002\003\004\005' > "$WORK/arrover420.bin"
+printf '\023\004\001\002\003\004'     > "$WORK/arrin420.bin"
+for v in skipmistyped skipunknown; do
+    ST=$("$WORK/lim420/harness/harness" status dyn < "$WORK/$v.bin" | head -n1)
+    [ "$ST" = "COMPLETE" ] \
+        || { echo "FAIL: [cpp] $v -- an over-cap SKIPPED array must stay COMPLETE, got $ST"; exit 1; }
+    # ...and skipped means untouched: `a` keeps its default rather than being
+    # sized from the skipped header's count (§7.3/§7.4).
+    DEC=$("$WORK/lim420/harness/harness" decode dyn < "$WORK/$v.bin")
+    echo "$DEC" | grep -q '"a":\[\]' \
+        || { echo "FAIL: [cpp] $v -- a skipped field must bind nothing; got: $DEC"; exit 1; }
+done
+ST=$("$WORK/lim420/harness/harness" status dyn < "$WORK/arrover420.bin" | head -n1)
+[ "$ST" = "LIMIT_EXCEEDED" ] \
+    || { echo "FAIL: [cpp] the matching-kind over-cap control must stay LIMIT_EXCEEDED, got $ST"; exit 1; }
+ST=$("$WORK/lim420/harness/harness" status dyn < "$WORK/arrin420.bin" | head -n1)
+[ "$ST" = "COMPLETE" ] \
+    || { echo "FAIL: [cpp] a count at the cap must decode, got $ST"; exit 1; }
+echo "==> [cpp] array cap exclusivity OK (mis-typed kind and unknown id both skipped)"
+
 # The WRAPPER-array half (generator#402 item 3, CORELIB_PLAN §6.2.1), and the
 # only measurement that settles it: a nine-byte message must not be able to
 # allocate.

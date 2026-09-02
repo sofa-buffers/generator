@@ -1,4 +1,0 @@
-# Temporary pin: this branch's cpp backend states sofab::MessageSeq's new
-# rowCap/rowDynCap, which corelib-cpp main does not have yet. Delete this file
-# in the same PR that follows sofa-buffers/corelib-cpp#131 merging to main.
-SOFAB_CORELIB_CPP_REF=fix/skipped-child-span-and-nested-row-bounds

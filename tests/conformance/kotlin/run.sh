@@ -362,6 +362,48 @@ grep -q "LIMIT_EXCEEDED" "$WORK/limerr.txt" || { echo "FAIL: rejection must carr
 $HL decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count 4 at the limit must decode"; exit 1; }
 $HN decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must decode 5 elements"; exit 1; }
 
+# CORELIB_PLAN §6.2.1, "a skipped field is never capped": a limit bounds an
+# ALLOCATION, and a field MESSAGE_SPEC §7.3 skips is walked, not materialised, so
+# no cap may reach it. A decode that steps over an over-cap field it was never
+# going to read stays COMPLETE (generator#410).
+#
+# §7.3 skips two shapes and they fail independently, so both run:
+#
+#   04 05 …  id 0 IS declared, but as array<u64> -- UNSIGNED. A SIGNED array
+#            header (wire type 4) there was never this field's value.
+#   4b 05 …  id 9, an id this message does not declare at all.
+#
+# Both carry a count of 5, one over max_dyn_array_count: 4. What keeps them
+# COMPLETE is ordering: the emitted arrayBegin arms the skip counter FIRST, and
+# the cap sits inside `when (cur) { <idx> -> if (kind == ArrayKind.Unsigned) { … } }`
+# -- behind the id dispatch and behind the kind test. Hoist it out of the `when`,
+# or widen the arm, and both rows answer LIMIT_EXCEEDED while every assertion
+# above still passes, because the cap is still there and still fires on the
+# control. tryDecode is what reads the CATEGORY (§6.3) rather than an exit status.
+echo "==> a §7.3-skipped field is never capped (CORELIB_PLAN §6.2.1, generator#410)"
+printf '\004\005\000\000\000\000\000' > "$WORK/skipmistyped.bin"
+printf '\113\005\001\001\001\001\001' > "$WORK/skipunknown.bin"
+for v in skipmistyped skipunknown; do
+    ST=$($HL trydecode dyn < "$WORK/$v.bin" 2>"$WORK/$v.err" | head -n1) || {
+        echo "FAIL: $v -- an over-cap SKIPPED array must not be rejected; got:"; cat "$WORK/$v.err"; exit 1; }
+    [ "$ST" = "COMPLETE" ] || { echo "FAIL: $v -> $ST (want COMPLETE)"; exit 1; }
+    # ...and skipped means untouched: `a` must keep its default, not be resized
+    # from the skipped header's count (§7.3, §7.4).
+    OUT=$($HL decode dyn < "$WORK/$v.bin")
+    echo "$OUT" | grep -q '"a":\[\]' || { echo "FAIL: $v -- a skipped field must bind nothing; got: $OUT"; exit 1; }
+done
+# The control that keeps the pair honest: the SAME count at the SAME id with the
+# MATCHING kind is this field's own count and is still the policy category. A
+# backend that simply stopped capping would pass both rows above. The cap is
+# raised by the generated visitor, which tryDecode does not catch, so the
+# CATEGORY is read off the exception rather than off a status word.
+if $HL trydecode dyn < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/ctlcap.err"; then
+    echo "FAIL: the matching-kind over-cap control must still be refused"; exit 1
+fi
+grep -q "LIMIT_EXCEEDED" "$WORK/ctlcap.err" \
+    || { echo "FAIL: the control must stay LIMIT_EXCEEDED, not malformed input; got:"; cat "$WORK/ctlcap.err"; exit 1; }
+echo "==> skipped-field cap exclusivity OK"
+
 # Unbounded string, id 1: header 0x0a, fixlen_word (len<<3)|2. Five bytes is one
 # over max_dyn_string_len: 4; four is exactly at it.
 printf '\012\052\141\141\141\141\141' > "$WORK/overstr.bin"
