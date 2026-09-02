@@ -3512,11 +3512,47 @@ target renders the same metadata as HTML page content
 
 A reimplementation is **conformant** when it reproduces these gates:
 
-1. **Byte-exact shared vectors** — each corelib ships
-   `assets/test_vectors.json` (currently 75 vectors); the generated encoder's
-   output must be byte-identical to the subset each language harness's filter
-   selects (~37–41 per language). This is what guarantees cross-language
-   interop.
+1. **Shared vectors, both directions** — each corelib ships
+   `assets/test_vectors.json` (currently 131 vectors, authored by
+   `corelib-c-cpp`). It carries two byte columns, and a conformant generator is
+   checked against both.
+
+   *Encode* (`tests/conformance/<lang>/check_vectors.py`): the generated
+   encoder's output must be byte-identical to the file's **`serialized_sparse`**
+   column, over the subset each language harness's filter selects (~37–41 per
+   language). This is what guarantees cross-language interop.
+
+   *Decode* (`tests/conformance/lib/check_vectors_decode.py`, one driver for all
+   eleven backends): the **`serialized`** (dense) column is what a decoder
+   actually receives, and **every** one of the 131 vectors is fed through the
+   generated `decode` path. The message they decode into, `vecskip`, is printed
+   by that same driver (`--emit-schema`, so the schema and the expectations
+   asserted against it cannot drift) and declares `u64` on the ids the vectors
+   put their unsigned **anchors** on — and nothing else. Every other field on the
+   wire is therefore either an **unknown id**, or a declared id carrying a
+   **different wire type**, and both must be skipped (§5, §9.1, MESSAGE_SPEC
+   §7.3) with the anchor behind the skip still decoding to its exact value.
+
+   That second case is why this reaches past the file's own scenarios: a
+   generator emits only well-typed messages, so a §7.3 mismatch cannot appear in
+   any vector's `fields`, yet the schema-aware harness meets one on every backend
+   from real bytes without a hand-built fixture. And group `skip/matrix` is the
+   full wire-type cross product — every skippable construct skipped directly
+   behind every other — so a skip that mis-computes its length by a byte is
+   caught at the anchor instead of passing silently.
+
+   Two knobs, both narrow. `--mode` selects the decode surface: Go also runs
+   `streamdecode`, which drips the message **one byte per read**, making every
+   position inside every skipped payload a suspend/resume boundary — the
+   remaining ten backends have no such harness mode yet. `--max-id` lowers the
+   declared-id ceiling for a target whose descriptor profile cannot hold the
+   largest anchor (C's default 16-bit `SOFAB_OBJECT_DESCR_PROFILE`); lowering it
+   drops no vector, the id merely joins those being skipped. The driver runs the
+   whole file, treats a non-zero-exiting harness as a **failure** rather than a
+   skipped case, and prints its vector count — for the same reason
+   `check_vectors.py` carries a `checked == 0` guard, and the upstream C harness
+   stopped silently truncating an over-long `skip_ids`: a driver that quietly
+   narrows what it selects passes while testing less than it claims.
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one

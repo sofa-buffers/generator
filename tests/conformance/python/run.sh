@@ -527,6 +527,34 @@ echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_PY_CORELIB="$CORELIB" go test ./generators/python/ \
     -run 'Conformance|WireArraySparsity|NestedNativeRowCountBound|SchemaBoundIsDeclaredNotCopied' -count=1 )
 
+# ...and the decode direction (generator#444): each vector's DENSE bytes fed into
+# a message that declares u64 on the anchors and nothing else, so every other
+# field on the wire is an unknown id or a MESSAGE_SPEC S7.3 wire-type mismatch
+# and must be SKIPPED -- with the anchor behind it still exact.
+#
+# Run on BOTH engines. The skip path is one of the parts the accelerator
+# reimplements, so a pure-only run would leave the native one unmeasured
+# (generator#451).
+echo "==> shared-vector decode conformance (skip matrix)"
+printf 'version: 1\nmessages:\n' > "$WORK/vecskip.yaml"
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema >> "$WORK/vecskip.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python \
+    --in "$WORK/vecskip.yaml" --out "$WORK/vecskip" >/dev/null )
+if [ "$NATIVE" = yes ]; then
+    unset SOFAB_PUREPYTHON || true
+    require_engine native
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "Python (native)" \
+        --cwd "$WORK/vecskip" -- python3 harness.py
+fi
+SOFAB_PUREPYTHON=1
+export SOFAB_PUREPYTHON
+require_engine python
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+    "$CORELIB/assets/test_vectors.json" "Python (pure)" \
+    --cwd "$WORK/vecskip" -- python3 harness.py
+unset SOFAB_PUREPYTHON || true
+
 echo "==> corpus + realworld: every definition imports"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)

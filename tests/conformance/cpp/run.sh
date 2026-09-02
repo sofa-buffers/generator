@@ -44,6 +44,11 @@ messages:
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
   vecpa: { payload: { a: { id: 0, type: array, items: { type: struct, count: 8, fields: { k: { id: 0, type: u32 } } } } } }
 YAML
+# The decode-side message (generator#444). Printed by the driver that asserts
+# against it, so the ids it declares and the ids that driver expects to read
+# back cannot drift apart.
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
+    >> "$WORK/conf.yaml"
 
 # Exercises every field-type family (ints, u64, fp, bool, string, enum, bitfield,
 # fixed array, blob, string array, blob array, nested struct, union).
@@ -454,6 +459,15 @@ run_variant() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf-$label" )
     make -C "$WORK/conf-$label" "$@" >/dev/null
     python3 "$ROOT/tests/conformance/cpp/check_vectors.py" "$CC/assets/test_vectors.json" "$WORK/conf-$label/harness/harness"
+
+    # ...and the other direction (generator#444): feed each vector's DENSE bytes
+    # into a message that declares u64 on the anchors and nothing else, so every
+    # other field on the wire is an unknown id or a MESSAGE_SPEC S7.3 wire-type
+    # mismatch and must be SKIPPED -- with the anchor behind it still exact.
+    echo "==> [$label] shared-vector decode conformance (skip matrix)"
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CC/assets/test_vectors.json" "C++" \
+        -- "$WORK/conf-$label/harness/harness"
 
     echo "==> [$label] corpus + realworld: every definition compiles"
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do

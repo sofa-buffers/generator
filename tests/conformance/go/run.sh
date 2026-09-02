@@ -858,6 +858,25 @@ echo "==> over-fill refusal OK"
 echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_GO_CORELIB="$CORELIB" go test ./generators/golang/ -run "Conformance|Wire" -count=1 )
 
+# ...and the decode direction (generator#444): each vector's DENSE bytes fed into
+# a message that declares u64 on the anchors and nothing else, so every other
+# field on the wire is an unknown id or a MESSAGE_SPEC S7.3 wire-type mismatch
+# and must be SKIPPED -- with the anchor behind it still exact.
+#
+# Run on BOTH decode surfaces. `streamdecode` drips the message in ONE BYTE PER
+# Read, so every position inside every skipped payload becomes a suspend/resume
+# boundary; that is where a resync bug the single-buffer path hides shows up.
+echo "==> shared-vector decode conformance (skip matrix)"
+printf 'version: 1\nmessages:\n' > "$WORK/vecskip.yaml"
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema >> "$WORK/vecskip.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/vecskip.yaml" --out "$WORK/vecskip-proj" >/dev/null )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/vecskip-proj/go.mod"
+( cd "$WORK/vecskip-proj" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && GOFLAGS=-mod=mod go build -o "$WORK/vecskip" ./harness )
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "Go" --mode "$surface" -- "$WORK/vecskip"
+done
+
 echo "==> corpus + realworld: every definition builds"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
