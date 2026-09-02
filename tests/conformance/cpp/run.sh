@@ -385,6 +385,41 @@ run_variant() {
     echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: [$label] control must decode to 2.5; got: $OUT"; exit 1; }
     echo "==> [$label] fixlen subtype skip OK"
 
+    # ...and the same question one level up, on a fixlen ARRAY, where the answer
+    # is the other one (CORELIB_PLAN S4.8.1, generator#411). S4.8.1 fixes five
+    # steps and the order of the middle three is normative: read the count; read
+    # the fixlen_word; a subtype that is neither fp32 nor fp64 -- a string, a
+    # blob, or a reserved 0x4-0x7 -- is INVALID before any schema is consulted
+    # (step 3); a fixed-width subtype that merely CONTRADICTS the declared
+    # element type is the S7.3 skip just tested (step 4), and the schema count
+    # MUST NOT be applied to it; only a matching subtype reaches the schema bound
+    # (step 5).
+    #
+    # So `string` is a skip on the SCALAR field above and INVALID on an array:
+    # S4.8 admits no fixlen array of string or blob, so no schema could have
+    # declared one and the bytes are malformed whatever follows. Generated C++
+    # cannot tell the two apart on its own -- the fixlen_word never reaches it,
+    # and its array arm only asks whether the announced kind is the one it
+    # declared -- so a corelib that forwarded such a header instead of rejecting
+    # it at the word would be skipped in silence. This suite pinned no step of
+    # that order at all before; the driver brings all three.
+    #
+    # One shared driver for all eleven suites (ARCHITECTURE S12). It derives
+    # every fixture from $EXAMPLE's own somefloatarray declaration, so the ids it
+    # writes and the values it asserts cannot drift from what this leg was built
+    # with -- which is why the c-cpp legs hand it their own bounded schema.
+    #
+    # The category is asserted on the pure legs only: the corelib-c-cpp harness
+    # has no `status` verb, the same split the nested-row check below makes. That
+    # leg is not decoration -- a corelib that skipped instead of rejecting would
+    # still fail the decode on some rows, just as the wrong category.
+    echo "==> [$label] a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
+    FA_CAT=""
+    if [ -z "$corelib" ]; then FA_CAT="--status-verb status"; fi
+    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "$label" \
+        --schema "$EXAMPLE" $FA_CAT \
+        -- "$WORK/ex-$label/harness/harness"
+
     # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
     # skipped under S7.3 is not an occurrence for this clause: a correctly typed
     # earlier occurrence survives a mis-typed later one." somestringarray (id 18) is
