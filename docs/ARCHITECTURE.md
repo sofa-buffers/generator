@@ -3823,6 +3823,54 @@ A reimplementation is **conformant** when it reproduces these gates:
    round-trip. Adopting this driver there means giving their `streamdecode` the
    chunk-size argument the four have (`tests/matrix/streamdecode_test.go` records
    which backends carry it).
+
+   *Fixlen-array subtype* (`tests/conformance/lib/check_fixlen_array_subtype.py`):
+   CORELIB_PLAN §4.8.1 fixes the fixlen-array decode order in five steps, and the
+   order of the middle three is **normative** (generator#411). Step 3 — a subtype
+   that is neither `fp32` nor `fp64`, i.e. a `string`, a `blob` or a reserved
+   `0x4`–`0x7`, is **INVALID** *before any schema is consulted* — is a **format**
+   verdict: §4.8 admits no fixlen array of `string` or `blob`, so no schema could
+   have declared one and the bytes are malformed whatever follows. Step 4 — a
+   fixed-width subtype that merely **contradicts** the declared element type — is
+   a **schema** mismatch and MESSAGE_SPEC §7.3 **skips** it, with the schema
+   `count` deliberately not applied. Routing step 3 into that skip would accept a
+   construct the format does not have.
+
+   Nothing in generated code can notice if a corelib does: the `fixlen_word` never
+   reaches the backend, whose array arm reduces to "is this the element kind I
+   declared? no → return", so a forwarded string-subtype header is skipped in
+   silence. Seven suites carried a `generator#259` block covering steps 4 and 5,
+   all seven hard-coding the same bytes against the same field; step 3 was in none
+   of them, and `c`, `cpp`, `python` and `typescript` had no block at all. The
+   nine-row table this driver runs closes that and straddles the boundary in both
+   directions on the *same* question: four bad subtypes, one of them over the
+   declared bound as well and one of them on an undeclared id, are `INVALID`; an
+   `fp64` array at the `fp32` id is **skipped** with the field still at its
+   default; and a well-formed `fp32` array is **read back** — so a decoder that
+   rejects every fixlen array, one that accepts every subtype, and one that skips
+   the field it should have read all fail. Every count is inside the declared
+   bound but one, and every payload is complete, which is what makes these step-3
+   rows rather than step-5 or §5.2.3 ones; a matched pair on an **undeclared** id
+   is the row no schema can explain at all.
+
+   Two deliberate departures from its peers. It **reads** the suite's schema
+   instead of printing one — the field's id becomes the header varint, its element
+   count and default become the controls' expectations — which buys the same
+   anti-drift property that `--emit-schema` buys elsewhere without the generate
+   and build a twelfth message would cost every suite (four extra Cargo builds in
+   `rust`, four in `cpp`, a Maven and a Gradle cycle in `java` and `kotlin`), and
+   it fits a rule decided *before any schema is consulted* better than an own
+   schema would. And the **category** assertion is optional, because the category
+   channel is not uniform: `--status-verb` for a harness with a verb that prints
+   `INVALID` on line 1, `--invalid-pattern` for one that names the category in its
+   error text, nothing for `c` and the `corelib: c-cpp` C++ legs, which report exit
+   status alone. That leg is not decoration — under a corelib mutated to skip
+   instead of reject, `zig` and `rust` still *fail* the decode, just as
+   `INCOMPLETE`, and only the category assertion sees it.
+
+   Values are compared as JSON **numbers**, not greps: the same skipped field
+   prints `[0,-1.5,3.25]`, `[0.0,-1.5,3.25]` and `[0, -1.5, 3.25]` across the
+   eleven backends, and eleven hand-tuned patterns are eleven things to rot.
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one

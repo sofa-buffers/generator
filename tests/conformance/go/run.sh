@@ -108,6 +108,25 @@ if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage <
 fi
 echo "==> fixlen-array subtype ordering OK"
 
+# ...and step 3 of that same order (CORELIB_PLAN S4.8.1, generator#411): a
+# fixlen array whose subtype is neither fp32 nor fp64 -- a string, a blob, or a
+# reserved 0x4-0x7 -- is INVALID, not a skip. The block above pins steps 4 and 5;
+# step 3 sits before both, and before the schema: S4.8 admits no fixlen array of
+# string or blob, so no schema could have declared one and the bytes are
+# malformed whatever follows. Routing that into the S7.3 skip would accept a
+# construct the format does not have -- and generated Go could not notice, since
+# its array arm is `if kind != sofab.ArrayFp32 { return nil }`: it skips
+# silently the moment a corelib forwards such a header instead of rejecting it
+# at the fixlen_word.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12). It derives every
+# fixture from the schema's own somefloatarray declaration, so the ids it writes
+# and the values it asserts cannot drift from what the harness was built with.
+echo "==> a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
+python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "Go" \
+    --cwd "$WORK/proj" --invalid-pattern 'invalid message' \
+    -- env GOFLAGS=-mod=mod go run ./harness
+
 # A SKIPPED string is never UTF-8-validated (CORELIB_PLAN S6.4, generator#257 /
 # Crucible F-0038). Validation belongs where a `string` is MATERIALIZED -- read
 # into a declared destination -- never on a payload the decoder jumps over. The
