@@ -1302,3 +1302,75 @@ messages:
 		t.Error("a schema-bounded field must not meet the receiver cap (§6.2.1)")
 	}
 }
+
+// TestCsCapGuardsSitBehindTheKindTest: a §7.3-skipped field must never be capped
+// (CORELIB_PLAN §6.2.1, generator#410). A limit bounds an ALLOCATION, and a field
+// the visitor skips allocates nothing, so a decode that steps over an over-cap
+// field it was never going to read stays Complete.
+//
+// §7.3 skips two shapes and this backend defeats both structurally rather than by
+// testing for them: ArrayBegin switches on `(location, id)`, so an unknown id
+// reaches no arm, and every arm opens with `if (kind != ArrayKind.X) break;`, so
+// an array whose wire kind contradicts the declared element type leaves the arm
+// with the skip counter still armed. The cap sits inside that arm, behind both.
+//
+// TestCsDecodeLimits pins the same ordering, but by spelling out the two arms its
+// own schema happens to produce. This states it as a PROPERTY instead: every count
+// guard the backend emits, for every schema, sits inside a keyed arm and behind
+// that arm's kind test. That is what survives a new field shape, and it is what
+// catches the cap being hoisted OUT of the switch -- where there is no enumerated
+// line left to miss it, and where the cap would reach both shapes §7.3 requires to
+// be skipped while still firing correctly on a well-typed over-cap array.
+// tests/conformance/csharp/run.sh decodes the bytes end to end; this pins the
+// shape that keeps them decoding.
+func TestCsCapGuardsSitBehindTheKindTest(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      da:  { id: 0, type: array, items: { type: u32 } }
+      ba:  { id: 1, type: array, items: { type: u32, count: 4 } }
+      mat: { id: 2, type: array, items: { type: array, items: { type: u32 } } }
+`
+	m := buildModule(t, []byte(src), "m.yaml", map[string]any{"max_dyn_array_count": 8})
+
+	// The skip counter is armed BEFORE the guarded switch, and its DEFAULT is the
+	// wire count: every (kind, location, id) triple this message does not declare
+	// drops exactly its own elements and leaves every declared field untouched.
+	arm := strings.Index(m, "askip = kind switch {")
+	if arm < 0 {
+		t.Fatalf("ArrayBegin must arm a skip counter keyed by (kind, cur, id):\n%s", m)
+	}
+	if !strings.Contains(m[arm:], "_ => count,") {
+		t.Errorf("the skip counter must default to the wire count (§7.3):\n%s", m)
+	}
+	if g := strings.Index(m, "if (count > "); g >= 0 && g < arm {
+		t.Errorf("a count guard ahead of the skip arming -- a skipped field would be capped:\n%s", m)
+	}
+
+	// Every count comparison -- the cap and the schema bound alike -- is the body
+	// of a `case (<location>, <id>):` arm and sits behind that arm's ArrayKind
+	// test. A guard that is not one caps whatever the callback was handed, skipped
+	// or not.
+	seen := 0
+	for _, line := range strings.Split(m, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, "if (count > ") || strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		seen++
+		if !strings.HasPrefix(trimmed, "case (") {
+			t.Errorf("an array count guard outside a keyed ArrayBegin arm:\n%s", trimmed)
+			continue
+		}
+		kind := strings.Index(trimmed, "if (kind != ArrayKind.")
+		if kind < 0 || kind > strings.Index(trimmed, "if (count > ") {
+			t.Errorf("an array count guard ahead of (or without) the §7.3 kind test:\n%s", trimmed)
+		}
+	}
+	// da's cap, ba's schema bound, and the matrix row's own element count.
+	if seen < 3 {
+		t.Fatalf("expected a count guard on each of da, ba and the mat row, found %d:\n%s", seen, m)
+	}
+}

@@ -369,6 +369,44 @@ grep -q "_decode(bytes, new _DynVis(o, new PayloadAcc()));" "$WORK/lim/message.t
 (cd "$WORK/nolim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
 
+# CORELIB_PLAN S6.2.1, "a skipped field is never capped": a limit bounds an
+# ALLOCATION, and a field MESSAGE_SPEC S7.3 skips is walked, not materialised, so
+# no cap may reach it. A decode that steps over an over-cap field it was never
+# going to read stays COMPLETE (generator#410).
+#
+# S7.3 skips two shapes and they fail independently, so both are run:
+#
+#   04 05 ...  id 0 IS declared, but as array<u64> -- UNSIGNED. A SIGNED array
+#              header (wire type 4) at that id was never this field's value.
+#   4b 05 ...  id 9, an id this message does not declare at all.
+#
+# Both carry a count of 5, one over max_dyn_array_count: 4. What keeps them
+# COMPLETE is ordering, and only ordering: emitArrayCbs writes the `case <id>:`
+# dispatch and the `kind !== ArrayKind.Unsigned` test AHEAD of arrayCountBound.
+# Widen either -- hoist the cap out of the switch, or drop the kind test -- and
+# both rows answer LIMIT_EXCEEDED while every existing assertion here still
+# passes, because the cap is still present and still fires on the control.
+echo "==> a S7.3-skipped field is never capped (CORELIB_PLAN S6.2.1, generator#410)"
+printf '\004\005\000\000\000\000\000' > "$WORK/skipmistyped.bin"
+printf '\113\005\001\001\001\001\001' > "$WORK/skipunknown.bin"
+for v in skipmistyped skipunknown; do
+    ST=$( (cd "$WORK/lim" && npx tsx harness.ts status dyn) < "$WORK/$v.bin" | head -n1 )
+    [ "$ST" = "COMPLETE" ] \
+        || { echo "FAIL: $v -- an over-cap SKIPPED array must leave the decode COMPLETE, got $ST"; exit 1; }
+    # ...and skipped means the field is not touched at all: `a` keeps its default.
+    OUT=$( (cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/$v.bin" )
+    echo "$OUT" | grep -q '"a":\[\]' \
+        || { echo "FAIL: $v -- a skipped field must bind nothing; got: $OUT"; exit 1; }
+done
+# The control that keeps the pair honest: the SAME count at the SAME id with the
+# matching kind is the field's own count, and is still LIMIT_EXCEEDED -- pinned
+# above via $WORK/overlimit.bin, re-read here as the category (S6.3), since a
+# backend that simply stopped capping would pass both rows above.
+ST=$( (cd "$WORK/lim" && npx tsx harness.ts status dyn) < "$WORK/overlimit.bin" | head -n1 )
+[ "$ST" = "LIMIT_EXCEEDED" ] \
+    || { echo "FAIL: the matching-kind over-cap control must stay LIMIT_EXCEEDED, got $ST"; exit 1; }
+echo "==> skipped-field cap exclusivity OK"
+
 # A wrapper array's string/blob elements never reach the generated visitor: their
 # index and their length word both go to the corelib's StringSeq/BlobSeq. So both
 # of their receiver caps ride ON the collector (`receiverCap`, `receiverElemMax`),

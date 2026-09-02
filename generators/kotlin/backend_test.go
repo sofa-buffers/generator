@@ -1261,3 +1261,62 @@ func TestKotlinFixlenBeginLatchesTheReceiverCapAtTheLengthWord(t *testing.T) {
 		t.Error("a schema-bounded field must not meet the receiver cap (§6.2.1)")
 	}
 }
+
+// TestKotlinCapGuardsSitBehindTheKindTest: a §7.3-skipped field must never be
+// capped (CORELIB_PLAN §6.2.1, generator#410). A limit bounds an ALLOCATION, and
+// a field the visitor skips allocates nothing, so a decode that steps over an
+// over-cap field it was never going to read stays COMPLETE.
+//
+// §7.3 skips two shapes and this backend defeats both structurally rather than by
+// testing for them: the `when (cur)` in arrayBegin dispatches on the SCOPE and the
+// field index, so an unknown id reaches no arm, and each arm opens with
+// `if (kind == ArrayKind.X)`, so an array whose wire kind contradicts the declared
+// element type falls through with `askip` still armed. The cap sits inside that
+// arm, behind both.
+//
+// The test is on the emitted line rather than on a decode because the regression
+// it guards against is invisible in a diff review AND in every other assertion
+// here: hoist `if (count > MAX_DYN_ARRAY_COUNT)` to the top of arrayBegin and the
+// cap is still present, still names the field, still fires on a well-typed
+// over-cap array -- and now also rejects the two shapes §7.3 requires to be
+// skipped. TestKotlinDecodeLimits asserts only the guard's substring, so it stays
+// green through exactly that change. tests/conformance/kotlin/run.sh decodes the
+// bytes end to end; this pins the shape that keeps them decoding.
+func TestKotlinCapGuardsSitBehindTheKindTest(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      da: { id: 0, type: array, items: { type: u32 } }\n" +
+		"      ba: { id: 1, type: array, items: { type: u32, count: 4 } }\n" +
+		"      mat: { id: 2, type: array, items: { type: array, items: { type: u32 } } }\n"
+	m := genFromYAML(t, src, map[string]any{"max_dyn_array_count": 8})["src/main/kotlin/message/M.kt"]
+
+	// The skip counter is armed from the wire count BEFORE any arm runs, so a
+	// header that matches nothing below drops exactly its own elements and leaves
+	// every declared field untouched.
+	if !strings.Contains(m, "askip = count") {
+		t.Errorf("arrayBegin must arm the skip counter ahead of the dispatch:\n%s", m)
+	}
+
+	// Every count comparison -- the cap and the schema bound alike -- is the body
+	// of an arm keyed by the field index and gated on the array kind. A guard that
+	// is not one caps whatever the callback was handed, skipped or not.
+	seen := 0
+	for _, line := range strings.Split(m, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, "if (count > ") || strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		seen++
+		if !strings.Contains(trimmed, "if (kind == ArrayKind.") ||
+			strings.Index(trimmed, "if (kind == ArrayKind.") > strings.Index(trimmed, "if (count > ") {
+			t.Errorf("an array count guard ahead of (or without) the §7.3 kind test:\n%s", trimmed)
+		}
+		if !strings.HasPrefix(trimmed, "0 ->") && !strings.HasPrefix(trimmed, "1 ->") &&
+			!strings.HasPrefix(trimmed, "2 ->") {
+			t.Errorf("an array count guard outside a keyed `when (cur)` arm:\n%s", trimmed)
+		}
+	}
+	// da's cap, ba's schema bound, and the matrix row's own element count.
+	if seen < 3 {
+		t.Fatalf("expected a count guard on each of da, ba and the mat row, found %d:\n%s", seen, m)
+	}
+}
