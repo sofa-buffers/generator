@@ -461,7 +461,7 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 	g.emitBench(h, s)
 	g.emitBenchMain(h, s)
 	h.line("int main(int argc, char **argv) {")
-	h.line("    if (argc < 2) { fprintf(stderr, \"usage: %%s <encode|decode|bench> [Message|workload]\\n\", argv[0]); return 2; }")
+	h.line("    if (argc < 2) { fprintf(stderr, \"usage: %%s <encode|decode|streamdecode|bench> [Message|workload]\\n\", argv[0]); return 2; }")
 	h.line("    const char *mode = argv[1];")
 	h.line(`    const char *msg = argc > 2 ? argv[2] : %q;`, s.Messages[0].Name)
 	h.line("    (void)msg;")
@@ -501,6 +501,28 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		h.line("            fwrite(out, 1, used, stdout);")
 		h.line(`        } else if (strcmp(mode, "decode") == 0) {`)
 		h.line("            if (%s_decode(&obj, in, len) != SOFAB_RET_OK) return 1;", pfx)
+		h.line("            %s_to_json(&obj, stdout);", fn)
+		h.line("            fputc('\\n', stdout);")
+		// The same bytes through the SAME corelib stream, fed ONE BYTE per feed.
+		// `decode` above is the incremental decoder fed once, so it never makes the
+		// decoder suspend and resume -- and that is the half that can actually be
+		// wrong: a skip's own length computation and its progress counter both have
+		// to survive a chunk boundary. Drip-feeding turns every byte offset, inside
+		// a skipped payload included, into such a boundary. The JSON printed here
+		// is compared against `decode`'s by the conformance runner, so any
+		// difference between the two surfaces is the finding.
+		//
+		// A zero-length feed is the end-of-input probe (CORELIB_PLAN §5.2), and it
+		// is what gives the verdict for the message as a whole: the last one-byte
+		// feed can only say whether THOSE bytes ended on a field boundary.
+		h.line(`        } else if (strcmp(mode, "streamdecode") == 0) {`)
+		h.line("            %s_decoder_t d;", pfx)
+		h.line("            sofab_ret_t ret;")
+		h.line("            size_t i;")
+		h.line("            %s_decoder_init(&d, &obj);", pfx)
+		h.line("            for (i = 0; i < len; i++) { (void)%s_decoder_feed(&d, in + i, 1); }", pfx)
+		h.line("            ret = %s_decoder_feed(&d, NULL, 0);", pfx)
+		h.line("            if (ret != SOFAB_RET_OK) return 1;")
 		h.line("            %s_to_json(&obj, stdout);", fn)
 		h.line("            fputc('\\n', stdout);")
 		h.line(`        } else { fprintf(stderr, "unknown mode\n"); return 2; }`)

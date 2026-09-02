@@ -3565,10 +3565,25 @@ A reimplementation is **conformant** when it reproduces these gates:
    behind every other — so a skip that mis-computes its length by a byte is
    caught at the anchor instead of passing silently.
 
-   Two knobs, both narrow. `--mode` selects the decode surface: Go also runs
-   `streamdecode`, which drips the message **one byte per read**, making every
-   position inside every skipped payload a suspend/resume boundary — the
-   remaining ten backends have no such harness mode yet. `--max-id` lowers the
+   Two knobs, both narrow. `--mode` selects the decode surface, and **every**
+   backend runs both (generator#456): `decode` is the one-shot, whole-buffer
+   entry point, and `streamdecode` drips the same bytes **one byte per feed**
+   through that backend's incremental decoder, making every position inside every
+   skipped payload a suspend/resume boundary. The two are different code — a
+   one-shot decode never suspends, so nothing in it has to carry parse state
+   across a boundary, whereas the chunked path has to resume mid-varint,
+   mid-payload, mid-array-element and mid-sequence — and inside a *skipped* field
+   that is where a resync bug hides: the skip's own length computation and its
+   progress counter both have to survive the boundary, and the anchor behind the
+   skip is the only thing that notices when they don't. Both surfaces are checked
+   against **identical** expectations, so any difference between them is the
+   finding. The per-language chunk checks that exist beside this
+   (`streaming_check.rs`, zig's chunk-invariance probe, the TypeScript
+   six-chunk-size comparison, Kotlin's `stream` mode) run against their own
+   hand-built fixtures and none of them puts a skipped field of every wire type
+   at a boundary. `tests/matrix/streamdecode_test.go` pins the mode into every
+   registered backend's project harness, so a new target cannot land without it.
+   `--max-id` lowers the
    declared-id ceiling for a target whose descriptor profile cannot hold the
    largest anchor (C's default 16-bit `SOFAB_OBJECT_DESCR_PROFILE`); lowering it
    drops no vector, the id merely joins those being skipped. The driver runs the
@@ -3826,6 +3841,12 @@ removed from the config schema — embedded C++ shipped as the `cpp` target's
    construction, say which in `docs/generator/<lang>.md`. Do not leave it unstated.
 5. Add a project/harness template, corpus coverage, and a `tests/conformance/<lang>/run.sh`
    (generate → build → round-trip → byte-exact vectors) plus a gated unit test.
+   The harness needs **both** decode surfaces: `decode` (one-shot, whole buffer)
+   and `streamdecode` (the same raw bytes on stdin, fed **one byte per feed**
+   through the incremental decoder, printing exactly what `decode` prints).
+   `tests/matrix/streamdecode_test.go` fails until it is there, and the vector
+   driver is then run in both modes — without the second, no skipped field is
+   ever cut by a chunk boundary (§12).
 6. Add a `lang-<x>` CI job running the harness.
 7. Add the `bench` verb to the project harness and a row to `tests/bench/rows.json`
    + a `tests/bench/lang/<x>.sh` recipe, then regenerate `tests/bench/results.txt`

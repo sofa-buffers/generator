@@ -239,6 +239,21 @@ func TestTSHeaderBoundReject(t *testing.T) {
 			t.Errorf("harness.ts missing status-mode surface %q:\n%s", want, harness)
 		}
 	}
+	// ...and the CHUNKED decode surface (generator#456): the same raw wire bytes
+	// `decode` takes, fed ONE BYTE PER feed, so every position inside every
+	// skipped payload becomes a suspend/resume boundary. The Decoder classes sit
+	// beside the message classes rather than on them, hence a map of their own.
+	for _, want := range []string{
+		`mode === "streamdecode"`,
+		`const dec = new DECODERS[name]();`,
+		`for (const b of input) { one[0] = b; dec.feed(one); }`,
+		`obj = dec.finish();`,
+		`"M": M.MDecoder,`,
+	} {
+		if !strings.Contains(harness, want) {
+			t.Errorf("harness.ts missing streamdecode-mode surface %q:\n%s", want, harness)
+		}
+	}
 }
 
 func TestTSMaxlenReject(t *testing.T) {

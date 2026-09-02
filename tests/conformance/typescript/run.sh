@@ -470,10 +470,17 @@ python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/t
 # into a message that declares u64 on the anchors and nothing else, so every
 # other field on the wire is an unknown id or a MESSAGE_SPEC S7.3 wire-type
 # mismatch and must be SKIPPED -- with the anchor behind it still exact.
+#
+# Run on BOTH decode surfaces. `streamdecode` drips the message in ONE BYTE PER
+# feed, so every position inside every skipped payload becomes a suspend/resume
+# boundary; that is where a resync bug the single-buffer path hides shows up
+# (generator#456).
 echo "==> shared-vector decode conformance (skip matrix)"
-python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
-    "$CORELIB/assets/test_vectors.json" "TypeScript" \
-    --cwd "$WORK/conf" -- npx tsx harness.ts
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "TypeScript" --mode "$surface" \
+        --cwd "$WORK/conf" -- npx tsx harness.ts
+done
 
 # fp32 signaling-NaN bit-for-bit round-trip (issue #235). A JS number is a 64-bit
 # double, and widening an fp32 sNaN into one QUIETS it (0x7F800001 -> 0x7FC00001),

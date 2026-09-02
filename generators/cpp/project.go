@@ -399,7 +399,7 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 	f.blank()
 	g.emitBench(f, s)
 	f.line("int main(int argc, char **argv) {")
-	f.line("    if (argc < 2) { std::cerr << \"usage: harness <encode|decode|bench> [Message|workload]\\n\"; return 2; }")
+	f.line("    if (argc < 2) { std::cerr << \"usage: harness <encode|decode|streamdecode|bench> [Message|workload]\\n\"; return 2; }")
 	f.line("    std::string mode = argv[1];")
 	f.line("    std::string msg = argc > 2 ? argv[2] : %q;", defaultMessage(s))
 	f.line("    std::ostringstream _in; _in << std::cin.rdbuf(); std::string in = _in.str();")
@@ -437,6 +437,41 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 			// a driver that needs the verdict AND the reject in one run could not
 			// get both. Pure corelib-cpp only: the c-cpp wrapper's Result carries
 			// no invalid()/incomplete()/limitExceeded() predicates.
+			f.line("            if (!r.ok()) { std::cerr << \"decode error: \" << (r.invalid() ? \"INVALID\" : r.incomplete() ? \"INCOMPLETE\" : r.limitExceeded() ? \"LIMIT_EXCEEDED\" : \"INVALID_ARGUMENT\") << \"\\n\"; return 1; }")
+		}
+		f.line("            to_json(obj, std::cout); std::cout << \"\\n\";")
+		// The same bytes through the SAME corelib stream, fed ONE BYTE per feed.
+		// try_decode above hands the whole message over in a single call, so it
+		// never makes the decoder suspend and resume -- and that is the half that
+		// can actually be wrong: a skip's own length computation and its progress
+		// counter both have to survive a chunk boundary. Drip-feeding turns every
+		// byte offset, inside a skipped payload included, into such a boundary. The
+		// JSON printed here is compared against `decode`'s by the conformance
+		// runner, so any difference between the two surfaces is the finding.
+		//
+		// A zero-length feed is the end-of-input probe (§5.2.4), and it is what
+		// gives the verdict for the message as a whole: the last one-byte feed can
+		// only say whether THOSE bytes ended on a field boundary.
+		f.line("        } else if (mode == \"streamdecode\") {")
+		f.line("            %s obj;", mt)
+		f.line("            const std::uint8_t *p = reinterpret_cast<const std::uint8_t *>(in.data());")
+		if g.clib {
+			f.line("            sofab::IStreamObject<%s> _is%s;", mt, g.istreamLimits())
+		} else {
+			f.line("            obj.reset();")
+			f.line("            sofab::IStreamInline *_isp = nullptr;")
+			f.line("            sofab::IStreamInline _is{[&obj, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {")
+			f.line("                obj.deserialize(*_isp, _id, _size, _count);")
+			f.line("            }%s};", g.istreamInlineLimits())
+			f.line("            _isp = &_is;")
+		}
+		f.line("            sofab::IStreamImpl::Result r = _is.feed(p, 0);")
+		f.line("            for (std::size_t i = 0; i < in.size(); i++) { r = _is.feed(p + i, 1); }")
+		f.line("            r = _is.feed(p, 0);")
+		if g.clib {
+			f.line("            if (!r.ok()) { std::cerr << \"decode error\\n\"; return 1; }")
+			f.line("            obj = *_is;")
+		} else {
 			f.line("            if (!r.ok()) { std::cerr << \"decode error: \" << (r.invalid() ? \"INVALID\" : r.incomplete() ? \"INCOMPLETE\" : r.limitExceeded() ? \"LIMIT_EXCEEDED\" : \"INVALID_ARGUMENT\") << \"\\n\"; return 1; }")
 		}
 		f.line("            to_json(obj, std::cout); std::cout << \"\\n\";")

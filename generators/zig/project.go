@@ -197,6 +197,25 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("            const obj = try message.%s.decode(alloc, input);", mt)
 		f.line("            try toJson_%s(&obj, out);", mt)
 		f.line("            try out.writeByte('\\n');")
+		// The same bytes through the incremental decoder (PLAN §5.6), fed ONE BYTE
+		// per feed. A whole-buffer feed would exercise the Decoder's signature
+		// without ever making it suspend and resume, which is the half that can
+		// actually be wrong; drip-feeding turns every byte offset -- inside a
+		// skipped payload included -- into a boundary the parse state has to
+		// survive. The JSON printed here is compared against `decode`'s by the
+		// conformance runner.
+		f.line("        } else if (std.mem.eql(u8, mode, \"streamdecode\")) {")
+		f.line("            var obj: message.%s = .{};", mt)
+		f.line("            var dec = message.%s.decoder(&obj, alloc);", mt)
+		// An .incomplete per feed is the normal verdict for a chunk that ended
+		// mid-field: it says the BYTES ended there, not that the message is bad.
+		// Only finish() decides on the message as a whole.
+		f.line("            for (input) |b| {")
+		f.line("                _ = try dec.feed(&[_]u8{b});")
+		f.line("            }")
+		f.line("            try dec.finish();")
+		f.line("            try toJson_%s(&obj, out);", mt)
+		f.line("            try out.writeByte('\\n');")
 		f.line("        } else {")
 		f.line("            std.process.exit(2);")
 		f.line("        }")

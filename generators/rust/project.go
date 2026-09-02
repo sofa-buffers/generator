@@ -239,6 +239,28 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                    Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }")
 		f.line("                };")
 		f.line("                println!(\"{}\", serde_json::to_string(&obj).unwrap());")
+		// The same bytes through the incremental decoder (§5.6), fed ONE BYTE per
+		// feed. A whole-buffer feed would exercise the Decoder's signature without
+		// ever making it suspend and resume, which is the half that can actually be
+		// wrong; drip-feeding turns every byte offset -- inside a skipped payload
+		// included -- into a boundary the parse state has to survive. The JSON
+		// printed here is compared against `decode`'s by the conformance runner.
+		f.line("            } else if mode == \"streamdecode\" {")
+		f.line("                let mut dec = %s::decoder();", mt)
+		// Incomplete mid-stream is the normal verdict for a chunk that ended
+		// mid-field -- it says the BYTES ended there, not that the message is bad.
+		// Only finish() decides whether the message as a whole is acceptable.
+		f.line("                for b in &input {")
+		f.line("                    match dec.feed(&[*b]) {")
+		f.line("                        Ok(()) | Err(sofab::Error::Incomplete) => {}")
+		f.line("                        Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }")
+		f.line("                    }")
+		f.line("                }")
+		f.line("                let obj = match dec.finish() {")
+		f.line("                    Ok(o) => o,")
+		f.line("                    Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }")
+		f.line("                };")
+		f.line("                println!(\"{}\", serde_json::to_string(&obj).unwrap());")
 		f.line("            } else { eprintln!(\"unknown mode\"); std::process::exit(2); }")
 		f.line("        }")
 	}
