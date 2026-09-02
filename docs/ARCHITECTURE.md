@@ -3623,6 +3623,36 @@ A reimplementation is **conformant** when it reproduces these gates:
    `max_length` asks how far a container grew **before** a rejection, and a
    fallible decode returns an error rather than a partial container, so the JSON
    harness has no surface on which it is observable.
+
+   *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
+   CORELIB_PLAN §5.2 makes the decode outcome computable at *any* byte boundary,
+   §6.0 borrows a fed chunk only for the duration of `feed`, and §5.2.3 fixes the
+   verdict precedence — together, one property: **the verdict and the decoded
+   value must not depend on where the chunks were cut** (generator#413). A resume
+   bug — a half-read varint, a payload accumulator that is not carried, a scope
+   stack that unwinds one level too far — is invisible until the split lands in
+   the wrong place, and the one-shot `decode` path never suspends at all.
+
+   The driver re-feeds the fixtures the suite **already built** for its negative
+   cases at six splits (1, 2, 3, 5, 16, whole) and requires the verdict *and* the
+   decoded value to be identical at every one. The reference is the whole-buffer
+   feed through the **same** streaming API, not the one-shot verb: Java's and C#'s
+   `decode`/`Decode` is the documented back-compat *best-effort* surface, which
+   hands back a half-filled object for a truncated message where
+   `Decoder.finish()` rejects it, so comparing those two would report that
+   contract difference on every truncation fixture as a chunking bug. `--oneshot`
+   adds the cross-check where `decode` *is* fallible (python, dart). Loud, as the
+   other drivers are: a missing fixture fails rather than shrinking the table,
+   `--expect` pins the count, and a table that does not straddle accept/reject is
+   rejected as no evidence at all.
+
+   It runs on `java`, `csharp`, `python` and `dart` — the four suites that had no
+   chunked-decode check of any shape. The other seven already carry one of their
+   own: `go`, `zig` (#293) and `typescript` compare verdicts across splits over
+   their own fixtures; `rust`, `cpp`, `kotlin` and `c` feed a streaming
+   round-trip. Adopting this driver there means giving their `streamdecode` the
+   chunk-size argument the four have (`tests/matrix/streamdecode_test.go` records
+   which backends carry it).
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one

@@ -99,8 +99,18 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// Incomplete mid-stream is the normal verdict for a chunk that ended
 		// mid-field: it says the BYTES ended there, not that the message is bad.
 		// Only Finish() decides on the message as a whole.
-		f.line("                    var one = new byte[1];")
-		f.line("                    foreach (var b in input) { one[0] = b; dec.Feed(one); }")
+		// The chunk SIZE is an argument, defaulting to 1. A single split width
+		// only shows that the decoder resumed once; sweeping several is what
+		// turns that into "where the cut lands does not matter", which is the
+		// property CORELIB_PLAN §5.2/§6.0 actually claims. `0` feeds the whole
+		// message in one go -- the degenerate split, which separates "the
+		// streaming path is wrong" from "it is wrong when it suspends".
+		// tests/conformance/lib/check_chunk_invariance.py drives the sweep.
+		f.line("                    var csz = args.Length > 2 ? int.Parse(args[2]) : 1;")
+		f.line("                    var step = csz > 0 ? csz : Math.Max(input.Length, 1);")
+		f.line("                    for (var off = 0; off < input.Length; off += step) {")
+		f.line("                        dec.Feed(input, off, Math.Min(step, input.Length - off));")
+		f.line("                    }")
 		f.line("                    obj = dec.Finish();")
 		f.line("                } catch (Exception e) {")
 		f.line("                    Console.Error.WriteLine(\"decode error: \" + e.Message);")

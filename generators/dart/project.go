@@ -103,10 +103,18 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// mid-field: it says the BYTES ended there, not that the message is bad.
 		// Only finish() decides on the message as a whole; it returns null when the
 		// stream ended half-read or was rejected.
-		f.line("        final one = <int>[0];")
-		f.line("        for (final b in input) {")
-		f.line("          one[0] = b;")
-		f.line("          final st = dec.feed(one);")
+		// The chunk SIZE is an argument, defaulting to 1. A single split width
+		// only shows that the decoder resumed once; sweeping several is what
+		// turns that into "where the cut lands does not matter", which is the
+		// property CORELIB_PLAN §5.2/§6.0 actually claims. `0` feeds the whole
+		// message in one go -- the degenerate split, which separates "the
+		// streaming path is wrong" from "it is wrong when it suspends".
+		// tests/conformance/lib/check_chunk_invariance.py drives the sweep.
+		f.line("        final csz = args.length > 2 ? int.parse(args[2]) : 1;")
+		f.line("        final step = csz > 0 ? csz : (input.isEmpty ? 1 : input.length);")
+		f.line("        for (var off = 0; off < input.length; off += step) {")
+		f.line("          final end = off + step < input.length ? off + step : input.length;")
+		f.line("          final st = dec.feed(input.sublist(off, end));")
 		f.line("          if (st != sofab.DecodeStatus.complete &&")
 		f.line("              st != sofab.DecodeStatus.incomplete) {")
 		f.line("            stderr.writeln('decode failed: ${st.name}');")

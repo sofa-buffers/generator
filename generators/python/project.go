@@ -134,11 +134,20 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// last feed returned IS the outcome, and an INCOMPLETE mid-stream only says
 	// the BYTES ended mid-field. End-of-input is the harness's own framing, so it
 	// is the FINAL status that has to be COMPLETE.
+	// The chunk SIZE is an argument, defaulting to 1. A single split width only
+	// shows that the decoder resumed once; sweeping several is what turns that
+	// into "where the cut lands does not matter", which is the property
+	// CORELIB_PLAN §5.2/§6.0 actually claims. `0` feeds the whole message in one
+	// go -- the degenerate split, which separates "the streaming path is wrong"
+	// from "it is wrong when it suspends".
+	// tests/conformance/lib/check_chunk_invariance.py drives the sweep.
+	f.line("        csz = int(sys.argv[3]) if len(sys.argv) > 3 else 1")
+	f.line("        step = csz if csz > 0 else max(len(data), 1)")
 	f.line("        dec = cls.decoder()")
 	f.line("        st = dec.status")
 	f.line("        try:")
-	f.line("            for i in range(len(data)):")
-	f.line("                st = dec.feed(data[i:i + 1])")
+	f.line("            for off in range(0, len(data), step):")
+	f.line("                st = dec.feed(data[off:off + step])")
 	f.line("        except Exception as e:")
 	f.line("            sys.stderr.write('decode error: %%s\\n' %% (e,))")
 	f.line("            return 1")

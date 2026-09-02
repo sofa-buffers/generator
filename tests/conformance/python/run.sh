@@ -614,4 +614,45 @@ python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "Python" --cap 4 \
     --cwd "$WORK/growth" -- python3 harness.py
 
+# CORELIB_PLAN S5.2/S6.0/S5.2.3, one property: the verdict AND the decoded value
+# must not depend on where the chunks were cut (generator#413). A resume bug -- a
+# half-read varint, a payload accumulator that is not carried, a scope stack that
+# unwinds one level too far -- is invisible until the split lands in the wrong
+# place, and the one-shot `decode` path never suspends at all.
+#
+# The fixtures are the ones this suite ALREADY built for its negative cases, so
+# the table costs nothing but the feeding: every §7.1 reject, every §7.3 skip,
+# every truncation, and the controls beside them.
+#
+# Run on BOTH engines, for the reason the shared-vector block runs on both
+# (generator#451): the accelerator reimplements the resume machinery, so a
+# pure-only run would leave the half that actually ships unmeasured.
+echo "==> a chunk boundary must not change the verdict or the value (generator#413)"
+chunk_invariance() {
+    python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "$1" \
+        --message myfirstmessage --expect 21 --oneshot \
+        "$WORK/control.bin" "$WORK/overcount.bin" \
+        "$WORK/overcount_trunc.bin" "$WORK/incount_trunc.bin" \
+        "$WORK/overindex.bin" "$WORK/overindex_control.bin" \
+        "$WORK/overmaxlen.bin" "$WORK/overmaxlen_control.bin" \
+        "$WORK/overmaxlen_trunc.bin" "$WORK/inmaxlen_trunc.bin" \
+        "$WORK/overwidth_trunc.bin" "$WORK/inwidth_trunc.bin" \
+        "$WORK/wiremismatch.bin" "$WORK/wiremismatch_control.bin" \
+        "$WORK/wiremismatch_seq.bin" \
+        "$WORK/fixsubtype.bin" "$WORK/fixsubtype_control.bin" \
+        "$WORK/reopen_struct.bin" "$WORK/reopen_array.bin" \
+        "$WORK/skipped_occ_struct.bin" "$WORK/skipped_occ_array.bin" \
+        --cwd "$WORK/proj" -- python3 harness.py
+}
+if [ "$NATIVE" = yes ]; then
+    unset SOFAB_PUREPYTHON || true
+    require_engine native
+    chunk_invariance "Python (native)"
+fi
+SOFAB_PUREPYTHON=1
+export SOFAB_PUREPYTHON
+require_engine python
+chunk_invariance "Python (pure)"
+unset SOFAB_PUREPYTHON || true
+
 echo "PASS"

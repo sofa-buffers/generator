@@ -715,4 +715,31 @@ python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "Dart" --cap 4 \
     -- "$WORK/growth/harness"
 
+# CORELIB_PLAN S5.2/S6.0/S5.2.3, one property: the verdict AND the decoded value
+# must not depend on where the chunks were cut (generator#413). A resume bug -- a
+# half-read varint, a payload accumulator that is not carried, a scope stack that
+# unwinds one level too far -- is invisible until the split lands in the wrong
+# place, and the one-shot `decode` path never suspends at all.
+#
+# The fixtures are the ones this suite ALREADY built for its negative cases, so
+# the table costs nothing but the feeding: every §7.1 reject, every §7.3 skip,
+# every truncation, and the controls beside them. The two UTF-8 fixtures matter
+# most here -- §8 validates a payload at COMPLETION, so a chunk boundary inside a
+# bad sequence is exactly where a validator that checks per-chunk goes wrong.
+echo "==> a chunk boundary must not change the verdict or the value (generator#413)"
+python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "Dart" \
+    --message myfirstmessage --expect 22 --oneshot \
+    "$WORK/control.bin" "$WORK/overcount.bin" \
+    "$WORK/overindex.bin" "$WORK/overindex_control.bin" \
+    "$WORK/overindex_trunc.bin" "$WORK/inindex_trunc.bin" \
+    "$WORK/overmaxlen.bin" "$WORK/overmaxlen_control.bin" \
+    "$WORK/overwidth_trunc.bin" "$WORK/inwidth_trunc.bin" \
+    "$WORK/fp64_at_fp32.bin" "$WORK/fp32_overcount.bin" \
+    "$WORK/fp_arr_at_scalar.bin" "$WORK/arr_at_u8.bin" "$WORK/arr_legit.bin" \
+    "$WORK/skipped_bad_utf8.bin" "$WORK/declared_bad_utf8.bin" \
+    "$WORK/wiremismatch.bin" "$WORK/wiremismatch_control.bin" \
+    "$WORK/fixsubtype.bin" "$WORK/fixsubtype_control.bin" \
+    "$WORK/reopen_struct.bin" \
+    -- "$H"
+
 echo "PASS"
