@@ -2719,6 +2719,21 @@ discounts what a skipped subtree spans — header and payload, in one window or
 across ten, so the verdict cannot depend on the caller's chunking — and measures
 the cap against the bulk this receiver actually took on.
 
+The generator's own suite measures that from this side too (generator#442), and
+reaching this cap at all takes a schema built for it. The project that pins the
+**per-read** caps (generator#420) carries an array field precisely to push the
+derived budget out of the way — measured, 42 bytes there — because otherwise its
+images would be refused by the byte budget before the per-field cap they exist to
+test was ever consulted. That choice makes those images structurally unable to
+put a *skipped* field over the budget. So the span-cap case uses a **string-only**
+schema, where the walk yields 11 bytes: an over-budget field at an undeclared id,
+and a §7.3-mismatched one, each carrying a declared field **behind it in the same
+message** — separate images could not tell a working skip from one that ate the
+next field, and only the neighbour's exact value does. For a *declared* field the
+two caps are inseparable by construction, the budget being derived so that nothing
+within its per-field cap can exceed it; that is why a skipped field is the only
+place this cap is observable on its own, and why the gap could exist unnoticed.
+
 **Allocation shape: check first, then allocate once.** No generated decoder may
 allocate from an untrusted wire count *before* checking it, and an over-cap count
 is `LimitExceeded` — never a clamp to the cap, which is the #100 lesson again.

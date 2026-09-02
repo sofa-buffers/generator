@@ -711,6 +711,89 @@ ST=$("$WORK/lim420/harness/harness" status dyn < "$WORK/arrin420.bin" | head -n1
     || { echo "FAIL: [cpp] a count at the cap must decode, got $ST"; exit 1; }
 echo "==> [cpp] array cap exclusivity OK (mis-typed kind and unknown id both skipped)"
 
+# The OTHER §6.2.1 receiver cap in this decoder, and the one every image above is
+# structurally unable to reach (generator#442).
+#
+# `sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}` is a BYTE budget for reassembling
+# one field (#228), derived from the worst-case span walk rather than configured.
+# The lim420 project deliberately carries an array field to make that budget WIDE
+# -- measured, 42 bytes there -- because otherwise its own images would be refused
+# by the byte budget before the per-field cap they exist to test was ever
+# consulted. The cost of that choice is a blind spot: skip420.bin's over-cap blob
+# is skipped by the per-read cap while the span cap never fires, and no image
+# above puts a SKIPPED field over the byte budget.
+#
+# corelib-cpp had exactly that defect -- the span cap fired on undeclared ids,
+# §7.3 mismatches and skipped subtrees, returning LimitExceeded where Go returned
+# COMPLETE (fixed in corelib-cpp#129). Measured against 0198cf0, the commit before
+# that fix: the two images below are refused as LIMIT_EXCEEDED there, while
+# skip420.bin decodes COMPLETE on that same buggy library. So this is not a second
+# spelling of the case above; it is the half that case cannot see.
+#
+# A STRING-ONLY schema is what makes the budget tight: with max_dyn_string_len 8
+# the walk yields 11 bytes, so a field spanning 19 is over the budget and under
+# nothing else.
+echo "==> [cpp] the field-span cap never reaches a skipped field either (generator#442)"
+cat > "$WORK/span442.yaml" <<'YAML'
+version: 1
+messages:
+  span:
+    payload:
+      s: { id: 0, type: string }
+      n: { id: 1, type: u32 }
+YAML
+cat > "$WORK/cfg-442.yaml" <<'YAML'
+generic: { emit: project, max_dyn_string_len: 8 }
+targets: { cpp: { namespace: sofabuffers } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-442.yaml" --lang cpp --in "$WORK/span442.yaml" --out "$WORK/span442" )
+# The budget is DERIVED, so the test states the number it reasoned about: a walk
+# that changed would otherwise move the boundary and leave these images UNDER it,
+# passing while proving nothing -- the very failure this case exists to close.
+grep -q '#define SOFAB_MAX_DYN_BUFFERED_FIELD 11$' "$WORK/span442/span.hpp" || {
+    echo "FAIL: [cpp] the derived span budget is no longer 11, so these images may no longer exceed it:"
+    grep 'SOFAB_MAX_DYN_BUFFERED_FIELD' "$WORK/span442/span.hpp"; exit 1; }
+make -C "$WORK/span442" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+
+# Each image is ONE message carrying both halves: the over-budget field, and a
+# declared `n` behind it. Separate images could not tell a working skip from one
+# that ate the next field -- only the neighbour's exact value does that.
+#
+#   3a 82 01 …   a 16-byte STRING at id 7, declared nowhere   (span 19 > 11)
+#   02 83 01 …   a 16-byte BLOB at the string-declared id 0   (§7.3 mismatch)
+#   08 2a        n = 42, the resync detector
+SPAN442=AAAAAAAAAAAAAAAA
+printf '\072\202\001%s\010\052' "$SPAN442" > "$WORK/span_unknown.bin"
+printf '\002\203\001%s\010\052' "$SPAN442" > "$WORK/span_mistyped.bin"
+for v in span_unknown span_mistyped; do
+    ST=$("$WORK/span442/harness/harness" status span < "$WORK/$v.bin" | head -n1)
+    [ "$ST" = "COMPLETE" ] || {
+        echo "FAIL: [cpp] $v -- an over-BUDGET skipped field must stay COMPLETE (§6.2.1), got $ST"; exit 1; }
+    DEC=$("$WORK/span442/harness/harness" decode span < "$WORK/$v.bin")
+    echo "$DEC" | grep -q '"n":42' || {
+        echo "FAIL: [cpp] $v -- the skip consumed the wrong span; the field behind it reads: $DEC"; exit 1; }
+    echo "$DEC" | grep -q '"s":""' || {
+        echo "FAIL: [cpp] $v -- a skipped field must bind nothing; got: $DEC"; exit 1; }
+done
+
+# The controls. A READ field over the budget is still refused -- and for a
+# DECLARED field the two caps are inseparable by construction, the budget being
+# derived so that nothing within its per-field cap can exceed it. That is exactly
+# why the skipped rows above are the only place this cap is observable on its own,
+# and why the blind spot could exist at all.
+printf '\002\202\001%s' "$SPAN442" > "$WORK/span_read.bin"
+ST=$("$WORK/span442/harness/harness" status span < "$WORK/span_read.bin" | head -n1)
+[ "$ST" = "LIMIT_EXCEEDED" ] || {
+    echo "FAIL: [cpp] a READ field over the same budget must stay LIMIT_EXCEEDED, got $ST"; exit 1; }
+# ...and the budget must not refuse legitimate traffic: an at-cap string spans 10.
+printf '\002\102' > "$WORK/span_ok.bin"
+printf '12345678\010\052' >> "$WORK/span_ok.bin"
+DEC=$("$WORK/span442/harness/harness" decode span < "$WORK/span_ok.bin") || {
+    echo "FAIL: [cpp] an at-cap string is within the derived budget and must decode"; exit 1; }
+echo "$DEC" | grep -q '"s":"12345678"' || {
+    echo "FAIL: [cpp] at-cap string lost its bytes; got: $DEC"; exit 1; }
+echo "==> [cpp] field-span cap exclusivity OK (skipped over-budget fields stay COMPLETE, reads still refused)"
+
 # The WRAPPER-array half (generator#402 item 3, CORELIB_PLAN §6.2.1), and the
 # only measurement that settles it: a nine-byte message must not be able to
 # allocate.
