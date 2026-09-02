@@ -95,6 +95,14 @@ the corelib** into a temp dir; to test against a local checkout, pass its path a
 > which is **not** the devcontainer's default — it exports `SOFAB_KOTLIN_JDK` at
 > the second one it installs, and the harness reads that before `JAVA_HOME`.
 > Gradle comes from the corelib's own wrapper.
+
+> `python` runs its §5.1 encode-buffer legs on **both** of corelib-py's engines,
+> so it needs what the Cython accelerator's build needs: Cython, setuptools, a C
+> compiler and the CPython headers. It builds `sofab._speedups` **in place** in
+> the corelib checkout (so a checkout passed as `$1` gains a `.so`) and asserts
+> `sofab.IMPL` per leg — a missing accelerator fails the run rather than quietly
+> making both legs pure (generator#451). `SOFAB_PY_ALLOW_PURE_ONLY=1` accepts the
+> reduced coverage explicitly where the platform cannot compile it.
 | `csharp` | corelib-cs | `$1` / `SOFAB_CS_CORELIB` | `check_vectors.py` |
 | `typescript` | corelib-ts | `$1` / `SOFAB_TS_CORELIB` | `check_vectors.py` |
 | `zig` | corelib-zig | `$1` / `SOFAB_ZIG_CORELIB` | `check_vectors.py` |

@@ -3525,6 +3525,20 @@ A reimplementation is **conformant** when it reproduces these gates:
    §9.3), while the `count == N` control still decodes (generator#100). The
    harness `decode` therefore uses the fallible entry point everywhere (Rust
    `try_decode`, C++ `try_decode`, …).
+   Where a corelib ships more than one implementation, the harness **pins which
+   one it ran**: corelib-py picks between its pure-Python classes and its Cython
+   accelerator at import time, silently, and the §5.1 encode-buffer legs run
+   twice precisely because the two carry independent
+   `over_buffer`/`_put`/`_drain` code. A cloned corelib has no built extension,
+   so for as long as that loop existed both passes ran the *pure* engine and
+   printed whichever name they got (generator#451). The harness now builds the
+   accelerator and **asserts** `sofab.IMPL` per leg — a missing one fails the run
+   instead of halving its coverage, unless `SOFAB_PY_ALLOW_PURE_ONLY=1` says so
+   out loud — and everything after the loop, the shared-vector check included,
+   runs on the native engine, which is what a user with a compiler gets. This is
+   the same discipline §15 already applies to the `python`/`python-native` bench
+   rows, for the same reason: an engine that silently substitutes itself reports
+   one implementation's result under the other's name.
 3. **Corpus** (`tests/matrix`) — a corner-case corpus generated across **all**
    backends; invalid defs are rejected; dangling-ref + depth-cap enforced.
    Per-language `run.sh` additionally **compiles/builds every corpus def** against

@@ -104,6 +104,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
+      # corelib-py's native accelerator is a Cython extension whose generated .c
+      # is not committed, so the suite needs Cython (and setuptools, which is no
+      # longer bundled with CPython) to build it. Without these the run does not
+      # silently degrade to the pure engine — run.sh verifies the import and fails
+      # instead — but it would fail every run (generator#451).
+      - name: Cython (corelib-py's native accelerator)
+        run: python -m pip install --upgrade pip "setuptools>=61" wheel "Cython>=3.0,!=3.3.0"
       - uses: ./.github/actions/corelib-refs
       - name: Python backend — generate, syntax, round-trip, conformance
         run: ./tests/conformance/python/run.sh
