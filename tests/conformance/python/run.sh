@@ -24,6 +24,78 @@ fi
 echo "==> corelib-py: $CORELIB"
 export PYTHONPATH="$CORELIB/src"
 
+# corelib-py ships TWO engines: the pure-Python classes and an optional Cython
+# accelerator (`sofab._speedups`). `sofab/__init__.py` imports the accelerator
+# when it is importable and falls back to the pure classes otherwise -- silently,
+# by design -- and `setup.py` marks the extension `optional=True`, so a compile it
+# cannot do is not a failure exit either. A suite that only clones the corelib
+# therefore never has an accelerator to import: it runs the pure engine on every
+# leg, including the two below that print an engine name (generator#451).
+#
+# So the accelerator is built here, and it is the IMPORT that is verified, never
+# the build's exit status.
+#
+# (corelib-py's own `SOFAB_REQUIRE_ENGINE` guard is a fixture in ITS pytest suite;
+# nothing in a generated harness reads it, so the assertion has to live here.)
+
+# engine_is <native|python> -- true when `import sofab` right now uses that engine.
+# For `native`, `IMPL` alone is not enough: the exported Encoder/Decoder must BE
+# the accelerator's, which is what a native leg actually exercises.
+engine_is() {
+    python3 -c '
+import sys
+import sofab
+want = sys.argv[1]
+if sofab.IMPL != want:
+    sys.exit(1)
+if want == "native":
+    from sofab import _speedups
+    sys.exit(0 if sofab.Encoder is _speedups.Encoder and sofab.Decoder is _speedups.Decoder else 1)
+' "$1" 2>/dev/null
+}
+
+# active_engine -- the engine name for a message, never for a decision.
+active_engine() { python3 -c 'import sofab; print(sofab.IMPL)' 2>/dev/null || echo "<import failed>"; }
+
+# require_engine <native|python> -- the same check, but a mismatch ends the run.
+require_engine() {
+    engine_is "$1" && return 0
+    echo "FAIL: this leg must run on the '$1' engine, but sofab.IMPL is '$(active_engine)'." >&2
+    echo "      corelib-py falls back to pure Python whenever sofab._speedups cannot be" >&2
+    echo "      imported, which would make this a second pure leg (generator#451)." >&2
+    exit 1
+}
+
+echo "==> building corelib-py's native accelerator (sofab._speedups)"
+unset SOFAB_PUREPYTHON || true
+NATIVE=yes
+( cd "$CORELIB" && python3 setup.py build_ext --inplace ) > "$WORK/build_ext.log" 2>&1 || NATIVE=no
+[ "$NATIVE" = no ] || engine_is native || NATIVE=no
+if [ "$NATIVE" = yes ]; then
+    echo "==> native accelerator built (sofab.IMPL = native)"
+else
+    echo "--- last 20 lines of $WORK/build_ext.log ---" >&2
+    tail -n 20 "$WORK/build_ext.log" >&2 || true
+    echo "-------------------------------------------" >&2
+    # The build needs Cython (the generated .c is not committed), setuptools, a C
+    # compiler and the CPython headers. Naming the missing one beats a wall of
+    # compiler output.
+    for MOD in Cython setuptools; do
+        python3 -c "import $MOD" 2>/dev/null || echo "    missing build dependency: $MOD (pip install $MOD)" >&2
+    done
+    if [ "${SOFAB_PY_ALLOW_PURE_ONLY:-}" = 1 ]; then
+        echo "!!! SKIP: corelib-py's native accelerator is unavailable here, and" >&2
+        echo "!!!       SOFAB_PY_ALLOW_PURE_ONLY=1 was set: this run covers the PURE" >&2
+        echo "!!!       engine only and proves nothing about the native encoder/decoder." >&2
+    else
+        echo "FAIL: could not build corelib-py's native accelerator, so this run would" >&2
+        echo "      exercise the pure engine twice and report it as two engines." >&2
+        echo "      Install the build dependencies above, or set SOFAB_PY_ALLOW_PURE_ONLY=1" >&2
+        echo "      to accept the reduced coverage explicitly." >&2
+        exit 1
+    fi
+fi
+
 cat > "$WORK/cfg.yaml" <<YAML
 generic: { emit: project }
 targets: { python: {} }
@@ -62,13 +134,16 @@ sed 's/"f_str": *"[^"]*"/"f_str": "'"$(printf 'x%.0s' $(seq 1 400))"'"/' \
     "$ROOT/tests/conformance/lib/maxsize_fill.json" > "$OVERFILL"
 grep -q 'xxxxxxxxxx' "$OVERFILL" || { echo "FAIL: could not build the over-filled input (f_str renamed?)"; exit 1; }
 
-for ENGINE in native pure; do
-    if [ "$ENGINE" = pure ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+ENGINES="native python"
+[ "$NATIVE" = yes ] || ENGINES=python
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     # A fallback to the pure engine where the native one was expected would make
-    # the second pass a duplicate of the first, silently.
-    IMPL=$(python3 -c 'import sofab; print(sofab.IMPL)')
-    echo "==> bounded encode buffer is exactly MAX_SIZE, engine=$IMPL (ARCHITECTURE §9.6)"
-    check_maxsize_fill "python/$IMPL" python3 "$WORK/fill/harness.py" encode fill
+    # the second pass a duplicate of the first, silently -- so the leg ASSERTS the
+    # engine it claims instead of printing whichever one it got.
+    require_engine "$ENGINE"
+    echo "==> bounded encode buffer is exactly MAX_SIZE, engine=$ENGINE (ARCHITECTURE §9.6)"
+    check_maxsize_fill "python/$ENGINE" python3 "$WORK/fill/harness.py" encode fill
 
     # ...and the other side of owning the buffer: a value the caller filled PAST
     # its own schema bound does not fit, and §5.1 forbids returning partial output
@@ -77,14 +152,21 @@ for ENGINE in native pure; do
     # receiver would then reject as INVALID.
     echo "==> an over-filled bounded value must be refused, not truncated (§5.1)"
     if python3 "$WORK/fill/harness.py" encode fill < "$OVERFILL" > "$WORK/overfill.bin" 2>/dev/null; then
-        echo "FAIL: [$IMPL] a string 400 bytes into a maxlen-9 field must be reported, not encoded"; exit 1
+        echo "FAIL: [$ENGINE] a string 400 bytes into a maxlen-9 field must be reported, not encoded"; exit 1
     fi
     [ ! -s "$WORK/overfill.bin" ] || {
-        echo "FAIL: [$IMPL] a refused encode emitted $(wc -c < "$WORK/overfill.bin") bytes of partial output"; exit 1
+        echo "FAIL: [$ENGINE] a refused encode emitted $(wc -c < "$WORK/overfill.bin") bytes of partial output"; exit 1
     }
-    echo "   [$IMPL] over-fill refusal OK"
+    echo "   [$ENGINE] over-fill refusal OK"
 done
+
+# Everything below runs on ONE engine -- the shared-vector byte-exactness check
+# included -- and that engine is the native one wherever it exists: it is what a
+# user with a compiler gets, and the pure engine has just been through every leg
+# of the loop above.
 unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+echo "==> remaining legs run on the $(active_engine) engine"
 
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
