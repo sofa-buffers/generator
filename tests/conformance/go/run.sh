@@ -886,4 +886,25 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
 
+# CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
+# (generator#449). A wrapper array carries no element count: its length is
+# highest present id + 1, so it GROWS as elements arrive, and the element INDEX
+# is what the receiver cap bounds. Two ports that grow differently emit
+# IDENTICAL bytes, so no vector can reach this -- the cases are a delivery
+# sequence of ids, and the driver builds the message from them.
+#
+# The index check lives in GENERATED code in every backend, which is why this
+# runs here and not only in the corelibs.
+echo "==> sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
+printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
+python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limits.yaml" --lang go --in "$WORK/growth.yaml" --out "$WORK/growth" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/growth/go.mod"
+( cd "$WORK/growth" && GOFLAGS=-mod=mod go build -o "$WORK/growth-harness" ./harness )
+# --cap must equal the max_dyn_array_count the config above generated with:
+# the cases' indices are offsets onto it, so a mismatch moves the boundary.
+python3 "$ROOT/tests/conformance/lib/check_growth.py" \
+    "$CORELIB/assets/test_vectors.json" "Go" --cap 4 \
+    -- "$WORK/growth-harness"
+
 echo "PASS"

@@ -425,7 +425,20 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 		// conformance run can assert rejects, e.g. over-count arrays (#100).
 		f.line("            %s obj;", mt)
 		f.line("            auto r = %s::try_decode(reinterpret_cast<const std::uint8_t *>(in.data()), in.size(), obj);", mt)
-		f.line("            if (!r.ok()) { std::cerr << \"decode error\\n\"; return 1; }")
+		if g.clib {
+			f.line("            if (!r.ok()) { std::cerr << \"decode error\\n\"; return 1; }")
+		} else {
+			// NAME the category, as every other backend's harness does. A bare
+			// "decode error" says only that something was refused, and the §6.3
+			// categories are exactly what a conformance driver has to tell apart:
+			// an over-cap element index is LimitExceeded (well-formed bytes, a
+			// policy rejection that a looser cap would accept), never Invalid.
+			// `status` beside this one already names all four, but it exits 0 --
+			// a driver that needs the verdict AND the reject in one run could not
+			// get both. Pure corelib-cpp only: the c-cpp wrapper's Result carries
+			// no invalid()/incomplete()/limitExceeded() predicates.
+			f.line("            if (!r.ok()) { std::cerr << \"decode error: \" << (r.invalid() ? \"INVALID\" : r.incomplete() ? \"INCOMPLETE\" : r.limitExceeded() ? \"LIMIT_EXCEEDED\" : \"INVALID_ARGUMENT\") << \"\\n\"; return 1; }")
+		}
 		f.line("            to_json(obj, std::cout); std::cout << \"\\n\";")
 		if !g.clib {
 			// Surface the §7 decode outcome so a conformance run can assert the
