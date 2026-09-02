@@ -11,7 +11,7 @@
 | job | what it proves |
 |---|---|
 | `hermetic` | the generator builds and its unit + matrix tests pass, with no network |
-| `lang-<x>` (10) | generated code for `<x>` compiles against the real corelib, round-trips JSON, and matches the shared vectors byte for byte |
+| `lang-<x>` (10) | generated code for `<x>` compiles against the real corelib, round-trips JSON, encodes the shared vectors byte for byte, and decodes all 131 of them into a message declaring only their anchors — so every other field must be skipped (ARCHITECTURE §12 item 1) |
 | `lang-docs` | the `docs` target renders |
 | `build-binaries` | release artifacts (main only) |
 

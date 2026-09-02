@@ -38,6 +38,11 @@ messages:
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
   vecua: { payload: { a: { id: 0, type: array, items: { type: u32, count: 8 } } } }
 YAML
+# The decode-side message (generator#444). Printed by the driver that asserts
+# against it, so the ids it declares and the ids that driver expects to read
+# back cannot drift apart.
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
+    >> "$WORK/conf.yaml"
 
 printf 'generic: { emit: project }\n' > "$WORK/cfg.yaml"
 
@@ -644,6 +649,15 @@ echo "==> wrapper index / row count caps OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/zig/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
+
+# ...and the other direction (generator#444): feed each vector's DENSE bytes
+# into a message that declares u64 on the anchors and nothing else, so every
+# other field on the wire is an unknown id or a MESSAGE_SPEC S7.3 wire-type
+# mismatch and must be SKIPPED -- with the anchor behind it still exact.
+echo "==> shared-vector decode conformance (skip matrix)"
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+    "$CORELIB/assets/test_vectors.json" "Zig" \
+    -- "$WORK/conf/zig-out/bin/harness"
 
 echo "==> corpus + realworld: every definition builds"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do

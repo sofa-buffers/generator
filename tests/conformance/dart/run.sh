@@ -37,6 +37,11 @@ messages:
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
 YAML
+# The decode-side message (generator#444). Printed by the driver that asserts
+# against it, so the ids it declares and the ids that driver expects to read
+# back cannot drift apart.
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
+    >> "$WORK/conf.yaml"
 
 # Generate a project, wire the corelib path, resolve deps and compile the harness
 # to a native exe (fast: no per-invocation JIT startup for the vector loop).
@@ -612,6 +617,15 @@ echo "==> matrix row count OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/dart/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/harness"
+
+# ...and the other direction (generator#444): feed each vector's DENSE bytes
+# into a message that declares u64 on the anchors and nothing else, so every
+# other field on the wire is an unknown id or a MESSAGE_SPEC S7.3 wire-type
+# mismatch and must be SKIPPED -- with the anchor behind it still exact.
+echo "==> shared-vector decode conformance (skip matrix)"
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+    "$CORELIB/assets/test_vectors.json" "Dart" \
+    -- "$WORK/conf/harness"
 
 # fp32 signaling-NaN bit-for-bit round-trip (issue #226): a Dart double quiets an
 # fp32 sNaN, so the generated code must route through corelib-dart's raw-bits API

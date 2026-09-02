@@ -82,6 +82,11 @@ messages:
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
 YAML
+# The decode-side message (generator#444). Printed by the driver that asserts
+# against it, so the ids it declares and the ids that driver expects to read
+# back cannot drift apart.
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
+    >> "$WORK/conf.yaml"
 
 IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someu64":18446744073709551615,"somestringarray":["a","b","c"]}'
 
@@ -657,6 +662,15 @@ YAML
 
     echo "==> [$label] shared-vector byte-exact conformance"
     python3 "$ROOT/tests/conformance/rust/check_vectors.py" "$corelib/assets/test_vectors.json" "$WORK/conf-$label"
+
+    # ...and the other direction (generator#444): feed each vector's DENSE bytes
+    # into a message that declares u64 on the anchors and nothing else, so every
+    # other field on the wire is an unknown id or a MESSAGE_SPEC S7.3 wire-type
+    # mismatch and must be SKIPPED -- with the anchor behind it still exact.
+    echo "==> [$label] shared-vector decode conformance (skip matrix)"
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$corelib/assets/test_vectors.json" "Rust" \
+        --cwd "$WORK/conf-$label" -- cargo run -q --
 
     echo "==> [$label] corpus + realworld: every definition builds"
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do

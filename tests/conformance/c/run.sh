@@ -448,4 +448,24 @@ OUT=$("$WORK/proj/harness/harness" decode < "$WORK/w_u8_255_ctl.bin") || { echo 
 echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK"
 
+echo "==> shared-vector decode conformance (skip matrix)"
+# generator#444: each vector's DENSE bytes fed into a message that declares u64
+# on the anchors and nothing else, so every other field on the wire is an unknown
+# id or a MESSAGE_SPEC S7.3 wire-type mismatch and must be SKIPPED -- with the
+# anchor behind it still exact.
+#
+# --max-id: corelib-c-cpp's default SOFAB_OBJECT_DESCR_PROFILE holds a 16-bit
+# field id, so the one anchor at 100001 cannot be declared here. It is not lost
+# coverage of the vector -- the id simply joins the ids being skipped, and
+# skip_large_id still has to decode cleanly past its three-byte header varint.
+printf 'version: 1\nmessages:\n' > "$WORK/vecskip.yaml"
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema --max-id 65535 \
+    >> "$WORK/vecskip.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/vecskip.yaml" --out "$WORK/vecskip" )
+make -C "$WORK/vecskip" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+    "$CORELIB/assets/test_vectors.json" "C" --max-id 65535 \
+    -- "$WORK/vecskip/harness/harness"
+
 echo "PASS"

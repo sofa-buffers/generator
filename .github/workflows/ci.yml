@@ -46,6 +46,13 @@ jobs:
       - name: Wheel builder unit tests
         run: python3 -m unittest discover -s packaging/pypi -v
 
+  # Every lang-<x> job below runs tests/conformance/<x>/run.sh, which checks the
+  # shared wire vectors in BOTH directions: the generated encoder's bytes against
+  # the file's sparse column, and the generated decoder against its dense one --
+  # the latter through a message declaring only the vectors' anchors, so every
+  # other field must be skipped as an unknown id or a MESSAGE_SPEC S7.3
+  # wire-type mismatch (generator#444, ARCHITECTURE S12 item 1).
+  #
   # Language milestone: C (corelib-c-cpp). Generates code, builds it against the
   # real corelib with gcc, round-trips through the harness, and checks byte-exact
   # output against the shared wire vectors. tests/conformance/c/run.sh clones the corelib.

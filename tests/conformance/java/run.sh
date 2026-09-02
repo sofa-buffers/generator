@@ -37,6 +37,11 @@ messages:
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
 YAML
+# The decode-side message (generator#444). Printed by the driver that asserts
+# against it, so the ids it declares and the ids that driver expects to read
+# back cannot drift apart.
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
+    >> "$WORK/conf.yaml"
 
 build() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang java --in "$1" --out "$2" )
@@ -603,6 +608,15 @@ echo "==> payload length caps OK (rejects, off schema-bounded fields, off skippe
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/java/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/target/harness.jar"
+
+# ...and the other direction (generator#444): feed each vector's DENSE bytes
+# into a message that declares u64 on the anchors and nothing else, so every
+# other field on the wire is an unknown id or a MESSAGE_SPEC S7.3 wire-type
+# mismatch and must be SKIPPED -- with the anchor behind it still exact.
+echo "==> shared-vector decode conformance (skip matrix)"
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+    "$CORELIB/assets/test_vectors.json" "Java" \
+    -- java -jar "$WORK/conf/target/harness.jar"
 
 echo "==> §7 decode status through the generated API (generator#105)"
 HC="java -jar $WORK/conf/target/harness.jar"
