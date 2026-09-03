@@ -129,6 +129,10 @@ echo "==> round-trip OK"
 # runs the default engine proves nothing about the other — and the native
 # over_buffer is typed `bytearray`, a mismatch the pure one would accept.
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill" )
+# The constant is engine-independent -- it is generated source, not runtime --
+# so it is read once, outside the per-engine loop below.
+check_maxsize_constant python "$WORK/fill/message.py" \
+    "^    MAX_SIZE = $SOFAB_MAXSIZE_FILL_BYTES\$"
 OVERFILL="$WORK/overfill.json"
 sed 's/"f_str": *"[^"]*"/"f_str": "'"$(printf 'x%.0s' $(seq 1 400))"'"/' \
     "$ROOT/tests/conformance/lib/maxsize_fill.json" > "$OVERFILL"

@@ -92,8 +92,8 @@ echo "==> round-trip OK"
 # neither short (a legal message would not fit) nor slack (RAM paid for nothing).
 echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
 build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
-grep -q 'static const int maxSize = 234;' "$WORK/fill/lib/message.dart" \
-    || { echo "FAIL: bounded message must emit a derived maxSize, not a ceiling"; exit 1; }
+check_maxsize_constant dart "$WORK/fill/lib/message.dart" \
+    "static const int maxSize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
 # jsonDecode is the harness's front door and a Dart `int` is SIGNED 64-bit: it
 # reads 18446744073709551615 as a double, which the u64 arm then clamps to
 # 2^63-1 -- four bytes short of the filled message. Quote those so the arm takes

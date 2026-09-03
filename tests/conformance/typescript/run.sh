@@ -102,8 +102,8 @@ echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
 gen "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
 ln -s "$WORK/ex/node_modules" "$WORK/fill/node_modules"
 ( cd "$WORK/fill" && npx tsc --noEmit )
-grep -q 'static readonly MAX_SIZE = 234;' "$WORK/fill/message.ts" \
-    || { echo "FAIL: bounded message must emit a derived MAX_SIZE, not a ceiling"; exit 1; }
+check_maxsize_constant typescript "$WORK/fill/message.ts" \
+    "static readonly MAX_SIZE = $SOFAB_MAXSIZE_FILL_BYTES;\$"
 # JSON.parse is the harness's front door and a JS number is a double, so an
 # integer above 2^53 in the shared fill input would arrive ROUNDED — u64 max
 # reads back as 2^64, which the encoder rightly refuses as out of range. Quote

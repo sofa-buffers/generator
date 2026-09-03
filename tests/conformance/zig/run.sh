@@ -92,6 +92,8 @@ zig_build "$WORK/conf.yaml" "$WORK/conf"
 # fully filled message must fit it AND reach it exactly.
 echo "==> MAX_SIZE fill check"
 zig_build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
+check_maxsize_constant zig "$WORK/fill/src/message.zig" \
+    "pub const MAX_SIZE: usize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
 check_maxsize_fill zig "$WORK/fill/zig-out/bin/harness" encode fill
 
 echo "==> JSON encode -> decode round-trip"

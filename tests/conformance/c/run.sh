@@ -72,6 +72,9 @@ YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/fill-proj.yaml" --lang c \
     --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fillproj" )
 make -C "$WORK/fillproj" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+# The macro carries the project's symbol_prefix (sofab_ above), upper-cased.
+check_maxsize_constant c "$WORK/fillproj/generated/fill.h" \
+    "^#define SOFAB_FILL_MAX_SIZE $SOFAB_MAXSIZE_FILL_BYTES\$"
 check_maxsize_fill c "$WORK/fillproj/harness/harness" encode fill
 
 echo "==> streaming: encode through a sink, feed the decoder byte by byte"

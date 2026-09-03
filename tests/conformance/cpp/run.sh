@@ -152,6 +152,8 @@ run_variant() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
         --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill-$label" )
     make -C "$WORK/fill-$label" "$@" >/dev/null
+    check_maxsize_constant "$label" "$WORK/fill-$label/fill.hpp" \
+        "static constexpr std::size_t _maxSize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
     check_maxsize_fill "$label" "$WORK/fill-$label/harness/harness" encode fill
 
     # Streaming behaviour: both corelibs stream in both directions and always

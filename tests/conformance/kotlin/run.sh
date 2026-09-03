@@ -27,6 +27,9 @@ fi
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
 
+# Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
+
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_KOTLIN_CORELIB:-}}"
 WORK=$(mktemp -d)
@@ -98,6 +101,29 @@ STREAMED=$(printf '%s' "$IN" | $H stream myfirstmessage) \
 [ "$STREAMED" = "$OUT" ] \
     || { echo "FAIL: streaming differs from the one-shot pair"; printf 'one-shot: %s\nstream:   %s\n' "$OUT" "$STREAMED"; exit 1; }
 echo "==> streaming OK"
+
+# The OTHER encode arm of the same §5.1 table (ARCHITECTURE §9.6,
+# generator#415). The streaming row just above is the UNBOUNDED shape -- a
+# scratch window plus a flush sink. A schema whose every field carries a
+# count/maxlen has a worst case instead, and the backend emits a genuinely
+# different body for it: one `ByteArray(MAX_SIZE)`, no sink, no flush.
+#
+# That bounded body already RUNS here -- $WORK/conf's vecu/vecs/vecsa are all
+# schema-bounded and the shared-vector leg below drives their encode dozens of
+# times -- but nothing ever asserted the SIZE it derives. example.yaml, the only
+# schema whose MAX_SIZE a reader of this file meets, is unbounded
+# (MAX_SIZE = MAX_SIZE_LIMIT) and says nothing about it either.
+#
+# The fill message pins that size from both sides: filling every field to its
+# declared bound must encode to exactly MAX_SIZE bytes, so the buffer can be
+# neither short (a legal message would not fit) nor slack (RAM paid for nothing).
+# Why that needs both a constant leg and an encoder leg is argued once, in the
+# driver.
+echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
+build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
+check_maxsize_constant kotlin "$WORK/fill/src/main/kotlin/message/Fill.kt" \
+    "public const val MAX_SIZE = $SOFAB_MAXSIZE_FILL_BYTES\$"
+check_maxsize_fill kotlin "$WORK/fill/build/install/harness/bin/harness" encode fill
 
 # A decoded message OWNS its bytes (CORELIB_PLAN §6.7 / §6.7.1, generator#412) --
 # the LIFETIME half of the streaming claim just above. No value the codec

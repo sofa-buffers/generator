@@ -3562,15 +3562,30 @@ from. Both paths now pass `borrow = false` to `sofab.PayloadAcc.take`, the flag
 that told them apart is gone, and the property is a *test* rather than a claim in
 a doc comment (§12).
 
-**Verification.** `tests/matrix/maxsize_test.go` requires every target to emit
-the *same* number and to match `ir.MaxWireSize` — the guard none of the seven
-copies ever had. `tests/conformance/c/maxsize_fill.{yaml,c}` (and the shared
-`tests/conformance/lib/maxsize_fill.sh` its peers reuse) closes the loop
-against reality: a message with one field per wire shape, every bound exhausted
-and every varint at its widest, must encode to **exactly** `MAX_SIZE`. Too small
-means a legal message does not fit its own buffer; too large means every
-fixed-buffer target wastes that RAM silently. The wrapper-array surplus byte
-above was found by that check on its first run.
+**Verification**, in three legs, because no one of them is enough. (1)
+`tests/matrix/maxsize_test.go` requires every target to emit the *same* number
+and to match `ir.MaxWireSize` — the guard none of the seven copies ever had — but
+it never builds or runs anything, so every target could agree on a wrong number.
+(2) `check_maxsize_constant` reads the constant back out of the source each
+backend generates for the fill schema. (3) `check_maxsize_fill` runs that
+target's real encoder on a message with every bound exhausted and every varint at
+its widest, and requires **exactly** `MAX_SIZE` bytes — and exactly the bytes
+frozen in `maxsize_fill.hex`. Too small means a legal message does not fit its own
+buffer; too large means every fixed-buffer target wastes that RAM silently. The
+wrapper-array surplus byte above was found by leg (3) on its first run.
+
+Legs (2) and (3) are both needed and in that order of subtlety: slack in an
+over-sized buffer is never written, so an inflated `MAX_SIZE` encodes to the same
+bytes and passes the encoder leg — only reading the constant sees it. And the
+byte count alone cannot see a backend that mis-encodes at the *same* length
+(swapped ids, a wrapper sequence framed wrong), which is why (3) compares bytes
+and not just a count; the fill schema is the only place several of those shapes
+meet an encoder at all. `tests/conformance/c/maxsize_fill.c` and the shared
+`tests/conformance/lib/maxsize_fill.{yaml,json,hex,sh}` carry all of it, and
+since generator#415 **all eleven** suites run both legs. The fill schema's own
+coverage limits — an enum and a union are deliberately over-charged and can never
+join it; a bitfield and an array-of-struct are exactly priced and still missing
+(generator#470) — are recorded in the fixture's header.
 
 ---
 

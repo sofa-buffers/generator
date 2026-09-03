@@ -11,6 +11,18 @@
 # No field declares a `default`: a field equal to its default is omitted from the
 # wire (MESSAGE_SPEC §2), which would make a "full" message shorter than its
 # worst case and hide a wrong bound.
+#
+# The coverage is NOT complete, and two different reasons keep shapes out.
+#
+# Deliberately impossible here: an enum is charged the full u32 width and a union
+# the SUM of all its options, both safe OVER-estimates (only one option is ever
+# written, and a small enum never reaches 2^32). A field of either kind would
+# make the fullest legal message shorter than MAX_SIZE and break the "exactly"
+# this schema exists to assert. Do not add one and then relax the assertion.
+#
+# Missing but exactly priced, and therefore a real gap: a bitfield (10 bytes) and
+# a wrapper array whose elements are structs or arrays. Tracked as generator#470;
+# adding them moves SOFAB_MAXSIZE_FILL_BYTES and maxsize_fill.hex with them.
 version: 1
 messages:
   fill:

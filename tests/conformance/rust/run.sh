@@ -127,6 +127,8 @@ run_variant() {
     # it AND reach it exactly.
     echo "==> [$label] MAX_SIZE fill check"
     rust_build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill-$label"
+    check_maxsize_constant "$label" "$WORK/fill-$label/src/message.rs" \
+        "pub const MAX_SIZE: usize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
     ( cd "$WORK/fill-$label" && check_maxsize_fill "$label" cargo run -q -- encode fill )
 
     # Streaming behaviour (PR #242): the generator tests only assert that the
