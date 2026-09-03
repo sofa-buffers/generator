@@ -69,7 +69,7 @@ fn main() {
         let mut dec = Vecs::decoder();
         for chunk in one_shot.chunks(size) {
             match dec.feed(chunk) {
-                Ok(()) | Err(sofab::Error::Incomplete) => continue,
+                Ok(_) => continue,
                 Err(e) => panic!("heapless chunk size {size}: feed failed: {e:?}"),
             }
         }
@@ -105,7 +105,7 @@ fn main() {
         let mut dec = Vecsa::decoder();
         for chunk in wire.chunks(size) {
             match dec.feed(chunk) {
-                Ok(()) | Err(sofab::Error::Incomplete) => continue,
+                Ok(_) => continue,
                 Err(e) => panic!("heapless array chunk size {size}: feed failed: {e:?}"),
             }
         }
@@ -136,7 +136,7 @@ fn main() {
         let mut dec = Vecsa::decoder();
         for chunk in deep.chunks(size) {
             match dec.feed(chunk) {
-                Ok(()) | Err(sofab::Error::Incomplete) => continue,
+                Ok(_) => continue,
                 Err(e) => panic!("heapless deep-nest chunk size {size}: feed failed: {e:?}"),
             }
         }

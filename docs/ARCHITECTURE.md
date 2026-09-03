@@ -1020,13 +1020,14 @@ addresses, and why it is the array path it addresses rather than the dispatch.
 **Decode outcome (MESSAGE_SPEC §7).** Every corelib reports the finish-less
 three-valued outcome — COMPLETE / INCOMPLETE / INVALID — and the generated
 one-shot decode must not hide it. For corelibs that surface INCOMPLETE as an
-error/exception (Go, Rust, C++, C, Python, TS) the fallible decode entry
-point (`try_decode`, Go's `(msg, error)`, thrown exceptions) already propagates
-all three. The **status-returning** corelibs (C#, Java, Kotlin, Zig, Dart) treat
+error/exception (Go, C++, C, Python, TS) the fallible decode entry point (Go's
+`(msg, error)`, thrown exceptions) already propagates all three. The
+**status-returning** corelibs (C#, Java, Kotlin, Zig, Dart, Rust) treat
 INCOMPLETE as a non-error status (C#/Java: `DecodeStatus` from `Feed`/`feed`;
 Kotlin: `DecodeStatus` from its `status` property; Zig: `Status` from
-`feed(chunk)`; Dart: `DecodeStatus` from `Decoder.decode`/`feed`) and leave the
-end-of-input verdict to the caller, so their backends must surface it explicitly:
+`feed(chunk)`; Dart: `DecodeStatus` from `Decoder.decode`/`feed`; Rust: `Status`
+from `Result<Status>`) and leave the end-of-input verdict to the caller, so their
+backends must surface it explicitly:
 
 - C#/Java emit an additional status-surfacing entry point next to the
   back-compat best-effort `Decode`/`decode`: C# `static DecodeStatus
@@ -1067,6 +1068,18 @@ end-of-input verdict to the caller, so their backends must surface it explicitly
   verdict §7 says generated code must not hide. `Decoder.finish()` draws the same
   line for the streaming path. The conformance harness pins all three channels —
   the two `trydecode` statuses, and a truncated `decode` that must not succeed.
+- Rust joined this family in 2026-09 (see the next section): `IStream::feed`
+  returns `Result<Status>`, and `sofab::Error` no longer has an `Incomplete`
+  variant at all. So the generated crate names the missing outcome itself —
+  `enum DecodeError { Incomplete, Sofab(sofab::Error) }`, with
+  `From<sofab::Error>` so `?` still carries the corelib's own refusals — and
+  `try_decode` and `Decoder::finish` return `Result<T, DecodeError>`. That is
+  the Zig ruling in Rust spelling: Zig unions the corelib's error set with
+  `error{IncompleteMessage}`, Kotlin raises a non-corelib exception type, and
+  Rust unions the corelib's error enum with the one outcome its error channel
+  deliberately does not model. `Decoder::feed` itself stays on
+  `Result<sofab::Status, sofab::Error>` — mid-stream it holds no framing and has
+  no verdict to give.
 
 #### The stream answers once: `feed` is the only channel (generator#461)
 
@@ -1074,10 +1087,13 @@ A corelib's incremental decoder used to publish its outcome twice — as `feed`'
 return value *and* through a status accessor on the stream (`IStream.Status` /
 `status()` / `.status`). The two could not disagree, but the accessor was a
 second decode surface for one fact, and CORELIB_PLAN §5.2.4 allows only one: the
-outcome belongs to the call that produced it. Six corelibs removed the accessor
-in one sweep (2026-09-02), leaving `feed` as the sole answer; a refusal, which is
-terminal and therefore not a status at all, still travels the error channel with
-its own code.
+outcome belongs to the call that produced it. Five corelibs removed the accessor
+in one sweep (2026-09-02) — C#, Java, TypeScript, Zig, Python — leaving `feed` as
+the sole answer; a refusal, which is terminal and therefore not a status at all,
+still travels the error channel with its own code. The two Rust corelibs had no
+accessor to remove and made the same move through the other surface: they took
+INCOMPLETE *off* the error channel, which is the one break in the sweep that
+reaches generated code (last subsection).
 
 **The generated wrapper is the caller, and a caller may remember.** The removal is
 a corelib-side break, but it must not become a break for users of generated code,
@@ -1098,6 +1114,14 @@ back it with a private field holding what the last `feed` returned:
   is a **type-only** export, and a value-import of it would break any consumer
   project compiling with `verbatimModuleSyntax`. Its supertype is import-neutral,
   non-breaking, and wide enough for the latched Invalid the wrapper can hold.
+- **Python** `_StreamDecoder` keeps its `status` property, now reading `_st`.
+  corelib-py's `feed` already returned the `Status`; only the accessor beside it
+  went. A `SofaLimitError` raised out of `feed` deliberately leaves `_st`
+  untouched, because the corelib's own `_status` was not written on that path
+  either (§6.3 keeps a policy refusal off the three-outcome channel entirely), so
+  remembering `feed`'s return reproduces the removed accessor's readings exactly.
+  An INVALID needs no latch: it is terminal and every later `feed` returns it
+  again.
 - **Zig** `Msg.Decoder` keeps `pub fn status(self: *const Decoder) sofab.Status`,
   now reading `st: sofab.Status = .complete`. corelib-zig's `feed` already
   returned `Error!Status`, so it expressed the same removal by deleting the
@@ -1146,6 +1170,44 @@ inside `finish()` and said nothing about `status()`, and a fix repairing only
 dead-broken for every user of generated code. The harness call is what puts a
 compiler behind it. The same blind spot applies to every `pub fn` a generated Zig
 module exposes but no harness exercises.
+
+**Rust is the one target where this is a break for generated code, and it is not
+about an accessor.** corelib-rs and corelib-rs-no-std had no status accessor to
+remove; what they did instead is move INCOMPLETE off the error channel —
+`IStream::feed` now returns `Result<Status>` with `Status { Complete,
+Incomplete }`, and `Error::Incomplete` is deleted ("INCOMPLETE is not here, by
+design", `src/error.rs`). Three generated signatures follow from that, and they
+are not the same signature:
+
+- `Decoder::feed` becomes `Result<sofab::Status, sofab::Error>`, mirroring the
+  corelib exactly. Both ordinary outcomes share the `Ok` arm because mid-stream
+  the decoder holds no framing and has no verdict to give; the error arm is left
+  carrying nothing but refusals. Collapsing the two into `Ok(())` would destroy
+  the one bit a streaming caller reads. The precedence in front of it is
+  unchanged: a structural `InvalidMsg` and a crossed receiver cap are still
+  reported ahead of feed's own status (§5.2 / §6.2.1 / §6.3).
+- `try_decode` and `Decoder::finish` become `Result<T, DecodeError>`. They *are*
+  the framing — one is handed the whole buffer, the other is called when the
+  caller says the input is over — so for them a trailing `Status::Incomplete` is
+  truncation, and §7 forbids handing back a half-filled value instead. There is
+  no `sofab::Error` variant left to carry that, which is why the crate declares
+  `DecodeError` (see the §7 family list above). Returning `(T, Status)` instead
+  was rejected: it would make Rust the only target whose whole-buffer decode
+  hands back a truncated message and asks every caller, forever, to remember to
+  check — the exact hiding §7 rules out.
+
+The trap here is that the *wrong* fix compiles. With `feed` returning
+`Result<Status, _>`, the old `fed?;` and `self.feed(&[])?;` still build — `?`
+simply drops the `Status` — and `try_decode` then accepts a truncated message and
+returns it half-filled. Measured on the suite's own in-bound-truncated vector:
+exit 0 and partial JSON where the contract says reject. rustc reports it only as
+`warning: unused Status that must be used`, `cargo build -q` hides warnings, and
+no job runs `-D warnings`. So "it builds" proves nothing on this change; the
+signatures are pinned by unit tests and the verdict by the conformance suite's
+stderr categories, which separate `Incomplete` from `InvalidMsg` in fifteen
+places. `tests/bench/lang/rust.sh`'s hand-written firmware harness needs no edit
+under this shape — `match Msg::try_decode(..) { Ok(d) => .., Err(_) => .. }` is
+signature-agnostic — which a `(T, Status)` return would have broken.
 
 #### Decode verdict: over-count scalar arrays are INVALID (all families)
 

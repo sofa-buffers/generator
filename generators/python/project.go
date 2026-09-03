@@ -148,6 +148,14 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("        try:")
 	f.line("            for off in range(0, len(data), step):")
 	f.line("                st = dec.feed(data[off:off + step])")
+	// The corelib publishes its outcome once, as feed's return value, and has no
+	// accessor to ask again -- so the reader's `status` is the wrapper
+	// remembering it (generator#461). Nothing else in the suite reads that memory
+	// after a feed (the line above reads only its initial value), so a stale or
+	// mis-wired property would let every vector pass. Check it against the feed
+	// that produced it, on every chunk of every vector.
+	f.line("                if dec.status is not st:")
+	f.line("                    raise AssertionError('status %%s disagrees with the feed that set it (%%s)' %% (dec.status, st))")
 	f.line("        except Exception as e:")
 	f.line("            sys.stderr.write('decode error: %%s\\n' %% (e,))")
 	f.line("            return 1")

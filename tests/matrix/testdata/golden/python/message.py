@@ -172,21 +172,28 @@ class _StreamDecoder:
     COMPLETE / INCOMPLETE / INVALID. There is no finalize step: an
     INCOMPLETE tail is retained and continued by the next chunk, and only
     the caller's framing knows whether more can still come.
+
+    status reports what the last feed() returned. The corelib publishes
+    that outcome exactly once, on feed's return, and keeps no accessor to
+    ask a second time -- so this reader is the caller that remembers, and
+    its own surface is unchanged.
     """
 
-    __slots__ = ("message", "_d")
+    __slots__ = ("message", "_d", "_st")
 
     def __init__(self, msg_cls, vis_cls, reassembly=REASSEMBLY) -> None:
         self.message = msg_cls()
         self._d = Decoder(visitor=vis_cls(self.message), max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304,
                           reassembly=reassembly)
+        self._st = Status.COMPLETE
 
     def feed(self, chunk) -> Status:
-        return self._d.feed(chunk)
+        self._st = self._d.feed(chunk)
+        return self._st
 
     @property
     def status(self) -> Status:
-        return self._d.status
+        return self._st
 
     @property
     def error(self):

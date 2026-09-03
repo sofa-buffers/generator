@@ -249,10 +249,13 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                let mut dec = %s::decoder();", mt)
 		// Incomplete mid-stream is the normal verdict for a chunk that ended
 		// mid-field -- it says the BYTES ended there, not that the message is bad.
-		// Only finish() decides whether the message as a whole is acceptable.
+		// Only finish() decides whether the message as a whole is acceptable, so
+		// BOTH statuses are ignored here and every Err is fatal: since
+		// corelib-rs#101 the two normal outcomes share the Ok arm and the error
+		// channel carries nothing but refusals (generator#461).
 		f.line("                for b in &input {")
 		f.line("                    match dec.feed(&[*b]) {")
-		f.line("                        Ok(()) | Err(sofab::Error::Incomplete) => {}")
+		f.line("                        Ok(_) => {}")
 		f.line("                        Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }")
 		f.line("                    }")
 		f.line("                }")

@@ -614,6 +614,56 @@ messages:
 	}
 }
 
+// TestPythonDecoderRemembersWhatFeedAnswered: corelib-py#142 removed
+// Decoder.status — feed already returned the outcome, and CORELIB_PLAN §5.2.4
+// gives one channel per fact. The rule binds the STREAM, not its caller, and the
+// generated _StreamDecoder is the caller, so its own `status` survives, backed by
+// what the last feed returned (generator#461).
+//
+// Nothing pinned this before, and the conformance harness reads the property
+// only BEFORE its feed loop, so a stale or mis-wired one passed every vector.
+func TestPythonDecoderRemembersWhatFeedAnswered(t *testing.T) {
+	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["message.py"])
+	for _, want := range []string{
+		// __slots__ is not decoration here: without the name the assignment below
+		// raises AttributeError on the first feed.
+		`    __slots__ = ("message", "_d", "_st")`,
+		// COMPLETE before the first feed: an all-default message is zero bytes on
+		// the wire, so a reader can legitimately be read without ever being fed,
+		// and that is what the removed accessor answered for a fresh decoder.
+		"        self._st = Status.COMPLETE",
+		"    def feed(self, chunk) -> Status:\n        self._st = self._d.feed(chunk)\n        return self._st",
+		"    @property\n    def status(self) -> Status:\n        return self._st",
+		// `error` still belongs to the corelib: §6.3 keeps the reason behind an
+		// INVALID on the decoder, and only `status` had to move.
+		"        return self._d.error",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing remembered-status shape %q", want)
+		}
+	}
+	// The removed accessor must not come back: it no longer exists on either
+	// engine, so asking is an AttributeError at the first read.
+	if strings.Contains(mod, "self._d.status") {
+		t.Error("Decoder.status is gone (corelib-py#142); feed's return is the only answer")
+	}
+}
+
+// TestPythonHarnessChecksTheRememberedStatus: the streamdecode mode is the only
+// place the suite can see the memory at all, and it read the property just once,
+// before feeding anything. Assert it against the feed that set it, per chunk.
+func TestPythonHarnessChecksTheRememberedStatus(t *testing.T) {
+	h := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{"emit": "project"})["harness.py"])
+	for _, want := range []string{
+		"                st = dec.feed(data[off:off + step])",
+		"                if dec.status is not st:",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("harness.py missing %q", want)
+		}
+	}
+}
+
 func TestPythonSyntaxValid(t *testing.T) {
 	py, err := exec.LookPath("python3")
 	if err != nil {
