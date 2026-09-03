@@ -4,8 +4,11 @@
 Usage:
   check_fixlen_array_subtype.py <label> [--schema PATH] [--field NAME]
                                 [--message NAME] [--unknown-id N] [--cwd DIR]
-                                [--invalid-pattern REGEX] [--status-verb VERB]
-                                -- <harness argv...>
+                                [--verb VERB] [--invalid-pattern REGEX]
+                                [--status-verb VERB] -- <harness argv...>
+
+`--message` is the harness's own message ARGUMENT (empty for a harness that
+takes none), not a scope for the schema scan -- see parse_schema_field.
 
 CORELIB_PLAN §4.8.1 fixes the fixlen-array decode order in five steps, and the
 order of the middle three is **normative**:
@@ -61,38 +64,66 @@ Against a declared fixlen array field (`somefloatarray`: `fp32`, `count: 3`,
 id 17 -> header `\215\001`), with `fixlen_word = (length << 3) | subtype` and
 subtype `0`=fp32, `1`=fp64, `2`=string, `3`=blob, `4`-`7` reserved (§4.6):
 
-    subtype_string          count 2, word 0x22  4-byte STRING     INVALID
-    subtype_blob            count 2, word 0x23  4-byte BLOB       INVALID
-    subtype_reserved_4      count 2, word 0x24  reserved 0x4      INVALID
-    subtype_reserved_7      count 2, word 0x27  reserved 0x7      INVALID
-    subtype_string_over     count 5, word 0x22                    INVALID  (step 3 precedes step 5)
-    subtype_string_unknown  count 2, word 0x22, UNDECLARED id     INVALID  (step 3 precedes any schema)
-    fp64_skip               count 2, word 0x41  8-byte fp64       accepted, field keeps its DEFAULT
-    fp64_skip_unknown       count 2, word 0x41, UNDECLARED id     accepted, field keeps its DEFAULT
-    fp32_read               count 3, word 0x20  4-byte fp32       accepted, field READS BACK
+    subtype_string          count 2, word 0x22  4-byte STRING     INVALID   (3)
+    subtype_blob            count 2, word 0x23  4-byte BLOB       INVALID   (3)
+    subtype_reserved_4      count 2, word 0x24  reserved 0x4      INVALID   (3)
+    subtype_reserved_7      count 2, word 0x27  reserved 0x7      INVALID   (3)
+    subtype_string_over     count 5, word 0x22                    INVALID   (3)
+    subtype_string_unknown  count 2, word 0x22, UNDECLARED id     INVALID   (3)
+    fp64_skip               count 2, word 0x41  8-byte fp64       DEFAULT   (4)
+    fp64_skip_unknown       count 2, word 0x41, UNDECLARED id     DEFAULT   (4)
+    fp64_skip_over          count 5, word 0x41  OVER the bound    DEFAULT   (4)
+    fp32_over               count 5, word 0x20  4-byte fp32       INVALID   (5)
+    fp32_read               count 3, word 0x20  4-byte fp32       READS BACK
 
-Every count is **inside** the declared `count: 3` except the one that says
-otherwise, and every payload is **complete** -- so neither the schema bound nor
-truncation can explain a rejection, which is what makes these step-3 rows and
-not step-5 or §5.2.3 ones.
+The bracketed digit is the §4.8.1 step each row lands on, and the table walks
+all three: six subtype rejections (3), three skips the schema count must not
+touch (4), and the one count bound that does apply (5). Every payload is
+**complete**, so truncation can never explain a rejection; and the two rows that
+sit *over* the declared `count: 3` are the pair that separates step 4 from step
+5 -- the same over-count is accepted with an `fp64` subtype and rejected with an
+`fp32` one, so a decoder that applies the bound before it has decided the
+subtype fails one of them whichever way it leans.
+
+`subtype_string_over` is NOT an ordering witness on its own: a decoder that
+applied the count first would answer INVALID there too. What it shows is the
+weaker, still-worth-having claim that the schema bound cannot *mask* the subtype
+verdict -- the ordering itself is carried by `fp64_skip_over` against
+`fp32_over`.
 
 The table straddles the accept/reject boundary on purpose, and in both
 directions on the *same* subtype question: a decoder that rejects every fixlen
-array fails `fp64_skip`, one that accepts every subtype fails the four INVALID
-rows, and one that skips the field it should have read fails `fp32_read`. The
-`_unknown` pair is the row no schema can explain -- the bad subtype and its good
-twin sit on the very same undeclared id, so the only thing separating them is
-the `fixlen_word`.
+array fails the three `fp64_skip` rows, one that accepts every subtype fails the
+six INVALID ones, one that never applies the bound fails `fp32_over`, and one
+that skips the field it should have read fails `fp32_read`. The `_unknown` pair
+is the row no schema can explain -- the bad subtype and its good twin sit on the
+very same undeclared id, so the only thing separating them is the `fixlen_word`.
 
 ## Categories
 
-Not every harness has a category channel: `c` and the `corelib: c-cpp` C++ legs
-report exit status only. So the category is asserted where a suite HAS one, via
-whichever of the two shapes it has -- `--status-verb` for a verb that prints
-`INVALID`/`COMPLETE` on line 1 (`status`, `trydecode`), `--invalid-pattern` for a
-harness that names the category in its error text -- while the exit-status leg
-runs everywhere. Without one of those a wrongly-INCOMPLETE verdict would pass,
-which is why the suites that can pin it, do.
+The category is asserted through whichever of two shapes a harness has --
+`--status-verb` for a verb that prints `INVALID`/`COMPLETE` on line 1 (`status`,
+`trydecode`), `--invalid-pattern` for a harness that names the category in its
+error text. Without one of them a wrongly-INCOMPLETE verdict passes on exit
+status alone, which is not a hypothetical: a harness answering INCOMPLETE to
+every step-3 row was measured to satisfy the exit-status leg on all eleven rows
+and to fail instantly under either flag. So every suite pins it, `c` included --
+its harness grew the same `status` verb its C++ sibling already had. The one
+remaining gap is the `corelib: c-cpp` C++ leg of `cpp`, whose wrapper `Result`
+carries no category predicates at all; the `c` suite reaches the same C corelib
+through the C API, which does distinguish `SOFAB_RET_E_INVALID_MSG` from
+`SOFAB_RET_INCOMPLETE`, so the substance is covered there.
+
+## Both decode surfaces
+
+The rule lives entirely inside the corelib, at the `fixlen_word`, and several
+corelibs reach that word twice: corelib-dart, for one, decides it in `_fixArray`
+on the one-shot path and again in `_onArrFixWord` on the chunked one, two
+independent copies of the same `return invalid`. A driver that only ever ran the
+one-shot verb would pass with the streaming copy mutated. So every suite runs the
+whole table through `--verb decode` **and** `--verb streamdecode`, the same two
+surfaces the shared-vector and growth drivers beside it already sweep; the
+category assertion rides the one-shot pass, which is where the category verbs are.
 
 §5.2.3's neighbouring question -- the same bad word with the payload *cut off*,
 which must still be INVALID rather than INCOMPLETE -- is deliberately not here:
@@ -142,16 +173,26 @@ def parse_schema_field(path, field):
     on PyYAML, and everything needed here is one indented block. Anything it
     cannot find is a hard failure -- a driver that quietly fell back to a
     hard-coded id would keep passing after the schema moved out from under it.
+
+    The scan is over the whole FILE, not one message: `--message` names the
+    harness's message argument, and one suite (`c`) passes it empty because its
+    harness takes none, so it is no scope to narrow to. An AMBIGUOUS name is
+    therefore the one way the fixtures could still be derived from the wrong
+    declaration, and it is refused rather than resolved by position -- the whole
+    point of reading the schema is that the bytes cannot drift from it.
     """
     with open(path, "r", encoding="utf-8") as fh:
         lines = fh.read().splitlines()
-    start = None
+    hits = [i for i, line in enumerate(lines)
+            if re.match(r"^\s+%s:\s*$" % re.escape(field), line)]
+    if len(hits) > 1:
+        die("schema %s declares %d fields named %r (lines %s) -- this driver "
+            "derives its fixtures from one declaration and cannot choose"
+            % (path, len(hits), field, ", ".join(str(i + 1) for i in hits)))
+    start = hits[0] if hits else None
     indent = 0
-    for i, line in enumerate(lines):
-        if re.match(r"^\s+%s:\s*$" % re.escape(field), line):
-            start = i
-            indent = len(line) - len(line.lstrip())
-            break
+    if start is not None:
+        indent = len(lines[start]) - len(lines[start].lstrip())
     if start is None:
         die("schema %s declares no field %r -- this driver's fixtures are "
             "derived from it and cannot be built" % (path, field))
@@ -229,6 +270,17 @@ def build_table(fid, count, unknown_id):
          unk + varint(2) + fixlen_word(8, FP64) + b"\0" * 16,
          "accept", "default",
          "an fp64 array on an undeclared id -- the good twin of the row above"),
+        ("fp64_skip_over",
+         hdr + varint(over) + fixlen_word(8, FP64) + b"\0" * (8 * over),
+         "accept", "default",
+         "an fp64 array whose count is OVER the declared bound -- still a §7.3 "
+         "skip, because step 4 forbids applying the schema count to a field "
+         "the subtype already disqualified"),
+        ("fp32_over",
+         hdr + varint(over) + fixlen_word(4, FP32) + b"\0" * (4 * over),
+         "invalid", None,
+         "the same over-count with the DECLARED subtype -- the one row where "
+         "the schema bound applies (step 5)"),
     ]
     read_back = [1.5, 2.5, 3.5, 4.5, 5.5][:count]
     while len(read_back) < count:
@@ -313,9 +365,9 @@ def main():
 
         if expect == "invalid":
             if rc == 0:
-                die("[%s] %s must be INVALID (CORELIB_PLAN §4.8.1 step 3) but "
+                die("[%s] %s [%s] must be INVALID (CORELIB_PLAN §4.8.1) but "
                     "the decode SUCCEEDED -- %s; bytes: %s"
-                    % (args.label, name, why, wire.hex()))
+                    % (args.label, name, args.verb, why, wire.hex()))
             if args.invalid_pattern and not re.search(args.invalid_pattern,
                                                       out + err):
                 die("[%s] %s -- rejected, but not as InvalidMessage: the harness "
@@ -332,9 +384,9 @@ def main():
                            ("\n" + serr.strip()) if serr.strip() else ""))
         else:
             if rc != 0:
-                die("[%s] %s must DECODE -- %s (step 4 is untouched by "
-                    "step 3); rc=%d:\n%s"
-                    % (args.label, name, why, rc, (out + err).strip()))
+                die("[%s] %s [%s] must DECODE -- %s; rc=%d:\n%s"
+                    % (args.label, name, args.verb, why, rc,
+                       (out + err).strip()))
             want = default if value == "default" else value
             got = decoded_field(out, args.field)
             if got is None:
@@ -348,9 +400,9 @@ def main():
 
     if checked != len(table):
         die("[%s] ran %d of %d rows" % (args.label, checked, len(table)))
-    print("   [%s] fixlen-array subtype: %d rows (%d INVALID, %d accepted) "
+    print("   [%s] fixlen-array subtype [%s]: %d rows (%d INVALID, %d accepted) "
           "on %s id %d"
-          % (args.label, checked,
+          % (args.label, args.verb, checked,
              sum(1 for r in table if r[2] == "invalid"),
              sum(1 for r in table if r[2] == "accept"),
              args.field, fid))

@@ -177,10 +177,18 @@ echo "==> fixlen-array subtype ordering OK"
 # One shared driver for all eleven suites (ARCHITECTURE S12). It derives every
 # fixture from the schema's own somefloatarray declaration, so the ids it writes
 # and the values it asserts cannot drift from what the harness was built with.
+#
+# Run on BOTH decode surfaces. The verdict is the corelib's, taken at the
+# fixlen_word, and several corelibs reach that word twice -- one arm for a
+# whole-buffer decode and a separate one for the chunked path -- so a table that
+# only ever ran the one-shot verb passes with the streaming copy mutated. This is
+# the sweep the shared-vector and growth drivers beside it already do.
 echo "==> a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
-python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "zig" \
-    --invalid-pattern 'InvalidMessage' \
-    -- "$WORK/ex/zig-out/bin/harness"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "zig" \
+        --verb "$surface" --invalid-pattern 'InvalidMessage' \
+        -- "$WORK/ex/zig-out/bin/harness"
+done
 
 # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
 # MESSAGE_SPEC S5.2). someuintarray count 4; a header of 6 (> 4) then only 2

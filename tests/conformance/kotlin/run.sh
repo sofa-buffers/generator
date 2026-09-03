@@ -148,10 +148,18 @@ echo "==> fixlen-array subtype ordering OK"
 # and the values it asserts cannot drift from what the harness was built with,
 # and it compares the skipped field's default as JSON numbers rather than by
 # grep, which is what lets one table serve backends that render it three ways.
+#
+# Run on BOTH decode surfaces. The verdict is the corelib's, taken at the
+# fixlen_word, and several corelibs reach that word twice -- one arm for a
+# whole-buffer decode and a separate one for the chunked path -- so a table that
+# only ever ran the one-shot verb passes with the streaming copy mutated. This is
+# the sweep the shared-vector and growth drivers beside it already do.
 echo "==> a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
-python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "kotlin" \
-    --invalid-pattern 'INVALID_MSG' \
-    -- "$H"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "kotlin" \
+        --verb "$surface" --invalid-pattern 'INVALID_MSG' \
+        -- "$H"
+done
 
 # Over-index wrapper array (generator#142): somestringarray declares count: 5
 # (id 18). A string element with a wire index >= 5 is INVALID for every target

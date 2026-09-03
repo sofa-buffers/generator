@@ -404,13 +404,27 @@ echo "==> fixlen subtype skip OK"
 # with its own fixlen_word arm, so a single-engine run leaves one of the two
 # gates wholly unexercised. Nine subprocesses per engine is a cheap price for
 # that. The engine is put back to the file's default afterwards.
+#
+# Run on BOTH decode surfaces. The verdict is the corelib's, taken at the
+# fixlen_word, and several corelibs reach that word twice -- one arm for a
+# whole-buffer decode and a separate one for the chunked path -- so a table that
+# only ever ran the one-shot verb passes with the streaming copy mutated. This is
+# the sweep the shared-vector and growth drivers beside it already do.
 echo "==> a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
 for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
-    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "python/$ENGINE" \
-        --cwd "$WORK/proj" --invalid-pattern 'SofaDecodeError' \
-        -- python3 harness.py
+    # The exception-class assertion rides `decode`, which prints the type.
+    # `streamdecode` prints str(e) instead, where the class name does not appear,
+    # so the same pattern would assert nothing there: that pass runs on exit
+    # status, and the one-shot pass is what keeps a wrongly-INCOMPLETE verdict
+    # out.
+    for surface in decode streamdecode; do
+        if [ "$surface" = decode ]; then FA_CAT="--invalid-pattern SofaDecodeError"; else FA_CAT=""; fi
+        python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "python/$ENGINE" \
+            --cwd "$WORK/proj" --verb "$surface" $FA_CAT \
+            -- python3 harness.py
+    done
 done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi

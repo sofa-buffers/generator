@@ -265,10 +265,18 @@ run_variant() {
     # every fixture from the schema's own somefloatarray declaration, so the ids
     # it writes and the values it asserts cannot drift from what this leg was
     # built with -- which is why the no_std legs hand it their own $EXAMPLE.
+    #
+    # Run on BOTH decode surfaces: the verdict is the corelib's, taken at the
+    # fixlen_word, and a corelib that reaches that word from two arms -- one for
+    # a whole-buffer decode, one for the chunked path -- is pinned by neither if
+    # only the one-shot verb runs.
     echo "==> [$label] a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
-    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "$label" \
-        --schema "$EXAMPLE" --cwd "$WORK/ex-$label" --invalid-pattern 'InvalidMsg' \
-        -- cargo run -q --
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "$label" \
+            --schema "$EXAMPLE" --cwd "$WORK/ex-$label" --verb "$surface" \
+            --invalid-pattern 'InvalidMsg' \
+            -- cargo run -q --
+    done
 
     # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
     # MESSAGE_SPEC S5.2). someuintarray declares count 4; a header announcing 6

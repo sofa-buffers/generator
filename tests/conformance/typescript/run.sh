@@ -321,10 +321,19 @@ echo "==> fixlen subtype skip OK"
 # above already use: a bare non-zero exit would also accept a wrongly INCOMPLETE
 # verdict, and INCOMPLETE is exactly what a corelib that mis-routes step 3 into
 # the skip reports once it walks off the end of the shorter payload.
+#
+# Run on BOTH decode surfaces. The verdict is the corelib's, taken at the
+# fixlen_word, and several corelibs reach that word twice -- one arm for a
+# whole-buffer decode and a separate one for the chunked path -- so a table that
+# only ever ran the one-shot verb passes with the streaming copy mutated. This is
+# the sweep the shared-vector and growth drivers beside it already do.
 echo "==> a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
-python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "typescript" \
-    --cwd "$WORK/ex" --status-verb status \
-    -- npx tsx harness.ts
+for surface in decode streamdecode; do
+    if [ "$surface" = decode ]; then FA_CAT="--status-verb status"; else FA_CAT=""; fi
+    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "typescript" \
+        --cwd "$WORK/ex" --verb "$surface" $FA_CAT \
+        -- npx tsx harness.ts
+done
 
 # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
 # skipped under S7.3 is not an occurrence for this clause: a correctly typed

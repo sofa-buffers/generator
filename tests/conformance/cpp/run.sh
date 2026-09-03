@@ -413,12 +413,20 @@ run_variant() {
     # has no `status` verb, the same split the nested-row check below makes. That
     # leg is not decoration -- a corelib that skipped instead of rejecting would
     # still fail the decode on some rows, just as the wrong category.
+    #
+    # Run on BOTH decode surfaces. The verdict is the corelib's, taken at the
+    # fixlen_word, and several corelibs reach that word twice -- one arm for a
+    # whole-buffer decode and a separate one for the chunked path -- so a table
+    # that only ever ran the one-shot verb passes with the streaming copy
+    # mutated. This is the sweep the shared-vector driver below already does.
     echo "==> [$label] a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
-    FA_CAT=""
-    if [ -z "$corelib" ]; then FA_CAT="--status-verb status"; fi
-    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "$label" \
-        --schema "$EXAMPLE" $FA_CAT \
-        -- "$WORK/ex-$label/harness/harness"
+    for surface in decode streamdecode; do
+        FA_CAT=""
+        if [ -z "$corelib" ] && [ "$surface" = decode ]; then FA_CAT="--status-verb status"; fi
+        python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "$label" \
+            --schema "$EXAMPLE" --verb "$surface" $FA_CAT \
+            -- "$WORK/ex-$label/harness/harness"
+    done
 
     # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
     # skipped under S7.3 is not an occurrence for this clause: a correctly typed

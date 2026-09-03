@@ -122,10 +122,18 @@ echo "==> fixlen-array subtype ordering OK"
 # One shared driver for all eleven suites (ARCHITECTURE S12). It derives every
 # fixture from the schema's own somefloatarray declaration, so the ids it writes
 # and the values it asserts cannot drift from what the harness was built with.
+#
+# Run on BOTH decode surfaces. The verdict is the corelib's, taken at the
+# fixlen_word, and several corelibs reach that word twice -- one arm for a
+# whole-buffer decode and a separate one for the chunked path -- so a table that
+# only ever ran the one-shot verb passes with the streaming copy mutated. This is
+# the sweep the shared-vector and growth drivers beside it already do.
 echo "==> a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
-python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "Go" \
-    --cwd "$WORK/proj" --invalid-pattern 'invalid message' \
-    -- env GOFLAGS=-mod=mod go run ./harness
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "Go" \
+        --cwd "$WORK/proj" --verb "$surface" --invalid-pattern 'invalid message' \
+        -- env GOFLAGS=-mod=mod go run ./harness
+done
 
 # A SKIPPED string is never UTF-8-validated (CORELIB_PLAN S6.4, generator#257 /
 # Crucible F-0038). Validation belongs where a `string` is MATERIALIZED -- read
