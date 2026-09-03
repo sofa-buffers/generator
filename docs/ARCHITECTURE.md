@@ -3891,6 +3891,74 @@ A reimplementation is **conformant** when it reproduces these gates:
    Values are compared as JSON **numbers**, not greps: the same skipped field
    prints `[0,-1.5,3.25]`, `[0.0,-1.5,3.25]` and `[0, -1.5, 3.25]` across the
    eleven backends, and eleven hand-tuned patterns are eleven things to rot.
+
+   *Refusal category* (`tests/conformance/lib/check_refusal_category.py`):
+   CORELIB_PLAN §6.3 keeps a **receiver-cap** refusal and a **schema-bound**
+   breach in different categories, and forbids collapsing them in either
+   direction (generator#416). A configured cap on a schema-*unbounded* field is
+   `LimitExceeded`: the bytes are well formed and the same message decodes under a
+   looser cap, so it is a **policy** verdict on the receiver's own configuration,
+   and reporting it as `InvalidMessage` tells the caller the sender is broken.
+   The mirror rule is §6.3's "never raised for a field the schema bounds": a
+   `count`/`maxlen` breach is `InvalidMessage` and never the cap category.
+
+   Neither half is visible on an exit status — both refusals exit non-zero — so
+   the driver **refuses to run** without a category channel, and takes whichever
+   of the two shapes a harness has: `--status-verb` for a verb printing the
+   verdict name on line 1, or the `--limit-pattern`/`--invalid-pattern` pair for a
+   harness that names the category in its error text. The pair is mandatory
+   together, because each refusing row asserts its own pattern **matches** *and*
+   that the other one does **not** — the assertion a single "does it mention a
+   limit?" grep cannot make, which is how the `python` block used to read: its
+   `grep -i limit` was matching the traceback's own `$WORK/limitproj` frames, and
+   passed when the wrong category was raised.
+
+   The table runs one printed schema (`--emit-schema`, so fixture ids cannot
+   drift from declared ones) over **four shapes**, because a cap reaches four
+   different pieces of machinery and a decoder can get the category right in one
+   and wrong in another: `array<u32>` (the count cap), `string` and `blob` (two
+   separate length caps that a suite testing only strings never tells apart), and
+   the count-less **wrapper** array, where generated code compares nothing at all
+   — the element index *is* the length, and every backend hands the number to a
+   corelib collector (corelib-dart's `StringSeq.rcap`) that decides the category
+   itself. The first three carry a schema-*bounded* twin — `array<u32> count 8`,
+   `string maxlen 32`, `blob maxlen 32` — which is what pins the mirror rule; the
+   wrapper has none, because the whole point of it is that the schema declares no
+   count. `--shapes` selects them (default: all four), so a suite whose harness
+   cannot build one declines it **by name** rather than by silence.
+
+   Generated with `max_dyn_array_count: 4, max_dyn_string_len: 8,
+   max_dyn_blob_len: 8`, that is fourteen rows: four breach a cap
+   (`LimitExceeded`), three breach a schema bound (`InvalidMessage`), and seven
+   are accepted and read back — one *at* the cap and one *over the cap but inside
+   the schema bound* per bounded shape, and both sides of the exact boundary for
+   the wrapper (index 3 fills the cap, index 4 is one slot past it). The refusing
+   rows differ only in **which** number the wire breached, so a decoder that
+   collapses the categories fails one of each pair whichever way it leans; the
+   accepting rows keep a refuse-everything decoder from passing and pin the cap's
+   own value, failing loudly if a suite configures a cap the driver was not told
+   about. The cap numbers and `--shapes` are therefore passed *identically* to
+   `--emit-schema` and to the run, the `check_vectors_decode.py` discipline. Every
+   payload is complete, so truncation explains nothing.
+
+   It is wired in `dart` and `python`, on **both** decode surfaces in each: the
+   verdict travels back through a corelib's one-shot and chunked paths
+   separately, so a table that only ever ran the whole-buffer call passes with the
+   streaming copy mis-routed. `dart` reads `trydecode`'s line 1 on the one-shot
+   pass and the harness's `decode failed: <status>` line on the streaming one;
+   `python` reads the exception class off `decode`'s traceback, and off the
+   `decode error: <class>: <msg>` / `decode failed: <STATUS>` lines its
+   `streamdecode` now prints (`str(e)` never carried the class, and `Status` is an
+   `IntEnum` whose `%s` printed `2`). The `python` legs run on **both** engines,
+   because the array-count cap is raised inside corelib-py and the Cython
+   accelerator reimplements that path — and the rest of that suite's
+   receiver-limit region is native-only. The other nine suites make the assertion
+   each in its own `generator#102` block and to its own depth — `rust` reads a
+   category off its harness's `decode error:` line, `go` checks the exit status
+   and nothing else, which both refusals satisfy — and moving them onto this
+   table is what it exists for. Each suite owns the generate-and-build either
+   way: the cap is a generate-time config key, so what the driver is handed is a
+   capped project's harness argv.
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one

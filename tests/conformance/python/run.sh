@@ -459,6 +459,34 @@ OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/sk
 echo "$OUT" | grep -q '"nestedstring": "x"' || { echo "FAIL: skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
 echo "==> skipped occurrence keeps struct OK"
 
+# refused_as <class> <label> <dir> <message> <fixture> -- the CATEGORY, by
+# exception CLASS, for a `decode` that must fail. sofab.types keeps
+# SofaLimitError a SIBLING of SofaDecodeError, so the class name is the caller's
+# channel: a cap breach is SofaLimitError and a schema-bound breach is
+# SofaDecodeError, and CORELIB_PLAN S6.3 forbids either standing in for the other
+# (generator#416). Both halves are asserted -- the wanted class present AND the
+# other one absent -- because a chained traceback names both when a decode
+# re-raises, and only the negative half sees that.
+#
+# A bare `if ... decode ...; then FAIL; fi` sees neither: both categories exit
+# non-zero, which is exactly the collapse under test.
+refused_as() {
+    ra_want=$1; ra_label=$2; ra_dir=$3; ra_msg=$4; ra_fixture=$5
+    case $ra_want in
+        SofaLimitError) ra_other=SofaDecodeError ;;
+        SofaDecodeError) ra_other=SofaLimitError ;;
+        *) echo "FAIL: refused_as: unknown class $ra_want"; exit 1 ;;
+    esac
+    if (cd "$ra_dir" && python3 harness.py decode "$ra_msg") < "$ra_fixture" >/dev/null 2>"$WORK/cat-err.txt"; then
+        echo "FAIL: $ra_label -- the decode SUCCEEDED, and must be refused as $ra_want"; exit 1
+    fi
+    grep -q "$ra_want" "$WORK/cat-err.txt" \
+        || { echo "FAIL: $ra_label -- refused, but not as $ra_want (S6.3); got:"; cat "$WORK/cat-err.txt"; exit 1; }
+    grep -q "$ra_other" "$WORK/cat-err.txt" \
+        && { echo "FAIL: $ra_label -- reported as $ra_other; S6.3 keeps the two apart"; cat "$WORK/cat-err.txt"; exit 1; }
+    return 0
+}
+
 # Receiver-side decode limits (generator#102): max_dyn_array_count: 4 caps a
 # count-less (schema-unbounded) u64 array. Wire header 0x03 = id 0, unsigned
 # array; a wire count of 5 MUST fail decode with the corelib limit error,
@@ -479,13 +507,79 @@ YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/nolimitproj" )
 printf '\003\005\001\002\003\004\005' > "$WORK/limit-over.bin"
 printf '\003\004\001\002\003\004' > "$WORK/limit-ok.bin"
-if (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null 2>"$WORK/limit-err.txt"; then
-    echo "FAIL: wire count 5 > max_dyn_array_count 4 must fail decode"; exit 1
-fi
-grep -qi "limit" "$WORK/limit-err.txt" || { echo "FAIL: over-cap decode error should mention the limit"; cat "$WORK/limit-err.txt"; exit 1; }
+# The old assertion here was `grep -qi limit` over the traceback, which is no
+# assertion at all: the frames name this very project directory
+# ($WORK/limitproj), so the pattern matched whatever was raised -- a
+# SofaDecodeError included (generator#416).
+refused_as SofaLimitError "wire count 5 > max_dyn_array_count 4" \
+    "$WORK/limitproj" dyn "$WORK/limit-over.bin"
 (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/limit-ok.bin" >/dev/null || { echo "FAIL: wire count 4 must decode under limit 4"; exit 1; }
 (cd "$WORK/nolimitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null || { echo "FAIL: unset limit must keep count 5 decodable"; exit 1; }
 echo "==> decode-limit reject OK"
+
+# The two refusals of CORELIB_PLAN §6.3, on one schema and one harness
+# (generator#416). A configured receiver cap on a schema-UNBOUNDED field is a
+# policy verdict -- SofaLimitError, because the bytes are well formed and the
+# same message decodes under a looser cap -- while a field the SCHEMA bounds
+# answers SofaDecodeError when the wire breaches that bound, and §6.3 adds the
+# other direction: LimitExceeded is "never raised for a field the schema bounds".
+# Reporting either as the other tells the caller the wrong party is broken.
+#
+# One shared driver, wired here and in tests/conformance/dart/run.sh
+# (ARCHITECTURE §12) -- the two suites generator#416 names. The other nine still
+# make this assertion each in its own #102 block and to its own depth (go's is
+# exit status alone), which is what a driver in lib/ exists to replace.
+#
+# It prints its own `refusal` message, so the ids its fixtures breach and the
+# bounds it asserts against cannot drift from what this project was generated
+# with, and each refusing row asserts its own class AND that the other one did
+# not appear.
+# Its accepting rows (at the cap; over the cap but inside the schema bound) read
+# their value back, so a decoder cannot pass by refusing everything, and they pin
+# the cap's own value against the config written here.
+#
+# Four shapes, because a cap reaches four different pieces of machinery: the
+# count cap in the generated on_array_begin, the string and blob length caps in
+# the generated on_fixlen_header -- two separate numbers -- and the count-less
+# WRAPPER array, whose element index is its length and is compared where the
+# elements are collected.
+#
+# BOTH engines. The array-count cap is raised inside corelib-py, and the
+# accelerator reimplements that path (`_speedups` _visit_varints) independently
+# of decoder.py -- so a native-only pass would leave the pure decoder's category
+# unmeasured, and the rest of this receiver-limits region runs native-only.
+#
+# BOTH decode surfaces, as dart runs them. The two paths reach the corelib
+# separately, so a table that only ever ran the one-shot `decode` passes with the
+# chunked copy mis-routed. `decode` reads the class off its traceback; the
+# generated `streamdecode` now names the category itself -- `decode error:
+# <class>: <msg>` for the raise a cap makes, `decode failed: <STATUS>` for the
+# status a schema-bound breach comes back as -- because `str(e)` never carried
+# the class and `Status` is an IntEnum whose `%s` printed `2`.
+echo "==> a cap is SofaLimitError, a schema bound is SofaDecodeError (§6.3, generator#416)"
+printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+cat > "$WORK/refusal-cfg.yaml" <<YAML
+generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/refusal-cfg.yaml" --lang python --in "$WORK/refusal.yaml" --out "$WORK/refusalproj" )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "python/$ENGINE" \
+        --cwd "$WORK/refusalproj" \
+        --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
+        --limit-pattern SofaLimitError --invalid-pattern SofaDecodeError \
+        -- python3 harness.py
+    python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "python/$ENGINE" \
+        --cwd "$WORK/refusalproj" --verb streamdecode \
+        --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
+        --limit-pattern 'decode error: SofaLimitError' \
+        --invalid-pattern 'decode failed: INVALID' \
+        -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 # CORELIB_PLAN S6.2.1, the two rules a scope-wide cap could not honour. Both are
 # end-to-end: the generator's unit tests can only see emitted substrings.
@@ -507,9 +601,8 @@ printf '\014\006\002\002\002\002\002\002' > "$WORK/bounded6.bin"
     || { echo "FAIL: a schema-bounded array must not be judged against the receiver cap"; exit 1; }
 # ...while the unbounded sibling at the same cap still rejects at 6.
 printf '\003\006\001\001\001\001\001\001' > "$WORK/unbounded6.bin"
-if (cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/unbounded6.bin" >/dev/null 2>&1; then
-    echo "FAIL: the unbounded sibling must still be capped at 4"; exit 1
-fi
+refused_as SofaLimitError "the unbounded sibling must still be capped at 4" \
+    "$WORK/exclproj" dyn "$WORK/unbounded6.bin"
 # A field the handler SKIPS is never capped (S6.2.1: it allocates nothing). id 9
 # is declared nowhere, so an over-cap array there must decode.
 printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
@@ -534,9 +627,8 @@ printf '\026\052\013\170\007' > "$WORK/wrapmistyped.bin"
 # ...told apart from the very same element as a STRING, which this scope DOES
 # read and which the index cap therefore does bound.
 printf '\026\052\012\170\007' > "$WORK/wrapovercap.bin"
-if (cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/wrapovercap.bin" >/dev/null 2>&1; then
-    echo "FAIL: a string element at index 5 must still exceed max_dyn_array_count 4"; exit 1
-fi
+refused_as SofaLimitError "a string element at index 5 exceeds max_dyn_array_count 4" \
+    "$WORK/exclproj" dyn "$WORK/wrapovercap.bin"
 echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kind and mis-subtyped wrapper element all skipped)"
 
 # A wrapper string element's own byte LENGTH, and a matrix ROW's own element
@@ -558,18 +650,16 @@ YAML
 # 06 seq_begin(id 0) | 02 string elem id 0 | 2a fixlen_word (len 5, subtype
 # string) | "xxxxx" (5 bytes > cap 4) | 07 end
 printf '\006\002\052\170\170\170\170\170\007' > "$WORK/elemover.bin"
-if (cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/elemover.bin" >/dev/null 2>&1; then
-    echo "FAIL: a wrapper string element 5 bytes long must exceed max_dyn_string_len 4"; exit 1
-fi
+refused_as SofaLimitError "a wrapper string element 5 bytes long exceeds max_dyn_string_len 4" \
+    "$WORK/elemproj" el "$WORK/elemover.bin"
 # ...4 bytes is at the cap and decodes.
 printf '\006\002\042\170\170\170\170\007' > "$WORK/elemok.bin"
 (cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/elemok.bin" >/dev/null \
     || { echo "FAIL: a wrapper string element at the cap must decode"; exit 1; }
 # 0e seq_begin(id 1) | 03 unsigned array elem id 0 | count 5 > cap 4
 printf '\016\003\005\001\002\003\004\005\007' > "$WORK/rowover.bin"
-if (cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/rowover.bin" >/dev/null 2>&1; then
-    echo "FAIL: a matrix row of 5 elements must exceed max_dyn_array_count 4"; exit 1
-fi
+refused_as SofaLimitError "a matrix row of 5 elements exceeds max_dyn_array_count 4" \
+    "$WORK/elemproj" el "$WORK/rowover.bin"
 printf '\016\003\004\001\002\003\004\007' > "$WORK/rowok.bin"
 (cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/rowok.bin" >/dev/null \
     || { echo "FAIL: a matrix row at the cap must decode"; exit 1; }

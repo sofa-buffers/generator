@@ -469,12 +469,67 @@ sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/dynlim/pubspec.yaml"
 build "$WORK/dyn.yaml" "$WORK/dynfree"
 printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
 printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
-if "$WORK/dynlim/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null 2>&1; then
-    echo "FAIL: 5 elements above max_dyn_array_count 4 must fail decode"; exit 1
-fi
+# The CATEGORY, not merely the exit status: a cap breach is a receiver POLICY
+# refusal (limitExceeded) and a bad message is INVALID, both exit non-zero, so an
+# `if ... decode ...; then FAIL` guard passes with the two collapsed into one --
+# which is precisely what CORELIB_PLAN S6.3 forbids (generator#416).
+ST=$("$WORK/dynlim/harness" trydecode dyn < "$WORK/overlimit.bin" | sed -n 1p)
+[ "$ST" = "LIMITEXCEEDED" ] \
+    || { echo "FAIL: 5 elements above max_dyn_array_count 4 must be refused as LIMITEXCEEDED, got $ST"; exit 1; }
 "$WORK/dynlim/harness" decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: 4 elements at the limit must decode"; exit 1; }
 "$WORK/dynfree/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap build must decode the oversized message"; exit 1; }
 echo "==> decode limits OK"
+
+# The two refusals of CORELIB_PLAN S6.3, on one schema and one harness
+# (generator#416). A configured receiver cap on a schema-UNBOUNDED field is a
+# policy verdict -- limitExceeded, because the bytes are well formed and the same
+# message decodes under a looser cap -- while a field the SCHEMA bounds answers
+# INVALID when the wire breaches that bound, and S6.3 adds the other direction:
+# LimitExceeded is "never raised for a field the schema bounds". Reporting either
+# as the other tells the caller the wrong party is broken.
+#
+# One shared driver, wired here and in tests/conformance/python/run.sh
+# (ARCHITECTURE S12) -- the two suites generator#416 names. The other nine still
+# make this assertion each in its own #102 block and to its own depth (go's is
+# exit status alone), which is what a driver in lib/ exists to replace.
+#
+# It prints its own `refusal` message, so the ids its fixtures breach and the
+# bounds it asserts against cannot drift from what this harness was built with,
+# and each refusing row asserts its own category AND that the other one did not
+# appear -- the
+# assertion neither an exit status nor a "does it mention a limit?" grep can
+# make. Its accepting rows (at the cap; over the cap but inside the schema bound)
+# read their value back, so a decoder cannot pass by refusing everything, and
+# they pin the cap's own value against the config written here.
+#
+# Four shapes, because a cap reaches four different pieces of machinery and a
+# decoder can get the category right in one and wrong in another: the count cap
+# in the generated onArrayBegin, the string and blob length caps in the generated
+# onFixlenHeader -- two separate numbers -- and the count-less WRAPPER array,
+# where generated code compares nothing at all and the cap travels as
+# sofab.StringSeq's `rcap` for corelib-dart to judge.
+#
+# Both decode surfaces. The verdict travels back through corelib-dart's one-shot
+# and chunked paths separately, so a table that only ever ran tryDecode passes
+# with the streaming copy mis-routed. `trydecode` carries the category on the
+# one-shot pass (line 1, and COMPLETE for the accepting rows); the streaming pass
+# reads it off the harness's own `decode failed: <status>` line.
+echo "==> a cap is limitExceeded, a schema bound is INVALID (S6.3, generator#416)"
+printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+cat > "$WORK/cfg-refusal.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-refusal.yaml" --lang dart --in "$WORK/refusal.yaml" --out "$WORK/refusal" )
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/refusal/pubspec.yaml"
+( cd "$WORK/refusal" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "dart" \
+    --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
+    --status-verb trydecode -- "$WORK/refusal/harness"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "dart" \
+    --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
+    --verb streamdecode --limit-pattern 'decode failed: limitExceeded' \
+    --invalid-pattern 'decode failed: invalid' -- "$WORK/refusal/harness"
 
 # The WRAPPER half of the same cap (generator#387/#402 item 3). A wrapper array
 # carries no count header: its elements are keyed by an unbounded varint index and
@@ -516,9 +571,14 @@ build "$WORK/wrap.yaml" "$WORK/wrapfree"
 printf '\006\052\012\170\007' > "$WORK/wrapover.bin"
 # ...and the same element at index 3, inside the cap.
 printf '\006\032\012\170\007' > "$WORK/wrapok.bin"
-if "$WORK/wraplim/harness" decode wrap < "$WORK/wrapover.bin" >/dev/null 2>&1; then
-    echo "FAIL: wrapper element index 5 above max_dyn_array_count 4 must fail decode"; exit 1
-fi
+# The CATEGORY again (S6.3, generator#416), and this is the shape where it is
+# NOT decided by an emitted `limitExceeded()`: the element headers go to the
+# collector, so the cap rides as sofab.StringSeq's `rcap` and corelib-dart is
+# what picks the verdict. A guard on exit status alone stays green through a
+# corelib regression that answers invalid here.
+ST=$("$WORK/wraplim/harness" trydecode wrap < "$WORK/wrapover.bin" | sed -n 1p)
+[ "$ST" = "LIMITEXCEEDED" ] \
+    || { echo "FAIL: wrapper element index 5 above max_dyn_array_count 4 must be LIMITEXCEEDED, got $ST"; exit 1; }
 "$WORK/wraplim/harness" decode wrap < "$WORK/wrapok.bin" >/dev/null \
     || { echo "FAIL: wrapper element index 3 under the cap must decode"; exit 1; }
 "$WORK/wrapfree/harness" decode wrap < "$WORK/wrapover.bin" >/dev/null \
@@ -548,9 +608,9 @@ printf '\014\006\002\002\002\002\002\002' > "$WORK/bounded6.bin"
     || { echo "FAIL: a schema-bounded array must not be judged against the receiver cap"; exit 1; }
 # ...while the unbounded sibling at the same cap still rejects at 6.
 printf '\003\006\001\001\001\001\001\001' > "$WORK/unbounded6.bin"
-if "$WORK/excl/harness" decode dyn < "$WORK/unbounded6.bin" >/dev/null 2>&1; then
-    echo "FAIL: the unbounded sibling must still be capped at 4"; exit 1
-fi
+ST=$("$WORK/excl/harness" trydecode dyn < "$WORK/unbounded6.bin" | sed -n 1p)
+[ "$ST" = "LIMITEXCEEDED" ] \
+    || { echo "FAIL: the unbounded sibling must still be capped at 4, as LIMITEXCEEDED, got $ST"; exit 1; }
 # A field the visitor SKIPS is never capped (S6.2.1: it allocates nothing). id 9
 # is declared nowhere, so an over-cap array there must stay COMPLETE -- and with
 # the generated onArrayDest declining it, nothing is even allocated for it.
@@ -581,9 +641,9 @@ printf '\026\052\013\170\007' > "$WORK/wrapmistyped.bin"
 # ...told apart from the very same element as a STRING, which this scope DOES
 # read and which the index cap therefore does bound.
 printf '\026\052\012\170\007' > "$WORK/wrapovercap.bin"
-if "$WORK/excl/harness" decode dyn < "$WORK/wrapovercap.bin" >/dev/null 2>&1; then
-    echo "FAIL: a string element at index 5 must still exceed max_dyn_array_count 4"; exit 1
-fi
+ST=$("$WORK/excl/harness" trydecode dyn < "$WORK/wrapovercap.bin" | sed -n 1p)
+[ "$ST" = "LIMITEXCEEDED" ] \
+    || { echo "FAIL: a string element at index 5 must exceed max_dyn_array_count 4 as LIMITEXCEEDED, got $ST"; exit 1; }
 echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kind and mis-subtyped wrapper element all skipped)"
 
 # The ENFORCEMENT POINT, pinned end-to-end (CORELIB_PLAN S6.2.1: a limit "MUST be
@@ -645,9 +705,12 @@ printf '\006\003\002\001\002\007' > "$WORK/row_ok.bin"       # row 0: 2 elements
 printf '\006\003\003\001\002\003\007' > "$WORK/row_over.bin" # row 0: 3 elements > count 2
 "$WORK/mat/harness" decode mat < "$WORK/row_ok.bin" >/dev/null \
     || { echo "FAIL: an at-count matrix row must decode"; exit 1; }
-if "$WORK/mat/harness" decode mat < "$WORK/row_over.bin" >/dev/null 2>&1; then
-    echo "FAIL: a matrix row over its schema count must be INVALID"; exit 1
-fi
+# INVALID and not LIMITEXCEEDED: the row's `count: 2` is a bound the SCHEMA
+# declares, and S6.3 forbids the cap category for a field the schema bounds --
+# the mirror of the four assertions above (generator#416).
+ST=$("$WORK/mat/harness" trydecode mat < "$WORK/row_over.bin" | sed -n 1p)
+[ "$ST" = "INVALID" ] \
+    || { echo "FAIL: a matrix row over its schema count must be INVALID, got $ST"; exit 1; }
 echo "==> matrix row count OK"
 
 echo "==> shared-vector byte-exact conformance"
