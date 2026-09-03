@@ -888,6 +888,8 @@ echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill" )
 sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/fill/go.mod"
 ( cd "$WORK/fill" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build -o harness_bin ./harness )
+check_maxsize_constant go "$WORK/fill/message/fill.go" \
+    "^const FillMaxSize = $SOFAB_MAXSIZE_FILL_BYTES\$"
 check_maxsize_fill go "$WORK/fill/harness_bin" encode fill
 
 # ...and the other side of owning the buffer: a value the caller filled PAST its

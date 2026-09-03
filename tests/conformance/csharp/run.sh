@@ -9,6 +9,9 @@ set -eu
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
 
+# Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
+. "$(dirname "$0")/../lib/maxsize_fill.sh"
+
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_CS_CORELIB:-}}"
 WORK=$(mktemp -d)
@@ -58,6 +61,24 @@ OUT=$(printf '%s' "$IN" | $H encode myfirstmessage | $H decode myfirstmessage)
 echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
+
+# The BOUNDED encode arm (CORELIB_PLAN §5.1, ARCHITECTURE §9.6, generator#415).
+# Generated code owns the output buffer and the corelib never grows or
+# reallocates it, so the worst-case size the backend derives from the schema --
+# emitted as MaxSize and used verbatim as `new byte[MaxSize]` -- is the only
+# thing between a legal message and a BufferFull. That number ships in every
+# generated class and every encode above already runs through it -- what nothing
+# here asserted is that it is EXACT.
+#
+# The fill message pins it from both sides: filling every field to its declared
+# bound must encode to exactly MaxSize bytes, so the buffer can be neither short
+# (a legal message would not fit) nor slack (RAM paid for nothing). Why that
+# needs both a constant leg and an encoder leg is argued once, in the driver.
+echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
+build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
+check_maxsize_constant csharp "$WORK/fill/Message.cs" \
+    "public const int MaxSize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
+check_maxsize_fill csharp dotnet "$WORK/fill/bin/Debug/net9.0/harness.dll" encode fill
 
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be

@@ -1,0 +1,57 @@
+# The exact encoding of tests/conformance/lib/maxsize_fill.json against
+# tests/conformance/lib/maxsize_fill.yaml — 234 bytes, the schema's MAX_SIZE.
+# Read by check_maxsize_fill (maxsize_fill.sh); every target must produce this
+# byte for byte, because the wire format is a property of the schema and not of
+# the language. Comments and whitespace are stripped before comparing.
+#
+# Each field pays its (id<<3)|wiretype header varint. Wire types used below:
+# 0 varint, 1 signed (ZigZag) varint, 2 fixlen, 3 unsigned array, 5 fixlen
+# array, 6 sequence.
+
+00 01                                # f_bool     id  0  hdr 0x00, true
+08 ff 01                             # f_u8       id  1  255
+10 ff ff 03                          # f_u16      id  2  65535
+18 ff ff ff ff 0f                    # f_u32      id  3  2^32-1
+20 ff ff ff ff ff ff ff ff ff 01     # f_u64      id  4  2^64-1
+29 ff ff ff ff 0f                    # f_i32      id  5  hdr|1, ZigZag(-2^31)
+31 ff ff ff ff ff ff ff ff ff 01     # f_i64      id  6  ZigZag(-2^63)
+3a 20 00 00 80 3f                    # f_fp32     id  7  hdr|2, fixlen word 0x20, 1.0f
+42 41 00 00 00 00 00 00 f0 3f        # f_fp64     id  8  fixlen word 0x41, 1.0
+4a 4a 31 32 33 34 35 36 37 38 39     # f_str      id  9  word 0x4a (9, string) "123456789"
+52 3b ab ab ab ab ab ab ab           # f_blob     id 10  word 0x3b (7, blob)
+
+# Native count-prefixed arrays: header, element count, then the elements.
+5b 05                                # f_arr_u32  id 11  hdr|3, count 5
+   ff ff ff ff 0f  ff ff ff ff 0f
+   ff ff ff ff 0f  ff ff ff ff 0f
+   ff ff ff ff 0f
+63 03                                # f_arr_u64  id 12  count 3
+   ff ff ff ff ff ff ff ff ff 01
+   ff ff ff ff ff ff ff ff ff 01
+   ff ff ff ff ff ff ff ff ff 01
+
+# fixlen arrays carry ONE fixlen word for the whole array, after the count.
+6d 04 20                             # f_arr_fp32 id 13  hdr|5, count 4, word 0x20
+   00 00 80 3f  00 00 80 3f  00 00 80 3f  00 00 80 3f
+75 02 41                             # f_arr_fp64 id 14  count 2, word 0x41
+   00 00 00 00 00 00 f0 3f
+   00 00 00 00 00 00 f0 3f
+
+# Wrapper arrays lower to a sequence whose CHILD IDS are the element indices,
+# closed by the one-byte terminator 0x07.
+7e                                   # f_arr_str  id 15  hdr|6
+   02 32 61 62 63 64 65 66           #   elem 0: id 0, word 0x32 (6, string) "abcdef"
+   0a 32 61 62 63 64 65 66           #   elem 1: id 1
+   12 32 61 62 63 64 65 66           #   elem 2: id 2
+   07
+86 01                                # f_arr_blob id 16  (16<<3)|6 = 134, two header bytes
+   02 2b cd cd cd cd cd              #   elem 0: word 0x2b (5, blob)
+   0a 2b cd cd cd cd cd              #   elem 1
+   07
+
+# A nested struct is the same sequence framing, and id 17 is the first field
+# whose header does not fit in one varint byte.
+8e 01                                # f_nested   id 17  (17<<3)|6 = 142
+   01 ff ff ff ff 0f                 #   n_i32 id 0, ZigZag(-2^31)
+   0a 22 77 78 79 7a                 #   n_str id 1, word 0x22 (4, string) "wxyz"
+   07
