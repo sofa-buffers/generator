@@ -91,6 +91,11 @@ func TestZigStructural(t *testing.T) {
 		// F-0058) on both.
 		"return self.acc.take(self.alloc, total, offset, chunk, false) catch { self.inv = true; return null; };",
 		"return .{ .v = .{ .m = out, .alloc = alloc } };",
+		// The user-facing prose says the same thing as the code above it. It has
+		// drifted before -- the Decoder doc still taught the borrow for a release
+		// after the streaming path stopped borrowing -- so one sentence of it is
+		// pinned here.
+		"/// stitched item overwrites it. And decode() copies too, though it could",
 		// Bounded string: over-maxlen -> INVALID (§7.1), decided on the announced
 		// `total` BEFORE the payload is taken; then strict UTF-8 -> INVALID (issue
 		// #85); else stored, out of the copy _take made.

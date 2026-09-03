@@ -25,7 +25,8 @@
 //   * The legs that can fail are the ones whose Zig storage is a SLICE the
 //     corelib could hand over unchanged: `somestring`, `someblob`, each element
 //     of `somestringarray`/`someblobarray`, the string inside the nested struct,
-//     the union's string option, and the `key` of each dynamic map row.
+//     the union's string option, the string inside a union in a wrapper array,
+//     `somestructwitharray.label`, and the `key` of each dynamic map row.
 //   * A counted native array (`someuintarray`, `somefloatarray`, ...) is
 //     `sofab.FixedArray(T, N)` -- storage inside the message itself, filled
 //     element by element from decoded scalars. It cannot alias, so dropping a
@@ -64,8 +65,10 @@ fn fail(comptime fmt: []const u8, args: anytype) void {
 
 /// A message filling every aliasing-capable field kind: string, blob,
 /// array<string>, array<blob>, a string nested in a struct, a string in a
-/// union, a string in a dynamic wrapper-array row -- plus the native arrays,
-/// which are in the sample so the wire has them, not because they can alias.
+/// union, a string in a union inside a wrapper array, a struct-with-array's own
+/// label, and the string key of a dynamic wrapper-array row -- each a separate
+/// generated payload arm -- plus the native arrays, which are in the sample so
+/// the wire has them, not because they can alias.
 fn sample() M {
     var m: M = .{};
     m.somestring = "hello world payload";
@@ -76,6 +79,8 @@ fn sample() M {
     m.somefloatarray = .init(&.{ 1.5, -2.5, 3.5 });
     m.somestruct.nestedstring = "nested payload";
     m.someunion.option2 = "union payload";
+    m.somestructwitharray.label = "struct label";
+    m.someunionarray = &.{.{ .asstring = "union row" }};
     m.somemap = &.{
         .{ .key = "first key", .value = 1 },
         .{ .key = "second key", .value = 2 },

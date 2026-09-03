@@ -103,6 +103,16 @@ gcc -std=c99 -Wall -Wextra -Werror -I"$INC" -I"$WORK/stream" \
 # redzone-check uninstrumented code. Verified against a corelib copy mutated to
 # memcpy each payload from a remembered chunk pointer at completion -- ASan
 # reports heap-use-after-free, and the value diff fires without it.
+# The ownership check below is built with -fsanitize=address and needs the ASan
+# runtime (libasan) present, which is a separate package on some images. Without
+# this preflight the leg dies at LINK time with a message that reads like a
+# conformance failure rather than a missing toolchain.
+echo 'int main(void){return 0;}' | gcc -fsanitize=address -x c - -o /dev/null 2>/dev/null || {
+    echo "FAIL: -fsanitize=address is unavailable (install libasan); the decode-ownership"
+    echo "      check needs it -- see docs/CI.md. This is a toolchain gap, not a conformance"
+    echo "      failure."
+    exit 1
+}
 echo "==> a decoded message owns its bytes (CORELIB_PLAN S6.7, generator#412)"
 gcc -std=c99 -Wall -Wextra -Werror -fsanitize=address -I"$INC" -I"$WORK/stream" \
     "$ROOT/tests/conformance/c/ownership_check.c" "$WORK"/stream/*.c \

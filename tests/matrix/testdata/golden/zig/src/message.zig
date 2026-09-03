@@ -99,17 +99,18 @@ pub const Scalars = struct {
     /// mid-stream; the caller's own framing decides when the input is over,
     /// and `finish` then gives the verdict for the message as a whole.
     ///
-    /// STORAGE: unlike decode(), this path COPIES every string and blob into
-    /// `alloc` -- a fed chunk does not have to outlive the message, and the
-    /// decoded value never points into a buffer the caller may reuse.
+    /// STORAGE: this path COPIES every string and blob into `alloc` -- a fed
+    /// chunk does not have to outlive the message, and the decoded value never
+    /// points into a buffer the caller may reuse.
     ///
-    /// Borrowing is not available here, and not merely declined: a payload
-    /// stitched across a chunk boundary is completed inside the corelib's own
-    /// reusable carry buffer, and the delivered slice then points THERE, not
-    /// into any chunk the caller passed. Nothing in the callback distinguishes
-    /// that slice from one in the caller's buffer, and the next stitched item
-    /// overwrites it. decode() is unaffected -- it hands the corelib one whole
-    /// buffer, which is never stitched, so it keeps borrowing.
+    /// Neither path borrows, and this one could not even if it wanted to: a
+    /// payload stitched across a chunk boundary is completed inside the
+    /// corelib's own reusable carry buffer, and the delivered slice then points
+    /// THERE, not into any chunk the caller passed. Nothing in the callback
+    /// distinguishes that slice from one in the caller's buffer, and the next
+    /// stitched item overwrites it. And decode() copies too, though it could
+    /// borrow: a message's lifetime must not depend on which entry point
+    /// produced it.
     pub const Decoder = struct {
         is: sofab.IStream = sofab.IStream.init(),
         v: _dec_Scalars,

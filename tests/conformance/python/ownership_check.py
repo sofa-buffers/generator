@@ -56,11 +56,13 @@ KNOWN REACH -- do not read a pass as "every field is copied":
     on: an aliased string destination must still RE-ENCODE, so the oracle stays a
     byte diff and never becomes a UTF-8 error that unrelated causes could produce.
 
-Usage: ownership_check.py <generated-project-dir>   (exits non-zero on failure)
+Usage: ownership_check.py <generated-project-dir> <native|python>
+       (asserts the engine it actually loaded; exits non-zero on failure)
 """
 
 import sys
 
+import sofab
 from sofab import Status
 
 # See the header note: an aliased string destination must still encode.
@@ -81,9 +83,11 @@ def fail(what, detail):
 
 def sample(message):
     """Fill every aliasing-capable field kind: string, blob, array<string>,
-    array<blob>, a string nested in a struct, a string in a union and the string
-    key of a dynamic wrapper-array row -- plus the native arrays, which are here
-    so the wire carries them, not because they can alias."""
+    array<blob>, a string nested in a struct, a string in a union, a string in a
+    union inside a wrapper array, a struct-with-array's own label and the string
+    key of a dynamic wrapper-array row -- each a separate generated payload arm --
+    plus the native arrays, which are here so the wire carries them, not because
+    they can alias."""
     m = message.Myfirstmessage()
     m.somestring = "héllo wörld payload"
     m.someblob = b"\x01\x02\x03\x04\x05"
@@ -93,6 +97,8 @@ def sample(message):
     m.someblobarray = [b"\x09\x09", b"\x08"]
     m.somestruct.nestedstring = "nested payload"
     m.someunion.option2 = "union payload"
+    m.somestructwitharray.label = "struct label"
+    m.someunionarray = [message.MyfirstmessageSomeunionarrayElem(asstring="union row")]
     m.somemap = [
         message.MyfirstmessageSomemapElem(key="first key", value=1),
         message.MyfirstmessageSomemapElem(key="second key", value=2),
@@ -129,8 +135,11 @@ def check_types(what, got):
         ("someblob", got.someblob, bytes),
         ("somestruct.nestedstring", got.somestruct.nestedstring, str),
         ("someunion.option2", got.someunion.option2, str),
+        ("somestructwitharray.label", got.somestructwitharray.label, str),
         ("someuintarray", got.someuintarray, list),
     ]
+    for i, e in enumerate(got.someunionarray):
+        want.append(("someunionarray[%d].asstring" % i, e.asstring, str))
     for i, s in enumerate(got.somestringarray):
         want.append(("somestringarray[%d]" % i, s, str))
     for i, b in enumerate(got.someblobarray):
@@ -143,10 +152,41 @@ def check_types(what, got):
                        "into the input buffer" % (name, type(value).__name__, kind.__name__))
 
 
+def require_engine(want):
+    """Assert IN THIS PROCESS which corelib-py engine is loaded.
+
+    run.sh runs this driver once per engine, but its own ``require_engine``
+    checked a DIFFERENT process. corelib-py falls back to pure Python whenever
+    ``sofab._speedups`` cannot be imported, and marks the extension
+    ``optional=True``, so an accelerator that fails to import here would make the
+    native pass a silent duplicate of the pure one -- both printing success
+    (generator#451, and the .so-staleness lesson behind it). The two engines
+    carry independent payload paths, which is the whole reason this leg runs
+    twice, so the assertion belongs where the decode happens.
+
+    ``IMPL`` alone is not enough for ``native``: the exported Encoder/Decoder
+    must BE the accelerator's, which is what a native leg actually exercises.
+    """
+    if sofab.IMPL != want:
+        print("FAIL: this leg must run on the '%s' engine, but sofab.IMPL is '%s'"
+              % (want, sofab.IMPL))
+        return False
+    if want == "native":
+        from sofab import _speedups
+        if sofab.Encoder is not _speedups.Encoder or sofab.Decoder is not _speedups.Decoder:
+            print("FAIL: sofab.IMPL says 'native' but the exported Encoder/Decoder "
+                  "are not the accelerator's")
+            return False
+    return True
+
+
 def main(argv):
-    if len(argv) != 2:
-        print(__doc__.strip().splitlines()[-1])
+    if len(argv) != 3:
+        print("\n".join(__doc__.strip().splitlines()[-2:]))
         return 2
+    if not require_engine(argv[2]):
+        return 2
+    print("   engine: sofab.IMPL = %s" % sofab.IMPL)
     sys.path.insert(0, argv[1])
     import message  # noqa: E402 -- the generated project is only on the path now
 

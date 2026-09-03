@@ -165,15 +165,19 @@ for ENGINE in $ENGINES; do
     # `decode` docstring states it in prose and nothing tested it.
     #
     # Inside the loop, not below it, for the reason the two legs above are: both
-    # engines carry independent payload paths, and only require_engine keeps the
-    # second pass from being a silent duplicate of the first (generator#451).
+    # engines carry independent payload paths, and only an engine assertion keeps
+    # the second pass from being a silent duplicate of the first (generator#451).
+    # The driver is handed the engine it must be running on and asserts it IN ITS
+    # OWN process -- require_engine above proved it for a different one, and an
+    # accelerator that failed to import here would fall back to pure Python and
+    # print the same success line twice.
     #
     # The driver runs BOTH oracles, because the scrub the other suites use is
     # partly vacuous here -- Decoder.feed copies any non-`bytes` chunk at the
     # front door, so only a destination-TYPE assertion over a `bytes` input can
     # see a window the codec handed out. Its header explains the split.
     echo "==> a decoded message owns its bytes, engine=$ENGINE (CORELIB_PLAN §6.7, generator#412)"
-    python3 "$ROOT/tests/conformance/python/ownership_check.py" "$WORK/proj" \
+    python3 "$ROOT/tests/conformance/python/ownership_check.py" "$WORK/proj" "$ENGINE" \
         || { echo "FAIL: [$ENGINE] a decoded field aliased the buffer it was decoded from"; exit 1; }
 done
 

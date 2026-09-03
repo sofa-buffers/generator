@@ -128,10 +128,17 @@ fi
 }
 echo "==> encode-buffer ownership OK"
 
-# The decode side of the same ownership rule: a decoded message must OWN its
-# bytes. corelib-dart hands the visitor views into the decode buffer (and into
-# the fed chunk when streaming), so this property lives in the generated
-# destinations -- it holds today, but held unasserted until here.
+# The decode side of the same ownership rule (CORELIB_PLAN §6.7 / §6.7.1,
+# generator#412): a decoded message must OWN its bytes, so the buffer it came
+# from may be reused or overwritten the moment the call returns. Here the
+# property holds twice over -- corelib-dart copies each payload into the
+# destination `onBytesDest` supplied, and the generated destination copies again
+# -- and the check asserts the property, not either layer; its header records
+# which mutations do and do not turn it red. The sweep runs chunk sizes up to one
+# that carries the whole message: a payload split across chunks is reassembled
+# into the corelib's accumulator and copied out of it whether or not the
+# destination wanted a view, so small chunks alone cannot reach the branch where
+# a whole payload could be handed over unchanged.
 echo "==> a decoded message owns its bytes (must outlive its input buffer)"
 cp "$ROOT/tests/conformance/dart/ownership_check.dart" "$WORK/ex/bin/ownership_check.dart"
 ( cd "$WORK/ex" && dart run bin/ownership_check.dart ) \

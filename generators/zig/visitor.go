@@ -1076,7 +1076,8 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	}
 	var all []frameArms
 	// Strict UTF-8 (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4): a `string` payload is
-	// UTF-8. Zig's string is a borrowed byte slice (byte-container), so the corelib
+	// UTF-8. Zig's string is a `[]const u8` byte container (the bytes are the
+	// message's own since CORELIB_PLAN §6.7.1 / generator#412), so the corelib
 	// exposes `utf8Valid(bytes)` and generated code emits an UNCONDITIONAL call to
 	// it at the materialization site — the SOFAB_STRICT_UTF8 gate lives inside the
 	// primitive (folds to true when compiled off), so this code is identical across

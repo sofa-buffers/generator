@@ -933,10 +933,14 @@ cat > "$WORK/proj/own/main.go" <<'GO'
 //
 // KNOWN REACH — do not read a pass as "every field is copied":
 //
-//   - Only a []byte destination can regress in Go: `Someblob` and each element
-//     of `Someblobarray`. A `string` field cannot — the `string(b)` conversion
-//     the generated code performs is a copy the language makes, so a pass says
-//     nothing about the string path.
+//   - The only GENERATED []byte destination is `Someblob` — one
+//     `append([]byte(nil), _b...)` in the whole message package. Elements of
+//     `Someblobarray` are filled by the corelib through sofab.NewBlobSeq, so
+//     that leg is a corelib regression net rather than a generated-destination
+//     one; worth having, and it is what the chunk sweep exercises. A `string`
+//     field cannot regress at all — the `string(b)` conversion the generated
+//     code performs is a copy the language makes, so a pass says nothing about
+//     the string path.
 //   - The hazard is real and lives in the corelib: sofab.PayloadAcc.Take returns
 //     the caller's first chunk UNCOPIED whenever the whole payload fits it. Go
 //     survives because the generated blob arm copies it out.
@@ -969,9 +973,11 @@ var failures int
 var chunkSizes = []int{1, 7, 16, 32, 64, 4096}
 
 // sample fills every aliasing-capable field kind: string, blob, array<string>,
-// array<blob>, a string nested in a struct, a string in a union, and the string
-// key of a dynamic wrapper-array row — plus the native arrays, which are here so
-// the wire carries them, not because they can alias.
+// array<blob>, a string nested in a struct, a string in a union, a string in a
+// union inside a wrapper array, a struct-with-array's own label, and the string
+// key of a dynamic wrapper-array row — each of which is a separate generated
+// payload arm — plus the native arrays, which are here so the wire carries them,
+// not because they can alias.
 func sample() *message.Myfirstmessage {
 	m := message.NewMyfirstmessage()
 	m.Somestring = "héllo wörld payload"
@@ -982,6 +988,8 @@ func sample() *message.Myfirstmessage {
 	m.Someblobarray = [][]byte{{9, 9}, {8}}
 	m.Somestruct.Nestedstring = "nested payload"
 	m.Someunion.Option2 = "union payload"
+	m.Somestructwitharray.Label = "struct label"
+	m.Someunionarray = []message.MyfirstmessageSomeunionarrayElem{{Asstring: "union row"}}
 	m.Somemap = []message.MyfirstmessageSomemapElem{
 		{Key: "first key", Value: 1},
 		{Key: "second key", Value: 2},

@@ -32,6 +32,18 @@ fi
 echo "==> corelib-cpp: $CPP"
 echo "==> corelib-c-cpp: $CC"
 
+# The decode-ownership check in every profile is built with -fsanitize=address
+# and needs the ASan runtime (libasan) present, which is a separate package on
+# some images. Checked once, up front: without this the first instrumented build
+# dies at LINK time with a message that reads like a conformance failure rather
+# than a missing toolchain.
+echo 'int main(void){return 0;}' | g++ -fsanitize=address -x c++ - -o /dev/null 2>/dev/null || {
+    echo "FAIL: -fsanitize=address is unavailable (install libasan); the decode-ownership"
+    echo "      check needs it -- see docs/CI.md. This is a toolchain gap, not a conformance"
+    echo "      failure."
+    exit 1
+}
+
 # Shared definition for the byte-exact shared-vector conformance check.
 cat > "$WORK/conf.yaml" <<'YAML'
 version: 1

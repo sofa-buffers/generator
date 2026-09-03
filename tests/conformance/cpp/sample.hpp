@@ -90,6 +90,28 @@ static void fillMessage(MSG_TYPE &m)
         // and on sofab::FixedBytes<N>. maxlen 8 per element.
         m.someblobarray[i].assign({std::uint8_t(i + 1), 0x7f, 0x00, 0xff});
     }
+
+    // The SCALAR blob. It carries a schema default, so leaving it alone omits it
+    // from the wire entirely (MESSAGE_SPEC §2 sparse omission) and the whole
+    // scalar-blob destination goes untested -- which is what happened until
+    // generator#412: blob delivery was reached only through someblobarray.
+    // Same spelling on std::vector<std::uint8_t> and on sofab::FixedBytes<N>.
+    m.someblob.assign({std::uint8_t(0x01), 0x7f, 0x00, 0xff, 0x2a});
+
+    // The remaining payload arms that are their own generated destination
+    // rather than another use of the same helper: a string inside a union
+    // inside a wrapper array, a struct-with-array's own label, and the string
+    // key of a dynamic map row. resize + index works on std::vector and on
+    // sofab::InlineVector<T, N> alike; both start EMPTY here, so a loop over
+    // size() would fill nothing.
+    m.someunionarray.resize(1);                                          // count 2
+    m.someunionarray[0].asstring.assign(std::string_view{"union-row-str"});  // maxlen 16
+    m.somestructwitharray.label.assign(std::string_view{"struct-label"});    // maxlen 16
+    m.somemap.resize(2);                                                 // dynamic
+    m.somemap[0].key.assign(std::string_view{"first-key-straddles"});    // maxlen 32
+    m.somemap[0].value = 1;
+    m.somemap[1].key.assign(std::string_view{"second-key-straddles"});
+    m.somemap[1].value = 2;
 }
 
 #endif // SOFAB_CONFORMANCE_CPP_SAMPLE_HPP

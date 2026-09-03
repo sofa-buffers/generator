@@ -84,9 +84,11 @@ internal static class OwnershipCheck {
 
     /// <summary>
     /// Fills every aliasing-capable field kind: string, blob, array&lt;string&gt;,
-    /// array&lt;blob&gt;, a string nested in a struct, a string in a union and the
-    /// string key of a dynamic wrapper-array row -- plus the native arrays, which
-    /// are here so the wire carries them, not because they can alias.
+    /// array&lt;blob&gt;, a string nested in a struct, a string in a union, a string
+    /// in a union inside a wrapper array, a struct-with-array's own label and the
+    /// string key of a dynamic wrapper-array row -- each a separate generated
+    /// payload arm -- plus the native arrays, which are here so the wire carries
+    /// them, not because they can alias.
     /// </summary>
     private static Myfirstmessage Sample() {
         var m = new Myfirstmessage();
@@ -98,6 +100,10 @@ internal static class OwnershipCheck {
         m.someblobarray = new List<byte[]>{ new byte[]{9, 9}, new byte[]{8} };
         m.somestruct.nestedstring = "nested payload";
         m.someunion.option2 = "union payload";
+        m.somestructwitharray.label = "struct label";
+        m.someunionarray = new List<MyfirstmessageSomeunionarrayElem>{
+            new MyfirstmessageSomeunionarrayElem{ asstring = "union row" },
+        };
         m.somemap = new List<MyfirstmessageSomemapElem>{
             new MyfirstmessageSomemapElem{ key = "first key", value = 1 },
             new MyfirstmessageSomemapElem{ key = "second key", value = 2 },

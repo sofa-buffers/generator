@@ -77,9 +77,11 @@ public final class OwnershipCheck {
 
     /**
      * Fills every aliasing-capable field kind: string, blob, array&lt;string&gt;,
-     * array&lt;blob&gt;, a string nested in a struct, a string in a union and the
-     * string key of a dynamic wrapper-array row -- plus the native arrays, which
-     * are here so the wire carries them, not because they can alias.
+     * array&lt;blob&gt;, a string nested in a struct, a string in a union, a string
+     * in a union inside a wrapper array, a struct-with-array's own label and the
+     * string key of a dynamic wrapper-array row -- each a separate generated
+     * payload arm -- plus the native arrays, which are here so the wire carries
+     * them, not because they can alias.
      */
     private static Myfirstmessage sample() {
         Myfirstmessage m = new Myfirstmessage();
@@ -98,6 +100,10 @@ public final class OwnershipCheck {
         m.someblobarray = blobs;
         m.somestruct.nestedstring = "nested payload";
         m.someunion.option2 = "union payload";
+        m.somestructwitharray.label = "struct label";
+        MyfirstmessageSomeunionarrayElem row = new MyfirstmessageSomeunionarrayElem();
+        row.asstring = "union row";
+        m.someunionarray = new ArrayList<>(List.of(row));
         MyfirstmessageSomemapElem first = new MyfirstmessageSomemapElem();
         first.key = "first key";
         first.value = 1L;

@@ -158,7 +158,7 @@ The generator emits code against one corelib per language:
 |---|---|---|
 | C (`object.h`) | `corelib-c-cpp` | Embedded, minimal footprint, no heap |
 | C++ (embedded) | `corelib-c-cpp` (`sofab.hpp`) | Embedded friendly |
-| C++ (max speed) | `corelib-cpp` | Max speed, zero-copy decode |
+| C++ (max speed) | `corelib-cpp` | Max speed |
 | Rust (`no_std`) | `corelib-rs-no-std` | Embedded, no `alloc` by default |
 | Rust (std) | `corelib-rs` | Max speed |
 | Go | `corelib-go` | Max speed |

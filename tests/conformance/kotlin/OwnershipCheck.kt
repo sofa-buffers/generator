@@ -69,9 +69,11 @@ private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
 
 /**
  * Fills every aliasing-capable field kind: string, blob, array<string>,
- * array<blob>, a string nested in a struct, a string in a union and the string
- * key of a dynamic wrapper-array row -- plus the native arrays, which are here
- * so the wire carries them, not because they can alias.
+ * array<blob>, a string nested in a struct, a string in a union, a string in a
+ * union inside a wrapper array, a struct-with-array's own label and the string
+ * key of a dynamic wrapper-array row -- each a separate generated payload arm --
+ * plus the native arrays, which are here so the wire carries them, not because
+ * they can alias.
  */
 private fun sample(): Myfirstmessage {
     val m = Myfirstmessage()
@@ -83,6 +85,10 @@ private fun sample(): Myfirstmessage {
     m.someblobarray = mutableListOf(byteArrayOf(9, 9), byteArrayOf(8))
     m.somestruct.nestedstring = "nested payload"
     m.someunion.option2 = "union payload"
+    m.somestructwitharray.label = "struct label"
+    m.someunionarray = mutableListOf(
+        MyfirstmessageSomeunionarrayElem().also { it.asstring = "union row" },
+    )
     m.somemap = mutableListOf(
         MyfirstmessageSomemapElem().also { it.key = "first key"; it.value = 1u },
         MyfirstmessageSomemapElem().also { it.key = "second key"; it.value = 2u },
