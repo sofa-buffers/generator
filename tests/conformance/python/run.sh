@@ -370,6 +370,65 @@ OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/fi
 echo "$OUT" | grep -q '"somefp64": 2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
 echo "==> fixlen subtype skip OK"
 
+# ...and the same question one level up, on a fixlen ARRAY, where the answer is
+# the other one (CORELIB_PLAN S4.8.1, generator#411). S4.8.1 fixes five steps and
+# the order of the middle three is normative: read the count; read the
+# fixlen_word; a subtype that is neither fp32 nor fp64 -- a string, a blob, or a
+# reserved 0x4-0x7 -- is INVALID before any schema is consulted (step 3); a
+# fixed-width subtype that merely CONTRADICTS the declared element type is the
+# S7.3 skip just tested (step 4), and the schema count MUST NOT be applied to it;
+# only a matching subtype reaches the schema bound (step 5).
+#
+# So the STRING subtype that is a skip on the scalar somefp64 above is INVALID on
+# an array: S4.8 admits no fixlen array of string or blob, so no schema could
+# have declared one. Generated Python could not tell the two apart -- its array
+# arm only asks whether the announced element kind is the one it declared and
+# returns quietly when it is not, and the fixlen_word never reaches it at all.
+# The corelib decides at the word.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12). It derives every
+# fixture from the schema's own somefloatarray declaration, so the ids it writes
+# and the values it asserts cannot drift from what the harness was built with,
+# and it compares the skipped field's default as JSON numbers rather than by
+# grep, which is what lets one table serve backends that render it three ways.
+#
+# The category is asserted by exception class, the channel the blocks above use:
+# SofaDecodeError is INVALID, SofaIncompleteError is INCOMPLETE, and neither
+# derives from the other. A bare non-zero exit would accept either, and
+# INCOMPLETE is exactly what a corelib that mis-routes step 3 into the skip
+# reports once it walks off the end of the shorter payload.
+#
+# This is the one leg below the engine split that runs on BOTH engines. The rule
+# is decided entirely inside the corelib, and corelib-py carries two independent
+# decoders -- the pure `sofab.decoder` and the Cython `sofab._speedups` -- each
+# with its own fixlen_word arm, so a single-engine run leaves one of the two
+# gates wholly unexercised. Nine subprocesses per engine is a cheap price for
+# that. The engine is put back to the file's default afterwards.
+#
+# Run on BOTH decode surfaces. The verdict is the corelib's, taken at the
+# fixlen_word, and several corelibs reach that word twice -- one arm for a
+# whole-buffer decode and a separate one for the chunked path -- so a table that
+# only ever ran the one-shot verb passes with the streaming copy mutated. This is
+# the sweep the shared-vector and growth drivers beside it already do.
+echo "==> a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    # The exception-class assertion rides `decode`, which prints the type.
+    # `streamdecode` prints str(e) instead, where the class name does not appear,
+    # so the same pattern would assert nothing there: that pass runs on exit
+    # status, and the one-shot pass is what keeps a wrongly-INCOMPLETE verdict
+    # out.
+    for surface in decode streamdecode; do
+        if [ "$surface" = decode ]; then FA_CAT="--invalid-pattern SofaDecodeError"; else FA_CAT=""; fi
+        python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "python/$ENGINE" \
+            --cwd "$WORK/proj" --verb "$surface" $FA_CAT \
+            -- python3 harness.py
+    done
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
 # skipped under S7.3 is not an occurrence for this clause: a correctly typed
 # earlier occurrence survives a mis-typed later one." somestringarray (id 18) is

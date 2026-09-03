@@ -200,6 +200,44 @@ OUT=$("$WORK/proj/harness/harness" decode < "$WORK/fixsubtype_control.bin") \
 echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
 echo "==> fixlen subtype skip OK"
 
+# ...and the same question one level up, on a fixlen ARRAY, where the answer is
+# the other one (CORELIB_PLAN S4.8.1, generator#411). S4.8.1 fixes five steps and
+# the order of the middle three is normative: read the count; read the
+# fixlen_word; a subtype that is neither fp32 nor fp64 -- a string, a blob, or a
+# reserved 0x4-0x7 -- is INVALID before any schema is consulted (step 3); a
+# fixed-width subtype that merely CONTRADICTS the declared element type is the
+# S7.3 skip above (step 4), and the schema count MUST NOT be applied to it; only
+# a matching subtype reaches the schema bound (step 5).
+#
+# So a `string` subtype is a skip on the SCALAR field just tested and INVALID on
+# an array: S4.8 admits no fixlen array of string or blob, so no schema could
+# have declared one. Generated C could not tell the difference on its own -- the
+# corelib decides at the fixlen_word, before any hand-off -- which is exactly why
+# this is worth pinning.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+# fixture from $EXAMPLE's own somefloatarray declaration.
+#
+# The category rides the `status` verb, which this harness grew for exactly this
+# check: `decode` returns 1 for every non-OK sofab_ret_t, so exit status alone
+# also accepts a wrongly INCOMPLETE verdict -- and INCOMPLETE is what a corelib
+# that mis-routes step 3 into the skip reports the moment it walks off the end of
+# the shorter payload. corelib-c does distinguish the two codes; `status` prints
+# which one on line 1.
+#
+# Run on BOTH decode surfaces. The verdict is the corelib's, taken at the
+# fixlen_word, and several corelibs reach that word twice -- one arm for a
+# whole-buffer decode and a separate one for the chunked path -- so a table that
+# only ever ran the one-shot verb passes with the streaming copy mutated. This is
+# the sweep the shared-vector and growth drivers beside it already do.
+echo "==> a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
+for surface in decode streamdecode; do
+    if [ "$surface" = decode ]; then FA_CAT="--status-verb status"; else FA_CAT=""; fi
+    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "c" \
+        --schema "$EXAMPLE" --message '' --verb "$surface" $FA_CAT \
+        -- "$WORK/proj/harness/harness"
+done
+
 # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
 # skipped under S7.3 is not an occurrence for this clause: a correctly typed
 # earlier occurrence survives a mis-typed later one." somestringarray (id 18) is

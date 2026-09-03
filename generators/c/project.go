@@ -461,7 +461,7 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 	g.emitBench(h, s)
 	g.emitBenchMain(h, s)
 	h.line("int main(int argc, char **argv) {")
-	h.line("    if (argc < 2) { fprintf(stderr, \"usage: %%s <encode|decode|streamdecode|bench> [Message|workload]\\n\", argv[0]); return 2; }")
+	h.line("    if (argc < 2) { fprintf(stderr, \"usage: %%s <encode|decode|streamdecode|status|bench> [Message|workload]\\n\", argv[0]); return 2; }")
 	h.line("    const char *mode = argv[1];")
 	h.line(`    const char *msg = argc > 2 ? argv[2] : %q;`, s.Messages[0].Name)
 	h.line("    (void)msg;")
@@ -524,6 +524,24 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		h.line("            ret = %s_decoder_feed(&d, NULL, 0);", pfx)
 		h.line("            if (ret != SOFAB_RET_OK) return 1;")
 		h.line("            %s_to_json(&obj, stdout);", fn)
+		h.line("            fputc('\\n', stdout);")
+		// Surface the §7 decode OUTCOME rather than a bare pass/fail, so a
+		// conformance run can assert the INVALID-vs-INCOMPLETE distinction that an
+		// exit status hides. `decode` above returns 1 for every non-OK
+		// sofab_ret_t, so a corelib that answered INCOMPLETE where the spec says
+		// INVALID -- the shape a mis-routed §4.8.1 step 3 produces the moment it
+		// walks off the end of a shorter payload -- satisfied every negative check
+		// this harness had. corelib-c distinguishes the two codes; this is the
+		// verb that lets a test read them. The C++ sibling emits the same verb
+		// (generators/cpp/project.go), and both always exit 0: the category is on
+		// line 1 of stdout, not in the status.
+		h.line(`        } else if (strcmp(mode, "status") == 0) {`)
+		h.line("            sofab_ret_t _ret = %s_decode(&obj, in, len);", pfx)
+		h.line(`            fputs(_ret == SOFAB_RET_OK ? "COMPLETE"`)
+		h.line(`                : _ret == SOFAB_RET_INCOMPLETE ? "INCOMPLETE"`)
+		h.line(`                : _ret == SOFAB_RET_E_INVALID_MSG ? "INVALID"`)
+		h.line(`                : _ret == SOFAB_RET_E_LIMIT_EXCEEDED ? "LIMIT_EXCEEDED"`)
+		h.line(`                : "INVALID_ARGUMENT", stdout);`)
 		h.line("            fputc('\\n', stdout);")
 		h.line(`        } else { fprintf(stderr, "unknown mode\n"); return 2; }`)
 		h.line("    }")
