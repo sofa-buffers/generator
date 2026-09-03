@@ -65,6 +65,10 @@ import sys
 import sofab
 from sofab import Status
 
+# The engine oracle is shared with the other per-engine drivers in this
+# directory (see engine.py); sys.path[0] is this directory.
+from engine import require_engine
+
 # See the header note: an aliased string destination must still encode.
 SCRIBBLE = 0x41
 
@@ -150,34 +154,6 @@ def check_types(what, got):
         if type(value) is not kind:
             fail(what, "%s is a %s, not a %s -- the codec handed out a window "
                        "into the input buffer" % (name, type(value).__name__, kind.__name__))
-
-
-def require_engine(want):
-    """Assert IN THIS PROCESS which corelib-py engine is loaded.
-
-    run.sh runs this driver once per engine, but its own ``require_engine``
-    checked a DIFFERENT process. corelib-py falls back to pure Python whenever
-    ``sofab._speedups`` cannot be imported, and marks the extension
-    ``optional=True``, so an accelerator that fails to import here would make the
-    native pass a silent duplicate of the pure one -- both printing success
-    (generator#451, and the .so-staleness lesson behind it). The two engines
-    carry independent payload paths, which is the whole reason this leg runs
-    twice, so the assertion belongs where the decode happens.
-
-    ``IMPL`` alone is not enough for ``native``: the exported Encoder/Decoder
-    must BE the accelerator's, which is what a native leg actually exercises.
-    """
-    if sofab.IMPL != want:
-        print("FAIL: this leg must run on the '%s' engine, but sofab.IMPL is '%s'"
-              % (want, sofab.IMPL))
-        return False
-    if want == "native":
-        from sofab import _speedups
-        if sofab.Encoder is not _speedups.Encoder or sofab.Decoder is not _speedups.Decoder:
-            print("FAIL: sofab.IMPL says 'native' but the exported Encoder/Decoder "
-                  "are not the accelerator's")
-            return False
-    return True
 
 
 def main(argv):
