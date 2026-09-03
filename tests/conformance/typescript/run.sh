@@ -77,7 +77,13 @@ echo "==> typecheck generated code"
 ( cd "$WORK/ex" && npx tsc --noEmit )
 
 echo "==> JSON encode -> decode round-trip"
-IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someu64":"18446744073709551615","somestringarray":["a","b","c"]}'
+# someblobarray is here for the OWNERSHIP legs of stream_check.ts, which run on
+# this subject: a Uint8Array is the only TypeScript destination that can alias
+# the buffer it was decoded from, and a blob ARRAY reaches that destination
+# through the wrapper-sequence collector rather than the scalar arm. Left at its
+# default the example subject carried no blob array at all, so only nested_rows
+# exercised the kind.
+IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1,2],[3],[9,9,9]],"someu64":"18446744073709551615","somestringarray":["a","b","c"]}'
 OUT=$(cd "$WORK/ex" && printf '%s' "$IN" | npx tsx harness.ts encode myfirstmessage | npx tsx harness.ts decode myfirstmessage)
 echo "$OUT" | grep -q '"someu64":"18446744073709551615"' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
@@ -900,13 +906,24 @@ NROUT=$(cd "$WORK/corpus/nested_rows" && printf '%s' "$NR" | npx tsx harness.ts 
 [ "$NROUT" = "$NR" ] || { echo "FAIL: nested wrapper row round-trip drift"; echo "  in : $NR"; echo "  out: $NROUT"; exit 1; }
 echo "==> nested wrapper rows OK"
 
-# The two decoders must not drift. decode() runs the monomorphic Cursor over a
-# contiguous buffer; decoder()/feed() drives a visitor over the resumable
-# IStream. Two decoders per type means every S7 verdict exists twice, so this
-# feeds the SAME bytes through both -- at six chunk sizes, one byte at a time
-# included -- and requires deeply equal values. Run over the shared example (every
-# field shape) and over nested_rows (the wrapper-row collectors, depth 3).
-echo "==> streaming: decode() and feed() must agree"
+# ONE decoder, fed two ways, must not drift. decode() and decoder()/feed() build
+# the same visitor over the same corelib IStream (CORELIB_PLAN S5.3.1), so what
+# is still free to vary is where the chunk boundaries fall -- and every S7
+# verdict has to be reached identically whether or not a field arrives in
+# pieces. This feeds the SAME bytes both ways, at six chunk sizes with one byte
+# at a time included, and requires deeply equal values.
+#
+# It also carries the LIFETIME half of the rule (CORELIB_PLAN S6.7 / S6.7.1,
+# generator#412): a decoded message must OWN its bytes, so the buffer it came
+# from may be overwritten the moment the call returns. Nothing else in this
+# suite reaches that -- every other decode here reads a buffer that stays alive
+# and unmodified, and an aliased destination reads back correctly out of one.
+# stream_check.ts destroys the input instead, on BOTH paths, and states in its
+# header which field kinds a pass can actually speak for.
+#
+# Run over the shared example (every field shape) and over nested_rows (the
+# wrapper-row collectors, depth 3).
+echo "==> streaming: decode() and feed() must agree, and a decoded message owns its bytes"
 mk_stream_check "$WORK/ex" \
     'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
     'const _m = Myfirstmessage.fromJSON(JSON.parse(process.argv[2])); check("example", _m, Myfirstmessage.decode, () => new MyfirstmessageDecoder());'

@@ -82,6 +82,33 @@ gcc -std=c99 -Wall -Wextra -Werror -I"$INC" -I"$WORK/stream" \
     "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/stream_check"
 "$WORK/stream_check"
 
+# The LIFETIME half of the same contract (CORELIB_PLAN S6.7 / S6.7.1,
+# generator#412): a decoded message must OWN its bytes, so the buffer it came
+# from may be reused, overwritten or FREED the moment the call returns -- S6.0
+# for a fed chunk, S6.7.1 for the one-shot path, which gets no exemption.
+#
+# Nothing above reaches it. streaming_check.c feeds out of a file-scope array
+# that stays alive and unmodified for the whole run, and example_roundtrip.c and
+# maxsize_fill.c decode from live buffers too, so a destination holding a window
+# into one of them reads back perfectly and every check passes. The oracle has
+# to DESTROY the input between decode and re-encode instead: one heap block per
+# chunk, scribbled and freed the instant feed returns.
+#
+# Built with -fsanitize=address, the corelib sources included, and that is what
+# gives the leg its edge here. Every C destination is inline storage in the
+# caller's struct, so no GENERATED code can alias -- what can regress is a
+# corelib that starts deferring the copy, and without ASan a dangling read
+# usually still returns the bytes that were there and the value comparison
+# prints a pass. The corelib .c files must be instrumented too: ASan does not
+# redzone-check uninstrumented code. Verified against a corelib copy mutated to
+# memcpy each payload from a remembered chunk pointer at completion -- ASan
+# reports heap-use-after-free, and the value diff fires without it.
+echo "==> a decoded message owns its bytes (CORELIB_PLAN S6.7, generator#412)"
+gcc -std=c99 -Wall -Wextra -Werror -fsanitize=address -I"$INC" -I"$WORK/stream" \
+    "$ROOT/tests/conformance/c/ownership_check.c" "$WORK"/stream/*.c \
+    "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/own_check"
+"$WORK/own_check"
+
 echo "==> verifying capability guards fire when a feature is stripped"
 if gcc -std=c99 -DSOFAB_DISABLE_SEQUENCE_SUPPORT -I"$INC" -I"$WORK/gen" \
         -c "$WORK"/gen/myfirstmessage.c -o /dev/null 2>/dev/null; then

@@ -1,26 +1,35 @@
-// Differential check: the two TypeScript decoders must not drift.
+// Differential check: ONE decoder, fed two ways, must not drift.
 //
-// The backend emits TWO decoders per type and that is deliberate. decode() runs
-// the monomorphic Cursor over a contiguous buffer — the speed showcase, and the
-// reason the push/visitor path was removed in the first place. It cannot be fed
-// in chunks, so decoder()/feed() drives a visitor over the corelib's resumable
-// IStream instead.
+// There is exactly one decode surface (CORELIB_PLAN §5.3.1). The corelib's
+// `decode(bytes, visitor)` is one `IStream.feed` of the whole buffer, and the
+// generated `decode()` and `decoder()/feed()` build the same visitor over it.
+// What can still drift is where the chunk boundaries fall: only the streaming
+// entry point makes a field arrive in pieces, and every §7 verdict has to be
+// reached identically whether or not it does. The property under test is that
+// the boundaries are INVISIBLE:
 //
-// The cost of two decoders is that every §7 verdict now exists twice and could
-// drift apart. Emitting both from the same helpers narrows that; this pins it.
-// The property under test is that the two are INDISTINGUISHABLE:
-//
-//   1. the same bytes decode to deeply equal values on both paths,
+//   1. the same bytes decode to deeply equal values however they are chunked,
 //   2. at every chunk size, one byte at a time included — where every varint,
 //      every string payload and every array element is split across feeds, so
 //      any parse state the visitor fails to carry between calls shows up,
 //   3. a truncated stream is rejected rather than returned half-filled.
 //
-// It also pins the ownership rule the two decoders can silently disagree on:
-// a decoded message must own its bytes (CORELIB_PLAN §5.1 read on the decode
-// side), so overwriting the input buffer afterwards may not change it. The
-// streaming path always copied; the cursor path handed blob destinations a view
-// into the buffer, and no value comparison between the two could see it.
+// It also pins the LIFETIME half of the same rule: a decoded message must OWN
+// its bytes (CORELIB_PLAN §6.7 / §6.7.1, generator#412), so the buffer it came
+// from may be reused, overwritten or freed the moment the call returns — §6.0
+// for `feed`, and §6.7.1 for the one-shot path, which gets no exemption. That
+// oracle is DESTRUCTIVE rather than comparative: decode, destroy the input,
+// re-encode and diff. Comparing values between two feeds cannot see it — both
+// would be reading the same live bytes and would simply agree.
+//
+// KNOWN REACH of the ownership legs — do not read a pass as "every field is
+// copied". The only TypeScript destination that CAN alias is a `Uint8Array`:
+// the scalar `blob`, each element of a blob array, and a blob row. A `string`
+// cannot — a JS string is an immutable copy the runtime makes — and a numeric
+// array is a fresh JS array the generated collector fills element by element.
+// The hazard is real on the blob legs: `PayloadAcc.take` is handed a window
+// into the buffer being read and copies out of it, and a destination that kept
+// the window instead would make the message's lifetime the buffer's.
 //
 // Run against the shared example so every field shape is covered, and against
 // nested_rows so the wrapper-row collectors (array<array<string|blob|struct>>,
@@ -54,6 +63,44 @@ function feedInChunks<T>(mk: () => { feed(c: Uint8Array): DecodeStatus; finish()
   return d.finish();
 }
 
+/**
+ * The same feed, but every chunk is copied into ONE reusable scratch buffer that
+ * is DESTROYED the instant `feed` returns — what a caller refilling a socket
+ * buffer does, and what §6.0 says it is allowed to do.
+ */
+function feedFromScratch<T>(mk: () => { feed(c: Uint8Array): DecodeStatus; finish(): T },
+                            wire: Uint8Array, size: number): T {
+  const d = mk();
+  const scratch = new Uint8Array(size);
+  for (let i = 0; i < wire.length; i += size) {
+    const n = Math.min(size, wire.length - i);
+    scratch.set(wire.subarray(i, i + n), 0);
+    d.feed(scratch.subarray(0, n));
+    scratch.fill(SCRIBBLE);
+  }
+  return d.finish();
+}
+
+/**
+ * The byte an input buffer is destroyed with: 'A', not 0xff. An aliased string
+ * destination must still RE-ENCODE, or the oracle stops being a byte comparison
+ * and becomes an encoder error that unrelated causes could produce.
+ */
+const SCRIBBLE = 0x41;
+
+/**
+ * The chunk sizes every sweep uses. It has to END at one that delivers every
+ * payload whole: a payload SPLIT across chunks is reassembled into the corelib's
+ * accumulator and copied out of it whether or not the destination wanted a view,
+ * so which sizes can see an aliased destination is decided by where the
+ * boundaries happen to fall, not by how small the chunks are. Measured with the
+ * generated blob arm broken on purpose (`this.o.someblob = src.subarray(...)` on
+ * the whole-payload path) against the example subject: 1, 2, 3 and 16 pass while
+ * 7, 32, 64 and the whole-message size fail. Only the last size is guaranteed —
+ * it is the one that cannot split anything.
+ */
+const chunkSizes = (wire: Uint8Array): number[] => [1, 2, 3, 7, 16, wire.length];
+
 let checks = 0;
 
 /** One subject: a populated message, its one-shot decode, and its chunked ones. */
@@ -66,18 +113,17 @@ function check<T extends Encodable>(
   const wire = m.encode();
   const want = norm(oneShot(wire));
 
-  // A decoded message OWNS its bytes (CORELIB_PLAN §5.1 read on the decode side):
-  // the cursor hands blob payloads over as views into the input buffer, and a
-  // destination that kept one would make the message's lifetime the buffer's.
-  // Scribbling over a throwaway copy of the wire after decoding is what shows the
-  // difference — comparing VALUES between the two decoders cannot, because the
-  // streaming path has always copied and the two would simply agree while both
-  // reading freed memory.
+  // A decoded message OWNS its bytes, on the ONE-SHOT path (CORELIB_PLAN §6.7 /
+  // §6.7.1, generator#412): `decode(buffer)` copies too, so the buffer may be
+  // overwritten the moment it returns. Scribbling over a throwaway copy of the
+  // wire after decoding is what shows a destination that kept a window into it —
+  // comparing VALUES between two feeds cannot, because both read the same live
+  // bytes and would simply agree.
   const scratch = wire.slice();
   const owned = oneShot(scratch);
   const before = norm(owned);
   const reencodedBefore = norm(owned.encode());
-  scratch.fill(0xff);
+  scratch.fill(SCRIBBLE);
   if (norm(owned) !== before) {
     console.error(`FAIL ${label}: the decoded message aliases its input buffer`);
     console.error(`  before: ${before}`);
@@ -90,8 +136,25 @@ function check<T extends Encodable>(
   }
   checks++;
 
-  // (1) + (2): every chunk size must agree with the cursor path.
-  for (const size of [1, 2, 3, 7, 16, wire.length]) {
+  // ...and on the STREAMING path, which is where a retained chunk pointer hides:
+  // §6.0 ends the borrow when `feed` returns, so every chunk here is fed out of
+  // ONE reusable scratch that is destroyed immediately afterwards. Both the value
+  // and the re-encoded bytes must be what the one-shot decode produced.
+  for (const size of chunkSizes(wire)) {
+    const got = feedFromScratch(mk, wire, size);
+    if (norm(got) !== before || norm(got.encode()) !== reencodedBefore) {
+      console.error(`FAIL ${label}: chunk size ${size}: a decoded field aliased the buffer it was fed from`);
+      console.error(`  want: ${before}`);
+      console.error(`  got : ${norm(got)}`);
+      console.error(`  want bytes: ${reencodedBefore}`);
+      console.error(`  got  bytes: ${norm(got.encode())}`);
+      process.exit(1);
+    }
+    checks++;
+  }
+
+  // (1) + (2): every chunk size must agree with the one-shot decode.
+  for (const size of chunkSizes(wire)) {
     const got = norm(feedInChunks(mk, wire, size));
     if (got !== want) {
       console.error(`FAIL ${label}: chunk size ${size} disagrees with decode()`);
@@ -115,7 +178,7 @@ function check<T extends Encodable>(
     checks++;
   }
 
-  console.log(`   [${label}] ${wire.length} bytes, cursor === feed at 6 chunk sizes (1 byte included), truncation rejected, decode owns its bytes`);
+  console.log(`   [${label}] ${wire.length} bytes, decode() === feed() at 6 chunk sizes (1 byte included), truncation rejected, decoded message owns its bytes on both paths`);
 }
 
 /**

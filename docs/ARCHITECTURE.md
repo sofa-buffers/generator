@@ -4204,6 +4204,26 @@ A reimplementation is **conformant** when it reproduces these gates:
    than a live net), and a counted native array is inline storage everywhere and
    cannot alias. This is not a hypothetical class: the zig backend was borrowing
    on `decode()` when the check was written, and it is the check that showed it.
+
+   Where a language's destinations **cannot** alias — C, C++, Rust — the check
+   changes what it is a net for, and the port has to say so rather than count
+   itself as coverage of the generated side. In C every field is inline storage
+   in the caller's struct and the corelib's only payload entry points take a
+   destination to copy into; in C++ every profile stores an owning container and
+   corelib-cpp `static_assert`s a `std::string_view` destination away, citing §6.
+   In both, the mutation the issue asks for is a compile error, so what remains
+   reachable is a **corelib** that starts deferring the copy — holding a pointer
+   into a fed chunk and reading it back later. Two things make that reachable at
+   all: every chunk is a separate heap block **freed** the instant `feed`
+   returns, not merely overwritten, and the binary is built with
+   `-fsanitize=address` — the corelib's own C sources included, since ASan does
+   not redzone-check uninstrumented code. Without it a value comparison prints a
+   pass while the message holds a dangling pointer, because freed heap usually
+   still reads back the bytes that were in it. Both halves were verified against
+   deliberately mutated corelib copies (a `readPayload` that defers its `memcpy`
+   by one call; an `istream.c` that copies each payload from a remembered chunk
+   pointer at completion), which report `heap-use-after-free` on the affected
+   chunk sizes.
 3. **Corpus** (`tests/matrix`) — a corner-case corpus generated across **all**
    backends; invalid defs are rejected; dangling-ref + depth-cap enforced.
    Per-language `run.sh` additionally **compiles/builds every corpus def** against
