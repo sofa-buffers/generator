@@ -898,10 +898,19 @@ messages:
 	}
 }
 
-// TestPythonNoFixlenSubtypeImportWhenUnused keeps the import line honest: a
-// schema with no fixlen-framed field never references FixlenSubtype, so
-// importing it would leave an unused name in every generated module.
-func TestPythonNoFixlenSubtypeImportWhenUnused(t *testing.T) {
+// TestPythonFixlenSubtypeGuardWithoutFixlenFields pins the one guard that keys
+// on the WIRE rather than on the schema: a schema with no fixlen-framed field at
+// all still declines a header announcing a STRING or BLOB payload.
+//
+// The schema decides nothing here. Whatever it declares, the bytes can announce
+// a string at any id, and accepting that header hands the codec a length to
+// reassemble against, bytes to copy and -- for a string -- a UTF-8 verdict to
+// take at payload completion. CORELIB_PLAN §6.4.5 says validation never runs on
+// a skip "in any mode", so a §7.3-skipped string that is nevertheless validated
+// turns a COMPLETE decode into INVALID (measured against corelib-py before this
+// guard existed, on both engines). That is why FixlenSubtype is referenced by
+// every module, including this one.
+func TestPythonFixlenSubtypeGuardWithoutFixlenFields(t *testing.T) {
 	s := schema(t, `
 version: 1
 messages:
@@ -911,79 +920,94 @@ messages:
       b: { id: 1, type: i32 }
 `)
 	mod := string(genPy(t, s, map[string]any{})["message.py"])
-	if strings.Contains(mod, "FixlenSubtype") {
-		t.Errorf("message.py must not import FixlenSubtype when no fixlen field exists:\n%s", mod)
+	if !strings.Contains(mod, "if fld.subtype is not None and fld.subtype >= FixlenSubtype.STRING:") {
+		t.Errorf("message.py must decline a string/blob payload even where the schema declares none:\n%s", mod)
 	}
 	// Field is unconditional: on_field carries the undeclared-id decline in every
 	// scope, so every generated visitor overrides it (§6.2.1 -- a field this
 	// handler does not read must be skipped, or the codec's cap reaches it).
-	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
+	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
 		t.Errorf("message.py missing plain import line:\n%s", mod)
 	}
 }
 
-// TestPythonFixlenSubtypeImportMatchesUse is the durable form of generator#246:
-// instead of pinning one import line per shape, it asserts the INVARIANT the gate
-// exists for — the module imports FixlenSubtype exactly when its body references
-// it. The old gate looked only at field kinds plus one level of NATIVE array
-// element, so every wrapper-array element that names a subtype (an array<string>
-// element guard, or a nested array<array<fp32>> row) generated a module using a
-// name it never imported: NameError at decode time, from decode of any field —
-// the module imports fine, so no test that merely compiles it can catch this.
-func TestPythonFixlenSubtypeImportMatchesUse(t *testing.T) {
+// TestPythonFixlenSubtypeImportedInEveryModule is the durable form of
+// generator#246. That bug was an import gate that looked at field kinds plus one
+// level of NATIVE array element, so every wrapper-array element naming a subtype
+// (an array<string> element guard, or a nested array<array<fp32>> row) generated
+// a module that used a name it never imported: NameError at decode of any field,
+// and invisible to any test that merely imports the module. The durable answer
+// was to stop pinning one import line per shape and assert the INVARIANT the gate
+// exists for instead.
+//
+// Since the §6.4.5 guard that invariant has only one side left. The guard keys on
+// what the WIRE announces, not on what the schema declares, so every scope of
+// every generated module names FixlenSubtype.STRING to decline a string or blob
+// payload it would otherwise materialize and validate. No schema produces a
+// module without it — and a `want` column of eleven `true`s would have said that
+// while looking like it still discriminated, so there is none. The table asserts
+// the two halves on their own terms: the name is referenced in every module,
+// which is what makes an unconditional import correct, and the import line agrees
+// with the body — imported without use is a dead name, used without import is a
+// NameError at decode.
+//
+// The shapes below are kept because they are the ones that used to disagree: the
+// generator#246 reproductions, the unbounded fixlen fields that were negatives
+// while the gate keyed on bounds, and three schemas with no fixlen field at all.
+func TestPythonFixlenSubtypeImportedInEveryModule(t *testing.T) {
 	cases := []struct {
 		name string
-		want bool // FixlenSubtype expected in the import line
 		src  string
 	}{
 		// The issue's reproduction: the ONLY fixlen use is a wrapper string
 		// ELEMENT. Under the visitor a subtype is compared where a BOUND has to
 		// know the header is really the field it bounds -- so the element carries
 		// its maxlen here, which is what puts FixlenSubtype in the body.
-		{"bounded wrapper string array", true, `
+		{"bounded wrapper string array", `
       tags: { id: 0, type: array, items: { type: string, maxlen: 8 } }
       n:    { id: 1, type: u32 }`},
-		{"bounded wrapper blob array", true, `
+		{"bounded wrapper blob array", `
       parts: { id: 0, type: array, items: { type: blob, maxlen: 8 } }
       n:     { id: 1, type: u32 }`},
 		// Nested rows: the bound sits one (or two) levels below the field.
-		{"bounded nested string rows", true, `
+		{"bounded nested string rows", `
       rows: { id: 0, type: array, items: { type: array, items: { type: string, maxlen: 4 } } }
       n:    { id: 1, type: u32 }`},
-		{"counted nested fp32 rows", true, `
+		{"counted nested fp32 rows", `
       grid: { id: 0, type: array, items: { type: array, items: { type: fp32, count: 3 } } }
       n:    { id: 1, type: u32 }`},
-		{"doubly nested bounded blob rows", true, `
+		{"doubly nested bounded blob rows", `
       cube: { id: 0, type: array, items: { type: array, items: { type: array, items: { type: blob, maxlen: 4 } } } }
       n:    { id: 1, type: u32 }`},
 		// A bounded string reached through a STRUCT element is bounded inside that
 		// struct's own visitor, which the scope walk reaches through the element.
-		{"bounded string inside a struct element", true, `
+		{"bounded string inside a struct element", `
       items: { id: 0, type: array, items: { type: struct, fields: { s: { id: 0, type: string, maxlen: 8 } } } }
       n:     { id: 1, type: u32 }`},
-		// Negatives — the import must stay out, or every module carries an unused
-		// name (the reason the gate exists at all). UNBOUNDED fixlen fields are
-		// negatives now: with no bound there is nothing for on_field to frame, and
-		// §7.3 needs no code of its own on the visitor surface.
-		// An unbounded string element is a POSITIVE again since every target
-		// carries a finite default string cap (§9.5, generator#385): the guard
-		// keys on fld.subtype == FixlenSubtype.STRING, so the name is used.
-		{"unbounded wrapper string array", true, `
+		// Unbounded fixlen fields. These were the negatives while the gate keyed on
+		// BOUNDS -- with no bound there is nothing for on_field to frame. They stop
+		// being negatives for two independent reasons, either of which suffices: an
+		// unbounded string element still meets the finite default string cap every
+		// target carries (§9.5, generator#385), and an unbounded fp32 row's element
+		// COUNT is capped by the receiver behind the §7.3 tag test for the row,
+		// which for a fixlen array names the subtype.
+		{"unbounded wrapper string array", `
       tags: { id: 0, type: array, items: { type: string } }
       n:    { id: 1, type: u32 }`},
-		// An unbounded fp32 row is a POSITIVE too: the row's own element COUNT is
-		// capped by the receiver, and that cap sits behind the §7.3 tag test for
-		// the row -- which for a fixlen array names the subtype.
-		{"unbounded fp32 rows", true, `
+		{"unbounded fp32 rows", `
       grid: { id: 0, type: array, items: { type: array, items: { type: fp32 } } }
       n:    { id: 1, type: u32 }`},
-		{"native integer array", false, `
+		// No fixlen field anywhere. These were the last negatives, and the §6.4.5
+		// guard is what turned them: the bytes can announce a string at any id, and
+		// accepting that header hands the codec a length to reassemble against and
+		// a UTF-8 verdict to take -- on a field this schema never declared.
+		{"native integer array", `
       a: { id: 0, type: array, items: { type: u32 } }
       n: { id: 1, type: u32 }`},
-		{"nested integer rows", false, `
+		{"nested integer rows", `
       m: { id: 0, type: array, items: { type: array, items: { type: i32 } } }
       n: { id: 1, type: u32 }`},
-		{"struct elements without fixlen", false, `
+		{"struct elements without fixlen", `
       items: { id: 0, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }
       n:     { id: 1, type: u32 }`},
 	}
@@ -995,8 +1019,8 @@ func TestPythonFixlenSubtypeImportMatchesUse(t *testing.T) {
 			// The body is what settles it: a reference outside the import line is a
 			// NameError unless the name was imported.
 			used := strings.Contains(mod[strings.Index(mod, imp)+len(imp):], "FixlenSubtype")
-			if used != tc.want {
-				t.Fatalf("expected the emitted guards to reference FixlenSubtype=%v; module:\n%s", tc.want, mod)
+			if !used {
+				t.Fatalf("every generated module must reference FixlenSubtype: the §6.4.5 guard declines a string/blob payload in every scope, whatever the schema declares; module:\n%s", mod)
 			}
 			if imported != used {
 				t.Errorf("import/use mismatch: imported=%v used=%v (imported without use = dead name; used without import = NameError at decode)\n%s",
@@ -1390,7 +1414,7 @@ messages:
     payload:
       rows: { id: 0, type: array, items: { type: array, items: { type: u32, count: 3 } } }
 `), map[string]any{})["message.py"])
-	if !strings.Contains(rows, "from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType\n") {
+	if !strings.Contains(rows, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType\n") {
 		t.Errorf("a nested-row-only §7.3 tag test still needs WireType imported:\n%s", rows)
 	}
 

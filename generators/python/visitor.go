@@ -607,6 +607,7 @@ func (g *gen) objFieldArm(sc *pyScope) []string {
 		fmt.Sprintf("if fld.id not in %s:", pyIDSet(sc.fields)),
 		"    return False  # an id this scope does not declare is walked, not read",
 	}
+	out = append(out, textPayloadGuard(pyIDSet(textFields(sc.fields)))...)
 	inner := true
 	for _, fld := range sc.fields {
 		var body []string
@@ -662,7 +663,11 @@ func (g *gen) arrFieldArm(sc *pyScope) []string {
 		if isNativeArrayElem(sc.elemItems.Elem) {
 			out = append(out, declineOnMismatch(
 				tagMismatch(ir.KindArray, sc.elemItems.Elem), sc.loc+" row")...)
+			break
 		}
+		out = append(out, textPayloadGuard("")...)
+	default:
+		out = append(out, textPayloadGuard("")...)
 	}
 	if sc.child < 0 {
 		// A value element is bounded here; an element that opens a scope is
@@ -670,6 +675,53 @@ func (g *gen) arrFieldArm(sc *pyScope) []string {
 		out = append(out, g.indexBound(sc.cap, "fld.id", sc.loc)...)
 	}
 	return out
+}
+
+// textFields returns the scope's fields declared `string` or `blob` -- the two
+// kinds whose payload is a byte run the codec materializes.
+func textFields(fields []*ir.Field) []*ir.Field {
+	var out []*ir.Field
+	for _, fld := range fields {
+		if fld.Kind == ir.KindString || fld.Kind == ir.KindBlob {
+			out = append(out, fld)
+		}
+	}
+	return out
+}
+
+// textPayloadGuard renders the §7.3 decline for the mismatch that costs
+// something: a fixlen header announcing a STRING or BLOB payload at a position
+// that declares neither.
+//
+// The per-id arms above walk the mismatch from one side only -- a header that is
+// not what THIS field declared. That is enough for every tag whose payload the
+// codec reads in place, and it is not enough for these two, because a string or
+// blob is a byte RUN: accepting the header hands the codec a length to
+// reassemble against, bytes to copy, and -- for a string -- a UTF-8 verdict to
+// take at payload completion (CORELIB_PLAN §6.4.4). CORELIB_PLAN §6.4.5 is
+// explicit that validation "runs only where a string is materialized ... never
+// on skip, in any mode", so a skipped string that is nevertheless validated
+// turns a decode §7.3 requires to stay COMPLETE into INVALID. The corelib cannot
+// see it coming: a field a visitor ACCEPTS is a field it reads, and the id chain
+// above accepted every id it declares whose kind is not string, blob or a native
+// array.
+//
+// `ids` is the set display of the positions that DO declare one, or "" for a
+// scope that declares none (an array scope of structs, say, where every element
+// is sequence-framed). The test is behind `fld.subtype is not None`, which is
+// true only for a fixlen scalar or a fixlen array header, so every other field
+// pays one identity comparison; §4.6 numbers the subtypes fp32, fp64, string,
+// blob, and a fixlen ARRAY's is always one of the first two (the corelib rejects
+// the others at the word, generator#411), so `>= STRING` says "a byte run".
+func textPayloadGuard(ids string) []string {
+	cond := "fld.subtype is not None and fld.subtype >= FixlenSubtype.STRING"
+	if ids != "" && ids != "frozenset()" {
+		cond += " and fld.id not in " + ids
+	}
+	return []string{
+		fmt.Sprintf("if %s:", cond),
+		"    return False  # a string/blob payload here is not this scope's: skip it, never materialize it (S6.4.5)",
+	}
 }
 
 // pyIDSet renders the scope's declared ids as a set display of literals. CPython

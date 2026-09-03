@@ -295,6 +295,48 @@ OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/subt
 echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
 echo "==> fixlen subtype skip OK"
 
+# The same skip, one rule over: a string a decoder STEPS OVER is never
+# UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417). Validation belongs where
+# a string is MATERIALIZED, and it is taken on the complete payload (S6.4.4), so
+# the two halves have to be asserted on the same bytes: a backend that validates
+# too eagerly passes the declared half and fails the skipped one, a backend that
+# never validates passes the skipped half and fails the declared one, and neither
+# failure is visible from the other side. This suite had the declared half alone
+# -- checkReject("invalid utf-8") in the streaming section below, on these very
+# bytes -- which is the half a corelib owns; the skip half is the one that pins
+# GENERATED code's read-vs-skip decision, and it was missing.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+# fixture from the schema's own somestring/somefp64/someu8 declarations, and every
+# skip row carries a trailing someu8 = 42 so a skip that ate one byte too many or
+# too few cannot pass while the string sits at its default.
+#
+# Nothing is gated: a JS string is a S6.4.1 Unicode type -- there is no lenient
+# constructor to choose, TextDecoder's fatal mode is the only one that does not
+# mutate -- so the check is always on and the option MAY be omitted entirely.
+# docs/generator/typescript.md documents no switch because there is none.
+#
+# The category channel differs per SURFACE here, and both are real. The `decode`
+# row goes through the `status` verb, the channel the blocks above use. The
+# `streamdecode` row cannot: `status` always runs cls.decode, the one-shot
+# whole-buffer surface, so pointing it at the streaming row would assert that
+# decoder's verdict twice and the chunked decoder's never. Its channel is the
+# LATCH the harness prints on its error path instead, `[status=INVALID]`
+# (generator#461) -- the streaming decoder's own remembered verdict, and the only
+# way to tell an INVALID from the INCOMPLETE a mis-measured skip produces the
+# moment it walks off the payload.
+echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+for surface in decode streamdecode; do
+    if [ "$surface" = decode ]; then
+        SU_CAT="--status-verb status"
+    else
+        SU_CAT='--invalid-pattern status=INVALID'
+    fi
+    python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "typescript" \
+        --cwd "$WORK/ex" --verb "$surface" $SU_CAT \
+        -- npx tsx harness.ts
+done
+
 # ...and the same question one level up, on a fixlen ARRAY, where the answer is
 # the other one (CORELIB_PLAN S4.8.1, generator#411). S4.8.1 fixes five steps and
 # the order of the middle three is normative: read the count; read the
@@ -902,6 +944,29 @@ mk_stream_check "$WORK/corpus/nested_rows" \
 mk_stream_check "$WORK/ex" \
     'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
     'checkReject("invalid utf-8", new Uint8Array([0x5a, 0x12, 0xff, 0xff]), Myfirstmessage.decode, () => new MyfirstmessageDecoder());'
+( cd "$WORK/ex" && npx tsx stream_check.ts )
+
+# ...and the OTHER half of that same rule, on the same bytes (CORELIB_PLAN S6.4.5,
+# generator#417). The rejection above is the corelib's: decodeUtf8 raises wherever
+# it is called from, so it says nothing about which fields generated code decides
+# to read. S6.4.5 -- validation runs only where a string is MATERIALIZED, never on
+# a skip, in any mode -- is about exactly that decision, and the same ff ff is a
+# non-event once it sits at a position the decoder steps over. The shared driver
+# beside the S7.3 markers runs the full nine-row table on both harness verbs; this
+# re-runs the two skip shapes through checkAccept for what the verbs cannot give,
+# the six-chunk-size sweep across BOTH decoders -- generator#300 was a skip that
+# was only wrong once a header and its payload landed in different feeds.
+#   9a 06  an id the schema does not declare (99), FIXLEN
+#   5a     somestring (id 11) << 3 | 2, with...
+#   13     ...a fixlen word announcing the BLOB subtype: a S7.3 skip at an id whose
+#          string destination is live, so only the subtype disqualifies the field
+#   12     fixlen word: string subtype, length 2
+#   ff ff  the same two bytes checkReject just required a rejection for
+#   00 2a  someu8 = 42, not its default 7: a skip that ate one byte too many or
+#          too few leaves somestring at "" either way, and cannot leave this at 42
+mk_stream_check "$WORK/ex" \
+    'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
+    'checkAccept("skipped invalid utf-8, undeclared id", new Uint8Array([0x9a, 0x06, 0x12, 0xff, 0xff, 0x00, 0x2a]), Myfirstmessage.decode, () => new MyfirstmessageDecoder(), { somestring: "", someu8: 42 }); checkAccept("skipped invalid utf-8, blob subtype at the string id", new Uint8Array([0x5a, 0x13, 0xff, 0xff, 0x00, 0x2a]), Myfirstmessage.decode, () => new MyfirstmessageDecoder(), { somestring: "", someu8: 42 });'
 ( cd "$WORK/ex" && npx tsx stream_check.ts )
 
 # ...and on the same VERDICT, not just the same exception type. An array header

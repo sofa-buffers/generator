@@ -167,6 +167,73 @@ function checkReject(label: string, wire: Uint8Array,
   console.log(`   [${label}] rejected as SofabError(${viaCursor.code}) by decode() and by feed() at 6 chunk sizes`);
 }
 
+/**
+ * ACCEPTED raw wire bytes: both paths must take them, and take them the same way.
+ *
+ * checkReject above is the other half of one rule. CORELIB_PLAN §6.4.5 says a
+ * string a decoder STEPS OVER is never UTF-8-validated, in any mode, and §6.4.4
+ * says a read one is judged at payload completion — so the same invalid bytes are
+ * a rejection at a declared id and a non-event at a skipped one. Only the
+ * rejection was pinned here, and that is the half the CORELIB owns: decodeUtf8
+ * raises it wherever it is called from. Which fields are read at all is generated
+ * code's decision, and the accept half is what pins it (generator#417).
+ *
+ * `check` cannot serve: it starts from an Encodable and encodes it, so it can
+ * only ever build wire this library would itself produce — and no encoder emits a
+ * field at an id its schema does not declare. Like checkReject this therefore
+ * takes raw bytes, and like it, it sweeps six chunk sizes: the two skip defects
+ * this family has already had (generator#297, generator#300) were both invisible
+ * on the one-shot path and one of them only appeared when the header and its
+ * payload landed in different feeds.
+ *
+ * `want` is asserted on the one-shot result and every chunked result is required
+ * to equal it, so a decoder that skipped the whole message cannot satisfy it.
+ */
+function checkAccept(label: string, wire: Uint8Array,
+                     oneShot: (b: Uint8Array) => unknown,
+                     mk: () => { feed(c: Uint8Array): DecodeStatus; finish(): unknown },
+                     want: Record<string, unknown>): void {
+  let viaOneShot: unknown;
+  try {
+    viaOneShot = oneShot(wire);
+  } catch (e) {
+    console.error(`FAIL ${label}: decode() rejected bytes it must accept: ${String(e)}`);
+    process.exit(1);
+  }
+  const fields = (viaOneShot as { toJSON(): Record<string, unknown> }).toJSON();
+  for (const [k, v] of Object.entries(want)) {
+    if (!(k in fields)) {
+      console.error(`FAIL ${label}: decode() printed no ${k}; got ${norm(fields)}`);
+      process.exit(1);
+    }
+    if (norm(fields[k]) !== norm(v)) {
+      console.error(`FAIL ${label}: decode() left ${k} = ${norm(fields[k])}, want ${norm(v)}`);
+      process.exit(1);
+    }
+  }
+  const expected = norm(viaOneShot);
+  checks++;
+
+  for (const size of [1, 2, 3, 7, 16, wire.length]) {
+    let got: string;
+    try {
+      got = norm(feedInChunks(mk, wire, size));
+    } catch (e) {
+      console.error(`FAIL ${label}: feed() at chunk size ${size} rejected bytes decode() accepted: ${String(e)}`);
+      process.exit(1);
+    }
+    if (got !== expected) {
+      console.error(`FAIL ${label}: chunk size ${size} disagrees with decode()`);
+      console.error(`  decode(): ${expected}`);
+      console.error(`  feed()  : ${got}`);
+      process.exit(1);
+    }
+    checks++;
+  }
+
+  console.log(`   [${label}] accepted with the expected values by decode() and by feed() at 6 chunk sizes`);
+}
+
 //SOFAB_BODY
 
 console.log(`streaming: ${checks} differential checks, decode() and feed() agree everywhere`);

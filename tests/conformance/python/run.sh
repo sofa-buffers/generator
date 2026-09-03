@@ -370,6 +370,66 @@ OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/fi
 echo "$OUT" | grep -q '"somefp64": 2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
 echo "==> fixlen subtype skip OK"
 
+# The same skip, one rule over: a string a decoder STEPS OVER is never
+# UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417). Validation belongs where
+# a string is MATERIALIZED, and it is taken on the complete payload (S6.4.4), so
+# the two halves have to be asserted on the same bytes: a backend that validates
+# too eagerly passes the declared half and fails the skipped one, a backend that
+# never validates passes the skipped half and fails the declared one, and neither
+# failure is visible from the other side. The driver runs four accept rows, not
+# two: an undeclared id, a BLOB subtype at the id that DOES declare a string, a
+# well-formed STRING at a scalar-declared id, and that last shape again one
+# scope down, inside a sequence-framed struct.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+# fixture from the schema's own somestring/somefp64/someu8 declarations, and every
+# skip row carries a trailing someu8 = 42 so a skip that ate one byte too many or
+# too few cannot pass while the string sits at its default.
+#
+# Nothing is gated here: Python `str` is a S6.4.1 Unicode type, always strict, and
+# the option MAY be omitted entirely -- there is no switch to turn the check off,
+# and gating the declared half would only hide a regression.
+#
+# What the skip rows pin on the generated side is the S6.4.5 guard in on_field.
+# The corelib cannot make this decision: a field a visitor ACCEPTS is a field it
+# reads, so the moment on_field returns True for a fixlen header announcing a
+# STRING payload, corelib-py materializes those bytes and validates them -- and
+# then drops the value at an on_string arm that does not exist. Before
+# generator#417 the id chain declined only string, blob and native-array ids, so
+# `4a 0a ff` (a STRING subtype at the fp64-declared somefp64) and `a2 01 0a ff`
+# (the same at somestruct) came back INVALID on both engines and both surfaces,
+# where S6.4.5 requires COMPLETE. Delete the guard and skipped_string_at_scalar
+# goes red.
+#
+# Both engines, for the reason the generator#411 block above runs on both: the
+# accelerator reimplements the payload path, so a single-engine run leaves the
+# half that actually ships unmeasured. The engine is put back afterwards.
+echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    # Both surfaces name the category, in the two different ways this harness
+    # has. `decode` lets the exception out, so the CLASS is the channel:
+    # SofaDecodeError is INVALID and SofaIncompleteError is INCOMPLETE --
+    # siblings, neither deriving from the other. `streamdecode` never raises
+    # here; it reads the status the last feed returned and prints its NAME, so
+    # the channel is that line, and `decode failed: INCOMPLETE` is what the same
+    # row would print if the decoder mis-measured the skipped payload and walked
+    # off its end. Exit status alone would accept either.
+    for surface in decode streamdecode; do
+        if [ "$surface" = decode ]; then
+            U8_CAT="SofaDecodeError"
+        else
+            U8_CAT="decode failed: INVALID"
+        fi
+        python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "python/$ENGINE" \
+            --cwd "$WORK/proj" --verb "$surface" --invalid-pattern "$U8_CAT" \
+            -- python3 harness.py
+    done
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 # ...and the same question one level up, on a fixlen ARRAY, where the answer is
 # the other one (CORELIB_PLAN S4.8.1, generator#411). S4.8.1 fixes five steps and
 # the order of the middle three is normative: read the count; read the

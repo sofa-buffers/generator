@@ -2238,6 +2238,67 @@ resolve-then-leave prologue (#258). Where a backend can make the property
 structural rather than per-emission-site, it should: that is what stops the next collector class from
 silently re-inheriting the default.
 
+**A push backend has to decline the string, not just fail to store it
+(generator#417).** The rule above — emit the skip for *every* visitor scope — is
+about scopes with no string destination. Its mirror image is a scope that has
+one: generated Python declined a header whose subtype contradicted the
+declaration only on the ids it declared `string`, `blob` or a native array, and
+let every other id through, on the reasoning that a value arriving at a typed
+hook with no arm for it is dropped anyway. For a scalar that is true. For a
+string it is not: on a visitor surface, *a field the visitor accepts is a field
+it reads*, so accepting the header hands the codec a length to reassemble
+against, bytes to copy, and — CORELIB_PLAN §6.4.4 — a UTF-8 verdict to take at
+payload completion. §6.4.5 says validation runs only where a string is
+materialized, "never on skip, in any mode", so the drop came one step too late:
+measured against corelib-py on both engines and both decode surfaces, a fixlen
+STRING payload at an id declared `fp64` (or `struct`) came back INVALID where
+MESSAGE_SPEC §7.3 requires COMPLETE with the field at its default.
+
+The fix keys on what the **wire** announces rather than on what the schema
+declares, which is why it is one guard per scope and not one arm per id: a fixlen
+header whose subtype is `string` or `blob` — the two subtypes whose payload is a
+byte run — is declined unless the id is one that declares one. It is emitted in
+every scope of every module, including a schema with no fixlen field anywhere,
+because the schema is not what decides whether such a header can arrive. Cost is
+one `fld.subtype is not None` identity comparison on the accepted path; the set
+membership behind it is reached only for fixlen headers. The pull-style backends
+(`go`, `dart`) resolve a destination before asking the corelib for bytes and
+never had this shape; the push backends that already carry a #257/#258
+destination guard in front of their string callback (`rust`, `java`, `csharp`,
+`kotlin`) answer correctly for the same reason.
+
+**The check-ON build has to be buildable, and for two targets it was not
+(generator#417).** CORELIB_PLAN §6.4.2 lets a constrained profile default the
+check OFF but still requires the target's CI to build and conformance-test the
+check-ON configuration. The `c` target's emitted `Makefile` (`CORE :=`) and
+`CMakeLists.txt` (`add_executable`), and the `cpp` target's `corelib: c-cpp`
+`Makefile` (`COBJS`), listed `object.c`, `ostream.c` and `istream.c` and omitted
+corelib-c-cpp's `src/utf8.c` — so `-DSOFAB_STRICT_UTF8=1` on a generated project
+failed at **link**, with `undefined reference to 'sofab_utf8_valid'` raised from
+`istream.c` *and* `ostream.c` (it breaks strict encoding too). corelib-c-cpp's own
+`src/CMakeLists.txt` has carried `utf8.c` unconditionally throughout, so the
+omission was the generator's. All three build files now list it unconditionally,
+which is footprint-neutral: with the flag off every function in the translation
+unit compiles away, and the emitted C++ `Makefile` already passes
+`-ffunction-sections -Wl,--gc-sections`.
+
+**Which builds a suite needs follows the corelib's DEFAULT, not the target's type
+(generator#417).** Both `c`/`c-cpp` and `zig` are §6.4.1 byte-container targets,
+both expose the switch, and in both the gate compiles the validator out of the
+binary entirely — `#if SOFAB_STRICT_UTF8` around corelib-c-cpp's call sites in
+`istream.c` and around the whole of its `utf8.c`, a comptime
+`if (comptime !STRICT_UTF8) return true;` inside corelib-zig's `sofab.utf8Valid`.
+What differs is which way each *defaults*. corelib-c-cpp is the footprint profile
+and defaults it OFF, so the `c` suite and the two `c-cpp` legs of `cpp` build a
+binary that cannot assert the declared half at all and need a second,
+strict-built harness for the full table; corelib-zig defaults it ON, so one build
+carries both halves. Neither target's opposite build earns a second harness for
+the *skip* rows on its own: on both, generated code is byte-identical across the
+two configurations — the emitted read calls the validator unconditionally and the
+gate is entirely corelib-side — so a check-OFF harness re-runs the same generated
+decision against a corelib arm the corelib's own suite owns. `c` and the `c-cpp`
+legs still run the skip rows there, because it is the build they already have.
+
 The validator is a real UTF-8 validator (rejects overlong forms incl. `C0 80`,
 surrogates `U+D800`–`U+DFFF`, and code points above `U+10FFFF`; permits embedded
 `U+0000`), and validity is a property of the **complete** payload — a multi-byte
@@ -3891,6 +3952,118 @@ A reimplementation is **conformant** when it reproduces these gates:
    Values are compared as JSON **numbers**, not greps: the same skipped field
    prints `[0,-1.5,3.25]`, `[0.0,-1.5,3.25]` and `[0, -1.5, 3.25]` across the
    eleven backends, and eleven hand-tuned patterns are eleven things to rot.
+
+
+   *Skipped-string UTF-8* (`tests/conformance/lib/check_skipped_string_utf8.py`):
+   CORELIB_PLAN §6.4.5 is one sentence — validation runs only where a `string` is
+   **materialized**, never on a skip, in any mode — and §6.4.4 fixes when it runs
+   when it does: at **payload completion**, so a chunk boundary cannot change the
+   verdict. That draws a line with two sides, and a suite that walks only one of
+   them is worse than no suite at all (generator#417): a backend that validates
+   too eagerly passes the declared half and fails the skipped one, a backend that
+   never validates passes the skipped half and fails the declared one, and neither
+   failure is visible from the other side. So both halves are asserted on the
+   **same bytes**: a declared `somestring` carrying them is `INVALID`, and the
+   same payload at a position the decoder steps over decodes `COMPLETE` with every
+   declared field still at its default.
+
+   The pair was pinned in three suites before this driver (`go`, `dart`, `kotlin`),
+   hand-rolled three different ways with three different undeclared ids, each
+   discarding the decoded object and reading only the exit status, none of them on
+   the chunked surface; `typescript` had the declared half alone, and `c`, `cpp`,
+   `csharp`, `java`, `python`, `rust` and `zig` had neither. All eleven suites call
+   the driver now and the three hand-rolled blocks are gone — leaving three copies
+   of one concern standing beside the driver written to replace them would have
+   been the §12 duplication this section exists to forbid, in a sharper form than
+   before. The `invalid_utf8` shared-vector block
+   does not close it — it is read only by the corelibs' own test suites
+   (`grep -rn invalid_utf8 tests/conformance/` is empty), and it exercises the
+   corelib's validator, not generated code's decision about which fields are read,
+   which is where the #257/#258 destination guard lives.
+
+   Nine rows. Four `INVALID` rows are four *kinds* of invalidity rather than four
+   spellings of one: `ff` (a byte no sequence may contain anywhere), `c3 28` (a
+   legal lead with an illegal continuation), `e2 82` (a sequence that runs out at
+   payload completion — the §6.4.4 row, which a byte-at-a-time validator calls
+   fine) and `c0 af` (an overlong `/`, well-formed byte by byte and still
+   forbidden). Every payload is **complete**, so truncation can never explain a
+   rejection. Four skip rows are four reasons to skip, in increasing sharpness: an
+   **undeclared id**, where a decoder has nothing to validate into; a **`blob`
+   subtype on the id that does declare a string** — not a UTF-8 row and not claimed
+   as one, since no decoder validates a blob payload, but a §7.3 skip at a *live
+   destination*, the place a backend can plausibly materialize first and dispatch
+   second; a **well-formed string field on an id declared as a scalar**, which is a
+   UTF-8 row and the one that found the Python defect above, refused by generated
+   code's decline arm rather than by its string dispatcher; and **that last shape
+   one scope down**, at a scalar id inside a sequence-framed struct. The nested row
+   is not a spelling of the flat one: every backend renders one dispatch arm per
+   scope, and both skip defects this family has had (generator#297, generator#300)
+   were right at the message root and wrong inside a nested scope, so a root-only
+   table cannot see a guard that was emitted in one place and not the other. A
+   ninth row **reads the field back**, without which a backend that skipped
+   everything satisfies all four skip rows.
+
+   Every skip row and the read-back row carry a trailing `someu8 = 42`, a value
+   that is not its declared default. A skip that swallowed the rest of the message
+   or consumed one byte too few still leaves the string at its default and would
+   pass a test asserting only that; it cannot leave `someu8` at 42. None of the
+   three hand-rolled blocks had that control.
+
+   Like its `check_fixlen_array_subtype.py` sibling it **reads** the suite's schema
+   rather than printing one, derives every fixture byte from the `somestring` /
+   `somefp64` / `someu8` declarations (plus `somestruct` / `nestedint` for the
+   nested row), compares decoded fields as JSON **values**
+   so `"somefp64":3.1415926535897931` (C, C++) and
+   `"somefp64": 3.141592653589793` (Python) are one expectation rather than
+   eleven greps that rot apart, and takes the category through `--status-verb` or
+   `--invalid-pattern` — without one of them a wrongly-`INCOMPLETE` verdict passes
+   on exit status alone. The whole table runs on `decode` **and** `streamdecode`,
+   which §6.4.4 makes mandatory rather than tidy.
+
+   Two escape hatches, both narrow. `--no-declared-leg` drops the four `INVALID`
+   rows for a **footprint** build that compiles the validator out (§6.4.2 lets the
+   `c` and `c-cpp` profiles default `SOFAB_STRICT_UTF8` OFF); the skip rows stay,
+   because §6.4.5 holds "in any mode" and a build with no validator is exactly
+   where a decoder could start validating skipped bytes with nothing going red.
+   Such a suite is expected to run the *full* table against a second, strict-built
+   harness as well, which is what `c` and the two `c-cpp` legs of `cpp` do.
+   `--skip-row NAME` quarantines one row for a known, filed backend defect and
+   nothing else; an unknown row name is a hard failure, so a quarantine cannot
+   outlive the row it names.
+
+   The category channel is chosen per **surface**, not per suite. `typescript`
+   is the case that shows why: its `status` verb always runs the one-shot
+   decoder, so passing it on the `streamdecode` row would assert the same
+   decoder's verdict twice and the streaming one's never. That row takes its
+   category from the latch the harness prints on its error path instead
+   (`[status=INVALID]`, generator#461) — the streaming decoder's own remembered
+   verdict. A suite whose `status` verb is surface-agnostic can use it for both.
+
+   Where a harness had no channel on one surface, the harness grew one rather than
+   the row being asserted on an exit status. The emitted `c` harness's
+   `streamdecode` arm printed nothing and returned 1 for every non-OK
+   `sofab_ret_t`, and its `status` verb runs the one-shot `_decode`, so pointing
+   `--status-verb` at the streaming row would have asserted the wrong decoder;
+   that arm now prints `decode error: <CATEGORY>` from the same `sofab_ret_t`
+   mapping `status` prints, exactly as its C++ sibling already did. One suite is
+   still short a channel and says so in place: the two `c-cpp` legs of `cpp` take
+   their four `INVALID` rows on the exit status alone, because the wrapper
+   `Result` those builds use carries no `invalid()`/`incomplete()` predicates —
+   `tests/conformance/c` reaches the same C corelib through the C API, where both
+   surfaces do name the category.
+
+   Where a suite already owns a chunk-size sweep, the skip rows are worth running
+   through it as well. `typescript`'s `stream_check.ts` pinned the *declared* half
+   at six chunk sizes across both decoders (`checkReject("invalid utf-8")`) and
+   had no counterpart for bytes that must be ACCEPTED — `check()` starts from an
+   `Encodable` and encodes it, so it can only build wire this library would itself
+   produce, and no encoder emits a field at an undeclared id. `checkAccept` is
+   that counterpart: raw bytes in, both decoders must accept them, agree, and
+   leave the named fields at the values given. The two skip defects this family
+   has had (generator#297, generator#300) were both invisible on the one-shot path
+   and one appeared only when a header and its payload landed in different feeds,
+   which is more chunk boundaries than a harness verb that always drip-feeds one
+   byte can reach.
 
    *Refusal category* (`tests/conformance/lib/check_refusal_category.py`):
    CORELIB_PLAN §6.3 keeps a **receiver-cap** refusal and a **schema-bound**

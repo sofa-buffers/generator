@@ -410,6 +410,50 @@ OUT=$("$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/fixsubtype_c
 echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
 echo "==> fixlen subtype skip OK"
 
+# The same skip, one rule over: a string a decoder STEPS OVER is never
+# UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417). Validation belongs where
+# a string is MATERIALIZED, and it is taken on the complete payload (S6.4.4), so
+# the two halves have to be asserted on the same bytes: a backend that validates
+# too eagerly passes the declared half and fails the skipped one, a backend that
+# never validates passes the skipped half and fails the declared one, and neither
+# failure is visible from the other side. The driver runs four accept rows, not
+# two: an undeclared id, a BLOB subtype at the id that DOES declare a string, a
+# well-formed STRING at a scalar-declared id, and that last shape again one
+# scope down, inside a sequence-framed struct.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+# fixture from the schema's own somestring/somefp64/someu8 declarations, and every
+# skip row carries a trailing someu8 = 42 so a skip that ate one byte too many or
+# too few cannot pass while the string sits at its default.
+#
+# Nothing is gated here, and one build is enough. Zig's `[]const u8` is a S6.4.1
+# BYTE CONTAINER, so corelib-zig must expose the switch and does -- `-Dstrict_utf8`
+# -- but unlike the c-cpp footprint profile it defaults it ON (src/utf8.zig), and
+# this suite builds the default. So the declared half runs on the harness already
+# built, where the c suite needs a second, strict-built one to reach it at all.
+# The OFF build is not worth a second harness for the skip rows either: the gate
+# is a comptime `if (comptime !STRICT_UTF8) return true;` INSIDE sofab.utf8Valid
+# and generated code calls it unconditionally, so the emitted .zig is identical in
+# both configurations and an OFF harness would re-run the same generated decision
+# against a corelib arm the corelib's own suite owns.
+#
+# That decision is what the skip rows pin: the id switch in `fn string(...)`
+# reaches utf8Valid only on the arm that STORES, and its `else` arms walk the
+# payload without looking at it (generators/zig/visitor.go). Delete that split and
+# the skip rows go red in either build.
+#
+# The category comes from the error text: this harness has no `status` verb, and
+# a bare non-zero exit would also accept a wrongly INCOMPLETE verdict -- which is
+# what a decoder that mis-measures a skipped payload reports the moment it walks
+# off its end. InvalidMessage is the same channel the generator#411 call above
+# uses.
+echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "zig" \
+        --verb "$surface" --invalid-pattern 'InvalidMessage' \
+        -- "$WORK/ex/zig-out/bin/harness"
+done
+
 # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
 # skipped under S7.3 is not an occurrence for this clause: a correctly typed
 # earlier occurrence survives a mis-typed later one." somestringarray (id 18) is

@@ -560,6 +560,55 @@ YAML
     echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: [$label] control must decode to 2.5; got: $OUT"; exit 1; }
     echo "==> [$label] fixlen subtype skip OK"
 
+    # The same skip, one rule over: a string a decoder STEPS OVER is never
+    # UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417). Validation belongs
+    # where a string is MATERIALIZED, and it is taken on the complete payload
+    # (S6.4.4), so the two halves have to be asserted on the same bytes: a backend
+    # that validates too eagerly passes the declared half and fails the skipped
+    # one, a backend that never validates passes the skipped half and fails the
+    # declared one, and neither failure is visible from the other side. The
+    # driver runs four accept rows, not two: an undeclared id, a BLOB subtype at
+    # the id that DOES declare a string, a well-formed STRING at a
+    # scalar-declared id, and that last shape again one scope down, inside a
+    # sequence-framed struct.
+    #
+    # One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+    # fixture from $EXAMPLE's own somestring/somefp64/someu8 declarations -- which
+    # is why the no_std legs hand it their own -- and every skip row carries a
+    # trailing someu8 = 42 so a skip that ate one byte too many or too few cannot
+    # pass while the string sits at its default.
+    #
+    # Nothing is gated here, on ANY of the four labels. Rust `String`/`&str` are a
+    # S6.4.1 Unicode type -- their only non-mutating constructor is the strict one
+    # -- so the check is always on and the option MAY be omitted entirely; the
+    # backend emits an unconditional core::str::from_utf8 in both the owned and
+    # the borrowed arm, and docs/generator/rust.md documents no switch. That holds
+    # for rs-no-std too: it is a footprint profile, but not one of the S6.4.2
+    # profiles that may compile the check out, because there is no separate check
+    # to compile out. Gating the declared half would silently disable it on half
+    # the labels.
+    #
+    # This block sits INSIDE run_variant so it runs on both storage modes:
+    # allow_dynamic picks the destination type, and therefore which of those two
+    # from_utf8 arms is reached. What the skip rows pin is the #257/#258
+    # destination guard in front of them -- the `(_Loc::Root, 11) => {}, _ =>
+    # return,` match that opens the generated `fn string(...)`, before self.acc is
+    # fed and before from_utf8 is called on anything. Delete it and the skip rows
+    # go red on every label.
+    #
+    # The category comes from the error text: cargo run exits 1 for
+    # Sofab(Incomplete) too, so a bare non-zero exit would accept a wrongly
+    # INCOMPLETE verdict -- which is what a decoder that mis-measures a skipped
+    # payload reports the moment it walks off its end. InvalidMsg is the same
+    # channel the generator#411 call above uses.
+    echo "==> [$label] a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "$label" \
+            --schema "$EXAMPLE" --cwd "$WORK/ex-$label" --verb "$surface" \
+            --invalid-pattern 'InvalidMsg' \
+            -- cargo run -q --
+    done
+
     # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
     # skipped under S7.3 is not an occurrence for this clause: a correctly typed
     # earlier occurrence survives a mis-typed later one." somestringarray (id 18) is
