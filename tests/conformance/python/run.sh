@@ -459,11 +459,6 @@ OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/sk
 echo "$OUT" | grep -q '"nestedstring": "x"' || { echo "FAIL: skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
 echo "==> skipped occurrence keeps struct OK"
 
-# Receiver-side decode limits (generator#102): max_dyn_array_count: 4 caps a
-# count-less (schema-unbounded) u64 array. Wire header 0x03 = id 0, unsigned
-# array; a wire count of 5 MUST fail decode with the corelib limit error,
-# exactly 4 still decodes, and the same oversized bytes decode fine against a
-# project generated WITHOUT the limit (unset = unlimited).
 # refused_as <class> <label> <dir> <message> <fixture> -- the CATEGORY, by
 # exception CLASS, for a `decode` that must fail. sofab.types keeps
 # SofaLimitError a SIBLING of SofaDecodeError, so the class name is the caller's
@@ -492,6 +487,11 @@ refused_as() {
     return 0
 }
 
+# Receiver-side decode limits (generator#102): max_dyn_array_count: 4 caps a
+# count-less (schema-unbounded) u64 array. Wire header 0x03 = id 0, unsigned
+# array; a wire count of 5 MUST fail decode with the corelib limit error,
+# exactly 4 still decodes, and the same oversized bytes decode fine against a
+# project generated WITHOUT the limit (unset = unlimited).
 echo "==> receiver-side decode limits must reject over-cap counts (generator#102)"
 cat > "$WORK/limit-def.yaml" <<YAML
 version: 1
