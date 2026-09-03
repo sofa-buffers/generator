@@ -179,6 +179,32 @@ for ENGINE in $ENGINES; do
     echo "==> a decoded message owns its bytes, engine=$ENGINE (CORELIB_PLAN §6.7, generator#412)"
     python3 "$ROOT/tests/conformance/python/ownership_check.py" "$WORK/proj" "$ENGINE" \
         || { echo "FAIL: [$ENGINE] a decoded field aliased the buffer it was decoded from"; exit 1; }
+
+    # fp32 bit-exactness, signaling NaNs included (CORELIB_PLAN §6.5 /
+    # MESSAGE_SPEC §4.6, generator#414). A Python float is a double, and IEEE
+    # widening an fp32 signaling NaN into one SETS the quiet bit while keeping
+    # the payload (§6.5's diagram: 0x7F800001 -> 0x7FC00001), so decode ->
+    # re-encode stops reproducing the 4 wire bytes. TypeScript (#235) and Dart
+    # (#226) -- the other two double-only targets -- each pin this after a real
+    # defect; python had no NaN case at all.
+    #
+    # In the loop for the reason the legs above are: corelib-py's pure and native
+    # engines carry SEPARATE fp32 narrowing/widening code (`_core.py` vs
+    # `_speedups.pyx`), so a single-engine leg proves nothing about the other.
+    #
+    # A driver rather than a shell block over the harness verbs: the round-trip
+    # must be wire -> object -> wire, and this harness has no `recode` verb (only
+    # ts and dart emit one; #468 tracks adding it here and folding the three
+    # one-shot legs onto one lib/ driver). The JSON detour through
+    # `decode | encode` is measurably lossy -- an sNaN comes back as the
+    # canonical payload-less quiet NaN 0x7FC00000 -- so a block built on it would
+    # be vacuous or falsely red. The driver also asserts the MATERIALIZED value,
+    # the second oracle §6.5's testing clause names, and drives the STREAMING
+    # surface, which §6.5 asks for ("on every decode surface") and neither the ts
+    # nor the dart block covers.
+    echo "==> fp32 signaling-NaN bit-exact round-trip, engine=$ENGINE (§6.5, generator#414)"
+    python3 "$ROOT/tests/conformance/python/fp32_nan_check.py" "$WORK/proj" "$ENGINE" \
+        || { echo "FAIL: [$ENGINE] an fp32 payload changed across decode -> re-encode"; exit 1; }
 done
 
 # Everything below runs on ONE engine -- the shared-vector byte-exactness check
