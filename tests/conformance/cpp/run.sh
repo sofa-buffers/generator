@@ -385,6 +385,80 @@ run_variant() {
     echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: [$label] control must decode to 2.5; got: $OUT"; exit 1; }
     echo "==> [$label] fixlen subtype skip OK"
 
+    # The same skip, one rule over: a string a decoder STEPS OVER is never
+    # UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417). Validation belongs
+    # where a string is MATERIALIZED, and it is taken on the complete payload
+    # (S6.4.4), so the two halves have to be asserted on the same bytes: a
+    # backend that validates too eagerly passes the declared half and fails the
+    # skipped one, a backend that never validates passes the skipped half and
+    # fails the declared one, and neither failure is visible from the other side.
+    # The driver runs four accept rows, not two: an undeclared id, a BLOB
+    # subtype at the id that DOES declare a string, a well-formed STRING at a
+    # scalar-declared id, and that last shape again one scope down, inside a
+    # sequence-framed struct.
+    #
+    # One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+    # fixture from $EXAMPLE's own somestring/somefp64/someu8 declarations, and
+    # every skip row carries a trailing someu8 = 42 so a skip that ate one byte
+    # too many or too few cannot pass while the string sits at its default.
+    #
+    # $corelib is the gate, because the two corelibs answer S6.4.2 differently.
+    # Pure corelib-cpp defaults SOFAB_STRICT_UTF8 to 1 (sofab.hpp), so both halves
+    # run on the harness already built. corelib-c-cpp is the footprint profile and
+    # defaults it OFF, so there the DEFAULT build runs the skip rows only -- with
+    # the validator compiled out the declared rows would assert nothing, while
+    # S6.4.5 holds "in any mode" and a build with no validator is exactly where a
+    # decoder could start validating skipped bytes with nothing going red -- and a
+    # second, strict-built harness runs the whole table. That check-ON build is
+    # what S6.4.2 requires a target to be able to build and conformance-test, and
+    # until generator#417 it could not be built at all: the emitted Makefile's
+    # COBJS listed object/ostream/istream and omitted the corelib's src/utf8.c, so
+    # -DSOFAB_STRICT_UTF8=1 failed to LINK from both ostream.c and istream.c.
+    #
+    # Both storage modes matter and this block sits inside run_variant to get
+    # them: allow_dynamic picks std::string vs FixedString<N> for the destination,
+    # which is the arm that validates.
+    #
+    # Category: the pure legs pin INVALID on BOTH surfaces, off the error text the
+    # harness prints -- `decode error: INVALID` -- because pure corelib-cpp's
+    # Result carries the invalid()/incomplete()/limitExceeded() predicates and
+    # both the one-shot and the streaming arm name the category with them. Exit
+    # status alone would also accept a wrongly INCOMPLETE verdict, which is what a
+    # decoder that mis-measures the payload reports the moment it walks off its
+    # end.
+    #
+    # The c-cpp legs have NO category channel, on either surface: the wrapper
+    # Result those builds use carries no predicates, so its arm prints a bare
+    # "decode error" -- the same gap the generator#411 block above records -- and
+    # those four INVALID rows are asserted on the exit status alone. That is
+    # stated rather than hidden. tests/conformance/c reaches the same C corelib
+    # through the C API, where both surfaces do name the category, so the
+    # substance is covered there.
+    echo "==> [$label] a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+    if [ -z "$corelib" ]; then
+        for surface in decode streamdecode; do
+            python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "$label" \
+                --schema "$EXAMPLE" --verb "$surface" \
+                --invalid-pattern 'decode error: INVALID' \
+                -- "$WORK/ex-$label/harness/harness"
+        done
+    else
+        cp -R "$WORK/ex-$label" "$WORK/ex-$label-strict"
+        make -C "$WORK/ex-$label-strict" clean >/dev/null
+        make -C "$WORK/ex-$label-strict" "$@" \
+            CFLAGS="-Os -ffunction-sections -fdata-sections -DSOFAB_STRICT_UTF8=1" \
+            CXXFLAGS="-Os -Wall -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -DSOFAB_STRICT_UTF8=1" \
+            >/dev/null
+        for surface in decode streamdecode; do
+            python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "$label" \
+                --schema "$EXAMPLE" --verb "$surface" --no-declared-leg \
+                -- "$WORK/ex-$label/harness/harness"
+            python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "$label-strict" \
+                --schema "$EXAMPLE" --verb "$surface" \
+                -- "$WORK/ex-$label-strict/harness/harness"
+        done
+    fi
+
     # ...and the same question one level up, on a fixlen ARRAY, where the answer
     # is the other one (CORELIB_PLAN S4.8.1, generator#411). S4.8.1 fixes five
     # steps and the order of the middle three is normative: read the count; read

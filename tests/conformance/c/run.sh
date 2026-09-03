@@ -200,6 +200,62 @@ OUT=$("$WORK/proj/harness/harness" decode < "$WORK/fixsubtype_control.bin") \
 echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
 echo "==> fixlen subtype skip OK"
 
+# The same skip, one rule over: a string a decoder STEPS OVER is never
+# UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417). Validation belongs where
+# a string is MATERIALIZED, and it is taken on the complete payload (S6.4.4), so
+# the two halves have to be asserted on the same bytes: a backend that validates
+# too eagerly passes the declared half and fails the skipped one, a backend that
+# never validates passes the skipped half and fails the declared one, and neither
+# failure is visible from the other side. The driver runs four accept rows, not
+# two: an undeclared id, a BLOB subtype at the id that DOES declare a string, a
+# well-formed STRING at a scalar-declared id, and that last shape again one
+# scope down, inside a sequence-framed struct.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+# fixture from $EXAMPLE's own somestring/somefp64/someu8 declarations, and every
+# skip row carries a trailing someu8 = 42 so a skip that ate one byte too many or
+# too few cannot pass while the string sits at its default.
+#
+# The C target is a footprint profile and corelib-c-cpp defaults SOFAB_STRICT_UTF8
+# OFF (CORELIB_PLAN S6.4.2 allows a constrained profile to; saying so in the
+# README is the corelib's duty, not this repo's). So the legs are split. Against
+# the DEFAULT build only the skip rows run -- with the validator compiled out the
+# declared rows would assert nothing, while S6.4.5 holds "in any mode", and a
+# build with no validator is exactly where a decoder could start validating
+# skipped bytes with nothing going red. A second, strict-built harness then runs
+# the whole table: that is the check-ON configuration S6.4.2 requires a target to
+# be able to build and conformance-test, and until generator#417 it could not be
+# built at all -- the emitted Makefile and CMakeLists listed object/ostream/istream
+# and omitted the corelib's src/utf8.c, so -DSOFAB_STRICT_UTF8=1 failed to LINK.
+#
+# Both surfaces name the category, because exit status alone would also accept a
+# wrongly INCOMPLETE verdict -- which is what a decoder that mis-measures the
+# payload reports the moment it walks off its end. On `decode` the channel is the
+# `status` verb, which runs the same one-shot _decode and prints its
+# sofab_ret_t by name. `status` cannot serve the streaming row: it would assert
+# the one-shot decoder's verdict twice and the chunked decoder's never. So the
+# streaming arm of the emitted harness names the category on its own error path
+# (generator#417) -- `decode error: INVALID` -- from the same mapping the
+# `status` verb prints.
+echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+cp -R "$WORK/proj" "$WORK/proj-strict"
+make -C "$WORK/proj-strict" clean >/dev/null
+make -C "$WORK/proj-strict" SOFAB_C_CORELIB="$CORELIB" \
+    CFLAGS="-Wall -Wextra -DSOFAB_STRICT_UTF8=1" >/dev/null
+for surface in decode streamdecode; do
+    if [ "$surface" = decode ]; then
+        U8_OPT=--status-verb; U8_VAL=status
+    else
+        U8_OPT=--invalid-pattern; U8_VAL='decode error: INVALID'
+    fi
+    python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "c" \
+        --schema "$EXAMPLE" --message '' --verb "$surface" --no-declared-leg \
+        -- "$WORK/proj/harness/harness"
+    python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "c-strict" \
+        --schema "$EXAMPLE" --message '' --verb "$surface" "$U8_OPT" "$U8_VAL" \
+        -- "$WORK/proj-strict/harness/harness"
+done
+
 # ...and the same question one level up, on a fixlen ARRAY, where the answer is
 # the other one (CORELIB_PLAN S4.8.1, generator#411). S4.8.1 fixes five steps and
 # the order of the middle three is normative: read the count; read the

@@ -623,26 +623,39 @@ echo "$OUT" | tr -d ' ' | grep -q '"someuintarray":\[1,4294967295\]' \
     || { echo "FAIL: control must keep the array exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK (scalar and array element)"
 
-# Invalid UTF-8 in a materialized string is INVALID (MESSAGE_SPEC S8): a Kotlin
-# String is a Unicode type, so the strict path is the only non-mutating one and
-# U+FFFD substitution is forbidden in every mode. somestring is id 11 ->
-# header 0x5a; the fixlen word 0x12 is (2 << 3) | STRING.
-#   5a 12 c3 28  -- an invalid two-byte sequence: INVALID
-#   5a 12 c3 a9  -- the same length, valid ("e-acute"): must decode
-# ...and a payload at an id this message does NOT declare must still be SKIPPED
-# rather than validated (CORELIB_PLAN S6.4, generator#257): id 40 is undeclared,
-# so its header is (40 << 3) | fixlen(2) = 322 -> the varint c2 02.
-echo "==> invalid UTF-8 in a materialized string must be INVALID (S8)"
-printf '\132\022\303\050' > "$WORK/badutf8.bin"
-printf '\132\022\303\251' > "$WORK/goodutf8.bin"
-printf '\302\002\022\303\050' > "$WORK/badutf8_skipped.bin"
-if $H decode myfirstmessage < "$WORK/badutf8.bin" >/dev/null 2>&1; then
-    echo "FAIL: invalid UTF-8 in a declared string must be INVALID, never replaced"; exit 1
-fi
-$H decode myfirstmessage < "$WORK/goodutf8.bin" >/dev/null || { echo "FAIL: valid UTF-8 control must decode"; exit 1; }
-$H decode myfirstmessage < "$WORK/badutf8_skipped.bin" >/dev/null \
-    || { echo "FAIL: an invalid-UTF-8 string at an UNDECLARED id must be skipped, not validated"; exit 1; }
-echo "==> UTF-8 strictness OK (declared rejects, skipped is not validated)"
+# Invalid UTF-8 in a MATERIALIZED string is INVALID (MESSAGE_SPEC S8): a Kotlin
+# String is a S6.4.1 Unicode type, so the strict path is the only non-mutating
+# one and U+FFFD substitution is forbidden in every mode. A string a decoder
+# STEPS OVER is the other side of that same line and must decode COMPLETE
+# (CORELIB_PLAN S6.4.5, generator#417 / generator#257): validation belongs where
+# a string is materialized, and it is taken on the complete payload (S6.4.4). The
+# two halves have to be asserted on the same bytes -- a backend that validates too
+# eagerly passes the declared half and fails the skipped one, a backend that never
+# validates passes the skipped half and fails the declared one, and neither
+# failure is visible from the other side. The driver runs four accept rows, not
+# two: an undeclared id, a BLOB subtype at the id that DOES declare a string, a
+# well-formed STRING at a scalar-declared id, and that last shape again one scope
+# down, inside a sequence-framed struct.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+# fixture from the schema's own somestring/somefp64/someu8 declarations, and every
+# skip row carries a trailing someu8 = 42 so a skip that ate one byte too many or
+# too few cannot pass while the string sits at its default. This suite hand-rolled
+# the pair before the driver existed -- one undeclared id (40), one declared id,
+# the decoded object piped to /dev/null and only the exit status read, on the
+# one-shot surface only -- so nothing checked that the skipped decode left the
+# declared field at its default, and nothing ran on the chunked decoder at all.
+#
+# The category rides the error text on both surfaces, as the generator#411 block
+# above does: corelib-kotlin-mp names its refusal INVALID_MSG, which a bare
+# non-zero exit would not separate from the INCOMPLETE a decoder that mis-measures
+# the skipped payload reports the moment it walks off its end.
+echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "kotlin" \
+        --verb "$surface" --invalid-pattern 'INVALID_MSG' \
+        -- "$H"
+done
 
 # The claim this target is built around: the generated MESSAGE sources are plain
 # `commonMain` Kotlin -- the standard library and `sofab`, nothing else -- so one

@@ -210,23 +210,53 @@ for surface in decode streamdecode; do
         -- "$H"
 done
 
-# A SKIPPED string is never UTF-8-validated (CORELIB_PLAN S6.4, generator#257 /
-# Crucible F-0038). The corelib hands the visitor RAW wire bytes
-# (onStringBytes) instead of a finished String, so the generated destination arm
-# resolves the field first and only then validates and transcodes.
+# The same skip, one rule over: a string a decoder STEPS OVER is never
+# UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417 / Crucible F-0038).
+# Validation belongs where a string is MATERIALIZED, and it is taken on the
+# complete payload (S6.4.4), so the two halves have to be asserted on the same
+# bytes: a backend that validates too eagerly passes the declared half and fails
+# the skipped one, a backend that never validates passes the skipped half and
+# fails the declared one, and neither failure is visible from the other side.
+# The driver runs four accept rows, not two: an undeclared id, a BLOB subtype at
+# the id that DOES declare a string, a well-formed STRING at a scalar-declared
+# id, and that last shape again one scope down, inside a sequence-framed struct.
 #
-#   id 99 is undeclared: 9a 06 (99<<3|2, fixlen) 0a (fixlen word: len 1, subtype
-#   string) 8a (a lone continuation byte). Skipped, so never inspected.
+# One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+# fixture from the schema's own somestring/somefp64/someu8 declarations, and every
+# skip row carries a trailing someu8 = 42 so a skip that ate one byte too many or
+# too few cannot pass while the string sits at its default. This suite hand-rolled
+# the pair before the driver existed -- one undeclared id, one declared id, the
+# decoded object piped to /dev/null and only the exit status read, on the one-shot
+# surface only -- so nothing checked that the skipped decode left the declared
+# field at its default, and nothing ran on the chunked decoder at all.
 #
-#   somestring is declared at id 11: 5a 0a 8a. Same byte, materialized -> INVALID.
-echo "==> a skipped string is not UTF-8-validated (generator#257)"
+# Nothing is gated: a Dart String is a S6.4.1 Unicode type. The corelib hands the
+# visitor RAW wire bytes (onStringBytes) instead of a finished String, so the
+# generated destination arm resolves the field first and only then validates and
+# transcodes -- which puts the read-vs-skip decision this driver pins squarely in
+# GENERATED code.
+#
+# The category rides the harness's own status line on both surfaces: `decode` and
+# `streamdecode` both print `decode failed: <DecodeStatus.name>`, so `invalid`
+# separates cleanly from the `incomplete` a decoder that mis-measures the skipped
+# payload reports the moment it walks off its end. A bare non-zero exit would
+# accept either.
+echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "dart" \
+        --verb "$surface" --invalid-pattern 'decode failed: invalid' \
+        -- "$H"
+done
+# The same two shapes as .bin files, for the chunk-invariance sweep near the end
+# of this suite. The driver above feeds one byte at a time and nothing else;
+# check_chunk_invariance.py sweeps several widths plus the degenerate one-shot
+# split, which is where a validator that decides per chunk rather than at payload
+# completion (S6.4.4) actually shows itself.
+#   9a 06 (id 99, undeclared, fixlen) 0a (len 1, subtype string) 8a (a lone
+#   continuation byte) -- skipped, so never inspected.
+#   5a (id 11, somestring) 0a 8a -- the same byte, materialized.
 printf '\232\006\012\212' > "$WORK/skipped_bad_utf8.bin"
 printf '\132\012\212'      > "$WORK/declared_bad_utf8.bin"
-"$H" decode myfirstmessage < "$WORK/skipped_bad_utf8.bin" >/dev/null || { echo "FAIL: invalid UTF-8 at a SKIPPED id must not fail the decode"; exit 1; }
-if "$H" decode myfirstmessage < "$WORK/declared_bad_utf8.bin" >/dev/null 2>&1; then
-    echo "FAIL: invalid UTF-8 in a DECLARED string must be INVALID"; exit 1
-fi
-echo "==> skipped-string UTF-8 OK"
 
 # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
 # MESSAGE_SPEC S5.2). someuintarray declares count 4; a header announcing 6 elements

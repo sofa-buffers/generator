@@ -337,6 +337,42 @@ OUT=$($H decode myfirstmessage < "$WORK/fixsubtype_control.bin") \
 echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
 echo "==> fixlen subtype skip OK"
 
+# The same skip, one rule over: a string a decoder STEPS OVER is never
+# UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417). Validation belongs where
+# a string is MATERIALIZED, and it is taken on the complete payload (S6.4.4), so
+# the two halves have to be asserted on the same bytes: a backend that validates
+# too eagerly passes the declared half and fails the skipped one, a backend that
+# never validates passes the skipped half and fails the declared one, and neither
+# failure is visible from the other side. The driver runs four accept rows, not
+# two: an undeclared id, a BLOB subtype at the id that DOES declare a string, a
+# well-formed STRING at a scalar-declared id, and that last shape again one
+# scope down, inside a sequence-framed struct.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+# fixture from the schema's own somestring/somefp64/someu8 declarations, and every
+# skip row carries a trailing someu8 = 42 so a skip that ate one byte too many or
+# too few cannot pass while the string sits at its default.
+#
+# Nothing is gated here: C# `string` is a S6.4.1 Unicode target, always strict,
+# and the option MAY be omitted entirely -- there is no switch to turn the check
+# off and gating the declared half would only hide a regression. What this pins on
+# the generated side is the #257/#258 destination guard: Message.String(...) opens
+# with a `switch ((cur, id))` whose `default: return;` fires BEFORE the payload
+# accumulator is touched, and corelib-cs validates inside PayloadAcc.String ->
+# Utf8.Decode. Delete that guard and the skip rows go red.
+#
+# The category comes from the error text, not from `trydecode`: TryDecode lets a
+# SofabException escape for every InvalidMessage instead of returning
+# DecodeStatus.Invalid (measured on invalid UTF-8 and on an over-count array; it
+# does return INCOMPLETE correctly), so it cannot serve as the category channel.
+# `--invalid-pattern` is the same channel the generator#411 driver call above uses.
+echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "csharp" \
+        --verb "$surface" --invalid-pattern 'InvalidMessage' \
+        -- $H
+done
+
 # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
 # skipped under S7.3 is not an occurrence for this clause: a correctly typed
 # earlier occurrence survives a mis-typed later one." somestringarray (id 18) is

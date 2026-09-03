@@ -135,27 +135,52 @@ for surface in decode streamdecode; do
         -- env GOFLAGS=-mod=mod go run ./harness
 done
 
-# A SKIPPED string is never UTF-8-validated (CORELIB_PLAN S6.4, generator#257 /
-# Crucible F-0038). Validation belongs where a `string` is MATERIALIZED -- read
-# into a declared destination -- never on a payload the decoder jumps over. The
-# corelib's visitor path deliberately does not validate (its cursor cannot tell a
-# bound field from a skipped one), so the generated destination arms do, via
-# sofab.UTF8Valid.
+# The same skip, one rule over: a string a decoder STEPS OVER is never
+# UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417 / Crucible F-0038).
+# Validation belongs where a string is MATERIALIZED, and it is taken on the
+# complete payload (S6.4.4), so the two halves have to be asserted on the same
+# bytes: a backend that validates too eagerly passes the declared half and fails
+# the skipped one, a backend that never validates passes the skipped half and
+# fails the declared one, and neither failure is visible from the other side.
+# The driver runs four accept rows, not two: an undeclared id, a BLOB subtype at
+# the id that DOES declare a string, a well-formed STRING at a scalar-declared
+# id, and that last shape again one scope down, inside a sequence-framed struct.
 #
-#   id 99 is undeclared: 9a 06 (99<<3|2, fixlen) 0a (fixlen word: len 1, subtype
-#   string) 8a (a lone continuation byte, invalid UTF-8). The field is skipped,
-#   so the byte is never inspected and the message decodes to all-defaults.
+# One shared driver for all eleven suites (ARCHITECTURE S12); it derives every
+# fixture from the schema's own somestring/somefp64/someu8 declarations, and every
+# skip row carries a trailing someu8 = 42 so a skip that ate one byte too many or
+# too few cannot pass while the string sits at its default. This suite hand-rolled
+# the pair before the driver existed -- one undeclared id, one declared id, the
+# decoded object piped to /dev/null and only the exit status read, on the one-shot
+# surface only -- so nothing checked that the skipped decode left the declared
+# field at its default, and nothing ran on the chunked decoder at all.
 #
-#   somestring is declared at id 11: 5a (11<<3|2) 0a 8a. Same byte, now
-#   materialized -- INVALID.
-echo "==> a skipped string is not UTF-8-validated (generator#257)"
+# Nothing is gated: a Go `string` is a S6.4.1 Unicode type. The corelib's visitor
+# path deliberately does not validate (its cursor cannot tell a bound field from a
+# skipped one), so the generated destination arms do, via sofab.UTF8Valid -- which
+# puts the read-vs-skip decision this driver pins squarely in GENERATED code.
+#
+# The category rides the error text on both surfaces: this harness routes every
+# refusal through fail(err), and corelib-go's InvalidMessage carries "invalid
+# message" where its truncation error does not. A bare non-zero exit would also
+# accept a wrongly INCOMPLETE verdict, which is what a decoder that mis-measures
+# the skipped payload reports the moment it walks off its end.
+echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "Go" \
+        --cwd "$WORK/proj" --verb "$surface" --invalid-pattern 'invalid message' \
+        -- env GOFLAGS=-mod=mod go run ./harness
+done
+# The same two shapes as .bin files, for the fixture table near the end of this
+# suite: it replays every malformed fixture built here through both surfaces and
+# asserts they never disagree, and a skipped-vs-declared string is one of the
+# pairs worth having in that set. The driver above owns the assertions; these two
+# exist so the table's own claim covers these bytes too.
+#   9a 06 (id 99, undeclared, fixlen) 0a (len 1, subtype string) 8a (a lone
+#   continuation byte) -- skipped, so never inspected.
+#   5a (id 11, somestring) 0a 8a -- the same byte, materialized.
 printf '\232\006\012\212' > "$WORK/skipped_bad_utf8.bin"
 printf '\132\012\212'      > "$WORK/declared_bad_utf8.bin"
-(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/skipped_bad_utf8.bin" >/dev/null) || { echo "FAIL: invalid UTF-8 at a SKIPPED id must not fail the decode"; exit 1; }
-if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/declared_bad_utf8.bin" >/dev/null 2>&1); then
-    echo "FAIL: invalid UTF-8 in a DECLARED string must be INVALID"; exit 1
-fi
-echo "==> skipped-string UTF-8 OK"
 
 # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
 # MESSAGE_SPEC S5.2). someuintarray declares count 4; a header announcing 6 elements
