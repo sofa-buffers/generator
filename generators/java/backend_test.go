@@ -1759,3 +1759,46 @@ messages:
 		}
 	}
 }
+
+// TestJavaDecoderRemembersFeedStatus pins the "one fact, one channel" adoption
+// (issue #461): the corelib's IStream publishes its outcome exactly once, as
+// feed's return value, and status() is gone. The generated Decoder keeps its own
+// public status() — so no user of generated code breaks — by REMEMBERING what
+// the last feed returned, and by latching a refusal that never comes back as a
+// status at all.
+func TestJavaDecoderRemembersFeedStatus(t *testing.T) {
+	m := exampleFile(t)
+	for _, want := range []string{
+		// The one-shot needs no memory: feed's return IS the answer.
+		"        return is.feed(data, new MyfirstmessageVisitor(out));",
+		// COMPLETE, not INCOMPLETE: an all-default message is zero bytes, so a
+		// Decoder that is never fed must still finish().
+		"        private DecodeStatus st = DecodeStatus.COMPLETE;",
+		// One place records, so the two overloads cannot drift.
+		"            return feed(chunk, 0, chunk.length);",
+		"                return st = is.feed(chunk, off, len, v);",
+		"            } catch (SofabException e) {",
+		"                st = DecodeStatus.INVALID;",
+		// A Visitor cannot throw the checked exception, so every generated
+		// schema-bound guard and every receiver-limit refusal arrives wrapped
+		// instead. Catching only SofabException would latch none of them.
+		"            } catch (java.io.UncheckedIOException e) {",
+		"                if (e.getCause() instanceof SofabException cause",
+		"                        && cause.error() == SofabError.INVALID_MSG) {",
+		"                    st = DecodeStatus.INVALID;",
+		"                    st = DecodeStatus.INCOMPLETE;",
+		// The public surface is unchanged; only its backing moved.
+		"        public DecodeStatus status() { return st; }",
+		"            if (st != DecodeStatus.COMPLETE) {",
+		"                    \"Myfirstmessage: stream ended mid-field (\" + st + \")\");",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Myfirstmessage.java missing %q (generator#461):\n%s", want, m)
+		}
+	}
+	// The accessor is gone from the corelib; asking the stream a second time
+	// must not come back in any form.
+	if strings.Contains(m, "is.status()") {
+		t.Errorf("Myfirstmessage.java still calls the removed IStream.status() (generator#461):\n%s", m)
+	}
+}

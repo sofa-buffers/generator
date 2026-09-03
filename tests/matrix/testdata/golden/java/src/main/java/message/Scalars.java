@@ -75,8 +75,7 @@ public class Scalars {
     public static DecodeStatus tryDecode(byte[] data, Scalars out) throws SofabException {
         out.reset();
         IStream is = new IStream();
-        is.feed(data, new ScalarsVisitor(out));
-        return is.status();
+        return is.feed(data, new ScalarsVisitor(out));
     }
     /**
      * An incremental decoder for this message: hold it and feed chunks as
@@ -102,6 +101,13 @@ public class Scalars {
         private final Scalars m = new Scalars();
         private final IStream is = new IStream();
         private final ScalarsVisitor v = new ScalarsVisitor(m);
+        // What the last feed answered. The stream publishes its outcome once,
+        // as feed's return value, and offers no accessor to ask a second time,
+        // so the caller is the one that remembers -- and this decoder is the
+        // caller. COMPLETE before the first feed: an all-default message is
+        // zero bytes, so a stream that has been fed nothing ended on a field
+        // boundary.
+        private DecodeStatus st = DecodeStatus.COMPLETE;
 
         /**
          * Feed the next chunk, of any size. Returns {@code COMPLETE} if it
@@ -111,18 +117,40 @@ public class Scalars {
          * @throws SofabException the bytes are malformed (INVALID); terminal.
          */
         public DecodeStatus feed(byte[] chunk) throws SofabException {
-            is.feed(chunk, v);
-            return is.status();
+            return feed(chunk, 0, chunk.length);
         }
 
         /** As {@link #feed(byte[])}, over a slice of {@code chunk}. */
         public DecodeStatus feed(byte[] chunk, int off, int len) throws SofabException {
-            is.feed(chunk, off, len, v);
-            return is.status();
+            try {
+                return st = is.feed(chunk, off, len, v);
+            } catch (SofabException e) {
+                // A refusal is terminal and never comes back as a status, so
+                // record what it means for the stream before rethrowing.
+                st = DecodeStatus.INVALID;
+                throw e;
+            } catch (java.io.UncheckedIOException e) {
+                // A Visitor cannot declare a checked exception, so a bound
+                // this schema rejects, and a receiver limit this side
+                // refuses, both arrive wrapped instead. Only malformed bytes
+                // make the message INVALID; a limit is this side's policy, so
+                // it leaves the message unfinished rather than wrong.
+                if (e.getCause() instanceof SofabException cause
+                        && cause.error() == SofabError.INVALID_MSG) {
+                    st = DecodeStatus.INVALID;
+                } else {
+                    st = DecodeStatus.INCOMPLETE;
+                }
+                throw e;
+            }
         }
 
-        /** The outcome for everything fed so far, without feeding more. */
-        public DecodeStatus status() { return is.status(); }
+        /**
+         * The outcome for everything fed so far: what the last {@link
+         * #feed(byte[])} returned, remembered here. The stream itself answers
+         * only through that return value.
+         */
+        public DecodeStatus status() { return st; }
 
         /** The destination, holding whatever has been decoded so far. */
         public Scalars message() { return m; }
@@ -140,9 +168,9 @@ public class Scalars {
          * @throws IllegalStateException the message ended inside a field or an open sequence.
          */
         public Scalars finish() {
-            if (is.status() != DecodeStatus.COMPLETE) {
+            if (st != DecodeStatus.COMPLETE) {
                 throw new IllegalStateException(
-                    "Scalars: stream ended mid-field (" + is.status() + ")");
+                    "Scalars: stream ended mid-field (" + st + ")");
             }
             return m;
         }

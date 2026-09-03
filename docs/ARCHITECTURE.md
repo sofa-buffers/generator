@@ -1023,10 +1023,10 @@ one-shot decode must not hide it. For corelibs that surface INCOMPLETE as an
 error/exception (Go, Rust, C++, C, Python, TS) the fallible decode entry
 point (`try_decode`, Go's `(msg, error)`, thrown exceptions) already propagates
 all three. The **status-returning** corelibs (C#, Java, Kotlin, Zig, Dart) treat
-INCOMPLETE as a non-error status (C#/Java/Kotlin: `DecodeStatus` from
-`Feed`/`status()`/`status`; Zig: `Status` from `feed(chunk)`; Dart: `DecodeStatus`
-from `Decoder.decode`/`feed`) and leave the end-of-input verdict to the caller, so
-their backends must surface it explicitly:
+INCOMPLETE as a non-error status (C#/Java: `DecodeStatus` from `Feed`/`feed`;
+Kotlin: `DecodeStatus` from its `status` property; Zig: `Status` from
+`feed(chunk)`; Dart: `DecodeStatus` from `Decoder.decode`/`feed`) and leave the
+end-of-input verdict to the caller, so their backends must surface it explicitly:
 
 - C#/Java emit an additional status-surfacing entry point next to the
   back-compat best-effort `Decode`/`decode`: C# `static DecodeStatus
@@ -1067,6 +1067,53 @@ their backends must surface it explicitly:
   verdict §7 says generated code must not hide. `Decoder.finish()` draws the same
   line for the streaming path. The conformance harness pins all three channels —
   the two `trydecode` statuses, and a truncated `decode` that must not succeed.
+
+#### The stream answers once: `feed` is the only channel (generator#461)
+
+A corelib's incremental decoder used to publish its outcome twice — as `feed`'s
+return value *and* through a status accessor on the stream (`IStream.Status` /
+`status()` / `.status`). The two could not disagree, but the accessor was a
+second decode surface for one fact, and CORELIB_PLAN §5.2.4 allows only one: the
+outcome belongs to the call that produced it. Six corelibs removed the accessor
+in one sweep (2026-09-02), leaving `feed` as the sole answer; a refusal, which is
+terminal and therefore not a status at all, still travels the error channel with
+its own code.
+
+**The generated wrapper is the caller, and a caller may remember.** The removal is
+a corelib-side break, but it must not become a break for users of generated code,
+so the accessor-shaped backends keep their public surface exactly as it was and
+back it with a private field holding what the last `feed` returned:
+
+- **C#** `Msg.Decoder` keeps `public DecodeStatus Status`, now reading `_st`.
+  Both `Feed` overloads funnel through the `(chunk, off, len)` one so a single
+  statement records; `Finish()` tests `_st`.
+- **Java** `Msg.Decoder` keeps `public DecodeStatus status()`, now reading `st`,
+  with the same funnel and the same `finish()`. The static `tryDecode` needs no
+  memory at all — `feed`'s return *is* what it returns.
+
+Two details are load-bearing and neither is caught by simply compiling:
+
+1. **The initial value is COMPLETE, not INCOMPLETE.** An all-default message
+   encodes to zero bytes, so a `Decoder` can legitimately be finished without
+   ever being fed; a stream fed nothing ended on a field boundary. Both corelibs'
+   removed accessors returned COMPLETE for a fresh stream, so this preserves the
+   observable behaviour exactly.
+2. **A refusal must be latched, in every carrier it can arrive in.** It never
+   comes back as a status, so without a latch a caller that catches the rejection
+   and then asks would be told the stream is Complete. C# raises one exception
+   type and distinguishes by `SofabError` — `InvalidMessage` → Invalid, a
+   receiver cap → Incomplete, since §6.3 forbids reporting a policy stop as the
+   wire verdict. Java needs *two* catches: a `Visitor` cannot declare a checked
+   exception, so every generated schema-bound guard (§7.1) and every receiver-cap
+   refusal (§6.2.1) arrives as an `UncheckedIOException` wrapping a
+   `SofabException`, and a `catch (SofabException)` alone latches none of them.
+
+The remembered value had no conformance coverage — every suite reads it only
+indirectly, through `Finish()`/`finish()` — so the project harnesses' `streamdecode`
+mode now asserts `Status == fed` after each chunk. That puts the memory under the
+shared-vector skip matrix at one byte per feed and under the chunk-invariance
+sweep at every split width, where a stale or mis-wired accessor fails loudly
+instead of passing silently.
 
 #### Decode verdict: over-count scalar arrays are INVALID (all families)
 
@@ -2978,7 +3025,7 @@ no unit test able to see it. That is what the rows are for.
 
 #### 9.5.3 Java: which caps ride a corelib call, and which do not
 
-corelib-java 0.12.0 takes §6.2.1's option — "A corelib MAY take a limit as an
+corelib-java 0.13.0 takes §6.2.1's option — "A corelib MAY take a limit as an
 argument and perform the check itself" — on the calls this backend was already
 making at the point each limit guards, and the guards in front of them are
 deleted with it. **One implementation, wherever it runs** is what makes the

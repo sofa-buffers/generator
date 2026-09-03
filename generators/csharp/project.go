@@ -109,7 +109,17 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                    var csz = args.Length > 2 ? int.Parse(args[2]) : 1;")
 		f.line("                    var step = csz > 0 ? csz : Math.Max(input.Length, 1);")
 		f.line("                    for (var off = 0; off < input.Length; off += step) {")
-		f.line("                        dec.Feed(input, off, Math.Min(step, input.Length - off));")
+		f.line("                        var fed = dec.Feed(input, off, Math.Min(step, input.Length - off));")
+		// The stream publishes its outcome once, as Feed's return value, and
+		// has no accessor to ask again -- so Decoder.Status is the wrapper
+		// remembering it. Nothing else in the suite reads that memory, and a
+		// stale one would still let every vector pass, so check it here: it has
+		// to agree with the Feed that produced it, on every chunk of every
+		// vector at every split width (generator#461).
+		f.line("                        if (dec.Status != fed) {")
+		f.line("                            throw new InvalidOperationException(")
+		f.line("                                $\"Status {dec.Status} disagrees with the Feed that set it ({fed})\");")
+		f.line("                        }")
 		f.line("                    }")
 		f.line("                    obj = dec.Finish();")
 		f.line("                } catch (Exception e) {")

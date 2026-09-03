@@ -199,7 +199,18 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		f.line("                    int csz = args.length > 2 ? Integer.parseInt(args[2]) : 1;")
 		f.line("                    int step = csz > 0 ? csz : Math.max(input.length, 1);")
 		f.line("                    for (int off = 0; off < input.length; off += step) {")
-		f.line("                        dec.feed(input, off, Math.min(step, input.length - off));")
+		f.line("                        org.sofabuffers.sofab.DecodeStatus fed =")
+		f.line("                            dec.feed(input, off, Math.min(step, input.length - off));")
+		// The stream publishes its outcome once, as feed's return value, and has
+		// no accessor to ask again -- so Decoder.status() is the wrapper
+		// remembering it. Nothing else in the suite reads that memory, and a
+		// stale one would still let every vector pass, so check it here: it has
+		// to agree with the feed that produced it, on every chunk of every
+		// vector at every split width (generator#461).
+		f.line("                        if (dec.status() != fed) {")
+		f.line("                            throw new IllegalStateException(")
+		f.line("                                \"status \" + dec.status() + \" disagrees with the feed that set it (\" + fed + \")\");")
+		f.line("                        }")
 		f.line("                    }")
 		f.line("                    obj = dec.finish();")
 		f.line("                } catch (Exception e) {")

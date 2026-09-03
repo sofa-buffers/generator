@@ -88,6 +88,13 @@ public sealed class Scalars {
         private readonly Scalars _m = new Scalars();
         private readonly IStream _is = new IStream();
         private readonly ScalarsVisitor _v;
+        // What the last Feed answered. The stream publishes its outcome once,
+        // as Feed's return value, and offers no accessor to ask a second time,
+        // so the caller is the one that remembers -- and this decoder is the
+        // caller. Complete before the first Feed: an all-default message is
+        // zero bytes, so a stream that has been fed nothing ended on a field
+        // boundary.
+        private DecodeStatus _st = DecodeStatus.Complete;
 
         public Decoder() { _v = new ScalarsVisitor(_m); }
 
@@ -96,13 +103,30 @@ public sealed class Scalars {
         /// ended on a field boundary, <c>Incomplete</c> if it ended mid-field
         /// -- neither answers whether the MESSAGE is done.
         /// </summary>
-        public DecodeStatus Feed(byte[] chunk) => _is.Feed(chunk, 0, chunk.Length, _v);
+        public DecodeStatus Feed(byte[] chunk) => Feed(chunk, 0, chunk.Length);
 
         /// <summary>As <c>Feed</c>, over a slice of <paramref name="chunk"/>.</summary>
-        public DecodeStatus Feed(byte[] chunk, int off, int len) => _is.Feed(chunk, off, len, _v);
+        public DecodeStatus Feed(byte[] chunk, int off, int len) {
+            try {
+                return _st = _is.Feed(chunk, off, len, _v);
+            } catch (SofabException e) {
+                // A refusal is terminal and never comes back as a status, so
+                // record what it means for the stream before rethrowing.
+                // Malformed bytes make the message Invalid; a receiver limit
+                // is this side's policy, so it leaves the message unfinished
+                // rather than wrong.
+                _st = e.Error == SofabError.InvalidMessage
+                    ? DecodeStatus.Invalid : DecodeStatus.Incomplete;
+                throw;
+            }
+        }
 
-        /// <summary>The outcome for everything fed so far.</summary>
-        public DecodeStatus Status => _is.Status;
+        /// <summary>
+        /// The outcome for everything fed so far: what the last <c>Feed</c>
+        /// returned, remembered here. The stream itself answers only through
+        /// that return value.
+        /// </summary>
+        public DecodeStatus Status => _st;
 
         /// <summary>The destination, holding whatever has been decoded so far.</summary>
         public Scalars Message => _m;
@@ -120,9 +144,9 @@ public sealed class Scalars {
         /// declared end-of-input at a point they did not agree with.
         /// </remarks>
         public Scalars Finish() {
-            if (_is.Status != DecodeStatus.Complete) {
+            if (_st != DecodeStatus.Complete) {
                 throw new InvalidOperationException(
-                    $"Scalars: stream ended mid-field ({_is.Status})");
+                    $"Scalars: stream ended mid-field ({_st})");
             }
             return _m;
         }
