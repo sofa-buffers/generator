@@ -157,12 +157,16 @@ CXXFLAGS ?= -Os -Wall -ffunction-sections -fdata-sections -fno-exceptions -fno-r
 LDFLAGS  ?= -Wl,--gc-sections
 INCLUDES := -I. -I$(SOFAB_C_DIR)/src/include -I$(SOFAB_C_DIR)/test/shared
 
-COBJS = object.o ostream.o istream.o sofab_test_json.o
+# utf8.o holds the strict-UTF-8 validator. It is listed unconditionally: the
+# check is off by default and every function in that file then compiles away,
+# while a build that turns it on (-DSOFAB_STRICT_UTF8=1) needs it to link --
+# both the encoder and the decoder call into it.
+COBJS = object.o ostream.o istream.o utf8.o sofab_test_json.o
 
 .PHONY: all
 all: harness/harness
 
-object.o ostream.o istream.o: %.o: $(SOFAB_C_DIR)/src/%.c
+object.o ostream.o istream.o utf8.o: %.o: $(SOFAB_C_DIR)/src/%.c
 	$(CC) $(CSTD) $(CFLAGS) -I$(SOFAB_C_DIR)/src/include -c $< -o $@
 sofab_test_json.o: $(SOFAB_C_DIR)/test/shared/sofab_test_json.c
 	$(CC) $(CSTD) $(CFLAGS) -I$(SOFAB_C_DIR)/src/include -I$(SOFAB_C_DIR)/test/shared -c $< -o $@

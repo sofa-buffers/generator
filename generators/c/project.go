@@ -32,7 +32,11 @@ CC ?= cc
 CSTD ?= -std=c99
 CFLAGS ?= -Wall -Wextra
 INCLUDES := -Igenerated -I$(SOFAB_C_CORELIB)/src/include -I$(SOFAB_C_CORELIB)/test/shared
-CORE := $(SOFAB_C_CORELIB)/src/object.c $(SOFAB_C_CORELIB)/src/ostream.c $(SOFAB_C_CORELIB)/src/istream.c
+# utf8.c holds the strict-UTF-8 validator. It is listed unconditionally: the
+# check is off by default and every function in that file then compiles away,
+# while a build that turns it on (-DSOFAB_STRICT_UTF8=1) needs it to link --
+# both the encoder and the decoder call into it.
+CORE := $(SOFAB_C_CORELIB)/src/object.c $(SOFAB_C_CORELIB)/src/ostream.c $(SOFAB_C_CORELIB)/src/istream.c $(SOFAB_C_CORELIB)/src/utf8.c
 JSON := $(SOFAB_C_CORELIB)/test/shared/sofab_test_json.c
 GEN  := $(wildcard generated/*.c)
 
@@ -64,6 +68,7 @@ add_executable(harness
   ${SOFAB_C_CORELIB}/src/object.c
   ${SOFAB_C_CORELIB}/src/ostream.c
   ${SOFAB_C_CORELIB}/src/istream.c
+  ${SOFAB_C_CORELIB}/src/utf8.c
   ${SOFAB_C_CORELIB}/test/shared/sofab_test_json.c)
 target_include_directories(harness PRIVATE
   generated ${SOFAB_C_CORELIB}/src/include ${SOFAB_C_CORELIB}/test/shared)
@@ -460,6 +465,22 @@ func (g *gen) emitBenchMain(h *cfile, s *ir.Schema) {
 func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 	g.emitBench(h, s)
 	g.emitBenchMain(h, s)
+	// The §7 decode outcome as a NAME. Two verbs need it, for the same reason:
+	// an exit status says only that something was refused, and the categories a
+	// conformance driver has to tell apart are INVALID (malformed bytes,
+	// terminal) and INCOMPLETE (the bytes merely ended early) -- which is
+	// exactly what a decoder that mis-measures a payload reports the moment it
+	// walks off its end. `status` prints it and exits 0; `streamdecode` prints
+	// it on stderr and exits 1, so a driver that needs the verdict AND the
+	// reject gets both from one run of the streaming surface.
+	h.line("static const char *sofab_ret_name(sofab_ret_t r) {")
+	h.line(`    return r == SOFAB_RET_OK ? "COMPLETE"`)
+	h.line(`        : r == SOFAB_RET_INCOMPLETE ? "INCOMPLETE"`)
+	h.line(`        : r == SOFAB_RET_E_INVALID_MSG ? "INVALID"`)
+	h.line(`        : r == SOFAB_RET_E_LIMIT_EXCEEDED ? "LIMIT_EXCEEDED"`)
+	h.line(`        : "INVALID_ARGUMENT";`)
+	h.line("}")
+	h.blank()
 	h.line("int main(int argc, char **argv) {")
 	h.line("    if (argc < 2) { fprintf(stderr, \"usage: %%s <encode|decode|streamdecode|status|bench> [Message|workload]\\n\", argv[0]); return 2; }")
 	h.line("    const char *mode = argv[1];")
@@ -522,7 +543,7 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		h.line("            %s_decoder_init(&d, &obj);", pfx)
 		h.line("            for (i = 0; i < len; i++) { (void)%s_decoder_feed(&d, in + i, 1); }", pfx)
 		h.line("            ret = %s_decoder_feed(&d, NULL, 0);", pfx)
-		h.line("            if (ret != SOFAB_RET_OK) return 1;")
+		h.line("            if (ret != SOFAB_RET_OK) { fprintf(stderr, \"decode error: %%s\\n\", sofab_ret_name(ret)); return 1; }")
 		h.line("            %s_to_json(&obj, stdout);", fn)
 		h.line("            fputc('\\n', stdout);")
 		// Surface the §7 decode OUTCOME rather than a bare pass/fail, so a
@@ -537,11 +558,7 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		// line 1 of stdout, not in the status.
 		h.line(`        } else if (strcmp(mode, "status") == 0) {`)
 		h.line("            sofab_ret_t _ret = %s_decode(&obj, in, len);", pfx)
-		h.line(`            fputs(_ret == SOFAB_RET_OK ? "COMPLETE"`)
-		h.line(`                : _ret == SOFAB_RET_INCOMPLETE ? "INCOMPLETE"`)
-		h.line(`                : _ret == SOFAB_RET_E_INVALID_MSG ? "INVALID"`)
-		h.line(`                : _ret == SOFAB_RET_E_LIMIT_EXCEEDED ? "LIMIT_EXCEEDED"`)
-		h.line(`                : "INVALID_ARGUMENT", stdout);`)
+		h.line("            fputs(sofab_ret_name(_ret), stdout);")
 		h.line("            fputc('\\n', stdout);")
 		h.line(`        } else { fprintf(stderr, "unknown mode\n"); return 2; }`)
 		h.line("    }")
