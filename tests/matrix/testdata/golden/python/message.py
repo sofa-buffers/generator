@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
-from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, Status, Visitor
+from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor
 
 # Bytes of reassembly space, derived from the schema and the decode limits.
 #
@@ -280,5 +280,7 @@ class _ScalarsVisitor(Visitor):
         if c == _L_Scalars:
             if fld.id not in {0, 1, 2, 3, 4, 5, 6, 7}:
                 return False  # an id this scope does not declare is walked, not read
+            if fld.subtype is not None and fld.subtype >= FixlenSubtype.STRING:
+                return False  # a string/blob payload here is not this scope's: skip it, never materialize it (S6.4.5)
         return True
 
