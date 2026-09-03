@@ -512,6 +512,33 @@ dotnet "$WORK/skipblob/bin/Debug/net9.0/harness.dll" \
     || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
 echo "==> skipped-blob allocation OK"
 
+# A decoded message OWNS its bytes (CORELIB_PLAN §6.7 / §6.7.1, generator#412):
+# no value the codec delivers may outlive the callback it arrived in, so the
+# buffer a message was decoded from may be reused or overwritten the moment the
+# call returns.
+#
+# Nothing else here reaches it. Every decode above and below hands the harness a
+# buffer that stays alive and unmodified for the whole run -- the chunk-invariance
+# row (generator#413) included, which compares two readers of the SAME live bytes
+# and would see identical values out of an aliased destination. The oracle has to
+# DESTROY the input between decode and re-encode, in the same process, holding the
+# decoded object; that is what OwnershipCheck.cs does, on both surfaces the
+# generated code offers and across a sweep of chunk sizes.
+#
+# Like the skipped-blob probe above it REPLACES the generated Program.cs -- the
+# project's own Main is the JSON harness -- so it needs a project of its own, and
+# it is generated from $WORK/cfg.yaml because it needs example.yaml's
+# aliasing-capable fields AND that config's namespace, which the file names.
+echo "==> a decoded message owns its bytes (CORELIB_PLAN §6.7, generator#412)"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang csharp \
+    --in "$ROOT/examples/messages/example.yaml" --out "$WORK/own" )
+rm "$WORK/own/Program.cs"
+cp "$ROOT/tests/conformance/csharp/OwnershipCheck.cs" "$WORK/own/"
+( cd "$WORK/own" && dotnet build -v q >/dev/null )
+dotnet "$WORK/own/bin/Debug/net9.0/harness.dll" \
+    || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
+echo "==> decode ownership OK"
+
 # The string/blob half of the same rule, and the half a diff cannot check
 # (CORELIB_PLAN 6.2.1, corelib-cs#101). The generated guard in front of the
 # payload callback is gone: the cap now travels INTO PayloadAcc.String/.Blob,

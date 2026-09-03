@@ -60,6 +60,29 @@ echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 roun
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
 
+# A decoded message OWNS its bytes (CORELIB_PLAN §6.7 / §6.7.1, generator#412):
+# no value the codec delivers may outlive the callback it arrived in, so the
+# buffer a message was decoded from may be reused or overwritten the moment the
+# call returns.
+#
+# Nothing else here reaches it. Every decode above and below hands the harness a
+# buffer that stays alive and unmodified for the whole run -- the chunk-invariance
+# row (generator#413) included, which compares two readers of the SAME live bytes
+# and would see identical values out of an aliased destination. The oracle has to
+# DESTROY the input between decode and re-encode, in the same process, holding the
+# decoded object; that is what OwnershipCheck.java does, on both surfaces the
+# generated code offers and across a sweep of chunk sizes.
+#
+# It rides in $WORK/ex rather than in a project of its own: it needs example.yaml's
+# aliasing-capable fields, and the extra class does not disturb the harness jar
+# (the pom names Main as its Main-Class).
+echo "==> a decoded message owns its bytes (CORELIB_PLAN §6.7, generator#412)"
+cp "$ROOT/tests/conformance/java/OwnershipCheck.java" "$WORK/ex/src/main/java/message/"
+( cd "$WORK/ex" && mvn -q -Dsofab.version="$VER" package )
+java -cp "$WORK/ex/target/harness.jar" message.OwnershipCheck \
+    || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
+echo "==> decode ownership OK"
+
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
 # INVALID per MESSAGE_SPEC 3+7 (decode exits non-zero); exactly 4 still decode.

@@ -99,6 +99,33 @@ STREAMED=$(printf '%s' "$IN" | $H stream myfirstmessage) \
     || { echo "FAIL: streaming differs from the one-shot pair"; printf 'one-shot: %s\nstream:   %s\n' "$OUT" "$STREAMED"; exit 1; }
 echo "==> streaming OK"
 
+# A decoded message OWNS its bytes (CORELIB_PLAN §6.7 / §6.7.1, generator#412) --
+# the LIFETIME half of the streaming claim just above. No value the codec
+# delivers may outlive the callback it arrived in, so the buffer a message was
+# decoded from may be reused or overwritten the moment the call returns.
+#
+# The 1-byte streaming row pins that decoder STATE survives a boundary at every
+# byte offset; it feeds one caller-owned array it never mutates, and an aliased
+# destination reads back perfectly from a buffer that stays alive. The oracle has
+# to DESTROY the input between decode and re-encode, in the same process, holding
+# the decoded object; that is what OwnershipCheck.kt does, on both surfaces the
+# generated code offers and across a sweep of chunk sizes.
+#
+# It rides in $WORK/ex rather than in a project of its own: it needs example.yaml's
+# aliasing-capable fields. Its entry point is the file class message.OwnershipCheckKt,
+# not the application plugin's mainClass, which stays the JSON harness -- so the
+# install image is unchanged for every row that uses $H.
+echo "==> a decoded message owns its bytes (CORELIB_PLAN §6.7, generator#412)"
+cp "$ROOT/tests/conformance/kotlin/OwnershipCheck.kt" "$WORK/ex/src/main/kotlin/message/"
+( cd "$WORK/ex" && "$GRADLEW" --console=plain -q -Psofab.version="$VER" installDist )
+# The JDK is the one exported above, never the one on PATH: the Kotlin Gradle
+# plugin refuses a newer JDK, and this repo's devcontainer keeps a newer one as
+# the default.
+"${JAVA_HOME:-$(dirname "$(dirname "$(command -v java)")")}/bin/java" \
+    -cp "$WORK/ex/build/install/harness/lib/*" message.OwnershipCheckKt \
+    || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
+echo "==> decode ownership OK"
+
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
 # INVALID per MESSAGE_SPEC 3+7 (decode exits non-zero); exactly 4 still decode.
@@ -667,11 +694,16 @@ done
 # Metadata only: a JS or native compilation would prove the same thing and pull a
 # Node distribution or the whole Kotlin/Native toolchain to do it. The message
 # sources are copied WITHOUT the project scaffolding (Main.kt / Json.kt), which is
-# deliberately JVM-specific -- a harness needs a `main`, an exit code and a stdin.
+# deliberately JVM-specific -- a harness needs a `main`, an exit code and a stdin
+# -- and without OwnershipCheck.kt, which is not generated output at all: it is
+# this suite's own JVM-only check (String.format, kotlin.system.exitProcess), and
+# the claim being made here is about what the GENERATOR emits.
 echo "==> generated sources type-check as commonMain (multiplatform)"
 mkdir -p "$WORK/mp/src/commonMain/kotlin"
 cp -r "$WORK/ex/src/main/kotlin/message" "$WORK/mp/src/commonMain/kotlin/message"
-rm -f "$WORK/mp/src/commonMain/kotlin/message/Main.kt" "$WORK/mp/src/commonMain/kotlin/message/Json.kt"
+rm -f "$WORK/mp/src/commonMain/kotlin/message/Main.kt" \
+      "$WORK/mp/src/commonMain/kotlin/message/Json.kt" \
+      "$WORK/mp/src/commonMain/kotlin/message/OwnershipCheck.kt"
 cat > "$WORK/mp/settings.gradle.kts" <<'YAML'
 rootProject.name = "mp"
 pluginManagement { repositories { gradlePluginPortal(); mavenCentral() } }

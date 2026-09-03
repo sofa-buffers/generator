@@ -4224,6 +4224,33 @@ A reimplementation is **conformant** when it reproduces these gates:
    by one call; an `istream.c` that copies each payload from a remembered chunk
    pointer at completion), which report `heap-use-after-free` on the affected
    chunk sizes.
+
+   **Python needs a second oracle, not a translated one.** `Decoder.feed` puts a
+   chunk where the walk can reach it, and with nothing carried that is
+   `buf = data if isinstance(data, bytes) else bytes(data)` — the native
+   accelerator's `_rebind` does the same. So a `bytearray` or `memoryview` handed
+   to a one-shot decode is **copied at the front door**, and scrubbing the
+   caller's object afterwards can never reach what the codec walked: with
+   corelib-py mutated to deliver `memoryview(buf)[pos:end]` — a real §6.7
+   violation — both scrub legs still pass while `type(msg.someblob)` is
+   `memoryview`. Only a real `bytes` input is adopted uncopied, and a `bytes`
+   cannot be scrubbed. The leg with teeth on that path therefore decodes from
+   `bytes` and asserts the **destination types** (a slice of a `bytes` is a
+   `bytes`; a window into one is a `memoryview`), which is what caught the
+   mutation. A port that translates the scrub alone reports a false pass here.
+
+   On the JVM family — java, kotlin, csharp — the reach is narrower than it looks
+   and the ports say so. There is no sub-range view of a `byte[]`/`ByteArray` and
+   no mutable string, so the only destination that CAN alias is one that keeps
+   the **whole** delivered array, which is only ever the right bytes when a
+   payload fills a chunk exactly. That is a real regression shape — it is what a
+   "fast path for the whole-payload case" looks like written wrong, and mutating
+   the generated blob arm to it fails the streaming leg at chunk 1 in all three —
+   but it leaves the one-shot legs near-vacuous, kept because §6.7.1 names that
+   path rather than because anything can fail them. What would give the row teeth
+   there is a corelib moving its payload callback to a span type
+   (`ReadOnlySpan<byte>`/`ReadOnlyMemory<byte>` in C#), which is the regression
+   this leg exists to catch early.
 3. **Corpus** (`tests/matrix`) — a corner-case corpus generated across **all**
    backends; invalid defs are rejected; dangling-ref + depth-cap enforced.
    Per-language `run.sh` additionally **compiles/builds every corpus def** against

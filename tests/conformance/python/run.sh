@@ -158,6 +158,23 @@ for ENGINE in $ENGINES; do
         echo "FAIL: [$ENGINE] a refused encode emitted $(wc -c < "$WORK/overfill.bin") bytes of partial output"; exit 1
     }
     echo "   [$ENGINE] over-fill refusal OK"
+
+    # The DECODE side of the same ownership rule (CORELIB_PLAN §6.7 / §6.7.1,
+    # generator#412): a decoded message must own its bytes, so the buffer it came
+    # from may be reused or overwritten the moment the call returns. The generated
+    # `decode` docstring states it in prose and nothing tested it.
+    #
+    # Inside the loop, not below it, for the reason the two legs above are: both
+    # engines carry independent payload paths, and only require_engine keeps the
+    # second pass from being a silent duplicate of the first (generator#451).
+    #
+    # The driver runs BOTH oracles, because the scrub the other suites use is
+    # partly vacuous here -- Decoder.feed copies any non-`bytes` chunk at the
+    # front door, so only a destination-TYPE assertion over a `bytes` input can
+    # see a window the codec handed out. Its header explains the split.
+    echo "==> a decoded message owns its bytes, engine=$ENGINE (CORELIB_PLAN §6.7, generator#412)"
+    python3 "$ROOT/tests/conformance/python/ownership_check.py" "$WORK/proj" \
+        || { echo "FAIL: [$ENGINE] a decoded field aliased the buffer it was decoded from"; exit 1; }
 done
 
 # Everything below runs on ONE engine -- the shared-vector byte-exactness check
