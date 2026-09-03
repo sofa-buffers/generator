@@ -907,6 +907,215 @@ fi
 }
 echo "==> over-fill refusal OK"
 
+# The DECODE side of the same ownership rule (CORELIB_PLAN §6.7 / §6.7.1,
+# generator#412): a decoded message must own its bytes, so the buffer it came
+# from can be reused, overwritten or freed the moment the call returns.
+#
+# Nothing above reaches it. Every decode here hands the harness a buffer that
+# stays alive and unmodified for the whole run — including the streaming block,
+# which compares `streamdecode` against `decode` and would see the same values
+# out of an aliased destination. The oracle has to DESTROY the input between
+# decode and re-encode, in the same process, holding the decoded object; that is
+# what the probe below does, on all three surfaces the generated code offers.
+#
+# The hazard is not hypothetical: sofab.PayloadAcc.Take hands back the caller's
+# own chunk UNCOPIED whenever a whole payload fits it, and says so in its doc.
+# Go survives only because the generated blob arm copies out of it.
+echo "==> a decoded message owns its bytes (CORELIB_PLAN §6.7, generator#412)"
+mkdir -p "$WORK/proj/own"
+cat > "$WORK/proj/own/main.go" <<'GO'
+// A decoded message OWNS its bytes (CORELIB_PLAN §6.7 / §6.7.1, generator#412).
+//
+// The oracle is destructive, not comparative: encode a sample, decode it out of
+// storage this program controls, DESTROY that storage, then re-encode and diff.
+// Comparing two decoders against each other cannot see this — both would read
+// the same live buffer.
+//
+// KNOWN REACH — do not read a pass as "every field is copied":
+//
+//   - Only a []byte destination can regress in Go: `Someblob` and each element
+//     of `Someblobarray`. A `string` field cannot — the `string(b)` conversion
+//     the generated code performs is a copy the language makes, so a pass says
+//     nothing about the string path.
+//   - The hazard is real and lives in the corelib: sofab.PayloadAcc.Take returns
+//     the caller's first chunk UNCOPIED whenever the whole payload fits it. Go
+//     survives because the generated blob arm copies it out.
+//   - Native arrays ([]uint32, []float32, ...) are built element by element from
+//     decoded scalars and never pass through a payload callback at all.
+//
+// CHUNK SIZE IS THE AXIS, not the entry point. A payload SPLIT across chunks is
+// reassembled into the accumulator and copied out of it whether or not the
+// destination wanted a view, so a small-chunk-only feed is structurally unable
+// to fail: measured with the generated blob destination broken on purpose,
+// chunk 7 passes and chunk 32 fails. Every leg therefore sweeps sizes, ending at
+// one that delivers every payload whole.
+package main
+
+import (
+	"bytes"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+
+	message "example.com/gen/message"
+	sofab "github.com/sofa-buffers/corelib-go"
+)
+
+var failures int
+
+// chunkSizes ends at a size larger than the whole message: only a chunk at
+// least as long as the longest payload reaches the corelib's no-copy branch.
+var chunkSizes = []int{1, 7, 16, 32, 64, 4096}
+
+// sample fills every aliasing-capable field kind: string, blob, array<string>,
+// array<blob>, a string nested in a struct, a string in a union, and the string
+// key of a dynamic wrapper-array row — plus the native arrays, which are here so
+// the wire carries them, not because they can alias.
+func sample() *message.Myfirstmessage {
+	m := message.NewMyfirstmessage()
+	m.Somestring = "héllo wörld payload"
+	m.Someblob = []byte{1, 2, 3, 4, 5}
+	m.Someuintarray = []uint32{9, 8, 7, 6}
+	m.Somefloatarray = []float32{1.5, -2.5, 3.5}
+	m.Somestringarray = []string{"a", "bb", "ccc"}
+	m.Someblobarray = [][]byte{{9, 9}, {8}}
+	m.Somestruct.Nestedstring = "nested payload"
+	m.Someunion.Option2 = "union payload"
+	m.Somemap = []message.MyfirstmessageSomemapElem{
+		{Key: "first key", Value: 1},
+		{Key: "second key", Value: 2},
+	}
+	return m
+}
+
+// mustMatch re-encodes and diffs. A re-encode that FAILS is a failure of this
+// check too: the encoder validates UTF-8, so a scribbled string destination can
+// come back as an error rather than as different bytes.
+func mustMatch(what string, want []byte, got *message.Myfirstmessage) {
+	re, err := got.Encode()
+	if err != nil {
+		fmt.Printf("FAIL: %s: re-encoding the decoded message failed: %v\n", what, err)
+		failures++
+		return
+	}
+	if !bytes.Equal(want, re) {
+		fmt.Printf("FAIL: %s: a decoded field aliased the buffer it was decoded from\n  want %s\n  got  %s\n",
+			what, hex.EncodeToString(want), hex.EncodeToString(re))
+		fmt.Printf("  Someblob = %x  Somestring = %q\n", got.Someblob, got.Somestring)
+		for i, b := range got.Someblobarray {
+			fmt.Printf("  Someblobarray[%d] = %x\n", i, b)
+		}
+		failures++
+	}
+}
+
+func scribble(b []byte) {
+	for i := range b {
+		b[i] = 0x41 // printable ASCII: an aliased string must still re-encode,
+	} // so the oracle stays a byte diff and never a UTF-8 error
+}
+
+// dripReader feeds the io.Reader path `chunk` bytes per Read and scribbles what
+// it handed over on the NEXT Read. The buffer belongs to the generated decode
+// function, so this is the only way to reach it — and it is structurally one
+// chunk short: the final Read's bytes are never scribbled, because no later Read
+// happens.
+type dripReader struct {
+	src   []byte
+	pos   int
+	prev  []byte
+	chunk int
+}
+
+func (d *dripReader) Read(p []byte) (int, error) {
+	if d.prev != nil {
+		scribble(d.prev)
+		d.prev = nil
+	}
+	if d.pos >= len(d.src) {
+		return 0, io.EOF
+	}
+	n := d.chunk
+	if n > len(p) {
+		n = len(p)
+	}
+	if n > len(d.src)-d.pos {
+		n = len(d.src) - d.pos
+	}
+	copy(p[:n], d.src[d.pos:d.pos+n])
+	d.pos += n
+	d.prev = p[:n]
+	return n, nil
+}
+
+func main() {
+	want, err := sample().Encode()
+	if err != nil {
+		fmt.Println("encode:", err)
+		os.Exit(2)
+	}
+
+	// 1. One-shot, out of a MUTABLE copy. §6.7.1 gives this path no exemption:
+	// `data` may be reused the moment the call returns.
+	wire := append([]byte(nil), want...)
+	got, err := message.DecodeMyfirstmessage(wire)
+	if err != nil {
+		fmt.Println("FAIL: one-shot decode:", err)
+		os.Exit(1)
+	}
+	scribble(wire)
+	mustMatch("one-shot Decode", want, got)
+
+	// 2. Streaming Feed, every chunk out of ONE reusable scratch that is
+	// scribbled the instant Feed returns (§6.0: the borrow ends there).
+	for _, size := range chunkSizes {
+		scratch := make([]byte, size)
+		out := message.NewMyfirstmessage()
+		dec := sofab.NewDecoder(out)
+		var last sofab.Outcome
+		for i := 0; i < len(want); i += size {
+			n := size
+			if n > len(want)-i {
+				n = len(want) - i
+			}
+			copy(scratch[:n], want[i:i+n])
+			last, err = dec.Feed(scratch[:n])
+			if err != nil {
+				fmt.Printf("FAIL: streaming Feed(chunk=%d): %v\n", size, err)
+				os.Exit(1)
+			}
+			scribble(scratch)
+		}
+		if last != sofab.Complete {
+			fmt.Printf("FAIL: streaming Feed(chunk=%d) outcome %v, expected Complete\n", size, last)
+			failures++
+			continue
+		}
+		mustMatch(fmt.Sprintf("streaming Feed(chunk=%d)", size), want, out)
+	}
+
+	// 3. The io.Reader wrapper the generated code ships, driven by a reader that
+	// overwrites the buffer it just handed over.
+	for _, size := range chunkSizes {
+		got3, err := message.DecodeMyfirstmessageFrom(&dripReader{src: want, chunk: size})
+		if err != nil {
+			fmt.Printf("FAIL: DecodeFrom(chunk=%d): %v\n", size, err)
+			os.Exit(1)
+		}
+		mustMatch(fmt.Sprintf("DecodeFrom(io.Reader, chunk=%d)", size), want, got3)
+	}
+
+	if failures > 0 {
+		os.Exit(1)
+	}
+	fmt.Printf("decoded message owns its bytes: one-shot + %d chunk sizes on both streaming surfaces\n", len(chunkSizes))
+}
+GO
+( cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./own ) \
+    || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
+echo "==> decode ownership OK"
+
 echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_GO_CORELIB="$CORELIB" go test ./generators/golang/ -run "Conformance|Wire" -count=1 )
 

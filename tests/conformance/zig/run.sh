@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 # Reproducible Zig conformance harness: generate -> zig build -> round-trip ->
 # byte-exact shared-vector conformance, against corelib-zig (the max-speed
-# port: allocation-free streaming encoder, zero-copy contiguous decode).
+# port: allocation-free streaming encoder, contiguous decode into a message that
+# owns its bytes).
 #
 # Usage: tests/conformance/zig/run.sh [corelib-zig]
 #   (or set $SOFAB_ZIG_CORELIB)
@@ -532,6 +533,28 @@ cp "$ROOT/tests/conformance/zig/stream_check.zig" "$WORK/probe/src/main.zig"
 ( cd "$WORK/probe" && zig build --release=fast --cache-dir .zig-cache --global-cache-dir "$WORK/zig-global-cache" )
 "$WORK/probe/zig-out/bin/harness" || { echo "FAIL: chunked decode is not chunk-invariant"; exit 1; }
 echo "==> chunk invariance OK"
+
+# A decoded message OWNS its bytes (CORELIB_PLAN §6.7 / §6.7.1, generator#412).
+# The lifetime half of the property the block above pins by value: no
+# destination may keep a window into the buffer the bytes came from, on the
+# one-shot path (§6.7.1 gives it no exemption) any more than on the streaming
+# one (§6.0: a chunk is borrowed only for the duration of the feed call).
+#
+# Nothing else here reaches it. Every check above hands the harness a buffer
+# that stays alive and unmodified for the whole decode, so an aliased
+# destination still reads back correctly; the oracle has to DESTROY the input
+# between decode and re-encode, which is what ownership_check.zig does.
+#
+# This is a REGRESSION gate, not a hypothetical: decode() borrowed its payloads
+# out of the caller's buffer until generator#412. The check needs its own
+# project because it replaces src/main.zig, and $WORK/ex's harness is still used
+# by the checks below.
+echo "==> a decoded message owns its bytes (CORELIB_PLAN §6.7, generator#412)"
+zig_build "$ROOT/examples/messages/example.yaml" "$WORK/own"
+cp "$ROOT/tests/conformance/zig/ownership_check.zig" "$WORK/own/src/main.zig"
+( cd "$WORK/own" && zig build --release=fast --cache-dir .zig-cache --global-cache-dir "$WORK/zig-global-cache" )
+"$WORK/own/zig-out/bin/harness" || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
+echo "==> decode ownership OK"
 
 # Receiver-side decode limits (generator#102): a count-less u64 array with
 # max_dyn_array_count: 4 baked into the generated module (id 0 -> header 0x03 =

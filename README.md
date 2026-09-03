@@ -167,7 +167,7 @@ The generator emits code against one corelib per language:
 | Kotlin (Multiplatform) | `corelib-kotlin-mp` | Max speed; one source set for JVM, JS and native |
 | C# / .NET | `corelib-cs` | Max speed |
 | TypeScript | `corelib-ts` | Max speed |
-| Zig | `corelib-zig` | Max speed, zero-copy decode |
+| Zig | `corelib-zig` | Max speed |
 | Dart | `corelib-dart` | Max speed |
 
 Because every corelib speaks the **same wire format**, code generated for one
