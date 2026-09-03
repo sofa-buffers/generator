@@ -482,10 +482,62 @@ printf '\003\004\001\002\003\004' > "$WORK/limit-ok.bin"
 if (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null 2>"$WORK/limit-err.txt"; then
     echo "FAIL: wire count 5 > max_dyn_array_count 4 must fail decode"; exit 1
 fi
-grep -qi "limit" "$WORK/limit-err.txt" || { echo "FAIL: over-cap decode error should mention the limit"; cat "$WORK/limit-err.txt"; exit 1; }
+# The CATEGORY, by exception CLASS. `grep -i limit` over a traceback is no
+# assertion at all: the frames name this very project directory ($WORK/limitproj),
+# so the pattern matches whatever was raised -- a SofaDecodeError included, which
+# is the collapse CORELIB_PLAN S6.3 forbids (generator#416). sofab.types keeps
+# SofaLimitError a SIBLING of SofaDecodeError, so the class name is the caller's
+# channel and the one thing worth matching.
+grep -q 'SofaLimitError' "$WORK/limit-err.txt" \
+    || { echo "FAIL: an over-cap unbounded array must be refused as SofaLimitError (S6.3), got:"; cat "$WORK/limit-err.txt"; exit 1; }
+grep -q 'SofaDecodeError' "$WORK/limit-err.txt" \
+    && { echo "FAIL: a receiver-cap refusal must not be reported as InvalidMessage (S6.3)"; cat "$WORK/limit-err.txt"; exit 1; }
 (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/limit-ok.bin" >/dev/null || { echo "FAIL: wire count 4 must decode under limit 4"; exit 1; }
 (cd "$WORK/nolimitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null || { echo "FAIL: unset limit must keep count 5 decodable"; exit 1; }
 echo "==> decode-limit reject OK"
+
+# The two refusals of CORELIB_PLAN §6.3, on one schema and one harness
+# (generator#416). A configured receiver cap on a schema-UNBOUNDED field is a
+# policy verdict -- SofaLimitError, because the bytes are well formed and the
+# same message decodes under a looser cap -- while a field the SCHEMA bounds
+# answers SofaDecodeError when the wire breaches that bound, and §6.3 adds the
+# other direction: LimitExceeded is "never raised for a field the schema bounds".
+# Reporting either as the other tells the caller the wrong party is broken.
+#
+# One shared driver for all eleven suites (ARCHITECTURE §12). It prints its own
+# `refusal` message, so the ids its fixtures breach and the bounds it asserts
+# against cannot drift from what this project was generated with, and each
+# refusing row asserts its own class AND that the other one did not appear.
+# Its accepting rows (at the cap; over the cap but inside the schema bound) read
+# their value back, so a decoder cannot pass by refusing everything, and they pin
+# the cap's own value against the config written here.
+#
+# BOTH engines. The array-count cap is raised inside corelib-py, and the
+# accelerator reimplements that path (`_speedups` _visit_varints) independently
+# of decoder.py -- so a native-only pass would leave the pure decoder's category
+# unmeasured, and the rest of this receiver-limits region runs native-only.
+#
+# The class assertion rides `decode`, which prints the traceback. `streamdecode`
+# prints `str(e)` instead, where the class name never appears, so that surface
+# would assert nothing here; its cap behaviour is swept by the blocks above on
+# exit status.
+echo "==> a cap is SofaLimitError, a schema bound is SofaDecodeError (§6.3, generator#416)"
+printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+cat > "$WORK/refusal-cfg.yaml" <<YAML
+generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/refusal-cfg.yaml" --lang python --in "$WORK/refusal.yaml" --out "$WORK/refusalproj" )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "python/$ENGINE" \
+        --cwd "$WORK/refusalproj" \
+        --limit-pattern SofaLimitError --invalid-pattern SofaDecodeError \
+        -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 # CORELIB_PLAN S6.2.1, the two rules a scope-wide cap could not honour. Both are
 # end-to-end: the generator's unit tests can only see emitted substrings.

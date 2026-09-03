@@ -469,12 +469,55 @@ sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/dynlim/pubspec.yaml"
 build "$WORK/dyn.yaml" "$WORK/dynfree"
 printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
 printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
-if "$WORK/dynlim/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null 2>&1; then
-    echo "FAIL: 5 elements above max_dyn_array_count 4 must fail decode"; exit 1
-fi
+# The CATEGORY, not merely the exit status: a cap breach is a receiver POLICY
+# refusal (limitExceeded) and a bad message is INVALID, both exit non-zero, so an
+# `if ... decode ...; then FAIL` guard passes with the two collapsed into one --
+# which is precisely what CORELIB_PLAN S6.3 forbids (generator#416).
+ST=$("$WORK/dynlim/harness" trydecode dyn < "$WORK/overlimit.bin" | sed -n 1p)
+[ "$ST" = "LIMITEXCEEDED" ] \
+    || { echo "FAIL: 5 elements above max_dyn_array_count 4 must be refused as LIMITEXCEEDED, got $ST"; exit 1; }
 "$WORK/dynlim/harness" decode dyn < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: 4 elements at the limit must decode"; exit 1; }
 "$WORK/dynfree/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap build must decode the oversized message"; exit 1; }
 echo "==> decode limits OK"
+
+# The two refusals of CORELIB_PLAN S6.3, on one schema and one harness
+# (generator#416). A configured receiver cap on a schema-UNBOUNDED field is a
+# policy verdict -- limitExceeded, because the bytes are well formed and the same
+# message decodes under a looser cap -- while a field the SCHEMA bounds answers
+# INVALID when the wire breaches that bound, and S6.3 adds the other direction:
+# LimitExceeded is "never raised for a field the schema bounds". Reporting either
+# as the other tells the caller the wrong party is broken.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12). It prints its own
+# `refusal` message, so the ids its fixtures breach and the bounds it asserts
+# against cannot drift from what this harness was built with, and each refusing
+# row asserts its own category AND that the other one did not appear -- the
+# assertion neither an exit status nor a "does it mention a limit?" grep can
+# make. Its accepting rows (at the cap; over the cap but inside the schema bound)
+# read their value back, so a decoder cannot pass by refusing everything, and
+# they pin the cap's own value against the config written here.
+#
+# Both decode surfaces. The count cap sits in the generated onArrayBegin and the
+# length cap in the generated onFixlenHeader, but the verdict travels back
+# through corelib-dart's one-shot and chunked paths separately, so a table that
+# only ever ran tryDecode passes with the streaming copy mis-routed. `trydecode`
+# carries the category on the one-shot pass (line 1, and COMPLETE for the
+# accepting rows); the streaming pass reads it off the harness's own
+# `decode failed: <status>` line.
+echo "==> a cap is limitExceeded, a schema bound is INVALID (S6.3, generator#416)"
+printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+cat > "$WORK/cfg-refusal.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-refusal.yaml" --lang dart --in "$WORK/refusal.yaml" --out "$WORK/refusal" )
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/refusal/pubspec.yaml"
+( cd "$WORK/refusal" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "dart" \
+    --status-verb trydecode -- "$WORK/refusal/harness"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "dart" \
+    --verb streamdecode --limit-pattern 'decode failed: limitExceeded' \
+    --invalid-pattern 'decode failed: invalid' -- "$WORK/refusal/harness"
 
 # The WRAPPER half of the same cap (generator#387/#402 item 3). A wrapper array
 # carries no count header: its elements are keyed by an unbounded varint index and
