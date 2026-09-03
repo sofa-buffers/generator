@@ -175,6 +175,32 @@ if "$H" decode myfirstmessage < "$WORK/fp32_overcount.bin" >/dev/null 2>&1; then
 fi
 echo "==> fixlen-array subtype ordering OK"
 
+# ...and step 3 of that same order (CORELIB_PLAN S4.8.1, generator#411): a fixlen
+# array whose subtype is neither fp32 nor fp64 -- a string, a blob, or a reserved
+# 0x4-0x7 -- is INVALID, not a skip. The block above pins steps 4 and 5; step 3
+# sits before both, and before the schema: S4.8 admits no fixlen array of string
+# or blob, so no schema could have declared one and the bytes are malformed
+# whatever follows. Routing that into the S7.3 skip would accept a construct the
+# format does not have -- and generated Dart could not notice, since its array
+# arm only asks whether the announced kind is the one it declared and returns
+# quietly when it is not. The fixlen_word never reaches it; the corelib decides
+# at the word.
+#
+# One shared driver for all eleven suites (ARCHITECTURE S12). It derives every
+# fixture from the schema's own somefloatarray declaration, so the ids it writes
+# and the values it asserts cannot drift from what the harness was built with,
+# and it compares the skipped field's default as JSON numbers rather than by
+# grep, which is what lets one table serve backends that render it three ways.
+#
+# The category is asserted through trydecode's line 1, the channel the blocks
+# below already use: a bare non-zero exit would also accept a wrongly INCOMPLETE
+# verdict, and INCOMPLETE is exactly what a corelib that mis-routes step 3 into
+# the skip reports once it walks off the end of the shorter payload.
+echo "==> a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
+python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "dart" \
+    --status-verb trydecode \
+    -- "$H"
+
 # A SKIPPED string is never UTF-8-validated (CORELIB_PLAN S6.4, generator#257 /
 # Crucible F-0038). The corelib hands the visitor RAW wire bytes
 # (onStringBytes) instead of a finished String, so the generated destination arm
