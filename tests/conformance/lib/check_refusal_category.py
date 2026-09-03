@@ -2,9 +2,11 @@
 """A receiver cap answers LimitExceeded; a schema bound answers InvalidMessage (generator#416).
 
 Usage:
-  check_refusal_category.py --emit-schema
+  check_refusal_category.py --emit-schema [--shapes LIST]
   check_refusal_category.py <label> [--message NAME] [--cwd DIR] [--verb VERB]
+                            [--shapes LIST]
                             [--max-dyn-array-count N] [--max-dyn-string-len N]
+                            [--max-dyn-blob-len N]
                             [--status-verb VERB] [--status-limit NAME]
                             [--status-invalid NAME] [--status-complete NAME]
                             [--limit-pattern REGEX] [--invalid-pattern REGEX]
@@ -38,39 +40,71 @@ contributes only the capped project and its harness argv.
 
 The driver prints its OWN schema (`--emit-schema`, the `check_vectors_decode.py`
 idiom), so the ids it writes into fixtures and the bounds it asserts against
-cannot drift from what the harness was built with.
+cannot drift from what the harness was built with. `--shapes` must be passed
+identically to `--emit-schema` and to the run, as must the cap numbers, or the
+schema and the expectations stop describing the same project.
+
+## The four shapes
+
+A receiver cap reaches four different pieces of machinery, and a decoder can get
+the category right in one and wrong in another, so `refusal` declares an
+unbounded and a bounded field of each -- the bounded one is what pins the mirror
+rule -- plus the count-less WRAPPER array, which has no schema-bounded twin
+because the whole point of it is that the schema declares no count:
+
+    dynarr   id 0  array<u32>              max_dyn_array_count applies
+    bndarr   id 1  array<u32> count 8      bounded -> the cap must NOT apply
+    dynstr   id 2  string                  max_dyn_string_len applies
+    bndstr   id 3  string maxlen 32        bounded -> the cap must NOT apply
+    dynblob  id 4  blob                    max_dyn_blob_len applies
+    bndblob  id 5  blob maxlen 32          bounded -> the cap must NOT apply
+    wraparr  id 6  array<string>           the element INDEX takes the count cap
+
+The wrapper row is the one shape where the cap is typically NOT compared by
+generated code at all: a count-less array's elements are keyed by an unbounded
+varint index and the list grows to fit, so the index IS the length, and every
+backend hands the number to a corelib collector (corelib-dart's `StringSeq.rcap`,
+and the same shape elsewhere) which decides the category itself. A suite that
+tested only the count-headed array would leave that decision unmeasured.
+
+`--shapes` selects them (default: all four). A suite whose harness cannot build
+one -- a target with no wrapper arrays, a JSON rendering this driver cannot read
+a blob back out of -- declines it by name, so the omission is a decision in the
+suite rather than a silence.
 
 ## The table
 
-`refusal` declares four fields -- an unbounded and a bounded one of each shape
-the caps can reach -- and the suite generates it with
-`max_dyn_array_count: 4, max_dyn_string_len: 8`:
+Generated with `max_dyn_array_count: 4, max_dyn_string_len: 8,
+max_dyn_blob_len: 8`, the rows are:
 
-    dynarr  id 0  array<u32>              unbounded -> the count cap applies
-    bndarr  id 1  array<u32> count 8      bounded   -> the cap must NOT apply
-    dynstr  id 2  string                  unbounded -> the length cap applies
-    bndstr  id 3  string maxlen 32        bounded   -> the cap must NOT apply
-
-    dynarr_over_cap    count 5  > cap 4                      LimitExceeded
-    dynarr_at_cap      count 4  = cap 4                      COMPLETE
-    bndarr_over_bound  count 9  > schema count 8             InvalidMessage
-    bndarr_over_cap    count 6  > cap 4, < schema count 8    COMPLETE
-    dynstr_over_cap    len 9    > cap 8                      LimitExceeded
-    dynstr_at_cap      len 8    = cap 8                      COMPLETE
-    bndstr_over_bound  len 40   > schema maxlen 32           InvalidMessage
-    bndstr_over_cap    len 20   > cap 8, < schema maxlen 32  COMPLETE
+    dynarr_over_cap     count 5  > cap 4                      LimitExceeded
+    dynarr_at_cap       count 4  = cap 4                      COMPLETE
+    bndarr_over_bound   count 9  > schema count 8             InvalidMessage
+    bndarr_over_cap     count 6  > cap 4, < schema count 8    COMPLETE
+    dynstr_over_cap     len 9    > cap 8                      LimitExceeded
+    dynstr_at_cap       len 8    = cap 8                      COMPLETE
+    bndstr_over_bound   len 40   > schema maxlen 32           InvalidMessage
+    bndstr_over_cap     len 20   > cap 8, < schema maxlen 32  COMPLETE
+    dynblob_over_cap    len 9    > cap 8                      LimitExceeded
+    dynblob_at_cap      len 8    = cap 8                      COMPLETE
+    bndblob_over_bound  len 40   > schema maxlen 32           InvalidMessage
+    bndblob_over_cap    len 20   > cap 8, < schema maxlen 32  COMPLETE
+    wraparr_over_cap    index 4  -> 5 slots > cap 4           LimitExceeded
+    wraparr_at_cap      index 3  -> 4 slots = cap 4           COMPLETE
 
 Every payload is COMPLETE, so truncation can never explain a rejection, and the
 accepted rows carry their decoded value so a "refuse everything" decoder cannot
 pass by rejecting less.
 
-The four rows that matter to §6.3 are the two `_over_cap` refusals against the
-two `_over_bound` ones: they differ only in WHICH number the wire count breached,
-so a decoder that collapses the categories -- in either direction -- fails one of
-each pair, whichever way it collapses them. The `_at_cap` and `_over_cap`
-accepting rows pin the cap's own value: they fail loudly if a suite configures a
-cap this driver was not told about, which is what keeps the assertions honest
-without the driver reading the suite's config file.
+The rows that matter to §6.3 are the `_over_cap` refusals against the
+`_over_bound` ones: they differ only in WHICH number the wire breached, so a
+decoder that collapses the categories -- in either direction -- fails one of each
+pair, whichever way it collapses them. The `_at_cap` and `_over_cap` accepting
+rows pin the cap's own value: they fail loudly if a suite configures a cap this
+driver was not told about, which is what keeps the assertions honest without the
+driver reading the suite's config file. `wraparr` pins it from both sides at the
+exact boundary -- index 3 fills the cap and decodes, index 4 is one slot past it
+and is refused.
 
 ## Categories are asserted, never exit status
 
@@ -100,17 +134,26 @@ import subprocess
 import sys
 
 MESSAGE = "refusal"
+SHAPES = ("array", "string", "blob", "wrapper")
 
 # The schema this driver prints. The bounds live here, not in a suite's YAML, so
 # a fixture can never breach a number the harness was not built with.
 DYNARR_ID, BNDARR_ID, DYNSTR_ID, BNDSTR_ID = 0, 1, 2, 3
+DYNBLOB_ID, BNDBLOB_ID, WRAPARR_ID = 4, 5, 6
 BNDARR_COUNT = 8
 BNDSTR_MAXLEN = 32
+BNDBLOB_MAXLEN = 32
 
 # Wire types (MESSAGE_SPEC §4.2): a field header is (id << 3) | wire_type.
 WT_FIXLEN = 2
 WT_ARRAY_UNSIGNED = 3
+WT_SEQ_BEGIN = 6
+WT_SEQ_END = 7
 SUBTYPE_STRING = 2
+SUBTYPE_BLOB = 3
+
+# The byte a blob fixture is filled with, and the character a string is.
+BLOB_FILL = 0x62  # 'b'
 
 
 def die(msg):
@@ -139,20 +182,41 @@ def fixlen_word(length, subtype):
     return varint((length << 3) | subtype)
 
 
-def emit_schema() -> int:
+def parse_shapes(spec):
+    shapes = [s.strip() for s in spec.split(",") if s.strip()]
+    unknown = [s for s in shapes if s not in SHAPES]
+    if unknown:
+        die("--shapes: %s is not one of %s"
+            % (", ".join(unknown), ", ".join(SHAPES)))
+    if not shapes:
+        die("--shapes selected nothing; the driver has no table to run")
+    return shapes
+
+
+def emit_schema(shapes) -> int:
     """Print the `refusal` message, for appending to a conformance schema."""
     print("# refusal -- the LimitExceeded-vs-InvalidMessage message (generator#416),")
     print("# printed by tests/conformance/lib/check_refusal_category.py so the ids and")
     print("# bounds the fixtures breach have exactly one definition between them. It")
-    print("# must be generated with max_dyn_array_count: 4 and max_dyn_string_len: 8.")
+    print("# must be generated with the same cap numbers and the same --shapes the run")
+    print("# is given (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len).")
     print("  %s:" % MESSAGE)
     print("    payload:")
-    print("      dynarr: { id: %d, type: array, items: { type: u32 } }" % DYNARR_ID)
-    print("      bndarr: { id: %d, type: array, items: { type: u32, count: %d } }"
-          % (BNDARR_ID, BNDARR_COUNT))
-    print("      dynstr: { id: %d, type: string }" % DYNSTR_ID)
-    print("      bndstr: { id: %d, type: string, maxlen: %d }"
-          % (BNDSTR_ID, BNDSTR_MAXLEN))
+    if "array" in shapes:
+        print("      dynarr: { id: %d, type: array, items: { type: u32 } }" % DYNARR_ID)
+        print("      bndarr: { id: %d, type: array, items: { type: u32, count: %d } }"
+              % (BNDARR_ID, BNDARR_COUNT))
+    if "string" in shapes:
+        print("      dynstr: { id: %d, type: string }" % DYNSTR_ID)
+        print("      bndstr: { id: %d, type: string, maxlen: %d }"
+              % (BNDSTR_ID, BNDSTR_MAXLEN))
+    if "blob" in shapes:
+        print("      dynblob: { id: %d, type: blob }" % DYNBLOB_ID)
+        print("      bndblob: { id: %d, type: blob, maxlen: %d }"
+              % (BNDBLOB_ID, BNDBLOB_MAXLEN))
+    if "wrapper" in shapes:
+        print("      wraparr: { id: %d, type: array, items: { type: string } }"
+              % WRAPARR_ID)
     return 0
 
 
@@ -161,56 +225,123 @@ def uarray(fid, count):
     return header(fid, WT_ARRAY_UNSIGNED) + varint(count) + b"\x01" * count
 
 
+def fixlen(fid, length, subtype, fill):
+    """A complete `length`-byte fixlen payload at `fid`."""
+    return header(fid, WT_FIXLEN) + fixlen_word(length, subtype) + fill * length
+
+
 def string(fid, length):
-    """A complete `length`-byte ASCII string at `fid`."""
-    return (header(fid, WT_FIXLEN) + fixlen_word(length, SUBTYPE_STRING)
-            + b"x" * length)
+    return fixlen(fid, length, SUBTYPE_STRING, b"x")
 
 
-def build_table(cap_count, cap_len):
-    if cap_count >= BNDARR_COUNT:
-        die("--max-dyn-array-count %d is not below the schema's count %d -- the "
-            "over-cap-but-inside-the-bound row could not exist"
-            % (cap_count, BNDARR_COUNT))
-    if cap_len >= BNDSTR_MAXLEN:
-        die("--max-dyn-string-len %d is not below the schema's maxlen %d -- the "
-            "over-cap-but-inside-the-bound row could not exist"
-            % (cap_len, BNDSTR_MAXLEN))
-    mid = (cap_count + BNDARR_COUNT) // 2          # over the cap, inside the bound
-    smid = (cap_len + BNDSTR_MAXLEN) // 2
-    return [
-        ("dynarr_over_cap", uarray(DYNARR_ID, cap_count + 1), "limit", None,
-         "an unbounded array %d elements long, over the configured cap %d -- a "
-         "receiver POLICY refusal, never InvalidMessage (§6.3)"
-         % (cap_count + 1, cap_count)),
-        ("dynarr_at_cap", uarray(DYNARR_ID, cap_count), "accept",
-         ("dynarr", [1] * cap_count),
-         "the same array exactly AT the cap -- pins the cap's own value"),
-        ("bndarr_over_bound", uarray(BNDARR_ID, BNDARR_COUNT + 1), "invalid",
-         None,
-         "a schema-bounded array past its own count %d -- the schema is what "
-         "refused, so InvalidMessage, and §6.3 forbids LimitExceeded for a field "
-         "the schema bounds" % BNDARR_COUNT),
-        ("bndarr_over_cap", uarray(BNDARR_ID, mid), "accept",
-         ("bndarr", [1] * mid),
-         "%d elements: over the cap %d, inside the schema's count %d -- the cap "
-         "must not reach a bounded field at all (§6.2.1)"
-         % (mid, cap_count, BNDARR_COUNT)),
-        ("dynstr_over_cap", string(DYNSTR_ID, cap_len + 1), "limit", None,
-         "an unbounded string %d bytes long, over the configured cap %d"
-         % (cap_len + 1, cap_len)),
-        ("dynstr_at_cap", string(DYNSTR_ID, cap_len), "accept",
-         ("dynstr", "x" * cap_len),
-         "the same string exactly AT the cap -- pins the cap's own value"),
-        ("bndstr_over_bound", string(BNDSTR_ID, BNDSTR_MAXLEN + 8), "invalid",
-         None,
-         "a schema-bounded string past its own maxlen %d -- InvalidMessage, the "
-         "declared-bound half of the pair" % BNDSTR_MAXLEN),
-        ("bndstr_over_cap", string(BNDSTR_ID, smid), "accept",
-         ("bndstr", "x" * smid),
-         "%d bytes: over the cap %d, inside the schema's maxlen %d"
-         % (smid, cap_len, BNDSTR_MAXLEN)),
-    ]
+def blob(fid, length):
+    return fixlen(fid, length, SUBTYPE_BLOB, bytes([BLOB_FILL]))
+
+
+def wrapper_element(fid, index):
+    """A count-less array at `fid` carrying one 1-byte string at `index`.
+
+    The index is the length: the list is grown to `index + 1` slots, and that is
+    the number the receiver cap has to bound (§6.2.1).
+    """
+    return (header(fid, WT_SEQ_BEGIN) + string(index, 1)
+            + header(0, WT_SEQ_END))
+
+
+def midpoint(cap, bound, flag):
+    """A value strictly over the cap and strictly inside the schema bound."""
+    if cap >= bound:
+        die("%s %d is not below the schema's %d -- the over-cap-but-inside-the-"
+            "bound row could not exist" % (flag, cap, bound))
+    mid = (cap + bound) // 2
+    if mid <= cap:
+        die("%s %d leaves no value strictly between the cap and the schema's "
+            "%d, so the over-cap-but-inside-the-bound row would sit AT the cap "
+            "and assert nothing (§6.2.1)" % (flag, cap, bound))
+    return mid
+
+
+def build_table(shapes, cap_count, cap_len, cap_blob):
+    rows = []
+    if "array" in shapes or "wrapper" in shapes:
+        if cap_count < 1:
+            die("--max-dyn-array-count %d: a cap below 1 leaves no accepting row"
+                % cap_count)
+    if "array" in shapes:
+        mid = midpoint(cap_count, BNDARR_COUNT, "--max-dyn-array-count")
+        rows += [
+            ("dynarr_over_cap", uarray(DYNARR_ID, cap_count + 1), "limit", None,
+             "an unbounded array %d elements long, over the configured cap %d -- a "
+             "receiver POLICY refusal, never InvalidMessage (§6.3)"
+             % (cap_count + 1, cap_count)),
+            ("dynarr_at_cap", uarray(DYNARR_ID, cap_count), "accept",
+             ("dynarr", [1] * cap_count),
+             "the same array exactly AT the cap -- pins the cap's own value"),
+            ("bndarr_over_bound", uarray(BNDARR_ID, BNDARR_COUNT + 1), "invalid",
+             None,
+             "a schema-bounded array past its own count %d -- the schema is what "
+             "refused, so InvalidMessage, and §6.3 forbids LimitExceeded for a field "
+             "the schema bounds" % BNDARR_COUNT),
+            ("bndarr_over_cap", uarray(BNDARR_ID, mid), "accept",
+             ("bndarr", [1] * mid),
+             "%d elements: over the cap %d, inside the schema's count %d -- the cap "
+             "must not reach a bounded field at all (§6.2.1)"
+             % (mid, cap_count, BNDARR_COUNT)),
+        ]
+    if "string" in shapes:
+        smid = midpoint(cap_len, BNDSTR_MAXLEN, "--max-dyn-string-len")
+        rows += [
+            ("dynstr_over_cap", string(DYNSTR_ID, cap_len + 1), "limit", None,
+             "an unbounded string %d bytes long, over the configured cap %d"
+             % (cap_len + 1, cap_len)),
+            ("dynstr_at_cap", string(DYNSTR_ID, cap_len), "accept",
+             ("dynstr", "x" * cap_len),
+             "the same string exactly AT the cap -- pins the cap's own value"),
+            ("bndstr_over_bound", string(BNDSTR_ID, BNDSTR_MAXLEN + 8), "invalid",
+             None,
+             "a schema-bounded string past its own maxlen %d -- InvalidMessage, the "
+             "declared-bound half of the pair" % BNDSTR_MAXLEN),
+            ("bndstr_over_cap", string(BNDSTR_ID, smid), "accept",
+             ("bndstr", "x" * smid),
+             "%d bytes: over the cap %d, inside the schema's maxlen %d"
+             % (smid, cap_len, BNDSTR_MAXLEN)),
+        ]
+    if "blob" in shapes:
+        bmid = midpoint(cap_blob, BNDBLOB_MAXLEN, "--max-dyn-blob-len")
+        rows += [
+            ("dynblob_over_cap", blob(DYNBLOB_ID, cap_blob + 1), "limit", None,
+             "an unbounded blob %d bytes long, over the configured cap %d -- the "
+             "blob cap is a THIRD number, and a backend that routes it through the "
+             "InvalidMessage path is invisible to the string rows"
+             % (cap_blob + 1, cap_blob)),
+            ("dynblob_at_cap", blob(DYNBLOB_ID, cap_blob), "accept",
+             ("dynblob", [BLOB_FILL] * cap_blob),
+             "the same blob exactly AT the cap -- pins the cap's own value"),
+            ("bndblob_over_bound", blob(BNDBLOB_ID, BNDBLOB_MAXLEN + 8), "invalid",
+             None,
+             "a schema-bounded blob past its own maxlen %d -- InvalidMessage"
+             % BNDBLOB_MAXLEN),
+            ("bndblob_over_cap", blob(BNDBLOB_ID, bmid), "accept",
+             ("bndblob", [BLOB_FILL] * bmid),
+             "%d bytes: over the cap %d, inside the schema's maxlen %d"
+             % (bmid, cap_blob, BNDBLOB_MAXLEN)),
+        ]
+    if "wrapper" in shapes:
+        rows += [
+            ("wraparr_over_cap", wrapper_element(WRAPARR_ID, cap_count), "limit",
+             None,
+             "a count-less array whose element index %d makes it %d slots, one past "
+             "the cap %d. The schema declares no count here, so nothing about these "
+             "bytes is invalid -- and on this shape the category is usually decided "
+             "inside the corelib's collector, not by generated code (§6.2.1/§6.3)"
+             % (cap_count, cap_count + 1, cap_count)),
+            ("wraparr_at_cap", wrapper_element(WRAPARR_ID, cap_count - 1),
+             "accept",
+             ("wraparr", [""] * (cap_count - 1) + ["x"]),
+             "the element one index lower: exactly %d slots, filling the cap -- the "
+             "other side of the same boundary" % cap_count),
+        ]
+    return rows
 
 
 def run(argv, cwd, data):
@@ -241,22 +372,28 @@ def same_value(got, want):
         return got == want
     if not isinstance(got, list) or len(got) != len(want):
         return False
-    return all(isinstance(g, (int, float)) and not isinstance(g, bool)
-               and float(g) == float(w) for g, w in zip(got, want))
+    for g, w in zip(got, want):
+        if isinstance(w, str):
+            if g != w:
+                return False
+            continue
+        if (not isinstance(g, (int, float)) or isinstance(g, bool)
+                or float(g) != float(w)):
+            return False
+    return True
 
 
 def main():
-    argv = sys.argv[1:]
-    if "--emit-schema" in argv:
-        return emit_schema()
-
     ap = argparse.ArgumentParser()
-    ap.add_argument("label")
+    ap.add_argument("label", nargs="?")
+    ap.add_argument("--emit-schema", action="store_true")
     ap.add_argument("--message", default=MESSAGE)
     ap.add_argument("--cwd", default=None)
     ap.add_argument("--verb", default="decode")
+    ap.add_argument("--shapes", default=",".join(SHAPES))
     ap.add_argument("--max-dyn-array-count", type=int, default=4)
     ap.add_argument("--max-dyn-string-len", type=int, default=8)
+    ap.add_argument("--max-dyn-blob-len", type=int, default=8)
     ap.add_argument("--status-verb", default=None)
     ap.add_argument("--status-limit", default="LIMITEXCEEDED")
     ap.add_argument("--status-invalid", default="INVALID")
@@ -264,11 +401,21 @@ def main():
     ap.add_argument("--limit-pattern", default=None)
     ap.add_argument("--invalid-pattern", default=None)
     ap.add_argument("--no-values", action="store_true")
-    if "--" not in argv:
-        die("no harness argv given (put it after `--`)")
-    sep = argv.index("--")
-    args = ap.parse_args(argv[:sep])
-    harness = argv[sep + 1:]
+
+    argv = sys.argv[1:]
+    if "--" in argv:
+        sep = argv.index("--")
+        head, harness = argv[:sep], argv[sep + 1:]
+    else:
+        head, harness = argv, []
+    args = ap.parse_args(head)
+    shapes = parse_shapes(args.shapes)
+
+    if args.emit_schema:
+        return emit_schema(shapes)
+
+    if not args.label:
+        die("no label given (the suite name this run is reported under)")
     if not harness:
         die("no harness argv given (put it after `--`)")
 
@@ -283,7 +430,8 @@ def main():
             "tell LimitExceeded from InvalidMessage, which is the whole of "
             "CORELIB_PLAN §6.3")
 
-    table = build_table(args.max_dyn_array_count, args.max_dyn_string_len)
+    table = build_table(shapes, args.max_dyn_array_count,
+                        args.max_dyn_string_len, args.max_dyn_blob_len)
     msg = [args.message] if args.message else []
 
     for name, wire, expect, value, why in table:
@@ -350,9 +498,9 @@ def main():
 
     channel = ("--status-verb %s" % args.status_verb if args.status_verb
                else "%s/%s" % (args.limit_pattern, args.invalid_pattern))
-    print("   [%s] refusal category [%s]: %d rows (%d LimitExceeded, %d "
+    print("   [%s] refusal category [%s]: %d rows over %s (%d LimitExceeded, %d "
           "InvalidMessage, %d accepted) via %s"
-          % (args.label, args.verb, len(table),
+          % (args.label, args.verb, len(table), "+".join(shapes),
              sum(1 for r in table if r[2] == "limit"),
              sum(1 for r in table if r[2] == "invalid"),
              sum(1 for r in table if r[2] == "accept"), channel))

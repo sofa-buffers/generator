@@ -156,11 +156,20 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// that produced it, on every chunk of every vector.
 	f.line("                if dec.status is not st:")
 	f.line("                    raise AssertionError('status %%s disagrees with the feed that set it (%%s)' %% (dec.status, st))")
+	// NAME the category on both refusal paths, as the cpp harness does. The
+	// §6.3 categories are what a conformance driver has to tell apart, and
+	// neither rendering carried one: `str(e)` is the message text alone, in
+	// which the class never appears, and `Status` is an IntEnum, so `%s` of it
+	// prints `2` rather than `INVALID`. A cap breach raises (SofaLimitError) and
+	// a schema-bound breach comes back as a feed status, so the two lines below
+	// are the two halves of one channel -- with the class and the status name
+	// spelled out, `streamdecode` can assert the category the one-shot `decode`
+	// asserts off its traceback (generator#416).
 	f.line("        except Exception as e:")
-	f.line("            sys.stderr.write('decode error: %%s\\n' %% (e,))")
+	f.line("            sys.stderr.write('decode error: %%s: %%s\\n' %% (type(e).__name__, e))")
 	f.line("            return 1")
 	f.line("        if st != message.Status.COMPLETE:")
-	f.line("            sys.stderr.write('decode failed: %%s\\n' %% (st,))")
+	f.line("            sys.stderr.write('decode failed: %%s\\n' %% (getattr(st, 'name', st),))")
 	f.line("            return 1")
 	f.line("        sys.stdout.write(json.dumps(dec.message.to_jsonable()))")
 	f.line("        sys.stdout.write('\\n')")
