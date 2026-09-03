@@ -1374,3 +1374,45 @@ messages:
 		t.Fatalf("expected a count guard on each of da, ba and the mat row, found %d:\n%s", seen, m)
 	}
 }
+
+// TestCsDecoderRemembersFeedStatus pins the "one fact, one channel" adoption
+// (issue #461): the corelib's IStream publishes its outcome exactly once, as
+// Feed's return value, and its status accessor is gone. The generated Decoder
+// keeps its own public Status — so no user of generated code breaks — by
+// REMEMBERING what the last Feed returned, and by latching a refusal that never
+// comes back as a status at all.
+func TestCsDecoderRemembersFeedStatus(t *testing.T) {
+	m := exampleModule(t)
+	for _, want := range []string{
+		// Complete, not Incomplete: an all-default message is zero bytes, so a
+		// Decoder that is never fed must still Finish().
+		"private DecodeStatus _st = DecodeStatus.Complete;",
+		// One place records, so the two overloads cannot drift.
+		"public DecodeStatus Feed(byte[] chunk) => Feed(chunk, 0, chunk.Length);",
+		"                return _st = _is.Feed(chunk, off, len, _v);",
+		// A refusal is terminal and leaves no status behind: latch what it
+		// meant, keeping the wire verdict apart from a receiver-limit stop --
+		// and leaving the memory alone for a fault that is neither, an
+		// Argument (a caller mistake, not a statement about the bytes) above
+		// all.
+		"            } catch (SofabException e) {",
+		"                if (e.Error == SofabError.InvalidMessage) {",
+		"                    _st = DecodeStatus.Invalid;",
+		"                } else if (e.Error == SofabError.LimitExceeded) {",
+		"                    _st = DecodeStatus.Incomplete;",
+		"                }",
+		// The public surface is unchanged; only its backing moved.
+		"public DecodeStatus Status => _st;",
+		"            if (_st != DecodeStatus.Complete) {",
+		"                    $\"Myfirstmessage: stream ended mid-field ({_st})\");",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q (generator#461):\n%s", want, m)
+		}
+	}
+	// The accessor is gone from the corelib; asking the stream a second time
+	// must not come back in any form.
+	if strings.Contains(m, "_is.Status") {
+		t.Errorf("Message.cs still reads the removed IStream.Status (generator#461):\n%s", m)
+	}
+}

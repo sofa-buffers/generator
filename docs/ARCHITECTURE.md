@@ -1020,13 +1020,14 @@ addresses, and why it is the array path it addresses rather than the dispatch.
 **Decode outcome (MESSAGE_SPEC §7).** Every corelib reports the finish-less
 three-valued outcome — COMPLETE / INCOMPLETE / INVALID — and the generated
 one-shot decode must not hide it. For corelibs that surface INCOMPLETE as an
-error/exception (Go, Rust, C++, C, Python, TS) the fallible decode entry
-point (`try_decode`, Go's `(msg, error)`, thrown exceptions) already propagates
-all three. The **status-returning** corelibs (C#, Java, Kotlin, Zig, Dart) treat
-INCOMPLETE as a non-error status (C#/Java/Kotlin: `DecodeStatus` from
-`Feed`/`status()`/`status`; Zig: `Status` from `feed(chunk)`; Dart: `DecodeStatus`
-from `Decoder.decode`/`feed`) and leave the end-of-input verdict to the caller, so
-their backends must surface it explicitly:
+error/exception (Go, C++, C, Python, TS) the fallible decode entry point (Go's
+`(msg, error)`, thrown exceptions) already propagates all three. The
+**status-returning** corelibs (C#, Java, Kotlin, Zig, Dart, Rust) treat
+INCOMPLETE as a non-error status (C#/Java: `DecodeStatus` from `Feed`/`feed`;
+Kotlin: `DecodeStatus` from its `status` property; Zig: `Status` from
+`feed(chunk)`; Dart: `DecodeStatus` from `Decoder.decode`/`feed`; Rust: `Status`
+from `Result<Status>`) and leave the end-of-input verdict to the caller, so their
+backends must surface it explicitly:
 
 - C#/Java emit an additional status-surfacing entry point next to the
   back-compat best-effort `Decode`/`decode`: C# `static DecodeStatus
@@ -1067,6 +1068,175 @@ their backends must surface it explicitly:
   verdict §7 says generated code must not hide. `Decoder.finish()` draws the same
   line for the streaming path. The conformance harness pins all three channels —
   the two `trydecode` statuses, and a truncated `decode` that must not succeed.
+- Rust joined this family in 2026-09 (see the next section): `IStream::feed`
+  returns `Result<Status>`, and `sofab::Error` no longer has an `Incomplete`
+  variant at all. So the generated crate names the missing outcome itself —
+  `enum DecodeError { Incomplete, Sofab(sofab::Error) }`, with
+  `From<sofab::Error>` so `?` still carries the corelib's own refusals — and
+  `try_decode` and `Decoder::finish` return `Result<T, DecodeError>`. That is
+  the Zig ruling in Rust spelling: Zig unions the corelib's error set with
+  `error{IncompleteMessage}`, Kotlin raises a non-corelib exception type, and
+  Rust unions the corelib's error enum with the one outcome its error channel
+  deliberately does not model. `Decoder::feed` itself stays on
+  `Result<sofab::Status, sofab::Error>` — mid-stream it holds no framing and has
+  no verdict to give.
+
+#### The stream answers once: `feed` is the only channel (generator#461)
+
+A corelib's incremental decoder used to publish its outcome twice — as `feed`'s
+return value *and* through a status accessor on the stream (`IStream.Status` /
+`status()` / `.status`). The two could not disagree, but the accessor was a
+second decode surface for one fact, and CORELIB_PLAN §5.2.4 allows only one: the
+outcome belongs to the call that produced it. Five corelibs removed the accessor
+in one sweep (2026-09-02) — C#, Java, TypeScript, Zig, Python — leaving `feed` as
+the sole answer; a refusal, which is terminal and therefore not a status at all,
+still travels the error channel with its own code. The two Rust corelibs had no
+accessor to remove and made the same move through the other surface: they took
+INCOMPLETE *off* the error channel, which is the one break in the sweep that
+reaches generated code (last subsection).
+
+**The generated wrapper is the caller, and a caller may remember.** The removal is
+a corelib-side break, but it must not become a break for users of generated code,
+so the accessor-shaped backends keep their public surface exactly as it was and
+back it with a private field holding what the last `feed` returned:
+
+- **C#** `Msg.Decoder` keeps `public DecodeStatus Status`, now reading `_st`.
+  Both `Feed` overloads funnel through the `(chunk, off, len)` one so a single
+  statement records; `Finish()` tests `_st`.
+- **Java** `Msg.Decoder` keeps `public DecodeStatus status()`, now reading `st`,
+  with the same funnel and the same `finish()`. The static `tryDecode` needs no
+  memory at all — `feed`'s return *is* what it returns.
+- **TypeScript** `MsgDecoder` keeps `get status(): DecodeStatus`, now reading a
+  private `st`, and `finish()` tests it. corelib-ts expressed the removal by
+  *narrowing* `feed`'s return type — `DecodeStatus` → `FeedStatus`, a type that
+  admits only Complete and Incomplete, so a caller has no unreachable Invalid arm
+  to write. The generated surface deliberately stays `DecodeStatus`: `FeedStatus`
+  is a **type-only** export, and a value-import of it would break any consumer
+  project compiling with `verbatimModuleSyntax`. Its supertype is import-neutral,
+  non-breaking, and wide enough for the latched Invalid the wrapper can hold.
+- **Python** `_StreamDecoder` keeps its `status` property, now reading `_st`.
+  corelib-py's `feed` already returned the `Status`; only the accessor beside it
+  went. A `SofaLimitError` raised out of `feed` deliberately leaves `_st`
+  untouched, because the corelib's own `_status` was not written on that path
+  either (§6.3 keeps a policy refusal off the three-outcome channel entirely), so
+  remembering `feed`'s return reproduces the removed accessor's readings exactly.
+  An INVALID needs no latch: it is terminal and every later `feed` returns it
+  again.
+- **Zig** `Msg.Decoder` keeps `pub fn status(self: *const Decoder) sofab.Status`,
+  now reading `st: sofab.Status = .complete`. corelib-zig's `feed` already
+  returned `Error!Status`, so it expressed the same removal by deleting the
+  `.refused` enum member that only the accessor could ever produce — `Status` is
+  back to the three §7 outcomes, and `.invalid` is documented as being kept for
+  precisely this mapping. The latch is an `errdefer |e|`, which covers all three
+  error exits in one line: the corelib's own raise and both generated-side
+  guards (`v.inv`, `v.lim`) that run after it.
+
+Two details are load-bearing and neither is caught by simply compiling:
+
+1. **The initial value is COMPLETE, not INCOMPLETE.** An all-default message
+   encodes to zero bytes, so a `Decoder` can legitimately be finished without
+   ever being fed; a stream fed nothing ended on a field boundary. Both corelibs'
+   removed accessors returned COMPLETE for a fresh stream, so this preserves the
+   observable behaviour exactly.
+2. **A refusal must be latched, in every carrier it can arrive in — and only a
+   refusal.** It never comes back as a status, so without a latch a caller that
+   catches the rejection and then asks would be told the stream is Complete. The
+   mapping is the same everywhere and it is a *three-way* test, not an if/else:
+   malformed bytes (`InvalidMessage` / `INVALID_MSG`) → Invalid; a receiver cap
+   (`LimitExceeded`) → Incomplete, since §6.3 forbids reporting a policy stop as
+   the wire verdict; **anything else leaves the memory untouched**. That third
+   arm matters because the same carriers also deliver faults that are not
+   statements about the wire at all — `ARGUMENT` (a missing bound, a bad
+   off/len), a `TypeError` out of a callback, an allocator failure — and a status
+   is a verdict on the message. Answering Incomplete for a caller's own mistake
+   would tell that caller something about the bytes that is not true. Java needs
+   *two* catches applying that same test: a `Visitor` cannot declare a checked
+   exception, so every generated schema-bound guard (§7.1) and every receiver-cap
+   refusal (§6.2.1) arrives as an `UncheckedIOException` wrapping a
+   `SofabException`, and a `catch (SofabException)` alone latches none of them.
+   TypeScript tests `SofabError.code` and requires the `instanceof` first, so a
+   non-corelib throw falls through; Zig's `errdefer` capture tests the error
+   value the same way. The one visible movement is Zig's, and it is forced: a
+   receiver-cap refusal used to read back as `.refused`, a value that no longer
+   exists, so it now maps to `.incomplete` and a `finish()` after a caught cap
+   refusal fails where it once succeeded. Mapping it to `.invalid` instead would
+   report a policy stop as the wire verdict, which §6.3 forbids.
+
+The remembered value had no conformance coverage — every suite reads it only
+indirectly, through `Finish()`/`finish()` — so the project harnesses' `streamdecode`
+mode now asserts `status == fed` after each chunk. That puts the memory under the
+shared-vector skip matrix at one byte per feed and under the chunk-invariance
+sweep at every split width, where a stale or mis-wired accessor fails loudly
+instead of passing silently.
+
+That covers the *accepting* half only, and the latch is the half that is new
+logic. A reject vector exits non-zero whatever the latch recorded, so replaying
+vectors can never distinguish a correct mapping from an inverted one, from one
+that records nothing, or from a deleted catch arm. The harnesses therefore
+**print the remembered status on their refusal path** — `decode error: … [status=X]`
+— and the four suites read it back for three fixtures each: a corelib-raised
+malformation (a varint past the 64-bit bound), a generated-guard rejection (an
+over-count array or an over-maxlen length word), and a receiver-cap refusal.
+Malformed → Invalid, capped → Incomplete, on both of Java's carriers. In Zig the
+`catch` that prints it is also what makes the error path compile at all, for the
+same reason the `status()` call is.
+
+In Zig that assertion does more than assert. **Zig only semantically analyses a
+function something calls**, so a generated `pub fn` no harness reaches is never
+compiled at all: with the old body still in place, `zig build` reported the break
+inside `finish()` and said nothing about `status()`, and a fix repairing only
+`finish()` would have taken the whole `lang-zig` suite green with the accessor
+dead-broken for every user of generated code. The harness call is what puts a
+compiler behind it. The same blind spot applies to every `pub fn` a generated Zig
+module exposes but no harness exercises.
+
+**Rust is the one target where this is a break for generated code, and it is not
+about an accessor.** corelib-rs and corelib-rs-no-std had no status accessor to
+remove; what they did instead is move INCOMPLETE off the error channel —
+`IStream::feed` now returns `Result<Status>` with `Status { Complete,
+Incomplete }`, and `Error::Incomplete` is deleted ("INCOMPLETE is not here, by
+design", `src/error.rs`). Three generated signatures follow from that, and they
+are not the same signature:
+
+- `Decoder::feed` becomes `Result<sofab::Status, sofab::Error>`, mirroring the
+  corelib exactly. Both ordinary outcomes share the `Ok` arm because mid-stream
+  the decoder holds no framing and has no verdict to give; the error arm is left
+  carrying nothing but refusals. Collapsing the two into `Ok(())` would destroy
+  the one bit a streaming caller reads. The precedence in front of it is
+  unchanged: a structural `InvalidMsg` and a crossed receiver cap are still
+  reported ahead of feed's own status (§5.2 / §6.2.1 / §6.3).
+- `try_decode` and `Decoder::finish` become `Result<T, DecodeError>`. They *are*
+  the framing — one is handed the whole buffer, the other is called when the
+  caller says the input is over — so for them a trailing `Status::Incomplete` is
+  truncation, and §7 forbids handing back a half-filled value instead. There is
+  no `sofab::Error` variant left to carry that, which is why the crate declares
+  `DecodeError` (see the §7 family list above). Returning `(T, Status)` instead
+  was rejected: it would make Rust the only target whose whole-buffer decode
+  hands back a truncated message and asks every caller, forever, to remember to
+  check — the exact hiding §7 rules out.
+
+The trap here is that the *wrong* fix compiles. With `feed` returning
+`Result<Status, _>`, the old `fed?;` and `self.feed(&[])?;` still build — `?`
+simply drops the `Status` — and `try_decode` then accepts a truncated message and
+returns it half-filled. Measured on the suite's own in-bound-truncated vector:
+exit 0 and partial JSON where the contract says reject. rustc reports it only as
+`warning: unused Status that must be used`, `cargo build -q` hides warnings, and
+no job runs `-D warnings`. So "it builds" proves nothing on this change; the
+signatures are pinned by unit tests and the verdict by the conformance suite's
+stderr categories, which separate `Incomplete` from `InvalidMsg` in fifteen
+places. `tests/bench/lang/rust.sh`'s hand-written firmware harness needs no edit
+under this shape — `match Msg::try_decode(..) { Ok(d) => .., Err(_) => .. }` is
+signature-agnostic — which a `(T, Status)` return would have broken.
+
+`DecodeError` is a new *module-scope* name in every generated crate, and the
+crate already spends six more on the corelib import (`OStream`, `IStream`,
+`Visitor`, `Id`, `Unsigned`, `Signed`). A schema element whose Rust name lands on
+one of those emits two definitions of it — rustc E0428/E0255, with nothing in the
+diagnostic pointing back at the schema. The backend therefore rejects the
+collision itself, before emitting, naming the schema element and what the name is
+already spent on. Only names that reach the top level qualify: a named enum or
+bitfield emits a lowercase `pub mod`, and `ArrayKind`/`FixlenType` are imported
+inside the per-message decoder module rather than crate-wide.
 
 #### Decode verdict: over-count scalar arrays are INVALID (all families)
 
@@ -2978,7 +3148,7 @@ no unit test able to see it. That is what the rows are for.
 
 #### 9.5.3 Java: which caps ride a corelib call, and which do not
 
-corelib-java 0.12.0 takes §6.2.1's option — "A corelib MAY take a limit as an
+corelib-java 0.13.0 takes §6.2.1's option — "A corelib MAY take a limit as an
 argument and perform the check itself" — on the calls this backend was already
 making at the point each limit guards, and the guards in front of them are
 deleted with it. **One implementation, wherever it runs** is what makes the

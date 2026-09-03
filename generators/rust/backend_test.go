@@ -79,11 +79,22 @@ func TestRustStructural(t *testing.T) {
 		"pub fn serialize<_F: sofab::Flush>(&self, os: &mut OStream<'_, _F>)",
 		"pub fn encode(&self) -> Vec<u8>",
 		"pub fn decode(data: &[u8]) -> Self",
-		"pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error>", // fallible entry point (generator#79)
-		"fed = is.feed(data, &mut v);",                                 // feed's verdict captured, not propagated (generator#190)
-		"if invalid { return Err(sofab::Error::InvalidMsg); }",         // INVALID checked BEFORE feed's error (§5.2, generator#190)
-		"fed?;", // then surface a clean Incomplete / structural InvalidMsg
-		"if overflow { return Err(sofab::Error::BufferFull); }", // fixed-capacity overflow surfaced (generator#82)
+		"pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError>",              // fallible entry point (generator#79)
+		"fed = is.feed(data, &mut v);",                                             // feed's verdict captured, not propagated (generator#190)
+		"if invalid { return Err(DecodeError::Sofab(sofab::Error::InvalidMsg)); }", // INVALID checked BEFORE feed's error (§5.2, generator#190)
+		// Then feed's own verdict. `?` alone would DROP it since corelib-rs#101
+		// moved Complete/Incomplete into the Ok arm, and this entry point holds the
+		// whole buffer -- so a trailing Incomplete is truncation and is rejected
+		// here, not handed back half-filled (generator#461).
+		"if fed? == sofab::Status::Incomplete { return Err(DecodeError::Incomplete); }",
+		"if overflow { return Err(DecodeError::Sofab(sofab::Error::BufferFull)); }", // fixed-capacity overflow surfaced (generator#82)
+		// The verdict type itself: `sofab::Error` has no INCOMPLETE variant by
+		// design (§5.2.1 makes it an outcome), so the crate names the one outcome
+		// the corelib's error channel does not model, beside the corelib's own.
+		"pub enum DecodeError {",
+		"    Incomplete,",
+		"    Sofab(sofab::Error),",
+		"impl From<sofab::Error> for DecodeError {",
 		"err: bool,",                           // sticky overflow flag on the visitor (generator#82)
 		"inv: bool,",                           // sticky malformed-message flag (generator#100)
 		"mod myfirstmessage_dec {",             // isolated decode module
@@ -264,16 +275,16 @@ messages:
 		"(_Loc::Root_sa, _) => if total > MAX_DYN_STRING_LEN { self.lim = true; return; },",
 		"(_Loc::Root, 3) => if total > MAX_DYN_BLOB_LEN { self.lim = true; return; },",
 		// try_decode surfaces the flag as LimitExceeded.
-		"if limited { return Err(sofab::Error::LimitExceeded); }",
+		"if limited { return Err(DecodeError::Sofab(sofab::Error::LimitExceeded)); }",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs (limits) missing %q", want)
 		}
 	}
 	// Precedence order in try_decode: inv first, then lim, then err.
-	invIdx := strings.Index(m, "if invalid { return Err(sofab::Error::InvalidMsg); }")
-	limIdx := strings.Index(m, "if limited { return Err(sofab::Error::LimitExceeded); }")
-	errIdx := strings.Index(m, "if overflow { return Err(sofab::Error::BufferFull); }")
+	invIdx := strings.Index(m, "if invalid { return Err(DecodeError::Sofab(sofab::Error::InvalidMsg)); }")
+	limIdx := strings.Index(m, "if limited { return Err(DecodeError::Sofab(sofab::Error::LimitExceeded)); }")
+	errIdx := strings.Index(m, "if overflow { return Err(DecodeError::Sofab(sofab::Error::BufferFull)); }")
 	if invIdx < 0 || limIdx < 0 || errIdx < 0 || !(invIdx < limIdx && limIdx < errIdx) {
 		t.Errorf("try_decode checks out of order: inv=%d lim=%d err=%d (want inv < lim < err)", invIdx, limIdx, errIdx)
 	}
@@ -285,8 +296,8 @@ messages:
 	// wants, a connection held open at the cost of a truncated header. A
 	// structural INVALID from feed still dominates the cap (§5.2.3), so that
 	// check stays in front of it.
-	fedIdx := strings.Index(m, "\n        fed?;")
-	fedInvIdx := strings.Index(m, "if let Err(sofab::Error::InvalidMsg) = fed { return Err(sofab::Error::InvalidMsg); }")
+	fedIdx := strings.Index(m, "\n        if fed? == sofab::Status::Incomplete {")
+	fedInvIdx := strings.Index(m, "if let Err(sofab::Error::InvalidMsg) = fed { return Err(DecodeError::Sofab(sofab::Error::InvalidMsg)); }")
 	if fedIdx < 0 || fedInvIdx < 0 || !(invIdx < fedInvIdx && fedInvIdx < limIdx && limIdx < fedIdx) {
 		t.Errorf("try_decode must report LimitExceeded before feed's Incomplete, and a structural InvalidMsg before both: inv=%d fedInv=%d lim=%d fed=%d", invIdx, fedInvIdx, limIdx, fedIdx)
 	}
@@ -301,8 +312,8 @@ messages:
 	}
 	finishFn := m[strings.Index(m, "pub fn finish("):]
 	finishFn = finishFn[:strings.Index(finishFn, "Ok(self.m)")]
-	finLim := strings.Index(finishFn, "if self.lim { return Err(sofab::Error::LimitExceeded); }")
-	finProbe := strings.Index(finishFn, "self.feed(&[])?;")
+	finLim := strings.Index(finishFn, "if self.lim { return Err(DecodeError::Sofab(sofab::Error::LimitExceeded)); }")
+	finProbe := strings.Index(finishFn, "if self.feed(&[])? == sofab::Status::Incomplete {")
 	if finLim < 0 || finProbe < 0 || finLim > finProbe {
 		t.Errorf("Decoder::finish must check the cap ahead of the end-of-input probe: lim=%d probe=%d\n%s", finLim, finProbe, finishFn)
 	}
@@ -319,7 +330,7 @@ messages:
 		"const MAX_DYN_ARRAY_COUNT: usize = 65536;",
 		"const MAX_DYN_STRING_LEN: usize = 1048576;",
 		"const MAX_DYN_BLOB_LEN: usize = 4194304;",
-		"if limited { return Err(sofab::Error::LimitExceeded); }",
+		"if limited { return Err(DecodeError::Sofab(sofab::Error::LimitExceeded)); }",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("default limits missing %q", want)
@@ -472,6 +483,67 @@ func moduleFromYAML(t *testing.T, src string, cfg map[string]any) string {
 	}
 	t.Fatal("no module")
 	return ""
+}
+
+// TestRustReservedTypeNames: a schema element whose Rust name collides with a
+// module-scope name the crate already spends -- `DecodeError`, which generator#461
+// added, or one of the six corelib imports -- is refused by the generator, naming
+// the element. Left to rustc it is an E0428/E0255 on generated code with nothing
+// pointing back at the schema, and `decode_error` in particular compiled fine
+// until #461 introduced the enum.
+func TestRustReservedTypeNames(t *testing.T) {
+	// A named struct or union cannot reach this set: it is emitted under its
+	// graph key, so `struct/Point` becomes `StructPoint`. Only a message can.
+	schemaFor := func(t *testing.T, src string) *ir.Schema {
+		t.Helper()
+		doc, err := parser.Parse([]byte(src), "inline.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolved, _ := doc.Resolve()
+		if errs := parser.Validate(resolved); errs != nil {
+			t.Fatalf("invalid: %v", errs)
+		}
+		s, err := model.Build(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := analysis.Analyze(s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	for _, tc := range []struct{ name, src, want string }{
+		{"message", `
+version: 1
+messages:
+  decode_error: { payload: { a: { id: 0, type: u32 } } }
+`, "DecodeError"},
+		{"corelib-import", `
+version: 1
+messages:
+  i_stream: { payload: { a: { id: 0, type: u32 } } }
+`, "IStream"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := (&Backend{}).Generate(schemaFor(t, tc.src), map[string]any{})
+			if err == nil {
+				t.Fatalf("a schema element named %q must be refused, not emitted", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the error must name the colliding type %q; got: %v", tc.want, err)
+			}
+		})
+	}
+	// ...and a name that merely resembles one still generates.
+	m := moduleFromYAML(t, `
+version: 1
+messages:
+  decode_errors: { payload: { a: { id: 0, type: u32 } } }
+`, map[string]any{})
+	if !strings.Contains(m, "pub struct DecodeErrors {") {
+		t.Error("only the exact collisions are reserved; DecodeErrors must still generate")
+	}
 }
 
 // A `count: N` array is fixed-length: the encoder emits only the elements up to
@@ -1208,19 +1280,28 @@ messages:
 			"pub use m_dec::Decoder as MDecoder;",
 			"pub fn decoder() -> MDecoder {",
 			"pub struct Decoder {",
-			"pub fn feed(&mut self, chunk: &[u8]) -> Result<(), sofab::Error> {",
-			"pub fn finish(mut self) -> Result<M, sofab::Error> {",
+			// feed mirrors the corelib since corelib-rs#101: Complete and Incomplete
+			// are BOTH ordinary outcomes and share the Ok arm, because only the
+			// caller's framing knows whether more bytes come (§5.2.1/§5.2.4). The
+			// error channel is left carrying nothing but refusals (generator#461).
+			"pub fn feed(&mut self, chunk: &[u8]) -> Result<sofab::Status, sofab::Error> {",
+			// finish IS that framing, so it is where the status turns into a verdict
+			// and the signature changes with it.
+			"pub fn finish(mut self) -> Result<M, DecodeError> {",
 			// finish must probe end-of-input, or a stream cut mid-field would be
 			// handed back as a half-filled value instead of rejected. The corelib
-			// exposes no finalize(); an empty chunk is the documented probe.
-			"self.feed(&[])?;",
+			// exposes no finalize(); an empty chunk is the documented probe, and its
+			// Incomplete has to be TESTED -- `?` no longer rejects it for us.
+			"if self.feed(&[])? == sofab::Status::Incomplete {",
+			"return Err(DecodeError::Incomplete);",
 			// The state the visitor needs across chunks lives in the decoder, not
 			// in a borrow: a self-referential struct would need unsafe.
 			"let mut v = V { m: &mut self.m,",
 			"let r = self.is.feed(chunk, &mut v);",
 			"let V {",
 			// INVALID dominates a truncated tail, so it is checked before feed's
-			// own Incomplete verdict is returned.
+			// own Incomplete verdict is returned. In feed it stays a plain
+			// sofab::Error -- feed has no truncation verdict to give.
 			"if self.inv { return Err(sofab::Error::InvalidMsg); }",
 		} {
 			if !strings.Contains(m, want) {
@@ -1884,6 +1965,101 @@ func TestRustStaticStorageOnStd(t *testing.T) {
 	}
 }
 
+// TestRustDecodeVerdictCarriesTruncation: corelib-rs#101 / corelib-rs-no-std#114
+// moved INCOMPLETE out of `sofab::Error` and into `feed`'s success arm, where
+// CORELIB_PLAN §5.2.1 says it belongs — it is an outcome, not a failure, and only
+// the caller's framing can turn it into one. `sofab::Error::Incomplete` is gone,
+// so the generated `Decoder::feed` mirrors the corelib and the two entry points
+// that DO hold the framing keep rejecting truncation through a verdict type of
+// their own (generator#461).
+//
+// The point of pinning this is that the wrong fix compiles. With `feed` returning
+// `Result<Status, _>` the old `fed?;` / `self.feed(&[])?;` still build — `?` just
+// drops the Status — and `try_decode` then accepts a truncated message and hands
+// back a half-filled value. rustc says so only as an `unused must_use` warning,
+// and nothing in CI runs `-D warnings`.
+func TestRustDecodeVerdictCarriesTruncation(t *testing.T) {
+	for _, cfg := range []map[string]any{
+		{"corelib": "rs"},                               // std
+		{"corelib": "rs-no-std"},                        // no_std, heapless
+		{"corelib": "rs-no-std", "allow_dynamic": true}, // no_std, alloc
+		{"corelib": "rs", "allow_dynamic": false},       // std, static storage
+	} {
+		m := exampleModule(t, cfg)
+		for _, want := range []string{
+			// One verdict type per crate, an enum union of the corelib's errors and
+			// the single outcome its error channel deliberately does not model. This
+			// is the Rust spelling of the Zig backend's
+			// `DecodeError = sofab.Error || error{IncompleteMessage}` and of Kotlin's
+			// non-corelib exception: a distinct name, so the §7 outcomes never
+			// collapse into InvalidMsg.
+			"pub enum DecodeError {",
+			"    Incomplete,",
+			"    Sofab(sofab::Error),",
+			// `?` on a corelib error has to keep working inside the generated bodies.
+			"impl From<sofab::Error> for DecodeError {",
+			"impl core::fmt::Display for DecodeError {",
+			// feed mirrors the corelib exactly: both ordinary outcomes in Ok, every
+			// refusal in Err.
+			"pub fn feed(&mut self, chunk: &[u8]) -> Result<sofab::Status, sofab::Error> {",
+			// The two framing-holding entry points reject a trailing Incomplete, and
+			// they must TEST it rather than lean on `?`.
+			"if fed? == sofab::Status::Incomplete { return Err(DecodeError::Incomplete); }",
+			"if self.feed(&[])? == sofab::Status::Incomplete {",
+			"                return Err(DecodeError::Incomplete);",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing decode-verdict shape %q", cfg, want)
+			}
+		}
+		// The removed variant must not come back in any spelling: it no longer
+		// exists on either corelib, and folding truncation onto InvalidMsg would
+		// collapse two of the three §7 outcomes.
+		if strings.Contains(m, "sofab::Error::Incomplete") {
+			t.Errorf("message.rs (%v) still names sofab::Error::Incomplete, which both corelibs removed", cfg)
+		}
+		// `impl std::error::Error` is the std half only — the no_std crate has no
+		// std to name, and Display (core::fmt) is what both share.
+		if got, want := strings.Contains(m, "impl std::error::Error for DecodeError {}"), cfg["corelib"] != "rs-no-std"; got != want {
+			t.Errorf("message.rs (%v): std::error::Error impl = %v, want %v", cfg, got, want)
+		}
+	}
+}
+
+// TestRustHarnessTreatsBothStatusesAsOrdinary: the streamdecode harness used to
+// match `Ok(()) | Err(sofab::Error::Incomplete)`, which no longer compiles. Both
+// statuses are ordinary mid-stream — an Incomplete chunk says the BYTES ended
+// there, not that the message is bad — so the loop ignores the status entirely
+// and lets finish() give the verdict, while every Err is fatal on the spot
+// because since corelib-rs#101 the error channel carries only refusals.
+func TestRustHarnessTreatsBothStatusesAsOrdinary(t *testing.T) {
+	files, err := (&Backend{}).Generate(exampleSchema(t), map[string]any{"corelib": "rs", "emit": "project"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var main string
+	for _, f := range files {
+		if f.Path == "src/main.rs" {
+			main = string(f.Content)
+		}
+	}
+	if main == "" {
+		t.Fatal("no src/main.rs")
+	}
+	for _, want := range []string{
+		"                    match dec.feed(&[*b]) {",
+		"                        Ok(_) => {}",
+		"                        Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }",
+	} {
+		if !strings.Contains(main, want) {
+			t.Errorf("main.rs missing %q", want)
+		}
+	}
+	if strings.Contains(main, "sofab::Error::Incomplete") {
+		t.Error("main.rs still matches the removed sofab::Error::Incomplete variant")
+	}
+}
+
 // TestRustStaticStorageCargoDep: heapless reaches the generated std crate only
 // when static storage is selected. A project that never asked for inline storage
 // should not gain a third-party container dependency.
@@ -2023,7 +2199,7 @@ messages:
 		// length. Its own element count is capped beside it, id first.
 		"_Loc::Root_dmat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT",
 		// and the flag is surfaced as the policy category, never as InvalidMsg.
-		"if limited { return Err(sofab::Error::LimitExceeded); }",
+		"if limited { return Err(DecodeError::Sofab(sofab::Error::LimitExceeded)); }",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs missing wrapper index cap %q:\n%s", want, m)

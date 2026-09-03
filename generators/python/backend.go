@@ -321,6 +321,19 @@ func (g *gen) decodeSection(s *ir.Schema) string {
 // any size. There is deliberately no finish()/end() — the status each feed
 // returns IS the outcome so far, and whether an INCOMPLETE at end-of-input is
 // acceptable is the caller's framing decision (CORELIB_PLAN §5.2.4).
+//
+// The `status` property is this reader's MEMORY of that outcome, not a second
+// question put to the corelib: §5.2.4 gives one channel per fact, and
+// corelib-py removed `Decoder.status` accordingly (generator#461). The rule
+// binds the decoder, not its caller, and this reader is the caller — so the
+// generated surface keeps `status` and backs it with `_st`.
+//
+// A SofaLimitError raised out of feed deliberately leaves `_st` alone. That is
+// what the removed accessor did too: the corelib's own `_status` is not touched
+// on the limit path (§6.3 keeps a policy refusal off the three-outcome channel
+// entirely), so remembering feed's return reproduces the old readings exactly.
+// An INVALID needs no latch either — it is terminal and every later feed
+// returns it again.
 func (g *gen) emitStreamDecoder(f *pyfile) {
 	f.line("class _StreamDecoder:")
 	f.line("    \"\"\"Streaming reader: feed chunks, read the message when it is COMPLETE.")
@@ -329,21 +342,32 @@ func (g *gen) emitStreamDecoder(f *pyfile) {
 	f.line("    COMPLETE / INCOMPLETE / INVALID. There is no finalize step: an")
 	f.line("    INCOMPLETE tail is retained and continued by the next chunk, and only")
 	f.line("    the caller's framing knows whether more can still come.")
+	f.line("")
+	f.line("    status reports what the last feed() returned. The corelib publishes")
+	f.line("    that outcome exactly once, on feed's return, and keeps no accessor to")
+	f.line("    ask a second time -- so this reader is the caller that remembers, and")
+	f.line("    its own surface is unchanged.")
 	f.line(`    """`)
 	f.line("")
-	f.line("    __slots__ = (\"message\", \"_d\")")
+	f.line("    __slots__ = (\"message\", \"_d\", \"_st\")")
 	f.line("")
 	f.line("    def __init__(self, msg_cls, vis_cls, reassembly=REASSEMBLY) -> None:")
 	f.line("        self.message = msg_cls()")
 	f.line("        self._d = Decoder(visitor=vis_cls(self.message), %s,", g.capsArgs())
 	f.line("                          reassembly=reassembly)")
+	// COMPLETE, not INCOMPLETE: an all-default message is zero bytes on the wire,
+	// so a reader can legitimately be read before it is ever fed, and a stream fed
+	// nothing ended on a field boundary. It is also what the corelib's removed
+	// accessor answered for a fresh decoder (its own _status starts COMPLETE).
+	f.line("        self._st = Status.COMPLETE")
 	f.line("")
 	f.line("    def feed(self, chunk) -> Status:")
-	f.line("        return self._d.feed(chunk)")
+	f.line("        self._st = self._d.feed(chunk)")
+	f.line("        return self._st")
 	f.line("")
 	f.line("    @property")
 	f.line("    def status(self) -> Status:")
-	f.line("        return self._d.status")
+	f.line("        return self._st")
 	f.line("")
 	f.line("    @property")
 	f.line("    def error(self):")

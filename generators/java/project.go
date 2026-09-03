@@ -199,11 +199,33 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		f.line("                    int csz = args.length > 2 ? Integer.parseInt(args[2]) : 1;")
 		f.line("                    int step = csz > 0 ? csz : Math.max(input.length, 1);")
 		f.line("                    for (int off = 0; off < input.length; off += step) {")
-		f.line("                        dec.feed(input, off, Math.min(step, input.length - off));")
+		f.line("                        org.sofabuffers.sofab.DecodeStatus fed =")
+		f.line("                            dec.feed(input, off, Math.min(step, input.length - off));")
+		// The stream publishes its outcome once, as feed's return value, and has
+		// no accessor to ask again -- so Decoder.status() is the wrapper
+		// remembering it. Nothing else in the suite reads that memory, and a
+		// stale one would still let every vector pass, so check it here: it has
+		// to agree with the feed that produced it, on every chunk of every
+		// vector at every split width (generator#461).
+		f.line("                        if (dec.status() != fed) {")
+		f.line("                            throw new IllegalStateException(")
+		f.line("                                \"status \" + dec.status() + \" disagrees with the feed that set it (\" + fed + \")\");")
+		f.line("                        }")
 		f.line("                    }")
 		f.line("                    obj = dec.finish();")
 		f.line("                } catch (Exception e) {")
-		f.line("                    System.err.println(\"decode error: \" + e);")
+		// The remembered status is printed, not just the throwable. A refusal is
+		// terminal and leaves through this catch, so the ONLY way the latch in
+		// the generated feed -- the one arm of #461 that is new logic rather
+		// than a rename, and the one that has to answer for BOTH carriers
+		// (bare SofabException and the UncheckedIOException a Visitor callback
+		// has to wrap in) -- becomes observable to a suite is by naming what it
+		// recorded. Without it a deleted arm, or an inverted mapping, still
+		// exits 1 and every reject vector still passes.
+		// tests/conformance/java/run.sh greps this for the malformed and the
+		// over-cap fixtures it already builds.
+		f.line("                    System.err.println(")
+		f.line("                        \"decode error: \" + e + \" [status=\" + dec.status() + \"]\");")
 		f.line("                    System.exit(1); return;")
 		f.line("                }")
 		f.line("                StringBuilder sb = new StringBuilder(); Json.to(obj, sb);")

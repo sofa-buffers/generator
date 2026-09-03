@@ -154,14 +154,16 @@ fn main() {
     for size in [1usize, 2, 3, 5, 16, 64, 4096] {
         let mut dec = Myfirstmessage::decoder();
 
-        // Feed everything. Neither Ok nor Incomplete means "done" here: the wire
-        // format has no top-level end marker, so a chunk that happens to end on a
-        // field boundary returns Ok even though more of the message follows.
-        // Stopping at the first Ok is exactly the mistake this loop must not make
-        // -- at chunk size 1 that would truncate after the first complete field.
+        // Feed everything. NEITHER status means "done" here: the wire format has
+        // no top-level end marker, so a chunk that happens to end on a field
+        // boundary answers Status::Complete even though more of the message
+        // follows. Stopping at the first Complete is exactly the mistake this loop
+        // must not make -- at chunk size 1 that would truncate after the first
+        // complete field. Both statuses are therefore ignored, and every Err is
+        // fatal: the error channel now carries refusals only.
         for chunk in one_shot.chunks(size) {
             match dec.feed(chunk) {
-                Ok(()) | Err(sofab::Error::Incomplete) => continue,
+                Ok(_) => continue,
                 Err(e) => panic!("chunk size {size}: feed failed: {e:?}"),
             }
         }
@@ -186,13 +188,20 @@ fn main() {
     // half-read, and finish() must say so rather than hand over the partial
     // value. That is what the end-of-input probe inside finish() is for; the
     // counter proves the path is reached instead of being silently unreachable.
+    //
+    // The verdict is DecodeError::Incomplete, not sofab::Error::Incomplete: the
+    // corelib's feed answers Ok(Status::Incomplete) because mid-stream it holds no
+    // framing, and finish() is where the caller's framing turns that status into a
+    // rejection. This assertion is what makes that conversion observable -- a
+    // finish() that merely propagated feed's Result with `?` would compile, drop
+    // the status, and count every cut as a completion.
     let mut incompletes = 0;
     let mut completions = 0;
     for cut in 1..one_shot.len() {
         let mut dec = Myfirstmessage::decoder();
         let _ = dec.feed(&one_shot[..cut]);
         match dec.finish() {
-            Err(sofab::Error::Incomplete) => incompletes += 1,
+            Err(DecodeError::Incomplete) => incompletes += 1,
             Ok(_) => completions += 1,
             Err(e) => panic!("truncating at {cut} reported {e:?}"),
         }
@@ -226,7 +235,7 @@ so a half-read field would be returned as a value"
         let mut dec = Myfirstmessage::decoder();
         for chunk in deep.chunks(size) {
             match dec.feed(chunk) {
-                Ok(()) | Err(sofab::Error::Incomplete) => continue,
+                Ok(_) => continue,
                 Err(e) => panic!("deep-nest chunk size {size}: feed failed: {e:?}"),
             }
         }

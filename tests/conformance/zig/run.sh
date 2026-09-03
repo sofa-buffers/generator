@@ -486,6 +486,36 @@ fi
 "$WORK/nolim/zig-out/bin/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
 
+# The LATCH -- the one thing generator#461 added that is new logic rather than a
+# rename. A refusal is terminal and never comes back as a status, so the
+# generated feed's errdefer records what it MEANT before the error leaves, and
+# Decoder.status() answers from that memory. Every reject vector exits non-zero
+# whatever the errdefer recorded, so no amount of vector replay can tell a
+# correct mapping from an inverted one or from one that records nothing. The
+# harness therefore PRINTS the remembered status on its error path and this block
+# reads it: malformed bytes are .invalid, a receiver cap is .incomplete and never
+# .invalid (CORELIB_PLAN 6.3 -- a policy stop is this side's decision, not a
+# verdict on the wire). Catching there is also what makes Zig compile the error
+# path at all: it analyses only what something reaches.
+echo "==> a refusal latches into the remembered status (generator#461)"
+# A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
+# by the CORELIB, where overcount.bin is refused by a GENERATED guard -- the two
+# routes into the same errdefer (4.1).
+printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
+latch() {   # <harness> <fixture> <want-status> <message>
+    lh=$1 lfx=$2 lwant=$3 lmsg=$4
+    if "$lh" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
+        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
+    fi
+    grep -q "\[status=$lwant\]" "$WORK/latch.err" || {
+        echo "FAIL: $(basename "$lfx") -- the refusal must latch status=$lwant; got:"
+        cat "$WORK/latch.err"; exit 1; }
+}
+latch "$WORK/ex/zig-out/bin/harness"  "$WORK/varint_overflow.bin" invalid    myfirstmessage
+latch "$WORK/ex/zig-out/bin/harness"  "$WORK/overcount.bin"       invalid    myfirstmessage
+latch "$WORK/lim/zig-out/bin/harness" "$WORK/overlimit.bin"       incomplete dyn
+echo "==> refusal latch OK"
+
 # CORELIB_PLAN 6.2.1, "a skipped field is never capped": a limit bounds an
 # ALLOCATION, and a field MESSAGE_SPEC 7.3 skips is walked, not materialised, so
 # no cap may reach it. A decode that steps over an over-cap field it was never

@@ -576,6 +576,41 @@ grep -q "InvalidMessage" "$WORK/cap_eof_maxlen.err" || {
 
 echo "==> string/blob caps OK"
 
+# The LATCH -- the one thing generator#461 added that is new logic rather than a
+# rename. A refusal is terminal and never comes back as a status, so the
+# generated Feed records what it MEANT before rethrowing, and Decoder.Status
+# answers from that memory. Every reject vector exits non-zero whatever the latch
+# recorded, so no amount of vector replay can tell a correct mapping from an
+# inverted one, from one that records nothing, or from a catch arm deleted
+# outright. The harness therefore PRINTS the remembered status on its error path
+# and this block reads it: malformed bytes are Invalid, a receiver cap is
+# Incomplete and never Invalid (CORELIB_PLAN 6.3 -- a policy stop is this side's
+# decision, not a verdict on the wire).
+#
+# All three arrival routes are covered: overcount.bin trips a GENERATED
+# schema-bound guard mid-array, cap_eof_maxlen.bin trips one at a fixlen length
+# word, and cap_str_over.bin is refused by the CORELIB's own cap check.
+echo "==> a refusal latches into the remembered status (generator#461)"
+latch() {   # <fixture> <want-status> <message> <harness...>
+    lfx=$1 lwant=$2 lmsg=$3
+    shift 3
+    if "$@" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
+        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
+    fi
+    grep -q "\[status=$lwant\]" "$WORK/latch.err" || {
+        echo "FAIL: $(basename "$lfx") -- the refusal must latch status=$lwant; got:"
+        cat "$WORK/latch.err"; exit 1; }
+}
+# A varint past the 64-bit bound: 10 continuation bytes and an eleventh. This one
+# is refused by the CORELIB itself rather than by a generated guard, so it is the
+# other side of the same catch (S4.1 -- INVALID only past the bound).
+printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
+latch "$WORK/overcount.bin"       Invalid    myfirstmessage $H
+latch "$WORK/varint_overflow.bin" Invalid    myfirstmessage $H
+latch "$WORK/cap_eof_maxlen.bin"  Invalid    caps           $HP
+latch "$WORK/cap_str_over.bin"    Incomplete caps           $HP
+echo "==> refusal latch OK"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"
 

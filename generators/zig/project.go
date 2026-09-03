@@ -210,10 +210,36 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// An .incomplete per feed is the normal verdict for a chunk that ended
 		// mid-field: it says the BYTES ended there, not that the message is bad.
 		// Only finish() decides on the message as a whole.
+		// The stream publishes its outcome once, as feed's return value, and has
+		// no accessor to ask again -- so Decoder.status() is the wrapper
+		// remembering it. Checking it here is not optional bookkeeping: Zig only
+		// semantically analyses a function something calls, so a generated
+		// `pub fn status` that nothing in the harness reaches is never compiled
+		// at all, and a broken body takes the whole suite green. This call both
+		// compiles it and asserts the memory agrees with the feed that set it,
+		// on every byte of every vector (generator#461).
 		f.line("            for (input) |b| {")
-		f.line("                _ = try dec.feed(&[_]u8{b});")
+		// `catch`, not `try`: a refusal is terminal and would otherwise leave
+		// main without anyone reading the latch, and the latch -- the errdefer
+		// in the generated feed -- is the one arm of #461 that is new logic
+		// rather than a rename. Printing what it recorded is what makes it
+		// observable to a suite: without it an inverted mapping, or an errdefer
+		// that sets nothing, still exits 1 and every reject vector still
+		// passes. It also forces semantic analysis of the error path, which
+		// Zig performs only for code something reaches.
+		// tests/conformance/zig/run.sh greps this line.
+		f.line("                const fed = dec.feed(&[_]u8{b}) catch |e| {")
+		f.line("                    std.debug.print(\"decode error: {s} [status={s}]\\n\",")
+		f.line("                                    .{ @errorName(e), @tagName(dec.status()) });")
+		f.line("                    std.process.exit(1);")
+		f.line("                };")
+		f.line("                if (dec.status() != fed) return error.StatusDisagreesWithFeed;")
 		f.line("            }")
-		f.line("            try dec.finish();")
+		f.line("            dec.finish() catch |e| {")
+		f.line("                std.debug.print(\"decode error: {s} [status={s}]\\n\",")
+		f.line("                                .{ @errorName(e), @tagName(dec.status()) });")
+		f.line("                std.process.exit(1);")
+		f.line("            };")
 		f.line("            try toJson_%s(&obj, out);", mt)
 		f.line("            try out.writeByte('\\n');")
 		f.line("        } else {")

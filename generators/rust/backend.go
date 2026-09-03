@@ -64,6 +64,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 			return nil, err
 		}
 	}
+	if err := g.checkReservedNames(s); err != nil {
+		return nil, err
+	}
 	files := []generator.File{{Path: "src/message.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -258,7 +261,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
 		f.line("// only schema-unbounded fields (array without count, string/blob without")
 		f.line("// maxlen); schema-bounded fields stay governed by their own bound. Exceeding")
-		f.line("// a cap fails try_decode with sofab::Error::LimitExceeded, never a clamp.")
+		f.line("// a cap fails try_decode with DecodeError::Sofab(LimitExceeded), never a clamp.")
 		if g.limits.arrayHas {
 			f.line("const MAX_DYN_ARRAY_COUNT: usize = %d;", g.limits.arrayCount)
 		}
@@ -269,6 +272,12 @@ func (g *gen) module(s *ir.Schema) []byte {
 			f.line("const MAX_DYN_BLOB_LEN: usize = %d;", g.limits.blobLen)
 		}
 		f.blank()
+	}
+
+	// The decode verdict type. Only a message has a fallible decode entry point,
+	// so a schema of pure named types needs none.
+	if len(s.Messages) > 0 {
+		g.emitDecodeError(f)
 	}
 
 	for _, key := range s.NamedOrder {
@@ -290,6 +299,111 @@ func (g *gen) module(s *ir.Schema) []byte {
 		g.emitStruct(f, exported(m.Name), m.Fields, true, m.Summary)
 	}
 	return f.bytes()
+}
+
+// rustReservedNames are the module-scope Rust type names the emitted crate has
+// already spent, mapped to what spends them. A schema element whose Rust name
+// lands on one of these produces a module with two definitions of that name --
+// rustc E0428 or E0255 -- with nothing in the diagnostic pointing back at the
+// schema, so the check below turns it into a generator-time error naming the
+// element instead.
+//
+// Only names that reach the TOP level of src/message.rs belong here. A named
+// enum or bitfield emits a lowercase `pub mod`, which cannot collide with a
+// type, and ArrayKind/FixlenType are imported inside the per-message decoder
+// module rather than crate-wide.
+//
+// Only a MESSAGE can land on one. A named struct or union is emitted under its
+// graph key, which carries its category -- `struct/Point` becomes `StructPoint`
+// -- so its name is out of reach of this set by construction.
+var rustReservedNames = map[string]string{
+	"DecodeError": "the crate's own decode verdict enum",
+	"OStream":     "an encoder type imported from the corelib",
+	"IStream":     "a decoder type imported from the corelib",
+	"Visitor":     "a decode-callback trait imported from the corelib",
+	"Id":          "a field-id type imported from the corelib",
+	"Unsigned":    "a wire-scalar type imported from the corelib",
+	"Signed":      "a wire-scalar type imported from the corelib",
+}
+
+// checkReservedNames rejects a schema whose Rust type names collide with what
+// the crate defines or imports for itself, before rustc has to.
+func (g *gen) checkReservedNames(s *ir.Schema) error {
+	for _, m := range s.Messages {
+		name := exported(m.Name)
+		if spent := rustReservedNames[name]; spent != "" {
+			return fmt.Errorf("rust: message %q generates the type name %q, which the emitted "+
+				"crate already uses for %s -- rename the message", m.Name, name, spent)
+		}
+	}
+	return nil
+}
+
+// emitDecodeError emits the crate's decode verdict type.
+//
+// `sofab::Error` cannot carry the whole verdict on its own. CORELIB_PLAN §5.2.1
+// makes INCOMPLETE a decode OUTCOME and not an error, so corelib-rs deliberately
+// has no variant for it (`src/error.rs`: "INCOMPLETE is not here, by design");
+// `IStream::feed` reports it as `Ok(Status::Incomplete)` because only the
+// caller's framing knows whether more bytes can still come (generator#461).
+//
+// `try_decode` and `Decoder::finish` ARE that framing: the first is handed the
+// whole buffer, the second is called when the caller says the input is over. For
+// them a trailing INCOMPLETE is truncation, and §7 forbids hiding it behind a
+// half-filled value. That is the same ruling the Zig backend reached with
+// `DecodeError = sofab.Error || error{IncompleteMessage}` and the Kotlin backend
+// with a non-corelib exception type: a distinct name, so the §7 outcomes never
+// collapse into InvalidMsg. This is its Rust spelling — an enum union of
+// `sofab::Error` and the one outcome it does not model.
+func (g *gen) emitDecodeError(f *rfile) {
+	// Plain code spans, not intra-doc links: `try_decode` is an inherent method on
+	// every message type and `finish` lives in a private per-message module, so a
+	// link would be unresolvable and `cargo doc` would warn on every crate.
+	f.line("/// Why a whole-buffer decode was refused: the error half of a message's")
+	f.line("/// `try_decode` and of `Decoder::finish`.")
+	f.line("///")
+	f.line("/// `sofab::Error` has no INCOMPLETE variant on purpose: running out of")
+	f.line("/// bytes mid-field is an outcome rather than a failure, so `IStream::feed`")
+	f.line("/// hands it back as `Ok(Status::Incomplete)` -- only the caller's framing")
+	f.line("/// can say whether more bytes are still coming. The two entry points above")
+	f.line("/// ARE that framing, so for them a trailing INCOMPLETE is truncation. It")
+	f.line("/// stays distinct from `InvalidMsg`: a truncated message is unfinished,")
+	f.line("/// not malformed, and more bytes would complete it.")
+	f.line("#[derive(Debug, Clone, Copy, PartialEq, Eq)]")
+	f.line("pub enum DecodeError {")
+	f.line("    /// The bytes ended inside a field, or with a sequence still open, and")
+	f.line("    /// there are no more: `Status::Incomplete` where that is final.")
+	f.line("    Incomplete,")
+	f.line("    /// Whatever the decode itself refused, in the corelib's own vocabulary:")
+	f.line("    /// malformed bytes, a receiver-side cap (S6.2.1/S6.3), an overflowed")
+	f.line("    /// fixed-capacity field.")
+	f.line("    Sofab(sofab::Error),")
+	f.line("}")
+	f.blank()
+	// The From impl is what keeps `?` working through the corelib's own errors:
+	// the generated bodies propagate feed's terminal verdicts with a bare `?`, and
+	// a caller can write `try_decode(b)?` in a function over DecodeError.
+	f.line("impl From<sofab::Error> for DecodeError {")
+	f.line("    fn from(e: sofab::Error) -> Self { DecodeError::Sofab(e) }")
+	f.line("}")
+	f.blank()
+	// Debug is derived and is what the conformance harness prints; Display is what
+	// makes the type usable in a caller's own error chain. core::fmt so the no_std
+	// profile gets it too -- and {:?} for the wrapped value rather than a Display
+	// bound, which corelib-rs-no-std's Error does not implement.
+	f.line("impl core::fmt::Display for DecodeError {")
+	f.line("    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {")
+	f.line("        match self {")
+	f.line("            DecodeError::Incomplete => f.write_str(\"incomplete message\"),")
+	f.line("            DecodeError::Sofab(e) => write!(f, \"{:?}\", e),")
+	f.line("        }")
+	f.line("    }")
+	f.line("}")
+	f.blank()
+	if !g.noStd {
+		f.line("impl std::error::Error for DecodeError {}")
+		f.blank()
+	}
 }
 
 func (g *gen) emitEnum(f *rfile, nt *ir.NamedType) {
@@ -534,7 +648,10 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 		f.line("    pub fn decode(data: &[u8]) -> Self {")
 		f.line("        %s_dec::decode(data)", strings.ToLower(name))
 		f.line("    }")
-		f.line("    pub fn try_decode(data: &[u8]) -> Result<Self, sofab::Error> {")
+		f.line("    /// Decode a whole buffer, surfacing the accept/reject verdict --")
+		f.line("    /// a truncated tail included, which is `DecodeError::Incomplete` and")
+		f.line("    /// not a half-filled value.")
+		f.line("    pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError> {")
 		f.line("        %s_dec::try_decode(data)", strings.ToLower(name))
 		f.line("    }")
 		f.line("    /// An incremental decoder for this message: hold it and feed chunks as")
