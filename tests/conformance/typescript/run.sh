@@ -33,6 +33,13 @@ messages:
   veci: { payload: { a: { id: 0, type: i64 } } }
   vecf32: { payload: { a: { id: 0, type: fp32 } } }
   vecf32a: { payload: { a: { id: 0, type: array, items: { type: fp32, count: 3 } } } }
+  # The same fp32[3], with a DECLARED default, so the shared fp32 driver can
+  # build its §2 array row here too: a default that is explicitly encoded must
+  # still normalize away, and this target keeps a per-ARRAY raw-bits companion
+  # beside the numeric one, which is where "raw bytes were captured" is most
+  # easily mistaken for "the field is present". vecf32a stays as it is, so the
+  # legs pointing at it are untouched.
+  vecf32ad: { payload: { a: { id: 0, type: array, items: { type: fp32, count: 3 }, default: [0.0, -1.5, 3.25] } } }
   vecf64: { payload: { a: { id: 0, type: fp64 } } }
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
@@ -610,36 +617,23 @@ done
 # null and could not tell a signaling one from a quiet one. Covers a signaling
 # (0x7F800001), a quiet/payload (0x7FC00001) and a negative NaN, at the scalar
 # position AND at an fp32[] element position.
+#
+# The table is the shared one (generator#468): all three double-only targets run
+# the same fixtures over the same `recode` verb, derived from each suite's own
+# schema. What this suite contributes to it is the messages it points at --
+# vecf32/vecf32a are BOUNDED, so the re-encode goes through the exactly-sized
+# MAX_SIZE arm rather than the scratch+sink one example.yaml exercises -- plus
+# vecf32ad, the fp32[3] that DECLARES a default, which is what makes the §2
+# array row expressible here: it is this target's per-array raw-bits companion
+# (`Uint8Array | null`) that a presence flag is most likely to be derived from.
+# Both row kinds are pinned by count, so one silently becoming the other fails.
 echo "==> fp32 signaling-NaN bit-exact round-trip (issue #235)"
-recode_exact() { # label message octal-wire
-    # shellcheck disable=SC2059  # $3 is a controlled octal escape sequence, not user data
-    printf "$3" > "$WORK/fp32in.bin"
-    (cd "$WORK/conf" && npx tsx harness.ts recode "$2") < "$WORK/fp32in.bin" > "$WORK/fp32out.bin" \
-        || { echo "FAIL: $1 must decode"; exit 1; }
-    cmp -s "$WORK/fp32in.bin" "$WORK/fp32out.bin" \
-        || { echo "FAIL: $1 not bit-exact (an fp32 NaN was quieted): $(od -An -tx1 "$WORK/fp32in.bin" | tr -d ' \n') -> $(od -An -tx1 "$WORK/fp32out.bin" | tr -d ' \n')"; exit 1; }
-}
-# scalar: 02 (id 0, fixlen) 20 (fixlen word: len 4, fp32 subtype) + 4 LE bytes.
-recode_exact "scalar sNaN"  vecf32 '\002\040\001\000\200\177'
-recode_exact "scalar qNaN"  vecf32 '\002\040\001\000\300\177'
-recode_exact "scalar -NaN"  vecf32 '\002\040\001\000\300\377'
-recode_exact "scalar -sNaN" vecf32 '\002\040\001\000\200\377'
-# array: 05 (id 0, array-fixlen) 03 (count) 20 (fixlen word) + 3 x 4 LE bytes. The
-# wire count IS the array's length (MESSAGE_SPEC S3), so all three come back; the
-# middle element is an ordinary 1.0, which must survive beside the NaNs.
-recode_exact "array NaNs"   vecf32a '\005\003\040\001\000\200\177\000\000\200\077\001\000\200\377'
-# Control: a non-NaN scalar keeps its plain number path (nothing regressed for the
-# 99.9% of fp32 values a JS number carries exactly).
-recode_exact "scalar 2.5"   vecf32 '\002\040\000\000\040\100'
-# Regression guard for the mistake that is easiest to make here: carrying raw wire
-# bytes must NOT be read as "the field was present". S2 decides presence from the
-# VALUE, so an explicit +0.0 (the field's default) must still normalize away to the
-# empty message on re-encode -- as it does on the other 12 drivers.
-printf '\002\040\000\000\000\000' > "$WORK/fp32zero.bin"
-(cd "$WORK/conf" && npx tsx harness.ts recode vecf32) < "$WORK/fp32zero.bin" > "$WORK/fp32zero.out" \
-    || { echo "FAIL: explicit +0.0 must decode"; exit 1; }
-[ ! -s "$WORK/fp32zero.out" ] || { echo "FAIL: explicit +0.0 must re-encode as the empty message (S2), got $(od -An -tx1 "$WORK/fp32zero.out" | tr -d ' \n')"; exit 1; }
-echo "==> fp32 sNaN round-trip OK"
+python3 "$ROOT/tests/conformance/lib/check_fp32_nan.py" "TypeScript" \
+    --schema "$WORK/conf.yaml" \
+    --scalar-message vecf32 --scalar-field a \
+    --array-message vecf32a --array-field a \
+    --array-default-message vecf32ad --array-default-field a \
+    --expect 10 --expect-normalize 2 --cwd "$WORK/conf" -- npx tsx harness.ts
 
 # int64: long / number — the Long-backed 64-bit hot path must be wire-identical
 # to the default bigint representation (issue #51; corelib-ts #19/#20).
