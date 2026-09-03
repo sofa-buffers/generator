@@ -13,6 +13,13 @@
 //   2. the incremental decoder must produce the same value as `try_decode`,
 //      no matter where the chunk boundaries fall.
 //   3. a truncated stream must be rejected, not returned half-filled.
+//   4. the decoded message must OWN its bytes — it must have detached from the
+//      buffer the bytes came from by the time the call returns, on both paths
+//      (CORELIB_PLAN §6.7/§6.7.1, generator#412).
+//
+// Point 4 is the odd one out and its section says so at length: in safe Rust the
+// borrow checker already forbids the failure, so it is written as insurance
+// rather than counted as a live net.
 //
 // Point 2 is the one that finds real bugs: at a chunk size of 1 every varint,
 // every string and every array element is split across feeds, so any parse
@@ -246,9 +253,72 @@ so a half-read field would be returned as a value"
         );
     }
 
+    // ---- 5. a decoded message owns its bytes (CORELIB_PLAN §6.7) --------
+
+    // §6.7: no value the codec delivers may outlive the callback it arrived in,
+    // and §6.7.1 gives the one-shot path no exemption — `try_decode(buf)` copies
+    // too, so `buf` may be reused, overwritten or freed the moment it returns.
+    // Section 2 above cannot see this: it feeds `one_shot.chunks(size)`, slices
+    // of a buffer that stays alive and unmodified, so an aliased destination
+    // reads back correctly. The oracle has to DESTROY the input between decode
+    // and re-encode.
+    //
+    // KNOWN REACH, and it is unusual here — say it plainly rather than let a
+    // pass read as a runtime guarantee. In safe Rust this property is enforced
+    // by the TYPE SYSTEM, not by this check: the generated destinations are
+    // `String`/`Vec<u8>` (and `heapless::String`/`heapless::Vec` on the static
+    // legs), and the generated message type carries no lifetime parameter at
+    // all, so a destination that kept the borrow the corelib hands over
+    // (`PayloadAcc::feed` does return the caller's chunk uncopied when a payload
+    // fits it) does not compile — mutating the generated `blob` arm to keep the
+    // view is `error[E0308]`, not a red test. What this section is worth is
+    // insurance against a future `unsafe`/`from_raw_parts`/`from_utf8_unchecked`
+    // zero-copy experiment, and a runtime statement of the rule the other ten
+    // ports assert. It costs a few milliseconds.
+    //
+    // Chunk size is the axis that matters, not the entry point: a payload SPLIT
+    // across chunks is reassembled into `acc` and copied out of it whether or
+    // not the destination wanted a view, so small chunks alone cannot reach the
+    // corelib's no-copy branch. The sweep therefore ends at the whole message.
+    {
+        // 0x41 ('A'), not 0xff: an aliased string must still re-encode, so the
+        // oracle stays a byte comparison instead of becoming a UTF-8 error.
+        const SCRIBBLE: u8 = 0x41;
+
+        let mut wire: Vec<u8> = one_shot.to_vec();
+        let got = Myfirstmessage::try_decode(&wire).expect("ownership: one-shot decode failed");
+        wire.iter_mut().for_each(|b| *b = SCRIBBLE);
+        assert_eq!(
+            &one_shot[..],
+            &got.encode()[..],
+            "one-shot try_decode: a decoded field aliased the buffer it was decoded from"
+        );
+
+        for size in [1usize, 7, 16, 64, one_shot.len()] {
+            let mut scratch = vec![0u8; size];
+            let mut dec = Myfirstmessage::decoder();
+            for chunk in one_shot.chunks(size) {
+                scratch[..chunk.len()].copy_from_slice(chunk);
+                match dec.feed(&scratch[..chunk.len()]) {
+                    Ok(_) => {}
+                    Err(e) => panic!("ownership: chunk size {size}: feed failed: {e:?}"),
+                }
+                // §6.0: the borrow ends when feed returns.
+                scratch.iter_mut().for_each(|b| *b = SCRIBBLE);
+            }
+            let got = dec.finish().expect("ownership: finish failed");
+            assert_eq!(
+                &one_shot[..],
+                &got.encode()[..],
+                "streaming chunk size {size}: a decoded field aliased the chunk it arrived in"
+            );
+        }
+    }
+
     println!(
         "streaming: encode byte-identical through a 7-byte buffer; decode value-identical \
-at 7 chunk sizes; a 40-deep skipped subtree unwinds correctly at 6 chunk sizes; of {} \
+at 7 chunk sizes; a 40-deep skipped subtree unwinds correctly at 6 chunk sizes; the decoded \
+message owns its bytes after its input is scribbled (one-shot + 5 chunk sizes); of {} \
 truncations {incompletes} were rejected as Incomplete and \
 {completions} decoded cleanly on a field boundary",
         one_shot.len() - 1

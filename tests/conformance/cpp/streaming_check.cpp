@@ -20,6 +20,12 @@
 // equivalent turned up a decoder that returned truncated messages as values;
 // this is the same net, cast over C++.
 //
+// What this check does NOT reach is the LIFETIME of a decoded value: every chunk
+// it feeds is a pointer into `oneShot`, a vector that stays alive and unmodified
+// for the whole run, so a destination holding a window into one would read back
+// perfectly. That property is CORELIB_PLAN §6.7 and it is pinned next door, in
+// ownership_check.cpp, which destroys each chunk instead of keeping it.
+//
 // The message header and MSG_TYPE are supplied by run.sh via -include/-D, which
 // knows the profile. Everything below is profile-independent by construction:
 // only operations that mean the same thing whether a field is a std::string or a
@@ -29,82 +35,13 @@
 #include <cstdio>
 #include <cstring>
 #include <span>
-#include <string_view>
-#include <type_traits>
 #include <vector>
 
-// corelib-cpp's IStreamObject takes a sofab::Limits -- the byte budget for one
-// top-level field -- and offers no constructor that leaves it out (corelib-cpp#128;
-// CORELIB_PLAN §6.2.1: a codec supplies no default for a number it was not given).
-// The corelib-c-cpp one takes none, its containers being statically bounded, and
-// does not declare the type at all, so the choice cannot be a `requires` test and
-// run.sh passes it as a -D. This check is about chunk boundaries rather than caps,
-// so the pure leg states the platform ceiling -- a number stated, not a mode.
-#ifdef SOFAB_STREAM_LIMITS
-#define SOFAB_STREAM_ARGS {sofab::Limits{SIZE_MAX}}
-#else
-#define SOFAB_STREAM_ARGS
-#endif
+// The shared fixture: fillMessage() and SOFAB_STREAM_ARGS, so this check and
+// ownership_check.cpp cannot drift apart on which field kinds are populated.
+#include "sample.hpp"
 
 static std::vector<std::uint8_t> g_sink;
-
-// Populate the shapes that matter for chunked feeding: scalars at their widest
-// varint, strings (which is what the reassembly buffer exists for), a native
-// array (index assignment works in every storage mode) and a nested sequence.
-static void fillMessage(MSG_TYPE &m)
-{
-    m.someu8 = 255;
-    m.someu16 = 65535;
-    m.someu32 = 4294967295u;
-    m.someu64 = 18446744073709551614ull;   // the schema default IS u64 max
-    m.somei16 = -32768;
-    m.somei32 = -2147483647 - 1;
-    m.somei64 = -9223372036854775807LL - 1;
-    m.somefp32 = 2.5f;
-    m.somefp64 = -1.0e300;
-    m.somebool = !m.somebool;
-    m.somestring = "0123456789-0123456789-0123456789-0123456789-01234";  // maxlen 50
-    for (std::size_t i = 0; i < m.someintarray.size(); ++i)
-    {
-        m.someintarray[i] = -static_cast<std::int32_t>((i + 1) * 100000);
-    }
-    for (std::size_t i = 0; i < m.someuintarray.size(); ++i)
-    {
-        m.someuintarray[i] = static_cast<std::uint32_t>((i + 1) * 100000);
-    }
-    m.somestruct.nestedint = 7;
-    m.somestruct.nestedstring = "nested-string-straddles";               // maxlen 32
-    m.somestruct.nestedstruct.deepint = -99;
-
-    // The array kinds whose decode destination is NOT the wire element type, and
-    // the wrapper-sequence kinds. Chunked feeding is the only thing that tells
-    // these apart from the native arrays above: a resumed field is delivered once
-    // per chunk that carries part of it, into the destination it was handed, so
-    // anything decoded through a per-delivery temporary keeps just the last
-    // chunk's elements and silently drops the rest. Every array here carries a
-    // schema default, so its size is already non-zero and the loops below only
-    // have to give each element a value the default does not have.
-    using EnumElem = std::remove_cvref_t<decltype(m.someenumarray[0])>;
-    for (std::size_t i = 0; i < m.someenumarray.size(); ++i)
-    {
-        m.someenumarray[i] = static_cast<EnumElem>(i % 3);
-    }
-    for (std::size_t i = 0; i < m.someboolarray.size(); ++i)
-    {
-        m.someboolarray[i] = (i % 2 == 0);
-    }
-    for (std::size_t i = 0; i < m.somestringarray.size(); ++i)
-    {
-        // maxlen 16 per element, and long enough to straddle a small chunk.
-        m.somestringarray[i].assign(std::string_view{"straddle-0123456"}.substr(0, 10 + i % 6));
-    }
-    for (std::size_t i = 0; i < m.someblobarray.size(); ++i)
-    {
-        // assign(initializer_list) is spelled the same on std::vector<uint8_t>
-        // and on sofab::FixedBytes<N>. maxlen 8 per element.
-        m.someblobarray[i].assign({std::uint8_t(i + 1), 0x7f, 0x00, 0xff});
-    }
-}
 
 // Comparing the re-encoded bytes rather than the fields keeps this independent
 // of the storage types, and is the stronger statement anyway: two messages that

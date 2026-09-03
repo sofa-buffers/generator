@@ -41,8 +41,8 @@ rust-rs-unbounded  maxspeed   toggle    6762          21184
 ts-bigint          maxspeed   subtract  605081        768394
 ts-long            maxspeed   subtract  597309        771956
 ts-number          maxspeed   subtract  614802        767552
-zig                maxspeed   toggle    9929          20885
-zig-unbounded      maxspeed   toggle    7837          16599
+zig                maxspeed   toggle    9929          22495
+zig-unbounded      maxspeed   toggle    7837          18799
 
 ## toolchain
 tool                      version       rows

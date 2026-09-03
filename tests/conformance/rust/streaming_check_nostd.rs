@@ -149,10 +149,56 @@ unwind was lost (got {} element(s))",
         );
     }
 
+    // 5. the decoded message owns its bytes (CORELIB_PLAN §6.7/§6.7.1,
+    //    generator#412). The fixed-capacity twin of the section in
+    //    streaming_check.rs, and the same caveat applies with more force: a
+    //    `heapless::String<N>` / `heapless::Vec<u8, N>` is inline storage, so it
+    //    could not hold a borrow into a chunk even if the generated code tried —
+    //    the enforcement is the type, and this is a runtime statement of the
+    //    rule rather than the thing that catches a regression. What it WOULD
+    //    catch is a corelib whose reassembly buffer was handed over instead of
+    //    copied out of.
+    //
+    //    The scribble is 0x41 ('A'): an aliased string must still re-encode, so
+    //    the oracle stays a byte comparison rather than a UTF-8 error. The chunk
+    //    sweep ends at the whole message, because a payload split across chunks
+    //    is copied out of `acc` whether or not the destination wanted a view.
+    {
+        const SCRIBBLE: u8 = 0x41;
+
+        let mut owned: std::vec::Vec<u8> = one_shot.iter().copied().collect();
+        let got = Vecs::try_decode(&owned).expect("heapless ownership: one-shot decode failed");
+        owned.iter_mut().for_each(|b| *b = SCRIBBLE);
+        assert!(
+            got == expect,
+            "heapless one-shot: a decoded field aliased the buffer it was decoded from"
+        );
+
+        for size in [1usize, 7, 64, one_shot.len()] {
+            let mut scratch: std::vec::Vec<u8> = std::vec![0u8; size];
+            let mut dec = Vecs::decoder();
+            for chunk in one_shot.chunks(size) {
+                scratch[..chunk.len()].copy_from_slice(chunk);
+                match dec.feed(&scratch[..chunk.len()]) {
+                    Ok(_) => {}
+                    Err(e) => panic!("heapless ownership chunk size {size}: feed failed: {e:?}"),
+                }
+                // The borrow ends when feed returns (§6.0).
+                scratch.iter_mut().for_each(|b| *b = SCRIBBLE);
+            }
+            let got = dec.finish().expect("heapless ownership: finish failed");
+            assert!(
+                got == expect,
+                "heapless chunk size {size}: a decoded field aliased the chunk it arrived in"
+            );
+        }
+    }
+
     println!(
         "streaming (pure heapless): {}-byte payload byte-identical through a 7-byte buffer; \
 value-identical at 7 chunk sizes; 8-element wrapper array at 4 chunk sizes; a 40-deep \
-skipped subtree unwinds correctly at 4 chunk sizes",
+skipped subtree unwinds correctly at 4 chunk sizes; the decoded message owns its bytes \
+after its input is scribbled (one-shot + 4 chunk sizes)",
         one_shot.len()
     );
 }

@@ -2163,8 +2163,9 @@ the generator carries responsibility:
   `UTF8Encoding(throwOnInvalidBytes: true)` (`Encoding.UTF8.GetString`
   is lossy) — invalid bytes throw the same `INVALID_MSG` channel as the over-count
   guards. No config key is threaded into generated code.
-- **Codegen-materialized byte-container target (Zig)** — the borrowed `[]const u8`
-  slice is zero-copy, so the corelib exposes a `utf8Valid(bytes)` primitive and the
+- **Codegen-materialized byte-container target (Zig)** — the destination is a
+  `[]const u8` byte container (holding the message's own bytes since §6.7.1 /
+  generator#412), so the corelib exposes a `utf8Valid(bytes)` primitive and the
   generator emits an **unconditional** call at the materialization site
   (`!sofab.utf8Valid(chunk) → self.inv`); the `SOFAB_STRICT_UTF8` gate lives
   inside the primitive (folds to `true` when compiled off), so generated code is
@@ -3551,12 +3552,15 @@ lifetime the buffer's, silently. So a generated destination **copies** into
 storage the message owns, on every target whose corelib offers a borrowing read
 (Go's `AcceptBytes` cursor is the clearest case). Faster borrowing modes are
 deliberately not offered and not configurable: the complexity of a second lifetime
-regime is not worth what it buys. One target still diverges: Zig's `decode()`
-borrows strings/blobs out of the input buffer into a message the *caller* declared
-(§10), so there the lifetime is at least visible in the caller's own code rather
-than hidden — and its streaming path copies regardless, because a payload stitched
-across a chunk boundary completes inside corelib memory. Bringing it in line is a
-separate change to that backend.
+regime is not worth what it buys. CORELIB_PLAN §6.7.1 removed the last exemption —
+"`decode(buffer)` copies too", because a message whose lifetime depends on which
+entry point produced it is the divergence §6.7 exists to end — and Zig, the one
+target that still borrowed there, was brought in line with it (generator#412): its
+`decode()` used to hand every payload back as a slice of the caller's buffer while
+only `decoder()` copied, so a decoded message silently died with the bytes it came
+from. Both paths now pass `borrow = false` to `sofab.PayloadAcc.take`, the flag
+that told them apart is gone, and the property is a *test* rather than a claim in
+a doc comment (§12).
 
 **Verification.** `tests/matrix/maxsize_test.go` requires every target to emit
 the *same* number and to match `ir.MaxWireSize` — the guard none of the seven
@@ -3583,8 +3587,8 @@ above was found by that check on its first run.
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Serialize`/`EncodeTo`; nested `Msg.Decoder` (constructed with `new`, not a `Decoder()` factory — C# puts nested types and members in one declaration space) → `Feed`/`Finish` for chunked decode; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | one public class per file (`<Message>.java`, one `<Type>.java` per struct/union) — schema types are public like every other target's, and a type reached from two messages is emitted once (#305); no support file beside them: `Seq`, `PayloadAcc`, `Utf8.decode`, `Sofab.invalid`, `Bound` and `OStream.overScratch` are corelib API (corelib-java#97 / #345 / #105); classes + `serialize`/`encodeTo`; nested `Msg.Decoder` via `decoder()` → `feed`/`finish` for chunked decode (`finish` throws `IllegalStateException`, not `SofabException`: `SofabError` has no INCOMPLETE, and an incomplete message is not a malformed one); ints → `long` (u64 via `toUnsignedString`); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
 | **Kotlin** | `corelib-kotlin-mp` (Gradle/Maven Central) | flat-visitor location-stack | Kotlin Multiplatform: the emitted message sources are plain `commonMain` (stdlib + `sofab`, no JVM API), so one source set compiles for the JVM, Node/browser and native, and only the `emit: project` scaffolding is JVM-specific. One file per declaration (`<Message>.kt` + the internal `<Message>Visitor`, one `<Type>.kt` per struct/union) and no support file of its own -- element placement, array growth, payload reassembly and UTF-8 materialisation are the corelib's `Seq`/`PayloadAcc`/`Utf8` (#345); classes + `serialize`/`encodeTo`/`encode()`; nested `Msg.Decoder` via `decoder()` -> `feed`/`finish`. Integers map to their EXACT declared width, unsigned included (`u8` is a `UByte`, `u8[]` a `UByteArray`) -- the C# position, not Java's widen-to-`long`, since Java's reason for widening does not apply. What is Kotlin-specific is that this costs nothing at the corelib boundary: the unsigned arrays are inline classes over their signed peers, so `asIntArray()` is a reinterpretation and the field's own backing array reaches `writeArrayUnsigned`, while the `arrayBulk` offer hands that same view over as the destination, whose element width IS the declared width (§7.1 checked in the pass that decodes). `enum` -> `Int` and `bitfield` -> `ULong`, the widths that cannot lose a legal value, with the declared members emitted as documented named constants in an `object` beside the field -- so per-constant metadata is rendered where C and Java have no symbol for it. `boolean[]` is a `BooleanArray` (no native array boxes). Keyword field names are BACKTICK-escaped, never mangled; a name colliding with a generated member is mangled instead. `tryDecode(data, out)` returns the §7 `DecodeStatus` and `decode(bytes)` is STRICT about both non-COMPLETE outcomes (`IllegalStateException` on a terminal INCOMPLETE, deliberately not `SofabException`). Guards throw the corelib's `SofabException` unwrapped -- Kotlin has no checked exceptions. The receiver caps are split by field kind (§9.5.4): a payload length and a wrapper row index travel as arguments into `PayloadAcc.string`/`.blob` and `Seq.reserveRow*`, beside the schema bound they are exclusive with, so the check lands at the length/index header inside a call the visitor already makes; a native array's count keeps its generated guard in `arrayBegin`, there being no such call to carry it. Hand-written JSON harness (exact u64 from the literal text). |
-| **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `serialize`; `decoder(out, alloc)` → `feed`/`finish` (the destination is the CALLER's: Zig moves structs by value, so a decoder owning its message would dangle its own visitor pointer); zero-copy `decode()` (strings/blobs borrow the input buffer, arrays from a caller allocator) — but the STREAMING path borrows nothing: `feed` copies every string/blob into `alloc`, because a payload stitched across a chunk boundary completes inside the corelib's reused carry buffer and is delivered as a slice into the decoder itself, indistinguishable in the callback from one into the caller's chunk (generator#295); fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
-| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`/`encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `maxSize` `Uint8List` (`Encoder.overBuffer(buf)`, returning the `written` view over it) for a bounded schema and drains a fixed 512-byte scratch into a caller `BytesBuilder(copy: true)` (`Encoder(sink, buffer: scratch)`) for an unbounded one; the corelib's `Encoder.encodeToBytes` — the one place that package allocates output storage — is emitted nowhere; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); the corelib hands a string/blob over as a view into the decode buffer on the ONE-SHOT path (it allocates the container itself for an array on either path, and reassembles a split payload while streaming), but every generated destination COPIES (`Uint8List.fromList`, `sofab.decodeUtf8Strict`), so a decoded message owns its bytes and outlives the input buffer regardless of which side allocated; the schema-free half of the emitted prelude is the corelib's (`sofab.VisitorBase`, `sofab.elementsEqual`, `sofab.decodeUtf8Strict`, `sofab.utf8Length` — §8, #345); the receiver-side `max_dyn_*` caps are applied per field, at that field's own count/length header (§9.5): as the *else* of the schema bound in the generated `onFixlenHeader`/`onArrayBegin` for a scalar and a native array (`limitExceeded()`), and inside the collector for a wrapper array's element index, element length and matrix-row count, which take them as its `rcap`/`relemMax`/`rowCap` **required** arguments; every visitor also overrides `onBytesDest`/`onArrayDest` to return `null` for every id it does not bind, so a §7.3-skipped field gets no destination at all; JSON harness carries u64 as a string. |
+| **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `serialize`; `decoder(out, alloc)` → `feed`/`finish` (the destination is the CALLER's: Zig moves structs by value, so a decoder owning its message would dangle its own visitor pointer); a decoded message OWNS its bytes on BOTH paths (strings, blobs and array storage all from the caller's allocator, so the input may be reused the moment the call returns): `feed` has to copy, because a payload stitched across a chunk boundary completes inside the corelib's reused carry buffer and is delivered as a slice into the decoder itself, indistinguishable in the callback from one into the caller's chunk (generator#295); `decode()` copies for the same reason §6.7.1 gives — it borrowed until generator#412, which is what `tests/conformance/zig/ownership_check.zig` now pins; fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
+| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`/`encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `maxSize` `Uint8List` (`Encoder.overBuffer(buf)`, returning the `written` view over it) for a bounded schema and drains a fixed 512-byte scratch into a caller `BytesBuilder(copy: true)` (`Encoder(sink, buffer: scratch)`) for an unbounded one; the corelib's `Encoder.encodeToBytes` — the one place that package allocates output storage — is emitted nowhere; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); a decoded message owns its bytes on BOTH paths, twice over: the corelib takes the destination `onBytesDest` supplies and COPIES the payload into it (its one-shot blob arm cites §6.7.1 by name -- it used to hand out a view into the decode buffer, which is what the older text here described), and every generated destination copies again (`Uint8List.fromList`, `sofab.decodeUtf8Strict`); it allocates the container itself for an array on either path, and reassembles a split payload while streaming; the schema-free half of the emitted prelude is the corelib's (`sofab.VisitorBase`, `sofab.elementsEqual`, `sofab.decodeUtf8Strict`, `sofab.utf8Length` — §8, #345); the receiver-side `max_dyn_*` caps are applied per field, at that field's own count/length header (§9.5): as the *else* of the schema bound in the generated `onFixlenHeader`/`onArrayBegin` for a scalar and a native array (`limitExceeded()`), and inside the collector for a wrapper array's element index, element length and matrix-row count, which take them as its `rcap`/`relemMax`/`rowCap` **required** arguments; every visitor also overrides `onBytesDest`/`onArrayDest` to return `null` for every id it does not bind, so a §7.3-skipped field gets no destination at all; JSON harness carries u64 as a string. |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 
 **Common type mapping:** enum → smallest *signed* backing; bitfield → smallest
@@ -4154,6 +4158,106 @@ A reimplementation is **conformant** when it reproduces these gates:
    the same discipline §15 already applies to the `python`/`python-native` bench
    rows, for the same reason: an engine that silently substitutes itself reports
    one implementation's result under the other's name.
+
+   **A decoded message owns its bytes.** CORELIB_PLAN §6.7 — no value the codec
+   delivers may outlive the callback it arrived in — read on the generated side:
+   whatever the corelib hands over, the destination must own a copy, or the
+   message's lifetime is silently the input buffer's. §6.0 fixes it for `feed` (a
+   chunk is borrowed only for the duration of the call) and §6.7.1 gives the
+   one-shot path no exemption. The oracle is **destructive, not comparative**:
+   encode a sample covering every aliasing-capable kind (`string`, `blob`,
+   `array<string>`, `array<blob>`, a string nested in a struct, in a union and in
+   a dynamic wrapper row), decode it out of storage the check controls, DESTROY
+   that storage, re-encode and diff. Nothing else in a suite reaches it — every
+   other check decodes from a buffer that stays alive and unmodified, so an
+   aliased destination reads back correctly, and comparing two decoders against
+   each other compares two readers of the same live bytes.
+
+   It is **per suite, not a `lib/` driver**, and that is the one place §12's
+   one-driver-per-concern rule does not apply. Every driver in
+   `tests/conformance/lib` talks to a generated harness across a process boundary
+   through stdin/stdout; this check has to run *inside* the decoding process,
+   holding the decoded object while the memory it came from is overwritten or
+   freed. The only shape that would cross the boundary is a new harness verb in
+   every backend's emitted project — test-only code in shipped generated output,
+   eleven codegen changes to test codegen — so the concern stays where
+   `ownership_check.dart` put it: one small hand-written program per suite
+   (`tests/conformance/<lang>/ownership_check.<ext>`, or a numbered section in
+   that suite's existing in-process streaming check).
+
+   Two things make a naive port lie, both measured. **Chunk size is the axis, not
+   the entry point**: a payload split across chunks is reassembled into the
+   corelib's accumulator and copied out of it whether or not the destination
+   wanted a view, so a small-chunk-only feed is structurally unable to fail —
+   with the `go` blob destination deliberately broken, chunk 7 passes and chunk 32
+   fails. Every leg therefore sweeps sizes and ends at one that delivers every
+   payload whole. And the **scribble byte is `0x41`**, not `0xff`: an aliased
+   string must still re-encode, or the oracle stops being a byte comparison and
+   becomes a UTF-8 error that unrelated causes could produce.
+
+   Each port states its **reach**, because a pass means something different in
+   each language, and `ownership_check.dart` sets that discipline: Go can only
+   regress on a `[]byte` destination (`string(b)` is a copy the language makes),
+   Rust cannot regress in safe code at all (the destinations are
+   `String`/`Vec<u8>` and the generated message type carries no lifetime
+   parameter — the mutation the issue asks for is `error[E0308]`, verified, so
+   that leg is insurance against a future `unsafe` zero-copy experiment rather
+   than a live net), and a counted native array is inline storage everywhere and
+   cannot alias. This is not a hypothetical class: the zig backend was borrowing
+   on `decode()` when the check was written, and it is the check that showed it.
+   Dart, the port that set this discipline, is now the case where the property
+   holds at *two* layers at once — corelib-dart copies each payload into the
+   destination `onBytesDest` supplied, and the generated destination copies again
+   — so mutating either layer alone still passes and only removing both turns it
+   red (measured). That is the right answer for a property test, and it is stated
+   in the file rather than left to be read as coverage of the generated side.
+
+   Where a language's destinations **cannot** alias — C, C++, Rust — the check
+   changes what it is a net for, and the port has to say so rather than count
+   itself as coverage of the generated side. In C every field is inline storage
+   in the caller's struct and the corelib's only payload entry points take a
+   destination to copy into; in C++ every profile stores an owning container and
+   corelib-cpp `static_assert`s a `std::string_view` destination away, citing §6.
+   In both, the mutation the issue asks for is a compile error, so what remains
+   reachable is a **corelib** that starts deferring the copy — holding a pointer
+   into a fed chunk and reading it back later. Two things make that reachable at
+   all: every chunk is a separate heap block **freed** the instant `feed`
+   returns, not merely overwritten, and the binary is built with
+   `-fsanitize=address` — the corelib's own C sources included, since ASan does
+   not redzone-check uninstrumented code. Without it a value comparison prints a
+   pass while the message holds a dangling pointer, because freed heap usually
+   still reads back the bytes that were in it. Both halves were verified against
+   deliberately mutated corelib copies (a `readPayload` that defers its `memcpy`
+   by one call; an `istream.c` that copies each payload from a remembered chunk
+   pointer at completion), which report `heap-use-after-free` on the affected
+   chunk sizes.
+
+   **Python needs a second oracle, not a translated one.** `Decoder.feed` puts a
+   chunk where the walk can reach it, and with nothing carried that is
+   `buf = data if isinstance(data, bytes) else bytes(data)` — the native
+   accelerator's `_rebind` does the same. So a `bytearray` or `memoryview` handed
+   to a one-shot decode is **copied at the front door**, and scrubbing the
+   caller's object afterwards can never reach what the codec walked: with
+   corelib-py mutated to deliver `memoryview(buf)[pos:end]` — a real §6.7
+   violation — both scrub legs still pass while `type(msg.someblob)` is
+   `memoryview`. Only a real `bytes` input is adopted uncopied, and a `bytes`
+   cannot be scrubbed. The leg with teeth on that path therefore decodes from
+   `bytes` and asserts the **destination types** (a slice of a `bytes` is a
+   `bytes`; a window into one is a `memoryview`), which is what caught the
+   mutation. A port that translates the scrub alone reports a false pass here.
+
+   On the JVM family — java, kotlin, csharp — the reach is narrower than it looks
+   and the ports say so. There is no sub-range view of a `byte[]`/`ByteArray` and
+   no mutable string, so the only destination that CAN alias is one that keeps
+   the **whole** delivered array, which is only ever the right bytes when a
+   payload fills a chunk exactly. That is a real regression shape — it is what a
+   "fast path for the whole-payload case" looks like written wrong, and mutating
+   the generated blob arm to it fails the streaming leg at chunk 1 in all three —
+   but it leaves the one-shot legs near-vacuous, kept because §6.7.1 names that
+   path rather than because anything can fail them. What would give the row teeth
+   there is a corelib moving its payload callback to a span type
+   (`ReadOnlySpan<byte>`/`ReadOnlyMemory<byte>` in C#), which is the regression
+   this leg exists to catch early.
 3. **Corpus** (`tests/matrix`) — a corner-case corpus generated across **all**
    backends; invalid defs are rejected; dangling-ref + depth-cap enforced.
    Per-language `run.sh` additionally **compiles/builds every corpus def** against

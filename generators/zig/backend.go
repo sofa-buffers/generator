@@ -7,9 +7,9 @@
 //
 // The generated code follows the corelib's speed contract: encode() streams
 // through a caller-owned scratch buffer into a growable list via the flush
-// sink; decode() is zero-copy for strings and blobs (the decoded message
-// borrows those bytes from the input buffer) and allocates array storage from
-// the caller's allocator -- pass an arena and free everything at once.
+// sink; decode() copies every string and blob into the caller's allocator, so
+// the decoded message owns its bytes and outlives the input buffer
+// (CORELIB_PLAN §6.7.1) -- pass an arena and free everything at once.
 package zig
 
 import (
@@ -180,9 +180,10 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
 	f.line("//! SofaBuffers message types over the `sofab` Zig corelib (max-speed build).")
-	f.line("//! decode() borrows string/blob bytes from the input buffer (zero-copy) and")
-	f.line("//! allocates array storage from the caller's allocator; pass an arena and")
-	f.line("//! free the whole message at once.")
+	f.line("//! A decoded message owns its bytes: strings, blobs and array storage all")
+	f.line("//! come from the caller's allocator, on the one-shot path as on the streaming")
+	f.line("//! one, so the input buffer may be reused the moment decode() returns. Pass")
+	f.line("//! an arena and free the whole message at once.")
 	f.blank()
 	f.line("const std = @import(\"std\");")
 	f.line("const sofab = @import(\"sofab\");")
@@ -327,9 +328,12 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 		f.line("        return sink.toOwnedSlice();")
 		f.line("    }")
 		f.blank()
-		f.line("    /// Decode a complete message. Zero-copy: the result borrows string and")
-		f.line("    /// blob bytes from `data` (keep it alive as long as the message); array")
-		f.line("    /// storage comes from `alloc` (an arena frees everything at once).")
+		f.line("    /// Decode a complete message. The result OWNS its bytes: strings, blobs")
+		f.line("    /// and array storage are all copied out of `data` into `alloc` (an arena")
+		f.line("    /// frees everything at once), so `data` may be reused, overwritten or")
+		f.line("    /// freed the moment this returns. Decoding a whole buffer costs the same")
+		f.line("    /// copies as feeding it in pieces: the message's lifetime must not depend")
+		f.line("    /// on which entry point produced it.")
 		f.line("    /// Truncated input (the corelib's .incomplete decode Status) fails with")
 		f.line("    /// error.IncompleteMessage; malformed input with error.InvalidMessage.")
 		f.line("    pub fn decode(alloc: std.mem.Allocator, data: []const u8) DecodeError!%s {", name)
@@ -662,17 +666,18 @@ func (g *gen) emitStreamDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("    /// mid-stream; the caller's own framing decides when the input is over,")
 	f.line("    /// and `finish` then gives the verdict for the message as a whole.")
 	f.line("    ///")
-	f.line("    /// STORAGE: unlike decode(), this path COPIES every string and blob into")
-	f.line("    /// `alloc` -- a fed chunk does not have to outlive the message, and the")
-	f.line("    /// decoded value never points into a buffer the caller may reuse.")
+	f.line("    /// STORAGE: this path COPIES every string and blob into `alloc` -- a fed")
+	f.line("    /// chunk does not have to outlive the message, and the decoded value never")
+	f.line("    /// points into a buffer the caller may reuse.")
 	f.line("    ///")
-	f.line("    /// Borrowing is not available here, and not merely declined: a payload")
-	f.line("    /// stitched across a chunk boundary is completed inside the corelib's own")
-	f.line("    /// reusable carry buffer, and the delivered slice then points THERE, not")
-	f.line("    /// into any chunk the caller passed. Nothing in the callback distinguishes")
-	f.line("    /// that slice from one in the caller's buffer, and the next stitched item")
-	f.line("    /// overwrites it. decode() is unaffected -- it hands the corelib one whole")
-	f.line("    /// buffer, which is never stitched, so it keeps borrowing.")
+	f.line("    /// Neither path borrows, and this one could not even if it wanted to: a")
+	f.line("    /// payload stitched across a chunk boundary is completed inside the")
+	f.line("    /// corelib's own reusable carry buffer, and the delivered slice then points")
+	f.line("    /// THERE, not into any chunk the caller passed. Nothing in the callback")
+	f.line("    /// distinguishes that slice from one in the caller's buffer, and the next")
+	f.line("    /// stitched item overwrites it. And decode() copies too, though it could")
+	f.line("    /// borrow: a message's lifetime must not depend on which entry point")
+	f.line("    /// produced it.")
 	f.line("    pub const Decoder = struct {")
 	f.line("        is: sofab.IStream = sofab.IStream.init(),")
 	f.line("        v: _dec_%s,", name)
@@ -731,11 +736,13 @@ func (g *gen) emitStreamDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("    };")
 	f.blank()
 	f.line("    /// An incremental decoder filling `out`: hold it and feed chunks as they")
-	f.line("    /// arrive, instead of buffering the whole message first.")
+	f.line("    /// arrive, instead of buffering the whole message first. A chunk is read")
+	f.line("    /// only during the `feed` call it is passed to: reuse, overwrite or free it")
+	f.line("    /// as soon as feed returns.")
 	f.line("    pub fn decoder(out: *%s, alloc: std.mem.Allocator) Decoder {", name)
-	// `.own = true` is what separates this path from decode(): every payload is
-	// copied, because a slice the corelib delivers may point into its carry
-	// buffer rather than into the caller's chunk (generator#295).
-	f.line("        return .{ .v = .{ .m = out, .alloc = alloc, .own = true } };")
+	// Nothing distinguishes this path from decode() any more: both copy every
+	// payload into `alloc`. It used to be the only one that did (generator#295);
+	// §6.7.1 then removed the one-shot path's exemption (generator#412).
+	f.line("        return .{ .v = .{ .m = out, .alloc = alloc } };")
 	f.line("    }")
 }

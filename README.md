@@ -158,7 +158,7 @@ The generator emits code against one corelib per language:
 |---|---|---|
 | C (`object.h`) | `corelib-c-cpp` | Embedded, minimal footprint, no heap |
 | C++ (embedded) | `corelib-c-cpp` (`sofab.hpp`) | Embedded friendly |
-| C++ (max speed) | `corelib-cpp` | Max speed, zero-copy decode |
+| C++ (max speed) | `corelib-cpp` | Max speed |
 | Rust (`no_std`) | `corelib-rs-no-std` | Embedded, no `alloc` by default |
 | Rust (std) | `corelib-rs` | Max speed |
 | Go | `corelib-go` | Max speed |
@@ -167,7 +167,7 @@ The generator emits code against one corelib per language:
 | Kotlin (Multiplatform) | `corelib-kotlin-mp` | Max speed; one source set for JVM, JS and native |
 | C# / .NET | `corelib-cs` | Max speed |
 | TypeScript | `corelib-ts` | Max speed |
-| Zig | `corelib-zig` | Max speed, zero-copy decode |
+| Zig | `corelib-zig` | Max speed |
 | Dart | `corelib-dart` | Max speed |
 
 Because every corelib speaks the **same wire format**, code generated for one

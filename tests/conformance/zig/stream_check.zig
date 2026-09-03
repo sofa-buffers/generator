@@ -31,9 +31,11 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 
 /// Feed `wire` through decoder()/feed() `n` bytes at a time.
 ///
-/// The chunks are slices of `wire`, which outlives the returned message -- the
-/// borrow contract the generated decoder documents (a payload arriving whole
-/// inside one chunk is borrowed from it).
+/// The chunks are slices of `wire`, which stays alive for the whole call. That
+/// is deliberately the EASY case: this file asks whether the VALUE depends on
+/// the split, so nothing here would notice a destination that kept a window
+/// into the input. tests/conformance/zig/ownership_check.zig asks the lifetime
+/// question instead, by feeding out of a scratch buffer it destroys.
 fn decodeChunked(alloc: std.mem.Allocator, wire: []const u8, n: usize) !Probe {
     var out: Probe = .{};
     var d = Probe.decoder(&out, alloc);

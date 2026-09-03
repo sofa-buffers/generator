@@ -32,6 +32,18 @@ fi
 echo "==> corelib-cpp: $CPP"
 echo "==> corelib-c-cpp: $CC"
 
+# The decode-ownership check in every profile is built with -fsanitize=address
+# and needs the ASan runtime (libasan) present, which is a separate package on
+# some images. Checked once, up front: without this the first instrumented build
+# dies at LINK time with a message that reads like a conformance failure rather
+# than a missing toolchain.
+echo 'int main(void){return 0;}' | g++ -fsanitize=address -x c++ - -o /dev/null 2>/dev/null || {
+    echo "FAIL: -fsanitize=address is unavailable (install libasan); the decode-ownership"
+    echo "      check needs it -- see docs/CI.md. This is a toolchain gap, not a conformance"
+    echo "      failure."
+    exit 1
+}
+
 # Shared definition for the byte-exact shared-vector conformance check.
 cat > "$WORK/conf.yaml" <<'YAML'
 version: 1
@@ -83,11 +95,18 @@ run_variant() {
     label=$1; corelib=$2; dynamic=$3; include=$4; shift 4
     # corelib-cpp is header-only; the c-cpp wrapper needs the C sources linked.
     STREAM_OBJS=""
+    OWN_OBJS=""
     if [ -n "$corelib" ]; then
         for u in ostream istream object utf8; do
             gcc -c -I"$CC/src/include" -o "$WORK/$u.o" "$CC/src/$u.c"
+            # A second, ASan-instrumented set for the ownership check below. It
+            # needs its own: ASan does not redzone-check uninstrumented code, so
+            # a corelib compiled without it would read a freed chunk in silence.
+            gcc -c -g -fsanitize=address -I"$CC/src/include" \
+                -o "$WORK/asan-$u.o" "$CC/src/$u.c"
         done
         STREAM_OBJS="$WORK/ostream.o $WORK/istream.o $WORK/object.o $WORK/utf8.o"
+        OWN_OBJS="$WORK/asan-ostream.o $WORK/asan-istream.o $WORK/asan-object.o $WORK/asan-utf8.o"
     fi
     echo "==> [$label] generating + building example project"
     if [ -n "$corelib" ]; then
@@ -150,6 +169,34 @@ run_variant() {
         -o "$WORK/stream-$label" "$ROOT/tests/conformance/cpp/streaming_check.cpp" \
         $STREAM_OBJS
     "$WORK/stream-$label"
+
+    # The LIFETIME half of the same contract (CORELIB_PLAN S6.7 / S6.7.1,
+    # generator#412): a decoded message must OWN its bytes, so the buffer it came
+    # from may be reused, overwritten or FREED the moment the call returns --
+    # S6.0 for a fed chunk, S6.7.1 for the one-shot path, which gets no
+    # exemption.
+    #
+    # The streaming check above cannot reach it: every chunk it feeds points into
+    # a vector that stays alive and unmodified for the whole run, so a
+    # destination holding a window into one reads back perfectly. This one
+    # destroys the input instead -- one heap block per chunk, scribbled and freed
+    # the instant feed returns -- and runs on all four profiles, whose storage
+    # types differ (std::string/std::vector vs FixedString/FixedBytes/InlineVector).
+    #
+    # -fsanitize=address is what gives the leg its edge. No generated C++
+    # destination CAN alias -- corelib-cpp static_asserts a std::string_view one
+    # away, citing S6 -- so what this nets is a CORELIB that starts deferring the
+    # copy, and without ASan a dangling read usually still returns the bytes that
+    # were there and the value comparison prints a pass. Verified both ways: a
+    # corelib-cpp copy whose readPayload defers its memcpy by one call, and a
+    # corelib-c-cpp copy that memcpys each payload from a remembered chunk
+    # pointer at completion, both report heap-use-after-free here.
+    echo "==> [$label] a decoded message owns its bytes (CORELIB_PLAN S6.7, generator#412)"
+    g++ -std=c++20 -Wall -Werror -g -fsanitize=address $include -I"$WORK/ex-$label" $STREAM_LIMITS \
+        -DMSG_TYPE=sofabuffers::Myfirstmessage -include myfirstmessage.hpp \
+        -o "$WORK/own-$label" "$ROOT/tests/conformance/cpp/ownership_check.cpp" \
+        $OWN_OBJS
+    "$WORK/own-$label"
 
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(printf '%s' "$IN" | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)

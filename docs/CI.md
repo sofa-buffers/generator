@@ -19,6 +19,12 @@ Each `lang-<x>` job is a thin wrapper around `tests/conformance/<x>/run.sh`. The
 script is the source of truth and runs the same way locally — that is deliberate:
 a red CI job must be reproducible with one command.
 
+`lang-c` and `lang-cpp` additionally need the **ASan runtime** (`libasan`) on the
+image: their decode-ownership check is built with `-fsanitize=address`, because a
+freed buffer usually still reads back the bytes that were in it and a plain value
+comparison would print a pass over a dangling pointer. Both scripts preflight it
+and say so by name rather than failing at link time.
+
 ## Where the corelibs come from
 
 A conformance runner needs a corelib checkout. It takes one of:

@@ -374,17 +374,11 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("    stack: [256]_Loc = undefined,")
 	f.line("    sp: usize = 0,")
 	f.line("    cur: _Loc = .root,")
-	// Reassembly buffer for a string/blob payload split across feed chunks.
-	// Untouched -- and never allocated -- on the contiguous path and on every
-	// streaming payload that happens to arrive whole in one chunk, which is what
-	// keeps the zero-copy borrow the common case rather than the exception.
+	// Reassembly buffer for a string/blob payload split across feed chunks. A
+	// payload that arrives whole skips it and is copied straight out of the
+	// chunk instead; either way the value the destination keeps is this
+	// decoder's, never a window into the bytes the caller fed (CORELIB_PLAN §6.7).
 	f.line("    acc: sofab.PayloadAcc = .{}, // only a payload split across feed chunks lands here")
-	// Set by decoder(), left false by decode(). It is _take's `borrow` argument,
-	// inverted: on the streaming path a delivered slice may live in the corelib's
-	// reusable carry buffer rather than in the caller's chunk, and nothing in the
-	// callback tells the two apart -- so that path owns every payload instead of
-	// borrowing.
-	f.line("    own: bool = false, // copy every payload instead of borrowing (streaming path)")
 	// Sticky malformed-message flag: a fixed native array received more
 	// elements than its schema count (generator#100); decode() then rejects
 	// with error.InvalidMessage. Always present so decode() can check it.
@@ -1037,9 +1031,9 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind) []string {
 
 // emitPayloadVisit emits the string or blob callback. The generated decode()
 // feeds the whole buffer at once, so payloads always arrive single-shot
-// (offset 0, whole chunk) and the borrowed chunk IS the value -- zero-copy.
-// The streaming decoder is the case that has to buffer, and only when a payload
-// straddles a feed boundary.
+// (offset 0, whole chunk) and are copied straight out of that chunk; the
+// streaming decoder is the case that has to buffer, and only when a payload
+// straddles a feed boundary. Copied either way (CORELIB_PLAN §6.7.1).
 //
 // Every arm binds its own payload, and binds it LAST (generator#432): the id has
 // matched, the location is this field's, and the arm's bound -- a schema
@@ -1082,7 +1076,8 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	}
 	var all []frameArms
 	// Strict UTF-8 (MESSAGE_SPEC §8 / CORELIB_PLAN §6.4): a `string` payload is
-	// UTF-8. Zig's string is a borrowed byte slice (byte-container), so the corelib
+	// UTF-8. Zig's string is a `[]const u8` byte container (the bytes are the
+	// message's own since CORELIB_PLAN §6.7.1 / generator#412), so the corelib
 	// exposes `utf8Valid(bytes)` and generated code emits an UNCONDITIONAL call to
 	// it at the materialization site — the SOFAB_STRICT_UTF8 gate lives inside the
 	// primitive (folds to true when compiled off), so this code is identical across
@@ -1511,19 +1506,19 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	f.line("    /// Give a string/blob arm ONE contiguous payload, whatever the feed")
 	f.line("    /// chunking was. Returns null while the payload is still incomplete.")
 	f.line("    ///")
-	f.line("    /// `borrow` is `!own`. On the contiguous decode() path the payload arrives")
-	f.line("    /// whole inside the buffer the caller handed to decode(), which outlives the")
-	f.line("    /// message, so it is handed straight back and nothing is copied. The")
-	f.line("    /// streaming path borrows NOTHING, whether or not the payload arrived whole:")
-	f.line("    /// a payload completing inside the corelib's fixed, REUSED carry buffer is")
-	f.line("    /// indistinguishable in the callback from one in the caller's chunk, and the")
-	f.line("    /// next stitched item overwrites it.")
+	f.line("    /// `borrow` is always false: NEITHER path hands a chunk window to a")
+	f.line("    /// destination. Streaming cannot -- a payload completing inside the")
+	f.line("    /// corelib's fixed, REUSED carry buffer is indistinguishable in the callback")
+	f.line("    /// from one in the caller's chunk, and the next stitched item overwrites it.")
+	f.line("    /// One-shot does not either, so that a decoded message never has a shorter")
+	f.line("    /// life than the caller thinks: the copy is what lets the input buffer be")
+	f.line("    /// reused, overwritten or freed the moment decode() returns.")
 	f.line("    ///")
 	f.line("    /// This is the SCHEMA-BOUNDED entry point. A `maxlen` is a validity bound and")
 	f.line("    /// stays the caller's, decided on `total` before this call; a field the")
 	f.line("    /// schema leaves unbounded goes through _takeCapped instead.")
 	f.line("    fn _take(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
-	f.line("        return self.acc.take(self.alloc, total, offset, chunk, !self.own) catch { self.inv = true; return null; };")
+	f.line("        return self.acc.take(self.alloc, total, offset, chunk, false) catch { self.inv = true; return null; };")
 	f.line("    }")
 	if g.msgLim {
 		f.blank()
@@ -1537,7 +1532,7 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 		f.line("    /// well-formed length, a policy verdict; OutOfMemory is the allocator")
 		f.line("    /// having no room for one that was accepted.")
 		f.line("    fn _takeCapped(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8, cap: usize) ?[]const u8 {", name)
-		f.line("        return self.acc.takeCapped(self.alloc, total, offset, chunk, !self.own, cap) catch |e| {")
+		f.line("        return self.acc.takeCapped(self.alloc, total, offset, chunk, false, cap) catch |e| {")
 		f.line("            switch (e) {")
 		f.line("                error.LimitExceeded => self.lim = true,")
 		f.line("                error.OutOfMemory => self.inv = true,")

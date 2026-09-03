@@ -71,7 +71,7 @@ func TestZigStructural(t *testing.T) {
 		"somefloatarray: sofab.FixedArray(f32, 3) =",                                     // count:N fp array
 		// a 3-element default is 3 long: `count` is a capacity, never padded to (§3)
 		"someboolarray: sofab.FixedArray(bool, 8) = .init(&.{ true, true, false }),",
-		"somestring: []const u8 = \"\",",                                                     // zero-copy string storage
+		"somestring: []const u8 = \"\",",                                                     // slice storage: the bytes are the message's, allocated by decode
 		"someblob: []const u8 = &.{ 72, 101, 108, 108, 111 },",                               // blob default bytes
 		"somemap: []const MyfirstmessageSomemap",                                             // dynamic composite array -> slice
 		"if (!std.mem.eql(u32, self.someuintarray.slice(), &.{ 0, 1, 1000, 4294967295 })) {", // omit-guard vs default, over the VALUE (items[0..len])
@@ -82,15 +82,23 @@ func TestZigStructural(t *testing.T) {
 		// that decodes it, never above the switch (generator#432).
 		"const chunk = self._take(total, offset, _chunk) orelse return;",
 		// The borrow/copy/stitch decision is the corelib's (sofab.PayloadAcc.take),
-		// not a hand-rolled generated one. `borrow` is !own: on the streaming path a
-		// delivered slice may point into the corelib's reused carry buffer, which the
-		// next stitched item overwrites (generator#295), and a split payload comes
-		// back as its OWN allocation (generator#293 / F-0058).
-		"return self.acc.take(self.alloc, total, offset, chunk, !self.own) catch { self.inv = true; return null; };",
-		"return .{ .v = .{ .m = out, .alloc = alloc, .own = true } };",
+		// not a hand-rolled generated one. `borrow` is pinned FALSE on both paths
+		// (CORELIB_PLAN §6.7/§6.7.1, generator#412): streaming cannot borrow, because
+		// a delivered slice may point into the corelib's reused carry buffer, which
+		// the next stitched item overwrites (generator#295); decode() must not
+		// either, or a message's lifetime would depend on which entry point produced
+		// it. A split payload comes back as its OWN allocation (generator#293 /
+		// F-0058) on both.
+		"return self.acc.take(self.alloc, total, offset, chunk, false) catch { self.inv = true; return null; };",
+		"return .{ .v = .{ .m = out, .alloc = alloc } };",
+		// The user-facing prose says the same thing as the code above it. It has
+		// drifted before -- the Decoder doc still taught the borrow for a release
+		// after the streaming path stopped borrowing -- so one sentence of it is
+		// pinned here.
+		"/// stitched item overwrites it. And decode() copies too, though it could",
 		// Bounded string: over-maxlen -> INVALID (§7.1), decided on the announced
 		// `total` BEFORE the payload is taken; then strict UTF-8 -> INVALID (issue
-		// #85); else zero-copy.
+		// #85); else stored, out of the copy _take made.
 		"11 => if (total > 50) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.somestring = chunk; } },",
 		"/// Unsigned 8-bit integer", // descriptions as doc comments
 	} {
@@ -481,7 +489,7 @@ messages:
 		// rides allocNCapped: it is compared at the announced length, before a byte
 		// is copied or appended, and generated code emits no test of its own
 		// (CORELIB_PLAN §6.2.1, generator#432).
-		"return self.acc.takeCapped(self.alloc, total, offset, chunk, !self.own, cap) catch |e| {",
+		"return self.acc.takeCapped(self.alloc, total, offset, chunk, false, cap) catch |e| {",
 		// InvalidMessage (generator#100) takes precedence over LimitExceeded.
 		"if (v.inv) return error.InvalidMessage;",
 		"if (v.lim) return error.LimitExceeded;",
