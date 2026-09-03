@@ -98,8 +98,9 @@ fn unsigned(&mut self, id: Id, value: Unsigned) {
         _ => {}
     }
 }
-// try_decode reads the sticky `inv` before propagating feed's Incomplete:
-//   if v.inv { return Err(Error::InvalidMsg) }   // INVALID dominates
+// try_decode reads the sticky `inv` before turning feed's Ok(Status::Incomplete)
+// into DecodeError::Incomplete:
+//   if v.inv { return Err(DecodeError::Sofab(sofab::Error::InvalidMsg)) }  // INVALID dominates
 ```
 
 **Generated decode (Zig) — same shape, `arrayBegin`:**

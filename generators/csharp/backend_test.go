@@ -1391,10 +1391,16 @@ func TestCsDecoderRemembersFeedStatus(t *testing.T) {
 		"public DecodeStatus Feed(byte[] chunk) => Feed(chunk, 0, chunk.Length);",
 		"                return _st = _is.Feed(chunk, off, len, _v);",
 		// A refusal is terminal and leaves no status behind: latch what it
-		// meant, keeping the wire verdict apart from a receiver-limit stop.
+		// meant, keeping the wire verdict apart from a receiver-limit stop --
+		// and leaving the memory alone for a fault that is neither, an
+		// Argument (a caller mistake, not a statement about the bytes) above
+		// all.
 		"            } catch (SofabException e) {",
-		"                _st = e.Error == SofabError.InvalidMessage",
-		"                    ? DecodeStatus.Invalid : DecodeStatus.Incomplete;",
+		"                if (e.Error == SofabError.InvalidMessage) {",
+		"                    _st = DecodeStatus.Invalid;",
+		"                } else if (e.Error == SofabError.LimitExceeded) {",
+		"                    _st = DecodeStatus.Incomplete;",
+		"                }",
 		// The public surface is unchanged; only its backing moved.
 		"public DecodeStatus Status => _st;",
 		"            if (_st != DecodeStatus.Complete) {",

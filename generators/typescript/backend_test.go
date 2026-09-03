@@ -252,6 +252,11 @@ func TestTSHeaderBoundReject(t *testing.T) {
 		// memory, so a stale one would let every vector pass. Check it per byte
 		// (generator#461).
 		`if (dec.status !== fed) {`,
+		// ...and on the refusal path NAME what the latch recorded. A reject
+		// vector exits non-zero whatever the latch did, so printing the
+		// remembered status is the only thing that makes an inverted -- or
+		// absent -- mapping visible to the suite, which greps this line.
+		"`decode error: ${String(e)} [status=${dec.status}]\\n`);",
 		`obj = dec.finish();`,
 		`"M": M.MDecoder,`,
 	} {
@@ -417,11 +422,16 @@ func TestTSStructural(t *testing.T) {
 		"  private st: DecodeStatus = DecodeStatus.Complete;",
 		"      return (this.st = this.is.feed(chunk));",
 		// A refusal is terminal and never comes back as a status, so it is
-		// latched: InvalidMsg is the wire verdict, any other refusal is this
+		// latched: InvalidMsg is the wire verdict, a receiver cap is this
 		// side's own stop and leaves the message unfinished, not wrong (S6.3).
-		"        e instanceof SofabError && e.code === SofabErrorCode.InvalidMsg",
-		"          ? DecodeStatus.Invalid",
-		"          : DecodeStatus.Incomplete;",
+		// A throw that is not the corelib's -- a TypeError out of a callback, an
+		// Argument fault -- is not a wire event at all, so it leaves the memory
+		// alone rather than claiming the stream ended mid-field.
+		"      if (e instanceof SofabError) {",
+		"        if (e.code === SofabErrorCode.InvalidMsg) {",
+		"          this.st = DecodeStatus.Invalid;",
+		"          e.code === SofabErrorCode.LimitExceeded ||",
+		"          this.st = DecodeStatus.Incomplete;",
 		"  get status(): DecodeStatus { return this.st; }",
 		"    if (this.st !== DecodeStatus.Complete) {",
 		"  sequenceBegin(id: number): boolean {",

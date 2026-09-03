@@ -121,7 +121,13 @@ pub const Scalars = struct {
         /// ended on a field boundary, `.incomplete` mid-field -- neither
         /// answers whether the MESSAGE is done.
         pub fn feed(self: *Decoder, chunk: []const u8) DecodeError!sofab.Status {
-            errdefer |e| self.st = if (e == error.InvalidMessage) .invalid else .incomplete;
+            errdefer |e| {
+                if (e == error.InvalidMessage) {
+                    self.st = .invalid;
+                } else if (e == error.LimitExceeded) {
+                    self.st = .incomplete;
+                }
+            }
             const st = try self.is.feed(chunk, &self.v);
             if (self.v.inv) return error.InvalidMessage;
             self.st = st;

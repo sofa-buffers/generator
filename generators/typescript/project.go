@@ -190,7 +190,16 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("      }")
 	f.line("      obj = dec.finish();")
 	f.line("    } catch (e) {")
-	f.line("      process.stderr.write(`decode error: ${String(e)}\\n`);")
+	// The remembered status is printed, not just the throw. A refusal is
+	// terminal and leaves through this catch, so the ONLY way the latch in the
+	// generated feed -- the one arm of #461 that is new logic rather than a
+	// rename -- becomes observable to a suite is by naming what it recorded.
+	// Without it an inverted mapping, or a latch that sets nothing at all,
+	// still exits 1 and every reject vector still passes.
+	// tests/conformance/typescript/run.sh greps this for the malformed and the
+	// over-cap fixtures it already builds.
+	f.line("      process.stderr.write(")
+	f.line("        `decode error: ${String(e)} [status=${dec.status}]\\n`);")
 	f.line("      return 1;")
 	f.line("    }")
 	f.line("    process.stdout.write(JSON.stringify(obj.toJSON()) + \"\\n\");")

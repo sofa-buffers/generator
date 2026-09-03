@@ -1138,22 +1138,29 @@ Two details are load-bearing and neither is caught by simply compiling:
    ever being fed; a stream fed nothing ended on a field boundary. Both corelibs'
    removed accessors returned COMPLETE for a fresh stream, so this preserves the
    observable behaviour exactly.
-2. **A refusal must be latched, in every carrier it can arrive in.** It never
-   comes back as a status, so without a latch a caller that catches the rejection
-   and then asks would be told the stream is Complete. C# raises one exception
-   type and distinguishes by `SofabError` — `InvalidMessage` → Invalid, a
-   receiver cap → Incomplete, since §6.3 forbids reporting a policy stop as the
-   wire verdict. Java needs *two* catches: a `Visitor` cannot declare a checked
+2. **A refusal must be latched, in every carrier it can arrive in — and only a
+   refusal.** It never comes back as a status, so without a latch a caller that
+   catches the rejection and then asks would be told the stream is Complete. The
+   mapping is the same everywhere and it is a *three-way* test, not an if/else:
+   malformed bytes (`InvalidMessage` / `INVALID_MSG`) → Invalid; a receiver cap
+   (`LimitExceeded`) → Incomplete, since §6.3 forbids reporting a policy stop as
+   the wire verdict; **anything else leaves the memory untouched**. That third
+   arm matters because the same carriers also deliver faults that are not
+   statements about the wire at all — `ARGUMENT` (a missing bound, a bad
+   off/len), a `TypeError` out of a callback, an allocator failure — and a status
+   is a verdict on the message. Answering Incomplete for a caller's own mistake
+   would tell that caller something about the bytes that is not true. Java needs
+   *two* catches applying that same test: a `Visitor` cannot declare a checked
    exception, so every generated schema-bound guard (§7.1) and every receiver-cap
    refusal (§6.2.1) arrives as an `UncheckedIOException` wrapping a
    `SofabException`, and a `catch (SofabException)` alone latches none of them.
-   TypeScript raises one class and distinguishes on `SofabError.code`, the C#
-   shape; Zig's `errdefer` capture tests the error value the same way. The one
-   visible movement is Zig's, and it is forced: a receiver-cap refusal used to
-   read back as `.refused`, a value that no longer exists, so it now maps to
-   `.incomplete` and a `finish()` after a caught cap refusal fails where it once
-   succeeded. Mapping it to `.invalid` instead would report a policy stop as the
-   wire verdict, which §6.3 forbids.
+   TypeScript tests `SofabError.code` and requires the `instanceof` first, so a
+   non-corelib throw falls through; Zig's `errdefer` capture tests the error
+   value the same way. The one visible movement is Zig's, and it is forced: a
+   receiver-cap refusal used to read back as `.refused`, a value that no longer
+   exists, so it now maps to `.incomplete` and a `finish()` after a caught cap
+   refusal fails where it once succeeded. Mapping it to `.invalid` instead would
+   report a policy stop as the wire verdict, which §6.3 forbids.
 
 The remembered value had no conformance coverage — every suite reads it only
 indirectly, through `Finish()`/`finish()` — so the project harnesses' `streamdecode`
@@ -1161,6 +1168,18 @@ mode now asserts `status == fed` after each chunk. That puts the memory under th
 shared-vector skip matrix at one byte per feed and under the chunk-invariance
 sweep at every split width, where a stale or mis-wired accessor fails loudly
 instead of passing silently.
+
+That covers the *accepting* half only, and the latch is the half that is new
+logic. A reject vector exits non-zero whatever the latch recorded, so replaying
+vectors can never distinguish a correct mapping from an inverted one, from one
+that records nothing, or from a deleted catch arm. The harnesses therefore
+**print the remembered status on their refusal path** — `decode error: … [status=X]`
+— and the four suites read it back for three fixtures each: a corelib-raised
+malformation (a varint past the 64-bit bound), a generated-guard rejection (an
+over-count array or an over-maxlen length word), and a receiver-cap refusal.
+Malformed → Invalid, capped → Incomplete, on both of Java's carriers. In Zig the
+`catch` that prints it is also what makes the error path compile at all, for the
+same reason the `status()` call is.
 
 In Zig that assertion does more than assert. **Zig only semantically analyses a
 function something calls**, so a generated `pub fn` no harness reaches is never
@@ -1208,6 +1227,16 @@ stderr categories, which separate `Incomplete` from `InvalidMsg` in fifteen
 places. `tests/bench/lang/rust.sh`'s hand-written firmware harness needs no edit
 under this shape — `match Msg::try_decode(..) { Ok(d) => .., Err(_) => .. }` is
 signature-agnostic — which a `(T, Status)` return would have broken.
+
+`DecodeError` is a new *module-scope* name in every generated crate, and the
+crate already spends six more on the corelib import (`OStream`, `IStream`,
+`Visitor`, `Id`, `Unsigned`, `Signed`). A schema element whose Rust name lands on
+one of those emits two definitions of it — rustc E0428/E0255, with nothing in the
+diagnostic pointing back at the schema. The backend therefore rejects the
+collision itself, before emitting, naming the schema element and what the name is
+already spent on. Only names that reach the top level qualify: a named enum or
+bitfield emits a lowercase `pub mod`, and `ArrayKind`/`FixlenType` are imported
+inside the per-message decoder module rather than crate-wide.
 
 #### Decode verdict: over-count scalar arrays are INVALID (all families)
 

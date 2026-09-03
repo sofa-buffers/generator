@@ -214,7 +214,18 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		f.line("                    }")
 		f.line("                    obj = dec.finish();")
 		f.line("                } catch (Exception e) {")
-		f.line("                    System.err.println(\"decode error: \" + e);")
+		// The remembered status is printed, not just the throwable. A refusal is
+		// terminal and leaves through this catch, so the ONLY way the latch in
+		// the generated feed -- the one arm of #461 that is new logic rather
+		// than a rename, and the one that has to answer for BOTH carriers
+		// (bare SofabException and the UncheckedIOException a Visitor callback
+		// has to wrap in) -- becomes observable to a suite is by naming what it
+		// recorded. Without it a deleted arm, or an inverted mapping, still
+		// exits 1 and every reject vector still passes.
+		// tests/conformance/java/run.sh greps this for the malformed and the
+		// over-cap fixtures it already builds.
+		f.line("                    System.err.println(")
+		f.line("                        \"decode error: \" + e + \" [status=\" + dec.status() + \"]\");")
 		f.line("                    System.exit(1); return;")
 		f.line("                }")
 		f.line("                StringBuilder sb = new StringBuilder(); Json.to(obj, sb);")

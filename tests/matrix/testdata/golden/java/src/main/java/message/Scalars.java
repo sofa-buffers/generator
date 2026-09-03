@@ -127,19 +127,35 @@ public class Scalars {
             } catch (SofabException e) {
                 // A refusal is terminal and never comes back as a status, so
                 // record what it means for the stream before rethrowing.
-                st = DecodeStatus.INVALID;
+                // Malformed bytes make the message INVALID; a receiver limit
+                // is this side's policy, so it leaves the message unfinished
+                // rather than wrong.
+                //
+                // Anything else leaves the memory alone. ARGUMENT above all
+                // says the mistake is in the CALL and not in the bytes; a
+                // status is a verdict on the MESSAGE, so recording one for a
+                // caller fault would report something about the wire that is
+                // not true. This is the same three-way test IStream applies
+                // in its own isTerminal().
+                if (e.error() == SofabError.INVALID_MSG) {
+                    st = DecodeStatus.INVALID;
+                } else if (e.error() == SofabError.LIMIT_EXCEEDED) {
+                    st = DecodeStatus.INCOMPLETE;
+                }
                 throw e;
             } catch (java.io.UncheckedIOException e) {
                 // A Visitor cannot declare a checked exception, so a bound
                 // this schema rejects, and a receiver limit this side
-                // refuses, both arrive wrapped instead. Only malformed bytes
-                // make the message INVALID; a limit is this side's policy, so
-                // it leaves the message unfinished rather than wrong.
-                if (e.getCause() instanceof SofabException cause
-                        && cause.error() == SofabError.INVALID_MSG) {
-                    st = DecodeStatus.INVALID;
-                } else {
-                    st = DecodeStatus.INCOMPLETE;
+                // refuses, both arrive wrapped instead -- and so does an
+                // ARGUMENT fault raised from inside a callback, which is why
+                // this arm applies the same three-way test as the bare one
+                // rather than sending everything unrecognized to INCOMPLETE.
+                if (e.getCause() instanceof SofabException cause) {
+                    if (cause.error() == SofabError.INVALID_MSG) {
+                        st = DecodeStatus.INVALID;
+                    } else if (cause.error() == SofabError.LIMIT_EXCEEDED) {
+                        st = DecodeStatus.INCOMPLETE;
+                    }
                 }
                 throw e;
             }

@@ -1777,16 +1777,24 @@ func TestJavaDecoderRemembersFeedStatus(t *testing.T) {
 		// One place records, so the two overloads cannot drift.
 		"            return feed(chunk, 0, chunk.length);",
 		"                return st = is.feed(chunk, off, len, v);",
+		// Both carriers apply the SAME three-way test: the wire verdict for
+		// malformed bytes, INCOMPLETE for a receiver limit, and nothing at all
+		// for a fault that is neither -- an ARGUMENT is a mistake in the CALL,
+		// and recording it as a verdict would describe the wire falsely.
 		"            } catch (SofabException e) {",
-		"                st = DecodeStatus.INVALID;",
+		"                if (e.error() == SofabError.INVALID_MSG) {",
+		"                    st = DecodeStatus.INVALID;",
+		"                } else if (e.error() == SofabError.LIMIT_EXCEEDED) {",
+		"                    st = DecodeStatus.INCOMPLETE;",
 		// A Visitor cannot throw the checked exception, so every generated
 		// schema-bound guard and every receiver-limit refusal arrives wrapped
 		// instead. Catching only SofabException would latch none of them.
 		"            } catch (java.io.UncheckedIOException e) {",
-		"                if (e.getCause() instanceof SofabException cause",
-		"                        && cause.error() == SofabError.INVALID_MSG) {",
-		"                    st = DecodeStatus.INVALID;",
-		"                    st = DecodeStatus.INCOMPLETE;",
+		"                if (e.getCause() instanceof SofabException cause) {",
+		"                    if (cause.error() == SofabError.INVALID_MSG) {",
+		"                        st = DecodeStatus.INVALID;",
+		"                    } else if (cause.error() == SofabError.LIMIT_EXCEEDED) {",
+		"                        st = DecodeStatus.INCOMPLETE;",
 		// The public surface is unchanged; only its backing moved.
 		"        public DecodeStatus status() { return st; }",
 		"            if (st != DecodeStatus.COMPLETE) {",

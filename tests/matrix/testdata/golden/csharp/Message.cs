@@ -115,8 +115,17 @@ public sealed class Scalars {
                 // Malformed bytes make the message Invalid; a receiver limit
                 // is this side's policy, so it leaves the message unfinished
                 // rather than wrong.
-                _st = e.Error == SofabError.InvalidMessage
-                    ? DecodeStatus.Invalid : DecodeStatus.Incomplete;
+                //
+                // Anything else leaves the memory alone. <c>Argument</c>
+                // above all says the mistake is in the CALL and not in the
+                // bytes; a status is a verdict on the MESSAGE, so answering
+                // <c>Incomplete</c> for a caller fault would report
+                // something about the wire that is not true.
+                if (e.Error == SofabError.InvalidMessage) {
+                    _st = DecodeStatus.Invalid;
+                } else if (e.Error == SofabError.LimitExceeded) {
+                    _st = DecodeStatus.Incomplete;
+                }
                 throw;
             }
         }

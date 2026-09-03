@@ -485,6 +485,67 @@ func moduleFromYAML(t *testing.T, src string, cfg map[string]any) string {
 	return ""
 }
 
+// TestRustReservedTypeNames: a schema element whose Rust name collides with a
+// module-scope name the crate already spends -- `DecodeError`, which generator#461
+// added, or one of the six corelib imports -- is refused by the generator, naming
+// the element. Left to rustc it is an E0428/E0255 on generated code with nothing
+// pointing back at the schema, and `decode_error` in particular compiled fine
+// until #461 introduced the enum.
+func TestRustReservedTypeNames(t *testing.T) {
+	// A named struct or union cannot reach this set: it is emitted under its
+	// graph key, so `struct/Point` becomes `StructPoint`. Only a message can.
+	schemaFor := func(t *testing.T, src string) *ir.Schema {
+		t.Helper()
+		doc, err := parser.Parse([]byte(src), "inline.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolved, _ := doc.Resolve()
+		if errs := parser.Validate(resolved); errs != nil {
+			t.Fatalf("invalid: %v", errs)
+		}
+		s, err := model.Build(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := analysis.Analyze(s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	for _, tc := range []struct{ name, src, want string }{
+		{"message", `
+version: 1
+messages:
+  decode_error: { payload: { a: { id: 0, type: u32 } } }
+`, "DecodeError"},
+		{"corelib-import", `
+version: 1
+messages:
+  i_stream: { payload: { a: { id: 0, type: u32 } } }
+`, "IStream"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := (&Backend{}).Generate(schemaFor(t, tc.src), map[string]any{})
+			if err == nil {
+				t.Fatalf("a schema element named %q must be refused, not emitted", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the error must name the colliding type %q; got: %v", tc.want, err)
+			}
+		})
+	}
+	// ...and a name that merely resembles one still generates.
+	m := moduleFromYAML(t, `
+version: 1
+messages:
+  decode_errors: { payload: { a: { id: 0, type: u32 } } }
+`, map[string]any{})
+	if !strings.Contains(m, "pub struct DecodeErrors {") {
+		t.Error("only the exact collisions are reserved; DecodeErrors must still generate")
+	}
+}
+
 // A `count: N` array is fixed-length: the encoder emits only the elements up to
 // the last non-default one and the decoder rebuilds the trailing default run
 // from N (MESSAGE_SPEC §3). A dynamic (count-less) array has no N to refill

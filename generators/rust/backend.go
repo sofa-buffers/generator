@@ -64,6 +64,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 			return nil, err
 		}
 	}
+	if err := g.checkReservedNames(s); err != nil {
+		return nil, err
+	}
 	files := []generator.File{{Path: "src/message.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -296,6 +299,44 @@ func (g *gen) module(s *ir.Schema) []byte {
 		g.emitStruct(f, exported(m.Name), m.Fields, true, m.Summary)
 	}
 	return f.bytes()
+}
+
+// rustReservedNames are the module-scope Rust type names the emitted crate has
+// already spent, mapped to what spends them. A schema element whose Rust name
+// lands on one of these produces a module with two definitions of that name --
+// rustc E0428 or E0255 -- with nothing in the diagnostic pointing back at the
+// schema, so the check below turns it into a generator-time error naming the
+// element instead.
+//
+// Only names that reach the TOP level of src/message.rs belong here. A named
+// enum or bitfield emits a lowercase `pub mod`, which cannot collide with a
+// type, and ArrayKind/FixlenType are imported inside the per-message decoder
+// module rather than crate-wide.
+//
+// Only a MESSAGE can land on one. A named struct or union is emitted under its
+// graph key, which carries its category -- `struct/Point` becomes `StructPoint`
+// -- so its name is out of reach of this set by construction.
+var rustReservedNames = map[string]string{
+	"DecodeError": "the crate's own decode verdict enum",
+	"OStream":     "an encoder type imported from the corelib",
+	"IStream":     "a decoder type imported from the corelib",
+	"Visitor":     "a decode-callback trait imported from the corelib",
+	"Id":          "a field-id type imported from the corelib",
+	"Unsigned":    "a wire-scalar type imported from the corelib",
+	"Signed":      "a wire-scalar type imported from the corelib",
+}
+
+// checkReservedNames rejects a schema whose Rust type names collide with what
+// the crate defines or imports for itself, before rustc has to.
+func (g *gen) checkReservedNames(s *ir.Schema) error {
+	for _, m := range s.Messages {
+		name := exported(m.Name)
+		if spent := rustReservedNames[name]; spent != "" {
+			return fmt.Errorf("rust: message %q generates the type name %q, which the emitted "+
+				"crate already uses for %s -- rename the message", m.Name, name, spent)
+		}
+	}
+	return nil
 }
 
 // emitDecodeError emits the crate's decode verdict type.

@@ -219,10 +219,27 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// compiles it and asserts the memory agrees with the feed that set it,
 		// on every byte of every vector (generator#461).
 		f.line("            for (input) |b| {")
-		f.line("                const fed = try dec.feed(&[_]u8{b});")
+		// `catch`, not `try`: a refusal is terminal and would otherwise leave
+		// main without anyone reading the latch, and the latch -- the errdefer
+		// in the generated feed -- is the one arm of #461 that is new logic
+		// rather than a rename. Printing what it recorded is what makes it
+		// observable to a suite: without it an inverted mapping, or an errdefer
+		// that sets nothing, still exits 1 and every reject vector still
+		// passes. It also forces semantic analysis of the error path, which
+		// Zig performs only for code something reaches.
+		// tests/conformance/zig/run.sh greps this line.
+		f.line("                const fed = dec.feed(&[_]u8{b}) catch |e| {")
+		f.line("                    std.debug.print(\"decode error: {s} [status={s}]\\n\",")
+		f.line("                                    .{ @errorName(e), @tagName(dec.status()) });")
+		f.line("                    std.process.exit(1);")
+		f.line("                };")
 		f.line("                if (dec.status() != fed) return error.StatusDisagreesWithFeed;")
 		f.line("            }")
-		f.line("            try dec.finish();")
+		f.line("            dec.finish() catch |e| {")
+		f.line("                std.debug.print(\"decode error: {s} [status={s}]\\n\",")
+		f.line("                                .{ @errorName(e), @tagName(dec.status()) });")
+		f.line("                std.process.exit(1);")
+		f.line("            };")
 		f.line("            try toJson_%s(&obj, out);", mt)
 		f.line("            try out.writeByte('\\n');")
 		f.line("        } else {")

@@ -252,10 +252,22 @@ export class ScalarsDecoder {
       // what it means for the stream before rethrowing. Malformed bytes make
       // the message Invalid; a receiver limit is this side's policy, so it
       // leaves the message unfinished rather than wrong.
-      this.st =
-        e instanceof SofabError && e.code === SofabErrorCode.InvalidMsg
-          ? DecodeStatus.Invalid
-          : DecodeStatus.Incomplete;
+      //
+      // Anything else leaves the memory alone: a TypeError out of a
+      // callback, or a SofabError carrying Argument, says the mistake is in
+      // the CALL and not in the bytes. A status is a verdict on the
+      // MESSAGE, so recording one for a fault that is not a wire event
+      // would report something about the wire that is not true.
+      if (e instanceof SofabError) {
+        if (e.code === SofabErrorCode.InvalidMsg) {
+          this.st = DecodeStatus.Invalid;
+        } else if (
+          e.code === SofabErrorCode.LimitExceeded ||
+          e.code === SofabErrorCode.Incomplete
+        ) {
+          this.st = DecodeStatus.Incomplete;
+        }
+      }
       throw e;
     }
   }

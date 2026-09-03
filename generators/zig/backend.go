@@ -691,11 +691,20 @@ func (g *gen) emitStreamDecoder(f *zfile, name string, fields []*ir.Field) {
 	// A refusal is terminal and never comes back as a status, so record what it
 	// means for the stream before it leaves. Malformed bytes make the message
 	// .invalid -- §6.3 pairs INVALID with error.InvalidMessage, and Status.invalid
-	// exists for exactly this mapping. Any other refusal (a receiver cap, an
-	// allocator failure) is this side's own stop, not a verdict on the wire, so it
-	// leaves the message unfinished rather than wrong. The errdefer covers all
-	// three exits: the corelib's raise and both generated-side guards.
-	f.line("            errdefer |e| self.st = if (e == error.InvalidMessage) .invalid else .incomplete;")
+	// exists for exactly this mapping. A receiver cap is this side's own policy,
+	// not a verdict on the wire, so it leaves the message unfinished rather than
+	// wrong. Anything else -- an allocator failure above all -- is neither a
+	// statement about the bytes nor about a limit they crossed, so it leaves the
+	// memory alone, matching what the C#, Java and TypeScript decoders record for
+	// the same class of fault. The errdefer covers every exit: the corelib's raise
+	// and both generated-side guards.
+	f.line("            errdefer |e| {")
+	f.line("                if (e == error.InvalidMessage) {")
+	f.line("                    self.st = .invalid;")
+	f.line("                } else if (e == error.LimitExceeded) {")
+	f.line("                    self.st = .incomplete;")
+	f.line("                }")
+	f.line("            }")
 	f.line("            const st = try self.is.feed(chunk, &self.v);")
 	f.line("            if (self.v.inv) return error.InvalidMessage;")
 	if g.msgLimitGuards(fields) {

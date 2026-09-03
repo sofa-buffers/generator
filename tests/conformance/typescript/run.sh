@@ -374,6 +374,36 @@ grep -q "_decode(bytes, new _DynVis(o, new PayloadAcc()));" "$WORK/lim/message.t
 (cd "$WORK/nolim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
 
+# The LATCH -- the one thing generator#461 added that is new logic rather than a
+# rename. A refusal is terminal and never comes back as a status, so the
+# generated feed records what it MEANT before rethrowing, and the Decoder's
+# `status` answers from that memory. Every reject vector exits non-zero whatever
+# the latch recorded, so no amount of vector replay can tell a correct mapping
+# from an inverted one, from one that records nothing, or from a catch arm
+# deleted outright. The harness therefore PRINTS the remembered status on its
+# error path and this block reads it: malformed bytes are INVALID, a receiver cap
+# is INCOMPLETE and never INVALID (CORELIB_PLAN S6.3 -- a policy stop is this
+# side's decision, not a verdict on the wire).
+echo "==> a refusal latches into the remembered status (generator#461)"
+# A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
+# by the CORELIB, where overcount.bin is refused by a GENERATED guard -- the two
+# routes into the same catch (S4.1).
+printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
+latch() {   # <project-dir> <fixture> <want-status> <message>
+    ldir=$1 lfx=$2 lwant=$3 lmsg=$4
+    if (cd "$ldir" && npx tsx harness.ts streamdecode "$lmsg") \
+            < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
+        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
+    fi
+    grep -q "\[status=$lwant\]" "$WORK/latch.err" || {
+        echo "FAIL: $(basename "$lfx") -- the refusal must latch status=$lwant; got:"
+        cat "$WORK/latch.err"; exit 1; }
+}
+latch "$WORK/ex"  "$WORK/varint_overflow.bin" INVALID    myfirstmessage
+latch "$WORK/ex"  "$WORK/overcount.bin"       INVALID    myfirstmessage
+latch "$WORK/lim" "$WORK/overlimit.bin"       INCOMPLETE dyn
+echo "==> refusal latch OK"
+
 # CORELIB_PLAN S6.2.1, "a skipped field is never capped": a limit bounds an
 # ALLOCATION, and a field MESSAGE_SPEC S7.3 skips is walked, not materialised, so
 # no cap may reach it. A decode that steps over an over-cap field it was never

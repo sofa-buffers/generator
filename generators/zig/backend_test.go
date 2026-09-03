@@ -541,10 +541,6 @@ messages:
 	}
 }
 
-// TestZigMetadataDocs: enum-constant descriptions, bitfield-flag descriptions
-// with a default note, and a deprecated field's `///` note all reach the
-// generated source as clean Zig doc comments (Zig has no native deprecation
-// attribute, so the doc line is the only marker).
 // corelib-zig#84 removed IStream.status(): `feed` already returned the outcome,
 // and §5.3.1 allows one surface per fact. The generated Decoder is the CALLER,
 // and a caller may remember -- so its public surface is unchanged and backed by
@@ -561,9 +557,12 @@ func TestZigDecoderRemembersWhatFeedAnswered(t *testing.T) {
 		"st: sofab.Status = .complete,",
 		// A refusal is terminal and never comes back as a status, so it is latched
 		// on every error exit -- the corelib's own raise and the generated guards
-		// after it. §6.3 pairs INVALID with error.InvalidMessage; any other refusal
-		// is this side's stop, leaving the message unfinished rather than wrong.
-		"errdefer |e| self.st = if (e == error.InvalidMessage) .invalid else .incomplete;",
+		// after it. §6.3 pairs INVALID with error.InvalidMessage; a receiver cap is
+		// this side's stop, leaving the message unfinished rather than wrong; and
+		// anything else (OutOfMemory) is neither, so it leaves the memory alone.
+		"            errdefer |e| {\n                if (e == error.InvalidMessage) {\n" +
+			"                    self.st = .invalid;\n                } else if (e == error.LimitExceeded) {\n" +
+			"                    self.st = .incomplete;\n                }\n            }",
 		"            self.st = st;\n            return st;",
 		"        pub fn status(self: *const Decoder) sofab.Status {\n            return self.st;\n        }",
 		"if (self.st == .incomplete) return error.IncompleteMessage;",
@@ -579,6 +578,10 @@ func TestZigDecoderRemembersWhatFeedAnswered(t *testing.T) {
 	}
 }
 
+// TestZigMetadataDocs: enum-constant descriptions, bitfield-flag descriptions
+// with a default note, and a deprecated field's `///` note all reach the
+// generated source as clean Zig doc comments (Zig has no native deprecation
+// attribute, so the doc line is the only marker).
 func TestZigMetadataDocs(t *testing.T) {
 	const src = `
 version: 1
@@ -665,13 +668,20 @@ func TestZigProjectMode(t *testing.T) {
 		// through both and compares.
 		"std.mem.eql(u8, mode, \"streamdecode\")",
 		"var dec = message.Myfirstmessage.decoder(&obj, alloc);",
-		"const fed = try dec.feed(&[_]u8{b});",
+		"const fed = dec.feed(&[_]u8{b}) catch |e| {",
 		// Zig only analyses a function something calls, so a generated
 		// `pub fn status` no harness reaches is never compiled -- a broken body
 		// would take the whole suite green. This call compiles it AND asserts the
 		// decoder's memory agrees with the feed that set it (generator#461).
 		"if (dec.status() != fed) return error.StatusDisagreesWithFeed;",
-		"try dec.finish();",
+		// The refusal path is the half a passing suite cannot otherwise see: a
+		// reject vector exits non-zero whatever the latch recorded, so the
+		// harness NAMES what it recorded and run.sh greps for it. `catch` here
+		// also forces semantic analysis of the errdefer, which `try` would have
+		// left to a caller that never reads it.
+		"                    std.debug.print(\"decode error: {s} [status={s}]\\n\",",
+		"                                    .{ @errorName(e), @tagName(dec.status()) });",
+		"            dec.finish() catch |e| {",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("main.zig missing %q", want)
