@@ -1090,6 +1090,22 @@ back it with a private field holding what the last `feed` returned:
 - **Java** `Msg.Decoder` keeps `public DecodeStatus status()`, now reading `st`,
   with the same funnel and the same `finish()`. The static `tryDecode` needs no
   memory at all — `feed`'s return *is* what it returns.
+- **TypeScript** `MsgDecoder` keeps `get status(): DecodeStatus`, now reading a
+  private `st`, and `finish()` tests it. corelib-ts expressed the removal by
+  *narrowing* `feed`'s return type — `DecodeStatus` → `FeedStatus`, a type that
+  admits only Complete and Incomplete, so a caller has no unreachable Invalid arm
+  to write. The generated surface deliberately stays `DecodeStatus`: `FeedStatus`
+  is a **type-only** export, and a value-import of it would break any consumer
+  project compiling with `verbatimModuleSyntax`. Its supertype is import-neutral,
+  non-breaking, and wide enough for the latched Invalid the wrapper can hold.
+- **Zig** `Msg.Decoder` keeps `pub fn status(self: *const Decoder) sofab.Status`,
+  now reading `st: sofab.Status = .complete`. corelib-zig's `feed` already
+  returned `Error!Status`, so it expressed the same removal by deleting the
+  `.refused` enum member that only the accessor could ever produce — `Status` is
+  back to the three §7 outcomes, and `.invalid` is documented as being kept for
+  precisely this mapping. The latch is an `errdefer |e|`, which covers all three
+  error exits in one line: the corelib's own raise and both generated-side
+  guards (`v.inv`, `v.lim`) that run after it.
 
 Two details are load-bearing and neither is caught by simply compiling:
 
@@ -1107,13 +1123,29 @@ Two details are load-bearing and neither is caught by simply compiling:
    exception, so every generated schema-bound guard (§7.1) and every receiver-cap
    refusal (§6.2.1) arrives as an `UncheckedIOException` wrapping a
    `SofabException`, and a `catch (SofabException)` alone latches none of them.
+   TypeScript raises one class and distinguishes on `SofabError.code`, the C#
+   shape; Zig's `errdefer` capture tests the error value the same way. The one
+   visible movement is Zig's, and it is forced: a receiver-cap refusal used to
+   read back as `.refused`, a value that no longer exists, so it now maps to
+   `.incomplete` and a `finish()` after a caught cap refusal fails where it once
+   succeeded. Mapping it to `.invalid` instead would report a policy stop as the
+   wire verdict, which §6.3 forbids.
 
 The remembered value had no conformance coverage — every suite reads it only
 indirectly, through `Finish()`/`finish()` — so the project harnesses' `streamdecode`
-mode now asserts `Status == fed` after each chunk. That puts the memory under the
+mode now asserts `status == fed` after each chunk. That puts the memory under the
 shared-vector skip matrix at one byte per feed and under the chunk-invariance
 sweep at every split width, where a stale or mis-wired accessor fails loudly
 instead of passing silently.
+
+In Zig that assertion does more than assert. **Zig only semantically analyses a
+function something calls**, so a generated `pub fn` no harness reaches is never
+compiled at all: with the old body still in place, `zig build` reported the break
+inside `finish()` and said nothing about `status()`, and a fix repairing only
+`finish()` would have taken the whole `lang-zig` suite green with the accessor
+dead-broken for every user of generated code. The harness call is what puts a
+compiler behind it. The same blind spot applies to every `pub fn` a generated Zig
+module exposes but no harness exercises.
 
 #### Decode verdict: over-count scalar arrays are INVALID (all families)
 

@@ -109,26 +109,38 @@ pub const Scalars = struct {
     pub const Decoder = struct {
         is: sofab.IStream = sofab.IStream.init(),
         v: _dec_Scalars,
+        /// What the last `feed` answered. The stream publishes its outcome
+        /// once, as that return value, and offers no accessor to ask a second
+        /// time (S5.3.1), so the caller is the one that remembers -- and this
+        /// decoder is the caller. `.complete` before the first feed: an
+        /// all-default message is zero bytes, so a stream that has been fed
+        /// nothing ended on a field boundary.
+        st: sofab.Status = .complete,
 
         /// Feed the next chunk, of any size. `.complete` means the bytes
         /// ended on a field boundary, `.incomplete` mid-field -- neither
         /// answers whether the MESSAGE is done.
         pub fn feed(self: *Decoder, chunk: []const u8) DecodeError!sofab.Status {
+            errdefer |e| self.st = if (e == error.InvalidMessage) .invalid else .incomplete;
             const st = try self.is.feed(chunk, &self.v);
             if (self.v.inv) return error.InvalidMessage;
+            self.st = st;
             return st;
         }
 
-        /// The outcome for everything fed so far, without feeding more.
+        /// The outcome for everything fed so far: what the last `feed`
+        /// returned, remembered here. The stream itself answers only through
+        /// that return value, so this is the wrapper's memory of it, not a
+        /// second question put to the stream.
         pub fn status(self: *const Decoder) sofab.Status {
-            return self.is.status();
+            return self.st;
         }
 
         /// Declare end-of-input. Fails a stream that ended mid-field rather
         /// than leaving the destination half-filled; the destination is the
         /// caller's either way.
         pub fn finish(self: *const Decoder) DecodeError!void {
-            if (self.is.status() == .incomplete) return error.IncompleteMessage;
+            if (self.st == .incomplete) return error.IncompleteMessage;
         }
     };
 

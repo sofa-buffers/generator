@@ -676,29 +676,48 @@ func (g *gen) emitStreamDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("    pub const Decoder = struct {")
 	f.line("        is: sofab.IStream = sofab.IStream.init(),")
 	f.line("        v: _dec_%s,", name)
+	f.line("        /// What the last `feed` answered. The stream publishes its outcome")
+	f.line("        /// once, as that return value, and offers no accessor to ask a second")
+	f.line("        /// time (S5.3.1), so the caller is the one that remembers -- and this")
+	f.line("        /// decoder is the caller. `.complete` before the first feed: an")
+	f.line("        /// all-default message is zero bytes, so a stream that has been fed")
+	f.line("        /// nothing ended on a field boundary.")
+	f.line("        st: sofab.Status = .complete,")
 	f.blank()
 	f.line("        /// Feed the next chunk, of any size. `.complete` means the bytes")
 	f.line("        /// ended on a field boundary, `.incomplete` mid-field -- neither")
 	f.line("        /// answers whether the MESSAGE is done.")
 	f.line("        pub fn feed(self: *Decoder, chunk: []const u8) DecodeError!sofab.Status {")
+	// A refusal is terminal and never comes back as a status, so record what it
+	// means for the stream before it leaves. Malformed bytes make the message
+	// .invalid -- §6.3 pairs INVALID with error.InvalidMessage, and Status.invalid
+	// exists for exactly this mapping. Any other refusal (a receiver cap, an
+	// allocator failure) is this side's own stop, not a verdict on the wire, so it
+	// leaves the message unfinished rather than wrong. The errdefer covers all
+	// three exits: the corelib's raise and both generated-side guards.
+	f.line("            errdefer |e| self.st = if (e == error.InvalidMessage) .invalid else .incomplete;")
 	f.line("            const st = try self.is.feed(chunk, &self.v);")
 	f.line("            if (self.v.inv) return error.InvalidMessage;")
 	if g.msgLimitGuards(fields) {
 		f.line("            if (self.v.lim) return error.LimitExceeded;")
 	}
+	f.line("            self.st = st;")
 	f.line("            return st;")
 	f.line("        }")
 	f.blank()
-	f.line("        /// The outcome for everything fed so far, without feeding more.")
+	f.line("        /// The outcome for everything fed so far: what the last `feed`")
+	f.line("        /// returned, remembered here. The stream itself answers only through")
+	f.line("        /// that return value, so this is the wrapper's memory of it, not a")
+	f.line("        /// second question put to the stream.")
 	f.line("        pub fn status(self: *const Decoder) sofab.Status {")
-	f.line("            return self.is.status();")
+	f.line("            return self.st;")
 	f.line("        }")
 	f.blank()
 	f.line("        /// Declare end-of-input. Fails a stream that ended mid-field rather")
 	f.line("        /// than leaving the destination half-filled; the destination is the")
 	f.line("        /// caller's either way.")
 	f.line("        pub fn finish(self: *const Decoder) DecodeError!void {")
-	f.line("            if (self.is.status() == .incomplete) return error.IncompleteMessage;")
+	f.line("            if (self.st == .incomplete) return error.IncompleteMessage;")
 	f.line("        }")
 	f.line("    };")
 	f.blank()

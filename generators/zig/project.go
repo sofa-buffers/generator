@@ -210,8 +210,17 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// An .incomplete per feed is the normal verdict for a chunk that ended
 		// mid-field: it says the BYTES ended there, not that the message is bad.
 		// Only finish() decides on the message as a whole.
+		// The stream publishes its outcome once, as feed's return value, and has
+		// no accessor to ask again -- so Decoder.status() is the wrapper
+		// remembering it. Checking it here is not optional bookkeeping: Zig only
+		// semantically analyses a function something calls, so a generated
+		// `pub fn status` that nothing in the harness reaches is never compiled
+		// at all, and a broken body takes the whole suite green. This call both
+		// compiles it and asserts the memory agrees with the feed that set it,
+		// on every byte of every vector (generator#461).
 		f.line("            for (input) |b| {")
-		f.line("                _ = try dec.feed(&[_]u8{b});")
+		f.line("                const fed = try dec.feed(&[_]u8{b});")
+		f.line("                if (dec.status() != fed) return error.StatusDisagreesWithFeed;")
 		f.line("            }")
 		f.line("            try dec.finish();")
 		f.line("            try toJson_%s(&obj, out);", mt)

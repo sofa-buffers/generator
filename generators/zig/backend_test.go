@@ -545,6 +545,40 @@ messages:
 // with a default note, and a deprecated field's `///` note all reach the
 // generated source as clean Zig doc comments (Zig has no native deprecation
 // attribute, so the doc line is the only marker).
+// corelib-zig#84 removed IStream.status(): `feed` already returned the outcome,
+// and §5.3.1 allows one surface per fact. The generated Decoder is the CALLER,
+// and a caller may remember -- so its public surface is unchanged and backed by
+// a field holding what the last feed returned (generator#461).
+//
+// Nothing pinned the Decoder body before this, which is why it needs pinning:
+// Zig never even compiles a `pub fn` nothing calls, so the emitted accessor has
+// no compiler behind it either.
+func TestZigDecoderRemembersWhatFeedAnswered(t *testing.T) {
+	m := exampleFiles(t, map[string]any{})["src/message.zig"]
+	for _, want := range []string{
+		// A stream fed nothing ended on a field boundary: an all-default message
+		// is zero bytes, so a Decoder can legitimately finish() without a feed.
+		"st: sofab.Status = .complete,",
+		// A refusal is terminal and never comes back as a status, so it is latched
+		// on every error exit -- the corelib's own raise and the generated guards
+		// after it. §6.3 pairs INVALID with error.InvalidMessage; any other refusal
+		// is this side's stop, leaving the message unfinished rather than wrong.
+		"errdefer |e| self.st = if (e == error.InvalidMessage) .invalid else .incomplete;",
+		"            self.st = st;\n            return st;",
+		"        pub fn status(self: *const Decoder) sofab.Status {\n            return self.st;\n        }",
+		"if (self.st == .incomplete) return error.IncompleteMessage;",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing remembered-status shape %q", want)
+		}
+	}
+	// The removed accessor must not come back: asking the stream a second time no
+	// longer compiles, and (worse) would not be compiled at all inside `status`.
+	if strings.Contains(m, "self.is.status()") {
+		t.Error("IStream.status() is gone (corelib-zig#84); feed's return is the only answer")
+	}
+}
+
 func TestZigMetadataDocs(t *testing.T) {
 	const src = `
 version: 1
@@ -631,7 +665,12 @@ func TestZigProjectMode(t *testing.T) {
 		// through both and compares.
 		"std.mem.eql(u8, mode, \"streamdecode\")",
 		"var dec = message.Myfirstmessage.decoder(&obj, alloc);",
-		"_ = try dec.feed(&[_]u8{b});",
+		"const fed = try dec.feed(&[_]u8{b});",
+		// Zig only analyses a function something calls, so a generated
+		// `pub fn status` no harness reaches is never compiled -- a broken body
+		// would take the whole suite green. This call compiles it AND asserts the
+		// decoder's memory agrees with the feed that set it (generator#461).
+		"if (dec.status() != fed) return error.StatusDisagreesWithFeed;",
 		"try dec.finish();",
 	} {
 		if !strings.Contains(h, want) {

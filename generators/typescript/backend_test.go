@@ -246,7 +246,12 @@ func TestTSHeaderBoundReject(t *testing.T) {
 	for _, want := range []string{
 		`mode === "streamdecode"`,
 		`const dec = new DECODERS[name]();`,
-		`for (const b of input) { one[0] = b; dec.feed(one); }`,
+		`const fed = dec.feed(one);`,
+		// The stream answers once, on feed's return, so the Decoder's `status` is
+		// the wrapper's memory of it -- and nothing else in the suite reads that
+		// memory, so a stale one would let every vector pass. Check it per byte
+		// (generator#461).
+		`if (dec.status !== fed) {`,
 		`obj = dec.finish();`,
 		`"M": M.MDecoder,`,
 	} {
@@ -392,6 +397,10 @@ func TestTSStructural(t *testing.T) {
 		// The eager begin no longer exists in corelib-ts: every sequence is opened
 		// with writeSequenceBeginLazy (MESSAGE_SPEC §2).
 		"os.writeSequenceBegin(",
+		// corelib-ts#170 removed IStream's status accessor: `feed`'s return is the
+		// only channel the outcome travels on (§5.2.4). Asking the stream a second
+		// time no longer compiles, and must not come back (generator#461).
+		"this.is.status()",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("message.ts should no longer emit %q (one visitor surface, §5.3.1)", gone)
@@ -400,7 +409,21 @@ func TestTSStructural(t *testing.T) {
 	// The streaming surface is the same visitor, fed incrementally.
 	for _, want := range []string{
 		"export class MyfirstmessageDecoder {",
-		"  feed(chunk: Uint8Array): DecodeStatus { return this.is.feed(chunk); }",
+		// corelib-ts#170 left `feed`'s return as the only place the stream
+		// publishes its outcome. The wrapper is the caller, and a caller may
+		// remember: the public surface is unchanged and backed by a field.
+		// Complete before the first feed -- an all-default message is zero bytes,
+		// so a decoder that was never fed still finishes (generator#461).
+		"  private st: DecodeStatus = DecodeStatus.Complete;",
+		"      return (this.st = this.is.feed(chunk));",
+		// A refusal is terminal and never comes back as a status, so it is
+		// latched: InvalidMsg is the wire verdict, any other refusal is this
+		// side's own stop and leaves the message unfinished, not wrong (S6.3).
+		"        e instanceof SofabError && e.code === SofabErrorCode.InvalidMsg",
+		"          ? DecodeStatus.Invalid",
+		"          : DecodeStatus.Incomplete;",
+		"  get status(): DecodeStatus { return this.st; }",
+		"    if (this.st !== DecodeStatus.Complete) {",
 		"  sequenceBegin(id: number): boolean {",
 		// The scope graph is a tree, so the parent is static and sequenceEnd needs
 		// no stack to restore it.

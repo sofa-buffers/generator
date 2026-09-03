@@ -67,7 +67,10 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// The incremental Decoder classes are exported per message, beside the message
 	// classes rather than on them, so they need a map of their own for the
 	// `streamdecode` mode to reach one by message name.
-	f.line("const DECODERS: Record<string, { new (): { feed(chunk: Uint8Array): unknown; finish(): { toJSON(): Record<string, unknown> } } }> = {")
+	// `status` is in the structural type on purpose: it is the decoder's memory of
+	// what the last `feed` returned, and the streamdecode mode below checks the two
+	// agree. Typing it as `unknown` would let that check compare nothing.
+	f.line("const DECODERS: Record<string, { new (): { feed(chunk: Uint8Array): import(%q).DecodeStatus; readonly status: import(%q).DecodeStatus; finish(): { toJSON(): Record<string, unknown> } } }> = {", corelibPkg, corelibPkg)
 	for _, m := range s.Messages {
 		f.line("  %q: M.%sDecoder,", m.Name, exported(m.Name))
 	}
@@ -173,7 +176,18 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    const one = new Uint8Array(1);")
 	f.line("    let obj;")
 	f.line("    try {")
-	f.line("      for (const b of input) { one[0] = b; dec.feed(one); }")
+	// The stream publishes its outcome once, as feed's return value, and has no
+	// accessor to ask again -- so the Decoder's `status` is the wrapper
+	// remembering it. Nothing else in the suite reads that memory, and a stale one
+	// would still let every vector pass, so check it here: it has to agree with
+	// the feed that produced it, on every byte of every vector (generator#461).
+	f.line("      for (const b of input) {")
+	f.line("        one[0] = b;")
+	f.line("        const fed = dec.feed(one);")
+	f.line("        if (dec.status !== fed) {")
+	f.line("          throw new Error(`status ${dec.status} disagrees with the feed that set it (${fed})`);")
+	f.line("        }")
+	f.line("      }")
 	f.line("      obj = dec.finish();")
 	f.line("    } catch (e) {")
 	f.line("      process.stderr.write(`decode error: ${String(e)}\\n`);")
