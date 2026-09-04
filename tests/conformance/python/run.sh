@@ -196,19 +196,32 @@ for ENGINE in $ENGINES; do
     # engines carry SEPARATE fp32 narrowing/widening code (`_core.py` vs
     # `_speedups.pyx`), so a single-engine leg proves nothing about the other.
     #
-    # A driver rather than a shell block over the harness verbs: the round-trip
-    # must be wire -> object -> wire, and this harness has no `recode` verb (only
-    # ts and dart emit one; #468 tracks adding it here and folding the three
-    # one-shot legs onto one lib/ driver). The JSON detour through
-    # `decode | encode` is measurably lossy -- an sNaN comes back as the
-    # canonical payload-less quiet NaN 0x7FC00000 -- so a block built on it would
-    # be vacuous or falsely red. The driver also asserts the MATERIALIZED value,
-    # the second oracle §6.5's testing clause names, and drives the STREAMING
-    # surface, which §6.5 asks for ("on every decode surface") and neither the ts
-    # nor the dart block covers.
+    # The round-trip itself is the shared driver's, run over the harness's
+    # `recode` verb -- wire -> object -> wire with no JSON in the middle, because
+    # `decode | encode` is measurably lossy here (an sNaN comes back as the
+    # canonical payload-less quiet NaN 0x7FC00000, so a block built on the JSON
+    # verbs would be vacuous or falsely red). ts and dart run the same table over
+    # the same verb (generator#468); the fixtures are derived from example.yaml's
+    # own two fp32 positions.
     echo "==> fp32 signaling-NaN bit-exact round-trip, engine=$ENGINE (§6.5, generator#414)"
-    python3 "$ROOT/tests/conformance/python/fp32_nan_check.py" "$WORK/proj" "$ENGINE" \
+    python3 "$ROOT/tests/conformance/lib/check_fp32_nan.py" "python/$ENGINE" \
+        --schema "$ROOT/examples/messages/example.yaml" \
+        --scalar-message myfirstmessage --scalar-field somefp32 \
+        --array-message myfirstmessage --array-field somefloatarray \
+        --expect 9 --expect-normalize 2 --cwd "$WORK/proj" -- python3 harness.py \
         || { echo "FAIL: [$ENGINE] an fp32 payload changed across decode -> re-encode"; exit 1; }
+
+    # ...and the two oracles that verb cannot reach, which stay python's: the
+    # MATERIALIZED value (§6.5's second named oracle -- a wire -> wire subprocess
+    # has no field access) and the STREAMING decode surface (`recode` is one-shot
+    # in all three harnesses, and chunk 3 deliberately splits the 4-byte fp32
+    # word). It runs the SAME fixture table, imported from the shared driver, and
+    # asserts the engine in its own process (generator#451) -- the driver above
+    # inherits SOFAB_PUREPYTHON and so selects an engine but cannot assert one.
+    echo "==> fp32 value + streaming oracles, engine=$ENGINE (§6.5, generator#414)"
+    python3 "$ROOT/tests/conformance/python/fp32_nan_check.py" "$WORK/proj" "$ENGINE" \
+        "$ROOT/examples/messages/example.yaml" \
+        || { echo "FAIL: [$ENGINE] an fp32 payload did not survive the materialized-value or streaming oracle (§6.5)"; exit 1; }
 done
 
 # Everything below runs on ONE engine -- the shared-vector byte-exactness check

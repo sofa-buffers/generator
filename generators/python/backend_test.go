@@ -664,6 +664,26 @@ func TestPythonHarnessChecksTheRememberedStatus(t *testing.T) {
 	}
 }
 
+// TestPythonHarnessEmitsRecode: the wire -> object -> wire verb the two other
+// double-only targets (ts, dart) have carried since generator#235/#226. It is
+// the only harness surface on which an fp32 signaling NaN's payload can be
+// observed at all -- `decode | encode` renders it as JSON `NaN` and re-encodes
+// the canonical payload-less quiet 0x7FC00000 -- and it is what
+// tests/conformance/lib/check_fp32_nan.py drives (generator#468).
+func TestPythonHarnessEmitsRecode(t *testing.T) {
+	h := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{"emit": "project"})["harness.py"])
+	for _, want := range []string{
+		"    elif mode == 'recode':",
+		// Bytes out, not JSON -- the whole point of the verb.
+		"        obj = cls.decode(data)\n        sys.stdout.buffer.write(obj.encode())",
+		"usage: harness.py <encode|decode|recode|streamdecode|bench>",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("harness.py missing %q", want)
+		}
+	}
+}
+
 func TestPythonSyntaxValid(t *testing.T) {
 	py, err := exec.LookPath("python3")
 	if err != nil {
