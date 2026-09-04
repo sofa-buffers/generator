@@ -2007,3 +2007,68 @@ messages:
 		}
 	}
 }
+
+// TestJavaBitfieldArrayDefaultIsALegalLongLiteral: the same rule one level in.
+//
+// An ARRAY of bitfield lowers to a Java `long[]` (primArrayBase puts bitfield on
+// the long base), and its default is rendered element by element by
+// javaPrimElemLit -- which special-cased only ir.KindU64 and let a bitfield
+// element fall through to a bare decimal. A default element with bit 63 set
+// therefore emitted `new long[]{0x1L, 9223372036854775808L}`, which javac 25.0.3
+// refused twice (the per-instance initializer and the hoisted _arrdef_ constant),
+// so the class did not compile at all -- the same total failure the scalar arm
+// had. Both now go through javaMaskLit.
+func TestJavaBitfieldArrayDefaultIsALegalLongLiteral(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  Bf2:
+    payload:
+      masks: { id: 0, type: array, items: { type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }, default: [1, 9223372036854775808] }
+`
+	want := []uint64{1, 1 << 63}
+
+	var out string
+	for p, c := range genJavaFromYAML(t, src, map[string]any{"package": "messages"}) {
+		if strings.HasSuffix(p, "Bf2.java") {
+			out = c
+		}
+	}
+	if out == "" {
+		t.Fatal("no Bf2.java generated")
+	}
+
+	// Every `new long[]{...}` the default is spelled as: the field initializer and
+	// the hoisted _arrdef_ constant serialize/isDefault/reset compare against.
+	inits := regexp.MustCompile(`new long\[\]\{([^}]*)\}`).FindAllStringSubmatch(out, -1)
+	if len(inits) != 2 {
+		t.Fatalf("expected the array default at 2 sites (field initializer, _arrdef_ constant), got %d:\n%s",
+			len(inits), out)
+	}
+	for _, in := range inits {
+		lits := strings.Split(in[1], ", ")
+		if len(lits) != len(want) {
+			t.Errorf("%q has %d elements, want %d", in[0], len(lits), len(want))
+			continue
+		}
+		for i, lit := range lits {
+			// The range rule javac itself applies -- a substring assertion would
+			// have passed just as happily on the decimal that does not compile.
+			bits, err := javaLongLiteralBits(lit)
+			if err != nil {
+				t.Errorf("element %d of %q is not a long literal javac accepts (%v) -- the generated class does not compile",
+					i, in[0], err)
+				continue
+			}
+			if bits != want[i] {
+				t.Errorf("element %d of %q denotes 0x%X, want 0x%X", i, in[0], bits, want[i])
+			}
+		}
+	}
+
+	// And the spelling, so the per-instance initializer cannot be traded for a
+	// Long.parseUnsignedLong call per element per object constructed.
+	if !strings.Contains(out, "new long[]{0x1L, 0x8000000000000000L}") {
+		t.Errorf("Bf2.java does not spell the array default in hex:\n%s", out)
+	}
+}

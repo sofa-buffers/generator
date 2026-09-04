@@ -85,7 +85,17 @@ func (g *gen) javaArrayElemLit(elem ir.Kind, v any) string {
 		return floatLit(v)
 	case ir.KindU64:
 		return fmt.Sprintf("Long.parseUnsignedLong(%q)", scalarLit(v))
-	default: // integers, enum, bitfield -> Long
+	case ir.KindBitfield:
+		// Symmetry with javaPrimElemLit only, and nothing reaches it: this boxed
+		// path is boolean-only today, because primitiveArrayElem claims bitfield
+		// and every caller tests that predicate first. Kept correct so that moving
+		// a bitfield array onto the boxed List<Long> path cannot silently
+		// reintroduce the decimal literal javac rejects at bit 63 (generator#477).
+		if bits, err := strconv.ParseUint(scalarLit(v), 10, 64); err == nil {
+			return javaMaskLit(bits)
+		}
+		return scalarLit(v) + "L"
+	default: // integers, enum -> Long
 		return scalarLit(v) + "L"
 	}
 }
@@ -266,6 +276,19 @@ func javaPrimElemLit(elem ir.Kind, v any) string {
 		if elem == ir.KindU64 {
 			return fmt.Sprintf("Long.parseUnsignedLong(%q)", scalarLit(v))
 		}
+		if elem == ir.KindBitfield {
+			// The same hole as the scalar default, one level in: an element mask
+			// with bit 63 set has no decimal long literal, so
+			// `new long[]{1L, 9223372036854775808L}` is "integer number too large"
+			// and the class does not compile at all. Hex is doubly right here --
+			// this initializer is per-INSTANCE, so Long.parseUnsignedLong would be
+			// a static call per element per object constructed.
+			if bits, err := strconv.ParseUint(scalarLit(v), 10, 64); err == nil {
+				return javaMaskLit(bits)
+			}
+			// Not a mask the validator would have accepted; fall through and let
+			// the compiler complain rather than emitting something invented.
+		}
 		return scalarLit(v) + "L"
 	}
 	// A narrowed width: reduce the schema's value to the bits the field holds.
@@ -419,7 +442,7 @@ func (g *gen) javaInit(f *ir.Field) string {
 		// the right spelling for a mask assembled from flag POSITIONS -- it shows
 		// which bits are set, which no decimal does.
 		if bits := g.bitfieldDefault(f); bits != 0 {
-			return fmt.Sprintf(" = 0x%XL", bits)
+			return " = " + javaMaskLit(bits)
 		}
 		return ""
 	case ir.KindFP32:
@@ -434,6 +457,21 @@ func (g *gen) javaInit(f *ir.Field) string {
 		return ""
 	}
 	return ""
+}
+
+// javaMaskLit spells a bitfield mask as a Java `long` literal. It is the one
+// place that decision lives: javaInit renders a scalar bitfield default with it
+// and javaPrimElemLit renders an array element with it, so a third site cannot
+// drift from the first two -- generator#477 was exactly that drift, the scalar
+// arm spelled the mask correctly while the array element in the same file did
+// not.
+//
+// Hex is the spelling, for the reasons javaInit's arm sets out: it is the only
+// one that covers every uint64 pattern in a SIGNED carrier, it stays a
+// compile-time constant on a maxspeed target, and it shows which bits a mask
+// assembled from flag POSITIONS actually sets.
+func javaMaskLit(bits uint64) string {
+	return fmt.Sprintf("0x%XL", bits)
 }
 
 func (g *gen) bitfieldDefault(f *ir.Field) uint64 {
