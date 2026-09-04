@@ -406,8 +406,20 @@ func (g *gen) javaInit(f *ir.Field) string {
 		}
 		return ""
 	case ir.KindBitfield:
+		// A bitfield is an unsigned 64-bit mask carried in a SIGNED Java long, so
+		// a mask with bit 63 set has no DECIMAL long literal: `9223372036854775808L`
+		// is "integer number too large" and the class does not compile. A HEX long
+		// literal has no such hole -- it spells every uint64 bit pattern, up to
+		// 0xFFFFFFFFFFFFFFFFL -- and unlike the Long.parseUnsignedLong the u64 arm
+		// above needs (a decimal default is an author-written number, and rewriting
+		// it would hide what the schema said) it stays a compile-time constant.
+		// That matters because this one string is reused four times, twice of them
+		// in a hot path: the field initializer, the `!= default` omission compare in
+		// serialize, the same compare in isDefault, and reset(). Hex is also simply
+		// the right spelling for a mask assembled from flag POSITIONS -- it shows
+		// which bits are set, which no decimal does.
 		if bits := g.bitfieldDefault(f); bits != 0 {
-			return fmt.Sprintf(" = %dL", bits)
+			return fmt.Sprintf(" = 0x%XL", bits)
 		}
 		return ""
 	case ir.KindFP32:
