@@ -431,10 +431,18 @@ func (g *gen) emitEnum(f *hfile, nt *ir.NamedType) {
 func (g *gen) emitBitfield(f *hfile, nt *ir.NamedType) {
 	f.line("enum %s : %s {", g.typeName(nt.Key), bitfieldBacking(nt))
 	for _, fl := range nt.Flags {
+		// The ULL suffix is not decoration. An unsuffixed decimal literal takes
+		// the first SIGNED type that holds it, so the mask for position 63 —
+		// 9223372036854775808 — fits no signed type at all: GCC and Clang warn
+		// ("integer constant is so large that it is unsigned") and a user
+		// building with -Werror cannot compile the header we generated. The
+		// suffix is harmless on a narrower backing type, where the enumerator
+		// converts to it as usual.
+		mask := uint64(1) << uint(fl.Pos)
 		if doc := flagDoc(fl); doc != "" {
-			f.line("    %s%s = %d,  ///< %s", g.typeName(nt.Key), exported(fl.Name), uint64(1)<<uint(fl.Pos), doc)
+			f.line("    %s%s = %dULL,  ///< %s", g.typeName(nt.Key), exported(fl.Name), mask, doc)
 		} else {
-			f.line("    %s%s = %d,", g.typeName(nt.Key), exported(fl.Name), uint64(1)<<uint(fl.Pos))
+			f.line("    %s%s = %dULL,", g.typeName(nt.Key), exported(fl.Name), mask)
 		}
 	}
 	f.line("};")

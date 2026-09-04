@@ -79,6 +79,25 @@ int main(void)
     m.f_nested.n_i32 = INT32_MIN;
     memcpy(m.f_nested.n_str, "wxyz", 4);
 
+    /* A bitfield is charged the full 64-bit varint width whatever its declared
+     * positions, so only an all-flags-set value reaches the worst case. Every one
+     * of the 64 positions is declared in the schema, so this is a value the
+     * schema really permits and not a reliance on undeclared bits. */
+    m.f_bitfield = UINT64_MAX;
+
+    /* A wrapper array whose ELEMENTS are structs: the holder carries the element
+     * count exactly as the string and blob holders above do, and each element is
+     * a sequence frame of its own nested inside the array's frame. The two
+     * elements carry different strings, which this oracle cannot see -- it weighs
+     * the message and nothing else -- but which the shared byte comparison over
+     * the same fixture (tests/conformance/lib/maxsize_fill.hex) does: an element
+     * written twice, or indexed the wrong way round, is the same LENGTH. */
+    m.f_arr_struct.len = 2;
+    m.f_arr_struct.items[0].s_u8 = UINT8_MAX;
+    memcpy(m.f_arr_struct.items[0].s_str, "abc", 3);
+    m.f_arr_struct.items[1].s_u8 = UINT8_MAX;
+    memcpy(m.f_arr_struct.items[1].s_str, "def", 3);
+
     /* Deliberately oversized so an encode that overruns MAX_SIZE still succeeds
      * and can be measured, instead of failing with BUFFER_FULL and hiding by how
      * much the bound was wrong. */

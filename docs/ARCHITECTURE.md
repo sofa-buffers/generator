@@ -3587,10 +3587,16 @@ coverage limits are recorded in the fixture's header: an enum and a union are
 deliberately over-charged and can never join it, and a wrapper array whose
 elements are themselves ARRAYS is the last exactly-priced shape still missing.
 The bitfield and the array-of-struct joined in generator#470, which moved the
-count from 234 to 269 bytes and cost two backends a carrier: TypeScript could not
-hold an all-flags-set mask in a `number` at all, and Dart's `(x as num).toInt()`
-JSON arm silently CLAMPED one to 2^63-1 — a shortfall a `<=` assertion would
-have accepted.
+count from 234 to 269 bytes and cost three backends a fix. Two were carriers:
+TypeScript could not hold an all-flags-set mask in a `number` at all, and Dart's
+`(x as num).toInt()` JSON arm silently CLAMPED one to 2^63-1 — a shortfall a `<=`
+assertion would have accepted. The third was a literal: C++ emitted a flag mask
+as an unsuffixed decimal, and the mask for position 63 fits no *signed* type, so
+the header the generator wrote for its own fixture warned under `-Wall` and could
+not be compiled by a user with `-Werror`. That one is the reminder that a fixture
+reaches further than the check it was added for: no conformance leg compiles the
+fill project with `-Werror`, so it was the flag constant being *emitted at all*
+that exposed it, not the byte count.
 
 ---
 
