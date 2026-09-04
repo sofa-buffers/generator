@@ -10,7 +10,8 @@ import (
 
 // projectFiles scaffolds a Maven project with a Gson-based encode/decode JSON
 // harness over corelib-java. JSON is parsed with Gson and emitted by hand so
-// u64 round-trips exactly (Long.toUnsignedString / parseUnsignedLong).
+// u64 and bitfield round-trip exactly -- both are unsigned 64-bit values in a
+// signed `long` carrier (Long.toUnsignedString / parseUnsignedLong).
 func (g *gen) projectFiles(s *ir.Schema, cfg map[string]any, dir string) []generator.File {
 	return []generator.File{
 		{Path: "pom.xml", Content: []byte(g.pom())},
@@ -249,7 +250,7 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 }
 
 // jsonHelper emits to/from JSON for every object (Gson tree in, hand-written
-// out). u64 fields are exact via unsigned string handling.
+// out). u64 and bitfield fields are exact via unsigned string handling.
 func (g *gen) jsonHelper(s *ir.Schema) []byte {
 	f := &jfile{}
 	g.header(f)
@@ -418,7 +419,9 @@ func (g *gen) emitFromArray(f *jfile, fld *ir.Field, acc string) {
 // jsonFromArray rebuilds target from the JsonArray src, mirroring jsonToArray:
 // u64 and bitfield parse unsigned, struct/union recurse via from(), nested
 // arrays recurse into a fresh List; the rest map to the matching Gson accessor.
-// Loop/temporary vars are depth-suffixed to nest safely.
+// Loop/temporary vars are depth-suffixed to nest safely. The boxed branch's
+// bitfield case is symmetry with jsonToArray only -- primitiveArrayElem puts
+// every bitfield array on the prim path today, so nothing reaches it.
 func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, prim bool) {
 	if prim {
 		// Primitive array: allocate to the JSON array size and fill by index.

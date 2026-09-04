@@ -56,10 +56,17 @@ build "$ROOT/examples/messages/example.yaml" "$WORK/ex"
 build "$WORK/conf.yaml" "$WORK/conf"
 
 echo "==> JSON encode -> decode round-trip"
-IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someu64":18446744073709551615,"somestringarray":["a","b","c"]}'
+IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somebitfieldarray":[1,2,3],"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someu64":18446744073709551615,"somestringarray":["a","b","c"]}'
 H="java -jar $WORK/ex/target/harness.jar"
 OUT=$(printf '%s' "$IN" | $H encode myfirstmessage | $H decode myfirstmessage)
 echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 round-trip"; exit 1; }
+# A bitfield is an unsigned 64-bit mask in a signed `long` carrier, so it takes
+# the same unsigned JSON spelling a u64 does (#475). This mask fits below bit 63,
+# which is exactly why the assertion is worth making: the unsigned spelling must
+# leave a narrow mask byte-identical (Long.toUnsignedString(2L) is "2"), so a
+# regression to a value-changing arm shows up here. The cpp suite asserts both.
+echo "$OUT" | grep -q '"somebitfield":2' || { echo "FAIL: bitfield round-trip"; exit 1; }
+echo "$OUT" | grep -q '"somebitfieldarray":\[1,2,3\]' || { echo "FAIL: bitfield array round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
 

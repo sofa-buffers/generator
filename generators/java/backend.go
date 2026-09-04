@@ -2,7 +2,7 @@
 // serialize over OStream and a flat-visitor decode (Visitor) against corelib-java.
 // The Visitor is flat (sequenceBegin/end, no child visitors), so decode is a
 // (location, id) state machine with a location stack — same as Rust/C#. Java has
-// no unsigned ints, so all integers map to long (u64 handled via
+// no unsigned ints, so all integers map to long (u64 and bitfield handled via
 // Long.toUnsignedString / parseUnsignedLong in the JSON harness).
 package java
 

@@ -1811,36 +1811,19 @@ func TestJavaDecoderRemembersFeedStatus(t *testing.T) {
 	}
 }
 
-// jsonHelperFor generates the `emit: project` harness for def and returns
-// Json.java, the generated JSON codec the conformance runner drives.
+// jsonHelperFor generates the `emit: project` harness for the definition file
+// def and returns Json.java, the generated JSON codec the conformance runner
+// drives. The front-end pipeline itself is genJavaFromYAML's, so it is spelled
+// out once in this file.
 func jsonHelperFor(t *testing.T, def string) string {
 	t.Helper()
 	b, err := os.ReadFile(def)
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := parser.Parse(b, def)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolved, _ := doc.Resolve()
-	if errs := parser.Validate(resolved); errs != nil {
-		t.Fatalf("invalid: %v", errs)
-	}
-	s, err := model.Build(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := analysis.Analyze(s); err != nil {
-		t.Fatal(err)
-	}
-	files, err := (&Backend{}).Generate(s, map[string]any{"package": "messages", "emit": "project"})
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	for _, f := range files {
-		if strings.HasSuffix(f.Path, "Json.java") {
-			return string(f.Content)
+	for p, c := range genJavaFromYAML(t, string(b), map[string]any{"package": "messages", "emit": "project"}) {
+		if strings.HasSuffix(p, "Json.java") {
+			return c
 		}
 	}
 	t.Fatal("no Json.java in the project emit")
