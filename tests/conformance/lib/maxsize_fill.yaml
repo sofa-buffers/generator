@@ -1,28 +1,33 @@
-# One field per wire shape, every one bounded, for the MAX_SIZE fill check
+# One field per EXACTLY PRICED branch of the cost walk, every one bounded, less
+# the exclusions recorded below, for the MAX_SIZE fill check
 # (tests/conformance/c/maxsize_fill.c).
 #
 # The point of this schema is coverage of the cost walk in internal/ir/wiresize.go,
 # not realism: it carries a scalar of every varint width, both float widths, a
 # string and a blob, a bitfield, a native integer array, both fixlen array kinds
-# (which carry a per-array fixlen word), all three wrapper-array element kinds
-# that lower to a sequence (string, blob, struct), and a nested struct. Filling
-# every one of them to its declared bound must produce exactly MAX_SIZE bytes.
+# (which carry a per-array fixlen word), three of the five wrapper-array element
+# kinds that lower to a sequence (string, blob, struct), and a nested struct.
+# Filling every one of them to its declared bound must produce exactly MAX_SIZE
+# bytes.
 #
 # No field declares a `default`: a field equal to its default is omitted from the
 # wire (MESSAGE_SPEC §2), which would make a "full" message shorter than its
 # worst case and hide a wrong bound.
 #
-# Two kinds are deliberately absent, and they can never join: an enum is charged
-# the full u32 width and a union the SUM of all its options. Both are safe
-# OVER-estimates — only one union option is ever written, and a small enum never
-# reaches 2^32 — so a field of either kind would make the fullest legal message
-# shorter than MAX_SIZE and break the "exactly" this schema exists to assert. Do
-# not add one and then relax the assertion.
+# Three shapes are deliberately absent and can never join, all for one reason: the
+# walk OVER-estimates them, so a field of that kind makes the fullest legal
+# message shorter than MAX_SIZE and breaks the "exactly" this schema exists to
+# assert. An enum is charged the full u32 width, though a small enum never reaches
+# 2^32. A union is charged the SUM of all its options, though only one option is
+# ever written — and an array whose ELEMENTS are unions is over-charged the same
+# way, which is why the wrapper-array coverage stops at three of five kinds. Do
+# not add one of these and then relax the assertion.
 #
-# Everything else is exactly priced and belongs here. A wrapper array whose
-# elements are themselves ARRAYS is the one such shape still missing; it is
-# round-trip-covered by tests/matrix/corpus/defs/nested_rows.yaml, but its worst
-# case has never met an encoder.
+# Everything else is exactly priced and belongs here. The fifth wrapper-array
+# element kind — an array whose elements are themselves ARRAYS — is exactly priced
+# and is the one such shape still missing; it is round-trip-covered by
+# tests/matrix/corpus/defs/nested_rows.yaml, but its worst case has never met an
+# encoder.
 version: 1
 messages:
   fill:

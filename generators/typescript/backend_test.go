@@ -2420,13 +2420,15 @@ messages:
 }
 
 // wideBitfieldDef puts a bitfield whose highest flag sits at 63 beside one whose
-// flags all fit in 32 bits, as scalars and as array elements.
+// flags all fit below the 32-bit sign bit, as scalars and as array elements, and
+// a third sitting exactly ON the boundary at position 31.
 const wideBitfieldDef = `
 version: 1
 $defs:
   bitfield:
     Wide:   { low: { pos: 0 }, high: { pos: 63, default: true } }
-    Narrow: { a: { pos: 0 }, b: { pos: 31 } }
+    Edge:   { a: { pos: 30 }, b: { pos: 31 } }
+    Narrow: { a: { pos: 0 }, b: { pos: 30 } }
 messages:
   m:
     payload:
@@ -2434,29 +2436,43 @@ messages:
       n:  { id: 1, type: bitfield, bits: { $ref: "#/$defs/bitfield/Narrow" } }
       wa: { id: 2, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Wide" } } }
       na: { id: 3, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Narrow" } } }
+      e:  { id: 4, type: bitfield, bits: { $ref: "#/$defs/bitfield/Edge" } }
 `
 
-// TestTSWideBitfieldIsBigint: a bitfield with a flag at position 32 or above is
+// TestTSWideBitfieldIsBigint: a bitfield with a flag at position 31 or above is
 // carried as a `bigint`, not a `number`.
 //
-// A `number` is a double. It holds a mask exactly only to bit 52, and JavaScript
-// narrows both operands of `|`/`&` to 32 bits, so a flag above 31 is neither
-// storable nor combinable in one. The size walk charges EVERY bitfield the full
-// ten-byte varint (internal/ir/wiresize.go), so a `number`-carried bitfield could
-// not reach its own MAX_SIZE: an all-flags-set value arrived rounded and the
-// encode was refused outright (generator#470). Narrower bitfields keep the
-// numeric enum they have always had -- this is the same "smallest type that holds
-// the highest flag position" choice C, C++, C#, Rust and Zig already make, with
-// the two carriers TypeScript has.
+// A `number` is a double. It holds a mask exactly only to bit 52, and the size
+// walk charges EVERY bitfield the full ten-byte varint (internal/ir/wiresize.go),
+// so a `number`-carried 64-bit bitfield could not reach its own MAX_SIZE: an
+// all-flags-set value arrived rounded and the encode was refused outright
+// (generator#470).
+//
+// The boundary sits at 31, not 32, and `e` is here to pin it. Storage is not the
+// only property a mask needs. JavaScript narrows both operands of `|` and `&` to
+// 32-bit SIGNED, so a mask with bit 31 set comes back NEGATIVE -- `Edge.A |
+// Edge.B` as numbers is -1073741824, which corelib-ts refuses as an unsigned
+// value out of 64-bit range. Position 31 IS storable in a double and is NOT
+// combinable, and combinable is the property the carrier choice turns on.
+// Positions 0..30 have neither problem (`|` over them tops out at 0x7FFFFFFF) and
+// keep the numeric enum they have always had -- this is the same "smallest type
+// that holds the highest flag position" choice C, C++, C#, Rust and Zig already
+// make, with the two carriers TypeScript has.
 func TestTSWideBitfieldIsBigint(t *testing.T) {
 	mod := genTSWith(t, wideBitfieldDef, map[string]any{})
 	for _, want := range []string{
-		// A TS enum member can only be a number, so the wide masks become a frozen
-		// const object; the narrow ones stay an enum.
+		// A TS enum member can only be a number, so the wide masks become a
+		// literal-typed `const` object; the narrow ones stay an enum.
 		"export const BitfieldWide = {",
 		"  High: 9223372036854775808n,",
 		"export enum BitfieldNarrow {",
-		"  B = 2147483648,",
+		"  B = 1073741824,",
+		// The boundary itself: a highest flag at 31 is bigint-carried too.
+		"export const BitfieldEdge = {",
+		"  A: 1073741824n,",
+		"  B: 2147483648n,",
+		"e: bigint = 0n;",
+		"case 4: this.o.e = BigInt(v); break;",
 		// Storage, default and the default comparison that reads it.
 		"w: bigint = 9223372036854775808n;",
 		"n: number = 0;",
@@ -2484,6 +2500,9 @@ func TestTSWideBitfieldIsBigint(t *testing.T) {
 		"w: number =",
 		"case 0: this.o.w = Number(v); break;",
 		"export enum BitfieldWide {",
+		// A mask with bit 31 set is not `|`-combinable as a number.
+		"e: number =",
+		"export enum BitfieldEdge {",
 	} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("a 64-bit-backed bitfield must not be carried as a number: found %q", bad)

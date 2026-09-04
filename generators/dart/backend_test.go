@@ -1311,4 +1311,22 @@ func TestDartBitfieldReadsJSONAsUnsigned(t *testing.T) {
 	if strings.Contains(out, "m.flags = (j['flags'] as num).toInt();") {
 		t.Error("(x as num).toInt() clamps a mask with bit 63 set instead of carrying it")
 	}
+	// The WRITE half of the same treatment. Dart's `int` is signed, so a mask
+	// with bit 63 set prints as -1 unless it goes out the way a u64 does --
+	// where python, go, rust, C#, kotlin and typescript all print
+	// 18446744073709551615. Nothing else catches it: the shared max-fill message
+	// is encode-only in every suite, so the asymmetry never shows up as a failed
+	// comparison.
+	if !strings.Contains(out, "BigInt.from(m.flags).toUnsigned(64).toString()") {
+		t.Error("a bitfield reaching bit 63 must WRITE its JSON unsigned, not as a negative int")
+	}
+	// A narrow bitfield keeps the plain JSON number every hand-written input in
+	// the tree spells and the round-trip greps expect (`"somebitfield":2`).
+	ex := genFor(t, exampleDef, map[string]any{"emit": "project"})
+	if strings.Contains(ex, "BigInt.from(m.somebitfield)") {
+		t.Error("a bitfield that fits below bit 32 must stay a plain JSON number")
+	}
+	if !strings.Contains(ex, "'somebitfield': m.somebitfield,") {
+		t.Error("a narrow bitfield's JSON write must pass straight through")
+	}
 }

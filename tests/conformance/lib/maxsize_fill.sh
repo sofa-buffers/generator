@@ -22,11 +22,12 @@
 # back out of the generated source, against SOFAB_MAXSIZE_FILL_BYTES rather than
 # a literal, so a schema change moves the expected number in one place.
 #
-# maxsize_fill.yaml carries one field per wire shape, every one bounded;
-# maxsize_fill.json fills every one to its declared bound with every varint at
-# its widest value. Nothing sits on its default — a field equal to its default is
-# omitted from the wire (MESSAGE_SPEC §2) and would make the "full" message
-# short.
+# maxsize_fill.json fills every field of maxsize_fill.yaml to its declared bound
+# with every varint at its widest value; which wire shapes that schema covers,
+# and which of them can never join it, are recorded in that file's own header
+# rather than claimed a second time here. Nothing sits on its default — a field
+# equal to its default is omitted from the wire (MESSAGE_SPEC §2) and would make
+# the "full" message short.
 
 # The expected byte count. Language-independent by construction: the wire format
 # is the same everywhere, so this is a property of maxsize_fill.yaml alone. If

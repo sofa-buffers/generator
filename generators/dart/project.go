@@ -192,14 +192,41 @@ func (g *gen) emitJSONCodec(f *dfile, typeName string, fields []*ir.Field) {
 	f.blank()
 }
 
+// wideBitfield reports whether a bitfield's declared flags reach past bit 31 —
+// the point where a Dart `int` stops being interchangeable with the double
+// jsonDecode hands back on the other side, and (at bit 63) where the signed
+// carrier prints the mask NEGATIVE. Such a bitfield writes and reads its JSON the
+// way a u64 does; a narrower one stays a plain JSON number, which is what every
+// hand-written input in the tree spells and what the round-trip greps expect.
+func wideBitfield(ref *ir.TypeRef) bool {
+	if ref == nil || ref.Target == nil {
+		return false
+	}
+	for _, fl := range ref.Target.Flags {
+		if fl.Pos > 31 {
+			return true
+		}
+	}
+	return false
+}
+
 // jsonTo is the Dart expression converting field `acc` to its JSON value.
 func (g *gen) jsonTo(fld *ir.Field, acc string) string {
 	switch fld.Kind {
 	case ir.KindU64:
 		return u64ToJSON(acc)
+	case ir.KindBitfield:
+		// The write half of the u64 treatment jsonFrom gives every bitfield: a
+		// mask with bit 63 set sits in the Dart carrier as a NEGATIVE int, so
+		// printing it straight emits -1 where python, go, rust, C#, kotlin and
+		// typescript all emit 18446744073709551615.
+		if wideBitfield(fld.Ref) {
+			return u64ToJSON(acc)
+		}
+		return acc
 	case ir.KindU8, ir.KindU16, ir.KindU32,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
-		ir.KindEnum, ir.KindBitfield, ir.KindFP32, ir.KindFP64, ir.KindBool, ir.KindString:
+		ir.KindEnum, ir.KindFP32, ir.KindFP64, ir.KindBool, ir.KindString:
 		return acc
 	case ir.KindBlob:
 		return acc + ".toList()"
@@ -215,13 +242,18 @@ func (g *gen) arrayElemToJSON(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem
 	switch elem {
 	case ir.KindU64:
 		return fmt.Sprintf("[for (final _x in %s) %s]", acc, u64ToJSON("_x"))
+	case ir.KindBitfield:
+		if wideBitfield(ref) {
+			return fmt.Sprintf("[for (final _x in %s) %s]", acc, u64ToJSON("_x"))
+		}
+		return acc
 	case ir.KindBlob:
 		return fmt.Sprintf("[for (final _x in %s) _x.toList()]", acc)
 	case ir.KindStruct, ir.KindUnion:
 		return fmt.Sprintf("[for (final _x in %s) _toJson%s(_x)]", acc, g.typeName(ref.Key))
 	case ir.KindArray:
 		return fmt.Sprintf("[for (final _x in %s) %s]", acc, g.arrayElemToJSON(items.Elem, items.ElemRef, items.ElemItems, "_x"))
-	default: // int/enum/bitfield/bool/fp/string pass through
+	default: // int/enum/bool/fp/string pass through
 		return acc
 	}
 }

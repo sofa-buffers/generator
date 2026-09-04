@@ -46,14 +46,17 @@ flag position, which in TypeScript means one of two:
 
 | highest `pos` | field type | flag masks |
 |---|---|---|
-| 0–31 | `number` | `export enum` members |
-| 32–63 | `bigint` | a frozen `const` object of `bigint` masks |
+| 0–30 | `number` | `export enum` members |
+| 31–63 | `bigint` | a `const` object of `bigint` masks (`as const`) |
 
-A `number` is a double, so it holds a mask exactly only to bit 52, and JavaScript
-narrows both operands of `|` and `&` to 32 bits — a flag above position 31 is
-neither storable nor combinable in one. A `bigint` has neither limit, and a TS
-`enum` member can only be a number, which is why the wide masks are a `const`
-object instead:
+A `number` is a double, so it holds a mask exactly only to bit 52 — but the band
+ends earlier than that, at 30, because **combining** is what a mask is for.
+JavaScript narrows both operands of `|` and `&` to 32-bit *signed*, so a mask
+with bit 31 set comes back negative: `Flags.A | Flags.AtBit31` evaluates to a
+negative number, which the encoder rejects as an unsigned value out of range.
+Positions 0–30 combine cleanly (`|` over them tops out at `0x7FFFFFFF`). A
+`bigint` has neither limit, and a TS `enum` member can only be a number, which is
+why the wide masks are a `const` object instead:
 
 ```ts
 m.caps = Caps.Read | Caps.WriteAt63;   // bigint | bigint

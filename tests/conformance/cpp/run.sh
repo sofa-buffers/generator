@@ -156,6 +156,26 @@ run_variant() {
         "static constexpr std::size_t _maxSize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
     check_maxsize_fill "$label" "$WORK/fill-$label/harness/harness" encode fill
 
+    # The fill schema is the one place in this suite that carries every wire
+    # shape, so it is also the one header most likely to hit a literal or
+    # attribute defect -- and the project Makefile above builds it with -Wall
+    # only, while the two -Werror builds further down compile the EXAMPLE schema,
+    # which has no wide bitfield. That gap shipped a real defect once: a bitfield
+    # flag mask for position 63 was emitted as a bare decimal, which fits no
+    # signed type, so gcc and clang answered "integer constant is so large that
+    # it is unsigned" -- a warning here, an error in a user's -Werror build, and
+    # invisible to this suite (generator#470). Compiling the generated header
+    # strictly, on its own, closes it for every future shape too.
+    #
+    # The header is compiled through a one-line translation unit rather than
+    # named on the command line: g++ treats a header given directly as a MAIN
+    # file, and `#pragma once` in a main file is itself a -Werror diagnostic.
+    echo "==> [$label] the generated fill header compiles under -Wall -Wextra -Werror"
+    printf '#include "fill.hpp"\n' > "$WORK/fill-$label/strict_tu.cpp"
+    g++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only $include -I"$WORK/fill-$label" \
+        "$WORK/fill-$label/strict_tu.cpp" \
+        || { echo "FAIL: [$label] the generated fill header does not compile strictly"; exit 1; }
+
     # Streaming behaviour: both corelibs stream in both directions and always
     # have, but nothing drove either -- the capability was demonstrable and
     # unverified. Property: streaming is indistinguishable from the one-shot path.

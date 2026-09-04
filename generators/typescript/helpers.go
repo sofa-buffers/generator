@@ -608,16 +608,21 @@ func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {
 }
 
 // wideBitfield reports whether a bitfield needs a 64-bit carrier — a flag at
-// position 32 or above.
+// position 31 or above.
 //
 // Every other backend already picks the smallest unsigned type that holds the
 // highest declared flag position (internal/ir.AlignRank mirrors that choice);
 // TypeScript has exactly two carriers to pick from, and this is the same split.
-// A `number` is a double: it holds a mask exactly only to bit 52, and JavaScript
-// applies `|`/`&` to a number's low 32 bits, so a flag above 31 is neither
-// storable nor combinable there. The MAX_SIZE walk charges every bitfield the
-// full ten-byte varint (internal/ir/wiresize.go), so a 64-bit-backed bitfield
-// must be able to CARRY 2^64-1 for a filled message to reach its own worst case.
+// The boundary sits one position BELOW the carrier's storage limit, because
+// combining is what a mask is for: JavaScript narrows both operands of `|` and
+// `&` to 32-bit SIGNED, so a mask with bit 31 set comes back NEGATIVE — the
+// pos-30/pos-31 pair evaluates to -1073741824, which corelib-ts refuses as
+// "unsigned value out of 64-bit range". A number is also a double, so it holds
+// a mask exactly only to bit 52 in the first place. Positions 0..30 have neither
+// problem: `|` over them tops out at 0x7FFFFFFF. The MAX_SIZE walk charges every
+// bitfield the full ten-byte varint (internal/ir/wiresize.go), so a 64-bit-backed
+// bitfield must be able to CARRY 2^64-1 for a filled message to reach its own
+// worst case.
 func wideBitfield(ref *ir.TypeRef) bool {
 	return ref != nil && wideBitfieldType(ref.Target)
 }
@@ -629,7 +634,7 @@ func wideBitfieldType(nt *ir.NamedType) bool {
 		return false
 	}
 	for _, fl := range nt.Flags {
-		if fl.Pos > 31 {
+		if fl.Pos > 30 {
 			return true
 		}
 	}
