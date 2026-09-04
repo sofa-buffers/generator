@@ -2,7 +2,9 @@ package java
 
 import (
 	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1901,5 +1903,172 @@ func TestJavaBitfieldIsJSONUnsigned(t *testing.T) {
 		if strings.Contains(ex, gone) {
 			t.Errorf("Json.java must not treat a bitfield as a SIGNED long: %q:\n%s", gone, ex)
 		}
+	}
+}
+
+// javaLongLiteralBits applies javac's own range rule to one Java `long` literal
+// and returns the 64 bits it denotes. It is the whole point of
+// TestJavaBitfieldDefaultIsALegalLongLiteral: a test that merely grepped for the
+// emitted substring would pass just as happily on the decimal spelling javac
+// rejects.
+//
+// JLS 3.10.1: a DECIMAL long literal denotes a value in [0, 2^63-1] -- only the
+// unary minus that may precede it reaches -2^63 -- so 9223372036854775808L is
+// the compile error "integer number too large". A HEX (or binary/octal) long
+// literal is read as a 64-bit two's-complement PATTERN instead, so it spells
+// every value up to 0xFFFFFFFFFFFFFFFFL.
+func javaLongLiteralBits(lit string) (uint64, error) {
+	body := strings.TrimSuffix(strings.TrimSuffix(lit, "L"), "l")
+	switch {
+	case strings.HasPrefix(body, "0x"), strings.HasPrefix(body, "0X"):
+		return strconv.ParseUint(strings.ReplaceAll(body[2:], "_", ""), 16, 64)
+	case strings.HasPrefix(body, "0b"), strings.HasPrefix(body, "0B"):
+		return strconv.ParseUint(strings.ReplaceAll(body[2:], "_", ""), 2, 64)
+	default:
+		// Decimal: bounded by int64, exactly as javac bounds it.
+		v, err := strconv.ParseInt(strings.ReplaceAll(body, "_", ""), 10, 64)
+		return uint64(v), err
+	}
+}
+
+// TestJavaBitfieldDefaultIsALegalLongLiteral: a bitfield default whose highest
+// defaulted flag sits at bit 63 must still be SPELLABLE (generator#477).
+//
+// A bitfield is an unsigned 64-bit mask carried in a signed Java `long`. The
+// backend used to render its default with `fmt.Sprintf(" = %dL", bits)` over a
+// uint64, so a pos-63 `default: true` produced ` = 9223372036854775808L` -- past
+// the top of a decimal long literal. Measured on javac 25.0.3, the emitted class
+// did not compile at all, with one "integer number too large" per site:
+//
+//	Bf.java:8: error: integer number too large
+//	    public long flags = 9223372036854775808L;
+//
+// There are FOUR such sites, because javaDefaultValue's one string is reused in
+// the field initializer, the `!= default` omission compare in serialize(), the
+// same compare in isDefault(), and reset() -- which is also why the fix is a hex
+// literal rather than the Long.parseUnsignedLong the u64 arm needs: hex is a
+// compile-time constant, so the two compares stay a bare lcmp against the
+// constant pool instead of an invokestatic per call on a maxspeed target.
+func TestJavaBitfieldDefaultIsALegalLongLiteral(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  Bf:
+    payload:
+      flags: { id: 0, type: bitfield, bits: { LOW: { pos: 0, default: true }, HIGH: { pos: 63, default: true } } }
+`
+	const want = uint64(1)<<63 | 1 // HIGH | LOW
+
+	var out string
+	for p, c := range genJavaFromYAML(t, src, map[string]any{"package": "messages"}) {
+		if strings.HasSuffix(p, "Bf.java") {
+			out = c
+		}
+	}
+	if out == "" {
+		t.Fatal("no Bf.java generated")
+	}
+
+	// Every literal the default is spelled as, at all four sites.
+	lits := regexp.MustCompile(`(?m)flags (?:= |!= )([0-9A-Fa-fxX_]+L)`).FindAllStringSubmatch(out, -1)
+	if len(lits) != 4 {
+		t.Fatalf("expected the default at 4 sites (initializer, serialize compare, isDefault compare, reset), got %d:\n%s",
+			len(lits), out)
+	}
+	for _, m := range lits {
+		bits, err := javaLongLiteralBits(m[1])
+		if err != nil {
+			t.Errorf("%q is not a long literal javac accepts (%v) -- the generated class does not compile", m[1], err)
+			continue
+		}
+		if bits != want {
+			t.Errorf("%q denotes 0x%X, want the declared mask 0x%X", m[1], bits, want)
+		}
+	}
+
+	// The spelling itself, so the constant-fold argument above cannot be
+	// silently traded away for a runtime parse.
+	if !strings.Contains(out, "public long flags = 0x8000000000000001L;") {
+		t.Errorf("Bf.java does not initialize the mask with a hex long literal:\n%s", out)
+	}
+
+	// A mask that FITS keeps a compact hex spelling and the same value; nothing
+	// about the narrow case regressed into a wide one.
+	const narrow = `
+version: 1
+messages:
+  Bf:
+    payload:
+      flags: { id: 0, type: bitfield, bits: { LOW: { pos: 1, default: true }, HIGH: { pos: 63 } } }
+`
+	for p, c := range genJavaFromYAML(t, narrow, map[string]any{"package": "messages"}) {
+		if strings.HasSuffix(p, "Bf.java") && !strings.Contains(c, "public long flags = 0x2L;") {
+			t.Errorf("a narrow bitfield default should stay a plain hex literal:\n%s", c)
+		}
+	}
+}
+
+// TestJavaBitfieldArrayDefaultIsALegalLongLiteral: the same rule one level in.
+//
+// An ARRAY of bitfield lowers to a Java `long[]` (primArrayBase puts bitfield on
+// the long base), and its default is rendered element by element by
+// javaPrimElemLit -- which special-cased only ir.KindU64 and let a bitfield
+// element fall through to a bare decimal. A default element with bit 63 set
+// therefore emitted `new long[]{0x1L, 9223372036854775808L}`, which javac 25.0.3
+// refused twice (the per-instance initializer and the hoisted _arrdef_ constant),
+// so the class did not compile at all -- the same total failure the scalar arm
+// had. Both now go through javaMaskLit.
+func TestJavaBitfieldArrayDefaultIsALegalLongLiteral(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  Bf2:
+    payload:
+      masks: { id: 0, type: array, items: { type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }, default: [1, 9223372036854775808] }
+`
+	want := []uint64{1, 1 << 63}
+
+	var out string
+	for p, c := range genJavaFromYAML(t, src, map[string]any{"package": "messages"}) {
+		if strings.HasSuffix(p, "Bf2.java") {
+			out = c
+		}
+	}
+	if out == "" {
+		t.Fatal("no Bf2.java generated")
+	}
+
+	// Every `new long[]{...}` the default is spelled as: the field initializer and
+	// the hoisted _arrdef_ constant serialize/isDefault/reset compare against.
+	inits := regexp.MustCompile(`new long\[\]\{([^}]*)\}`).FindAllStringSubmatch(out, -1)
+	if len(inits) != 2 {
+		t.Fatalf("expected the array default at 2 sites (field initializer, _arrdef_ constant), got %d:\n%s",
+			len(inits), out)
+	}
+	for _, in := range inits {
+		lits := strings.Split(in[1], ", ")
+		if len(lits) != len(want) {
+			t.Errorf("%q has %d elements, want %d", in[0], len(lits), len(want))
+			continue
+		}
+		for i, lit := range lits {
+			// The range rule javac itself applies -- a substring assertion would
+			// have passed just as happily on the decimal that does not compile.
+			bits, err := javaLongLiteralBits(lit)
+			if err != nil {
+				t.Errorf("element %d of %q is not a long literal javac accepts (%v) -- the generated class does not compile",
+					i, in[0], err)
+				continue
+			}
+			if bits != want[i] {
+				t.Errorf("element %d of %q denotes 0x%X, want 0x%X", i, in[0], bits, want[i])
+			}
+		}
+	}
+
+	// And the spelling, so the per-instance initializer cannot be traded for a
+	// Long.parseUnsignedLong call per element per object constructed.
+	if !strings.Contains(out, "new long[]{0x1L, 0x8000000000000000L}") {
+		t.Errorf("Bf2.java does not spell the array default in hex:\n%s", out)
 	}
 }
