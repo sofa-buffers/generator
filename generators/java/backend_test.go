@@ -1810,3 +1810,96 @@ func TestJavaDecoderRemembersFeedStatus(t *testing.T) {
 		t.Errorf("Myfirstmessage.java still calls the removed IStream.status() (generator#461):\n%s", m)
 	}
 }
+
+// jsonHelperFor generates the `emit: project` harness for the definition file
+// def and returns Json.java, the generated JSON codec the conformance runner
+// drives. The front-end pipeline itself is genJavaFromYAML's, so it is spelled
+// out once in this file.
+func jsonHelperFor(t *testing.T, def string) string {
+	t.Helper()
+	b, err := os.ReadFile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, c := range genJavaFromYAML(t, string(b), map[string]any{"package": "messages", "emit": "project"}) {
+		if strings.HasSuffix(p, "Json.java") {
+			return c
+		}
+	}
+	t.Fatal("no Json.java in the project emit")
+	return ""
+}
+
+// TestJavaBitfieldIsJSONUnsigned: the generated harness writes and reads a
+// bitfield the way it writes and reads a u64, because that is what a bitfield is
+// -- an unsigned 64-bit mask carried in a SIGNED Java `long` (generator#475).
+//
+// The signed arm it used to share with the small integers gets both halves
+// wrong. Writing, `b.append(o.flags)` prints a mask with bit 63 set as -1, where
+// python, go, rust, C#, kotlin, typescript and dart all print
+// 18446744073709551615. Reading, `e.getAsLong()` ACCEPTS a JSON value at or
+// above 2^64 and wraps it into a legal-looking mask -- Gson's
+// LazilyParsedNumber.longValue() falls back to asBigDecimal().longValue(), which
+// silently keeps the low 64 bits (measured on gson 2.11.0: a bare 2^64 read back
+// as 0) -- where C# and kotlin reject it. The same arm THREW on the QUOTED
+// spelling dart and typescript write for a wide mask, so the two halves of the
+// asymmetry could not even meet.
+//
+// The dart twin is TestDartBitfieldReadsJSONAsUnsigned.
+func TestJavaBitfieldIsJSONUnsigned(t *testing.T) {
+	// bitfields.yaml declares LOW at pos 0 and HIGH at pos 63, so `flags` is a
+	// mask that reaches the sign bit of its Java carrier.
+	out := jsonHelperFor(t, "../../tests/matrix/corpus/defs/bitfields.yaml")
+	for _, want := range []string{
+		// WRITE: unsigned decimal, so bit 63 prints as 18446744073709551615.
+		"b.append(Long.toUnsignedString(o.flags));",
+		// READ: parseUnsignedLong REJECTS >= 2^64 with a NumberFormatException
+		// instead of wrapping it, and still accepts a bare JSON number --
+		// Gson's getAsString() on a numeric primitive returns the literal's own
+		// spelling, so an unquoted `"flags":2` parses unchanged.
+		"o.flags = Long.parseUnsignedLong(e.getAsString());",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Json.java missing %q:\n%s", want, out)
+		}
+	}
+	for _, gone := range []string{
+		"b.append(o.flags);",       // signed write: a bit-63 mask prints -1
+		"o.flags = e.getAsLong();", // signed read: >= 2^64 wraps instead of throwing
+	} {
+		if strings.Contains(out, gone) {
+			t.Errorf("Json.java must not treat a bitfield as a SIGNED long: %q:\n%s", gone, out)
+		}
+	}
+
+	// The same treatment on the ARRAY arms, and the narrow bitfield the
+	// hand-written round-trip inputs in this tree spell (`"somebitfield":2`).
+	// Java prints the unsigned spelling as a bare JSON number, so a mask that
+	// fits stays byte-identical: Long.toUnsignedString(2L) is "2".
+	ex := jsonHelperFor(t, "../../examples/messages/example.yaml")
+	for _, want := range []string{
+		"b.append(Long.toUnsignedString(o.somebitfield));",
+		"o.somebitfield = Long.parseUnsignedLong(e.getAsString());",
+		"b.append(Long.toUnsignedString(o.somebitfieldarray[_i0]));",
+		"o.somebitfieldarray[_k0] = Long.parseUnsignedLong(_a0.get(_k0).getAsString());",
+	} {
+		if !strings.Contains(ex, want) {
+			t.Errorf("Json.java missing %q:\n%s", want, ex)
+		}
+	}
+	// A bitfield's JSON stays an unquoted number on both sides -- the unsigned
+	// spelling is appended raw, never through the string writer.
+	if strings.Contains(ex, "Json.str(b, o.somebitfield") {
+		t.Error("a bitfield must stay a bare JSON number, not a quoted string")
+	}
+	for _, gone := range []string{
+		"b.append(o.somebitfield);",
+		"o.somebitfield = e.getAsLong();",
+		"b.append(o.somebitfieldarray[_i0]);",
+		"o.somebitfieldarray[_k0] = _a0.get(_k0).getAsLong();",
+	} {
+		if strings.Contains(ex, gone) {
+			t.Errorf("Json.java must not treat a bitfield as a SIGNED long: %q:\n%s", gone, ex)
+		}
+	}
+}

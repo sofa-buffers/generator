@@ -10,7 +10,8 @@ import (
 
 // projectFiles scaffolds a Maven project with a Gson-based encode/decode JSON
 // harness over corelib-java. JSON is parsed with Gson and emitted by hand so
-// u64 round-trips exactly (Long.toUnsignedString / parseUnsignedLong).
+// u64 and bitfield round-trip exactly -- both are unsigned 64-bit values in a
+// signed `long` carrier (Long.toUnsignedString / parseUnsignedLong).
 func (g *gen) projectFiles(s *ir.Schema, cfg map[string]any, dir string) []generator.File {
 	return []generator.File{
 		{Path: "pom.xml", Content: []byte(g.pom())},
@@ -249,7 +250,7 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 }
 
 // jsonHelper emits to/from JSON for every object (Gson tree in, hand-written
-// out). u64 fields are exact via unsigned string handling.
+// out). u64 and bitfield fields are exact via unsigned string handling.
 func (g *gen) jsonHelper(s *ir.Schema) []byte {
 	f := &jfile{}
 	g.header(f)
@@ -314,9 +315,15 @@ func (g *gen) emitJSONFns(f *jfile, typeName string, fields []*ir.Field) {
 func (g *gen) emitTo(f *jfile, fld *ir.Field) {
 	acc := "o." + javaIdent(fld.Name)
 	switch fld.Kind {
-	case ir.KindU64:
+	// A bitfield is an unsigned 64-bit mask, so it prints the way a u64 does.
+	// Java's carrier for both is the SIGNED `long`: a mask with bit 63 set is a
+	// negative long, and appending it straight emits -1 where python, go, rust,
+	// C#, kotlin, typescript and dart all emit 18446744073709551615. A mask that
+	// fits below bit 63 is unaffected -- Long.toUnsignedString(2L) is "2", the
+	// same bare JSON number the round-trip inputs in this tree spell.
+	case ir.KindU64, ir.KindBitfield:
 		f.line("        b.append(Long.toUnsignedString(%s));", acc)
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum, ir.KindBitfield:
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		f.line("        b.append(%s);", acc)
 	case ir.KindBool:
 		f.line("        b.append(%s);", acc)
@@ -337,7 +344,8 @@ func (g *gen) emitToArray(f *jfile, fld *ir.Field, acc string) {
 	g.jsonToArray(f, "        ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, primitiveArrayElem(fld.Elem))
 }
 
-// jsonToArray writes val as a JSON array. u* elements print unsigned; struct/union
+// jsonToArray writes val as a JSON array. u* and bitfield elements print
+// unsigned (a bitfield is an unsigned mask in a signed long); struct/union
 // recurse via to(); nested arrays recurse; the rest print via append. Loop vars
 // are depth-suffixed to nest safely. prim: val is a primitive array (index via
 // [i]/length) rather than a boxed List (get(i)/size()).
@@ -359,7 +367,7 @@ func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeR
 		f.line("%s    Json.str(b, %s);", ind, el)
 	case ir.KindBlob:
 		f.line("%s    Json.bytes(b, %s);", ind, el)
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("%s    b.append(Long.toUnsignedString(%s));", ind, el)
 	case ir.KindStruct, ir.KindUnion:
 		f.line("%s    to(%s, b);", ind, el)
@@ -367,7 +375,7 @@ func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeR
 		// A primitive inner row is a primitive array (List<long[]>), so it indexes
 		// like one -- same rule javaArrayElemType applies to the storage type.
 		g.jsonToArray(f, ind+"    ", el, items.Elem, items.ElemRef, items.ElemItems, depth+1, primitiveArrayElem(items.Elem))
-	default: // i*, enum, bitfield, boolean, fp
+	default: // i*, enum, boolean, fp
 		f.line("%s    b.append(%s);", ind, el)
 	}
 	f.line("%s} b.append(']'); }", ind)
@@ -376,9 +384,16 @@ func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeR
 func (g *gen) emitFrom(f *jfile, fld *ir.Field) {
 	acc := "o." + javaIdent(fld.Name)
 	switch fld.Kind {
-	case ir.KindU64:
+	// As in emitTo: a bitfield reads the way a u64 does. The signed arm it used
+	// to share, e.getAsLong(), accepts a JSON value at or above 2^64 and WRAPS it
+	// to a legal-looking mask (Gson's LazilyParsedNumber falls back to
+	// BigDecimal.longValue(), which keeps the low 64 bits); C# and kotlin reject
+	// that input. parseUnsignedLong rejects it too, and still accepts a bare JSON
+	// number: Gson's getAsString() on a numeric primitive hands back the literal's
+	// own spelling, so an unquoted "somebitfield":2 parses unchanged.
+	case ir.KindU64, ir.KindBitfield:
 		f.line("            %s = Long.parseUnsignedLong(e.getAsString());", acc)
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum, ir.KindBitfield:
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		f.line("            %s = e.getAsLong();", acc)
 	case ir.KindBool:
 		f.line("            %s = e.getAsBoolean();", acc)
@@ -402,9 +417,11 @@ func (g *gen) emitFromArray(f *jfile, fld *ir.Field, acc string) {
 }
 
 // jsonFromArray rebuilds target from the JsonArray src, mirroring jsonToArray:
-// u64 parses from string, struct/union recurse via from(), nested arrays recurse
-// into a fresh List; the rest map to the matching Gson accessor. Loop/temporary
-// vars are depth-suffixed to nest safely.
+// u64 and bitfield parse unsigned, struct/union recurse via from(), nested
+// arrays recurse into a fresh List; the rest map to the matching Gson accessor.
+// Loop/temporary vars are depth-suffixed to nest safely. The boxed branch's
+// bitfield case is symmetry with jsonToArray only -- primitiveArrayElem puts
+// every bitfield array on the prim path today, so nothing reaches it.
 func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, prim bool) {
 	if prim {
 		// Primitive array: allocate to the JSON array size and fill by index.
@@ -412,13 +429,13 @@ func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref
 		kv := fmt.Sprintf("_k%d", depth)
 		var getter string
 		switch elem {
-		case ir.KindU64:
+		case ir.KindU64, ir.KindBitfield:
 			getter = fmt.Sprintf("Long.parseUnsignedLong(%s.get(%s).getAsString())", av, kv)
 		case ir.KindFP32:
 			getter = fmt.Sprintf("%s.get(%s).getAsFloat()", av, kv)
 		case ir.KindFP64:
 			getter = fmt.Sprintf("%s.get(%s).getAsDouble()", av, kv)
-		default: // u8/u16/u32, i8..i64, enum, bitfield
+		default: // u8/u16/u32, i8..i64, enum
 			getter = fmt.Sprintf("%s.get(%s).getAsLong()", av, kv)
 		}
 		f.line("%sJsonArray %s = %s; %s = new %s[%s.size()];", ind, av, src, target, primArrayBase(elem), av)
@@ -434,7 +451,7 @@ func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref
 		f.line("%s    %s.add(%s.getAsString());", ind, target, ev)
 	case ir.KindBlob:
 		f.line("%s    %s.add(Json.toBytes(%s.getAsJsonArray()));", ind, target, ev)
-	case ir.KindU64:
+	case ir.KindU64, ir.KindBitfield:
 		f.line("%s    %s.add(Long.parseUnsignedLong(%s.getAsString()));", ind, target, ev)
 	case ir.KindBool:
 		f.line("%s    %s.add(%s.getAsBoolean());", ind, target, ev)
@@ -459,7 +476,7 @@ func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref
 		f.line("%s    %s %s = new ArrayList<>();", ind, vt, v)
 		g.jsonFromArray(f, ind+"    ", v, ev+".getAsJsonArray()", items.Elem, items.ElemRef, items.ElemItems, depth+1, false)
 		f.line("%s    %s.add(%s);", ind, target, v)
-	default: // u8/u16/u32, i8..i64, enum, bitfield
+	default: // u8/u16/u32, i8..i64, enum
 		f.line("%s    %s.add(%s.getAsLong());", ind, target, ev)
 	}
 	f.line("%s}", ind)
