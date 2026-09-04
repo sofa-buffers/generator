@@ -229,9 +229,14 @@ func (g *gen) arrayElemToJSON(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem
 // jsonFrom is the Dart expression building field `fld` from JSON accessor `jx`.
 func (g *gen) jsonFrom(fld *ir.Field, jx string) string {
 	switch fld.Kind {
-	case ir.KindU64:
+	// A bitfield is a 64-bit UNSIGNED mask, so it reads the way u64 does. Its
+	// Dart carrier is the same signed `int`, and `(x as num).toInt()` cannot
+	// reach the top of it: a JSON number above 2^53 has already lost bits by the
+	// time jsonDecode returns one, and toInt() then CLAMPS to 2^63-1 instead of
+	// throwing — a mask with bit 63 set came back four bytes short, silently.
+	case ir.KindU64, ir.KindBitfield:
 		return u64FromJSON(jx, false)
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum, ir.KindBitfield:
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		return fmt.Sprintf("(%s as num).toInt()", jx)
 	case ir.KindFP32, ir.KindFP64:
 		return fmt.Sprintf("(%s as num).toDouble()", jx)
@@ -253,9 +258,9 @@ func (g *gen) jsonFrom(fld *ir.Field, jx string) string {
 func (g *gen) arrayElemFromJSON(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, jx string) string {
 	switch elem {
 	// jx is the comprehension's own local (`_x` / `_y`), which promotes.
-	case ir.KindU64:
+	case ir.KindU64, ir.KindBitfield: // unsigned 64-bit, as in jsonFrom above
 		return u64FromJSON(jx, true)
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum, ir.KindBitfield:
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		return fmt.Sprintf("(%s as num).toInt()", jx)
 	case ir.KindFP32, ir.KindFP64:
 		return fmt.Sprintf("(%s as num).toDouble()", jx)

@@ -2418,3 +2418,75 @@ messages:
 		}
 	}
 }
+
+// wideBitfieldDef puts a bitfield whose highest flag sits at 63 beside one whose
+// flags all fit in 32 bits, as scalars and as array elements.
+const wideBitfieldDef = `
+version: 1
+$defs:
+  bitfield:
+    Wide:   { low: { pos: 0 }, high: { pos: 63, default: true } }
+    Narrow: { a: { pos: 0 }, b: { pos: 31 } }
+messages:
+  m:
+    payload:
+      w:  { id: 0, type: bitfield, bits: { $ref: "#/$defs/bitfield/Wide" } }
+      n:  { id: 1, type: bitfield, bits: { $ref: "#/$defs/bitfield/Narrow" } }
+      wa: { id: 2, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Wide" } } }
+      na: { id: 3, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Narrow" } } }
+`
+
+// TestTSWideBitfieldIsBigint: a bitfield with a flag at position 32 or above is
+// carried as a `bigint`, not a `number`.
+//
+// A `number` is a double. It holds a mask exactly only to bit 52, and JavaScript
+// narrows both operands of `|`/`&` to 32 bits, so a flag above 31 is neither
+// storable nor combinable in one. The size walk charges EVERY bitfield the full
+// ten-byte varint (internal/ir/wiresize.go), so a `number`-carried bitfield could
+// not reach its own MAX_SIZE: an all-flags-set value arrived rounded and the
+// encode was refused outright (generator#470). Narrower bitfields keep the
+// numeric enum they have always had -- this is the same "smallest type that holds
+// the highest flag position" choice C, C++, C#, Rust and Zig already make, with
+// the two carriers TypeScript has.
+func TestTSWideBitfieldIsBigint(t *testing.T) {
+	mod := genTSWith(t, wideBitfieldDef, map[string]any{})
+	for _, want := range []string{
+		// A TS enum member can only be a number, so the wide masks become a frozen
+		// const object; the narrow ones stay an enum.
+		"export const BitfieldWide = {",
+		"  High: 9223372036854775808n,",
+		"export enum BitfieldNarrow {",
+		"  B = 2147483648,",
+		// Storage, default and the default comparison that reads it.
+		"w: bigint = 9223372036854775808n;",
+		"n: number = 0;",
+		"wa: bigint[] = [];",
+		"na: number[] = [];",
+		"if (!(this.w === 9223372036854775808n)) return false;",
+		// JSON: a bigint is not JSON-able, so it prints as a decimal string and
+		// reads back through BigInt() -- exactly what u64 does.
+		`"w": this.w.toString(),`,
+		`"n": this.n,`,
+		`if ("w" in d) o.w = BigInt(d["w"] as string | number);`,
+		`if ("n" in d) o.n = d["n"] as number;`,
+		`o.wa = (d["wa"] as (string | number)[]).map((_x0) => BigInt(_x0));`,
+		`o.na = d["na"] as number[];`,
+		// Decode: the unsigned callback delivers a number below 2^53 and a bigint
+		// above, so the wide store normalises instead of rounding through Number().
+		"case 0: this.o.w = BigInt(v); break;",
+		"case 1: this.o.n = Number(v); break;",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	for _, bad := range []string{
+		"w: number =",
+		"case 0: this.o.w = Number(v); break;",
+		"export enum BitfieldWide {",
+	} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("a 64-bit-backed bitfield must not be carried as a number: found %q", bad)
+		}
+	}
+}

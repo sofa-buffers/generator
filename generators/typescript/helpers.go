@@ -403,7 +403,12 @@ func (g *gen) tsType(f *ir.Field) string {
 			return "Long"
 		}
 		return "bigint"
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindBitfield, ir.KindFP32, ir.KindFP64:
+	case ir.KindBitfield:
+		if wideBitfield(f.Ref) {
+			return "bigint"
+		}
+		return "number"
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindFP32, ir.KindFP64:
 		return "number"
 	case ir.KindBool:
 		return "boolean"
@@ -438,7 +443,12 @@ func (g *gen) tsArrayType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) st
 		return g.typeName(ref.Key) + "[]"
 	case ir.KindArray:
 		return g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems) + "[]"
-	default: // integers, bitfield
+	case ir.KindBitfield:
+		if wideBitfield(ref) {
+			return "bigint[]"
+		}
+		return "number[]"
+	default: // integers
 		return "number[]"
 	}
 }
@@ -471,6 +481,9 @@ func (g *gen) tsDefault(f *ir.Field) string {
 		}
 		return "0"
 	case ir.KindBitfield:
+		if wideBitfield(f.Ref) {
+			return fmt.Sprintf("%dn", g.bitfieldDefault(f))
+		}
 		return fmt.Sprintf("%d", g.bitfieldDefault(f))
 	case ir.KindFP32, ir.KindFP64:
 		if f.Default != nil {
@@ -569,7 +582,12 @@ func (g *gen) nativeArrayDefault(f *ir.Field) (string, bool) {
 			parts[i] = fmt.Sprintf("%v", v)
 		case ir.KindEnum:
 			parts[i] = fmt.Sprintf("(%s as %s)", scalarLit(v), g.typeName(f.ElemRef.Key))
-		default: // u8/u16/u32, i8/i16/i32, bitfield
+		case ir.KindBitfield:
+			parts[i] = scalarLit(v)
+			if wideBitfield(f.ElemRef) {
+				parts[i] += "n"
+			}
+		default: // u8/u16/u32, i8/i16/i32
 			parts[i] = scalarLit(v)
 		}
 	}
@@ -587,6 +605,35 @@ func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// wideBitfield reports whether a bitfield needs a 64-bit carrier — a flag at
+// position 32 or above.
+//
+// Every other backend already picks the smallest unsigned type that holds the
+// highest declared flag position (internal/ir.AlignRank mirrors that choice);
+// TypeScript has exactly two carriers to pick from, and this is the same split.
+// A `number` is a double: it holds a mask exactly only to bit 52, and JavaScript
+// applies `|`/`&` to a number's low 32 bits, so a flag above 31 is neither
+// storable nor combinable there. The MAX_SIZE walk charges every bitfield the
+// full ten-byte varint (internal/ir/wiresize.go), so a 64-bit-backed bitfield
+// must be able to CARRY 2^64-1 for a filled message to reach its own worst case.
+func wideBitfield(ref *ir.TypeRef) bool {
+	return ref != nil && wideBitfieldType(ref.Target)
+}
+
+// wideBitfieldType is the same question asked of the named type itself, for the
+// one caller that emits the masks rather than a field.
+func wideBitfieldType(nt *ir.NamedType) bool {
+	if nt == nil {
+		return false
+	}
+	for _, fl := range nt.Flags {
+		if fl.Pos > 31 {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *gen) bitfieldDefault(f *ir.Field) uint64 {
@@ -700,6 +747,13 @@ func (g *gen) toJSONExpr(f *ir.Field) string {
 			return fmt.Sprintf("%s.toString(%t)", acc, f.Kind == ir.KindI64)
 		}
 		return acc + ".toString()"
+	case ir.KindBitfield:
+		// A bigint is not JSON-able; the 64-bit scalars print as decimal strings
+		// for the same reason, and both read back through BigInt() in fromJSON.
+		if wideBitfield(f.Ref) {
+			return acc + ".toString()"
+		}
+		return acc
 	case ir.KindBlob:
 		return "Array.from(" + acc + ")"
 	case ir.KindStruct, ir.KindUnion:
@@ -724,6 +778,11 @@ func (g *gen) tsArrayToJSON(val string, elem ir.Kind, ref *ir.TypeRef, items *ir
 			return fmt.Sprintf("%s.map((%s) => %s.toString(%t))", val, x, x, elem == ir.KindI64)
 		}
 		return fmt.Sprintf("%s.map((%s) => %s.toString())", val, x, x)
+	case ir.KindBitfield:
+		if wideBitfield(ref) {
+			return fmt.Sprintf("%s.map((%s) => %s.toString())", val, x, x)
+		}
+		return val
 	case ir.KindBlob:
 		return fmt.Sprintf("%s.map((%s) => Array.from(%s))", val, x, x)
 	case ir.KindStruct, ir.KindUnion:
@@ -751,7 +810,12 @@ func (g *gen) fromJSONStmt(f *ir.Field) string {
 			return fmt.Sprintf("%s = Long.fromValue(BigInt(%s as string | number))", acc, src)
 		}
 		return fmt.Sprintf("%s = BigInt(%s as string | number)", acc, src)
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindBitfield, ir.KindFP32, ir.KindFP64:
+	case ir.KindBitfield:
+		if wideBitfield(f.Ref) {
+			return fmt.Sprintf("%s = BigInt(%s as string | number)", acc, src)
+		}
+		return fmt.Sprintf("%s = %s as number", acc, src)
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindFP32, ir.KindFP64:
 		return fmt.Sprintf("%s = %s as number", acc, src)
 	case ir.KindBool:
 		return fmt.Sprintf("%s = %s as boolean", acc, src)
@@ -785,6 +849,11 @@ func (g *gen) tsArrayFromJSON(src string, elem ir.Kind, ref *ir.TypeRef, items *
 		return fmt.Sprintf("%s as %s[]", src, g.typeName(ref.Key))
 	case ir.KindArray:
 		return fmt.Sprintf("(%s as unknown[]).map((%s) => %s)", src, x, g.tsArrayFromJSON(x, items.Elem, items.ElemRef, items.ElemItems, depth+1))
+	case ir.KindBitfield:
+		if wideBitfield(ref) {
+			return fmt.Sprintf("(%s as (string | number)[]).map((%s) => BigInt(%s))", src, x, x)
+		}
+		return fmt.Sprintf("%s as number[]", src)
 	case ir.KindBool:
 		return fmt.Sprintf("%s as boolean[]", src)
 	case ir.KindString:

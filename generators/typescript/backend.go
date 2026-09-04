@@ -374,6 +374,20 @@ func (g *gen) emitEnum(f *tsfile, nt *ir.NamedType) {
 }
 
 func (g *gen) emitBitfield(f *tsfile, nt *ir.NamedType) {
+	// A TypeScript `enum` member can only be a number. A 64-bit-backed bitfield
+	// is carried as a bigint (wideBitfield), so its masks are emitted as a frozen
+	// const object instead — an enum of numbers would hand the caller masks that
+	// neither assign to the field nor combine with `|` above bit 31.
+	if wideBitfieldType(nt) {
+		f.line("export const %s = {", g.typeName(nt.Key))
+		for _, fl := range nt.Flags {
+			f.emitDoc("  ", flagDoc(fl))
+			f.line("  %s: %dn,", exported(fl.Name), uint64(1)<<uint(fl.Pos))
+		}
+		f.line("} as const;")
+		f.blank()
+		return
+	}
 	f.line("export enum %s {", g.typeName(nt.Key))
 	for _, fl := range nt.Flags {
 		f.emitDoc("  ", flagDoc(fl))

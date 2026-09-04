@@ -552,6 +552,13 @@ func (g *gen) scalarArm(sc *tsScope, x *ir.Field, cb string) string {
 		return fmt.Sprintf("case %d: %s = %s; break;", x.ID, acc, g.big64(x.Kind == ir.KindI64))
 	case ir.KindEnum:
 		return fmt.Sprintf("case %d: %s = Number(v) as %s; break;", x.ID, acc, g.typeName(x.Ref.Key))
+	case ir.KindBitfield:
+		// The unsigned callback delivers a number below 2^53 and a bigint above,
+		// so a wide bitfield has to normalise — `Number(v)` would silently round
+		// away the top bits of the value this field exists to carry.
+		if wideBitfield(x.Ref) {
+			return fmt.Sprintf("case %d: %s = BigInt(v); break;", x.ID, acc)
+		}
 	}
 	cond := widthCond("_v", x.Kind)
 	if cond == "" {
@@ -919,7 +926,12 @@ func (g *gen) elemConv(elem ir.Kind, ref *ir.TypeRef) (string, string) {
 	switch elem {
 	case ir.KindBool:
 		return "Boolean(v)", "unsigned"
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindBitfield:
+	case ir.KindBitfield:
+		if wideBitfield(ref) {
+			return "BigInt(v)", "unsigned"
+		}
+		return "Number(v)", "unsigned"
+	case ir.KindU8, ir.KindU16, ir.KindU32:
 		return "Number(v)", "unsigned"
 	case ir.KindU64:
 		return g.big64Arr(), "unsigned"

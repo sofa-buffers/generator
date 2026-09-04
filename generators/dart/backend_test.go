@@ -1291,3 +1291,24 @@ messages:
 		t.Errorf("no cap may be raised to a sibling's schema bound:\n%s", out)
 	}
 }
+
+// TestDartBitfieldReadsJSONAsUnsigned: the generated harness reads a bitfield the
+// way it reads a u64, because that is what a bitfield is -- an unsigned 64-bit
+// mask in a SIGNED Dart `int`.
+//
+// The arm it used to share with the small integers, `(x as num).toInt()`, cannot
+// carry one. jsonDecode hands back a double for any integer literal above 2^53,
+// which has already lost bits, and `toInt()` then CLAMPS to 2^63-1 rather than
+// throwing: a mask with bit 63 set encoded four bytes short, with a zero exit
+// status (generator#470). The u64 arm parses the quoted spelling exactly through
+// BigInt and still accepts a bare JSON number, so it covers both inputs.
+func TestDartBitfieldReadsJSONAsUnsigned(t *testing.T) {
+	// bitfields.yaml declares LOW at pos 0 and HIGH at pos 63.
+	out := genFor(t, "../../tests/matrix/corpus/defs/bitfields.yaml", map[string]any{"emit": "project"})
+	if !strings.Contains(out, "BigInt.parse(j['flags'] as String)") {
+		t.Error("a bitfield must read its JSON through the u64 BigInt path")
+	}
+	if strings.Contains(out, "m.flags = (j['flags'] as num).toInt();") {
+		t.Error("(x as num).toInt() clamps a mask with bit 63 set instead of carrying it")
+	}
+}
