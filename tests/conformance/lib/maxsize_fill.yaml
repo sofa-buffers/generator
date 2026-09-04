@@ -1,28 +1,33 @@
-# One field per wire shape, every one bounded, for the MAX_SIZE fill check
+# One field per EXACTLY PRICED branch of the cost walk, every one bounded, less
+# the exclusions recorded below, for the MAX_SIZE fill check
 # (tests/conformance/c/maxsize_fill.c).
 #
 # The point of this schema is coverage of the cost walk in internal/ir/wiresize.go,
 # not realism: it carries a scalar of every varint width, both float widths, a
-# string and a blob, a native integer array, both fixlen array kinds (which carry
-# a per-array fixlen word), both wrapper-array kinds (string and blob elements,
-# which lower to a sequence), and a nested struct. Filling every one of them to
-# its declared bound must produce exactly MAX_SIZE bytes.
+# string and a blob, a bitfield, a native integer array, both fixlen array kinds
+# (which carry a per-array fixlen word), three of the five wrapper-array element
+# kinds that lower to a sequence (string, blob, struct), and a nested struct.
+# Filling every one of them to its declared bound must produce exactly MAX_SIZE
+# bytes.
 #
 # No field declares a `default`: a field equal to its default is omitted from the
 # wire (MESSAGE_SPEC §2), which would make a "full" message shorter than its
 # worst case and hide a wrong bound.
 #
-# The coverage is NOT complete, and two different reasons keep shapes out.
+# Three shapes are deliberately absent and can never join, all for one reason: the
+# walk OVER-estimates them, so a field of that kind makes the fullest legal
+# message shorter than MAX_SIZE and breaks the "exactly" this schema exists to
+# assert. An enum is charged the full u32 width, though a small enum never reaches
+# 2^32. A union is charged the SUM of all its options, though only one option is
+# ever written — and an array whose ELEMENTS are unions is over-charged the same
+# way, which is why the wrapper-array coverage stops at three of five kinds. Do
+# not add one of these and then relax the assertion.
 #
-# Deliberately impossible here: an enum is charged the full u32 width and a union
-# the SUM of all its options, both safe OVER-estimates (only one option is ever
-# written, and a small enum never reaches 2^32). A field of either kind would
-# make the fullest legal message shorter than MAX_SIZE and break the "exactly"
-# this schema exists to assert. Do not add one and then relax the assertion.
-#
-# Missing but exactly priced, and therefore a real gap: a bitfield (10 bytes) and
-# a wrapper array whose elements are structs or arrays. Tracked as generator#470;
-# adding them moves SOFAB_MAXSIZE_FILL_BYTES and maxsize_fill.hex with them.
+# Everything else is exactly priced and belongs here. The fifth wrapper-array
+# element kind — an array whose elements are themselves ARRAYS — is exactly priced
+# and is the one such shape still missing; it is round-trip-covered by
+# tests/matrix/corpus/defs/nested_rows.yaml, but its worst case has never met an
+# encoder.
 version: 1
 messages:
   fill:
@@ -52,3 +57,40 @@ messages:
         fields:
           n_i32: { id: 0, type: i32 }
           n_str: { id: 1, type: string, maxlen: 4 }
+      # A bitfield is charged the full 64-bit varint width (10 bytes), so the
+      # worst case is only reached with the top bit set. Every one of the 64
+      # positions is declared, so "every flag set" — 2^64-1 in the JSON — is a
+      # value the schema really permits and not a reliance on undeclared bits.
+      f_bitfield:
+        id: 18
+        type: bitfield
+        bits: {
+            b00: { pos: 0 }, b01: { pos: 1 }, b02: { pos: 2 }, b03: { pos: 3 },
+            b04: { pos: 4 }, b05: { pos: 5 }, b06: { pos: 6 }, b07: { pos: 7 },
+            b08: { pos: 8 }, b09: { pos: 9 }, b10: { pos: 10 }, b11: { pos: 11 },
+            b12: { pos: 12 }, b13: { pos: 13 }, b14: { pos: 14 }, b15: { pos: 15 },
+            b16: { pos: 16 }, b17: { pos: 17 }, b18: { pos: 18 }, b19: { pos: 19 },
+            b20: { pos: 20 }, b21: { pos: 21 }, b22: { pos: 22 }, b23: { pos: 23 },
+            b24: { pos: 24 }, b25: { pos: 25 }, b26: { pos: 26 }, b27: { pos: 27 },
+            b28: { pos: 28 }, b29: { pos: 29 }, b30: { pos: 30 }, b31: { pos: 31 },
+            b32: { pos: 32 }, b33: { pos: 33 }, b34: { pos: 34 }, b35: { pos: 35 },
+            b36: { pos: 36 }, b37: { pos: 37 }, b38: { pos: 38 }, b39: { pos: 39 },
+            b40: { pos: 40 }, b41: { pos: 41 }, b42: { pos: 42 }, b43: { pos: 43 },
+            b44: { pos: 44 }, b45: { pos: 45 }, b46: { pos: 46 }, b47: { pos: 47 },
+            b48: { pos: 48 }, b49: { pos: 49 }, b50: { pos: 50 }, b51: { pos: 51 },
+            b52: { pos: 52 }, b53: { pos: 53 }, b54: { pos: 54 }, b55: { pos: 55 },
+            b56: { pos: 56 }, b57: { pos: 57 }, b58: { pos: 58 }, b59: { pos: 59 },
+            b60: { pos: 60 }, b61: { pos: 61 }, b62: { pos: 62 }, b63: { pos: 63 }
+        }
+      # A wrapper array whose ELEMENTS are structs: each element is a sequence
+      # frame of its own, nested inside the array's frame, and the element index
+      # is the child id. Nothing else here reaches a sequence inside a sequence.
+      f_arr_struct:
+        id: 19
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            s_u8:  { id: 0, type: u8 }
+            s_str: { id: 1, type: string, maxlen: 3 }

@@ -804,8 +804,8 @@ func TestCppMetadataDocs(t *testing.T) {
 		"Active = 1,  ///< Node is sampling and transmitting.",
 		"Fault = 2,  ///< Node detected an unrecoverable fault.",
 		// bitfield-flag descriptions + default note
-		"BitfieldStatusFlagsReady = 1,  ///< Node has completed initialization. (default: true)",
-		"BitfieldStatusFlagsOverheated = 2,  ///< Core temperature exceeded the safe threshold.",
+		"BitfieldStatusFlagsReady = 1ULL,  ///< Node has completed initialization. (default: true)",
+		"BitfieldStatusFlagsOverheated = 2ULL,  ///< Core temperature exceeded the safe threshold.",
 		// deprecated field: native attribute + doc note
 		"[[deprecated]] std::uint32_t legacyId = 0;  ///< Old identifier retained for backward compatibility. @deprecated",
 		// warning-suppression pragma around the generated member functions
@@ -2488,5 +2488,33 @@ func TestCppCCppGrowableRowCarriesItsBound(t *testing.T) {
 	}
 	if strings.Contains(fixed, ".elemCount") {
 		t.Errorf("an inline row states its bound as its capacity, not as elemCount:\n%s", fixed)
+	}
+}
+
+// A bitfield flag at position 63 has the mask 2^63, which fits no SIGNED integer
+// type. An unsuffixed decimal literal takes the first signed type that holds it,
+// so without a suffix GCC and Clang emit "integer constant is so large that it is
+// unsigned" — a warning that is an ERROR for anyone building the generated header
+// with -Werror. The mask carries ULL, at every position.
+func TestCppWideBitfieldMaskIsUnsigned(t *testing.T) {
+	src := "version: 1\n" +
+		"messages:\n" +
+		"  wide:\n" +
+		"    payload:\n" +
+		"      flags: { id: 1, type: bitfield, bits: { low: { pos: 0 }, top: { pos: 63 } } }\n"
+	h := headerFromYAML(t, src, "wide.hpp")
+	for _, want := range []string{
+		"enum WideFlags : std::uint64_t {",
+		"WideFlagsLow = 1ULL,",
+		"WideFlagsTop = 9223372036854775808ULL,",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("header missing %q:\n%s", want, h)
+		}
+	}
+	// The bare spelling is the one the compiler rejects; it must not survive
+	// anywhere, including inside a documented flag.
+	if strings.Contains(h, "= 9223372036854775808,") {
+		t.Errorf("a 2^63 mask was emitted without an unsigned suffix:\n%s", h)
 	}
 }

@@ -1,5 +1,5 @@
 # The exact encoding of tests/conformance/lib/maxsize_fill.json against
-# tests/conformance/lib/maxsize_fill.yaml — 234 bytes, the schema's MAX_SIZE.
+# tests/conformance/lib/maxsize_fill.yaml — 269 bytes, the schema's MAX_SIZE.
 # Read by check_maxsize_fill (maxsize_fill.sh); every target must produce this
 # byte for byte, because the wire format is a property of the schema and not of
 # the language. Comments and whitespace are stripped before comparing.
@@ -54,4 +54,23 @@
 8e 01                                # f_nested   id 17  (17<<3)|6 = 142
    01 ff ff ff ff 0f                 #   n_i32 id 0, ZigZag(-2^31)
    0a 22 77 78 79 7a                 #   n_str id 1, word 0x22 (4, string) "wxyz"
+   07
+
+# A bitfield is charged the widest 64-bit varint, so only an all-flags-set value
+# reaches the worst case.
+90 01                                # f_bitfield id 18  (18<<3)|0 = 144
+   ff ff ff ff ff ff ff ff ff 01     #   every flag set, 2^64-1
+
+# A wrapper array of STRUCT elements: a sequence whose children are themselves
+# sequences. The child id is the element index, exactly as for the leaf wrapper
+# arrays above, and each element frame carries its own terminator.
+9e 01                                # f_arr_struct id 19  (19<<3)|6 = 158
+   06                                #   elem 0: id 0, hdr|6
+      00 ff 01                       #     s_u8 id 0, 255
+      0a 1a 61 62 63                 #     s_str id 1, word 0x1a (3, string) "abc"
+      07
+   0e                                #   elem 1: id 1
+      00 ff 01
+      0a 1a 64 65 66                 #     "def"
+      07
    07

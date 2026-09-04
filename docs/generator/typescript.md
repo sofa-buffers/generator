@@ -38,3 +38,33 @@ values fit JavaScript's ±2⁵³ safe-integer range. A value outside it is silen
 imprecise, not rejected. Choose it only when the schema's 64-bit fields are known
 to carry small values — timestamps in milliseconds, counters — and the ergonomics
 of a plain number are worth the guarantee.
+
+## Bitfields
+
+A `bitfield` is carried in the narrowest type that holds its highest declared
+flag position, which in TypeScript means one of two:
+
+| highest `pos` | field type | flag masks |
+|---|---|---|
+| 0–30 | `number` | `export enum` members |
+| 31–63 | `bigint` | a `const` object of `bigint` masks (`as const`) |
+
+A `number` is a double, so it holds a mask exactly only to bit 52 — but the band
+ends earlier than that, at 30, because **combining** is what a mask is for.
+JavaScript narrows both operands of `|` and `&` to 32-bit *signed*, so a mask
+with bit 31 set comes back negative: `Flags.A | Flags.AtBit31` evaluates to a
+negative number, which the encoder rejects as an unsigned value out of range.
+Positions 0–30 combine cleanly (`|` over them tops out at `0x7FFFFFFF`). A
+`bigint` has neither limit, and a TS `enum` member can only be a number, which is
+why the wide masks are a `const` object instead:
+
+```ts
+m.caps = Caps.Read | Caps.WriteAt63;   // bigint | bigint
+```
+
+`int64` does not reach bitfields. It chooses how a 64-bit **integer** is
+represented, and a mask has no lossy-number reading to opt into.
+
+In JSON, a `bigint`-carried bitfield is a decimal **string**, as `u64` is under
+`int64: bigint` — `fromJSON` accepts both the string and a plain number. A
+`number`-carried one is a plain JSON number.

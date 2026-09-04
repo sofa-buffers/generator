@@ -1291,3 +1291,42 @@ messages:
 		t.Errorf("no cap may be raised to a sibling's schema bound:\n%s", out)
 	}
 }
+
+// TestDartBitfieldReadsJSONAsUnsigned: the generated harness reads a bitfield the
+// way it reads a u64, because that is what a bitfield is -- an unsigned 64-bit
+// mask in a SIGNED Dart `int`.
+//
+// The arm it used to share with the small integers, `(x as num).toInt()`, cannot
+// carry one. jsonDecode hands back a double for any integer literal above 2^53,
+// which has already lost bits, and `toInt()` then CLAMPS to 2^63-1 rather than
+// throwing: a mask with bit 63 set encoded four bytes short, with a zero exit
+// status (generator#470). The u64 arm parses the quoted spelling exactly through
+// BigInt and still accepts a bare JSON number, so it covers both inputs.
+func TestDartBitfieldReadsJSONAsUnsigned(t *testing.T) {
+	// bitfields.yaml declares LOW at pos 0 and HIGH at pos 63.
+	out := genFor(t, "../../tests/matrix/corpus/defs/bitfields.yaml", map[string]any{"emit": "project"})
+	if !strings.Contains(out, "BigInt.parse(j['flags'] as String)") {
+		t.Error("a bitfield must read its JSON through the u64 BigInt path")
+	}
+	if strings.Contains(out, "m.flags = (j['flags'] as num).toInt();") {
+		t.Error("(x as num).toInt() clamps a mask with bit 63 set instead of carrying it")
+	}
+	// The WRITE half of the same treatment. Dart's `int` is signed, so a mask
+	// with bit 63 set prints as -1 unless it goes out the way a u64 does --
+	// where python, go, rust, C#, kotlin and typescript all print
+	// 18446744073709551615. Nothing else catches it: the shared max-fill message
+	// is encode-only in every suite, so the asymmetry never shows up as a failed
+	// comparison.
+	if !strings.Contains(out, "BigInt.from(m.flags).toUnsigned(64).toString()") {
+		t.Error("a bitfield reaching bit 63 must WRITE its JSON unsigned, not as a negative int")
+	}
+	// A narrow bitfield keeps the plain JSON number every hand-written input in
+	// the tree spells and the round-trip greps expect (`"somebitfield":2`).
+	ex := genFor(t, exampleDef, map[string]any{"emit": "project"})
+	if strings.Contains(ex, "BigInt.from(m.somebitfield)") {
+		t.Error("a bitfield that fits below bit 32 must stay a plain JSON number")
+	}
+	if !strings.Contains(ex, "'somebitfield': m.somebitfield,") {
+		t.Error("a narrow bitfield's JSON write must pass straight through")
+	}
+}
