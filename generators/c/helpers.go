@@ -20,7 +20,7 @@ func (g *gen) cDefaultInit(f *ir.Field) (string, bool) {
 	// A bitfield derives its default from the set flags, not a field Default.
 	if f.Kind == ir.KindBitfield {
 		if bits := g.bitfieldDefault(f); bits != 0 {
-			return fmt.Sprintf("%d", bits), true
+			return cMaskLit(bits), true
 		}
 		return "", false
 	}
@@ -129,6 +129,27 @@ func (g *gen) cArrayDefaultInit(f *ir.Field) (string, bool) {
 			} else {
 				e = "0"
 			}
+		case ir.KindBitfield:
+			// The same hole as the scalar default, one level in: an element mask
+			// with bit 63 set is written as a bare decimal, which no signed type
+			// holds, so the initializer is `integer constant is so large that it
+			// is unsigned` — a hard error under -pedantic-errors.
+			if bits, err := strconv.ParseUint(scalarLit(v), 10, 64); err == nil {
+				e = cMaskLit(bits)
+			} else {
+				// Reachable, and deliberately a pass-through. internal/parser's
+				// checkArrayElem has no "bitfield" arm, so an element default that
+				// is not a plain decimal — a negative, a float, a quoted "0x10", a
+				// magnitude past uint64 — reaches codegen unchecked (measured).
+				// Parsing it as a mask anyway would silently change the VALUE (-1
+				// would become 0), so the text is carried through unaltered and the
+				// C compiler judges it, which for the one spelling this fix is
+				// about — a decimal wider than uint64 — it does: "integer constant
+				// is too large for its type". The validator gap is generator#482;
+				// this arm goes away when the parser rejects those shapes.
+				e = scalarLit(v)
+			}
+			nonZero = nonZero || !isZeroInt(scalarLit(v))
 		default: // integer / enum
 			e = intLit(f.Elem, scalarLit(v))
 			nonZero = nonZero || !isZeroInt(scalarLit(v))
@@ -150,6 +171,24 @@ func (g *gen) bitfieldDefault(f *ir.Field) uint64 {
 		}
 	}
 	return bits
+}
+
+// cMaskLit renders a bitfield mask as a C integer constant.
+//
+// The "ULL" suffix is not decoration. C11 6.4.4.1 looks an UNSUFFIXED decimal
+// constant up in the SIGNED list only, so the mask for position 63 —
+// 9223372036854775808 — has no type at all in strict C99+: GCC accepts it as an
+// extension with "integer constant is so large that it is unsigned", which is a
+// warning under -pedantic and an ERROR under -pedantic-errors. The suffix is
+// harmless on a narrower backing type (uint8_t..uint32_t), where the constant
+// converts to the member's type as usual.
+//
+// Every place this backend turns a mask into C source text goes through here —
+// the scalar default and the element of an array-of-bitfield default — so a
+// third site cannot drift from the first two, which is how generator#480
+// existed at all.
+func cMaskLit(bits uint64) string {
+	return fmt.Sprintf("%dULL", bits)
 }
 
 // intLit widens an integer literal to its C member type: a "ULL" suffix for
