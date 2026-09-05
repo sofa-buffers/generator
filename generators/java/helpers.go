@@ -3,6 +3,7 @@ package java
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -84,7 +85,11 @@ func (g *gen) javaArrayElemLit(elem ir.Kind, v any) string {
 	case ir.KindFP64:
 		return floatLit(v)
 	case ir.KindU64:
-		return fmt.Sprintf("Long.parseUnsignedLong(%q)", scalarLit(v))
+		// Symmetry with javaPrimElemLit only, and nothing reaches it: primitiveArrayElem
+		// claims u64, so a u64 array is a long[] and never this boxed List<Long>.
+		// Kept in step all the same, so that moving u64 onto the boxed path cannot
+		// silently reintroduce the per-instance parse (generator#479).
+		return javaU64Lit(scalarLit(v)) // Long.valueOf(long) autoboxes the literal
 	case ir.KindBitfield:
 		// Symmetry with javaPrimElemLit only, and nothing reaches it: this boxed
 		// path is boolean-only today, because primitiveArrayElem claims bitfield
@@ -274,7 +279,11 @@ func javaPrimElemLit(elem ir.Kind, v any) string {
 		return floatLit(v)
 	case "long":
 		if elem == ir.KindU64 {
-			return fmt.Sprintf("Long.parseUnsignedLong(%q)", scalarLit(v))
+			// Doubly worth a literal here: this initializer is per-INSTANCE, so the
+			// parse it used to emit was a static call per element per object
+			// constructed (generator#479) -- the same argument the bitfield arm
+			// below already made for itself.
+			return javaU64Lit(scalarLit(v))
 		}
 		if elem == ir.KindBitfield {
 			// The same hole as the scalar default, one level in: an element mask
@@ -414,8 +423,12 @@ func (g *gen) javaInit(f *ir.Field) string {
 		}
 		return ""
 	case ir.KindU64:
+		// A u64 is carried in a SIGNED Java long, so the default has to be spelled
+		// as a literal that survives the reuse of this one string at five sites, two
+		// of them compares in the encode path -- see javaU64Lit. Decimal as written
+		// up to 2^63-1, hex past it.
 		if f.Default != nil {
-			return fmt.Sprintf(" = Long.parseUnsignedLong(%q)", scalarLit(f.Default))
+			return " = " + javaU64Lit(scalarLit(f.Default))
 		}
 		return ""
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
@@ -433,14 +446,15 @@ func (g *gen) javaInit(f *ir.Field) string {
 		// a mask with bit 63 set has no DECIMAL long literal: `9223372036854775808L`
 		// is "integer number too large" and the class does not compile. A HEX long
 		// literal has no such hole -- it spells every uint64 bit pattern, up to
-		// 0xFFFFFFFFFFFFFFFFL -- and unlike the Long.parseUnsignedLong the u64 arm
-		// above needs (a decimal default is an author-written number, and rewriting
-		// it would hide what the schema said) it stays a compile-time constant.
-		// That matters because this one string is reused four times, twice of them
-		// in a hot path: the field initializer, the `!= default` omission compare in
-		// serialize, the same compare in isDefault, and reset(). Hex is also simply
-		// the right spelling for a mask assembled from flag POSITIONS -- it shows
-		// which bits are set, which no decimal does.
+		// 0xFFFFFFFFFFFFFFFFL -- and it stays a compile-time constant. That matters
+		// because this one string is reused four times, twice of them in a hot path:
+		// the field initializer, the `!= default` omission compare in serialize, the
+		// same compare in isDefault, and reset(). Hex is also simply the right
+		// spelling for a mask assembled from flag POSITIONS -- it shows which bits
+		// are set, which no decimal does. The u64 arm above reaches the same place by
+		// a different route (javaU64Lit): there the author DID write a decimal, so it
+		// stands as written wherever javac accepts it, and only a value past 2^63-1
+		// is re-spelled in hex.
 		if bits := g.bitfieldDefault(f); bits != 0 {
 			return " = " + javaMaskLit(bits)
 		}
@@ -470,8 +484,143 @@ func (g *gen) javaInit(f *ir.Field) string {
 // one that covers every uint64 pattern in a SIGNED carrier, it stays a
 // compile-time constant on a maxspeed target, and it shows which bits a mask
 // assembled from flag POSITIONS actually sets.
+//
+// Every mask is re-spelled in hex, including an ARRAY element the author did
+// write as a decimal (bitfields.yaml's `masks` row spells one element `1` and
+// another as the quoted decimal "18446744073709551615"), and none of them gets
+// the javadoc line javaWideU64Note gives a re-spelled u64. That is deliberate,
+// and it is the one place this file re-spells without a note: hex is the RIGHT
+// reading of a mask whatever base it was written in -- the value's meaning is
+// which bits are set -- so the hex literal is not hiding the author's number,
+// it is showing it better. A u64 default is the opposite case: there the
+// decimal IS the meaning (a count, a limit, an id), so re-spelling it loses
+// something and the javadoc pays it back.
 func javaMaskLit(bits uint64) string {
 	return fmt.Sprintf("0x%XL", bits)
+}
+
+// javaU64Lit spells a `u64` schema default as a Java `long` literal, and is the
+// one place that decision lives -- javaInit renders the scalar default with it,
+// javaPrimElemLit an element of a `long[]` default, javaArrayElemLit a boxed one.
+//
+// The whole point is that the result is a COMPILE-TIME CONSTANT, because the one
+// string javaInit returns is reused at five sites, two of them compares and one of
+// those in the encode path: the field initializer, the `!= default` omission
+// compare in serialize(), the same compare in isDefault(), reset(), and -- for an
+// array -- once per element in the per-instance `new long[]{...}`. The
+// Long.parseUnsignedLong this used to emit is none of those things; javac renders
+// it `ldc` + `invokestatic` where a literal is a bare `ldc2_w`, and C2 does not
+// fold it away either (generator#479, measured at ~20 ns/op against ~0.9 for a
+// literal, JDK 25.0.3).
+//
+// Two spellings, split at the top of a decimal long literal:
+//
+//   - Up to 2^63-1 the value is emitted as its own DECIMAL, which for every
+//     well-formed schema default is the author's text unchanged (`default: 42`
+//     gives `42L`). That is the common case, it is already what every other
+//     integer kind emits one arm up in javaInit, and it keeps the author's number
+//     visible in the generated source.
+//   - Past it there IS no decimal long literal -- 9223372036854775808L is javac's
+//     "integer number too large" -- so the value is spelled in HEX, through
+//     javaMaskLit, which reads a 64-bit two's-complement pattern and so covers
+//     every uint64 up to 0xFFFFFFFFFFFFFFFFL. Only here is the author's spelling
+//     re-written, and javaWideU64Note puts the decimal back in the field's javadoc
+//     so the generated source still says what the schema said.
+//
+// The decimal is RE-RENDERED from the parsed value (strconv.FormatUint), never
+// echoed as the schema's raw text, and that is load-bearing rather than tidiness:
+// Java reads a leading-zero integer literal as OCTAL. An array element may reach
+// here as "010" -- internal/parser/validate.go's checkArrayElem accepts any string
+// for a u64 element with no format check, unlike the scalar path, where
+// checkInt64Range's decIntRe rejects it -- and `010L` is 8 to javac, while `09L`
+// is not a legal literal at all. Long.parseUnsignedLong("010") was 10, so echoing
+// the text here would be a silent value change at the omission compare, isDefault
+// and reset. FormatUint is free for every other input: `42` is still `42L`.
+//
+// A default that is not a decimal integer at all falls back to the old parse
+// rather than inventing a literal, and it is reachable: the validator ACCEPTS an
+// integral float64 in the double-safe range, so `default: 1e10` on a u64 arrives
+// as "1e+10" (scalarLit's %v) and the emitted
+// `Long.parseUnsignedLong("1e+10")` compiles and then throws
+// NumberFormatException in the constructor. That is pre-existing, family-wide
+// (the same schema gives cpp `std::uint64_t expo = 1e+10ULL;`, which does not
+// compile) and belongs in the parser/IR, not here: it is not this function's
+// business to decide what a valid default is. Both halves -- the unchecked
+// element string and the float spelling -- are generator#484.
+func javaU64Lit(dec string) string {
+	lit, _ := javaU64Spelling(dec)
+	return lit
+}
+
+// javaU64Spelling is the single owner of the 2^63-1 split: it returns the Java
+// literal for a u64 schema default and whether that literal is the HEX form, i.e.
+// whether the author's decimal has been re-spelled and so needs javaWideU64Note to
+// put it back in the javadoc.
+//
+// Both halves come from here on purpose. The javadoc note used to re-derive the
+// threshold with its own ParseUint comparison, which is the drift javaMaskLit was
+// extracted to prevent in #477 one function up: move the split and the literal and
+// the sentence describing it would disagree, and no test would notice, because
+// each is asserted against its own hardcoded string.
+func javaU64Spelling(dec string) (lit string, hex bool) {
+	n, err := strconv.ParseUint(dec, 10, 64)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("Long.parseUnsignedLong(%q)", dec), false
+	case n > math.MaxInt64:
+		return javaMaskLit(n), true
+	default:
+		return strconv.FormatUint(n, 10) + "L", false
+	}
+}
+
+// javaWideU64Note is the javadoc line that carries a re-spelled u64 default's
+// DECIMAL value, and the empty string when nothing was re-spelled -- which is the
+// usual case, since only a value past 2^63-1 is re-spelled at all.
+//
+// It exists because the hex literal is the only record of the default in the
+// generated source (the field javadoc carries the description and the schema
+// bound, never the default), and hex is not how the author wrote a u64 quantity.
+// A trailing `//` comment cannot serve: javaDefaultValue hands the same one string
+// to two INLINE compares, where a line comment would swallow the rest of the
+// expression. The javadoc is where a reader asks "what is this field's default"
+// anyway.
+//
+// It never decides for itself WHICH defaults were re-spelled: javaU64Spelling
+// hands back that flag alongside the literal, and the sentence interpolates the
+// literal it is actually describing rather than recomputing it.
+//
+// An array of BITFIELD is re-spelled in hex too and deliberately gets no note --
+// see javaMaskLit, where hex is the right reading of a mask however it was
+// written.
+func javaWideU64Note(f *ir.Field) string {
+	switch {
+	case f.Kind == ir.KindU64 && f.Default != nil:
+		dec := scalarLit(f.Default)
+		lit, hex := javaU64Spelling(dec)
+		if !hex {
+			return ""
+		}
+		return fmt.Sprintf("Default %s: past 2^63-1, so it is spelled below as the hex long literal %s.", dec, lit)
+	case f.Kind == ir.KindArray && f.Elem == ir.KindU64:
+		vals, ok := f.Default.([]any)
+		if !ok {
+			return ""
+		}
+		anyHex := false
+		decs := make([]string, len(vals))
+		for i, v := range vals {
+			decs[i] = scalarLit(v)
+			_, hex := javaU64Spelling(decs[i])
+			anyHex = anyHex || hex
+		}
+		if !anyHex {
+			return ""
+		}
+		return fmt.Sprintf("Default [%s]: the elements past 2^63-1 are spelled below as hex long literals.",
+			strings.Join(decs, ", "))
+	}
+	return ""
 }
 
 func (g *gen) bitfieldDefault(f *ir.Field) uint64 {

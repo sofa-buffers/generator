@@ -1,6 +1,7 @@
 package java
 
 import (
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -58,8 +59,8 @@ func TestJavaStructural(t *testing.T) {
 		"public static Myfirstmessage decode(byte[] data)",
 		"public static DecodeStatus tryDecode(byte[] data, Myfirstmessage out) throws SofabException", // status-surfacing decode (#105)
 		"class MyfirstmessageVisitor implements Visitor {",
-		"public void sequenceBegin(int id)", // flat-visitor nesting
-		"public long someu64 = Long.parseUnsignedLong(\"18446744073709551615\");",
+		"public void sequenceBegin(int id)",                                             // flat-visitor nesting
+		"public long someu64 = 0xFFFFFFFFFFFFFFFFL;",                                    // a u64 default is a compile-time constant, not a runtime parse (#479)
 		"public int[] someuintarray = new int[]{0, 1, 1000, -1};",                       // primitive array (was List<Long>)
 		"public float[] somefloatarray = new float[]{0.0f, -1.5f, 3.25f};",              // primitive fp array
 		"public long[] someenumarray = new long[]{2L, 1L, 0L};",                         // declared default, NOT padded to count (count is a capacity)
@@ -1946,9 +1947,11 @@ func javaLongLiteralBits(lit string) (uint64, error) {
 // There are FOUR such sites, because javaDefaultValue's one string is reused in
 // the field initializer, the `!= default` omission compare in serialize(), the
 // same compare in isDefault(), and reset() -- which is also why the fix is a hex
-// literal rather than the Long.parseUnsignedLong the u64 arm needs: hex is a
-// compile-time constant, so the two compares stay a bare lcmp against the
-// constant pool instead of an invokestatic per call on a maxspeed target.
+// literal rather than the Long.parseUnsignedLong the u64 arm used to emit: hex is
+// a compile-time constant, so the two compares stay a bare lcmp against the
+// constant pool instead of an invokestatic per call on a maxspeed target. The u64
+// arm has since been held to the same rule; see
+// TestJavaU64DefaultIsACompileTimeConstant (generator#479).
 func TestJavaBitfieldDefaultIsALegalLongLiteral(t *testing.T) {
 	const src = `
 version: 1
@@ -2070,5 +2073,204 @@ messages:
 	// Long.parseUnsignedLong call per element per object constructed.
 	if !strings.Contains(out, "new long[]{0x1L, 0x8000000000000000L}") {
 		t.Errorf("Bf2.java does not spell the array default in hex:\n%s", out)
+	}
+}
+
+// TestJavaU64DefaultIsACompileTimeConstant: a `u64` default must be spelled as a
+// long LITERAL at every site, not as a Long.parseUnsignedLong call (generator#479).
+//
+// javaDefaultValue hands javaInit's one string to five sites -- the field
+// initializer, the `!= default` omission compare in serialize(), the same compare
+// in isDefault(), reset(), and (for an array) once per element in the per-instance
+// `new long[]{...}`. Two of those are compares and one of THOSE is the encode
+// path, so on this maxspeed target the spelling has to be a compile-time constant.
+// The parse is not one at any tier: javac emits `ldc` + `invokestatic
+// Long.parseUnsignedLong` + `lcmp` where a literal is a bare `ldc2_w` + `lcmp`,
+// and C2 does not fold it away either -- measured at 19.7-20.0 ns/op against
+// 0.6-1.0 for the literal (200M iterations after 100M warmup, JDK 25.0.3).
+//
+// The assertions below are on the SHAPE of each emitted literal, via javac's own
+// range rule; a substring check would pass just as happily on the parse call this
+// replaced, and on the decimal that does not compile past 2^63-1.
+func TestJavaU64DefaultIsACompileTimeConstant(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  Wide:
+    payload:
+      big:    { id: 0, type: u64, default: 18446744073709551615 }
+      small:  { id: 1, type: u64, default: 42 }
+      bigarr: { id: 2, type: array, items: { type: u64, count: 3 }, default: ["18446744073709551615", 1, "9223372036854775808"] }
+`
+	var out string
+	for p, c := range genJavaFromYAML(t, src, map[string]any{"package": "messages"}) {
+		if strings.HasSuffix(p, "Wide.java") {
+			out = c
+		}
+	}
+	if out == "" {
+		t.Fatal("no Wide.java generated")
+	}
+
+	// Nothing anywhere in the class may parse a default at run time -- not the
+	// scalar sites, not an array element, not the hoisted _arrdef_ constant.
+	if strings.Contains(out, "Long.parseUnsignedLong(") {
+		t.Errorf("a u64 default is still parsed at run time:\n%s", out)
+	}
+
+	// Both scalar defaults, at all four of their sites, checked by value rather
+	// than by spelling: a wide one has no decimal long literal and must be hex, a
+	// narrow one keeps the schema's own decimal.
+	for _, tc := range []struct {
+		field string
+		want  uint64
+	}{
+		{"big", math.MaxUint64},
+		{"small", 42},
+	} {
+		re := regexp.MustCompile(`(?m)\b` + tc.field + ` (?:= |!= )([0-9A-Fa-fxX_]+L)`)
+		lits := re.FindAllStringSubmatch(out, -1)
+		if len(lits) != 4 {
+			t.Errorf("expected %s at 4 sites (initializer, serialize compare, isDefault compare, reset), got %d:\n%s",
+				tc.field, len(lits), out)
+			continue
+		}
+		for _, m := range lits {
+			bits, err := javaLongLiteralBits(m[1])
+			if err != nil {
+				t.Errorf("%q is not a long literal javac accepts (%v)", m[1], err)
+				continue
+			}
+			if bits != tc.want {
+				t.Errorf("%s spelled %q denotes 0x%X, want 0x%X", tc.field, m[1], bits, tc.want)
+			}
+		}
+	}
+
+	// The narrow default keeps the author's decimal, and the wide one -- which has
+	// no decimal spelling at all -- goes to hex. Split at exactly 2^63-1.
+	if !strings.Contains(out, "public long small = 42L;") {
+		t.Errorf("a u64 default that fits in a signed long must keep the schema's decimal:\n%s", out)
+	}
+	if !strings.Contains(out, "public long big = 0xFFFFFFFFFFFFFFFFL;") {
+		t.Errorf("a u64 default past 2^63-1 must be spelled in hex:\n%s", out)
+	}
+
+	// Both `new long[]{...}` sites: the per-instance field initializer and the
+	// hoisted _arrdef_ constant. Per element, per object constructed, is where the
+	// parse hurt most.
+	wantElems := []uint64{math.MaxUint64, 1, 1 << 63}
+	inits := regexp.MustCompile(`new long\[\]\{([^}]*)\}`).FindAllStringSubmatch(out, -1)
+	if len(inits) != 2 {
+		t.Fatalf("expected the array default at 2 sites (field initializer, _arrdef_ constant), got %d:\n%s",
+			len(inits), out)
+	}
+	for _, in := range inits {
+		lits := strings.Split(in[1], ", ")
+		if len(lits) != len(wantElems) {
+			t.Errorf("%q has %d elements, want %d", in[0], len(lits), len(wantElems))
+			continue
+		}
+		for i, lit := range lits {
+			bits, err := javaLongLiteralBits(lit)
+			if err != nil {
+				t.Errorf("element %d of %q is not a long literal javac accepts (%v)", i, in[0], err)
+				continue
+			}
+			if bits != wantElems[i] {
+				t.Errorf("element %d of %q denotes 0x%X, want 0x%X", i, in[0], bits, wantElems[i])
+			}
+		}
+	}
+	if !strings.Contains(out, "new long[]{0xFFFFFFFFFFFFFFFFL, 1L, 0x8000000000000000L}") {
+		t.Errorf("the u64 array default is not spelled element-for-element as literals:\n%s", out)
+	}
+
+	// Re-spelling a value in hex is the one thing that loses what the schema said,
+	// so the decimal is put back in the field's javadoc -- and only there, where a
+	// line comment cannot break the two inline compares.
+	for _, note := range []string{
+		"Default 18446744073709551615: past 2^63-1, so it is spelled below as the hex long literal 0xFFFFFFFFFFFFFFFFL.",
+		"Default [18446744073709551615, 1, 9223372036854775808]: the elements past 2^63-1 are spelled below as hex long literals.",
+	} {
+		if !strings.Contains(out, note) {
+			t.Errorf("the javadoc does not carry the re-spelled default: %q\n%s", note, out)
+		}
+	}
+	// A default that was NOT re-spelled gets no such note: nothing was hidden.
+	if strings.Contains(out, "Default 42") {
+		t.Errorf("a u64 default that keeps its decimal needs no javadoc note:\n%s", out)
+	}
+}
+
+// TestJavaU64LeadingZeroDefaultIsNotOctal: a u64 default is emitted as the value
+// the generator PARSED, never as the schema's raw text, because Java reads a
+// leading-zero integer literal as OCTAL.
+//
+// The reachable spelling is an ARRAY element. internal/parser/validate.go's
+// checkArrayElem accepts any string for a `u64` element with no format check at
+// all, where the scalar path runs checkInt64Range's decIntRe
+// (`^-?(0|[1-9][0-9]*)$`) and rejects a leading zero -- so "010" is schema-legal
+// in exactly the place javaPrimElemLit renders per instance. That the validator
+// lets it through is generator#484, and out of this backend's hands; that the
+// backend must not mis-spell whatever it is handed is this test.
+//
+// Echoing the text there would have been a silent value change, and #479 nearly
+// was one: Long.parseUnsignedLong("010") is 10, while `010L` is 8 to javac
+// (verified with javac 25.0.3 -- `System.out.println(010L)` prints 8) and `09L`
+// is "illegal digit in an octal literal", which does not compile at all. The
+// omission compare in serialize(), isDefault() and reset() would every one of
+// them have read the wrong constant.
+func TestJavaU64LeadingZeroDefaultIsNotOctal(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  Oct:
+    payload:
+      arr: { id: 0, type: array, items: { type: u64, count: 3 }, default: ["010", "09", 1] }
+`
+	var out string
+	for p, c := range genJavaFromYAML(t, src, map[string]any{"package": "messages"}) {
+		if strings.HasSuffix(p, "Oct.java") {
+			out = c
+		}
+	}
+	if out == "" {
+		t.Fatal("no Oct.java generated")
+	}
+
+	// By VALUE, through javac's own literal rule -- which is the only assertion
+	// that catches this: `010L` is a perfectly legal long literal, so every shape
+	// check in the test above passes just as happily on the broken output.
+	wantElems := []uint64{10, 9, 1}
+	inits := regexp.MustCompile(`new long\[\]\{([^}]*)\}`).FindAllStringSubmatch(out, -1)
+	if len(inits) != 2 {
+		t.Fatalf("expected the array default at 2 sites (field initializer, _arrdef_ constant), got %d:\n%s",
+			len(inits), out)
+	}
+	for _, in := range inits {
+		lits := strings.Split(in[1], ", ")
+		if len(lits) != len(wantElems) {
+			t.Errorf("%q has %d elements, want %d", in[0], len(lits), len(wantElems))
+			continue
+		}
+		for i, lit := range lits {
+			bits, err := javaLongLiteralBits(lit)
+			if err != nil {
+				t.Errorf("element %d of %q is not a long literal javac accepts (%v)", i, in[0], err)
+				continue
+			}
+			if bits != wantElems[i] {
+				t.Errorf("element %d of %q denotes %d, want %d -- the raw text was echoed and javac read it as octal",
+					i, in[0], bits, wantElems[i])
+			}
+		}
+	}
+	// And the spelling, so the leading zero cannot come back by another route.
+	if !strings.Contains(out, "new long[]{10L, 9L, 1L}") {
+		t.Errorf("the leading zeros were not normalized away:\n%s", out)
+	}
+	if strings.Contains(out, "010L") || strings.Contains(out, "09L") {
+		t.Errorf("an octal-looking literal survived into the generated class:\n%s", out)
 	}
 }

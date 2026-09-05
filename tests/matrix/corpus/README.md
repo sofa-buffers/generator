@@ -7,7 +7,11 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   **generated across every registered language backend** (with a parse check on
   the Go output). Covers: scalar boundaries, `fp` `decimals`, strings/blobs
   (incl. without `maxlen`), every array kind (numeric, array-of-string,
-  array-of-blob), wrapper-sequence **elements** in fixed/dynamic pairs
+  array-of-blob) — including a `u64` array whose element defaults run past
+  2^63-1, the only element default that does not fit the **signed** 64-bit
+  carrier some targets back a `u64` with, and which each backend therefore has
+  to re-spell inside a per-instance array initializer — wrapper-sequence
+  **elements** in fixed/dynamic pairs
   (`seq_elements.yaml`), nested wrapper **rows** at depth 2 and 3 with their
   native-row control (`nested_rows.yaml`), enums (shorthand + object form,
   negative values), bitfields (pos 0 and 63, both defaulted so a pos-63 mask

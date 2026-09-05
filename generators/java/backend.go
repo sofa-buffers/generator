@@ -253,7 +253,7 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 	f.javadoc("", summary)
 	f.line("%sclass %s {", vis, name)
 	for _, fld := range fields {
-		f.javadoc("    ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
+		f.javadoc("    ", fieldDoc(fld, generator.AppendDoc(generator.BoundNote(fld, generator.StorageDynamic), javaWideU64Note(fld))))
 		if fld.Deprecated {
 			f.line("    @Deprecated")
 		}
