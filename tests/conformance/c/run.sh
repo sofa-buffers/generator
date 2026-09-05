@@ -479,7 +479,13 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     case "$name" in no_maxlen | seq_elements_dyn) continue ;; esac
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     for c in "$WORK"/corpus/"$name"/*.c; do
-        gcc -std=c99 -Wall -DSOFAB_OBJECT_DESCR_PROFILE=3 -I"$INC" -I"$WORK/corpus/$name" -c "$c" -o /dev/null \
+        # -Werror, because the defects this loop exists to catch are DIAGNOSTICS,
+        # not hard errors: an unsuffixed decimal constant above INT64_MAX has no
+        # type under C11 6.4.4.1, and GCC accepts it as an extension with a mere
+        # "integer constant is so large that it is unsigned" (generator#480). Every
+        # corpus definition plus the realworld example was swept under these flags
+        # before they were tightened: all clean.
+        gcc -std=c99 -Wall -Werror -DSOFAB_OBJECT_DESCR_PROFILE=3 -I"$INC" -I"$WORK/corpus/$name" -c "$c" -o /dev/null \
             || { echo "FAIL: corpus def $name did not compile"; exit 1; }
     done
 done

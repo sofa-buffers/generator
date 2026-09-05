@@ -10,7 +10,8 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   array-of-blob), wrapper-sequence **elements** in fixed/dynamic pairs
   (`seq_elements.yaml`), nested wrapper **rows** at depth 2 and 3 with their
   native-row control (`nested_rows.yaml`), enums (shorthand + object form,
-  negative values), bitfields (pos 0 and 63), nested structs, unions with
+  negative values), bitfields (pos 0 and 63, both defaulted so a pos-63 mask
+  reaches each backend's default renderer), nested structs, unions with
   `default_id`, large/non-contiguous field ids, metadata
   (`deprecated`/`unit`/`description`), and `$ref` reuse.
 - **`invalid/`** — definitions that **must be rejected** by the hard gate

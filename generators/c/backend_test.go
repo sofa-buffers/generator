@@ -2,9 +2,12 @@ package c
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -736,4 +739,144 @@ func keys(m map[string]string) []string {
 		k = append(k, x)
 	}
 	return k
+}
+
+// intConstRE matches a decimal integer constant and the suffix glued to it, the
+// way a C compiler tokenizes one: a run of digits not preceded by an identifier
+// character, a hex prefix or a decimal point, followed by its unsigned/long
+// suffix letters. The optional leading sign is captured only so a NEGATIVE
+// spelling can be recognised and dropped — C has no negative constants, so
+// "-9223372036854775808" is the unary minus of a constant whose magnitude the
+// rules below would otherwise judge on its own and report as untyped.
+var intConstRE = regexp.MustCompile(`(?:^|[^0-9A-Za-z_.])(-?)([0-9]+)([uUlL]*)`)
+
+// intConsts yields each decimal constant in src as (value, full text), skipping
+// the ones these rules cannot judge: a negated spelling (see intConstRE) and a
+// magnitude wider than uint64, which is a different defect.
+func intConsts(src string, fn func(v uint64, lit string)) {
+	for _, m := range intConstRE.FindAllStringSubmatch(src, -1) {
+		if m[1] == "-" {
+			continue
+		}
+		v, err := strconv.ParseUint(m[2], 10, 64)
+		if err != nil {
+			continue
+		}
+		fn(v, m[2]+m[3])
+	}
+}
+
+// hugeSignedlessConstants returns every decimal constant in src that is above
+// INT64_MAX and carries no unsigned suffix — that is, every constant C11
+// 6.4.4.1 gives no type at all, because an unsuffixed decimal constant is looked
+// up in the SIGNED list only.
+//
+// This applies the compiler's own rule to the emitted text. A substring
+// assertion cannot: "9223372036854775808ULL" contains "9223372036854775808", so
+// a grep for the good spelling passes just as happily on the broken one.
+func hugeSignedlessConstants(src string) []string {
+	var bad []string
+	intConsts(src, func(v uint64, lit string) {
+		if v > math.MaxInt64 && !strings.ContainsAny(lit, "uU") {
+			bad = append(bad, lit)
+		}
+	})
+	return bad
+}
+
+// constantsSpelling returns the full text of every decimal constant in src whose
+// digits spell want, suffix included.
+func constantsSpelling(src string, want uint64) []string {
+	var out []string
+	intConsts(src, func(v uint64, lit string) {
+		if v == want {
+			out = append(out, lit)
+		}
+	})
+	return out
+}
+
+// The guard above judges MAGNITUDES, so it has to know a minus sign when it sees
+// one: 9223372036854775808 is untyped on its own but is exactly how INT64_MIN's
+// magnitude is written, and reporting that as a defect would be a phantom
+// finding on any schema with an i64-min default. Neither backend emits that
+// spelling today (intLit writes `(-9223372036854775807LL - 1)`), which is why the
+// case is pinned here rather than left to the emitted text to disprove.
+func TestCHugeSignedlessConstantsIgnoresNegatives(t *testing.T) {
+	for _, src := range []string{
+		"int64_t x = -9223372036854775808;",
+		"int64_t x = (-9223372036854775807LL - 1);",
+	} {
+		if bad := hugeSignedlessConstants(src); len(bad) != 0 {
+			t.Errorf("%q: a negated magnitude is not an untyped constant, got %v", src, bad)
+		}
+	}
+	// ...and the unsigned spellings it does exist to judge.
+	if bad := hugeSignedlessConstants("uint64_t x = 9223372036854775808;"); len(bad) != 1 {
+		t.Errorf("an unsuffixed 2^63 must be reported, got %v", bad)
+	}
+	if bad := hugeSignedlessConstants("uint64_t x = 9223372036854775808ULL;"); len(bad) != 0 {
+		t.Errorf("a suffixed 2^63 is well-typed, got %v", bad)
+	}
+}
+
+// A bitfield whose highest defaulted flag sits at position 63 has the default
+// 2^63, and cDefaultInit spelled it into the const default image as a bare
+// decimal. C11 6.4.4.1 looks an unsuffixed decimal constant up in the SIGNED
+// list only, so it has no type at all in strict C99+; GCC accepts it as an
+// extension with "integer constant is so large that it is unsigned", which is a
+// warning under -pedantic and an ERROR under -pedantic-errors (measured, gcc
+// 15.2.0 -std=c11, generator#480).
+func TestCBitfieldDefaultAtBit63IsUnsignedConstant(t *testing.T) {
+	src := "version: 1\n" +
+		"messages:\n" +
+		"  bf:\n" +
+		"    payload:\n" +
+		"      flags: { id: 0, type: bitfield, bits: { low: { pos: 0 }, high: { pos: 63, default: true } } }\n"
+	files := genCFromYAML(t, src)
+	all := strings.Join([]string{files["bf.h"], files["bf.c"]}, "\n")
+
+	lits := constantsSpelling(all, 1<<63)
+	if len(lits) != 1 {
+		t.Fatalf("expected the 2^63 default once (the const default image), got %d: %v\n%s",
+			len(lits), lits, all)
+	}
+	if !strings.ContainsAny(lits[0], "uU") {
+		t.Errorf("2^63 spelled as %q: an unsuffixed decimal constant is looked up in "+
+			"the SIGNED list only, so it has no type\n%s", lits[0], all)
+	}
+	if bad := hugeSignedlessConstants(all); len(bad) != 0 {
+		t.Errorf("constants above INT64_MAX with no unsigned suffix: %v\n%s", bad, all)
+	}
+}
+
+// The same hole one level in, and the repro above does not reach it: an ARRAY of
+// bitfield renders its default element by element in cArrayDefaultInit, whose
+// bitfield element fell through to intLit's untyped default arm. That is the
+// shape generator#477's review found in the java twin after the scalar half had
+// been fixed, so it is pinned here rather than assumed.
+func TestCBitfieldArrayDefaultAtBit63IsUnsignedConstant(t *testing.T) {
+	src := "version: 1\n" +
+		"messages:\n" +
+		"  bf3:\n" +
+		"    payload:\n" +
+		"      masks: { id: 0, type: array, items: { type: bitfield, count: 2, bits: { low: { pos: 0 }, high: { pos: 63 } } }, default: [1, 9223372036854775808] }\n"
+	files := genCFromYAML(t, src)
+	all := strings.Join([]string{files["bf3.h"], files["bf3.c"]}, "\n")
+
+	lits := constantsSpelling(all, 1<<63)
+	if len(lits) != 1 {
+		t.Fatalf("expected the 2^63 element default once, got %d: %v\n%s", len(lits), lits, all)
+	}
+	if !strings.ContainsAny(lits[0], "uU") {
+		t.Errorf("2^63 array element spelled as %q: no signed type holds it\n%s", lits[0], all)
+	}
+	if bad := hugeSignedlessConstants(all); len(bad) != 0 {
+		t.Errorf("constants above INT64_MAX with no unsigned suffix: %v\n%s", bad, all)
+	}
+	// The whole brace initializer goes through the mask renderer, not only the
+	// element that happens to overflow.
+	if !strings.Contains(all, "{ 1ULL, 9223372036854775808ULL }") {
+		t.Errorf("array default not rendered through the mask literal:\n%s", all)
+	}
 }

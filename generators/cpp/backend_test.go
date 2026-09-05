@@ -2,7 +2,10 @@ package cpp
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -2516,5 +2519,153 @@ func TestCppWideBitfieldMaskIsUnsigned(t *testing.T) {
 	// anywhere, including inside a documented flag.
 	if strings.Contains(h, "= 9223372036854775808,") {
 		t.Errorf("a 2^63 mask was emitted without an unsigned suffix:\n%s", h)
+	}
+}
+
+// intConstRE matches a decimal integer literal and the suffix glued to it, the
+// way a C++ compiler tokenizes one: a run of digits not preceded by an
+// identifier character, a hex prefix or a decimal point, followed by its
+// unsigned/long suffix letters. The optional leading sign is captured only so a
+// NEGATIVE spelling can be recognised and dropped — C++ has no negative
+// literals, so "-9223372036854775808" is the unary minus of a literal whose
+// magnitude the rules below would otherwise judge on its own and report as
+// untyped. (This backend never emits that spelling — cppI64Lit writes INT64_MIN
+// as `(-9223372036854775807LL - 1)` — but a caller must not have to know that.)
+var intConstRE = regexp.MustCompile(`(?:^|[^0-9A-Za-z_.])(-?)([0-9]+)([uUlL]*)`)
+
+// intConsts yields each decimal literal in src as (value, full text), skipping
+// the ones these rules cannot judge: a negated spelling (see intConstRE) and a
+// magnitude wider than uint64, which is a different defect.
+func intConsts(src string, fn func(v uint64, lit string)) {
+	for _, m := range intConstRE.FindAllStringSubmatch(src, -1) {
+		if m[1] == "-" {
+			continue
+		}
+		v, err := strconv.ParseUint(m[2], 10, 64)
+		if err != nil {
+			continue
+		}
+		fn(v, m[2]+m[3])
+	}
+}
+
+// hugeSignedlessConstants returns every decimal literal in src that is above
+// INT64_MAX and carries no unsigned suffix — that is, every literal [lex.icon]
+// finds no type for, because an unsuffixed decimal is looked up in the SIGNED
+// list only.
+//
+// This applies the compiler's own rule to the emitted text. A substring
+// assertion cannot: "9223372036854775808ULL" contains "9223372036854775808", so
+// a grep for the good spelling passes just as happily on the broken one.
+func hugeSignedlessConstants(src string) []string {
+	var bad []string
+	intConsts(src, func(v uint64, lit string) {
+		if v > math.MaxInt64 && !strings.ContainsAny(lit, "uU") {
+			bad = append(bad, lit)
+		}
+	})
+	return bad
+}
+
+// constantsSpelling returns the full text of every decimal literal in src whose
+// digits spell want, suffix included.
+func constantsSpelling(src string, want uint64) []string {
+	var out []string
+	intConsts(src, func(v uint64, lit string) {
+		if v == want {
+			out = append(out, lit)
+		}
+	})
+	return out
+}
+
+// The guard above judges MAGNITUDES, so it has to know a minus sign when it sees
+// one: 9223372036854775808 is untyped on its own but is exactly how INT64_MIN's
+// magnitude is written, and reporting that as a defect would be a phantom
+// finding on any schema with an i64-min default. This backend does not emit that
+// spelling (cppI64Lit writes `(-9223372036854775807LL - 1)`), which is why the
+// case is pinned here rather than left to the emitted text to disprove.
+func TestCppHugeSignedlessConstantsIgnoresNegatives(t *testing.T) {
+	for _, src := range []string{
+		"std::int64_t x = -9223372036854775808;",
+		"std::int64_t x = (-9223372036854775807LL - 1);",
+	} {
+		if bad := hugeSignedlessConstants(src); len(bad) != 0 {
+			t.Errorf("%q: a negated magnitude is not an untyped literal, got %v", src, bad)
+		}
+	}
+	// ...and the unsigned spellings it does exist to judge.
+	if bad := hugeSignedlessConstants("std::uint64_t x = 9223372036854775808;"); len(bad) != 1 {
+		t.Errorf("an unsuffixed 2^63 must be reported, got %v", bad)
+	}
+	if bad := hugeSignedlessConstants("std::uint64_t x = 9223372036854775808ULL;"); len(bad) != 0 {
+		t.Errorf("a suffixed 2^63 is well-typed, got %v", bad)
+	}
+}
+
+// The flag masks were already suffixed (the test above); the DEFAULT VALUE
+// assembled from those flags was not. A bitfield whose highest defaulted flag
+// sits at position 63 has the default 2^63, and cppDefault spelled it as a bare
+// decimal at all four sites the string is reused at — the member initializer,
+// reset(), the _isDefault() compare and the omission compare in serialize().
+// Measured before the fix, g++ 15.2.0 -std=c++20 -pedantic-errors: four
+// "integer constant is so large that it is unsigned" errors (generator#480).
+func TestCppBitfieldDefaultAtBit63IsUnsignedConstant(t *testing.T) {
+	src := "version: 1\n" +
+		"messages:\n" +
+		"  bf:\n" +
+		"    payload:\n" +
+		"      flags: { id: 0, type: bitfield, bits: { low: { pos: 0 }, high: { pos: 63, default: true } } }\n"
+	h := headerFromYAML(t, src, "bf.hpp")
+
+	// One enumerator plus the four reuses of the default value.
+	lits := constantsSpelling(h, 1<<63)
+	if len(lits) != 5 {
+		t.Fatalf("expected the 2^63 mask at 5 sites (the flag enumerator, the member "+
+			"initializer, reset(), _isDefault() and serialize()'s omission compare), got %d: %v\n%s",
+			len(lits), lits, h)
+	}
+	for _, lit := range lits {
+		if !strings.ContainsAny(lit, "uU") {
+			t.Errorf("2^63 spelled as %q: an unsuffixed decimal is looked up in the "+
+				"SIGNED list only, so this constant has no type\n%s", lit, h)
+		}
+	}
+	if bad := hugeSignedlessConstants(h); len(bad) != 0 {
+		t.Errorf("constants above INT64_MAX with no unsigned suffix: %v\n%s", bad, h)
+	}
+}
+
+// The same hole one level in, and the repro above does not reach it: an ARRAY of
+// bitfield renders its default element by element through cppArrayElemLit, whose
+// bitfield element fell through to the bare `scalarLit(v)` default arm. That is
+// the shape generator#477's review found in the java twin after the scalar half
+// had been fixed, so it is pinned here rather than assumed.
+func TestCppBitfieldArrayDefaultAtBit63IsUnsignedConstant(t *testing.T) {
+	src := "version: 1\n" +
+		"messages:\n" +
+		"  bf3:\n" +
+		"    payload:\n" +
+		"      masks: { id: 0, type: array, items: { type: bitfield, count: 2, bits: { low: { pos: 0 }, high: { pos: 63 } } }, default: [1, 9223372036854775808] }\n"
+	h := headerFromYAML(t, src, "bf3.hpp")
+
+	// One enumerator plus the four container initializers the default appears in.
+	lits := constantsSpelling(h, 1<<63)
+	if len(lits) != 5 {
+		t.Fatalf("expected the 2^63 element mask at 5 sites, got %d: %v\n%s", len(lits), lits, h)
+	}
+	for _, lit := range lits {
+		if !strings.ContainsAny(lit, "uU") {
+			t.Errorf("2^63 array element spelled as %q: no signed type holds it\n%s", lit, h)
+		}
+	}
+	if bad := hugeSignedlessConstants(h); len(bad) != 0 {
+		t.Errorf("constants above INT64_MAX with no unsigned suffix: %v\n%s", bad, h)
+	}
+	// The braced initializer is where the element literal lands; check the whole
+	// list came out through the mask renderer, not just the element that happens
+	// to overflow.
+	if !strings.Contains(h, "{1ULL, 9223372036854775808ULL}") {
+		t.Errorf("array default not rendered through the mask literal:\n%s", h)
 	}
 }

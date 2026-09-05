@@ -678,7 +678,22 @@ run_variant() {
         name=$(basename "$def" .yaml)
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp --in "$def" --out "$WORK/corpus-$label/$name" >/dev/null )
         for h in "$WORK"/corpus-"$label"/"$name"/*.hpp; do
-            g++ -std=c++20 -fsyntax-only -x c++ $include "$h" \
+            # -Wall -Werror, because the defects this loop exists to catch are
+            # DIAGNOSTICS, not hard errors: an unsuffixed decimal literal above
+            # INT64_MAX has no type under [lex.icon], and GCC accepts it as an
+            # extension with a mere "integer constant is so large that it is
+            # unsigned" (generator#480).
+            #
+            # The header is compiled through a one-line translation unit that
+            # INCLUDES it rather than being handed to g++ as the main file, which
+            # is how a consumer uses it anyway. Feeding a `#pragma once` header as
+            # the main file is a diagnostic of the harness's own making, and it
+            # cannot be waived portably: g++ 15 attaches it to
+            # -Wpragma-once-outside-header, while the g++ in CI emits it under no
+            # -W option at all, so -Wno-... is simply unrecognised there.
+            tu="$WORK/corpus-$label/$name/_tu.cpp"
+            printf '#include "%s"\n' "$h" > "$tu"
+            g++ -std=c++20 -Wall -Werror -fsyntax-only $include "$tu" \
                 || { echo "FAIL: [$label] corpus def $name did not compile"; exit 1; }
         done
     done

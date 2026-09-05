@@ -3,6 +3,7 @@ package cpp
 import (
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -383,7 +384,7 @@ func (g *gen) cppDefault(f *ir.Field) string {
 		}
 		return fmt.Sprintf("static_cast<%s>(0)", tn)
 	case ir.KindBitfield:
-		return fmt.Sprintf("%d", g.bitfieldDefault(f))
+		return cppMaskLit(g.bitfieldDefault(f))
 	case ir.KindStruct, ir.KindUnion:
 		return "{}"
 	case ir.KindArray:
@@ -463,9 +464,46 @@ func (g *gen) cppArrayElemLit(elem ir.Kind, ref *ir.TypeRef, v any) string {
 			return tn + "::" + name
 		}
 		return fmt.Sprintf("static_cast<%s>(%s)", tn, scalarLit(v))
-	default: // u8..i32, bitfield
+	case ir.KindBitfield:
+		// The same hole as the scalar default, one level in: an element mask with
+		// bit 63 set is written as a bare decimal, which [lex.icon] finds no type
+		// for, so the initializer is ill-formed (GCC: "integer constant is so
+		// large that it is unsigned", an error under -pedantic-errors).
+		if bits, err := strconv.ParseUint(scalarLit(v), 10, 64); err == nil {
+			return cppMaskLit(bits)
+		}
+		// Reachable, and deliberately a pass-through. internal/parser's
+		// checkArrayElem has no "bitfield" arm, so an element default that is not a
+		// plain decimal — a negative, a float, a quoted "0x10", a magnitude past
+		// uint64 — reaches codegen unchecked (measured). Parsing it as a mask
+		// anyway would silently change the VALUE (-1 would become 0), so the text
+		// is carried through unaltered and the C++ compiler judges it, which for
+		// the one spelling this fix is about — a decimal wider than uint64 — it
+		// does: "integer constant is too large for its type". The validator gap is
+		// generator#482; this arm goes away when the parser rejects those shapes.
+		return scalarLit(v)
+	default: // u8..i32
 		return scalarLit(v)
 	}
+}
+
+// cppMaskLit renders a bitfield mask as a C++ integer literal.
+//
+// The "ULL" suffix is not decoration. [lex.icon] looks an UNSUFFIXED decimal
+// literal up in the SIGNED list only, so the mask for position 63 —
+// 9223372036854775808 — has no type at all and the program is ill-formed: GCC
+// accepts it as an extension with "integer constant is so large that it is
+// unsigned", a warning under -pedantic and an ERROR under -pedantic-errors. The
+// suffix is harmless on a narrower backing type, where the constant converts to
+// it as usual.
+//
+// Every place this backend turns a mask into C++ source text goes through here —
+// the flag enumerators, the scalar default and the element of an
+// array-of-bitfield default — so a fourth site cannot drift from the first
+// three, which is how generator#480 existed at all: the enumerators were already
+// suffixed while the two default renderers, in the same header, were not.
+func cppMaskLit(bits uint64) string {
+	return fmt.Sprintf("%dULL", bits)
 }
 
 func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {
