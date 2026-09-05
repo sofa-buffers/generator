@@ -7,3 +7,15 @@ messages:
       fps:   { id: 2, type: array, items: { type: fp64, count: 2 }, default: [1.0, 2.0] }
       strs:  { id: 3, type: array, items: { type: string, count: 2, maxlen: 8 }, default: ["a", "b"] }
       blobs: { id: 4, type: array, items: { type: blob, count: 1, maxlen: 4 }, default: ["AAE="] }
+      # The only element default whose value does not fit the SIGNED 64-bit carrier
+      # some targets back a u64 with (java `long`, dart `int`), so it is the only one
+      # that forces those backends to re-spell rather than copy the schema's decimal.
+      # Every element here is emitted per INSTANCE, inside the array initializer, so
+      # this row is what puts that spelling through each backend's compiler; the
+      # scalar twin in scalars.yaml (`u64max`) exercises only the field-level sites.
+      # Past 2^63-1 the value must be QUOTED: an unquoted 9223372036854775808 is
+      # rejected as "element must be an integer", since the element check reads it
+      # through a signed int64. 10 is here to hold the common case -- a default that
+      # fits and must therefore stay the author's own decimal -- next to the two that
+      # do not.
+      wides: { id: 5, type: array, items: { type: u64, count: 3 }, default: [10, "9223372036854775808", "18446744073709551615"] }

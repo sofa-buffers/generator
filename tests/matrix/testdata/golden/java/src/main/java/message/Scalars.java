@@ -7,7 +7,8 @@ import java.util.*;
 public class Scalars {
     public long u8min = 0L;
     public long u8max = 255L;
-    public long u64max = Long.parseUnsignedLong("18446744073709551615");
+    /** Default 18446744073709551615: past 2^63-1, so it is spelled below as the hex long literal 0xFFFFFFFFFFFFFFFFL. */
+    public long u64max = 0xFFFFFFFFFFFFFFFFL;
     public long i8min = -128L;
     public long i64min = -9223372036854775808L;
     public float f32 = 3.14f;
@@ -17,7 +18,7 @@ public class Scalars {
     public void serialize(OStream os) throws IOException {
         if (this.u8min != 0L) { os.writeUnsigned(0, this.u8min); }
         if (this.u8max != 255L) { os.writeUnsigned(1, this.u8max); }
-        if (this.u64max != Long.parseUnsignedLong("18446744073709551615")) { os.writeUnsigned(2, this.u64max); }
+        if (this.u64max != 0xFFFFFFFFFFFFFFFFL) { os.writeUnsigned(2, this.u64max); }
         if (this.i8min != -128L) { os.writeSigned(3, this.i8min); }
         if (this.i64min != -9223372036854775808L) { os.writeSigned(4, this.i64min); }
         if (this.f32 != 3.14f) { os.writeFp32(5, this.f32); }
@@ -28,7 +29,7 @@ public class Scalars {
     boolean isDefault() {
         if (this.u8min != 0L) return false;
         if (this.u8max != 255L) return false;
-        if (this.u64max != Long.parseUnsignedLong("18446744073709551615")) return false;
+        if (this.u64max != 0xFFFFFFFFFFFFFFFFL) return false;
         if (this.i8min != -128L) return false;
         if (this.i64min != -9223372036854775808L) return false;
         if (this.f32 != 3.14f) return false;
@@ -40,7 +41,7 @@ public class Scalars {
     public void reset() {
         this.u8min = 0L;
         this.u8max = 255L;
-        this.u64max = Long.parseUnsignedLong("18446744073709551615");
+        this.u64max = 0xFFFFFFFFFFFFFFFFL;
         this.i8min = -128L;
         this.i64min = -9223372036854775808L;
         this.f32 = 3.14f;
