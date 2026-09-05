@@ -287,6 +287,41 @@ ajv.addKeyword({
 > A reimplementation must parse the string with a big-integer type and range-check
 > against the exact 64-bit bounds.
 
+#### 8.1 Array-of-`bitfield` element masks
+
+An **array** is the only place a `bitfield` default is written as a **number**: the
+field-level form is a set of per-flag booleans (`bits: { LOW: { default: true } }`)
+that the generator folds into a mask itself. So `items.type: bitfield` +
+`default: [...]` is the one spot where an author spells a mask out, and it is
+checked like a `u64`: each element is a **non-negative integer**, or a **quoted
+decimal string** for a value the double-safe range cannot carry. A quoted
+non-decimal spelling is rejected — write `0x10` unquoted and YAML converts it
+before the validator ever sees it — and so is a number with a decimal point or an
+exponent, because a bit pattern has no fractional spelling and the generator would
+render `1000000.0` into the emitted source as `1e+06`.
+
+A bit set at a position no flag declares is **accepted**: nothing masks a bitfield
+down to its declared positions, the wire carries the whole unsigned value, and an
+undeclared bit is how a peer built from a newer schema carries a flag this one does
+not declare yet.
+
+What a stock JSON Schema validator can check here is the **spelling and the sign**:
+the shipped branch carries `"type": ["integer", "string"]`, `"minimum": 0` (the
+integer form) and `"pattern": "^(0|[1-9][0-9]*)$"` (the string form). Two bounds
+are **generator-side only**:
+
+- the **exact 64-bit top**, for the same reason as §8 — `18446744073709551615` is
+  not representable as an IEEE-754 double, so a `maximum` written at that magnitude
+  rounds up to 2^64 and admits a value the generator rejects; and the `pattern`
+  constrains only the string form anyway;
+- the **backing width**. Six of the eleven targets back a bitfield with the
+  smallest unsigned type that holds its highest declared `pos` (c, cpp, rust, go,
+  zig, csharp; the other five carry it at full width), so a two-flag bitfield is one
+  byte wide there and `default: [1000]` does not fit the member they emit. One
+  definition has to generate for all eleven, so the schema takes the narrowest
+  target's bound. It depends on the sibling `bits` map, which is not something a
+  keyword-free branch can reach.
+
 ### 9. Hard-gate semantics
 
 Validation is an all-or-nothing gate: on any violation, the tool emits a clear,
@@ -308,6 +343,7 @@ A validator is only conformant if it does **all** of:
 - [ ] enforce `bitfield` **`pos` uniqueness** across a bitfield's flags (§6);
 - [ ] enforce `union` **`default_id` membership** against the declared option ids (§7);
 - [ ] enforce **exact 64-bit range** for `i64`/`u64` `default`s, accepting an integer or string and range-checking with a big-integer type (§8);
+- [ ] enforce **array-of-`bitfield` element defaults** as non-negative decimal masks — an integer or a quoted decimal string, within the exact 64-bit range and within the bitfield's own backing width (§8.1);
 - [ ] enforce **enum values are signed 32-bit** (`-2147483648 … 2147483647`), values and `default` alike;
 - [ ] resolve `$ref` before validating, but keep `$ref` for generation;
 - [ ] fail closed: located error, non-zero exit, no output.

@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: array, items: { type: bitfield, count: 2, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }, default: ["18446744073709551616"] } } } }

@@ -472,15 +472,13 @@ func (g *gen) cppArrayElemLit(elem ir.Kind, ref *ir.TypeRef, v any) string {
 		if bits, err := strconv.ParseUint(scalarLit(v), 10, 64); err == nil {
 			return cppMaskLit(bits)
 		}
-		// Reachable, and deliberately a pass-through. internal/parser's
-		// checkArrayElem has no "bitfield" arm, so an element default that is not a
-		// plain decimal — a negative, a float, a quoted "0x10", a magnitude past
-		// uint64 — reaches codegen unchecked (measured). Parsing it as a mask
-		// anyway would silently change the VALUE (-1 would become 0), so the text
-		// is carried through unaltered and the C++ compiler judges it, which for
-		// the one spelling this fix is about — a decimal wider than uint64 — it
-		// does: "integer constant is too large for its type". The validator gap is
-		// generator#482; this arm goes away when the parser rejects those shapes.
+		// Nothing reaches this from a validated definition: internal/parser's
+		// checkArrayElem grew a "bitfield" arm (generator#482), and every spelling
+		// that survives it is a non-negative decimal ParseUint accepts, so the
+		// branch above always wins. Kept correct so that a future change to the
+		// validator or to element lowering cannot silently turn -1 into 0 — parsing
+		// a stray spelling as a mask would change the VALUE, so the text is carried
+		// through unaltered and the C++ compiler judges it.
 		return scalarLit(v)
 	default: // u8..i32
 		return scalarLit(v)

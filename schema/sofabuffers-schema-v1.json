@@ -900,6 +900,32 @@
                     }
                   }
                 }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "const": "bitfield" }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "default": {
+                      "type": "array",
+                      "description": "An array is the only place a bitfield default is written as a NUMBER, so a mask is spelled like a u64: a non-negative integer, or a quoted DECIMAL string for a value past the double-safe range. What this branch checks is the spelling and the sign -- minimum applies to the integer form, pattern to the string form. Two bounds are generator-side only: the exact 64-bit top (18446744073709551615 is not representable as a double, so a maximum written at that magnitude would round up to 2^64 and admit a value the generator rejects -- see README section 8), and the bitfield's own backing width, the smallest unsigned type covering its highest declared pos, which depends on the sibling bits map (README section 8.1).",
+                      "items": {
+                        "type": ["integer", "string"],
+                        "minimum": 0,
+                        "pattern": "^(0|[1-9][0-9]*)$"
+                      }
+                    }
+                  }
+                }
               }
             ]
           }

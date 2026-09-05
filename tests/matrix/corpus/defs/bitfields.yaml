@@ -3,3 +3,15 @@ messages:
   Bf:
     payload:
       flags: { id: 0, type: bitfield, bits: { LOW: { pos: 0, default: true }, HIGH: { pos: 63, default: true } } }
+      # An array is the only place a bitfield default is written as a NUMBER (the
+      # field-level form above is a set of per-flag booleans), so every accepted
+      # spelling of a mask is exercised here: a plain integer, an unquoted YAML hex
+      # integer, a mask with bit 63 set, and a quoted DECIMAL string for the top of
+      # the unsigned range, which no signed carrier holds.
+      masks: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }, default: [1, 0x10, 9223372036854775808, "18446744073709551615"] }
+      # The highest declared pos is 2, so every backend backs this bitfield with a
+      # single byte and a mask default has to fit one. 255 also sets bits no flag
+      # declares, which is legal: nothing masks a bitfield down to its declared
+      # positions, the wire carries the whole unsigned value, and that is how a peer
+      # built from a newer schema carries a flag this one does not declare yet.
+      narrow: { id: 2, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 0 }, C: { pos: 2 } } }, default: [5, 255] }
