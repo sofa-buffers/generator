@@ -234,7 +234,18 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
    array is still exactly `count` elements long, §11). All six custom keywords recurse into composite array
    elements (e.g. an array-of-struct element's fields get `uniqueIds`). Array
    `default` elements are additionally validated **per element** (type/range
-   check, base64 decode for blob elements, enum membership).
+   check, base64 decode for blob elements, enum membership, and — for a
+   `bitfield` element, the only place a bitfield default is written as a *number*
+   rather than a set of per-flag booleans — a non-negative integer or quoted
+   **decimal** string that fits the bitfield's own backing width, i.e. the
+   smallest unsigned type covering its highest declared `pos`, §10. That width is
+   the **intersection** across targets, not a universal: six backends narrow a
+   bitfield's storage that way (c, cpp, rust, go, zig, csharp) and five carry it
+   at full width (java, kotlin, typescript, python, dart), and one definition has
+   to generate for all eleven. Both the width and the exact 64-bit top are
+   generator-side — the width is sibling-dependent, and 2^64−1 is not
+   representable as an IEEE-754 double — so the shipped JSON Schema states only
+   the non-negative/decimal half; `schema/README.md` §8.1 has the full rule).
 4. **Six custom keywords**:
    - `uniqueIds` — id unique in **every** scope (payload + each struct + each union).
    - `uniquePositions` — bitfield `pos` unique.

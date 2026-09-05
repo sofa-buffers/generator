@@ -127,6 +127,66 @@ func TestNegativeCases(t *testing.T) {
 			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {A: {pos: 0}, B: {pos: 0}}}}\n",
 			expect: "duplicate pos 0",
 		},
+		// An array is the only place a bitfield default is written as a NUMBER,
+		// so it is the only place a mask can be misspelled (generator#482).
+		{
+			name:   "array-of-bitfield negative element mask",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, default: [-1]}\n",
+			expect: "must not be negative",
+		},
+		{
+			// "-0" is the shape a sign check on the VALUE misses: big.Int reports
+			// it as zero, so it has to be refused by spelling.
+			name:   "array-of-bitfield negative-zero element mask",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, default: [\"-0\"]}\n",
+			expect: "element mask \"-0\" must not be negative",
+		},
+		{
+			name:   "array-of-bitfield fractional element mask",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, default: [3.5]}\n",
+			expect: "must be an integer, not a fractional number",
+		},
+		{
+			// An exact integer written as a number: the message has to name the
+			// integer to write, because fmt's "%v" would spell it 1e+06.
+			name:   "array-of-bitfield exact-valued float element mask",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, default: [1000000.0]}\n",
+			expect: "write it as the integer 1000000",
+		},
+		{
+			// An integer literal past what yaml.v3 holds as an integer: it arrives
+			// as a float64, and the author must be sent to the quoted form, not
+			// told to write the integer they already wrote.
+			name:   "array-of-bitfield unquoted element mask past 64 bits",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, default: [18446744073709551616]}\n",
+			expect: "is not an exact integer; quote it as a decimal string",
+		},
+		{
+			// Decimal, but not a legal literal. The hex advice would be wrong here.
+			name:   "array-of-bitfield element mask with leading zeros",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, default: [\"0000000005\"]}\n",
+			expect: "no leading zeros, no sign, no spacing",
+		},
+		{
+			name:   "array-of-bitfield quoted hex element mask",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, default: [\"0x10\"]}\n",
+			expect: "is not a decimal integer literal",
+		},
+		{
+			name:   "array-of-bitfield element mask past 64 bits",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, default: [\"18446744073709551616\"]}\n",
+			expect: "does not fit the 64-bit backing",
+		},
+		{
+			name:   "array-of-bitfield element mask past the declared backing width",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {A: {pos: 0}, C: {pos: 2}}}, default: [1000]}\n",
+			expect: "does not fit the 8-bit backing of a bitfield whose highest declared pos is 2",
+		},
+		{
+			name:   "array-of-bitfield boolean element mask",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}}}, default: [true]}\n",
+			expect: "element must be an integer mask or a quoted decimal integer string",
+		},
 		{
 			name:   "struct array element missing fields",
 			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: struct, count: 2}}\n",
@@ -155,6 +215,34 @@ func TestNegativeCases(t *testing.T) {
 				t.Fatalf("expected error containing %q, got:\n%s", tc.expect, errs.Error())
 			}
 		})
+	}
+}
+
+// TestBitfieldArrayElementSpellingsAccepted pins the other half of the rule the
+// negative cases above cover: an array-of-bitfield default written the way an
+// author reasonably would still validates. A plain integer, an unquoted YAML hex
+// integer (YAML has already turned it into an integer by the time the validator
+// sees it, which is why no hex STRING is needed), a mask with bit 63 set, and a
+// quoted decimal string for the top of the unsigned range. The last element sets
+// bits at positions no flag declares: legal, because nothing masks a bitfield down
+// to its declared positions and the wire carries the whole unsigned value.
+func TestBitfieldArrayElementSpellingsAccepted(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: {id: 0, type: array, items: {type: bitfield, count: 5, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, " +
+		"default: [0, 1, 0x10, 9223372036854775808, \"18446744073709551615\"]}\n"
+	if errs := validateString(t, src); errs != nil {
+		t.Fatalf("every legal mask spelling should validate, got:\n%s", errs.Error())
+	}
+}
+
+// A narrow bitfield is backed by the smallest unsigned type holding its highest
+// declared pos, so 255 is the widest mask a two-flag bitfield can carry — and it
+// must be accepted, undeclared bits and all.
+func TestNarrowBitfieldArrayElementFillsItsBacking(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {A: {pos: 0}, C: {pos: 2}}}, default: [5, 255]}\n"
+	if errs := validateString(t, src); errs != nil {
+		t.Fatalf("a mask filling the 8-bit backing should validate, got:\n%s", errs.Error())
 	}
 }
 

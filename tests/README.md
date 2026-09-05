@@ -26,8 +26,8 @@ tests/
 │   ├── omit_test.go        #   sparse-canonical marshal
 │   ├── realworld_test.go   #   the multi-file vehicle_telemetry schema
 │   ├── corpus/             #   definition corpus — see corpus/README.md
-│   │   ├── defs/           #     15 positive corner-case definitions
-│   │   ├── invalid/        #     22 definitions that MUST be rejected
+│   │   ├── defs/           #     20 positive corner-case definitions
+│   │   ├── invalid/        #     28 definitions that MUST be rejected
 │   │   └── shared/         #     $defs reused across defs
 │   └── testdata/golden/    #   committed golden output, one dir per backend
 │

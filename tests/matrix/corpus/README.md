@@ -11,13 +11,18 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   (`seq_elements.yaml`), nested wrapper **rows** at depth 2 and 3 with their
   native-row control (`nested_rows.yaml`), enums (shorthand + object form,
   negative values), bitfields (pos 0 and 63, both defaulted so a pos-63 mask
-  reaches each backend's default renderer), nested structs, unions with
-  `default_id`, large/non-contiguous field ids, metadata
+  reaches each backend's default renderer, plus arrays of bitfield — the one
+  place a mask is written as a **number** — in every accepted spelling, and a
+  narrow bitfield whose mask fills its one-byte backing), nested structs, unions
+  with `default_id`, large/non-contiguous field ids, metadata
   (`deprecated`/`unit`/`description`), and `$ref` reuse.
 - **`invalid/`** — definitions that **must be rejected** by the hard gate
   (duplicate ids, out-of-range defaults, enum/union default mismatch, bitfield
   pos collision, blob/string default over `maxlen`, oversize/negative u64,
-  array default-count mismatch, unknown keys, bad names, `decimals` > 15,
+  array default-count mismatch, every misspelling of an array-of-bitfield
+  element mask — negative, the quoted `-0` whose *value* is zero, fractional,
+  quoted hex, past 64 bits, past the bitfield's own backing width — unknown
+  keys, bad names, `decimals` > 15,
   `items.maxlen` on a numeric array, array-of-struct, recursive `$ref`, a
   cross-file `$ref` to a missing definition, …).
 - **`shared/`** — definitions referenced from `defs/` via **cross-file `$ref`**
