@@ -6,21 +6,25 @@ shape, but with only its own row freshly measured) and writes a markdown report.
 
 The report is triage, not a dump. A raw diff treats a 0.4% wobble and a doubled row
 the same, and says nothing at all about a measurement that failed — so this splits
-what it finds into: failures, outliers, ordinary movement, and toolchain drift.
+what it finds into: failures, outliers, ordinary movement, and provenance drift.
 
-Toolchain drift is checked FIRST and on purpose. The measuring runner and the
-devcontainer that produced results.txt pin different compiler versions, and Ir/op is
-the instruction count of a particular binary. A row can move a long way for that
-reason alone, so the report has to name it before anyone reads a number as a
-regression.
+Provenance is checked FIRST and on purpose. A row's Ir/op is the instruction count
+of a particular binary: generated code, built by a toolchain, against a corelib
+checkout, from a schema. The header records all three, and a row can move a long way
+because one of them moved — the measuring runner and the devcontainer that produced
+results.txt pin different compilers, and run.sh clones the corelibs unpinned — so the
+report names them before anyone reads a number as a regression.
 
-Exit status is 1 only when a measurement FAILED, never for drift: a row that moved is
-information, a row that could not be measured is a broken run.
+Exit status is 1 only when a measurement FAILED, never for drift of any kind: a row
+that moved is information, a row that could not be measured is a broken run. That
+matters most for the corelib SHAs, which differ on most runs by design.
 """
 
 import argparse
+import json
 import re
 import sys
+from collections import namedtuple
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -51,13 +55,29 @@ IR_METHODS = ("toggle", "subtract")
 # the old set()-valued entry did. A row id is never empty, so it cannot collide.
 NO_ROW = ""
 
+# The cells, plus every header line that is a claim about what produced them. All
+# three claims are compared: a row's number is the instruction count of generated
+# code, built by a toolchain, against a corelib checkout, from a schema — and any of
+# the three can move a row with the generator unchanged (#501).
+Parsed = namedtuple("Parsed", "ir sizes tools corelibs schemas notes")
+
 
 def parse(path):
-    """-> (ir, sizes, toolchain).
+    """-> Parsed(ir, sizes, tools, corelibs, schemas, notes).
 
     ir: {row: (enc, dec)}; sizes: {(row, arch): (text, data, bss)};
-    toolchain: {(tool, row): version} from the `## toolchain` table -- ONE entry per
+    tools: {(tool, row): version} from the `## toolchain` table -- ONE entry per
     row the line names, and row None for a line whose rows column is `all`.
+
+    corelibs: {short repo name: sha} off the `# corelib:` line, which has no rows
+    column: it is one statement about the whole file. `notes` holds the entries of
+    that line that could not be read at all.
+
+    schemas: {(path, row): sha256} off the `# schema:` lines -- the same shape as
+    `tools`, compared by schema_diff(). A `# schema:` line with no rows column is
+    format.py's DEFAULT schema, the one every row uses unless it names its own, and
+    is stored under row None; see schemas_for() for why that resolves differently
+    from the toolchain's `all`, and schema_diff() for why the comparison differs too.
 
     Keyed by the pair and not by the tool because the table is not a tool->version
     map: `sofab-engine` gets one line PER python row, deliberately, since the two
@@ -65,17 +85,46 @@ def parse(path):
     one of them. Keyed by name alone the second line overwrote the first, so a
     healthy `python` artifact read as engine drift and a `python` row that really had
     flipped engines read as no drift at all (#492).
-
-    The header's other provenance -- the `# corelib:` SHAs and the `# schema:`
-    digests, both of which move numbers exactly as a compiler version does -- is NOT
-    read here and therefore not compared; #501 tracks that. It used to be parsed and
-    then dropped unread, which implied a check that was never made.
     """
-    ir, sizes, tools = {}, {}, {}
+    ir, sizes, tools, corelibs, schemas, notes = {}, {}, {}, {}, {}, []
     section = None
     for line in Path(path).read_text().splitlines():
         if line.startswith("## "):
             section = line[3:].strip()
+            continue
+        if line.startswith("# corelib:"):
+            # "<repo> <sha> | <repo> <sha> | ...". "(unknown)" is kept rather than
+            # skipped: format.py writes it when a checkout could not be resolved, and
+            # a run that could not say what it built against, where the committed
+            # file could, is a difference worth naming.
+            for part in line.split(":", 1)[1].split("|"):
+                f = part.split()
+                if len(f) == 2:
+                    corelibs[f[0]] = f[1]
+                elif part.strip():
+                    # Reflowed, annotated or hand-edited: not two fields, so not a
+                    # SHA this reader can compare. Dropped silently that corelib
+                    # simply left the comparison and the report read as agreement --
+                    # the same silent loss format.py's parse_previous() refuses on
+                    # this very line. Recorded here and printed by main().
+                    notes.append(part.strip())
+            continue
+        if line.startswith("# schema:"):
+            # "# schema:  <path>  sha256 <digest>[  rows: a,b,c]".
+            f = line.split()
+            if len(f) >= 5 and f[3] == "sha256":
+                # A line that NAMES a rows column describes exactly the rows it
+                # lists -- including none at all, if it lists none. Only a line with
+                # no rows column is format.py's default, covering every row that
+                # names no schema of its own, so the two must not be conflated: a
+                # trailing bare `rows:` read as the default would attribute one
+                # row's schema to every row in the file.
+                if len(f) > 5 and f[5] == "rows:":
+                    where = f[6].split(",") if len(f) > 6 else []
+                else:
+                    where = [None]
+                for r in where:
+                    schemas[(f[2], r)] = f[4]
             continue
         if line.startswith("#") or not line.strip() or line.startswith("row"):
             continue
@@ -102,7 +151,7 @@ def parse(path):
             ir[f[0]] = (f[3], f[4])
         elif len(f) == 6 and f[2] not in IR_METHODS:
             sizes[(f[0], f[2])] = (f[3], f[4], f[5])
-    return ir, sizes, tools
+    return Parsed(ir, sizes, tools, corelibs, schemas, notes)
 
 
 def pct(old, new):
@@ -117,7 +166,7 @@ def pct(old, new):
 
 
 def tools_for(tools, row):
-    """{tool: version} as a parsed `## toolchain` table states it for ONE row.
+    """{tool: version} as the parsed `## toolchain` table states it for ONE row.
 
     That is also the filter: every measured file carries the full table, so without
     it a go artifact would report the C++ or Zig compiler as drifted — true, and
@@ -129,8 +178,24 @@ def tools_for(tools, row):
     return out
 
 
+def schemas_for(schemas, row):
+    """{path: digest} for the schema ONE row was measured from.
+
+    The `# schema:` table resolves differently from the toolchain one, and reusing
+    tools_for() here would over-attribute. format.py writes the default line with no
+    rows column at all, meaning "every row that does not name its own" — not `all`.
+    So a line naming this row REPLACES the default rather than joining it, and an
+    edit to the top-level schema says nothing about a row measured on another one.
+    """
+    own = {path: d for (path, r), d in schemas.items() if r == row}
+    return own or {path: d for (path, r), d in schemas.items() if r is None}
+
+
 def tool_diff(old, new, row):
-    """Differing toolchain entries as (name, committed, measured), for THIS row.
+    """Differing toolchain entries as (tool, committed, measured), for THIS row.
+
+    Only the toolchain: the `# schema:` digests have the same table shape but not the
+    same fallback, and go through schema_diff().
 
     When the committed table has no line naming this row for a tool, fall back to the
     version it records for that tool elsewhere — but only when every line EITHER file
@@ -166,6 +231,88 @@ def tool_diff(old, new, row):
     return out
 
 
+def schema_diff(old, new, row):
+    """Differing `# schema:` entries as (path, committed, measured), for THIS row.
+
+    Deliberately not tool_diff(). Its fallback -- an entry this run names that the
+    committed table has no line for borrows the version recorded for that name
+    elsewhere -- is right for the toolchain, where a name present on one side only
+    means a tool added since results.txt was written. For a schema it is inert, and
+    it hides the largest schema change there is: a row measured on a DIFFERENT file.
+    schemas_for() yields exactly one entry per row (format.py writes one line per
+    distinct file, and a row is either named by one of them or covered by the
+    default), so the borrow finds only the measured file's own digest and the
+    `committed != v` guard can never fire. Measured on the committed results.txt with
+    `cpp-cpp-unbounded` moved onto a new `wide_ingest.yaml` line in every artifact,
+    the whole report was `Every measured row matches the committed file within 0.3%.`
+
+    So here a path the committed file does not attribute to this row is compared
+    against what it DOES attribute to it, path and digest both -- the path is the
+    change. That covers the mirror case too: a row whose own line was deleted, which
+    falls back onto the default schema.
+    """
+    was, now = schemas_for(old, row), schemas_for(new, row)
+    out = []
+    for path, digest in sorted(now.items()):
+        if path in was:
+            committed = was[path]
+        elif was:
+            committed = ", ".join(f"{p} {d}" for p, d in sorted(was.items()))
+        else:
+            committed = "(not recorded)"
+        if committed != digest:
+            out.append((path, committed, digest))
+    return out
+
+
+def rows_col(rows_, seen):
+    """The `rows` cell of a drift table: `all` when every artifact that stated this
+    kind of provenance shows the difference, `all but <ids>` when it is shorter to
+    name the exceptions, else the rows that do.
+
+    One runner measures every row, so the same compiler difference is repeated in
+    twenty-four artifacts and reads as one line. `seen` is the artifacts that made
+    the claim at all, which is not the same set for each table -- bench.yml's
+    per-row artifacts each name only the corelib they cloned.
+
+    The `all but` form is not cosmetic. Editing the DEFAULT schema is the headline
+    case of the schema comparison, and it covers every row except the four measured
+    on another file: enumerated, that is one markdown cell holding twenty back-ticked
+    ids, which scrolls sideways in a step summary and buries the interesting half --
+    the rows the edit could NOT have moved. Whichever side is shorter is printed.
+    """
+    missing = [r for r in sorted(seen) if r not in rows_]
+    if not missing:
+        return "all"
+    if len(missing) < len(rows_):
+        return "all but " + ", ".join(f"`{r}`" for r in missing)
+    return ", ".join(f"`{r}`" for r in rows_)
+
+
+def corelib_of_row():
+    """{row id: short corelib name} out of rows.json, or {} if it cannot be read.
+
+    The `# corelib:` line has no rows column, so without this the corelib table's
+    `rows` cell would mean "the artifacts that stated this SHA" while the identically
+    headed toolchain column means "the rows this difference could have moved". In
+    bench.yml's shape the two coincide, because each per-row artifact names only the
+    corelib that row cloned; they diverge the moment an artifact carries the whole
+    line (a local full run, or any --partial merge), and then a moved corelib-zig is
+    listed against a java row that never links it -- a blanket excuse handed to the
+    reader for the one number the report should be pointing at.
+
+    rows.json is a cross-check, not an input: unreadable, it falls back to today's
+    behaviour rather than failing a run over a file the report does not need.
+    """
+    try:
+        spec = json.loads((Path(__file__).resolve().parent.parent / "rows.json")
+                          .read_text())
+        return {r["id"]: r["corelib"].replace("corelib-", "")
+                for r in spec["rows"] if "id" in r and "corelib" in r}
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--committed", required=True)
@@ -173,9 +320,14 @@ def main():
                     help="measured result files; the row is taken from the filename")
     args = ap.parse_args()
 
-    base_ir, base_sz, base_tool = parse(args.committed)
+    base = parse(args.committed)
+    base_ir, base_sz, base_tool = base.ir, base.sizes, base.tools
 
-    failures, outliers, moved, tools_seen = [], [], [], {}
+    failures, outliers, moved = [], [], []
+    tools_seen, cores_seen, schemas_seen = {}, {}, {}
+    # Entries of a `# corelib:` line that could not be read at all, per file. A
+    # corelib that silently leaves the comparison reads as agreement.
+    unreadable = [("the committed file", base.notes)] if base.notes else []
 
     for path in args.measured:
         m = re.search(r"bench-(.+)\.txt$", Path(path).name)
@@ -183,14 +335,23 @@ def main():
             continue
         row = m.group(1)
         try:
-            ir, sz, tool = parse(path)
+            got = parse(path)
         except OSError as e:
             failures.append((row, f"unreadable measured file: {e}"))
             continue
-        if tool:
+        ir, sz = got.ir, got.sizes
+        if got.tools:
             # The whole table; tool_diff() narrows it to the tools that built THIS
             # row, per the measured file's own rows column.
-            tools_seen[row] = tool
+            tools_seen[row] = got.tools
+        # Recorded only when the artifact states them at all: an absent header line
+        # is a file that makes no claim, not a claim that the provenance is empty.
+        if got.corelibs:
+            cores_seen[row] = got.corelibs
+        if got.schemas:
+            schemas_seen[row] = got.schemas
+        if got.notes:
+            unreadable.append((f"`{row}`", got.notes))
 
         vals = ir.get(row)
         if not vals:
@@ -247,8 +408,64 @@ def main():
             "|---|---|---|---|",
         ]
         for (name, old, new), rows_ in sorted(drift.items()):
-            where = "all" if len(rows_) == len(tools_seen) else ", ".join(f"`{r}`" for r in rows_)
-            out.append(f"| {name} | {old} | {new} | {where} |")
+            out.append(f"| {name} | {old} | {new} | {rows_col(rows_, tools_seen)} |")
+        out.append("")
+
+    # The corelib the row was built against, and the schema it was built from. Both
+    # decide a number exactly as the compiler does, both were recorded in the header
+    # and neither was ever compared (#501).
+    core_drift = {}
+    builds = corelib_of_row()
+    for row, cores in sorted(cores_seen.items()):
+        for repo, sha in sorted(cores.items()):
+            # The rows column has to mean the same thing as the toolchain table's, so
+            # a SHA is attributed only to a row that repo actually builds. A row
+            # rows.json does not know (renamed, or a synthetic file) keeps the old
+            # behaviour: the artifacts that stated the SHA.
+            if builds.get(row, repo) != repo:
+                continue
+            # Only what the artifact itself states: a repo it does not name is a
+            # corelib this run had no opinion about, not one that vanished.
+            was = base.corelibs.get(repo, "(not recorded)")
+            if was != sha:
+                core_drift.setdefault((repo, was, sha), []).append(row)
+    if core_drift:
+        out += [
+            "### Corelib checkouts differ from the committed file",
+            "",
+            "Context, not a finding: run.sh clones the corelibs unpinned, so a moved",
+            "SHA is the ordinary case. It never affects the exit status; why it is",
+            "reported at all is in tests/bench/README.md.",
+            "",
+            "| corelib | committed | this run | rows |",
+            "|---|---|---|---|",
+        ]
+        for (repo, old, new), rows_ in sorted(core_drift.items()):
+            out.append(f"| {repo} | {old} | {new} | {rows_col(rows_, cores_seen)} |")
+        out.append("")
+    for where, parts in unreadable:
+        out += [f"Could not read {len(parts)} "
+                f"entr{'y' if len(parts) == 1 else 'ies'} from the `# corelib:` line "
+                f"in {where} ({', '.join('`' + x + '`' for x in parts)}); those "
+                "checkouts are not compared.", ""]
+
+    schema_drift = {}
+    for row, sch in sorted(schemas_seen.items()):
+        for name, old, new in schema_diff(base.schemas, sch, row):
+            schema_drift.setdefault((name, old, new), []).append(row)
+    if schema_drift:
+        out += [
+            "### Schema digests differ from the committed file",
+            "",
+            "The message definition is an input to the generated code, so an edited",
+            "schema legitimately moves every number measured on it — and only those.",
+            "Rows are compared against the digest their own schema line names.",
+            "",
+            "| schema | committed | this run | rows |",
+            "|---|---|---|---|",
+        ]
+        for (name, old, new), rows_ in sorted(schema_drift.items()):
+            out.append(f"| {name} | {old} | {new} | {rows_col(rows_, schemas_seen)} |")
         out.append("")
 
     if failures:
@@ -275,9 +492,12 @@ def main():
         out += ["Every measured row matches the committed file within "
                 f"{HOLD_PCT}%.", ""]
 
-    if drift and (outliers or moved):
-        out += ["> Toolchains differ (see above), so movement here is not by itself",
-                "> evidence of a generator or corelib regression.", ""]
+    differs = [what for what, d in (("toolchains", drift),
+                                    ("corelib checkouts", core_drift),
+                                    ("schemas", schema_drift)) if d]
+    if differs and (outliers or moved):
+        out += [f"> Provenance differs ({', '.join(differs)}; see above), so movement",
+                "> here is not by itself evidence that the generated code changed.", ""]
 
     sys.stdout.write("\n".join(out) + "\n")
     return 1 if failures else 0

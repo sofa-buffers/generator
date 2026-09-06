@@ -75,9 +75,9 @@ IR_WIDTHS = [19, 11, 10, 14, 13]
 SZ_COLS = ["row", "profile", "arch", "text", "data", "bss"]
 SZ_WIDTHS = [19, 11, 16, 8, 7, 6]
 
-# Three columns on purpose: parse_previous() reads any non-# line by field count, so
-# the rows list is comma-joined WITHOUT spaces to keep this table at exactly three
-# fields and clear of the 5-field Ir and 6-field footprint shapes.
+# Three columns on purpose: parse_previous() and report.py both read this table by
+# splitting the padded columns and gating on the count, so the rows list is
+# comma-joined WITHOUT spaces to keep every line at exactly three columns.
 TC_COLS = ["tool", "version", "rows"]
 TC_WIDTHS = [26, 14, 0]
 
@@ -268,26 +268,40 @@ def parse_previous(path):
 
     Cells: `sizes` {(row,arch): (text,data,bss)}, `irs` {row: (enc,dec)}.
 
-    Header: `corelibs` {short repo name: sha} off the `# corelib:` line, `engines`
-    {row: engine} and `tools` {label: version} off the `## toolchain` table, and
-    `schemas` {path: sha256} off the `# schema:` lines. Those are recovered for
-    exactly the same reason the cells are. A partial run resolves a SHA only for the
-    corelibs it checked out, probes an engine only for a python row it measured, and
-    probes the host for tools and schema files that may have nothing to do with the
-    row it ran — so building the header from this run alone dropped eleven of twelve
-    SHAs and both engine lines, and rewrote the toolchain and schema lines for
-    twenty-three rows it never touched (#487).
+    Header: `corelibs` {short repo name: sha} off the `# corelib:` line, `tools`
+    {(label, rows column): version} and `engines` {row: engine} off the
+    `## toolchain` table, and `schemas` {path: sha256} off the `# schema:` lines.
+    Those are recovered for exactly the same reason the cells are. A partial run
+    resolves a SHA only for the corelibs it checked out, probes an engine only for a
+    python row it measured, and probes the host for tools and schema files that may
+    have nothing to do with the row it ran — so building the header from this run
+    alone dropped eleven of twelve SHAs and both engine lines, and rewrote the
+    toolchain and schema lines for twenty-three rows it never touched (#487).
 
     "(unknown)" is not carried, for a SHA or for an engine: it is a recorded failure
     to resolve one, and re-printing it would launder it into the next run's header as
     if it were a value. A tool's "(not found)" IS carried — that one is a recorded
     fact about the environment the cells were measured in, not a failure to look.
+
+    `tools` is keyed by the PAIR and not by the label, and the toolchain table is
+    read inside its own section rather than by field count, for the two reasons
+    report.py's parse() is (#492, #502). The table is not a label->version map:
+    `sofab-engine` gets one line per python row, deliberately, so a label keyed
+    alone collapses to the last line — and a version containing a space
+    ("(not found)", the one drift the writer goes out of its way to record) yields
+    four whitespace fields, matched no branch, and was dropped entirely. `engines`
+    is a view of that same table rather than a second parse, so the reader has one
+    rule where it used to have a rule plus an exception.
     """
     sizes, irs, corelibs, engines, tools, schemas, notes = {}, {}, {}, {}, {}, {}, []
     if not path or not Path(path).exists():
         return Previous(sizes, irs, corelibs, engines, tools, schemas, notes)
     saw_corelib = False
+    section = None
     for line in Path(path).read_text().splitlines():
+        if line.startswith("## "):
+            section = line[3:].strip()
+            continue
         if line.startswith("# corelib:"):
             saw_corelib = True
             dropped = []
@@ -315,20 +329,62 @@ def parse_previous(path):
             continue
         if line.startswith("#") or not line.strip() or line.startswith("row"):
             continue
+        if section == "toolchain":
+            # Split the padded columns, not the whitespace: a version can contain a
+            # space ("(not found)"), and splitting on whitespace made that line four
+            # fields, which matched neither branch and lost the record. Columns are
+            # ljust()-padded, so two spaces always separate them -- but only here:
+            # the Ir and footprint tables hold values that FILL their column
+            # ("rust-rs-no-std-dyn" is 18 of 19), leaving one space, so the same
+            # split would merge two of their fields. Hence the section, exactly as
+            # report.py does it.
+            f = re.split(r"\s{2,}", line.strip())
+            if len(f) == len(TC_COLS) and f[0] != TC_COLS[0]:
+                tools[(f[0], f[2])] = f[1]
+            elif f and f[0] != TC_COLS[0]:
+                # A toolchain line whose columns ran together (or that was edited by
+                # hand). The writer pads so this cannot happen -- see fmt_tc() -- and
+                # if it does anyway, say so: dropped in silence, the next partial run
+                # re-probes that tool and writes this host's answer over rows it only
+                # carried, which is exactly the #487 loss.
+                notes.append("could not read the toolchain line %r; that tool is "
+                             "re-probed rather than carried" % line.strip())
+            continue
         f = line.split()
-        if len(f) == len(TC_COLS) and f[0] == ENGINE_LABEL:
-            if f[1] != "(unknown)":
-                engines[f[2]] = f[1]
-        elif len(f) == len(TC_COLS) and f[0] != TC_COLS[0]:
-            tools[f[0]] = f[1]
-        elif len(f) == len(SZ_COLS) and f[2] not in ("toggle", "subtract"):
+        if len(f) == len(SZ_COLS) and f[2] not in ("toggle", "subtract"):
             sizes[(f[0], f[2])] = (f[3], f[4], f[5])
         elif len(f) == len(IR_COLS) and f[2] in ("toggle", "subtract"):
             irs[f[0]] = (f[3], f[4])
+    # The engine lines are toolchain lines like any other, so they are parsed with
+    # the rest and narrowed here. "(unknown)" is dropped for the reason above: it is
+    # a failed probe, and the merge must not carry it as if it were a reading.
+    for (label, where), version in tools.items():
+        if label == ENGINE_LABEL and version != "(unknown)":
+            for rid in where.split(","):
+                engines[rid] = version
     if not saw_corelib and (corelibs or irs or sizes):
         notes.append("the previous file has no '# corelib:' line; this run can only "
                      "attribute the rows it measured")
     return Previous(sizes, irs, corelibs, engines, tools, schemas, notes)
+
+
+def previous_tool(tools, label, where):
+    """What a parsed `## toolchain` table states for ONE line, or None.
+
+    The line is (label, rows column), because that is what the table records: a
+    label alone is not a key (`sofab-engine` has one line per python row). An exact
+    hit answers; otherwise -- rows.json gained or lost a row since the previous file
+    was written, so this run's rows column names a set that file never wrote -- fall
+    back to the version it records for the label elsewhere, but only when every line
+    it carries for that label agrees. A label whose version is known to vary per row
+    then answers for nothing, which is the point: carrying one of two disagreeing
+    lines onto a line that names neither would state a version the previous file
+    never recorded for these rows. Same rule as report.py's tool_diff().
+    """
+    if (label, where) in tools:
+        return tools[(label, where)]
+    elsewhere = {v for (lbl, _), v in tools.items() if lbl == label}
+    return elsewhere.pop() if len(elsewhere) == 1 else None
 
 
 def parse_previous_raw(path):
@@ -494,6 +550,27 @@ def main():
     def fmt(vals, widths):
         return "".join(str(v).ljust(w) for v, w in zip(vals, widths)).rstrip()
 
+    def fmt_tc(vals):
+        """The `## toolchain` row, padded so its columns can never run together.
+
+        Both readers of that table -- parse_previous() above and report.py's
+        parse() -- split it on two-or-more spaces, because a version can contain one
+        ("(not found)"). A value that FILLS or overflows its column leaves no
+        separator, the split merges two fields, and the line is dropped: silently, so
+        the next partial run re-probes that tool and stamps this host's answer onto
+        rows it only carried. tool_version() can produce such a value -- when its
+        version regex misses, it returns the first line of the tool's output, of any
+        length ("1.98.0-nightly+x" already overflows, and "Apple clang 17" holds a
+        space as well).
+
+        Scoped to this table on purpose: the same pad on IR_WIDTHS would move
+        `rust-rs-no-std-dyn` (18 chars in a 19-wide column) and rewrite results.txt.
+        Every toolchain line the committed file holds is already under its width, so
+        this changes no byte of it either.
+        """
+        return "".join(str(v).ljust(max(w, len(str(v)) + 2))
+                       for v, w in zip(vals, TC_WIDTHS)).rstrip()
+
     rows = sorted(spec["rows"], key=lambda r: r["id"])
 
     # Both tables are rendered BEFORE the header, because the header is a claim about
@@ -625,8 +702,8 @@ def main():
             # measured. Without this a one-row refresh on a partly-provisioned box
             # rewrote (or "(not found)"-ed) the version of tools whose rows it only
             # carried -- erasing a recorded version rather than recording an absence.
-            version = choose(version, prev.tools.get(lbl), rows_ & in_file,
-                             measured_ids, report(lbl))
+            version = choose(version, previous_tool(prev.tools, lbl, where),
+                             rows_ & in_file, measured_ids, report(lbl))
         toolchain_rows.append((lbl, version, where))
 
     corelib_dirs = {}
@@ -707,9 +784,9 @@ def main():
 
     out.append("")
     out.append("## toolchain")
-    out.append(fmt(TC_COLS, TC_WIDTHS))
+    out.append(fmt_tc(TC_COLS))
     for vals in toolchain_rows:
-        out.append(fmt(vals, TC_WIDTHS))
+        out.append(fmt_tc(vals))
 
     out.append("")
     out.append("## footprint")
