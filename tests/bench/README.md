@@ -680,8 +680,9 @@ looks like coverage.
 
 Its report (`lib/report.py`) is built around that hazard:
 
-* **Toolchain comparison first.** Whatever differs from the header of the committed
-  file is named before any number, because that alone moves rows.
+* **Provenance comparison first.** Whatever differs from the header of the committed
+  file — toolchain versions, corelib SHAs, schema digests — is named before any
+  number, because any of the three moves rows on unchanged generated code.
 * **Failed measurements are their own section**, and the only thing that fails the
   job. A `!` cell means a broken run, not a slow row — and it would overwrite a
   committed value if it reached the file.
@@ -708,7 +709,21 @@ The table is split on its padded columns, not on whitespace, because `format.py`
 writes `(not found)` as a version when a probe finds no tool at all — a value with a
 space in it. Split on whitespace that line named no real row and was dropped, so the
 one drift the writer goes out of its way to record was the one the report could not
-read.
+read. `format.py`'s own reader of the same table (`parse_previous`, the carry-forward
+a `--rows` run depends on) had both defects too, and lost that line entirely: a
+partial run following a run where a tool had vanished re-probed the tool and wrote
+this box's answer over rows it had only carried (#502).
+
+The other two header entries are compared the same way (#501), and the corelib
+comparison is deliberately **context, not a finding**: `run.sh` clones every corelib
+from its default branch and never pins it, so a SHA differing from the committed file
+is the ordinary case and most runs print that table. It is still worth printing —
+an Ir/op number is the cost of the generated code *plus* the corelib it calls, so a
+row that moved under a corelib bump is a different question from one that moved on
+its own — but it never affects the exit status, which stays reserved for a
+measurement that failed. Schema digests are compared per row: the `# schema:` line
+with no rows column is the default schema, covering every row that does not name its
+own, so an edit to it says nothing about a row measured on another schema.
 
 ## The two Ir/op methods
 

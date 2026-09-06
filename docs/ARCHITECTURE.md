@@ -4843,8 +4843,11 @@ Neither is wrong; they are different scales. One environment owns the file.
 second opinion on demand, for a number that looks implausible locally or a toolchain
 not available in the devcontainer. It is not a PR gate, because it would be loud on
 every PR for reasons no PR caused. Its report (`tests/bench/lib/report.py`) leads
-with the toolchain comparison for that reason, then separates failed measurements
-from outliers from ordinary movement; it fails the job only on a failed measurement.
+with the provenance comparison for that reason — toolchain versions, corelib SHAs and
+schema digests, each of which moves a row on unchanged generated code — then
+separates failed measurements from outliers from ordinary movement; it fails the job
+only on a failed measurement. A differing corelib SHA is context and never a failure:
+the corelibs are unpinned by design, so they differ on most runs.
 
 **The `zig` and `csharp` rows carry runner-specific pins** so that the "second
 measuring device" merely *drifts* rather than *fails* — for two different reasons.
