@@ -46,8 +46,8 @@ principles"). Existing placements: footprint = `c`, `cpp` with
 Both axes are **measured**, not asserted — `tests/bench/results.txt` (ARCHITECTURE
 §15) records instructions/op for every row and, for the footprint rows,
 `.text`/`.data`/`.bss` cross-compiled to the embedded targets they ship to. If you
-change codegen, regenerate it with `tests/bench/run.sh` and read the diff: that is
-how a claim on either axis is checked.
+change a backend, measure that backend — `tests/bench/run.sh --rows <its rows>` —
+and read the diff: that is how a claim on either axis is checked.
 
 ## Reference implementations
 
