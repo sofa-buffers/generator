@@ -1,0 +1,36 @@
+# RAW Ir readings — regenerate with tests/bench/run.sh. See lib/format.py.
+#
+# What tests/bench/results.txt would hold if it did not hold cells still: the
+# reading each row's last measurement actually produced. A row this run did not
+# measure keeps its previous reading, as in results.txt.
+#
+# Read results.txt for the verdict and its header for provenance. This file is
+# the record: a cell held back by the noise band shows up here and nowhere else,
+# and jittery rows (go encode above all — #494) move here without meaning
+# anything. See tests/bench/README.md, "Measured jitter, per row".
+#
+row                profile    method    encode_ir/op  decode_ir/op
+c                  footprint  toggle    25985         52648
+cpp-c-cpp          footprint  toggle    33650         40154
+cpp-c-cpp-dyn      footprint  toggle    34020         51157
+cpp-cpp            maxspeed   toggle    12608         29953
+cpp-cpp-static     maxspeed   toggle    12300         22706
+cpp-cpp-unbounded  maxspeed   toggle    8543          21990
+csharp             maxspeed   subtract  31521         70709
+dart               maxspeed   subtract  25785         57238
+go                 maxspeed   toggle    20468         60100
+go-unbounded       maxspeed   toggle    13335         45088
+java               maxspeed   subtract  17009         30899
+kotlin             maxspeed   subtract  17199         32753
+python             maxspeed   subtract  1081889       2309212
+python-native      maxspeed   subtract  130661        802289
+rust-rs            maxspeed   toggle    8273          23366
+rust-rs-no-std     footprint  toggle    8067          29998
+rust-rs-no-std-dyn footprint  toggle    8292          38808
+rust-rs-static     maxspeed   toggle    8120          16564
+rust-rs-unbounded  maxspeed   toggle    6762          21215
+ts-bigint          maxspeed   subtract  605542        768539
+ts-long            maxspeed   subtract  596936        772117
+ts-number          maxspeed   subtract  614906        767709
+zig                maxspeed   toggle    9941          22495
+zig-unbounded      maxspeed   toggle    7837          18799

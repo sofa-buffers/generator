@@ -6,6 +6,10 @@
 # generator, re-run this, and `git diff tests/bench/results.txt` shows what the
 # change cost or saved. See tests/bench/README.md for what the numbers mean.
 #
+# It also regenerates tests/bench/results-raw.txt, the same table without the
+# hysteresis: what this run READ, as against what results.txt commits. Read the
+# first for the verdict and the second for what a held cell is hiding.
+#
 # Phase 1 (this script today) covers the footprint metric: .text/.data/.bss of the
 # generated code cross-compiled to the embedded targets the footprint profiles
 # actually ship to. Ir/op via Callgrind is Phase 2.
@@ -42,7 +46,7 @@ while [ $# -gt 0 ]; do
         --rows)  ONLY="$2"; shift 2 ;;
         --out)   OUT="$2"; shift 2 ;;
         --check) CHECK=1; shift ;;
-        -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -294,6 +298,25 @@ done
 # drops eleven of twelve SHAs and both engine lines and rewrites the rest, for
 # numbers that are still in the file. format.py refuses outright when no merged
 # header would be true. A full run's header is written from that run alone.
+#
+# --raw-out writes the second half of the committed pair: results-raw.txt, the same
+# table with the hysteresis left off (lib/format.py, render_raw). Asked for only when
+# this run is updating the committed results.txt, for the same reason --partial is:
+# an --out preview and bench.yml's per-row artifacts are a second measuring device,
+# and their readings are not this repository's record. --check asks for it too, into
+# the scratch dir, so a staleness check compares both halves without writing either.
+#
+# A PARTIAL run carries the sidecar's unmeasured rows out of --previous-raw, so if that
+# file is missing the carry has nothing to carry and the run would write a sidecar
+# holding only the rows it measured, over the committed one. format.py refuses that
+# outright (the same principle as the header refusal above): regenerate both files with
+# a full run. results.txt is never at risk, because --previous is always committed.
+RAW="$BENCH/results-raw.txt"
+RAW_OUT=""
+if [ "$CHECK" = "1" ] || [ "$OUT" = "$BENCH/results.txt" ]; then
+    RAW_OUT="$WORK/new-raw.txt"
+fi
+
 python3 "$BENCH/lib/format.py" \
     --rows "$BENCH/rows.json" \
     --sizes "$SIZES" \
@@ -301,11 +324,36 @@ python3 "$BENCH/lib/format.py" \
     --previous "$BENCH/results.txt" \
     --root "$ROOT" \
     --corelibs "$CORELIBS" \
+    ${RAW_OUT:+--raw-out "$RAW_OUT"} \
+    ${RAW_OUT:+--previous-raw "$RAW"} \
     ${PARTIAL:+--partial} \
     > "$WORK/new.txt"
 
 if [ "$CHECK" = "1" ]; then
-    if diff -u "$BENCH/results.txt" "$WORK/new.txt" > "$WORK/diff" 2>&1; then
+    rc=0
+    diff -u "$BENCH/results.txt" "$WORK/new.txt" > "$WORK/diff" 2>&1 || rc=1
+    # The sidecar is EXPECTED to move on the jittery rows (#494, #489), so it is
+    # reported and does not by itself make the check fail: staleness is a property of
+    # results.txt, which is the file a reviewer reads.
+    if [ -f "$RAW_OUT" ] && [ ! -f "$RAW" ]; then
+        echo "results-raw.txt does not exist yet; a full run would create it" >&2
+    elif [ -f "$RAW_OUT" ]; then
+        # Values in the sidecar move by design; its ROW SET must not. A sidecar that
+        # is missing rows results.txt has is a truncated record, and a value diff is
+        # not how you would notice.
+        missing="$(comm -23 \
+            <(awk 'NF==5 && ($3=="toggle"||$3=="subtract") {print $1}' "$BENCH/results.txt" | sort) \
+            <(awk 'NF==5 && ($3=="toggle"||$3=="subtract") {print $1}' "$RAW" | sort) | tr '\n' ' ')"
+        if [ -n "${missing// /}" ]; then
+            echo "results-raw.txt is missing rows: ${missing% }" >&2
+            echo "  regenerate both files with a full tests/bench/run.sh" >&2
+        fi
+        if ! diff -u "$RAW" "$RAW_OUT" > "$WORK/diff-raw" 2>&1; then
+            echo "results-raw.txt differs (readings move; not a staleness failure):" >&2
+            cat "$WORK/diff-raw" >&2
+        fi
+    fi
+    if [ "$rc" = "0" ]; then
         echo "results.txt is up to date" >&2
         exit 0
     fi
@@ -316,3 +364,7 @@ fi
 
 cp "$WORK/new.txt" "$OUT"
 echo ">> wrote $OUT" >&2
+if [ -n "$RAW_OUT" ]; then
+    cp "$RAW_OUT" "$RAW"
+    echo ">> wrote $RAW" >&2
+fi

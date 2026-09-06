@@ -42,11 +42,25 @@ the whole thing worthless. Guarded by `run.sh` being idempotent (run it twice, t
 file must be byte-identical) and by `-ffile-prefix-map`/`--remap-path-prefix` (see
 [Traps](#traps)).
 
-The toggle rows are *exactly* reproducible. The subtract rows are not: a JIT's
-instruction count is not bit-reproducible, and `corelib-java/bench/run_callgrind.sh`
-documents ~0.03% surviving jitter. So `lib/format.py` applies **hysteresis** — a
-cell keeps its committed value while a new reading is within 0.3% of it, and moves
-only on a change big enough to be real (`stabilize()`).
+**That guard does not hold today, on exactly one cell.** `go` encode is bimodal —
+18625 or 20468, the low value on ~13% of 53 readings taken on an unchanged tree (see
+[Measured jitter, per row](#measured-jitter-per-row)) — so running `run.sh` twice
+flips that one cell by −9.15% about one run in eight, with nothing changed. It is 30x
+the noise band, so no hysteresis holds it, and the value the file currently commits
+(20501) is neither of the two modes. **A `go` encode move of ~9% is that defect,
+#494, not a regression**; re-run the row before writing anything down. Every other
+cell in the file is idempotent as described.
+
+Most rows are exactly reproducible; some are not. `lib/format.py` therefore applies
+**hysteresis** — a cell keeps its committed value while a new reading is within 0.3%
+of it, and moves only on a change big enough to be real (`stabilize()`). Which rows
+need that, and how much, is measured: see
+[Measured jitter, per row](#measured-jitter-per-row). The split is **not** toggle vs
+subtract, which is what this file used to say.
+
+Because a held cell discards the reading that produced it, every run also writes
+`results-raw.txt` — the same table with no hysteresis. See
+[The raw sidecar](#the-raw-sidecar).
 
 Rounding was tried first and does not work. Every deterministic rounding has bucket
 edges, and a raw value sitting on one flips regardless of how coarse the buckets
@@ -58,21 +72,253 @@ csharp decode  71100 <-> 71200      (raw ~71,150 — sat on a 3-s.f. edge)
 java   encode  16500 <-> 16600      (raw ~16,550 — likewise)
 ```
 
-The 0.3% band sits an order of magnitude above the jitter documented for a subtract row
-(~0.03%, from corelib-java's `bench/run_callgrind.sh`) and an order of magnitude below
-the smallest change worth seeing (1%; the wins in `docs/perf-patches/` are tens of
+The band is a **one-sided deviation from the committed value**, so the quantity to
+compare it against is `max |reading - committed| / committed`, not a max-min spread.
+The widest that has been measured is 0.122% (`kotlin` encode: a 17221 against the
+17200 its readings cluster on; 0.105% against the 17203 the file happens to commit
+today). So 0.3% sits ~2.5x above the measurement and an order of magnitude below the
+smallest change worth seeing (1%; the wins in `docs/perf-patches/` are tens of
 percent). If a row ever flips on its own *jitter*, raise **that row's reps** — which
-tightens that jitter — rather than widening the band. One row has since been measured directly, and
-found much quieter than the documented figure: `kotlin` spreads 0.006%, so the band is
-~50x its jitter (#489).
+tightens that jitter — rather than widening the band.
 
 Confirm the flip before spending the reps: re-run the row unchanged a few times and look
 at the spread. A crossing can also be an earlier, *real* change that the band held back
 until it tipped — and more reps cannot see that one. Check whether a corelib SHA or a
 toolchain version in the header moved since that cell last **changed**, and suspect it
-first. `kotlin` decode crossed once at +0.3001% and then re-measured at a 0.006% spread
-around the **new** value across three runs, so its reps were left where they were and the
-step went to an issue (#488) instead — see ARCHITECTURE §15.
+first. `kotlin` decode crossed once at +0.3001% and then re-measured around the **new**
+value, so its reps were left where they were and the step went to an issue (#488)
+instead — see ARCHITECTURE §15.
+
+## Measured jitter, per row
+
+Every row, three or more back-to-back runs on an unchanged tree, raw readings
+recorded. Devcontainer, generator `6315cd1`, pinned corelib checkouts at the SHAs the
+`results.txt` header of 2026-09-06 names (with one exception — see the caveat below
+the table), toolchain as in that header. Nothing was changed between runs of a row,
+so every difference below is the measurement's own.
+
+Two run shapes were used, and neither is "one invocation per row per trial" across
+the board. The nine `subtract` rows and `go`/`go-unbounded` were driven one row per
+`run.sh --rows <id>` invocation. The fifteen `toggle` rows were driven by three
+invocations that each passed all fifteen ids — one build of each row per invocation,
+so the three trials are still independent runs, but they share a process and a
+scratch tree with their siblings. `go`'s 53 readings are those three plus 50 further
+single-row runs. The per-invocation stderr logs were kept outside the repository (a
+scratch directory, not committed); what survives here is the readings themselves.
+
+Read `n×k` as "that value came up k times". The **spread** column is
+`(max − min) / mean` — a property of the readings. It is *not* the quantity
+`NOISE_BAND` is compared against, which is a reading's deviation from the *committed*
+value; the two are distinguished where the band is sized, below.
+
+| row | method | n | encode readings | spread % | decode readings | spread % |
+|---|---|---|---|---|---|---|
+| `csharp` | subtract | 3 | 31516×2 31522 | 0.019 | 70709 70710×2 | 0.001 |
+| `dart` | subtract | 3 | 25786×2 25788 | 0.008 | 57236 57238 57240 | 0.007 |
+| `java` | subtract | 6 | 17008 17009×2 17010 17011 17012 | 0.024 | 30886 30887 30890×2 30891 30898 | 0.039 |
+| `kotlin` | subtract | 8 | 17199 17200×5 17203 **17221** | **0.128** | 32751×2 32752×2 32753×2 32755 32756 | 0.015 |
+| `python` | subtract | 3 | 1082239×3 | 0.000 | 2310825×3 | 0.000 |
+| `python-native` | subtract | 3 | 130539×3 | 0.000 | 801804×3 | 0.000 |
+| `ts-bigint` | subtract | 3 | 605520×2 605525 | 0.001 | 768543 768544 768546 | 0.000 |
+| `ts-long` | subtract | 3 | 596836 596837×2 | 0.000 | 772111 772112×2 | 0.000 |
+| `ts-number` | subtract | 3 | 614908×2 614909 | 0.000 | 767709×2 767710 | 0.000 |
+| `c` | toggle | 3 | 25985×3 | 0.000 | 52648×3 | 0.000 |
+| `cpp-c-cpp` | toggle | 3 | 33650×3 | 0.000 | 40154×3 | 0.000 |
+| `cpp-c-cpp-dyn` | toggle | 3 | 34020×3 | 0.000 | 51157×3 | 0.000 |
+| `cpp-cpp` | toggle | 3 | 12608×3 | 0.000 | 29953×3 | 0.000 |
+| `cpp-cpp-static` | toggle | 3 | 12300×3 | 0.000 | 22706×3 | 0.000 |
+| `cpp-cpp-unbounded` | toggle | 3 | 8543×3 | 0.000 | 21990×3 | 0.000 |
+| `go` | toggle | 53 | **18625×7 20468×46** | **9.113** | 60051 60100×51 60118 | 0.111 |
+| `go-unbounded` | toggle | 8 | 13335×8 | 0.000 | 45088×8 | 0.000 |
+| `rust-rs` | toggle | 3 | 8273×3 | 0.000 | 23366×3 | 0.000 |
+| `rust-rs-no-std` | toggle | 3 | 8079×3 | 0.000 | 29998×3 | 0.000 |
+| `rust-rs-no-std-dyn` | toggle | 3 | 8292×3 | 0.000 | 38808×3 | 0.000 |
+| `rust-rs-static` | toggle | 3 | 8120×3 | 0.000 | 16564×3 | 0.000 |
+| `rust-rs-unbounded` | toggle | 3 | 6762×3 | 0.000 | 21215×3 | 0.000 |
+| `zig` | toggle | 3 | 9941×3 | 0.000 | 22495×3 | 0.000 |
+| `zig-unbounded` | toggle | 3 | 7837×3 | 0.000 | 18799×3 | 0.000 |
+
+Four things follow, and three of them contradict what this file used to claim.
+
+**The split is the runtime, not the method.** Both `python` rows and all three `ts`
+rows are `subtract` and reproduce to within 1–5 Ir; `go` is `toggle` and is the
+noisiest row in the file by two orders of magnitude. Sixteen of the twenty-four rows
+repeat *exactly*, both halves.
+
+Read that as **within one build context**, which is all a back-to-back campaign can
+measure. It is not the same thing as reproducing across contexts, and for several rows
+it is not even close: see the two caveats below the table and the section after it.
+
+**`kotlin` is not the quiet row three runs made it look.** #473 read it six times,
+saw encode 17199–17201, and concluded the band was ~50× that row's jitter. Eight more
+runs produced one 17221 — a 0.122% excursion, twenty times the spread those six showed.
+A three-run spread is a lower bound on jitter, never a characterisation of it.
+
+**So the band has ~2.5× headroom, not ~10× and not ~50×.** Measured like for like —
+the band is a deviation from the committed value, so the comparison is
+`max |reading − committed| / committed`, not the spread column beside it. The widest is
+`kotlin` encode: 17221 against the 17200 its readings cluster on is 0.122%, and
+`NOISE_BAND = 0.003` clears that by 2.5×. (Against the 17203 the file happens to commit
+today the same reading is 0.105%, i.e. 2.9×; 2.5× is the conservative of the two and is
+the figure used everywhere.) `0.001` would sit *below* that excursion and flip the cell
+about **one reading in eleven** — the 11 readings taken at this row's committed reps,
+`10000 110000`: three from #473 plus the eight of this campaign. (#473 took three more at
+`10000 210000`, a different reps setting, which are not pooled here.) `0.002` clears the
+excursion by 1.6×, on a tail seen once in those eleven. The band was **kept at 0.003**
+for that reason (#489) — the honest answer was that the premise of narrowing it was
+wrong, not that the number was.
+
+**And one row is past any band's reach.** `go` encode is bimodal — 18625 or 20468,
+1843 Ir apart, ~13% of runs — so that cell moves at random whatever the band is set to.
+Widening the band far enough to hold it would swallow every regression this tool exists
+to catch. That is a defect in the row, filed as **#494**; until it is fixed, treat a
+large `go` encode move as unproven until re-run.
+
+Two caveats on reading the table, and both bite the next section.
+
+**The absolutes are not comparable with `results.txt`.** The campaign ran against
+**pinned local corelib checkouts**, frozen so that three runs of a row differ in nothing
+at all. That is what makes the spreads trustworthy and the absolute values not directly
+comparable with a full run's — a fresh clone of the same SHA does not always build the
+same bytes. The `rust` and `python` rows moved by ~0.1% between a pinned copy and a
+fresh clone of the identical commit, which is the same magnitude as the steps the next
+section is about; compare spreads, not absolutes.
+
+**The three `ts` rows were measured one corelib commit behind the header**, and the
+gap between contexts is bigger than the row's own spread by two orders of magnitude.
+The pinned checkout is corelib-ts `f8ea3cd`; the full run that wrote the current
+`results.txt` cloned `d664f2f`. `ts-long` encode read 596836/596837/596837 here and
+596936 there — 100 Ir apart on a row whose three campaign readings span 1 Ir.
+
+That was re-measured rather than argued, because an unexamined corelib SHA move sitting
+under a moved reading is the attribution failure #488 exists to prevent. **The SHA owns
+none of it.** `f8ea3cd..d664f2f` is a `vitest` devDependency bump and its lockfile: no
+`src/` change, and `tsup`, `esbuild`, `rollup` and `typescript` resolve to identical
+versions in both lockfiles. Measured to match, `run.sh --rows ts-long` against two
+fresh clones of this repository's corelib-ts, one at each SHA, back to back on the same
+host:
+
+```
+corelib-ts d664f2f (fresh clone)  x2   encode 596996 596996   decode 772111 772112
+corelib-ts f8ea3cd (fresh clone)  x2   encode 596996 596996   decode 772112 772112
+```
+
+Bit-identical encode across the SHA move, four runs for four. What moves is the
+**build context**: the campaign's pinned checkout carries a `dist/` the recipe reuses
+rather than rebuilding, while a fresh clone builds it with whatever `npm install`
+resolves at that moment — and the full run's own fresh clone read a third value again
+(596936). So `ts-long` encode is bit-reproducible *within* a context and spans 160 Ir
+(0.027%) across three of them. Treat the `ts` rows'
+spreads as sound, their absolutes as belonging to a context, and a `ts` cell that moved
+under a corelib bump as unexplained until the bump is measured.
+
+### What the band is hiding right now
+
+*Counts in this section describe the two files as of generator `6315cd1`, 2026-09-06.
+They move on the next full run, and nothing regenerates them — re-derive them from the
+files rather than trusting the prose.*
+
+The same question, asked of the files in the repository rather than of a campaign:
+`results-raw.txt` is what the last full run read, `results.txt` is what it committed,
+and **25 of the 48 cells disagree**. Twelve of those sit on rows the table above
+measured at *zero* spread, so the row's own jitter explains none of them.
+
+Those twelve do not all say the same thing, and a **third** column is why. The campaign
+read the same rows three times each at the same generator SHA and — for every row below
+— the same corelib SHA the `results.txt` header names, but in a different build context
+(pinned checkouts, not the full run's fresh clones). Seven cells read the same value in
+both contexts. Five read a third.
+
+**Seven masked steps.** Two independent contexts, three campaign readings each, every
+reading agreeing to the instruction and every one disagreeing with what the file
+commits. No jitter to absorb them and no commit that owns them — the #488 disease at
+file scale:
+
+| cell | committed | last full run | campaign (×3) | held by |
+|---|---|---|---|---|
+| `rust-rs` decode | 23329 | 23366 | 23366 | +0.159% |
+| `rust-rs-unbounded` decode | 21184 | 21215 | 21215 | +0.146% |
+| `rust-rs-no-std-dyn` encode | 8280 | 8292 | 8292 | +0.145% |
+| `cpp-c-cpp-dyn` decode | 51084 | 51157 | 51157 | +0.143% |
+| `zig` encode | 9929 | 9941 | 9941 | +0.121% |
+| `cpp-c-cpp` decode | 40150 | 40154 | 40154 | +0.010% |
+| `c` encode | 25986 | 25985 | 25985 | −0.004% |
+
+(`rust-rs` and `rust-rs-unbounded` decode moved by +37 and +31 Ir, in every run of the
+campaign — consistent with one step on the decode path both rows share, though nothing
+here establishes that.)
+
+**Five that do not reconcile.** Same rows, zero spread *within* each context, three
+different values *across* the two of them. The gap between the two contexts runs from
+0.03% to 0.15%, and in three of the five it is **larger than the step** a
+committed-vs-read reading would claim. So "the row has no jitter" is a statement about
+one context, and these five are **unattributed**, not masked steps. The pinned-vs-fresh
+caveat above predicts exactly this, on exactly these rows; it does not say which
+reading is right.
+
+| cell | committed | last full run | campaign (×3) | do the two contexts agree? |
+|---|---|---|---|---|
+| `python-native` decode | 803335 | 802289 (−0.130%) | 801804 (−0.191%) | on the sign, not the size |
+| `python-native` encode | 130483 | 130661 (+0.136%) | 130539 (+0.043%) | on the sign, not the size |
+| `python` encode | 1081554 | 1081889 (+0.031%) | 1082239 (+0.063%) | on the sign, not the size |
+| `rust-rs-no-std` encode | 8078 | 8067 (−0.136%) | 8079 (+0.012%) | **no** — opposite signs, and the campaign lands on the committed value |
+| `python` decode | 2309178 | 2309212 (+0.001%) | 2310825 (+0.071%) | **no** — the full run reads the committed value, the campaign is 1647 Ir off it |
+
+The last two are the ones to keep in mind when reading the first table: for
+`rust-rs-no-std` encode the −0.136% "step" appears only in the full run, and for
+`python` decode the +0.001% "hold" is the full run agreeing with the file while the
+campaign disagrees with both. Neither is evidence of a masked step.
+
+The remaining thirteen of the 25 sit on the eight rows that do jitter — `go` encode
+−0.161%, `csharp` encode −0.111%, the `ts` rows around ±0.02–0.08% — and there a held
+cell is doing the job it was built for. (The `ts` rows' campaign readings are from a
+different corelib SHA; see the caveat above.)
+
+Narrowing the band does not fix the first group, and the measurements above say why it
+cannot be narrowed far enough to matter. Recording the reading does, which is the next
+section — that table is now in the repository, so the *committed-vs-read* half of this
+question can be asked again after any run with `diff <(…) <(…)` rather than a day of
+measuring. The third column cannot: separating a masked step from a change of build
+context needs a second context, and that means measuring again.
+
+## The raw sidecar
+
+`results-raw.txt` is the same instruction-cost table with the hysteresis left off: what
+each row's last measurement actually **read**, as against what `results.txt` commits.
+`run.sh` writes both, from the same run.
+
+```sh
+git diff tests/bench/results.txt        # the verdict — what changed enough to count
+git diff tests/bench/results-raw.txt    # the readings — including the ones held back
+git log -p tests/bench/results-raw.txt  # when a held cell actually moved
+```
+
+It exists because a held cell used to leave **no trace at all**. When `kotlin` decode
+finally crossed the band it surfaced a step that had landed six regenerations earlier,
+and no intermediate reading survived to say which of four corelib bumps, a JDK change
+and 820 lines of codegen owned it (#488). With the sidecar committed, that question is a
+`git log`.
+
+Two properties to know:
+
+* **It is not idempotent, on purpose.** The eight jittery rows move it run to run. That
+  is the reading changing, not the file being wrong — `run.sh --check` prints its diff
+  and does *not* fail on it, because staleness is a property of `results.txt`.
+* **It carries no header.** Every claim about what produced the numbers — corelib SHAs,
+  toolchain versions, schema hashes — is in `results.txt` beside it, written by the same
+  run. Two headers could disagree; one cannot.
+
+A `--rows` run updates the rows it measured and carries the rest, exactly as
+`results.txt` does, and a run that is refused a true header writes neither file. An
+`--out` preview and `bench.yml`'s per-row artifacts write no sidecar at all: a second
+measuring device's readings are not this repository's record.
+
+The carry-forward has one asymmetry worth knowing. `results.txt`'s comes from the
+committed file, which is always there; the sidecar's comes from the sidecar, which
+might not be — delete it, or check out a revision that predates it, and a `--rows` run
+would write a record holding only the rows it measured. **That run is refused**, with
+the same message either way: regenerate both files with a full run. `--check` also
+reports a sidecar whose row set is short of `results.txt`'s, without failing on it.
 
 ## Reading a diff
 

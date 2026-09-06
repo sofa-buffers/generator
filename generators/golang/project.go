@@ -64,10 +64,19 @@ func (g *gen) readme(s *ir.Schema) string {
 // that one-time cost is charged to the op. Measured on the bench schema, it was
 // 18k Ir (32%) of decode and 5.5k Ir (22%) of encode — enough that making codegen
 // more interface-heavy read as a 44% decode regression while steady-state per-op
-// work had actually got cheaper. One warmup op suffices: every one of those costs
-// is a global cache filled on first touch, never a per-op cost that decays —
-// checked at 1/2/3/5/10 warmups, which land within 95 Ir (0.25%) of each other
-// with no trend, i.e. below the 0.3% at which results.txt calls a value moved.
+// work had actually got cheaper. One warmup op was believed to suffice: every one
+// of those costs is a global cache filled on first touch, never a per-op cost that
+// decays — checked at 1/2/3/5/10 warmups, which landed within 95 Ir (0.25%) of each
+// other with no trend, i.e. below the 0.3% at which results.txt calls a value moved.
+//
+// That belief does not survive being measured properly. 53 runs of the `go` row on
+// an unchanged tree read encode as either 18625 or 20468 — 9.1% apart, the low value
+// on ~13% of runs — so something the collected op depends on is still not settled by
+// one warmup, and the 1/2/3/5/10 comparison above was one sample per setting, which
+// cannot see a bimodal reading at all. Do not treat the warmup count as validated
+// until #494 re-measures it; the decode half and every other toggle row reproduce
+// exactly.
+//
 // The warmup is a separate symbol so --toggle-collect cannot see it.
 func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
 	f.line("// Bench state at package scope: the results outlive the measured call so")

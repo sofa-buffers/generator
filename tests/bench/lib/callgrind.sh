@@ -117,8 +117,11 @@ ir_subtract() {
 #     csharp decode  71100 <-> 71200      (raw ~71,150, bucket edge at 71,150)
 #     java   encode  16500 <-> 16600      (raw ~16,550, bucket edge at 16,550)
 #
-# Rounding cannot fix this because the underlying value is not bit-reproducible on a
-# JIT; only a deterministic runtime (CPython, and the toggle rows) is. So the raw
-# number is passed through and format.py applies hysteresis against the committed
+# Rounding cannot fix this because the underlying value is not bit-reproducible on
+# every row. Which rows those are is measured, and it is NOT "the subtract rows" --
+# both python rows and all three ts rows repeat to within 1-5 Ir, while `go`, a
+# toggle row, is bimodal at 9.1% (#489, #494; table in tests/bench/README.md). So the
+# raw number is passed through and format.py applies hysteresis against the committed
 # value: it keeps the old number while the new one is inside the noise band, and
-# only moves on a change big enough to be real. See format.py's `stabilize`.
+# only moves on a change big enough to be real. See format.py's `stabilize`. The
+# reading itself is not thrown away -- it is committed to results-raw.txt.
