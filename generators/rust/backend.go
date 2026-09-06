@@ -49,6 +49,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		allowDynamic: allowDynamic,
 		staticStore:  !allowDynamic,
 		size:         generator.NewSizePolicy(cfg),
+		reserveCap:   generator.ServerDynLimits.Resolve(cfg).ArrayCount,
 	}
 	// Receiver-side decode limits (generator#102) apply only to the std
 	// corelib-rs: corelib-rs-no-std has no Error::LimitExceeded, and its heapless
@@ -115,6 +116,18 @@ type gen struct {
 	// limits are the receiver-side decode limits (generator#102); resolved only
 	// for the std corelib-rs (empty — all inert — under corelib-rs-no-std).
 	limits limitSet
+	// reserveCap is the CEILING on a pre-sizing reserve_exact — the largest
+	// element count generated code will hand the allocator on the strength of a
+	// wire count header alone (see reserveCount). It is the resolved
+	// max_dyn_array_count, the number this project already treats as its
+	// amplification barrier, and it is resolved for EVERY profile rather than only
+	// where limits is: limits is populated only when the schema has an unbounded
+	// array (otherwise MAX_DYN_ARRAY_COUNT is never emitted) and is skipped
+	// entirely on corelib-rs-no-std, while a schema-bounded array can be pre-sized
+	// on any profile with a dynamic container. It bounds no verdict and rejects
+	// nothing — capacity is a hint, and a Vec whose wire really delivers more than
+	// the ceiling still grows to hold it (generator#505).
+	reserveCap int64
 	// size is the max_message_size policy; sizeErr carries a violation out of
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy

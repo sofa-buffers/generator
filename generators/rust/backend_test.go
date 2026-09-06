@@ -107,8 +107,11 @@ func TestRustStructural(t *testing.T) {
 		"pub someboolarray: Vec<bool>,",                // bounded bool array
 		"someuintarray: vec![0, 1, 1000, 4294967295],", // default is an N-element array literal
 		"someboolarray: vec![true, true, false],",      // the declared default exactly as written -- `count` never pads it
-		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {",           // omit-guard is a default compare
-		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear() ", // over-count rejects (generator#100/#216), then the wire's M elements are collected
+		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {", // omit-guard is a default compare
+		// Over-count rejects (generator#100/#216), then the container is sized to the
+		// count the reject just approved and the wire's M elements are collected into
+		// it (generator#505).
+		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear(); self.m.someuintarray.reserve_exact(count) ",
 		"acc: sofab::PayloadAcc,", // the corelib owns chunk reassembly (generator#345)
 		"let _p = match self.acc.feed(total, offset, chunk) { Some(_v) => _v, None => return };",                   // ...and generated code only calls it
 		"match core::str::from_utf8(_p) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }", // strict UTF-8 on the ASSEMBLED payload: invalid -> INVALID (issue #85, subsumes #80)
@@ -890,14 +893,25 @@ messages:
       nodef:  { id: 2, type: array, items: { type: u32, count: 3 } }
       fdef:   { id: 3, type: array, items: { type: fp32, count: 3 }, default: [1.5] }
 `
-	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
+	// The clear is followed by a reserve_exact of the just-checked count on a
+	// DYNAMIC container and by nothing at all on a heapless one, whose capacity is
+	// already in its type (generator#505). TestRustBoundedArrayReservesTheWireCount
+	// owns that split; here it is only spelled so these arms stay pinned whole.
+	for _, tc := range []struct {
+		cfg  map[string]any
+		size func(field string) string
+	}{
+		{map[string]any{}, func(f string) string { return "; self.m." + f + ".reserve_exact(count)" }},
+		{map[string]any{"corelib": "rs-no-std"}, func(string) string { return "" }},
+	} {
+		cfg := tc.cfg
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
-			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear() },",
-			"(ArrayKind::Unsigned, _Loc::Root, 2) => { if count > 3 { self.inv = true; return; } self.m.nodef.clear() },",
+			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear()" + tc.size("defd") + " },",
+			"(ArrayKind::Unsigned, _Loc::Root, 2) => { if count > 3 { self.inv = true; return; } self.m.nodef.clear()" + tc.size("nodef") + " },",
 			// The fp32 array's arm is keyed to its own subtype, so an fp64 header
 			// at id 3 never reaches this bound (generator#259).
-			"(ArrayKind::Fp32, _Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear() },",
+			"(ArrayKind::Fp32, _Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear()" + tc.size("fdef") + " },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -1081,7 +1095,19 @@ messages:
       f64s: { id: 2, type: array, items: { type: fp64, count: 6 } }
       ints: { id: 3, type: array, items: { type: u32, count: 8 } }
 `
-	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
+	// The dynamic profile appends a reserve_exact of the just-checked count to the
+	// clear (generator#505); the heapless one appends nothing. Spelled per profile
+	// rather than truncating the expectation, so these arms stay pinned to their
+	// closing brace on BOTH — a prefix match would let a future edit append a
+	// second statement to them unnoticed.
+	for _, tc := range []struct {
+		cfg  map[string]any
+		size func(field string) string
+	}{
+		{map[string]any{}, func(f string) string { return "; self.m." + f + ".reserve_exact(count)" }},
+		{map[string]any{"corelib": "rs-no-std"}, func(string) string { return "" }},
+	} {
+		cfg := tc.cfg
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
 			// Skip counter: each fp field disarms only under its own subtype's arm,
@@ -1094,11 +1120,11 @@ messages:
 			// Target match: keyed by (kind, loc, id), with the schema `count` bound
 			// and the clear both INSIDE the kind-matched arm.
 			"match (kind, self.cur, id) {",
-			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 4 { self.inv = true; return; } self.m.f32s.clear() },",
-			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; return; } self.m.f64s.clear() },",
+			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 4 { self.inv = true; return; } self.m.f32s.clear()" + tc.size("f32s") + " },",
+			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; return; } self.m.f64s.clear()" + tc.size("f64s") + " },",
 			// Integer arrays are unaffected: no second header word, so no subtype to
 			// contradict.
-			"(ArrayKind::Unsigned, _Loc::Root, 3) => { if count > 8 { self.inv = true; return; } self.m.ints.clear() },",
+			"(ArrayKind::Unsigned, _Loc::Root, 3) => { if count > 8 { self.inv = true; return; } self.m.ints.clear()" + tc.size("ints") + " },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing subtype-keyed fixlen arm %q:\n%s", cfg, want, m)
@@ -1417,7 +1443,10 @@ messages:
 		// Matrix rows: array_begin opens the row the id names, and elements push into
 		// THAT row rather than into the last one appended.
 		if !strings.Contains(got, "(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {") ||
-			!strings.Contains(got, "self._ix1 = id as usize; },") {
+			// Pinned to the closing brace: all three configs here have DYNAMIC rows,
+			// so all three size the row from the inner count the guard above just
+			// approved, and nothing else follows (generator#505).
+			!strings.Contains(got, "self._ix1 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { if _r.is_empty() { _r.reserve_exact(count); } } },") {
 			t.Errorf("(%v) a matrix row must be opened at out[id], bounded by the outer count:\n%s", cfg, got)
 		}
 		if !strings.Contains(got, "if let Some(_r) = self.m.mat.get_mut(self._ix1) {") {
@@ -1697,7 +1726,17 @@ messages:
           u8s: { id: 0, type: array, items: { type: u8, count: 5 } }
           i8s: { id: 1, type: array, items: { type: i8, count: 5 } }
 `
-	for _, cfg := range []map[string]any{{"corelib": "rs"}, {"corelib": "rs-no-std"}} {
+	// The clear is followed by a reserve_exact of the just-checked count on the
+	// dynamic profile and by nothing on the heapless one (generator#505); spelled
+	// per profile so these arms stay pinned to their closing brace on both.
+	for _, tc := range []struct {
+		cfg  map[string]any
+		size func(field string) string
+	}{
+		{map[string]any{"corelib": "rs"}, func(f string) string { return "; self.m.arrays." + f + ".reserve_exact(count)" }},
+		{map[string]any{"corelib": "rs-no-std"}, func(string) string { return "" }},
+	} {
+		cfg := tc.cfg
 		got := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
 			// One arm per wire kind: never `Unsigned | Signed` collapsed together.
@@ -1713,8 +1752,8 @@ messages:
 			"            ArrayKind::Unsigned => match (self.cur, id) {\n                (_Loc::Root_arrays, 0) => count,\n                _ => 0,\n            },",
 			// The schema `count` bound names the declared kind, so a fixlen header
 			// at an integer id matches no arm and is never measured (#271).
-			"(ArrayKind::Unsigned, _Loc::Root_arrays, 0) => { if count > 5 { self.inv = true; return; } self.m.arrays.u8s.clear() },",
-			"(ArrayKind::Signed, _Loc::Root_arrays, 1) => { if count > 5 { self.inv = true; return; } self.m.arrays.i8s.clear() },",
+			"(ArrayKind::Unsigned, _Loc::Root_arrays, 0) => { if count > 5 { self.inv = true; return; } self.m.arrays.u8s.clear()" + tc.size("u8s") + " },",
+			"(ArrayKind::Signed, _Loc::Root_arrays, 1) => { if count > 5 { self.inv = true; return; } self.m.arrays.i8s.clear()" + tc.size("i8s") + " },",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("(%v) array_begin must key on the wire kind, missing %q:\n%s", cfg, want, got)
@@ -2365,5 +2404,196 @@ messages:
 `, map[string]any{"corelib": "rs-no-std"})
 	if strings.Contains(ns, "MAX_DYN_STRING_LEN") {
 		t.Error("the no_std profile names no receiver cap")
+	}
+}
+
+// A schema-bounded native array must be SIZED from the wire count its own bound
+// check just approved, not grown into -- and never beyond a ceiling
+// (generator#505).
+//
+// The defect: array_begin read the count, compared it against the schema `count`
+// and then discarded it. `Vec::clear()` only resets the length, so a field that
+// starts life as `Vec::new()` (capacity 0) grew under the pushes that followed --
+// measured, a `count: 8` u16 array took two allocations and a copy, and a
+// `count: 4` u32 array took one allocation of capacity 4 whatever the wire count
+// was. (Vec floors its first allocation at 4, or 8 for a byte-sized element, so
+// the doubling only bites past that floor -- the issue's "1, 2, 4" is not what
+// Vec does.) The two sibling backends never grew at all: go writes
+// `make([]uint32, 0, count)` and csharp `new int[count]`, one allocation in the
+// exact size, which is what ARCHITECTURE §9.5 shape A asks for.
+//
+// The SCOPE boundary is the load-bearing half, and it is the one TestCsDecodeLimits
+// records: a schema-bounded array is pre-sized because its bound already caps what
+// the wire may ask for, while the count-LESS arm is deliberately left lazy. Its
+// MAX_DYN_ARRAY_COUNT is a refusal threshold, not a size hint -- reserving 65536
+// elements because a message was permitted to carry that many is exactly the eager
+// allocation from an untrusted count that that arm exists to prevent.
+//
+// The SECOND boundary is the ceiling, and it is what the first cut of #505 got
+// wrong: `count > N` only proves the wire stayed inside the SCHEMA's N, and the
+// schema language caps N at 2147483647. Measured against corelib-rs 7599f9a on
+// `arr: array<u64>, count: 2000000`, a FOUR-byte truncated prefix -- the array
+// header and its count word, nothing else -- allocated 16,000,000 bytes and then
+// returned Incomplete; the same input costs 0 without the pre-size and 524,288
+// with the clamp. So the reserve is capped at the resolved max_dyn_array_count,
+// the number this project already treats as its amplification barrier.
+func TestRustBoundedArrayReservesTheWireCount(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      nums: { id: 0, type: array, items: { type: u32, count: 4 } }
+      fps:  { id: 1, type: array, items: { type: fp32, count: 3 } }
+      s:
+        id: 2
+        type: struct
+        fields:
+          vals: { id: 0, type: array, items: { type: u32, count: 5 } }
+      mat:  { id: 3, type: array, items: { type: array, count: 2, items: { type: u32, count: 6 } } }
+      rows:
+        id: 4
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            vs: { id: 0, type: array, items: { type: u64, count: 7 } }
+`
+	// Every profile whose bounded array lands in a container that HAS a
+	// reserve_exact: std (Vec), and the no_std profile asked for alloc storage
+	// (alloc::vec::Vec), which grows exactly like the std one. The axis is
+	// staticStore, not no_std.
+	for _, cfg := range []map[string]any{
+		{},
+		{"corelib": "rs"},
+		{"corelib": "rs-no-std", "allow_dynamic": true},
+	} {
+		m := moduleFromYAML(t, src, cfg)
+		for _, want := range []string{
+			// Whole arms, so the ORDER is pinned too: the reserve can only ever
+			// follow the over-count reject. Reserving first would hand an
+			// attacker-controlled count straight to the allocator.
+			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; return; } self.m.nums.clear(); self.m.nums.reserve_exact(count) },",
+			// A fixlen (fp) array is the same arm, reached through its own subtype.
+			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 3 { self.inv = true; return; } self.m.fps.clear(); self.m.fps.reserve_exact(count) },",
+			// Under a struct, addressed through the frame's path -- the bound is not
+			// a property of being at Root.
+			"(ArrayKind::Unsigned, _Loc::Root_s, 0) => { if count > 5 { self.inv = true; return; } self.m.s.vals.clear(); self.m.s.vals.reserve_exact(count) },",
+			// ...and inside a struct that is the ELEMENT of a wrapper sequence, where
+			// the arm is addressed through the element index and fires once per
+			// element rather than once per message. That is the fourth reach of the
+			// leaf arm, and the first cut of #505 left it out of its own surface
+			// claim; csharp emits `new ulong[count]` at the identical shape.
+			"(ArrayKind::Unsigned, _Loc::Root_rows_e, 0) => { if count > 7 { self.inv = true; return; } self.m.rows[self._ix1].vs.clear(); self.m.rows[self._ix1].vs.reserve_exact(count) },",
+			// A nested row is the same field one level down: its INNER count is
+			// checked by the row guards, so the row it just opened is sized from it.
+			// Through get_mut, because the growth loop above can legitimately stop
+			// short of the index on a fixed-capacity outer container -- and only when
+			// the row is EMPTY, because this arm does not clear and a repeated row id
+			// would otherwise reserve len + M exactly (see rowReserve).
+			"if count > 6 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {",
+			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { if _r.is_empty() { _r.reserve_exact(count); } } },",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
+			}
+		}
+	}
+
+	// The count-LESS arms keep their hardening: rejected against the receiver cap,
+	// and then grown on demand. A reserve here would let a three-byte header cost
+	// a 64K-element allocation. Both faces are checked -- the LEAF (`free`) and the
+	// nested ROW (`matfree`), whose inner array carries no count either and whose
+	// guard is therefore rowReserve's `fr.ecap < 0` branch.
+	//
+	// `huge` is the ceiling case: a schema bound two orders of magnitude past the
+	// resolved max_dyn_array_count, which must be pre-sized to the CEILING and not
+	// to whatever the header asked for.
+	const unbounded = `
+version: 1
+messages:
+  m:
+    payload:
+      bounded: { id: 0, type: array, items: { type: u32, count: 4 } }
+      free:    { id: 1, type: array, items: { type: u32 } }
+      matfree: { id: 2, type: array, items: { type: array, count: 2, items: { type: u32 } } }
+      huge:    { id: 3, type: array, items: { type: u64, count: 2000000 } }
+      wrapped:
+        id: 4
+        type: array
+        items:
+          type: struct
+          fields:
+            vs: { id: 0, type: array, items: { type: u64, count: 7 } }
+`
+	d := moduleFromYAML(t, unbounded, map[string]any{})
+	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.free.clear() },") {
+		t.Errorf("the count-less arm must stay lazy -- clear and nothing else:\n%s", d)
+	}
+	if strings.Contains(d, "self.m.free.reserve") {
+		t.Errorf("an unbounded array must never be pre-sized from an untrusted count:\n%s", d)
+	}
+	// The count-less ROW: the outer array is bounded (count: 2) and the INNER one
+	// is not, so the row exists but must not be sized -- a three-byte row header
+	// reserving MAX_DYN_ARRAY_COUNT elements is the same eager allocation one level
+	// down. Pinned to the closing brace, because the whole assertion is that
+	// nothing follows the index store.
+	if !strings.Contains(d, "self._ix0 = id as usize; },") {
+		t.Errorf("a count-less row must be opened and left unsized:\n%s", d)
+	}
+	if strings.Contains(d, "self.m.matfree.get_mut(id as usize)") {
+		t.Errorf("a count-less row must never be pre-sized from an untrusted count:\n%s", d)
+	}
+	// ...while the bounded field in the very same message still is.
+	if !strings.Contains(d, "self.m.bounded.clear(); self.m.bounded.reserve_exact(count)") {
+		t.Errorf("a bounded array beside an unbounded one must still be sized:\n%s", d)
+	}
+	// The ceiling. 2000000 is far past the resolved cap, so the reserve is clamped
+	// -- capacity is a hint, so the Vec still grows to hold a wire that really
+	// delivers more, but a truncated prefix can no longer buy the schema's whole
+	// declared worst case.
+	if !strings.Contains(d, "if count > 2000000 { self.inv = true; return; } self.m.huge.clear(); self.m.huge.reserve_exact(count.min(65536)) },") {
+		t.Errorf("a schema count past the ceiling must be pre-sized to the ceiling:\n%s", d)
+	}
+	// The wrapper-sequence element arm is the one that fires up to
+	// MAX_DYN_ARRAY_COUNT times per message; it is bounded per firing by its own
+	// schema count, and now by the ceiling as well.
+	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root_wrapped_e, 0) => { if count > 7 { self.inv = true; return; } self.m.wrapped[self._ix1].vs.clear(); self.m.wrapped[self._ix1].vs.reserve_exact(count) },") {
+		t.Errorf("a bounded array under an unbounded wrapper sequence must be sized:\n%s", d)
+	}
+
+	// The ceiling follows the CONFIG, not a constant: max_dyn_array_count is what
+	// resolves it, and it is resolved even in a schema that has no unbounded array
+	// at all -- where MAX_DYN_ARRAY_COUNT is never emitted, so the clamp could not
+	// be spelled with it.
+	c := moduleFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      big: { id: 0, type: array, items: { type: u64, count: 500 } }
+`, map[string]any{"max_dyn_array_count": 100})
+	if strings.Contains(c, "MAX_DYN_ARRAY_COUNT") {
+		t.Errorf("a fully bounded schema emits no receiver cap to clamp with:\n%s", c)
+	}
+	if !strings.Contains(c, "self.m.big.clear(); self.m.big.reserve_exact(count.min(100)) },") {
+		t.Errorf("the clamp must be the resolved max_dyn_array_count:\n%s", c)
+	}
+
+	// The fixed-capacity profiles emit no reserve at all: a heapless::Vec<T, N>
+	// carries its capacity in its type, is already the exact allocation the bound
+	// describes, and has no reserve_exact to call.
+	for _, cfg := range []map[string]any{
+		{"corelib": "rs-no-std"},
+		{"corelib": "rs", "allow_dynamic": false},
+	} {
+		m := moduleFromYAML(t, src, cfg)
+		if strings.Contains(m, "reserve_exact") {
+			t.Errorf("message.rs (%v) must not reserve into fixed-capacity storage:\n%s", cfg, m)
+		}
+		if !strings.Contains(m, "(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; return; } self.m.nums.clear() },") {
+			t.Errorf("message.rs (%v) fixed-capacity arm must be clear-only:\n%s", cfg, m)
+		}
 	}
 }

@@ -114,6 +114,127 @@ func (g *gen) overIndexGuard(cap int64) string {
 	return "if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } "
 }
 
+// reserveCount emits the sizing half of a schema-bounded native array's
+// array_begin arm: `; <target>.reserve_exact(count)`, to be appended after the
+// container's `clear()`.
+//
+// The wire count M IS the array's length (MESSAGE_SPEC §3), so at this point the
+// decoder knows exactly how many elements are about to arrive through the scalar
+// callbacks — and before generator#505 it threw that number away. `clear()` only
+// resets the length, so a freshly defaulted `Vec::new()` (capacity 0) grew under
+// the pushes that followed. Go has always spelled this `make([]T, 0, count)` and
+// C# `new T[count]`; this is the Rust half of the same
+// single-allocation-in-the-exact-size shape (ARCHITECTURE §9.5 shape A).
+//
+// What growing actually cost is worth stating precisely, because Vec's first
+// allocation is not 1. RawVec floors it at MIN_NON_ZERO_CAP — 8 for a byte-sized
+// element, 4 for anything up to 1 KiB — and doubles from there, measured:
+//
+//	Vec<u32>, four pushes    caps 4, 4, 4, 4          one alloc, of 4
+//	Vec<u32>, eight pushes   caps 4, 4, 4, 4, 8, ...  two allocs, one copy
+//	Vec<u16>, eight pushes   caps 4, 4, 4, 4, 8, ...  two allocs, one copy
+//
+// So a `count: 4` u32 array was already one allocation and the doubling only bit
+// past the floor — a `count: 8` row paid a second allocation and a copy of the
+// first four elements. Both are wrong in the same way and the reserve fixes both:
+// one allocation, of exactly M, for every bound.
+//
+// `reserve_exact`, not `reserve`: `reserve` leaves amortized-growth headroom
+// (and a 4- or 8-element floor), which is dead weight here because M is the
+// final length and not a running total — no further growth follows. It is also
+// what makes the allocation *exactly* the wire count, matching the sibling
+// backends rather than merely bounding it.
+//
+// ORDER IS LOAD-BEARING. This must only ever be appended AFTER the over-count
+// reject, never before it: `count` is attacker-controlled, and reserving it
+// unchecked would turn a three-byte header into an arbitrary allocation. For the
+// same reason there is no call for the count-LESS arm, whose receiver cap
+// (MAX_DYN_ARRAY_COUNT, generator#102) is a refusal threshold and not a size
+// hint — reserving 65536 elements because a message was *allowed* to carry that
+// many is precisely the eager allocation that arm exists to prevent. The split is
+// the one TestCsDecodeLimits records for csharp: pre-size the schema-bounded
+// array, keep the count-less arm lazy.
+//
+// THE BOUND IS NOT A CEILING BY ITSELF, which is the second half of the same
+// argument and the one the first cut of generator#505 missed. `count > N` only
+// establishes that the wire asked for no more than the SCHEMA's N, and N is
+// capped by the schema language at 2147483647 — so a truncated prefix of a
+// message whose field declares `count: 2000000, items: u64` would reserve 16 MB
+// and then return Incomplete, having allocated the whole announced array before a
+// single element arrived. Measured against corelib-rs 7599f9a, that prefix is
+// FOUR bytes: the array header and its count word, and not one element byte
+// (0 allocated before generator#505, 16,000,000 unclamped, 524,288 clamped, all
+// three Incomplete). Rust's allocation-failure path is handle_alloc_error, a
+// process abort rather than a catchable error, so that is not a cost to leave to
+// the schema author. reserveArg therefore clamps the reserve at reserveCap; see
+// there for why clamping is free of semantic effect.
+//
+// A fixed-capacity heapless::Vec has no reserve_exact and needs none, so on those
+// profiles this emits nothing (boundedSeqIsDynamic).
+func (g *gen) reserveCount(target string, bound int64) string {
+	if !g.boundedSeqIsDynamic() {
+		return ""
+	}
+	return fmt.Sprintf("; %s.reserve_exact(%s)", target, g.reserveArg(bound))
+}
+
+// reserveArg renders the element count a reserve_exact is taken on, clamped so a
+// pre-size can never exceed reserveCap however large the schema `bound` is.
+//
+// Clamping is free: capacity is a HINT with no semantic effect. The Vec still
+// grows correctly if the wire really delivers more than the ceiling — it just
+// pays the growth it would have paid anyway before generator#505 — so nothing is
+// truncated, no verdict moves, and this is not the "clamping" CORELIB_PLAN
+// §6.2.1 forbids (that is about clamping a VALUE, or holding a cap in place of
+// the peer's).
+//
+// The clamp is resolved at GENERATE time, so it costs nothing in the overwhelming
+// case: a bound at or below the ceiling emits a bare `count` and the emitted arm
+// is byte-identical to the unclamped one. Only a schema that declares an array
+// bigger than the receiver's own amplification barrier pays a `usize::min`.
+func (g *gen) reserveArg(bound int64) string {
+	if bound <= g.reserveCap {
+		return "count"
+	}
+	return fmt.Sprintf("count.min(%d)", g.reserveCap)
+}
+
+// rowReserve is reserveCount for a NATIVE ROW frame (fkNestedNative): the row a
+// nested array's array_begin just opened at out[id] is itself a bounded native
+// array, and its elements arrive through the same scalar callbacks.
+//
+// It reserves through get_mut rather than indexing because the growth loop it
+// follows can legitimately fail to reach the index -- seqElemGrow breaks out when
+// a fixed-capacity outer container is full -- so a bare [id] would panic on
+// untrusted input where the store one level down already does the Some-guarded
+// thing (rowStore).
+//
+// Emitted only when the row's inner bound is a schema `count` (fr.ecap >= 0). A
+// count-less row's elements are bounded by MAX_DYN_ARRAY_COUNT, which is a refusal
+// threshold and not a size hint; see reserveCount. The count is clamped by the
+// same reserveArg, for the same reason.
+//
+// THE is_empty GUARD is not decoration. Unlike the leaf arm, this arm does not
+// clear the row: seqElemGrow only pushes Default::default() rows up TO the index,
+// so a row id that repeats within one message (legal on the wire — MESSAGE_SPEC
+// §7.4 is last-occurrence-wins, and no shared vector exercises it) finds a row
+// that already holds the previous occurrence's elements. `reserve_exact` is
+// additional capacity on top of the current LENGTH, so reserving there would ask
+// for len + M, and would do it exactly — one precise realloc per repeated header
+// instead of the amortized growth it replaced, i.e. slower than doing nothing.
+// Guarding on empty keeps the pre-size to the one case it was measured for (the
+// row seqElemGrow just created) and leaves the repeat path exactly as it was.
+//
+// The merge itself — rust appends where go/csharp/zig install a fresh row, and
+// where rust's own LEAF arm clears — is pre-existing and out of this change's
+// scope; it is filed as generator#509.
+func (g *gen) rowReserve(fr frame) string {
+	if fr.ecap < 0 || !g.boundedSeqIsDynamic() {
+		return ""
+	}
+	return fmt.Sprintf(" if let Some(_r) = %s.get_mut(id as usize) { if _r.is_empty() { _r.reserve_exact(%s); } }", fr.path, g.reserveArg(fr.ecap))
+}
+
 // rowReject builds one reject clause for a NATIVE ROW frame (fkNestedNative) in
 // array_begin: it sets the sticky verdict flag, DISARMS the fill counter and
 // returns before the row is opened or grown.
@@ -1194,6 +1315,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// while the discard counter armed above is simultaneously throwing the
 		// elements away. The two halves contradict each other.
 		//
+		// Since generator#505 that arm PRE-ALLOCATES as well as clears, so a
+		// mistyped header now also costs the declared field a reserve_exact it will
+		// never fill. That is a widening of this gap rather than a new one — the
+		// reserve rides the same already-wrong path, is bounded by the same schema
+		// `count`, and is bounded again by reserveArg's ceiling — but it is worth
+		// naming here, because it is what the gap now costs.
+		//
 		// It is left alone deliberately. That face is generator#254 / Crucible
 		// F-0039, which was fixed for java and csharp only and never for rust; it
 		// is a different codegen path (its primary form is a non-fixlen
@@ -1226,7 +1354,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 							// count word is read before the fixlen_word, so a bound applied on
 							// the strength of the count alone would reject a header that turns
 							// out to belong to no declared field at all.
-							f.line("            (%s, _Loc::%s, %d) => { if count > %d { self.inv = true; return; } %s },", kp, fr.loc, fld.ID, fld.Count, clear)
+							f.line("            (%s, _Loc::%s, %d) => { if count > %d { self.inv = true; return; } %s%s },", kp, fr.loc, fld.ID, fld.Count, clear, g.reserveCount(fmt.Sprintf("%s.%s", fr.path, rustIdent(fld.Name)), fld.Count))
 							continue
 						}
 						// Unbounded array under an active receiver cap (generator#102):
@@ -1260,8 +1388,16 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				// Keyed by the row's own element subtype for the same reason as the
 				// leaf arms: an fp64 row header at a declared fp32 row is a skipped
 				// field, so neither of these bounds is its bound.
-				f.line("            (%s, _Loc::%s, _) => { %s%s self.%s = id as usize; },",
-					arrayKindPat(fr.elemKind), fr.loc, g.rowGuards(fr), g.seqElemGrow(fr.path), fr.ixVar)
+				//
+				// The row is sized last, once it exists: it is the same field the leaf
+				// arms are, one level down (generator#505). Its inner `count` was just
+				// checked by rowGuards, and the M elements that follow are the row's
+				// whole value -- so a dynamic row that was just grown into as an empty
+				// Default::default() gets that count reserved instead of doubling into
+				// it. rowReserve is silent when the inner bound is a receiver cap
+				// rather than a schema `count`, for the reason reserveCount gives.
+				f.line("            (%s, _Loc::%s, _) => { %s%s self.%s = id as usize;%s },",
+					arrayKindPat(fr.elemKind), fr.loc, g.rowGuards(fr), g.seqElemGrow(fr.path), fr.ixVar, g.rowReserve(fr))
 			}
 		}
 		f.line("            _ => {}")

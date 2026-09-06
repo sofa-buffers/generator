@@ -988,6 +988,38 @@ sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/skipped_blob_alloc.rs"
 ( cd "$WORK/skipalloc" && cargo run -q ) || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
 echo "==> [rs] skipped-blob allocation OK"
 
+# A TRUNCATED schema-bounded array must not cost its declared count -- also a
+# MEASUREMENT, and the counterweight to generator#505.
+#
+# The pre-size that #505 added is taken on a count the arm's own `count > N` has
+# just approved, but N is the SCHEMA's bound and the schema language caps it at
+# 2147483647. Without a ceiling, a four-byte header announcing 2,000,000 u64
+# elements allocates 16 MB and then returns Incomplete -- an over-allocation a
+# green "truncated input is Incomplete" row cannot see, because the over-allocating
+# build returns Incomplete too. The generated arm clamps at the resolved
+# max_dyn_array_count; this counts the bytes and also proves the clamp is a HINT,
+# by decoding a well-formed message that carries more than the ceiling.
+#
+# Deliberately built with the DEFAULT config (no max_dyn_array_count key), so the
+# ceiling under test is the shipped default and not a test-only value.
+echo "==> [rs] a truncated bounded array does not allocate its declared count (generator#505)"
+cat > "$WORK/bigarr.yaml" <<'YAML'
+version: 1
+messages:
+  big:
+    payload:
+      arr: { id: 0, type: array, items: { type: u64, count: 2000000 } }
+YAML
+rm -rf "$WORK/bigalloc"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/bigarr.yaml" --out "$WORK/bigalloc" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/bigalloc/Cargo.toml"
+crate_bin_name "$WORK/bigalloc"
+printf 'mod message;\nuse message::*;\n' > "$WORK/bigalloc/src/main.rs"
+sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/truncated_array_alloc.rs" \
+    >> "$WORK/bigalloc/src/main.rs"
+( cd "$WORK/bigalloc" && cargo run -q ) || { echo "FAIL: a truncated bounded array must not allocate its declared count"; exit 1; }
+echo "==> [rs] truncated-array allocation OK"
+
 # CORELIB_PLAN §7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). Not run in corelib-rs, and not out of oversight: under the
 # ARCHITECTURE §8 rule only PayloadAcc moved into that library (corelib-rs#87);
