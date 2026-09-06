@@ -27,6 +27,13 @@ jobs:
         run: test -z "$(gofmt -l .)" || { echo "unformatted files:"; gofmt -l .; exit 1; }
       - name: Test
         run: go test ./... -count=1
+      # tests/bench/results.txt is committed, and what makes it worth committing is
+      # its header: the corelib SHAs and toolchain versions the numbers were measured
+      # against. Rendering that header is python, not Go, so `go test` cannot see it
+      # -- and a partial `run.sh --rows` run silently dropped eleven of twelve SHAs
+      # for months (#487). Stdlib unittest, no corelib and no toolchain needed.
+      - name: Bench formatter unit tests
+        run: python3 -m unittest discover -s tests/bench/lib -v
       - name: Cross-compile matrix
         run: |
           for t in linux/amd64 linux/arm64 windows/amd64 darwin/arm64; do

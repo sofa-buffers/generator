@@ -4636,22 +4636,62 @@ Provenance replaces pinning: corelib SHAs and toolchain versions live in the
 `results.txt` header. Header unchanged + a number moved ⇒ the generator did it. The
 cost is that absolute numbers are not comparable across days; this is a diff tool.
 
+**A `--rows` run merges that header entry by entry rather than rewriting it.** The
+*cells* of an unmeasured row always survived a partial run, read back out of
+`--previous`; the header did not. Corelib SHAs and the `sofab-engine` lines are
+resolved inside `run.sh`'s `corelib_for()`, which runs only for a row being measured,
+and the toolchain versions and schema hashes are probed from the host and the working
+tree whatever was measured — so a one-row run named that one corelib, dropped the
+other eleven, and restated the rest, stripping or falsifying the attribution of
+numbers that were still in the file. That made a partial run's output uncommittable,
+and left a 24-row full run as the only sanctioned way to move one number; it had
+already cost two hand-merges and one 56-minute re-measurement before it was fixed
+(#487). `format.py --partial` now merges all four families: an entry whose rows this
+run re-measured in full contributes the value this run resolved, and any other entry
+keeps the value its committed cells were measured against. Nothing is invented — a
+repo in neither the previous header nor this run's checkouts never appears, nor does
+a carried SHA whose rows have no cell left in the file, and an unresolved `(unknown)`
+is never carried forward as if it were a value.
+
+**The merge never stamps.** `--rows` selects per row while an entry covers every row
+it built, and eight of the twelve corelibs back more than one (`valgrind` backs all
+24). Where a run re-measured only some of an entry's rows *and* the value moved, no
+statement the line can carry is true of both halves — and the false half is the
+dangerous one, since "the header moved and those numbers did not" reads as evidence
+the bump cost them nothing. Such a run is refused, naming the rows to add, and
+`results.txt` is left untouched; widening the selection to the rows the entry covers
+is what makes it writable. That refusal is why the line still does not mark which
+entries were carried: every entry asserts "this is what the numbers below were
+measured against", and the merge is not allowed to produce one for which that is
+false. A probe covering no measured cell at all (the `zig` version on a `--rows
+kotlin` run) is not a conflict — it is a reading about nothing, so the committed
+value stands and the run says so on stderr.
+
+The flag is passed by `run.sh` only for a `--rows` run that will update
+`results.txt`, so a **full** run is unchanged and its header stays entirely its own
+(#464), and so is a `--rows` run written elsewhere with `--out` — bench.yml's per-row
+artifacts, which are a second measuring device rather than a candidate for the
+committed file. `tests/bench/lib/test_format.py` pins all three edges.
+
 **That rule has one qualifier: an Ir cell is a baseline, not a fresh reading.**
 `format.py`'s `stabilize()` writes a new measurement only when it deviates from the
 committed value by more than 0.3%, and returns the committed value otherwise, so
 that a JIT row flipping run-to-run cannot dirty the file. Two consequences follow,
 and both matter when reading a bench diff.
 
-*A cell may be older than the run that produced the file.* Provenance is uniform per
-header and per row — every SHA comes from one run, and every row was re-measured —
-but not per cell: a held cell still carries the reading of whichever earlier run last
-crossed the band. The band is one-sided against the committed value, so any change
-smaller than 0.3% is held back silently — one of them, or several summing — and the PR
-that finally tips such a cell across inherits the whole suppressed step. It must not be
-blamed for all of it; check the raw readings in the run log before attributing. A cell whose *reading*
-reproduces off-baseline in the same direction across two independent runs is
-suppressed drift rather than noise, and worth recording even though the file cannot
-show it.
+*A cell may be older than the run that produced the file.* After a full run,
+provenance is uniform per header and per row — every SHA comes from that run, and
+every row was re-measured. After a `--rows` run it is uniform per *entry* instead:
+each header entry describes the cells it covers, and a run that could not say that
+truthfully was refused rather than written (see above). In neither case is it uniform
+per cell: a held cell still carries the reading of whichever earlier run last crossed
+the band. The band is one-sided against the committed value, so any change
+smaller than 0.3% is held back silently — one of them, or several summing — and the
+PR that finally tips such a cell across inherits the whole suppressed step. It must
+not be blamed for all of it; check the raw readings in the run log before
+attributing. A cell whose *reading* reproduces off-baseline in the same direction
+across two independent runs is suppressed drift rather than noise, and worth
+recording even though the file cannot show it.
 
 *A cell landing within a hair of 0.3% is ambiguous until it is re-measured.* On a
 `subtract` row the underlying JIT number is not bit-reproducible at all, so a

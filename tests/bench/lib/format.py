@@ -11,9 +11,12 @@ nothing changed. Two rules follow from that and are load-bearing:
     provenance is what lets the corelibs stay unpinned (they must match the
     generated code built against them).
 
-Rows measured this run come from --measured; any row not measured (a partial
+Rows measured this run come from --irs/--sizes; any row not measured (a partial
 `run.sh --rows c` run) keeps its previously committed values, parsed back out of
---previous.
+--previous. Under --partial the same applies to every header line that attributes
+those values -- see parse_previous() and choose(). A partial run that cannot state a
+true header refuses to write one at all, rather than stamping this run's provenance
+onto cells it never measured.
 """
 
 import argparse
@@ -23,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import namedtuple
 from pathlib import Path
 
 # (label, argv) — label is what lands in the header.
@@ -208,24 +212,125 @@ def stabilize(new, prev):
     return new
 
 
+# The header's own lines, in the form results.txt writes them. parse_previous()
+# reads them back, so the literals live in one place.
+CORELIB_PREFIX = "# corelib:   "
+SCHEMA_PREFIX = "# schema:  "
+ENGINE_LABEL = "sofab-engine"
+
+# What a previously committed results.txt gives back: the cells, and every header
+# line that is a claim ABOUT those cells. `notes` carries whatever could not be read
+# back, so a header about to be rewritten cannot degrade in silence.
+Previous = namedtuple("Previous", "sizes irs corelibs engines tools schemas notes")
+
+
 def parse_previous(path):
-    """Recover previously committed values, so a partial `run.sh --rows c` keeps
+    """Recover previously committed state, so a partial `run.sh --rows c` keeps
     the rest of the file intact instead of blanking it.
 
-    Returns (sizes, irs): {(row,arch): (text,data,bss)} and {row: (enc,dec)}.
+    Cells: `sizes` {(row,arch): (text,data,bss)}, `irs` {row: (enc,dec)}.
+
+    Header: `corelibs` {short repo name: sha} off the `# corelib:` line, `engines`
+    {row: engine} and `tools` {label: version} off the `## toolchain` table, and
+    `schemas` {path: sha256} off the `# schema:` lines. Those are recovered for
+    exactly the same reason the cells are. A partial run resolves a SHA only for the
+    corelibs it checked out, probes an engine only for a python row it measured, and
+    probes the host for tools and schema files that may have nothing to do with the
+    row it ran — so building the header from this run alone dropped eleven of twelve
+    SHAs and both engine lines, and rewrote the toolchain and schema lines for
+    twenty-three rows it never touched (#487).
+
+    "(unknown)" is not carried, for a SHA or for an engine: it is a recorded failure
+    to resolve one, and re-printing it would launder it into the next run's header as
+    if it were a value. A tool's "(not found)" IS carried — that one is a recorded
+    fact about the environment the cells were measured in, not a failure to look.
     """
-    sizes, irs = {}, {}
+    sizes, irs, corelibs, engines, tools, schemas, notes = {}, {}, {}, {}, {}, {}, []
     if not path or not Path(path).exists():
-        return sizes, irs
+        return Previous(sizes, irs, corelibs, engines, tools, schemas, notes)
+    saw_corelib = False
     for line in Path(path).read_text().splitlines():
+        if line.startswith("# corelib:"):
+            saw_corelib = True
+            dropped = []
+            for part in line.split(":", 1)[1].split("|"):
+                f = part.split()
+                if len(f) == 2 and f[1] != "(unknown)":
+                    corelibs[f[0]] = f[1]
+                elif len(f) == 2 or not part.strip():
+                    pass                      # "<repo> (unknown)", or padding
+                else:
+                    # A hand-edited, reflowed or annotated entry. Dropping it
+                    # silently re-guts the header into exactly the #487 output, so
+                    # say so rather than let the next commit carry the loss.
+                    dropped.append(part.strip())
+            if dropped:
+                notes.append("could not read %d entr%s from the previous "
+                             "'# corelib:' line (%s); their provenance is dropped"
+                             % (len(dropped), "y" if len(dropped) == 1 else "ies",
+                                ", ".join(repr(d) for d in dropped)))
+            continue
+        if line.startswith("# schema:"):
+            f = line.split()
+            if len(f) >= 5 and f[3] == "sha256":
+                schemas[f[2]] = f[4]
+            continue
         if line.startswith("#") or not line.strip() or line.startswith("row"):
             continue
         f = line.split()
-        if len(f) == len(SZ_COLS) and f[2] not in ("toggle", "subtract"):
+        if len(f) == len(TC_COLS) and f[0] == ENGINE_LABEL:
+            if f[1] != "(unknown)":
+                engines[f[2]] = f[1]
+        elif len(f) == len(TC_COLS) and f[0] != TC_COLS[0]:
+            tools[f[0]] = f[1]
+        elif len(f) == len(SZ_COLS) and f[2] not in ("toggle", "subtract"):
             sizes[(f[0], f[2])] = (f[3], f[4], f[5])
         elif len(f) == len(IR_COLS) and f[2] in ("toggle", "subtract"):
             irs[f[0]] = (f[3], f[4])
-    return sizes, irs
+    if not saw_corelib and (corelibs or irs or sizes):
+        notes.append("the previous file has no '# corelib:' line; this run can only "
+                     "attribute the rows it measured")
+    return Previous(sizes, irs, corelibs, engines, tools, schemas, notes)
+
+
+def choose(new, old, describes, measured_ids, report):
+    """Which value one header entry should state, on a partial run.
+
+    Every entry -- a corelib SHA, a toolchain version, a schema hash, a python row's
+    engine -- makes one claim: *this is what the cells below were measured against*.
+    `describes` is the set of rows in this file that the entry covers, and
+    `measured_ids` the rows this run actually re-measured. Four cases, and only the
+    last is a problem:
+
+    * this run resolved nothing for the entry (`new is None`) -> carry the committed
+      value; the cells it describes were not re-measured either, so it is still true;
+    * nothing committed to contradict, or the two agree -> this run's value;
+    * this run re-measured EVERY row the entry covers -> this run's value;
+    * this run re-measured some of them and the value moved -> the entry would be
+      true of the cells it just measured and false of the ones it carried, and the
+      line has no room to say both. `report("refuse", ...)`; main() then refuses the
+      whole run rather than stamping this run's value onto cells that were never
+      built with it (#487). The unmeasured half is the dangerous one: the header
+      moved and those numbers did not, which reads as "the corelib bump cost them
+      nothing".
+
+    A probe that describes NO cell in this file (a `--rows kotlin` run on a box with
+    no zig, whose zig rows are all carried) is not a conflict: it is a reading about
+    nothing, so the committed value stands. That case is reported as "carry" so the
+    run can mention it, not refuse it.
+    """
+    if new is None:
+        return old
+    if old is None or old == new:
+        return new
+    stale = describes - measured_ids
+    if not stale:
+        return new
+    if describes & measured_ids:
+        report("refuse", old, new, stale)
+        return new
+    report("carry", old, new, stale)
+    return old
 
 
 def main():
@@ -236,6 +341,17 @@ def main():
     ap.add_argument("--previous")
     ap.add_argument("--root", required=True)
     ap.add_argument("--corelibs", help="TSV: <repo>\\t<checkout dir>")
+    # Passed by run.sh only when it was given --rows. Deciding it here instead
+    # (measured rows vs rows.json) would be wrong in the dangerous direction: a FULL
+    # run legitimately measures fewer rows than rows.json lists — a backend with no
+    # bench verb yet, a missing lang recipe, an `"ir": false` row — so it would look
+    # partial and start carrying header lines forward. As a flag, "a full run's
+    # header is entirely its own" is a property of the call rather than a guess.
+    ap.add_argument("--partial", action="store_true",
+                    help="only some rows were measured (run.sh --rows): merge the "
+                         "header with --previous entry by entry, instead of writing "
+                         "it from this run alone; refuse if no merged header would "
+                         "be true")
     args = ap.parse_args()
 
     spec = json.loads(Path(args.rows).read_text())
@@ -253,7 +369,64 @@ def main():
             row, enc, dec = line.split("\t")
             irs[row] = (enc, dec)
 
-    prev_sizes, prev_irs = parse_previous(args.previous)
+    prev = parse_previous(args.previous)
+
+    def fmt(vals, widths):
+        return "".join(str(v).ljust(w) for v, w in zip(vals, widths)).rstrip()
+
+    rows = sorted(spec["rows"], key=lambda r: r["id"])
+
+    # Both tables are rendered BEFORE the header, because the header is a claim about
+    # the cells this file ends up carrying: a corelib SHA carried forward for a row
+    # that has no cell here would be provenance about nothing. `in_file` is that set.
+    ir_lines, sz_lines, in_file = [], [], set()
+
+    for row in rows:
+        # `"ir": false` rows are known-unmeasurable with a reason recorded in
+        # rows.json. Omit them entirely rather than carrying a stale value (or a
+        # "!") forward from whatever the file happened to hold before.
+        if not row.get("ir", True):
+            continue
+        measured = irs.get(row["id"])
+        prev_ir = prev.irs.get(row["id"])
+        if measured:
+            # Hold the committed number still through noise; move it on signal.
+            vals = tuple(stabilize(m, p)
+                         for m, p in zip(measured, prev_ir or (None, None)))
+        else:
+            vals = prev_ir
+        if not vals:
+            continue
+        in_file.add(row["id"])
+        ir_lines.append(fmt([row["id"], row["profile"], row["method"], *vals], IR_WIDTHS))
+
+    for row in rows:
+        for arch in row["archs"]:
+            key = (row["id"], arch)
+            vals = sizes.get(key) or prev.sizes.get(key)
+            if not vals:
+                continue
+            in_file.add(row["id"])
+            sz_lines.append(fmt([row["id"], row["profile"], arch, *vals], SZ_WIDTHS))
+
+    # The rows this run actually re-measured — the ones whose cells above are this
+    # run's. Every header entry is a claim about a set of cells, so this is what
+    # decides whether this run may state it. A `!` cell counts as measured: the run
+    # did build that row against this run's corelib and toolchain.
+    measured_ids = set(irs) | {row for row, _ in sizes}
+
+    # Entries this run may not state, collected as they are found and acted on once,
+    # below, so a refusal names every conflicting line rather than the first.
+    refusals, carried_notes = [], []
+
+    def report(what):
+        def record(kind, old, new, stale):
+            (refusals if kind == "refuse" else carried_notes).append(
+                (what, old, new, sorted(stale)))
+        return record
+
+    for note in prev.notes if args.partial else []:
+        print(f"warning: {note}", file=sys.stderr)
 
     out = []
     out.append("# sofabgen bench results — regenerate with tests/bench/run.sh")
@@ -281,7 +454,14 @@ def main():
         by_schema.setdefault(row.get("schema", spec["schema"]), []).append(row["id"])
     default = spec["schema"]
     for schema in [default] + sorted(s for s in by_schema if s != default):
-        line = f"# schema:  {schema}  sha256 {sha256(root / schema)}"
+        digest = sha256(root / schema)
+        if args.partial:
+            # Hashed from the WORKING TREE, so an edited schema would otherwise
+            # re-attribute every carried row measured on the old one.
+            digest = choose(digest, prev.schemas.get(schema),
+                            set(by_schema[schema]) & in_file, measured_ids,
+                            report(f"schema {schema}"))
+        line = f"{SCHEMA_PREFIX}{schema}  sha256 {digest}"
         if schema != default:
             line += "  rows: " + ",".join(sorted(by_schema[schema]))
         out.append(line)
@@ -312,7 +492,15 @@ def main():
         # "(not found)" is deliberate: a tool that vanished from the environment is
         # exactly the kind of thing that silently changes a number, so record its
         # absence rather than dropping the line.
-        toolchain_rows.append((lbl, tool_version(argv) or "(not found)", where))
+        version = tool_version(argv) or "(not found)"
+        if args.partial:
+            # Probed from the HOST, for every tool in rows.json, whatever this run
+            # measured. Without this a one-row refresh on a partly-provisioned box
+            # rewrote (or "(not found)"-ed) the version of tools whose rows it only
+            # carried -- erasing a recorded version rather than recording an absence.
+            version = choose(version, prev.tools.get(lbl), rows_ & in_file,
+                             measured_ids, report(lbl))
+        toolchain_rows.append((lbl, version, where))
 
     corelib_dirs = {}
     if args.corelibs and Path(args.corelibs).exists():
@@ -327,48 +515,68 @@ def main():
     # run different engines — a single line could only be wrong for one of them. Only
     # for rows actually measured: the label must not appear for a --rows run that
     # never touched python.
+    engines = {}
     if "corelib-py" in corelib_dirs:
-        for row in sorted(spec["rows"], key=lambda r: r["id"]):
+        for row in rows:
             if row["lang"] != "python" or row["id"] not in irs:
                 continue
-            engine = python_engine(corelib_dirs["corelib-py"],
-                                   pin_pure=row.get("engine") != "native")
-            if engine:
-                toolchain_rows.append(("sofab-engine", engine, row["id"]))
+            # "(unknown)" rather than no entry when the probe fails, mirroring an
+            # unresolvable SHA: this row WAS re-measured, so a carried engine would
+            # attribute a new number to an engine this run never established.
+            engines[row["id"]] = python_engine(
+                corelib_dirs["corelib-py"],
+                pin_pure=row.get("engine") != "native") or "(unknown)"
+    if args.partial:
+        # A python row this run did not measure keeps the engine its committed number
+        # was measured with — the same statement the carried number itself makes.
+        python_ids = {r["id"] for r in spec["rows"] if r["lang"] == "python"}
+        merged = {}
+        for rid in set(engines) | set(prev.engines):
+            if rid not in python_ids or rid not in in_file:
+                continue      # provenance about a row with no cell here is a guess
+            value = choose(engines.get(rid), prev.engines.get(rid), {rid},
+                           measured_ids, report(f"{ENGINE_LABEL} {rid}"))
+            if value is not None:
+                merged[rid] = value
+        engines = merged
+    if engines:
+        for rid in sorted(engines):
+            toolchain_rows.append((ENGINE_LABEL, engines[rid], rid))
         toolchain_rows.sort(key=lambda t: (t[0], t[2]))
 
-    if corelib_dirs:
-        shas = []
-        for repo, d in sorted(corelib_dirs.items()):
-            sha = git_sha(d)
-            shas.append(f"{repo.replace('corelib-', '')} {sha or '(unknown)'}")
-        if shas:
-            out.append("# corelib:   " + " | ".join(shas))
+    # Per repo, not per file: a corelib checked out this run contributes the SHA this
+    # run resolved, one that was not keeps the SHA its committed cells were measured
+    # against. Merging on a FULL run is not merely unnecessary, it would be wrong —
+    # every cell there is this run's, so every SHA must be too (#464).
+    shas = {repo.replace("corelib-", ""): git_sha(d) or "(unknown)"
+            for repo, d in corelib_dirs.items()}
+    if args.partial:
+        # Per REPO, but `--rows` selects per ROW and eight of twelve corelibs back
+        # more than one: re-measuring a strict subset of a repo's rows may not stamp
+        # this run's SHA onto the siblings it carried, which is what choose() refuses.
+        rows_of_corelib = {}
+        for row in spec["rows"]:
+            rows_of_corelib.setdefault(row["corelib"].replace("corelib-", ""),
+                                       set()).add(row["id"])
+        merged = {}
+        for repo in set(shas) | set(prev.corelibs):
+            # A carried SHA is dropped when none of the rows it built is in this file
+            # any more: provenance about nothing is a guess, not a record.
+            describes = rows_of_corelib.get(repo, set()) & in_file
+            if not describes:
+                continue
+            value = choose(shas.get(repo), prev.corelibs.get(repo), describes,
+                           measured_ids, report(f"corelib-{repo}"))
+            if value is not None:
+                merged[repo] = value
+        shas = merged
+    if shas:
+        out.append(CORELIB_PREFIX + " | ".join(f"{r} {shas[r]}" for r in sorted(shas)))
     out.append("#")
-
-    def fmt(vals, widths):
-        return "".join(str(v).ljust(w) for v, w in zip(vals, widths)).rstrip()
-
-    rows = sorted(spec["rows"], key=lambda r: r["id"])
 
     out.append("## instruction cost")
     out.append(fmt(IR_COLS, IR_WIDTHS))
-    for row in rows:
-        # `"ir": false` rows are known-unmeasurable with a reason recorded in
-        # rows.json. Omit them entirely rather than carrying a stale value (or a
-        # "!") forward from whatever the file happened to hold before.
-        if not row.get("ir", True):
-            continue
-        measured = irs.get(row["id"])
-        prev = prev_irs.get(row["id"])
-        if measured:
-            # Hold the committed number still through noise; move it on signal.
-            vals = tuple(stabilize(m, p) for m, p in zip(measured, prev or (None, None)))
-        else:
-            vals = prev
-        if not vals:
-            continue
-        out.append(fmt([row["id"], row["profile"], row["method"], *vals], IR_WIDTHS))
+    out += ir_lines
 
     out.append("")
     out.append("## toolchain")
@@ -379,13 +587,27 @@ def main():
     out.append("")
     out.append("## footprint")
     out.append(fmt(SZ_COLS, SZ_WIDTHS))
-    for row in rows:
-        for arch in row["archs"]:
-            key = (row["id"], arch)
-            vals = sizes.get(key) or prev_sizes.get(key)
-            if not vals:
-                continue
-            out.append(fmt([row["id"], row["profile"], arch, *vals], SZ_WIDTHS))
+    out += sz_lines
+
+    for what, old, new, stale in carried_notes:
+        print(f"note: {what} reads {new} here but no row it describes was measured; "
+              f"keeping the committed {old}", file=sys.stderr)
+
+    # Nothing has been written yet, so refusing here leaves results.txt exactly as it
+    # was -- the honest outcome, because no header this format can write is true of
+    # both halves of the file. The fix is to widen the run, not to weaken the claim.
+    if refusals:
+        msg = ["refusing to write a header this run cannot make true:"]
+        widen = set(measured_ids)
+        for what, old, new, stale in refusals:
+            msg.append(f"  {what} moved {old} -> {new}, but "
+                       f"{','.join(stale)} {'was' if len(stale) == 1 else 'were'} "
+                       f"not re-measured against it")
+            widen |= set(stale)
+        msg.append("results.txt is unchanged. Re-run " +
+                   ("without --rows (a full run)" if widen >= all_ids
+                    else "with --rows " + ",".join(sorted(widen))))
+        sys.exit("\n".join(msg))
 
     sys.stdout.write("\n".join(out) + "\n")
 

@@ -13,9 +13,16 @@
 # Usage:
 #   tests/bench/run.sh                       # all rows -> results.txt
 #   tests/bench/run.sh --rows c,cpp-c-cpp    # only these rows; other rows keep
-#                                            #   their committed values
+#                                            #   their committed values, and the
+#                                            #   header keeps what attributes them
 #   tests/bench/run.sh --check               # exit 1 if results.txt would change
 #   tests/bench/run.sh --out /dev/stdout     # print instead of writing
+#
+# A --rows run is REFUSED when writing a true header is impossible -- a corelib or a
+# compiler moved under a row this run only carried -- and names the rows to add.
+# Merging the header is what makes a partial run committable, so only a run that
+# updates results.txt does it; --out elsewhere is a second opinion whose header
+# describes that run alone.
 #
 # Corelibs are cloned from their default branch (never pinned): a corelib has to
 # match the generated code built against it, and pinning would break the bench on
@@ -35,10 +42,20 @@ while [ $# -gt 0 ]; do
         --rows)  ONLY="$2"; shift 2 ;;
         --out)   OUT="$2"; shift 2 ;;
         --check) CHECK=1; shift ;;
-        -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+# Merging the results.txt header with the committed one (format.py --partial) is
+# what makes a one-row refresh committable. It is for exactly that: a run that will
+# not update results.txt -- bench.yml's per-row artifacts, or an --out preview -- is
+# a second measuring device, and report.py reads each artifact only for the row its
+# filename names, so its header stays a statement about the run that wrote it.
+PARTIAL=""
+if [ -n "$ONLY" ] && { [ "$CHECK" = "1" ] || [ "$OUT" = "$BENCH/results.txt" ]; }; then
+    PARTIAL=1
+fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -270,7 +287,13 @@ done
 # ---- render ----------------------------------------------------------------
 
 # Preserve rows we did not measure this run (--rows), so a partial run does not
-# blank the rest of the committed file.
+# blank the rest of the committed file. --partial extends that to the HEADER: the
+# corelib SHAs and the sofab-engine lines come from corelib_for(), which only runs
+# for a row being measured, and the toolchain versions and schema hashes are probed
+# from this host and this tree whatever was measured -- so without it a one-row run
+# drops eleven of twelve SHAs and both engine lines and rewrites the rest, for
+# numbers that are still in the file. format.py refuses outright when no merged
+# header would be true. A full run's header is written from that run alone.
 python3 "$BENCH/lib/format.py" \
     --rows "$BENCH/rows.json" \
     --sizes "$SIZES" \
@@ -278,6 +301,7 @@ python3 "$BENCH/lib/format.py" \
     --previous "$BENCH/results.txt" \
     --root "$ROOT" \
     --corelibs "$CORELIBS" \
+    ${PARTIAL:+--partial} \
     > "$WORK/new.txt"
 
 if [ "$CHECK" = "1" ]; then

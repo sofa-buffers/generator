@@ -101,6 +101,41 @@ Consequence, stated plainly: **absolute numbers are not comparable across days**
 because the corelib moves underneath. Compare within a run, or across a run where
 the header didn't move.
 
+**A one-row refresh keeps the header.** `run.sh --rows <id>` re-measures those rows
+and preserves everything else — the other rows' numbers, and every header line that
+attributes them: the corelib SHAs, the `sofab-engine` lines, the toolchain versions
+and the schema hashes. Each of those is probed from this run's checkouts, host and
+working tree, so without the merge a one-row refresh restated all four for the
+twenty-three rows it only carried. Entry by entry, then: the value this run resolved
+where this run re-measured every row that entry covers, and otherwise the committed
+value, which is what those cells were in fact built with. Nothing in the line
+distinguishes the two, because the claim each entry makes — "this is what the numbers
+below were measured against" — is the same either way.
+
+**And a refresh that cannot say that is refused.** `--rows` selects per row, but an
+entry covers every row it built — eight of the twelve corelibs back more than one
+row, `valgrind` backs all of them. Re-measure some of a corelib's rows and let its
+SHA move, and the entry would be true of the cells just measured and false of the
+ones carried: the header moved and those numbers did not, which reads as *the corelib
+bump cost them nothing*. There is no true header to write in that case, so `run.sh`
+writes none and leaves `results.txt` alone, naming the rows to add:
+
+```
+refusing to write a header this run cannot make true:
+  corelib-zig moved be2f1d8 -> 2423a95, but zig-unbounded was not re-measured against it
+results.txt is unchanged. Re-run with --rows zig,zig-unbounded
+```
+
+An entry that did not move is never refused, and neither is one whose rows this run
+measured none of — a `--rows kotlin` run on a box with no `zig` keeps the committed
+`zig` version and says so on stderr, because a probe that describes no cell in the
+file is a reading about nothing.
+
+A **full** run carries nothing forward and is never refused: it merges nothing, so
+its header is one run's, end to end. So is the header of a `--rows` run written
+somewhere else with `--out` (this is how `.github/workflows/bench.yml` measures):
+that output is a second opinion, not a candidate for the committed file.
+
 Override a clone to test a local corelib:
 
 ```sh
