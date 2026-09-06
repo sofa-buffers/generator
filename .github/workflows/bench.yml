@@ -103,6 +103,10 @@ jobs:
         if: startsWith(matrix.row, 'ts-')
         with: { node-version: "24" }
 
+      # --out, so run.sh does NOT merge the committed header into this file
+      # (tests/bench/run.sh, PARTIAL): this runner is a second measuring device and
+      # its artifact is never committed, so its header describes this run alone.
+      # report.py reads each artifact only for the row its filename names.
       - name: Measure
         run: ./tests/bench/run.sh --rows ${{ matrix.row }} --out bench-${{ matrix.row }}.txt
 
