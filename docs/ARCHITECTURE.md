@@ -4627,7 +4627,11 @@ generator's own runtime.
 **Ir, not wall-clock.** Instructions retired under Callgrind are independent of CPU
 clock and OS scheduling, which is what makes a number stable enough to commit to a
 file at all. Determinism is therefore a hard requirement here, not a nicety: a file
-that wobbles when nothing changed is one nobody regenerates.
+that wobbles when nothing changed is one nobody regenerates. **One cell does not meet
+it today**: `go` encode is bimodal (18625 or 20468, the low value on ~13% of 53
+readings taken on an unchanged tree), so re-running `run.sh` flips it by −9.15% about
+one run in eight, 30x past any hysteresis. A `go` encode move of ~9% is that defect,
+#494, and not a regression; every other cell is idempotent.
 
 **The corelib is deliberately not pinned.** It is cloned from its default branch, as
 conformance does, because a corelib must match the generated code built against it —
@@ -4688,25 +4692,36 @@ per cell: a held cell still carries the reading of whichever earlier run last cr
 the band. The band is one-sided against the committed value, so any change
 smaller than 0.3% is held back silently — one of them, or several summing — and the
 PR that finally tips such a cell across inherits the whole suppressed step. It must
-not be blamed for all of it; check the raw readings in the run log before
-attributing. A cell whose *reading* reproduces off-baseline in the same direction
-across two independent runs is suppressed drift rather than noise, and worth
-recording even though the file cannot show it.
+not be blamed for all of it; check `results-raw.txt` (below) before attributing. A
+cell whose *reading* reproduces off-baseline in the same direction across two
+independent runs is suppressed drift rather than noise.
 
-*A cell landing within a hair of 0.3% is ambiguous until it is re-measured.* On a
-`subtract` row the underlying JIT number is not bit-reproducible at all, so a
-threshold crossing near the edge has two readings that tell opposite stories: noise
-that cleared the gate once, or an earlier real change that the band held back until it
-tipped. The file cannot tell them apart, so re-run the row before writing either one
-down.
+**So the reading is committed too.** Every run writes `tests/bench/results-raw.txt`
+beside `results.txt`: the same instruction-cost table with the hysteresis left off —
+what the run read, as against what the file commits. A held cell is then a diff there
+while `results.txt` stays still, and `git log -p` dates it to a run, which is exactly
+what #488 could not be given. It carries no header (the provenance is in
+`results.txt`, written by the same run, and two headers could disagree), it carries
+rows forward on a `--rows` run as `results.txt` does, and neither file is written when
+a run is refused a true header. It is deliberately **not** idempotent — the eight rows
+with real jitter move it every run — so `--check` reports its diff and fails only on
+`results.txt`, which is the file a reviewer reads.
+
+*A cell landing within a hair of 0.3% is ambiguous until it is re-measured.* Some
+rows' underlying number is not bit-reproducible, so a threshold crossing near the edge
+has two readings that tell opposite stories: noise that cleared the gate once, or an
+earlier real change that the band held back until it tipped. The file cannot tell them
+apart, so re-run the row before writing either one down.
 
 The instance on record is `kotlin` decode 32655 → 32753 (+0.3001%, i.e. past the gate by
 one part in a million) — corelib-kotlin-mp unmoved and no kotlin backend change *between
 that run and the one before it*, and the row's own encode half moving −0.023% in the same
 run. It read as a gate artifact and was not. Three back-to-back re-runs of the row on the
-unchanged tree read decode 32752/32753/32751 and encode 17200/17200/17199: a spread of
-0.006%, fifty times inside the band, and centred on the new value rather than the old. So
-32753 is what this row's decode half costs.
+unchanged tree read decode 32752/32753/32751 and encode 17200/17200/17199, centred on the
+new value rather than the old, so 32753 is what this row's decode half costs. (The 0.006%
+spread those three runs showed is *not* this row's jitter — see the measured table below;
+eight further runs turned up an encode reading 0.122% out. Three runs bound a spread from
+below and never characterise it.)
 
 What the crossing does *not* establish is when the row got there. 32655 is the value the
 cell last **changed** to, on 2026-08-18, and six later regenerations re-printed it while
@@ -4734,12 +4749,44 @@ row whose *measured* jitter approaches the band; widening the band never is. But
 cannot touch masking — the band is a fixed 0.3% relative and does not move with them.
 Measured here, doubling this row to `10000 210000` left the spread where it was
 (0.003–0.012%, the resolution floor of the integer Ir/op the harness reports) and cost ~30%
-wall clock, so the counts stayed. The one lever that acts on masking is `NOISE_BAND`
-itself, and its sizing is unvalidated: `kotlin` is the only row whose jitter has ever been
-measured directly (the band is ~50x it there, not the ~10x the code claims), and the other
-23 rows are uncharacterised — which is why it has not been narrowed on one row's evidence.
-That is #489. Footprint sizes bypass `stabilize()` entirely and are always direct
-measurements.
+wall clock, so the counts stayed.
+
+**All 24 rows have since been characterised** — three or more back-to-back runs each on
+an unchanged tree, raw readings and the two run shapes in `tests/bench/README.md` — and
+the result sized the band from data rather than from a figure documented in corelib-java
+(#489):
+
+* the reproducible/jittery split is the **runtime**, not the method. Sixteen rows repeat
+  exactly, both halves, including both `python` rows and (to 1–5 Ir) all three `ts` rows,
+  which are `subtract`. That is reproduction *within one build context*, which is the
+  only thing a back-to-back campaign measures; across contexts several of those rows
+  move by ~0.1%, which is the point of the last bullet;
+* the band is a **one-sided deviation from the committed value**, so it is sized against
+  `max |reading − committed| / committed` and not against a max-min spread. The widest
+  well-behaved one is `kotlin` encode at **0.122%** (a 17221 against the 17200 its
+  readings cluster on), so the band clears the measurement by ~2.5x — not the ~10x the
+  code claimed nor the ~50x three runs of that row suggested. There is no headroom:
+  `0.001` sits below that excursion, `0.002` clears it by 1.6x. **`NOISE_BAND` was
+  therefore kept at 0.003**, and the sidecar above, not a smaller band, is what makes a
+  masked step visible;
+* and `go` encode is **bimodal** — 18625 or 20468, 9.1% apart, ~13% of runs — so that cell
+  moves at random whatever the band is. No band can hold it without swallowing every
+  regression this tool exists to catch; it is a defect in the row, filed as #494;
+* committed cells **are** being held off a value that reproduces to the instruction —
+  `rust-rs` decode by 0.159%, `cpp-c-cpp-dyn` decode by 0.143%, `zig` encode by 0.121%
+  — the #488 disease at file scale, and the reason the sidecar landed. How many, and
+  which, is a property of the two committed files rather than of this document: it is
+  counted and tabulated in `tests/bench/README.md`, "What the band is hiding right now",
+  and re-derived by diffing the files.
+
+  The qualifier that table exists to carry: a cell one re-measurement puts off the
+  committed value is a masked step **only if a second, independent measurement agrees
+  with the first**. The same campaign read five further cells at a *third* value at an
+  identical corelib SHA (both `python` rows, both `python-native` rows, `rust-rs-no-std`
+  encode) — a build context moving, not a step, and unattributed either way. "The row
+  has no jitter" is a statement about one context.
+
+Footprint sizes bypass `stabilize()` entirely and are always direct measurements.
 
 **`results.txt` is regenerated by hand in the devcontainer**, the same way the
 benchmark arena is driven — never by CI. Ir/op depends on the compiler that produced

@@ -46,6 +46,8 @@ tests/
 ├── bench/                  # Tier 3 — Ir/op + footprint of the generated code (ARCHITECTURE §15)
 │   ├── run.sh              #   regenerates results.txt; --rows <ids> to iterate on one row
 │   ├── results.txt         #   COMMITTED — the artifact; `git diff` it
+│   ├── results-raw.txt     #   COMMITTED — the same cells WITHOUT the noise band:
+│   │                       #   what each run read, so a held cell leaves a trace
 │   ├── rows.json           #   the (language x corelib x config) rows + their arches/reps
 │   ├── payload/            #   the saturated JSON payload every row encodes
 │   ├── lang/<lang>.sh      #   per-language build + measure recipes

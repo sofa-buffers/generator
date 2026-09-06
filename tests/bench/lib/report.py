@@ -23,9 +23,19 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from format import NOISE_BAND  # noqa: E402  (same directory; its argv work is in main())
+
 # Below this a reading is noise: results.txt itself holds a cell until it moves this
-# far (lib/format.py), so anything under it would not have changed the file.
-HOLD_PCT = 0.3
+# far, so anything under it would not have changed the file. Taken FROM format.py
+# rather than copied: a report that bucketed on a different threshold than the file it
+# compares against would call a move "moved" that results.txt had held.
+#
+# "Noise" is the rule, not a guarantee. Per-row jitter is measured in
+# tests/bench/README.md: sixteen rows repeat exactly and would show nothing under this
+# threshold, while `go` encode swings 9.1% on an unchanged tree (#494) and therefore
+# lands in the outlier bucket for no reason a commit caused.
+HOLD_PCT = NOISE_BAND * 100
 
 # Above this a row is called out separately. Not a statistical bound — a threshold
 # low enough to catch a real codegen regression and high enough that JIT rows do not

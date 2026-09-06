@@ -154,15 +154,35 @@ def sha256(path):
 # Ir counts as unchanged while it stays inside this band of the committed value.
 #
 # It has to sit above the measurement's own noise and below the smallest regression
-# worth seeing. The subtract rows' documented jitter is ~0.03%
-# (corelib-java/bench/run_callgrind.sh); the perf changes this tool exists to catch
-# are 1%+ (see docs/perf-patches/, where the wins are tens of percent). 0.3% is an
-# order of magnitude clear of both edges.
+# worth seeing. The perf changes this tool exists to catch are 1%+ (see
+# docs/perf-patches/, where the wins are tens of percent), and every row's jitter has
+# now been measured: three or more back-to-back `run.sh --rows <id>` on an unchanged
+# tree, raw readings in tests/bench/README.md, "Measured jitter, per row".
 #
-# That ~0.03% is a documented figure, not one measured here. The only row measured
-# directly -- kotlin, six back-to-back runs -- spreads 0.006%, so on that row the band
-# is ~50x the jitter rather than ~10x. The other 23 rows are uncharacterised, which is
-# why this is not narrowed on one row's evidence: see issue #489.
+# What that table says about this number:
+#
+#   * sixteen of the twenty-four rows reproduce EXACTLY, both halves. For those the
+#     band buys nothing and hides up to 0.3%, and cells in the committed file are in
+#     fact being held off a reading that repeats to the instruction. How many, at any
+#     moment, is a property of the two committed files and not of this source: read
+#     it off them (diff results.txt against results-raw.txt), or see the counted
+#     table in tests/bench/README.md, "What the band is hiding right now".
+#   * the widest deviation a reading showed from a committed value on a well-behaved
+#     row is kotlin encode at 0.122% (17221 against the 17200 its readings cluster
+#     on) -- one excursion in eleven readings at that row's committed reps, the rest
+#     inside 0.023%. That is the quantity to compare this constant against: the band
+#     is a one-sided deviation from the committed value, NOT a max-min spread. So the
+#     band is ~2.5x the widest measured deviation, NOT the ~10x this comment used to
+#     claim, nor the ~50x that kotlin's first three runs suggested (#473). There is
+#     no headroom to narrow: 0.001 would sit BELOW that excursion and flip the cell
+#     on roughly one reading in eleven, and 0.002 clears it by only 1.6x.
+#   * and one row is beyond any band's reach: `go` encode is bimodal, 18625 or 20468
+#     over 53 runs (9.1%, 30x this band), so that cell moves at random whatever this
+#     is set to. Sizing the band cannot fix it; that is issue #494, not this one.
+#
+# So 0.003 stands, sized from the data rather than from a figure documented in
+# corelib-java. The lever that acts on MASKING is not this constant but the raw
+# sidecar next to it (results-raw.txt), which records what was actually read.
 NOISE_BAND = 0.003
 
 
@@ -178,28 +198,46 @@ def stabilize(new, prev):
     bucket edges, and a raw value sitting on one flips regardless. The idempotence
     check caught exactly that on two of three subtract rows (csharp decode
     71100<->71200, java encode 16500<->16600 — both raws sat on a 3-s.f. edge).
-    The real cause is that a JIT's instruction count is not bit-reproducible; only
-    CPython and the toggle rows are.
 
-    Hysteresis is honest about that: it holds the number still through noise and
-    moves it on signal. Two properties worth knowing —
+    "Only CPython and the toggle rows are bit-reproducible" was the reason given for
+    holding at all, and it is not the split the measurements found (#489). What
+    reproduces exactly is a property of the RUNTIME, not of the method: the two python
+    rows, all three ts rows to within 1-5 Ir, and fourteen of the fifteen toggle rows
+    repeat to the instruction, while `go` — a toggle row — is the noisiest row in the
+    file by two orders of magnitude (#494). Per-row readings: tests/bench/README.md.
+
+    Hysteresis is honest about the rows that do move. Two properties worth knowing —
 
     * it is order-dependent (the committed value is the reference), which is the
       point: `results.txt` is a baseline, not a fresh reading each time;
     * a change smaller than the band is held back, and stays invisible until it (or
-      the sum of it and later ones) crosses. This has now happened for real: kotlin
-      decode's cell held at 32655 across four corelib-kotlin-mp bumps, a JDK change
-      and the whole receiver-cap series, then moved +0.3001% in one run -- surfacing
-      a step that had landed weeks earlier, which the crossing PR did not cause and
-      cannot be blamed for (issue #488, ARCHITECTURE 15).
+      the sum of it and later ones) crosses. This is not hypothetical and not rare:
+      kotlin decode's cell held at 32655 across four corelib-kotlin-mp bumps, a JDK
+      change and the whole receiver-cap series, then moved +0.3001% in one run,
+      surfacing a step that had landed weeks earlier (#488). Re-measuring every row
+      found more of the same: cells held off a value that reproduces to the
+      instruction in two independent measurement contexts — rust-rs decode by
+      0.159%, cpp-c-cpp-dyn decode by 0.143%, zig encode by 0.121% — with no
+      jitter to absorb them and nothing that owns them. The current count and the
+      per-cell table live in tests/bench/README.md; they are a property of the
+      committed files and move on every run, so they are not restated here.
+
+      Two contexts is the load-bearing part. A cell that ONE re-measurement puts off
+      the committed value may be a masked step, or may be the build context moving:
+      the same campaign read five further cells at a THIRD value, at an identical
+      corelib SHA, and those are unattributed rather than masked.
 
     Raising a row's reps is the answer to JITTER, not to that. It shrinks the raw
     spread; the band is a fixed 0.3% RELATIVE and does not move with it, so more reps
     cannot surface a masked step -- measured on kotlin, doubling the delta left the
-    spread at the 1-2 Ir resolution floor for +30% wall clock. The band being ~50x
-    that row's jitter is exactly what gives a real change room to hide. NOISE_BAND is
-    the only lever that acts on masking; sizing it needs the other rows' jitter
-    measured first (#489).
+    spread at the 1-2 Ir resolution floor for +30% wall clock.
+
+    Nor can NOISE_BAND be narrowed to shrink the masking: at 0.003 it is already only
+    ~2.5x the widest measured deviation from a committed value (see the constant
+    above). What DOES surface a masked step is recording the reading this run
+    actually took, which is what the raw sidecar written next to results.txt is for —
+    a held cell is then a diff in results-raw.txt and `git log` dates it, instead of
+    leaving no trace at all.
     """
     if prev in (None, "!") or new == "!":
         return new
@@ -293,6 +331,67 @@ def parse_previous(path):
     return Previous(sizes, irs, corelibs, engines, tools, schemas, notes)
 
 
+def parse_previous_raw(path):
+    """The raw sidecar's cells, {row: (encode, decode)} — so a partial run carries
+    the rows it did not measure instead of dropping them, exactly as results.txt does.
+
+    Deliberately not parse_previous(): the sidecar has no header to merge (see
+    render_raw), so reusing that parser would only produce a "no '# corelib:' line"
+    note about a file that is not supposed to have one.
+    """
+    out = {}
+    if not path or not Path(path).exists():
+        return out
+    for line in Path(path).read_text().splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        f = line.split()
+        if len(f) == len(IR_COLS) and f[2] in ("toggle", "subtract"):
+            out[f[0]] = (f[3], f[4])
+    return out
+
+
+def render_raw(lines):
+    """The Ir readings this run actually took, with no hysteresis applied.
+
+    results.txt holds a cell still while a reading is within NOISE_BAND of it, which
+    is what keeps the committed file from wobbling — and it also means the reading is
+    DISCARDED. That is not a small loss. When kotlin decode finally crossed the band
+    it surfaced a step that had landed weeks and six regenerations earlier, and
+    because every intermediate reading had been thrown away, the repository could not
+    say which of four corelib bumps, a JDK change and 820 lines of codegen owned it
+    (#488). Re-measuring every row later found more cells in the same state, on rows
+    that reproduce to the instruction (#489); the count and the table are in
+    tests/bench/README.md, because they are a property of the committed files.
+
+    This file is the fix, and it is deliberately the cheapest one: the same table,
+    same order, same widths, holding what was measured rather than what is committed.
+    A held cell is then a diff HERE while results.txt stays still, and `git log -p`
+    dates it to a run. It is a record, not a gate — nothing reads it back but the next
+    run's carry-forward, and unlike results.txt it is EXPECTED to move on rows with
+    real jitter, so read it for what a run saw and results.txt for the verdict.
+
+    No header: every claim about what produced these numbers — corelib SHAs,
+    toolchain versions, schema hashes — is in results.txt beside it, written by the
+    same run from the same probes, and duplicating the merge machinery here would
+    give two headers that could disagree.
+    """
+    return [
+        "# RAW Ir readings — regenerate with tests/bench/run.sh. See lib/format.py.",
+        "#",
+        "# What tests/bench/results.txt would hold if it did not hold cells still: the",
+        "# reading each row's last measurement actually produced. A row this run did not",
+        "# measure keeps its previous reading, as in results.txt.",
+        "#",
+        "# Read results.txt for the verdict and its header for provenance. This file is",
+        "# the record: a cell held back by the noise band shows up here and nowhere else,",
+        "# and jittery rows (go encode above all — #494) move here without meaning",
+        "# anything. See tests/bench/README.md, \"Measured jitter, per row\".",
+        "#",
+        "".join(str(v).ljust(w) for v, w in zip(IR_COLS, IR_WIDTHS)).rstrip(),
+    ] + lines
+
+
 def choose(new, old, describes, measured_ids, report):
     """Which value one header entry should state, on a partial run.
 
@@ -339,6 +438,11 @@ def main():
     ap.add_argument("--sizes", required=True)
     ap.add_argument("--irs", required=True)
     ap.add_argument("--previous")
+    # The raw sidecar (see render_raw). Both optional: a run that is not updating the
+    # committed pair — an --out preview, bench.yml's per-row artifacts — writes no
+    # record, because a second measuring device's readings are not this file's history.
+    ap.add_argument("--raw-out", help="write the un-stabilized Ir table here")
+    ap.add_argument("--previous-raw", help="the committed raw sidecar, for carry-forward")
     ap.add_argument("--root", required=True)
     ap.add_argument("--corelibs", help="TSV: <repo>\\t<checkout dir>")
     # Passed by run.sh only when it was given --rows. Deciding it here instead
@@ -370,6 +474,22 @@ def main():
             irs[row] = (enc, dec)
 
     prev = parse_previous(args.previous)
+    prev_raw = parse_previous_raw(args.previous_raw)
+
+    # A partial run CARRIES the rows it did not measure, in both files. results.txt
+    # gets that from --previous, which is committed and always there; the sidecar gets
+    # it from --previous-raw, which may not be (deleted, or a checkout predating it).
+    # With nothing to carry, `raw = measured or prev_raw.get(id)` below keeps only the
+    # rows this run touched, and run.sh then copies that one-row file over the
+    # committed sidecar — a permanent truncation, silent, and with no analogue of the
+    # header refusal that protects results.txt. So refuse, on the same principle: a
+    # partial run may not write a record it cannot make complete.
+    if args.partial and args.raw_out and not prev_raw:
+        print("refusing: --partial with no readings to carry in "
+              f"{args.previous_raw or '(no --previous-raw)'} — a partial run would "
+              "write a sidecar holding only the rows it measured. Regenerate both "
+              "files with a full tests/bench/run.sh.", file=sys.stderr)
+        sys.exit(2)
 
     def fmt(vals, widths):
         return "".join(str(v).ljust(w) for v, w in zip(vals, widths)).rstrip()
@@ -380,6 +500,7 @@ def main():
     # the cells this file ends up carrying: a corelib SHA carried forward for a row
     # that has no cell here would be provenance about nothing. `in_file` is that set.
     ir_lines, sz_lines, in_file = [], [], set()
+    raw_lines = []
 
     for row in rows:
         # `"ir": false` rows are known-unmeasurable with a reason recorded in
@@ -399,6 +520,11 @@ def main():
             continue
         in_file.add(row["id"])
         ir_lines.append(fmt([row["id"], row["profile"], row["method"], *vals], IR_WIDTHS))
+        # The same cell WITHOUT the hysteresis — see render_raw().
+        raw = measured or prev_raw.get(row["id"])
+        if raw:
+            raw_lines.append(fmt([row["id"], row["profile"], row["method"], *raw],
+                                 IR_WIDTHS))
 
     for row in rows:
         for arch in row["archs"]:
@@ -436,8 +562,9 @@ def main():
     out.append("#")
     out.append("#   Ir/op     instructions retired for ONE op (Callgrind). Independent of CPU clock")
     out.append("#             and OS scheduling, so it compares across machines. Host x86-64, -O3.")
-    out.append("#             A cell holds its value until a reading moves >0.3% (the JIT rows are")
-    out.append("#             not bit-reproducible), so noise cannot dirty this file. See README.")
+    out.append("#             A cell holds its value until a reading moves >0.3%, so a row that")
+    out.append("#             is not bit-reproducible cannot dirty this file. What each run READ,")
+    out.append("#             held cells included, is in results-raw.txt beside this. See README.")
     out.append("#   footprint .text/.data/.bss in bytes, -Os, cross-compiled to the targets the")
     out.append("#             footprint profiles actually ship to.")
     out.append("#")
@@ -608,6 +735,11 @@ def main():
                    ("without --rows (a full run)" if widen >= all_ids
                     else "with --rows " + ",".join(sorted(widen))))
         sys.exit("\n".join(msg))
+
+    # After the refusal, never before: a run whose header cannot be written leaves the
+    # pair exactly as it was, so the record and the table stay from the same run.
+    if args.raw_out:
+        Path(args.raw_out).write_text("\n".join(render_raw(raw_lines)) + "\n")
 
     sys.stdout.write("\n".join(out) + "\n")
 

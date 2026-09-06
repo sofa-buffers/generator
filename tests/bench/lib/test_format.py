@@ -137,7 +137,8 @@ class FormatHeaderTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def render(self, *, irs=(), sizes=(), corelibs=(), previous=None, partial=False):
+    def render(self, *, irs=(), sizes=(), corelibs=(), previous=None, partial=False,
+               raw=False, previous_raw=None):
         w = self.root
         (w / "irs.tsv").write_text("".join("\t".join(r) + "\n" for r in irs))
         (w / "sizes.tsv").write_text("".join("\t".join(r) + "\n" for r in sizes))
@@ -152,6 +153,16 @@ class FormatHeaderTest(unittest.TestCase):
         if previous is not None:
             (w / "previous.txt").write_text(previous)
             argv += ["--previous", str(w / "previous.txt")]
+        # The raw sidecar is written to a file rather than stdout, so a test that
+        # wants it asks for it and reads self.raw afterwards.
+        self.raw = None
+        if raw or previous_raw is not None:
+            argv += ["--raw-out", str(w / "raw.txt")]
+            if (w / "raw.txt").exists():
+                (w / "raw.txt").unlink()
+        if previous_raw is not None:
+            (w / "previous-raw.txt").write_text(previous_raw)
+            argv += ["--previous-raw", str(w / "previous-raw.txt")]
         if partial:
             argv.append("--partial")
         buf, err = io.StringIO(), io.StringIO()
@@ -161,6 +172,8 @@ class FormatHeaderTest(unittest.TestCase):
                 fmt.main()
         finally:
             self.stderr = err.getvalue()
+            if (w / "raw.txt").exists():
+                self.raw = (w / "raw.txt").read_text()
         return buf.getvalue()
 
     def refusal(self, **kw):
@@ -433,6 +446,76 @@ class FormatHeaderTest(unittest.TestCase):
         out = self.render(irs=[("beta", "300", "400")], corelibs=["corelib-go"],
                           previous=prev, partial=True)
         self.assertEqual(out, prev)
+
+    # -- the raw sidecar (#489) ----------------------------------------------
+    #
+    # results.txt holds a cell still while a reading is within NOISE_BAND of it, and
+    # THROWS THE READING AWAY. That is why #488 could not be dated from the repository
+    # at all, and why re-measuring every row found seven more cells held off a number
+    # that reproduces to the instruction in two independent measurement contexts (and
+    # five further cells that read a third value, which is a different finding — see
+    # tests/bench/README.md). results-raw.txt is the record that closes it, so what
+    # these pin is the one property that makes it a record: it states what was
+    # measured, never what is committed.
+
+    def test_the_sidecar_holds_the_reading_where_results_holds_the_baseline(self):
+        prev = self.committed()
+        self.assertEqual(ir_rows(prev)["beta"], ("300", "400"))
+        # A partial run needs a sidecar to carry, so give it one from a full run.
+        self.render(irs=ALL_IRS, sizes=ALL_SIZES, corelibs=ALL_CORELIBS, raw=True)
+        carried = self.raw
+
+        # +0.2% on encode: inside the 0.3% band, so results.txt must not move...
+        out = self.render(irs=[("beta", "300.6", "400")], corelibs=["corelib-go"],
+                          previous=prev, partial=True, previous_raw=carried)
+        self.assertEqual(ir_rows(out)["beta"], ("300", "400"))
+        # ...and the sidecar must say what was actually read, or the step is lost.
+        self.assertEqual(ir_rows(self.raw)["beta"], ("300.6", "400"))
+
+    def test_a_partial_run_with_no_sidecar_to_carry_is_refused(self):
+        """results.txt survives a partial run because --previous is committed and
+        always there. The sidecar's carry-forward reads --previous-raw, which can be
+        absent (deleted, or a checkout predating it) — and then a `--rows` run would
+        quietly replace the committed record with just the rows it measured. That is a
+        truncation nothing else would catch, so it is refused instead."""
+        prev = self.render(irs=ALL_IRS, sizes=ALL_SIZES, corelibs=ALL_CORELIBS,
+                           raw=True)
+        with self.assertRaises(SystemExit):
+            self.render(irs=[("beta", "333", "444")], corelibs=["corelib-go"],
+                        previous=prev, partial=True, raw=True)
+        self.assertIsNone(self.raw)
+        self.assertIn("refusing", self.stderr)
+
+    def test_a_row_the_sidecar_did_not_measure_keeps_its_previous_reading(self):
+        """Same carry-forward rule as results.txt: a partial run must not blank the
+        rows it did not touch, or the record would only ever hold one row."""
+        first = self.render(irs=ALL_IRS, sizes=ALL_SIZES, corelibs=ALL_CORELIBS,
+                            raw=True)
+        self.assertEqual(ir_rows(first)["alpha"], ("100", "200"))
+
+        self.render(irs=[("beta", "333", "444")], corelibs=["corelib-go"],
+                    previous=first, partial=True, previous_raw=self.raw)
+        self.assertEqual(ir_rows(self.raw),
+                         {"alpha": ("100", "200"), "beta": ("333", "444"),
+                          "python": ("500", "600"), "python-native": ("700", "800")})
+
+    def test_a_run_that_asks_for_no_sidecar_writes_none(self):
+        """An --out preview and bench.yml's per-row artifacts are a second measuring
+        device; their readings are not this repository's record."""
+        self.render(irs=ALL_IRS, sizes=ALL_SIZES, corelibs=ALL_CORELIBS)
+        self.assertIsNone(self.raw)
+
+    def test_a_refused_run_writes_no_sidecar_either(self):
+        """The pair has to come from one run. A header this run cannot make true
+        leaves results.txt alone, so it must leave the record alone too."""
+        prev = self.render(irs=ALL_IRS, sizes=ALL_SIZES, corelibs=ALL_CORELIBS,
+                           raw=True)
+        before = self.raw
+        self.shas["corelib-py"] = "9999999"
+        with self.assertRaises(SystemExit):
+            self.render(irs=[("python", "555", "666")], corelibs=["corelib-py"],
+                        previous=prev, partial=True, previous_raw=before)
+        self.assertIsNone(self.raw)
 
 
 if __name__ == "__main__":
