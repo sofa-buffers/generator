@@ -861,7 +861,7 @@ found the hard way while building this.
 It is **generated**, not hand-written — a hand-written driver cannot compile against
 two generator revisions, and the API-changing commits are precisely the ones worth
 measuring (`docs/perf-patches/rust-fixed-arrays.md` changed the emitted struct from
-`Vec<T>` to `[T; N]`; `java-primitive-arrays` changed `List<Long>` to `long[]`). It
+`Vec<T>` to `[T; N]`, since reverted by `count`-is-a-capacity; `java-primitive-arrays` changed `List<Long>` to `long[]`). It
 lives in each backend's `project.go` beside the `encode`/`decode` verbs and is
 IR-driven like them, so it needs no new config key and no schema coupling.
 

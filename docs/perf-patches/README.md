@@ -1,12 +1,16 @@
 # Codegen performance improvements
 
-> **Status: implemented in the generator.** All four fixes below now emit from
-> `sofabgen` itself (Rust `[T; N]` arrays + string/blob single-shot; Java
-> primitive `long[]/float[]/double[]` + single-shot; C# string/blob single-shot;
-> Go `sofab.AcceptBytes` visitor decode). Wire output is unchanged — the generator
-> test suite stays green and the Go decode path is round-trip-verified against a
-> real `corelib-go`. The per-language arena `setup.sh` re-apply blocks can now be
-> deleted (they become no-ops). The guides below remain the design rationale.
+> **Status: implemented in the generator, with one half since reverted.** The
+> fixes below emit from `sofabgen` itself (Rust string/blob single-shot; Java
+> primitive arrays + single-shot; C# string/blob single-shot; Go
+> `sofab.AcceptBytes` visitor decode). The **Rust `[T; N]` fixed-array half was
+> reverted** by `count`-is-a-capacity (MESSAGE_SPEC §3): a member of exactly `N`
+> cannot express the `M < N` the wire may carry, so a native array stays `Vec<T>`
+> / `heapless::Vec<T, N>` — see the banner on `rust-fixed-arrays.md`. Wire output
+> is unchanged — the generator test suite stays green and the Go decode path is
+> round-trip-verified against a real `corelib-go`. The per-language arena
+> `setup.sh` re-apply blocks can now be deleted (they become no-ops). The guides
+> below remain the design rationale.
 
 This directory documents four **generated-code performance fixes** discovered while
 performance-tuning the multi-language SofaBuffers benchmark arena (encode+decode

@@ -29,7 +29,7 @@ const (
 	KindBool
 	KindString
 	KindBlob
-	KindArray    // fixed-count array of a scalar/string/blob element
+	KindArray    // array of a scalar/string/blob/composite element; `count` is an optional capacity
 	KindEnum     // -> NamedType (Enum)
 	KindBitfield // -> NamedType (Bitfield)
 	KindStruct   // -> NamedType (Struct)

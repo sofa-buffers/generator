@@ -247,7 +247,12 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.line("#include <string>")
 	f.line("#include <vector>")
 	f.line("#include <array>")
-	// <span>/<cstring>/<cstddef> back the _trimTail fixed-count encode helper.
+	// <span> backs the encodeTo sink lambda emitted for an unbounded schema
+	// (`std::span<const std::uint8_t> chunk`); <cstddef> backs the std::size_t in
+	// every emitted signature. <cstring> is a leftover -- no generated C++ calls
+	// into it -- as is <array> above, since no member is a std::array any more
+	// (`count` is a capacity, §3). Both are tracked as a follow-up rather than
+	// dropped here.
 	f.line("#include <span>")
 	f.line("#include <cstring>")
 	f.line("#include <cstddef>")
@@ -1259,8 +1264,9 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 			// own, so the rule lands on the WRITE rather than on a closer: an
 			// interior row equal to the element default is not written at all, and
 			// the last row always is. The element default is the row container's own
-			// default value -- empty for a std::vector row, and the N element
-			// defaults for a fixed std::array row, which has no shorter value.
+			// default value -- EMPTY, in every container a row can land in: both
+			// std::vector and sofab::InlineVector<T, N> carry their own length, so a
+			// declared inner `count: N` sizes the row's capacity and adds nothing.
 			inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
 			f.line("%s    if (%s != %s{} || %s) {", ind, ev, inner, lastElemExpr(iv, nv))
 			g.serializeArray(f, ind+"        ", fmt.Sprintf("static_cast<sofab::id>(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, depth+1, "")
@@ -1391,10 +1397,10 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// The wire count M IS the array's length (MESSAGE_SPEC §3): the M elements
 		// that arrived are the whole value, taken as they come. A declared
 		// `count: N` is a capacity and bounds M; it never adds elements, so there
-		// is nothing to fill in at [M, N). The one exception is forced by C++
-		// storage rather than by the spec: a fixed std::array<T, N> has no logical
-		// length, so its value is always N elements and readArray value-initialises
-		// it before the M that arrived land on top.
+		// is nothing to fill in at [M, N). Both containers a native array can land
+		// in -- std::vector<T> and sofab::InlineVector<T, N> -- carry their own
+		// logical length, so readArray sizes the destination to M and there is no
+		// storage left that has to be padded out to N.
 
 		// A composite array's wrapper sequence IS the array's value (MESSAGE_SPEC
 		// §5), so a field id repeating within one scope REPLACES it whole — unlike a

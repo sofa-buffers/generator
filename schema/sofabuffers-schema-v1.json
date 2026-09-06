@@ -639,7 +639,7 @@
               "items": { "$ref": "#/$defs/arrayItems" },
               "default": {
                 "type": "array",
-                "description": "Optional default array value; must match the defined item type and count.",
+                "description": "Optional default array value; must match the defined item type and hold at most 'count' elements. 'count' is a capacity, not a length: a shorter default stands exactly as written and is never padded out to it.",
                 "items": { },
                 "maxItems": { "$data": "1/items/count" }
               },
