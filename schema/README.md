@@ -264,7 +264,11 @@ ajv.addKeyword({
     if (x === undefined) return true;
     let big;
     if (typeof x === "string") {
-      if (!/^-?(0|[1-9][0-9]*)$/.test(x)) return false;
+      // A u64 takes the UNSIGNED pattern, the one the schema's own `default`
+      // carries: "-0" parses to zero, so the sign test below would wave it
+      // through and the literal "-0" would reach the emitted source.
+      const re = kind === "u64" ? /^(0|[1-9][0-9]*)$/ : /^-?(0|[1-9][0-9]*)$/;
+      if (!re.test(x)) return false;
       big = BigInt(x);
     } else if (typeof x === "number") {
       if (!Number.isSafeInteger(x)) return false;   // imprecise -> require a string
@@ -286,6 +290,26 @@ ajv.addKeyword({
 > integer is parsed as a lossy number, so always **quote** 64-bit values past 2^53.
 > A reimplementation must parse the string with a big-integer type and range-check
 > against the exact 64-bit bounds.
+
+Two rules the keyword above cannot state, because JSON has no way to express them,
+and a reimplementation reading a **YAML** document must add both:
+
+- **A number spelled with a decimal point or an exponent is rejected**, even when
+  its value is an exact integer. In JSON `1000000.0` and `1000000` are the same
+  number and `Number.isSafeInteger` cannot tell them apart, but YAML hands the
+  generator a float, which it renders through the shortest decimal form — and that
+  flips to exponent notation at 1e6, so `default: 100000.0` emits `100000` while
+  `default: 1000000.0` emits `1e+06`. Measured one build per target, `1e+06` does
+  not compile in c, cpp, rust, kotlin, csharp or typescript, throws
+  `NumberFormatException` at class-init in java, and binds a float to an
+  `int`-declared field in python; only go, zig and dart render it correctly. The
+  spelling is therefore refused outright, and the error names the integer to write.
+- **A negative u64 is refused by SPELLING, not by value.** `"-0"` parses to zero,
+  so a sign test on the parsed value passes it, and the literal `-0` then reaches
+  the emitted source (`-0` into a Rust `u64` is E0600). The `pattern` on the u64
+  `default` above is already the unsigned one, `^(0|[1-9][0-9]*)$`, so a
+  reimplementation that applies the documented pattern gets this for free; it is
+  the keyword's own string branch that must not fall back to the signed pattern.
 
 #### 8.1 Array-of-`bitfield` element masks
 
@@ -322,6 +346,76 @@ are **generator-side only**:
   target's bound. It depends on the sibling `bits` map, which is not something a
   keyword-free branch can reach.
 
+#### 8.2 Array-of-`u64` / `i64` element defaults
+
+An `items.type` of `u64` or `i64` puts the **same** value in an array that §8 puts
+in a field, so it is spelled the same way and checked by the same rule: each
+element is an **integer**, or a **quoted decimal string** where the value needs
+more than the double-safe range — above 2^63-1 the quoted form is the only
+spelling a `u64` element has that every reader of the definition can carry, since
+JSON has no unsigned 64-bit number. (A YAML reader that hands the validator an
+unsigned integer of its own — as `gopkg.in/yaml.v3` does — may accept the unquoted
+literal too, and the generator does; a reimplementation is not obliged to.)
+Everything §8 says applies per element, the two additions above included: no
+fractional or exponent spelling, and for a `u64` no sign, so `"-0"` is refused
+like any other negative — as is an unquoted `-1`, which is reported for its sign
+rather than for its range.
+
+What a stock JSON Schema validator can check here is again the **spelling and the
+sign**. The shipped branches carry `"type": ["integer", "string"]` plus, for
+`u64`, `"minimum": 0` and `"pattern": "^(0|[1-9][0-9]*)$"`, and for `i64`,
+`"minimum": -9223372036854775808` and `"pattern": "^-?(0|[1-9][0-9]*)$"`. Two
+bounds stay **generator-side only**:
+
+- the **exact 64-bit top**, for the reason §8 and §8.1 both give — neither
+  `18446744073709551615` nor `9223372036854775807` is representable as an IEEE-754
+  double, so a `maximum` written at either magnitude rounds *up* (to 2^64 and 2^63)
+  and admits a value the generator rejects, while reading as if the range were
+  covered. The `i64` floor `-9223372036854775808` **is** exact, so it stays;
+- the **decimal-point / exponent refusal**, which JSON cannot express at all.
+
+> Before this rule existed the two halves disagreed in both directions: the Go
+> validator accepted **any** string for a `u64` element (`"nonsense"` reached all
+> eleven backends verbatim), while the shipped branch accepted **no** string at
+> all — so it rejected `tests/matrix/corpus/defs/arrays.yaml`, a definition in the
+> generator's own corpus, for spelling `18446744073709551615` the only way it can
+> be spelled.
+
+#### 8.3 The decimal-point / exponent refusal covers **every** integer default
+
+The first of §8's two YAML-only rules is not specific to a 64-bit type. It applies
+wherever the definition declares an **integer** and the author writes a number with
+a decimal point or an exponent:
+
+| where | example |
+|---|---|
+| a `u8`…`i32` field `default` | `{ type: u32, default: 1000000.0 }` |
+| a `u8`…`i32` array element | `items: { type: u32 }, default: [1000000.0]` |
+| an `enum` field `default` | `{ type: enum, enum: {...}, default: 1000000.0 }` |
+| an `enum` array element | `items: { type: enum, ... }, default: [1000000.0]` |
+| a `u64`/`i64` field `default` or array element | §8, §8.2 |
+| an array-of-`bitfield` element mask | §8.1 |
+
+The reason is the same in all six rows and has nothing to do with width: the
+generator carries the decoded value into the emitted source, and a float renders
+through the shortest decimal form, which flips to exponent notation at 1e6. So
+`default: 100000.0` emits `100000` and compiles everywhere, while
+`default: 1000000.0` emits `1e+06` — measured on this tree into a 32-bit member as
+`.a = 1e+06` (c), `a: 1e+06` (rust, `E0308`), `new int[]{1e+06}` (java, *incompatible
+types*), and the same shape in the other eight. A rule that accepted a float only
+below a threshold nothing in the schema names would be worse than one that refuses
+the spelling, so the spelling is refused and the error names the integer to write.
+
+This is invisible to a JSON reader — `1000000.0` and `1000000` are the same JSON
+number, and the shipped `"type": "integer"` branches accept both — which is exactly
+why it is written down here. A **YAML** reimplementation has to add it by hand, at
+every site above; there is no keyword that can carry it.
+
+Not covered, deliberately: `fp32`/`fp64` defaults (a float is the point), and
+schema *knobs* rather than defaults — `count`, `maxlen`, `decimals`, `pos`,
+`default_id`, enum member values — which are coerced to an integer and never echoed
+into the emitted source, so their spelling cannot reach a compiler.
+
 ### 9. Hard-gate semantics
 
 Validation is an all-or-nothing gate: on any violation, the tool emits a clear,
@@ -344,6 +438,8 @@ A validator is only conformant if it does **all** of:
 - [ ] enforce `union` **`default_id` membership** against the declared option ids (§7);
 - [ ] enforce **exact 64-bit range** for `i64`/`u64` `default`s, accepting an integer or string and range-checking with a big-integer type (§8);
 - [ ] enforce **array-of-`bitfield` element defaults** as non-negative decimal masks — an integer or a quoted decimal string, within the exact 64-bit range and within the bitfield's own backing width (§8.1);
+- [ ] enforce **array-of-`u64`/`i64`** element defaults by the same rule as the field default of that type — an integer or a quoted decimal string, exact-64-bit-range-checked, no fractional or exponent spelling, and no sign for a `u64` (§8, §8.2);
 - [ ] enforce **enum values are signed 32-bit** (`-2147483648 … 2147483647`), values and `default` alike;
+- [ ] refuse a **decimal-point or exponent spelling** for *every* integer default — narrow scalars, enums, their array elements, `u64`/`i64` and bitfield masks alike — and name the integer to write (§8.3);
 - [ ] resolve `$ref` before validating, but keep `$ref` for generation;
 - [ ] fail closed: located error, non-zero exit, no output.

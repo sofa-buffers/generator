@@ -791,7 +791,12 @@
                   "properties": {
                     "default": {
                       "type": "array",
-                      "items": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 }
+                      "description": "An element is spelled like an i64 default (see the i64 field branch and README section 8): an integer, or a quoted DECIMAL string, optionally signed, for a value past the double-safe range. What this branch checks is the spelling -- minimum applies to the integer form, pattern to the string form. Two bounds are generator-side only: the exact 64-bit top (9223372036854775807 is not representable as an IEEE-754 double, so a maximum written at that magnitude rounds up to 2^63 and would admit a value the generator rejects; the floor -9223372036854775808 IS exact, so it stays), and the refusal of a number spelled with a decimal point or an exponent (README section 8.2).",
+                      "items": {
+                        "type": ["integer", "string"],
+                        "minimum": -9223372036854775808,
+                        "pattern": "^-?(0|[1-9][0-9]*)$"
+                      }
                     }
                   }
                 }
@@ -812,7 +817,12 @@
                   "properties": {
                     "default": {
                       "type": "array",
-                      "items": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+                      "description": "An element is spelled like a u64 default (see the u64 field branch and README section 8): a non-negative integer, or a quoted DECIMAL string for a value past the double-safe range -- the only spelling that carries a u64 above 2^53, and the only one that reaches 18446744073709551615 at all. What this branch checks is the spelling and the sign -- minimum applies to the integer form, pattern to the string form. Two bounds are generator-side only: the exact 64-bit top (18446744073709551615 is not representable as an IEEE-754 double, so a maximum written at that magnitude rounds up to 2^64 and would admit a value the generator rejects), and the refusal of a number spelled with a decimal point or an exponent, which JSON cannot distinguish from an integer but YAML can -- the generator renders one as 1e+06 and eight of the eleven targets do not accept that (README section 8.2).",
+                      "items": {
+                        "type": ["integer", "string"],
+                        "minimum": 0,
+                        "pattern": "^(0|[1-9][0-9]*)$"
+                      }
                     }
                   }
                 }
