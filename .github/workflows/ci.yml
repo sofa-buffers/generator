@@ -31,8 +31,11 @@ jobs:
       # its header: the corelib SHAs and toolchain versions the numbers were measured
       # against. Rendering that header is python, not Go, so `go test` cannot see it
       # -- and a partial `run.sh --rows` run silently dropped eleven of twelve SHAs
-      # for months (#487). Stdlib unittest, no corelib and no toolchain needed.
-      - name: Bench formatter unit tests
+      # for months (#487). The same goes for the side that READS that header: the
+      # report collapsed the two per-row `sofab-engine` lines onto one key, so a
+      # python row that had flipped engines compared native against native (#492).
+      # Stdlib unittest, no corelib and no toolchain needed.
+      - name: Bench formatter and report unit tests
         run: python3 -m unittest discover -s tests/bench/lib -v
       - name: Cross-compile matrix
         run: |

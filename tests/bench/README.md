@@ -692,6 +692,24 @@ It reads the toolchain comparison out of the `## toolchain` table on both sides,
 filters it to the tools that built the row being judged — a `go` artifact reporting
 that the Zig compiler drifted is true and useless.
 
+That comparison is per **(tool, row)**, not per tool, because the table is not a
+tool→version map: `sofab-engine` gets one line per python row, since the two rows run
+different corelib-py engines. Keyed by name alone the second line overwrote the
+first, and both sides collapsed the same way — so a healthy `python` artifact read as
+engine drift on every run, while a `python` row that had really flipped engines
+compared `native` against `native` and reported nothing (#492). A tool the committed
+table records no line for at this row (a bench row added since `results.txt` was
+last written) falls back to the version recorded for it elsewhere, but only when
+every line *either* file carries for that tool agrees — so a single committed
+`sofab-engine` line, the state right after a second python row is added to
+`rows.json`, cannot answer for the row it does not name.
+
+The table is split on its padded columns, not on whitespace, because `format.py`
+writes `(not found)` as a version when a probe finds no tool at all — a value with a
+space in it. Split on whitespace that line named no real row and was dropped, so the
+one drift the writer goes out of its way to record was the one the report could not
+read.
+
 ## The two Ir/op methods
 
 Which one a row uses is `method` in `rows.json`, decided by one thing: whether a
