@@ -876,48 +876,6 @@
                     "items": {
                       "type": "object",
                       "properties": {
-                        "type": { "const": "string" }
-                      }
-                    }
-                  }
-                },
-                "then": {
-                  "properties": {
-                    "default": {
-                      "type": "array",
-                      "items": { "type": "string" }
-                    }
-                  }
-                }
-              } ,
-
-              {
-                "if": {
-                  "properties": {
-                    "items": {
-                      "type": "object",
-                      "properties": {
-                        "type": { "const": "blob" }
-                      }
-                    }
-                  }
-                },
-                "then": {
-                  "properties": {
-                    "default": {
-                      "type": "array",
-                      "items": { "type": "string", "pattern": "^[A-Za-z0-9+/\\s]+={0,2}$" }
-                    }
-                  }
-                }
-              },
-
-              {
-                "if": {
-                  "properties": {
-                    "items": {
-                      "type": "object",
-                      "properties": {
                         "type": { "const": "bitfield" }
                       }
                     }
@@ -935,6 +893,25 @@
                       }
                     }
                   }
+                }
+              },
+
+              {
+                "if": {
+                  "properties": {
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "enum": ["string", "blob", "struct", "union", "array"] }
+                      },
+                      "required": ["type"]
+                    }
+                  },
+                  "required": ["items"]
+                },
+                "then": {
+                  "description": "An array element that is lowered to a WRAPPER SEQUENCE -- string, blob, struct, union, or a nested array -- takes no default at all. These are exactly the five kinds the sequence-routing rule names (see schema/README.md), and exactly the complement of the native element kinds each backend materializes. None of the eleven code backends emits an initializer for one: the member is constructed EMPTY whatever the schema declares, and the serialize omission test compares against empty too, so a default written here reaches no generated code; only the docs target ever printed it. Unlike the branches above, this one IS fully expressible in stock JSON Schema, so it is enforced here as well as in the generator (README section 8.4). The string and blob element `default` branches that stood here before generator#497 blessed a shape no code backend emits, which made the two halves of the contract disagree; they are gone.",
+                  "not": { "required": ["default"] }
                 }
               }
             ]

@@ -35,7 +35,10 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   element alike, the sites that share the spelling refusal without sharing the
   64-bit range check, unknown
   keys, bad names, `decimals` > 15,
-  `items.maxlen` on a numeric array, array-of-struct, recursive `$ref`, a
+  `items.maxlen` on a numeric array, array-of-struct, a `default` on an array
+  whose element type is lowered to a **wrapper sequence** — `string`, `blob`,
+  `struct`, `union` or a nested `array`, the five kinds no backend emits an
+  initializer for — recursive `$ref`, a
   cross-file `$ref` to a missing definition, …).
 - **`shared/`** — definitions referenced from `defs/` via **cross-file `$ref`**
   (e.g. `common.yaml`); not validated standalone.

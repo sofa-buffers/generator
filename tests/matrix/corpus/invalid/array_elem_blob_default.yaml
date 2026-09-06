@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: array, items: { type: blob, count: 1, maxlen: 4 }, default: ["AAE="] } } } }

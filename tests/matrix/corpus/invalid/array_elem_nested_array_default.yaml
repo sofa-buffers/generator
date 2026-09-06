@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: array, items: { type: array, count: 2, items: { type: u64, count: 2 } }, default: [["nonsense", 1000000.0]] } } } }

@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: array, items: { type: union, count: 2, oneof: { p: { id: 0, type: u32 }, q: { id: 1, type: u64 } } }, default: [{ p: 7 }] } } } }
