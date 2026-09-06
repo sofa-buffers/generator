@@ -229,9 +229,10 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
    and validate the *resolved* tree (a dangling ref fails fast), but lower the
    *unresolved* document so a shared `$defs` type stays a single generated type.
 3. **`$data` cross-field rules** (no stock validator runs these): string
-   `default` length ≤ `maxlen`; array `default` length ≤ `items.count` (a
-   shorter `default` leaves the trailing elements at the element default — the
-   array is still exactly `count` elements long, §11). All six custom keywords recurse into composite array
+   `default` length ≤ `maxlen`; array `default` length ≤ `items.count` (`count`
+   is a **capacity**, not a length: it never reaches the wire and never adds an
+   element, so a shorter `default` stands exactly as written — the array holds
+   `0 .. count` elements and the wire count *is* its length, §11). All six custom keywords recurse into composite array
    elements (e.g. an array-of-struct element's fields get `uniqueIds`). Array
    `default` elements are additionally validated **per element** (type/range
    check, enum membership, and — for a
@@ -818,12 +819,24 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    new view-storing backend inherits this obligation**: borrow on the contiguous
    path, copy on the resumable one.
 
-   Fixed-count native arrays decode into a fixed/primitive member
-   (Rust `[T; N]`, Java `long[]/float[]/double[]`, C++ `std::array<T, N>`)
-   filled by index, not a grown heap collection; a **count-less** native array
-   on a heap target is dynamic instead (C++ `corelib: cpp` gives `std::vector<T>`,
-   sized to the wire count on decode — never `std::array<T, 0>`, which would drop
-   every element). The C++ `c-cpp` wrapper (the embedded target) goes
+   Native arrays decode into a **length-carrying** member whose length is the
+   wire count `M`, never the declared `count: N`: Java
+   `byte[]/short[]/int[]/long[]/float[]/double[]` (`List<Boolean>` for a
+   `boolean` array — Java widens *scalars* to `long`, not array elements), C#
+   the exact declared width (`byte[]`/`short[]`/`uint[]`/`ulong[]`), Rust
+   `Vec<T>` or `heapless::Vec<T, N>`, C++ `std::vector<T>` or
+   `sofab::InlineVector<T, N>`, Zig `sofab.FixedArray(T, N)`. Whether that
+   destination is pre-sized to `M` and filled by index (Java, C#) or cleared at
+   the array header and pushed into as the elements arrive (Rust, Zig, Go, and
+   the C++ corelib's `readArray`, which sizes the destination to `M` itself) is a
+   **per-target choice**; what §3 fixes is only that the member ends up exactly
+   `M` long. A declared `count: N` picks the *capacity* — inline slots where the
+   profile is heap-free — never the length; a **count-less** native array has no
+   `N` to size inline storage with, so on a heap target it stays dynamic (C++
+   `corelib: cpp` gives `std::vector<T>`, sized to the wire count on decode —
+   never `std::array<T, 0>`, which would drop every element, #112), while the
+   heap-free profiles (`c-cpp`, `rs-no-std`) **reject** it at generation rather
+   than falling back to a heap container. The C++ `c-cpp` wrapper (the embedded target) goes
    further: it **always** uses fixed-capacity, heap-free containers
    (`docs/generator/cpp.md`) — bounded strings, blobs, and their wrapper-sequence
    arrays (plus struct/union/matrix sequences) decode into schema-sized inline
@@ -3654,13 +3667,15 @@ build.
 | **C#** | `corelib-cs` | flat-visitor location-stack (`IVisitor`) | classes + `Serialize`/`EncodeTo`; nested `Msg.Decoder` (constructed with `new`, not a `Decoder()` factory — C# puts nested types and members in one declaration space) → `Feed`/`Finish` for chunked decode; `TryDecode(data, out msg)` returns the §7 `DecodeStatus` (#105); System.Text.Json harness. |
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | one public class per file (`<Message>.java`, one `<Type>.java` per struct/union) — schema types are public like every other target's, and a type reached from two messages is emitted once (#305); no support file beside them: `Seq`, `PayloadAcc`, `Utf8.decode`, `Sofab.invalid`, `Bound` and `OStream.overScratch` are corelib API (corelib-java#97 / #345 / #105); classes + `serialize`/`encodeTo`; nested `Msg.Decoder` via `decoder()` → `feed`/`finish` for chunked decode (`finish` throws `IllegalStateException`, not `SofabException`: `SofabError` has no INCOMPLETE, and an incomplete message is not a malformed one); ints → `long` (u64 **and bitfield** via `toUnsignedString` / `parseUnsignedLong` in the JSON harness — both are unsigned 64-bit values in a signed carrier, so the sign of the carrier must not reach the interchange format, #475); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
 | **Kotlin** | `corelib-kotlin-mp` (Gradle/Maven Central) | flat-visitor location-stack | Kotlin Multiplatform: the emitted message sources are plain `commonMain` (stdlib + `sofab`, no JVM API), so one source set compiles for the JVM, Node/browser and native, and only the `emit: project` scaffolding is JVM-specific. One file per declaration (`<Message>.kt` + the internal `<Message>Visitor`, one `<Type>.kt` per struct/union) and no support file of its own -- element placement, array growth, payload reassembly and UTF-8 materialisation are the corelib's `Seq`/`PayloadAcc`/`Utf8` (#345); classes + `serialize`/`encodeTo`/`encode()`; nested `Msg.Decoder` via `decoder()` -> `feed`/`finish`. Integers map to their EXACT declared width, unsigned included (`u8` is a `UByte`, `u8[]` a `UByteArray`) -- the C# position, not Java's widen-to-`long`, since Java's reason for widening does not apply. What is Kotlin-specific is that this costs nothing at the corelib boundary: the unsigned arrays are inline classes over their signed peers, so `asIntArray()` is a reinterpretation and the field's own backing array reaches `writeArrayUnsigned`, while the `arrayBulk` offer hands that same view over as the destination, whose element width IS the declared width (§7.1 checked in the pass that decodes). `enum` -> `Int` and `bitfield` -> `ULong`, the widths that cannot lose a legal value, with the declared members emitted as documented named constants in an `object` beside the field -- so per-constant metadata is rendered where C and Java have no symbol for it. `boolean[]` is a `BooleanArray` (no native array boxes). Keyword field names are BACKTICK-escaped, never mangled; a name colliding with a generated member is mangled instead. `tryDecode(data, out)` returns the §7 `DecodeStatus` and `decode(bytes)` is STRICT about both non-COMPLETE outcomes (`IllegalStateException` on a terminal INCOMPLETE, deliberately not `SofabException`). Guards throw the corelib's `SofabException` unwrapped -- Kotlin has no checked exceptions. The receiver caps are split by field kind (§9.5.4): a payload length and a wrapper row index travel as arguments into `PayloadAcc.string`/`.blob` and `Seq.reserveRow*`, beside the schema bound they are exclusive with, so the check lands at the length/index header inside a call the visitor already makes; a native array's count keeps its generated guard in `arrayBegin`, there being no such call to carry it. Hand-written JSON harness (exact u64 from the literal text). |
-| **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `serialize`; `decoder(out, alloc)` → `feed`/`finish` (the destination is the CALLER's: Zig moves structs by value, so a decoder owning its message would dangle its own visitor pointer); a decoded message OWNS its bytes on BOTH paths (strings, blobs and array storage all from the caller's allocator, so the input may be reused the moment the call returns): `feed` has to copy, because a payload stitched across a chunk boundary completes inside the corelib's reused carry buffer and is delivered as a slice into the decoder itself, indistinguishable in the callback from one into the caller's chunk (generator#295); `decode()` copies for the same reason §6.7.1 gives — it borrowed until generator#412, which is what `tests/conformance/zig/ownership_check.zig` now pins; fixed `[N]T` for counted native arrays; hand-rolled JSON harness (exact u64). |
+| **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `serialize`; `decoder(out, alloc)` → `feed`/`finish` (the destination is the CALLER's: Zig moves structs by value, so a decoder owning its message would dangle its own visitor pointer); a decoded message OWNS its bytes on BOTH paths (strings, blobs and array storage all from the caller's allocator, so the input may be reused the moment the call returns): `feed` has to copy, because a payload stitched across a chunk boundary completes inside the corelib's reused carry buffer and is delivered as a slice into the decoder itself, indistinguishable in the callback from one into the caller's chunk (generator#295); `decode()` copies for the same reason §6.7.1 gives — it borrowed until generator#412, which is what `tests/conformance/zig/ownership_check.zig` now pins; `sofab.FixedArray(T, N)` (inline slots plus a logical length) for counted native arrays; hand-rolled JSON harness (exact u64). |
 | **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`/`encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `maxSize` `Uint8List` (`Encoder.overBuffer(buf)`, returning the `written` view over it) for a bounded schema and drains a fixed 512-byte scratch into a caller `BytesBuilder(copy: true)` (`Encoder(sink, buffer: scratch)`) for an unbounded one; the corelib's `Encoder.encodeToBytes` — the one place that package allocates output storage — is emitted nowhere; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226), exercised through the `recode` harness mode by the shared `tests/conformance/lib/check_fp32_nan.py` (#468); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); a decoded message owns its bytes on BOTH paths, twice over: the corelib takes the destination `onBytesDest` supplies and COPIES the payload into it (its one-shot blob arm cites §6.7.1 by name -- it used to hand out a view into the decode buffer, which is what the older text here described), and every generated destination copies again (`Uint8List.fromList`, `sofab.decodeUtf8Strict`); it allocates the container itself for an array on either path, and reassembles a split payload while streaming; the schema-free half of the emitted prelude is the corelib's (`sofab.VisitorBase`, `sofab.elementsEqual`, `sofab.decodeUtf8Strict`, `sofab.utf8Length` — §8, #345); the receiver-side `max_dyn_*` caps are applied per field, at that field's own count/length header (§9.5): as the *else* of the schema bound in the generated `onFixlenHeader`/`onArrayBegin` for a scalar and a native array (`limitExceeded()`), and inside the collector for a wrapper array's element index, element length and matrix-row count, which take them as its `rcap`/`relemMax`/`rowCap` **required** arguments; every visitor also overrides `onBytesDest`/`onArrayDest` to return `null` for every id it does not bind, so a §7.3-skipped field gets no destination at all; JSON harness carries u64 as a string. |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 
 **Common type mapping:** enum → smallest *signed* backing; bitfield → smallest
-*unsigned* backing; fixed numeric array → native fixed array/slice; string/blob
-array & struct/union → sequence framing.
+*unsigned* backing; a counted numeric array → the target's length-carrying
+container, sized from the schema *capacity* (a growable container, or inline
+slots plus a logical length — §11, "`count` is a capacity"); string/blob array &
+struct/union → sequence framing.
 
 **Metadata rendering (see §8 for the contract).** Every backend emits the
 definition metadata as doc comments on the generated symbols — message `summary`
@@ -3705,17 +3720,21 @@ target renders the same metadata as HTML page content
   - **Decode.** The decoder materializes exactly the `M` elements it received.
     There is **no fill to `N`**. `M > N` is `INVALID` (§7), `M = 0` is the empty
     array.
-  - **Storage that cannot express `M < N`.** A backend whose `count: N` array
-    lowers to a fixed-size type (`T[N]`, `std::array<T,N>`, `[N]T`) has no
-    logical length to carry, so it always encodes `N` and settles a received
-    `M < N` at the element default. That is a conformant encoding of an
-    `N`-length value, but such a target cannot *send* a shorter array. Where
-    that matters the length has to be carried explicitly — the C backend does it
-    with a companion member (`SOFAB_OBJECT_FIELD_ARRAY_SIZED`, and
-    `SOFAB_OBJECT_DESCR_SEQ_SIZED` for a wrapper holder), following the
-    sized-blob convention that already paired a buffer with its length. The
-    length must be at least as wide as the element's alignment or it is padded
-    away from the slot; corelib-c-cpp asserts the adjacency at compile time.
+  - **Every array member carries a length.** A storage that cannot express
+    `M < N` — a bare fixed-size type (`T[N]`, `std::array<T,N>`, `[N]T`), whose
+    only length is `N` — would always encode `N` and settle a received `M < N`
+    at the element default, so the *same* schema would produce two different
+    wire images depending on the target's storage. No backend lowers an array
+    that way: the growable containers carry their length themselves, and the
+    heap-free ones pair the inline slots with a logical length
+    (`sofab::InlineVector<T,N>`, `heapless::Vec<T,N>`, `sofab.FixedArray(T,N)`).
+    Where the storage is raw slots the length is a **companion member** — the C
+    backend's `SOFAB_OBJECT_FIELD_ARRAY_SIZED`, and `SOFAB_OBJECT_DESCR_SEQ_SIZED`
+    for a wrapper holder, following the sized-blob convention that already paired
+    a buffer with its length. The companion must be at least as wide as the
+    element's alignment or it is padded away from the slot; corelib-c-cpp asserts
+    the adjacency at compile time. A new backend inherits the obligation: pick a
+    container that says `0 .. N`, or carry the length beside it.
   - **The bit-pattern rule survives its cause.** The trim it protected is gone,
     but "equals the element default" is still decided on **bits**, not `==`,
     wherever the predicate is used (element sparsity below): `-0.0 == 0.0` holds

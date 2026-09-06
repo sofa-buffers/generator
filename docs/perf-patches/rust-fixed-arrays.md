@@ -1,5 +1,16 @@
 # Rust — fixed-size `[T; N]` arrays instead of `Vec<T>`
 
+> ⚠️ **SUPERSEDED (MESSAGE_SPEC §3, `count` is a capacity) — the `[T; N]` half
+> only.** The fixed-array lowering below is **not** what the generator emits and
+> must not be re-implemented: `count: N` is a *capacity*, not a length, so the
+> wire count `M` is the array's length and a member of exactly `N` cannot express
+> `M < N` — it would round-trip a 3-element message into a 5-element value. A
+> native array therefore lowers to `Vec<T>` on std and `heapless::Vec<T, N>`
+> under `no_std` (see the comment on `generators/rust/helpers.go`'s array
+> lowering, and ARCHITECTURE §11). **The string/blob single-shot half of this
+> patch stands and is still in the generator.** Retained for its measurement
+> method and for the single-shot rationale.
+
 **Impact:** arena 0.85× → **1.42×** (now beats Protobuf, level with C++).
 **Reference diff:** `rust-fixed-arrays.patch`
 **Generator files:** `generators/rust/backend.go`, `generators/rust/visitor.go`
@@ -93,6 +104,10 @@ supported), so no JSON changes are needed. `&self.u8` (`&[T; N]`) coerces to the
   elements (guaranteed for a conformant fixed-size array). If you want defensive
   behavior on malformed input, bound the index — but the corelib should reject a
   wrong element count before the visitor sees it.
+  **Retracted:** the wire never delivers exactly `N`. `count: N` is a capacity,
+  the wire count `M` is the length, and `M < N` is an ordinary conformant value
+  (`M > N` is `INVALID`). This caveat is the fill-to-`N` reading and is the
+  reason the `[T; N]` half of the patch was reverted.
 
 ## Also folded into this patch: string/blob single-shot
 

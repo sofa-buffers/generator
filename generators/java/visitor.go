@@ -1175,10 +1175,11 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	// that id still decodes afterwards. Every arm that runs disarms it. This is
 	// exactly what the old first pass computed, since ArrayKind has no fifth value.
 	//
-	// A primitive array reserves a small backing store (capped, NOT `new T[count]`
-	// — count is untrusted, see #96) and is grown/filled by index (ai reset here);
-	// a boolean array clears its List; a native-matrix row is placed at the index
-	// its element id names.
+	// A primitive array is allocated at exactly the wire count, once (§9.5 shape
+	// A), after that count has been bounded by the schema capacity or the
+	// configured cap, and is filled by index (ai reset here); a boolean array
+	// clears its List; a native-matrix row is placed at the index its element id
+	// names.
 	f.line("    public void arrayBegin(int id, ArrayKind kind, int count) {")
 	f.line("        ai = 0;")
 	f.line("        // An array delivered at an id that does not declare one of the SAME")

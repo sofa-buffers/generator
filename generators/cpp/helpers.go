@@ -109,10 +109,6 @@ func (g *gen) cppType(f *ir.Field) string {
 	return "void"
 }
 
-// isNativeArrayElem reports whether an array element lowers to a native array
-// wire type (numeric/enum/boolean/bitfield): those are stored in a fixed
-// std::array. String/blob/struct/union/nested-array elements lower to a wrapper
-// sequence and are stored in a std::vector (decode appends).
 // cppExpectedWire returns the sofab::Wire member a field's header must carry for
 // its schema-typed read() to be the right one, mirroring the encode side:
 // unsigned integers, bool and bitfield -> Unsigned; signed integers and enum ->
@@ -195,6 +191,12 @@ func cppWireGuard(fld *ir.Field) string {
 	return cond
 }
 
+// isNativeArrayElem reports whether an array element lowers to a native array
+// wire type (numeric/enum/boolean/bitfield): those are read in one count-prefixed
+// call. String/blob/struct/union/nested-array elements lower to a wrapper
+// sequence and are collected element by element. Both kinds land in the same
+// length-carrying container (cppArrayContainer) -- `count` is a capacity for
+// both, and the wire count is the length for both.
 func isNativeArrayElem(k ir.Kind) bool {
 	switch k {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,

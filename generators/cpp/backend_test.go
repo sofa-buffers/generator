@@ -153,7 +153,9 @@ func fixedHeader(t *testing.T, src, msgFile string, extra map[string]any) (strin
 // unbounded array (no count) must lower to a growable std::vector<T> — like the
 // unbounded string->std::string and blob->std::vector<uint8_t> already do — not a
 // fixed std::array<T, 0>, which cannot hold any element and silently drops the
-// whole array on decode (#112). A bounded native array stays std::array<T, N>.
+// whole array on decode (#112). A bounded native array is length-carrying too --
+// a std::vector on the heap profile, sofab::InlineVector<T, N> on the heap-free
+// one -- because `count` is a capacity and the wire count is the length (§3).
 func TestCppHeapUnboundedArray(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      arr:    { id: 0, type: array, items: { type: u32 } }\n" + // unbounded native
@@ -947,13 +949,13 @@ func TestCppDynamicArrayNotTrimmed(t *testing.T) {
 	}
 }
 
-// TestCppFixedCountResetsSchemaDefaultTail: a `count: N` array decodes to N
-// elements — M from the wire, the ELEMENT default (zero) at [M,N) (MESSAGE_SPEC
-// §3). The std::array member starts at the field's *declaration* default, so a
-// non-zero SCHEMA default would leak into the tail the corelib's span read never
-// touches: `default: [1,2,3]` on `count: 5` decoding a 2-element wire [1,2] would
-// yield [1,2,3,0,0] instead of [1,2,0,0,0]. The encode trim (F-0010) is what
-// makes that short wire reachable, so the reset ships with it.
+// TestCppFixedCountResetsSchemaDefaultTail: a `count: N` array decodes to exactly
+// the M elements the wire carried — `count` is a capacity, so nothing is filled in
+// at [M, N) (MESSAGE_SPEC §3). The member starts at the field's *declaration*
+// default, so without a reset a non-zero SCHEMA default would leak past what the
+// read delivered: `default: [1,2,3]` on `count: 5` decoding a 2-element wire [1,2]
+// would yield the three-element [1,2,3] instead of the two-element [1,2] — a
+// different value, not merely a different tail.
 //
 // The reset is gated on a non-zero schema default: every other schema's decode
 // stays byte-identical.
@@ -979,9 +981,11 @@ func TestCppFixedCountResetsSchemaDefaultTail(t *testing.T) {
 			if !strings.Contains(h, wantC) {
 				t.Errorf("[%s] schema default must stay the member's declaration default:\n%s", corelib, h)
 			}
-			// A non-zero schema default must be reset on decode so the elements the
-			// encoder trimmed off the tail come back as the ELEMENT default, not as
-			// that schema default (MESSAGE_SPEC S3). Both corelibs now do it inside
+			// A non-zero schema default must be reset on decode so the M elements the
+			// wire carried are the whole value, rather than landing on top of the
+			// declaration default and leaving its longer tail behind (MESSAGE_SPEC
+			// S3) -- `count` is a capacity, so nothing is filled in at [M, N) and
+			// there is no encoder trim any more. Both corelibs now do it inside
 			// readArray — behind the tag match and the bound, which is the order
 			// that makes a §7.3-skipped or rejected occurrence leave the target
 			// alone. Neither profile resets in the arm any more.
@@ -1186,10 +1190,11 @@ messages:
 // materialized exactly as written, never tail-padded. That is what keeps
 // [10, 20] a two-element value distinct from [10, 20, 0, 0].
 //
-// The fixed std::array<T,N> has no logical length at all, so its value is always
-// N elements: the aggregate initializer zero-fills whatever the default leaves
-// out, and a shorter value is simply not representable there. That divergence is
-// storage, not spec.
+// The heap-free storage says the same thing: sofab::InlineVector<T, N> is inline
+// slots plus a logical length, so [10, 20] on a `count: 4` field is a two-element
+// value there too. No native array member is a bare std::array<T,N> any more --
+// that container has no logical length, so it could only ever hold N elements and
+// the same schema would have had two different wire images.
 func TestCppNativeArrayIsNotPaddedToCount(t *testing.T) {
 	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
 		"      zeros:   { id: 0, type: array, items: { type: u32, count: 4 } }\n" +
@@ -1787,9 +1792,10 @@ func TestCppWrapperArrayInteriorIsSparseLastElementKept(t *testing.T) {
 // c-cpp inline sofab::InlineVector, whose logical length is separate from its N
 // inline slots.
 //
-// The one container that cannot say so is std::array<T,N>, which the native
-// arrays keep: it has no logical length, so its value is always N elements. That
-// divergence is storage, not spec.
+// The native arrays say so too, in the same containers: the bare std::array<T,N>
+// they used to keep has no logical length, so its value could only ever be N
+// elements -- one storage kind disagreeing with the other three about the value of
+// one and the same schema. It is gone from every array member.
 func TestCppCountIsACapacityNotALength(t *testing.T) {
 	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
 		"      strs:  { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }\n" +

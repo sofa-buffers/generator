@@ -117,8 +117,10 @@ pub fn arrayBegin(self: *_dec_M, id: sofab.Id, kind: sofab.ArrayKind, count: usi
 // decode() checks the sticky flag first:  if (v.inv) return error.InvalidMessage;
 ```
 
-Fixed-capacity storage (`[N]T` in Zig, `heapless::Vec<T, N>` in no_std Rust) maps
-the schema bound directly onto the buffer capacity.
+Fixed-capacity storage (`sofab.FixedArray(T, N)` in Zig, `heapless::Vec<T, N>` in
+no_std Rust) maps the schema bound onto the container's **capacity**; the length
+stays with the value, so the member holds the `0 .. N` elements the wire actually
+carried and never `N` by construction.
 
 ### A2 — flat visitor, `on_field` carries the count · `corelib-py`
 
@@ -338,16 +340,21 @@ descriptors (`{id, type, size, element_size, ...}`); the shared
 so the corelib rejects `wire_count > N` at the count word — no per-field generated
 `if`.
 
-**Generated decode (C++ wrapper) — the bound is the container's fixed capacity:**
+**Generated decode (C++ wrapper) — the bound is the schema `N`, passed in:**
 ```cpp
+// member:  sofab::InlineVector<std::uint8_t, 4> arr = {};
 void MyMsg::deserialize(IStreamImpl& is, sofab::id id, size_t size, size_t count) noexcept {
     switch (id) {
     case 15:
-        // arr is std::array<uint8_t, 4> / a fixed span; its capacity IS the bound.
-        is.read_array(arr.data(), arr.size(), sizeof(uint8_t), /*opt*/0);
-        // corelib compares count vs arr.size() at the header -> INVALID before payload.
+        // The schema capacity N is passed to readArray, which settles the tag,
+        // checks the wire count against N before any resize, then binds.
+        is.readArray(arr, _count, 4);
+        // The container's own size() is the LOGICAL LENGTH (0 on a fresh
+        // message), not the bound -- reading the bound off it would reject
+        // every non-empty array.
         break;
-    // FixedString<N> / FixedBytes<N> bind likewise: is.read_string(s.data(), s.capacity());
+    // FixedString<N> / FixedBytes<N> bind likewise, with maxlen passed the same
+    // way: is.readString(s, _size, 16);
     }
 }
 ```

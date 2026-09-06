@@ -69,8 +69,10 @@ but **targets that cannot allocate dynamically (e.g. C `char s[N]`, `no_std` Rus
 require it** to size static storage — so such a backend rejects a `maxlen`-less
 `string`/`blob` as a generator-side, per-language check (see PLAN §5.7). The same
 applies element-wise to a `string`/`blob` **array** via `items.maxlen`: when it is
-present a fixed-storage target can emit a **2-D buffer** (e.g. C
-`char data[count][maxlen]`).
+present a fixed-storage target can size the elements inline, as a **2-D buffer**
+plus the length the wire carries (e.g. C `struct { uint8_t len; char
+data[count][maxlen+1]; }`) — `count` is the buffer's capacity, and the leading
+`len` is what lets the field hold `0 .. count` elements rather than only `count`.
 
 Every field **requires `id`** (a uint in `0 .. 2147483647`) and `type`.
 

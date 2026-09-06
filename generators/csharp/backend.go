@@ -161,8 +161,9 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	}
 	// Hoist each native array's omit-compare default into a static: Serialize only
 	// ever reads it, so one shared instance suffices and encode stops allocating
-	// a fresh literal (a `count: N` field's default is N elements long — for a
-	// large N that per-call allocation would dominate). The mutable per-object
+	// a fresh literal (the default is as long as the schema wrote it -- `count` is
+	// a capacity and never pads it out, but a long one would still make that
+	// per-call allocation dominate). The mutable per-object
 	// initializer above stays a fresh allocation.
 	for _, fld := range fields {
 		if def, ok := g.csArrayCompareDefault(fld); ok {
