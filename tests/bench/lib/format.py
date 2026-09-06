@@ -341,6 +341,14 @@ def parse_previous(path):
             f = re.split(r"\s{2,}", line.strip())
             if len(f) == len(TC_COLS) and f[0] != TC_COLS[0]:
                 tools[(f[0], f[2])] = f[1]
+            elif f and f[0] != TC_COLS[0]:
+                # A toolchain line whose columns ran together (or that was edited by
+                # hand). The writer pads so this cannot happen -- see fmt_tc() -- and
+                # if it does anyway, say so: dropped in silence, the next partial run
+                # re-probes that tool and writes this host's answer over rows it only
+                # carried, which is exactly the #487 loss.
+                notes.append("could not read the toolchain line %r; that tool is "
+                             "re-probed rather than carried" % line.strip())
             continue
         f = line.split()
         if len(f) == len(SZ_COLS) and f[2] not in ("toggle", "subtract"):
@@ -541,6 +549,27 @@ def main():
 
     def fmt(vals, widths):
         return "".join(str(v).ljust(w) for v, w in zip(vals, widths)).rstrip()
+
+    def fmt_tc(vals):
+        """The `## toolchain` row, padded so its columns can never run together.
+
+        Both readers of that table -- parse_previous() above and report.py's
+        parse() -- split it on two-or-more spaces, because a version can contain one
+        ("(not found)"). A value that FILLS or overflows its column leaves no
+        separator, the split merges two fields, and the line is dropped: silently, so
+        the next partial run re-probes that tool and stamps this host's answer onto
+        rows it only carried. tool_version() can produce such a value -- when its
+        version regex misses, it returns the first line of the tool's output, of any
+        length ("1.98.0-nightly+x" already overflows, and "Apple clang 17" holds a
+        space as well).
+
+        Scoped to this table on purpose: the same pad on IR_WIDTHS would move
+        `rust-rs-no-std-dyn` (18 chars in a 19-wide column) and rewrite results.txt.
+        Every toolchain line the committed file holds is already under its width, so
+        this changes no byte of it either.
+        """
+        return "".join(str(v).ljust(max(w, len(str(v)) + 2))
+                       for v, w in zip(vals, TC_WIDTHS)).rstrip()
 
     rows = sorted(spec["rows"], key=lambda r: r["id"])
 
@@ -755,9 +784,9 @@ def main():
 
     out.append("")
     out.append("## toolchain")
-    out.append(fmt(TC_COLS, TC_WIDTHS))
+    out.append(fmt_tc(TC_COLS))
     for vals in toolchain_rows:
-        out.append(fmt(vals, TC_WIDTHS))
+        out.append(fmt_tc(vals))
 
     out.append("")
     out.append("## footprint")

@@ -262,9 +262,18 @@ class ToolchainDriftTest(unittest.TestCase):
         moved = {r: "9999999" for r in CORELIBS}
         out = self.report(results(), {row: results(corelibs=moved) for row in IR})
         self.assertEqual(len(corelib_table(out)), len(CORELIBS))
-        self.assertEqual({t[3] for t in corelib_table(out)}, {"all"})
         self.assertEqual(self.status, 0)
         self.assertIn("Every measured row matches the committed file", out)
+        # And the `rows` column means what the toolchain table's does: the rows this
+        # corelib builds, not the artifacts that stated the SHA. `# corelib:` has no
+        # rows column, and here every artifact carries every SHA (a local full run,
+        # or any --partial merge), so without rows.json a moved corelib-py would be
+        # listed against the C row that never links it. `python`/`python-native` are
+        # real ids and rows.json says corelib-py builds exactly them, so neither is
+        # attributed to c-cpp or go; `alpha` and `beta` are not in rows.json at all,
+        # so they keep the old behaviour and every repo still answers for them.
+        self.assertEqual({t[0]: t[3] for t in corelib_table(out)},
+                         {"c-cpp": "alpha, beta", "go": "alpha, beta", "py": "all"})
 
     def test_an_artifact_reports_only_the_corelibs_it_names(self):
         """bench.yml's per-row artifact is written WITHOUT --partial, so its header
@@ -306,9 +315,13 @@ class ToolchainDriftTest(unittest.TestCase):
         """
         edited = [(p, "999999999999" if p == "s.yaml" else d, r) for p, d, r in SCHEMAS]
         out = self.report(results(), {row: results(schemas=edited) for row in IR})
+        # Named by exception, because that is the shorter half and the interesting
+        # one: on the real rows.json this same edit covers twenty of twenty-four
+        # rows, and enumerated it is one table cell that scrolls sideways in a step
+        # summary while burying the four rows the edit could not have moved.
         self.assertEqual(schema_table(out),
                          [("s.yaml", "111111111111", "999999999999",
-                           "beta, python, python-native")])
+                           "all but alpha")])
 
     def test_the_three_kinds_of_provenance_are_reported_together(self):
         """One artifact, all three moved. They are separate sections, in the order a
@@ -326,6 +339,69 @@ class ToolchainDriftTest(unittest.TestCase):
         self.assertEqual(heads, ["### Toolchain differs from the committed file",
                                  "### Corelib checkouts differ from the committed file",
                                  "### Schema digests differ from the committed file"])
+        self.assertEqual(self.status, 0)
+
+    def test_a_row_measured_on_a_different_schema_is_reported(self):
+        """The schema change that moves a number hardest: the row is measured on
+        another FILE, not an edit of the same one. It is also the one the borrow
+        fallback swallowed. schemas_for() yields exactly one entry per row, so when
+        the artifact names a path the committed file does not attribute to this row,
+        tool_diff() fell back to "the version recorded for that name elsewhere" --
+        and elsewhere is the measured file's own digest, so `committed != v` could
+        never fire. Measured on the committed results.txt with `cpp-cpp-unbounded`
+        moved onto a new `wide_ingest.yaml` line, the entire report was
+        `Every measured row matches the committed file within 0.3%.`
+
+        Fails before schema_diff(): the table is empty.
+        """
+        moved = [("s3.yaml", "333333333333", "alpha")] + [
+            (p, d, r) for p, d, r in SCHEMAS if r != "alpha"]
+        out = self.report(results(), {"alpha": results(schemas=moved)})
+        self.assertEqual(schema_table(out),
+                         [("s3.yaml", "s2.yaml 222222222222", "333333333333",
+                           "all")])
+        self.assertEqual(self.status, 0)
+
+    def test_a_row_that_fell_back_to_the_default_schema_is_reported(self):
+        """The mirror: alpha's own `# schema:` line is gone, so it is now measured on
+        the default schema every other row uses. Same class of change, same silence
+        before the fix -- and the committed side is named in full, because what moved
+        is the path.
+
+        Fails before schema_diff(): the table is empty.
+        """
+        dropped = [(p, d, r) for p, d, r in SCHEMAS if r != "alpha"]
+        out = self.report(results(), {"alpha": results(schemas=dropped)})
+        self.assertEqual(schema_table(out),
+                         [("s.yaml", "s2.yaml 222222222222", "111111111111",
+                           "all")])
+
+    def test_a_schema_line_that_lists_no_rows_describes_no_row(self):
+        """A `# schema:` line ending in a bare `rows:` names a rows column and lists
+        nothing, so it describes no row. Read as the DEFAULT line -- which is what a
+        `len(f) > 6` guard alone does -- one row's schema would be attributed to
+        every row that names none of its own, the exact over-attribution
+        schemas_for() exists to prevent. format.py never writes that shape, so this
+        guards a latent hole rather than a live one."""
+        text = results() + "# schema:  s4.yaml  sha256 444444444444  rows:\n"
+        schemas = rep.parse(self.one(text)).schemas
+        self.assertNotIn(("s4.yaml", None), schemas)
+        self.assertEqual(rep.schemas_for(schemas, "beta"), {"s.yaml": "111111111111"})
+
+    def test_an_unreadable_corelib_entry_is_named_not_dropped(self):
+        """An entry that does not split into exactly two fields -- reflowed,
+        annotated or hand-edited -- cannot be compared. Dropped in silence that
+        corelib simply leaves the comparison and the report reads as agreement, which
+        is the failure mode this whole change is about; format.py's reader collects
+        the same loss into a note on the same line, for the same reason.
+
+        Fails before the fix, which prints nothing and compares no corelib at all.
+        """
+        broken = results().replace("| go bbbbbbb", "| go bbbbbbb ccc")
+        out = self.report(results(), {"beta": broken})
+        self.assertIn("Could not read 1 entry from the `# corelib:` line in `beta` "
+                      "(`go bbbbbbb ccc`); those checkouts are not compared.", out)
+        self.assertEqual(corelib_table(out), [])
         self.assertEqual(self.status, 0)
 
     # -- what must not change ------------------------------------------------

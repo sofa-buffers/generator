@@ -519,6 +519,44 @@ class FormatHeaderTest(unittest.TestCase):
                           previous=prev, partial=True)
         self.assertIn(("gcc", "(not found)", "alpha,gamma"), toolchain_lines(out))
 
+    def test_a_version_that_fills_its_column_still_round_trips(self):
+        """The writer has to GUARANTEE the separator both readers split on. The
+        version column is 14 wide and `tool_version()` can return a value of any
+        length -- when its `\\d+\\.\\d+(\\.\\d+)?` regex misses it returns the first line
+        of the tool's own output. At sixteen characters the value ran straight into
+        the rows column, the padded-column split merged the two fields, and the line
+        was dropped by this reader and by report.py alike. Silently, and one step
+        further out than #502's own fix: the next partial run then re-probes that
+        tool and writes this host's answer over rows it only carried.
+
+        Fails before the fix: the committed line reads
+        `go            1.98.0-nightly+xbeta` and the partial run writes `1.0` for a
+        row it never measured.
+        """
+        self.tools["go"] = "1.98.0-nightly+x"
+        prev = self.committed()
+        self.assertIn(("go", "1.98.0-nightly+x", "beta"), toolchain_lines(prev))
+
+        self.tools.pop("go")                      # ...and this box answers 1.0
+        out = self.render(irs=PY_IRS, corelibs=["corelib-py"],
+                          previous=prev, partial=True)
+        self.assertEqual(toolchain(out)["go"], "1.98.0-nightly+x")
+        self.assertEqual(ir_rows(out)["beta"], ("300", "400"))   # still carried
+
+    def test_a_toolchain_line_that_cannot_be_read_is_reported(self):
+        """And if one turns up anyway -- hand-edited, or written by an older
+        format.py -- the loss is named rather than silent, the same way an unreadable
+        `# corelib:` entry is. A dropped line is a tool re-probed from this host and
+        stamped onto rows it only carried."""
+        prev = re.sub(r"^go +1\.0 +beta$", "go" + " " * 24 + "1.0beta",
+                      self.committed(), flags=re.M)
+
+        out = self.render(irs=PY_IRS, corelibs=["corelib-py"],
+                          previous=prev, partial=True)
+        self.assertIn("could not read the toolchain line", self.stderr)
+        self.assertIn("1.0beta", self.stderr)
+        self.assertEqual(toolchain(out)["go"], "1.0")   # re-probed, as the note says
+
     # -- the round trip ------------------------------------------------------
 
     def test_two_partial_runs_in_a_row_do_not_degrade_the_header(self):
